@@ -17,6 +17,7 @@ import {
   apiGetAutomationRun,
   apiGetContact,
   apiGetConversation,
+  apiGetDeal,
   apiGetOrder,
   apiGetMessage,
   apiKeyReminderNotice,
@@ -26,10 +27,12 @@ import {
   apiListConversationMessages,
   apiListConversationNotes,
   apiListConversations,
+  apiListDeals,
   apiListMembers,
   apiListMessages,
   apiMessageChanges,
   apiListOrders,
+  apiListPipelines,
   apiListTeams,
   apiListTemplates,
   apiRecordConsent,
@@ -53,6 +56,7 @@ import {
   createCommerceService,
   createConsentService,
   createContactsService,
+  createCrmService,
   createCsatService,
   createInboxService,
   createPlanAdminService,
@@ -3929,6 +3933,280 @@ describe('WhatsApp orders (ADR-167)', () => {
       keys.create(narrower, { name: 'Orders', scopes: ['orders.write'], expiresInDays: 30 }),
       'forbidden',
       /Confirm, fulfil and cancel WhatsApp orders/,
+    );
+  });
+});
+
+describe('CRM pipelines and deals (ADR-253)', () => {
+  const crm = () =>
+    createCrmService({ db: fx.dbs.app, clock: systemClock, jobs: fx.jobs(), signer: fx.signer });
+  const contacts = () => createContactsService({ db: fx.dbs.app, clock: systemClock });
+  let phones = 0;
+  /** A contact with a number of its own (98 and eight digits: the clock and a counter). */
+  const contactOf = async (owner: TenantContext, name: string) => {
+    phones += 1;
+    const digits = `${String(Date.now() % 1_000_000).padStart(6, '0')}${String(phones % 100).padStart(2, '0')}`;
+    return (await contacts().createContact(owner, { displayName: name, phone: `+9198${digits}` }))
+      .id;
+  };
+  /** A pipeline of the company and its active stages, as the CRM settings list them. */
+  async function pipelineOf(
+    owner: TenantContext,
+    name: string,
+    currency: string,
+    stages: unknown[],
+  ) {
+    const { id } = await crm().createPipeline(owner, { name, currency, stages });
+    const [pipeline] = (await crm().listPipelines(owner)).filter((p) => p.id === id);
+    return { id, stages: pipeline!.stages.map((s) => s.id) };
+  }
+
+  it('list pipelines with their stages and deals newest first on exact pages, filtered, and one by id', async () => {
+    const c = await fx.company();
+    const other = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const agent = await fx.ctx(c, c.agent);
+    const theirOwner = await fx.ctx(other, other.owner);
+    const reader = await apiKey(c, ['deals.read'], 'Deal sync');
+    const sales = await pipelineOf(owner, 'Sales', 'INR', [
+      'New',
+      { name: 'Qualified', winPercent: 40 },
+      'Proposal',
+    ]);
+    const renewals = await pipelineOf(owner, 'Renewals', 'USD', ['Due']);
+    const theirs = await pipelineOf(theirOwner, 'Theirs', 'INR', ['Open']);
+    const asha = await contactOf(owner, 'Asha');
+    const ravi = await contactOf(owner, 'Ravi');
+    const first = await crm().createDeal(owner, {
+      contactId: asha,
+      pipelineId: sales.id,
+      stageId: sales.stages[0],
+      title: 'Annual plan',
+      value: '1500.50',
+      ownerMembershipId: agent.membership.id,
+      expectedCloseOn: '2026-12-15',
+    });
+    const second = await crm().createDeal(owner, {
+      contactId: ravi,
+      pipelineId: sales.id,
+      stageId: sales.stages[1],
+      title: 'Pilot',
+    });
+    const third = await crm().createDeal(owner, {
+      contactId: asha,
+      pipelineId: renewals.id,
+      stageId: renewals.stages[0],
+      title: 'Renewal',
+      value: '200',
+    });
+    const theirDeal = await crm().createDeal(theirOwner, {
+      contactId: await contactOf(theirOwner, 'Mira'),
+      pipelineId: theirs.id,
+      stageId: theirs.stages[0],
+      title: 'Theirs',
+    });
+
+    // Pipelines oldest first, a page at a time, each with its stages in board order; never
+    // another company's.
+    const page = await apiListPipelines(deps(), reader.ctx, { limit: '1' });
+    expect(page.data.map((p) => p.id)).toEqual([sales.id]);
+    expect(page.nextCursor).toEqual(expect.any(String));
+    const rest = await apiListPipelines(deps(), reader.ctx, { cursor: page.nextCursor });
+    expect(rest.data.map((p) => p.id)).toEqual([renewals.id]);
+    expect(rest.nextCursor).toBeNull();
+    expect(page.data[0]).toEqual({
+      id: sales.id,
+      name: 'Sales',
+      currency: 'INR',
+      position: expect.any(Number),
+      archived: false,
+      stages: [
+        {
+          id: sales.stages[0],
+          name: 'New',
+          position: expect.any(Number),
+          archived: false,
+          winPercent: null,
+        },
+        {
+          id: sales.stages[1],
+          name: 'Qualified',
+          position: expect.any(Number),
+          archived: false,
+          winPercent: 40,
+        },
+        {
+          id: sales.stages[2],
+          name: 'Proposal',
+          position: expect.any(Number),
+          archived: false,
+          winPercent: null,
+        },
+      ],
+      createdAt: expect.any(String),
+    });
+
+    // Deals newest first, two to a page and the last on the next; another company's never.
+    const list = (query: Record<string, string | null | undefined>) =>
+      apiListDeals(deps(), reader.ctx, query);
+    const deals = await list({ limit: '2' });
+    expect(deals.data.map((d) => d.id)).toEqual([third.id, second.id]);
+    const last = await list({ limit: '2', cursor: deals.nextCursor });
+    expect(last.data.map((d) => d.id)).toEqual([first.id]);
+    expect(last.nextCursor).toBeNull();
+
+    // The deal as the board shows it: the value in minor units of the pipeline's currency, ids only.
+    const [stored] = await fx.query<{ created_at: Date; stage_entered_at: Date }>(
+      'SELECT created_at, stage_entered_at FROM app.crm_deals WHERE id = $1',
+      [first.id],
+    );
+    expect(last.data[0]).toEqual({
+      id: first.id,
+      title: 'Annual plan',
+      pipelineId: sales.id,
+      stageId: sales.stages[0],
+      status: 'open',
+      valueMinor: 150_050,
+      currency: 'INR',
+      contactId: asha,
+      conversationId: null,
+      ownerId: agent.membership.id,
+      expectedCloseOn: '2026-12-15',
+      stageEnteredAt: stored!.stage_entered_at.toISOString(),
+      lostReason: null,
+      closedAt: null,
+      createdAt: stored!.created_at.toISOString(),
+      updatedAt: expect.any(String),
+    });
+    expect(await apiGetDeal(deps(), reader.ctx, first.id)).toEqual(last.data[0]);
+    expect((await apiGetDeal(deps(), reader.ctx, third.id)).currency).toBe('USD');
+    expect(deals.data[1]).toMatchObject({ valueMinor: null, ownerId: null, expectedCloseOn: null });
+
+    // Filters, alone and together.
+    const ids = async (query: Record<string, string>) => (await list(query)).data.map((d) => d.id);
+    expect(await ids({ pipelineId: sales.id })).toEqual([second.id, first.id]);
+    expect(await ids({ stageId: sales.stages[1]! })).toEqual([second.id]);
+    expect(await ids({ contactId: asha })).toEqual([third.id, first.id]);
+    expect(await ids({ contactId: asha, pipelineId: sales.id })).toEqual([first.id]);
+    expect(await ids({ ownerId: agent.membership.id })).toEqual([first.id]);
+    expect(await ids({ ownerId: 'none' })).toEqual([third.id, second.id]);
+
+    // A member closes the second deal as lost: it is found by its status, with its reason, and
+    // as changed since; a closed deal keeps its stage.
+    const before = new Date(Date.now() - 1_000).toISOString();
+    await crm().closeDeal(owner, {
+      id: second.id,
+      expectedVersion: 1,
+      outcome: 'lost',
+      lostReason: 'Chose another supplier',
+    });
+    const lost = await list({ status: 'lost' });
+    expect(lost.data.map((d) => [d.id, d.stageId, d.lostReason])).toEqual([
+      [second.id, sales.stages[1], 'Chose another supplier'],
+    ]);
+    expect(lost.data[0]?.closedAt).toEqual(expect.any(String));
+    expect(await ids({ status: 'open' })).toEqual([third.id, first.id]);
+    expect(await ids({ updatedSince: before })).toContain(second.id);
+    expect(await ids({ updatedSince: new Date(Date.now() + 60_000).toISOString() })).toEqual([]);
+
+    // An archived pipeline is still listed, and its closed deals still read.
+    await crm().closeDeal(owner, { id: third.id, expectedVersion: 1, outcome: 'won' });
+    const [renewal] = (await crm().listPipelines(owner)).filter((p) => p.id === renewals.id);
+    await crm().archivePipeline(owner, { id: renewals.id, expectedVersion: renewal!.version });
+    const all = await apiListPipelines(deps(), reader.ctx, {});
+    expect(all.data.map((p) => [p.id, p.archived])).toEqual([
+      [sales.id, false],
+      [renewals.id, true],
+    ]);
+    expect((await apiGetDeal(deps(), reader.ctx, third.id)).status).toBe('won');
+
+    // Another company's deal is not found by its id; nor is one that does not exist.
+    await expectAppError(apiGetDeal(deps(), reader.ctx, theirDeal.id), 'not_found');
+    await expectAppError(apiGetDeal(deps(), reader.ctx, uuidv7()), 'not_found');
+  });
+
+  it('keep an erased contact’s deals as erasure leaves them, and need the scope and the CRM in the plan', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const reader = await apiKey(c, ['deals.read']);
+    const sales = await pipelineOf(owner, 'Sales', 'INR', ['New']);
+    const contactId = await contactOf(owner, 'Asha');
+    const deal = await crm().createDeal(owner, {
+      contactId,
+      pipelineId: sales.id,
+      stageId: sales.stages[0],
+      title: 'Annual plan for Asha',
+    });
+    await crm().closeDeal(owner, {
+      id: deal.id,
+      expectedVersion: 1,
+      outcome: 'lost',
+      lostReason: 'Asha moved abroad',
+    });
+    const changedAt = async () =>
+      (
+        await fx.query<{ at: string }>(
+          'SELECT updated_at::text AS at FROM app.crm_deals WHERE id = $1',
+          [deal.id],
+        )
+      )[0]!.at;
+    const closedAt = await changedAt();
+    const before = await apiGetDeal(deps(), reader.ctx, deal.id);
+    await contacts().eraseContact(owner, { contactId, suppress: false });
+    const kept = await apiGetDeal(deps(), reader.ctx, deal.id);
+    expect([kept.title, kept.lostReason, kept.status, kept.contactId]).toEqual([
+      'Deal (contact erased)',
+      null,
+      'lost',
+      contactId,
+    ]);
+    // Erasure changes the deal, so a pass asking for changes since then sees it again.
+    expect(await changedAt()).not.toBe(closedAt);
+    expect(
+      (await apiListDeals(deps(), reader.ctx, { updatedSince: before.updatedAt })).data,
+    ).toEqual([kept]);
+
+    // A key without the scope is refused before anything is read; reading is allowed while the
+    // company is suspended, as every read is.
+    const others = await apiKey(c, ['contacts.read', 'orders.read']);
+    for (const read of [
+      () => apiListPipelines(deps(), others.ctx, {}),
+      () => apiListDeals(deps(), others.ctx, {}),
+      () => apiGetDeal(deps(), others.ctx, deal.id),
+    ]) {
+      await expectAppError(read(), 'forbidden', /deals\.read/);
+    }
+    const suspended = {
+      ...reader.ctx,
+      tenant: { ...reader.ctx.tenant, status: 'suspended' as const },
+    };
+    expect((await apiListDeals(deps(), suspended, {})).data).toHaveLength(1);
+
+    // A plan without the CRM reads no pipelines or deals; with it again, it does.
+    await onPlan(c, []);
+    for (const read of [
+      () => apiListPipelines(deps(), reader.ctx, {}),
+      () => apiListDeals(deps(), reader.ctx, {}),
+      () => apiGetDeal(deps(), reader.ctx, deal.id),
+    ]) {
+      const error = await expectAppError(read(), 'forbidden', /does not include the CRM/);
+      expect(isAppError(error) && error.details).toEqual({ apiReason: 'not_in_plan' });
+    }
+    await onPlan(c, ['crm']);
+    expect((await apiGetDeal(deps(), reader.ctx, deal.id)).id).toBe(deal.id);
+    expect((await apiListPipelines(deps(), reader.ctx, {})).data.map((p) => p.id)).toEqual([
+      sales.id,
+    ]);
+
+    // Granting the scope needs crm.read, which members read the CRM with.
+    const narrower: TenantContext = {
+      ...owner,
+      permissions: new Set([...owner.permissions].filter((p) => p !== 'crm.read')),
+    };
+    await expectAppError(
+      keys.create(narrower, { name: 'Deals', scopes: ['deals.read'], expiresInDays: 30 }),
+      'forbidden',
+      /Read CRM deals/,
     );
   });
 });

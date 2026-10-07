@@ -1,5 +1,39 @@
 # Progress
 
+## 2026-10-07 — Reading CRM deals through the public API (P5-08, P4-04, H-033, ADR-253)
+
+Status: **Implemented; its database and browser tests run in CI only.** Integrations could not read
+the CRM. The local PostgreSQL is unavailable, so migrations 0167 and 0168 and the integration and
+e2e tests below were written but not run here.
+
+### Completed
+
+- **Database:** migration 0167 (the key and plan scope checks with `deals.read`) and 0168
+  (`crm_deals_list_idx`, built concurrently).
+- **Domain:** `api/deals.ts` (`apiListPipelines`, `apiListDeals`, `apiGetDeal`, the CRM plan check);
+  the scope in `API_SCOPES` and `API_SCOPE_INFO`; the OpenAPI paths, the `Pipeline` and `Deal`
+  schemas and the 403 wording.
+- **Web:** the routes `GET /api/v1/pipelines`, `GET /api/v1/deals` and `GET /api/v1/deals/{id}`;
+  Settings → API keys and the platform plan pages list the scope from the registry.
+- **Tests:** unit (6 new in `deals.test.ts`); integration (2 new in `api.test.ts`: pages, filters,
+  archived pipelines, erasure, the scope, the plan and granting); e2e (`crm.spec.ts`: a key created
+  in Settings reads the won deal and the pipelines). Written for CI; not run here.
+- **Docs:** ADR-253; ARCHITECTURE; SECURITY; THREAT-MODEL T222; DEPLOYMENT; RUNBOOKS; BACKLOG P5-08
+  and P4-04; feature matrix W-134, H-033 and H-012 (whose description still said forecasts in
+  Reports were not built, corrected).
+- **Mutation checks:** 16/16 deliberate regressions caught.
+
+### Test commands and results (local, 2026-10-07)
+
+| Command                                                     | Result                                                          |
+| ----------------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck`          | clean                                                           |
+| `pnpm test` (unit)                                          | 1079 passed (116 files)                                         |
+| `pnpm test:integration`, `pnpm test:e2e`, `pnpm db:migrate` | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                                | passed                                                          |
+| Mutation checks                                             | 16/16 deliberate regressions caught                             |
+| gitleaks 8.30.1 on the staged changes                       | no leaks found                                                  |
+
 ## 2026-10-07 — A weighted CRM forecast in Reports (P4-04, H-024, ADR-252)
 
 Status: **Implemented; its database and browser tests run in CI only.** Reports showed the open

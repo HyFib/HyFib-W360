@@ -9593,3 +9593,44 @@ Decision:
 
 Not built: forecasts by owner or by month beyond the third, and history of past forecasts (nothing
 is stored).
+
+## ADR-253 Reading CRM deals through the public API (P5-08, P4-04) (2026-10-07)
+
+Context: integrations could read a company's contacts, conversations, campaigns and orders through
+the API, but not its CRM: a data warehouse, a sales dashboard or another CRM had no way to read the
+pipelines and the deals members and automations move on the board.
+
+Decision:
+
+- **A new reading scope, `deals.read`** ("Read CRM deals"), granted with `crm.read`, the permission
+  members read the CRM with; only owners and administrators create keys, and both hold it. It only
+  reads, so it works while the company is suspended or restricted, as every reading scope does.
+  Existing keys keep their scopes, and a plan version that chose its scopes (ADR-092) leaves it out
+  until a new version includes it.
+- **The CRM in the plan:** pipelines and deals are the CRM's, so a plan without it reads none
+  through the API (403, reason `not_in_plan`), as orders need Commerce (ADR-167); checked first in
+  the transaction. Members keep reading the CRM in the app after a downgrade (ADR-051).
+- **Endpoints:** `GET /api/v1/pipelines` (`listPipelines`) pages the company's pipelines oldest
+  first, archived ones too, each with its stages in board order (archived ones last) and each
+  stage's chance of winning, read in one snapshot. `GET /api/v1/deals` (`listDeals`) pages its
+  deals, open and closed, newest first by when they were created, on exact keyset pages
+  (`crm_deals_list_idx`, built concurrently by migration 0168), filtered by `pipelineId`, `stageId`,
+  `status`, `contactId`, `ownerId` (or `none`) and `updatedSince`; `GET /api/v1/deals/{id}`
+  (`getDeal`) reads one. Another company's deal and an unknown id answer 404, and an id that is not
+  a UUID is refused before any query.
+- **A deal with ids only:** its title, pipeline and stage (a closed deal keeps the stage it was
+  closed in), status, value as an integer in the pipeline currency's minor units with the currency,
+  the contact, the conversation it was created from and the owner by id (the owner as GET /members
+  names members), the expected close date, when it entered its stage, the lost reason, when it
+  closed, was created and last changed. Never notes, tasks, the timeline or the contact's name or
+  number, which `contacts.read` reads.
+- **Erased contacts:** deals are kept for reports, renamed and without the lost reason (erasure),
+  and read as they are; erasure changes a deal's `updatedAt`, so a pass catching up on changes sees
+  it again.
+- **Reads only:** one read-only transaction per call, the pipelines' in repeatable read so a page's
+  stages are of the same moment as its pipelines. A call counts as one request. Migration 0167
+  replaces the key and plan scope checks with ones that also accept `deals.read`, validated at once
+  (one row per key and per plan version), as 0153 did.
+
+Not built: changing deals or pipelines through the API, tasks and notes, the timeline, deal webhook
+events, and who created a deal (a member or an automation).

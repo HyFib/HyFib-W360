@@ -612,6 +612,14 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    `ops.metric_definitions`. Until the web rollout ends, an old web server's Reports page shows no
    forecast; nothing else reads the new row.
 
+   Migration 0167 (ADR-253) widens the same scope checks as 0153, with the same brief locks, and
+   0168 builds `app.crm_deals_list_idx` concurrently, outside a transaction (if it fails, see
+   `docs/RUNBOOKS.md`). Web servers from before them do not know `deals.read`: until the web rollout
+   ends, an old server answers Settings → API keys with an error for a company with a key holding it
+   (and the platform plan pages for a plan version including it), and `/api/v1/pipelines` and
+   `/api/v1/deals` with 404; rolling web servers back to an image from before them does the same.
+   Workers are not affected.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

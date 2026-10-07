@@ -27,6 +27,7 @@ export const API_SCOPE_KEYS = [
   'automations.start',
   'orders.read',
   'orders.write',
+  'deals.read',
   'webhooks.manage',
 ] as const satisfies readonly ApiScope[];
 
@@ -162,6 +163,13 @@ export const API_SCOPE_INFO: Record<
       "Move the company's WhatsApp orders on as members do: confirm or cancel a received order, fulfil or cancel a confirmed one, fulfil a paid one. Never payments: members ask for and cancel Payment Links in the app. Needs Commerce in the company's plan.",
     permission: 'inbox.reply',
     writes: true,
+  },
+  'deals.read': {
+    label: 'Read CRM deals',
+    description:
+      "List the company's CRM pipelines with their stages and each stage's chance of winning, and its deals with their pipeline, stage, status, value, expected close date and owner, and their contact and conversation ids. Never notes, tasks or the timeline. Needs the CRM in the company's plan.",
+    permission: 'crm.read',
+    writes: false,
   },
   'webhooks.manage': {
     label: 'Manage webhook endpoints',

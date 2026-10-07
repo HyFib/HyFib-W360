@@ -268,9 +268,10 @@ verification, app review, Embedded Signup configuration).
   pipeline closed as won or lost, with an optional reason, as the automation). **[A weighted
   forecast in Reports built; its database and browser tests run only in CI]** (ADR-252, migration
   0166: open deals by expected close month, weighed by each stage's chance as on the board).
-  **Remaining:** custom deal fields, products on deals, deal import, CRM connectors (HubSpot,
-  Salesforce, Zoho: integrations), reminder emails through the production SMTP provider (release
-  checklist).
+  **[Reading pipelines and deals through the public API built; its database and browser tests run
+  only in CI]** (ADR-253, migrations 0167 and 0168; recorded under P5-08). **Remaining:** custom
+  deal fields, products on deals, deal import, CRM connectors (HubSpot, Salesforce, Zoho:
+  integrations), reminder emails through the production SMTP provider (release checklist).
 - **P4-05 Growth tools** — _implemented and locally verified (2026-09-27); no live WhatsApp or ad
   traffic yet_: click-to-chat links (a short link that counts clicks per link and company day
   without any visitor data and redirects to wa.me with a pre-filled message and an optional
@@ -787,7 +788,13 @@ verification, app review, Embedded Signup configuration).
   send gives in `variables.buttons`; a send gives the end of each link in `variables.buttons`).
   **[Campaign drafts take the ends of links; their database tests run only in CI]** (ADR-229:
   `variables.buttons`, one source per link, as members choose them).
-  Remaining: call-to-action messages through the API, taking
+  **[Reading CRM pipelines and deals built; its database and browser tests run only in CI]**
+  (ADR-253, migrations 0167 and 0168: `GET /pipelines`, `GET /deals` and `GET /deals/{id}` with the
+  new `deals.read` scope, granted with `crm.read`, and the CRM in the plan: pipelines with their
+  stages and chances, deals newest first on exact pages, filtered by pipeline, stage, status,
+  contact, owner or time of change, values in minor units and ids only).
+  Remaining: changing CRM deals and reading tasks through the API, call-to-action messages through
+  the API, taking
   reactions back,
   changing a field's type,
   which fields of a contact changed in the contact feed (webhooks name them since ADR-121),

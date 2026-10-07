@@ -19,6 +19,7 @@ export * from './key-usage-notices';
 export * from './rate-limits';
 export * from './conversations';
 export * from './orders';
+export * from './deals';
 export * from './message-changes';
 export * from './members';
 export * from './channels';

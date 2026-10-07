@@ -5,6 +5,7 @@ import {
   CAMPAIGN_STATUSES,
   CHANNEL_STATUSES,
   CONVERSATION_STATUSES,
+  DEAL_STATUSES,
   MESSAGE_STATUSES,
   TEAM_ASSIGNMENT_MODES,
   MESSAGE_TYPES,
@@ -336,6 +337,91 @@ export const apiOrderSchema = z.object({
   receivedAt: z.iso.datetime(),
   paidAt: z.iso.datetime().nullable().describe('When Razorpay reported its Payment Link paid.'),
   updatedAt: z.iso.datetime().describe('When anything about the order last changed.'),
+});
+
+/** A CRM pipeline with its stages (ADR-253). */
+export const apiPipelineSchema = z.object({
+  id: z.uuid().describe('The pipeline, as deals name it (`pipelineId`).'),
+  name: z.string(),
+  currency: z
+    .string()
+    .describe('ISO 4217, like INR: the currency of every deal’s value in the pipeline.'),
+  position: z
+    .number()
+    .int()
+    .describe('The pipeline’s place among the company’s pipelines in the app, the first lowest.'),
+  archived: z
+    .boolean()
+    .describe(
+      'An archived pipeline holds only closed deals and takes none until members restore it.',
+    ),
+  stages: z
+    .array(
+      z.object({
+        id: z.uuid().describe('The stage, as deals name it (`stageId`).'),
+        name: z.string(),
+        position: z.number().int().describe('The stage’s place on the board, the leftmost lowest.'),
+        archived: z
+          .boolean()
+          .describe(
+            'Removed from the board: an archived stage holds no open deals, and the closed deals closed in it keep it.',
+          ),
+        winPercent: z
+          .number()
+          .int()
+          .min(0)
+          .max(100)
+          .nullable()
+          .describe(
+            'The chance, in whole percent, that the stage’s open deals are won, which the board and Reports weigh them by; null when it is not set.',
+          ),
+      }),
+    )
+    .describe('In board order, archived stages last.'),
+  createdAt: z.iso.datetime(),
+});
+
+/** A CRM deal (ADR-253). */
+export const apiDealSchema = z.object({
+  id: z.uuid(),
+  title: z.string().describe('“Deal (contact erased)” once its contact is erased.'),
+  pipelineId: z.uuid().describe('The deal’s pipeline, as GET /pipelines lists it.'),
+  stageId: z
+    .uuid()
+    .describe('The deal’s stage in its pipeline; a closed deal keeps the stage it was closed in.'),
+  status: z.enum(DEAL_STATUSES).describe('`open`, or closed as `won` or `lost`.'),
+  valueMinor: z
+    .number()
+    .int()
+    .nullable()
+    .describe(
+      'The deal’s value in the pipeline currency’s minor units (paise for INR); null when it has none.',
+    ),
+  currency: z.string().describe('ISO 4217, like INR: the pipeline’s currency.'),
+  contactId: z
+    .uuid()
+    .describe('The customer, as GET /contacts/{id} reads them with `contacts.read`.'),
+  conversationId: z
+    .uuid()
+    .nullable()
+    .describe('The conversation the deal was created from, if any.'),
+  ownerId: z
+    .uuid()
+    .nullable()
+    .describe(
+      'The member who owns the deal, by the id GET /members gives them (it lists the members still active); null when it has no owner.',
+    ),
+  expectedCloseOn: z.iso.date().nullable().describe('The day the deal is expected to close.'),
+  stageEnteredAt: z.iso.datetime().describe('When the deal entered its stage.'),
+  lostReason: z
+    .string()
+    .nullable()
+    .describe(
+      'Why a lost deal was lost, as a member or an automation wrote it; null otherwise, and once its contact is erased.',
+    ),
+  closedAt: z.iso.datetime().nullable().describe('When the deal was won or lost; null while open.'),
+  createdAt: z.iso.datetime(),
+  updatedAt: z.iso.datetime().describe('When anything about the deal last changed.'),
 });
 
 /** A member conversations can be assigned to (ADR-093). */
@@ -774,7 +860,7 @@ const errors = (...statuses: number[]) =>
           {
             400: 'The request is malformed (for example invalid JSON or a missing header).',
             401: 'No valid API key: missing, unknown, revoked or expired.',
-            403: "The key lacks the scope this needs, the company's plan does not include the API, the scope this needs, automations when starting one or Commerce when sending products or reading or changing orders (reason not_in_plan), or the key, or its company for all its keys, does not accept requests from the client's address (reason ip_not_allowed).",
+            403: "The key lacks the scope this needs, the company's plan does not include the API, the scope this needs, automations when starting one, the CRM when reading pipelines or deals, or Commerce when sending products or reading or changing orders (reason not_in_plan), or the key, or its company for all its keys, does not accept requests from the client's address (reason ip_not_allowed).",
             404: 'Not found in the company.',
             409: 'The request conflicts with the current state. Starting an automation: another automation handles the conversation (reason automation_busy), a member is assigned to it (conversation_assigned), or it had as many runs in the last hour as allowed (automation_limit). Pausing, resuming or cancelling a campaign: its status does not allow it, or, resuming, a member or HyFib paused it; the message names the status or the pause reason.',
             412: "A condition for sending or saving is not met (consent, suppression, state). With reason window_closed, the number has not written to the WhatsApp number in the last 24 hours, so only templates can be sent to it. Starting an automation: it is not published, archived or not started through the API (automation_unavailable), paused (automation_paused), its number is not active (channel_unavailable), or the plan's automation runs for the month are used up (automation_quota).",
@@ -1990,6 +2076,84 @@ export function buildOpenApiDocument(serverUrl: string) {
           },
         },
       },
+      '/pipelines': {
+        get: {
+          operationId: 'listPipelines',
+          summary: 'CRM pipelines, oldest first',
+          description: `${scopeNote('deals.read')} The company’s CRM pipelines, archived ones too, each with its stages in board order and each stage’s chance of winning, read together; pages never skip or repeat a pipeline. Needs the CRM in the company’s plan (403, reason not_in_plan).`,
+          parameters: [...pageParams],
+          responses: {
+            '200': { description: 'A page of pipelines.', content: pageOf('Pipeline') },
+            ...errors(401, 403, 422, 429, 500),
+          },
+        },
+      },
+      '/deals': {
+        get: {
+          operationId: 'listDeals',
+          summary: 'CRM deals, newest first',
+          description: [
+            `${scopeNote('deals.read')} The company’s CRM deals, open and closed, as the CRM board and the deal page show them, newest first by when they were created; pages never skip or repeat a deal. Filters combine: a deal matches all of them. Each deal has its pipeline, stage, status, value, expected close date and owner, with its contact and conversation by id. Needs the CRM in the company’s plan (403, reason not_in_plan).`,
+            'Values are integers in the pipeline currency’s minor units (paise for INR). Notes, tasks and the deal’s timeline are never read here, nor the contact’s name or number, which `contacts.read` reads. An erased contact’s deals are kept, renamed and without a lost reason, as erasure leaves them. To catch up on changes, ask for `updatedSince` a little before your previous pass began (a minute, say) and expect to see some deals again: a change carries the time it began to be saved, so one still being saved while you read can carry an earlier time.',
+          ].join('\n\n'),
+          parameters: [
+            ...pageParams,
+            {
+              name: 'pipelineId',
+              in: 'query',
+              schema: { type: 'string', format: 'uuid' },
+              description: 'Only the deals of this pipeline.',
+            },
+            {
+              name: 'stageId',
+              in: 'query',
+              schema: { type: 'string', format: 'uuid' },
+              description: 'Only the deals in this stage.',
+            },
+            {
+              name: 'status',
+              in: 'query',
+              schema: { type: 'string', enum: [...DEAL_STATUSES] },
+              description: 'Only the deals with this status.',
+            },
+            {
+              name: 'contactId',
+              in: 'query',
+              schema: { type: 'string', format: 'uuid' },
+              description: 'Only the deals of this contact.',
+            },
+            {
+              name: 'ownerId',
+              in: 'query',
+              schema: { anyOf: [{ type: 'string', format: 'uuid' }, { const: 'none' }] },
+              description: 'Only the deals this member owns, or `none` for those without an owner.',
+            },
+            {
+              name: 'updatedSince',
+              in: 'query',
+              schema: { type: 'string', format: 'date-time' },
+              description:
+                'Only deals changed at or after this time (created, edited, moved, closed or reopened, moved to another contact by a merge, or renamed when their contact was erased).',
+            },
+          ],
+          responses: {
+            '200': { description: 'A page of deals.', content: pageOf('Deal') },
+            ...errors(401, 403, 422, 429, 500),
+          },
+        },
+      },
+      '/deals/{id}': {
+        get: {
+          operationId: 'getDeal',
+          summary: 'A CRM deal',
+          description: `${scopeNote('deals.read')} As GET /deals gives it. Needs the CRM in the company’s plan (403, reason not_in_plan).`,
+          parameters: [{ $ref: '#/components/parameters/Id' }],
+          responses: {
+            '200': { description: 'The deal.', content: json(dataOf(ref('Deal'))) },
+            ...errors(401, 403, 404, 429, 500),
+          },
+        },
+      },
       '/webhook-endpoints': {
         get: {
           operationId: 'listWebhookEndpoints',
@@ -2618,6 +2782,8 @@ export function buildOpenApiDocument(serverUrl: string) {
         Campaign: jsonSchema(apiCampaignSchema),
         Order: jsonSchema(apiOrderSchema),
         UpdateOrder: jsonSchema(apiUpdateOrderSchema, 'input'),
+        Pipeline: jsonSchema(apiPipelineSchema),
+        Deal: jsonSchema(apiDealSchema),
         CampaignWithResults: jsonSchema(apiCampaignDetailSchema),
         CampaignReview: jsonSchema(apiCampaignReviewSchema),
         CreateCampaign: jsonSchema(apiCreateCampaignSchema, 'input'),
@@ -2726,6 +2892,9 @@ export const API_ROUTES = [
   ['get', '/orders'],
   ['get', '/orders/{id}'],
   ['patch', '/orders/{id}'],
+  ['get', '/pipelines'],
+  ['get', '/deals'],
+  ['get', '/deals/{id}'],
   ['get', '/webhook-endpoints'],
   ['post', '/webhook-endpoints'],
   ['post', '/webhook-endpoints/replay-failed'],

@@ -1434,6 +1434,14 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   (`commerce/service.ts`), shared with members' `setOrderStatus`, writes the status, its time and
   the next version, and the trigger of 0063 captures `order.status_changed`. The answer is read as
   `GET /orders/{id}` reads it (`readApiOrder`).
+- **CRM pipelines and deals through the API (ADR-253):** `GET /pipelines`, `GET /deals` and
+  `GET /deals/{id}` (`api/deals.ts`, `deals.read`) check the CRM in the plan first
+  (`loadEntitlements`, reason `not_in_plan`). Pipelines are read oldest first on exact keyset
+  cursors (`created_at`, `id`) with the page's stages in a second query, both in one repeatable-read
+  snapshot. Deals are read in the company joined to their pipeline (its currency), newest first by
+  `created_at` on exact keyset cursors (`crm_deals_list_idx`), the filters as plain equalities
+  (`ownerId` `none` as a null owner) and `updated_at >= updatedSince`; `toApiDeal` gives ids in
+  place of the contact, conversation and owner.
 - **Numbers through the API (ADR-171):** `GET /channels` (`api/channels.ts`, `channels.read`) reads
   `channel_accounts` in the company oldest first on exact keyset cursors (`created_at`, `id`), with
   `status` as an equality, and gives the id, `display_phone_number`, `verified_name`, the status and

@@ -24,6 +24,7 @@ export const API_SCOPES = [
   'automations.start',
   'orders.read',
   'orders.write',
+  'deals.read',
   'webhooks.manage',
 ] as const;
 export type ApiScope = (typeof API_SCOPES)[number];

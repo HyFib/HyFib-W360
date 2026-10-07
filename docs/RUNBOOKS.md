@@ -2085,6 +2085,19 @@ status asked for answers 200, so a retry is safe. 403 `forbidden` names the scop
 plan leaves out Commerce or the scope. 423 means the company is suspended or its plan has ended;
 reading orders still works.
 
+**`GET /api/v1/deals` or `GET /api/v1/pipelines` answers 403 or 404, or a deal seems missing
+(ADR-253).** 403 `forbidden` names the scope the key lacks, `deals.read` (keys keep the scopes they
+were created with: create a key with it); reason `not_in_plan` means the company's plan leaves out
+the CRM or the scope (ADR-092). 404 means the id is not one of the key's company's deals. Deals are
+listed newest first by when they were created, closed ones too, and filters narrow them: a deal
+missing from a pass with `updatedSince` changed while the pass ran, so ask from a little before the
+previous pass began. A deal titled "Deal (contact erased)" without a lost reason belongs to an
+erased contact. Archived pipelines are listed with `archived: true`; their deals are closed ones.
+
+**Migration 0168 failed.** It builds `app.crm_deals_list_idx` concurrently. If it failed, an INVALID
+index can remain: run `DROP INDEX CONCURRENTLY app.crm_deals_list_idx;` and run the migrations
+again.
+
 **`GET /api/v1/channels` answers 403, or a number shows no phone or name (ADR-171).** 403
 `forbidden` names the scope the key lacks, `channels.read` (keys keep the scopes they were created
 with: create a key with it); reason `not_in_plan` means the company's plan leaves the scope out

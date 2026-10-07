@@ -61,6 +61,7 @@ async function createPipeline(
 
 test('a deal moves through a pipeline with tasks, an emailed reminder, notes and reports', async ({
   page,
+  request,
 }) => {
   test.setTimeout(180_000);
   const { email, slug } = await createCompany(page, 'crm', 'Chandra');
@@ -193,6 +194,50 @@ test('a deal moves through a pipeline with tasks, an emailed reminder, notes and
   await expect(stat(page, 'Deals won')).toContainText('₹26,000.00');
   await expect(stat(page, 'Win rate')).toContainText('100%');
   await expectNoHorizontalOverflow(page);
+
+  // A key that reads deals finds the won deal and its pipelines through the API (ADR-253): the
+  // value in paise, the pipeline it moved to and the stage it was won in, by id.
+  await page.goto(`/c/${slug}/settings/api-keys`);
+  await page.getByLabel('Name', { exact: true }).fill('Deal sync');
+  await page.getByRole('checkbox', { name: /Read CRM deals/ }).check();
+  await page.getByRole('button', { name: 'Create API key' }).click();
+  const tokenField = page.getByLabel('API key', { exact: true });
+  await expect(tokenField).toBeVisible();
+  const auth = { Authorization: `Bearer ${await tokenField.inputValue()}` };
+  await page.getByRole('button', { name: 'I have stored the key' }).click();
+  const pipelinesRes = await request.get('/api/v1/pipelines', { headers: auth });
+  expect(pipelinesRes.status()).toBe(200);
+  const pipelines = (
+    (await pipelinesRes.json()) as {
+      data: {
+        id: string;
+        name: string;
+        stages: { id: string; name: string; winPercent: number | null }[];
+      }[];
+    }
+  ).data;
+  expect(pipelines.map((p) => p.name)).toEqual(['Sales', 'Renewals']);
+  expect(pipelines[0]!.stages.find((s) => s.name === 'Qualified')?.winPercent).toBe(50);
+  const wonRes = await request.get('/api/v1/deals?status=won', { headers: auth });
+  expect(wonRes.status()).toBe(200);
+  const won = (
+    (await wonRes.json()) as {
+      data: { id: string; title: string; pipelineId: string; stageId: string }[];
+      nextCursor: string | null;
+    }
+  ).data;
+  expect(won).toHaveLength(1);
+  expect(won[0]).toMatchObject({
+    title: 'Annual plan',
+    status: 'won',
+    valueMinor: 2_600_000,
+    currency: 'INR',
+    pipelineId: pipelines[1]!.id,
+    stageId: pipelines[1]!.stages.find((s) => s.name === 'New')!.id,
+    closedAt: expect.any(String),
+  });
+  const one = await request.get(`/api/v1/deals/${won[0]!.id}`, { headers: auth });
+  expect(((await one.json()) as { data: unknown }).data).toEqual(won[0]);
 });
 
 test.describe('from the inbox', () => {
