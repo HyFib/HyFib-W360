@@ -73,8 +73,9 @@ test('members who open the same conversation see each other until one leaves (AD
     timeout: 30_000,
   });
 
-  // The agent leaves the conversation; the owner's next report no longer names them.
-  await agent.goto(`/c/${slug}/inbox`);
+  // The agent leaves the conversation for the unassigned queue (an agent's inbox opens on the
+  // conversations assigned to them); the owner's next report no longer names them.
+  await agent.goto(`/c/${slug}/inbox?view=unassigned`);
   await expect(agent.getByRole('link', { name: /Priya Customer/ })).toBeVisible();
   await expect(owner.getByText('Ari Agent also has this conversation open.')).toBeHidden({
     timeout: 30_000,

@@ -240,6 +240,8 @@ test('a form is checked by Meta, published, sent in a chat and its answers saved
   );
   await openFromNav(page, 'Flows');
   await page.getByRole('link', { name: 'Lead form' }).click();
+  // The link navigates on the client: reloading before it lands would reload the Flows list.
+  await expect(page.getByRole('heading', { name: 'Lead form', level: 1 })).toBeVisible();
   await reloadUntil(page, 'full_name: Ravi Kumar');
 });
 

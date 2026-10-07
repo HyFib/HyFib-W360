@@ -140,13 +140,13 @@ test('an API key created in settings sends an approved template once, and stops 
       data: {
         id: string;
         name: string;
-        variables: { header: number; body: number };
+        variables: { header: number; body: number; buttons: number };
         headerMedia: string | null;
       }[];
     }
   ).data;
   const template = listed.find((t) => t.name === 'shipping_update');
-  expect(template?.variables).toEqual({ header: 0, body: 2 });
+  expect(template?.variables).toEqual({ header: 0, body: 2, buttons: 0 });
   expect(template?.headerMedia).toBeNull();
   const photoTemplate = listed.find((t) => t.name === 'delivery_photo');
   expect(photoTemplate).toMatchObject({ variables: { header: 0, body: 1 }, headerMedia: 'image' });

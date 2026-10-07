@@ -225,7 +225,9 @@ test('an automation creates a CRM task and a deal about the customer (ADR-244, A
   await page.getByRole('button', { name: 'Create pipeline' }).click();
   await expect(page.getByText('Pipeline created.')).toBeVisible();
 
+  // The pipelines page has Name fields of its own: the link navigates on the client.
   await page.getByRole('link', { name: 'Automations' }).first().click();
+  await expect(page.getByRole('heading', { name: 'Automations' })).toBeVisible();
   await page.getByLabel('Name', { exact: true }).fill('Callbacks');
   await page.getByRole('button', { name: 'Create draft' }).click();
   await expect(page.getByRole('heading', { name: 'Callbacks' })).toBeVisible();

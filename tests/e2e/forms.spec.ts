@@ -101,7 +101,8 @@ test('the company security checkbox stays disabled until React hydrates it', asy
   releaseScripts();
   await expect(requireMfa).toBeEnabled();
   await requireMfa.check();
-  await page.getByRole('button', { name: 'Save', exact: true }).click();
+  // The page also saves which roles see numbers masked (ADR-226), with a Save of its own below.
+  await page.getByRole('button', { name: 'Save', exact: true }).first().click();
   await expect(page.getByText('Security settings saved.')).toBeVisible();
   await page.reload();
   await expect(requireMfa).toBeChecked();
