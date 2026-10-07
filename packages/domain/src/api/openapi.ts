@@ -102,7 +102,7 @@ import {
   apiUpdateMatchingConversationsSchema,
 } from './conversations';
 import { API_LIMITS, API_SCOPE_INFO, API_SCOPE_KEYS } from './model';
-import { apiCreateDealSchema } from './deals';
+import { apiCreateDealSchema, apiUpdateDealSchema } from './deals';
 import { apiUpdateOrderSchema } from './orders';
 import {
   apiConsentSchema,
@@ -423,6 +423,12 @@ export const apiDealSchema = z.object({
   closedAt: z.iso.datetime().nullable().describe('When the deal was won or lost; null while open.'),
   createdAt: z.iso.datetime(),
   updatedAt: z.iso.datetime().describe('When anything about the deal last changed.'),
+  version: z
+    .number()
+    .int()
+    .describe(
+      'Moves on with every change of the deal, by members, automations or keys; PATCH /deals/{id} takes it as `expectedVersion`.',
+    ),
 });
 
 /** A member conversations can be assigned to (ADR-093). */
@@ -861,7 +867,7 @@ const errors = (...statuses: number[]) =>
           {
             400: 'The request is malformed (for example invalid JSON or a missing header).',
             401: 'No valid API key: missing, unknown, revoked or expired.',
-            403: "The key lacks the scope this needs, the company's plan does not include the API, the scope this needs, automations when starting one, the CRM when reading pipelines or deals or creating deals, or Commerce when sending products or reading or changing orders (reason not_in_plan), or the key, or its company for all its keys, does not accept requests from the client's address (reason ip_not_allowed).",
+            403: "The key lacks the scope this needs, the company's plan does not include the API, the scope this needs, automations when starting one, the CRM when reading pipelines or deals or creating or changing deals, or Commerce when sending products or reading or changing orders (reason not_in_plan), or the key, or its company for all its keys, does not accept requests from the client's address (reason ip_not_allowed).",
             404: 'Not found in the company.',
             409: 'The request conflicts with the current state. Starting an automation: another automation handles the conversation (reason automation_busy), a member is assigned to it (conversation_assigned), or it had as many runs in the last hour as allowed (automation_limit). Pausing, resuming or cancelling a campaign: its status does not allow it, or, resuming, a member or HyFib paused it; the message names the status or the pause reason.',
             412: "A condition for sending or saving is not met (consent, suppression, state). With reason window_closed, the number has not written to the WhatsApp number in the last 24 hours, so only templates can be sent to it. Starting an automation: it is not published, archived or not started through the API (automation_unavailable), paused (automation_paused), its number is not active (channel_unavailable), or the plan's automation runs for the month are used up (automation_quota).",
@@ -2165,6 +2171,17 @@ export function buildOpenApiDocument(serverUrl: string) {
             ...errors(401, 403, 404, 429, 500),
           },
         },
+        patch: {
+          operationId: 'updateDeal',
+          summary: 'Change, move, close or reopen a CRM deal',
+          description: `${scopeNote('deals.write')} As members do on the deal page, in this order: \`status\` \`open\` reopens a closed deal (in its stage, or its pipeline’s first active stage when its stage was removed); \`stageId\` moves the open deal to another active stage of its pipeline; the title, the value in the pipeline currency’s minor units, the owner (an active member able to use the CRM, or null) and the expected close date change, except once the deal’s contact is erased (409); \`status\` \`won\` or \`lost\` closes the open deal, with \`lostReason\` for a lost one. A deal already as asked is answered as it is, so a retry changes nothing; a closed deal is not moved, or closed the other way, until it is reopened (409), and a deal in an archived pipeline is not reopened (409). With \`expectedVersion\`, a deal changed since is refused with 409. Each change is on the deal’s timeline as done through the API, and the audit log names the key. Needs the CRM in the company’s plan (403, reason not_in_plan).`,
+          parameters: [{ $ref: '#/components/parameters/Id' }],
+          requestBody: { required: true, content: json(ref('UpdateDeal')) },
+          responses: {
+            '200': { description: 'The deal as it is now.', content: json(dataOf(ref('Deal'))) },
+            ...errors(400, 401, 403, 404, 409, 415, 422, 423, 429, 500),
+          },
+        },
       },
       '/webhook-endpoints': {
         get: {
@@ -2797,6 +2814,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         Pipeline: jsonSchema(apiPipelineSchema),
         Deal: jsonSchema(apiDealSchema),
         CreateDeal: jsonSchema(apiCreateDealSchema, 'input'),
+        UpdateDeal: jsonSchema(apiUpdateDealSchema, 'input'),
         CampaignWithResults: jsonSchema(apiCampaignDetailSchema),
         CampaignReview: jsonSchema(apiCampaignReviewSchema),
         CreateCampaign: jsonSchema(apiCreateCampaignSchema, 'input'),
@@ -2909,6 +2927,7 @@ export const API_ROUTES = [
   ['get', '/deals'],
   ['post', '/deals'],
   ['get', '/deals/{id}'],
+  ['patch', '/deals/{id}'],
   ['get', '/webhook-endpoints'],
   ['post', '/webhook-endpoints'],
   ['post', '/webhook-endpoints/replay-failed'],

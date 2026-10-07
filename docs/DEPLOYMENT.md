@@ -629,6 +629,10 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    including it), and `POST /api/v1/deals` with 405; an old server shows a deal a key created as
    created by nobody. Workers are not affected.
 
+   ADR-255 has no migration. Until the web rollout ends, an old web server answers
+   `PATCH /api/v1/deals/{id}` with 405, leaves `version` out of deals and describes the scope as
+   creating deals only; rolling web servers back does the same. Workers are not affected.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

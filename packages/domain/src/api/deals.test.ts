@@ -12,6 +12,8 @@ import {
   apiListDeals,
   apiListPipelines,
   apiPipelineListQuerySchema,
+  apiUpdateDeal,
+  apiUpdateDealSchema,
 } from './deals';
 import { API_SCOPE_INFO } from './model';
 import { API_ROUTES, buildOpenApiDocument } from './openapi';
@@ -233,7 +235,7 @@ describe('CRM pipelines and deals through the API (ADR-253)', () => {
       expect(list.description).toContain(words);
     }
     expect(list.responses['403']?.description).toContain(
-      'the CRM when reading pipelines or deals or creating deals,',
+      'the CRM when reading pipelines or deals or creating or changing deals,',
     );
 
     const one = doc.paths['/deals/{id}']?.get as Operation;
@@ -285,6 +287,7 @@ describe('CRM pipelines and deals through the API (ADR-253)', () => {
       'closedAt',
       'createdAt',
       'updatedAt',
+      'version',
     ]);
     expect(deal.required).toEqual(Object.keys(deal.properties));
     // Ids only: no contact details, notes, tasks or timeline anywhere in it.
@@ -299,11 +302,11 @@ describe('creating CRM deals through the API (ADR-254)', () => {
   it('needs deals.write, a writing scope the database accepts, granted with crm.write', () => {
     expect(API_SCOPES).toContain('deals.write');
     expect(API_SCOPE_INFO['deals.write']).toMatchObject({
-      label: 'Create CRM deals',
+      label: 'Create and change CRM deals',
       permission: 'crm.write',
       writes: true,
     });
-    for (const words of ['as members do', 'recorded as created through the API', 'CRM']) {
+    for (const words of ['as members do', 'recorded as done through the API', 'CRM']) {
       expect(API_SCOPE_INFO['deals.write'].description).toContain(words);
     }
     // Owners and administrators, who create keys, create deals in the app.
@@ -421,6 +424,132 @@ describe('creating CRM deals through the API (ADR-254)', () => {
       'expectedCloseOn',
     ]);
     expect(body.required).toEqual(['contactId', 'pipelineId', 'title']);
+    expect(body.additionalProperties).toBe(false);
+  });
+});
+
+describe('changing CRM deals through the API (ADR-255)', () => {
+  const deps = (db: Database) => ({ db, clock: { now: () => new Date() } });
+
+  it('takes details, a stage and a status, at least one, and a lost reason only to lose a deal', () => {
+    const parse = (input: unknown) => apiUpdateDealSchema.safeParse(input);
+    for (const input of [
+      { title: 'Bigger plan' },
+      { valueMinor: null },
+      { valueMinor: 25_000, ownerId: null, expectedCloseOn: null },
+      { ownerId: TENANT, expectedCloseOn: '2026-12-01' },
+      { stageId: OTHER },
+      { status: 'open' },
+      { status: 'lost', lostReason: 'Budget cut' },
+      { status: 'won', expectedVersion: 3 },
+      { stageId: OTHER, status: 'won' },
+    ]) {
+      expect(parse(input).success, JSON.stringify(input)).toBe(true);
+    }
+    const issue = (input: unknown) => {
+      const parsed = parse(input);
+      return parsed.success
+        ? null
+        : [parsed.error.issues[0]?.path, parsed.error.issues[0]?.message];
+    };
+    expect(issue({})).toEqual([[], 'Give at least one change: a detail, `stageId` or `status`.']);
+    expect(issue({ expectedVersion: 2 })).toEqual(issue({}));
+    for (const input of [{ lostReason: 'Budget cut' }, { status: 'won', lostReason: 'Budget' }]) {
+      expect(issue(input)).toEqual([['lostReason'], 'A lost reason goes with `status` `lost`.']);
+    }
+    for (const input of [
+      { status: 'closed' },
+      { stageId: 'won' },
+      { title: '   ' },
+      { valueMinor: -1 },
+      { valueMinor: 1.5 },
+      { ownerId: 'me' },
+      { expectedCloseOn: '2026-02-30' },
+      { title: 'Bigger plan', expectedVersion: 0 },
+      { title: 'Bigger plan', expectedVersion: 1.5 },
+      { status: 'lost', lostReason: 'x'.repeat(201) },
+      { contactId: TENANT },
+      { pipelineId: OTHER },
+    ]) {
+      expect(parse(input).success, JSON.stringify(input)).toBe(false);
+    }
+  });
+
+  it('need deals.write, an active company and a deal id, refused before anything is read', async () => {
+    const change = { title: 'Bigger plan' };
+    expect(
+      await refusal(apiUpdateDeal(deps(untouched), ctx(['deals.read']), TENANT, change)),
+    ).toEqual(['forbidden', 'This API key does not have the deals.write scope.', []]);
+    expect(
+      (
+        await refusal(
+          apiUpdateDeal(deps(untouched), ctx(['deals.write'], 'suspended'), TENANT, change),
+        )
+      )[0],
+    ).toBe('tenant_suspended');
+    expect(
+      await refusal(apiUpdateDeal(deps(untouched), ctx(['deals.write']), 'not-an-id', change)),
+    ).toEqual(['not_found', 'Deal not found.', []]);
+    expect(
+      (await refusal(apiUpdateDeal(deps(untouched), ctx(['deals.write']), TENANT, {})))[0],
+    ).toBe('validation_failed');
+    // A valid request reaches the database in a writing transaction.
+    const { db, runs } = reached();
+    await expect(apiUpdateDeal(deps(db), ctx(['deals.write']), TENANT, change)).rejects.toThrow(
+      'reached the database',
+    );
+    expect(runs).toEqual([undefined]);
+  });
+
+  it('are described: the order of changes, the refusals, the version and the body', () => {
+    const doc = buildOpenApiDocument('https://example.test/api/v1') as unknown as {
+      paths: Record<string, Record<string, Record<string, unknown>>>;
+      components: { schemas: Record<string, unknown> };
+    };
+    expect(API_ROUTES).toContainEqual(['patch', '/deals/{id}']);
+    const update = doc.paths['/deals/{id}']?.patch as {
+      operationId: string;
+      description: string;
+      requestBody: { content: Record<string, { schema: unknown }> };
+      responses: Record<string, unknown>;
+    };
+    expect(update.operationId).toBe('updateDeal');
+    expect(update.requestBody.content['application/json']?.schema).toEqual({
+      $ref: '#/components/schemas/UpdateDeal',
+    });
+    expect(Object.keys(update.responses)).toEqual(
+      expect.arrayContaining(['200', '403', '404', '409', '422', '423']),
+    );
+    for (const words of [
+      'Scope: `deals.write`.',
+      '`status` `open` reopens a closed deal',
+      '`stageId` moves the open deal to another active stage of its pipeline',
+      'except once the deal’s contact is erased (409)',
+      '`status` `won` or `lost` closes the open deal, with `lostReason` for a lost one',
+      'so a retry changes nothing',
+      'a deal in an archived pipeline is not reopened (409)',
+      'With `expectedVersion`, a deal changed since is refused with 409',
+      'as done through the API',
+      '(403, reason not_in_plan)',
+    ]) {
+      expect(update.description).toContain(words);
+    }
+    const body = doc.components.schemas.UpdateDeal as {
+      properties: Record<string, unknown>;
+      required?: string[];
+      additionalProperties: boolean;
+    };
+    expect(Object.keys(body.properties)).toEqual([
+      'title',
+      'valueMinor',
+      'ownerId',
+      'expectedCloseOn',
+      'stageId',
+      'status',
+      'lostReason',
+      'expectedVersion',
+    ]);
+    expect(body.required ?? []).toEqual([]);
     expect(body.additionalProperties).toBe(false);
   });
 });

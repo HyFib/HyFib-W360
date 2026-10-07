@@ -200,7 +200,7 @@ test('a deal moves through a pipeline with tasks, an emailed reminder, notes and
   await page.goto(`/c/${slug}/settings/api-keys`);
   await page.getByLabel('Name', { exact: true }).fill('Deal sync');
   await page.getByRole('checkbox', { name: /Read CRM deals/ }).check();
-  await page.getByRole('checkbox', { name: /Create CRM deals/ }).check();
+  await page.getByRole('checkbox', { name: /Create and change CRM deals/ }).check();
   await page.getByRole('button', { name: 'Create API key' }).click();
   const tokenField = page.getByLabel('API key', { exact: true });
   await expect(tokenField).toBeVisible();
@@ -240,8 +240,9 @@ test('a deal moves through a pipeline with tasks, an emailed reminder, notes and
   const one = await request.get(`/api/v1/deals/${won[0]!.id}`, { headers: auth });
   expect(((await one.json()) as { data: unknown }).data).toEqual(won[0]);
 
-  // The key also creates a deal for the customer (ADR-254): in the pipeline's first stage, and
-  // its page says it came through the API.
+  // The key also creates a deal for the customer (ADR-254), in the pipeline's first stage, then
+  // changes it as members do (ADR-255): a new value and the next stage. Its page says it came
+  // through the API.
   const createdRes = await request.post('/api/v1/deals', {
     headers: { ...auth, 'Idempotency-Key': `crm-e2e-${Date.now()}` },
     data: {
@@ -252,11 +253,23 @@ test('a deal moves through a pipeline with tasks, an emailed reminder, notes and
     },
   });
   expect(createdRes.status()).toBe(201);
-  const created = ((await createdRes.json()) as { data: { id: string; stageId: string } }).data;
+  const created = (
+    (await createdRes.json()) as { data: { id: string; stageId: string; version: number } }
+  ).data;
   expect(created.stageId).toBe(pipelines[0]!.stages[0]!.id);
+  const qualified = pipelines[0]!.stages.find((s) => s.name === 'Qualified')!.id;
+  const changedRes = await request.patch(`/api/v1/deals/${created.id}`, {
+    headers: auth,
+    data: { stageId: qualified, valueMinor: 150_000, expectedVersion: created.version },
+  });
+  expect(changedRes.status()).toBe(200);
+  expect(
+    ((await changedRes.json()) as { data: { stageId: string; version: number } }).data,
+  ).toMatchObject({ stageId: qualified, version: created.version + 1 });
   await page.goto(`/c/${slug}/crm/deals/${created.id}`);
   await expect(page.getByRole('heading', { name: 'Second order', level: 1 })).toBeVisible();
-  await expect(page.getByText('Sales · ₹1,200.00')).toBeVisible();
+  await expect(page.getByText('Sales · ₹1,500.00')).toBeVisible();
+  await expect(page.getByLabel('Stage of Second order')).toHaveValue(qualified);
   await expect(page.getByText(/through the API/).first()).toBeVisible();
   await expectNoHorizontalOverflow(page);
 });

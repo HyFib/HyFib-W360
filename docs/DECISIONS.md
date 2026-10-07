@@ -9667,3 +9667,35 @@ Decision:
 
 Not built: changing, moving, closing or deleting deals through the API, linking a deal to a
 conversation through the API, and deal webhook events.
+
+## ADR-255 Changing CRM deals through the public API (P5-08, P4-04) (2026-10-07)
+
+Context: after ADR-254 an integration could create deals but not move them on: a paid order, a
+signed contract or a cancelled booking still needed a member to move, win or lose the deal on the
+board.
+
+Decision:
+
+- **`PATCH /api/v1/deals/{id}` (`updateDeal`)** with `deals.write`, now "Create and change CRM
+  deals": changes a deal as members do on the deal page, in one transaction with its contact and
+  then its row locked (the order erasure takes them in), in this order: `status` `open` reopens a
+  closed deal (in its stage, or its pipeline's first active stage when its stage was removed);
+  `stageId` moves the open deal to another active stage of its pipeline; the title, the value in the
+  pipeline currency's minor units, the owner (an active member who can use the CRM, or null) and the
+  expected close date change; `status` `won` or `lost` closes the open deal, with `lostReason` for a
+  lost one. The version moves on once per call.
+- **The members' rules:** a deal already as asked is answered as it is, so a retry changes nothing;
+  a closed deal is not moved, or closed the other way, until it is reopened, and a deal in an
+  archived pipeline is not reopened (409); an erased contact's deal keeps its details (409) and is
+  closed only without a reason (422); a stage of another pipeline or an owner who cannot use the CRM
+  is refused naming the field (422), a removed stage with 409. Moving a deal to another pipeline
+  stays with members.
+- **Versions:** deals now carry `version` (GET answers too), and `expectedVersion` refuses a change
+  to a deal changed since (409). Members' changes check the version as before, so a member saving
+  what they read before a key's change is told it changed.
+- **Recorded as the key's:** each change is on the deal's timeline without a member actor, naming
+  the key (shown "through the API"); a deal closed through the API has no member as its closer; the
+  audit log records `crm.deal_updated` as the key with what changed. No migration.
+
+Not built: moving deals to another pipeline, deleting deals, linking conversations, tasks and notes
+through the API, and deal webhook events.

@@ -1449,6 +1449,14 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   with `memberRefs`, then inserts the deal with `created_by_api_key_id`, a `deal_created` activity
   without an actor whose data names the key, and a `crm.deal_created` audit row as the key, and
   answers the deal as `readApiDeal` reads it.
+- **Changing CRM deals through the API (ADR-255):** `PATCH /deals/{id}` (`apiUpdateDeal`,
+  `deals.write`) checks the CRM in the plan, reads the deal's contact, locks it (key share) and then
+  the deal (for update; a merge that moved the deal between the reads answers 409), checks
+  `expectedVersion`, then applies a reopen and a move (sharing the pipeline before reading its
+  stages, `sharedActivePipeline`), the detail changes (owner through `memberRefs`) and a close to a
+  working copy, collecting the members' activity kinds; when anything changed it writes the row once
+  with the next version, adds the activities without an actor naming the key and a
+  `crm.deal_updated` audit row, and answers the deal as `readApiDeal` reads it.
 - **Numbers through the API (ADR-171):** `GET /channels` (`api/channels.ts`, `channels.read`) reads
   `channel_accounts` in the company oldest first on exact keyset cursors (`created_at`, `id`), with
   `status` as an equality, and gives the id, `display_phone_number`, `verified_name`, the status and

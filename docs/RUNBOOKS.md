@@ -2108,6 +2108,16 @@ of another pipeline, or an owner who cannot use the CRM (GET /members). 423 mean
 suspended or its plan has ended; reading deals still works. A deal created through the API says so
 on its page and timeline; the audit log has `crm.deal_created` with the key.
 
+**`PATCH /api/v1/deals/{id}` answers 409, 422 or 404 (ADR-255).** 409 `conflict` says why: the deal
+changed since the `expectedVersion` given (read it again and decide), it is closed (reopen it with
+`status` `open` before moving it or closing it the other way), its pipeline is archived (members
+restore it in the app), its stage was removed, its contact was erased (its details no longer
+change), or a merge moved it to another contact while the call ran (try again). 422 names the field:
+a stage of another pipeline, an owner who cannot use the CRM, or a lost reason without `status`
+`lost` or for an erased contact. 404 means the deal is not one of the key's company's. A call that
+asks for the deal as it already is changes nothing and answers 200. The timeline shows each change
+"through the API"; the audit log has `crm.deal_updated` with the key and what changed.
+
 **`GET /api/v1/channels` answers 403, or a number shows no phone or name (ADR-171).** 403
 `forbidden` names the scope the key lacks, `channels.read` (keys keep the scopes they were created
 with: create a key with it); reason `not_in_plan` means the company's plan leaves the scope out

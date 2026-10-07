@@ -584,8 +584,8 @@ Phase 5 rules (Public API, P5-08):
   same names (ADR-125, ADR-186), `campaigns.send` for `campaigns.stop` (ADR-128) and
   `campaigns.resume` (ADR-176), `commerce.read` for `orders.read` (ADR-167), `inbox.reply` for
   `orders.write` (ADR-168), `channels.read` for the scope of the same name (ADR-171), `crm.read` for
-  `deals.read` (ADR-253), and `crm.write` for `deals.write` (ADR-254). Nobody grants a key more than
-  they hold, and rotating needs the same. A key keeps the scopes it was created with.
+  `deals.read` (ADR-253), and `crm.write` for `deals.write` (ADR-254, ADR-255). Nobody grants a key
+  more than they hold, and rotating needs the same. A key keeps the scopes it was created with.
 - A request acts for the key's company only, as the key: its company comes from the key found by
   the token's hash, never from the path, body or headers, and data access runs in that company's
   scope (RLS). Audit rows name the key (`api_key`). Writing scopes are refused while the company is
@@ -1015,6 +1015,14 @@ Phase 5 rules (Public API, P5-08):
   stage active and the owner an active member who can use the CRM, as for members. The deal names
   the key as its creator, its timeline entry names the key, and the audit log records
   `crm.deal_created` as the key (unit tests; integration and e2e tests, run in CI only).
+- Changing CRM deals (ADR-255): `PATCH /deals/{id}` needs `deals.write`, an active company and the
+  CRM in the plan, checked before anything is written; it changes only the key's company's deals
+  (another company's answers 404), locks the contact before the deal as erasure does, keeps an
+  erased contact's details, takes stages of the deal's own pipeline and owners who can use the CRM
+  only, and follows the members' rules for closed and archived deals. `expectedVersion` stops a key
+  overwriting a change it did not see, and members' versions stop them overwriting a key's. Every
+  change is on the timeline naming the key, and the audit log records it as the key (unit tests;
+  integration and e2e tests, run in CI only).
 - Defining contact fields (ADR-115): adding, renaming and deleting the company's custom fields needs
   `contact_fields.manage`, which only members holding `tenant.settings.manage` (owners and
   administrators, who define fields in Settings) grant, and an active company. Fields are named by

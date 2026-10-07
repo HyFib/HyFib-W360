@@ -14,6 +14,7 @@ import {
   inArray,
   isNull,
   sql,
+  type CrmActivityKind,
   type DealStatus,
   type Tx,
 } from '@w360/db';
@@ -69,6 +70,30 @@ export const apiDealListQuerySchema = z
   })
   .strict();
 
+const titleSchema = z
+  .string()
+  .trim()
+  .min(1, 'Give the deal a title.')
+  .max(120, 'A title is limited to 120 characters.');
+
+const valueMinorSchema = z
+  .number()
+  .int()
+  .min(0)
+  .max(MAX_DEAL_MINOR)
+  .nullable()
+  .describe('The deal’s value in the pipeline currency’s minor units (paise for INR).');
+
+const ownerIdSchema = z
+  .uuid()
+  .nullable()
+  .describe('The member who owns the deal: an active member who can use the CRM (GET /members).');
+
+const expectedCloseOnSchema = z.iso
+  .date()
+  .nullable()
+  .describe('The day the deal is expected to close.');
+
 /** What `POST /deals` takes: the contact, the pipeline and the deal, as members create one. */
 export const apiCreateDealSchema = z
   .object({
@@ -78,33 +103,55 @@ export const apiCreateDealSchema = z
       .uuid()
       .optional()
       .describe('An active stage of the pipeline; without one, its first active stage.'),
-    title: z
-      .string()
-      .trim()
-      .min(1, 'Give the deal a title.')
-      .max(120, 'A title is limited to 120 characters.'),
-    valueMinor: z
-      .number()
-      .int()
-      .min(0)
-      .max(MAX_DEAL_MINOR)
-      .nullable()
-      .optional()
-      .describe('The deal’s value in the pipeline currency’s minor units (paise for INR).'),
-    ownerId: z
-      .uuid()
-      .nullable()
-      .optional()
-      .describe(
-        'The member who owns the deal: an active member who can use the CRM (GET /members).',
-      ),
-    expectedCloseOn: z.iso
-      .date()
-      .nullable()
-      .optional()
-      .describe('The day the deal is expected to close.'),
+    title: titleSchema,
+    valueMinor: valueMinorSchema.optional(),
+    ownerId: ownerIdSchema.optional(),
+    expectedCloseOn: expectedCloseOnSchema.optional(),
   })
   .strict();
+
+/**
+ * What `PATCH /deals/{id}` takes (ADR-255): any of the deal's details, a stage of its pipeline, and
+ * a status that closes or reopens it, from the version expected when one is given.
+ */
+export const apiUpdateDealSchema = z
+  .object({
+    title: titleSchema.optional(),
+    valueMinor: valueMinorSchema.optional(),
+    ownerId: ownerIdSchema.optional(),
+    expectedCloseOn: expectedCloseOnSchema.optional(),
+    stageId: z
+      .uuid()
+      .optional()
+      .describe('Moves the open deal to this active stage of its pipeline.'),
+    status: z
+      .enum(DEAL_STATUSES)
+      .optional()
+      .describe('`won` or `lost` closes the open deal; `open` reopens a closed one.'),
+    lostReason: z
+      .string()
+      .trim()
+      .max(200, 'The reason is limited to 200 characters.')
+      .nullable()
+      .optional()
+      .describe('With `status` `lost`: why the deal was lost, as members write it.'),
+    expectedVersion: z
+      .number()
+      .int()
+      .min(1)
+      .optional()
+      .describe(
+        'Change the deal only at this `version`: a deal changed since is refused with 409 (read it again).',
+      ),
+  })
+  .strict()
+  .refine((change) => Object.keys(change).some((key) => key !== 'expectedVersion'), {
+    message: 'Give at least one change: a detail, `stageId` or `status`.',
+  })
+  .refine((change) => !change.lostReason || change.status === 'lost', {
+    message: 'A lost reason goes with `status` `lost`.',
+    path: ['lostReason'],
+  });
 
 export interface ApiPipelineStage {
   id: string;
@@ -149,6 +196,8 @@ export interface ApiDeal {
   closedAt: string | null;
   createdAt: string;
   updatedAt: string;
+  /** Moves on with every change; `PATCH /deals/{id}` takes it as `expectedVersion` (ADR-255). */
+  version: number;
 }
 
 /** Pipelines and deals are the CRM's: a plan without it reads none through the API. */
@@ -270,6 +319,7 @@ const dealColumns = {
   closedAt: crmDeals.closedAt,
   createdAt: crmDeals.createdAt,
   updatedAt: crmDeals.updatedAt,
+  version: crmDeals.version,
   cursorAt: exactTimestamp(crmDeals.createdAt),
 };
 
@@ -290,6 +340,7 @@ interface DealRow {
   closedAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
+  version: number;
 }
 
 const toApiDeal = (row: DealRow): ApiDeal => ({
@@ -309,6 +360,7 @@ const toApiDeal = (row: DealRow): ApiDeal => ({
   closedAt: row.closedAt?.toISOString() ?? null,
   createdAt: row.createdAt.toISOString(),
   updatedAt: row.updatedAt.toISOString(),
+  version: row.version,
 });
 
 /** A deal's pipeline, which gives its currency (a deal's pipeline is the company's). */
@@ -532,4 +584,250 @@ export async function apiCreateDeal(
     if (claimed) await storeIdempotentResponse(tx, ctx, claimed, response);
     return { ...response, replayed: false };
   });
+}
+
+/** The pipeline of a deal being moved or reopened, shared until the change is in (see entryStage). */
+async function sharedActivePipeline(tx: Tx, tenantId: string, pipelineId: string) {
+  const [pipeline] = await tx
+    .select({ archivedAt: crmPipelines.archivedAt })
+    .from(crmPipelines)
+    .where(and(eq(crmPipelines.tenantId, tenantId), eq(crmPipelines.id, pipelineId)))
+    .for('share');
+  if (!pipeline || pipeline.archivedAt) {
+    throw new AppError(
+      'conflict',
+      'This deal’s pipeline is archived: members restore it in the app first.',
+    );
+  }
+  return tx
+    .select({ id: crmStages.id, archivedAt: crmStages.archivedAt })
+    .from(crmStages)
+    .where(and(eq(crmStages.tenantId, tenantId), eq(crmStages.pipelineId, pipelineId)))
+    .orderBy(asc(crmStages.position), asc(crmStages.id));
+}
+
+/**
+ * Changes one of the company's deals as members do on the board and the deal page (ADR-255), in one
+ * transaction with the deal's contact and then its row locked (the order erasure takes them in): a
+ * closed deal is reopened (in its stage, or the pipeline's first active one when its stage was
+ * removed), the open deal moved to another active stage of its pipeline, its title, value, owner and
+ * expected close date changed (not once its contact is erased), and the open deal closed as won or
+ * lost, in that order, with the version moving on once. A deal already as asked is answered as it
+ * is, so a retry changes nothing; a closed deal is not moved or closed the other way until it is
+ * reopened. Each change is on the deal's timeline without a member actor, naming the key, and the
+ * audit log records it as the key.
+ */
+export async function apiUpdateDeal(
+  deps: Pick<OutboundDeps, 'db' | 'clock'>,
+  ctx: ApiContext,
+  dealId: string,
+  input: unknown,
+): Promise<ApiDeal> {
+  assertScope(ctx, 'deals.write');
+  if (!z.uuid().safeParse(dealId).success) throw notFound('Deal');
+  const data = parseInput(apiUpdateDealSchema, input);
+  const now = deps.clock.now();
+  const deal = await deps.db.run(ctx.scope, async (tx) => {
+    await assertCrmInPlan(tx, ctx.tenant.id);
+    const [ref] = await tx
+      .select({ contactId: crmDeals.contactId })
+      .from(crmDeals)
+      .where(and(eq(crmDeals.tenantId, ctx.tenant.id), eq(crmDeals.id, dealId)));
+    if (!ref) return null;
+    const [contact] = await tx
+      .select({ erasedAt: contacts.erasedAt })
+      .from(contacts)
+      .where(and(eq(contacts.tenantId, ctx.tenant.id), eq(contacts.id, ref.contactId)))
+      .for('key share');
+    const [current] = await tx
+      .select()
+      .from(crmDeals)
+      .where(and(eq(crmDeals.tenantId, ctx.tenant.id), eq(crmDeals.id, dealId)))
+      .for('update');
+    if (!current) return null;
+    // A merge moved the deal to another contact between the reads: its contact is not locked.
+    if (!contact || current.contactId !== ref.contactId) {
+      throw new AppError('conflict', 'The deal moved to another contact meanwhile; try again.');
+    }
+    if (data.expectedVersion !== undefined && data.expectedVersion !== current.version) {
+      throw new AppError(
+        'conflict',
+        `The deal changed since version ${data.expectedVersion}; its version is ${current.version}. Read it again.`,
+      );
+    }
+    const erased = contact.erasedAt !== null;
+    const detailsGiven =
+      data.title !== undefined ||
+      data.valueMinor !== undefined ||
+      data.ownerId !== undefined ||
+      data.expectedCloseOn !== undefined;
+    if (erased && detailsGiven) {
+      throw new AppError(
+        'conflict',
+        'The contact was erased, so this deal’s details can no longer be changed.',
+      );
+    }
+    if (erased && data.lostReason) {
+      throw invalidField('lostReason', 'The contact was erased; close the deal without a reason.');
+    }
+
+    const next = { ...current };
+    const changes: string[] = [];
+    const activities: { kind: CrmActivityKind; data: Record<string, unknown> }[] = [];
+
+    if (data.status === 'open' && next.status !== 'open') {
+      const stages = await sharedActivePipeline(tx, ctx.tenant.id, next.pipelineId);
+      const kept = stages.find((s) => s.id === next.stageId && s.archivedAt === null);
+      const stageId = kept?.id ?? stages.find((s) => s.archivedAt === null)?.id;
+      if (!stageId) throw new AppError('conflict', 'This deal’s pipeline has no stages.');
+      activities.push({ kind: 'deal_reopened', data: {} });
+      if (stageId !== next.stageId) {
+        activities.push({
+          kind: 'stage_changed',
+          data: { fromStageId: next.stageId, toStageId: stageId },
+        });
+        Object.assign(next, { stageId, stageEnteredAt: now });
+      }
+      Object.assign(next, {
+        status: 'open',
+        closedAt: null,
+        closedByMembershipId: null,
+        lostReason: null,
+      });
+      changes.push('status');
+    }
+
+    if (data.stageId !== undefined && data.stageId !== next.stageId) {
+      if (next.status !== 'open') {
+        throw new AppError('conflict', 'Reopen the deal to move it (`status` `open`).');
+      }
+      const stages = await sharedActivePipeline(tx, ctx.tenant.id, next.pipelineId);
+      const stage = stages.find((s) => s.id === data.stageId);
+      if (!stage) {
+        throw invalidField(
+          'stageId',
+          'Give the id of a stage of the deal’s pipeline (GET /pipelines).',
+        );
+      }
+      if (stage.archivedAt) {
+        throw new AppError('conflict', 'This stage was removed from the pipeline.');
+      }
+      activities.push({
+        kind: 'stage_changed',
+        data: { fromStageId: next.stageId, toStageId: stage.id },
+      });
+      Object.assign(next, { stageId: stage.id, stageEnteredAt: now });
+      changes.push('stage');
+    }
+
+    const fields: string[] = [];
+    if (data.title !== undefined && data.title !== next.title) {
+      fields.push('title');
+      next.title = data.title;
+    }
+    const valueFrom = next.valueMinor;
+    if (data.valueMinor !== undefined && data.valueMinor !== next.valueMinor) {
+      fields.push('value');
+      next.valueMinor = data.valueMinor;
+    }
+    if (data.expectedCloseOn !== undefined && data.expectedCloseOn !== next.expectedCloseOn) {
+      fields.push('expected_close_on');
+      next.expectedCloseOn = data.expectedCloseOn;
+    }
+    if (fields.length > 0) {
+      activities.push({
+        kind: 'deal_updated',
+        data: {
+          fields,
+          ...(fields.includes('value') ? { valueFrom, valueTo: next.valueMinor } : {}),
+        },
+      });
+      changes.push(...fields);
+    }
+    if (data.ownerId !== undefined && data.ownerId !== next.ownerMembershipId) {
+      if (
+        data.ownerId &&
+        !(await memberRefs(tx, ctx.tenant.id, [data.ownerId])).get(data.ownerId)?.active
+      ) {
+        throw invalidField(
+          'ownerId',
+          'Give the id of an active member who can use the CRM (GET /members).',
+        );
+      }
+      activities.push({
+        kind: 'owner_changed',
+        data: { from: next.ownerMembershipId, to: data.ownerId },
+      });
+      next.ownerMembershipId = data.ownerId;
+      changes.push('owner');
+    }
+
+    if (data.status === 'won' || data.status === 'lost') {
+      if (next.status === 'open') {
+        const reason = data.status === 'lost' && data.lostReason ? data.lostReason : null;
+        activities.push(
+          data.status === 'won'
+            ? { kind: 'deal_won', data: { valueMinor: next.valueMinor } }
+            : { kind: 'deal_lost', data: {} },
+        );
+        Object.assign(next, {
+          status: data.status,
+          closedAt: now,
+          closedByMembershipId: null,
+          lostReason: reason,
+        });
+        changes.push('status');
+      } else if (next.status !== data.status) {
+        throw new AppError(
+          'conflict',
+          `This deal is already ${next.status}: reopen it first (\`status\` \`open\`).`,
+        );
+      }
+    }
+
+    if (activities.length > 0) {
+      await tx
+        .update(crmDeals)
+        .set({
+          stageId: next.stageId,
+          stageEnteredAt: next.stageEnteredAt,
+          status: next.status,
+          title: next.title,
+          valueMinor: next.valueMinor,
+          ownerMembershipId: next.ownerMembershipId,
+          expectedCloseOn: next.expectedCloseOn,
+          lostReason: next.lostReason,
+          closedAt: next.closedAt,
+          closedByMembershipId: next.closedByMembershipId,
+          version: current.version + 1,
+        })
+        .where(and(eq(crmDeals.tenantId, ctx.tenant.id), eq(crmDeals.id, current.id)));
+      for (const activity of activities) {
+        await addActivity(tx, {
+          tenantId: ctx.tenant.id,
+          contactId: current.contactId,
+          dealId: current.id,
+          actorMembershipId: null,
+          kind: activity.kind,
+          data: { ...activity.data, apiKeyId: ctx.key.id },
+          at: now,
+        });
+      }
+      await recordSystemAudit(
+        tx,
+        ctx.tenant.id,
+        {
+          action: 'crm.deal_updated',
+          subjectType: 'crm_deal',
+          subjectId: current.id,
+          correlationId: ctx.requestId,
+          metadata: { changes, source: 'api' },
+        },
+        apiActor(ctx),
+      );
+    }
+    return readApiDeal(tx, ctx.tenant.id, current.id);
+  });
+  if (!deal) throw notFound('Deal');
+  return deal;
 }
