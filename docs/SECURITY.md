@@ -1166,6 +1166,13 @@ Phase 5 rules (Public API, P5-08):
   conversations, as the conversations API does. A survey gives ids (its conversation, its message
   and the customer's tap, the members credited and resolving) and the score, never the customer's
   name or number. Nothing is written (unit tests; integration tests, run in CI only).
+- Satisfaction survey events (ADR-293): `satisfaction_survey.answered` is captured by a trigger in
+  the transaction that records a survey's answer, as the runtime role in the company's scope, and
+  delivered only to the company's endpoints that take it (and name the conversation's number, when
+  they name numbers). The trigger function is not executable by PUBLIC. The payload gives ids, the
+  score, the contact's name and number (null once erased) and the number, as the message events do;
+  never the survey's question or labels, which the survey message holds (unit tests; an integration
+  test, run in CI only).
 - Reading a deal's history (ADR-281): `GET /deals/{id}/history` needs `deals.read` and the CRM in
   the plan, checked before anything is read; it reads the key's company's deal only (another
   company's answers 404, as an unknown one does; an id that is not a UUID is refused before any

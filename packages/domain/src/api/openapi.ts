@@ -6,7 +6,6 @@ import {
   CHANNEL_STATUSES,
   CONVERSATION_STATUSES,
   CRM_CHANGERS,
-  CSAT_SKIP_REASONS,
   DEAL_STATUSES,
   MESSAGE_STATUSES,
   TEAM_ASSIGNMENT_MODES,
@@ -51,6 +50,7 @@ import {
   taskAssigneeChangedPayloadSchema,
   taskStatusChangedPayloadSchema,
   noteCreatedPayloadSchema,
+  satisfactionSurveyAnsweredPayloadSchema,
   paymentLinkStatusChangedPayloadSchema,
   consentChangedPayloadSchema,
   contactCreatedPayloadSchema,
@@ -136,7 +136,10 @@ import { apiUpdateMemberSchema } from './members';
 import { apiCreateClosedDaySchema, apiUpdateBusinessHoursSchema } from './business-hours';
 import { MAX_RANGES_PER_DAY } from '../inbox/business-hours';
 import { MAX_SAVED_REPLIES } from '../inbox/saved-replies';
-import { SATISFACTION_SURVEY_STATUSES } from './satisfaction-surveys';
+import {
+  SATISFACTION_SURVEY_STATUSES,
+  apiSatisfactionSurveySchema,
+} from './satisfaction-survey-view';
 import { apiCreateSavedReplySchema, apiUpdateSavedReplySchema } from './saved-replies';
 import { apiCreateTaskSchema, apiUpdateTaskSchema } from './tasks';
 import { apiUpdateOrderSchema } from './orders';
@@ -823,52 +826,6 @@ export const apiSavedReplySchema = z.object({
   updatedByApiKeyId: z.uuid().nullable(),
   createdAt: z.iso.datetime(),
   updatedAt: z.iso.datetime(),
-});
-
-/** A satisfaction survey (ADR-292). */
-export const apiSatisfactionSurveySchema = z.object({
-  id: z.uuid(),
-  conversationId: z.uuid(),
-  status: z
-    .enum(SATISFACTION_SURVEY_STATUSES)
-    .describe(
-      '`skipped`: not sent, for `skipReason`; `asked`: sent, or being sent, and not answered (`messageStatus` says how far it got); `answered`: the customer tapped one of its buttons.',
-    ),
-  skipReason: z
-    .enum(CSAT_SKIP_REASONS)
-    .nullable()
-    .describe(
-      'Why it was not sent: `window_closed` (the customer last wrote more than 24 hours before), `opted_out`, `suppressed`, `contact_erased`, `no_phone`, `channel_inactive`, or `recently_surveyed` (the conversation was asked within 24 hours).',
-    ),
-  messageId: z
-    .uuid()
-    .nullable()
-    .describe('The survey message, among the conversation’s messages; null when skipped.'),
-  messageStatus: z
-    .enum(MESSAGE_STATUSES)
-    .nullable()
-    .describe('Its delivery status, as the conversation’s messages give it; null when skipped.'),
-  score: z
-    .union([z.literal(1), z.literal(2), z.literal(3)])
-    .nullable()
-    .describe(
-      '3 for the first (best) button, 2 for the second, 1 for the third; null until answered.',
-    ),
-  answerMessageId: z
-    .uuid()
-    .nullable()
-    .describe('The customer’s tap, among the conversation’s messages; null until answered.'),
-  answeredAt: z.iso.datetime().nullable(),
-  assigneeId: z
-    .uuid()
-    .nullable()
-    .describe(
-      'The member the conversation was assigned to when it was resolved, credited with the answer, as GET /members lists them.',
-    ),
-  resolvedById: z.uuid().nullable().describe('The member who resolved the conversation.'),
-  createdAt: z.iso
-    .datetime()
-    .describe('When it was sent, or skipped: when the conversation was resolved.'),
 });
 
 /** A closed day (ADR-290). */
@@ -3685,6 +3642,12 @@ export function buildOpenApiDocument(serverUrl: string) {
         `${WEBHOOK_EVENT_INFO['conversation.team_changed'].description} conversation.teamId and conversation.previousTeamId are the change (teams as GET /teams lists them); the rest is the conversation when the event is delivered. Deleting a team sends one event for each of its conversations. Deliveries are not ordered: the latest change is the one with the latest createdAt.`,
         'WebhookConversationTeamChanged',
       ),
+      'satisfaction_survey.answered': webhook(
+        'webhookSatisfactionSurveyAnswered',
+        WEBHOOK_EVENT_INFO['satisfaction_survey.answered'].label,
+        `${WEBHOOK_EVENT_INFO['satisfaction_survey.answered'].description} The survey is the survey as GET /satisfaction-surveys reads it when the event is delivered: its score (3 for the first and best button, 1 for the third), the customer’s tap and the survey message by id among the conversation’s messages, and the members credited and resolving by id. Only the customer’s first tap answers a survey, so a survey is answered once and this event is sent once for it; surveys skipped or never answered send nothing. It happens on the conversation’s WhatsApp number, so an endpoint that names numbers receives it for those numbers only; the team, member and tag filters do not narrow it. Deliveries are not ordered.`,
+        'WebhookSatisfactionSurveyAnswered',
+      ),
       'contact.created': webhook(
         'webhookContactCreated',
         WEBHOOK_EVENT_INFO['contact.created'].label,
@@ -4074,6 +4037,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         WebhookTaskAssigneeChanged: jsonSchema(taskAssigneeChangedPayloadSchema),
         WebhookTaskStatusChanged: jsonSchema(taskStatusChangedPayloadSchema),
         WebhookNoteCreated: jsonSchema(noteCreatedPayloadSchema),
+        WebhookSatisfactionSurveyAnswered: jsonSchema(satisfactionSurveyAnsweredPayloadSchema),
         WebhookPing: jsonSchema(pingPayloadSchema),
       },
     },

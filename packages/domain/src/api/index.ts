@@ -26,6 +26,7 @@ export * from './pipeline-forecast';
 export * from './teams';
 export * from './business-hours';
 export * from './saved-replies';
+export * from './satisfaction-survey-view';
 export * from './satisfaction-surveys';
 export * from './notes';
 export * from './tasks';

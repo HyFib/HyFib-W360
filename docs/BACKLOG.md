@@ -1123,6 +1123,9 @@ verification, app review, Embedded Signup configuration).
   0205: `payment_link.status_changed` for every status the commerce worker writes, with the link as
   `GET /orders/{id}/payment-links` reads it, never its address or Razorpay's ids, narrowed by the
   order's number like the order events).
+  **[Satisfaction survey events built; their database tests run only in CI]** (ADR-293, migrations
+  0213 and 0214: `satisfaction_survey.answered` once for each survey a customer answers, with the
+  survey as `GET /satisfaction-surveys` reads it, narrowed by the conversation's number).
   Remaining: filters for other event types (task events by their deal's pipeline, stage or owner,
   among them) and on a message's or contact's values (such as a field's value, contact events by
   tag, or the key that started a run), other authentication (headers computed per delivery, other

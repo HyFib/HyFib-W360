@@ -6,53 +6,27 @@ import {
   csatSurveys,
   desc,
   eq,
-  exactTimestamp,
   isNotNull,
   isNull,
   messages,
   sql,
-  type CsatSkipReason,
-  type MessageStatus,
 } from '@w360/db';
 import type { OutboundDeps } from '../messaging/outbound';
 import { decodeKeysetCursor, encodeKeysetCursor, parseInput } from '../validation';
 import { assertScope, type ApiContext } from './context';
 import { API_LIMITS } from './model';
+import {
+  SATISFACTION_SURVEY_STATUSES,
+  satisfactionSurveyColumns,
+  toApiSatisfactionSurvey,
+  type ApiSatisfactionSurvey,
+} from './satisfaction-survey-view';
 
 /**
  * Satisfaction surveys through the public API (ADR-292): the surveys HyFib sent, or chose not to
  * send, when members resolved conversations, and the customers' answers, read by keys that read
  * conversations, which already read the survey messages and the taps answering them.
  */
-
-/** What a survey's `status` says. */
-export const SATISFACTION_SURVEY_STATUSES = ['skipped', 'asked', 'answered'] as const;
-
-/** A satisfaction survey as the API gives it. */
-export interface ApiSatisfactionSurvey {
-  id: string;
-  conversationId: string;
-  /**
-   * `skipped`: not sent, for `skipReason`; `asked`: sent or being sent and not answered (see
-   * `messageStatus`); `answered`: the customer tapped one of its buttons.
-   */
-  status: (typeof SATISFACTION_SURVEY_STATUSES)[number];
-  skipReason: CsatSkipReason | null;
-  /** The survey message, among the conversation's messages; null when skipped. */
-  messageId: string | null;
-  /** Its delivery status, as the conversation's messages give it; null when skipped. */
-  messageStatus: MessageStatus | null;
-  /** 3 for the first (best) button, 2 for the second and 1 for the third; null until answered. */
-  score: 1 | 2 | 3 | null;
-  /** The customer's tap, among the conversation's messages; null until answered. */
-  answerMessageId: string | null;
-  answeredAt: string | null;
-  /** The member the conversation was assigned to when it was resolved, credited with the answer. */
-  assigneeId: string | null;
-  /** The member who resolved the conversation. */
-  resolvedById: string | null;
-  createdAt: string;
-}
 
 /** What `GET /satisfaction-surveys` takes. */
 export const apiSatisfactionSurveyQuerySchema = z
@@ -71,51 +45,6 @@ export const apiSatisfactionSurveyQuerySchema = z
   })
   .strict();
 
-const surveyColumns = {
-  id: csatSurveys.id,
-  conversationId: csatSurveys.conversationId,
-  skipReason: csatSurveys.skipReason,
-  messageId: csatSurveys.messageId,
-  messageStatus: messages.status,
-  score: csatSurveys.score,
-  answerMessageId: csatSurveys.responseMessageId,
-  answeredAt: csatSurveys.answeredAt,
-  assigneeId: csatSurveys.assignedMembershipId,
-  resolvedById: csatSurveys.resolvedByMembershipId,
-  createdAt: csatSurveys.createdAt,
-  cursorAt: exactTimestamp(csatSurveys.createdAt),
-};
-
-/** A survey row as the API gives it. */
-export function toApiSatisfactionSurvey(row: {
-  id: string;
-  conversationId: string;
-  skipReason: CsatSkipReason | null;
-  messageId: string | null;
-  messageStatus: MessageStatus | null;
-  score: number | null;
-  answerMessageId: string | null;
-  answeredAt: Date | null;
-  assigneeId: string | null;
-  resolvedById: string | null;
-  createdAt: Date;
-}): ApiSatisfactionSurvey {
-  return {
-    id: row.id,
-    conversationId: row.conversationId,
-    status: row.skipReason ? 'skipped' : row.answeredAt ? 'answered' : 'asked',
-    skipReason: row.skipReason,
-    messageId: row.messageId,
-    messageStatus: row.messageStatus,
-    score: row.score as 1 | 2 | 3 | null,
-    answerMessageId: row.answerMessageId,
-    answeredAt: row.answeredAt?.toISOString() ?? null,
-    assigneeId: row.assigneeId,
-    resolvedById: row.resolvedById,
-    createdAt: row.createdAt.toISOString(),
-  };
-}
-
 /**
  * The company's satisfaction surveys, newest first on exact pages, without those of erased
  * contacts' conversations, as the conversations they belong to are hidden.
@@ -132,7 +61,7 @@ export async function apiListSatisfactionSurveys(
     ctx.scope,
     async (tx) => {
       const rows = await tx
-        .select(surveyColumns)
+        .select(satisfactionSurveyColumns)
         .from(csatSurveys)
         .innerJoin(
           conversations,

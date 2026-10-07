@@ -1624,6 +1624,12 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   for its status, in a read-only transaction, newest first on `(created_at, id)` keyset pages (the
   `csat_surveys_created_idx` and `csat_surveys_conversation_idx` indexes); `toApiSatisfactionSurvey`
   gives each survey's status from its skip reason and answer. Nothing is written.
+- **Satisfaction survey answers as webhook events (ADR-293):** `csat_surveys_webhook_answer`, an
+  `AFTER UPDATE OF answered_at` trigger that fires only when `answered_at` is first set, calls
+  `app.capture_webhook_event` with the survey, the conversation, its contact and its number (0213);
+  `buildWebhookPayload` reads the survey with `satisfactionSurveyOf` (the conversation's contact and
+  number joined) and gives it with `toApiSatisfactionSurvey` from `api/satisfaction-survey-view.ts`,
+  shared with `GET /satisfaction-surveys`.
 - **Many conversations at once (ADR-120):** `POST /conversations/update-many`
   (`apiUpdateManyConversations`) takes 1 to 100 `conversationIds` and the same fields. In one
   transaction it locks the member first (as a suspension does before releasing its conversations),

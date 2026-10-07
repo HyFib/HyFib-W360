@@ -1,5 +1,40 @@
 # Progress
 
+## 2026-10-07 — A webhook event when a customer answers a satisfaction survey (P5-09, W-138, H-014, ADR-293)
+
+Status: **Implemented; its database test runs in CI only.** Integrations could read survey answers
+(ADR-292) but not be told when one arrived. The local PostgreSQL is unavailable, so the migrations
+and the integration test below were written but not run here; migrations 0213 and 0214 passed the
+pglast parse check (syntax only).
+
+### Completed
+
+- **Database:** migrations 0213 (the event type in the endpoints' and events' checks, the number
+  list, the capture trigger on survey answers, the capture with the event among a number's events)
+  and 0214 (validating the events' type check).
+- **Domain:** the event in `WEBHOOK_EVENT_KEYS`, `WEBHOOK_EVENT_INFO` and `WEBHOOK_CHANNEL_EVENTS`;
+  `satisfactionSurveyAnsweredPayloadSchema` and its body in `buildWebhookPayload`;
+  `api/satisfaction-survey-view.ts`, the survey's shape shared by the API and the event; the OpenAPI
+  webhook.
+- **Tests:** unit (`webhooks/webhooks.test.ts`: the event's label and number, the payload schema,
+  the body from the survey, nothing for an unknown survey, the OpenAPI wording; the event lists
+  updated); integration (1 new in `webhook-events.test.ts`). Written for CI; the integration test
+  was not run here. No e2e test.
+- **Docs:** ADR-293; ARCHITECTURE; SECURITY; THREAT-MODEL T261; DEPLOYMENT; RUNBOOKS; BACKLOG P5-09;
+  feature matrix W-138 and H-014.
+- **Mutation checks:** 10/10 deliberate regressions caught
+
+### Test commands and results (local, 2026-10-07)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 130 files, 1240 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| pglast 7 parse of migrations 0213 and 0214         | passed (syntax only)                                          |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
 ## 2026-10-07 — Satisfaction surveys through the public API (P5-08, H-033, H-011, ADR-292)
 
 Status: **Implemented; its database test runs in CI only.** The surveys sent when members resolve

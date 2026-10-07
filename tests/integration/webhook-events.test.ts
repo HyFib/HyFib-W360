@@ -45,6 +45,7 @@ import {
   createContactMergeService,
   createContactsService,
   createCrmService,
+  createCsatService,
   createInboxService,
   createTeamsService,
   createTemplatesService,
@@ -60,6 +61,7 @@ import {
   orderReceivedPayloadSchema,
   orderStatusChangedPayloadSchema,
   paymentLinkStatusChangedPayloadSchema,
+  satisfactionSurveyAnsweredPayloadSchema,
   processCommerceSync,
   processPaymentAccountCheck,
   processPaymentLink,
@@ -5901,5 +5903,159 @@ describe('note events (ADR-280)', () => {
       ),
     ).toEqual([{ state: 'failed', attempts: 0, last_error: 'event_gone' }]);
     expect(bodiesAt(hook.path)).toHaveLength(1);
+  });
+});
+
+describe('satisfaction survey events (ADR-293)', () => {
+  /** The company's survey answer events in the order they were captured, with their delivery counts. */
+  const surveyEventsOf = (c: Company) =>
+    fx.query<EventRow & { occurred_at: Date }>(
+      `SELECT e.id, e.type, e.status, e.detail, e.conversation_id, e.contact_id, e.contact_changes,
+              e.occurred_at,
+              (SELECT count(*)::int FROM app.webhook_deliveries d
+                WHERE d.tenant_id = e.tenant_id AND d.event_id = e.id) AS deliveries
+         FROM app.webhook_events e
+        WHERE e.tenant_id = $1 AND e.type = 'satisfaction_survey.answered'
+        ORDER BY e.occurred_at, e.id`,
+      [c.tenant.id],
+    );
+
+  /** A customer's tap on a survey button, quoting the survey message as WhatsApp does. */
+  const tap = (c: Company, from: string, buttonId: string, contextId: string) =>
+    fx.deliver(
+      fx.messagesBody(c, {
+        messages: [
+          {
+            waId: from,
+            type: 'interactive',
+            extra: {
+              interactive: { type: 'button_reply', button_reply: { id: buttonId, title: 'Great' } },
+              context: { from: '919000000000', id: contextId },
+            },
+          },
+        ],
+      }),
+    );
+
+  it('sends a survey’s first answer once, as the API reads the survey, to the endpoints that take it on its number', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    await createCsatService({ db: fx.dbs.app, clock: systemClock }).updateCsatSettings(owner, {
+      enabled: true,
+      question: 'How did we do today?',
+      labels: ['Great', 'Okay', 'Poor'],
+    });
+    const inboxWithSends = createInboxService({
+      db: fx.dbs.app,
+      clock: systemClock,
+      jobs: fx.jobs(),
+      signer: fx.signer,
+    });
+    const resolve = async (conversationId: string) =>
+      inboxWithSends.setStatus(owner, {
+        conversationId,
+        status: 'resolved',
+        expectedVersion: await versionOf(conversationId),
+      });
+    const outlet = await fx.addNumber(c, { phone: '+91 90000 54323' });
+    const hook = await addEndpoint(c, ['satisfaction_survey.answered']);
+    const onMain = await addNumberEndpoint(
+      c,
+      ['satisfaction_survey.answered'],
+      [c.channelAccountId],
+    );
+    const onOutlet = await addNumberEndpoint(
+      c,
+      ['satisfaction_survey.answered'],
+      [outlet.channelAccountId],
+    );
+    const conversationsOnly = await addEndpoint(c, ['conversation.status_changed']);
+
+    // Resolved inside the window: asked; sending it captures nothing.
+    const phone = waId();
+    const { conversation_id: conversationId, contact_id: contactId } = await inbound(
+      c,
+      phone,
+      'Where is my parcel?',
+    );
+    await resolve(conversationId);
+    const [survey] = await fx.query<{ id: string; message_id: string }>(
+      `SELECT id, message_id FROM app.csat_surveys WHERE conversation_id = $1`,
+      [conversationId],
+    );
+    const [intent] = await fx.query<{ id: string }>(
+      `SELECT id FROM app.send_intents WHERE message_id = $1`,
+      [survey!.message_id],
+    );
+    await processSendIntent(
+      {
+        db: fx.dbs.app,
+        keyring: fx.keyring,
+        graph: fx.graph,
+        clock: systemClock,
+        rate: { capacity: 1000, refillPerSecond: 1000 },
+        jobs: fx.jobs(),
+        signer: fx.signer,
+      },
+      authorizedTenantScope(c.tenant.id, c.owner.id),
+      intent!.id,
+    );
+    const sent = fx.standIn.state.requests.filter((r) => r.path.endsWith('/messages')).at(-1)!;
+    expect(await surveyEventsOf(c)).toEqual([]);
+
+    // The first tap answers it: one event, for the endpoints taking it on its number. A second tap
+    // changes nothing and captures nothing.
+    await tap(c, phone, `w360csat:${survey!.id}:3`, sent.wamid!);
+    await tap(c, phone, `w360csat:${survey!.id}:1`, sent.wamid!);
+    const events = await surveyEventsOf(c);
+    expect(
+      events.map((e) => [e.status, e.detail, e.conversation_id, e.contact_id, e.deliveries]),
+    ).toEqual([[null, { surveyId: survey!.id }, conversationId, contactId, 2]]);
+
+    // Skipped (outside the 24-hour window): no answer, no event.
+    const late = await inbound(c, waId(), 'Thanks');
+    await fx.query(
+      `UPDATE app.conversations SET last_inbound_at = now() - interval '25 hours' WHERE id = $1`,
+      [late.conversation_id],
+    );
+    await resolve(late.conversation_id);
+    expect(await surveyEventsOf(c)).toHaveLength(1);
+
+    // Built when delivered: the survey as GET /satisfaction-surveys reads it, its conversation,
+    // contact and number.
+    await deliverDue(c);
+    const [answer] = await fx.query<{ id: string }>(
+      `SELECT response_message_id AS id FROM app.csat_surveys WHERE id = $1`,
+      [survey!.id],
+    );
+    for (const path of [hook.path, onMain.path]) {
+      const [body] = bodiesAt(path);
+      expect(satisfactionSurveyAnsweredPayloadSchema.safeParse(body).success).toBe(true);
+      expect(body).toMatchObject({
+        id: events[0]!.id,
+        type: 'satisfaction_survey.answered',
+        createdAt: events[0]!.occurred_at.toISOString(),
+        data: {
+          survey: {
+            id: survey!.id,
+            conversationId,
+            status: 'answered',
+            skipReason: null,
+            messageId: survey!.message_id,
+            score: 3,
+            answerMessageId: answer!.id,
+            assigneeId: null,
+            resolvedById: owner.membership.id,
+          },
+          conversation: { id: conversationId },
+          contact: { id: contactId, phone: `+${phone}` },
+          channel: { id: c.channelAccountId },
+        },
+      });
+    }
+    expect(bodiesAt(onOutlet.path)).toEqual([]);
+    const others = bodiesAt(conversationsOnly.path).map((b) => b.type);
+    expect(others.length).toBeGreaterThan(0);
+    expect(new Set(others)).toEqual(new Set(['conversation.status_changed']));
   });
 });

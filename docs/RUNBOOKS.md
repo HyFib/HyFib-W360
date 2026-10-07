@@ -2140,6 +2140,14 @@ a stage of another pipeline, an owner who cannot use the CRM, or a lost reason w
 asks for the deal as it already is changes nothing and answers 200. The timeline shows each change
 "through the API"; the audit log has `crm.deal_updated` with the key and what changed.
 
+**An endpoint gets no `satisfaction_survey.answered` (ADR-293).** The event is sent only when a
+customer taps a button of a survey that was sent, the first time: a second tap, a skipped survey
+(Settings → Inbox's surveys off, the 24-hour window closed, the customer opted out) or a
+conversation resolved through the API sends nothing. An endpoint that names numbers gets it only for
+those numbers; the team, member and tag filters do not narrow it. A tap on an old survey message
+that is not the conversation's survey records nothing. The webhook deliveries page shows each
+attempt; `GET /satisfaction-surveys?status=answered` lists the answers to compare.
+
 **A satisfaction survey request answers 403 or 422, or a survey is not listed (ADR-292).** 403
 `forbidden` names `conversations.read`, the scope the key lacks (granted by owners and
 administrators, who read every conversation). 422 names the parameter: `status` (`skipped`, `asked`

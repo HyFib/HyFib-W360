@@ -11133,3 +11133,29 @@ Decision:
 
 Not built: a webhook event when a customer answers, survey settings through the API, and surveys
 sent through the API.
+
+## ADR-293 A webhook event when a customer answers a satisfaction survey (P5-09) (2026-10-07)
+
+Context: ADR-292 lets keys read satisfaction surveys, but an integration that follows up a poor
+rating, or keeps a live satisfaction score, had to read the surveys again and again to see answers
+arrive, which come minutes or hours after the survey.
+
+Decision:
+
+- **`satisfaction_survey.answered`** ("Satisfaction survey answered"), captured by a trigger on
+  `app.csat_surveys` when a survey records its answer: the customer's first tap on one of its
+  buttons, which the ingestion of the customer's message writes; the guard of 0009 lets a survey
+  record one answer, once, so each survey sends the event once at most, and surveys skipped or never
+  answered send nothing (migrations 0213 and 0214).
+- **The payload** gives the survey as `GET /satisfaction-surveys` reads it when the event is
+  delivered (`toApiSatisfactionSurvey`, now in `api/satisfaction-survey-view.ts`, which the API and
+  the event share), with its conversation, its contact (as erasure left it) and its WhatsApp number.
+- **Filters:** it happens on the conversation's number, so the number filter narrows it, as it does
+  the conversation's other events (0213 replaces 0204's capture with the event among the number's
+  events, and the endpoints' number check). The team, member and tag filters of the conversation
+  events do not narrow it.
+- **Who receives it:** endpoints, which owners and administrators add in Settings → Webhooks or keys
+  add with `webhooks.manage` (granted only with `developer.manage`), as for every other event.
+
+Not built: the team, member and tag filters for this event, an event when a survey is sent or
+skipped, and a filter by score.

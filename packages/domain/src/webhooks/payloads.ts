@@ -23,6 +23,7 @@ import {
   crmDeals,
   crmPipelines,
   crmTasks,
+  csatSurveys,
   DEAL_STATUSES,
   eq,
   messageTemplates,
@@ -42,6 +43,11 @@ import {
   paymentLinkColumns,
   toApiPaymentLink,
 } from '../api/payment-link-view';
+import {
+  apiSatisfactionSurveySchema,
+  satisfactionSurveyColumns,
+  toApiSatisfactionSurvey,
+} from '../api/satisfaction-survey-view';
 import { campaignAnalytics, campaignResultsSchema, toCampaignResults } from '../campaigns/results';
 import { COMMERCE_LIMITS } from '../commerce/model';
 import { crmCreatedBy, noteWriter } from '../crm/common';
@@ -838,6 +844,20 @@ export const noteCreatedPayloadSchema = envelope(
   }),
 );
 
+/**
+ * A customer's answer to a satisfaction survey (ADR-293): the survey as GET /satisfaction-surveys
+ * reads it when the event is delivered (ADR-292), with its conversation, contact and number.
+ */
+export const satisfactionSurveyAnsweredPayloadSchema = envelope(
+  'satisfaction_survey.answered',
+  z.object({
+    survey: apiSatisfactionSurveySchema,
+    conversation: z.object({ id: z.uuid() }),
+    contact: contactSchema,
+    channel: channelSchema,
+  }),
+);
+
 export const pingPayloadSchema = envelope(
   'ping',
   z.object({ endpointId: z.uuid(), message: z.string() }),
@@ -1272,6 +1292,42 @@ async function noteOf(tx: Tx, tenantId: string, noteId: string | null) {
 }
 
 /**
+ * A satisfaction survey with its conversation's contact and number, in the company, read as the API
+ * reads it (ADR-292, ADR-293); null if there is none.
+ */
+async function satisfactionSurveyOf(tx: Tx, tenantId: string, surveyId: string | null) {
+  if (!surveyId || !z.uuid().safeParse(surveyId).success) return null;
+  const [row] = await tx
+    .select({
+      ...satisfactionSurveyColumns,
+      contactId: conversations.contactId,
+      channelId: conversations.channelAccountId,
+      channelPhone: channelAccounts.displayPhoneNumber,
+    })
+    .from(csatSurveys)
+    .innerJoin(
+      conversations,
+      and(
+        eq(conversations.tenantId, csatSurveys.tenantId),
+        eq(conversations.id, csatSurveys.conversationId),
+      ),
+    )
+    .leftJoin(
+      messages,
+      and(eq(messages.tenantId, csatSurveys.tenantId), eq(messages.id, csatSurveys.messageId)),
+    )
+    .leftJoin(
+      channelAccounts,
+      and(
+        eq(channelAccounts.tenantId, conversations.tenantId),
+        eq(channelAccounts.id, conversations.channelAccountId),
+      ),
+    )
+    .where(and(eq(csatSurveys.tenantId, tenantId), eq(csatSurveys.id, surveyId)));
+  return row ?? null;
+}
+
+/**
  * A Payment Link with its order's reference, status, conversation, contact and number, in the
  * company, read as the API reads it (ADR-284, ADR-285); null if there is none.
  */
@@ -1609,6 +1665,22 @@ export async function buildWebhookPayload(
           conversation: { id: link.conversationId },
           contact: await contactOf(tx, tenantId, link.contactId),
           channel: { id: link.channelId, phone: link.channelPhone ?? null },
+        },
+      };
+    }
+    case 'satisfaction_survey.answered': {
+      // The survey as it is now, its answer recorded once: surveys are kept with their conversation
+      // until the company is deleted, so a survey that is gone was never one of the company's. An
+      // erased contact's survey is sent as erasure left the contact.
+      const survey = await satisfactionSurveyOf(tx, tenantId, str(event.detail.surveyId));
+      if (!survey) throw new WebhookEventGoneError();
+      return {
+        ...base,
+        data: {
+          survey: toApiSatisfactionSurvey(survey),
+          conversation: { id: survey.conversationId },
+          contact: await contactOf(tx, tenantId, survey.contactId),
+          channel: { id: survey.channelId, phone: survey.channelPhone ?? null },
         },
       };
     }

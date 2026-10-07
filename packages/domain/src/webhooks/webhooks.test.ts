@@ -23,6 +23,7 @@ import {
 } from '@w360/db';
 import { apiCampaignResultsSchema } from '../api/campaigns';
 import { apiContactSchema } from '../api/contact-view';
+import { apiSatisfactionSurveySchema } from '../api/satisfaction-survey-view';
 import { buildOpenApiDocument } from '../api/openapi';
 import {
   campaignResultsSchema,
@@ -100,10 +101,12 @@ import {
 } from './model';
 import {
   noteCreatedPayloadSchema,
+  satisfactionSurveyAnsweredPayloadSchema,
   paymentLinkStatusChangedPayloadSchema,
   automationRunEndedPayloadSchema,
   automationRunStartedPayloadSchema,
   buildWebhookPayload,
+  WebhookEventGoneError,
   capturedCrmChanger,
   campaignStatusChangedPayloadSchema,
   dealCreatedPayloadSchema,
@@ -1678,6 +1681,7 @@ describe('the OpenAPI document', () => {
       'conversation.status_changed',
       'conversation.assignment_changed',
       'conversation.team_changed',
+      'satisfaction_survey.answered',
       'contact.created',
       'contact.updated',
       'contact.erased',
@@ -2601,6 +2605,7 @@ describe('number filters (ADR-170)', () => {
       'conversation.status_changed',
       'conversation.assignment_changed',
       'conversation.team_changed',
+      'satisfaction_survey.answered',
       'automation.run_started',
       'automation.run_ended',
       'order.received',
@@ -2616,6 +2621,7 @@ describe('number filters (ADR-170)', () => {
       'conversation.status_changed': conversationStatusPayloadSchema,
       'conversation.assignment_changed': conversationAssignmentPayloadSchema,
       'conversation.team_changed': conversationTeamPayloadSchema,
+      'satisfaction_survey.answered': satisfactionSurveyAnsweredPayloadSchema,
       'contact.created': contactCreatedPayloadSchema,
       'contact.updated': contactUpdatedPayloadSchema,
       'contact.erased': contactErasedPayloadSchema,
@@ -4252,6 +4258,186 @@ describe('the event of a Payment Link (ADR-285)', () => {
       'Never the link’s address or Razorpay’s ids.',
       'Only a link Razorpay reports paid marks the order paid, which order.status_changed reports.',
       'an endpoint that names numbers receives it for those numbers only',
+    ]) {
+      expect(described).toContain(words);
+    }
+  });
+});
+
+describe('the event of a satisfaction survey answer (ADR-293)', () => {
+  const id = '0192f0c4-8e2b-7c1d-9a3e-5b6c7d8e9f01';
+  const tenantId = '0192f0c4-8e2b-7c1d-9a3e-5b6c7d8e9f02';
+  const at = new Date('2026-10-07T10:00:00.000Z');
+
+  /** A transaction that answers its reads, in order, with `answers`; another read fails the test. */
+  function answering(answers: unknown[][]) {
+    const queue = [...answers];
+    const chain = {
+      from: () => chain,
+      innerJoin: () => chain,
+      leftJoin: () => chain,
+      where: () => {
+        const rows = queue.shift();
+        if (!rows) throw new Error('an unexpected read');
+        return Promise.resolve(rows);
+      },
+    };
+    return {
+      tx: { select: () => chain } as unknown as Parameters<typeof buildWebhookPayload>[0],
+      unread: () => queue.length,
+    };
+  }
+
+  const event = (surveyId: unknown) =>
+    ({
+      id,
+      tenantId,
+      type: 'satisfaction_survey.answered',
+      messageId: null,
+      conversationId: id,
+      contactId: id,
+      templateId: null,
+      status: null,
+      detail: { surveyId },
+      contactChanges: null,
+      tagsAdded: null,
+      tagsRemoved: null,
+      occurredAt: at,
+    }) as unknown as Parameters<typeof buildWebhookPayload>[1];
+
+  it('is one event on the conversation’s number, labelled as Settings lists it', () => {
+    expect(WEBHOOK_EVENT_INFO['satisfaction_survey.answered']).toEqual({
+      label: 'Satisfaction survey answered',
+      description:
+        'A customer answered the satisfaction survey sent when a member resolved their conversation, by tapping one of its three buttons.',
+    });
+    expect(webhookTakesChannelEvents(['satisfaction_survey.answered'])).toBe(true);
+    for (const takes of [
+      webhookTakesTaskEvents,
+      webhookTakesPipelineEvents,
+      webhookTakesTeamEvents,
+    ]) {
+      expect(takes(['satisfaction_survey.answered']), takes.name).toBe(false);
+    }
+  });
+
+  it('gives the survey as GET /satisfaction-surveys reads it, with its conversation, contact and number', () => {
+    const data = satisfactionSurveyAnsweredPayloadSchema.shape.data.shape;
+    expect(Object.keys(data)).toEqual(['survey', 'conversation', 'contact', 'channel']);
+    expect(Object.keys(data.survey.shape)).toEqual(Object.keys(apiSatisfactionSurveySchema.shape));
+    const body = (score: number) => ({
+      id,
+      type: 'satisfaction_survey.answered',
+      createdAt: at.toISOString(),
+      data: {
+        survey: {
+          id,
+          conversationId: id,
+          status: 'answered',
+          skipReason: null,
+          messageId: id,
+          messageStatus: 'read',
+          score,
+          answerMessageId: id,
+          answeredAt: at.toISOString(),
+          assigneeId: id,
+          resolvedById: id,
+          createdAt: at.toISOString(),
+        },
+        conversation: { id },
+        contact: { id, phone: '+919845012345', name: 'Asha' },
+        channel: { id, phone: '+91 80 4567 8901' },
+      },
+    });
+    expect(satisfactionSurveyAnsweredPayloadSchema.safeParse(body(3)).success).toBe(true);
+    expect(satisfactionSurveyAnsweredPayloadSchema.safeParse(body(4)).success).toBe(false);
+  });
+
+  it('builds the body from the survey as it is now and the contact as erasure left it', async () => {
+    const [conversation, contact, channel, message, answer, member, captured] = [
+      '0192f0c4-8e2b-7c1d-9a3e-5b6c7d8e9f03',
+      '0192f0c4-8e2b-7c1d-9a3e-5b6c7d8e9f04',
+      '0192f0c4-8e2b-7c1d-9a3e-5b6c7d8e9f05',
+      '0192f0c4-8e2b-7c1d-9a3e-5b6c7d8e9f06',
+      '0192f0c4-8e2b-7c1d-9a3e-5b6c7d8e9f07',
+      '0192f0c4-8e2b-7c1d-9a3e-5b6c7d8e9f08',
+      '0192f0c4-8e2b-7c1d-9a3e-5b6c7d8e9f09',
+    ];
+    const survey = {
+      id,
+      conversationId: conversation,
+      skipReason: null,
+      messageId: message,
+      messageStatus: 'delivered',
+      score: 1,
+      answerMessageId: answer,
+      answeredAt: at,
+      assigneeId: null,
+      resolvedById: member,
+      createdAt: at,
+      cursorAt: '2026-10-07T10:00:00.000000Z',
+      contactId: contact,
+      channelId: channel,
+      channelPhone: '+91 80 4567 8901',
+    };
+    const reads = answering([[survey], [{ phone: '+919845012345', name: 'Asha', erasedAt: at }]]);
+    // The contact captured with the event, since merged away: the conversation's contact now is sent.
+    const built = await buildWebhookPayload(
+      reads.tx,
+      { ...event(id), conversationId: conversation, contactId: captured },
+      'endpoint',
+    );
+    expect(built).toEqual({
+      id,
+      type: 'satisfaction_survey.answered',
+      createdAt: '2026-10-07T10:00:00.000Z',
+      data: {
+        survey: {
+          id,
+          conversationId: conversation,
+          status: 'answered',
+          skipReason: null,
+          messageId: message,
+          messageStatus: 'delivered',
+          score: 1,
+          answerMessageId: answer,
+          answeredAt: '2026-10-07T10:00:00.000Z',
+          assigneeId: null,
+          resolvedById: member,
+          createdAt: '2026-10-07T10:00:00.000Z',
+        },
+        conversation: { id: conversation },
+        contact: { id: contact, phone: null, name: null },
+        channel: { id: channel, phone: '+91 80 4567 8901' },
+      },
+    });
+    expect(satisfactionSurveyAnsweredPayloadSchema.safeParse(built).success).toBe(true);
+    expect(reads.unread()).toBe(0);
+  });
+
+  it('sends nothing for a survey that is not the company’s, reading nothing for an id that is not one', async () => {
+    const gone = answering([[]]);
+    await expect(buildWebhookPayload(gone.tx, event(id), 'endpoint')).rejects.toBeInstanceOf(
+      WebhookEventGoneError,
+    );
+    expect(gone.unread()).toBe(0);
+    for (const surveyId of ['survey', null, 7]) {
+      const none = answering([]);
+      await expect(
+        buildWebhookPayload(none.tx, event(surveyId), 'endpoint'),
+      ).rejects.toBeInstanceOf(WebhookEventGoneError);
+    }
+  });
+
+  it('is described: the survey as the API reads it, once per survey, on the conversation’s number', () => {
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const described = doc.webhooks['satisfaction_survey.answered'].post.description;
+    for (const words of [
+      'A customer answered the satisfaction survey sent when a member resolved their conversation',
+      'The survey is the survey as GET /satisfaction-surveys reads it when the event is delivered',
+      'its score (3 for the first and best button, 1 for the third)',
+      'a survey is answered once and this event is sent once for it; surveys skipped or never answered send nothing',
+      'an endpoint that names numbers receives it for those numbers only; the team, member and tag filters do not narrow it',
     ]) {
       expect(described).toContain(words);
     }

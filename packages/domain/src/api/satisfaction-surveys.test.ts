@@ -4,11 +4,11 @@ import { isAppError } from '@w360/core';
 import type { Database, SQL, Tx } from '@w360/db';
 import type { ApiContext } from './context';
 import { API_SCOPE_INFO } from './model';
-import { API_ROUTES, apiSatisfactionSurveySchema, buildOpenApiDocument } from './openapi';
+import { API_ROUTES, buildOpenApiDocument } from './openapi';
+import { apiSatisfactionSurveySchema, toApiSatisfactionSurvey } from './satisfaction-survey-view';
 import {
   apiListSatisfactionSurveys,
   apiSatisfactionSurveyQuerySchema,
-  toApiSatisfactionSurvey,
 } from './satisfaction-surveys';
 import { encodeKeysetCursor } from '../validation';
 
