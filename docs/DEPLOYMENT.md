@@ -1000,6 +1000,13 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    ends, an old web server still takes away, when it saves a team, the places of members who cannot
    answer conversations now; rolling web servers back does the same.
 
+   Migration 0225 (ADR-302) replaces the API keys' and plans' scope checks with `ads.read`
+   (validated at once). Until the web rollout ends, an old web server answers Settings → API keys
+   with an error for a company with a key holding `ads.read`, answers `GET /api/v1/ads` with 404,
+   and refuses the `adId` filter of `GET /api/v1/conversations` and
+   `POST /api/v1/conversations/update-matching` (422); rolling web servers back does the same.
+   Workers are unaffected.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

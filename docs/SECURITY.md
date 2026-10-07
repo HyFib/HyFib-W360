@@ -636,10 +636,11 @@ Phase 5 rules (Public API, P5-08):
   and `orders.request_payment` (ADR-283), `channels.read` for the scope of the same name (ADR-171),
   `reports.read` for the scope of the same name (ADR-297), `flows.read` for the scope of the same
   name (ADR-298), `campaigns.read` for `chat_links.read` (ADR-299), `campaigns.write` for
-  `chat_links.write` (ADR-300), `crm.read` for `deals.read` (ADR-253), `tasks.read` (ADR-258) and
-  `notes.read` (ADR-279), and `crm.write` for `deals.write` (ADR-254, ADR-255), `tasks.write`
-  (ADR-259) and `notes.write` (ADR-268). Nobody grants a key more than they hold, and rotating needs
-  the same. A key keeps the scopes it was created with.
+  `chat_links.write` (ADR-300), `campaigns.read` for `ads.read` (ADR-302), `crm.read` for
+  `deals.read` (ADR-253), `tasks.read` (ADR-258) and `notes.read` (ADR-279), and `crm.write` for
+  `deals.write` (ADR-254, ADR-255), `tasks.write` (ADR-259) and `notes.write` (ADR-268). Nobody
+  grants a key more than they hold, and rotating needs the same. A key keeps the scopes it was
+  created with.
 - A request acts for the key's company only, as the key: its company comes from the key found by
   the token's hash, never from the path, body or headers, and data access runs in that company's
   scope (RLS). Audit rows name the key (`api_key`). Writing scopes are refused while the company is
@@ -1233,6 +1234,12 @@ Phase 5 rules (Public API, P5-08):
   a source names only the company's own link. The ad click id, media addresses and ad text are never
   stored (ADR-044), so never given. The filters are checked before any query (one of the two kinds,
   a UUID); another company's link finds nothing (unit tests; integration tests, run in CI only).
+- Click-to-WhatsApp ads (ADR-302): `GET /ads` needs `ads.read`, granted only by members who hold
+  `campaigns.read`, checked before any query, as is the request (no parameters). It reads under row
+  security in the key's company, read only, and gives only what HyFib keeps of an ad (ADR-044):
+  Meta's id and type, the headline and an http(s) address, never the ad click id, which is not
+  stored. The `adId` filter is bounded (1 to 128 characters) and matches within the company (unit
+  tests; integration tests, run in CI only).
 - Reading a deal's history (ADR-281): `GET /deals/{id}/history` needs `deals.read` and the CRM in
   the plan, checked before anything is read; it reads the key's company's deal only (another
   company's answers 404, as an unknown one does; an id that is not a UUID is refused before any

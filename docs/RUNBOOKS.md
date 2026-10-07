@@ -2140,6 +2140,14 @@ a stage of another pipeline, an owner who cannot use the CRM, or a lost reason w
 asks for the deal as it already is changes nothing and answers 200. The timeline shows each change
 "through the API"; the audit log has `crm.deal_updated` with the key and what changed.
 
+**`GET /api/v1/ads` answers 403 or 422, or misses an ad (ADR-302).** 403: the key lacks `ads.read`
+(its creator needed `campaigns.read`), or the plan leaves it out (reason `not_in_plan`). 422: a
+parameter was given; the list takes none. It lists the last 30 days only, at most 200 ads, as Growth
+→ Ads does: an ad is there only when a customer's message arrived from it with its referral
+(ADR-044), and an ad whose headline or address changed is listed once for each.
+`GET /conversations?adId=` finds an ad's conversations at any time; an id over 128 characters
+answers 422.
+
 **A conversation's `source` is null, or the `source` and `chatLinkId` filters miss a conversation
 (ADR-301).** A source is recorded only when the customer's message carries a link's reference, "(ref
 CODE)", on the number the link opens, or arrives from a click-to-WhatsApp ad with its referral

@@ -1685,6 +1685,12 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   `latestConversationSource` reads it for the inbox; `toApiSource` shapes it.
   `conversationFilterSql` adds an `exists` over the conversation's sources for `source` and
   `chatLinkId`, so listing and changing by a filter find the same conversations.
+- **Click-to-WhatsApp ads through the API (ADR-302):** `apiListAds` in `api/ads.ts` reads with
+  `readAdSources` (`growth/service.ts`), the query Growth → Ads now calls too: the company's
+  `conversation_sources` rows of kind `ad` in the last 30 days, grouped by the ad's id, type,
+  headline and web address, ordered by conversations, the latest message and then every grouped
+  column, at most `GROWTH_LIMITS.adsShown`. `conversationFilterSql` matches `adId` against
+  `ad_source_id` in the same `exists` as `source` and `chatLinkId`.
 - **Many conversations at once (ADR-120):** `POST /conversations/update-many`
   (`apiUpdateManyConversations`) takes 1 to 100 `conversationIds` and the same fields. In one
   transaction it locks the member first (as a suspension does before releasing its conversations),

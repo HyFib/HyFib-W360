@@ -28,6 +28,7 @@ export const API_SCOPE_KEYS = [
   'campaigns.resume',
   'chat_links.read',
   'chat_links.write',
+  'ads.read',
   'automations.start',
   'flows.read',
   'orders.read',
@@ -189,6 +190,13 @@ export const API_SCOPE_INFO: Record<
       "Create chat links on the company's active numbers, change their name, number and message and whether the message carries the link's reference, and archive or restore them, as members who write campaigns do on the Growth pages. Links a key creates name it as their author.",
     permission: 'campaigns.write',
     writes: true,
+  },
+  'ads.read': {
+    label: 'Read ads',
+    description:
+      'List the click-to-WhatsApp ads customers wrote from in the last 30 days, with the conversations each started and the messages that came from it, as members who read campaigns see them on the Growth pages; never the ad click id, which is not kept.',
+    permission: 'campaigns.read',
+    writes: false,
   },
   'automations.start': {
     label: 'Start automations',

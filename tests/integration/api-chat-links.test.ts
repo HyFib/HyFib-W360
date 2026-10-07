@@ -4,6 +4,7 @@ import {
   apiCreateChatLink,
   apiGetChatLink,
   apiGetConversation,
+  apiListAds,
   apiListChatLinks,
   apiListConversations,
   apiUpdateChatLink,
@@ -25,7 +26,9 @@ import { startWhatsAppFixture, type Company, type WhatsAppFixture } from './what
  * archived ones when asked, and each link with its clicks per day; another company's links are
  * never read. Keys add links on the company's active numbers, once per Idempotency-Key, change,
  * archive and restore them from a version, recorded as the key's. Conversations give their latest
- * source as the inbox shows it, and are found by source and chat link (ADR-301).
+ * source as the inbox shows it, and are found by source and chat link (ADR-301). Keys read the
+ * click-to-WhatsApp ads customers wrote from as Growth → Ads lists them, and find their
+ * conversations (ADR-302).
  */
 let fx: WhatsAppFixture;
 
@@ -475,5 +478,85 @@ describe('where conversations came from, through the API (ADR-301)', () => {
     ]);
     expect((await apiGetConversation(deps(), reader, meera)).status).toBe('open');
     expect(await ids({ chatLinkId: bio.id, status: 'open' })).toEqual([]);
+  });
+});
+
+describe('click-to-WhatsApp ads through the API (ADR-302)', () => {
+  it('lists the ads customers wrote from as Growth → Ads does, and finds their conversations', async () => {
+    const c = await fx.company();
+    const other = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const key = await apiKey(c, ['ads.read', 'conversations.read']);
+    const diwali = {
+      source_url: 'https://fb.me/diwali',
+      source_id: '120200000000001',
+      source_type: 'ad',
+      headline: 'Diwali offer',
+      ctwa_clid: 'ARAkLkA8rmlFeiCktEJQ-QTwRiyYHAFDLMNDBH0CD3qpjd0HR4irJ6LEkR7JwFF4XvnO2E4Nx0',
+    };
+    const sale = { source_id: '120200000000002', source_type: 'post', headline: 'Weekend sale' };
+    const now = Math.floor(Date.now() / 1000);
+    await fx.deliver(customerMessage(c, '919811100701', 'Is the offer on?', now - 300, diwali));
+    await fx.deliver(customerMessage(c, '919811100702', 'Still on?', now - 200, diwali));
+    await fx.deliver(customerMessage(c, '919811100702', 'Hello?', now - 100, diwali));
+    await fx.deliver(customerMessage(c, '919811100703', 'Sale?', now - 50, sale));
+    await fx.deliver(customerMessage(other, '919811100704', 'Theirs', now, diwali));
+
+    // The ad that started the most conversations first, each counted as Growth → Ads counts it.
+    const { data } = await apiListAds(deps(), key, {});
+    expect(data).toEqual([
+      {
+        id: '120200000000001',
+        type: 'ad',
+        headline: 'Diwali offer',
+        url: 'https://fb.me/diwali',
+        last30Days: { conversations: 2, messages: 3 },
+        lastMessageAt: new Date((now - 100) * 1000).toISOString(),
+      },
+      {
+        id: '120200000000002',
+        type: 'post',
+        headline: 'Weekend sale',
+        url: null,
+        last30Days: { conversations: 1, messages: 1 },
+        lastMessageAt: new Date((now - 50) * 1000).toISOString(),
+      },
+    ]);
+    expect(
+      (await growth().adSources(owner)).map((a) => [a.sourceId, a.conversations, a.messages]),
+    ).toEqual(data.map((a) => [a.id, a.last30Days.conversations, a.last30Days.messages]));
+    expect(JSON.stringify(data)).not.toContain(diwali.ctwa_clid);
+
+    // Their conversations, by the ad's id, in the key's company only.
+    const ids = async (query: Record<string, string>) =>
+      (await apiListConversations(deps(), key, query)).data.map((x) => x.id).sort();
+    expect(await ids({ adId: '120200000000001' })).toEqual(
+      [await conversationOf(c, '919811100701'), await conversationOf(c, '919811100702')].sort(),
+    );
+    expect(await ids({ adId: '120200000000002', source: 'ad' })).toEqual([
+      await conversationOf(c, '919811100703'),
+    ]);
+    expect(await ids({ adId: '120200000000002', source: 'link' })).toEqual([]);
+
+    // Another company's key reads its own ad only; a key without the scope reads none; granting
+    // the scope needs campaigns.read.
+    const theirs = await apiListAds(deps(), await apiKey(other, ['ads.read']), {});
+    expect(theirs.data.map((a) => [a.id, a.last30Days.conversations])).toEqual([
+      ['120200000000001', 1],
+    ]);
+    await expectAppError(
+      apiListAds(deps(), await apiKey(c, ['chat_links.read']), {}),
+      'forbidden',
+      /ads\.read/,
+    );
+    const narrower: TenantContext = {
+      ...owner,
+      permissions: new Set([...owner.permissions].filter((p) => p !== 'campaigns.read')),
+    };
+    await expectAppError(
+      keys().create(narrower, { name: 'Ads', scopes: ['ads.read'], expiresInDays: 30 }),
+      'forbidden',
+      /Read ads/,
+    );
   });
 });

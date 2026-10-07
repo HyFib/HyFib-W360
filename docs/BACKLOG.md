@@ -927,6 +927,10 @@ verification, app review, Embedded Signup configuration).
   **[Where conversations came from, through the public API, built; its database tests run only in
   CI]** (ADR-301, no migration: conversations give their latest source, a chat link or a
   click-to-WhatsApp ad, as the inbox shows it, and are listed and changed by source and chat link).
+  **[Click-to-WhatsApp ads through the public API built; its database tests run only in CI]**
+  (ADR-302, migration 0225: `ads.read` lists the ads customers wrote from in the last 30 days as
+  Growth → Ads lists them, by the page's reader, and `GET /conversations` finds an ad's
+  conversations by `adId`).
   **[Reading CRM tasks built; its database tests run only in CI]** (ADR-258, migrations 0173 and
   0174: `tasks.read` lists the company's tasks newest first on exact pages, filtered by status,
   assignee, contact, deal and time, and reads each one, with the reminder and the assignee, contact

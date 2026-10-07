@@ -146,6 +146,7 @@ import {
   apiCreateChatLinkSchema,
   apiUpdateChatLinkSchema,
 } from './chat-links';
+import { apiAdSchema } from './ads';
 import { MAX_PERIOD_DAYS, PERIOD_PRESETS } from '../reports/period';
 import { apiCreateTeamSchema, apiUpdateTeamSchema } from './teams';
 import { apiUpdateMemberSchema } from './members';
@@ -2203,6 +2204,13 @@ export function buildOpenApiDocument(serverUrl: string) {
               description:
                 'Only the conversations whose customer sent this chat link’s reference (GET /chat-links), whenever in the conversation; a link’s `last30Days.conversations` counts those of the last 30 days.',
             },
+            {
+              name: 'adId',
+              in: 'query',
+              schema: { type: 'string', minLength: 1, maxLength: 128 },
+              description:
+                'Only the conversations whose customer wrote from this click-to-WhatsApp ad (its `id` in GET /ads), whenever in the conversation; an ad’s `last30Days.conversations` counts those of the last 30 days.',
+            },
           ],
           responses: {
             '200': { description: 'A page of conversations.', content: pageOf('Conversation') },
@@ -2473,6 +2481,20 @@ export function buildOpenApiDocument(serverUrl: string) {
           responses: {
             '200': { description: 'The chat link now.', content: json(dataOf(ref('ChatLink'))) },
             ...errors(400, 401, 403, 404, 409, 415, 422, 423, 429, 500),
+          },
+        },
+      },
+      '/ads': {
+        get: {
+          operationId: 'listAds',
+          summary: 'Click-to-WhatsApp ads customers wrote from',
+          description: `${scopeNote('ads.read')} The click-to-WhatsApp ads customers wrote from in the last 30 days, as Growth → Ads lists them: at most ${GROWTH_LIMITS.adsShown}, those that started the most conversations first, then the latest, each with the conversations it started and the customers’ messages that came from it. An ad is listed once for each id, type, headline and web address Meta sent with it. HyFib keeps only what identifies an ad, never the ad click id, its image or video addresses or its text, and connects no ad account, so spend and costs are not given. \`GET /conversations?adId=\` finds an ad’s conversations.`,
+          responses: {
+            '200': {
+              description: 'The ads of the last 30 days.',
+              content: json(dataOf({ type: 'array', items: ref('Ad') })),
+            },
+            ...errors(401, 403, 422, 429, 500),
           },
         },
       },
@@ -4344,6 +4366,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         Report: jsonSchema(apiReportSchema),
         Flow: jsonSchema(apiFlowSchema),
         FlowResponse: jsonSchema(apiFlowResponseSchema),
+        Ad: jsonSchema(apiAdSchema),
         ChatLink: jsonSchema(apiChatLinkSchema),
         ChatLinkDetail: jsonSchema(apiChatLinkDetailSchema),
         CreateChatLink: jsonSchema(apiCreateChatLinkSchema, 'input'),
@@ -4500,6 +4523,7 @@ export const API_ROUTES = [
   ['post', '/chat-links'],
   ['get', '/chat-links/{id}'],
   ['patch', '/chat-links/{id}'],
+  ['get', '/ads'],
   ['get', '/members'],
   ['patch', '/members/{id}'],
   ['get', '/business-hours'],

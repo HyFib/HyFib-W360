@@ -1,5 +1,38 @@
 # Progress
 
+## 2026-10-07 — Click-to-WhatsApp ads through the public API (P5-08, H-033, W-071, ADR-302)
+
+Status: **Implemented; its database tests run in CI only.** Growth → Ads listed the ads customers
+wrote from, and keys read each conversation's source (ADR-301), but not the ads or an ad's
+conversations. The local PostgreSQL is unavailable, so the migration and the integration test below
+were written but not run here; migration 0225 passed the pglast parse check (syntax only).
+
+### Completed
+
+- **Database:** migration 0225 (`ads.read` in the scope checks, validated at once).
+- **Domain:** `readAdSources` in `growth/service.ts`, the Ads page's query, shared and given a total
+  order (`GROWTH_LIMITS.adsShown`); `apiListAds` and the `Ad` schema in `api/ads.ts`; the `adId`
+  filter in `api/conversations.ts`; the scope; the OpenAPI operation, component and parameter.
+- **Web:** `GET /api/v1/ads`.
+- **Tests:** unit (`api/ads.test.ts`, 4 new: the scope and its grant, the refusals, the reader and
+  the mapping, the OpenAPI entries; the `adId` filter in `api/conversation-sources.test.ts`);
+  integration (1 new in `api-chat-links.test.ts`). Written for CI; the integration test was not run
+  here. No e2e test.
+- **Docs:** ADR-302; ARCHITECTURE; SECURITY; THREAT-MODEL T270; DEPLOYMENT; RUNBOOKS; BACKLOG P5-08;
+  feature matrix H-033 and W-071.
+- **Mutation checks:** 24/24 deliberate regressions caught.
+
+### Test commands and results (local, 2026-10-07)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 137 files, 1289 tests                                         |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| pglast 7 parse of migration 0225                   | passed (syntax only)                                          |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
 ## 2026-10-07 — Review fix: saving a team keeps the places of members who cannot answer now (ADR-287 amended)
 
 Status: **Implemented; its database test runs in CI only.** The Codex review of PR #40 found that

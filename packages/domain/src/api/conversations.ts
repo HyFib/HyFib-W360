@@ -105,6 +105,15 @@ const conversationFilters = {
     .describe(
       'Only the conversations whose customer sent this chat link’s reference (GET /chat-links).',
     ),
+  adId: z
+    .string()
+    .trim()
+    .min(1)
+    .max(128)
+    .optional()
+    .describe(
+      'Only the conversations whose customer wrote from this click-to-WhatsApp ad (its `id` in GET /ads).',
+    ),
 };
 
 export const apiConversationListQuerySchema = z
@@ -242,7 +251,7 @@ export const apiUpdateMatchingConversationsSchema = z
       .strict()
       .refine(
         (filter) => Object.values(filter).some((value) => value !== undefined),
-        'Give at least one filter: status, contactId, channelId, assigneeId, teamId, updatedSince, tag, source or chatLinkId.',
+        'Give at least one filter: status, contactId, channelId, assigneeId, teamId, updatedSince, tag, source, chatLinkId or adId.',
       )
       .describe(
         'The conversations to change, as GET /conversations filters them: at least one filter.',
@@ -498,7 +507,7 @@ export function conversationFilterSql(tenantId: string, filter: ConversationFilt
       conversationHasTag(sql`${conversations.tenantId}`, sql`${conversations.id}`, filter.tag),
     );
   }
-  if (filter.source !== undefined || filter.chatLinkId !== undefined) {
+  if (filter.source !== undefined || filter.chatLinkId !== undefined || filter.adId !== undefined) {
     // Any of its sources, not only the latest: a conversation a link started still came from it.
     const from = and(
       eq(conversationSources.tenantId, conversations.tenantId),
@@ -507,6 +516,7 @@ export function conversationFilterSql(tenantId: string, filter: ConversationFilt
       filter.chatLinkId !== undefined
         ? eq(conversationSources.linkId, filter.chatLinkId)
         : undefined,
+      filter.adId !== undefined ? eq(conversationSources.adSourceId, filter.adId) : undefined,
     );
     conditions.push(sql`exists (select 1 from ${conversationSources} where ${from})`);
   }

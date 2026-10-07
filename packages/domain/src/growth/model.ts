@@ -25,6 +25,8 @@ export const GROWTH_LIMITS = {
   widgets: 50,
   widgetLabelLength: 40,
   widgetGreetingLength: 200,
+  /** The most ads Growth → Ads lists, and the public API gives (ADR-302). */
+  adsShown: 200,
 } as const;
 
 /** A random string over a 32-character alphabet (each byte's low five bits: no modulo bias). */

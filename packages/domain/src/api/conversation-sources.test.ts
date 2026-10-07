@@ -79,6 +79,8 @@ describe('where conversations came from, through the API (ADR-301)', () => {
       { source: 'ad' },
       { chatLinkId: LINK },
       { source: 'link', chatLinkId: LINK, status: 'open' },
+      { adId: '120200000000001' },
+      { source: 'ad', adId: ' 120200000000001 ' },
     ]) {
       expect(apiConversationListQuerySchema.safeParse(input).success, JSON.stringify(input)).toBe(
         true,
@@ -90,7 +92,14 @@ describe('where conversations came from, through the API (ADR-301)', () => {
         }).success,
       ).toBe(true);
     }
-    for (const input of [{ source: 'campaign' }, { source: 'LINK' }, { chatLinkId: 'bio' }]) {
+    for (const input of [
+      { source: 'campaign' },
+      { source: 'LINK' },
+      { chatLinkId: 'bio' },
+      { adId: '' },
+      { adId: '  ' },
+      { adId: '1'.repeat(129) },
+    ]) {
       expect(apiConversationListQuerySchema.safeParse(input).success, JSON.stringify(input)).toBe(
         false,
       );
@@ -116,6 +125,16 @@ describe('where conversations came from, through the API (ADR-301)', () => {
         ` and "app"."conversation_sources"."link_id" = $2`,
       )})`,
       [TENANT, LINK],
+    ]);
+    // An ad's conversations (ADR-302), trimmed as Meta's ids are kept.
+    expect(apiConversationListQuerySchema.parse({ adId: ' 120200000000001 ' }).adId).toBe(
+      '120200000000001',
+    );
+    expect(render({ adId: '120200000000001' })).toEqual([
+      `("app"."conversations"."tenant_id" = $1 and ${exists(
+        ` and "app"."conversation_sources"."ad_source_id" = $2`,
+      )})`,
+      [TENANT, '120200000000001'],
     ]);
     expect(render({ status: 'open' })[0]).not.toContain('conversation_sources');
   });
@@ -233,6 +252,11 @@ describe('where conversations came from, through the API (ADR-301)', () => {
     expect(params.find((p) => p.name === 'chatLinkId')?.schema).toEqual({
       type: 'string',
       format: 'uuid',
+    });
+    expect(params.find((p) => p.name === 'adId')?.schema).toEqual({
+      type: 'string',
+      minLength: 1,
+      maxLength: 128,
     });
     const source = doc.components.schemas.Conversation?.properties.source;
     expect(source?.description).toContain(

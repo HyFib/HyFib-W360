@@ -11495,3 +11495,33 @@ Decision:
 
 Not built: a conversation's earlier sources, sources in webhook events, and the ads that brought
 conversations, which members see under Growth → Ads.
+
+## ADR-302 Click-to-WhatsApp ads through the public API (P5-08) (2026-10-07)
+
+Context: Growth → Ads lists the click-to-WhatsApp ads customers wrote from in the last 30 days, with
+the conversations each started (ADR-044), and keys read each conversation's source (ADR-301), but
+not the ads themselves or an ad's conversations, so a company could not compare its ads in its own
+tools or follow an ad's conversations there.
+
+Decision:
+
+- **An `ads.read` scope** ("Read ads"), reading, granted only by members who hold `campaigns.read`,
+  as the Growth pages need. Existing keys and plans that chose their scopes do not gain it. With it
+  the API has 39 scopes; migration 0225 replaces the keys' and plans' scope checks, validated at
+  once.
+- **`GET /api/v1/ads`** (`listAds`) gives the ads as Growth → Ads lists them, by the page's reader,
+  now shared (`readAdSources` in `growth/service.ts`): one row for each id, type, headline and web
+  address Meta sent with an ad, those that started the most conversations first, then the latest, at
+  most 200, each with the conversations it started and the customers' messages that came from it in
+  the last 30 days and when the latest arrived. Ties are now broken by every grouped column, so the
+  page and the API keep one order. It takes no parameters (422 for any), reads in a read-only
+  transaction, and works while the company is suspended.
+- **`adId` on `GET /conversations`** and on the conversations a change finds (ADR-166): the
+  conversations whose customer wrote from the ad with that id, at any time, among the sources
+  ADR-301 filters by; trimmed, 1 to 128 characters, as ids are kept.
+- **Nothing more is kept or given:** HyFib keeps only what identifies an ad (ADR-044), never the ad
+  click id, image or video addresses or the ad's text, and connects no ad account, so spend and cost
+  per conversation are not given.
+
+Not built: ads over other periods, ads of one number, and ad spend, which needs an ad account HyFib
+does not connect.
