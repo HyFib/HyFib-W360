@@ -286,7 +286,7 @@ describe('chat links written through the API (ADR-300)', () => {
     // The audit log names the key for each change, never a member.
     const audit = await fx.query<{ action: string; actor_type: string; actor_id: string }>(
       `SELECT action, actor_type, actor_id FROM app.audit_events
-        WHERE tenant_id = $1 AND subject_id = $2 ORDER BY created_at, id`,
+        WHERE tenant_id = $1 AND subject_id = $2 ORDER BY occurred_at, id`,
       [c.tenant.id, link.id],
     );
     expect(audit.map((a) => a.action)).toEqual([
