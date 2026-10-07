@@ -238,7 +238,7 @@ test('an automation creates a CRM task and a deal about the customer (ADR-244, A
   await page.locator('#step-welcome-text').fill('We will call you back.');
   await page.getByLabel('Add a step').selectOption('create_task');
   await page.getByRole('button', { name: 'Add step' }).click();
-  await page.locator('#step-create-task-1-title').fill('Call {{name}} back');
+  await page.locator('#step-create-task-1-task').fill('Call {{name}} back');
   await page.locator('#step-create-task-1-assignee').selectOption({ label: 'Tomas Tasks' });
   await page.locator('#step-create-task-1-due').fill('4');
   await page.locator('#step-create-task-1-remind').check();
@@ -246,7 +246,7 @@ test('an automation creates a CRM task and a deal about the customer (ADR-244, A
   // Then a deal in the pipeline's first stage, worth ₹2,500.50, owned by the owner.
   await page.getByLabel('Add a step').selectOption('create_deal');
   await page.getByRole('button', { name: 'Add step' }).click();
-  await page.locator('#step-create-deal-1-title').fill('Kettles for {{name}}');
+  await page.locator('#step-create-deal-1-deal').fill('Kettles for {{name}}');
   await expect(page.locator('#step-create-deal-1-stage')).toHaveValue(/.+/);
   await page.locator('#step-create-deal-1-value').fill('2,500.50');
   await page.locator('#step-create-deal-1-owner').selectOption({ label: 'Tomas Tasks' });

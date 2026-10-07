@@ -806,7 +806,7 @@ export function NodeFields({
       return (
         <div className="grid gap-4">
           <Field
-            id={`${p}-title`}
+            id={`${p}-task`}
             label="Task"
             description={`The task about the contact, in the CRM. ${hintFor(options)}`}
           >
@@ -894,7 +894,7 @@ export function NodeFields({
       return (
         <div className="grid gap-4">
           <Field
-            id={`${p}-title`}
+            id={`${p}-deal`}
             label="Deal"
             description={`The deal for the contact, from this conversation. ${hintFor(options)}`}
           >
