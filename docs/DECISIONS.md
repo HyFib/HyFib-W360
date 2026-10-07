@@ -10299,3 +10299,36 @@ Decision:
 Not built: filtering orders by who changed them, the history of an order's changes through the API
 (the audit log keeps members' and keys' changes), and who changed an order on the order page and in
 the members' CSV export.
+
+## ADR-272 Listing the tags in use through the public API (P5-08) (2026-10-07)
+
+Context: keys read the tags contacts and conversations carry (`tags`), filter by one (`tag`), add
+and remove them (ADR-112, ADR-221), and webhook endpoints narrow events by contact tags (ADR-267),
+but nothing listed the tags a company uses: an integration offering a tag picker, checking a tag
+before filtering by it, or keeping its own list had to page through every contact or conversation.
+ADR-221 left a list of the tags in use through the API unbuilt.
+
+Decision:
+
+- **`GET /contact-tags`** (`listContactTags`, `contacts.read`) and **`GET /conversation-tags`**
+  (`listConversationTags`, `conversations.read`): the tags on the company's contacts or
+  conversations, alphabetically, each with how many contacts (`contacts`) or conversations
+  (`conversations`) have it when the page is read. A tag nobody has any more is not listed; erasure
+  and merges delete a contact's tags, so erased and merged contacts count for none. Members' lists
+  (Contacts, the inbox's tag filter) are unchanged.
+- **Pages that continue after the last tag:** up to `limit` tags (1 to 100, 50 by default),
+  `nextCursor` the last tag listed, encoded, and a page reading the tags after it, so paging never
+  skips or repeats a tag that stays in use, even when nobody has the cursor's tag any more; a tag
+  first used meanwhile before the cursor is listed on the next pass, and the counts are read with
+  each page. A cursor that is not a tag as tags are written is refused with 422 naming `cursor`.
+- **`prefix`:** only the tags that start with a text, written as tags are (lower case, single
+  spaces), for a picker that completes what someone types; a prefix that cannot be part of a tag is
+  refused with 422 naming `prefix`, and unknown parameters are refused.
+- **Reads only, in the key's company:** one read-only transaction per page, the tags of the key's
+  company only (row security and an explicit company condition), allowed while the company is
+  suspended, as every read is; a page counts as one request. The tags are grouped by the existing
+  `(tenant_id, tag)` indexes; no migration.
+
+Not built: renaming, merging or deleting tags through the API (members cannot either), tags across
+both lists in one call, other orders (by count), and tags of contacts or conversations matching a
+filter.

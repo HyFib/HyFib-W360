@@ -1,5 +1,32 @@
 # Progress
 
+## 2026-10-07 — Listing the tags in use through the public API (P5-08, H-033, ADR-272)
+
+Status: **Implemented; its database tests run in CI only.** Keys read, filtered by and changed tags
+but nothing listed the tags a company uses. No migration. The local PostgreSQL is unavailable, so
+the integration tests below were written but not run here.
+
+### Completed
+
+- **Domain:** `api/tags.ts` (`apiListContactTags`, `apiListConversationTags`, the query with its
+  cursor and prefix), the routes `/api/v1/contact-tags` and `/api/v1/conversation-tags`, and the
+  OpenAPI entries (`listContactTags`, `listConversationTags`, `ContactTag`, `ConversationTag`).
+- **Tests:** unit (`api/tags.test.ts`: 5 tests); integration (`api-tags.test.ts`: 2 tests). Written
+  for CI; the integration tests were not run here. No e2e test: nothing a member sees changed.
+- **Docs:** ADR-272; ARCHITECTURE; SECURITY; THREAT-MODEL T240; DEPLOYMENT; RUNBOOKS; BACKLOG P5-08;
+  feature matrix H-033.
+- **Mutation checks:** 15/15 deliberate regressions caught.
+
+### Test commands and results (local, 2026-10-07)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 120 files, 1136 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
 ## 2026-10-07 — Who last changed an order, through the public API (P5-08, H-033, ADR-271)
 
 Status: **Implemented; its database and browser tests run in CI only.** An order system polling

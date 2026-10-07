@@ -729,6 +729,10 @@ verification, app review, Embedded Signup configuration).
   CI]** (ADR-271, no migration: `GET /orders`, `GET /orders/{id}` and the answer of
   `PATCH /orders/{id}` name who made an order's latest status change, a member, a key by its id or
   the Payment Link, as `order.status_changed` does since ADR-270).
+  **[Listing the tags in use built; its database tests run only in CI]** (ADR-272, no migration:
+  `GET /contact-tags` with `contacts.read` and `GET /conversation-tags` with `conversations.read`
+  list the company's tags alphabetically with how many contacts or conversations have each, on pages
+  that continue after the last tag, narrowed by a prefix).
   **[Reading WhatsApp numbers built; its database tests run only in CI]** (ADR-171: `GET /channels`
   with the new `channels.read` scope, granted with the permission of the same name: every number of
   the company oldest first on exact pages, filtered by status, with its number, verified name and

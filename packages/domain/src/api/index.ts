@@ -30,3 +30,4 @@ export * from './webhook-endpoints';
 export * from './campaigns';
 export * from './segments';
 export * from './media';
+export * from './tags';

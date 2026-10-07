@@ -2193,6 +2193,17 @@ suspended or its plan has ended. A note added cannot be read, changed or deleted
 members see it on the timeline as written through the API. A retry with the same `Idempotency-Key`
 answers the first note.
 
+**`GET /api/v1/contact-tags` or `/conversation-tags` answers 403 or 422, or leaves out a tag
+(ADR-272).** 403 `forbidden` names the scope the key lacks: `contacts.read` for contact tags,
+`conversations.read` for conversation tags (keys keep the scopes they were created with). 422 names
+the parameter: `limit` beyond 1 to 100, `prefix` with a comma or nothing but spaces, `cursor` that
+does not decode to a tag as tags are written (give the `nextCursor` a page answered), or one it does
+not take. A tag is listed only while a contact or conversation has it: one removed from its last
+contact or conversation, or only on erased contacts, is gone, and a tag first used before the cursor
+while a reader pages appears on the next pass. Counts are read with each page, so two pages can add
+up to more or fewer than the total. Tags are listed as they are written (lower case, single spaces);
+a `prefix` is compared the same way.
+
 **`GET /api/v1/channels` answers 403, or a number shows no phone or name (ADR-171).** 403
 `forbidden` names the scope the key lacks, `channels.read` (keys keep the scopes they were created
 with: create a key with it); reason `not_in_plan` means the company's plan leaves the scope out

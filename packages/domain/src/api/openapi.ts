@@ -562,6 +562,26 @@ export const apiChannelSchema = z.object({
 });
 
 /** A team conversations can be moved to (ADR-093). */
+/** A tag on the company's contacts, with how many have it (ADR-272). */
+export const apiContactTagSchema = z.object({
+  tag: z.string().describe('As contacts carry it: lower case, single spaces, up to 40 characters.'),
+  contacts: z
+    .number()
+    .int()
+    .describe('The contacts that have the tag when the page is read; erased contacts have none.'),
+});
+
+/** A tag on the company's conversations, with how many have it (ADR-272). */
+export const apiConversationTagSchema = z.object({
+  tag: z
+    .string()
+    .describe('As conversations carry it: lower case, single spaces, up to 40 characters.'),
+  conversations: z
+    .number()
+    .int()
+    .describe('The conversations that have the tag when the page is read.'),
+});
+
 export const apiTeamSchema = z.object({
   id: z.uuid(),
   name: z.string(),
@@ -1009,6 +1029,19 @@ const errors = (...statuses: number[]) =>
     ]),
   );
 
+/** Narrows a page of tags to those starting with a text (ADR-272). */
+const tagPrefixParam = {
+  name: 'prefix',
+  in: 'query',
+  schema: { type: 'string', maxLength: 100 },
+  description:
+    'Only the tags that start with this text, compared as tags are written (lower case, single spaces).',
+};
+
+/** How pages of tags are read, for both lists (ADR-272). */
+const tagPagesNote =
+  'Pages continue after the last tag of the page before, so paging never skips or repeats a tag that stays in use; a tag first used meanwhile before the cursor is listed on the next pass, and the counts are read with each page.';
+
 const pageParams = [
   {
     name: 'limit',
@@ -1073,7 +1106,7 @@ export function buildOpenApiDocument(serverUrl: string) {
       title: 'HyFib W360 API',
       version: '1.0.0',
       description: [
-        'Send approved WhatsApp templates, reply with text to contacts who wrote in the last 24 hours, read conversations, their messages (one conversation or all of them) and their notes, resolve, reopen, assign and tag conversations or move them between teams, manage contacts and consent, read campaigns, their results and their recipients, read and manage saved segments and list their contacts, create, edit, review and submit campaign drafts for a member’s approval, pause and cancel campaigns and resume the ones you paused, list your WhatsApp numbers, and read message status for your company.',
+        'Send approved WhatsApp templates, reply with text to contacts who wrote in the last 24 hours, read conversations, their messages (one conversation or all of them) and their notes, resolve, reopen, assign and tag conversations or move them between teams, manage contacts and consent, list the tags in use on contacts and conversations, read campaigns, their results and their recipients, read and manage saved segments and list their contacts, create, edit, review and submit campaign drafts for a member’s approval, pause and cancel campaigns and resume the ones you paused, list your WhatsApp numbers, and read message status for your company.',
         '',
         'Authenticate with `Authorization: Bearer <API key>`; keys are created in Settings → API keys and belong to the company. A key, and the company for all its keys, can be limited to the addresses its systems call from: a request from any other address is refused with 403 (reason `ip_not_allowed`).',
         `Scopes: ${API_SCOPE_KEYS.map((s) => `\`${s}\` (${API_SCOPE_INFO[s].label.toLowerCase()})`).join(', ')}. A company's plan may include only some of them: a request that needs a scope the plan leaves out is refused with 403 (reason \`not_in_plan\`), whatever scopes its key has.`,
@@ -1297,6 +1330,21 @@ export function buildOpenApiDocument(serverUrl: string) {
               content: pageOf('Contact'),
             },
             ...errors(400, 401, 403, 409, 415, 422, 423, 429, 500),
+          },
+        },
+      },
+      '/contact-tags': {
+        get: {
+          operationId: 'listContactTags',
+          summary: 'Tags on contacts, alphabetically',
+          description: [
+            `${scopeNote('contacts.read')} The tags on the company's contacts, alphabetically, each with how many contacts have it when the page is read: the tags contacts carry (\`tags\`), \`GET /contacts\` filters by (\`tag\`) and webhook endpoints name (\`contactTags\`). A tag no contact has any more is not listed.`,
+            tagPagesNote,
+          ].join('\n\n'),
+          parameters: [...pageParams, tagPrefixParam],
+          responses: {
+            '200': { description: 'A page of tags.', content: pageOf('ContactTag') },
+            ...errors(401, 403, 422, 429, 500),
           },
         },
       },
@@ -1726,6 +1774,21 @@ export function buildOpenApiDocument(serverUrl: string) {
           parameters: pageParams,
           responses: {
             '200': { description: 'A page of members.', content: pageOf('Member') },
+            ...errors(401, 403, 422, 429, 500),
+          },
+        },
+      },
+      '/conversation-tags': {
+        get: {
+          operationId: 'listConversationTags',
+          summary: 'Tags on conversations, alphabetically',
+          description: [
+            `${scopeNote('conversations.read')} The tags on the company's conversations, alphabetically, each with how many conversations have it when the page is read: the tags conversations carry (\`tags\`), \`GET /conversations\` filters by (\`tag\`) and changes add and remove (\`addTags\`, \`removeTags\`). A tag no conversation has any more is not listed.`,
+            tagPagesNote,
+          ].join('\n\n'),
+          parameters: [...pageParams, tagPrefixParam],
+          responses: {
+            '200': { description: 'A page of tags.', content: pageOf('ConversationTag') },
             ...errors(401, 403, 422, 429, 500),
           },
         },
@@ -2998,6 +3061,8 @@ export function buildOpenApiDocument(serverUrl: string) {
         ContactSearch: jsonSchema(apiContactSearchSchema, 'input'),
         UpdateMatchingContacts: jsonSchema(apiUpdateMatchingContactsSchema, 'input'),
         ContactField: jsonSchema(apiContactFieldSchema),
+        ContactTag: jsonSchema(apiContactTagSchema),
+        ConversationTag: jsonSchema(apiConversationTagSchema),
         ContactFieldCreate: jsonSchema(apiContactFieldCreateSchema, 'input'),
         ContactFieldUpdate: jsonSchema(apiContactFieldUpdateSchema, 'input'),
         ContactChange: {
@@ -3146,6 +3211,8 @@ export const API_ROUTES = [
   ['post', '/contacts/{id}/consent'],
   ['post', '/contacts/{id}/merge'],
   ['get', '/contact-fields'],
+  ['get', '/contact-tags'],
+  ['get', '/conversation-tags'],
   ['post', '/contact-fields'],
   ['patch', '/contact-fields/{key}'],
   ['delete', '/contact-fields/{key}'],

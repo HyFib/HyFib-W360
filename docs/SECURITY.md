@@ -1085,6 +1085,12 @@ Phase 5 rules (Public API, P5-08):
   never lands on an erased contact or the wrong one. The note is recorded as the key's (the timeline
   and the audit log, which never holds its text), and notes are never read through the API (unit
   tests; integration tests, run in CI only).
+- Listing the tags in use (ADR-272): `GET /contact-tags` needs `contacts.read` and
+  `GET /conversation-tags` `conversations.read`, both checked before anything is read. They group
+  the tags of the key's company only (row security and an explicit company condition), in read-only
+  transactions, giving each tag and a count, never which contacts or conversations carry it; erased
+  contacts have no tags left to count. The cursor and the prefix are checked as tags are written
+  before any query (unit tests; integration tests, run in CI only).
 - Defining contact fields (ADR-115): adding, renaming and deleting the company's custom fields needs
   `contact_fields.manage`, which only members holding `tenant.settings.manage` (owners and
   administrators, who define fields in Settings) grant, and an active company. Fields are named by

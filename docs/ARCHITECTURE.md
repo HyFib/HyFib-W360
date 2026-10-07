@@ -465,6 +465,12 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   `tag`, `prepareConversationChange` checks `addTags` and `removeTags` before the transaction, and
   `changeLockedConversation` applies them after the status under the row lock, touching
   `updated_at`, emitting `conversation.tags` and auditing the counts.
+- **The tags in use through the API** (`api/tags.ts`, ADR-272): `GET /contact-tags` and
+  `GET /conversation-tags` group `app.contact_tags` and `app.conversation_tags` by tag in the key's
+  company (`tagPage`), alphabetically after the cursor's tag (`gt`) and with `starts_with` for a
+  prefix, reading one more row than the page to tell whether another follows, in a read-only
+  transaction; the cursor is the last tag in base64url, refused unless it decodes to a tag as
+  `normalizeTag` writes it.
 - **Automations that tag the conversation** (ADR-222): `update_conversation` steps and
   `conversation_tag` rules in `automations/graph.ts`; the interpreter gives `add_conversation_tag`
   and `remove_conversation_tag` effects and reads `RunFacts.conversationTags`, which `loadFacts`
