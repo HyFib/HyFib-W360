@@ -2824,7 +2824,9 @@ recorded. To see who made a deal's or task's latest change, read `changedBy` and
 from `GET /deals/{id}` or `GET /tasks/{id}` (ADR-278), or `changed_by` and `changed_by_api_key_id`
 on `app.crm_deals` and `app.crm_tasks`; only the latest change is kept there, and a member's save of
 a task that changes nothing keeps it. Both are null while a deal or task is as it was added;
-`deal.created` and `task.created` say who added it.
+`deal.created` and `task.created` say who added it, as `createdBy` and `createdByApiKeyId` on the
+deal or task do (ADR-282), never null: `member` (never which), `automation` (never which), or `api`
+with the key's id.
 
 **A receiver misses the conversations of a tagged customer (ADR-267).** An endpoint can take the
 message and conversation events of the conversations whose contact has chosen tags only. The

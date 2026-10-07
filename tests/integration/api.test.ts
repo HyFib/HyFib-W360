@@ -4221,6 +4221,8 @@ describe('CRM pipelines and deals (ADR-253)', () => {
       version: 1,
       changedBy: null,
       changedByApiKeyId: null,
+      createdBy: 'member',
+      createdByApiKeyId: null,
     });
     expect(await apiGetDeal(deps(), reader.ctx, first.id)).toEqual(last.data[0]);
     expect((await apiGetDeal(deps(), reader.ctx, third.id)).currency).toBe('USD');
@@ -4396,6 +4398,8 @@ describe('CRM pipelines and deals (ADR-253)', () => {
       closedAt: null,
     });
     expect(await apiGetDeal(deps(), reader.ctx, deal.id)).toEqual(deal);
+    // Who added it, as the API answers and reads it (ADR-282): the key.
+    expect([deal.createdBy, deal.createdByApiKeyId]).toEqual(['api', writer.id]);
 
     // Recorded as the key's: its creator, its page and timeline, and the audit log.
     const [row] = await fx.query<{
@@ -5026,6 +5030,8 @@ describe('CRM pipelines and deals (ADR-253)', () => {
       version: 1,
       changedBy: null,
       changedByApiKeyId: null,
+      createdBy: 'member',
+      createdByApiKeyId: null,
     });
     expect(await apiGetTask(deps(), reader.ctx, first.id)).toEqual(last.data[0]);
     // A task about a deal is about its contact too; one about nobody names neither.
@@ -5208,6 +5214,8 @@ describe('CRM pipelines and deals (ADR-253)', () => {
       version: 1,
     });
     expect(await apiGetTask(deps(), reader.ctx, task.id)).toEqual(task);
+    // Who added it, as the API answers and reads it (ADR-282): the key.
+    expect([task.createdBy, task.createdByApiKeyId]).toEqual(['api', writer.id]);
     // Its reminder is scheduled for the time given, as members' reminders are.
     const [job] = await fx.query<{ start_after: Date }>(
       `SELECT start_after FROM pgboss.job WHERE name = $1 AND singleton_key = $2`,

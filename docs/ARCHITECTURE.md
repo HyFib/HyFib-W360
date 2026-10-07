@@ -1449,8 +1449,10 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   snapshot. Deals are read in the company joined to their pipeline (its currency), newest first by
   `created_at` on exact keyset cursors (`crm_deals_list_idx`), the filters as plain equalities
   (`ownerId` `none` as a null owner) and `updated_at >= updatedSince`; `toApiDeal` gives ids in
-  place of the contact, conversation and owner, and since ADR-278 who made its latest change
-  (`changedBy`, `changedByApiKeyId`, read from the columns of ADR-277).
+  place of the contact, conversation and owner, since ADR-278 who made its latest change
+  (`changedBy`, `changedByApiKeyId`, read from the columns of ADR-277), and since ADR-282 who added
+  it (`createdBy`, `createdByApiKeyId`: `crmCreatedBy` reads `created_by_api_key_id` and
+  `created_by_automation_id`, never the member's id).
 - **Creating CRM deals through the API (ADR-254):** `POST /deals` (`apiCreateDeal`, `deals.write`)
   claims the `Idempotency-Key` in the deal's transaction, checks the CRM in the plan, locks the
   contact (key share; `apiContactNotFound` for a missing or erased one), shares the pipeline and
@@ -1485,9 +1487,10 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   Tasks are read in the company newest first by `created_at` on exact keyset cursors
   (`crm_tasks_list_idx`), the filters as plain equalities and `updated_at >= updatedSince`;
   `toApiTask` gives ids in place of the assignee, contact and deal, and `reminder_detail` as
-  `reminderSkipReason`. The creator and the member who closed a task are never selected. Since
-  ADR-278 `toApiTask` gives who made its latest change (`changedBy`, `changedByApiKeyId`, read from
-  the columns of ADR-277), a member never by name.
+  `reminderSkipReason`. The member who created or closed a task is never selected. Since ADR-278
+  `toApiTask` gives who made its latest change (`changedBy`, `changedByApiKeyId`, read from the
+  columns of ADR-277), and since ADR-282 who added it (`createdBy`, `createdByApiKeyId`, from the
+  key and automation creator columns by `crmCreatedBy`), a member never by name.
 - **Creating CRM tasks through the API (ADR-259):** `POST /tasks` (`apiCreateTask`, `tasks.write`)
   claims the `Idempotency-Key` in the task's transaction, then checks the times with `taskTimeIssue`
   (the members' rule, naming the field), the CRM in the plan and the assignee with `memberRefs`; a
@@ -1798,9 +1801,10 @@ true`); the same key with another request (method, path and body hashed) answers
   trigger before each change the events report, clears a changer another transaction recorded. The
   deal and task capture functions put the changer and the key in the `detail` of every event an
   update captures, and the payloads (`dealOf`, `taskOf`) give `changedBy` and `apiKeyId` as
-  captured, an addition's from its creator. `GET /deals` and `GET /tasks` read the latest changer
-  (ADR-278); a member's save of a task that changes nothing the events report records no changer
-  (`taskDetailsChanged`, `crm/tasks.ts`).
+  captured, an addition's from its creator (`crmCreatedBy`, which the API's deals and tasks share
+  since ADR-282). `GET /deals` and `GET /tasks` read the latest changer (ADR-278); a member's save
+  of a task that changes nothing the events report records no changer (`taskDetailsChanged`,
+  `crm/tasks.ts`).
 - **Note events** (migrations 0200–0201, ADR-280): `crm_activities_webhook_note`, an `AFTER INSERT`
   trigger on `app.crm_activities` for kind `note`, captures `note.created`
   (`app.webhook_capture_note()`) with the note id in `detail` and its contact; members' `addNote`

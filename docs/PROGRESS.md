@@ -1,5 +1,35 @@
 # Progress
 
+## 2026-10-07 — Who added a CRM deal or task, through the public API (P5-08, H-033, ADR-282)
+
+Status: **Implemented; its database tests run in CI only.** Deals and tasks read through the API
+said who made their latest change but not who added them. No migration. The local PostgreSQL is
+unavailable, so the integration tests below were written but not run here.
+
+### Completed
+
+- **Domain:** `crmCreatedBy` (`crm/common.ts`), shared by `toApiDeal`, `toApiTask` and the
+  `deal.created` and `task.created` payloads; `createdBy` and `createdByApiKeyId` on the OpenAPI
+  `Deal` and `Task` schemas, and the lists' descriptions.
+- **Tests:** unit (`crm/changed-by.test.ts`: the creator of each kind; `api/deals.test.ts` and
+  `api/tasks.test.ts`: the fields, their descriptions and the lists' descriptions); integration
+  (`api.test.ts`: members' deals and tasks as read, a key's in its answers;
+  `webhook-events.test.ts`: members', a key's and an automation's deals and tasks read with the
+  creator their events name). Written for CI; the integration tests were not run here. No e2e test.
+- **Docs:** ADR-282; ARCHITECTURE; SECURITY; THREAT-MODEL T250; DEPLOYMENT; RUNBOOKS; BACKLOG P5-08;
+  feature matrix H-033.
+- **Mutation checks:** 15/15 deliberate regressions caught.
+
+### Test commands and results (local, 2026-10-07)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 121 files, 1156 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
 ## 2026-10-07 — A CRM deal's history through the public API (P5-08, P4-04, H-033, ADR-281)
 
 Status: **Implemented; its database tests run in CI only.** Keys read a deal as it is and heard each

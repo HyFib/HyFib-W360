@@ -21,7 +21,7 @@ import {
   type Tx,
 } from '@w360/db';
 import { recordSystemAudit } from '../audit';
-import { addActivity, crmChangedBy, memberRefs } from '../crm/common';
+import { addActivity, crmChangedBy, crmCreatedBy, memberRefs } from '../crm/common';
 import { MAX_DEAL_MINOR } from '../crm/money';
 import type { OutboundDeps } from '../messaging/outbound';
 import { loadEntitlements } from '../plans/entitlements';
@@ -212,6 +212,9 @@ export interface ApiDeal {
    */
   changedBy: CrmChanger | null;
   changedByApiKeyId: string | null;
+  /** Who added the deal (ADR-282): a member (never which), an automation's run or a key. */
+  createdBy: CrmChanger;
+  createdByApiKeyId: string | null;
 }
 
 /** Pipelines, deals and tasks are the CRM's: a plan without it reads none through the API. */
@@ -336,6 +339,8 @@ const dealColumns = {
   version: crmDeals.version,
   changedBy: crmDeals.changedBy,
   changedByApiKeyId: crmDeals.changedByApiKeyId,
+  createdByAutomationId: crmDeals.createdByAutomationId,
+  createdByApiKeyId: crmDeals.createdByApiKeyId,
   cursorAt: exactTimestamp(crmDeals.createdAt),
 };
 
@@ -359,6 +364,8 @@ interface DealRow {
   version: number;
   changedBy: CrmChanger | null;
   changedByApiKeyId: string | null;
+  createdByAutomationId: string | null;
+  createdByApiKeyId: string | null;
 }
 
 const toApiDeal = (row: DealRow): ApiDeal => ({
@@ -381,6 +388,7 @@ const toApiDeal = (row: DealRow): ApiDeal => ({
   version: row.version,
   changedBy: row.changedBy,
   changedByApiKeyId: row.changedByApiKeyId,
+  ...crmCreatedBy(row.createdByAutomationId, row.createdByApiKeyId),
 });
 
 /** A deal's pipeline, which gives its currency (a deal's pipeline is the company's). */

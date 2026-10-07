@@ -20,6 +20,8 @@ import {
   apiCreateNote,
   apiCreateTask,
   apiGetCampaign,
+  apiGetDeal,
+  apiGetTask,
   apiStartAutomationRun,
   apiUpdateConversation,
   apiUpdateDeal,
@@ -4147,6 +4149,24 @@ describe('deal events (ADR-256)', () => {
       'contact.created',
       'contact.created',
     ]);
+
+    // The API reads who added each deal as deal.created says it (ADR-282).
+    const reading = await createApiKeysService({ db: fx.dbs.app, clock: systemClock }).create(
+      owner,
+      { name: 'Deal sync', scopes: ['deals.read'], expiresInDays: 0 },
+    );
+    const reader = await authenticateApiToken(fx.dbs.app, reading.token, uuidv7());
+    if (!reader) throw new Error('a new key does not authenticate');
+    const creators: [string, string | null][] = [];
+    for (const id of [dealId, apiDealId, runDealId]) {
+      const { createdBy, createdByApiKeyId } = await apiGetDeal(apiDeps, reader, id);
+      creators.push([createdBy, createdByApiKeyId]);
+    }
+    expect(creators).toEqual([
+      ['member', null],
+      ['api', key.key.id],
+      ['automation', null],
+    ]);
   });
 
   it('sends nothing without an endpoint for deals or for an erasure or a merge, sends an erased contact’s deal as erasure left it, and fails a delivery whose deal is gone', async () => {
@@ -5125,6 +5145,25 @@ describe('task events (ADR-261)', () => {
     expect(bodiesAt(contactsOnly.path).map((b) => b.type)).toEqual([
       'contact.created',
       'contact.created',
+    ]);
+
+    // The API reads who added each task as task.created says it (ADR-282).
+    const reading = await createApiKeysService({ db: fx.dbs.app, clock: systemClock }).create(
+      owner,
+      { name: 'Task sync', scopes: ['tasks.read'], expiresInDays: 0 },
+    );
+    const reader = await authenticateApiToken(fx.dbs.app, reading.token, uuidv7());
+    if (!reader) throw new Error('a new key does not authenticate');
+    const creators: [string, string | null][] = [];
+    for (const id of [taskId, soloId, apiTaskId, runTaskId]) {
+      const { createdBy, createdByApiKeyId } = await apiGetTask(apiDeps, reader, id);
+      creators.push([createdBy, createdByApiKeyId]);
+    }
+    expect(creators).toEqual([
+      ['member', null],
+      ['member', null],
+      ['api', key.key.id],
+      ['automation', null],
     ]);
   });
 

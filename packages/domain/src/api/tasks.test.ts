@@ -177,7 +177,7 @@ describe('CRM tasks through the API (ADR-258)', () => {
     expect(Object.keys(list.responses)).not.toContain('404');
     for (const words of [
       'Scope: `tasks.read`.',
-      'whoever created them (a member or an automation)',
+      'whoever created them (a member, an automation or an API key)',
       'newest first by when they were created',
       'pages never skip or repeat a task',
       'Filters combine',
@@ -220,6 +220,8 @@ describe('CRM tasks through the API (ADR-258)', () => {
       'version',
       'changedBy',
       'changedByApiKeyId',
+      'createdBy',
+      'createdByApiKeyId',
     ]);
     expect(task.required).toEqual(Object.keys(task.properties));
     // Who made the latest change, with the key for a key's (ADR-278).
@@ -237,13 +239,26 @@ describe('CRM tasks through the API (ADR-258)', () => {
     expect(list.description).toContain(
       '`changedBy` says who made a task’s latest change of what task events report, with the key for one made through the API (`changedByApiKeyId`), so an integration can tell the tasks it changed last',
     );
+    // Who added it, always someone, with the key for a key's (ADR-282).
+    const creator = apiTaskSchema.shape.createdBy;
+    expect(creator.options).toEqual(['member', 'automation', 'api']);
+    expect(creator.safeParse(null).success).toBe(false);
+    for (const words of ['a member (member, never which member)', 'as task.created says']) {
+      expect(creator.description).toContain(words);
+    }
+    expect(apiTaskSchema.shape.createdByApiKeyId.description).toContain('when createdBy is api');
+    expect(list.description).toContain(
+      '`createdBy` and `createdByApiKeyId` say likewise who added it.',
+    );
     expect(task.properties.reminderState?.enum).toEqual([...REMINDER_STATES]);
     // Every reason a reminder is skipped for (crm/tasks.ts and crm/reminders.ts) is named.
     for (const reason of ['task_closed', 'too_late', 'assignee_inactive']) {
       expect(task.properties.reminderSkipReason?.description).toContain(`\`${reason}\``);
     }
-    // Ids only: no contact details, creators or timeline anywhere in it.
-    expect(JSON.stringify(task)).not.toMatch(/"(phone|contactName|createdBy\w*|timeline)"/);
+    // Ids only: no contact details, which member or automation added it, or timeline in it.
+    expect(JSON.stringify(task)).not.toMatch(
+      /"(phone|contactName|createdBy(Id|Membership\w*|Automation\w*)|timeline)"/,
+    );
   });
 });
 

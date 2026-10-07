@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { CRM_CHANGERS } from '@w360/db';
 import { PgDialect } from 'drizzle-orm/pg-core';
-import { crmChangedBy } from './common';
+import { crmChangedBy, crmCreatedBy } from './common';
 import { taskDetailsChanged } from './tasks';
 
 describe('who changed a deal or a task (ADR-277)', () => {
@@ -58,5 +58,18 @@ describe('who last changed a task, as the API reads it (ADR-278)', () => {
       expect(taskDetailsChanged(task, { ...same, ...change }), JSON.stringify(change)).toBe(true);
     }
     expect(taskDetailsChanged({ ...task, dueAt: null }, same)).toBe(true);
+  });
+});
+
+describe('who added a deal or a task, as the API reads it (ADR-282)', () => {
+  it('is its one creator: a key by its id, an automation’s run, or a member never named', () => {
+    const apiKeyId = '0192a1b2-0000-7000-8000-00000000000d';
+    const automationId = '0192a1b2-0000-7000-8000-00000000000e';
+    expect(crmCreatedBy(null, apiKeyId)).toEqual({ createdBy: 'api', createdByApiKeyId: apiKeyId });
+    expect(crmCreatedBy(automationId, null)).toEqual({
+      createdBy: 'automation',
+      createdByApiKeyId: null,
+    });
+    expect(crmCreatedBy(null, null)).toEqual({ createdBy: 'member', createdByApiKeyId: null });
   });
 });

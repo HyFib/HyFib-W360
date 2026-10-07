@@ -10681,3 +10681,33 @@ Decision:
 
 Not built: which member made a change, the history of a contact's timeline or of a task, values
 before a change of title or date, and filters by type or time.
+
+## ADR-282 Reading who added a CRM deal or task through the public API (P5-08) (2026-10-07)
+
+Context: `deal.created` and `task.created` say who added a deal or task, and since ADR-278 the API
+says who made a deal's or task's latest change, but a deal or task read through the API did not say
+who added it: an integration that polls `GET /deals` or `GET /tasks` instead of taking webhooks (or
+catches up after its receiver was down) could tell the ones it added from those members or
+automations added only by keeping every id it was answered. ADR-253, ADR-258 and ADR-278 left it
+unbuilt.
+
+Decision:
+
+- **`createdBy` and `createdByApiKeyId`** on the API's deal (`GET /deals`, `GET /deals/{id}` and the
+  answers of `POST /deals` and `PATCH /deals/{id}`) and task (`GET /tasks`, `GET /tasks/{id}` and
+  the answers of `POST /tasks` and `PATCH /tasks/{id}`): who added it, `member` (never which
+  member), `automation` (an automation's run, never which automation) or `api` with the key's id.
+  Never null: the database keeps exactly one creator for each deal and task (`crm_deals_creator`,
+  `crm_tasks_creator`), and the automation or key it names stays with it (a key is deleted only with
+  its company, after its deals and tasks; an automation that ran is archived, never deleted).
+- **The same as the events:** one function, `crmCreatedBy` (`crm/common.ts`), reads the creator for
+  the API's deals and tasks and for the `deal.created` and `task.created` payloads (`createdBy`,
+  with the key as `apiKeyId`), so a deal or task and its addition's event always agree.
+- **No migration, no new scope and no filter:** the creator columns are read with the deal's or
+  task's other columns, in the key's company scope, with `deals.read` or `tasks.read`; listing deals
+  or tasks by who added them is not offered (an integration skips its own key's as it pages). A
+  retried `POST /deals` or `POST /tasks` whose first answer was stored before the release replays
+  that answer, without the fields.
+
+Not built: which member or automation added a deal or task, filtering by who added them, and who
+completed or cancelled a task, beyond its latest change.

@@ -299,6 +299,8 @@ describe('CRM pipelines and deals through the API (ADR-253)', () => {
       'version',
       'changedBy',
       'changedByApiKeyId',
+      'createdBy',
+      'createdByApiKeyId',
     ]);
     expect(deal.required).toEqual(Object.keys(deal.properties));
     // Ids only: no contact details, notes, tasks or timeline anywhere in it.
@@ -316,6 +318,17 @@ describe('CRM pipelines and deals through the API (ADR-253)', () => {
     expect(apiDealSchema.shape.changedByApiKeyId.description).toContain('when changedBy is api');
     expect(list.description).toContain(
       '`changedBy` says who made a deal’s latest change of what deal events report, with the key for one made through the API (`changedByApiKeyId`), so an integration can tell the deals it changed last',
+    );
+    // Who added it, always someone, with the key for a key's (ADR-282).
+    const creator = apiDealSchema.shape.createdBy;
+    expect(creator.options).toEqual(['member', 'automation', 'api']);
+    expect(creator.safeParse(null).success).toBe(false);
+    for (const words of ['a member (member, never which member)', 'as deal.created says']) {
+      expect(creator.description).toContain(words);
+    }
+    expect(apiDealSchema.shape.createdByApiKeyId.description).toContain('when createdBy is api');
+    expect(list.description).toContain(
+      '`createdBy` and `createdByApiKeyId` say likewise who added it.',
     );
   });
 });

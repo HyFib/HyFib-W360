@@ -37,7 +37,7 @@ import {
 import { apiContactColumns, apiContactSchema, toApiContact } from '../api/contact-view';
 import { campaignAnalytics, campaignResultsSchema, toCampaignResults } from '../campaigns/results';
 import { COMMERCE_LIMITS } from '../commerce/model';
-import { noteWriter } from '../crm/common';
+import { crmCreatedBy, noteWriter } from '../crm/common';
 import { findAnsweredMessageId } from '../messaging/reply-context';
 import { WEBHOOK_MESSAGE_STATUSES, WEBHOOK_RUN_TRIGGERS } from './model';
 
@@ -1529,10 +1529,10 @@ export async function buildWebhookPayload(
       if (!deal) throw new WebhookEventGoneError();
       const moved = event.type === 'deal.stage_changed';
       const owned = event.type === 'deal.owner_changed';
-      const createdBy = deal.apiKeyId ? 'api' : deal.automationId ? 'automation' : 'member';
+      const { createdBy, createdByApiKeyId } = crmCreatedBy(deal.automationId, deal.apiKeyId);
       const changer =
         event.type === 'deal.created'
-          ? { changedBy: createdBy, apiKeyId: deal.apiKeyId }
+          ? { changedBy: createdBy, apiKeyId: createdByApiKeyId }
           : capturedCrmChanger(event.detail);
       return {
         ...base,
@@ -1576,10 +1576,10 @@ export async function buildWebhookPayload(
       const task = await taskOf(tx, tenantId, str(event.detail.taskId));
       if (!task) throw new WebhookEventGoneError();
       const reassigned = event.type === 'task.assignee_changed';
-      const createdBy = task.apiKeyId ? 'api' : task.automationId ? 'automation' : 'member';
+      const { createdBy, createdByApiKeyId } = crmCreatedBy(task.automationId, task.apiKeyId);
       const changer =
         event.type === 'task.created'
-          ? { changedBy: createdBy, apiKeyId: task.apiKeyId }
+          ? { changedBy: createdBy, apiKeyId: createdByApiKeyId }
           : capturedCrmChanger(event.detail);
       return {
         ...base,

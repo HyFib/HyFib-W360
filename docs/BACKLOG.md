@@ -747,6 +747,9 @@ verification, app review, Embedded Signup configuration).
   (ADR-278, no migration: `GET /deals`, `GET /tasks`, their single reads and the answers of their
   writes name who made a deal's or task's latest change, a member, an automation or a key by its id,
   as the deal and task events do since ADR-277).
+  **[Who added a deal or task, through the API, built; its database tests run only in CI]**
+  (ADR-282, no migration: deals and tasks read and answered through the API name who added them, a
+  member, an automation or a key by its id, as `deal.created` and `task.created` do).
   **[Reading WhatsApp numbers built; its database tests run only in CI]** (ADR-171: `GET /channels`
   with the new `channels.read` scope, granted with the permission of the same name: every number of
   the company oldest first on exact pages, filtered by status, with its number, verified name and

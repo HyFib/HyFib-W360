@@ -474,6 +474,15 @@ export const apiDealSchema = z.object({
     .uuid()
     .nullable()
     .describe('The API key that made the latest change, when changedBy is api; null otherwise.'),
+  createdBy: z
+    .enum(CRM_CHANGERS)
+    .describe(
+      'Who added the deal: a member (member, never which member), an automation’s run (automation) or an API key (api, named by createdByApiKeyId), as deal.created says.',
+    ),
+  createdByApiKeyId: z
+    .uuid()
+    .nullable()
+    .describe('The API key that added the deal, when createdBy is api; null otherwise.'),
 });
 
 /** One change of a CRM deal, as its history gives it (ADR-281). */
@@ -649,6 +658,15 @@ export const apiTaskSchema = z.object({
     .uuid()
     .nullable()
     .describe('The API key that made the latest change, when changedBy is api; null otherwise.'),
+  createdBy: z
+    .enum(CRM_CHANGERS)
+    .describe(
+      'Who added the task: a member (member, never which member), an automation’s run (automation) or an API key (api, named by createdByApiKeyId), as task.created says.',
+    ),
+  createdByApiKeyId: z
+    .uuid()
+    .nullable()
+    .describe('The API key that added the task, when createdBy is api; null otherwise.'),
 });
 
 /** A member conversations can be assigned to (ADR-093). */
@@ -2422,7 +2440,7 @@ export function buildOpenApiDocument(serverUrl: string) {
           description: [
             `${scopeNote('deals.read')} The company’s CRM deals, open and closed, as the CRM board and the deal page show them, newest first by when they were created; pages never skip or repeat a deal. Filters combine: a deal matches all of them. Each deal has its pipeline, stage, status, value, expected close date and owner, with its contact and conversation by id. Needs the CRM in the company’s plan (403, reason not_in_plan).`,
             'Values are integers in the pipeline currency’s minor units (paise for INR). Notes, tasks and the deal’s timeline are never read here, nor the contact’s name or number, which `contacts.read` reads. An erased contact’s deals are kept, renamed and without a lost reason, as erasure leaves them. To catch up on changes, ask for `updatedSince` a little before your previous pass began (a minute, say) and expect to see some deals again: a change carries the time it began to be saved, so one still being saved while you read can carry an earlier time.',
-            '`changedBy` says who made a deal’s latest change of what deal events report, with the key for one made through the API (`changedByApiKeyId`), so an integration can tell the deals it changed last from those members or automations did.',
+            '`changedBy` says who made a deal’s latest change of what deal events report, with the key for one made through the API (`changedByApiKeyId`), so an integration can tell the deals it changed last from those members or automations did; `createdBy` and `createdByApiKeyId` say likewise who added it.',
           ].join('\n\n'),
           parameters: [
             ...pageParams,
@@ -2527,9 +2545,9 @@ export function buildOpenApiDocument(serverUrl: string) {
           operationId: 'listTasks',
           summary: 'CRM tasks, newest first',
           description: [
-            `${scopeNote('tasks.read')} The company’s CRM tasks, open and closed, as the Tasks page and the contact and deal pages show them, whoever created them (a member or an automation), newest first by when they were created; pages never skip or repeat a task. Filters combine: a task matches all of them. Each task has its title, notes, due time, reminder, status and assignee, with its contact and deal by id. Needs the CRM in the company’s plan (403, reason not_in_plan).`,
+            `${scopeNote('tasks.read')} The company’s CRM tasks, open and closed, as the Tasks page and the contact and deal pages show them, whoever created them (a member, an automation or an API key), newest first by when they were created; pages never skip or repeat a task. Filters combine: a task matches all of them. Each task has its title, notes, due time, reminder, status and assignee, with its contact and deal by id. Needs the CRM in the company’s plan (403, reason not_in_plan).`,
             'The CRM timeline is never read here, nor the contact’s name or number, which `contacts.read` reads. Erasing a contact deletes its tasks, so they are no longer listed, and their ids answer 404; merging contacts moves the merged contact’s tasks to the one kept. To catch up on changes, ask for `updatedSince` a little before your previous pass began (a minute, say) and expect to see some tasks again: a change carries the time it began to be saved, so one still being saved while you read can carry an earlier time.',
-            '`changedBy` says who made a task’s latest change of what task events report, with the key for one made through the API (`changedByApiKeyId`), so an integration can tell the tasks it changed last from those members did.',
+            '`changedBy` says who made a task’s latest change of what task events report, with the key for one made through the API (`changedByApiKeyId`), so an integration can tell the tasks it changed last from those members did; `createdBy` and `createdByApiKeyId` say likewise who added it.',
           ].join('\n\n'),
           parameters: [
             ...pageParams,

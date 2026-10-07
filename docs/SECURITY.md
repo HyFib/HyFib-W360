@@ -1057,7 +1057,10 @@ Phase 5 rules (Public API, P5-08):
   renamed and without the lost reason, as erasure leaves them (unit tests; integration and e2e
   tests, run in CI only). A deal names who made its latest change (ADR-278) as the deal events do
   (ADR-277): a member never by name, an automation, a key of the company's own by its id, or nobody
-  when nothing was recorded, never an earlier change's maker (the database clears it).
+  when nothing was recorded, never an earlier change's maker (the database clears it). It names who
+  added it (ADR-282) as `deal.created` does: a member never by name, an automation's run never by
+  which automation, or a key of the company's own by its id (unit tests; integration tests, run in
+  CI only).
 - Creating CRM deals (ADR-254): `POST /deals` needs `deals.write`, granted only with `crm.write`, an
   active company and the CRM in the plan, all checked before a deal is written. The contact,
   pipeline, stage and owner must be the key's company's (row security and explicit company
@@ -1090,11 +1093,14 @@ Phase 5 rules (Public API, P5-08):
   in the key's company only (row security and an explicit company condition): another company's task
   answers 404 as an unknown one does, an id that is not a UUID is refused before any query, and
   every filter is typed (a status from the list, UUIDs, an ISO time). Tasks name the assignee,
-  contact and deal by id only, never the customer's number or name, the timeline, or who created or
-  closed them; erasing a contact deletes its tasks, so they are no longer read (unit tests;
-  integration and e2e tests, run in CI only). A task names who made its latest change (ADR-278) as
-  the task events do: a member never by name, or a key of the company's own by its id, or nobody,
-  never an earlier change's maker; a member's save that changes nothing records no one.
+  contact and deal by id only, never the customer's number or name, the timeline, or which member
+  created or closed them; erasing a contact deletes its tasks, so they are no longer read (unit
+  tests; integration and e2e tests, run in CI only). A task names who made its latest change
+  (ADR-278) as the task events do: a member never by name, or a key of the company's own by its id,
+  or nobody, never an earlier change's maker; a member's save that changes nothing records no one.
+  It names who added it (ADR-282) as `task.created` does: a member never by name, an automation's
+  run never by which automation, or a key of the company's own by its id (unit tests; integration
+  tests, run in CI only).
 - Creating CRM tasks (ADR-259): `POST /tasks` needs `tasks.write`, granted only with `crm.write`, an
   active company and the CRM in the company's plan. The assignee must be an active member of the
   key's company able to use the CRM; a deal or contact is found in the key's company only (another

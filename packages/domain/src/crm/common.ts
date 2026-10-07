@@ -191,6 +191,18 @@ export async function addActivity(
   return id;
 }
 
+/**
+ * Who added a deal or a task (ADR-282), from its creator columns: an API key, by its id; an
+ * automation's run; otherwise a member, never which (members' deals and tasks name the member).
+ */
+export const crmCreatedBy = (
+  automationId: string | null,
+  apiKeyId: string | null,
+): { createdBy: CrmChanger; createdByApiKeyId: string | null } =>
+  apiKeyId
+    ? { createdBy: 'api', createdByApiKeyId: apiKeyId }
+    : { createdBy: automationId ? 'automation' : 'member', createdByApiKeyId: null };
+
 /** Who wrote a CRM note: a member on the contact or deal page, or a key through the API. */
 export type NoteWriter = 'member' | 'api';
 

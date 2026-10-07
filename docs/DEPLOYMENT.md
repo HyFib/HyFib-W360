@@ -848,6 +848,11 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    `GET /api/v1/deals/{id}/history` with 404; rolling web servers back does the same. Workers are
    not affected.
 
+   ADR-282 has no migration. Until the web rollout ends, an old web server answers deals and tasks
+   without `createdBy` and `createdByApiKeyId`, and for 24 hours after it a retried `POST /deals` or
+   `POST /tasks` whose first answer an old server stored replays that answer, without them; rolling
+   web servers back does the same. Workers send the same events as before.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

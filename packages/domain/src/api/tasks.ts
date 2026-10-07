@@ -16,7 +16,7 @@ import {
   type TaskStatus,
 } from '@w360/db';
 import { recordSystemAudit } from '../audit';
-import { addActivity, crmChangedBy, memberRefs } from '../crm/common';
+import { addActivity, crmChangedBy, crmCreatedBy, memberRefs } from '../crm/common';
 import { scheduleTaskReminder } from '../crm/reminders';
 import { taskTimeIssue } from '../crm/tasks';
 import type { OutboundDeps } from '../messaging/outbound';
@@ -173,6 +173,9 @@ export interface ApiTask {
    */
   changedBy: CrmChanger | null;
   changedByApiKeyId: string | null;
+  /** Who added the task (ADR-282): a member (never which), an automation's run or a key. */
+  createdBy: CrmChanger;
+  createdByApiKeyId: string | null;
 }
 
 const taskColumns = {
@@ -194,6 +197,8 @@ const taskColumns = {
   version: crmTasks.version,
   changedBy: crmTasks.changedBy,
   changedByApiKeyId: crmTasks.changedByApiKeyId,
+  createdByAutomationId: crmTasks.createdByAutomationId,
+  createdByApiKeyId: crmTasks.createdByApiKeyId,
   cursorAt: exactTimestamp(crmTasks.createdAt),
 };
 
@@ -216,6 +221,8 @@ interface TaskRow {
   version: number;
   changedBy: CrmChanger | null;
   changedByApiKeyId: string | null;
+  createdByAutomationId: string | null;
+  createdByApiKeyId: string | null;
 }
 
 const toApiTask = (row: TaskRow): ApiTask => ({
@@ -237,6 +244,7 @@ const toApiTask = (row: TaskRow): ApiTask => ({
   version: row.version,
   changedBy: row.changedBy,
   changedByApiKeyId: row.changedByApiKeyId,
+  ...crmCreatedBy(row.createdByAutomationId, row.createdByApiKeyId),
 });
 
 /**
