@@ -1664,6 +1664,13 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   each in one read-only transaction. A response's contact, conversation, message and answers are
   mapped only when the key and the plan hold `contacts.read` (`hasScope`), as the Flows service
   gives them to members only with that permission.
+- **Chat links through the API (ADR-299):** `api/chat-links.ts` lists with `chat_links.read` the
+  company's chat links (`apiListChatLinks`: in use or archived, keyset pages on `created_at, id`,
+  served by `chat_links_list_idx`) and reads one with its clicks per day (`apiGetChatLink`), each in
+  one read-only transaction that reads the company's time zone from `tenants` first. The 30-day
+  counts are the Growth pages' SQL, now shared from `growth/service.ts` (`linkClicks30`,
+  `linkConversations30`); the short link is built on `APP_BASE_URL`, which the route passes, as the
+  link's page builds it.
 - **Many conversations at once (ADR-120):** `POST /conversations/update-many`
   (`apiUpdateManyConversations`) takes 1 to 100 `conversationIds` and the same fields. In one
   transaction it locks the member first (as a suspension does before releasing its conversations),

@@ -26,6 +26,7 @@ export const API_SCOPE_KEYS = [
   'campaigns.write',
   'campaigns.stop',
   'campaigns.resume',
+  'chat_links.read',
   'automations.start',
   'flows.read',
   'orders.read',
@@ -173,6 +174,13 @@ export const API_SCOPE_INFO: Record<
       'Resume a campaign a key paused, after the checks members’ resuming makes: the template still approved, the number active, neither cap reached. It sends again under the authority of the member who launched it, who must still be allowed to send campaigns. A campaign a member or HyFib paused stays for members to resume in the app.',
     permission: 'campaigns.send',
     writes: true,
+  },
+  'chat_links.read': {
+    label: 'Read chat links',
+    description:
+      "List the company's chat links, the short links and QR codes that open a chat with one of its numbers with a message ready to send, and read each one with its clicks per day and the conversations it started in the last 30 days.",
+    permission: 'campaigns.read',
+    writes: false,
   },
   'automations.start': {
     label: 'Start automations',

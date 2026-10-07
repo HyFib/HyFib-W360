@@ -139,6 +139,7 @@ import { apiCreatePipelineSchema, apiUpdatePipelineSchema } from './pipelines';
 import { apiPipelineForecastSchema } from './pipeline-forecast';
 import { apiReportSchema } from './reports';
 import { apiFlowResponseSchema, apiFlowSchema, apiJsonValueSchema } from './flows';
+import { apiChatLinkDetailSchema, apiChatLinkSchema } from './chat-links';
 import { MAX_PERIOD_DAYS, PERIOD_PRESETS } from '../reports/period';
 import { apiCreateTeamSchema, apiUpdateTeamSchema } from './teams';
 import { apiUpdateMemberSchema } from './members';
@@ -2369,6 +2370,41 @@ export function buildOpenApiDocument(serverUrl: string) {
           },
         },
       },
+      '/chat-links': {
+        get: {
+          operationId: 'listChatLinks',
+          summary: 'Chat links, newest first',
+          description: `${scopeNote('chat_links.read')} The company’s chat links, as the Growth pages list them: short links and QR codes that open a chat with one of its numbers with a message ready to send. Those in use, or archived ones with \`archived=true\`, newest first on pages that never skip or repeat a link. Each with its short link, the wa.me address it opens, its number, and its clicks and the conversations it started in the last 30 days. Visitors are never identified: clicks are counted per link and day only, repeated clicks and automated visits included.`,
+          parameters: [
+            ...pageParams,
+            {
+              name: 'archived',
+              in: 'query',
+              schema: { type: 'string', enum: ['true', 'false'] },
+              description: '`true`: only archived links; otherwise only those in use.',
+            },
+          ],
+          responses: {
+            '200': { description: 'A page of chat links.', content: pageOf('ChatLink') },
+            ...errors(401, 403, 422, 429, 500),
+          },
+        },
+      },
+      '/chat-links/{id}': {
+        get: {
+          operationId: 'getChatLink',
+          summary: 'A chat link with its clicks per day',
+          description: `${scopeNote('chat_links.read')} As GET /chat-links gives it, archived or not, with the days of the last 30 it was clicked on, in the company’s time zone, newest first. A conversation counts for a link when the customer’s message carries the link’s reference (“(ref CODE)”) on the link’s number, so the count is a lower bound: customers can edit the message, and a link without its reference counts none.`,
+          parameters: [{ $ref: '#/components/parameters/Id' }],
+          responses: {
+            '200': {
+              description: 'The chat link.',
+              content: json(dataOf(ref('ChatLinkDetail'))),
+            },
+            ...errors(401, 403, 404, 429, 500),
+          },
+        },
+      },
       '/reports': {
         get: {
           operationId: 'getReport',
@@ -4237,6 +4273,8 @@ export function buildOpenApiDocument(serverUrl: string) {
         Report: jsonSchema(apiReportSchema),
         Flow: jsonSchema(apiFlowSchema),
         FlowResponse: jsonSchema(apiFlowResponseSchema),
+        ChatLink: jsonSchema(apiChatLinkSchema),
+        ChatLinkDetail: jsonSchema(apiChatLinkDetailSchema),
         JsonValue: {
           description:
             'Any JSON value: text, a number, true or false, null, a list of JSON values or an object of them.',
@@ -4385,6 +4423,8 @@ export const API_ROUTES = [
   ['get', '/reports'],
   ['get', '/flows'],
   ['get', '/flow-responses'],
+  ['get', '/chat-links'],
+  ['get', '/chat-links/{id}'],
   ['get', '/members'],
   ['patch', '/members/{id}'],
   ['get', '/business-hours'],

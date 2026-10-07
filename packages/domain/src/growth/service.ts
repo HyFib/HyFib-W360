@@ -134,6 +134,23 @@ export interface AdSourceView {
 
 const channelName = sql<string>`coalesce(${channelAccounts.verifiedName}, ${channelAccounts.displayPhoneNumber}, ${channelAccounts.phoneNumberId})`;
 
+/**
+ * A link's clicks on the company's last 30 days, today included, as the Growth pages and the public
+ * API (ADR-299) count them, for a query that selects from `chat_links`.
+ */
+export const linkClicks30 = (timezone: string) =>
+  sql<number>`coalesce((
+          select sum(k.clicks) from app.chat_link_clicks k
+           where k.tenant_id = ${chatLinks.tenantId} and k.link_id = ${chatLinks.id}
+             and k.day > (now() at time zone ${timezone})::date - 30), 0)::int`;
+
+/** The conversations a link started in the last 30 days, likewise. */
+export const linkConversations30 = () =>
+  sql<number>`(
+          select count(distinct s.conversation_id) from app.conversation_sources s
+           where s.tenant_id = ${chatLinks.tenantId} and s.link_id = ${chatLinks.id}
+             and s.occurred_at > now() - interval '30 days')::int`;
+
 const stale = () =>
   new AppError(
     'conflict',
@@ -221,14 +238,8 @@ export function createGrowthService(deps: { db: Database; clock: Clock }) {
         archivedAt: chatLinks.archivedAt,
         version: chatLinks.version,
         createdAt: chatLinks.createdAt,
-        clicks30: sql<number>`coalesce((
-          select sum(k.clicks) from app.chat_link_clicks k
-           where k.tenant_id = ${chatLinks.tenantId} and k.link_id = ${chatLinks.id}
-             and k.day > (now() at time zone ${tz})::date - 30), 0)::int`,
-        conversations30: sql<number>`(
-          select count(distinct s.conversation_id) from app.conversation_sources s
-           where s.tenant_id = ${chatLinks.tenantId} and s.link_id = ${chatLinks.id}
-             and s.occurred_at > now() - interval '30 days')::int`,
+        clicks30: linkClicks30(tz),
+        conversations30: linkConversations30(),
       })
       .from(chatLinks)
       .innerJoin(

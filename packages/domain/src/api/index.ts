@@ -32,6 +32,7 @@ export * from './message-templates';
 export * from './message-template-drafts';
 export * from './reports';
 export * from './flows';
+export * from './chat-links';
 export * from './notes';
 export * from './tasks';
 export * from './message-changes';

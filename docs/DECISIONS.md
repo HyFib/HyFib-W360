@@ -11383,3 +11383,38 @@ Decision:
 
 Not built: reading one flow or one response by id, the Flow JSON, and creating, publishing or
 sending flows through the API.
+
+## ADR-299 Chat links through the public API (P5-08) (2026-10-07)
+
+Context: members who read campaigns see under Growth → Chat links the company's chat links
+(ADR-044): short links and QR codes that open a chat with one of its numbers with a message ready to
+send, each with its clicks per day and the conversations that sent its reference. A company that
+puts these links in emails, ads or a website builder, or reports on them elsewhere, copied them and
+their counts from the pages: keys could not read them.
+
+Decision:
+
+- **A `chat_links.read` scope** ("Read chat links"), granted only by members who hold
+  `campaigns.read` (owners, administrators, supervisors, marketers and analysts do), as the Growth
+  pages need, reading, so a suspended or restricted company's keys read links as its members do.
+  Existing keys and plans that chose their scopes do not gain it. With it the API has 37 scopes.
+- **`GET /api/v1/chat-links`** (`listChatLinks`) lists the links in use, or the archived ones with
+  `archived=true`, newest first on exact keyset pages, each with its name, message, reference and
+  whether the message carries it, the short link (`shortUrl`, on HyFib's address, which the QR code
+  opens too), the wa.me address it opens (null while the number has no phone number), its number and
+  whether that number is active, and `last30Days`: the clicks on the company's last 30 days, today
+  included, and the conversations it started in the last 30 days (null for a link without its
+  reference, which counts none), counted by the same SQL as the pages (`linkClicks30`,
+  `linkConversations30` in `growth/service.ts`).
+- **`GET /api/v1/chat-links/{id}`** (`getChatLink`) reads one link, archived or not, with the days
+  of the last 30 it was clicked on, in the company's time zone, newest first, as the link's page
+  lists them (days without clicks are left out). Another company's link answers 404, as an unknown
+  one does.
+- **What the counts are:** as ADR-044 sets out, clicks include repeated clicks and automated visits,
+  and nothing identifies a visitor; a conversation counts when the customer's message carries the
+  link's reference on the link's number, so the count is a lower bound. The descriptions say so.
+- **Migration 0222** replaces the scope checks of keys and plans with the new scope, validated at
+  once. The links' list index (`chat_links_list_idx`, 0016) serves the pages; no new index.
+
+Not built: creating, changing, archiving and restoring links through the API (next), website
+buttons, the ads that started conversations, and which conversations a link started.

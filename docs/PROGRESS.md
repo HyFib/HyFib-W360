@@ -1,5 +1,37 @@
 # Progress
 
+## 2026-10-07 — Chat links through the public API (P5-08, H-033, W-160, ADR-299)
+
+Status: **Implemented; its database tests run in CI only.** Keys could not read the company's chat
+links or their counts, which only the Growth pages showed. The local PostgreSQL is unavailable, so
+the migration and the integration test below were written but not run here; migration 0222 passed
+the pglast parse check (syntax only).
+
+### Completed
+
+- **Database:** migration 0222 (`chat_links.read` in the scope checks of keys and plans).
+- **Domain:** `api/chat-links.ts` (`apiListChatLinks`, `apiGetChatLink`, their schemas); the 30-day
+  counts shared from `growth/service.ts` (`linkClicks30`, `linkConversations30`); the scope; the
+  OpenAPI operations and components.
+- **Web:** `GET /api/v1/chat-links`, `GET /api/v1/chat-links/{id}`.
+- **Tests:** unit (`api/chat-links.test.ts`, 4: the scope and its refusals, the pages with the
+  counts' SQL, one link with its clicks per day, the OpenAPI entries); integration
+  (`api-chat-links.test.ts`, 1). Written for CI; the integration test was not run here. No e2e test.
+- **Docs:** ADR-299; ARCHITECTURE; SECURITY; THREAT-MODEL T267; DEPLOYMENT; RUNBOOKS; BACKLOG P5-08;
+  feature matrix H-033 and W-160.
+- **Mutation checks:** 34/34 deliberate regressions caught.
+
+### Test commands and results (local, 2026-10-07)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 135 files, 1276 tests                                         |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| pglast 7 parse of migration 0222                   | passed (syntax only)                                          |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
 ## 2026-10-07 — WhatsApp Flows and their responses through the public API (P5-08, H-033, W-085, ADR-298)
 
 Status: **Implemented; its database tests run in CI only.** Keys read contacts and messages but not

@@ -2140,6 +2140,16 @@ a stage of another pipeline, an owner who cannot use the CRM, or a lost reason w
 asks for the deal as it already is changes nothing and answers 200. The timeline shows each change
 "through the API"; the audit log has `crm.deal_updated` with the key and what changed.
 
+**A chat-links request answers 403, 404 or 422, or its counts differ from the Growth pages
+(ADR-299).** 403: the key lacks `chat_links.read` (its creator needed `campaigns.read`), or the plan
+leaves it out (reason `not_in_plan`). 404: the id is not one of the company's links. 422: a filter
+is not one the endpoint takes (`archived` is `true` or `false`) or the cursor is not one it gave. A
+link missing from the list is archived (`archived=true`). The counts are the pages' for the same
+moment: clicks on the company's last 30 days (Settings → Company time zone), today included,
+repeated clicks and automated visits too; conversations only for links whose message carries the
+reference (null otherwise), and only those whose customer sent it on the link's number, so fewer
+than the chats the link opened.
+
 **A flows or flow-responses request answers 403 or 422, or a response has no contact or answers
 (ADR-298).** 403: the key lacks `flows.read` (its creator needed that permission), or the plan
 leaves it out (reason `not_in_plan`); filtering responses by `contactId` needs `contacts.read` too.

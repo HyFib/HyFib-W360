@@ -635,10 +635,10 @@ Phase 5 rules (Public API, P5-08):
   (ADR-176), `commerce.read` for `orders.read` (ADR-167), `inbox.reply` for `orders.write` (ADR-168)
   and `orders.request_payment` (ADR-283), `channels.read` for the scope of the same name (ADR-171),
   `reports.read` for the scope of the same name (ADR-297), `flows.read` for the scope of the same
-  name (ADR-298), `crm.read` for `deals.read` (ADR-253), `tasks.read` (ADR-258) and `notes.read`
-  (ADR-279), and `crm.write` for `deals.write` (ADR-254, ADR-255), `tasks.write` (ADR-259) and
-  `notes.write` (ADR-268). Nobody grants a key more than they hold, and rotating needs the same. A
-  key keeps the scopes it was created with.
+  name (ADR-298), `campaigns.read` for `chat_links.read` (ADR-299), `crm.read` for `deals.read`
+  (ADR-253), `tasks.read` (ADR-258) and `notes.read` (ADR-279), and `crm.write` for `deals.write`
+  (ADR-254, ADR-255), `tasks.write` (ADR-259) and `notes.write` (ADR-268). Nobody grants a key more
+  than they hold, and rotating needs the same. A key keeps the scopes it was created with.
 - A request acts for the key's company only, as the key: its company comes from the key found by
   the token's hash, never from the path, body or headers, and data access runs in that company's
   scope (RLS). Audit rows name the key (`api_key`). Writing scopes are refused while the company is
@@ -1211,6 +1211,12 @@ Phase 5 rules (Public API, P5-08):
   flow tokens. Who completed a form (its contact, conversation and message) and what they typed are
   given only when the key and the plan hold `contacts.read`, as members see them; without it the
   contact filter is refused before any query, so a key cannot learn which forms a contact completed
+  (unit tests; integration tests, run in CI only).
+- Chat links (ADR-299): `GET /chat-links` and `GET /chat-links/{id}` need `chat_links.read`, granted
+  only by members who hold `campaigns.read`, checked before any query, as are the query and the id.
+  Both read under row security in the key's company, read only, on bounded pages; the company's time
+  zone is read from the database, never from the request. They give the counts the pages give and
+  nothing about visitors, which HyFib does not keep (ADR-044); another company's link answers 404
   (unit tests; integration tests, run in CI only).
 - Reading a deal's history (ADR-281): `GET /deals/{id}/history` needs `deals.read` and the CRM in
   the plan, checked before anything is read; it reads the key's company's deal only (another
