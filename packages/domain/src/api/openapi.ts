@@ -6,6 +6,7 @@ import {
   CHANNEL_STATUSES,
   CONVERSATION_STATUSES,
   CRM_CHANGERS,
+  CSAT_SKIP_REASONS,
   DEAL_STATUSES,
   MESSAGE_STATUSES,
   TEAM_ASSIGNMENT_MODES,
@@ -135,6 +136,7 @@ import { apiUpdateMemberSchema } from './members';
 import { apiCreateClosedDaySchema, apiUpdateBusinessHoursSchema } from './business-hours';
 import { MAX_RANGES_PER_DAY } from '../inbox/business-hours';
 import { MAX_SAVED_REPLIES } from '../inbox/saved-replies';
+import { SATISFACTION_SURVEY_STATUSES } from './satisfaction-surveys';
 import { apiCreateSavedReplySchema, apiUpdateSavedReplySchema } from './saved-replies';
 import { apiCreateTaskSchema, apiUpdateTaskSchema } from './tasks';
 import { apiUpdateOrderSchema } from './orders';
@@ -821,6 +823,52 @@ export const apiSavedReplySchema = z.object({
   updatedByApiKeyId: z.uuid().nullable(),
   createdAt: z.iso.datetime(),
   updatedAt: z.iso.datetime(),
+});
+
+/** A satisfaction survey (ADR-292). */
+export const apiSatisfactionSurveySchema = z.object({
+  id: z.uuid(),
+  conversationId: z.uuid(),
+  status: z
+    .enum(SATISFACTION_SURVEY_STATUSES)
+    .describe(
+      '`skipped`: not sent, for `skipReason`; `asked`: sent, or being sent, and not answered (`messageStatus` says how far it got); `answered`: the customer tapped one of its buttons.',
+    ),
+  skipReason: z
+    .enum(CSAT_SKIP_REASONS)
+    .nullable()
+    .describe(
+      'Why it was not sent: `window_closed` (the customer last wrote more than 24 hours before), `opted_out`, `suppressed`, `contact_erased`, `no_phone`, `channel_inactive`, or `recently_surveyed` (the conversation was asked within 24 hours).',
+    ),
+  messageId: z
+    .uuid()
+    .nullable()
+    .describe('The survey message, among the conversation’s messages; null when skipped.'),
+  messageStatus: z
+    .enum(MESSAGE_STATUSES)
+    .nullable()
+    .describe('Its delivery status, as the conversation’s messages give it; null when skipped.'),
+  score: z
+    .union([z.literal(1), z.literal(2), z.literal(3)])
+    .nullable()
+    .describe(
+      '3 for the first (best) button, 2 for the second, 1 for the third; null until answered.',
+    ),
+  answerMessageId: z
+    .uuid()
+    .nullable()
+    .describe('The customer’s tap, among the conversation’s messages; null until answered.'),
+  answeredAt: z.iso.datetime().nullable(),
+  assigneeId: z
+    .uuid()
+    .nullable()
+    .describe(
+      'The member the conversation was assigned to when it was resolved, credited with the answer, as GET /members lists them.',
+    ),
+  resolvedById: z.uuid().nullable().describe('The member who resolved the conversation.'),
+  createdAt: z.iso
+    .datetime()
+    .describe('When it was sent, or skipped: when the conversation was resolved.'),
 });
 
 /** A closed day (ADR-290). */
@@ -2087,6 +2135,41 @@ export function buildOpenApiDocument(serverUrl: string) {
           responses: {
             '200': { description: 'A page of messages.', content: pageOf('ConversationMessage') },
             ...errors(401, 403, 404, 422, 429, 500),
+          },
+        },
+      },
+      '/satisfaction-surveys': {
+        get: {
+          operationId: 'listSatisfactionSurveys',
+          summary: 'Satisfaction surveys, newest first',
+          description: [
+            `${scopeNote('conversations.read')} The surveys HyFib sends a customer when a member resolves a conversation while satisfaction surveys are on (Settings → Inbox): a question with three buttons, sent only inside the 24-hour window to a customer who has not opted out; or skipped, with the reason. Each survey has its conversation, its message and the customer’s tap by id (both among the conversation’s messages), the score once answered, and the members credited and resolving by id, as GET /members lists them. Newest first by when it was sent or skipped; pages never skip or repeat a survey. Filters combine. The surveys of erased contacts’ conversations are left out, as the conversations are.`,
+            'An answer comes later than its survey: to catch up on answers, read the surveys `asked` since you last saw them unanswered, or ask for `createdSince` a little before your previous pass began (a minute, say) and expect to see some surveys again. The question and the buttons’ labels are the company’s settings at the time, in the survey message. Conversations resolved through the API are never surveyed.',
+          ].join('\n\n'),
+          parameters: [
+            ...pageParams,
+            {
+              name: 'conversationId',
+              in: 'query',
+              schema: { type: 'string', format: 'uuid' },
+              description: 'Only this conversation’s surveys.',
+            },
+            {
+              name: 'status',
+              in: 'query',
+              schema: { type: 'string', enum: [...SATISFACTION_SURVEY_STATUSES] },
+              description: 'Only the surveys in this status.',
+            },
+            {
+              name: 'createdSince',
+              in: 'query',
+              schema: { type: 'string', format: 'date-time' },
+              description: 'Only the surveys sent or skipped at or after this time.',
+            },
+          ],
+          responses: {
+            '200': { description: 'A page of surveys.', content: pageOf('SatisfactionSurvey') },
+            ...errors(401, 403, 422, 429, 500),
           },
         },
       },
@@ -3910,6 +3993,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         BusinessHours: jsonSchema(apiBusinessHoursSchema),
         UpdateBusinessHours: jsonSchema(apiUpdateBusinessHoursSchema, 'input'),
         ClosedDay: jsonSchema(apiClosedDaySchema),
+        SatisfactionSurvey: jsonSchema(apiSatisfactionSurveySchema),
         SavedReply: jsonSchema(apiSavedReplySchema),
         CreateSavedReply: jsonSchema(apiCreateSavedReplySchema, 'input'),
         UpdateSavedReply: jsonSchema(apiUpdateSavedReplySchema, 'input'),
@@ -4031,6 +4115,7 @@ export const API_ROUTES = [
   ['post', '/conversations/{id}/notes'],
   ['get', '/conversations/{id}/notes'],
   ['get', '/conversations/{id}/messages'],
+  ['get', '/satisfaction-surveys'],
   ['get', '/members'],
   ['patch', '/members/{id}'],
   ['get', '/business-hours'],

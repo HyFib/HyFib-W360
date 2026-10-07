@@ -895,6 +895,10 @@ verification, app review, Embedded Signup configuration).
   migrations 0211 and 0212: `saved_replies.manage`, granted with `inbox.supervise`, lists, adds,
   changes and deletes the company's saved replies through the checks and writes Settings uses,
   recorded as the key's, and keys with `messages.reply` read them; a company keeps at most 500).
+  **[Satisfaction surveys through the public API built; its database tests run only in CI]**
+  (ADR-292, no migration: keys with `conversations.read` list the company's satisfaction surveys
+  newest first on exact pages, skipped, asked or answered with the score, by conversation, status
+  and time, without erased contacts' conversations).
   **[Reading CRM tasks built; its database tests run only in CI]** (ADR-258, migrations 0173 and
   0174: `tasks.read` lists the company's tasks newest first on exact pages, filtered by status,
   assignee, contact, deal and time, and reads each one, with the reminder and the assignee, contact

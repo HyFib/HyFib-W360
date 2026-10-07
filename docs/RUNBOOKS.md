@@ -2140,6 +2140,15 @@ a stage of another pipeline, an owner who cannot use the CRM, or a lost reason w
 asks for the deal as it already is changes nothing and answers 200. The timeline shows each change
 "through the API"; the audit log has `crm.deal_updated` with the key and what changed.
 
+**A satisfaction survey request answers 403 or 422, or a survey is not listed (ADR-292).** 403
+`forbidden` names `conversations.read`, the scope the key lacks (granted by owners and
+administrators, who read every conversation). 422 names the parameter: `status` (`skipped`, `asked`
+or `answered`), `conversationId`, `createdSince` or `limit` (1 to 100), or says the cursor is
+invalid. A conversation resolved while surveys were off (Settings → Inbox) or through the API has no
+survey; the surveys of erased contacts' conversations are left out. An answer comes after its
+survey: a survey listed as `asked` may be answered since, so read the `asked` ones again. A survey
+whose `messageStatus` is `failed` was not delivered: the conversation's messages give the error.
+
 **A saved reply request answers 403, 404, 409, 422 or 423 (ADR-291).** 403 `forbidden` names the
 scope the key lacks: `messages.reply` or `saved_replies.manage` to read, `saved_replies.manage` to
 add, change or delete (granted by owners and administrators, who supervise the inbox). 404 means the

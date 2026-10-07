@@ -11103,3 +11103,33 @@ Decision:
 
 Not built: saved replies per team or for one member only, files or templates in a saved reply,
 filling the placeholders through the API, and webhook events when saved replies change.
+
+## ADR-292 Satisfaction surveys through the public API (P5-08) (2026-10-07)
+
+Context: when a member resolves a conversation while satisfaction surveys are on, HyFib asks the
+customer to rate the help with three buttons, or records why it did not ask (ADR-032, turned on in
+Settings → Inbox). The answers were seen only in Reports, as counts, and in each conversation; a
+company that tracks satisfaction in its own warehouse or CRM, or follows up a poor rating, could not
+read them, except by finding the survey messages and the taps among every conversation's messages.
+
+Decision:
+
+- **`GET /api/v1/satisfaction-surveys`** (`listSatisfactionSurveys`) lists the company's surveys
+  newest first by when they were sent or skipped, on exact keyset pages, with filters that combine:
+  a conversation, a status, and a time they were created at or after. Each survey gives its
+  conversation, its status (`skipped` with the reason, `asked`, or `answered`), its message and that
+  message's delivery status, the score (3 for the first and best button, 1 for the third) and the
+  customer's tap once answered, and the member it was assigned to when resolved (credited with the
+  answer) and the member who resolved it, by id.
+- **No new scope:** keys with `conversations.read`, granted with `inbox.read_all`, read them. Those
+  keys already read the survey messages and the customers' taps among the conversations' messages,
+  and the members by id; members who read every conversation see each conversation's survey in the
+  inbox. The surveys of erased contacts' conversations are left out, as the conversations are. Reads
+  work while the company is suspended.
+- **Catching up:** an answer comes after its survey, so a reader reads the surveys it last saw
+  `asked` again, or reads from a little before its previous pass. Conversations resolved through the
+  API are never surveyed (ADR-075), and the question and labels are the company's settings at the
+  time, in the survey message.
+
+Not built: a webhook event when a customer answers, survey settings through the API, and surveys
+sent through the API.

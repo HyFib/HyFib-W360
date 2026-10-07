@@ -1160,6 +1160,12 @@ Phase 5 rules (Public API, P5-08):
   at most 500 a company, and give no conversation or customer data: a reply names the key that added
   or changed it by its id, and a member never. Each change is audited as the key, naming the
   shortcut, never the text (unit tests; integration tests, run in CI only).
+- Satisfaction surveys (ADR-292): `GET /satisfaction-surveys` needs `conversations.read` (granted
+  only with `inbox.read_all`) and reads in a read-only transaction the key's company's surveys only
+  (row security and an explicit company condition), leaving out those of erased contacts'
+  conversations, as the conversations API does. A survey gives ids (its conversation, its message
+  and the customer's tap, the members credited and resolving) and the score, never the customer's
+  name or number. Nothing is written (unit tests; integration tests, run in CI only).
 - Reading a deal's history (ADR-281): `GET /deals/{id}/history` needs `deals.read` and the CRM in
   the plan, checked before anything is read; it reads the key's company's deal only (another
   company's answers 404, as an unknown one does; an id that is not a UUID is refused before any

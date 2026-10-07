@@ -921,6 +921,9 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    added or changed without an editor's name, and its changes name its member, which the editor
    check accepts. Rolling web servers back does the same.
 
+   ADR-292 has no migration. Until the web rollout ends, an old web server answers
+   `GET /api/v1/satisfaction-surveys` with 404; rolling web servers back does the same.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

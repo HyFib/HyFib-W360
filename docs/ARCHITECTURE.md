@@ -1619,6 +1619,11 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   shortcut in use into 409. The writes take the author (`SavedReplyAuthor`: a member or a key) and
   are shared with the members' `createSavedRepliesService`; `toApiSavedReply` and Settings take the
   member as the last editor when one is named.
+- **Satisfaction surveys through the API (ADR-292):** `api/satisfaction-surveys.ts` reads
+  `app.csat_surveys` joined to the conversation, its contact unless erased, and the survey message
+  for its status, in a read-only transaction, newest first on `(created_at, id)` keyset pages (the
+  `csat_surveys_created_idx` and `csat_surveys_conversation_idx` indexes); `toApiSatisfactionSurvey`
+  gives each survey's status from its skip reason and answer. Nothing is written.
 - **Many conversations at once (ADR-120):** `POST /conversations/update-many`
   (`apiUpdateManyConversations`) takes 1 to 100 `conversationIds` and the same fields. In one
   transaction it locks the member first (as a suspension does before releasing its conversations),

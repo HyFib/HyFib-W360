@@ -1,12 +1,18 @@
 import { randomInt } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { isAppError, systemClock } from '@w360/core';
+import { isAppError, systemClock, uuidv7 } from '@w360/core';
 import { authorizedTenantScope } from '@w360/db';
 import {
+  apiListSatisfactionSurveys,
+  authenticateApiToken,
+  createApiKeysService,
+  createContactsService,
   createCsatService,
   createInboxService,
   createReportsService,
   processSendIntent,
+  type ApiContext,
+  type ApiScope,
   type TenantContext,
 } from '@w360/domain';
 import { startWhatsAppFixture, type Company, type WhatsAppFixture } from './whatsapp-fixture';
@@ -334,5 +340,135 @@ describe('CSAT surveys', () => {
       csatAnswered: 1,
       csatBest: 0,
     });
+  });
+});
+
+/** A key of the company created by its owner, as a request with it is authenticated. */
+async function apiKey(c: Company, scopes: ApiScope[]): Promise<ApiContext> {
+  const keys = createApiKeysService({ db: fx.dbs.app, clock: systemClock });
+  const created = await keys.create(await fx.ctx(c, c.owner), {
+    name: `Surveys ${uuidv7().slice(-6)}`,
+    scopes,
+    expiresInDays: 0,
+  });
+  const ctx = await authenticateApiToken(fx.dbs.app, created.token, uuidv7());
+  if (!ctx) throw new Error('a new key does not authenticate');
+  return ctx;
+}
+
+describe('satisfaction surveys through the API (ADR-292)', () => {
+  const list = (ctx: ApiContext, query: Record<string, string> = {}) =>
+    apiListSatisfactionSurveys({ db: fx.dbs.app }, ctx, query);
+
+  it('lists the surveys the inbox recorded, asked, answered or skipped, newest first, as conversations.read', async () => {
+    const s = await setup();
+    const reader = await apiKey(s.c, ['conversations.read']);
+
+    // Answered: assigned to the agent, resolved, sent, and the customer taps the middle button.
+    const phone = waId();
+    const answeredIn = await inbound(s.c, phone);
+    await s.inbox.assign(s.agent, {
+      conversationId: answeredIn,
+      membershipId: s.agent.membership.id,
+      expectedVersion: (await version(answeredIn)).version,
+    });
+    await resolve(s, answeredIn);
+    const [answered] = await surveys(answeredIn);
+    await sendSurvey(s.c, answered!.message_id!);
+    const sent = fx.standIn.state.requests.filter((r) => r.path.endsWith('/messages')).at(-1)!;
+    await tap(s.c, phone, `w360csat:${answered!.id}:2`, 'Okay', sent.wamid!);
+    const [answer] = await fx.query<{ id: string }>(
+      `SELECT response_message_id AS id FROM app.csat_surveys WHERE id = $1`,
+      [answered!.id],
+    );
+
+    // Asked and not yet sent; skipped outside the 24-hour window.
+    const askedIn = await inbound(s.c, waId());
+    await resolve(s, askedIn);
+    const [asked] = await surveys(askedIn);
+    const lateIn = await inbound(s.c, waId());
+    await fx.query(
+      `UPDATE app.conversations SET last_inbound_at = now() - interval '25 hours' WHERE id = $1`,
+      [lateIn],
+    );
+    await resolve(s, lateIn);
+    const [skipped] = await surveys(lateIn);
+
+    // Another company's survey is never listed.
+    const other = await setup();
+    await resolve(other, await inbound(other.c, waId()));
+
+    const all = await list(reader);
+    expect(all.data.map((x) => [x.id, x.status])).toEqual([
+      [skipped!.id, 'skipped'],
+      [asked!.id, 'asked'],
+      [answered!.id, 'answered'],
+    ]);
+    expect(all.nextCursor).toBeNull();
+    expect(all.data[2]).toMatchObject({
+      conversationId: answeredIn,
+      skipReason: null,
+      messageId: answered!.message_id,
+      score: 2,
+      answerMessageId: answer!.id,
+      assigneeId: s.agent.membership.id,
+      resolvedById: s.agent.membership.id,
+    });
+    expect(all.data[2]?.answeredAt).toEqual(expect.any(String));
+    expect(all.data[1]).toMatchObject({
+      conversationId: askedIn,
+      messageId: asked!.message_id,
+      messageStatus: 'queued',
+      score: null,
+      answerMessageId: null,
+      answeredAt: null,
+      assigneeId: null,
+    });
+    expect(all.data[0]).toMatchObject({
+      conversationId: lateIn,
+      skipReason: 'window_closed',
+      messageId: null,
+      messageStatus: null,
+    });
+
+    // Filters, exact pages, and a suspended company's key still reads.
+    for (const [status, id] of [
+      ['answered', answered!.id],
+      ['asked', asked!.id],
+      ['skipped', skipped!.id],
+    ] as const) {
+      expect((await list(reader, { status })).data.map((x) => x.id)).toEqual([id]);
+    }
+    expect((await list(reader, { conversationId: askedIn })).data.map((x) => x.id)).toEqual([
+      asked!.id,
+    ]);
+    expect(
+      (await list(reader, { createdSince: new Date(Date.now() + 60_000).toISOString() })).data,
+    ).toEqual([]);
+    const first = await list(reader, { limit: '2' });
+    expect(first.data.map((x) => x.id)).toEqual([skipped!.id, asked!.id]);
+    const second = await list(reader, { limit: '2', cursor: first.nextCursor! });
+    expect([second.data.map((x) => x.id), second.nextCursor]).toEqual([[answered!.id], null]);
+    const suspended: ApiContext = { ...reader, tenant: { ...reader.tenant, status: 'suspended' } };
+    expect((await list(suspended)).data).toHaveLength(3);
+
+    // An erased contact's conversation's survey is left out, as the conversation is.
+    const [late] = await fx.query<{ contact_id: string }>(
+      `SELECT contact_id FROM app.conversations WHERE id = $1`,
+      [lateIn],
+    );
+    await createContactsService({ db: fx.dbs.app, clock: systemClock }).eraseContact(s.owner, {
+      contactId: late!.contact_id,
+      suppress: false,
+    });
+    expect((await list(reader)).data.map((x) => x.id)).toEqual([asked!.id, answered!.id]);
+
+    // Keys that do not read conversations read nothing.
+    try {
+      await list(await apiKey(s.c, ['messages.reply']));
+      throw new Error('expected a refusal');
+    } catch (error) {
+      expect(isAppError(error) && error.code).toBe('forbidden');
+    }
   });
 });

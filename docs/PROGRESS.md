@@ -1,5 +1,36 @@
 # Progress
 
+## 2026-10-07 — Satisfaction surveys through the public API (P5-08, H-033, H-011, ADR-292)
+
+Status: **Implemented; its database test runs in CI only.** The surveys sent when members resolve
+conversations, and the customers' answers, were seen only in Reports, as counts, and in each
+conversation. The local PostgreSQL is unavailable, so the integration test below was written but not
+run here. No migration.
+
+### Completed
+
+- **Domain:** `api/satisfaction-surveys.ts` (`apiListSatisfactionSurveys`,
+  `apiSatisfactionSurveyQuerySchema`, `toApiSatisfactionSurvey`); the `conversations.read`
+  description; the OpenAPI entry.
+- **Web:** `GET /api/v1/satisfaction-surveys`.
+- **Tests:** unit (`api/satisfaction-surveys.test.ts`: the scope, the parameters, the statuses, the
+  joins, the order, the filters, the pages, refusals before any query, the OpenAPI entry);
+  integration (1 new in `csat.test.ts`). Written for CI; the integration test was not run here. No
+  e2e test.
+- **Docs:** ADR-292; ARCHITECTURE; SECURITY; THREAT-MODEL T260; DEPLOYMENT; RUNBOOKS; BACKLOG P5-08;
+  feature matrix H-033 and H-011.
+- **Mutation checks:** 21/21 deliberate regressions caught
+
+### Test commands and results (local, 2026-10-07)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 130 files, 1235 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
 ## 2026-10-07 — Saved replies through the public API (P5-08, H-033, W-033, ADR-291)
 
 Status: **Implemented; its database tests run in CI only.** Only members who supervise the inbox
