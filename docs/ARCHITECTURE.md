@@ -1673,6 +1673,18 @@ true`); the same key with another request (method, path and body hashed) answers
   as `GET /campaigns/{id}` counts them, counted in the delivery's claim by `campaignAnalytics`
   (`campaigns/results.ts`), which counts in one statement so its numbers agree at any isolation;
   null while the campaign is a draft.
+- **Deal events** (migrations 0171–0172, ADR-256): triggers on `app.crm_deals` capture
+  `deal.created` when a deal is inserted and `deal.stage_changed` and `deal.status_changed` when an
+  update changes its stage or status (members through the CRM service, the runner's deal steps, keys
+  through `apiUpdateDeal`), through `app.capture_webhook_event`: the deal, stage and pipeline ids,
+  and the stage, pipeline or status before a change, in `detail`, with the contact and no
+  conversation, so no filter narrows them. One update that changes both captures both in the order
+  the rules allow (reopened then moved, or moved then closed), each with the deal as its step left
+  it, stamped with `clock_timestamp()`. Erasure and merges change neither column, so they capture
+  nothing. Their payloads are built when delivered (`dealOf`): the stage, pipeline and statuses as
+  captured; the title, value in minor units, pipeline currency, owner id, expected date, lost reason
+  and creator (member, automation or key) as they are then; the conversation the deal was created
+  from and the contact.
 - **Dispatch:** the worker's LISTEN connection (`apps/worker/src/webhook-listener.ts`) turns a
   notification into a lookup of active companies with due deliveries (`ops.webhook_dispatch_due`,
   SECURITY DEFINER), at most one lookup every 250 ms; the per-minute messaging sweep does the same

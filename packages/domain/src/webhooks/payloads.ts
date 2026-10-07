@@ -17,6 +17,9 @@ import {
   contacts,
   CONVERSATION_STATUSES,
   conversations,
+  crmDeals,
+  crmPipelines,
+  DEAL_STATUSES,
   eq,
   messageTemplates,
   messages,
@@ -548,6 +551,85 @@ export const campaignStatusChangedPayloadSchema = envelope(
   }),
 );
 
+const dealStatusSchema = z.enum(DEAL_STATUSES);
+
+/**
+ * A CRM deal as its events give it (ADR-256): its stage, pipeline and status (and those before them)
+ * as the event's step left them, the rest as it is when the event is delivered.
+ */
+const webhookDealSchema = z.object({
+  id: z.uuid().describe('The deal, as GET /deals/{id} reads it.'),
+  title: z
+    .string()
+    .describe(
+      'The deal’s title when the event is delivered; “Deal (contact erased)” once its contact is erased.',
+    ),
+  pipelineId: z
+    .uuid()
+    .describe('The deal’s pipeline as this event left it, as GET /pipelines lists it.'),
+  stageId: z
+    .uuid()
+    .describe(
+      'The deal’s stage as this event left it: for deal.stage_changed, the one it moved to.',
+    ),
+  status: dealStatusSchema.describe(
+    'The deal’s status as this event left it: for deal.status_changed, the new one.',
+  ),
+  previousStageId: z
+    .uuid()
+    .nullable()
+    .describe('deal.stage_changed: the stage it left. Null for other events.'),
+  previousPipelineId: z
+    .uuid()
+    .nullable()
+    .describe(
+      'deal.stage_changed: the pipeline it left, when it moved to another one. Null otherwise.',
+    ),
+  previousStatus: dealStatusSchema
+    .nullable()
+    .describe('deal.status_changed: the status before it. Null for other events.'),
+  valueMinor: z
+    .number()
+    .int()
+    .nullable()
+    .describe(
+      'Its value in the currency’s minor units (paise for INR) when the event is delivered; null when it has none.',
+    ),
+  currency: z.string().describe('ISO 4217, like INR: its pipeline’s currency.'),
+  ownerId: z
+    .uuid()
+    .nullable()
+    .describe(
+      'The member who owns the deal when the event is delivered (an id from GET /members).',
+    ),
+  expectedCloseOn: z.iso.date().nullable(),
+  lostReason: z
+    .string()
+    .nullable()
+    .describe(
+      'Why a lost deal was lost, when the event is delivered; null otherwise, and once its contact is erased.',
+    ),
+  createdBy: z
+    .enum(['member', 'automation', 'api'])
+    .describe('Who added the deal: a member, an automation’s run or an API key.'),
+  createdAt: z.iso.datetime(),
+});
+const webhookDealDataSchema = z.object({
+  deal: webhookDealSchema,
+  conversation: z
+    .object({ id: z.uuid() })
+    .nullable()
+    .describe('The conversation the deal was created from, if any.'),
+  contact: contactSchema,
+});
+
+export const dealCreatedPayloadSchema = envelope('deal.created', webhookDealDataSchema);
+export const dealStageChangedPayloadSchema = envelope('deal.stage_changed', webhookDealDataSchema);
+export const dealStatusChangedPayloadSchema = envelope(
+  'deal.status_changed',
+  webhookDealDataSchema,
+);
+
 export const pingPayloadSchema = envelope(
   'ping',
   z.object({ endpointId: z.uuid(), message: z.string() }),
@@ -879,6 +961,36 @@ async function runOf(tx: Tx, tenantId: string, runId: string | null) {
   return row ?? null;
 }
 
+/** A deal with what its events give as it is now (ADR-256), or null once it is gone. */
+async function dealOf(tx: Tx, tenantId: string, dealId: string | null) {
+  if (!dealId || !z.uuid().safeParse(dealId).success) return null;
+  const [row] = await tx
+    .select({
+      id: crmDeals.id,
+      title: crmDeals.title,
+      contactId: crmDeals.contactId,
+      conversationId: crmDeals.conversationId,
+      pipelineId: crmDeals.pipelineId,
+      stageId: crmDeals.stageId,
+      status: crmDeals.status,
+      valueMinor: crmDeals.valueMinor,
+      currency: crmPipelines.currency,
+      ownerId: crmDeals.ownerMembershipId,
+      expectedCloseOn: crmDeals.expectedCloseOn,
+      lostReason: crmDeals.lostReason,
+      automationId: crmDeals.createdByAutomationId,
+      apiKeyId: crmDeals.createdByApiKeyId,
+      createdAt: crmDeals.createdAt,
+    })
+    .from(crmDeals)
+    .innerJoin(
+      crmPipelines,
+      and(eq(crmPipelines.tenantId, crmDeals.tenantId), eq(crmPipelines.id, crmDeals.pipelineId)),
+    )
+    .where(and(eq(crmDeals.tenantId, tenantId), eq(crmDeals.id, dealId)));
+  return row ?? null;
+}
+
 /** A WhatsApp order with its items in cart order and its number, in the company. */
 async function orderOf(tx: Tx, tenantId: string, orderId: string | null) {
   if (!orderId || !z.uuid().safeParse(orderId).success) return null;
@@ -1155,6 +1267,40 @@ export async function buildWebhookPayload(
           conversation: { id: order.conversationId },
           contact: await contactOf(tx, tenantId, order.contactId),
           channel: { id: order.channelId, phone: order.channelPhone ?? null },
+        },
+      };
+    }
+    case 'deal.created':
+    case 'deal.stage_changed':
+    case 'deal.status_changed': {
+      // The stage, pipeline and status, and those before them, as captured; the rest as it is now,
+      // so an erased contact's deal is sent as erasure left it.
+      const deal = await dealOf(tx, tenantId, str(event.detail.dealId));
+      if (!deal) throw new WebhookEventGoneError();
+      const moved = event.type === 'deal.stage_changed';
+      return {
+        ...base,
+        data: {
+          deal: {
+            id: deal.id,
+            title: deal.title,
+            pipelineId: str(event.detail.pipelineId) ?? deal.pipelineId,
+            stageId: str(event.detail.stageId) ?? deal.stageId,
+            status: event.status ?? deal.status,
+            previousStageId: moved ? str(event.detail.previousStageId) : null,
+            previousPipelineId: moved ? str(event.detail.previousPipelineId) : null,
+            previousStatus:
+              event.type === 'deal.status_changed' ? str(event.detail.previousStatus) : null,
+            valueMinor: deal.valueMinor,
+            currency: deal.currency,
+            ownerId: deal.ownerId,
+            expectedCloseOn: deal.expectedCloseOn,
+            lostReason: deal.lostReason,
+            createdBy: deal.apiKeyId ? 'api' : deal.automationId ? 'automation' : 'member',
+            createdAt: deal.createdAt.toISOString(),
+          },
+          conversation: deal.conversationId ? { id: deal.conversationId } : null,
+          contact: await contactOf(tx, tenantId, deal.contactId),
         },
       };
     }

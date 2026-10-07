@@ -11,6 +11,7 @@ import {
   CHANNEL_STATUSES,
   CONTACT_SOURCES,
   CONVERSATION_STATUSES,
+  DEAL_STATUSES,
   MESSAGE_TYPES,
   ORDER_STATUSES,
   TEMPLATE_STATUSES,
@@ -90,6 +91,9 @@ import {
   automationRunStartedPayloadSchema,
   buildWebhookPayload,
   campaignStatusChangedPayloadSchema,
+  dealCreatedPayloadSchema,
+  dealStageChangedPayloadSchema,
+  dealStatusChangedPayloadSchema,
   consentChangedPayloadSchema,
   contactCreatedPayloadSchema,
   contactErasedPayloadSchema,
@@ -1121,6 +1125,111 @@ describe('webhook payload schemas', () => {
     ).toBe(false);
   });
 
+  it('describe the deal events (ADR-256)', () => {
+    const deal = {
+      id: base.id,
+      title: 'Annual plan',
+      pipelineId: base.id,
+      stageId: base.id,
+      status: 'open',
+      previousStageId: null,
+      previousPipelineId: null,
+      previousStatus: null,
+      valueMinor: 250_050,
+      currency: 'INR',
+      ownerId: base.id,
+      expectedCloseOn: '2026-12-31',
+      lostReason: null,
+      createdBy: 'member',
+      createdAt: base.createdAt,
+    };
+    const person = { id: base.id, phone: '+919876543210', name: 'Jaya' };
+    const created = {
+      ...base,
+      type: 'deal.created',
+      data: { deal, conversation: null, contact: person },
+    };
+    expect(dealCreatedPayloadSchema.safeParse(created).success).toBe(true);
+    // A move, to another pipeline too, by each kind of creator.
+    for (const createdBy of ['member', 'automation', 'api']) {
+      expect(
+        dealStageChangedPayloadSchema.safeParse({
+          ...created,
+          type: 'deal.stage_changed',
+          data: {
+            ...created.data,
+            deal: { ...deal, previousStageId: base.id, previousPipelineId: base.id, createdBy },
+          },
+        }).success,
+        createdBy,
+      ).toBe(true);
+    }
+    // Every status a deal can reach, from every other one, with a lost deal's reason.
+    for (const status of DEAL_STATUSES) {
+      for (const previousStatus of DEAL_STATUSES) {
+        expect(
+          dealStatusChangedPayloadSchema.safeParse({
+            ...created,
+            type: 'deal.status_changed',
+            data: {
+              ...created.data,
+              deal: {
+                ...deal,
+                status,
+                previousStatus,
+                lostReason: status === 'lost' ? 'Budget cut' : null,
+              },
+            },
+          }).success,
+          `${previousStatus} → ${status}`,
+        ).toBe(true);
+      }
+    }
+    // An automation's deal names the conversation; an erased contact's deal has no number or name,
+    // and a deal may have no value, owner or expected date.
+    expect(
+      dealCreatedPayloadSchema.safeParse({
+        ...created,
+        data: {
+          deal: {
+            ...deal,
+            title: 'Deal (contact erased)',
+            valueMinor: null,
+            ownerId: null,
+            expectedCloseOn: null,
+            createdBy: 'automation',
+          },
+          conversation,
+          contact,
+        },
+      }).success,
+    ).toBe(true);
+    // An unknown status or creator, a fraction of the minor unit, a date in another form, an id
+    // that is not one, a field left out, or another type is not described.
+    for (const change of [
+      { status: 'closed' },
+      { previousStatus: 'pending' },
+      { createdBy: 'import' },
+      { valueMinor: 2_500.5 },
+      { expectedCloseOn: '31/12/2026' },
+      { stageId: 'stage-1' },
+      { previousPipelineId: undefined },
+    ]) {
+      expect(
+        dealCreatedPayloadSchema.safeParse({
+          ...created,
+          data: { ...created.data, deal: { ...deal, ...change } },
+        }).success,
+        JSON.stringify(change),
+      ).toBe(false);
+    }
+    expect(dealStatusChangedPayloadSchema.safeParse(created).success).toBe(false);
+    expect(
+      dealCreatedPayloadSchema.safeParse({ ...created, data: { deal, conversation: null } })
+        .success,
+    ).toBe(false);
+  });
+
   it('refuse a body of another type or with an unknown status', () => {
     expect(pingPayloadSchema.safeParse({ ...base, type: 'message.status', data: {} }).success).toBe(
       false,
@@ -1268,6 +1377,9 @@ describe('the OpenAPI document', () => {
       'order.received',
       'order.status_changed',
       'campaign.status_changed',
+      'deal.created',
+      'deal.stage_changed',
+      'deal.status_changed',
     ]);
     const schemas = doc.components.schemas as Record<string, unknown>;
     const parameters = doc.components.parameters as Record<string, { name: string }>;
@@ -1288,6 +1400,40 @@ describe('the OpenAPI document', () => {
       ]);
       expect(hook.post.security).toEqual([]);
     }
+  });
+
+  it('describes the deal events: what each step left, and the order of two from one change (ADR-256)', () => {
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const text = (type: 'deal.created' | 'deal.stage_changed' | 'deal.status_changed') =>
+      doc.webhooks[type].post.description;
+    expect(text('deal.created')).toContain(
+      'deal.stageId, deal.pipelineId and deal.status are those it was added with',
+    );
+    expect(text('deal.stage_changed')).toContain(
+      'with deal.previousPipelineId when it moved to another pipeline, and deal.status is its status as it moved',
+    );
+    expect(text('deal.stage_changed')).toContain('is reopened and then moved');
+    expect(text('deal.stage_changed')).toContain('is moved and then closed');
+    expect(text('deal.stage_changed')).toContain('the two can have the same createdAt');
+    expect(text('deal.status_changed')).toContain('with the stage and pipeline it was in');
+    // No filter narrows them: an endpoint that names numbers still receives every one it takes.
+    expect(doc.info.description).toContain(
+      'still every consent, contact, template and deal event it takes',
+    );
+    const schemas = doc.components.schemas as unknown as Record<
+      string,
+      { properties: Record<string, { description?: string }> } | undefined
+    >;
+    const described = (schema: string) => schemas[schema]?.properties.channelIds?.description;
+    expect(described('WebhookEndpoint')).toContain(
+      'Consent, contact, template and deal events are not narrowed.',
+    );
+    expect(described('CreateWebhookEndpoint')).toContain(
+      'Consent, contact, template and deal events belong to no number',
+    );
+    expect(
+      Object.keys(doc.components.schemas).filter((name) => name.startsWith('WebhookDeal')),
+    ).toEqual(['WebhookDealCreated', 'WebhookDealStageChanged', 'WebhookDealStatusChanged']);
   });
 
   it('builds no body for an event type it does not know, before reading anything', async () => {
@@ -1988,6 +2134,9 @@ describe('number filters (ADR-170)', () => {
       'order.received': orderReceivedPayloadSchema,
       'order.status_changed': orderStatusChangedPayloadSchema,
       'campaign.status_changed': campaignStatusChangedPayloadSchema,
+      'deal.created': dealCreatedPayloadSchema,
+      'deal.stage_changed': dealStageChangedPayloadSchema,
+      'deal.status_changed': dealStatusChangedPayloadSchema,
     } satisfies Record<(typeof WEBHOOK_EVENT_KEYS)[number], unknown>;
     for (const type of WEBHOOK_EVENT_KEYS) {
       const onANumber = WEBHOOK_CHANNEL_EVENTS.some((t) => t === type);

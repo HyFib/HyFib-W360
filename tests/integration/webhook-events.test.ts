@@ -16,9 +16,11 @@ import {
 } from '@w360/db';
 import {
   advanceAutomationRun,
+  apiCreateDeal,
   apiGetCampaign,
   apiStartAutomationRun,
   apiUpdateConversation,
+  apiUpdateDeal,
   authenticateApiToken,
   automationRunEndedPayloadSchema,
   automationRunStartedPayloadSchema,
@@ -37,10 +39,14 @@ import {
   createConsentService,
   createContactMergeService,
   createContactsService,
+  createCrmService,
   createInboxService,
   createTeamsService,
   createTemplatesService,
   createWebhooksService,
+  dealCreatedPayloadSchema,
+  dealStageChangedPayloadSchema,
+  dealStatusChangedPayloadSchema,
   messageReceivedPayloadSchema,
   messageStatusPayloadSchema,
   orderReceivedPayloadSchema,
@@ -68,12 +74,13 @@ import { startWhatsAppFixture, type Company, type WhatsAppFixture } from './what
 
 /**
  * Webhook events for conversations and contacts (ADR-074), automation runs (ADR-078), WhatsApp
- * orders (ADR-085) and campaigns (ADR-087) against real PostgreSQL and a local receiver: capture by
- * the triggers from every kind of change, one contact event per contact and transaction (savepoints
- * included), erasure sending only `contact.erased`, the start and end of live runs (not test runs),
- * orders and campaigns and every status change whoever makes it (members, Razorpay through the
- * worker, the campaign runner), delivery to the endpoints that take each type, payloads built when
- * delivered, and the capture function's limits for the company role.
+ * orders (ADR-085), campaigns (ADR-087) and CRM deals (ADR-256) against real PostgreSQL and a local
+ * receiver: capture by the triggers from every kind of change, one contact event per contact and
+ * transaction (savepoints included), erasure sending only `contact.erased`, the start and end of
+ * live runs (not test runs), orders, campaigns and deals and every change of their status whoever
+ * makes it (members, Razorpay through the worker, the campaign runner, automations, API keys),
+ * delivery to the endpoints that take each type, payloads built when delivered, and the capture
+ * function's limits for the company role.
  */
 let fx: WhatsAppFixture;
 let receiver: Server;
@@ -202,7 +209,15 @@ async function deliverDue(c: Company) {
 const bodiesAt = (path: string) =>
   received
     .filter((r) => r.path === path)
-    .map((r) => JSON.parse(r.body) as { id: string; type: string; data: Record<string, unknown> });
+    .map(
+      (r) =>
+        JSON.parse(r.body) as {
+          id: string;
+          type: string;
+          createdAt: string;
+          data: Record<string, unknown>;
+        },
+    );
 
 interface EventRow extends Record<string, unknown> {
   id: string;
@@ -3653,6 +3668,566 @@ describe('campaign events (ADR-087)', () => {
     expect(bodiesAt(gone.path)).toEqual([]);
 
     // An endpoint can take every event type, campaigns included.
+    const everything = await addEndpoint(c, [...WEBHOOK_EVENT_KEYS]);
+    expect(
+      await fx.query('SELECT event_types FROM app.webhook_endpoints WHERE id = $1', [
+        everything.id,
+      ]),
+    ).toEqual([{ event_types: [...WEBHOOK_EVENT_KEYS] }]);
+  });
+});
+
+describe('deal events (ADR-256)', () => {
+  const crm = () =>
+    createCrmService({ db: fx.dbs.app, clock: systemClock, jobs: fx.jobs(), signer: fx.signer });
+  const DEAL_EVENTS: WebhookEventType[] = [
+    'deal.created',
+    'deal.stage_changed',
+    'deal.status_changed',
+  ];
+  const payloadSchemas = {
+    'deal.created': dealCreatedPayloadSchema,
+    'deal.stage_changed': dealStageChangedPayloadSchema,
+    'deal.status_changed': dealStatusChangedPayloadSchema,
+  } as const;
+
+  /** A company with the pipelines Sales (New, Qualified, Proposal) and Renewals (Due, Signed), INR. */
+  async function crmCompany() {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const svc = crm();
+    const { id: salesId } = await svc.createPipeline(owner, {
+      name: 'Sales',
+      currency: 'INR',
+      stages: ['New', 'Qualified', 'Proposal'],
+    });
+    const { id: renewalsId } = await svc.createPipeline(owner, {
+      name: 'Renewals',
+      currency: 'INR',
+      stages: ['Due', 'Signed'],
+    });
+    const pipelines = await svc.listPipelines(owner);
+    const stagesOf = (id: string) => pipelines.find((p) => p.id === id)!.stages.map((s) => s.id);
+    return {
+      c,
+      owner,
+      salesId,
+      renewalsId,
+      sales: stagesOf(salesId),
+      renewals: stagesOf(renewalsId),
+    };
+  }
+
+  /** A contact a member adds, with a number; its id and number. */
+  async function newContact(owner: TenantContext, name: string) {
+    const phone = `+${waId()}`;
+    const { id } = await contactsService().createContact(owner, { displayName: name, phone });
+    return { id, phone };
+  }
+
+  /**
+   * The company's deal events in the order they were captured (one change can capture two, in one
+   * transaction), with their delivery counts.
+   */
+  const dealEventsOf = (c: Company) =>
+    fx.query<EventRow & { occurred_at: Date }>(
+      `SELECT e.id, e.type, e.status, e.detail, e.conversation_id, e.contact_id, e.occurred_at,
+              (SELECT count(*)::int FROM app.webhook_deliveries d
+                WHERE d.tenant_id = e.tenant_id AND d.event_id = e.id) AS deliveries
+         FROM app.webhook_events e
+        WHERE e.tenant_id = $1 AND e.type LIKE 'deal.%' ORDER BY e.occurred_at, e.id`,
+      [c.tenant.id],
+    );
+
+  /** The bodies the receiver got on a path, by event id: deliveries are sent concurrently. */
+  const bodiesById = (path: string) => new Map(bodiesAt(path).map((b) => [b.id, b]));
+
+  const dealIn = (body: { data: Record<string, unknown> } | undefined) =>
+    body?.data.deal as Record<string, unknown>;
+
+  it('sends each deal added and every move, close and reopening, with what was before it, from members, an automation and an API key', async () => {
+    const s = await crmCompany();
+    const { c, owner } = s;
+    const agent = await fx.ctx(c, c.agent);
+    const hook = await addEndpoint(c, DEAL_EVENTS);
+    const closes = await addEndpoint(c, ['deal.status_changed']);
+    const contactsOnly = await addEndpoint(c, ['contact.created']);
+    const svc = crm();
+    const jaya = await newContact(owner, 'Jaya');
+
+    // A member adds a deal, moves it in its pipeline and to the other one, and loses it.
+    const { id: dealId } = await svc.createDeal(agent, {
+      contactId: jaya.id,
+      pipelineId: s.salesId,
+      stageId: s.sales[0],
+      title: 'Annual plan',
+      value: '2,500.50',
+      ownerMembershipId: agent.membership.id,
+      expectedCloseOn: '2026-12-31',
+    });
+    await svc.moveDeal(agent, { id: dealId, expectedVersion: 1, stageId: s.sales[1] });
+    await svc.moveDeal(agent, {
+      id: dealId,
+      expectedVersion: 2,
+      stageId: s.renewals[0],
+      pipelineId: s.renewalsId,
+    });
+    await svc.closeDeal(agent, {
+      id: dealId,
+      expectedVersion: 3,
+      outcome: 'lost',
+      lostReason: 'Budget cut',
+    });
+    // Delivered now, the loss gives the reason and the rest of the deal as they are now.
+    await deliverDue(c);
+    const lost = [...bodiesById(hook.path).values()].find((b) => b.type === 'deal.status_changed');
+    expect(dealIn(lost)).toEqual({
+      id: dealId,
+      title: 'Annual plan',
+      pipelineId: s.renewalsId,
+      stageId: s.renewals[0],
+      status: 'lost',
+      previousStageId: null,
+      previousPipelineId: null,
+      previousStatus: 'open',
+      valueMinor: 250_050,
+      currency: 'INR',
+      ownerId: agent.membership.id,
+      expectedCloseOn: '2026-12-31',
+      lostReason: 'Budget cut',
+      createdBy: 'member',
+      createdAt: expect.any(String),
+    });
+    expect(lost?.data.contact).toEqual({ id: jaya.id, phone: jaya.phone, name: 'Jaya' });
+    expect(lost?.data.conversation).toBeNull();
+
+    // Its stage is removed while it is lost; reopened, it goes to the first stage left: reopened,
+    // then moved. Edits of its details change neither its stage nor its status.
+    const [renewals] = (await svc.listPipelines(owner)).filter((p) => p.id === s.renewalsId);
+    await svc.updatePipeline(owner, {
+      id: s.renewalsId,
+      expectedVersion: renewals!.version,
+      name: 'Renewals',
+      stages: [{ id: s.renewals[1]!, name: 'Signed' }],
+    });
+    await svc.reopenDeal(agent, { id: dealId, expectedVersion: 4 });
+    await svc.updateDeal(agent, {
+      id: dealId,
+      expectedVersion: 5,
+      title: 'Annual plan, renewed',
+      value: '3,000',
+      ownerMembershipId: null,
+      expectedCloseOn: null,
+    });
+
+    // An API key adds a deal, then moves and wins it in one request: moved, then won. A change of
+    // its title alone sends nothing.
+    const created = await createApiKeysService({ db: fx.dbs.app, clock: systemClock }).create(
+      owner,
+      { name: 'Web shop', scopes: ['deals.write'], expiresInDays: 0 },
+    );
+    const key = await authenticateApiToken(fx.dbs.app, created.token, uuidv7());
+    if (!key) throw new Error('a new key does not authenticate');
+    const apiDeps = { db: fx.dbs.app, clock: systemClock };
+    const response = await apiCreateDeal(
+      apiDeps,
+      key,
+      { contactId: jaya.id, pipelineId: s.salesId, title: 'Web order', valueMinor: 99_900 },
+      null,
+    );
+    const apiDealId = (response.body as { data: { id: string } }).data.id;
+    await apiUpdateDeal(apiDeps, key, apiDealId, { stageId: s.sales[2], status: 'won' });
+    await apiUpdateDeal(apiDeps, key, apiDealId, { title: 'Web order 1001' });
+
+    // An automation adds a deal for the customer who writes, moves it and wins it, a step at a time.
+    const automations = createAutomationService({
+      db: fx.dbs.app,
+      clock: systemClock,
+      jobs: fx.jobs(),
+      signer: fx.signer,
+    });
+    const { id: automationId } = await automations.createAutomation(owner, { name: 'Leads' });
+    const saved = await automations.updateAutomation(owner, {
+      id: automationId,
+      expectedVersion: 0,
+      name: 'Leads',
+      description: null,
+      channelAccountId: null,
+      trigger: {
+        type: 'keyword',
+        keywords: ['price'],
+        match: 'contains',
+        hours: 'any',
+        cooldownMinutes: 0,
+      },
+      graph: {
+        version: 1,
+        start: 'deal',
+        nodes: [
+          {
+            id: 'deal',
+            type: 'create_deal',
+            title: 'Kettles for {{name}}',
+            pipelineId: s.salesId,
+            stageId: s.sales[0],
+            value: null,
+            ownerMembershipId: null,
+            next: 'move',
+          },
+          {
+            id: 'move',
+            type: 'move_deal',
+            pipelineId: s.salesId,
+            stageId: s.sales[1],
+            next: 'win',
+          },
+          {
+            id: 'win',
+            type: 'close_deal',
+            pipelineId: s.salesId,
+            outcome: 'won',
+            lostReason: null,
+            next: null,
+          },
+        ],
+      },
+    });
+    expect(saved.issues).toEqual([]);
+    await automations.publishAutomation(owner, {
+      id: automationId,
+      expectedVersion: saved.version,
+      note: null,
+    });
+    const from = waId();
+    const { conversation_id: conversationId, contact_id: customerId } = await inbound(
+      c,
+      from,
+      'what is the price?',
+    );
+    const [run] = await fx.query<{ id: string }>(
+      'SELECT id FROM app.automation_runs WHERE conversation_id = $1',
+      [conversationId],
+    );
+    const advanced = await advanceAutomationRun(
+      {
+        db: fx.dbs.app,
+        jobs: fx.jobs(),
+        signer: fx.signer,
+        clock: systemClock,
+        keyring: fx.keyring,
+      },
+      authorizedTenantScope(c.tenant.id, null),
+      run!.id,
+      null,
+    );
+    expect(advanced.outcome).toBe('ended');
+    const [byRun] = await fx.query<{ id: string }>(
+      'SELECT id FROM app.crm_deals WHERE tenant_id = $1 AND created_by_automation_id = $2',
+      [c.tenant.id, automationId],
+    );
+    const runDealId = byRun!.id;
+
+    // One event per step, in the order the steps happened, each to the endpoints that take it.
+    const events = await dealEventsOf(c);
+    const sales = { pipelineId: s.salesId };
+    const renewal = { pipelineId: s.renewalsId };
+    expect(events.map((e) => [e.type, e.status, e.detail, e.deliveries])).toEqual([
+      ['deal.created', 'open', { dealId, stageId: s.sales[0], ...sales }, 1],
+      [
+        'deal.stage_changed',
+        'open',
+        {
+          dealId,
+          stageId: s.sales[1],
+          ...sales,
+          previousStageId: s.sales[0],
+          previousPipelineId: null,
+        },
+        1,
+      ],
+      [
+        'deal.stage_changed',
+        'open',
+        {
+          dealId,
+          stageId: s.renewals[0],
+          ...renewal,
+          previousStageId: s.sales[1],
+          previousPipelineId: s.salesId,
+        },
+        1,
+      ],
+      [
+        'deal.status_changed',
+        'lost',
+        { dealId, stageId: s.renewals[0], ...renewal, previousStatus: 'open' },
+        2,
+      ],
+      // Reopened in the stage that was removed, then moved to the first stage left.
+      [
+        'deal.status_changed',
+        'open',
+        { dealId, stageId: s.renewals[0], ...renewal, previousStatus: 'lost' },
+        2,
+      ],
+      [
+        'deal.stage_changed',
+        'open',
+        {
+          dealId,
+          stageId: s.renewals[1],
+          ...renewal,
+          previousStageId: s.renewals[0],
+          previousPipelineId: null,
+        },
+        1,
+      ],
+      ['deal.created', 'open', { dealId: apiDealId, stageId: s.sales[0], ...sales }, 1],
+      // Moved while it was open, then won.
+      [
+        'deal.stage_changed',
+        'open',
+        {
+          dealId: apiDealId,
+          stageId: s.sales[2],
+          ...sales,
+          previousStageId: s.sales[0],
+          previousPipelineId: null,
+        },
+        1,
+      ],
+      [
+        'deal.status_changed',
+        'won',
+        { dealId: apiDealId, stageId: s.sales[2], ...sales, previousStatus: 'open' },
+        2,
+      ],
+      ['deal.created', 'open', { dealId: runDealId, stageId: s.sales[0], ...sales }, 1],
+      [
+        'deal.stage_changed',
+        'open',
+        {
+          dealId: runDealId,
+          stageId: s.sales[1],
+          ...sales,
+          previousStageId: s.sales[0],
+          previousPipelineId: null,
+        },
+        1,
+      ],
+      [
+        'deal.status_changed',
+        'won',
+        { dealId: runDealId, stageId: s.sales[1], ...sales, previousStatus: 'open' },
+        2,
+      ],
+    ]);
+    expect(events.map((e) => e.contact_id)).toEqual([
+      ...Array<string>(9).fill(jaya.id),
+      customerId,
+      customerId,
+      customerId,
+    ]);
+    expect(events.every((e) => e.conversation_id === null)).toBe(true);
+
+    await deliverDue(c);
+    const bodies = bodiesById(hook.path);
+    expect([...bodies.keys()].sort()).toEqual(events.map((e) => e.id).sort());
+    const delivered = events.map((e) => bodies.get(e.id)!);
+    for (const body of delivered) {
+      const schema = payloadSchemas[body.type as keyof typeof payloadSchemas];
+      expect(schema.safeParse(body).success).toBe(true);
+    }
+    // Each event is stamped when it was captured, the two of one change too (in microseconds; a
+    // body gives milliseconds).
+    expect(delivered.map((b) => b.createdAt)).toEqual(
+      events.map((e) => e.occurred_at.toISOString()),
+    );
+    expect(
+      await fx.query(
+        `SELECT count(DISTINCT occurred_at)::int AS times FROM app.webhook_events
+          WHERE tenant_id = $1 AND type LIKE 'deal.%'`,
+        [c.tenant.id],
+      ),
+    ).toEqual([{ times: 12 }]);
+    // The stage, pipeline and status as each step left them, and those before them.
+    expect(
+      delivered.map((b) => {
+        const d = dealIn(b);
+        return [
+          b.type,
+          d.id,
+          d.stageId,
+          d.status,
+          d.previousStageId,
+          d.previousPipelineId,
+          d.previousStatus,
+          d.createdBy,
+        ];
+      }),
+    ).toEqual([
+      ['deal.created', dealId, s.sales[0], 'open', null, null, null, 'member'],
+      ['deal.stage_changed', dealId, s.sales[1], 'open', s.sales[0], null, null, 'member'],
+      ['deal.stage_changed', dealId, s.renewals[0], 'open', s.sales[1], s.salesId, null, 'member'],
+      ['deal.status_changed', dealId, s.renewals[0], 'lost', null, null, 'open', 'member'],
+      ['deal.status_changed', dealId, s.renewals[0], 'open', null, null, 'lost', 'member'],
+      ['deal.stage_changed', dealId, s.renewals[1], 'open', s.renewals[0], null, null, 'member'],
+      ['deal.created', apiDealId, s.sales[0], 'open', null, null, null, 'api'],
+      ['deal.stage_changed', apiDealId, s.sales[2], 'open', s.sales[0], null, null, 'api'],
+      ['deal.status_changed', apiDealId, s.sales[2], 'won', null, null, 'open', 'api'],
+      ['deal.created', runDealId, s.sales[0], 'open', null, null, null, 'automation'],
+      ['deal.stage_changed', runDealId, s.sales[1], 'open', s.sales[0], null, null, 'automation'],
+      ['deal.status_changed', runDealId, s.sales[1], 'won', null, null, 'open', 'automation'],
+    ]);
+    // The rest as the deal is when delivered: renamed and reopened, it has no reason any more.
+    const [jayaDeal] = await fx.query<{ created_at: Date }>(
+      'SELECT created_at FROM app.crm_deals WHERE id = $1',
+      [dealId],
+    );
+    for (const body of delivered.slice(4, 6)) {
+      expect(dealIn(body)).toMatchObject({
+        title: 'Annual plan, renewed',
+        valueMinor: 300_000,
+        currency: 'INR',
+        ownerId: null,
+        expectedCloseOn: null,
+        lostReason: null,
+        createdAt: jayaDeal!.created_at.toISOString(),
+      });
+    }
+    expect(dealIn(delivered[8])).toMatchObject({ title: 'Web order 1001', valueMinor: 99_900 });
+    expect(delivered[8]!.data.conversation).toBeNull();
+    // The automation's deal names the conversation it was added from and its customer.
+    for (const body of delivered.slice(9)) {
+      expect(dealIn(body)).toMatchObject({ title: 'Kettles for Priya Customer', valueMinor: null });
+      expect(body.data.conversation).toEqual({ id: conversationId });
+      expect(body.data.contact).toEqual({
+        id: customerId,
+        phone: `+${from}`,
+        name: 'Priya Customer',
+      });
+    }
+    // An endpoint for status changes hears only those; one for contacts hears no deal.
+    expect([...bodiesById(closes.path).keys()].sort()).toEqual(
+      events
+        .filter((e) => e.type === 'deal.status_changed')
+        .map((e) => e.id)
+        .sort(),
+    );
+    expect(bodiesAt(contactsOnly.path).map((b) => b.type)).toEqual([
+      'contact.created',
+      'contact.created',
+    ]);
+  });
+
+  it('sends nothing without an endpoint for deals or for an erasure or a merge, sends an erased contact’s deal as erasure left it, and fails a delivery whose deal is gone', async () => {
+    const s = await crmCompany();
+    const { c, owner } = s;
+    const svc = crm();
+    // No endpoint takes deal events: a deal and its changes capture nothing.
+    await addEndpoint(c, ['contact.created', 'order.status_changed']);
+    const quiet = await newContact(owner, 'Quiet');
+    const { id: quietDeal } = await svc.createDeal(owner, {
+      contactId: quiet.id,
+      pipelineId: s.salesId,
+      stageId: s.sales[0],
+      title: 'Quiet deal',
+    });
+    await svc.moveDeal(owner, { id: quietDeal, expectedVersion: 1, stageId: s.sales[1] });
+    await svc.closeDeal(owner, { id: quietDeal, expectedVersion: 2, outcome: 'won' });
+    expect(await dealEventsOf(c)).toEqual([]);
+
+    // An endpoint that names numbers still receives deal events: they happen on no number.
+    const hook = await addNumberEndpoint(
+      c,
+      ['deal.created', 'deal.status_changed', 'message.received'],
+      [c.channelAccountId],
+    );
+    // A customer who wrote by WhatsApp user id gets a deal, lost with a reason; the contact is
+    // merged into one a member added, which is then erased.
+    const merged = await writesByUserId(c);
+    const { id: dealId } = await svc.createDeal(owner, {
+      contactId: merged,
+      pipelineId: s.salesId,
+      stageId: s.sales[0],
+      title: 'Asha’s order',
+      value: '1,000',
+    });
+    await svc.closeDeal(owner, {
+      id: dealId,
+      expectedVersion: 1,
+      outcome: 'lost',
+      lostReason: 'Ring 98450 12345 after Diwali',
+    });
+    const kept = await newContact(owner, 'Asha');
+    await createContactMergeService({ db: fx.dbs.app, clock: systemClock }).mergeContacts(owner, {
+      keepContactId: kept.id,
+      mergeContactId: merged,
+    });
+    await contactsService().eraseContact(owner, { contactId: kept.id, suppress: false });
+    // The merge moved the deal and the erasure blanked its text, neither changing its stage or
+    // status: nothing more is captured.
+    expect(
+      (await dealEventsOf(c)).map((e) => [e.type, e.status, e.contact_id, e.deliveries]),
+    ).toEqual([
+      ['deal.created', 'open', merged, 1],
+      ['deal.status_changed', 'lost', merged, 1],
+    ]);
+
+    // Both are built when delivered: the deal of the contact it was merged into, as erasure left it.
+    await deliverDue(c);
+    const bodies = bodiesAt(hook.path)
+      .filter((b) => b.type.startsWith('deal.'))
+      .sort((a, b) => a.type.localeCompare(b.type));
+    expect(bodies.map((b) => b.type)).toEqual(['deal.created', 'deal.status_changed']);
+    for (const body of bodies) {
+      expect(body.data.contact).toEqual({ id: kept.id, phone: null, name: null });
+      expect(dealIn(body)).toMatchObject({
+        id: dealId,
+        title: 'Deal (contact erased)',
+        lostReason: null,
+        valueMinor: 100_000,
+      });
+      expect(body.data).not.toHaveProperty('channel');
+      expect(JSON.stringify(body)).not.toContain(kept.phone.slice(3));
+      expect(JSON.stringify(body)).not.toContain('98450');
+    }
+
+    // An event whose deal no longer exists fails without an attempt.
+    const gone = await addEndpoint(c, ['deal.stage_changed']);
+    const eventId = uuidv7();
+    await fx.dbs.app.run(authorizedTenantScope(c.tenant.id, null), async (tx) => {
+      await tx.insert(webhookEvents).values({
+        id: eventId,
+        tenantId: c.tenant.id,
+        type: 'deal.stage_changed',
+        contactId: kept.id,
+        status: 'open',
+        detail: {
+          dealId: uuidv7(),
+          stageId: s.sales[1],
+          pipelineId: s.salesId,
+          previousStageId: s.sales[0],
+          previousPipelineId: null,
+        },
+      });
+      await tx.insert(webhookDeliveries).values({
+        id: uuidv7(),
+        tenantId: c.tenant.id,
+        endpointId: gone.id,
+        eventId,
+      });
+    });
+    await deliverDue(c);
+    expect(
+      await fx.query(
+        'SELECT state, attempts, last_error FROM app.webhook_deliveries WHERE endpoint_id = $1',
+        [gone.id],
+      ),
+    ).toEqual([{ state: 'failed', attempts: 0, last_error: 'event_gone' }]);
+    expect(bodiesAt(gone.path)).toEqual([]);
+
+    // An endpoint can take every event type, deals included.
     const everything = await addEndpoint(c, [...WEBHOOK_EVENT_KEYS]);
     expect(
       await fx.query('SELECT event_types FROM app.webhook_endpoints WHERE id = $1', [

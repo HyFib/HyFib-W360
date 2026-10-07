@@ -148,6 +148,15 @@ Phase 3 rules on top of the matrix (enforced in domain services and re-checked w
   contact's id. The trigger runs as the merge (the definer role) and captures for the merging
   company alone; the API reads `app.contact_merges` in the key's company scope, so another company's
   merged contact is plainly not found.
+- Integrations hear of CRM deals (ADR-256) through the company's own endpoints only: `deal.created`,
+  `deal.stage_changed` and `deal.status_changed` give the deal (its title, value, owner id, expected
+  date and lost reason as they are when delivered), its stage and pipeline ids, the conversation id
+  and the contact as the API describes it; an erased contact's deal is sent titled "Deal (contact
+  erased)", without a reason, and its contact without number or name. The triggers run as whoever
+  changes the deal (the runtime role in the company's scope), so an event is captured for that
+  company alone, and only when one of its active endpoints takes it. No number, team or member
+  filter narrows deal events, which Settings and the OpenAPI document say, so a filter cannot be
+  mistaken for keeping them from an endpoint.
 - Customers' numbers (ADR-226): a company's owners and administrators choose the roles (supervisor,
   agent, marketer, analyst) whose members see them masked; the context leaves out
   `contacts.view_numbers` for a member whose every role that grants it is masked, and the services

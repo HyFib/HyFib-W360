@@ -56,6 +56,9 @@ export const WEBHOOK_EVENT_KEYS = [
   'order.received',
   'order.status_changed',
   'campaign.status_changed',
+  'deal.created',
+  'deal.stage_changed',
+  'deal.status_changed',
 ] as const satisfies readonly WebhookEventType[];
 
 export const WEBHOOK_EVENT_INFO: Record<WebhookEventType, { label: string; description: string }> =
@@ -136,6 +139,20 @@ export const WEBHOOK_EVENT_INFO: Record<WebhookEventType, { label: string; descr
       label: 'Campaign status',
       description:
         'A campaign was submitted for approval, sent back to draft, scheduled, started, paused, resumed, completed or cancelled, by a member or as it ran.',
+    },
+    'deal.created': {
+      label: 'Deal added',
+      description: 'A CRM deal was added: by a member, an automation or an API key.',
+    },
+    'deal.stage_changed': {
+      label: 'Deal stage',
+      description:
+        'A CRM deal moved to another stage of its pipeline, or to another pipeline: by a member, an automation or an API key.',
+    },
+    'deal.status_changed': {
+      label: 'Deal won, lost or reopened',
+      description:
+        'A CRM deal was won, lost or reopened: by a member, an automation or an API key.',
     },
   };
 
@@ -623,8 +640,8 @@ export function webhookTakesAutomationRuns(eventTypes: readonly WebhookEventType
 
 /**
  * The events that happen on a WhatsApp number, which an endpoint can take for chosen numbers
- * (ADR-170): a campaign's are on the number it sends from. Consent, contact and template events
- * belong to no number.
+ * (ADR-170): a campaign's are on the number it sends from. Consent, contact, template and deal
+ * events belong to no number.
  */
 export const WEBHOOK_CHANNEL_EVENTS = [
   'message.received',

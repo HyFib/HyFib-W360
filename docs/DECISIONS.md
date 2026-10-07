@@ -9699,3 +9699,41 @@ Decision:
 
 Not built: moving deals to another pipeline, deleting deals, linking conversations, tasks and notes
 through the API, and deal webhook events.
+
+## ADR-256 Webhook events for CRM deals (P5-09, P4-04) (2026-10-07)
+
+Context: integrations could read, create and change deals through the API (ADR-253 to ADR-255), but
+heard of nothing members, automations or other keys did to them: an ERP or a reporting tool had to
+poll `GET /deals` to notice a deal won on the board.
+
+Decision:
+
+- **Three event types:** `deal.created` when a deal is added, `deal.stage_changed` when it moves to
+  another stage (of its pipeline, or of another one: then naming the pipeline it left) and
+  `deal.status_changed` when it is won, lost or reopened, whoever makes the change: a member on the
+  board or the deal page, an automation's deal steps or an API key. Endpoints take them like any
+  other event, in Settings → Webhooks ("Deal added", "Deal stage", "Deal won, lost or reopened") or
+  through the API; the OpenAPI document describes each with its body.
+- **Captured by triggers on `app.crm_deals`** (migration 0171) through `app.capture_webhook_event`,
+  in the change's transaction and the company's scope, only when an active endpoint of the company
+  takes the type: the deal, its stage and pipeline, and for a change the stage, pipeline or status
+  before it. Edits of a deal's title, value, owner or expected date send nothing, and neither do
+  erasure (which blanks a deal's text) and merges (which move it to the kept contact). No endpoint
+  filter narrows deal events: an endpoint that names numbers, teams or members still receives every
+  one it takes.
+- **One change, two steps:** a change of both the stage and the status sends both events in the
+  order the rules allow, since a closed deal never moves: a deal reopened in another stage (its own
+  was removed while it was closed) is reopened, then moved; a deal one API request moves and closes
+  is moved, then closed. Each event gives the deal as its step left it, and each is stamped when it
+  is captured, as conversation and campaign events are; the two can still show the same `createdAt`,
+  which bodies give to the millisecond.
+- **Built when delivered:** the stage, pipeline and statuses as captured; the title, the value in
+  the pipeline currency's minor units, the currency, the owner (a membership id), the expected date,
+  the lost reason and who added the deal (`member`, `automation` or `api`) as they are then; the
+  conversation it was created from; the contact as the API describes it. An erased contact's deal is
+  sent as erasure left it: titled "Deal (contact erased)", without a reason, its contact without
+  number or name. An event whose deal no longer exists ends as `event_gone`. Migration 0172
+  validates the events' new type check while captures go on.
+
+Not built: filters for deal events (by pipeline, stage, status or owner), events for deal edits,
+notes and tasks, and an end-to-end test of its own.

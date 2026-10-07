@@ -36,6 +36,9 @@ import {
   automationRunEndedPayloadSchema,
   automationRunStartedPayloadSchema,
   campaignStatusChangedPayloadSchema,
+  dealCreatedPayloadSchema,
+  dealStageChangedPayloadSchema,
+  dealStatusChangedPayloadSchema,
   consentChangedPayloadSchema,
   contactCreatedPayloadSchema,
   contactErasedPayloadSchema,
@@ -716,7 +719,7 @@ export const apiWebhookEndpointSchema = z.object({
     .array(z.uuid())
     .nullable()
     .describe(
-      "The WhatsApp numbers whose message, conversation, automation run, order and campaign events the endpoint receives; null receives every number's, including numbers connected later. Consent, contact and template events are not narrowed.",
+      "The WhatsApp numbers whose message, conversation, automation run, order and campaign events the endpoint receives; null receives every number's, including numbers connected later. Consent, contact, template and deal events are not narrowed.",
     ),
   teamIds: z
     .array(z.uuid())
@@ -955,7 +958,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         '',
         `POST /messages needs an \`Idempotency-Key\` header: a retry with the same key and body returns the first response (header \`Idempotent-Replayed: true\`) and never sends twice; responses are kept ${API_LIMITS.idempotencyHours} hours. Delivery itself follows WhatsApp: read the status with GET /messages/{id}.`,
         '',
-        `Webhooks: endpoints added in Settings → Webhooks receive the events below as signed JSON POSTs. \`W360-Signature: t=<unix time>,v1=<hex HMAC-SHA256 of "<t>.<raw body>" with the endpoint secret>\` (two \`v1\` values for ${WEBHOOK_LIMITS.previousSecretHours} hours after the secret is rotated); reject a time more than 5 minutes from yours. Answer with a 2xx status within 10 seconds; anything else is retried (${retrySchedule}; ${WEBHOOK_LIMITS.attempts} attempts). Delivery is at least once and unordered: deduplicate on the event id. An endpoint failing for ${WEBHOOK_LIMITS.disableAfterHours} hours is turned off. An endpoint can also send up to ${WEBHOOK_LIMITS.headers} headers of its own with every delivery, such as an \`Authorization\` header its receiver issued; they never replace HyFib's. Or it can get an access token from its receiver's authorization server (OAuth 2.0 client credentials) and send it as \`Authorization: Bearer <token>\`. An endpoint receives the events of every WhatsApp number unless it names the numbers it takes (its \`channelIds\`, or the numbers chosen in Settings → Webhooks): then it receives the message, conversation, automation run, order and campaign events of those numbers only (a campaign's are those of the number it sends from), and still every consent, contact and template event it takes. It can likewise name teams (its \`teamIds\`, or the teams chosen in Settings → Webhooks): then it receives the message and conversation events of those teams' conversations only, by the team a conversation is in when the event happens, or members (its \`assigneeIds\`): then those of the conversations assigned to them only, by the member a conversation is assigned to when the event happens. And it can name templates (its \`templateIds\`): then it receives the statuses of the messages sent with them and their changes only, or campaigns (its \`campaignIds\`): then the statuses of the messages they sent and their changes only.`,
+        `Webhooks: endpoints added in Settings → Webhooks receive the events below as signed JSON POSTs. \`W360-Signature: t=<unix time>,v1=<hex HMAC-SHA256 of "<t>.<raw body>" with the endpoint secret>\` (two \`v1\` values for ${WEBHOOK_LIMITS.previousSecretHours} hours after the secret is rotated); reject a time more than 5 minutes from yours. Answer with a 2xx status within 10 seconds; anything else is retried (${retrySchedule}; ${WEBHOOK_LIMITS.attempts} attempts). Delivery is at least once and unordered: deduplicate on the event id. An endpoint failing for ${WEBHOOK_LIMITS.disableAfterHours} hours is turned off. An endpoint can also send up to ${WEBHOOK_LIMITS.headers} headers of its own with every delivery, such as an \`Authorization\` header its receiver issued; they never replace HyFib's. Or it can get an access token from its receiver's authorization server (OAuth 2.0 client credentials) and send it as \`Authorization: Bearer <token>\`. An endpoint receives the events of every WhatsApp number unless it names the numbers it takes (its \`channelIds\`, or the numbers chosen in Settings → Webhooks): then it receives the message, conversation, automation run, order and campaign events of those numbers only (a campaign's are those of the number it sends from), and still every consent, contact, template and deal event it takes. It can likewise name teams (its \`teamIds\`, or the teams chosen in Settings → Webhooks): then it receives the message and conversation events of those teams' conversations only, by the team a conversation is in when the event happens, or members (its \`assigneeIds\`): then those of the conversations assigned to them only, by the member a conversation is assigned to when the event happens. And it can name templates (its \`templateIds\`): then it receives the statuses of the messages sent with them and their changes only, or campaigns (its \`campaignIds\`): then the statuses of the messages they sent and their changes only.`,
       ].join('\n'),
     },
     servers: [{ url: serverUrl }],
@@ -2623,6 +2626,24 @@ export function buildOpenApiDocument(serverUrl: string) {
         `${WEBHOOK_EVENT_INFO['campaign.status_changed'].description} campaign.status and campaign.previousStatus are the change, with why it paused or completed; the rest is the campaign when the event is delivered. campaign.results are its results as GET /campaigns/{id} counts them, counted when the request is built, so a retry or a replay counts again; null while it is a draft. Deliveries are not ordered: the latest change is the one with the latest createdAt. An endpoint receives every status unless it names the statuses it takes (its \`campaignStatuses\`, or the statuses ticked in Settings → Webhooks).`,
         'WebhookCampaignStatusChanged',
       ),
+      'deal.created': webhook(
+        'webhookDealCreated',
+        WEBHOOK_EVENT_INFO['deal.created'].label,
+        `${WEBHOOK_EVENT_INFO['deal.created'].description} deal.stageId, deal.pipelineId and deal.status are those it was added with; the rest is the deal when the event is delivered, so a deal whose contact was erased is sent as erasure left it, without the contact's number or name. Read deals with GET /deals/{id} (\`deals.read\`).`,
+        'WebhookDealCreated',
+      ),
+      'deal.stage_changed': webhook(
+        'webhookDealStageChanged',
+        WEBHOOK_EVENT_INFO['deal.stage_changed'].label,
+        `${WEBHOOK_EVENT_INFO['deal.stage_changed'].description} deal.stageId and deal.previousStageId are the move, with deal.previousPipelineId when it moved to another pipeline, and deal.status is its status as it moved; the rest is the deal when the event is delivered. One change can also reopen or close the deal, and then sends deal.status_changed as well, in the order the steps happen (a closed deal never moves): a deal reopened in another stage, because its stage was removed, is reopened and then moved; a deal one request moves and closes is moved and then closed. Each event gives the deal as its step left it; the two can have the same createdAt. Deliveries are not ordered: the latest move is the one with the latest createdAt.`,
+        'WebhookDealStageChanged',
+      ),
+      'deal.status_changed': webhook(
+        'webhookDealStatusChanged',
+        WEBHOOK_EVENT_INFO['deal.status_changed'].label,
+        `${WEBHOOK_EVENT_INFO['deal.status_changed'].description} deal.status and deal.previousStatus are the change (open, won or lost), with the stage and pipeline it was in; the rest is the deal when the event is delivered, so deal.lostReason is its reason then. A change that also moves the deal sends deal.stage_changed as well (see it for their order). Deliveries are not ordered: the latest change is the one with the latest createdAt.`,
+        'WebhookDealStatusChanged',
+      ),
       ping: webhook(
         'webhookPing',
         'Test event',
@@ -2856,6 +2877,9 @@ export function buildOpenApiDocument(serverUrl: string) {
         WebhookOrderReceived: jsonSchema(orderReceivedPayloadSchema),
         WebhookOrderStatusChanged: jsonSchema(orderStatusChangedPayloadSchema),
         WebhookCampaignStatusChanged: jsonSchema(campaignStatusChangedPayloadSchema),
+        WebhookDealCreated: jsonSchema(dealCreatedPayloadSchema),
+        WebhookDealStageChanged: jsonSchema(dealStageChangedPayloadSchema),
+        WebhookDealStatusChanged: jsonSchema(dealStatusChangedPayloadSchema),
         WebhookPing: jsonSchema(pingPayloadSchema),
       },
     },

@@ -633,6 +633,14 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    `PATCH /api/v1/deals/{id}` with 405, leaves `version` out of deals and describes the scope as
    creating deals only; rolling web servers back does the same. Workers are not affected.
 
+   Migration 0171 (ADR-256) replaces the endpoints' event check (validated at once: at most 10
+   endpoints per company) and the events' type check (NOT VALID; 0172 validates it while captures go
+   on), and adds two triggers on `app.crm_deals`. Workers roll out before web servers, so no
+   endpoint takes the deal events before every worker can describe them. A worker from before it
+   fails each deal event's delivery without an attempt (`payload_failed`; replay it once newer
+   workers run), so before rolling workers back to such an image, turn the deal events off on the
+   endpoints that take them. An old web server's Settings and API do not offer them.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

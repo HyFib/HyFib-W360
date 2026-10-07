@@ -2118,6 +2118,16 @@ a stage of another pipeline, an owner who cannot use the CRM, or a lost reason w
 asks for the deal as it already is changes nothing and answers 200. The timeline shows each change
 "through the API"; the audit log has `crm.deal_updated` with the key and what changed.
 
+**An integration misses a deal change, or hears two at once (ADR-256).** Endpoints that take
+`deal.created`, `deal.stage_changed` or `deal.status_changed` are sent one event per deal added and
+per change of a deal's stage or status, whoever made it; edits of its title, value, owner or
+expected date send nothing (read the deal with GET /deals/{id}), and neither do erasure and merges.
+Changes made while no endpoint took the type were not recorded and are not sent later. A deal
+reopened in another stage (its own was removed), or moved and closed by one API request, sends two
+events, in the order the steps happened and possibly with the same `createdAt`; each gives the stage
+and status its step left. An erased contact's deal is sent titled "Deal (contact erased)", without
+its contact's number or name or a lost reason.
+
 **`GET /api/v1/channels` answers 403, or a number shows no phone or name (ADR-171).** 403
 `forbidden` names the scope the key lacks, `channels.read` (keys keep the scopes they were created
 with: create a key with it); reason `not_in_plan` means the company's plan leaves the scope out
