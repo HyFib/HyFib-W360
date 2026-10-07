@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { isAppError, systemClock, uuidv7 } from '@w360/core';
+import { isAppError, sha256Hex, systemClock, uuidv7 } from '@w360/core';
 import {
   apiCreateChatLink,
   apiGetChatLink,
@@ -187,7 +187,7 @@ describe('chat links written through the API (ADR-300)', () => {
     const other = await fx.company();
     const owner = await fx.ctx(c, c.owner);
     const writer = await apiKey(c, ['chat_links.read', 'chat_links.write']);
-    const idempotency = { key: `links-${uuidv7()}`, requestHash: 'body-1' };
+    const idempotency = { key: `links-${uuidv7()}`, requestHash: sha256Hex('body-1') };
 
     const created = await apiCreateChatLink(
       deps(),
