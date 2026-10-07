@@ -6,7 +6,9 @@ import {
   contacts,
   conversationNotes,
   conversations,
+  conversationSources,
   conversationTags,
+  CONVERSATION_SOURCE_KINDS,
   CONVERSATION_STATUSES,
   desc,
   eq,
@@ -25,6 +27,7 @@ import {
 import { recordSystemAudit } from '../audit';
 import { endRunForHuman } from '../automations/runs';
 import { normalizeTag } from '../contacts/fields';
+import { conversationSourceOf, type ConversationSourceJson } from '../growth/sources';
 import {
   MAX_TAGS_PER_CONVERSATION,
   conversationHasTag,
@@ -90,6 +93,18 @@ const conversationFilters = {
     .refine((value) => normalizeTag(value).ok, 'Give a tag: up to 40 characters, without commas.')
     .optional()
     .describe('Only the conversations with this tag, however its letters are cased.'),
+  source: z
+    .enum(CONVERSATION_SOURCE_KINDS)
+    .optional()
+    .describe(
+      'Only the conversations that came from a chat link (`link`: the customer sent its reference) or from a click-to-WhatsApp ad (`ad`).',
+    ),
+  chatLinkId: z
+    .uuid()
+    .optional()
+    .describe(
+      'Only the conversations whose customer sent this chat link’s reference (GET /chat-links).',
+    ),
 };
 
 export const apiConversationListQuerySchema = z
@@ -227,7 +242,7 @@ export const apiUpdateMatchingConversationsSchema = z
       .strict()
       .refine(
         (filter) => Object.values(filter).some((value) => value !== undefined),
-        'Give at least one filter: status, contactId, channelId, assigneeId, teamId, updatedSince or tag.',
+        'Give at least one filter: status, contactId, channelId, assigneeId, teamId, updatedSince, tag, source or chatLinkId.',
       )
       .describe(
         'The conversations to change, as GET /conversations filters them: at least one filter.',
@@ -263,6 +278,8 @@ export interface ApiConversation {
   teamId: string | null;
   /** The conversation's tags, alphabetically (ADR-221). */
   tags: string[];
+  /** Where it came from, as the inbox shows it (ADR-301); null for neither a link nor an ad. */
+  source: ApiConversationSource | null;
   unreadCount: number;
   lastMessageAt: string | null;
   lastInboundAt: string | null;
@@ -270,6 +287,23 @@ export interface ApiConversation {
   createdAt: string;
   updatedAt: string;
   resolvedAt: string | null;
+}
+
+/**
+ * A conversation's latest source (ADR-301): the chat link whose reference its customer sent, or the
+ * click-to-WhatsApp ad its customer wrote from, with when the message that carried it arrived.
+ */
+export interface ApiConversationSource {
+  kind: 'link' | 'ad';
+  at: string;
+  chatLink: { id: string; name: string } | null;
+  /** The ad as Meta identifies it, with its headline and web address; never the ad click id. */
+  ad: {
+    id: string | null;
+    type: string | null;
+    headline: string | null;
+    url: string | null;
+  } | null;
 }
 
 export type ApiSentBy = 'agent' | 'bot' | 'campaign' | 'api' | 'system';
@@ -343,6 +377,7 @@ const conversationColumns = {
   assignedMembershipId: conversations.assignedMembershipId,
   teamId: conversations.teamId,
   tags: conversationTagsOf(sql`${conversations.tenantId}`, sql`${conversations.id}`),
+  source: conversationSourceOf(sql`${conversations.tenantId}`, sql`${conversations.id}`),
   unreadCount: conversations.unreadCount,
   lastMessageAt: conversations.lastMessageAt,
   lastInboundAt: conversations.lastInboundAt,
@@ -360,6 +395,7 @@ type ConversationRow = {
   assignedMembershipId: string | null;
   teamId: string | null;
   tags: string[];
+  source: ConversationSourceJson | null;
   unreadCount: number;
   lastMessageAt: Date | null;
   lastInboundAt: Date | null;
@@ -367,6 +403,28 @@ type ConversationRow = {
   updatedAt: Date;
   resolvedAt: Date | null;
 };
+
+/** A conversation's latest source as the API gives it (ADR-301). */
+function toApiSource(source: ConversationSourceJson | null): ApiConversationSource | null {
+  if (!source) return null;
+  return {
+    kind: source.kind,
+    at: new Date(source.at).toISOString(),
+    chatLink:
+      source.linkId !== null && source.linkName !== null
+        ? { id: source.linkId, name: source.linkName }
+        : null,
+    ad:
+      source.kind === 'ad'
+        ? {
+            id: source.adId,
+            type: source.adType,
+            headline: source.adHeadline,
+            url: source.adUrl,
+          }
+        : null,
+  };
+}
 
 const toApiConversation = (r: ConversationRow): ApiConversation => ({
   id: r.id,
@@ -377,6 +435,7 @@ const toApiConversation = (r: ConversationRow): ApiConversation => ({
   assigneeId: r.assignedMembershipId,
   teamId: r.teamId,
   tags: r.tags,
+  source: toApiSource(r.source),
   unreadCount: r.unreadCount,
   lastMessageAt: r.lastMessageAt?.toISOString() ?? null,
   lastInboundAt: r.lastInboundAt?.toISOString() ?? null,
@@ -438,6 +497,18 @@ export function conversationFilterSql(tenantId: string, filter: ConversationFilt
     conditions.push(
       conversationHasTag(sql`${conversations.tenantId}`, sql`${conversations.id}`, filter.tag),
     );
+  }
+  if (filter.source !== undefined || filter.chatLinkId !== undefined) {
+    // Any of its sources, not only the latest: a conversation a link started still came from it.
+    const from = and(
+      eq(conversationSources.tenantId, conversations.tenantId),
+      eq(conversationSources.conversationId, conversations.id),
+      filter.source !== undefined ? eq(conversationSources.kind, filter.source) : undefined,
+      filter.chatLinkId !== undefined
+        ? eq(conversationSources.linkId, filter.chatLinkId)
+        : undefined,
+    );
+    conditions.push(sql`exists (select 1 from ${conversationSources} where ${from})`);
   }
   return conditions;
 }

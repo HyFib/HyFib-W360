@@ -924,6 +924,9 @@ verification, app review, Embedded Signup configuration).
   **[Writing chat links through the public API built; its database tests run only in CI]** (ADR-300,
   migrations 0223 and 0224: `chat_links.write` adds links on the company's active numbers, changes,
   archives and restores them through the Growth pages' writes, recorded as the key's).
+  **[Where conversations came from, through the public API, built; its database tests run only in
+  CI]** (ADR-301, no migration: conversations give their latest source, a chat link or a
+  click-to-WhatsApp ad, as the inbox shows it, and are listed and changed by source and chat link).
   **[Reading CRM tasks built; its database tests run only in CI]** (ADR-258, migrations 0173 and
   0174: `tasks.read` lists the company's tasks newest first on exact pages, filtered by status,
   assignee, contact, deal and time, and reads each one, with the reminder and the assignee, contact

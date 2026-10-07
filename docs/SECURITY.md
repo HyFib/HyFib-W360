@@ -1227,6 +1227,12 @@ Phase 5 rules (Public API, P5-08):
   generates, never ones given; the link names the key (`created_by_api_key_id`, a composite foreign
   key to the company's keys, and a check of exactly one author), and the audit log names the key
   (unit tests; integration tests, run in CI only).
+- Where conversations came from (ADR-301): no new scope; the source comes with `conversations.read`
+  (granted with `inbox.read_all`, whose members see the inbox's source line), read under row
+  security in the key's company, the source and its link joined on the company as well as the id, so
+  a source names only the company's own link. The ad click id, media addresses and ad text are never
+  stored (ADR-044), so never given. The filters are checked before any query (one of the two kinds,
+  a UUID); another company's link finds nothing (unit tests; integration tests, run in CI only).
 - Reading a deal's history (ADR-281): `GET /deals/{id}/history` needs `deals.read` and the CRM in
   the plan, checked before anything is read; it reads the key's company's deal only (another
   company's answers 404, as an unknown one does; an id that is not a UUID is refused before any

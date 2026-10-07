@@ -4,6 +4,7 @@ import {
   AUTOMATION_RUN_STATUSES,
   CAMPAIGN_STATUSES,
   CHANNEL_STATUSES,
+  CONVERSATION_SOURCE_KINDS,
   CONVERSATION_STATUSES,
   CRM_CHANGERS,
   DEAL_STATUSES,
@@ -312,6 +313,32 @@ export const apiConversationSchema = z.object({
     .array(z.string())
     .describe(
       'The conversation’s tags, alphabetically, as members and keys put them on it (lower-cased, without commas).',
+    ),
+  source: z
+    .object({
+      kind: z.enum(CONVERSATION_SOURCE_KINDS),
+      at: z.iso.datetime().describe('When the customer’s message that carried it arrived.'),
+      chatLink: z
+        .object({ id: z.uuid(), name: z.string() })
+        .nullable()
+        .describe(
+          'The chat link whose reference the customer sent (`link`), as GET /chat-links names it.',
+        ),
+      ad: z
+        .object({
+          id: z.string().nullable(),
+          type: z.string().nullable(),
+          headline: z.string().nullable(),
+          url: z.string().nullable(),
+        })
+        .nullable()
+        .describe(
+          'The click-to-WhatsApp ad the customer wrote from (`ad`): Meta’s id and type for it, its headline and web address, as Meta sent them; never the ad click id.',
+        ),
+    })
+    .nullable()
+    .describe(
+      'Where the conversation came from, as the inbox shows it: its latest source, the chat link whose reference the customer sent or the click-to-WhatsApp ad they wrote from; null for neither.',
     ),
   unreadCount: z.number().int(),
   lastMessageAt: z.iso.datetime().nullable(),
@@ -2159,6 +2186,20 @@ export function buildOpenApiDocument(serverUrl: string) {
               schema: { type: 'string', maxLength: 100 },
               description:
                 'Only the conversations with this tag, however its letters are cased. A value that cannot be a tag (over 40 characters, or with a comma) is refused (422).',
+            },
+            {
+              name: 'source',
+              in: 'query',
+              schema: { type: 'string', enum: [...CONVERSATION_SOURCE_KINDS] },
+              description:
+                'Only the conversations that came from a chat link (`link`: the customer sent its reference) or from a click-to-WhatsApp ad (`ad`), whenever in the conversation.',
+            },
+            {
+              name: 'chatLinkId',
+              in: 'query',
+              schema: { type: 'string', format: 'uuid' },
+              description:
+                'Only the conversations whose customer sent this chat link’s reference (GET /chat-links), whenever in the conversation; a link’s `last30Days.conversations` counts those of the last 30 days.',
             },
           ],
           responses: {

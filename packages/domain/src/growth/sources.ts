@@ -6,7 +6,9 @@ import {
   conversationSources,
   desc,
   eq,
+  sql,
   type ConversationSourceKind,
+  type SQL,
   type Tx,
 } from '@w360/db';
 import { findRefCode } from './model';
@@ -125,6 +127,36 @@ export interface ConversationSourceView {
   adSourceUrl: string | null;
   adSourceType: string | null;
   occurredAt: string;
+}
+
+/** A conversation's latest source as `conversationSourceOf` gives it, before it is shaped. */
+export interface ConversationSourceJson {
+  kind: ConversationSourceKind;
+  /** When the message that carried it arrived, as PostgreSQL writes a timestamp in JSON. */
+  at: string;
+  linkId: string | null;
+  linkName: string | null;
+  adId: string | null;
+  adType: string | null;
+  adHeadline: string | null;
+  adUrl: string | null;
+}
+
+/**
+ * SQL: a conversation's latest source, as `latestConversationSource` reads it for the inbox (the
+ * public API gives it with each conversation, ADR-301), or null when it has none.
+ */
+export function conversationSourceOf(
+  tenantIdColumn: SQL,
+  conversationIdColumn: SQL,
+): SQL<ConversationSourceJson | null> {
+  return sql<ConversationSourceJson | null>`(select jsonb_build_object('kind', s.kind,
+      'at', s.occurred_at, 'linkId', s.link_id, 'linkName', l.name, 'adId', s.ad_source_id,
+      'adType', s.ad_source_type, 'adHeadline', s.ad_headline, 'adUrl', s.ad_source_url)
+    from app.conversation_sources s
+    left join app.chat_links l on l.tenant_id = s.tenant_id and l.id = s.link_id
+    where s.tenant_id = ${tenantIdColumn} and s.conversation_id = ${conversationIdColumn}
+    order by s.occurred_at desc, s.id desc limit 1)`;
 }
 
 /** The most recent source of a conversation (for the inbox). */

@@ -3,11 +3,15 @@ import { isAppError, systemClock, uuidv7 } from '@w360/core';
 import {
   apiCreateChatLink,
   apiGetChatLink,
+  apiGetConversation,
   apiListChatLinks,
+  apiListConversations,
   apiUpdateChatLink,
+  apiUpdateMatchingConversations,
   authenticateApiToken,
   createApiKeysService,
   createGrowthService,
+  createInboxService,
   followChatLink,
   type ApiContext,
   type ApiScope,
@@ -20,7 +24,8 @@ import { startWhatsAppFixture, type Company, type WhatsAppFixture } from './what
  * company's links as the Growth pages do, with the same clicks and attributed conversations,
  * archived ones when asked, and each link with its clicks per day; another company's links are
  * never read. Keys add links on the company's active numbers, once per Idempotency-Key, change,
- * archive and restore them from a version, recorded as the key's.
+ * archive and restore them from a version, recorded as the key's. Conversations give their latest
+ * source as the inbox shows it, and are found by source and chat link (ADR-301).
  */
 let fx: WhatsAppFixture;
 
@@ -33,6 +38,7 @@ afterAll(async () => {
 });
 
 const growth = () => createGrowthService({ db: fx.dbs.app, clock: systemClock });
+const inbox = () => createInboxService({ db: fx.dbs.app, clock: systemClock });
 const keys = () => createApiKeysService({ db: fx.dbs.app, clock: systemClock });
 const deps = () => ({
   db: fx.dbs.app,
@@ -336,5 +342,138 @@ describe('chat links written through the API (ADR-300)', () => {
         ),
       ).rejects.toThrow(/chat_links_author/);
     }
+  });
+});
+
+/** A customer's text message, sent at `timestamp` (seconds), with an ad referral when given. */
+function customerMessage(
+  c: Company,
+  waId: string,
+  text: string,
+  timestamp: number,
+  referral?: Record<string, unknown>,
+) {
+  const body = fx.messagesBody(c, { messages: [{ waId, text, timestamp }] }) as {
+    entry: { changes: { value: { messages: Record<string, unknown>[] } }[] }[];
+  };
+  if (referral) body.entry[0]!.changes[0]!.value.messages[0]!.referral = referral;
+  return body;
+}
+
+async function conversationOf(c: Company, waId: string): Promise<string> {
+  const [row] = await fx.query<{ id: string }>(
+    `SELECT cv.id FROM app.conversations cv
+       JOIN app.contact_identities i ON i.tenant_id = cv.tenant_id AND i.contact_id = cv.contact_id
+      WHERE cv.tenant_id = $1 AND i.wa_id = $2`,
+    [c.tenant.id, waId],
+  );
+  if (!row) throw new Error('conversation not created');
+  return row.id;
+}
+
+describe('where conversations came from, through the API (ADR-301)', () => {
+  it('gives each conversation its latest source as the inbox does, and finds them by source or link', async () => {
+    const c = await fx.company();
+    const other = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const reader = await apiKey(c, ['conversations.read']);
+    const bio = await newLink(owner, c, 'Instagram bio', true);
+    const shop = await newLink(owner, c, 'Shop window', true);
+    const theirs = await newLink(await fx.ctx(other, other.owner), other, 'Their link', true);
+    const ad = {
+      source_url: 'https://fb.me/diwali',
+      source_id: '120200000000001',
+      source_type: 'ad',
+      headline: 'Diwali offer',
+      body: 'Twenty percent off every order this week',
+      ctwa_clid: 'ARAkLkA8rmlFeiCktEJQ-QTwRiyYHAFDLMNDBH0CD3qpjd0HR4irJ6LEkR7JwFF4XvnO2E4Nx0',
+    };
+    const now = Math.floor(Date.now() / 1000);
+
+    // Priya came from the bio link; Meera from the shop window, then from an ad; Ravi from neither.
+    await fx.deliver(customerMessage(c, '919811100601', `Hello (ref ${bio.refCode})`, now - 300));
+    await fx.deliver(customerMessage(c, '919811100602', `Hi (ref ${shop.refCode})`, now - 200));
+    await fx.deliver(customerMessage(c, '919811100602', 'Is the offer still on?', now - 100, ad));
+    await fx.deliver(customerMessage(c, '919811100603', 'Just a question', now - 50));
+    await fx.deliver(customerMessage(other, '919811100604', `Hi (ref ${theirs.refCode})`, now));
+    const priya = await conversationOf(c, '919811100601');
+    const meera = await conversationOf(c, '919811100602');
+    const ravi = await conversationOf(c, '919811100603');
+    const theirConversation = await conversationOf(other, '919811100604');
+
+    const fromBio = await apiGetConversation(deps(), reader, priya);
+    expect(fromBio.source).toEqual({
+      kind: 'link',
+      at: new Date((now - 300) * 1000).toISOString(),
+      chatLink: { id: bio.id, name: 'Instagram bio' },
+      ad: null,
+    });
+    // The latest source counts, as the inbox shows it; never the ad click id or the ad's text.
+    const fromAd = await apiGetConversation(deps(), reader, meera);
+    expect(fromAd.source).toEqual({
+      kind: 'ad',
+      at: new Date((now - 100) * 1000).toISOString(),
+      chatLink: null,
+      ad: {
+        id: '120200000000001',
+        type: 'ad',
+        headline: 'Diwali offer',
+        url: 'https://fb.me/diwali',
+      },
+    });
+    expect(JSON.stringify(fromAd)).not.toContain(ad.ctwa_clid);
+    expect(JSON.stringify(fromAd)).not.toContain('Twenty percent');
+    expect((await apiGetConversation(deps(), reader, ravi)).source).toBeNull();
+    for (const [id, read] of [
+      [priya, fromBio],
+      [meera, fromAd],
+    ] as const) {
+      const shown = (await inbox().getConversation(owner, id)).source;
+      expect(shown).toMatchObject({
+        kind: read.source!.kind,
+        linkId: read.source!.chatLink?.id ?? null,
+        linkName: read.source!.chatLink?.name ?? null,
+        adHeadline: read.source!.ad?.headline ?? null,
+        adSourceUrl: read.source!.ad?.url ?? null,
+        occurredAt: read.source!.at,
+      });
+    }
+    // Listed with the same source.
+    const listed = new Map(
+      (await apiListConversations(deps(), reader, {})).data.map((x) => [x.id, x.source]),
+    );
+    expect(listed).toEqual(
+      new Map([
+        [priya, fromBio.source],
+        [meera, fromAd.source],
+        [ravi, null],
+      ]),
+    );
+
+    // Found by any of their sources, not only the latest: Meera's conversation came from the shop
+    // window too. Another company's link finds nothing.
+    const ids = async (query: Record<string, string>, key = reader) =>
+      (await apiListConversations(deps(), key, query)).data.map((x) => x.id).sort();
+    expect(await ids({ source: 'link' })).toEqual([priya, meera].sort());
+    expect(await ids({ source: 'ad' })).toEqual([meera]);
+    expect(await ids({ chatLinkId: shop.id })).toEqual([meera]);
+    expect(await ids({ chatLinkId: bio.id, source: 'link' })).toEqual([priya]);
+    expect(await ids({ chatLinkId: bio.id, source: 'ad' })).toEqual([]);
+    expect(await ids({ chatLinkId: theirs.id })).toEqual([]);
+    expect(
+      await ids({ chatLinkId: theirs.id }, await apiKey(other, ['conversations.read'])),
+    ).toEqual([theirConversation]);
+
+    // The conversations a change finds by link: only Priya's is resolved.
+    const writer = await apiKey(c, ['conversations.read', 'conversations.write']);
+    const changed = await apiUpdateMatchingConversations(deps(), writer, {
+      filter: { chatLinkId: bio.id },
+      change: { status: 'resolved' },
+    });
+    expect(changed.data.map((x) => [x.id, x.status, x.source])).toEqual([
+      [priya, 'resolved', fromBio.source],
+    ]);
+    expect((await apiGetConversation(deps(), reader, meera)).status).toBe('open');
+    expect(await ids({ chatLinkId: bio.id, status: 'open' })).toEqual([]);
   });
 });

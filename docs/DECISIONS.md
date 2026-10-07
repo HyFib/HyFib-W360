@@ -11454,3 +11454,35 @@ Decision:
 
 Not built: deleting links (members archive them too), website buttons through the API, and choosing
 a link's reference or short link.
+
+## ADR-301 Where conversations came from, through the public API (P5-08) (2026-10-07)
+
+Context: the inbox shows where a conversation came from (ADR-044): the chat link whose reference the
+customer sent, or the click-to-WhatsApp ad they wrote from. Keys read conversations (ADR-072) and
+chat links with the conversations they started (ADR-299), but not which conversations those were, so
+a company could not take a campaign's conversations into its own tools or work through them there.
+
+Decision:
+
+- **Each conversation gives `source`**, its latest source as the inbox's source line shows it:
+  `kind` (`link` or `ad`), `at` (when the customer's message that carried it arrived), `chatLink`
+  (its `id` and `name`) for a link, and `ad` (Meta's `id` and `type` for it, its `headline` and web
+  address, as Meta sent them) for an ad; null when the conversation has neither.
+  `GET /conversations` and `GET /conversations/{id}` give it, as do the answers of the changes
+  (`PATCH /conversations/{id}`, `update-many`, `update-matching`). The ad click id, media addresses
+  and the ad's text are never stored (ADR-044), so never given.
+- **Two filters**, `source` (`link` or `ad`) and `chatLinkId`, on `GET /conversations` and on the
+  conversations a change finds (ADR-166): a conversation matches when any of its sources does, not
+  only the latest, so one a link started is still found after its customer writes from an ad; given
+  together, one source must match both. An unknown kind or an id that is not a UUID is refused
+  (422); another company's link finds nothing. A link's `last30Days.conversations` (ADR-299) counts
+  those of the last 30 days.
+- **No new scope:** the source comes with `conversations.read`, granted with `inbox.read_all`, as
+  members who read every conversation see the source line; a link's reference, short link and counts
+  still need `chat_links.read`.
+- **No migration:** the source is read with each conversation by one subquery on
+  `conversation_sources_conversation_idx` (0016), as the inbox reads it (`conversationSourceOf` in
+  `growth/sources.ts`), and the filters probe the same index for each conversation.
+
+Not built: a conversation's earlier sources, sources in webhook events, and the ads that brought
+conversations, which members see under Growth → Ads.

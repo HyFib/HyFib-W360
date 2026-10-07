@@ -992,6 +992,10 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    but not ADR-300), and gives links without `createdBy`; it always names the member who adds a
    link, so the check holds. Rolling web servers back does the same. Workers are unaffected.
 
+   ADR-301 has no migration. Until the web rollout ends, an old web server gives conversations
+   without `source` and refuses the `source` and `chatLinkId` filters of `GET /api/v1/conversations`
+   and `POST /api/v1/conversations/update-matching` (422); rolling web servers back does the same.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

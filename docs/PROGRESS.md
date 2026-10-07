@@ -1,5 +1,36 @@
 # Progress
 
+## 2026-10-07 — Where conversations came from, through the public API (P5-08, H-033, W-160, ADR-301)
+
+Status: **Implemented; its database tests run in CI only.** The inbox showed the chat link or
+click-to-WhatsApp ad a conversation came from, but keys could not read it or find a link's
+conversations. No migration. The local PostgreSQL is unavailable, so the integration test below was
+written but not run here.
+
+### Completed
+
+- **Domain:** `conversationSourceOf` in `growth/sources.ts` (the inbox's latest source as one SQL
+  subquery); `source` on every conversation the API gives (`ApiConversationSource`, `toApiSource`)
+  and the `source` and `chatLinkId` filters (`conversationFilterSql`) in `api/conversations.ts`; the
+  OpenAPI schema and parameters.
+- **Tests:** unit (`api/conversation-sources.test.ts`, 3 new: the filters and their SQL, the latest
+  source for a link, an ad and none, the OpenAPI entries); integration (1 new in
+  `api-chat-links.test.ts`; the exact conversation in `api.test.ts` gives `source: null`). Written
+  for CI; the integration test was not run here. No e2e test.
+- **Docs:** ADR-301; ARCHITECTURE; SECURITY; THREAT-MODEL T269; DEPLOYMENT; RUNBOOKS; BACKLOG P5-08;
+  feature matrix H-033 and W-160.
+- **Mutation checks:** 30/30 deliberate regressions caught, two after the tests were tightened.
+
+### Test commands and results (local, 2026-10-07)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 136 files, 1284 tests                                         |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
 ## 2026-10-07 — Chat links written through the public API (P5-08, H-033, W-160, ADR-300)
 
 Status: **Implemented; its database tests run in CI only.** Keys read the company's chat links

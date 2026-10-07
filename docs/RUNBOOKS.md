@@ -2140,6 +2140,14 @@ a stage of another pipeline, an owner who cannot use the CRM, or a lost reason w
 asks for the deal as it already is changes nothing and answers 200. The timeline shows each change
 "through the API"; the audit log has `crm.deal_updated` with the key and what changed.
 
+**A conversation's `source` is null, or the `source` and `chatLinkId` filters miss a conversation
+(ADR-301).** A source is recorded only when the customer's message carries a link's reference, "(ref
+CODE)", on the number the link opens, or arrives from a click-to-WhatsApp ad with its referral
+(ADR-044): a customer who deletes the reference from the message is not attributed, and a link
+without its reference counts nothing. Erasing a contact deletes its sources. `source` gives the
+latest source; the filters match any of them. An unknown kind or an id that is not a UUID answers
+422; so do the filters on an old web server during a rollout, which also gives no `source`.
+
 **Adding or changing a chat link through the API answers 403, 404, 409, 422 or 423 (ADR-300).** 403:
 the key lacks `chat_links.write` (its creator needed `campaigns.write`), or the plan leaves it out
 (reason `not_in_plan`). 404: the id is not one of the company's links. 409: the company has 500
