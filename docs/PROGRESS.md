@@ -1,5 +1,37 @@
 # Progress
 
+## 2026-10-07 — Webhook events for CRM tasks (P5-09, P4-04, H-014, ADR-261)
+
+Status: **Implemented; its database tests run in CI only.** Integrations could read and change tasks
+through the API but not hear of them. The local PostgreSQL is unavailable, so the migrations and the
+integration tests below were written but not run here.
+
+### Completed
+
+- **Database:** migration 0177 (the endpoints' and events' type checks with `task.created` and
+  `task.status_changed`, the capture function and two triggers on `app.crm_tasks`) and 0178
+  (validates the events' type check).
+- **Domain:** the two types in the registry and the database's list; their payload schemas and
+  builder (`taskOf`), never with notes; the OpenAPI webhooks and the wording that task events belong
+  to no number, in Settings too.
+- **Tests:** unit (2 new in `webhooks.test.ts`, and the lists of event types and of events on no
+  number updated); integration (2 new in `webhook-events.test.ts`). Written for CI; the integration
+  tests were not run here. No e2e test.
+- **Docs:** ADR-261; ARCHITECTURE; SECURITY; THREAT-MODEL T230; DEPLOYMENT; RUNBOOKS; BACKLOG P5-09
+  and P4-04; feature matrix W-138, H-014 and H-012.
+- **Mutation checks:** 17/17 deliberate regressions caught.
+
+### Test commands and results (local, 2026-10-07)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 1105 passed (117 files)                                       |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| Mutation checks                                    | 17/17 deliberate regressions caught                           |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
 ## 2026-10-07 — Changing CRM tasks through the public API (P5-08, P4-04, H-033, ADR-260)
 
 Status: **Implemented; its database and browser tests run in CI only.** Keys could create tasks

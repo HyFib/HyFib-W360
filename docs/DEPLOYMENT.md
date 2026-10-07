@@ -665,6 +665,14 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    `PATCH /api/v1/tasks/{id}` with 405 and describes the scope as creating tasks only; rolling web
    servers back does the same. Workers are not affected.
 
+   Migration 0177 (ADR-261) replaces the endpoints' event check (validated at once) and the events'
+   type check (NOT VALID; 0178 validates it while captures go on), and adds two triggers on
+   `app.crm_tasks`. Workers roll out before web servers, so no endpoint takes the task events before
+   every worker can describe them. A worker from before it fails each task event's delivery without
+   an attempt (`payload_failed`; replay it once newer workers run), so before rolling workers back
+   to such an image, turn the task events off on the endpoints that take them. An old web server's
+   Settings and API do not offer them.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

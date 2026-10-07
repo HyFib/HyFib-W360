@@ -2128,6 +2128,14 @@ events, in the order the steps happened and possibly with the same `createdAt`; 
 and status its step left. An erased contact's deal is sent titled "Deal (contact erased)", without
 its contact's number or name or a lost reason.
 
+**An integration misses a task change, or a task event fails as gone (ADR-261).** Endpoints that
+take `task.created` or `task.status_changed` are sent one event per task added and per completion,
+cancellation or reopening, whoever made it; edits of its title, notes, due time, assignee or
+reminder send nothing (read the task with GET /tasks/{id}), and neither do reminders being sent,
+merges and erasure. Changes made while no endpoint took the type were not recorded and are not sent
+later. A delivery that failed with `event_gone` belonged to a task that no longer exists: erasing a
+contact deletes its tasks. Payloads never carry a task's notes.
+
 **A deal does not move to another pipeline through the API (ADR-257).** 409 with "This pipeline uses
 …; clear the deal's value (in …) before moving it" means the deal has a value in another currency:
 send `valueMinor` `null` in a request of its own, then move it (with a new value in the pipeline's

@@ -17,10 +17,12 @@ import {
 import {
   advanceAutomationRun,
   apiCreateDeal,
+  apiCreateTask,
   apiGetCampaign,
   apiStartAutomationRun,
   apiUpdateConversation,
   apiUpdateDeal,
+  apiUpdateTask,
   authenticateApiToken,
   automationRunEndedPayloadSchema,
   automationRunStartedPayloadSchema,
@@ -60,6 +62,8 @@ import {
   WebhookOAuthTokenCache,
   runCampaignTick,
   syncTemplates,
+  taskCreatedPayloadSchema,
+  taskStatusChangedPayloadSchema,
   WEBHOOK_EVENT_KEYS,
   type AutomationTrigger,
   type CatalogSyncDeps,
@@ -4228,6 +4232,316 @@ describe('deal events (ADR-256)', () => {
     expect(bodiesAt(gone.path)).toEqual([]);
 
     // An endpoint can take every event type, deals included.
+    const everything = await addEndpoint(c, [...WEBHOOK_EVENT_KEYS]);
+    expect(
+      await fx.query('SELECT event_types FROM app.webhook_endpoints WHERE id = $1', [
+        everything.id,
+      ]),
+    ).toEqual([{ event_types: [...WEBHOOK_EVENT_KEYS] }]);
+  });
+});
+
+describe('task events (ADR-261)', () => {
+  const crm = () =>
+    createCrmService({ db: fx.dbs.app, clock: systemClock, jobs: fx.jobs(), signer: fx.signer });
+  const TASK_EVENTS: WebhookEventType[] = ['task.created', 'task.status_changed'];
+  const payloadSchemas = {
+    'task.created': taskCreatedPayloadSchema,
+    'task.status_changed': taskStatusChangedPayloadSchema,
+  } as const;
+
+  /** A contact a member adds, with a number; its id and number. */
+  async function newContact(owner: TenantContext, name: string) {
+    const phone = `+${waId()}`;
+    const { id } = await contactsService().createContact(owner, { displayName: name, phone });
+    return { id, phone };
+  }
+
+  /** The company's task events in the order they were captured, with their delivery counts. */
+  const taskEventsOf = (c: Company) =>
+    fx.query<EventRow & { occurred_at: Date }>(
+      `SELECT e.id, e.type, e.status, e.detail, e.conversation_id, e.contact_id, e.occurred_at,
+              (SELECT count(*)::int FROM app.webhook_deliveries d
+                WHERE d.tenant_id = e.tenant_id AND d.event_id = e.id) AS deliveries
+         FROM app.webhook_events e
+        WHERE e.tenant_id = $1 AND e.type LIKE 'task.%' ORDER BY e.occurred_at, e.id`,
+      [c.tenant.id],
+    );
+
+  /** The bodies the receiver got on a path, by event id: deliveries are sent concurrently. */
+  const bodiesById = (path: string) => new Map(bodiesAt(path).map((b) => [b.id, b]));
+
+  const taskIn = (body: { data: Record<string, unknown> } | undefined) =>
+    body?.data.task as Record<string, unknown>;
+
+  it('sends each task added and every completion, cancellation and reopening, from members, an automation and an API key', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const agent = await fx.ctx(c, c.agent);
+    const hook = await addEndpoint(c, TASK_EVENTS);
+    const closes = await addEndpoint(c, ['task.status_changed']);
+    const contactsOnly = await addEndpoint(c, ['contact.created']);
+    const svc = crm();
+    const jaya = await newContact(owner, 'Jaya');
+
+    // A member adds a task about Jaya, completes, reopens and cancels it; an edit of its details
+    // and reminder sends nothing. Another member adds a task about nobody.
+    const { id: taskId } = await svc.createTask(agent, {
+      title: 'Call Jaya',
+      assigneeMembershipId: agent.membership.id,
+      contactId: jaya.id,
+      dueAt: new Date(Date.now() + 86_400_000).toISOString(),
+    });
+    await svc.completeTask(agent, { id: taskId, expectedVersion: 1 });
+    await svc.reopenTask(agent, { id: taskId, expectedVersion: 2 });
+    await svc.updateTask(agent, {
+      id: taskId,
+      expectedVersion: 3,
+      title: 'Call Jaya back',
+      notes: 'Ring 98450 12345 after Diwali',
+      dueAt: null,
+      remindAt: new Date(Date.now() + 3_600_000).toISOString(),
+      assigneeMembershipId: owner.membership.id,
+    });
+    await svc.cancelTask(agent, { id: taskId, expectedVersion: 4 });
+    const { id: soloId } = await svc.createTask(owner, {
+      title: 'Order brochures',
+      assigneeMembershipId: owner.membership.id,
+    });
+
+    // An API key adds a task about Jaya and completes it; a retry changes nothing.
+    const created = await createApiKeysService({ db: fx.dbs.app, clock: systemClock }).create(
+      owner,
+      { name: 'Order system', scopes: ['tasks.write'], expiresInDays: 0 },
+    );
+    const key = await authenticateApiToken(fx.dbs.app, created.token, uuidv7());
+    if (!key) throw new Error('a new key does not authenticate');
+    const apiDeps = { db: fx.dbs.app, clock: systemClock, jobs: fx.jobs(), signer: fx.signer };
+    const response = await apiCreateTask(
+      apiDeps,
+      key,
+      { title: 'Confirm the delivery', assigneeId: agent.membership.id, contactId: jaya.id },
+      null,
+    );
+    const apiTaskId = (response.body as { data: { id: string } }).data.id;
+    await apiUpdateTask(apiDeps, key, apiTaskId, { status: 'done' });
+    await apiUpdateTask(apiDeps, key, apiTaskId, { status: 'done' });
+
+    // An automation adds a task for the customer who writes.
+    const automations = createAutomationService({
+      db: fx.dbs.app,
+      clock: systemClock,
+      jobs: fx.jobs(),
+      signer: fx.signer,
+    });
+    const { id: automationId } = await automations.createAutomation(owner, { name: 'Leads' });
+    const saved = await automations.updateAutomation(owner, {
+      id: automationId,
+      expectedVersion: 0,
+      name: 'Leads',
+      description: null,
+      channelAccountId: null,
+      trigger: {
+        type: 'keyword',
+        keywords: ['price'],
+        match: 'contains',
+        hours: 'any',
+        cooldownMinutes: 0,
+      },
+      graph: {
+        version: 1,
+        start: 'task',
+        nodes: [
+          {
+            id: 'task',
+            type: 'create_task',
+            title: 'Quote for {{name}}',
+            assigneeMembershipId: agent.membership.id,
+            dueInHours: 4,
+            next: null,
+          },
+        ],
+      },
+    });
+    expect(saved.issues).toEqual([]);
+    await automations.publishAutomation(owner, {
+      id: automationId,
+      expectedVersion: saved.version,
+      note: null,
+    });
+    const from = waId();
+    const { conversation_id: conversationId, contact_id: customerId } = await inbound(
+      c,
+      from,
+      'what is the price?',
+    );
+    const [run] = await fx.query<{ id: string }>(
+      'SELECT id FROM app.automation_runs WHERE conversation_id = $1',
+      [conversationId],
+    );
+    const advanced = await advanceAutomationRun(
+      {
+        db: fx.dbs.app,
+        jobs: fx.jobs(),
+        signer: fx.signer,
+        clock: systemClock,
+        keyring: fx.keyring,
+      },
+      authorizedTenantScope(c.tenant.id, null),
+      run!.id,
+      null,
+    );
+    expect(advanced.outcome).toBe('ended');
+    const [byRun] = await fx.query<{ id: string }>(
+      'SELECT id FROM app.crm_tasks WHERE tenant_id = $1 AND created_by_automation_id = $2',
+      [c.tenant.id, automationId],
+    );
+    const runTaskId = byRun!.id;
+
+    // One event per addition and status change, in order, each to the endpoints that take it.
+    const events = await taskEventsOf(c);
+    expect(events.map((e) => [e.type, e.status, e.detail, e.contact_id, e.deliveries])).toEqual([
+      ['task.created', 'open', { taskId }, jaya.id, 1],
+      ['task.status_changed', 'done', { taskId, previousStatus: 'open' }, jaya.id, 2],
+      ['task.status_changed', 'open', { taskId, previousStatus: 'done' }, jaya.id, 2],
+      ['task.status_changed', 'cancelled', { taskId, previousStatus: 'open' }, jaya.id, 2],
+      ['task.created', 'open', { taskId: soloId }, null, 1],
+      ['task.created', 'open', { taskId: apiTaskId }, jaya.id, 1],
+      ['task.status_changed', 'done', { taskId: apiTaskId, previousStatus: 'open' }, jaya.id, 2],
+      ['task.created', 'open', { taskId: runTaskId }, customerId, 1],
+    ]);
+    expect(events.every((e) => e.conversation_id === null)).toBe(true);
+
+    // Built when delivered: the status and the one before it as captured, the rest as it is now,
+    // never the notes.
+    await deliverDue(c);
+    const bodies = bodiesById(hook.path);
+    expect([...bodies.keys()].sort()).toEqual(events.map((e) => e.id).sort());
+    const delivered = events.map((e) => bodies.get(e.id)!);
+    for (const body of delivered) {
+      const schema = payloadSchemas[body.type as keyof typeof payloadSchemas];
+      expect(schema.safeParse(body).success).toBe(true);
+      expect(JSON.stringify(body)).not.toContain('98450');
+    }
+    expect(delivered.map((b) => b.createdAt)).toEqual(
+      events.map((e) => e.occurred_at.toISOString()),
+    );
+    expect(
+      delivered.map((b) => {
+        const t = taskIn(b);
+        return [b.type, t.id, t.status, t.previousStatus, t.createdBy];
+      }),
+    ).toEqual([
+      ['task.created', taskId, 'open', null, 'member'],
+      ['task.status_changed', taskId, 'done', 'open', 'member'],
+      ['task.status_changed', taskId, 'open', 'done', 'member'],
+      ['task.status_changed', taskId, 'cancelled', 'open', 'member'],
+      ['task.created', soloId, 'open', null, 'member'],
+      ['task.created', apiTaskId, 'open', null, 'api'],
+      ['task.status_changed', apiTaskId, 'done', 'open', 'api'],
+      ['task.created', runTaskId, 'open', null, 'automation'],
+    ]);
+    const [jayaTask] = await fx.query<{ created_at: Date }>(
+      'SELECT created_at FROM app.crm_tasks WHERE id = $1',
+      [taskId],
+    );
+    for (const body of delivered.slice(0, 4)) {
+      expect(taskIn(body)).toMatchObject({
+        title: 'Call Jaya back',
+        dueAt: null,
+        assigneeId: owner.membership.id,
+        dealId: null,
+        createdAt: jayaTask!.created_at.toISOString(),
+      });
+      expect(body.data.contact).toEqual({ id: jaya.id, phone: jaya.phone, name: 'Jaya' });
+    }
+    expect(delivered[4]!.data.contact).toBeNull();
+    // The automation's task is due four hours after its step ran, about its customer.
+    expect(taskIn(delivered[7])).toMatchObject({
+      title: 'Quote for Priya Customer',
+      assigneeId: agent.membership.id,
+      dueAt: expect.any(String),
+    });
+    expect(delivered[7]!.data.contact).toEqual({
+      id: customerId,
+      phone: `+${from}`,
+      name: 'Priya Customer',
+    });
+    // An endpoint for status changes hears only those; one for contacts hears no task.
+    expect([...bodiesById(closes.path).keys()].sort()).toEqual(
+      events
+        .filter((e) => e.type === 'task.status_changed')
+        .map((e) => e.id)
+        .sort(),
+    );
+    expect(bodiesAt(contactsOnly.path).map((b) => b.type)).toEqual([
+      'contact.created',
+      'contact.created',
+    ]);
+  });
+
+  it('sends nothing without an endpoint for tasks or for a merge or an erasure, names the contact a merge gave, and fails a delivery whose task erasure deleted', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const svc = crm();
+    // No endpoint takes task events: a task and its changes capture nothing.
+    await addEndpoint(c, ['contact.created', 'deal.created']);
+    const quiet = await newContact(owner, 'Quiet');
+    const { id: quietTask } = await svc.createTask(owner, {
+      title: 'Quiet task',
+      assigneeMembershipId: owner.membership.id,
+      contactId: quiet.id,
+    });
+    await svc.completeTask(owner, { id: quietTask, expectedVersion: 1 });
+    expect(await taskEventsOf(c)).toEqual([]);
+
+    // An endpoint that names numbers still receives task events: they happen on no number.
+    const hook = await addNumberEndpoint(
+      c,
+      ['task.created', 'task.status_changed', 'message.received'],
+      [c.channelAccountId],
+    );
+    // A customer who wrote by WhatsApp user id gets a task; merged into a contact a member added,
+    // the task moves with it and the merge captures nothing.
+    const merged = await writesByUserId(c);
+    const { id: movedTask } = await svc.createTask(owner, {
+      title: 'Send the catalogue',
+      assigneeMembershipId: owner.membership.id,
+      contactId: merged,
+    });
+    const kept = await newContact(owner, 'Asha');
+    await createContactMergeService({ db: fx.dbs.app, clock: systemClock }).mergeContacts(owner, {
+      keepContactId: kept.id,
+      mergeContactId: merged,
+    });
+    expect((await taskEventsOf(c)).map((e) => [e.type, e.contact_id, e.deliveries])).toEqual([
+      ['task.created', merged, 1],
+    ]);
+    // Delivered after the merge, it names the contact the task belongs to now.
+    await deliverDue(c);
+    const [added] = bodiesAt(hook.path).filter((b) => b.type.startsWith('task.'));
+    expect(taskIn(added)).toMatchObject({ id: movedTask, title: 'Send the catalogue' });
+    expect(added!.data.contact).toEqual({ id: kept.id, phone: kept.phone, name: 'Asha' });
+
+    // Completed, then erased before its delivery: erasure deletes the task, captures nothing, and
+    // the completion fails without an attempt.
+    await svc.completeTask(owner, { id: movedTask, expectedVersion: 1 });
+    await contactsService().eraseContact(owner, { contactId: kept.id, suppress: false });
+    const events = await taskEventsOf(c);
+    expect(events.map((e) => [e.type, e.status])).toEqual([
+      ['task.created', 'open'],
+      ['task.status_changed', 'done'],
+    ]);
+    await deliverDue(c);
+    expect(
+      await fx.query(
+        'SELECT state, attempts, last_error FROM app.webhook_deliveries WHERE event_id = $1',
+        [events[1]!.id],
+      ),
+    ).toEqual([{ state: 'failed', attempts: 0, last_error: 'event_gone' }]);
+    expect(bodiesAt(hook.path).filter((b) => b.type === 'task.status_changed')).toEqual([]);
+
+    // An endpoint can take every event type, tasks included.
     const everything = await addEndpoint(c, [...WEBHOOK_EVENT_KEYS]);
     expect(
       await fx.query('SELECT event_types FROM app.webhook_endpoints WHERE id = $1', [

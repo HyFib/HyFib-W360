@@ -19,11 +19,13 @@ import {
   conversations,
   crmDeals,
   crmPipelines,
+  crmTasks,
   DEAL_STATUSES,
   eq,
   messageTemplates,
   messages,
   ORDER_STATUSES,
+  TASK_STATUSES,
   type Tx,
   type WebhookEventType,
 } from '@w360/db';
@@ -630,6 +632,54 @@ export const dealStatusChangedPayloadSchema = envelope(
   webhookDealDataSchema,
 );
 
+const taskStatusSchema = z.enum(TASK_STATUSES);
+
+/**
+ * A CRM task as its events give it (ADR-261): its status (and the one before it) as the event left
+ * it, the rest as it is when the event is delivered. Never its notes: GET /tasks/{id} reads them.
+ */
+const webhookTaskSchema = z.object({
+  id: z.uuid().describe('The task, as GET /tasks/{id} reads it with `tasks.read`.'),
+  title: z.string().describe('The task’s title when the event is delivered.'),
+  status: taskStatusSchema.describe(
+    'The task’s status as this event left it: for task.status_changed, the new one.',
+  ),
+  previousStatus: taskStatusSchema
+    .nullable()
+    .describe('task.status_changed: the status before it. Null for task.created.'),
+  dueAt: z.iso
+    .datetime()
+    .nullable()
+    .describe('When the task is due, when the event is delivered; null when it has no due time.'),
+  assigneeId: z
+    .uuid()
+    .describe(
+      'The member the task is assigned to when the event is delivered (an id from GET /members).',
+    ),
+  dealId: z
+    .uuid()
+    .nullable()
+    .describe(
+      'The deal the task is about, as GET /deals/{id} reads it; null when it is about none.',
+    ),
+  createdBy: z
+    .enum(['member', 'automation', 'api'])
+    .describe('Who added the task: a member, an automation’s run or an API key.'),
+  createdAt: z.iso.datetime(),
+});
+const webhookTaskDataSchema = z.object({
+  task: webhookTaskSchema,
+  contact: contactSchema
+    .nullable()
+    .describe('The customer the task is about, as it is now; null when it is about none.'),
+});
+
+export const taskCreatedPayloadSchema = envelope('task.created', webhookTaskDataSchema);
+export const taskStatusChangedPayloadSchema = envelope(
+  'task.status_changed',
+  webhookTaskDataSchema,
+);
+
 export const pingPayloadSchema = envelope(
   'ping',
   z.object({ endpointId: z.uuid(), message: z.string() }),
@@ -991,6 +1041,27 @@ async function dealOf(tx: Tx, tenantId: string, dealId: string | null) {
   return row ?? null;
 }
 
+/** A task with what its events give as it is now (ADR-261), or null once it is gone. */
+async function taskOf(tx: Tx, tenantId: string, taskId: string | null) {
+  if (!taskId || !z.uuid().safeParse(taskId).success) return null;
+  const [row] = await tx
+    .select({
+      id: crmTasks.id,
+      title: crmTasks.title,
+      status: crmTasks.status,
+      dueAt: crmTasks.dueAt,
+      assigneeId: crmTasks.assigneeMembershipId,
+      contactId: crmTasks.contactId,
+      dealId: crmTasks.dealId,
+      automationId: crmTasks.createdByAutomationId,
+      apiKeyId: crmTasks.createdByApiKeyId,
+      createdAt: crmTasks.createdAt,
+    })
+    .from(crmTasks)
+    .where(and(eq(crmTasks.tenantId, tenantId), eq(crmTasks.id, taskId)));
+  return row ?? null;
+}
+
 /** A WhatsApp order with its items in cart order and its number, in the company. */
 async function orderOf(tx: Tx, tenantId: string, orderId: string | null) {
   if (!orderId || !z.uuid().safeParse(orderId).success) return null;
@@ -1301,6 +1372,31 @@ export async function buildWebhookPayload(
           },
           conversation: deal.conversationId ? { id: deal.conversationId } : null,
           contact: await contactOf(tx, tenantId, deal.contactId),
+        },
+      };
+    }
+    case 'task.created':
+    case 'task.status_changed': {
+      // The status, and the one before it, as captured; the rest as it is now. Erasing a contact
+      // deletes its tasks, so an erased contact's task is gone and its events send nothing.
+      const task = await taskOf(tx, tenantId, str(event.detail.taskId));
+      if (!task) throw new WebhookEventGoneError();
+      return {
+        ...base,
+        data: {
+          task: {
+            id: task.id,
+            title: task.title,
+            status: event.status ?? task.status,
+            previousStatus:
+              event.type === 'task.status_changed' ? str(event.detail.previousStatus) : null,
+            dueAt: task.dueAt?.toISOString() ?? null,
+            assigneeId: task.assigneeId,
+            dealId: task.dealId,
+            createdBy: task.apiKeyId ? 'api' : task.automationId ? 'automation' : 'member',
+            createdAt: task.createdAt.toISOString(),
+          },
+          contact: await contactOf(tx, tenantId, task.contactId),
         },
       };
     }

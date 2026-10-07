@@ -280,9 +280,10 @@ verification, app review, Embedded Signup configuration).
   recorded under P5-08). **[Creating tasks through the public API built; its database tests run only
   in CI]** (ADR-259, migrations 0175 and 0176; recorded under P5-08). **[Changing tasks through the
   public API built; its database tests run only in CI]** (ADR-260, no migration; recorded under
-  P5-08). **Remaining:** custom deal fields, products on deals, deal import, CRM connectors
-  (HubSpot, Salesforce, Zoho: integrations), reminder emails through the production SMTP provider
-  (release checklist).
+  P5-08). **[Task webhook events built; their database tests run only in CI]** (ADR-261, migrations
+  0177 and 0178; recorded under P5-09). **Remaining:** custom deal fields, products on deals, deal
+  import, CRM connectors (HubSpot, Salesforce, Zoho: integrations), reminder emails through the
+  production SMTP provider (release checklist).
 - **P4-05 Growth tools** — _implemented and locally verified (2026-09-27); no live WhatsApp or ad
   traffic yet_: click-to-chat links (a short link that counts clicks per link and company day
   without any visitor data and redirects to wa.me with a pre-filled message and an optional
@@ -970,6 +971,10 @@ verification, app review, Embedded Signup configuration).
   deal added, moved, won, lost or reopened, by members, automations or API keys; one change of both
   the stage and the status sends both, in the order the steps happen, each with the deal as its step
   left it; erasure, merges and edits of a deal's details send nothing; no filter narrows them).
+  **[CRM task events built; their database tests run only in CI]** (ADR-261, migrations 0177 and
+  0178: `task.created` for every task added, by members, automations or API keys, and
+  `task.status_changed` for every completion, cancellation and reopening; never a task's notes;
+  edits, reminders, merges and erasure send nothing; no filter narrows them).
   Remaining: filters for other event types (deal events by pipeline, stage or owner among them) and
   on a message's or contact's values (such as by tag or a field's value, or the key that started a
   run), other authentication (headers computed per delivery, other OAuth grants), mutual TLS, fixed

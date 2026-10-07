@@ -157,6 +157,13 @@ Phase 3 rules on top of the matrix (enforced in domain services and re-checked w
   company alone, and only when one of its active endpoints takes it. No number, team or member
   filter narrows deal events, which Settings and the OpenAPI document say, so a filter cannot be
   mistaken for keeping them from an endpoint.
+- Integrations hear of CRM tasks (ADR-261) through the company's own endpoints only: `task.created`
+  and `task.status_changed` give the task's title, statuses, due time, assignee and deal ids, its
+  creator and its contact as the API describes it, never its notes (free text members write;
+  `tasks.read` reads them). The triggers run as whoever changes the task, so an event is captured
+  for that company alone, and only when one of its active endpoints takes it; erasing a contact
+  deletes its tasks, so their pending events are not delivered (`event_gone`). No filter narrows
+  task events, which Settings and the OpenAPI document say.
 - Customers' numbers (ADR-226): a company's owners and administrators choose the roles (supervisor,
   agent, marketer, analyst) whose members see them masked; the context leaves out
   `contacts.view_numbers` for a member whose every role that grants it is masked, and the services

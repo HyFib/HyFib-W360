@@ -1717,6 +1717,15 @@ true`); the same key with another request (method, path and body hashed) answers
   captured; the title, value in minor units, pipeline currency, owner id, expected date, lost reason
   and creator (member, automation or key) as they are then; the conversation the deal was created
   from and the contact.
+- **Task events** (migrations 0177–0178, ADR-261): triggers on `app.crm_tasks` capture
+  `task.created` when a task is inserted (members, the runner's task steps, keys) and
+  `task.status_changed` when an update changes its status (members, keys through `apiUpdateTask`),
+  through `app.capture_webhook_event`: the task id, and the status before a change, in `detail`,
+  with the task's contact and no conversation, so no filter narrows them, stamped with
+  `clock_timestamp()`. Edits, reminders and merges leave the status, and erasure deletes the row, so
+  they capture nothing. Their payloads are built when delivered (`taskOf`): the statuses as
+  captured; the title, due time, assignee id, deal id and creator as they are then, and the contact
+  or null; never the notes.
 - **Dispatch:** the worker's LISTEN connection (`apps/worker/src/webhook-listener.ts`) turns a
   notification into a lookup of active companies with due deliveries (`ops.webhook_dispatch_due`,
   SECURITY DEFINER), at most one lookup every 250 ms; the per-minute messaging sweep does the same

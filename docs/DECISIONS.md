@@ -9862,3 +9862,30 @@ Decision:
 
 Not built: changing a task's contact or deal, deleting tasks (members cannot either), and task
 webhook events.
+
+## ADR-261 Webhook events for CRM tasks (P5-09, P4-04) (2026-10-07)
+
+Context: integrations could read, create and change tasks through the API (ADR-258 to ADR-260) and
+hear of deals (ADR-256), but had to poll to learn that a member added a follow-up, completed it or
+reopened it.
+
+Decision:
+
+- **Two events:** `task.created` ("Task added") when a task is added, by a member, an automation's
+  run or an API key, and `task.status_changed` ("Task done, cancelled or reopened") when a task is
+  completed, cancelled or reopened, by a member or a key (automations add tasks only). Edits of a
+  task's details or reminder, a reminder being sent, a merge moving a task to another contact and
+  erasure deleting it change no status, so they send nothing.
+- **Captured as the deal events are (0171):** triggers on `app.crm_tasks` call
+  `app.capture_webhook_event` with the task id, and the status before a change, in `detail`, the
+  task's contact (none for a task about nobody) and the status it reports, stamped when captured,
+  and only when an active endpoint of the company takes the type; no number, team or member filter
+  narrows them (migration 0177; 0178 validates the events' type check).
+- **Payloads built when delivered:** the status and the one before it as captured; the title, due
+  time, assignee id, deal id and creator (member, automation or key) as the task is then, and its
+  contact as the API describes it, or null. Never the task's notes, which may hold anything a member
+  wrote; `GET /tasks/{id}` reads them with `tasks.read`. Erasing a contact deletes its tasks, so a
+  delivery whose task is gone fails without an attempt (`event_gone`).
+
+Not built: events for edits, reassignments or sent reminders, and filters narrowing task events (by
+assignee, say).

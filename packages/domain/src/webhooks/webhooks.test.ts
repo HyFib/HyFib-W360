@@ -14,7 +14,9 @@ import {
   DEAL_STATUSES,
   MESSAGE_TYPES,
   ORDER_STATUSES,
+  TASK_STATUSES,
   TEMPLATE_STATUSES,
+  WEBHOOK_EVENT_TYPES,
 } from '@w360/db';
 import { apiCampaignResultsSchema } from '../api/campaigns';
 import { apiContactSchema } from '../api/contact-view';
@@ -94,6 +96,8 @@ import {
   dealCreatedPayloadSchema,
   dealStageChangedPayloadSchema,
   dealStatusChangedPayloadSchema,
+  taskCreatedPayloadSchema,
+  taskStatusChangedPayloadSchema,
   consentChangedPayloadSchema,
   contactCreatedPayloadSchema,
   contactErasedPayloadSchema,
@@ -1230,6 +1234,85 @@ describe('webhook payload schemas', () => {
     ).toBe(false);
   });
 
+  it('describe the task events, without notes (ADR-261)', () => {
+    const task = {
+      id: base.id,
+      title: 'Call Jaya back',
+      status: 'open',
+      previousStatus: null,
+      dueAt: base.createdAt,
+      assigneeId: base.id,
+      dealId: null,
+      createdBy: 'member',
+      createdAt: base.createdAt,
+    };
+    const person = { id: base.id, phone: '+919876543210', name: 'Jaya' };
+    const created = { ...base, type: 'task.created', data: { task, contact: person } };
+    expect(taskCreatedPayloadSchema.safeParse(created).success).toBe(true);
+    // A task about a deal or about nobody, without a due time, by each kind of creator.
+    for (const createdBy of ['member', 'automation', 'api']) {
+      expect(
+        taskCreatedPayloadSchema.safeParse({
+          ...created,
+          data: { task: { ...task, dealId: base.id, dueAt: null, createdBy }, contact: null },
+        }).success,
+        createdBy,
+      ).toBe(true);
+    }
+    // Every status a task can reach, from every other one.
+    for (const status of TASK_STATUSES) {
+      for (const previousStatus of TASK_STATUSES) {
+        expect(
+          taskStatusChangedPayloadSchema.safeParse({
+            ...created,
+            type: 'task.status_changed',
+            data: { ...created.data, task: { ...task, status, previousStatus } },
+          }).success,
+          `${previousStatus} → ${status}`,
+        ).toBe(true);
+      }
+    }
+    // An unknown status or creator, an id or time that is not one, a field left out, or another
+    // type is not described.
+    for (const change of [
+      { status: 'closed' },
+      { previousStatus: 'won' },
+      { createdBy: 'import' },
+      { assigneeId: 'agent-1' },
+      { dueAt: '2026-10-09' },
+      { dealId: undefined },
+    ]) {
+      expect(
+        taskCreatedPayloadSchema.safeParse({
+          ...created,
+          data: { ...created.data, task: { ...task, ...change } },
+        }).success,
+        JSON.stringify(change),
+      ).toBe(false);
+    }
+    expect(taskStatusChangedPayloadSchema.safeParse(created).success).toBe(false);
+    expect(taskCreatedPayloadSchema.safeParse({ ...created, data: { task } }).success).toBe(false);
+    // A task is sent without its notes, which GET /tasks/{id} reads.
+    expect(Object.keys(taskCreatedPayloadSchema.shape.data.shape.task.shape)).toEqual([
+      'id',
+      'title',
+      'status',
+      'previousStatus',
+      'dueAt',
+      'assigneeId',
+      'dealId',
+      'createdBy',
+      'createdAt',
+    ]);
+    // The database takes exactly the events the API describes, in its order.
+    expect([...WEBHOOK_EVENT_TYPES]).toEqual([...WEBHOOK_EVENT_KEYS]);
+    expect(WEBHOOK_EVENT_INFO['task.created'].label).toBe('Task added');
+    expect(WEBHOOK_EVENT_INFO['task.status_changed']).toEqual({
+      label: 'Task done, cancelled or reopened',
+      description: 'A CRM task was completed, cancelled or reopened: by a member or an API key.',
+    });
+  });
+
   it('refuse a body of another type or with an unknown status', () => {
     expect(pingPayloadSchema.safeParse({ ...base, type: 'message.status', data: {} }).success).toBe(
       false,
@@ -1380,6 +1463,8 @@ describe('the OpenAPI document', () => {
       'deal.created',
       'deal.stage_changed',
       'deal.status_changed',
+      'task.created',
+      'task.status_changed',
     ]);
     const schemas = doc.components.schemas as Record<string, unknown>;
     const parameters = doc.components.parameters as Record<string, { name: string }>;
@@ -1418,7 +1503,7 @@ describe('the OpenAPI document', () => {
     expect(text('deal.status_changed')).toContain('with the stage and pipeline it was in');
     // No filter narrows them: an endpoint that names numbers still receives every one it takes.
     expect(doc.info.description).toContain(
-      'still every consent, contact, template and deal event it takes',
+      'still every consent, contact, template, deal and task event it takes',
     );
     const schemas = doc.components.schemas as unknown as Record<
       string,
@@ -1426,14 +1511,39 @@ describe('the OpenAPI document', () => {
     >;
     const described = (schema: string) => schemas[schema]?.properties.channelIds?.description;
     expect(described('WebhookEndpoint')).toContain(
-      'Consent, contact, template and deal events are not narrowed.',
+      'Consent, contact, template, deal and task events are not narrowed.',
     );
     expect(described('CreateWebhookEndpoint')).toContain(
-      'Consent, contact, template and deal events belong to no number',
+      'Consent, contact, template, deal and task events belong to no number',
     );
     expect(
       Object.keys(doc.components.schemas).filter((name) => name.startsWith('WebhookDeal')),
     ).toEqual(['WebhookDealCreated', 'WebhookDealStageChanged', 'WebhookDealStatusChanged']);
+  });
+
+  it('describes the task events: the change, what is never sent and what sends nothing (ADR-261)', () => {
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const text = (type: 'task.created' | 'task.status_changed') =>
+      doc.webhooks[type].post.description;
+    for (const words of [
+      'by a member, an automation or an API key',
+      'task.status is the one it was added with',
+      'A task’s notes are never sent: read the task with GET /tasks/{id} (`tasks.read`).',
+      'the events of an erased contact’s task are no longer delivered',
+    ]) {
+      expect(text('task.created')).toContain(words);
+    }
+    for (const words of [
+      'by a member or an API key',
+      'task.status and task.previousStatus are the change (open, done or cancelled)',
+      'Editing a task’s details or its reminder sends nothing.',
+      'the latest change is the one with the latest createdAt',
+    ]) {
+      expect(text('task.status_changed')).toContain(words);
+    }
+    expect(
+      Object.keys(doc.components.schemas).filter((name) => name.startsWith('WebhookTask')),
+    ).toEqual(['WebhookTaskCreated', 'WebhookTaskStatusChanged']);
   });
 
   it('builds no body for an event type it does not know, before reading anything', async () => {
@@ -2137,6 +2247,8 @@ describe('number filters (ADR-170)', () => {
       'deal.created': dealCreatedPayloadSchema,
       'deal.stage_changed': dealStageChangedPayloadSchema,
       'deal.status_changed': dealStatusChangedPayloadSchema,
+      'task.created': taskCreatedPayloadSchema,
+      'task.status_changed': taskStatusChangedPayloadSchema,
     } satisfies Record<(typeof WEBHOOK_EVENT_KEYS)[number], unknown>;
     for (const type of WEBHOOK_EVENT_KEYS) {
       const onANumber = WEBHOOK_CHANNEL_EVENTS.some((t) => t === type);
