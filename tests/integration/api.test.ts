@@ -3897,7 +3897,7 @@ describe('WhatsApp orders (ADR-167)', () => {
       await expectAppError(
         change(waiting.id, { status }),
         'conflict',
-        /members cancel its Payment Link in the app first\. This order's status is awaiting_payment\.$/,
+        /cancel its Payment Link first, with POST \/orders\/\{id\}\/cancel-payment or in the app\. This order's status is awaiting_payment\.$/,
       );
     }
     await expectAppError(change(paid.id, { status: 'cancelled' }), 'conflict', /status is paid\.$/);

@@ -626,11 +626,11 @@ Phase 5 rules (Public API, P5-08):
   `contact_fields.manage` (ADR-115), `campaigns.read` and `campaigns.write` for the scopes of the
   same names (ADR-125, ADR-186), `campaigns.send` for `campaigns.stop` (ADR-128) and
   `campaigns.resume` (ADR-176), `commerce.read` for `orders.read` (ADR-167), `inbox.reply` for
-  `orders.write` (ADR-168), `channels.read` for the scope of the same name (ADR-171), `crm.read` for
-  `deals.read` (ADR-253), `tasks.read` (ADR-258) and `notes.read` (ADR-279), and `crm.write` for
-  `deals.write` (ADR-254, ADR-255), `tasks.write` (ADR-259) and `notes.write` (ADR-268). Nobody
-  grants a key more than they hold, and rotating needs the same. A key keeps the scopes it was
-  created with.
+  `orders.write` (ADR-168) and `orders.request_payment` (ADR-283), `channels.read` for the scope of
+  the same name (ADR-171), `crm.read` for `deals.read` (ADR-253), `tasks.read` (ADR-258) and
+  `notes.read` (ADR-279), and `crm.write` for `deals.write` (ADR-254, ADR-255), `tasks.write`
+  (ADR-259) and `notes.write` (ADR-268). Nobody grants a key more than they hold, and rotating needs
+  the same. A key keeps the scopes it was created with.
 - A request acts for the key's company only, as the key: its company comes from the key found by
   the token's hash, never from the path, body or headers, and data access runs in that company's
   scope (RLS). Audit rows name the key (`api_key`). Writing scopes are refused while the company is
@@ -824,6 +824,17 @@ Phase 5 rules (Public API, P5-08):
   waiting for payment is left to members, and a paid order is never cancelled. The change is audited
   as the key and moves the order's version on, so a member's page opened before it is refused as
   stale (unit tests; integration and e2e tests, run in CI only).
+- Asking for payment (ADR-283): `POST /orders/{id}/request-payment` and
+  `POST /orders/{id}/cancel-payment` need `orders.request_payment`, granted only with `inbox.reply`
+  (a key with `orders.write` alone asks for nothing), checked before anything is read and refused
+  while the company is suspended or restricted, and Commerce in the company's plan. They act on an
+  order of the key's company only (row security and an explicit company condition; another company's
+  order answers 404), with its row locked, through the members' checks: a received or confirmed
+  order, the whole cart, an amount in rupees within the bounds, and the company's own Razorpay
+  account checked, whose keys only the worker uses. They never mark an order paid: only a link
+  fetched from Razorpay does. The link names the key as its creator (a database check holds exactly
+  one creator), its message is sent as the key, and both requests are audited as the key (unit
+  tests; integration tests, run in CI only).
 - Reading numbers (ADR-171): `GET /channels` needs `channels.read`, granted only with the permission
   of the same name, checked before anything is read. It reads in the key's company only (row
   security and an explicit company condition), takes a page and a status from the list and nothing

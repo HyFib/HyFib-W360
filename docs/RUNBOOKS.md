@@ -2078,12 +2078,25 @@ these answers; the company's Razorpay account has them.
 **`PATCH /api/v1/orders/{id}` answers 409, 403 or 423 (ADR-168).** 409 `conflict` names the order's
 status: the move is not one members can make from it (a received order is confirmed or cancelled, a
 confirmed one fulfilled or cancelled, a paid one fulfilled), the order was not in the
-`expectedStatus` given, or it is waiting for payment, which members end by cancelling its Payment
-Link in the app. Read the order (`GET /orders/{id}`) and decide again; an order already in the
-status asked for answers 200, so a retry is safe. 403 `forbidden` names the scope the key lacks
-(`orders.write`, granted by members with `inbox.reply`), or with reason `not_in_plan` the company's
-plan leaves out Commerce or the scope. 423 means the company is suspended or its plan has ended;
-reading orders still works.
+`expectedStatus` given, or it is waiting for payment, which ends when its Payment Link is cancelled
+(`POST /orders/{id}/cancel-payment` with `orders.request_payment`, or members in the app). Read the
+order (`GET /orders/{id}`) and decide again; an order already in the status asked for answers 200,
+so a retry is safe. 403 `forbidden` names the scope the key lacks (`orders.write`, granted by
+members with `inbox.reply`), or with reason `not_in_plan` the company's plan leaves out Commerce or
+the scope. 423 means the company is suspended or its plan has ended; reading orders still works.
+
+**`POST /api/v1/orders/{id}/request-payment` or `cancel-payment` answers 409, 412, 403 or 423
+(ADR-283).** 409 `conflict` names the order's status: payment is asked for only for a received or
+confirmed order, once while a link is open (send an `Idempotency-Key` so a retry is safe), and
+cancelling needs an open link. 412 `precondition_failed` says what members are told on the order
+page: HyFib could not read the whole cart or work out its total, the total is not in rupees, below
+₹1 or above the most one link asks for, or the company's Razorpay account is missing or not checked
+(Commerce → Payments). 403 `forbidden` names the scope the key lacks (`orders.request_payment`,
+granted by members with `inbox.reply`; `orders.write` alone asks for no payment), or with reason
+`not_in_plan` the company's plan leaves out Commerce or the scope. 423 means the company is
+suspended or its plan has ended. An order waits for payment until Razorpay reports its link paid or
+ended; the order page shows the link ("through the API"), whether it was sent in the chat and why
+not, and `order.status_changed` events report the outcome.
 
 **`GET /api/v1/deals` or `GET /api/v1/pipelines` answers 403 or 404, or a deal seems missing
 (ADR-253).** 403 `forbidden` names the scope the key lacks, `deals.read` (keys keep the scopes they
@@ -2961,14 +2974,14 @@ it again.
 **Order events (ADR-085).** An endpoint that takes `order.received` or `order.status_changed` hears
 of WhatsApp orders only: store orders (Shopify, WooCommerce) send nothing, since the store reports
 them itself. Every status change is sent whoever makes it: a member (confirm, fulfil, cancel, ask
-for payment), an API key (confirm, fulfil, cancel; ADR-168) or the worker applying a Payment Link's
-outcome (paid, or back to confirmed when the link ends unpaid). A receiver that sees `paidAt` on an
-early event is reading the order as it was when that event was delivered; `order.status` and
-`order.previousStatus` are the change itself, and the latest change has the latest `createdAt`. A
-receiver that asks for the Payment Link address or Razorpay's payment id: payloads never carry them;
-the order page shows the link. A missing note on an order whose contact was erased is expected:
-erasure clears it (and sends no order event). The event keeps the order id, the status before a
-change and who made it (ADR-270) in `app.webhook_events.detail`.
+for payment), an API key (confirm, fulfil, cancel, ask for payment; ADR-168, ADR-283) or the worker
+applying a Payment Link's outcome (paid, or back to confirmed when the link ends unpaid). A receiver
+that sees `paidAt` on an early event is reading the order as it was when that event was delivered;
+`order.status` and `order.previousStatus` are the change itself, and the latest change has the
+latest `createdAt`. A receiver that asks for the Payment Link address or Razorpay's payment id:
+payloads never carry them; the order page shows the link. A missing note on an order whose contact
+was erased is expected: erasure clears it (and sends no order event). The event keeps the order id,
+the status before a change and who made it (ADR-270) in `app.webhook_events.detail`.
 
 **A receiver cannot tell who changed an order, or ignores a member's change (ADR-270).**
 `order.changedBy` says who made the change an `order.status_changed` event reports: `member` (the

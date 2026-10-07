@@ -200,7 +200,9 @@ export const commercePaymentLinks = appSchema.table('commerce_payment_links', {
   nextCheckAt: tz('next_check_at'),
   checkedAt: tz('checked_at'),
   paidAt: tz('paid_at'),
-  createdByMembershipId: uuid('created_by_membership_id').notNull(),
+  /** Who asked for the payment: a member, or an API key (migration 0202, ADR-283); exactly one. */
+  createdByMembershipId: uuid('created_by_membership_id'),
+  createdByApiKeyId: uuid('created_by_api_key_id'),
   version: integer('version').notNull().default(1),
   createdAt: tz('created_at').notNull().defaultNow(),
   updatedAt: tz('updated_at').notNull().defaultNow(),

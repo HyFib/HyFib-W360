@@ -16,12 +16,26 @@ import {
   type Tx,
 } from '@w360/db';
 import { recordSystemAudit } from '../audit';
-import { MEMBER_ORDER_TRANSITIONS, ORDER_REFERENCE_RE } from '../commerce/model';
-import { writeLockedOrderStatus } from '../commerce/service';
+import {
+  MEMBER_ORDER_TRANSITIONS,
+  ORDER_REFERENCE_RE,
+  PAYABLE_ORDER_STATUSES,
+} from '../commerce/model';
+import {
+  writeLockedOrderStatus,
+  writePaymentLinkCancel,
+  writePaymentRequest,
+} from '../commerce/service';
 import type { OutboundDeps } from '../messaging/outbound';
 import { loadEntitlements } from '../plans/entitlements';
 import { decodeKeysetCursor, encodeKeysetCursor, parseInput } from '../validation';
 import { apiActor, assertScope, type ApiContext } from './context';
+import {
+  claimIdempotencyKey,
+  storeIdempotentResponse,
+  type ApiResponse,
+  type IdempotencyInput,
+} from './idempotency';
 import { API_LIMITS } from './model';
 
 /**
@@ -30,8 +44,9 @@ import { API_LIMITS } from './model';
  * (ADR-085), with the conversation, the contact and the number by id only. A key needs
  * `orders.read`, and the company's plan Commerce. Payment Links and Razorpay's payment ids are
  * never read; an erased contact's orders keep no note (erasure clears it). With `orders.write` a
- * key confirms, fulfils and cancels them as members do (ADR-168); payment stays with members and
- * Razorpay.
+ * key confirms, fulfils and cancels them as members do (ADR-168); with `orders.request_payment` it
+ * asks the customer to pay with a Payment Link, and cancels one, as members do (ADR-283). Payment
+ * statuses come only from Razorpay.
  */
 
 export const apiOrderListQuerySchema = z
@@ -314,7 +329,7 @@ const orderStatusRefusal = (message: string, status: OrderStatus) =>
  * already has the status asked for is answered as it is, whatever `expectedStatus` says, so a retry
  * changes nothing; any other move, or an order not in `expectedStatus`, is refused with 409, naming
  * its status. Payment statuses come only from Razorpay, and an order waiting for payment is moved
- * by members, who cancel its Payment Link first.
+ * once its Payment Link is cancelled (ADR-283).
  */
 export async function apiUpdateOrder(
   deps: Pick<OutboundDeps, 'db' | 'clock'>,
@@ -348,7 +363,7 @@ export async function apiUpdateOrder(
       if (!MEMBER_ORDER_TRANSITIONS[current.status].includes(data.status)) {
         throw orderStatusRefusal(
           current.status === 'awaiting_payment'
-            ? 'An order waiting for payment is not changed through the API: members cancel its Payment Link in the app first.'
+            ? 'An order waiting for payment is not changed: cancel its Payment Link first, with POST /orders/{id}/cancel-payment or in the app.'
             : `The order cannot move to ${data.status} from its status.`,
           current.status,
         );
@@ -375,6 +390,130 @@ export async function apiUpdateOrder(
       );
     }
     return readApiOrder(tx, ctx.tenant.id, orderId);
+  });
+  if (!order) throw notFound('Order');
+  return order;
+}
+
+/** An order to ask payment for or cancel a link of, locked for the change (as members lock it). */
+async function lockApiOrder(tx: Tx, tenantId: string, orderId: string) {
+  const [order] = await tx
+    .select({
+      id: commerceOrders.id,
+      reference: commerceOrders.reference,
+      status: commerceOrders.status,
+      droppedItems: commerceOrders.droppedItems,
+      currency: commerceOrders.currency,
+      subtotalMinor: commerceOrders.subtotalMinor,
+      conversationId: commerceOrders.conversationId,
+      version: commerceOrders.version,
+    })
+    .from(commerceOrders)
+    .where(and(eq(commerceOrders.tenantId, tenantId), eq(commerceOrders.id, orderId)))
+    .for('update');
+  return order ?? null;
+}
+
+/**
+ * Asks the customer to pay one of the company's orders with a Payment Link from its own Razorpay
+ * account, as members do on the order page (ADR-283), through the write members' requests use: a
+ * received or confirmed order, its cart read whole, its total in rupees within the bounds, and the
+ * account checked. The link is written ahead and the worker creates it once at Razorpay and sends
+ * it in the order's conversation, as the key; the order waits for payment, recorded as the key's
+ * change, until Razorpay reports the link paid, expired or cancelled. With an Idempotency-Key a
+ * retry answers the first response; without one, asking again for an order waiting for payment is
+ * refused (409), naming its status.
+ */
+export async function apiRequestOrderPayment(
+  deps: Pick<OutboundDeps, 'db' | 'clock' | 'jobs' | 'signer'>,
+  ctx: ApiContext,
+  orderId: string,
+  idempotency: IdempotencyInput | null,
+): Promise<ApiResponse> {
+  assertScope(ctx, 'orders.request_payment');
+  if (!z.uuid().safeParse(orderId).success) throw notFound('Order');
+  const now = deps.clock.now();
+  return deps.db.run(ctx.scope, async (tx) => {
+    // Claimed in the request's transaction, so a refused request leaves the key unused (ADR-052).
+    let claimed: string | null = null;
+    if (idempotency) {
+      const claim = await claimIdempotencyKey(tx, ctx, idempotency, now);
+      if ('replay' in claim) return claim.replay;
+      claimed = claim.claimed;
+    }
+    await assertCommerceInPlan(tx, ctx.tenant.id);
+    const order = await lockApiOrder(tx, ctx.tenant.id, orderId);
+    if (!order) throw notFound('Order');
+    if (!PAYABLE_ORDER_STATUSES.includes(order.status)) {
+      throw orderStatusRefusal(
+        'Payment can be asked for only for received or confirmed orders.',
+        order.status,
+      );
+    }
+    await writePaymentRequest(tx, deps, ctx.tenant.id, order, { apiKeyId: ctx.key.id }, now);
+    await recordSystemAudit(
+      tx,
+      ctx.tenant.id,
+      {
+        action: 'commerce.payment_requested',
+        subjectType: 'commerce_order',
+        subjectId: order.id,
+        correlationId: ctx.requestId,
+        metadata: {
+          reference: order.reference,
+          amountMinor: order.subtotalMinor,
+          currency: 'INR',
+          source: 'api',
+        },
+      },
+      apiActor(ctx),
+    );
+    const response = {
+      status: 200,
+      body: { data: await readApiOrder(tx, ctx.tenant.id, order.id) },
+    };
+    if (claimed) await storeIdempotentResponse(tx, ctx, claimed, response);
+    return { ...response, replayed: false };
+  });
+}
+
+/**
+ * Cancels the open Payment Link of one of the company's orders, as members do on the order page
+ * (ADR-283): the worker cancels it at Razorpay, and the order goes back to confirmed once Razorpay
+ * reports it cancelled (unless the customer paid first, which marks it paid). Asking again while
+ * the link is being cancelled answers the order as it is; an order without an open link is refused
+ * (409), naming its status.
+ */
+export async function apiCancelOrderPayment(
+  deps: Pick<OutboundDeps, 'db' | 'clock' | 'jobs' | 'signer'>,
+  ctx: ApiContext,
+  orderId: string,
+): Promise<ApiOrder> {
+  assertScope(ctx, 'orders.request_payment');
+  if (!z.uuid().safeParse(orderId).success) throw notFound('Order');
+  const order = await deps.db.run(ctx.scope, async (tx) => {
+    await assertCommerceInPlan(tx, ctx.tenant.id);
+    const current = await lockApiOrder(tx, ctx.tenant.id, orderId);
+    if (!current) return null;
+    if (current.status !== 'awaiting_payment') {
+      throw orderStatusRefusal('The order has no open Payment Link.', current.status);
+    }
+    const { requested } = await writePaymentLinkCancel(tx, deps, ctx.tenant.id, current.id, null);
+    if (requested) {
+      await recordSystemAudit(
+        tx,
+        ctx.tenant.id,
+        {
+          action: 'commerce.payment_link_cancel_requested',
+          subjectType: 'commerce_order',
+          subjectId: current.id,
+          correlationId: ctx.requestId,
+          metadata: { reference: current.reference, source: 'api' },
+        },
+        apiActor(ctx),
+      );
+    }
+    return readApiOrder(tx, ctx.tenant.id, current.id);
   });
   if (!order) throw notFound('Order');
   return order;

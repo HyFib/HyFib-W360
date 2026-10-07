@@ -483,6 +483,7 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
       'checked_at',
       'paid_at',
       'created_by_membership_id',
+      'created_by_api_key_id',
       'version',
       'created_at',
       'updated_at',

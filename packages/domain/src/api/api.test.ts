@@ -257,6 +257,7 @@ describe('API scopes', () => {
       'campaigns.resume',
       'automations.start',
       'orders.write',
+      'orders.request_payment',
       'deals.write',
       'tasks.write',
       'notes.write',

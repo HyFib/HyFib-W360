@@ -2407,7 +2407,7 @@ export function buildOpenApiDocument(serverUrl: string) {
           summary: 'Confirm, fulfil or cancel a WhatsApp order',
           description: [
             `${scopeNote('orders.write')} As members do on the order page: a received order is confirmed or cancelled, a confirmed one fulfilled or cancelled, a paid one fulfilled. Needs Commerce in the company’s plan (403, reason not_in_plan). The order’s \`order.status_changed\` webhook event follows, as for a member’s change.`,
-            'Any other move is refused (409, naming the order’s status, changing nothing), and so is an order not in `expectedStatus` when you give it. Payment statuses come only from Razorpay, and an order waiting for payment is not changed through the API: members cancel its Payment Link in the app first. Nothing is sent to the customer.',
+            'Any other move is refused (409, naming the order’s status, changing nothing), and so is an order not in `expectedStatus` when you give it. Payment statuses come only from Razorpay, and an order waiting for payment is not changed: cancel its Payment Link first, with POST /orders/{id}/cancel-payment or in the app. Nothing is sent to the customer.',
             'An order that already has the status asked for is answered as it is, whatever `expectedStatus` says, so a retry is safe without an `Idempotency-Key`.',
           ].join('\n\n'),
           parameters: [{ $ref: '#/components/parameters/Id' }],
@@ -2418,6 +2418,47 @@ export function buildOpenApiDocument(serverUrl: string) {
               content: json(dataOf(ref('Order'))),
             },
             ...errors(400, 401, 403, 404, 409, 415, 422, 423, 429, 500),
+          },
+        },
+      },
+      '/orders/{id}/request-payment': {
+        post: {
+          operationId: 'requestOrderPayment',
+          summary: 'Ask the customer to pay a WhatsApp order',
+          description: [
+            `${scopeNote('orders.request_payment')} As members ask for payment on the order page: a Payment Link for the order’s total from the company’s own Razorpay account, which HyFib creates at Razorpay and sends in the order’s conversation, as the key, while the customer service window is open (otherwise members copy it from the order page). The order waits for payment (\`awaiting_payment\`) until Razorpay reports the link paid, which marks it \`paid\`, or expired or cancelled, which takes it back to \`confirmed\`; \`order.status_changed\` webhook events report each change. Needs Commerce in the company’s plan (403, reason not_in_plan).`,
+            'Only a received or confirmed order is asked for (409 otherwise, naming its status, and for an order that already has an open link). Refused with 412 when HyFib could not read the whole cart or work out its total, the total is not in Indian rupees, below ₹1 or above the most HyFib asks for in one link, or the company’s Razorpay account is missing or not checked (members add and check it in Commerce → Payments). Payment statuses come only from Razorpay, never from the API.',
+            'With an `Idempotency-Key`, a retry answers the first response; without one, asking again for an order waiting for payment is refused with 409.',
+          ].join('\n\n'),
+          parameters: [
+            { $ref: '#/components/parameters/Id' },
+            { $ref: '#/components/parameters/IdempotencyKeyOptional' },
+          ],
+          responses: {
+            '200': {
+              description: 'The order, waiting for payment.',
+              content: json(dataOf(ref('Order'))),
+            },
+            ...errors(400, 401, 403, 404, 409, 412, 423, 429, 500),
+          },
+        },
+      },
+      '/orders/{id}/cancel-payment': {
+        post: {
+          operationId: 'cancelOrderPayment',
+          summary: 'Cancel a WhatsApp order’s Payment Link',
+          description: [
+            `${scopeNote('orders.request_payment')} As members cancel a link on the order page: HyFib cancels the order’s open Payment Link at Razorpay, and the order goes back to \`confirmed\` once Razorpay reports the link cancelled, or is marked \`paid\` if the customer paid first; \`order.status_changed\` webhook events report it. Needs Commerce in the company’s plan (403, reason not_in_plan).`,
+            'An order without an open link is refused with 409, naming its status. Asking again while the link is being cancelled answers the order as it is, so a retry is harmless until the link has ended. No `Idempotency-Key` is needed.',
+          ].join('\n\n'),
+          parameters: [{ $ref: '#/components/parameters/Id' }],
+          responses: {
+            '200': {
+              description:
+                'The order, as it is now: still waiting for payment until Razorpay reports the link cancelled.',
+              content: json(dataOf(ref('Order'))),
+            },
+            ...errors(401, 403, 404, 409, 423, 429, 500),
           },
         },
       },
@@ -3502,6 +3543,8 @@ export const API_ROUTES = [
   ['get', '/orders'],
   ['get', '/orders/{id}'],
   ['patch', '/orders/{id}'],
+  ['post', '/orders/{id}/request-payment'],
+  ['post', '/orders/{id}/cancel-payment'],
   ['get', '/pipelines'],
   ['get', '/deals'],
   ['post', '/deals'],

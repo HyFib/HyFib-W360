@@ -1442,6 +1442,16 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   (`commerce/service.ts`), shared with members' `setOrderStatus`, writes the status, its time and
   the next version, and the trigger of 0063 captures `order.status_changed`, naming the key
   (ADR-270). The answer is read as `GET /orders/{id}` reads it (`readApiOrder`).
+- **Payment requests through the API (ADR-283):** `POST /orders/{id}/request-payment`
+  (`apiRequestOrderPayment`, `orders.request_payment`) claims the `Idempotency-Key` in the request's
+  transaction, checks Commerce in the plan, locks the order's row and checks its status, then calls
+  `writePaymentRequest` (`commerce/service.ts`, shared with members' `requestPayment`): the cart,
+  amount and account checks, the link written ahead with `created_by_api_key_id`, the order moved to
+  `awaiting_payment` with `orderStatusChangedBy({ apiKeyId })`, and the `commerce.link` job without
+  an actor. `POST /orders/{id}/cancel-payment` (`apiCancelOrderPayment`) locks the order and calls
+  `writePaymentLinkCancel`, shared with members' `cancelPaymentLink`. The worker sends a key's link
+  message with `sender_type` `api` and the key (`queueLinkMessage`), and the order page reads
+  `throughApi`.
 - **CRM pipelines and deals through the API (ADR-253):** `GET /pipelines`, `GET /deals` and
   `GET /deals/{id}` (`api/deals.ts`, `deals.read`) check the CRM in the plan first
   (`loadEntitlements`, reason `not_in_plan`). Pipelines are read oldest first on exact keyset

@@ -853,6 +853,16 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    `POST /tasks` whose first answer an old server stored replays that answer, without them; rolling
    web servers back does the same. Workers send the same events as before.
 
+   Migration 0202 (ADR-283) widens the API keys' and plan versions' scope checks again for
+   `orders.request_payment`, with the same brief locks, validated at once, and adds
+   `commerce_payment_links.created_by_api_key_id` with its foreign key and the creator check NOT
+   VALID, so the table is not read under the lock, letting a link have no member; 0203 validates
+   both, reading the table without blocking its writes. Workers before web servers: an older worker
+   sends a key's link message as a member's without naming the member, so do not roll workers back
+   while keys have open links. Until the web rollout ends, an old web server answers Settings → API
+   keys with an error for a company with a key holding the new scope, and the new endpoints with 404
+   Not Found.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

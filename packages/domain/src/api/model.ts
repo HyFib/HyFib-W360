@@ -27,6 +27,7 @@ export const API_SCOPE_KEYS = [
   'automations.start',
   'orders.read',
   'orders.write',
+  'orders.request_payment',
   'deals.read',
   'deals.write',
   'tasks.read',
@@ -165,7 +166,14 @@ export const API_SCOPE_INFO: Record<
   'orders.write': {
     label: 'Confirm, fulfil and cancel WhatsApp orders',
     description:
-      "Move the company's WhatsApp orders on as members do: confirm or cancel a received order, fulfil or cancel a confirmed one, fulfil a paid one. Never payments: members ask for and cancel Payment Links in the app. Needs Commerce in the company's plan.",
+      "Move the company's WhatsApp orders on as members do: confirm or cancel a received order, fulfil or cancel a confirmed one, fulfil a paid one. Never payments: asking customers to pay with Payment Links is a scope of its own. Needs Commerce in the company's plan.",
+    permission: 'inbox.reply',
+    writes: true,
+  },
+  'orders.request_payment': {
+    label: 'Ask customers to pay WhatsApp orders',
+    description:
+      "Ask a customer to pay a received or confirmed order with a Payment Link from the company's own Razorpay account, sent in the order's conversation as members ask for payment on the order page, and cancel an order's open link. Payment statuses still come only from Razorpay. Needs Commerce in the company's plan and its Razorpay account checked.",
     permission: 'inbox.reply',
     writes: true,
   },

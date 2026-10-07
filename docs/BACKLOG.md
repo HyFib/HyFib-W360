@@ -731,6 +731,12 @@ verification, app review, Embedded Signup configuration).
   in the plan: an order confirmed, fulfilled or cancelled as members move it, from an expected
   status when one is given, payment statuses left to Razorpay; a retry changes nothing; migration
   0116).
+  **[Asking for payment of WhatsApp orders built; its database tests run only in CI]** (ADR-283,
+  migrations 0202 and 0203: `POST /orders/{id}/request-payment` and
+  `POST /orders/{id}/cancel-payment` with the new `orders.request_payment` scope, granted with
+  `inbox.reply`, and Commerce in the plan: a Payment Link for the order's total from the company's
+  own Razorpay account, sent in the chat as the key, and cancelled, as members do; only Razorpay's
+  report marks an order paid).
   **[Who last changed an order, through the API, built; its database and browser tests run only in
   CI]** (ADR-271, no migration: `GET /orders`, `GET /orders/{id}` and the answer of
   `PATCH /orders/{id}` name who made an order's latest status change, a member, a key by its id or

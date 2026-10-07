@@ -1,5 +1,42 @@
 # Progress
 
+## 2026-10-07 — Asking for payment of WhatsApp orders through the public API (P5-08, P4-06a, H-033, W-114, ADR-283)
+
+Status: **Implemented; its database tests run in CI only.** Order systems moved orders on through
+the API but had to ask a member to request payment. Migrations 0202 and 0203 passed the pglast parse
+check (syntax only); the local PostgreSQL is unavailable, so the integration test below was written
+but not run here.
+
+### Completed
+
+- **Database:** migration 0202 (the `orders.request_payment` scope in the key and plan checks;
+  `commerce_payment_links.created_by_api_key_id` with its foreign key and the one-creator check, NOT
+  VALID) and 0203 (validates them).
+- **Domain:** `writePaymentRequest` and `writePaymentLinkCancel` (`commerce/service.ts`), shared by
+  members' requests and `apiRequestOrderPayment` and `apiCancelOrderPayment` (`api/orders.ts`); the
+  scope; the OpenAPI entries; the worker sends a key's link message as the key; the order page says
+  when a key asked.
+- **Web:** `POST /api/v1/orders/{id}/request-payment` and `POST /api/v1/orders/{id}/cancel-payment`;
+  "through the API" on the order page's links.
+- **Tests:** unit (`commerce/payment-requests.test.ts`: every refusal before anything is written,
+  the writes as a key and as a member, the cancel writes; `api/orders.test.ts`: the scope, refusals
+  before any read, the OpenAPI entries); integration (1 new in `commerce.test.ts`, against the
+  Razorpay stand-in). Written for CI; the integration test was not run here. No e2e test.
+- **Docs:** ADR-283; ARCHITECTURE; SECURITY; THREAT-MODEL T251; DEPLOYMENT; RUNBOOKS; BACKLOG P5-08;
+  feature matrix H-033 and W-114.
+- **Mutation checks:** 24/24 deliberate regressions caught.
+
+### Test commands and results (local, 2026-10-07)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 122 files, 1165 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| pglast 7 parse of migrations 0202 and 0203         | passed (syntax only)                                          |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
 ## 2026-10-07 — Who added a CRM deal or task, through the public API (P5-08, H-033, ADR-282)
 
 Status: **Implemented; its database tests run in CI only.** Deals and tasks read through the API

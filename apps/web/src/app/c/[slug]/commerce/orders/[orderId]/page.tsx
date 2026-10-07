@@ -187,6 +187,7 @@ export default async function OrderPage({
                       </div>
                       <p className="text-xs text-muted-foreground">
                         Requested {formatDateTime(link.createdAt, tz)}
+                        {link.throughApi ? ' through the API' : ''}
                         {link.paidAt ? ` · paid ${formatDateTime(link.paidAt, tz)}` : ''}
                         {open ? ` · open until ${formatDateTime(link.expiresAt, tz)}` : ''}
                         {link.checkedAt

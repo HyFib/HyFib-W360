@@ -7,9 +7,11 @@ import type { ApiContext } from './context';
 import { API_SCOPE_INFO } from './model';
 import { API_ROUTES, apiOrderSchema, buildOpenApiDocument } from './openapi';
 import {
+  apiCancelOrderPayment,
   apiGetOrder,
   apiListOrders,
   apiOrderListQuerySchema,
+  apiRequestOrderPayment,
   apiUpdateOrder,
   apiUpdateOrderSchema,
 } from './orders';
@@ -344,7 +346,7 @@ describe('changing WhatsApp orders through the API (ADR-168)', () => {
       '`order.status_changed` webhook event follows',
       '(409, naming the order’s status, changing nothing)',
       'an order not in `expectedStatus`',
-      'members cancel its Payment Link in the app first',
+      'cancel its Payment Link first, with POST /orders/{id}/cancel-payment or in the app',
       'Nothing is sent to the customer.',
       'whatever `expectedStatus` says, so a retry is safe without an `Idempotency-Key`',
     ]) {
@@ -360,5 +362,128 @@ describe('changing WhatsApp orders through the API (ADR-168)', () => {
     expect(schema.properties.expectedStatus.enum).toEqual([...ORDER_STATUSES]);
     expect(schema.required).toEqual(['status']);
     expect(schema.additionalProperties).toBe(false);
+  });
+});
+
+describe('asking for payment of WhatsApp orders through the API (ADR-283)', () => {
+  const deps = (db: Database) =>
+    ({ db, clock: { now: () => new Date() }, jobs: {}, signer: {} }) as unknown as Parameters<
+      typeof apiRequestOrderPayment
+    >[0];
+
+  it('needs orders.request_payment, a writing scope the database accepts, granted with inbox.reply', () => {
+    expect(API_SCOPES).toContain('orders.request_payment');
+    expect(API_SCOPES.indexOf('orders.request_payment')).toBe(
+      API_SCOPES.indexOf('orders.write') + 1,
+    );
+    expect(API_SCOPE_INFO['orders.request_payment']).toMatchObject({
+      label: 'Ask customers to pay WhatsApp orders',
+      permission: 'inbox.reply',
+      writes: true,
+    });
+    for (const words of [
+      'a received or confirmed order',
+      "a Payment Link from the company's own Razorpay account",
+      "sent in the order's conversation as members ask for payment on the order page",
+      "cancel an order's open link",
+      'Payment statuses still come only from Razorpay',
+      "Needs Commerce in the company's plan and its Razorpay account checked",
+    ]) {
+      expect(API_SCOPE_INFO['orders.request_payment'].description).toContain(words);
+    }
+  });
+
+  it('refuse a key without the scope, a suspended company and a bad id before reading anything', async () => {
+    for (const call of [
+      (scopes: string[], id = TENANT, status = 'active') =>
+        refusal(apiRequestOrderPayment(deps(untouched), ctx(scopes, status), id, null)),
+      (scopes: string[], id = TENANT, status = 'active') =>
+        refusal(apiCancelOrderPayment(deps(untouched), ctx(scopes, status), id)),
+    ]) {
+      // orders.write moves orders on, but never asks for payment.
+      expect(await call(['orders.read', 'orders.write'])).toEqual([
+        'forbidden',
+        'This API key does not have the orders.request_payment scope.',
+        [],
+      ]);
+      for (const status of ['suspended', 'restricted']) {
+        expect((await call(['orders.request_payment'], TENANT, status))[0]).toBe(
+          'tenant_suspended',
+        );
+      }
+      expect((await call(['orders.request_payment'], 'not-an-id'))[0]).toBe('not_found');
+    }
+  });
+
+  it('ask and cancel in one read committed transaction each', async () => {
+    for (const call of [
+      (db: Database) =>
+        apiRequestOrderPayment(deps(db), ctx(['orders.request_payment']), TENANT, null),
+      (db: Database) => apiCancelOrderPayment(deps(db), ctx(['orders.request_payment']), TENANT),
+    ]) {
+      const { db, runs } = reached();
+      await expect(call(db)).rejects.toThrow('reached the database');
+      expect(runs).toEqual([undefined]);
+    }
+  });
+
+  it('are described: the scope, the link, the order’s statuses, refusals and retries', () => {
+    const doc = buildOpenApiDocument('https://example.test/api/v1') as unknown as {
+      paths: Record<string, Record<string, Record<string, unknown>>>;
+    };
+    expect(API_ROUTES).toContainEqual(['post', '/orders/{id}/request-payment']);
+    expect(API_ROUTES).toContainEqual(['post', '/orders/{id}/cancel-payment']);
+    const order = (
+      doc.paths['/orders/{id}']?.get as { responses: Record<string, { content?: unknown }> }
+    ).responses['200']?.content;
+    type Op = {
+      operationId: string;
+      description: string;
+      parameters: unknown[];
+      requestBody?: unknown;
+      responses: Record<string, { content?: unknown }>;
+    };
+    const ask = doc.paths['/orders/{id}/request-payment']?.post as Op;
+    expect(ask.operationId).toBe('requestOrderPayment');
+    expect(ask.parameters).toEqual([
+      { $ref: '#/components/parameters/Id' },
+      { $ref: '#/components/parameters/IdempotencyKeyOptional' },
+    ]);
+    expect(ask.requestBody).toBeUndefined();
+    expect(ask.responses['200']?.content).toEqual(order);
+    expect(Object.keys(ask.responses)).toEqual(
+      expect.arrayContaining(['200', '403', '404', '409', '412', '423', '429']),
+    );
+    for (const words of [
+      'Scope: `orders.request_payment`.',
+      'a Payment Link for the order’s total from the company’s own Razorpay account',
+      'sends in the order’s conversation, as the key, while the customer service window is open (otherwise members copy it from the order page)',
+      'The order waits for payment (`awaiting_payment`) until Razorpay reports the link paid, which marks it `paid`, or expired or cancelled, which takes it back to `confirmed`',
+      '`order.status_changed` webhook events report each change',
+      '(403, reason not_in_plan)',
+      'Only a received or confirmed order is asked for (409 otherwise, naming its status, and for an order that already has an open link)',
+      'Refused with 412 when HyFib could not read the whole cart or work out its total, the total is not in Indian rupees, below ₹1 or above the most HyFib asks for in one link, or the company’s Razorpay account is missing or not checked',
+      'Payment statuses come only from Razorpay, never from the API.',
+      'With an `Idempotency-Key`, a retry answers the first response; without one, asking again for an order waiting for payment is refused with 409.',
+    ]) {
+      expect(ask.description).toContain(words);
+    }
+    const cancel = doc.paths['/orders/{id}/cancel-payment']?.post as Op;
+    expect(cancel.operationId).toBe('cancelOrderPayment');
+    expect(cancel.parameters).toEqual([{ $ref: '#/components/parameters/Id' }]);
+    expect(cancel.requestBody).toBeUndefined();
+    expect(cancel.responses['200']?.content).toEqual(order);
+    expect(Object.keys(cancel.responses)).toEqual(
+      expect.arrayContaining(['200', '403', '404', '409', '423', '429']),
+    );
+    for (const words of [
+      'Scope: `orders.request_payment`.',
+      'HyFib cancels the order’s open Payment Link at Razorpay, and the order goes back to `confirmed` once Razorpay reports the link cancelled, or is marked `paid` if the customer paid first',
+      'An order without an open link is refused with 409, naming its status.',
+      'Asking again while the link is being cancelled answers the order as it is',
+      'No `Idempotency-Key` is needed.',
+    ]) {
+      expect(cancel.description).toContain(words);
+    }
   });
 });

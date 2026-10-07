@@ -10711,3 +10711,56 @@ Decision:
 
 Not built: which member or automation added a deal or task, filtering by who added them, and who
 completed or cancelled a task, beyond its latest change.
+
+## ADR-283 Asking for payment of a WhatsApp order through the public API (P5-08, P4-06a) (2026-10-07)
+
+Context: since ADR-168 an order system confirms, fulfils and cancels through the API the orders
+customers send from the company's WhatsApp catalog, but asking the customer to pay still needed a
+member on the order page: a web shop or ERP that decides when an order is ready to be paid had to
+ask someone to request payment. ADR-168 left asking for payment and cancelling a Payment Link
+through the API unbuilt.
+
+Decision:
+
+- **A new writing scope, `orders.request_payment`** ("Ask customers to pay WhatsApp orders"),
+  granted with `inbox.reply`, which members ask for payment with (and `commerce.read`, which every
+  role with `inbox.reply` has): a key that only moves orders on (`orders.write`) never asks for
+  money. Like every writing scope it is refused while the company is suspended or restricted (423).
+  Existing keys keep their scopes, and a plan version that chose its scopes (ADR-092) leaves it out
+  until a new version includes it.
+- **`POST /api/v1/orders/{id}/request-payment`** (`requestOrderPayment`), as members ask on the
+  order page and through the same write, `writePaymentRequest` (`commerce/service.ts`), which
+  members' requests now use too: a received or confirmed order (409 otherwise, naming its status),
+  its whole cart read, its total in rupees from ₹1 to the most HyFib asks for in one link, and the
+  company's Razorpay account checked (412 otherwise, as members are told). The link is written ahead
+  with the key as its creator; the worker creates it once in the company's own Razorpay account and
+  sends it in the order's conversation, as the key (`sender_type` `api`), while the customer service
+  window is open. The order waits for payment, recorded as the key's change (`order.status_changed`
+  names the key, ADR-270), until Razorpay reports the link paid or ended. It answers the order as
+  `GET /orders/{id}` reads it. With an `Idempotency-Key` a retry answers the first response (claimed
+  in the request's transaction, so a refused request leaves the key unused); without one, asking
+  again for an order waiting for payment is refused (409).
+- **`POST /api/v1/orders/{id}/cancel-payment`** (`cancelOrderPayment`), as members cancel a link and
+  through the same write, `writePaymentLinkCancel`: the worker cancels the open link at Razorpay,
+  and the order goes back to `confirmed` once Razorpay reports it cancelled, or is marked `paid` if
+  the customer paid first. Asking again while it is being cancelled changes nothing; an order
+  without an open link is refused (409, naming its status).
+- **Payment stays Razorpay's:** neither endpoint marks an order paid; only a link fetched from
+  Razorpay does (ADR-046). `PATCH /orders/{id}` still refuses an order waiting for payment, now
+  pointing to the cancel endpoint.
+- **Recorded as the key's:** `created_by_api_key_id` on `app.commerce_payment_links` (a link names
+  exactly one creator, a member or a key: `commerce_payment_links_creator`), the audit entries
+  `commerce.payment_requested` and `commerce.payment_link_cancel_requested` as the key with
+  `source: 'api'`, the link's message sent as the key, and "Requested … through the API" on the
+  order page. The company data export carries the column.
+- **Commerce in the plan** is checked before the order is read (403, reason `not_in_plan`); another
+  company's order and an unknown id answer 404, and an id that is not a UUID is refused before any
+  query.
+- **Migrations 0202 and 0203:** 0202 replaces the key and plan scope checks with ones that also
+  accept the scope, validated at once (one row per key and per plan version), adds the column with
+  its foreign key to the company's keys and the creator check NOT VALID, and lets a link have no
+  member; 0203 validates both.
+
+Not built: reading an order's Payment Links through the API (their status, address, amount paid, or
+why a link was not sent), Payment Link webhook events, refunds, links for an amount other than the
+order's total, and asking for payment of store orders.
