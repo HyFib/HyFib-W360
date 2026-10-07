@@ -36,6 +36,7 @@ export const API_SCOPES = [
   'availability.write',
   'business_hours.read',
   'business_hours.manage',
+  'saved_replies.manage',
   'webhooks.manage',
 ] as const;
 export type ApiScope = (typeof API_SCOPES)[number];

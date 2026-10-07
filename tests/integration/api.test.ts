@@ -9,11 +9,13 @@ import {
   API_MESSAGE_FEED_WINDOW,
   API_SCOPE_KEYS,
   API_TOKEN_RE,
+  MAX_SAVED_REPLIES,
   CRM_LIMITS,
   RUN_BUDGETS,
   advanceAutomationRun,
   apiAddConversationNote,
   apiCreateClosedDay,
+  apiCreateSavedReply,
   apiCreateContact,
   apiCreateDeal,
   apiCreateNote,
@@ -22,6 +24,7 @@ import {
   apiCreateTeam,
   apiDeleteTeam,
   apiDeleteClosedDay,
+  apiDeleteSavedReply,
   apiErrorResponse,
   apiGetAutomationRun,
   apiGetBusinessHours,
@@ -38,6 +41,7 @@ import {
   apiListAutomations,
   apiListChannels,
   apiListClosedDays,
+  apiListSavedReplies,
   apiListContacts,
   apiListConversationMessages,
   apiListConversationNotes,
@@ -59,6 +63,7 @@ import {
   apiSendTemplate,
   apiUpdateConversation,
   apiUpdateBusinessHours,
+  apiUpdateSavedReply,
   apiUpdateDeal,
   apiUpdatePipeline,
   apiUpdateTeam,
@@ -87,6 +92,7 @@ import {
   createInboxService,
   createPlanAdminService,
   createReportsService,
+  createSavedRepliesService,
   createTeamsService,
   createTemplatesService,
   createTenancyService,
@@ -8960,6 +8966,283 @@ describe('business hours (ADR-290)', () => {
         label,
       );
     }
+  });
+});
+
+describe('saved replies (ADR-291)', () => {
+  const replies = () => createSavedRepliesService({ db: fx.dbs.app, clock: systemClock });
+  type Reply = {
+    id: string;
+    shortcut: string;
+    title: string;
+    body: string;
+    createdBy: string;
+    createdByApiKeyId: string | null;
+    updatedBy: string;
+    updatedByApiKeyId: string | null;
+    updatedAt: string;
+  };
+
+  it('add, change and delete saved replies as Settings does, as the key (ADR-291)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const manager = await apiKey(c, ['saved_replies.manage']);
+    const replier = await apiKey(c, ['messages.reply']);
+
+    // Added once per key, by the key; Settings shows it as changed through the API.
+    const request = {
+      shortcut: ' Hours ',
+      title: 'Opening hours',
+      body: 'Hi {{name}}, we are open 9 to 5.',
+    };
+    const key = idem('saved-reply-1', JSON.stringify(request));
+    const created = await apiCreateSavedReply(deps(), manager.ctx, request, key);
+    const again = await apiCreateSavedReply(deps(), manager.ctx, request, key);
+    expect([created.status, created.replayed, again.replayed]).toEqual([201, false, true]);
+    const hours = (created.body as { data: Reply }).data;
+    expect(hours).toMatchObject({
+      shortcut: 'hours',
+      title: 'Opening hours',
+      body: 'Hi {{name}}, we are open 9 to 5.',
+      createdBy: 'api',
+      createdByApiKeyId: manager.id,
+      updatedBy: 'api',
+      updatedByApiKeyId: manager.id,
+    });
+    expect(await replies().listSavedReplies(owner)).toEqual([
+      expect.objectContaining({
+        id: hours.id,
+        shortcut: 'hours',
+        updatedByName: null,
+        updatedThroughApi: true,
+      }),
+    ]);
+    await expectAppError(
+      apiCreateSavedReply(deps(), manager.ctx, { ...request, title: 'Again' }, null),
+      'conflict',
+      /already uses this shortcut/,
+    );
+
+    // A member's reply, read by a key that replies, by shortcut.
+    const { id: thanksId } = await replies().createSavedReply(owner, {
+      shortcut: 'thanks',
+      title: 'Thank you',
+      body: 'Thanks, {{name}}!',
+    });
+    const listed = (await apiListSavedReplies(deps(), replier.ctx)).data;
+    expect(listed.map((r) => [r.shortcut, r.createdBy, r.createdByApiKeyId])).toEqual([
+      ['hours', 'api', manager.id],
+      ['thanks', 'member', null],
+    ]);
+
+    // Changed by the key: only what is given; the same change again writes nothing.
+    const changed = await apiUpdateSavedReply(deps(), manager.ctx, thanksId, { title: 'Thanks!' });
+    expect(changed).toMatchObject({
+      shortcut: 'thanks',
+      title: 'Thanks!',
+      body: 'Thanks, {{name}}!',
+      createdBy: 'member',
+      updatedBy: 'api',
+      updatedByApiKeyId: manager.id,
+    });
+    const unchanged = await apiUpdateSavedReply(deps(), manager.ctx, thanksId, {
+      title: ' Thanks! ',
+    });
+    expect(unchanged).toEqual(changed);
+    await expectAppError(
+      apiUpdateSavedReply(deps(), manager.ctx, thanksId, { shortcut: 'HOURS' }),
+      'conflict',
+      /already uses this shortcut/,
+    );
+    await expectAppError(
+      apiUpdateSavedReply(deps(), manager.ctx, thanksId, { body: 'Hi {{surname}}' }),
+      'validation_failed',
+      /Unknown placeholder/,
+    );
+    expect(
+      (await replies().listSavedReplies(owner)).find((r) => r.id === thanksId)?.updatedThroughApi,
+    ).toBe(true);
+
+    // A member's change from a web server of an earlier release names the member and leaves the
+    // key's column as it was: still valid, and the member changed it last.
+    await fx.query(
+      `UPDATE app.saved_replies SET title = 'Thanks from before', updated_by_membership_id = $3
+        WHERE tenant_id = $1 AND id = $2`,
+      [c.tenant.id, thanksId, owner.membership.id],
+    );
+    expect(
+      (await apiListSavedReplies(deps(), manager.ctx)).data.find((r) => r.id === thanksId),
+    ).toMatchObject({ title: 'Thanks from before', updatedBy: 'member', updatedByApiKeyId: null });
+    expect(
+      (await replies().listSavedReplies(owner)).find((r) => r.id === thanksId)?.updatedThroughApi,
+    ).toBe(false);
+
+    // Changed again by a member in Settings: the member is named, the key no longer.
+    await replies().updateSavedReply(owner, thanksId, {
+      shortcut: 'thanks',
+      title: 'Thank you',
+      body: 'Thanks, {{name}}!',
+    });
+    expect((await replies().listSavedReplies(owner)).find((r) => r.id === thanksId)).toMatchObject({
+      updatedByName: owner.user.name,
+      updatedThroughApi: false,
+    });
+    expect(
+      await fx.query(
+        `SELECT updated_by_membership_id, updated_by_api_key_id FROM app.saved_replies WHERE id = $1`,
+        [thanksId],
+      ),
+    ).toEqual([{ updated_by_membership_id: owner.membership.id, updated_by_api_key_id: null }]);
+    expect(
+      (await apiListSavedReplies(deps(), manager.ctx)).data.find((r) => r.id === thanksId),
+    ).toMatchObject({ updatedBy: 'member', updatedByApiKeyId: null });
+
+    // Deleted by the key; deleting it again is not found.
+    expect(await apiDeleteSavedReply(deps(), manager.ctx, hours.id)).toEqual({
+      id: hours.id,
+      deleted: true,
+    });
+    await expectAppError(
+      apiDeleteSavedReply(deps(), manager.ctx, hours.id),
+      'not_found',
+      /Saved reply/,
+    );
+    expect((await apiListSavedReplies(deps(), replier.ctx)).data.map((r) => r.id)).toEqual([
+      thanksId,
+    ]);
+
+    // The audit log names the key for each of its changes, and only for changes.
+    const audits = await fx.query<{
+      action: string;
+      actor_type: string;
+      actor_id: string | null;
+      metadata: { shortcut?: string; source?: string };
+    }>(
+      `SELECT action, actor_type, actor_id, metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND action LIKE 'saved_reply.%'
+        ORDER BY occurred_at, id`,
+      [c.tenant.id],
+    );
+    expect(
+      audits.map((a) => [a.action, a.actor_type, a.metadata.shortcut, a.metadata.source]),
+    ).toEqual([
+      ['saved_reply.created', 'api_key', 'hours', 'api'],
+      ['saved_reply.created', 'user', 'thanks', undefined],
+      ['saved_reply.updated', 'api_key', 'thanks', 'api'],
+      ['saved_reply.updated', 'user', 'thanks', undefined],
+      ['saved_reply.deleted', 'api_key', 'hours', 'api'],
+    ]);
+    expect(audits.filter((a) => a.actor_type === 'api_key').map((a) => a.actor_id)).toEqual([
+      manager.id,
+      manager.id,
+      manager.id,
+    ]);
+  });
+
+  it(`keep at most ${MAX_SAVED_REPLIES} saved replies a company, added by keys or in Settings (ADR-291)`, async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const manager = await apiKey(c, ['saved_replies.manage']);
+    await fx.query(
+      `INSERT INTO app.saved_replies
+         (id, tenant_id, shortcut, title, body, created_by_membership_id, updated_by_membership_id)
+       SELECT gen_random_uuid(), $1, 'r' || g, 'Reply ' || g, 'Text ' || g, $2, $2
+         FROM generate_series(1, $3::int) g`,
+      [c.tenant.id, owner.membership.id, MAX_SAVED_REPLIES - 1],
+    );
+    const last = await apiCreateSavedReply(
+      deps(),
+      manager.ctx,
+      { shortcut: 'last', title: 'Last', body: 'The last one.' },
+      null,
+    );
+    expect(last.status).toBe(201);
+    const limit = new RegExp(`already has ${MAX_SAVED_REPLIES} saved replies`);
+    await expectAppError(
+      apiCreateSavedReply(deps(), manager.ctx, { shortcut: 'one', title: 'One', body: 'x' }, null),
+      'conflict',
+      limit,
+    );
+    await expectAppError(
+      replies().createSavedReply(owner, { shortcut: 'one', title: 'One', body: 'x' }),
+      'conflict',
+      limit,
+    );
+    // All of them are listed, in Settings and to keys.
+    expect((await apiListSavedReplies(deps(), manager.ctx)).data).toHaveLength(MAX_SAVED_REPLIES);
+    expect(await replies().listSavedReplies(owner)).toHaveLength(MAX_SAVED_REPLIES);
+    // One deleted makes room for one.
+    await apiDeleteSavedReply(deps(), manager.ctx, (last.body as { data: Reply }).data.id);
+    expect(
+      (await replies().createSavedReply(owner, { shortcut: 'one', title: 'One', body: 'x' })).id,
+    ).toEqual(expect.any(String));
+  });
+
+  it('read with either scope, change only with saved_replies.manage and an active company, granted as in Settings (ADR-291)', async () => {
+    const c = await fx.company();
+    const other = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const manager = await apiKey(c, ['saved_replies.manage']);
+    const replier = await apiKey(c, ['messages.reply']);
+    const reader = await apiKey(c, ['conversations.read']);
+    const theirs = await replies().createSavedReply(await fx.ctx(other, other.owner), {
+      shortcut: 'theirs',
+      title: 'Theirs',
+      body: 'Not yours.',
+    });
+
+    // Another company's reply is neither listed, changed nor deleted; an unknown one is not found.
+    expect((await apiListSavedReplies(deps(), manager.ctx)).data).toEqual([]);
+    for (const id of [theirs.id, uuidv7()]) {
+      await expectAppError(
+        apiUpdateSavedReply(deps(), manager.ctx, id, { title: 'Mine' }),
+        'not_found',
+      );
+      await expectAppError(apiDeleteSavedReply(deps(), manager.ctx, id), 'not_found');
+    }
+
+    // A key that replies changes nothing; a key that does neither reads nothing.
+    for (const write of [
+      () =>
+        apiCreateSavedReply(deps(), replier.ctx, { shortcut: 'x', title: 'X', body: 'x' }, null),
+      () => apiUpdateSavedReply(deps(), replier.ctx, theirs.id, { title: 'X' }),
+      () => apiDeleteSavedReply(deps(), replier.ctx, theirs.id),
+    ]) {
+      await expectAppError(write(), 'forbidden', /saved_replies\.manage/);
+    }
+    await expectAppError(apiListSavedReplies(deps(), reader.ctx), 'forbidden', /messages\.reply/);
+
+    // A suspended company's keys read, and change nothing.
+    const suspended = (ctx: ApiContext): ApiContext => ({
+      ...ctx,
+      tenant: { ...ctx.tenant, status: 'suspended' as const },
+    });
+    expect((await apiListSavedReplies(deps(), suspended(replier.ctx))).data).toEqual([]);
+    expect((await apiListSavedReplies(deps(), suspended(manager.ctx))).data).toEqual([]);
+    await expectAppError(
+      apiCreateSavedReply(
+        deps(),
+        suspended(manager.ctx),
+        { shortcut: 'x', title: 'X', body: 'x' },
+        null,
+      ),
+      'tenant_suspended',
+    );
+
+    // Granting needs the permission members manage saved replies with.
+    const narrower: TenantContext = {
+      ...owner,
+      permissions: new Set([...owner.permissions].filter((p) => p !== 'inbox.supervise')),
+    };
+    await expectAppError(
+      keys.create(narrower, {
+        name: 'Replies',
+        scopes: ['saved_replies.manage'],
+        expiresInDays: 30,
+      }),
+      'forbidden',
+      /Manage saved replies/,
+    );
   });
 });
 

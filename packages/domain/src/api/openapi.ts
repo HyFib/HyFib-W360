@@ -134,6 +134,8 @@ import { apiCreateTeamSchema, apiUpdateTeamSchema } from './teams';
 import { apiUpdateMemberSchema } from './members';
 import { apiCreateClosedDaySchema, apiUpdateBusinessHoursSchema } from './business-hours';
 import { MAX_RANGES_PER_DAY } from '../inbox/business-hours';
+import { MAX_SAVED_REPLIES } from '../inbox/saved-replies';
+import { apiCreateSavedReplySchema, apiUpdateSavedReplySchema } from './saved-replies';
 import { apiCreateTaskSchema, apiUpdateTaskSchema } from './tasks';
 import { apiUpdateOrderSchema } from './orders';
 import {
@@ -799,6 +801,26 @@ export const apiBusinessHoursSchema = z.object({
       'While open by its hours: when this opening ends; null while closed, while the hours are off, or when it stays open for the next 14 days.',
     ),
   asOf: z.iso.datetime().describe('When `open`, `opensAt` and `closesAt` were worked out.'),
+});
+
+/** A saved reply (ADR-291). */
+export const apiSavedReplySchema = z.object({
+  id: z.uuid(),
+  shortcut: z.string().describe('What members type after / in the reply box to find it.'),
+  title: z.string(),
+  body: z
+    .string()
+    .describe(
+      'The text, with {{name}}, {{agent}} and {{company}} where the reply box fills in the customer’s name, the member’s and the company’s before the member reviews it.',
+    ),
+  createdBy: z
+    .enum(['member', 'api'])
+    .describe('Who added it: a member in Settings (never which), or an API key.'),
+  createdByApiKeyId: z.uuid().nullable(),
+  updatedBy: z.enum(['member', 'api']).describe('Who last changed it, likewise.'),
+  updatedByApiKeyId: z.uuid().nullable(),
+  createdAt: z.iso.datetime(),
+  updatedAt: z.iso.datetime(),
 });
 
 /** A closed day (ADR-290). */
@@ -2174,6 +2196,73 @@ export function buildOpenApiDocument(serverUrl: string) {
                     day: { type: 'string', format: 'date' },
                   },
                   required: ['id', 'deleted', 'day'],
+                }),
+              ),
+            },
+            ...errors(401, 403, 404, 423, 429, 500),
+          },
+        },
+      },
+      '/saved-replies': {
+        get: {
+          operationId: 'listSavedReplies',
+          summary: 'Saved replies, by shortcut',
+          description: `${scopeNote('messages.reply', 'saved_replies.manage')} The company’s saved replies, the answers members put in the reply box, all of them (a company keeps at most ${MAX_SAVED_REPLIES}), by shortcut. A reply’s placeholders are left as written: fill {{name}}, {{agent}} and {{company}} before sending it. Reading works while the company is suspended.`,
+          responses: {
+            '200': {
+              description: 'The saved replies.',
+              content: json({
+                type: 'object',
+                properties: { data: { type: 'array', items: ref('SavedReply') } },
+                required: ['data'],
+              }),
+            },
+            ...errors(401, 403, 429, 500),
+          },
+        },
+        post: {
+          operationId: 'createSavedReply',
+          summary: 'Add a saved reply',
+          description: `${scopeNote('saved_replies.manage')} As members who supervise the inbox add one in Settings → Saved replies: a shortcut unique in the company (409 otherwise), a title, and the text, with only the placeholders {{name}}, {{agent}} and {{company}} (422 otherwise). A company keeps at most ${MAX_SAVED_REPLIES} (409 at the limit: delete one first). Settings shows it as changed through the API, and the audit log names the key. With an \`Idempotency-Key\`, a retry answers the first response.`,
+          parameters: [{ $ref: '#/components/parameters/IdempotencyKeyOptional' }],
+          requestBody: { required: true, content: json(ref('CreateSavedReply')) },
+          responses: {
+            '201': { description: 'The saved reply.', content: json(dataOf(ref('SavedReply'))) },
+            ...errors(400, 401, 403, 409, 415, 422, 423, 429, 500),
+          },
+        },
+      },
+      '/saved-replies/{id}': {
+        patch: {
+          operationId: 'updateSavedReply',
+          summary: 'Change a saved reply',
+          description: `${scopeNote('saved_replies.manage')} As members save one in Settings → Saved replies: what is given changes and the rest stays as it is, with the same checks as when adding one. A change that leaves the reply as it is answers it as it is, with no audit entry, so a retry needs no \`Idempotency-Key\`; otherwise the audit log names the key.`,
+          parameters: [{ $ref: '#/components/parameters/Id' }],
+          requestBody: { required: true, content: json(ref('UpdateSavedReply')) },
+          responses: {
+            '200': {
+              description: 'The saved reply now.',
+              content: json(dataOf(ref('SavedReply'))),
+            },
+            ...errors(400, 401, 403, 404, 409, 415, 422, 423, 429, 500),
+          },
+        },
+        delete: {
+          operationId: 'deleteSavedReply',
+          summary: 'Delete a saved reply',
+          description: `${scopeNote('saved_replies.manage')} As members do in Settings → Saved replies. One already deleted answers 404. The audit log names the key.`,
+          parameters: [{ $ref: '#/components/parameters/Id' }],
+          responses: {
+            '200': {
+              description: 'Deleted.',
+              content: json(
+                dataOf({
+                  type: 'object',
+                  properties: {
+                    id: { type: 'string', format: 'uuid' },
+                    deleted: { const: true },
+                  },
+                  required: ['id', 'deleted'],
                 }),
               ),
             },
@@ -3821,6 +3910,9 @@ export function buildOpenApiDocument(serverUrl: string) {
         BusinessHours: jsonSchema(apiBusinessHoursSchema),
         UpdateBusinessHours: jsonSchema(apiUpdateBusinessHoursSchema, 'input'),
         ClosedDay: jsonSchema(apiClosedDaySchema),
+        SavedReply: jsonSchema(apiSavedReplySchema),
+        CreateSavedReply: jsonSchema(apiCreateSavedReplySchema, 'input'),
+        UpdateSavedReply: jsonSchema(apiUpdateSavedReplySchema, 'input'),
         CreateClosedDay: jsonSchema(apiCreateClosedDaySchema, 'input'),
         UpdateMember: jsonSchema(apiUpdateMemberSchema, 'input'),
         Team: jsonSchema(apiTeamSchema),
@@ -3946,6 +4038,10 @@ export const API_ROUTES = [
   ['get', '/business-hours/closed-days'],
   ['post', '/business-hours/closed-days'],
   ['delete', '/business-hours/closed-days/{id}'],
+  ['get', '/saved-replies'],
+  ['post', '/saved-replies'],
+  ['patch', '/saved-replies/{id}'],
+  ['delete', '/saved-replies/{id}'],
   ['get', '/teams'],
   ['post', '/teams'],
   ['get', '/teams/{id}'],

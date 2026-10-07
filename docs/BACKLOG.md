@@ -891,6 +891,10 @@ verification, app review, Embedded Signup configuration).
   closed days a year at a time; `business_hours.manage`, granted with `tenant.settings.manage`, also
   sets the week and adds and removes closed days, through the checks and writes Settings uses,
   recorded as the key's).
+  **[Saved replies through the public API built; its database tests run only in CI]** (ADR-291,
+  migrations 0211 and 0212: `saved_replies.manage`, granted with `inbox.supervise`, lists, adds,
+  changes and deletes the company's saved replies through the checks and writes Settings uses,
+  recorded as the key's, and keys with `messages.reply` read them; a company keeps at most 500).
   **[Reading CRM tasks built; its database tests run only in CI]** (ADR-258, migrations 0173 and
   0174: `tasks.read` lists the company's tasks newest first on exact pages, filtered by status,
   assignee, contact, deal and time, and reads each one, with the reminder and the assignee, contact

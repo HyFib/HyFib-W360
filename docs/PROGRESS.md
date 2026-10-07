@@ -1,5 +1,45 @@
 # Progress
 
+## 2026-10-07 — Saved replies through the public API (P5-08, H-033, W-033, ADR-291)
+
+Status: **Implemented; its database tests run in CI only.** Only members who supervise the inbox
+could read, add, change or delete saved replies, in Settings. The local PostgreSQL is unavailable,
+so the migrations and the integration tests below were written but not run here; migrations 0211 and
+0212 passed the pglast parse check (syntax only).
+
+### Completed
+
+- **Database:** migrations 0211 (the `saved_replies.manage` scope in the key and plan checks;
+  `created_by_api_key_id` and `updated_by_api_key_id` on `app.saved_replies` with their foreign keys
+  and checks NOT VALID) and 0212 (validating them).
+- **Domain:** `writeCreateSavedReply` (with the limit of 500, `MAX_SAVED_REPLIES`, under a lock per
+  company), `writeUpdateSavedReply`, `writeDeleteSavedReply` and `savedReplyShortcutError` in
+  `inbox/saved-replies.ts`, now shared by Settings, which shows a reply a key changed last as
+  changed through the API; `api/saved-replies.ts` (`apiListSavedReplies`, `apiCreateSavedReply`,
+  `apiUpdateSavedReply`, `apiDeleteSavedReply`, `toApiSavedReply`); the scope; the OpenAPI entries;
+  the company export's new columns.
+- **Web:** `GET` and `POST /api/v1/saved-replies`, and `PATCH` and
+  `DELETE /api/v1/saved-replies/{id}`; Settings → Saved replies says "through the API" for a reply a
+  key changed last.
+- **Tests:** unit (`api/saved-replies.test.ts`: the scope, the checks, the limit and its lock, who
+  added and last changed a reply, refusals before any query, the read-only list, a change that
+  changes nothing left unwritten, the OpenAPI entries; the scope lists updated); integration (3 new
+  in `api.test.ts`). Written for CI; the integration tests were not run here. No e2e test.
+- **Docs:** ADR-291; ARCHITECTURE; SECURITY; THREAT-MODEL T259; DEPLOYMENT; RUNBOOKS; BACKLOG P5-08;
+  feature matrix H-033 and W-033.
+- **Mutation checks:** 35/35 deliberate regressions caught (one after a test was added)
+
+### Test commands and results (local, 2026-10-07)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 129 files, 1229 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| pglast 7 parse of migrations 0211 and 0212         | passed (syntax only)                                          |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
 ## 2026-10-07 — Business hours and closed days through the public API (P5-08, H-033, ADR-290)
 
 Status: **Implemented; its database tests run in CI only.** Only owners and administrators could

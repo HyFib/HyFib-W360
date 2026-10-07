@@ -1611,6 +1611,14 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   closed days go through `writeAddClosedDay` and `writeRemoveClosedDay`, with `closedDayError` for a
   day already closed, all now shared with the members' `createBusinessHoursService`. `closedDaySpan`
   bounds a read of closed days to a year.
+- **Saved replies through the API (ADR-291):** `api/saved-replies.ts` lists the replies in a
+  read-only transaction; adds one with `writeCreateSavedReply`, which counts the company's replies
+  against `MAX_SAVED_REPLIES` under the advisory lock `saved-replies:<company>`; changes one by
+  merging the change into the row it locks and writing with `writeUpdateSavedReply` only when
+  something differs; and deletes one with `writeDeleteSavedReply`. `savedReplyShortcutError` turns a
+  shortcut in use into 409. The writes take the author (`SavedReplyAuthor`: a member or a key) and
+  are shared with the members' `createSavedRepliesService`; `toApiSavedReply` and Settings take the
+  member as the last editor when one is named.
 - **Many conversations at once (ADR-120):** `POST /conversations/update-many`
   (`apiUpdateManyConversations`) takes 1 to 100 `conversationIds` and the same fields. In one
   transaction it locks the member first (as a suspension does before releasing its conversations),

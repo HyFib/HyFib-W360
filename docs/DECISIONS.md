@@ -11060,3 +11060,46 @@ Decision:
 
 Not built: hours per team or per WhatsApp number, holiday calendars imported from a feed, and
 webhook events when the hours or closed days change.
+
+## ADR-291 Saved replies through the public API (P5-08) (2026-10-07)
+
+Context: saved replies, the answers members put in the reply box with {{name}}, {{agent}} and
+{{company}} filled in, were kept only in Settings → Saved replies by members who supervise the
+inbox, and nothing outside the app could read them. A company that keeps its answers in a help
+centre or a knowledge base had to copy each one by hand and keep them in step, and a chatbot or a
+tool replying through the API (`messages.reply`) could not use the answers members use.
+
+Decision:
+
+- **One new scope:** `saved_replies.manage` ("Manage saved replies"), a writing scope granted with
+  `inbox.supervise`, the permission members manage saved replies with, which reads them too; keys
+  with `messages.reply` read them, as members who reply do. Writes are refused while the company is
+  suspended or restricted (423); reads work then. Existing keys keep their scopes, and a plan
+  version that chose its scopes (ADR-092) leaves it out until a new version includes it (migration
+  0211 adds it to the scope checks).
+- **`GET /api/v1/saved-replies`** (`listSavedReplies`) gives all of the company's saved replies by
+  shortcut, their placeholders as written, with who added and last changed each: a member (never
+  which) or a key, by its id.
+- **`POST /api/v1/saved-replies`** (`createSavedReply`) adds one, checked as Settings checks it: a
+  shortcut of 1 to 32 lower-case letters, digits, hyphens or underscores, unique in the company (409
+  otherwise); a title of at most 80 characters; and a text of at most 4096 characters with no
+  placeholder but the three (422 otherwise); once per `Idempotency-Key` when one is given.
+  **`PATCH /api/v1/saved-replies/{id}`** (`updateSavedReply`) changes what is given and keeps the
+  rest, with the same checks; a change that leaves the reply as it is is answered as it is, with no
+  audit entry. **`DELETE /api/v1/saved-replies/{id}`** (`deleteSavedReply`) deletes one (404 when
+  the company has no such reply).
+- **At most 500 a company:** Settings and the reply box list the first 500 by shortcut, so a reply
+  past them was never seen. Adding one more, from a key or in Settings, is refused (409), counted
+  under a lock per company so two additions at once never pass the limit; a company that already has
+  more keeps them.
+- **Recorded as the key's:** a saved reply now names the key that added or last changed it
+  (`created_by_api_key_id` and `updated_by_api_key_id`, migrations 0211 and 0212), and Settings
+  shows a reply a key changed last as changed through the API. The last editor is the member when
+  one is named, otherwise the key, so a change from a web server of an earlier release, which names
+  its member and leaves the key's column as it is, stays valid and is shown as the member's. The
+  writes are shared with Settings (`writeCreateSavedReply`, `writeUpdateSavedReply` and
+  `writeDeleteSavedReply`), and the audit log records `saved_reply.created`, `saved_reply.updated`
+  and `saved_reply.deleted` as the key, with `source: 'api'`, naming the shortcut, never the text.
+
+Not built: saved replies per team or for one member only, files or templates in a saved reply,
+filling the placeholders through the API, and webhook events when saved replies change.

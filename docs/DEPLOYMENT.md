@@ -911,6 +911,16 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    with an error for a company with a key holding a new scope, and the business hours requests with
    405 or 404; rolling web servers back does the same.
 
+   Migrations 0211 and 0212 (ADR-291) widen the API keys' and plan versions' scope checks again for
+   `saved_replies.manage`, with the same brief locks, validated at once, and give
+   `app.saved_replies` the columns naming the key that added or last changed a reply: 0211 adds
+   them, with their foreign keys and checks NOT VALID, under a brief lock (the member columns become
+   nullable), and 0212 validates them, reading the table without blocking its writes. Until the web
+   rollout ends, an old web server answers Settings → API keys with an error for a company with a
+   key holding the new scope, and the saved reply requests with 405 or 404; it shows a reply a key
+   added or changed without an editor's name, and its changes name its member, which the editor
+   check accepts. Rolling web servers back does the same.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

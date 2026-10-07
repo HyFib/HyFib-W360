@@ -265,6 +265,7 @@ describe('API scopes', () => {
       'teams.manage',
       'availability.write',
       'business_hours.manage',
+      'saved_replies.manage',
       'webhooks.manage',
     ]);
     expect([...API_SEND_SCOPES]).toEqual(API_SCOPE_KEYS.filter((s) => s.startsWith('messages.')));

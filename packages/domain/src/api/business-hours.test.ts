@@ -93,12 +93,13 @@ describe('business hours through the API (ADR-290)', () => {
       expect(API_SCOPES).toContain(scope);
     }
     // After availability.write and before webhooks.manage, in the order the database's checks list them.
-    expect(API_SCOPE_KEYS.slice(API_SCOPE_KEYS.indexOf('availability.write'))).toEqual([
+    const after = API_SCOPE_KEYS.indexOf('availability.write');
+    expect(API_SCOPE_KEYS.slice(after, after + 3)).toEqual([
       'availability.write',
       'business_hours.read',
       'business_hours.manage',
-      'webhooks.manage',
     ]);
+    expect(API_SCOPE_KEYS.indexOf('webhooks.manage')).toBeGreaterThan(after + 2);
     expect(API_SCOPE_INFO['business_hours.read']).toMatchObject({
       label: 'Read business hours',
       permission: 'tenant.read',

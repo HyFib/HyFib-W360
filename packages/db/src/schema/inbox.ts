@@ -75,8 +75,12 @@ export const savedReplies = appSchema.table('saved_replies', {
   shortcut: text('shortcut').notNull(),
   title: text('title').notNull(),
   body: text('body').notNull(),
-  createdByMembershipId: uuid('created_by_membership_id').notNull(),
-  updatedByMembershipId: uuid('updated_by_membership_id').notNull(),
+  /** Exactly one of the member and the key (ADR-291, migration 0211) added the reply. */
+  createdByMembershipId: uuid('created_by_membership_id'),
+  createdByApiKeyId: uuid('created_by_api_key_id'),
+  /** Exactly one of the member and the key last changed it. */
+  updatedByMembershipId: uuid('updated_by_membership_id'),
+  updatedByApiKeyId: uuid('updated_by_api_key_id'),
   createdAt: tz('created_at').notNull().defaultNow(),
   updatedAt: tz('updated_at').notNull().defaultNow(),
 });

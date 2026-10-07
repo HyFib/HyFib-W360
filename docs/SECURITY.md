@@ -625,14 +625,15 @@ Phase 5 rules (Public API, P5-08):
   permission a member needs for the same work: `templates.read`, `contacts.read`, `contacts.write`,
   `inbox.reply` for `messages.send` (utility templates) and `messages.reply` (text replies,
   ADR-070), `campaigns.send` for `messages.send_marketing`, `inbox.read_all` for
-  `conversations.read` (ADR-072), `inbox.supervise` for `conversations.write` (ADR-075) and
-  `teams.manage` (ADR-287), `inbox.assign` for `availability.write` (ADR-289), `automations.publish`
-  for `automations.start` (ADR-077), `tenant.settings.manage` for `contact_fields.manage` (ADR-115),
-  `pipelines.manage` (ADR-286) and `business_hours.manage` (ADR-290), `tenant.read` for
-  `business_hours.read` (ADR-290), `campaigns.read` and `campaigns.write` for the scopes of the same
-  names (ADR-125, ADR-186), `campaigns.send` for `campaigns.stop` (ADR-128) and `campaigns.resume`
-  (ADR-176), `commerce.read` for `orders.read` (ADR-167), `inbox.reply` for `orders.write` (ADR-168)
-  and `orders.request_payment` (ADR-283), `channels.read` for the scope of the same name (ADR-171),
+  `conversations.read` (ADR-072), `inbox.supervise` for `conversations.write` (ADR-075),
+  `teams.manage` (ADR-287) and `saved_replies.manage` (ADR-291), `inbox.assign` for
+  `availability.write` (ADR-289), `automations.publish` for `automations.start` (ADR-077),
+  `tenant.settings.manage` for `contact_fields.manage` (ADR-115), `pipelines.manage` (ADR-286) and
+  `business_hours.manage` (ADR-290), `tenant.read` for `business_hours.read` (ADR-290),
+  `campaigns.read` and `campaigns.write` for the scopes of the same names (ADR-125, ADR-186),
+  `campaigns.send` for `campaigns.stop` (ADR-128) and `campaigns.resume` (ADR-176), `commerce.read`
+  for `orders.read` (ADR-167), `inbox.reply` for `orders.write` (ADR-168) and
+  `orders.request_payment` (ADR-283), `channels.read` for the scope of the same name (ADR-171),
   `crm.read` for `deals.read` (ADR-253), `tasks.read` (ADR-258) and `notes.read` (ADR-279), and
   `crm.write` for `deals.write` (ADR-254, ADR-255), `tasks.write` (ADR-259) and `notes.write`
   (ADR-268). Nobody grants a key more than they hold, and rotating needs the same. A key keeps the
@@ -1150,6 +1151,15 @@ Phase 5 rules (Public API, P5-08):
   (row security and an explicit company condition; another company's closed day answers 404, as an
   unknown one does), through the writes Settings uses, and give no member, conversation or customer
   data. Each change is audited as the key (unit tests; integration tests, run in CI only).
+- Saved replies (ADR-291): `GET /saved-replies` needs `messages.reply` (granted with `inbox.reply`)
+  or `saved_replies.manage` (granted only with `inbox.supervise`), and reads in a read-only
+  transaction; `POST /saved-replies`, `PATCH /saved-replies/{id}` and `DELETE /saved-replies/{id}`
+  need `saved_replies.manage` and an active company, checked before anything is written. They act on
+  the key's company's saved replies only (row security and an explicit company condition; another
+  company's reply answers 404, as an unknown one does), through the checks and writes Settings uses,
+  at most 500 a company, and give no conversation or customer data: a reply names the key that added
+  or changed it by its id, and a member never. Each change is audited as the key, naming the
+  shortcut, never the text (unit tests; integration tests, run in CI only).
 - Reading a deal's history (ADR-281): `GET /deals/{id}/history` needs `deals.read` and the CRM in
   the plan, checked before anything is read; it reads the key's company's deal only (another
   company's answers 404, as an unknown one does; an id that is not a UUID is refused before any

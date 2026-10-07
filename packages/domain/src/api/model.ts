@@ -39,6 +39,7 @@ export const API_SCOPE_KEYS = [
   'availability.write',
   'business_hours.read',
   'business_hours.manage',
+  'saved_replies.manage',
   'webhooks.manage',
 ] as const satisfies readonly ApiScope[];
 
@@ -257,6 +258,13 @@ export const API_SCOPE_INFO: Record<
     description:
       "Read and set the company's weekly business hours, turn them on or off, and add and remove closed days, as owners and administrators do in Settings → Inbox, recorded in the audit log as done by the key. Reply-due timers and automations' off-hours branches follow them.",
     permission: 'tenant.settings.manage',
+    writes: true,
+  },
+  'saved_replies.manage': {
+    label: 'Manage saved replies',
+    description:
+      "Read, add, change and delete the company's saved replies, the answers members put in the reply box, as members who supervise the inbox do in Settings → Saved replies, recorded as changed through the API and in the audit log as done by the key. Keys that send replies read them too.",
+    permission: 'inbox.supervise',
     writes: true,
   },
   'webhooks.manage': {

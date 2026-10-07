@@ -2140,6 +2140,18 @@ a stage of another pipeline, an owner who cannot use the CRM, or a lost reason w
 asks for the deal as it already is changes nothing and answers 200. The timeline shows each change
 "through the API"; the audit log has `crm.deal_updated` with the key and what changed.
 
+**A saved reply request answers 403, 404, 409, 422 or 423 (ADR-291).** 403 `forbidden` names the
+scope the key lacks: `messages.reply` or `saved_replies.manage` to read, `saved_replies.manage` to
+add, change or delete (granted by owners and administrators, who supervise the inbox). 404 means the
+saved reply is not one of the key's company's, or was deleted. 409: another saved reply already uses
+the shortcut (shortcuts are kept in lower case), or the company already has 500 saved replies;
+delete one first. 422 names what is wrong: the shortcut (1 to 32 lower-case letters, digits, hyphens
+or underscores), the title (1 to 80 characters), the text (1 to 4096 characters, with no placeholder
+but {{name}}, {{agent}} and {{company}}), or a change that gives none of the three. 423 means the
+company is suspended or its plan has ended; reads still work. The audit log has each change with the
+key, naming the shortcut, and Settings → Saved replies shows a reply a key changed last as changed
+through the API.
+
 **A business hours request answers 403, 404, 409, 422 or 423, or `open` is not what a team expects
 (ADR-290).** 403 `forbidden` names the scope the key lacks: `business_hours.read` or
 `business_hours.manage` to read, `business_hours.manage` to change (granted by owners and

@@ -10,8 +10,10 @@ import {
   isUniqueViolation,
   memberships,
   savedReplies,
+  sql,
   users,
   type Database,
+  type Tx,
 } from '@w360/db';
 import { assertCan, can, type TenantContext } from '../authz/context';
 import { recordAudit, type RequestMeta } from '../audit';
@@ -63,6 +65,115 @@ export interface SavedReplyView {
   body: string;
   updatedAt: string;
   updatedByName: string | null;
+  /** Last changed by an API key (ADR-291), which has no name to show. */
+  updatedThroughApi: boolean;
+}
+
+export type SavedReplyInput = z.output<typeof savedReplySchema>;
+
+/**
+ * The most saved replies a company keeps (ADR-291): Settings and the reply box list them all, and
+ * listed them only up to this many before.
+ */
+export const MAX_SAVED_REPLIES = 500;
+
+/**
+ * Who adds or changes a saved reply: a member, or a key since ADR-291. The last editor is the member
+ * when one is named, otherwise the key: a server from before ADR-291 names its member and leaves the
+ * key's column as it was.
+ */
+export type SavedReplyAuthor = { membershipId: string } | { apiKeyId: string };
+
+const authorOf = (by: SavedReplyAuthor) => ({
+  membershipId: 'membershipId' in by ? by.membershipId : null,
+  apiKeyId: 'apiKeyId' in by ? by.apiKeyId : null,
+});
+
+/** A shortcut another saved reply has, as a conflict; any other error as it is. */
+export function savedReplyShortcutError(error: unknown): unknown {
+  return isUniqueViolation(error, 'saved_replies_shortcut_uq')
+    ? new AppError('conflict', 'Another saved reply already uses this shortcut.')
+    : error;
+}
+
+/**
+ * Adds a saved reply (Settings, and keys since ADR-291) within MAX_SAVED_REPLIES, counted under the
+ * company's lock so two additions at once never pass it. The caller audits it and maps a shortcut in
+ * use with `savedReplyShortcutError`.
+ */
+export async function writeCreateSavedReply(
+  tx: Tx,
+  tenantId: string,
+  data: SavedReplyInput,
+  by: SavedReplyAuthor,
+): Promise<string> {
+  await tx.execute(
+    sql`select pg_advisory_xact_lock(hashtextextended(${`saved-replies:${tenantId}`}, 0))`,
+  );
+  const [count] = await tx
+    .select({ n: sql<number>`count(*)::int` })
+    .from(savedReplies)
+    .where(eq(savedReplies.tenantId, tenantId));
+  if ((count?.n ?? 0) >= MAX_SAVED_REPLIES) {
+    throw new AppError(
+      'conflict',
+      `The company already has ${MAX_SAVED_REPLIES} saved replies. Delete one before adding another.`,
+    );
+  }
+  const id = uuidv7();
+  const author = authorOf(by);
+  await tx.insert(savedReplies).values({
+    id,
+    tenantId,
+    shortcut: data.shortcut,
+    title: data.title,
+    body: data.body,
+    createdByMembershipId: author.membershipId,
+    createdByApiKeyId: author.apiKeyId,
+    updatedByMembershipId: author.membershipId,
+    updatedByApiKeyId: author.apiKeyId,
+  });
+  return id;
+}
+
+/**
+ * Changes a saved reply (Settings, and keys since ADR-291), naming who changed it last; false when
+ * the company has no such reply. The caller audits it and maps a shortcut in use with
+ * `savedReplyShortcutError`.
+ */
+export async function writeUpdateSavedReply(
+  tx: Tx,
+  tenantId: string,
+  id: string,
+  data: SavedReplyInput,
+  by: SavedReplyAuthor,
+): Promise<boolean> {
+  const author = authorOf(by);
+  const [updated] = await tx
+    .update(savedReplies)
+    .set({
+      shortcut: data.shortcut,
+      title: data.title,
+      body: data.body,
+      updatedByMembershipId: author.membershipId,
+      updatedByApiKeyId: author.apiKeyId,
+    })
+    .where(and(eq(savedReplies.tenantId, tenantId), eq(savedReplies.id, id)))
+    .returning({ id: savedReplies.id });
+  return updated !== undefined;
+}
+
+/** Deletes a saved reply (Settings, and keys since ADR-291); null when the company has no such reply. */
+export async function writeDeleteSavedReply(
+  tx: Tx,
+  tenantId: string,
+  id: string,
+): Promise<{ shortcut: string } | null> {
+  const [deleted] = await tx
+    .delete(savedReplies)
+    .where(and(eq(savedReplies.tenantId, tenantId), eq(savedReplies.id, id)))
+    .returning({ shortcut: savedReplies.shortcut });
+  return deleted ?? null;
 }
 
 /** Fills placeholders; values that are unknown (for example a contact without a name) are empty. */
@@ -84,9 +195,6 @@ export function renderSavedReply(
 export function createSavedRepliesService(deps: { db: Database; clock: Clock }) {
   const { db } = deps;
 
-  const duplicate = () =>
-    new AppError('conflict', 'Another saved reply already uses this shortcut.');
-
   return {
     async listSavedReplies(ctx: TenantContext): Promise<SavedReplyView[]> {
       if (!can(ctx, 'inbox.supervise')) assertCan(ctx, 'inbox.reply');
@@ -101,6 +209,7 @@ export function createSavedRepliesService(deps: { db: Database; clock: Clock }) 
               body: savedReplies.body,
               updatedAt: savedReplies.updatedAt,
               updatedByName: users.name,
+              updatedByMembershipId: savedReplies.updatedByMembershipId,
             })
             .from(savedReplies)
             .leftJoin(
@@ -116,7 +225,11 @@ export function createSavedRepliesService(deps: { db: Database; clock: Clock }) 
             .limit(500),
         { accessMode: 'read only' },
       );
-      return rows.map((r) => ({ ...r, updatedAt: r.updatedAt.toISOString() }));
+      return rows.map(({ updatedByMembershipId, ...r }) => ({
+        ...r,
+        updatedAt: r.updatedAt.toISOString(),
+        updatedThroughApi: updatedByMembershipId === null,
+      }));
     },
 
     /** Saved replies with placeholders filled for one conversation the member can see. */
@@ -191,17 +304,10 @@ export function createSavedRepliesService(deps: { db: Database; clock: Clock }) 
     ): Promise<{ id: string }> {
       assertCan(ctx, 'inbox.supervise');
       const data = parseInput(savedReplySchema, input);
-      const id = uuidv7();
       try {
-        await db.run(ctx.scope, async (tx) => {
-          await tx.insert(savedReplies).values({
-            id,
-            tenantId: ctx.tenant.id,
-            shortcut: data.shortcut,
-            title: data.title,
-            body: data.body,
-            createdByMembershipId: ctx.membership.id,
-            updatedByMembershipId: ctx.membership.id,
+        return await db.run(ctx.scope, async (tx) => {
+          const id = await writeCreateSavedReply(tx, ctx.tenant.id, data, {
+            membershipId: ctx.membership.id,
           });
           await recordAudit(
             tx,
@@ -214,12 +320,11 @@ export function createSavedRepliesService(deps: { db: Database; clock: Clock }) 
             },
             meta,
           );
+          return { id };
         });
       } catch (error) {
-        if (isUniqueViolation(error, 'saved_replies_shortcut_uq')) throw duplicate();
-        throw error;
+        throw savedReplyShortcutError(error);
       }
-      return { id };
     },
 
     async updateSavedReply(
@@ -233,16 +338,9 @@ export function createSavedRepliesService(deps: { db: Database; clock: Clock }) 
       const data = parseInput(savedReplySchema, input);
       try {
         await db.run(ctx.scope, async (tx) => {
-          const [updated] = await tx
-            .update(savedReplies)
-            .set({
-              shortcut: data.shortcut,
-              title: data.title,
-              body: data.body,
-              updatedByMembershipId: ctx.membership.id,
-            })
-            .where(and(eq(savedReplies.tenantId, ctx.tenant.id), eq(savedReplies.id, id)))
-            .returning({ id: savedReplies.id });
+          const updated = await writeUpdateSavedReply(tx, ctx.tenant.id, id, data, {
+            membershipId: ctx.membership.id,
+          });
           if (!updated) throw notFound('Saved reply');
           await recordAudit(
             tx,
@@ -257,8 +355,7 @@ export function createSavedRepliesService(deps: { db: Database; clock: Clock }) 
           );
         });
       } catch (error) {
-        if (isUniqueViolation(error, 'saved_replies_shortcut_uq')) throw duplicate();
-        throw error;
+        throw savedReplyShortcutError(error);
       }
     },
 
@@ -266,10 +363,7 @@ export function createSavedRepliesService(deps: { db: Database; clock: Clock }) 
       assertCan(ctx, 'inbox.supervise');
       if (!z.uuid().safeParse(id).success) throw notFound('Saved reply');
       await db.run(ctx.scope, async (tx) => {
-        const [deleted] = await tx
-          .delete(savedReplies)
-          .where(and(eq(savedReplies.tenantId, ctx.tenant.id), eq(savedReplies.id, id)))
-          .returning({ shortcut: savedReplies.shortcut });
+        const deleted = await writeDeleteSavedReply(tx, ctx.tenant.id, id);
         if (!deleted) throw notFound('Saved reply');
         await recordAudit(
           tx,
