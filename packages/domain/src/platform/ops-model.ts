@@ -712,7 +712,9 @@ export function platformAdministratorChoices(
   administrators: readonly PlatformAdministrator[],
   readerUserId: string,
 ): PlatformAdministratorChoice[] {
-  const nameOf = (a: PlatformAdministrator) => a.name?.trim() || 'An administrator without a name';
+  // A list option shows runs of spaces as one, so names are compared and shown that way.
+  const nameOf = (a: PlatformAdministrator) =>
+    a.name?.replace(/\s+/g, ' ').trim() || 'An administrator without a name';
   const shared = (a: PlatformAdministrator) =>
     administrators.some((b) => b.userId !== a.userId && nameOf(b) === nameOf(a));
   const labelled = administrators.map((a) => ({

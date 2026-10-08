@@ -19,7 +19,7 @@ below were changed but not run here.
   "(you)"). The integration and e2e tests were not run here.
 - **Docs:** ADR-325; ARCHITECTURE; SECURITY; THREAT-MODEL T293; RUNBOOKS; BACKLOG P5-10; feature
   matrix H-034.
-- **Mutation checks:** 9/9 deliberate regressions caught on the unit-tested parts.
+- **Mutation checks:** 10/10 deliberate regressions caught on the unit-tested parts (one added after Codex's review of PR #47 found that names differing only in runs of spaces, which a list option shows as one, were not told apart; names are now compared and shown with runs of spaces as one).
 
 ### Test commands and results (local, 2026-10-08)
 

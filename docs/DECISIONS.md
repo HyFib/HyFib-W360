@@ -12594,6 +12594,8 @@ addresses (ADR-054), so the name alone has to tell them apart.
 
 Decision:
 
+- **Names as a list shows them:** compared and shown trimmed, with runs of spaces as one, as a list
+  option displays them, so "Asha Ops" and "Asha Ops" count as one name.
 - **The reader is "(you)":** the administrator reading the console sees their own name followed by
   "(you)", whoever shares it, since assigning oneself is the common case.
 - **A shared name gets when they became an administrator:** any other administrator whose name

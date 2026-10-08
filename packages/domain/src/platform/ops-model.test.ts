@@ -923,7 +923,7 @@ describe('the administrators the Assign list offers (ADR-325)', () => {
       platformAdministratorChoices(
         [
           { userId: 'u-asha', name: 'Asha Ops', since: at('2026-10-01T09:30:00Z') },
-          { userId: 'u-ravi', name: ' Ravi Ops ', since: at('2026-10-02T09:30:00Z') },
+          { userId: 'u-ravi', name: ' Ravi\t Ops ', since: at('2026-10-02T09:30:00Z') },
           { userId: 'u-anon', name: null, since: at('2026-10-03T09:30:00Z') },
         ],
         'u-ravi',
@@ -938,7 +938,7 @@ describe('the administrators the Assign list offers (ADR-325)', () => {
   it('tells apart administrators who share a name by when they became one, then by place', () => {
     const choices = platformAdministratorChoices(
       [
-        { userId: 'u-1', name: 'Anil Staff', since: at('2026-10-01T09:30:59Z') },
+        { userId: 'u-1', name: 'Anil  Staff', since: at('2026-10-01T09:30:59Z') },
         { userId: 'u-2', name: 'Anil Staff', since: at('2026-10-05T14:05:00Z') },
         { userId: 'u-3', name: 'Anil Staff', since: at('2026-10-05T14:05:30Z') },
         { userId: 'u-me', name: 'Anil Staff', since: at('2026-10-06T08:00:00Z') },
