@@ -388,6 +388,12 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
    */
   crmChangeMakers: text('crm_change_makers').array().$type<WebhookCrmChangeMaker[]>(),
   /**
+   * The API keys whose deal, task and note changes it leaves out (migration 0243, ADR-321): the
+   * changes one of them made through the API, or a key one of them was rotated from or into. null
+   * leaves nothing out. Set only while a deal, task or note event is among its events.
+   */
+  crmExcludedApiKeyIds: uuid('crm_excluded_api_key_ids').array(),
+  /**
    * The scores of the satisfaction survey answers it takes (migration 0230, ADR-307), by the score
    * the customer's tap recorded; null takes every answer. Set only while
    * `satisfaction_survey.answered` is among its events.

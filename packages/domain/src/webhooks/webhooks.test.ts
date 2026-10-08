@@ -197,6 +197,9 @@ import {
   webhookRunApiKeyIdsFor,
   webhookRunApiKeyIdsSchema,
   WEBHOOK_MESSAGE_KEY_SCOPES,
+  WEBHOOK_CRM_KEY_SCOPES,
+  webhookCrmExcludedApiKeyIdsFor,
+  webhookCrmExcludedApiKeyIdsSchema,
   webhookMessageApiKeyIdsFor,
   webhookMessageApiKeyIdsSchema,
   webhookConsentChangesFor,
@@ -2507,6 +2510,50 @@ describe('API key filters of message statuses (ADR-320)', () => {
     // Received messages are not narrowed by key: the list goes with message.status.
     expect(webhookMessageApiKeyIdsFor(['message.received'], [store], [crm])).toBeNull();
     expect(webhookMessageApiKeyIdsFor(['automation.run_started'], undefined, [crm])).toBeNull();
+  });
+});
+
+describe('API keys left out of deal, task and note events (ADR-321)', () => {
+  const store = '0e1a2b3c-4d5e-4f60-8172-8394a5b6c7d8';
+  const crm = '1f2e3d4c-5b6a-4978-8695-a4b3c2d1e0f9';
+
+  it('take 1 to 20 key ids, once each, in lower case; null leaves nothing out', () => {
+    expect(webhookCrmExcludedApiKeyIdsSchema.parse([crm.toUpperCase(), store, crm])).toEqual([
+      crm,
+      store,
+    ]);
+    expect(webhookCrmExcludedApiKeyIdsSchema.parse(null)).toBeNull();
+    expect(WEBHOOK_LIMITS.crmExcludedApiKeys).toBe(API_KEY_LIMITS.activeKeys);
+    const ids = Array.from(
+      { length: 21 },
+      (_, i) => `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`,
+    );
+    expect(webhookCrmExcludedApiKeyIdsSchema.safeParse(ids.slice(1)).success).toBe(true);
+    expect(webhookCrmExcludedApiKeyIdsSchema.safeParse(ids).error?.issues[0]?.message).toBe(
+      'Choose at most 20 API keys.',
+    );
+    expect(webhookCrmExcludedApiKeyIdsSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one API key, or take every change.',
+    );
+  });
+
+  it('name the keys that change deals, tasks or notes', () => {
+    expect([...WEBHOOK_CRM_KEY_SCOPES].sort()).toEqual([
+      'deals.write',
+      'notes.write',
+      'tasks.write',
+    ]);
+  });
+
+  it('are kept only while the endpoint takes a deal, task or note event: given, kept, or cleared', () => {
+    for (const type of ['deal.updated', 'task.created', 'note.created'] as const) {
+      expect(webhookCrmExcludedApiKeyIdsFor([type], [store], null), type).toEqual([store]);
+      expect(webhookCrmExcludedApiKeyIdsFor([type], undefined, [crm]), type).toEqual([crm]);
+    }
+    expect(webhookCrmExcludedApiKeyIdsFor(['deal.created'], null, [crm])).toBeNull();
+    expect(webhookCrmExcludedApiKeyIdsFor(['deal.created'], undefined, null)).toBeNull();
+    expect(webhookCrmExcludedApiKeyIdsFor(['contact.updated'], [store], [crm])).toBeNull();
+    expect(webhookCrmExcludedApiKeyIdsFor(['automation.run_started'], undefined, [crm])).toBeNull();
   });
 });
 

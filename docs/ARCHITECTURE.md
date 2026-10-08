@@ -2204,6 +2204,16 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   for endpoints whose list is null or shares one of them, taking the key out of the detail before
   the event is stored. Settings (checkboxes under "Messages sent through the API") and the API
   (`messageApiKeyIds`) set it; a change that drops `message.status` clears it.
+- **CRM API key exclusions** (migration 0243, ADR-321): `crm_excluded_api_key_ids` on an endpoint
+  lists the API keys whose deal, task and note changes it does not take, null for none; a check
+  keeps it to 1 to 20 ids and to endpoints that take a deal, task or note event.
+  `app.capture_webhook_event` (replaced with the same signature), when an active endpoint taking the
+  event leaves out keys, reads the key that made the change (the deal's or task's creating key, the
+  note's key, or the `apiKeyId` the change triggers pass), its rotations through
+  `app.webhook_api_key_family`, and creates no delivery for an endpoint whose list shares one of
+  them; a change without a key is left out by no list. Settings (checkboxes under "Deal, task and
+  note changes made through the API") and the API (`crmExcludedApiKeyIds`) set it; a change that
+  drops every such event clears it.
 - **Custom field filters** (migration 0132, ADR-184): `contact_field_keys` on an endpoint lists the
   custom fields whose changes it takes as `contact.updated`, null for every field's; a check keeps
   it to 1 to 50 well-formed keys and to endpoints taking `contact.updated` for every part or for

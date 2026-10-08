@@ -3246,6 +3246,19 @@ more, tick the keys under "Messages sent through the API" on the endpoint's page
 `PATCH /webhook-endpoints/{id}` with `messageApiKeyIds` (null for every message). Removing Message
 status clears the list.
 
+**A receiver misses the deal, task or note changes of an API key (ADR-321).** An endpoint can leave
+out the changes chosen API keys made. The endpoints list shows them ("Deal, task and note changes
+left out, made through the API by: …"), and the API answers `crmExcludedApiKeyIds` (null leaves
+nothing out). A change goes by the key that made it, as the event's `apiKeyId` names it, and by the
+keys that key was rotated from or into, so a list naming an integration's old key leaves out its new
+key's changes too. Changes members and automations' runs make, and those without a recorded maker,
+are never left out by a list. Events no endpoint takes are not recorded, so there is nothing to
+replay; the API reads the deals, tasks and notes as they are now. With who made the changes chosen
+too, an event must pass both. To take a key's changes again, untick it under "Deal, task and note
+changes made through the API" on the endpoint's page, or `PATCH /webhook-endpoints/{id}` with
+`crmExcludedApiKeyIds` (null for every change). Removing every deal, task and note event clears the
+list.
+
 **A receiver misses the events of a member's conversations (ADR-181).** An endpoint can take the
 message and conversation events of the conversations assigned to chosen members only. The endpoints
 list shows them ("Members whose conversations’ events are sent: …"), and the API answers

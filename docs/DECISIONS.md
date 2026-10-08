@@ -12377,3 +12377,59 @@ Decision:
 
 Not built: lists that leave chosen keys' messages out, the statuses of the messages an automation
 sent for a key's run, and filters by the key that made a CRM or order change.
+
+## ADR-321 Choosing the API keys whose deal, task and note changes a webhook endpoint leaves out (P5-09) (2026-10-08)
+
+Context: an endpoint taking deal, task or note events can choose who made the changes it receives
+(ADR-306): members, automations' runs, API keys. An integration that writes deals, tasks or notes
+through the API and takes their events (to keep its own copy in step) was sent back every change it
+wrote; leaving out the API's changes left out every other integration's too, and the receiver read
+`apiKeyId` to drop its own. ADR-320 left filters by the key that made a CRM change unbuilt.
+
+Decision:
+
+- **One list per endpoint,** `crmExcludedApiKeyIds`: 1 to 20 ids of the company's API keys, each
+  once, whose changes the endpoint does not receive. A deal, task or note event is left out when the
+  key that made its change, as the payload's `apiKeyId` names it (for `deal.created` and
+  `task.created` the key that added the deal or task, for `note.created` the key that wrote the
+  note), is on the list, or a key it was rotated from or into, however many rotations away, as for
+  runs and messages (ADR-319, ADR-320). A change a member or an automation's run made, or one HyFib
+  recorded no maker for (such as erasure retitling a deal), is left out by no list. A list of keys
+  to leave out rather than to take, because what an integration needs is every change but its own,
+  members' and other keys' included. Null leaves nothing out, as before. With who made the changes
+  or other lists chosen too, an event must pass them all; other events are not narrowed. Chosen in
+  Settings → Webhooks ("Deal, task and note changes made through the API": every change by default,
+  or all but those the keys ticked made; shown while the endpoint takes a deal, task or note event),
+  shown on the endpoint as "Deal, task and note changes left out, made through the API by: …", and
+  through the API as `crmExcludedApiKeyIds` on `POST /webhook-endpoints` and
+  `PATCH /webhook-endpoints/{id}` and in every endpoint the API answers.
+- **Which keys:** the services refuse an id that is not one of the company's keys holding a scope
+  that changes deals, tasks or notes (`deals.write`, `tasks.write` or `notes.write`), named by
+  place, whatever the key's state: a key revoked or expired since it was ticked makes no more
+  changes but does not stop the endpoint being saved, and a rotated key's changes match the key that
+  replaced it. Settings offers the keys that work and were not rotated, and keeps naming a key an
+  endpoint has, with "revoked" or "expired" once it stops working.
+- **Only while a deal, task or note event is taken:** a list given for an endpoint that takes none
+  is refused (422 through the API); a change that drops every such event clears the list, a `PATCH`
+  that leaves the list out keeps it, and one that gives only the list is a change. A check in the
+  database holds the same rule and the list's shape (null, or 1 to 20 ids in one dimension without a
+  null, with a deal, task or note event).
+- **Applied at capture:** `app.capture_webhook_event` already read who made a change when an active
+  endpoint taking the event names makers (0229); it now does so too when one leaves out keys, and
+  reads the key that made it: the deal's or task's `created_by_api_key_id` for its creation, the
+  note's `apiKeyId` when no member wrote it, and the `apiKeyId` the change triggers pass with the
+  maker `api` for the other events. It reads the key's rotations through
+  `app.webhook_api_key_family` (0242) only when an active endpoint taking the event leaves out keys,
+  and creates no delivery for an endpoint whose list shares one of them. Nothing new is stored: the
+  events' payloads already name the key.
+- **Audited, exported, permissions unchanged,** as for runs and messages: `webhook.endpoint_created`
+  and `webhook.endpoint_updated` carry `crmExcludedApiKeyIds` when the endpoint has it, and the
+  company data export carries the column.
+- **Migration 0243:** `crm_excluded_api_key_ids uuid[]` on `app.webhook_endpoints` with its check,
+  validated at once (a company has at most 10 endpoints), the update grant on the column for the
+  runtime role, and `app.capture_webhook_event` replaced with the same signature (0242's, with the
+  exclusion), so its owner and grants stay. Existing endpoints keep null; nothing is backfilled.
+
+Not built: lists that take only chosen keys' CRM changes, lists that leave chosen keys' runs or
+messages out, the statuses of the messages an automation sent for a key's run, and filters by the
+key that made an order change.

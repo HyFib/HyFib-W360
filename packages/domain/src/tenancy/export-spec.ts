@@ -1639,6 +1639,7 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
       'note_stage_ids',
       'note_deal_owner_ids',
       'crm_change_makers',
+      'crm_excluded_api_key_ids',
       'survey_scores',
       'survey_assignee_ids',
       'survey_team_ids',

@@ -945,13 +945,23 @@ const API_KEY_WORDS = {
     none: 'No API key can send messages yet.',
     idPart: 'message-api-key',
   },
+  crm: {
+    legend: 'Deal, task and note changes made through the API',
+    help: 'Leave out the changes chosen keys made, so that an integration is not sent back what it wrote: a change made through the API belongs to the key that made it, and to the keys that key was rotated from or into. Changes members and automations make are never left out here. With who made the changes chosen too, an event must pass both.',
+    every: 'Every change',
+    everyHelp: 'Whichever key made it.',
+    only: 'Leave out the changes the API keys ticked made',
+    none: 'No API key can change deals, tasks or notes yet.',
+    idPart: 'crm-api-key',
+  },
 } as const;
 
 /**
- * The API keys whose runs (ADR-319) or messages' statuses (ADR-320) an endpoint takes, as `kind`
- * says, shown while it takes their events: every run or message, or only those of the keys ticked.
- * The keys that can start automations or send messages, work and were not rotated are offered; one
- * the endpoint already names stays listed, ticked, until it is unticked.
+ * The API keys whose runs (ADR-319) or messages' statuses (ADR-320) an endpoint takes, or whose
+ * deal, task and note changes it leaves out (ADR-321), as `kind` says, shown while it takes their
+ * events: every run, message or change, or only those of the keys ticked, or all but theirs.
+ * The keys that can start automations, send messages or change deals, tasks or notes, work and were
+ * not rotated are offered; one the endpoint already names stays listed, ticked, until it is unticked.
  */
 function ApiKeyChoices({
   kind,
@@ -2670,6 +2680,7 @@ export function WebhookEndpointForm({
   automationChoices,
   runApiKeyChoices,
   messageApiKeyChoices,
+  crmApiKeyChoices,
   channelChoices,
   teamChoices,
   templateChoices,
@@ -2752,6 +2763,8 @@ export function WebhookEndpointForm({
     noteDealOwners: WebhookEndpointOwner[] | null;
     /** Who made the changes whose deal, task and note events it takes (ADR-306); null: all. */
     crmChangeMakers: WebhookCrmChangeMaker[] | null;
+    /** The API keys whose CRM changes it leaves out (ADR-321), and if they work; null: none. */
+    crmExcludedApiKeys: WebhookEndpointApiKey[] | null;
     /** The scores of the survey answers it takes (ADR-307); null: every answer. */
     surveyScores: WebhookSurveyScore[] | null;
     /** The members credited with the survey answers it takes (ADR-311); null: every answer. */
@@ -2778,6 +2791,8 @@ export function WebhookEndpointForm({
   runApiKeyChoices: WebhookApiKeyChoice[];
   /** The company's API keys whose messages carry them, which an endpoint can choose (ADR-320). */
   messageApiKeyChoices: WebhookApiKeyChoice[];
+  /** The company's API keys that change deals, tasks or notes, which an endpoint can leave out. */
+  crmApiKeyChoices: WebhookApiKeyChoice[];
   /** The company's WhatsApp numbers, which an endpoint can choose (ADR-170). */
   channelChoices: WebhookChannelChoice[];
   /** The company's teams, which an endpoint can choose (ADR-174). */
@@ -2868,6 +2883,10 @@ export function WebhookEndpointForm({
   const [everyMessageApiKey, setEveryMessageApiKey] = useState(!endpoint?.messageApiKeys);
   const [messageApiKeyIds, setMessageApiKeyIds] = useState<string[]>(
     endpoint?.messageApiKeys?.map((k) => k.id) ?? [],
+  );
+  const [everyCrmChange, setEveryCrmChange] = useState(!endpoint?.crmExcludedApiKeys);
+  const [crmExcludedApiKeyIds, setCrmExcludedApiKeyIds] = useState<string[]>(
+    endpoint?.crmExcludedApiKeys?.map((k) => k.id) ?? [],
   );
   const [everyChannel, setEveryChannel] = useState(!endpoint?.channelIds);
   const [channelIds, setChannelIds] = useState<string[]>(endpoint?.channelIds ?? []);
@@ -3142,6 +3161,9 @@ export function WebhookEndpointForm({
           changeMakers.length < WEBHOOK_CRM_CHANGE_MAKERS.length
             ? changeMakers
             : null;
+        // Every change unless the API keys ticked are left out (ADR-321).
+        const chosenCrmExcludedApiKeys =
+          webhookTakesCrmChanges(eventTypes) && !everyCrmChange ? crmExcludedApiKeyIds : null;
         // Every score ticked takes every answer (null, ADR-307).
         const surveyScores =
           eventTypes.includes('satisfaction_survey.answered') &&
@@ -3241,6 +3263,7 @@ export function WebhookEndpointForm({
           noteStageIds: chosenNoteStages,
           noteDealOwnerIds: chosenNoteDealOwners,
           crmChangeMakers,
+          crmExcludedApiKeyIds: chosenCrmExcludedApiKeys,
           surveyScores,
           surveyAssigneeIds: chosenSurveyAssignees,
           surveyTeamIds: chosenSurveyTeams,
@@ -3750,6 +3773,18 @@ export function WebhookEndpointForm({
       ) : null}
       {webhookTakesCrmChanges(eventTypes) ? (
         <ChangeMakerChoices prefix={prefix} chosen={changeMakers} onChange={setChangeMakers} />
+      ) : null}
+      {webhookTakesCrmChanges(eventTypes) ? (
+        <ApiKeyChoices
+          kind="crm"
+          prefix={prefix}
+          choices={crmApiKeyChoices}
+          stored={endpoint?.crmExcludedApiKeys ?? []}
+          every={everyCrmChange}
+          onEveryChange={setEveryCrmChange}
+          chosen={crmExcludedApiKeyIds}
+          onChange={setCrmExcludedApiKeyIds}
+        />
       ) : null}
       <fieldset className="grid gap-2">
         <legend className="mb-1 text-sm font-medium">Headers</legend>

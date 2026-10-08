@@ -5828,6 +5828,141 @@ describe('change-maker filters for deal, task and note events (ADR-306)', () => 
   });
 });
 
+describe('API keys left out of deal, task and note events (ADR-321)', () => {
+  const crm = () =>
+    createCrmService({ db: fx.dbs.app, clock: systemClock, jobs: fx.jobs(), signer: fx.signer });
+
+  it('leaves out of an endpoint the changes the keys it names made, across a rotation either way, and sends every other change', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const svc = crm();
+    const { id: salesId } = await svc.createPipeline(owner, {
+      name: 'Sales',
+      currency: 'INR',
+      stages: ['New', 'Qualified'],
+    });
+    const [sales] = (await svc.listPipelines(owner)).filter((p) => p.id === salesId);
+    const [fresh] = sales!.stages.map((st) => st.id);
+    const keys = createApiKeysService({ db: fx.dbs.app, clock: systemClock });
+    const shop = await keys.create(owner, {
+      name: 'Shop',
+      scopes: ['deals.write', 'tasks.write', 'notes.write'],
+      expiresInDays: 0,
+    });
+    const sync = await keys.create(owner, {
+      name: 'Sync',
+      scopes: ['deals.write', 'notes.write'],
+      expiresInDays: 0,
+    });
+    const add = async (crmExcludedApiKeyIds: string[] | null) =>
+      (
+        await webhooks().create(owner, {
+          url: `http://${HOST}:${port}/ok/${randomBytes(6).toString('hex')}`,
+          eventTypes: ['deal.created', 'deal.updated', 'task.created', 'note.created'],
+          crmExcludedApiKeyIds,
+        })
+      ).id;
+    const every = await add(null);
+    const notShop = await add([shop.id]);
+    const notSync = await add([sync.id]);
+    // The shop's key is rotated: the old key works for a day more. An endpoint names the new one.
+    const shop2 = await keys.rotate(owner, { keyId: shop.id, overlapHours: 24 });
+    const notShop2 = await add([shop2.id]);
+    const keyCtx = async (token: string) => {
+      const ctx = await authenticateApiToken(fx.dbs.app, token, uuidv7());
+      if (!ctx) throw new Error('a key does not authenticate');
+      return ctx;
+    };
+    const apiDeps = { db: fx.dbs.app, clock: systemClock, jobs: fx.jobs(), signer: fx.signer };
+    const { id: jaya } = await contactsService().createContact(owner, {
+      displayName: 'Jaya',
+      phone: `+${waId()}`,
+    });
+
+    // A member adds a deal; the old key adds another; the new key retitles the member's.
+    const { id: membersDeal } = await svc.createDeal(owner, {
+      contactId: jaya,
+      pipelineId: salesId,
+      stageId: fresh,
+      title: 'Annual plan',
+      ownerMembershipId: null,
+    });
+    const created = await apiCreateDeal(
+      apiDeps,
+      await keyCtx(shop.token),
+      { contactId: jaya, pipelineId: salesId, title: 'Web order' },
+      null,
+    );
+    const shopsDeal = (created.body as { data: { id: string } }).data.id;
+    await apiUpdateDeal(apiDeps, await keyCtx(shop2.token), membersDeal, {
+      title: 'Annual plan 2027',
+    });
+    // The new key adds a task, the sync's key writes a note, and a change that records no maker
+    // retitles the shop's deal.
+    const taskResponse = await apiCreateTask(
+      apiDeps,
+      await keyCtx(shop2.token),
+      { title: 'Confirm the delivery', assigneeId: owner.membership.id, contactId: jaya },
+      null,
+    );
+    const shopsTask = (taskResponse.body as { data: { id: string } }).data.id;
+    const noteResponse = await apiCreateNote(
+      apiDeps,
+      await keyCtx(sync.token),
+      { body: 'Synced from the shop', dealId: membersDeal },
+      null,
+    );
+    const syncsNote = (noteResponse.body as { data: { id: string } }).data.id;
+    await fx.query(`UPDATE app.crm_deals SET title = 'Web order 1001' WHERE id = $1`, [shopsDeal]);
+
+    const sent = await fx.query<{ type: string; subject: string; endpoint: string }>(
+      `SELECT e.type, coalesce(e.detail ->> 'dealId', e.detail ->> 'taskId', e.detail ->> 'noteId')
+              AS subject, d.endpoint_id AS endpoint
+         FROM app.webhook_deliveries d
+         JOIN app.webhook_events e ON e.tenant_id = d.tenant_id AND e.id = d.event_id
+        WHERE d.tenant_id = $1`,
+      [c.tenant.id],
+    );
+    const endpointName = new Map([
+      [every, 'every change'],
+      [notShop, 'not the old key'],
+      [notSync, 'not the sync key'],
+      [notShop2, 'not the new key'],
+    ]);
+    const subjectName = new Map([
+      [membersDeal, "the member's deal"],
+      [shopsDeal, "the shop's deal"],
+      [shopsTask, "the shop's task"],
+      [syncsNote, "the sync's note"],
+    ]);
+    const sorted = (rows: unknown[][]) =>
+      [...rows].sort((x, y) => JSON.stringify(x).localeCompare(JSON.stringify(y)));
+    const all = ['every change', 'not the old key', 'not the sync key', 'not the new key'];
+    const to = (type: string, subject: string, endpoints: string[]) =>
+      endpoints.map((endpoint) => [type, subject, endpoint]);
+    expect(
+      sorted(sent.map((s) => [s.type, subjectName.get(s.subject), endpointName.get(s.endpoint)])),
+    ).toEqual(
+      sorted([
+        // A member's change reaches every endpoint.
+        ...to('deal.created', "the member's deal", all),
+        // The old key's change is left out by the lists naming it and the key it was rotated into…
+        ...to('deal.created', "the shop's deal", ['every change', 'not the sync key']),
+        // …and the new key's by the lists naming it and the key it replaced.
+        ...to('deal.updated', "the member's deal", ['every change', 'not the sync key']),
+        ...to('task.created', "the shop's task", ['every change', 'not the sync key']),
+        ...to('note.created', "the sync's note", [
+          'every change',
+          'not the old key',
+          'not the new key',
+        ]),
+        // A change that recorded no maker is left out by no list.
+        ...to('deal.updated', "the shop's deal", all),
+      ]),
+    );
+  });
+});
+
 describe('task events (ADR-261)', () => {
   const crm = () =>
     createCrmService({ db: fx.dbs.app, clock: systemClock, jobs: fx.jobs(), signer: fx.signer });

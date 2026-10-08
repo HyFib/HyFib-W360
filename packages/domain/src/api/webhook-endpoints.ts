@@ -74,6 +74,7 @@ import {
   assertWebhookAutomations,
   assertWebhookRunApiKeys,
   assertWebhookMessageApiKeys,
+  assertWebhookCrmExcludedApiKeys,
   assertWebhookCampaigns,
   assertWebhookChannels,
   assertWebhookPipelines,
@@ -137,6 +138,7 @@ import {
   WEBHOOK_NOTE_STAGES_NEED_THE_EVENTS,
   WEBHOOK_NOTE_DEAL_OWNERS_NEED_THE_EVENTS,
   WEBHOOK_CRM_CHANGE_MAKERS_NEED_THE_EVENTS,
+  WEBHOOK_CRM_EXCLUDED_API_KEYS_NEED_THE_EVENTS,
   WEBHOOK_SURVEY_SCORES_NEED_THE_EVENT,
   WEBHOOK_SURVEY_ASSIGNEES_NEED_THE_EVENT,
   WEBHOOK_SURVEY_TEAMS_NEED_THE_EVENT,
@@ -204,6 +206,8 @@ import {
   webhookNoteDealOwnerIdsSchema,
   webhookCrmChangeMakersFor,
   webhookCrmChangeMakersSchema,
+  webhookCrmExcludedApiKeyIdsFor,
+  webhookCrmExcludedApiKeyIdsSchema,
   webhookSurveyScoresFor,
   webhookSurveyScoresSchema,
   webhookSurveyAssigneeIdsFor,
@@ -645,6 +649,18 @@ const invalidCrmChangeMakers = () =>
     issues: [{ path: 'crmChangeMakers', message: WEBHOOK_CRM_CHANGE_MAKERS_NEED_THE_EVENTS }],
   });
 
+const crmExcludedApiKeyIdsField = webhookCrmExcludedApiKeyIdsSchema.describe(
+  `The API keys whose deal, task and note changes the endpoint does not receive: 1 to ${WEBHOOK_LIMITS.crmExcludedApiKeys} ids of the company's keys that can change them (deals.write, tasks.write or notes.write), as \`apiKeyId\` names the key that made a change in deal, task and note events (a key that adds an endpoint finds its own id in the endpoint's apiKeyId), only with a deal, task or note event. An event is left out when the key that made its change is listed, or a key it was rotated from or into, so an integration that writes through the API and takes the events is not sent back what it wrote, across rotations, while it is sent the changes of members, automations and other keys. A change HyFib did not record the maker of is never left out. With who made the changes or other lists too, an event must pass them all. Other events are not narrowed. null leaves nothing out.`,
+);
+
+/** Keys are left out only for an endpoint that receives CRM events (ADR-321). */
+const invalidCrmExcludedApiKeys = () =>
+  new AppError('validation_failed', WEBHOOK_CRM_EXCLUDED_API_KEYS_NEED_THE_EVENTS, {
+    issues: [
+      { path: 'crmExcludedApiKeyIds', message: WEBHOOK_CRM_EXCLUDED_API_KEYS_NEED_THE_EVENTS },
+    ],
+  });
+
 const surveyScoresField = webhookSurveyScoresSchema.describe(
   `The scores of the satisfaction survey answers the endpoint receives: one or more of ${WEBHOOK_SURVEY_SCORES.join(', ')}, as the survey's \`score\` gives them (3 for the first and best button, 2 for the second, 1 for the third, whatever the company's buttons say), only with satisfaction_survey.answered. Other events are not narrowed. null receives every answer.`,
 );
@@ -794,6 +810,7 @@ export const apiCreateWebhookEndpointSchema = z
     noteStageIds: noteStageIdsField.optional(),
     noteDealOwnerIds: noteDealOwnerIdsField.optional(),
     crmChangeMakers: crmChangeMakersField.optional(),
+    crmExcludedApiKeyIds: crmExcludedApiKeyIdsField.optional(),
     surveyScores: surveyScoresField.optional(),
     surveyAssigneeIds: surveyAssigneeIdsField.optional(),
     surveyTeamIds: surveyTeamIdsField.optional(),
@@ -962,6 +979,10 @@ export const apiCreateWebhookEndpointSchema = z
   .refine((data) => !data.crmChangeMakers || webhookTakesCrmChanges(data.events), {
     path: ['crmChangeMakers'],
     message: WEBHOOK_CRM_CHANGE_MAKERS_NEED_THE_EVENTS,
+  })
+  .refine((data) => !data.crmExcludedApiKeyIds || webhookTakesCrmChanges(data.events), {
+    path: ['crmExcludedApiKeyIds'],
+    message: WEBHOOK_CRM_EXCLUDED_API_KEYS_NEED_THE_EVENTS,
   })
   .refine((data) => !data.surveyScores || data.events.includes('satisfaction_survey.answered'), {
     path: ['surveyScores'],
@@ -1205,6 +1226,11 @@ export const apiUpdateWebhookEndpointSchema = z
       .describe(
         'Who made the changes whose deal, task and note events the endpoint receives; null receives every change. Left out, they stay, unless the events no longer include a deal, task or note event, which clears them.',
       ),
+    crmExcludedApiKeyIds: crmExcludedApiKeyIdsField
+      .optional()
+      .describe(
+        "The API keys whose deal, task and note changes the endpoint does not receive (the company's keys that can change them, whatever their state); null leaves nothing out. Left out, they stay, unless the events no longer include a deal, task or note event, which clears them.",
+      ),
     surveyScores: surveyScoresField
       .optional()
       .describe(
@@ -1301,6 +1327,7 @@ export const apiUpdateWebhookEndpointSchema = z
       data.noteStageIds !== undefined ||
       data.noteDealOwnerIds !== undefined ||
       data.crmChangeMakers !== undefined ||
+      data.crmExcludedApiKeyIds !== undefined ||
       data.surveyScores !== undefined ||
       data.surveyAssigneeIds !== undefined ||
       data.surveyTeamIds !== undefined ||
@@ -1311,7 +1338,7 @@ export const apiUpdateWebhookEndpointSchema = z
       data.contactTags !== undefined ||
       data.conversationTags !== undefined ||
       data.oauth !== undefined,
-    'Give the events, the description, the headers, the message statuses, who sent the messages, the API keys that sent them, the contact parts, the deal and task details, the custom fields, the automations, the campaign statuses, the order statuses, the Payment Link statuses, the template statuses, the conversation statuses, the deal statuses, the task statuses, the run end statuses, what started the runs, the API keys that started them, the consent changes, where contacts came from, the received message types, the run end reasons, the numbers, the teams, the templates, the campaigns, the pipelines, the stages, the deal owners, the task assignees, the pipelines, stages and owners of tasks’ deals and of notes’ deals, who made the CRM changes, the survey scores, the members credited with survey answers and the teams of their conversations, the contact and conversation tags of survey answers, the tags of added and changed contacts, the members, the contact tags, the conversation tags, the OAuth client or whether the endpoint is enabled',
+    'Give the events, the description, the headers, the message statuses, who sent the messages, the API keys that sent them, the contact parts, the deal and task details, the custom fields, the automations, the campaign statuses, the order statuses, the Payment Link statuses, the template statuses, the conversation statuses, the deal statuses, the task statuses, the run end statuses, what started the runs, the API keys that started them, the consent changes, where contacts came from, the received message types, the run end reasons, the numbers, the teams, the templates, the campaigns, the pipelines, the stages, the deal owners, the task assignees, the pipelines, stages and owners of tasks’ deals and of notes’ deals, who made the CRM changes, the API keys whose CRM changes are left out, the survey scores, the members credited with survey answers and the teams of their conversations, the contact and conversation tags of survey answers, the tags of added and changed contacts, the members, the contact tags, the conversation tags, the OAuth client or whether the endpoint is enabled',
   );
 
 export interface ApiWebhookEndpoint {
@@ -1404,6 +1431,8 @@ export interface ApiWebhookEndpoint {
   noteDealOwnerIds: string[] | null;
   /** Who made the changes whose deal, task and note events it receives (ADR-306); null: all. */
   crmChangeMakers: WebhookCrmChangeMaker[] | null;
+  /** The API keys whose deal, task and note changes it leaves out (ADR-321); null: none. */
+  crmExcludedApiKeyIds: string[] | null;
   /** The scores of the satisfaction survey answers it receives (ADR-307); null: every answer. */
   surveyScores: WebhookSurveyScore[] | null;
   /** The members credited with the survey answers it receives (ADR-311); null: every answer. */
@@ -1552,6 +1581,7 @@ const columns = {
   noteStageIds: webhookEndpoints.noteStageIds,
   noteDealOwnerIds: webhookEndpoints.noteDealOwnerIds,
   crmChangeMakers: webhookEndpoints.crmChangeMakers,
+  crmExcludedApiKeyIds: webhookEndpoints.crmExcludedApiKeyIds,
   surveyScores: webhookEndpoints.surveyScores,
   surveyAssigneeIds: webhookEndpoints.surveyAssigneeIds,
   surveyTeamIds: webhookEndpoints.surveyTeamIds,
@@ -1620,6 +1650,7 @@ type EndpointRow = Pick<
   | 'noteStageIds'
   | 'noteDealOwnerIds'
   | 'crmChangeMakers'
+  | 'crmExcludedApiKeyIds'
   | 'surveyScores'
   | 'surveyAssigneeIds'
   | 'surveyTeamIds'
@@ -1693,6 +1724,7 @@ function toApiEndpoint(row: EndpointRow, now: Date): ApiWebhookEndpoint {
     noteStageIds: row.noteStageIds,
     noteDealOwnerIds: row.noteDealOwnerIds,
     crmChangeMakers: row.crmChangeMakers,
+    crmExcludedApiKeyIds: row.crmExcludedApiKeyIds,
     surveyScores: row.surveyScores,
     surveyAssigneeIds: row.surveyAssigneeIds,
     surveyTeamIds: row.surveyTeamIds,
@@ -2019,6 +2051,12 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               data.crmChangeMakers,
               null,
             );
+            const crmExcludedApiKeyIds = webhookCrmExcludedApiKeyIdsFor(
+              data.events,
+              data.crmExcludedApiKeyIds,
+              null,
+            );
+            await assertWebhookCrmExcludedApiKeys(tx, ctx.tenant.id, crmExcludedApiKeyIds);
             const surveyScores = webhookSurveyScoresFor(data.events, data.surveyScores, null);
             const surveyAssigneeIds = webhookSurveyAssigneeIdsFor(
               data.events,
@@ -2093,6 +2131,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               noteStageIds,
               noteDealOwnerIds,
               crmChangeMakers,
+              crmExcludedApiKeyIds,
               surveyScores,
               surveyAssigneeIds,
               surveyTeamIds,
@@ -2146,6 +2185,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               ...(noteStageIds ? { noteStageIds } : {}),
               ...(noteDealOwnerIds ? { noteDealOwnerIds } : {}),
               ...(crmChangeMakers ? { crmChangeMakers } : {}),
+              ...(crmExcludedApiKeyIds ? { crmExcludedApiKeyIds } : {}),
               ...(surveyScores ? { surveyScores } : {}),
               ...(surveyAssigneeIds ? { surveyAssigneeIds } : {}),
               ...(surveyTeamIds ? { surveyTeamIds } : {}),
@@ -2253,6 +2293,9 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
         if (data.noteStageIds && !webhookTakesNoteEvents(events)) throw invalidNoteStages();
         if (data.noteDealOwnerIds && !webhookTakesNoteEvents(events)) throw invalidNoteDealOwners();
         if (data.crmChangeMakers && !webhookTakesCrmChanges(events)) throw invalidCrmChangeMakers();
+        if (data.crmExcludedApiKeyIds && !webhookTakesCrmChanges(events)) {
+          throw invalidCrmExcludedApiKeys();
+        }
         if (data.surveyScores && !events.includes('satisfaction_survey.answered')) {
           throw invalidSurveyScores();
         }
@@ -2291,6 +2334,10 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
         // And those for messages (ADR-320).
         if (data.messageApiKeyIds !== undefined) {
           await assertWebhookMessageApiKeys(tx, ctx.tenant.id, data.messageApiKeyIds);
+        }
+        // And those left out of CRM changes (ADR-321).
+        if (data.crmExcludedApiKeyIds !== undefined) {
+          await assertWebhookCrmExcludedApiKeys(tx, ctx.tenant.id, data.crmExcludedApiKeyIds);
         }
         // And the numbers likewise (ADR-170).
         if (data.channelIds !== undefined) {
@@ -2442,6 +2489,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
           data.noteStageIds !== undefined ||
           data.noteDealOwnerIds !== undefined ||
           data.crmChangeMakers !== undefined ||
+          data.crmExcludedApiKeyIds !== undefined ||
           data.surveyScores !== undefined ||
           data.surveyAssigneeIds !== undefined ||
           data.surveyTeamIds !== undefined ||
@@ -2607,6 +2655,11 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
                 data.crmChangeMakers,
                 endpoint.crmChangeMakers,
               ),
+              crmExcludedApiKeyIds: webhookCrmExcludedApiKeyIdsFor(
+                events,
+                data.crmExcludedApiKeyIds,
+                endpoint.crmExcludedApiKeyIds,
+              ),
               surveyScores: webhookSurveyScoresFor(
                 events,
                 data.surveyScores,
@@ -2686,6 +2739,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               noteStageIds: webhookEndpoints.noteStageIds,
               noteDealOwnerIds: webhookEndpoints.noteDealOwnerIds,
               crmChangeMakers: webhookEndpoints.crmChangeMakers,
+              crmExcludedApiKeyIds: webhookEndpoints.crmExcludedApiKeyIds,
               surveyScores: webhookEndpoints.surveyScores,
               surveyAssigneeIds: webhookEndpoints.surveyAssigneeIds,
               surveyTeamIds: webhookEndpoints.surveyTeamIds,
@@ -2742,6 +2796,9 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
             ...(changed.noteStageIds ? { noteStageIds: changed.noteStageIds } : {}),
             ...(changed.noteDealOwnerIds ? { noteDealOwnerIds: changed.noteDealOwnerIds } : {}),
             ...(changed.crmChangeMakers ? { crmChangeMakers: changed.crmChangeMakers } : {}),
+            ...(changed.crmExcludedApiKeyIds
+              ? { crmExcludedApiKeyIds: changed.crmExcludedApiKeyIds }
+              : {}),
             ...(changed.surveyScores ? { surveyScores: changed.surveyScores } : {}),
             ...(changed.surveyAssigneeIds ? { surveyAssigneeIds: changed.surveyAssigneeIds } : {}),
             ...(changed.surveyTeamIds ? { surveyTeamIds: changed.surveyTeamIds } : {}),

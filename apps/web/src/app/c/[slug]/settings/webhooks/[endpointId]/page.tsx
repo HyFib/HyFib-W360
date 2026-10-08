@@ -47,6 +47,7 @@ export default async function WebhookEndpointPage({
     automationChoices,
     runApiKeyChoices,
     messageApiKeyChoices,
+    crmApiKeyChoices,
     channelChoices,
     teamChoices,
     templateChoices,
@@ -61,6 +62,7 @@ export default async function WebhookEndpointPage({
     webhooks.automationChoices(ctx),
     webhooks.runApiKeyChoices(ctx),
     webhooks.messageApiKeyChoices(ctx),
+    webhooks.crmApiKeyChoices(ctx),
     webhooks.channelChoices(ctx),
     webhooks.teamChoices(ctx),
     webhooks.templateChoices(ctx),
@@ -243,6 +245,7 @@ export default async function WebhookEndpointPage({
               noteStages: endpoint.noteStages,
               noteDealOwners: endpoint.noteDealOwners,
               crmChangeMakers: endpoint.crmChangeMakers,
+              crmExcludedApiKeys: endpoint.crmExcludedApiKeys,
               surveyScores: endpoint.surveyScores,
               surveyAssignees: endpoint.surveyAssignees,
               surveyTeams: endpoint.surveyTeams,
@@ -257,6 +260,7 @@ export default async function WebhookEndpointPage({
             automationChoices={automationChoices}
             runApiKeyChoices={runApiKeyChoices}
             messageApiKeyChoices={messageApiKeyChoices}
+            crmApiKeyChoices={crmApiKeyChoices}
             channelChoices={channelChoices}
             teamChoices={teamChoices}
             templateChoices={templateChoices}

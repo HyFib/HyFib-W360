@@ -151,6 +151,7 @@ import {
   WEBHOOK_RUN_TRIGGERS_NEED_THE_EVENTS,
   WEBHOOK_RUN_API_KEYS_NEED_THE_EVENTS,
   WEBHOOK_MESSAGE_API_KEYS_NEED_THE_EVENT,
+  WEBHOOK_CRM_EXCLUDED_API_KEYS_NEED_THE_EVENTS,
   WEBHOOK_CONSENT_CHANGES_NEED_THE_EVENT,
   WEBHOOK_CONTACT_SOURCES_NEED_THE_EVENT,
   WEBHOOK_MESSAGE_TYPES_NEED_THE_EVENT,
@@ -1482,6 +1483,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'conversationStatuses',
       'conversationTags',
       'crmChangeMakers',
+      'crmExcludedApiKeyIds',
       'dealDetails',
       'dealStatuses',
       'description',
@@ -2158,7 +2160,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       taskAssigneeIds: [dev],
     });
     expect(apiUpdateWebhookEndpointSchema.safeParse({}).error?.issues[0]?.message).toContain(
-      'the deal owners, the task assignees, the pipelines, stages and owners of tasks’ deals and of notes’ deals, who made the CRM changes, the survey scores, the members credited with survey answers and the teams of their conversations, the contact and conversation tags of survey answers, the tags of added and changed contacts, the members, the contact tags, the conversation tags, the OAuth client',
+      'the deal owners, the task assignees, the pipelines, stages and owners of tasks’ deals and of notes’ deals, who made the CRM changes, the API keys whose CRM changes are left out, the survey scores, the members credited with survey answers and the teams of their conversations, the contact and conversation tags of survey answers, the tags of added and changed contacts, the members, the contact tags, the conversation tags, the OAuth client',
     );
     const doc = buildOpenApiDocument('https://app.example.com/api/v1');
     const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
@@ -3996,6 +3998,69 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     const webhooks = doc.webhooks as Record<string, { post?: { description?: string } }>;
     expect(webhooks['message.status']?.post?.description).toContain(
       'or the API keys that sent them (its `messageApiKeyIds`',
+    );
+  });
+
+  it('leave out API keys only with a deal, task or note event, each once, and a list of them alone is a change (ADR-321)', () => {
+    const store = '0E1A2B3C-4D5E-4F60-8172-8394A5B6C7D8';
+    const crm = '1f2e3d4c-5b6a-4978-8695-a4b3c2d1e0f9';
+    const base = { url: 'https://hooks.example.com/w360', events: ['deal.updated'] };
+    for (const events of [
+      ['deal.created'],
+      ['task.status_changed', 'consent.changed'],
+      ['note.created'],
+    ]) {
+      expect(
+        apiCreateWebhookEndpointSchema.parse({
+          ...base,
+          events,
+          crmExcludedApiKeyIds: [store, crm, store.toLowerCase()],
+        }).crmExcludedApiKeyIds,
+        JSON.stringify(events),
+      ).toEqual([store.toLowerCase(), crm]);
+    }
+    expect(
+      apiCreateWebhookEndpointSchema.parse({ ...base, crmExcludedApiKeyIds: null })
+        .crmExcludedApiKeyIds,
+    ).toBeNull();
+    for (const body of [
+      { ...base, crmExcludedApiKeyIds: [] },
+      { ...base, crmExcludedApiKeyIds: ['w360_aaaaaaaaaaaa'] },
+      { ...base, crmExcludedApiKeyIds: store },
+    ]) {
+      expect(apiCreateWebhookEndpointSchema.safeParse(body).success, JSON.stringify(body)).toBe(
+        false,
+      );
+    }
+    const refused = apiCreateWebhookEndpointSchema.safeParse({
+      ...base,
+      events: ['message.status', 'contact.updated'],
+      crmExcludedApiKeyIds: [store],
+    });
+    expect(refused.error?.issues.map((i) => [i.path.join('.'), i.message])).toEqual([
+      ['crmExcludedApiKeyIds', WEBHOOK_CRM_EXCLUDED_API_KEYS_NEED_THE_EVENTS],
+    ]);
+    for (const change of [{ crmExcludedApiKeyIds: null }, { crmExcludedApiKeyIds: [crm] }]) {
+      expect(apiUpdateWebhookEndpointSchema.parse(change)).toEqual(change);
+    }
+    expect(apiUpdateWebhookEndpointSchema.safeParse({}).error?.issues[0]?.message).toContain(
+      'who made the CRM changes, the API keys whose CRM changes are left out, the survey scores,',
+    );
+    // Answered as a list of key ids, or null, and set out with the webhooks.
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas;
+    const answered = schemas.WebhookEndpoint as {
+      properties: Record<string, { anyOf?: unknown[] }>;
+      required?: string[];
+    };
+    expect(answered.properties.crmExcludedApiKeyIds?.anyOf).toHaveLength(2);
+    expect(answered.required).toContain('crmExcludedApiKeyIds');
+    expect(
+      Object.keys((schemas.CreateWebhookEndpoint as { properties: object }).properties),
+    ).toContain('crmExcludedApiKeyIds');
+    expect(JSON.stringify(doc)).toContain(
+      'or it can leave out only the changes chosen keys made (its `crmExcludedApiKeyIds`',
     );
   });
 });

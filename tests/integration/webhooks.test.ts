@@ -2458,6 +2458,145 @@ describe('API key filters of message statuses (ADR-320)', () => {
   });
 });
 
+describe('API keys left out of deal, task and note events (ADR-321)', () => {
+  it('are refused without a deal, task or note event, or naming keys that are not the company’s or cannot change them, kept by a change that leaves them out and cleared with the events; the database keeps them to those events', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const keys = createApiKeysService({ db: fx.dbs.app, clock: systemClock });
+    const deals = await keys.create(owner, {
+      name: 'Deals',
+      scopes: ['deals.write'],
+      expiresInDays: 0,
+    });
+    const notes = await keys.create(owner, {
+      name: 'Notes',
+      scopes: ['contacts.read', 'notes.write'],
+      expiresInDays: 30,
+    });
+    const sender = await keys.create(owner, {
+      name: 'Sender',
+      scopes: ['messages.send'],
+      expiresInDays: 0,
+    });
+    const other = await fx.company();
+    const theirs = await keys.create(await fx.ctx(other, other.owner), {
+      name: 'Theirs',
+      scopes: ['deals.write'],
+      expiresInDays: 0,
+    });
+    const url = 'https://hooks.example.com/in';
+    const refused = (eventTypes: string[], crmExcludedApiKeyIds: unknown, message: RegExp) =>
+      expectAppError(
+        webhooks().create(owner, { url, eventTypes, crmExcludedApiKeyIds }),
+        'validation_failed',
+        message,
+      );
+    const needsTheEvents = /only for an endpoint that receives deal, task or note events/;
+    const notTheirs = /API keys of this company that can change deals, tasks or notes/;
+    await refused(['contact.updated', 'message.status'], [deals.id], needsTheEvents);
+    await refused(['deal.updated'], [], /at least one API key/);
+    await refused(['deal.updated'], [deals.keyPrefix], /from the list/);
+    await refused(['task.created'], [deals.id, sender.id], notTheirs);
+    await refused(['note.created'], [theirs.id], notTheirs);
+    expect(await webhooks().list(owner)).toEqual([]);
+    // Settings offers the keys that can change deals, tasks or notes and work, by name.
+    expect(await webhooks().crmApiKeyChoices(owner)).toEqual([
+      { id: deals.id, name: 'Deals', keyPrefix: deals.keyPrefix },
+      { id: notes.id, name: 'Notes', keyPrefix: notes.keyPrefix },
+    ]);
+
+    const created = await webhooks().create(owner, {
+      url,
+      eventTypes: ['deal.updated', 'consent.changed'],
+      crmExcludedApiKeyIds: [deals.id, notes.id, deals.id.toUpperCase()],
+    });
+    const [audit] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events WHERE tenant_id = $1 AND action = 'webhook.endpoint_created'`,
+      [c.tenant.id],
+    );
+    expect(audit?.metadata).toMatchObject({ crmExcludedApiKeyIds: [deals.id, notes.id] });
+    const change = (fields: Record<string, unknown>) =>
+      webhooks().update(owner, {
+        endpointId: created.id,
+        url,
+        description: '',
+        eventTypes: ['deal.updated', 'consent.changed'],
+        ...fields,
+      });
+    const current = async () =>
+      (await webhooks().list(owner)).find((e) => e.id === created.id)?.crmExcludedApiKeys;
+    const named = (key: { id: string; keyPrefix: string }, name: string, state: string) => ({
+      id: key.id,
+      name,
+      keyPrefix: key.keyPrefix,
+      state,
+    });
+    expect(await current()).toEqual([
+      named(deals, 'Deals', 'active'),
+      named(notes, 'Notes', 'active'),
+    ]);
+    await change({ description: 'kept' });
+    expect((await current())?.map((k) => k.id)).toEqual([deals.id, notes.id]);
+    // A key revoked since stays named, and allowed.
+    await keys.revoke(owner, { keyId: notes.id });
+    expect(await current()).toEqual([
+      named(deals, 'Deals', 'active'),
+      named(notes, 'Notes', 'revoked'),
+    ]);
+    await change({ crmExcludedApiKeyIds: [notes.id] });
+    const updates = await fx.query<{ metadata: { crmExcludedApiKeyIds?: unknown } }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND action = 'webhook.endpoint_updated' ORDER BY occurred_at`,
+      [c.tenant.id],
+    );
+    expect(updates.map((u) => u.metadata.crmExcludedApiKeyIds)).toEqual([
+      [deals.id, notes.id],
+      [notes.id],
+    ]);
+    await change({ crmExcludedApiKeyIds: null });
+    expect(await current()).toBeNull();
+    await change({ crmExcludedApiKeyIds: [deals.id] });
+    // Any deal, task or note event keeps the list.
+    await change({ eventTypes: ['note.created'] });
+    expect((await current())?.map((k) => k.id)).toEqual([deals.id]);
+    // The database refuses an empty list, more than 20 keys, a missing one or a list of lists from
+    // an endpoint taking such an event…
+    const setInDatabase = (value: string) =>
+      fx.query(
+        `UPDATE app.webhook_endpoints SET crm_excluded_api_key_ids = ${value} WHERE id = $1`,
+        [created.id],
+      );
+    const many = Array.from({ length: 21 }, () => `'${uuidv7()}'`).join(', ');
+    for (const bad of [
+      `'{}'`,
+      `ARRAY[${many}]::uuid[]`,
+      `ARRAY['${deals.id}', NULL]::uuid[]`,
+      `ARRAY[ARRAY['${deals.id}']]::uuid[]`,
+    ]) {
+      await expect(setInDatabase(bad), bad).rejects.toThrow(
+        /webhook_endpoints_crm_excluded_api_key_ids/,
+      );
+    }
+    await change({ eventTypes: ['consent.changed'] });
+    expect(await current()).toBeNull();
+    await expectAppError(
+      change({ eventTypes: ['consent.changed'], crmExcludedApiKeyIds: [deals.id] }),
+      'validation_failed',
+      needsTheEvents,
+    );
+    // …and any list from an endpoint taking none.
+    await expect(setInDatabase(`ARRAY['${deals.id}']::uuid[]`)).rejects.toThrow(
+      /webhook_endpoints_crm_excluded_api_key_ids/,
+    );
+    // The company role changes the list only through its column grant.
+    const [grant] = await fx.query<{ can_update: boolean }>(
+      `SELECT has_column_privilege('w360_app', 'app.webhook_endpoints', 'crm_excluded_api_key_ids',
+                'UPDATE') AS can_update`,
+    );
+    expect(grant?.can_update).toBe(true);
+  });
+});
+
 describe('run end filters (ADR-151)', () => {
   it('are refused without automation.run_ended, unknown, active or empty, kept by a change that leaves them out and cleared with the event; the database keeps them to that event', async () => {
     const c = await fx.company();

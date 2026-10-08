@@ -291,6 +291,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       noteStageIds: null,
       noteDealOwnerIds: null,
       crmChangeMakers: null,
+      crmExcludedApiKeyIds: null,
       surveyScores: null,
       surveyAssigneeIds: null,
       surveyTeamIds: null,
@@ -1849,6 +1850,100 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     expect((await api().get(key.ctx, id)).messageApiKeyIds).toEqual([key.id]);
     expect(await api().update(key.ctx, id, { messageApiKeyIds: null })).toMatchObject({
       messageApiKeyIds: null,
+    });
+  });
+
+  it('choose the API keys whose deal, task and note changes an endpoint leaves out, kept by changes that leave them out and cleared with the events (ADR-321)', async () => {
+    const c = await fx.company();
+    // The key adding the endpoint changes deals too; another key changes tasks; one only reads.
+    const key = await apiKey(c, ['webhooks.manage', 'deals.write'], 'Shop');
+    const tasks = await apiKey(c, ['tasks.write'], 'Tasks');
+    const reader = await apiKey(c, ['deals.read'], 'Reader');
+    const elsewhere = await apiKey(await fx.company(), ['deals.write'], 'Elsewhere');
+    const issueOf = async (promise: Promise<unknown>) => {
+      const error = await expectAppError(promise, 'validation_failed');
+      return isAppError(error) ? error.issues?.[0] : undefined;
+    };
+    // Keys need a deal, task or note event, at least one, each an id of the company's keys that can
+    // change them (named by place).
+    const refusals = [
+      [['contact.updated'], [key.id], 'crmExcludedApiKeyIds'],
+      [['deal.updated'], [], 'crmExcludedApiKeyIds'],
+      [['deal.updated'], [key.id, key.keyPrefix], 'crmExcludedApiKeyIds.1'],
+      [['task.created'], [key.id, reader.id], 'crmExcludedApiKeyIds.1'],
+      [['note.created'], [elsewhere.id], 'crmExcludedApiKeyIds.0'],
+    ] as const;
+    for (const [index, [events, crmExcludedApiKeyIds, path]] of refusals.entries()) {
+      expect(
+        await issueOf(
+          api().create(
+            key.ctx,
+            { url: receiverUrl(), events, crmExcludedApiKeyIds },
+            idem(`crm-keys-bad-${index}`, JSON.stringify(crmExcludedApiKeyIds)),
+          ),
+        ),
+        JSON.stringify(crmExcludedApiKeyIds),
+      ).toMatchObject({ path });
+    }
+    expect((await api().list(key.ctx)).data).toEqual([]);
+
+    // The key leaves its own changes out, as the endpoint's apiKeyId names it.
+    const created = await addThroughApi(key.ctx, 'crm-keys-1', {
+      url: receiverUrl(),
+      events: ['deal.created', 'deal.updated'],
+      crmExcludedApiKeyIds: [key.id, tasks.id, key.id.toUpperCase()],
+    });
+    const id = created.body.data.id;
+    expect(created.body.data.apiKeyId).toBe(key.id);
+    expect(created.body.data.crmExcludedApiKeyIds).toEqual([key.id, tasks.id]);
+    expect((await api().get(key.ctx, id)).crmExcludedApiKeyIds).toEqual([key.id, tasks.id]);
+    const [audit] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND subject_id = $2 AND action = 'webhook.endpoint_created'`,
+      [c.tenant.id, id],
+    );
+    expect(audit?.metadata).toMatchObject({ crmExcludedApiKeyIds: [key.id, tasks.id] });
+    // Settings names them, with whether they still work.
+    const owner = await fx.ctx(c, c.owner);
+    await keys.revoke(owner, { keyId: tasks.id });
+    expect((await settings().list(owner)).find((e) => e.id === id)?.crmExcludedApiKeys).toEqual([
+      { id: key.id, name: 'Shop', keyPrefix: key.keyPrefix, state: 'active' },
+      { id: tasks.id, name: 'Tasks', keyPrefix: tasks.keyPrefix, state: 'revoked' },
+    ]);
+
+    expect(await api().update(key.ctx, id, { description: 'CRM sync' })).toMatchObject({
+      crmExcludedApiKeyIds: [key.id, tasks.id],
+    });
+    expect(await api().update(key.ctx, id, { crmExcludedApiKeyIds: [key.id] })).toMatchObject({
+      crmExcludedApiKeyIds: [key.id],
+    });
+    const updates = await fx.query<{ metadata: { crmExcludedApiKeyIds?: unknown } }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND subject_id = $2 AND action = 'webhook.endpoint_updated'
+        ORDER BY occurred_at`,
+      [c.tenant.id, id],
+    );
+    expect(updates.map((u) => u.metadata.crmExcludedApiKeyIds)).toEqual([
+      [key.id, tasks.id],
+      [key.id],
+    ]);
+    expect(await api().update(key.ctx, id, { events: ['contact.updated'] })).toMatchObject({
+      events: ['contact.updated'],
+      crmExcludedApiKeyIds: null,
+    });
+    expect(
+      await issueOf(api().update(key.ctx, id, { crmExcludedApiKeyIds: [key.id] })),
+    ).toMatchObject({ path: 'crmExcludedApiKeyIds' });
+    expect(
+      await api().update(key.ctx, id, { events: ['task.created'], crmExcludedApiKeyIds: [key.id] }),
+    ).toMatchObject({ crmExcludedApiKeyIds: [key.id] });
+    // A list given again is checked again, changing nothing when it is refused.
+    expect(
+      await issueOf(api().update(key.ctx, id, { crmExcludedApiKeyIds: [reader.id] })),
+    ).toMatchObject({ path: 'crmExcludedApiKeyIds.0' });
+    expect((await api().get(key.ctx, id)).crmExcludedApiKeyIds).toEqual([key.id]);
+    expect(await api().update(key.ctx, id, { crmExcludedApiKeyIds: null })).toMatchObject({
+      crmExcludedApiKeyIds: null,
     });
   });
 

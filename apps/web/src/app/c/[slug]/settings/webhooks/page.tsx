@@ -72,6 +72,7 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
     automationChoices,
     runApiKeyChoices,
     messageApiKeyChoices,
+    crmApiKeyChoices,
     channelChoices,
     teamChoices,
     templateChoices,
@@ -86,6 +87,7 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
     webhooks.automationChoices(ctx),
     webhooks.runApiKeyChoices(ctx),
     webhooks.messageApiKeyChoices(ctx),
+    webhooks.crmApiKeyChoices(ctx),
     webhooks.channelChoices(ctx),
     webhooks.teamChoices(ctx),
     webhooks.templateChoices(ctx),
@@ -401,6 +403,12 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
                           .join(', ')}
                       </p>
                     ) : null}
+                    {e.crmExcludedApiKeys ? (
+                      <p className="text-xs break-all text-muted-foreground">
+                        Deal, task and note changes left out, made through the API by:{' '}
+                        {e.crmExcludedApiKeys.map(webhookApiKeyText).join(', ')}
+                      </p>
+                    ) : null}
                     {e.surveyScores ? (
                       <p className="text-xs text-muted-foreground">
                         Survey answers sent:{' '}
@@ -580,6 +588,7 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
             automationChoices={automationChoices}
             runApiKeyChoices={runApiKeyChoices}
             messageApiKeyChoices={messageApiKeyChoices}
+            crmApiKeyChoices={crmApiKeyChoices}
             channelChoices={channelChoices}
             teamChoices={teamChoices}
             templateChoices={templateChoices}
