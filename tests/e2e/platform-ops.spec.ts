@@ -367,8 +367,16 @@ test('staff acknowledge a company’s failing integration on the console, with a
   await expect(row).toContainText('By Anil Staff');
   await expect(row).toContainText('Called the owner: they will reconnect the number today.');
   await expect(row.getByText('Replace the note', { exact: true })).toBeVisible();
+  // Assigned to an administrator, here the one who took it (ADR-313).
+  await expect(row).not.toContainText('To Anil Staff');
+  await row.getByText('Assign', { exact: true }).click();
+  await row.getByLabel('Administrator').selectOption({ label: 'Anil Staff' });
+  await row.getByRole('button', { name: 'Assign failure' }).click();
+  await expect(row).toContainText('To Anil Staff');
+  await expect(row.getByText('Reassign', { exact: true })).toBeVisible();
   await expectNoHorizontalOverflow(page);
-  // The list as CSV (ADR-158): when the failure was acknowledged, but neither by whom nor the note.
+  // The list as CSV (ADR-158): when the failure was acknowledged, but neither by whom nor the note,
+  // and no assignment.
   const failures = await downloadCsv(page, 'Download CSV: Current failures');
   expect(failures.name).toMatch(/^hyfib-failures-\d{4}-\d{2}-\d{2}\.csv$/);
   expect(failures.text).toMatch(
@@ -384,4 +392,5 @@ test('staff acknowledge a company’s failing integration on the console, with a
   // In the platform audit log.
   await page.goto('/platform');
   await expect(page.getByText('platform.integration_failure_acknowledged').first()).toBeVisible();
+  await expect(page.getByText('platform.integration_failure_assigned').first()).toBeVisible();
 });

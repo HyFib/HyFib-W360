@@ -1470,6 +1470,45 @@ Phase 5 rules (outgoing webhooks, P5-09):
   transaction where the commerce worker writes the link's status: it narrows what one endpoint
   receives and never adds an event or a delivery for another endpoint or company. Statuses are not
   personal data. Audited with the list (unit tests; integration tests, run in CI only).
+- An endpoint can take `deal.status_changed` and `task.status_changed` only for some of the statuses
+  a deal or a task reaches (ADR-309), chosen with `developer.manage` in Settings or
+  `webhooks.manage` through the API. Each list is checked against the three statuses its records
+  have, kept only while the endpoint takes its event (database checks too, which also refuse a null
+  entry), and applied in `app.capture_webhook_event`, in the transaction that changes the deal or
+  the task, whoever changes it (a member, an automation's run or a key): it narrows what one
+  endpoint receives and never adds an event or a delivery for another endpoint or company. Statuses
+  are not personal data. Audited with the lists (unit tests; integration tests, run in CI only).
+- An endpoint can take `deal.updated` and `task.updated` only for the changes of some details
+  (ADR-310), chosen with `developer.manage` in Settings or `webhooks.manage` through the API. Each
+  list is checked against the details its event names, kept only while the endpoint takes its event
+  (database checks too, which also refuse a null entry), and applied in `app.capture_webhook_event`
+  against the details the change changed, in the transaction that changes the deal or the task: it
+  narrows what one endpoint receives and never adds an event or a delivery for another endpoint or
+  company, and the payload is unchanged (never the values before). Detail names are not personal
+  data. Audited with the lists (unit tests; integration tests, run in CI only).
+- An endpoint can take `satisfaction_survey.answered` only for the answers credited to some members
+  or of some teams' conversations (ADR-311), chosen with `developer.manage` in Settings or
+  `webhooks.manage` through the API. Each id a list adds is checked in the company's scope (members
+  who take conversations, the company's teams), so a list cannot name another company's member or
+  team; ids a list already holds stay after they leave or are deleted and match nothing new. The
+  lists are kept only while the endpoint takes the event (database checks too, which also refuse a
+  null entry) and applied in `app.capture_webhook_event` against the survey's credited member and
+  its conversation's team, read under the company's row-level security in the transaction that
+  records the answer: they narrow what one endpoint receives and never add an event or a delivery
+  for another endpoint or company, and the payload is unchanged. Audited with the lists (unit tests;
+  integration tests, run in CI only).
+- An endpoint can take `satisfaction_survey.answered` only for the answers of contacts or
+  conversations with some tags (ADR-312), chosen with `developer.manage` in Settings or
+  `webhooks.manage` through the API. Tags are labels: any tag may be named, checked only to be
+  written as contacts and conversations carry them, and reading a list tells nothing about which
+  contacts have it. The lists are kept only while the endpoint takes the event (database checks too,
+  which also refuse a null entry and tags not as they are written) and applied in
+  `app.capture_webhook_event` against the contact's and the conversation's tags, read under the
+  company's row-level security in the transaction that records the answer: they narrow what one
+  endpoint receives and never add an event or a delivery for another endpoint or company, and the
+  payload is unchanged. Tag names can say something about a person, so the lists are in the company
+  data export and the audits as the other tag lists are (unit tests; integration tests, run in CI
+  only).
 - An endpoint can take `template.status_changed` only for some of the statuses reported (ADR-148),
   chosen the same way. The list is checked against the eleven statuses the event reports (HyFib's
   own steps, a deletion under way or refused and an unrecognised status are never sent), kept only
@@ -2126,6 +2165,16 @@ message text, contact details, payloads, email addresses, secrets or full URLs:
   list returns the administrator's name and the note to platform administrators only, and the
   company never sees them. An acknowledgement is forgotten an hour after its failure stops being
   listed.
+- Assigning integration failures (ADR-313): a platform administrator assigns a listed failure to a
+  platform administrator through `ops.platform_assign_integration_failure` (SECURITY DEFINER,
+  executable only by the platform role), which checks the administrator, that the assignee is a
+  platform administrator and that the console lists the failure in that state now, and writes the
+  platform audit entry (`platform.integration_failure_assigned` with the assignee's account, or
+  `platform.integration_failure_unassigned`) in the same transaction; a request naming anyone else,
+  or a failure no longer listed, changes nothing. Only the definer role reads and writes
+  `ops.integration_assignments` (the failure's ids and two platform accounts, no company data),
+  which the sweep forgets an hour after the failure stops being listed; the failures' CSV leaves
+  assignments out (unit tests; integration and e2e tests, run in CI only).
 - Acknowledging dead letters (ADR-169): through `ops.platform_acknowledge_dead_letter` (SECURITY
   DEFINER, executable only by the platform role), which checks the platform administrator, the note
   (10 to 500 characters, trimmed) and the dead letter, and writes the platform audit entry

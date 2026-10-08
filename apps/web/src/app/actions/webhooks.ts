@@ -42,6 +42,14 @@ export async function createWebhookEndpointAction(
     orderStatuses: string[] | null;
     /** The Payment Link statuses it takes (ADR-308); null takes every status. */
     paymentLinkStatuses: string[] | null;
+    /** The deal statuses it takes (ADR-309); null takes every status. */
+    dealStatuses: string[] | null;
+    /** The task statuses it takes (ADR-309); null takes every status. */
+    taskStatuses: string[] | null;
+    /** The deal details whose changes it takes (ADR-310); null takes every change. */
+    dealDetails: string[] | null;
+    /** The task details whose changes it takes (ADR-310); null takes every change. */
+    taskDetails: string[] | null;
     /** The template statuses it takes (ADR-148); null takes every status. */
     templateStatuses: string[] | null;
     /** The conversation statuses it takes (ADR-149); null takes every status. */
@@ -90,6 +98,14 @@ export async function createWebhookEndpointAction(
     crmChangeMakers: string[] | null;
     /** The scores of the satisfaction survey answers it takes (ADR-307); null: every answer. */
     surveyScores: number[] | null;
+    /** The members credited with the survey answers it takes (ADR-311); null: every answer. */
+    surveyAssigneeIds: string[] | null;
+    /** The teams of the survey answers it takes (ADR-311); null: every answer. */
+    surveyTeamIds: string[] | null;
+    /** The contact tags of the survey answers it takes (ADR-312); null: every answer. */
+    surveyContactTags: string[] | null;
+    /** The conversation tags of the survey answers it takes (ADR-312); null: every answer. */
+    surveyConversationTags: string[] | null;
     /** The members whose assigned conversations' events it takes (ADR-181); null: every one's. */
     assigneeIds: string[] | null;
     /** The contact tags whose conversations' events it takes (ADR-267); null: every one's. */
@@ -134,6 +150,14 @@ export async function updateWebhookEndpointAction(
     orderStatuses: string[] | null;
     /** The Payment Link statuses it takes (ADR-308); null takes every status. */
     paymentLinkStatuses: string[] | null;
+    /** The deal statuses it takes (ADR-309); null takes every status. */
+    dealStatuses: string[] | null;
+    /** The task statuses it takes (ADR-309); null takes every status. */
+    taskStatuses: string[] | null;
+    /** The deal details whose changes it takes (ADR-310); null takes every change. */
+    dealDetails: string[] | null;
+    /** The task details whose changes it takes (ADR-310); null takes every change. */
+    taskDetails: string[] | null;
     /** The template statuses it takes (ADR-148); null takes every status. */
     templateStatuses: string[] | null;
     /** The conversation statuses it takes (ADR-149); null takes every status. */
@@ -182,6 +206,14 @@ export async function updateWebhookEndpointAction(
     crmChangeMakers: string[] | null;
     /** The scores of the satisfaction survey answers it takes (ADR-307); null: every answer. */
     surveyScores: number[] | null;
+    /** The members credited with the survey answers it takes (ADR-311); null: every answer. */
+    surveyAssigneeIds: string[] | null;
+    /** The teams of the survey answers it takes (ADR-311); null: every answer. */
+    surveyTeamIds: string[] | null;
+    /** The contact tags of the survey answers it takes (ADR-312); null: every answer. */
+    surveyContactTags: string[] | null;
+    /** The conversation tags of the survey answers it takes (ADR-312); null: every answer. */
+    surveyConversationTags: string[] | null;
     /** The members whose assigned conversations' events it takes (ADR-181); null: every one's. */
     assigneeIds: string[] | null;
     /** The contact tags whose conversations' events it takes (ADR-267); null: every one's. */

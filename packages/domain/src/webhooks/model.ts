@@ -12,6 +12,10 @@ import type {
   WebhookMessageStatus,
   WebhookOrderStatus,
   WebhookPaymentLinkStatus,
+  WebhookDealStatus,
+  WebhookTaskStatus,
+  WebhookDealDetail,
+  WebhookTaskDetail,
   WebhookRunEndStatus,
   WebhookReceivedMessageType,
   WebhookRunTrigger,
@@ -32,6 +36,10 @@ export type {
   WebhookMessageStatus,
   WebhookOrderStatus,
   WebhookPaymentLinkStatus,
+  WebhookDealStatus,
+  WebhookTaskStatus,
+  WebhookDealDetail,
+  WebhookTaskDetail,
   WebhookRunEndStatus,
   WebhookReceivedMessageType,
   WebhookRunTrigger,
@@ -377,6 +385,76 @@ export const WEBHOOK_PAYMENT_LINK_STATUS_LABELS: Record<WebhookPaymentLinkStatus
 };
 
 /**
+ * The statuses a `deal.status_changed` event reports, which an endpoint can choose (ADR-309), in
+ * the order the CRM lists them: `open` is a deal reopened.
+ */
+export const WEBHOOK_DEAL_STATUSES = [
+  'open',
+  'won',
+  'lost',
+] as const satisfies readonly WebhookDealStatus[];
+
+/** How Settings names each deal status an endpoint can choose (ADR-309): the change it reports. */
+export const WEBHOOK_DEAL_STATUS_LABELS: Record<WebhookDealStatus, string> = {
+  open: 'Reopened',
+  won: 'Won',
+  lost: 'Lost',
+};
+
+/**
+ * The statuses a `task.status_changed` event reports, which an endpoint can choose (ADR-309), in
+ * the order the CRM lists them: `open` is a task reopened.
+ */
+export const WEBHOOK_TASK_STATUSES = [
+  'open',
+  'done',
+  'cancelled',
+] as const satisfies readonly WebhookTaskStatus[];
+
+/** How Settings names each task status an endpoint can choose (ADR-309): the change it reports. */
+export const WEBHOOK_TASK_STATUS_LABELS: Record<WebhookTaskStatus, string> = {
+  open: 'Reopened',
+  done: 'Done',
+  cancelled: 'Cancelled',
+};
+
+/**
+ * The details whose change a `deal.updated` endpoint can choose (ADR-310), in the order the event's
+ * `changes` lists them.
+ */
+export const WEBHOOK_DEAL_DETAILS = [
+  'title',
+  'valueMinor',
+  'expectedCloseOn',
+] as const satisfies readonly WebhookDealDetail[];
+
+/** How Settings names each deal detail an endpoint can choose (ADR-310), as the deal form does. */
+export const WEBHOOK_DEAL_DETAIL_LABELS: Record<WebhookDealDetail, string> = {
+  title: 'Title',
+  valueMinor: 'Value',
+  expectedCloseOn: 'Expected close date',
+};
+
+/**
+ * The details whose change a `task.updated` endpoint can choose (ADR-310), in the order the event's
+ * `changes` lists them.
+ */
+export const WEBHOOK_TASK_DETAILS = [
+  'title',
+  'notes',
+  'dueAt',
+  'remindAt',
+] as const satisfies readonly WebhookTaskDetail[];
+
+/** How Settings names each task detail an endpoint can choose (ADR-310). */
+export const WEBHOOK_TASK_DETAIL_LABELS: Record<WebhookTaskDetail, string> = {
+  title: 'Title',
+  notes: 'Notes',
+  dueAt: 'Due time',
+  remindAt: 'Reminder',
+};
+
+/**
  * The statuses a `template.status_changed` event reports, which an endpoint can choose (ADR-148), in
  * the order Templates lists them: Meta's review states, then the deletion and Meta's limits.
  */
@@ -703,6 +781,14 @@ export const WEBHOOK_LIMITS = {
   noteStages: 50,
   /** The members whose deals' notes' events an endpoint can choose to take (ADR-305). */
   noteDealOwners: 50,
+  /** The members credited with satisfaction survey answers an endpoint can choose (ADR-311). */
+  surveyAssignees: 50,
+  /** The teams whose conversations' survey answers an endpoint can choose (ADR-311). */
+  surveyTeams: 50,
+  /** The contact tags whose survey answers an endpoint can choose (ADR-312). */
+  surveyContactTags: 50,
+  /** The conversation tags whose survey answers an endpoint can choose (ADR-312). */
+  surveyConversationTags: 50,
   /** The contact tags an endpoint can choose to take the conversations' events of (ADR-267). */
   contactTags: 50,
   /** The conversation tags an endpoint can choose to take the conversations' events of (ADR-273). */

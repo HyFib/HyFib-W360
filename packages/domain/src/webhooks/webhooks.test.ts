@@ -70,6 +70,14 @@ import {
   WEBHOOK_ORDER_STATUSES,
   WEBHOOK_PAYMENT_LINK_STATUS_LABELS,
   WEBHOOK_PAYMENT_LINK_STATUSES,
+  WEBHOOK_DEAL_STATUS_LABELS,
+  WEBHOOK_DEAL_STATUSES,
+  WEBHOOK_TASK_STATUS_LABELS,
+  WEBHOOK_TASK_STATUSES,
+  WEBHOOK_DEAL_DETAIL_LABELS,
+  WEBHOOK_DEAL_DETAILS,
+  WEBHOOK_TASK_DETAIL_LABELS,
+  WEBHOOK_TASK_DETAILS,
   WEBHOOK_REPLAY_PERIODS,
   WEBHOOK_RETRY_SECONDS,
   WEBHOOK_TEMPLATE_STATUS_LABELS,
@@ -205,6 +213,30 @@ import {
   webhookPaymentLinkStatusesFor,
   webhookPaymentLinkStatusesSchema,
   WEBHOOK_PAYMENT_LINK_STATUSES_NEED_THE_EVENT,
+  webhookDealStatusesFor,
+  webhookDealStatusesSchema,
+  WEBHOOK_DEAL_STATUSES_NEED_THE_EVENT,
+  webhookTaskStatusesFor,
+  webhookTaskStatusesSchema,
+  WEBHOOK_TASK_STATUSES_NEED_THE_EVENT,
+  webhookDealDetailsFor,
+  webhookDealDetailsSchema,
+  WEBHOOK_DEAL_DETAILS_NEED_THE_EVENT,
+  webhookTaskDetailsFor,
+  webhookTaskDetailsSchema,
+  WEBHOOK_TASK_DETAILS_NEED_THE_EVENT,
+  webhookSurveyAssigneeIdsFor,
+  webhookSurveyAssigneeIdsSchema,
+  webhookSurveyTeamIdsFor,
+  webhookSurveyTeamIdsSchema,
+  WEBHOOK_SURVEY_ASSIGNEES_NEED_THE_EVENT,
+  WEBHOOK_SURVEY_TEAMS_NEED_THE_EVENT,
+  webhookSurveyContactTagsFor,
+  webhookSurveyContactTagsSchema,
+  webhookSurveyConversationTagsFor,
+  webhookSurveyConversationTagsSchema,
+  WEBHOOK_SURVEY_CONTACT_TAGS_NEED_THE_EVENT,
+  WEBHOOK_SURVEY_CONVERSATION_TAGS_NEED_THE_EVENT,
   webhookTeamIdsFor,
   webhookTeamIdsSchema,
   webhookTemplateIdsFor,
@@ -2508,6 +2540,305 @@ describe('Payment Link status filters (ADR-308)', () => {
     ).toBeNull();
     expect(WEBHOOK_PAYMENT_LINK_STATUSES_NEED_THE_EVENT).toBe(
       `Choose Payment Link statuses only for an endpoint that receives ${WEBHOOK_EVENT_INFO['payment_link.status_changed'].label}.`,
+    );
+  });
+});
+
+describe('deal and task status filters (ADR-309)', () => {
+  it('take 1 to 3 of the statuses a deal or a task reaches, once each, in the order the CRM lists them; null takes every status', () => {
+    expect(webhookDealStatusesSchema.parse(['lost', 'won', 'lost'])).toEqual(['won', 'lost']);
+    expect(webhookTaskStatusesSchema.parse(['cancelled', 'open', 'cancelled'])).toEqual([
+      'open',
+      'cancelled',
+    ]);
+    expect(webhookDealStatusesSchema.parse(null)).toBeNull();
+    expect(webhookTaskStatusesSchema.parse(null)).toBeNull();
+    // Every status a deal or a task has: a change reaches any of them (`open` when reopened).
+    expect(WEBHOOK_DEAL_STATUSES).toEqual([...DEAL_STATUSES]);
+    expect(WEBHOOK_TASK_STATUSES).toEqual([...TASK_STATUSES]);
+    for (const refused of [
+      [],
+      ['closed'],
+      ['Won'],
+      ['won', 'done'],
+      'won',
+      [null],
+      Array(4).fill('won'),
+    ]) {
+      expect(webhookDealStatusesSchema.safeParse(refused).success, JSON.stringify(refused)).toBe(
+        false,
+      );
+    }
+    for (const refused of [
+      [],
+      ['completed'],
+      ['done', 'won'],
+      'done',
+      [null],
+      Array(4).fill('done'),
+    ]) {
+      expect(webhookTaskStatusesSchema.safeParse(refused).success, JSON.stringify(refused)).toBe(
+        false,
+      );
+    }
+    expect(webhookDealStatusesSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one deal status, or take every status.',
+    );
+    expect(webhookDealStatusesSchema.safeParse(['closed']).error?.issues[0]?.message).toBe(
+      'Choose deal statuses from the list.',
+    );
+    expect(
+      webhookDealStatusesSchema.safeParse(Array(4).fill('won')).error?.issues[0]?.message,
+    ).toBe('Give each deal status once.');
+    expect(webhookTaskStatusesSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one task status, or take every status.',
+    );
+    expect(webhookTaskStatusesSchema.safeParse(['completed']).error?.issues[0]?.message).toBe(
+      'Choose task statuses from the list.',
+    );
+    expect(
+      webhookTaskStatusesSchema.safeParse(Array(4).fill('done')).error?.issues[0]?.message,
+    ).toBe('Give each task status once.');
+    // Named by the change each reports.
+    expect(WEBHOOK_DEAL_STATUS_LABELS).toEqual({ open: 'Reopened', won: 'Won', lost: 'Lost' });
+    expect(WEBHOOK_TASK_STATUS_LABELS).toEqual({
+      open: 'Reopened',
+      done: 'Done',
+      cancelled: 'Cancelled',
+    });
+  });
+
+  it('are kept only while the endpoint takes the status changes: given, kept, or cleared', () => {
+    const deals = ['deal.status_changed', 'deal.created'] as const;
+    expect(webhookDealStatusesFor([...deals], ['won'], null)).toEqual(['won']);
+    expect(webhookDealStatusesFor([...deals], undefined, ['lost'])).toEqual(['lost']);
+    expect(webhookDealStatusesFor([...deals], null, ['lost'])).toBeNull();
+    expect(webhookDealStatusesFor([...deals], undefined, null)).toBeNull();
+    // A deal's other events, and a task's status changes, have no deal status to choose.
+    expect(
+      webhookDealStatusesFor(['deal.created', 'task.status_changed'], ['won'], ['lost']),
+    ).toBeNull();
+    const tasks = ['task.status_changed', 'task.created'] as const;
+    expect(webhookTaskStatusesFor([...tasks], ['done'], null)).toEqual(['done']);
+    expect(webhookTaskStatusesFor([...tasks], undefined, ['cancelled'])).toEqual(['cancelled']);
+    expect(webhookTaskStatusesFor([...tasks], null, ['cancelled'])).toBeNull();
+    expect(webhookTaskStatusesFor([...tasks], undefined, null)).toBeNull();
+    expect(
+      webhookTaskStatusesFor(['task.created', 'deal.status_changed'], ['done'], ['open']),
+    ).toBeNull();
+    expect(WEBHOOK_DEAL_STATUSES_NEED_THE_EVENT).toBe(
+      `Choose deal statuses only for an endpoint that receives ${WEBHOOK_EVENT_INFO['deal.status_changed'].label}.`,
+    );
+    expect(WEBHOOK_TASK_STATUSES_NEED_THE_EVENT).toBe(
+      `Choose task statuses only for an endpoint that receives ${WEBHOOK_EVENT_INFO['task.status_changed'].label}.`,
+    );
+  });
+});
+
+describe('deal and task detail filters (ADR-310)', () => {
+  it('take 1 to 3 deal details or 1 to 4 task details, once each, in the order the events name their changes; null takes every change', () => {
+    expect(webhookDealDetailsSchema.parse(['expectedCloseOn', 'title', 'expectedCloseOn'])).toEqual(
+      ['title', 'expectedCloseOn'],
+    );
+    expect(webhookTaskDetailsSchema.parse(['remindAt', 'dueAt', 'remindAt'])).toEqual([
+      'dueAt',
+      'remindAt',
+    ]);
+    // Every detail at once, in any order.
+    expect(webhookDealDetailsSchema.parse([...WEBHOOK_DEAL_DETAILS].reverse())).toEqual([
+      ...WEBHOOK_DEAL_DETAILS,
+    ]);
+    expect(webhookTaskDetailsSchema.parse([...WEBHOOK_TASK_DETAILS].reverse())).toEqual([
+      ...WEBHOOK_TASK_DETAILS,
+    ]);
+    expect(webhookDealDetailsSchema.parse(null)).toBeNull();
+    expect(webhookTaskDetailsSchema.parse(null)).toBeNull();
+    // The details the events' changes name, in their order.
+    expect(WEBHOOK_DEAL_DETAILS).toEqual([...WEBHOOK_DEAL_DETAIL_CHANGES]);
+    expect(WEBHOOK_TASK_DETAILS).toEqual([...WEBHOOK_TASK_DETAIL_CHANGES]);
+    for (const refused of [
+      [],
+      ['value'],
+      ['notes'],
+      ['Title'],
+      'title',
+      [null],
+      Array(4).fill('title'),
+    ]) {
+      expect(webhookDealDetailsSchema.safeParse(refused).success, JSON.stringify(refused)).toBe(
+        false,
+      );
+    }
+    for (const refused of [[], ['due'], ['valueMinor'], 'notes', [null], Array(5).fill('notes')]) {
+      expect(webhookTaskDetailsSchema.safeParse(refused).success, JSON.stringify(refused)).toBe(
+        false,
+      );
+    }
+    expect(webhookDealDetailsSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one deal detail, or take every change.',
+    );
+    expect(webhookDealDetailsSchema.safeParse(['value']).error?.issues[0]?.message).toBe(
+      'Choose deal details from the list.',
+    );
+    expect(
+      webhookDealDetailsSchema.safeParse(Array(4).fill('title')).error?.issues[0]?.message,
+    ).toBe('Give each deal detail once.');
+    expect(webhookTaskDetailsSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one task detail, or take every change.',
+    );
+    expect(webhookTaskDetailsSchema.safeParse(['due']).error?.issues[0]?.message).toBe(
+      'Choose task details from the list.',
+    );
+    expect(
+      webhookTaskDetailsSchema.safeParse(Array(5).fill('notes')).error?.issues[0]?.message,
+    ).toBe('Give each task detail once.');
+    expect(WEBHOOK_DEAL_DETAIL_LABELS).toEqual({
+      title: 'Title',
+      valueMinor: 'Value',
+      expectedCloseOn: 'Expected close date',
+    });
+    expect(WEBHOOK_TASK_DETAIL_LABELS).toEqual({
+      title: 'Title',
+      notes: 'Notes',
+      dueAt: 'Due time',
+      remindAt: 'Reminder',
+    });
+  });
+
+  it('are kept only while the endpoint takes the detail changes: given, kept, or cleared', () => {
+    const deals = ['deal.updated', 'deal.created'] as const;
+    expect(webhookDealDetailsFor([...deals], ['title'], null)).toEqual(['title']);
+    expect(webhookDealDetailsFor([...deals], undefined, ['valueMinor'])).toEqual(['valueMinor']);
+    expect(webhookDealDetailsFor([...deals], null, ['valueMinor'])).toBeNull();
+    expect(webhookDealDetailsFor([...deals], undefined, null)).toBeNull();
+    // A deal's other events, and a task's detail changes, have no deal detail to choose.
+    expect(
+      webhookDealDetailsFor(['deal.created', 'task.updated'], ['title'], ['title']),
+    ).toBeNull();
+    const tasks = ['task.updated', 'task.created'] as const;
+    expect(webhookTaskDetailsFor([...tasks], ['notes'], null)).toEqual(['notes']);
+    expect(webhookTaskDetailsFor([...tasks], undefined, ['dueAt'])).toEqual(['dueAt']);
+    expect(webhookTaskDetailsFor([...tasks], null, ['dueAt'])).toBeNull();
+    expect(webhookTaskDetailsFor([...tasks], undefined, null)).toBeNull();
+    expect(
+      webhookTaskDetailsFor(['task.created', 'deal.updated'], ['title'], ['title']),
+    ).toBeNull();
+    expect(WEBHOOK_DEAL_DETAILS_NEED_THE_EVENT).toBe(
+      `Choose deal details only for an endpoint that receives ${WEBHOOK_EVENT_INFO['deal.updated'].label}.`,
+    );
+    expect(WEBHOOK_TASK_DETAILS_NEED_THE_EVENT).toBe(
+      `Choose task details only for an endpoint that receives ${WEBHOOK_EVENT_INFO['task.updated'].label}.`,
+    );
+  });
+});
+
+describe('survey member and team filters (ADR-311)', () => {
+  const id = (i: number) => `0190e9a1-0000-7000-8000-${String(i).padStart(12, '0')}`;
+  const ids = (n: number) => Array.from({ length: n }, (_, i) => id(i));
+
+  it('take 1 to 50 members or teams, each once and in lower case; null takes every answer', () => {
+    for (const schema of [webhookSurveyAssigneeIdsSchema, webhookSurveyTeamIdsSchema]) {
+      expect(schema.parse([id(2), id(1).toUpperCase(), id(2)])).toEqual([id(2), id(1)]);
+      expect(schema.parse(null)).toBeNull();
+      expect(schema.parse(ids(50))).toEqual(ids(50));
+      for (const refused of [[], ['support'], [null], id(1), ids(51)]) {
+        expect(schema.safeParse(refused).success, JSON.stringify(refused)).toBe(false);
+      }
+    }
+    expect(WEBHOOK_LIMITS.surveyAssignees).toBe(50);
+    expect(WEBHOOK_LIMITS.surveyTeams).toBe(50);
+    expect(webhookSurveyAssigneeIdsSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one member, or take every answer.',
+    );
+    expect(webhookSurveyAssigneeIdsSchema.safeParse(['agent']).error?.issues[0]?.message).toBe(
+      'Choose members from the list.',
+    );
+    expect(webhookSurveyAssigneeIdsSchema.safeParse(ids(51)).error?.issues[0]?.message).toBe(
+      'Choose at most 50 members.',
+    );
+    expect(webhookSurveyTeamIdsSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one team, or take every answer.',
+    );
+    expect(webhookSurveyTeamIdsSchema.safeParse(['support']).error?.issues[0]?.message).toBe(
+      'Choose teams from the list.',
+    );
+    expect(webhookSurveyTeamIdsSchema.safeParse(ids(51)).error?.issues[0]?.message).toBe(
+      'Choose at most 50 teams.',
+    );
+  });
+
+  it('are kept only while the endpoint takes survey answers: given, kept, or cleared', () => {
+    const answers = ['satisfaction_survey.answered', 'conversation.status_changed'] as const;
+    for (const listFor of [webhookSurveyAssigneeIdsFor, webhookSurveyTeamIdsFor]) {
+      expect(listFor([...answers], [id(1)], null)).toEqual([id(1)]);
+      expect(listFor([...answers], undefined, [id(2)])).toEqual([id(2)]);
+      expect(listFor([...answers], null, [id(2)])).toBeNull();
+      expect(listFor([...answers], undefined, null)).toBeNull();
+      // Conversations' own events have no answer to narrow.
+      expect(
+        listFor(['conversation.status_changed', 'message.received'], [id(1)], [id(1)]),
+      ).toBeNull();
+    }
+    const event = WEBHOOK_EVENT_INFO['satisfaction_survey.answered'].label;
+    expect(WEBHOOK_SURVEY_ASSIGNEES_NEED_THE_EVENT).toBe(
+      `Choose the members credited with answers only for an endpoint that receives ${event}.`,
+    );
+    expect(WEBHOOK_SURVEY_TEAMS_NEED_THE_EVENT).toBe(
+      `Choose the teams of answered surveys only for an endpoint that receives ${event}.`,
+    );
+  });
+});
+
+describe('survey tag filters (ADR-312)', () => {
+  it('take 1 to 50 tags as contacts and conversations carry them, once each, in the order given; null takes every answer', () => {
+    const tags = Array.from({ length: 51 }, (_, i) => `tag ${i}`);
+    for (const schema of [webhookSurveyContactTagsSchema, webhookSurveyConversationTagsSchema]) {
+      expect(schema.parse(['VIP', ' wholesale ', 'vip', 'Gold   Member'])).toEqual([
+        'vip',
+        'wholesale',
+        'gold member',
+      ]);
+      expect(schema.parse(null)).toBeNull();
+      expect(schema.parse(tags.slice(1))).toEqual(tags.slice(1));
+      const refusal = (given: unknown) => {
+        const issue = schema.safeParse(given).error?.issues[0];
+        return issue && [issue.path.join('.'), issue.message];
+      };
+      expect(refusal([])).toEqual(['', 'Give at least one tag, or take every answer.']);
+      expect(refusal(tags)).toEqual(['', 'Give at most 50 tags.']);
+      expect(refusal(['vip', 'a,b'])).toEqual([
+        '1',
+        'Tags cannot contain commas or control characters.',
+      ]);
+      expect(refusal(['vip', 42])).toEqual(['1', 'Give tags as text.']);
+      // Refused at the first entry that is not a tag, once.
+      expect(schema.safeParse(['a,b', '   ']).error?.issues.map((i) => i.path.join('.'))).toEqual([
+        '0',
+      ]);
+      expect(schema.safeParse('vip').success).toBe(false);
+    }
+    expect(WEBHOOK_LIMITS.surveyContactTags).toBe(50);
+    expect(WEBHOOK_LIMITS.surveyConversationTags).toBe(50);
+  });
+
+  it('are kept only while the endpoint takes survey answers: given, kept, or cleared', () => {
+    const answers = ['satisfaction_survey.answered', 'message.received'] as const;
+    for (const listFor of [webhookSurveyContactTagsFor, webhookSurveyConversationTagsFor]) {
+      expect(listFor([...answers], ['vip'], null)).toEqual(['vip']);
+      expect(listFor([...answers], undefined, ['gold'])).toEqual(['gold']);
+      expect(listFor([...answers], null, ['gold'])).toBeNull();
+      expect(listFor([...answers], undefined, null)).toBeNull();
+      // Conversations' own events take the conversations' tag lists, not the answers'.
+      expect(
+        listFor(['message.received', 'conversation.status_changed'], ['vip'], ['vip']),
+      ).toBeNull();
+    }
+    const event = WEBHOOK_EVENT_INFO['satisfaction_survey.answered'].label;
+    expect(WEBHOOK_SURVEY_CONTACT_TAGS_NEED_THE_EVENT).toBe(
+      `Choose the contact tags of answered surveys only for an endpoint that receives ${event}.`,
+    );
+    expect(WEBHOOK_SURVEY_CONVERSATION_TAGS_NEED_THE_EVENT).toBe(
+      `Choose the conversation tags of answered surveys only for an endpoint that receives ${event}.`,
     );
   });
 });
@@ -4826,7 +5157,7 @@ describe('the event of a satisfaction survey answer (ADR-293)', () => {
       'The survey is the survey as GET /satisfaction-surveys reads it when the event is delivered',
       'its score (3 for the first and best button, 1 for the third)',
       'a survey is answered once and this event is sent once for it; surveys skipped or never answered send nothing',
-      'an endpoint that names numbers receives it for those numbers only; the team, member and tag filters do not narrow it',
+      'an endpoint that names numbers receives it for those numbers only; the team, member and tag filters of conversations’ events do not narrow it',
     ]) {
       expect(described).toContain(words);
     }

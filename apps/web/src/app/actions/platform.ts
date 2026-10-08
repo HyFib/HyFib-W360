@@ -384,6 +384,19 @@ export async function acknowledgeIntegrationFailureAction(input: unknown): Promi
   });
 }
 
+/**
+ * Assigns a company's failing integration to a platform administrator on the operations console,
+ * or takes the assignment off (audited, ADR-313).
+ */
+export async function assignIntegrationFailureAction(input: unknown): Promise<ActionResult> {
+  return runAction(async () => {
+    const { actor, runtime } = await actorForAction();
+    await runtime.platformOps.assignFailure(actor, input);
+    refresh();
+    return null;
+  });
+}
+
 /** Records how a quarantined webhook event was resolved (audited). */
 export async function resolveQuarantineAction(input: unknown): Promise<ActionResult> {
   return runAction(async () => {

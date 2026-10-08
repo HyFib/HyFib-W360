@@ -1,12 +1,13 @@
 'use client';
 import { useState } from 'react';
-import { Button, Field, Textarea } from '@w360/ui';
+import { Button, Field, Select, Textarea } from '@w360/ui';
 import {
   acknowledgeDeadLetterAction,
   acknowledgeIntegrationFailureAction,
   acknowledgeLateQueueAction,
   acknowledgeQuarantineAction,
   acknowledgeReceiptAction,
+  assignIntegrationFailureAction,
   resolveQuarantineAction,
   retryDeadLetterAction,
   retryWebhookReceiptAction,
@@ -358,6 +359,70 @@ export function AcknowledgeLateQueueForm({
         <div>
           <Button type="submit" size="sm" disabled={busy || note.trim().length < 10}>
             {busy ? 'Saving…' : 'Acknowledge late queue'}
+          </Button>
+        </div>
+      </ClientForm>
+    </details>
+  );
+}
+
+/**
+ * Assigns a company's failing integration to a platform administrator, themselves or another, or
+ * takes the assignment off (audited, ADR-313): the others see who handles it.
+ */
+export function AssignFailureForm({
+  source,
+  subjectId,
+  state,
+  assigneeUserId,
+  administrators,
+}: {
+  source: string;
+  subjectId: string;
+  state: string;
+  /** Who the failure is assigned to now; null while nobody. */
+  assigneeUserId: string | null;
+  administrators: readonly { userId: string; name: string | null }[];
+}) {
+  const [chosen, setChosen] = useState(assigneeUserId ?? '');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  async function submit(event: React.FormEvent) {
+    event.preventDefault();
+    setBusy(true);
+    setError(null);
+    const result = await assignIntegrationFailureAction({
+      source,
+      subjectId,
+      state,
+      assigneeUserId: chosen === '' ? null : chosen,
+    });
+    setBusy(false);
+    if (!result.ok) setError(result.message);
+  }
+  const id = `assign-${source}-${subjectId}-${state}`;
+  return (
+    <details className="group">
+      <summary className="cursor-pointer text-sm text-primary underline-offset-4 hover:underline">
+        {assigneeUserId ? 'Reassign' : 'Assign'}
+      </summary>
+      <ClientForm onSubmit={submit} className="mt-2 grid w-64 max-w-full gap-2">
+        <FormError message={error} />
+        <Field id={id} label="Administrator">
+          {(aria) => (
+            <Select {...aria} value={chosen} onChange={(e) => setChosen(e.target.value)}>
+              <option value="">Nobody</option>
+              {administrators.map((a) => (
+                <option key={a.userId} value={a.userId}>
+                  {a.name ?? 'An administrator without a name'}
+                </option>
+              ))}
+            </Select>
+          )}
+        </Field>
+        <div>
+          <Button type="submit" size="sm" disabled={busy || chosen === (assigneeUserId ?? '')}>
+            {busy ? 'Saving…' : chosen === '' ? 'Take the assignment off' : 'Assign failure'}
           </Button>
         </div>
       </ClientForm>

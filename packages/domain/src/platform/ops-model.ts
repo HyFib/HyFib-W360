@@ -662,6 +662,22 @@ export interface IntegrationFailure {
    * the account has no name) and the note; null while nobody has taken it.
    */
   acknowledgement: { at: Date; byName: string | null; note: string } | null;
+  /**
+   * The platform administrator this failure is assigned to (ADR-313): when, to whom (their account
+   * and name, null once the account has none) and by whom; null while it is assigned to nobody.
+   */
+  assignment: {
+    at: Date;
+    assigneeUserId: string;
+    assigneeName: string | null;
+    byName: string | null;
+  } | null;
+}
+
+/** A platform administrator a failure can be assigned to (ADR-313), by account and name. */
+export interface PlatformAdministrator {
+  userId: string;
+  name: string | null;
 }
 
 export type ReceiptProblem = 'exhausted' | 'waiting';

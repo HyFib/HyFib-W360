@@ -305,6 +305,10 @@ verification, app review, Embedded Signup configuration).
   in CI]** (ADR-305, migration 0228; recorded under P5-09).
   **[Change-maker filters for deal, task and note webhook events built; their database tests run
   only in CI]** (ADR-306, migration 0229; recorded under P5-09).
+  **[Status filters for deal and task webhook events built; their database tests run only in CI]**
+  (ADR-309, migration 0232; recorded under P5-09).
+  **[Detail filters for deal and task webhook events built; their database tests run only in CI]**
+  (ADR-310, migration 0233; recorded under P5-09).
   **[Deal owner webhook events built; their database tests run only in CI]** (ADR-269, migrations
   0185 and 0186; recorded under P5-09).
   **Remaining:** custom deal fields, products on deals, deal import, CRM connectors (HubSpot,
@@ -1138,6 +1142,12 @@ verification, app review, Embedded Signup configuration).
   members, automations' runs or API keys made, by the maker each event names, an addition's creator
   and a note's writer; a change that recorded no maker is always sent; other events are not
   narrowed).
+  **[Deal and task status filters built; their database tests run only in CI]** (ADR-309, migration
+  0232: an endpoint takes the deal and task status changes of chosen statuses, by the status each
+  change reached; other events are not narrowed).
+  **[Deal and task detail filters built; their database tests run only in CI]** (ADR-310, migration
+  0233: an endpoint takes the deal and task detail changes that changed chosen details, by the
+  details each change names; other events are not narrowed).
   **[Contact tag filters for message and conversation events built; their database tests run only in
   CI]** (ADR-267, migration 0183: an endpoint takes the events of the conversations whose contact
   has any of 1 to 50 tags when the events happen; tags are compared as contacts carry them, and one
@@ -1193,11 +1203,18 @@ verification, app review, Embedded Signup configuration).
   **[Score filters for satisfaction survey answers built; their database tests run only in CI]**
   (ADR-307, migration 0230: an endpoint takes the answers of chosen scores, 3, 2 or 1, by the score
   each answered survey records; other events are not narrowed).
-  Remaining: filters for other event types (survey answers by team or member, among them) and on a
-  message's or contact's values (such as a field's value, contact events by tag, or the key that
-  started a run or made a change), other authentication (headers computed per delivery, other OAuth
-  grants), mutual TLS, fixed egress addresses, events for store orders and each step of a run,
-  `createdAt` finer than the millisecond, load tests.
+  **[Member and team filters for satisfaction survey answers built; their database tests run only in
+  CI]** (ADR-311, migration 0234: an endpoint takes the answers credited to chosen members, the
+  conversation's assignee when it was resolved, or of chosen teams' conversations, the team when the
+  customer answers; other events are not narrowed).
+  **[Tag filters for satisfaction survey answers built; their database tests run only in CI]**
+  (ADR-312, migration 0235: an endpoint takes the answers of contacts or conversations with chosen
+  tags, as they have them when the customer answers; other events are not narrowed).
+  Remaining: filters for other event types and on a message's or contact's values (such as a field's
+  value, contact events by tag, or the key that started a run or made a change), other
+  authentication (headers computed per delivery, other OAuth grants), mutual TLS, fixed egress
+  addresses, events for store orders and each step of a run, `createdAt` finer than the millisecond,
+  load tests.
 - **P5-10 Platform ops screens** **[built, locally verified with test data only]** (ADR-054):
   `/platform/ops` with Overview, Onboarding (failed and abandoned signups, failed or stuck number
   setups, new companies without a number), Integrations (current failures with host-only labels,
@@ -1259,9 +1276,12 @@ verification, app review, Embedded Signup configuration).
   gives when, never who or the note).
   **[Exports beyond the rows a tab shows built; its database tests run only in CI]** (ADR-200: a
   list's CSV gives up to 5,000 rows, 1,000 failures and 500 signups, in the tab's order; the tabs
-  keep their rows). Remaining:
+  keep their rows). **[Assigning failing integrations built; its database and browser tests run
+  only in CI]** (ADR-313: a platform administrator assigns a failure Current failures lists to a
+  platform administrator, themselves or another, shown with to whom, by whom and when, audited,
+  lasting while the failure is listed; the CSV leaves it out). Remaining:
   other alert channels, longer trends and charts, Meta's quality webhook (unconfirmed),
-  assigning failures, paging and rollups for many companies.
+  paging and rollups for many companies.
 - **P5-11 Account export/deletion workflow** **[built, locally verified with test data only]**
   (ADR-055): Settings → Company data for owners. A streamed, gzip-compressed JSON Lines export of
   every company table from one read-only transaction (each table and column exported or excluded

@@ -32,6 +32,10 @@ import {
   WEBHOOK_MESSAGE_STATUSES,
   WEBHOOK_ORDER_STATUSES,
   WEBHOOK_PAYMENT_LINK_STATUSES,
+  WEBHOOK_DEAL_STATUSES,
+  WEBHOOK_TASK_STATUSES,
+  WEBHOOK_DEAL_DETAILS,
+  WEBHOOK_TASK_DETAILS,
   WEBHOOK_RUN_END_STATUSES,
   WEBHOOK_RUN_TRIGGERS,
   WEBHOOK_CONSENT_CHANGES,
@@ -1207,6 +1211,30 @@ export const apiWebhookEndpointSchema = z.object({
     .describe(
       'The statuses a Payment Link reaches that the endpoint receives as payment_link.status_changed; null receives every status.',
     ),
+  dealStatuses: z
+    .array(z.enum(WEBHOOK_DEAL_STATUSES))
+    .nullable()
+    .describe(
+      'The statuses a deal reaches that the endpoint receives as deal.status_changed (open is a deal reopened); null receives every status.',
+    ),
+  taskStatuses: z
+    .array(z.enum(WEBHOOK_TASK_STATUSES))
+    .nullable()
+    .describe(
+      'The statuses a task reaches that the endpoint receives as task.status_changed (open is a task reopened); null receives every status.',
+    ),
+  dealDetails: z
+    .array(z.enum(WEBHOOK_DEAL_DETAILS))
+    .nullable()
+    .describe(
+      'The deal details whose changes the endpoint receives as deal.updated: a change that changed one of them; null receives every change.',
+    ),
+  taskDetails: z
+    .array(z.enum(WEBHOOK_TASK_DETAILS))
+    .nullable()
+    .describe(
+      'The task details whose changes the endpoint receives as task.updated: a change that changed one of them; null receives every change.',
+    ),
   templateStatuses: z
     .array(z.enum(WEBHOOK_TEMPLATE_STATUSES))
     .nullable()
@@ -1350,6 +1378,30 @@ export const apiWebhookEndpointSchema = z.object({
     .nullable()
     .describe(
       'The scores of the satisfaction survey answers (satisfaction_survey.answered) the endpoint receives, as survey.score gives them (3 for the first and best button, 1 for the third); null receives every answer. Other events are not narrowed.',
+    ),
+  surveyAssigneeIds: z
+    .array(z.uuid())
+    .nullable()
+    .describe(
+      'The members credited with the satisfaction survey answers (satisfaction_survey.answered) the endpoint receives, as survey.assigneeId names them: the member the conversation was assigned to when it was resolved; null receives every answer. Other events are not narrowed.',
+    ),
+  surveyTeamIds: z
+    .array(z.uuid())
+    .nullable()
+    .describe(
+      "The teams whose conversations' satisfaction survey answers (satisfaction_survey.answered) the endpoint receives, by the team the conversation is in when the customer answers; null receives every answer. Other events are not narrowed.",
+    ),
+  surveyContactTags: z
+    .array(z.string())
+    .nullable()
+    .describe(
+      'The contact tags whose satisfaction survey answers (satisfaction_survey.answered) the endpoint receives, by the tags the answering contact has when they answer, as contacts carry them; null receives every answer. Other events are not narrowed.',
+    ),
+  surveyConversationTags: z
+    .array(z.string())
+    .nullable()
+    .describe(
+      'The conversation tags whose satisfaction survey answers (satisfaction_survey.answered) the endpoint receives, by the tags the conversation has when the customer answers, as conversations carry them; null receives every answer. Other events are not narrowed.',
     ),
   assigneeIds: z
     .array(z.uuid())
@@ -4108,7 +4160,7 @@ export function buildOpenApiDocument(serverUrl: string) {
       'satisfaction_survey.answered': webhook(
         'webhookSatisfactionSurveyAnswered',
         WEBHOOK_EVENT_INFO['satisfaction_survey.answered'].label,
-        `${WEBHOOK_EVENT_INFO['satisfaction_survey.answered'].description} The survey is the survey as GET /satisfaction-surveys reads it when the event is delivered: its score (3 for the first and best button, 1 for the third), the customer’s tap and the survey message by id among the conversation’s messages, and the members credited and resolving by id. Only the customer’s first tap answers a survey, so a survey is answered once and this event is sent once for it; surveys skipped or never answered send nothing. It happens on the conversation’s WhatsApp number, so an endpoint that names numbers receives it for those numbers only; the team, member and tag filters do not narrow it. An endpoint receives every answer unless it names the scores it takes (its \`surveyScores\`, or the scores ticked in Settings → Webhooks). Deliveries are not ordered.`,
+        `${WEBHOOK_EVENT_INFO['satisfaction_survey.answered'].description} The survey is the survey as GET /satisfaction-surveys reads it when the event is delivered: its score (3 for the first and best button, 1 for the third), the customer’s tap and the survey message by id among the conversation’s messages, and the members credited and resolving by id. Only the customer’s first tap answers a survey, so a survey is answered once and this event is sent once for it; surveys skipped or never answered send nothing. It happens on the conversation’s WhatsApp number, so an endpoint that names numbers receives it for those numbers only; the team, member and tag filters of conversations’ events do not narrow it. An endpoint receives every answer unless it names the scores it takes (its \`surveyScores\`, or the scores ticked in Settings → Webhooks). It can name as well the members credited with the answers it takes (its \`surveyAssigneeIds\`: the member the conversation was assigned to when it was resolved, the survey’s assigneeId) and the teams whose conversations’ answers it takes (its \`surveyTeamIds\`: the team the conversation is in when the customer answers), in Settings → Webhooks too; an answer credited to no member, or of a conversation in no team, matches no such list, and with more than one list an answer must pass them all. Tags narrow it too (its \`surveyContactTags\` and \`surveyConversationTags\`, or the tags given in Settings → Webhooks): an answer is sent when the answering contact, or its conversation, has any of the tags when the customer answers. Deliveries are not ordered.`,
         'WebhookSatisfactionSurveyAnswered',
       ),
       'contact.created': webhook(
@@ -4180,7 +4232,7 @@ export function buildOpenApiDocument(serverUrl: string) {
       'deal.updated': webhook(
         'webhookDealUpdated',
         WEBHOOK_EVENT_INFO['deal.updated'].label,
-        `${WEBHOOK_EVENT_INFO['deal.updated'].description} changes names what changed (title, valueMinor, expectedCloseOn), never the values before: the deal is the deal when the event is delivered, so a deal changed again since gives its latest details, and a deal whose contact was erased is sent as erasure left it. One change can also move, reopen, close or give the deal to another owner, and then sends deal.stage_changed, deal.status_changed and deal.owner_changed as well, in the order the steps happen: reopened, moved, details changed, given to another owner, closed; they can have the same createdAt. Pipelines, stages and owners an endpoint names narrow it as the other deal events. Deliveries are not ordered: the latest change is the one with the latest createdAt.`,
+        `${WEBHOOK_EVENT_INFO['deal.updated'].description} changes names what changed (title, valueMinor, expectedCloseOn), never the values before: the deal is the deal when the event is delivered, so a deal changed again since gives its latest details, and a deal whose contact was erased is sent as erasure left it. One change can also move, reopen, close or give the deal to another owner, and then sends deal.stage_changed, deal.status_changed and deal.owner_changed as well, in the order the steps happen: reopened, moved, details changed, given to another owner, closed; they can have the same createdAt. Pipelines, stages and owners an endpoint names narrow it as the other deal events. An endpoint receives every change unless it names the details it takes (its \`dealDetails\`, or the details ticked in Settings → Webhooks): a change is sent when it changed one of them, and its changes still name every detail it changed. Deliveries are not ordered: the latest change is the one with the latest createdAt.`,
         'WebhookDealUpdated',
       ),
       'deal.stage_changed': webhook(
@@ -4198,7 +4250,7 @@ export function buildOpenApiDocument(serverUrl: string) {
       'deal.status_changed': webhook(
         'webhookDealStatusChanged',
         WEBHOOK_EVENT_INFO['deal.status_changed'].label,
-        `${WEBHOOK_EVENT_INFO['deal.status_changed'].description} deal.status and deal.previousStatus are the change (open, won or lost), with the stage and pipeline it was in; the rest is the deal when the event is delivered, so deal.lostReason is its reason then. A change that also moves the deal sends deal.stage_changed as well (see it for their order). Deliveries are not ordered: the latest change is the one with the latest createdAt.`,
+        `${WEBHOOK_EVENT_INFO['deal.status_changed'].description} deal.status and deal.previousStatus are the change (open, won or lost), with the stage and pipeline it was in; the rest is the deal when the event is delivered, so deal.lostReason is its reason then. A change that also moves the deal sends deal.stage_changed as well (see it for their order). An endpoint receives every status unless it names the statuses it takes (its \`dealStatuses\`, or the statuses ticked in Settings → Webhooks). Deliveries are not ordered: the latest change is the one with the latest createdAt.`,
         'WebhookDealStatusChanged',
       ),
       'task.created': webhook(
@@ -4210,7 +4262,7 @@ export function buildOpenApiDocument(serverUrl: string) {
       'task.updated': webhook(
         'webhookTaskUpdated',
         WEBHOOK_EVENT_INFO['task.updated'].label,
-        `${WEBHOOK_EVENT_INFO['task.updated'].description} changes names what changed (title, notes, dueAt, remindAt), never the values before: the task is the task when the event is delivered, so a task changed again since gives its latest title and due time, and its notes and reminder are never sent: read them with GET /tasks/{id} (\`tasks.read\`). One change can also give the task to another member, and one through the API can also reopen or close it, and then sends task.assignee_changed and task.status_changed as well, in the order the steps happen: reopened, details changed, given to another member, closed; they can have the same createdAt. Assignees an endpoint names narrow it as the other task events. Deliveries are not ordered: the latest change is the one with the latest createdAt.`,
+        `${WEBHOOK_EVENT_INFO['task.updated'].description} changes names what changed (title, notes, dueAt, remindAt), never the values before: the task is the task when the event is delivered, so a task changed again since gives its latest title and due time, and its notes and reminder are never sent: read them with GET /tasks/{id} (\`tasks.read\`). One change can also give the task to another member, and one through the API can also reopen or close it, and then sends task.assignee_changed and task.status_changed as well, in the order the steps happen: reopened, details changed, given to another member, closed; they can have the same createdAt. Assignees an endpoint names narrow it as the other task events. An endpoint receives every change unless it names the details it takes (its \`taskDetails\`, or the details ticked in Settings → Webhooks): a change is sent when it changed one of them, and its changes still name every detail it changed. Deliveries are not ordered: the latest change is the one with the latest createdAt.`,
         'WebhookTaskUpdated',
       ),
       'task.assignee_changed': webhook(
@@ -4222,7 +4274,7 @@ export function buildOpenApiDocument(serverUrl: string) {
       'task.status_changed': webhook(
         'webhookTaskStatusChanged',
         WEBHOOK_EVENT_INFO['task.status_changed'].label,
-        `${WEBHOOK_EVENT_INFO['task.status_changed'].description} task.status and task.previousStatus are the change (open, done or cancelled); the rest is the task when the event is delivered. Editing its title, notes, due time or reminder sends task.updated, and giving it to another member task.assignee_changed. Deliveries are not ordered: the latest change is the one with the latest createdAt.`,
+        `${WEBHOOK_EVENT_INFO['task.status_changed'].description} task.status and task.previousStatus are the change (open, done or cancelled); the rest is the task when the event is delivered. An endpoint receives every status unless it names the statuses it takes (its \`taskStatuses\`, or the statuses ticked in Settings → Webhooks). Editing its title, notes, due time or reminder sends task.updated, and giving it to another member task.assignee_changed. Deliveries are not ordered: the latest change is the one with the latest createdAt.`,
         'WebhookTaskStatusChanged',
       ),
       'note.created': webhook(

@@ -11,6 +11,10 @@ import {
   WEBHOOK_LIMITS,
   WEBHOOK_ORDER_STATUS_LABELS,
   WEBHOOK_PAYMENT_LINK_STATUS_LABELS,
+  WEBHOOK_DEAL_STATUS_LABELS,
+  WEBHOOK_TASK_STATUS_LABELS,
+  WEBHOOK_DEAL_DETAIL_LABELS,
+  WEBHOOK_TASK_DETAIL_LABELS,
   WEBHOOK_RUN_END_STATUS_LABELS,
   WEBHOOK_RUN_TRIGGER_LABELS,
   WEBHOOK_CONSENT_CHANGE_LABELS,
@@ -216,6 +220,30 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
                           .join(', ')}
                       </p>
                     ) : null}
+                    {e.dealStatuses ? (
+                      <p className="text-xs text-muted-foreground">
+                        Deal statuses sent:{' '}
+                        {e.dealStatuses.map((s) => WEBHOOK_DEAL_STATUS_LABELS[s]).join(', ')}
+                      </p>
+                    ) : null}
+                    {e.taskStatuses ? (
+                      <p className="text-xs text-muted-foreground">
+                        Task statuses sent:{' '}
+                        {e.taskStatuses.map((s) => WEBHOOK_TASK_STATUS_LABELS[s]).join(', ')}
+                      </p>
+                    ) : null}
+                    {e.dealDetails ? (
+                      <p className="text-xs text-muted-foreground">
+                        Deal details whose changes are sent:{' '}
+                        {e.dealDetails.map((d) => WEBHOOK_DEAL_DETAIL_LABELS[d]).join(', ')}
+                      </p>
+                    ) : null}
+                    {e.taskDetails ? (
+                      <p className="text-xs text-muted-foreground">
+                        Task details whose changes are sent:{' '}
+                        {e.taskDetails.map((d) => WEBHOOK_TASK_DETAIL_LABELS[d]).join(', ')}
+                      </p>
+                    ) : null}
                     {e.campaignStatuses ? (
                       <p className="text-xs text-muted-foreground">
                         Campaign statuses sent:{' '}
@@ -360,6 +388,29 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
                       <p className="text-xs text-muted-foreground">
                         Survey answers sent:{' '}
                         {e.surveyScores.map((s) => WEBHOOK_SURVEY_SCORE_LABELS[s]).join(', ')}
+                      </p>
+                    ) : null}
+                    {e.surveyAssignees ? (
+                      <p className="text-xs text-muted-foreground">
+                        Survey answers sent, credited to:{' '}
+                        {e.surveyAssignees.map(webhookAssigneeText).join(', ')}
+                      </p>
+                    ) : null}
+                    {e.surveyTeams ? (
+                      <p className="text-xs text-muted-foreground">
+                        Survey answers sent, of conversations in:{' '}
+                        {e.surveyTeams.map(webhookTeamText).join(', ')}
+                      </p>
+                    ) : null}
+                    {e.surveyContactTags ? (
+                      <p className="text-xs break-all text-muted-foreground">
+                        Survey answers sent, of contacts tagged: {e.surveyContactTags.join(', ')}
+                      </p>
+                    ) : null}
+                    {e.surveyConversationTags ? (
+                      <p className="text-xs break-all text-muted-foreground">
+                        Survey answers sent, of conversations tagged:{' '}
+                        {e.surveyConversationTags.join(', ')}
                       </p>
                     ) : null}
                     {e.teams ? (

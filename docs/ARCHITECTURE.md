@@ -2050,6 +2050,44 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   delivery only for endpoints whose list is null or holds the status reached, which the links'
   trigger passes, and writes no event when none does. Settings (the status control orders use) and
   the API (`paymentLinkStatuses`) set it; a change that drops the event clears it.
+- **Deal and task status filters** (migration 0232, ADR-309): `deal_statuses` and `task_statuses` on
+  an endpoint list the statuses a deal or a task reaches that it takes as `deal.status_changed`
+  (`open`, `won`, `lost`) or `task.status_changed` (`open`, `done`, `cancelled`; `open` is a
+  reopening), null for every status; checks keep each to 1 to 3 known statuses and to endpoints that
+  take its event. `app.capture_webhook_event` (replaced with the same signature) creates a change's
+  delivery only for endpoints whose list is null or holds the status reached, which the deal and
+  task triggers pass, and writes no event when none does. Settings (the status control orders use)
+  and the API (`dealStatuses`, `taskStatuses`) set them; a change that drops an event clears its
+  list.
+- **Deal and task detail filters** (migration 0233, ADR-310): `deal_details` and `task_details` on
+  an endpoint list the details whose changes it takes as `deal.updated` (`title`, `valueMinor`,
+  `expectedCloseOn`) or `task.updated` (`title`, `notes`, `dueAt`, `remindAt`), null for every
+  change; checks keep each to its known details and to endpoints that take its event.
+  `app.capture_webhook_event` (replaced with the same signature) creates a change's delivery only
+  for endpoints whose list is null or holds a detail the change changed, as the deal and task
+  triggers pass them in `changes`, and writes no event when none does. Settings and the API
+  (`dealDetails`, `taskDetails`) set them; a change that drops an event clears its list.
+- **Member and team filters for satisfaction survey answers** (migration 0234, ADR-311):
+  `survey_assignee_ids` and `survey_team_ids` on an endpoint list the members credited with the
+  answers it takes (the conversation's assignee when it was resolved, as the survey keeps it) and
+  the teams whose conversations' answers it takes (the conversation's team when the customer
+  answers), null for every answer; checks keep them to 1 to 50 ids and to endpoints that take
+  `satisfaction_survey.answered`. `app.capture_webhook_event` (replaced with the same signature)
+  reads the survey's score, member and conversation's team in one query only when an active endpoint
+  names any of them, creates an answer's delivery only for endpoints whose lists hold them, and
+  writes no event when none does. Settings and the API (`surveyAssigneeIds`, `surveyTeamIds`) set
+  them, the services checking that members take conversations and teams are the company's (those a
+  list holds stay); a change that drops the event clears them.
+- **Tag filters for satisfaction survey answers** (migration 0235, ADR-312): `survey_contact_tags`
+  and `survey_conversation_tags` on an endpoint list the tags of the contacts whose answers it takes
+  and of the conversations answered, as contacts and conversations carry them, null for every
+  answer; checks keep them to the tags' rule and to endpoints that take
+  `satisfaction_survey.answered`. `app.capture_webhook_event` (replaced with the same signature)
+  reads the contact's and the conversation's tags only when an active endpoint names tags for
+  answers, creates an answer's delivery only for endpoints whose lists share a tag with them, and
+  writes no event when none does. Settings and the API (`surveyContactTags`,
+  `surveyConversationTags`) set them; a change that drops the event clears them. The four tag lists
+  share one schema.
 - **Template status filters** (migration 0112, ADR-148): `template_statuses` on an endpoint lists
   the statuses it takes as `template.status_changed` (the eleven the event reports, `pending` to
   `locked`; HyFib's own steps, a deletion under way or refused and an unrecognised status are never
@@ -2417,6 +2455,14 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   subject and state) and writes the platform audit entry in one transaction; the console's list
   returns each failure's acknowledgement. `ops.integration_alerts_due` keeps acknowledgements of
   listed failures and forgets the others after an hour, as it does the alert marks.
+- **Assigning failures** (ADR-313, migration 0236): a platform administrator assigns a failure on
+  Current failures to a platform administrator, or takes the assignment off, through
+  `ops.platform_assign_integration_failure` (definer, platform role only), which checks the
+  administrator, the assignee and that `ops.integration_failures` lists the failure in that state
+  now, upserts or deletes the row of `ops.integration_assignments` (by source, subject and state)
+  and writes the platform audit entry in one transaction; the console's list returns each failure's
+  assignment with the names. `ops.integration_alerts_due` keeps assignments of listed failures and
+  forgets the others after an hour, as it does acknowledgements.
 - **Acknowledging dead letters** (ADR-169, migration 0117): `acknowledged_at`,
   `acknowledged_by_user_id` and `acknowledgement` on `ops.dead_letters`, set together (the check
   `dead_letters_acknowledged`) and written only by `ops.platform_acknowledge_dead_letter` (definer,

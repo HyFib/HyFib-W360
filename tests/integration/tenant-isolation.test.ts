@@ -292,6 +292,11 @@ describe('database roles', () => {
     expect(await can('w360_platform', acknowledge)).toBe(true);
     expect(await can('w360_app', acknowledge)).toBe(false);
     expect(await can('w360_auth', acknowledge)).toBe(false);
+    // And assigning them (0236): platform staff only.
+    const assign = 'ops.platform_assign_integration_failure(text,uuid,text,text,text)';
+    expect(await can('w360_platform', assign)).toBe(true);
+    expect(await can('w360_app', assign)).toBe(false);
+    expect(await can('w360_auth', assign)).toBe(false);
     const rule = 'ops.webhook_receipt_exhausted(text,integer,timestamp with time zone)';
     expect(await can('w360_app', rule)).toBe(true);
     expect(await can('w360_platform', rule)).toBe(true);

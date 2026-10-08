@@ -262,6 +262,10 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       campaignStatuses: null,
       orderStatuses: null,
       paymentLinkStatuses: null,
+      dealStatuses: null,
+      taskStatuses: null,
+      dealDetails: null,
+      taskDetails: null,
       templateStatuses: null,
       conversationStatuses: null,
       runEndStatuses: null,
@@ -286,6 +290,10 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       noteDealOwnerIds: null,
       crmChangeMakers: null,
       surveyScores: null,
+      surveyAssigneeIds: null,
+      surveyTeamIds: null,
+      surveyContactTags: null,
+      surveyConversationTags: null,
       assigneeIds: null,
       contactTags: null,
       conversationTags: null,
@@ -1133,6 +1141,184 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     });
   });
 
+  it('choose the deal and task statuses an endpoint receives, kept by changes that leave them out and cleared with the event (ADR-309)', async () => {
+    const c = await fx.company();
+    const key = await apiKey(c, ['webhooks.manage']);
+    const issueOf = async (promise: Promise<unknown>) => {
+      const error = await expectAppError(promise, 'validation_failed');
+      return isAppError(error) ? error.issues?.[0] : undefined;
+    };
+    // Statuses need their event, at least one, and each from the list (an unknown one by place).
+    const refusals = [
+      [['deal.created'], { dealStatuses: ['won'] }, 'dealStatuses'],
+      [['task.status_changed'], { dealStatuses: ['won'] }, 'dealStatuses'],
+      [['deal.status_changed'], { dealStatuses: [] }, 'dealStatuses'],
+      [['deal.status_changed'], { dealStatuses: ['won', 'done'] }, 'dealStatuses.1'],
+      [['task.created'], { taskStatuses: ['done'] }, 'taskStatuses'],
+      [['deal.status_changed'], { taskStatuses: ['done'] }, 'taskStatuses'],
+      [['task.status_changed'], { taskStatuses: [] }, 'taskStatuses'],
+      [['task.status_changed'], { taskStatuses: ['completed'] }, 'taskStatuses.0'],
+    ] as const;
+    for (const [index, [events, lists, path]] of refusals.entries()) {
+      expect(
+        await issueOf(
+          api().create(
+            key.ctx,
+            { url: receiverUrl(), events, ...lists },
+            idem(`crm-statuses-bad-${index}`, JSON.stringify(lists)),
+          ),
+        ),
+        JSON.stringify(lists),
+      ).toMatchObject({ path });
+    }
+    expect((await api().list(key.ctx)).data).toEqual([]);
+
+    const created = await addThroughApi(key.ctx, 'crm-statuses-1', {
+      url: receiverUrl(),
+      events: ['deal.status_changed', 'task.status_changed', 'message.status'],
+      dealStatuses: ['lost', 'won', 'lost'],
+      taskStatuses: ['cancelled', 'open'],
+    });
+    const id = created.body.data.id;
+    expect(created.body.data).toMatchObject({
+      dealStatuses: ['won', 'lost'],
+      taskStatuses: ['open', 'cancelled'],
+    });
+    expect(await api().get(key.ctx, id)).toMatchObject({
+      dealStatuses: ['won', 'lost'],
+      taskStatuses: ['open', 'cancelled'],
+    });
+    const [audit] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND subject_id = $2 AND action = 'webhook.endpoint_created'`,
+      [c.tenant.id, id],
+    );
+    expect(audit?.metadata).toMatchObject({
+      dealStatuses: ['won', 'lost'],
+      taskStatuses: ['open', 'cancelled'],
+    });
+
+    expect(await api().update(key.ctx, id, { description: 'Outcomes' })).toMatchObject({
+      dealStatuses: ['won', 'lost'],
+      taskStatuses: ['open', 'cancelled'],
+    });
+    expect(await api().update(key.ctx, id, { dealStatuses: ['won'] })).toMatchObject({
+      dealStatuses: ['won'],
+      taskStatuses: ['open', 'cancelled'],
+    });
+    const updates = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND subject_id = $2 AND action = 'webhook.endpoint_updated'
+        ORDER BY occurred_at`,
+      [c.tenant.id, id],
+    );
+    expect(updates.map((u) => [u.metadata.dealStatuses, u.metadata.taskStatuses])).toEqual([
+      [
+        ['won', 'lost'],
+        ['open', 'cancelled'],
+      ],
+      [['won'], ['open', 'cancelled']],
+    ]);
+    // Dropping the tasks' status changes clears their list only.
+    expect(
+      await api().update(key.ctx, id, { events: ['deal.status_changed', 'message.status'] }),
+    ).toMatchObject({ dealStatuses: ['won'], taskStatuses: null });
+    expect(await issueOf(api().update(key.ctx, id, { taskStatuses: ['done'] }))).toMatchObject({
+      path: 'taskStatuses',
+    });
+    expect(await api().update(key.ctx, id, { dealStatuses: null })).toMatchObject({
+      dealStatuses: null,
+    });
+    expect(await issueOf(api().update(key.ctx, id, { dealStatuses: [] }))).toMatchObject({
+      path: 'dealStatuses',
+    });
+  });
+
+  it('choose the deal and task details whose changes an endpoint receives, kept by changes that leave them out and cleared with the event (ADR-310)', async () => {
+    const c = await fx.company();
+    const key = await apiKey(c, ['webhooks.manage']);
+    const issueOf = async (promise: Promise<unknown>) => {
+      const error = await expectAppError(promise, 'validation_failed');
+      return isAppError(error) ? error.issues?.[0] : undefined;
+    };
+    // Details need their event, at least one, and each from the list (an unknown one by place).
+    const refusals = [
+      [['deal.created'], { dealDetails: ['title'] }, 'dealDetails'],
+      [['task.updated'], { dealDetails: ['title'] }, 'dealDetails'],
+      [['deal.updated'], { dealDetails: [] }, 'dealDetails'],
+      [['deal.updated'], { dealDetails: ['title', 'notes'] }, 'dealDetails.1'],
+      [['task.created'], { taskDetails: ['notes'] }, 'taskDetails'],
+      [['deal.updated'], { taskDetails: ['notes'] }, 'taskDetails'],
+      [['task.updated'], { taskDetails: [] }, 'taskDetails'],
+      [['task.updated'], { taskDetails: ['valueMinor'] }, 'taskDetails.0'],
+    ] as const;
+    for (const [index, [events, lists, path]] of refusals.entries()) {
+      expect(
+        await issueOf(
+          api().create(
+            key.ctx,
+            { url: receiverUrl(), events, ...lists },
+            idem(`crm-details-bad-${index}`, JSON.stringify(lists)),
+          ),
+        ),
+        JSON.stringify(lists),
+      ).toMatchObject({ path });
+    }
+    expect((await api().list(key.ctx)).data).toEqual([]);
+
+    const created = await addThroughApi(key.ctx, 'crm-details-1', {
+      url: receiverUrl(),
+      events: ['deal.updated', 'task.updated', 'message.status'],
+      dealDetails: ['expectedCloseOn', 'valueMinor', 'expectedCloseOn'],
+      taskDetails: ['remindAt', 'dueAt'],
+    });
+    const id = created.body.data.id;
+    const chosen = {
+      dealDetails: ['valueMinor', 'expectedCloseOn'],
+      taskDetails: ['dueAt', 'remindAt'],
+    };
+    expect(created.body.data).toMatchObject(chosen);
+    expect(await api().get(key.ctx, id)).toMatchObject(chosen);
+    const [audit] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND subject_id = $2 AND action = 'webhook.endpoint_created'`,
+      [c.tenant.id, id],
+    );
+    expect(audit?.metadata).toMatchObject(chosen);
+
+    expect(await api().update(key.ctx, id, { description: 'Forecast' })).toMatchObject(chosen);
+    expect(await api().update(key.ctx, id, { dealDetails: ['valueMinor'] })).toMatchObject({
+      dealDetails: ['valueMinor'],
+      taskDetails: ['dueAt', 'remindAt'],
+    });
+    const updates = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND subject_id = $2 AND action = 'webhook.endpoint_updated'
+        ORDER BY occurred_at`,
+      [c.tenant.id, id],
+    );
+    expect(updates.map((u) => [u.metadata.dealDetails, u.metadata.taskDetails])).toEqual([
+      [
+        ['valueMinor', 'expectedCloseOn'],
+        ['dueAt', 'remindAt'],
+      ],
+      [['valueMinor'], ['dueAt', 'remindAt']],
+    ]);
+    // Dropping the tasks' detail changes clears their list only.
+    expect(
+      await api().update(key.ctx, id, { events: ['deal.updated', 'message.status'] }),
+    ).toMatchObject({ dealDetails: ['valueMinor'], taskDetails: null });
+    expect(await issueOf(api().update(key.ctx, id, { taskDetails: ['notes'] }))).toMatchObject({
+      path: 'taskDetails',
+    });
+    expect(await api().update(key.ctx, id, { dealDetails: null })).toMatchObject({
+      dealDetails: null,
+    });
+    expect(await issueOf(api().update(key.ctx, id, { dealDetails: [] }))).toMatchObject({
+      path: 'dealDetails',
+    });
+  });
+
   it('choose the template statuses an endpoint receives, kept by changes that leave them out and cleared with the event (ADR-148)', async () => {
     const c = await fx.company();
     const key = await apiKey(c, ['webhooks.manage']);
@@ -1704,6 +1890,268 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     });
     expect(await issueOf(api().update(key.ctx, id, { surveyScores: [] }))).toMatchObject({
       path: 'surveyScores',
+    });
+  });
+
+  it('choose the members credited with the satisfaction survey answers an endpoint receives and the teams of their conversations, kept by changes that leave them out, a member who stopped and a deleted team included, and cleared with the event (ADR-311)', async () => {
+    const c = await fx.company();
+    const key = await apiKey(c, ['webhooks.manage']);
+    const owner = await fx.ctx(c, c.owner);
+    const agent = (await fx.ctx(c, c.agent)).membership.id;
+    const ownerId = owner.membership.id;
+    const marketer = (await fx.ctx(c, c.marketer)).membership.id;
+    const other = await fx.company();
+    const elsewhere = (await fx.ctx(other, other.agent)).membership.id;
+    const teamOf = async (company: Company, name: string) => {
+      const teamId = uuidv7();
+      await fx.query('INSERT INTO app.teams (id, tenant_id, name) VALUES ($1, $2, $3)', [
+        teamId,
+        company.tenant.id,
+        name,
+      ]);
+      return teamId;
+    };
+    const support = await teamOf(c, 'Support');
+    const sales = await teamOf(c, 'Sales');
+    const otherTeam = await teamOf(other, 'Support');
+    const issueOf = async (promise: Promise<unknown>) => {
+      const error = await expectAppError(promise, 'validation_failed');
+      return isAppError(error) ? error.issues?.[0] : undefined;
+    };
+    // The lists need the event, at least one id, members who take conversations as GET /members
+    // lists them and the company's teams (named by place).
+    const refusals = [
+      [['conversation.status_changed'], { surveyAssigneeIds: [agent] }, 'surveyAssigneeIds'],
+      [['conversation.status_changed'], { surveyTeamIds: [support] }, 'surveyTeamIds'],
+      [['satisfaction_survey.answered'], { surveyAssigneeIds: [] }, 'surveyAssigneeIds'],
+      [
+        ['satisfaction_survey.answered'],
+        { surveyTeamIds: [support, 'support'] },
+        'surveyTeamIds.1',
+      ],
+      [
+        ['satisfaction_survey.answered'],
+        { surveyAssigneeIds: [agent, marketer] },
+        'surveyAssigneeIds.1',
+      ],
+      [['satisfaction_survey.answered'], { surveyAssigneeIds: [elsewhere] }, 'surveyAssigneeIds.0'],
+      [
+        ['satisfaction_survey.answered'],
+        { surveyTeamIds: [support, otherTeam] },
+        'surveyTeamIds.1',
+      ],
+    ] as const;
+    for (const [index, [events, lists, path]] of refusals.entries()) {
+      expect(
+        await issueOf(
+          api().create(
+            key.ctx,
+            { url: receiverUrl(), events, ...lists },
+            idem(`survey-lists-bad-${index}`, JSON.stringify(lists)),
+          ),
+        ),
+        JSON.stringify(lists),
+      ).toMatchObject({ path });
+    }
+    expect((await api().list(key.ctx)).data).toEqual([]);
+
+    const created = await addThroughApi(key.ctx, 'survey-lists-1', {
+      url: receiverUrl(),
+      events: ['satisfaction_survey.answered', 'message.received'],
+      surveyAssigneeIds: [agent, ownerId.toUpperCase(), agent],
+      surveyTeamIds: [sales, support],
+    });
+    const id = created.body.data.id;
+    expect(created.body.data).toMatchObject({
+      surveyAssigneeIds: [agent, ownerId],
+      surveyTeamIds: [sales, support],
+      assigneeIds: null,
+      teamIds: null,
+    });
+    expect(await api().get(key.ctx, id)).toMatchObject({
+      surveyAssigneeIds: [agent, ownerId],
+      surveyTeamIds: [sales, support],
+    });
+    const audits = async (action: string) =>
+      (
+        await fx.query<{ metadata: { surveyAssigneeIds?: unknown; surveyTeamIds?: unknown } }>(
+          `SELECT metadata FROM app.audit_events
+            WHERE tenant_id = $1 AND subject_id = $2 AND action = $3 ORDER BY occurred_at, id`,
+          [c.tenant.id, id, action],
+        )
+      ).map((a) => [a.metadata.surveyAssigneeIds, a.metadata.surveyTeamIds]);
+    expect(await audits('webhook.endpoint_created')).toEqual([
+      [
+        [agent, ownerId],
+        [sales, support],
+      ],
+    ]);
+    // A member who stops taking conversations and a deleted team stay, and settings says so.
+    await fx.query(`UPDATE app.memberships SET status = 'suspended' WHERE id = $1`, [agent]);
+    await fx.query('DELETE FROM app.teams WHERE id = $1', [sales]);
+    const shown = (await settings().list(owner)).find((e) => e.id === id);
+    expect([shown?.surveyAssignees, shown?.surveyTeams]).toEqual([
+      [
+        { id: agent, name: 'Agent', assignable: false },
+        { id: ownerId, name: 'Owner', assignable: true },
+      ],
+      [
+        { id: sales, name: null },
+        { id: support, name: 'Support' },
+      ],
+    ]);
+    expect(await api().update(key.ctx, id, { description: 'Support leads' })).toMatchObject({
+      surveyAssigneeIds: [agent, ownerId],
+      surveyTeamIds: [sales, support],
+    });
+    expect(
+      await api().update(key.ctx, id, {
+        surveyAssigneeIds: [ownerId, agent],
+        surveyTeamIds: [support, sales],
+      }),
+    ).toMatchObject({ surveyAssigneeIds: [ownerId, agent], surveyTeamIds: [support, sales] });
+    expect(
+      await api().update(key.ctx, id, { surveyAssigneeIds: [ownerId], surveyTeamIds: [support] }),
+    ).toMatchObject({ surveyAssigneeIds: [ownerId], surveyTeamIds: [support] });
+    // Once off the lists, they are refused like any other.
+    expect(
+      await issueOf(api().update(key.ctx, id, { surveyAssigneeIds: [ownerId, agent] })),
+    ).toMatchObject({ path: 'surveyAssigneeIds.1' });
+    expect(
+      await issueOf(api().update(key.ctx, id, { surveyTeamIds: [support, sales] })),
+    ).toMatchObject({ path: 'surveyTeamIds.1' });
+    expect(await audits('webhook.endpoint_updated')).toEqual([
+      [
+        [agent, ownerId],
+        [sales, support],
+      ],
+      [
+        [ownerId, agent],
+        [support, sales],
+      ],
+      [[ownerId], [support]],
+    ]);
+    // Conversations' events alone clear the lists, and then refuse them.
+    expect(await api().update(key.ctx, id, { events: ['message.received'] })).toMatchObject({
+      events: ['message.received'],
+      surveyAssigneeIds: null,
+      surveyTeamIds: null,
+    });
+    expect(await issueOf(api().update(key.ctx, id, { surveyTeamIds: [support] }))).toMatchObject({
+      path: 'surveyTeamIds',
+    });
+    expect(
+      await api().update(key.ctx, id, {
+        events: ['satisfaction_survey.answered'],
+        surveyTeamIds: [support],
+      }),
+    ).toMatchObject({ surveyAssigneeIds: null, surveyTeamIds: [support] });
+    expect(await api().update(key.ctx, id, { surveyTeamIds: null })).toMatchObject({
+      surveyTeamIds: null,
+    });
+  });
+
+  it('choose the contact and conversation tags of the satisfaction survey answers an endpoint receives, as contacts and conversations carry them, kept by changes that leave them out and cleared with the event (ADR-312)', async () => {
+    const c = await fx.company();
+    const key = await apiKey(c, ['webhooks.manage']);
+    const issueOf = async (promise: Promise<unknown>) => {
+      const error = await expectAppError(promise, 'validation_failed');
+      return isAppError(error) ? error.issues?.[0] : undefined;
+    };
+    // The lists need the event, at least one tag, and tags as they are written (named by place).
+    const refusals = [
+      [['conversation.status_changed'], { surveyContactTags: ['vip'] }, 'surveyContactTags'],
+      [
+        ['conversation.status_changed'],
+        { surveyConversationTags: ['refund'] },
+        'surveyConversationTags',
+      ],
+      [['satisfaction_survey.answered'], { surveyContactTags: [] }, 'surveyContactTags'],
+      [
+        ['satisfaction_survey.answered'],
+        { surveyConversationTags: ['refund', 'a,b'] },
+        'surveyConversationTags.1',
+      ],
+      [['satisfaction_survey.answered'], { surveyContactTags: ['vip', 42] }, 'surveyContactTags.1'],
+    ] as const;
+    for (const [index, [events, lists, path]] of refusals.entries()) {
+      expect(
+        await issueOf(
+          api().create(
+            key.ctx,
+            { url: receiverUrl(), events, ...lists },
+            idem(`survey-tags-bad-${index}`, JSON.stringify(lists)),
+          ),
+        ),
+        JSON.stringify(lists),
+      ).toMatchObject({ path });
+    }
+    expect((await api().list(key.ctx)).data).toEqual([]);
+
+    const created = await addThroughApi(key.ctx, 'survey-tags-1', {
+      url: receiverUrl(),
+      events: ['satisfaction_survey.answered', 'message.received'],
+      surveyContactTags: ['VIP', 'Gold   Member', 'vip'],
+      surveyConversationTags: ['Refund'],
+    });
+    const id = created.body.data.id;
+    expect(created.body.data).toMatchObject({
+      surveyContactTags: ['vip', 'gold member'],
+      surveyConversationTags: ['refund'],
+      contactTags: null,
+      conversationTags: null,
+    });
+    expect(await api().get(key.ctx, id)).toMatchObject({
+      surveyContactTags: ['vip', 'gold member'],
+      surveyConversationTags: ['refund'],
+    });
+    const audits = async (action: string) =>
+      (
+        await fx.query<{
+          metadata: { surveyContactTags?: unknown; surveyConversationTags?: unknown };
+        }>(
+          `SELECT metadata FROM app.audit_events
+            WHERE tenant_id = $1 AND subject_id = $2 AND action = $3 ORDER BY occurred_at, id`,
+          [c.tenant.id, id, action],
+        )
+      ).map((a) => [a.metadata.surveyContactTags, a.metadata.surveyConversationTags]);
+    expect(await audits('webhook.endpoint_created')).toEqual([
+      [['vip', 'gold member'], ['refund']],
+    ]);
+    expect(await api().update(key.ctx, id, { description: 'VIP desk' })).toMatchObject({
+      surveyContactTags: ['vip', 'gold member'],
+      surveyConversationTags: ['refund'],
+    });
+    expect(
+      await api().update(key.ctx, id, { surveyConversationTags: ['Delivery Delay', 'refund'] }),
+    ).toMatchObject({
+      surveyContactTags: ['vip', 'gold member'],
+      surveyConversationTags: ['delivery delay', 'refund'],
+    });
+    expect(await audits('webhook.endpoint_updated')).toEqual([
+      [['vip', 'gold member'], ['refund']],
+      [
+        ['vip', 'gold member'],
+        ['delivery delay', 'refund'],
+      ],
+    ]);
+    // Conversations' events alone clear the lists, and then refuse them.
+    expect(await api().update(key.ctx, id, { events: ['message.received'] })).toMatchObject({
+      events: ['message.received'],
+      surveyContactTags: null,
+      surveyConversationTags: null,
+    });
+    expect(await issueOf(api().update(key.ctx, id, { surveyContactTags: ['vip'] }))).toMatchObject({
+      path: 'surveyContactTags',
+    });
+    expect(
+      await api().update(key.ctx, id, {
+        events: ['satisfaction_survey.answered'],
+        surveyConversationTags: ['refund'],
+      }),
+    ).toMatchObject({ surveyContactTags: null, surveyConversationTags: ['refund'] });
+    expect(await api().update(key.ctx, id, { surveyConversationTags: null })).toMatchObject({
+      surveyConversationTags: null,
     });
   });
 

@@ -24,6 +24,7 @@ import {
 import { CompanyLink, ListTitle, Utc } from '@/components/platform/ops';
 import {
   AcknowledgeFailureForm,
+  AssignFailureForm,
   AcknowledgeQuarantineForm,
   AcknowledgeReceiptForm,
   ResolveQuarantineForm,
@@ -58,7 +59,10 @@ export default async function OpsIntegrationsPage() {
             )}{' '}
             An administrator who takes a failure acknowledges it with a note, so the others see who
             took it and what was found; the acknowledgement lasts while the failure is listed
-            (ADR-141). The CSV gives when a failure was acknowledged, not by whom or the note.
+            (ADR-141). Any administrator assigns a failure to an administrator, themselves or
+            another, so it is clear who handles it; the assignment lasts while the failure is listed
+            too (ADR-313). The CSV gives when a failure was acknowledged, not by whom or the note,
+            and leaves assignments out.
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -73,6 +77,7 @@ export default async function OpsIntegrationsPage() {
                   <TH>State</TH>
                   <TH>Error</TH>
                   <TH>Since</TH>
+                  <TH>Assigned</TH>
                   <TH>Acknowledged</TH>
                 </TR>
               </THead>
@@ -96,6 +101,24 @@ export default async function OpsIntegrationsPage() {
                     <TD className="max-w-sm text-sm">{f.error ?? '—'}</TD>
                     <TD>
                       <Utc at={f.since} />
+                    </TD>
+                    <TD className="max-w-xs text-sm">
+                      {f.assignment ? (
+                        <div className="mb-2">
+                          <div>To {f.assignment.assigneeName ?? 'an administrator'}</div>
+                          <div className="text-xs text-muted-foreground">
+                            by {f.assignment.byName ?? 'an administrator'},{' '}
+                            <Utc at={f.assignment.at} />
+                          </div>
+                        </div>
+                      ) : null}
+                      <AssignFailureForm
+                        source={f.source}
+                        subjectId={f.subjectId}
+                        state={f.state}
+                        assigneeUserId={f.assignment?.assigneeUserId ?? null}
+                        administrators={o.administrators}
+                      />
                     </TD>
                     <TD className="max-w-xs text-sm">
                       {f.acknowledgement ? (

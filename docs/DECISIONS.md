@@ -5629,10 +5629,10 @@ automation runs' period on Usage were blank, and failed onboarding sessions show
 page view as their start. The console now parses them (an integration test compares them with the
 stored times).
 
-Not built: assigning a failure to someone, acknowledging the console's other lists (dead letters,
-built by ADR-169; receipts, built by ADR-179; quarantine; late queues, built by ADR-177), editing or
-deleting a note (a new acknowledgement replaces it), and leaving acknowledged failures out of the
-alert email (each failure is emailed once anyway).
+Not built: assigning a failure to someone (built by ADR-313), acknowledging the console's other
+lists (dead letters, built by ADR-169; receipts, built by ADR-179; quarantine; late queues, built by
+ADR-177), editing or deleting a note (a new acknowledgement replaces it), and leaving acknowledged
+failures out of the alert email (each failure is emailed once anyway).
 
 ## ADR-142 Clearing the braces advisory from the Next.js ESLint plugin (2026-10-04)
 
@@ -11834,3 +11834,246 @@ Decision:
 Not built: lists by the status a link left (`previousStatus`), by amount or by who asked for payment
 (a member or a key), and events when payment is asked for or a cancellation asked (ADR-285 left them
 out).
+
+## ADR-309 Choosing the deal and task statuses a webhook endpoint receives (P5-09, P4-04) (2026-10-08)
+
+Context: `deal.status_changed` (ADR-256) is sent whenever a deal is won, lost or reopened, and
+`task.status_changed` (ADR-261) whenever a task is done, cancelled or reopened, but an endpoint
+received every one. An integration that books revenue wants won deals only, one that chases lost
+business lost deals only, and one that follows up dropped work cancelled tasks only; each was sent
+every change and had to drop the rest. ADR-256 left deal events by status unbuilt (pipelines, stages
+and owners came with ADR-263 to ADR-265), and ADR-261 left filters for task events unbuilt.
+
+Decision:
+
+- **Two lists per endpoint, one for each event,** `dealStatuses` for `deal.status_changed` and
+  `taskStatuses` for `task.status_changed`: the statuses a change reaches that the endpoint takes, 1
+  to 3 of `open`, `won` and `lost` for deals and of `open`, `done` and `cancelled` for tasks, in
+  that order (as the CRM lists them) with repeats merged, as the event's `deal.status` or
+  `task.status` gives them; `open` is a reopening. Null receives every status, as before. With
+  pipelines, stages, owners, assignees or makers chosen too, a change must pass every list. Other
+  events are not narrowed, the deal's and task's other events among them. Chosen in Settings →
+  Webhooks under each event (the status control orders use, every status ticked by default, named by
+  the change each reports: "Reopened", "Won", "Lost", "Done", "Cancelled"), shown on the endpoint as
+  "Deal statuses sent: …" and "Task statuses sent: …", and through the API as `dealStatuses` and
+  `taskStatuses` on `POST /webhook-endpoints` and `PATCH /webhook-endpoints/{id}` and in every
+  endpoint the API answers.
+- **Only while the event is taken:** a list given for an endpoint that does not take its event is
+  refused (`dealStatuses` or `taskStatuses`; 422 through the API). A change that drops the event
+  clears its list, and a `PATCH` that leaves a list out keeps it; Settings always sends both (null
+  while every status is ticked). Checks in the database hold the same rule (null, or 1 to 3 known
+  statuses in one dimension without a null, with the event).
+- **Applied at capture:** `app.capture_webhook_event` matches the status the change reached, which
+  the deal and task triggers pass as the event's status (0171, 0177), against each active endpoint's
+  list, in the transaction that makes the change; no row is read for it. No event is written when no
+  endpoint takes it, and stored events are unchanged.
+- **Audited and exported:** `webhook.endpoint_created` and `webhook.endpoint_updated` carry
+  `dealStatuses` and `taskStatuses` when the endpoint has them, and the company data export carries
+  the columns.
+- **Permissions unchanged:** members with `developer.manage` in Settings, keys with
+  `webhooks.manage` through the API.
+- **Migration 0232:** `deal_statuses text[]` and `task_statuses text[]` on `app.webhook_endpoints`
+  with their checks, validated at once (a company has at most 10 endpoints), update grants on the
+  columns for the runtime role, and `app.capture_webhook_event` replaced with the same signature
+  (0231's, with the deal and task statuses), so its owner and grants stay. Existing endpoints keep
+  null; nothing is backfilled.
+
+Not built: lists by the status a deal or task left (`previousStatus`), a deal's lost reason, and
+statuses for the deal's and task's other events (a deal added, moved or edited, a task added, edited
+or reassigned), which report no change of status.
+
+## ADR-310 Choosing the deal and task details whose changes a webhook endpoint receives (P5-09, P4-04) (2026-10-08)
+
+Context: `deal.updated` (ADR-275) is sent whenever a deal's title, value or expected close date
+changes, and `task.updated` (ADR-276) whenever a task's title, notes, due time or reminder changes,
+each naming what changed in `changes`, but an endpoint received every one. A forecast kept in step
+with the deals wants changes of value and expected close date only, and a calendar the changes of
+tasks' due times and reminders only; each was sent every edit and had to drop the rest by reading
+`changes`.
+
+Decision:
+
+- **Two lists per endpoint, one for each event,** `dealDetails` for `deal.updated` and `taskDetails`
+  for `task.updated`: the details whose changes the endpoint takes, 1 to 3 of `title`, `valueMinor`
+  and `expectedCloseOn` for deals and 1 to 4 of `title`, `notes`, `dueAt` and `remindAt` for tasks,
+  in the order the events' `changes` lists them, with repeats merged. A change is sent when it
+  changed a detail the list holds, and its `changes` still names every detail it changed, so a
+  receiver sees a retitle that came with a new value. Null receives every change, as before. With
+  pipelines, stages, owners, assignees or makers chosen too, a change must pass every list. Other
+  events are not narrowed. Chosen in Settings → Webhooks under each event ("Changes sent", every
+  detail ticked by default, named as the deal and task forms name them), shown on the endpoint as
+  "Deal details whose changes are sent: …" and "Task details whose changes are sent: …", and through
+  the API as `dealDetails` and `taskDetails` on `POST /webhook-endpoints` and
+  `PATCH /webhook-endpoints/{id}` and in every endpoint the API answers.
+- **Only while the event is taken:** a list given for an endpoint that does not take its event is
+  refused (`dealDetails` or `taskDetails`; 422 through the API). A change that drops the event
+  clears its list, and a `PATCH` that leaves a list out keeps it; Settings always sends both (null
+  while every detail is ticked). Checks in the database hold the same rule (null, or 1 to 3 or 1 to
+  4 known details in one dimension without a null, with the event).
+- **Applied at capture:** `app.capture_webhook_event` matches the details the change changed, which
+  the deal and task triggers pass in the detail's `changes` (0192, 0194), against each active
+  endpoint's list (`?|`, any of them), in the transaction that makes the change; no row is read for
+  it. No event is written when no endpoint takes it, and stored events are unchanged.
+- **Audited and exported:** `webhook.endpoint_created` and `webhook.endpoint_updated` carry
+  `dealDetails` and `taskDetails` when the endpoint has them, and the company data export carries
+  the columns.
+- **Permissions unchanged:** members with `developer.manage` in Settings, keys with
+  `webhooks.manage` through the API.
+- **Migration 0233:** `deal_details text[]` and `task_details text[]` on `app.webhook_endpoints`
+  with their checks, validated at once (a company has at most 10 endpoints), update grants on the
+  columns for the runtime role, and `app.capture_webhook_event` replaced with the same signature
+  (0232's, with the details), so its owner and grants stay. Existing endpoints keep null; nothing is
+  backfilled.
+
+Not built: a change sent only when it changed every chosen detail (one is enough), the values before
+a change (ADR-275 and ADR-276 never send them), and details of the deal's and task's other events.
+
+## ADR-311 Choosing the members and teams whose satisfaction survey answers a webhook endpoint receives (P5-09) (2026-10-08)
+
+Context: `satisfaction_survey.answered` (ADR-293) is sent for every answer on the endpoint's
+numbers, or only for the scores it names (ADR-307), but the team, member and tag lists that narrow
+conversations' events leave answers out (ADR-293 chose so: an answer is not a conversation's event,
+and a change of those lists' meaning would change what existing endpoints receive). A team lead's
+dashboard or a coaching tool wants the answers of its own team's conversations, or those credited to
+the members it follows, and was sent every answer, with no team in the payload to drop the rest by.
+
+Decision:
+
+- **Two lists per endpoint for the event,** `surveyAssigneeIds` and `surveyTeamIds`. The first holds
+  1 to 50 members credited with the answers it takes: an answer is credited to the member its
+  conversation was assigned to when it was resolved, as the survey keeps it and its `assigneeId`
+  gives it, as Reports credits it, so a later reassignment does not move it. The second holds 1 to
+  50 of the company's teams: an answer belongs to the team its conversation is in when the customer
+  answers (the tap that answers neither reopens nor moves the conversation, ADR-032). An answer
+  credited to no member, or of a conversation in no team, matches no list. Null receives every
+  answer, as before; with scores or the other list chosen too, an answer must pass them all. The
+  conversations' `assigneeIds` and `teamIds` still do not narrow answers. Other events are not
+  narrowed. Chosen in Settings → Webhooks ("Members credited with answers" and "Teams of answered
+  surveys", every answer by default), shown on the endpoint as "Survey answers sent, credited to: …"
+  and "Survey answers sent, of conversations in: …", and through the API as `surveyAssigneeIds` and
+  `surveyTeamIds` on `POST /webhook-endpoints` and `PATCH /webhook-endpoints/{id}` and in every
+  endpoint the API answers.
+- **Checked as the conversations' lists are:** a member a list adds must take conversations now
+  (active, with a role that reads and answers them; `GET /members` lists them) and a team must be
+  the company's; members and teams a list already holds stay when they leave, lose the role or are
+  deleted (Settings marks them), so a change that keeps them is accepted. Refusals name the entry
+  (`surveyAssigneeIds.1`).
+- **Only while the event is taken:** a list given for an endpoint that does not take
+  `satisfaction_survey.answered` is refused (422 through the API). A change that drops the event
+  clears both lists, and a `PATCH` that leaves a list out keeps it; Settings always sends both (null
+  while every answer is taken). Checks in the database hold the same rule (null, or 1 to 50 ids in
+  one dimension without a null, with the event).
+- **Applied at capture:** `app.capture_webhook_event` reads the survey's score, its credited member
+  and its conversation's team in one query, only when an active endpoint of the company that takes
+  the event names scores, members or teams, in the transaction that records the answer, and creates
+  a delivery only for the endpoints whose lists hold them. No event is written when no endpoint
+  takes it, and stored events are unchanged.
+- **Audited and exported:** `webhook.endpoint_created` and `webhook.endpoint_updated` carry
+  `surveyAssigneeIds` and `surveyTeamIds` when the endpoint has them, and the company data export
+  carries the columns.
+- **Permissions unchanged:** members with `developer.manage` in Settings, keys with
+  `webhooks.manage` through the API.
+- **Migration 0234:** `survey_assignee_ids uuid[]` and `survey_team_ids uuid[]` on
+  `app.webhook_endpoints` with their checks, validated at once (a company has at most 10 endpoints),
+  update grants on the columns for the runtime role, and `app.capture_webhook_event` replaced with
+  the same signature (0233's, with the member and team), so its owner and grants stay. Existing
+  endpoints keep null; nothing is backfilled.
+
+Not built: the team at resolution (surveys do not record it; the conversation's team when the
+customer answers is used), the member who resolved (`resolvedById`) as a filter, the team in the
+payload, contact and conversation tags for answers, and an event when a survey is sent or skipped.
+
+## ADR-312 Choosing the contact and conversation tags whose satisfaction survey answers a webhook endpoint receives (P5-09) (2026-10-08)
+
+Context: an endpoint taking `satisfaction_survey.answered` can name the scores (ADR-307), the
+members credited and the teams (ADR-311) of the answers it takes, but the contact and conversation
+tag lists that narrow conversations' events (ADR-267, ADR-273) leave answers out (ADR-293 chose so).
+A desk that follows a segment of customers, `vip` say, or a kind of conversation, `refund`, was sent
+every answer and had to read each contact and conversation to drop the rest.
+
+Decision:
+
+- **Two lists per endpoint for the event,** `surveyContactTags` and `surveyConversationTags`: 1 to
+  50 tags each, as contacts and conversations carry them (`normalizeTag`: lower case, single spaces,
+  up to 40 characters without commas or control characters), each once in the order given. An answer
+  is sent when the answering contact, or the conversation answered, has any of the list's tags when
+  the customer answers, so a tag added after the survey went out counts and one removed by then does
+  not; a contact or conversation without tags matches no list. A tag no contact or conversation has
+  yet may be named; it matches nothing until one has it. Null receives every answer, as before; with
+  scores, members, teams or the other tag list chosen too, an answer must pass them all. The
+  conversations' `contactTags` and `conversationTags` still do not narrow answers. Other events are
+  not narrowed. Chosen in Settings → Webhooks ("Contact tags of answered surveys" and "Conversation
+  tags of answered surveys", typed separated by commas, every answer by default), shown on the
+  endpoint as "Survey answers sent, of contacts tagged: …" and "Survey answers sent, of
+  conversations tagged: …", and through the API as `surveyContactTags` and `surveyConversationTags`
+  on `POST /webhook-endpoints` and `PATCH /webhook-endpoints/{id}` and in every endpoint the API
+  answers.
+- **One rule for every tag list:** the four tag lists' schemas now share one definition
+  (`webhookTagsSchema`), so the conversations' lists keep their words and limits and the answers'
+  lists refuse what they refuse, naming the entry (`surveyConversationTags.1`).
+- **Only while the event is taken:** a list given for an endpoint that does not take
+  `satisfaction_survey.answered` is refused (422 through the API). A change that drops the event
+  clears both lists, and a `PATCH` that leaves a list out keeps it; Settings always sends both (null
+  while every answer is taken). Checks in the database hold the same rule and the tags' own (null,
+  or 1 to 50 tags as contacts carry them, in one dimension without a null, with the event).
+- **Applied at capture:** `app.capture_webhook_event` reads the answering contact's and the
+  conversation's tags only when an active endpoint of the company that takes the event names tags
+  for answers, in the transaction that records the answer, and creates a delivery only for the
+  endpoints whose lists share a tag with them (`&&`). No event is written when no endpoint takes it,
+  and stored events are unchanged; the payload does not carry the tags.
+- **Audited and exported:** `webhook.endpoint_created` and `webhook.endpoint_updated` carry
+  `surveyContactTags` and `surveyConversationTags` when the endpoint has them, and the company data
+  export carries the columns.
+- **Permissions unchanged:** members with `developer.manage` in Settings, keys with
+  `webhooks.manage` through the API.
+- **Migration 0235:** `survey_contact_tags text[]` and `survey_conversation_tags text[]` on
+  `app.webhook_endpoints` with their checks, validated at once (a company has at most 10 endpoints),
+  update grants on the columns for the runtime role, and `app.capture_webhook_event` replaced with
+  the same signature (0234's, with the tags), so its owner and grants stay. Existing endpoints keep
+  null; nothing is backfilled.
+
+Not built: lists that leave tagged answers out, tags at the time the conversation was resolved (the
+tags when the customer answers are used), and the tags in the payload.
+
+## ADR-313 Assigning companies' failing integrations to a platform administrator (P5-10) (2026-10-08)
+
+Context: since ADR-141 a platform administrator acknowledges a failure Operations → Integrations
+lists, with a note, so the others see who took it and what was found. A note says what was done, not
+who handles the failure from now on: a lead who wants a colleague to take a failure, or an
+administrator handing one over at the end of a shift, had nowhere to say so but the note, and
+ADR-141 left assigning out.
+
+Decision:
+
+- **Assigned to a platform administrator:** on Current failures, any platform administrator assigns
+  a listed failure to a platform administrator, themselves or another, owners and operators alike;
+  reassigns it; or takes the assignment off ("Nobody"). The row shows to whom, by whom and when. The
+  platform audit log keeps each change (`platform.integration_failure_assigned`, with the assignee's
+  account, and `platform.integration_failure_unassigned`), with the company and the failure's
+  source, subject and state; taking off an assignment nobody made changes nothing and is not
+  audited.
+- **What is assigned:** a failure as ADR-139 tells it, by its integration (source and subject) and
+  state, in `ops.integration_assignments` (migration 0236), as acknowledgements are: a new state of
+  the same integration starts unassigned. Only a failure the console lists at that moment can be
+  assigned ("This integration is no longer failing in that state. Reload the page."), and only to a
+  platform administrator ("Assign the failure to a platform administrator."). An assignment is its
+  own: it neither makes nor clears an acknowledgement.
+- **How long:** while the console lists the failure; forgotten an hour after it stops being listed,
+  by the minute sweep's check, with the acknowledgements and the alert marks, so a failure that
+  comes back within the hour keeps its assignment and one that fails again later starts unassigned.
+- **Where it is enforced:** `ops.platform_assign_integration_failure` (SECURITY DEFINER, executable
+  by the platform role only) checks the administrator, the assignee and that
+  `ops.integration_failures` lists the failure in that state now, then records the assignment and
+  the audit entry in one transaction. The console's `ops.platform_ops_integration_failures` returns
+  each failure's assignment (when, the assignee's account and name, and who assigned it). Only the
+  definer role reads and writes the table, which holds the failure's ids and the two accounts; the
+  company never sees it. The Integrations tab offers every platform administrator by name.
+- **Left out of the CSV:** the failures' CSV (ADR-158) is unchanged; assignments, like who
+  acknowledged and the notes, stay on the console.
+- **Migration 0236:** the table and the function, and the console's list and the sweep's check
+  replaced (each dropped by its owner and created again, as 0107 did) with their owners, search
+  paths and grants as before.
+
+Not built: an email to the assignee (the alert email of ADR-139 is unchanged), assigning the
+console's other lists (dead letters, receipts, quarantine, late queues), a view of the failures
+assigned to oneself, and assignments in the CSV.

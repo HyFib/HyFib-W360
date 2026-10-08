@@ -2,7 +2,7 @@ import { integer, smallint, text, timestamp, uuid } from 'drizzle-orm/pg-core';
 import { jsonb } from './columns';
 import type { AutomationEndReason } from './automations';
 import type { PaymentLinkStatus } from './commerce';
-import type { CrmChanger } from './crm';
+import type { CrmChanger, DealStatus, TaskStatus } from './crm';
 import type { ContactSource, MessageType } from './messaging';
 import { appSchema } from './tenancy';
 
@@ -89,6 +89,30 @@ export type WebhookOrderStatus =
  * (ADR-308); a link is `creating` only until the worker creates it, which sends no event.
  */
 export type WebhookPaymentLinkStatus = Exclude<PaymentLinkStatus, 'creating'>;
+
+/**
+ * The statuses a `deal.status_changed` event reports, which an endpoint can choose (ADR-309): a
+ * deal won, lost, or reopened (`open`).
+ */
+export type WebhookDealStatus = DealStatus;
+
+/**
+ * The statuses a `task.status_changed` event reports, which an endpoint can choose (ADR-309): a
+ * task done, cancelled, or reopened (`open`).
+ */
+export type WebhookTaskStatus = TaskStatus;
+
+/**
+ * The details whose change a `deal.updated` endpoint can choose (ADR-310), as the event's `changes`
+ * names them.
+ */
+export type WebhookDealDetail = 'title' | 'valueMinor' | 'expectedCloseOn';
+
+/**
+ * The details whose change a `task.updated` endpoint can choose (ADR-310), as the event's `changes`
+ * names them.
+ */
+export type WebhookTaskDetail = 'title' | 'notes' | 'dueAt' | 'remindAt';
 
 /**
  * The statuses a `template.status_changed` event reports, which an endpoint can choose (ADR-148):
@@ -202,6 +226,28 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
    * its events.
    */
   paymentLinkStatuses: text('payment_link_statuses').array().$type<WebhookPaymentLinkStatus[]>(),
+  /**
+   * The statuses a deal reaches that it takes as `deal.status_changed` (migration 0232, ADR-309);
+   * null takes every status. Set only while `deal.status_changed` is among its events.
+   */
+  dealStatuses: text('deal_statuses').array().$type<WebhookDealStatus[]>(),
+  /**
+   * The statuses a task reaches that it takes as `task.status_changed` (migration 0232, ADR-309);
+   * null takes every status. Set only while `task.status_changed` is among its events.
+   */
+  taskStatuses: text('task_statuses').array().$type<WebhookTaskStatus[]>(),
+  /**
+   * The details whose changes it takes as `deal.updated` (migration 0233, ADR-310): a change that
+   * changed any of them. null takes every change. Set only while `deal.updated` is among its
+   * events.
+   */
+  dealDetails: text('deal_details').array().$type<WebhookDealDetail[]>(),
+  /**
+   * The details whose changes it takes as `task.updated` (migration 0233, ADR-310): a change that
+   * changed any of them. null takes every change. Set only while `task.updated` is among its
+   * events.
+   */
+  taskDetails: text('task_details').array().$type<WebhookTaskDetail[]>(),
   /**
    * The template statuses it takes as `template.status_changed` (ADR-148); null takes every status.
    * Set only while `template.status_changed` is among its events.
@@ -335,6 +381,30 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
    * `satisfaction_survey.answered` is among its events.
    */
   surveyScores: smallint('survey_scores').array().$type<WebhookSurveyScore[]>(),
+  /**
+   * The members credited with the satisfaction survey answers it takes (migration 0234, ADR-311):
+   * the member each answered survey's conversation was assigned to when it was resolved. null takes
+   * every answer. Set only while `satisfaction_survey.answered` is among its events.
+   */
+  surveyAssigneeIds: uuid('survey_assignee_ids').array(),
+  /**
+   * The teams whose conversations' satisfaction survey answers it takes (migration 0234, ADR-311),
+   * by the team the conversation is in when the customer answers. null takes every answer. Set only
+   * while `satisfaction_survey.answered` is among its events.
+   */
+  surveyTeamIds: uuid('survey_team_ids').array(),
+  /**
+   * The contact tags whose satisfaction survey answers it takes (migration 0235, ADR-312), by the
+   * tags the answering contact has when they answer, as contacts carry them. null takes every
+   * answer. Set only while `satisfaction_survey.answered` is among its events.
+   */
+  surveyContactTags: text('survey_contact_tags').array(),
+  /**
+   * The conversation tags whose satisfaction survey answers it takes (migration 0235, ADR-312), by
+   * the tags the conversation has when the customer answers. null takes every answer. Set only
+   * while `satisfaction_survey.answered` is among its events.
+   */
+  surveyConversationTags: text('survey_conversation_tags').array(),
   /**
    * The consent changes it takes as `consent.changed` (ADR-189), by purpose and action; null takes
    * every change. Set only while `consent.changed` is among its events.

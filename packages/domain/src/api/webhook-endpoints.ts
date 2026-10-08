@@ -28,6 +28,10 @@ import {
   type WebhookMessageStatus,
   type WebhookOrderStatus,
   type WebhookPaymentLinkStatus,
+  type WebhookDealStatus,
+  type WebhookTaskStatus,
+  type WebhookDealDetail,
+  type WebhookTaskDetail,
   type WebhookRunEndStatus,
   type WebhookRunTrigger,
   type WebhookConsentChange,
@@ -56,6 +60,10 @@ import {
   WEBHOOK_CRM_CHANGE_MAKERS,
   WEBHOOK_SURVEY_SCORES,
   WEBHOOK_PAYMENT_LINK_STATUSES,
+  WEBHOOK_DEAL_STATUSES,
+  WEBHOOK_TASK_STATUSES,
+  WEBHOOK_DEAL_DETAILS,
+  WEBHOOK_TASK_DETAILS,
   webhookTakesTeamEvents,
   webhookTakesTemplateEvents,
   type WebhookEndpointOAuth,
@@ -76,6 +84,8 @@ import {
   assertWebhookNotePipelines,
   assertWebhookNoteStages,
   assertWebhookNoteDealOwners,
+  assertWebhookSurveyAssignees,
+  assertWebhookSurveyTeams,
   assertWebhookTeams,
   assertWebhookTemplates,
   checkedWebhookOAuth,
@@ -97,6 +107,10 @@ import {
   WEBHOOK_CONVERSATION_STATUSES_NEED_THE_EVENT,
   WEBHOOK_ORDER_STATUSES_NEED_THE_EVENT,
   WEBHOOK_PAYMENT_LINK_STATUSES_NEED_THE_EVENT,
+  WEBHOOK_DEAL_STATUSES_NEED_THE_EVENT,
+  WEBHOOK_TASK_STATUSES_NEED_THE_EVENT,
+  WEBHOOK_DEAL_DETAILS_NEED_THE_EVENT,
+  WEBHOOK_TASK_DETAILS_NEED_THE_EVENT,
   WEBHOOK_RUN_END_STATUSES_NEED_THE_EVENT,
   WEBHOOK_RUN_TRIGGERS_NEED_THE_EVENTS,
   WEBHOOK_CONSENT_CHANGES_NEED_THE_EVENT,
@@ -120,6 +134,10 @@ import {
   WEBHOOK_NOTE_DEAL_OWNERS_NEED_THE_EVENTS,
   WEBHOOK_CRM_CHANGE_MAKERS_NEED_THE_EVENTS,
   WEBHOOK_SURVEY_SCORES_NEED_THE_EVENT,
+  WEBHOOK_SURVEY_ASSIGNEES_NEED_THE_EVENT,
+  WEBHOOK_SURVEY_TEAMS_NEED_THE_EVENT,
+  WEBHOOK_SURVEY_CONTACT_TAGS_NEED_THE_EVENT,
+  WEBHOOK_SURVEY_CONVERSATION_TAGS_NEED_THE_EVENT,
   WEBHOOK_ASSIGNEES_NEED_THE_EVENTS,
   WEBHOOK_CONTACT_TAGS_NEED_THE_EVENTS,
   WEBHOOK_CONVERSATION_TAGS_NEED_THE_EVENTS,
@@ -181,6 +199,14 @@ import {
   webhookCrmChangeMakersSchema,
   webhookSurveyScoresFor,
   webhookSurveyScoresSchema,
+  webhookSurveyAssigneeIdsFor,
+  webhookSurveyAssigneeIdsSchema,
+  webhookSurveyTeamIdsFor,
+  webhookSurveyTeamIdsSchema,
+  webhookSurveyContactTagsFor,
+  webhookSurveyContactTagsSchema,
+  webhookSurveyConversationTagsFor,
+  webhookSurveyConversationTagsSchema,
   webhookAssigneeIdsFor,
   webhookAssigneeIdsSchema,
   webhookContactTagsFor,
@@ -205,6 +231,14 @@ import {
   webhookOrderStatusesSchema,
   webhookPaymentLinkStatusesFor,
   webhookPaymentLinkStatusesSchema,
+  webhookDealStatusesFor,
+  webhookDealStatusesSchema,
+  webhookTaskStatusesFor,
+  webhookTaskStatusesSchema,
+  webhookDealDetailsFor,
+  webhookDealDetailsSchema,
+  webhookTaskDetailsFor,
+  webhookTaskDetailsSchema,
   webhookTemplateStatusesFor,
   webhookTemplateStatusesSchema,
   type WebhookDeliveryView,
@@ -306,6 +340,46 @@ const invalidPaymentLinkStatuses = () =>
     issues: [
       { path: 'paymentLinkStatuses', message: WEBHOOK_PAYMENT_LINK_STATUSES_NEED_THE_EVENT },
     ],
+  });
+
+const dealStatusesField = webhookDealStatusesSchema.describe(
+  `The statuses a deal reaches that the endpoint receives as deal.status_changed (${WEBHOOK_DEAL_STATUSES.join(', ')}; open is a deal reopened), only with the deal.status_changed event; null receives every status.`,
+);
+
+/** Deal statuses are chosen only for an endpoint that receives deal status changes (ADR-309). */
+const invalidDealStatuses = () =>
+  new AppError('validation_failed', WEBHOOK_DEAL_STATUSES_NEED_THE_EVENT, {
+    issues: [{ path: 'dealStatuses', message: WEBHOOK_DEAL_STATUSES_NEED_THE_EVENT }],
+  });
+
+const taskStatusesField = webhookTaskStatusesSchema.describe(
+  `The statuses a task reaches that the endpoint receives as task.status_changed (${WEBHOOK_TASK_STATUSES.join(', ')}; open is a task reopened), only with the task.status_changed event; null receives every status.`,
+);
+
+/** Task statuses are chosen only for an endpoint that receives task status changes (ADR-309). */
+const invalidTaskStatuses = () =>
+  new AppError('validation_failed', WEBHOOK_TASK_STATUSES_NEED_THE_EVENT, {
+    issues: [{ path: 'taskStatuses', message: WEBHOOK_TASK_STATUSES_NEED_THE_EVENT }],
+  });
+
+const dealDetailsField = webhookDealDetailsSchema.describe(
+  `The deal details whose changes the endpoint receives as deal.updated (${WEBHOOK_DEAL_DETAILS.join(', ')}, as the event's changes names them): a change is sent when it changed one of them, naming every detail it changed; only with the deal.updated event. null receives every change.`,
+);
+
+/** Deal details are chosen only for an endpoint that receives deals' detail changes (ADR-310). */
+const invalidDealDetails = () =>
+  new AppError('validation_failed', WEBHOOK_DEAL_DETAILS_NEED_THE_EVENT, {
+    issues: [{ path: 'dealDetails', message: WEBHOOK_DEAL_DETAILS_NEED_THE_EVENT }],
+  });
+
+const taskDetailsField = webhookTaskDetailsSchema.describe(
+  `The task details whose changes the endpoint receives as task.updated (${WEBHOOK_TASK_DETAILS.join(', ')}, as the event's changes names them): a change is sent when it changed one of them, naming every detail it changed; only with the task.updated event. null receives every change.`,
+);
+
+/** Task details are chosen only for an endpoint that receives tasks' detail changes (ADR-310). */
+const invalidTaskDetails = () =>
+  new AppError('validation_failed', WEBHOOK_TASK_DETAILS_NEED_THE_EVENT, {
+    issues: [{ path: 'taskDetails', message: WEBHOOK_TASK_DETAILS_NEED_THE_EVENT }],
   });
 
 const templateStatusesField = webhookTemplateStatusesSchema.describe(
@@ -550,6 +624,51 @@ const invalidSurveyScores = () =>
     issues: [{ path: 'surveyScores', message: WEBHOOK_SURVEY_SCORES_NEED_THE_EVENT }],
   });
 
+const surveyAssigneeIdsField = webhookSurveyAssigneeIdsSchema.describe(
+  `The members credited with the satisfaction survey answers the endpoint receives: 1 to ${WEBHOOK_LIMITS.surveyAssignees} member ids (as GET /members lists them: active members who take conversations), only with satisfaction_survey.answered. An answer is credited to the member its conversation was assigned to when it was resolved, as the survey's assigneeId names them, so an answer of a conversation resolved unassigned is on no list. A member who later stops taking conversations stays on the list, and the answers still credited to them match. With scores, teams or tags too, an answer must pass them all. Other events are not narrowed. null receives every answer.`,
+);
+
+/** Members credited with answers are chosen only for an endpoint that receives them (ADR-311). */
+const invalidSurveyAssignees = () =>
+  new AppError('validation_failed', WEBHOOK_SURVEY_ASSIGNEES_NEED_THE_EVENT, {
+    issues: [{ path: 'surveyAssigneeIds', message: WEBHOOK_SURVEY_ASSIGNEES_NEED_THE_EVENT }],
+  });
+
+const surveyTeamIdsField = webhookSurveyTeamIdsSchema.describe(
+  `The teams whose conversations' satisfaction survey answers the endpoint receives: 1 to ${WEBHOOK_LIMITS.surveyTeams} ids of the company's teams, only with satisfaction_survey.answered. An answer belongs to the team its conversation is in when the customer answers, so an answer of a conversation in no team is on no list; a team deleted since it was chosen stays on the list and matches nothing. With scores, members or tags too, an answer must pass them all. Other events are not narrowed. null receives every answer.`,
+);
+
+/** Teams of answered surveys are chosen only for an endpoint that receives answers (ADR-311). */
+const invalidSurveyTeams = () =>
+  new AppError('validation_failed', WEBHOOK_SURVEY_TEAMS_NEED_THE_EVENT, {
+    issues: [{ path: 'surveyTeamIds', message: WEBHOOK_SURVEY_TEAMS_NEED_THE_EVENT }],
+  });
+
+const surveyContactTagsField = webhookSurveyContactTagsSchema.describe(
+  `The contact tags whose satisfaction survey answers the endpoint receives: 1 to ${WEBHOOK_LIMITS.surveyContactTags} tags as contacts carry them (as GET /contacts gives them: compared as tags are written, in lower case with single spaces, each up to 40 characters without commas), only with satisfaction_survey.answered. An answer counts when the answering contact has any of the tags when they answer, so a contact without them is on no list. A tag no contact has yet may be named; it matches nothing until a contact has it. With scores, members, teams or conversation tags too, an answer must pass them all. Other events are not narrowed. null receives every answer.`,
+);
+
+/** Contact tags of answered surveys are chosen only for an endpoint receiving answers (ADR-312). */
+const invalidSurveyContactTags = () =>
+  new AppError('validation_failed', WEBHOOK_SURVEY_CONTACT_TAGS_NEED_THE_EVENT, {
+    issues: [{ path: 'surveyContactTags', message: WEBHOOK_SURVEY_CONTACT_TAGS_NEED_THE_EVENT }],
+  });
+
+const surveyConversationTagsField = webhookSurveyConversationTagsSchema.describe(
+  `The conversation tags whose satisfaction survey answers the endpoint receives: 1 to ${WEBHOOK_LIMITS.surveyConversationTags} tags as conversations carry them (as GET /conversations and GET /conversation-tags give them: compared as tags are written, in lower case with single spaces, each up to 40 characters without commas), only with satisfaction_survey.answered. An answer counts when its conversation has any of the tags when the customer answers, so a conversation without them is on no list. A tag no conversation has yet may be named; it matches nothing until a conversation has it. With scores, members, teams or contact tags too, an answer must pass them all. Other events are not narrowed. null receives every answer.`,
+);
+
+/** Conversation tags of answered surveys likewise (ADR-312). */
+const invalidSurveyConversationTags = () =>
+  new AppError('validation_failed', WEBHOOK_SURVEY_CONVERSATION_TAGS_NEED_THE_EVENT, {
+    issues: [
+      {
+        path: 'surveyConversationTags',
+        message: WEBHOOK_SURVEY_CONVERSATION_TAGS_NEED_THE_EVENT,
+      },
+    ],
+  });
+
 const assigneeIdsField = webhookAssigneeIdsSchema.describe(
   `The members whose assigned conversations' events the endpoint receives: 1 to ${WEBHOOK_LIMITS.assignees} member ids (as GET /members lists them: active members who take conversations), only with an event of a conversation: message.received, message.status, conversation.status_changed, conversation.assignment_changed or conversation.team_changed. A conversation's member is the one it is assigned to when the event happens, so an unassigned conversation is on no list; conversation.assignment_changed reaches the endpoints of the member the conversation left as well as of the member it went to. A member who later stops taking conversations stays on the list: their conversations are released then. Other events are not narrowed. null receives every conversation's events.`,
 );
@@ -605,6 +724,10 @@ export const apiCreateWebhookEndpointSchema = z
     campaignStatuses: campaignStatusesField.optional(),
     orderStatuses: orderStatusesField.optional(),
     paymentLinkStatuses: paymentLinkStatusesField.optional(),
+    dealStatuses: dealStatusesField.optional(),
+    taskStatuses: taskStatusesField.optional(),
+    dealDetails: dealDetailsField.optional(),
+    taskDetails: taskDetailsField.optional(),
     templateStatuses: templateStatusesField.optional(),
     conversationStatuses: conversationStatusesField.optional(),
     runEndStatuses: runEndStatusesField.optional(),
@@ -629,6 +752,10 @@ export const apiCreateWebhookEndpointSchema = z
     noteDealOwnerIds: noteDealOwnerIdsField.optional(),
     crmChangeMakers: crmChangeMakersField.optional(),
     surveyScores: surveyScoresField.optional(),
+    surveyAssigneeIds: surveyAssigneeIdsField.optional(),
+    surveyTeamIds: surveyTeamIdsField.optional(),
+    surveyContactTags: surveyContactTagsField.optional(),
+    surveyConversationTags: surveyConversationTagsField.optional(),
     assigneeIds: assigneeIdsField.optional(),
     contactTags: contactTagsField.optional(),
     conversationTags: conversationTagsField.optional(),
@@ -668,6 +795,22 @@ export const apiCreateWebhookEndpointSchema = z
     (data) => !data.paymentLinkStatuses || data.events.includes('payment_link.status_changed'),
     { path: ['paymentLinkStatuses'], message: WEBHOOK_PAYMENT_LINK_STATUSES_NEED_THE_EVENT },
   )
+  .refine((data) => !data.dealStatuses || data.events.includes('deal.status_changed'), {
+    path: ['dealStatuses'],
+    message: WEBHOOK_DEAL_STATUSES_NEED_THE_EVENT,
+  })
+  .refine((data) => !data.taskStatuses || data.events.includes('task.status_changed'), {
+    path: ['taskStatuses'],
+    message: WEBHOOK_TASK_STATUSES_NEED_THE_EVENT,
+  })
+  .refine((data) => !data.dealDetails || data.events.includes('deal.updated'), {
+    path: ['dealDetails'],
+    message: WEBHOOK_DEAL_DETAILS_NEED_THE_EVENT,
+  })
+  .refine((data) => !data.taskDetails || data.events.includes('task.updated'), {
+    path: ['taskDetails'],
+    message: WEBHOOK_TASK_DETAILS_NEED_THE_EVENT,
+  })
   .refine((data) => !data.templateStatuses || data.events.includes('template.status_changed'), {
     path: ['templateStatuses'],
     message: WEBHOOK_TEMPLATE_STATUSES_NEED_THE_EVENT,
@@ -772,6 +915,22 @@ export const apiCreateWebhookEndpointSchema = z
     path: ['surveyScores'],
     message: WEBHOOK_SURVEY_SCORES_NEED_THE_EVENT,
   })
+  .refine(
+    (data) => !data.surveyAssigneeIds || data.events.includes('satisfaction_survey.answered'),
+    { path: ['surveyAssigneeIds'], message: WEBHOOK_SURVEY_ASSIGNEES_NEED_THE_EVENT },
+  )
+  .refine((data) => !data.surveyTeamIds || data.events.includes('satisfaction_survey.answered'), {
+    path: ['surveyTeamIds'],
+    message: WEBHOOK_SURVEY_TEAMS_NEED_THE_EVENT,
+  })
+  .refine(
+    (data) => !data.surveyContactTags || data.events.includes('satisfaction_survey.answered'),
+    { path: ['surveyContactTags'], message: WEBHOOK_SURVEY_CONTACT_TAGS_NEED_THE_EVENT },
+  )
+  .refine(
+    (data) => !data.surveyConversationTags || data.events.includes('satisfaction_survey.answered'),
+    { path: ['surveyConversationTags'], message: WEBHOOK_SURVEY_CONVERSATION_TAGS_NEED_THE_EVENT },
+  )
   .refine((data) => !data.assigneeIds || webhookTakesTeamEvents(data.events), {
     path: ['assigneeIds'],
     message: WEBHOOK_ASSIGNEES_NEED_THE_EVENTS,
@@ -841,6 +1000,26 @@ export const apiUpdateWebhookEndpointSchema = z
       .optional()
       .describe(
         'The statuses a Payment Link reaches that the endpoint receives as payment_link.status_changed; null receives every status. Left out, they stay, unless the events no longer include payment_link.status_changed, which clears them.',
+      ),
+    dealStatuses: dealStatusesField
+      .optional()
+      .describe(
+        'The statuses a deal reaches that the endpoint receives as deal.status_changed; null receives every status. Left out, they stay, unless the events no longer include deal.status_changed, which clears them.',
+      ),
+    taskStatuses: taskStatusesField
+      .optional()
+      .describe(
+        'The statuses a task reaches that the endpoint receives as task.status_changed; null receives every status. Left out, they stay, unless the events no longer include task.status_changed, which clears them.',
+      ),
+    dealDetails: dealDetailsField
+      .optional()
+      .describe(
+        'The deal details whose changes the endpoint receives as deal.updated; null receives every change. Left out, they stay, unless the events no longer include deal.updated, which clears them.',
+      ),
+    taskDetails: taskDetailsField
+      .optional()
+      .describe(
+        'The task details whose changes the endpoint receives as task.updated; null receives every change. Left out, they stay, unless the events no longer include task.updated, which clears them.',
       ),
     templateStatuses: templateStatusesField
       .optional()
@@ -962,6 +1141,26 @@ export const apiUpdateWebhookEndpointSchema = z
       .describe(
         'The scores of the satisfaction survey answers the endpoint receives; null receives every answer. Left out, they stay, unless the events no longer include satisfaction_survey.answered, which clears them.',
       ),
+    surveyAssigneeIds: surveyAssigneeIdsField
+      .optional()
+      .describe(
+        'The members credited with the satisfaction survey answers the endpoint receives (members who take conversations; one the endpoint already names may have stopped since and stays); null receives every answer. Left out, they stay, unless the events no longer include satisfaction_survey.answered, which clears them.',
+      ),
+    surveyTeamIds: surveyTeamIdsField
+      .optional()
+      .describe(
+        "The teams whose conversations' satisfaction survey answers the endpoint receives (the company's teams; one the endpoint already names may have been deleted since and stays); null receives every answer. Left out, they stay, unless the events no longer include satisfaction_survey.answered, which clears them.",
+      ),
+    surveyContactTags: surveyContactTagsField
+      .optional()
+      .describe(
+        'The contact tags whose satisfaction survey answers the endpoint receives (any tag, as contacts carry them); null receives every answer. Left out, they stay, unless the events no longer include satisfaction_survey.answered, which clears them.',
+      ),
+    surveyConversationTags: surveyConversationTagsField
+      .optional()
+      .describe(
+        'The conversation tags whose satisfaction survey answers the endpoint receives (any tag, as conversations carry them); null receives every answer. Left out, they stay, unless the events no longer include satisfaction_survey.answered, which clears them.',
+      ),
     assigneeIds: assigneeIdsField
       .optional()
       .describe(
@@ -999,6 +1198,10 @@ export const apiUpdateWebhookEndpointSchema = z
       data.campaignStatuses !== undefined ||
       data.orderStatuses !== undefined ||
       data.paymentLinkStatuses !== undefined ||
+      data.dealStatuses !== undefined ||
+      data.taskStatuses !== undefined ||
+      data.dealDetails !== undefined ||
+      data.taskDetails !== undefined ||
       data.templateStatuses !== undefined ||
       data.conversationStatuses !== undefined ||
       data.runEndStatuses !== undefined ||
@@ -1023,11 +1226,15 @@ export const apiUpdateWebhookEndpointSchema = z
       data.noteDealOwnerIds !== undefined ||
       data.crmChangeMakers !== undefined ||
       data.surveyScores !== undefined ||
+      data.surveyAssigneeIds !== undefined ||
+      data.surveyTeamIds !== undefined ||
+      data.surveyContactTags !== undefined ||
+      data.surveyConversationTags !== undefined ||
       data.assigneeIds !== undefined ||
       data.contactTags !== undefined ||
       data.conversationTags !== undefined ||
       data.oauth !== undefined,
-    'Give the events, the description, the headers, the message statuses, who sent the messages, the contact parts, the custom fields, the automations, the campaign statuses, the order statuses, the Payment Link statuses, the template statuses, the conversation statuses, the run end statuses, what started the runs, the consent changes, where contacts came from, the received message types, the run end reasons, the numbers, the teams, the templates, the campaigns, the pipelines, the stages, the deal owners, the task assignees, the pipelines, stages and owners of tasks’ deals and of notes’ deals, who made the CRM changes, the survey scores, the members, the contact tags, the conversation tags, the OAuth client or whether the endpoint is enabled',
+    'Give the events, the description, the headers, the message statuses, who sent the messages, the contact parts, the deal and task details, the custom fields, the automations, the campaign statuses, the order statuses, the Payment Link statuses, the template statuses, the conversation statuses, the deal statuses, the task statuses, the run end statuses, what started the runs, the consent changes, where contacts came from, the received message types, the run end reasons, the numbers, the teams, the templates, the campaigns, the pipelines, the stages, the deal owners, the task assignees, the pipelines, stages and owners of tasks’ deals and of notes’ deals, who made the CRM changes, the survey scores, the members credited with survey answers and the teams of their conversations, the contact and conversation tags of survey answers, the members, the contact tags, the conversation tags, the OAuth client or whether the endpoint is enabled',
   );
 
 export interface ApiWebhookEndpoint {
@@ -1062,6 +1269,14 @@ export interface ApiWebhookEndpoint {
   orderStatuses: WebhookOrderStatus[] | null;
   /** The Payment Link statuses it receives (ADR-308); null receives every status. */
   paymentLinkStatuses: WebhookPaymentLinkStatus[] | null;
+  /** The deal statuses it receives (ADR-309); null receives every status. */
+  dealStatuses: WebhookDealStatus[] | null;
+  /** The task statuses it receives (ADR-309); null receives every status. */
+  taskStatuses: WebhookTaskStatus[] | null;
+  /** The deal details whose changes it receives (ADR-310); null receives every change. */
+  dealDetails: WebhookDealDetail[] | null;
+  /** The task details whose changes it receives (ADR-310); null receives every change. */
+  taskDetails: WebhookTaskDetail[] | null;
   /** The template statuses it receives (ADR-148); null receives every status. */
   templateStatuses: WebhookTemplateStatus[] | null;
   /** The conversation statuses it receives (ADR-149); null receives every status. */
@@ -1110,6 +1325,14 @@ export interface ApiWebhookEndpoint {
   crmChangeMakers: WebhookCrmChangeMaker[] | null;
   /** The scores of the satisfaction survey answers it receives (ADR-307); null: every answer. */
   surveyScores: WebhookSurveyScore[] | null;
+  /** The members credited with the survey answers it receives (ADR-311); null: every answer. */
+  surveyAssigneeIds: string[] | null;
+  /** The teams of the conversations whose survey answers it receives (ADR-311); null: every one. */
+  surveyTeamIds: string[] | null;
+  /** The contact tags whose survey answers it receives (ADR-312); null: every answer. */
+  surveyContactTags: string[] | null;
+  /** The conversation tags whose survey answers it receives (ADR-312); null: every answer. */
+  surveyConversationTags: string[] | null;
   /** The members whose assigned conversations' events it receives (ADR-181); null: every one's. */
   assigneeIds: string[] | null;
   /** The contact tags whose conversations' events it receives (ADR-267); null: every one's. */
@@ -1217,6 +1440,10 @@ const columns = {
   campaignStatuses: webhookEndpoints.campaignStatuses,
   orderStatuses: webhookEndpoints.orderStatuses,
   paymentLinkStatuses: webhookEndpoints.paymentLinkStatuses,
+  dealStatuses: webhookEndpoints.dealStatuses,
+  taskStatuses: webhookEndpoints.taskStatuses,
+  dealDetails: webhookEndpoints.dealDetails,
+  taskDetails: webhookEndpoints.taskDetails,
   templateStatuses: webhookEndpoints.templateStatuses,
   conversationStatuses: webhookEndpoints.conversationStatuses,
   runEndStatuses: webhookEndpoints.runEndStatuses,
@@ -1241,6 +1468,10 @@ const columns = {
   noteDealOwnerIds: webhookEndpoints.noteDealOwnerIds,
   crmChangeMakers: webhookEndpoints.crmChangeMakers,
   surveyScores: webhookEndpoints.surveyScores,
+  surveyAssigneeIds: webhookEndpoints.surveyAssigneeIds,
+  surveyTeamIds: webhookEndpoints.surveyTeamIds,
+  surveyContactTags: webhookEndpoints.surveyContactTags,
+  surveyConversationTags: webhookEndpoints.surveyConversationTags,
   assigneeIds: webhookEndpoints.assigneeIds,
   contactTags: webhookEndpoints.contactTags,
   conversationTags: webhookEndpoints.conversationTags,
@@ -1274,6 +1505,10 @@ type EndpointRow = Pick<
   | 'campaignStatuses'
   | 'orderStatuses'
   | 'paymentLinkStatuses'
+  | 'dealStatuses'
+  | 'taskStatuses'
+  | 'dealDetails'
+  | 'taskDetails'
   | 'templateStatuses'
   | 'conversationStatuses'
   | 'runEndStatuses'
@@ -1298,6 +1533,10 @@ type EndpointRow = Pick<
   | 'noteDealOwnerIds'
   | 'crmChangeMakers'
   | 'surveyScores'
+  | 'surveyAssigneeIds'
+  | 'surveyTeamIds'
+  | 'surveyContactTags'
+  | 'surveyConversationTags'
   | 'assigneeIds'
   | 'contactTags'
   | 'conversationTags'
@@ -1336,6 +1575,10 @@ function toApiEndpoint(row: EndpointRow, now: Date): ApiWebhookEndpoint {
     campaignStatuses: row.campaignStatuses,
     orderStatuses: row.orderStatuses,
     paymentLinkStatuses: row.paymentLinkStatuses,
+    dealStatuses: row.dealStatuses,
+    taskStatuses: row.taskStatuses,
+    dealDetails: row.dealDetails,
+    taskDetails: row.taskDetails,
     templateStatuses: row.templateStatuses,
     conversationStatuses: row.conversationStatuses,
     runEndStatuses: row.runEndStatuses,
@@ -1360,6 +1603,10 @@ function toApiEndpoint(row: EndpointRow, now: Date): ApiWebhookEndpoint {
     noteDealOwnerIds: row.noteDealOwnerIds,
     crmChangeMakers: row.crmChangeMakers,
     surveyScores: row.surveyScores,
+    surveyAssigneeIds: row.surveyAssigneeIds,
+    surveyTeamIds: row.surveyTeamIds,
+    surveyContactTags: row.surveyContactTags,
+    surveyConversationTags: row.surveyConversationTags,
     assigneeIds: row.assigneeIds,
     contactTags: row.contactTags,
     conversationTags: row.conversationTags,
@@ -1594,6 +1841,10 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               data.paymentLinkStatuses,
               null,
             );
+            const dealStatuses = webhookDealStatusesFor(data.events, data.dealStatuses, null);
+            const taskStatuses = webhookTaskStatusesFor(data.events, data.taskStatuses, null);
+            const dealDetails = webhookDealDetailsFor(data.events, data.dealDetails, null);
+            const taskDetails = webhookTaskDetailsFor(data.events, data.taskDetails, null);
             const templateStatuses = webhookTemplateStatusesFor(
               data.events,
               data.templateStatuses,
@@ -1669,6 +1920,24 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               null,
             );
             const surveyScores = webhookSurveyScoresFor(data.events, data.surveyScores, null);
+            const surveyAssigneeIds = webhookSurveyAssigneeIdsFor(
+              data.events,
+              data.surveyAssigneeIds,
+              null,
+            );
+            await assertWebhookSurveyAssignees(tx, ctx.tenant.id, surveyAssigneeIds);
+            const surveyTeamIds = webhookSurveyTeamIdsFor(data.events, data.surveyTeamIds, null);
+            await assertWebhookSurveyTeams(tx, ctx.tenant.id, surveyTeamIds);
+            const surveyContactTags = webhookSurveyContactTagsFor(
+              data.events,
+              data.surveyContactTags,
+              null,
+            );
+            const surveyConversationTags = webhookSurveyConversationTagsFor(
+              data.events,
+              data.surveyConversationTags,
+              null,
+            );
             const assigneeIds = webhookAssigneeIdsFor(data.events, data.assigneeIds, null);
             await assertWebhookAssignees(tx, ctx.tenant.id, assigneeIds);
             const contactTags = webhookContactTagsFor(data.events, data.contactTags, null);
@@ -1690,6 +1959,10 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               campaignStatuses,
               orderStatuses,
               paymentLinkStatuses,
+              dealStatuses,
+              taskStatuses,
+              dealDetails,
+              taskDetails,
               templateStatuses,
               conversationStatuses,
               runEndStatuses,
@@ -1714,6 +1987,10 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               noteDealOwnerIds,
               crmChangeMakers,
               surveyScores,
+              surveyAssigneeIds,
+              surveyTeamIds,
+              surveyContactTags,
+              surveyConversationTags,
               assigneeIds,
               contactTags,
               conversationTags,
@@ -1732,6 +2009,10 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               ...(campaignStatuses ? { campaignStatuses } : {}),
               ...(orderStatuses ? { orderStatuses } : {}),
               ...(paymentLinkStatuses ? { paymentLinkStatuses } : {}),
+              ...(dealStatuses ? { dealStatuses } : {}),
+              ...(taskStatuses ? { taskStatuses } : {}),
+              ...(dealDetails ? { dealDetails } : {}),
+              ...(taskDetails ? { taskDetails } : {}),
               ...(templateStatuses ? { templateStatuses } : {}),
               ...(conversationStatuses ? { conversationStatuses } : {}),
               ...(runEndStatuses ? { runEndStatuses } : {}),
@@ -1756,6 +2037,10 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               ...(noteDealOwnerIds ? { noteDealOwnerIds } : {}),
               ...(crmChangeMakers ? { crmChangeMakers } : {}),
               ...(surveyScores ? { surveyScores } : {}),
+              ...(surveyAssigneeIds ? { surveyAssigneeIds } : {}),
+              ...(surveyTeamIds ? { surveyTeamIds } : {}),
+              ...(surveyContactTags ? { surveyContactTags } : {}),
+              ...(surveyConversationTags ? { surveyConversationTags } : {}),
               ...(assigneeIds ? { assigneeIds } : {}),
               ...(contactTags ? { contactTags } : {}),
               ...(conversationTags ? { conversationTags } : {}),
@@ -1803,6 +2088,14 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
         if (data.paymentLinkStatuses && !events.includes('payment_link.status_changed')) {
           throw invalidPaymentLinkStatuses();
         }
+        if (data.dealStatuses && !events.includes('deal.status_changed')) {
+          throw invalidDealStatuses();
+        }
+        if (data.taskStatuses && !events.includes('task.status_changed')) {
+          throw invalidTaskStatuses();
+        }
+        if (data.dealDetails && !events.includes('deal.updated')) throw invalidDealDetails();
+        if (data.taskDetails && !events.includes('task.updated')) throw invalidTaskDetails();
         if (data.templateStatuses && !events.includes('template.status_changed')) {
           throw invalidTemplateStatuses();
         }
@@ -1847,6 +2140,18 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
         if (data.crmChangeMakers && !webhookTakesCrmChanges(events)) throw invalidCrmChangeMakers();
         if (data.surveyScores && !events.includes('satisfaction_survey.answered')) {
           throw invalidSurveyScores();
+        }
+        if (data.surveyAssigneeIds && !events.includes('satisfaction_survey.answered')) {
+          throw invalidSurveyAssignees();
+        }
+        if (data.surveyTeamIds && !events.includes('satisfaction_survey.answered')) {
+          throw invalidSurveyTeams();
+        }
+        if (data.surveyContactTags && !events.includes('satisfaction_survey.answered')) {
+          throw invalidSurveyContactTags();
+        }
+        if (data.surveyConversationTags && !events.includes('satisfaction_survey.answered')) {
+          throw invalidSurveyConversationTags();
         }
         if (data.assigneeIds && !webhookTakesTeamEvents(events)) throw invalidAssignees();
         if (data.contactTags && !webhookTakesTeamEvents(events)) throw invalidContactTags();
@@ -1939,6 +2244,24 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
         if (data.assigneeIds !== undefined) {
           await assertWebhookAssignees(tx, ctx.tenant.id, data.assigneeIds, endpoint.assigneeIds);
         }
+        // And the members and teams of survey answers it adds: those it held may have left or been
+        // deleted since (ADR-311).
+        if (data.surveyAssigneeIds !== undefined) {
+          await assertWebhookSurveyAssignees(
+            tx,
+            ctx.tenant.id,
+            data.surveyAssigneeIds,
+            endpoint.surveyAssigneeIds,
+          );
+        }
+        if (data.surveyTeamIds !== undefined) {
+          await assertWebhookSurveyTeams(
+            tx,
+            ctx.tenant.id,
+            data.surveyTeamIds,
+            endpoint.surveyTeamIds,
+          );
+        }
         // Left out, the OAuth client stays as it is (ADR-173).
         const oauth = data.oauth
           ? checkedWebhookOAuth(data.oauth, endpoint, deps.egressPolicy)
@@ -1960,6 +2283,10 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
           data.campaignStatuses !== undefined ||
           data.orderStatuses !== undefined ||
           data.paymentLinkStatuses !== undefined ||
+          data.dealStatuses !== undefined ||
+          data.taskStatuses !== undefined ||
+          data.dealDetails !== undefined ||
+          data.taskDetails !== undefined ||
           data.templateStatuses !== undefined ||
           data.conversationStatuses !== undefined ||
           data.runEndStatuses !== undefined ||
@@ -1984,6 +2311,10 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
           data.noteDealOwnerIds !== undefined ||
           data.crmChangeMakers !== undefined ||
           data.surveyScores !== undefined ||
+          data.surveyAssigneeIds !== undefined ||
+          data.surveyTeamIds !== undefined ||
+          data.surveyContactTags !== undefined ||
+          data.surveyConversationTags !== undefined ||
           data.assigneeIds !== undefined ||
           data.contactTags !== undefined ||
           data.conversationTags !== undefined ||
@@ -2037,6 +2368,18 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
                 data.paymentLinkStatuses,
                 endpoint.paymentLinkStatuses,
               ),
+              dealStatuses: webhookDealStatusesFor(
+                events,
+                data.dealStatuses,
+                endpoint.dealStatuses,
+              ),
+              taskStatuses: webhookTaskStatusesFor(
+                events,
+                data.taskStatuses,
+                endpoint.taskStatuses,
+              ),
+              dealDetails: webhookDealDetailsFor(events, data.dealDetails, endpoint.dealDetails),
+              taskDetails: webhookTaskDetailsFor(events, data.taskDetails, endpoint.taskDetails),
               templateStatuses: webhookTemplateStatusesFor(
                 events,
                 data.templateStatuses,
@@ -2126,6 +2469,26 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
                 data.surveyScores,
                 endpoint.surveyScores,
               ),
+              surveyAssigneeIds: webhookSurveyAssigneeIdsFor(
+                events,
+                data.surveyAssigneeIds,
+                endpoint.surveyAssigneeIds,
+              ),
+              surveyTeamIds: webhookSurveyTeamIdsFor(
+                events,
+                data.surveyTeamIds,
+                endpoint.surveyTeamIds,
+              ),
+              surveyContactTags: webhookSurveyContactTagsFor(
+                events,
+                data.surveyContactTags,
+                endpoint.surveyContactTags,
+              ),
+              surveyConversationTags: webhookSurveyConversationTagsFor(
+                events,
+                data.surveyConversationTags,
+                endpoint.surveyConversationTags,
+              ),
               assigneeIds: webhookAssigneeIdsFor(events, data.assigneeIds, endpoint.assigneeIds),
               contactTags: webhookContactTagsFor(events, data.contactTags, endpoint.contactTags),
               conversationTags: webhookConversationTagsFor(
@@ -2146,6 +2509,10 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               campaignStatuses: webhookEndpoints.campaignStatuses,
               orderStatuses: webhookEndpoints.orderStatuses,
               paymentLinkStatuses: webhookEndpoints.paymentLinkStatuses,
+              dealStatuses: webhookEndpoints.dealStatuses,
+              taskStatuses: webhookEndpoints.taskStatuses,
+              dealDetails: webhookEndpoints.dealDetails,
+              taskDetails: webhookEndpoints.taskDetails,
               templateStatuses: webhookEndpoints.templateStatuses,
               conversationStatuses: webhookEndpoints.conversationStatuses,
               runEndStatuses: webhookEndpoints.runEndStatuses,
@@ -2170,6 +2537,10 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               noteDealOwnerIds: webhookEndpoints.noteDealOwnerIds,
               crmChangeMakers: webhookEndpoints.crmChangeMakers,
               surveyScores: webhookEndpoints.surveyScores,
+              surveyAssigneeIds: webhookEndpoints.surveyAssigneeIds,
+              surveyTeamIds: webhookEndpoints.surveyTeamIds,
+              surveyContactTags: webhookEndpoints.surveyContactTags,
+              surveyConversationTags: webhookEndpoints.surveyConversationTags,
               assigneeIds: webhookEndpoints.assigneeIds,
               contactTags: webhookEndpoints.contactTags,
               conversationTags: webhookEndpoints.conversationTags,
@@ -2189,6 +2560,10 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
             ...(changed.paymentLinkStatuses
               ? { paymentLinkStatuses: changed.paymentLinkStatuses }
               : {}),
+            ...(changed.dealStatuses ? { dealStatuses: changed.dealStatuses } : {}),
+            ...(changed.taskStatuses ? { taskStatuses: changed.taskStatuses } : {}),
+            ...(changed.dealDetails ? { dealDetails: changed.dealDetails } : {}),
+            ...(changed.taskDetails ? { taskDetails: changed.taskDetails } : {}),
             ...(changed.templateStatuses ? { templateStatuses: changed.templateStatuses } : {}),
             ...(changed.conversationStatuses
               ? { conversationStatuses: changed.conversationStatuses }
@@ -2215,6 +2590,12 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
             ...(changed.noteDealOwnerIds ? { noteDealOwnerIds: changed.noteDealOwnerIds } : {}),
             ...(changed.crmChangeMakers ? { crmChangeMakers: changed.crmChangeMakers } : {}),
             ...(changed.surveyScores ? { surveyScores: changed.surveyScores } : {}),
+            ...(changed.surveyAssigneeIds ? { surveyAssigneeIds: changed.surveyAssigneeIds } : {}),
+            ...(changed.surveyTeamIds ? { surveyTeamIds: changed.surveyTeamIds } : {}),
+            ...(changed.surveyContactTags ? { surveyContactTags: changed.surveyContactTags } : {}),
+            ...(changed.surveyConversationTags
+              ? { surveyConversationTags: changed.surveyConversationTags }
+              : {}),
             ...(changed.assigneeIds ? { assigneeIds: changed.assigneeIds } : {}),
             ...(changed.contactTags ? { contactTags: changed.contactTags } : {}),
             ...(changed.conversationTags ? { conversationTags: changed.conversationTags } : {}),

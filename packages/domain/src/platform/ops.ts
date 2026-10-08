@@ -4,6 +4,7 @@ import { forbidden, notFound, uuidv7, type Clock } from '@w360/core';
 import { ALL_QUEUES, queueMaxWaitMinutes } from '@w360/contracts';
 import {
   and,
+  asc,
   channelAccounts,
   deadLetters,
   desc,
@@ -72,6 +73,7 @@ import {
   type CompanyWithoutNumber,
   type EmailDeliveryCount,
   type IntegrationFailure,
+  type PlatformAdministrator,
   type NumberSetupProblem,
   type OpsExportList,
   type QueueRow,
@@ -384,6 +386,17 @@ const acknowledgeSchema = z.object({
     .max(500, 'Write a note of at most 500 characters'),
 });
 
+/**
+ * A failure the console lists, by its integration and state, and the platform administrator to
+ * assign it to (ADR-313); null takes the assignment off.
+ */
+const assignSchema = z.object({
+  source: z.string().trim().min(1).max(40),
+  subjectId: z.uuid(),
+  state: z.string().trim().min(1).max(40),
+  assigneeUserId: z.string().trim().min(1).max(200).nullable(),
+});
+
 const resolveSchema = z.object({
   quarantineId: z.uuid(),
   resolution: z
@@ -461,6 +474,7 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
     );
     return result.rows.map((r) => {
       const acknowledgedAt = date(r.acknowledged_at);
+      const assignedAt = date(r.assigned_at);
       return {
         tenantId: String(r.tenant_id),
         tenantName: String(r.tenant_name),
@@ -478,8 +492,25 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
               note: String(r.acknowledgement),
             }
           : null,
+        assignment: assignedAt
+          ? {
+              at: assignedAt,
+              assigneeUserId: String(r.assignee_user_id),
+              assigneeName: text(r.assignee_name),
+              byName: text(r.assigned_by_name),
+            }
+          : null,
       };
     });
+  }
+
+  /** The platform administrators a failure can be assigned to (ADR-313), by name. */
+  async function platformAdministrators(tx: Tx): Promise<PlatformAdministrator[]> {
+    return tx
+      .select({ userId: platformAdmins.userId, name: users.name })
+      .from(platformAdmins)
+      .innerJoin(users, eq(users.id, platformAdmins.userId))
+      .orderBy(asc(users.name), asc(platformAdmins.userId));
   }
 
   /**
@@ -963,6 +994,7 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
       const now = clock.now();
       return platformDb.run(actor.userId, async (tx) => {
         const failures = await integrationFailures(tx, OPS_LIST_ROWS.failures.shown);
+        const administrators = await platformAdministrators(tx);
         const receipts = await receiptsNeedingAttention(tx, now);
         const quarantine = await openQuarantine(tx, now);
         const emails = await emailDelivery(tx, now);
@@ -975,6 +1007,7 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
         const lastSent = (kind: string) => alerts.find((a) => a.kind === kind)?.lastSentAt ?? null;
         return {
           failures,
+          administrators,
           receipts,
           lastFailureAlertAt: lastSent('failures'),
           lastIntegrationAlertAt: lastSent('integrations'),
@@ -1214,6 +1247,19 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
       await platformDb.run(actor.userId, async (tx) => {
         await tx.execute(
           sql`select ops.platform_acknowledge_integration_failure(${data.source}, ${data.subjectId}::uuid, ${data.state}, ${data.note}, ${actor.correlationId})`,
+        );
+      });
+    },
+
+    /**
+     * Assigns a failure the console lists to a platform administrator, themselves or another, or
+     * takes the assignment off (`assigneeUserId` null); audited in the same transaction (ADR-313).
+     */
+    async assignFailure(actor: PlatformActor, input: unknown): Promise<void> {
+      const data = parseInput(assignSchema, input);
+      await platformDb.run(actor.userId, async (tx) => {
+        await tx.execute(
+          sql`select ops.platform_assign_integration_failure(${data.source}, ${data.subjectId}::uuid, ${data.state}, ${data.assigneeUserId}, ${actor.correlationId})`,
         );
       });
     },
