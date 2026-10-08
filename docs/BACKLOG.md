@@ -1184,6 +1184,9 @@ verification, app review, Embedded Signup configuration).
   0205: `payment_link.status_changed` for every status the commerce worker writes, with the link as
   `GET /orders/{id}/payment-links` reads it, never its address or Razorpay's ids, narrowed by the
   order's number like the order events).
+  **[Payment Link status filters built; their database tests run only in CI]** (ADR-308, migration
+  0231: an endpoint takes the changes of chosen link statuses, by the status each change reached;
+  order and other events are not narrowed).
   **[Satisfaction survey events built; their database tests run only in CI]** (ADR-293, migrations
   0213 and 0214: `satisfaction_survey.answered` once for each survey a customer answers, with the
   survey as `GET /satisfaction-surveys` reads it, narrowed by the conversation's number).

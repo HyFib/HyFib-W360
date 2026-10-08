@@ -11,6 +11,7 @@ import type {
   WebhookMessageSender,
   WebhookMessageStatus,
   WebhookOrderStatus,
+  WebhookPaymentLinkStatus,
   WebhookRunEndStatus,
   WebhookReceivedMessageType,
   WebhookRunTrigger,
@@ -30,6 +31,7 @@ export type {
   WebhookMessageSender,
   WebhookMessageStatus,
   WebhookOrderStatus,
+  WebhookPaymentLinkStatus,
   WebhookRunEndStatus,
   WebhookReceivedMessageType,
   WebhookRunTrigger,
@@ -349,6 +351,29 @@ export const WEBHOOK_ORDER_STATUS_LABELS: Record<WebhookOrderStatus, string> = {
   paid: 'Paid',
   fulfilled: 'Fulfilled',
   cancelled: 'Cancelled',
+};
+
+/**
+ * The statuses a `payment_link.status_changed` event reports, which an endpoint can choose
+ * (ADR-308), in the order Orders lists them; a link that is `creating` sends no event.
+ */
+export const WEBHOOK_PAYMENT_LINK_STATUSES = [
+  'created',
+  'partially_paid',
+  'paid',
+  'expired',
+  'cancelled',
+  'failed',
+] as const satisfies readonly WebhookPaymentLinkStatus[];
+
+/** How Settings names each Payment Link status an endpoint can choose (ADR-308), as Orders does. */
+export const WEBHOOK_PAYMENT_LINK_STATUS_LABELS: Record<WebhookPaymentLinkStatus, string> = {
+  created: 'Waiting for payment',
+  partially_paid: 'Partly paid',
+  paid: 'Paid',
+  expired: 'Expired',
+  cancelled: 'Cancelled',
+  failed: 'Not created',
 };
 
 /**

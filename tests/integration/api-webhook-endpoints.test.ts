@@ -261,6 +261,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       automationIds: null,
       campaignStatuses: null,
       orderStatuses: null,
+      paymentLinkStatuses: null,
       templateStatuses: null,
       conversationStatuses: null,
       runEndStatuses: null,
@@ -1048,6 +1049,87 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     });
     expect(await issueOf(api().update(key.ctx, id, { orderStatuses: [] }))).toMatchObject({
       path: 'orderStatuses',
+    });
+  });
+
+  it('choose the Payment Link statuses an endpoint receives, kept by changes that leave them out and cleared with the event (ADR-308)', async () => {
+    const c = await fx.company();
+    const key = await apiKey(c, ['webhooks.manage']);
+    const issueOf = async (promise: Promise<unknown>) => {
+      const error = await expectAppError(promise, 'validation_failed');
+      return isAppError(error) ? error.issues?.[0] : undefined;
+    };
+    // Statuses need the event, at least one, and each from the list (creating or an unknown one by
+    // place).
+    const refusals = [
+      [['order.status_changed'], ['paid'], 'paymentLinkStatuses'],
+      [['payment_link.status_changed'], [], 'paymentLinkStatuses'],
+      [['payment_link.status_changed'], ['paid', 'creating'], 'paymentLinkStatuses.1'],
+      [['payment_link.status_changed'], ['canceled'], 'paymentLinkStatuses.0'],
+    ] as const;
+    for (const [index, [events, paymentLinkStatuses, path]] of refusals.entries()) {
+      expect(
+        await issueOf(
+          api().create(
+            key.ctx,
+            { url: receiverUrl(), events, paymentLinkStatuses },
+            idem(`link-statuses-bad-${index}`, JSON.stringify(paymentLinkStatuses)),
+          ),
+        ),
+        JSON.stringify(paymentLinkStatuses),
+      ).toMatchObject({ path });
+    }
+    expect((await api().list(key.ctx)).data).toEqual([]);
+
+    const created = await addThroughApi(key.ctx, 'link-statuses-1', {
+      url: receiverUrl(),
+      events: ['payment_link.status_changed', 'order.status_changed'],
+      paymentLinkStatuses: ['failed', 'paid', 'failed'],
+    });
+    const id = created.body.data.id;
+    expect(created.body.data.paymentLinkStatuses).toEqual(['paid', 'failed']);
+    expect((await api().get(key.ctx, id)).paymentLinkStatuses).toEqual(['paid', 'failed']);
+    const [audit] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND subject_id = $2 AND action = 'webhook.endpoint_created'`,
+      [c.tenant.id, id],
+    );
+    expect(audit?.metadata).toMatchObject({ paymentLinkStatuses: ['paid', 'failed'] });
+
+    expect(await api().update(key.ctx, id, { description: 'Payments' })).toMatchObject({
+      paymentLinkStatuses: ['paid', 'failed'],
+    });
+    expect(await api().update(key.ctx, id, { paymentLinkStatuses: ['expired'] })).toMatchObject({
+      paymentLinkStatuses: ['expired'],
+    });
+    const updates = await fx.query<{ metadata: { paymentLinkStatuses?: unknown } }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND subject_id = $2 AND action = 'webhook.endpoint_updated'
+        ORDER BY occurred_at`,
+      [c.tenant.id, id],
+    );
+    expect(updates.map((u) => u.metadata.paymentLinkStatuses)).toEqual([
+      ['paid', 'failed'],
+      ['expired'],
+    ]);
+    expect(await api().update(key.ctx, id, { events: ['order.status_changed'] })).toMatchObject({
+      events: ['order.status_changed'],
+      paymentLinkStatuses: null,
+    });
+    expect(
+      await issueOf(api().update(key.ctx, id, { paymentLinkStatuses: ['paid'] })),
+    ).toMatchObject({ path: 'paymentLinkStatuses' });
+    expect(
+      await api().update(key.ctx, id, {
+        events: ['payment_link.status_changed'],
+        paymentLinkStatuses: ['partially_paid'],
+      }),
+    ).toMatchObject({ paymentLinkStatuses: ['partially_paid'] });
+    expect(await api().update(key.ctx, id, { paymentLinkStatuses: null })).toMatchObject({
+      paymentLinkStatuses: null,
+    });
+    expect(await issueOf(api().update(key.ctx, id, { paymentLinkStatuses: [] }))).toMatchObject({
+      path: 'paymentLinkStatuses',
     });
   });
 

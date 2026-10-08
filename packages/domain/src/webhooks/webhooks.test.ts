@@ -68,6 +68,8 @@ import {
   WEBHOOK_MESSAGE_STATUSES,
   WEBHOOK_ORDER_STATUS_LABELS,
   WEBHOOK_ORDER_STATUSES,
+  WEBHOOK_PAYMENT_LINK_STATUS_LABELS,
+  WEBHOOK_PAYMENT_LINK_STATUSES,
   WEBHOOK_REPLAY_PERIODS,
   WEBHOOK_RETRY_SECONDS,
   WEBHOOK_TEMPLATE_STATUS_LABELS,
@@ -200,6 +202,9 @@ import {
   webhookMessageStatusesSchema,
   webhookOrderStatusesFor,
   webhookOrderStatusesSchema,
+  webhookPaymentLinkStatusesFor,
+  webhookPaymentLinkStatusesSchema,
+  WEBHOOK_PAYMENT_LINK_STATUSES_NEED_THE_EVENT,
   webhookTeamIdsFor,
   webhookTeamIdsSchema,
   webhookTemplateIdsFor,
@@ -2437,6 +2442,73 @@ describe('order status filters (ADR-147)', () => {
     expect(webhookOrderStatusesFor([...both], undefined, null)).toBeNull();
     expect(webhookOrderStatusesFor(['order.received'], ['paid'], ['fulfilled'])).toBeNull();
     expect(webhookOrderStatusesFor(['campaign.status_changed'], undefined, ['paid'])).toBeNull();
+  });
+});
+
+describe('Payment Link status filters (ADR-308)', () => {
+  it('take 1 to 6 of the statuses a link reaches once created, once each, in the order Orders lists them; null takes every status', () => {
+    expect(webhookPaymentLinkStatusesSchema.parse(['failed', 'paid', 'failed'])).toEqual([
+      'paid',
+      'failed',
+    ]);
+    expect(webhookPaymentLinkStatusesSchema.parse(null)).toBeNull();
+    expect(
+      webhookPaymentLinkStatusesSchema.parse([...WEBHOOK_PAYMENT_LINK_STATUSES].reverse()),
+    ).toEqual([...WEBHOOK_PAYMENT_LINK_STATUSES]);
+    // Every link status but `creating`, which sends no event.
+    expect(WEBHOOK_PAYMENT_LINK_STATUSES).toEqual(
+      PAYMENT_LINK_STATUSES.filter((s) => s !== 'creating'),
+    );
+    for (const refused of [
+      [],
+      ['creating'],
+      ['canceled'],
+      ['Paid'],
+      'paid',
+      [null],
+      Array(7).fill('paid'),
+    ]) {
+      expect(
+        webhookPaymentLinkStatusesSchema.safeParse(refused).success,
+        JSON.stringify(refused),
+      ).toBe(false);
+    }
+    expect(webhookPaymentLinkStatusesSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one Payment Link status, or take every status.',
+    );
+    expect(webhookPaymentLinkStatusesSchema.safeParse(['creating']).error?.issues[0]?.message).toBe(
+      'Choose Payment Link statuses from the list.',
+    );
+    expect(
+      webhookPaymentLinkStatusesSchema.safeParse(Array(7).fill('paid')).error?.issues[0]?.message,
+    ).toBe('Give each Payment Link status once.');
+    // Named as Orders names them.
+    expect(WEBHOOK_PAYMENT_LINK_STATUS_LABELS).toEqual({
+      created: 'Waiting for payment',
+      partially_paid: 'Partly paid',
+      paid: 'Paid',
+      expired: 'Expired',
+      cancelled: 'Cancelled',
+      failed: 'Not created',
+    });
+    expect(Object.keys(WEBHOOK_PAYMENT_LINK_STATUS_LABELS)).toEqual([
+      ...WEBHOOK_PAYMENT_LINK_STATUSES,
+    ]);
+  });
+
+  it('are kept only while the endpoint takes payment_link.status_changed: given, kept, or cleared', () => {
+    const both = ['payment_link.status_changed', 'order.status_changed'] as const;
+    expect(webhookPaymentLinkStatusesFor([...both], ['paid'], null)).toEqual(['paid']);
+    expect(webhookPaymentLinkStatusesFor([...both], undefined, ['failed'])).toEqual(['failed']);
+    expect(webhookPaymentLinkStatusesFor([...both], null, ['failed'])).toBeNull();
+    expect(webhookPaymentLinkStatusesFor([...both], undefined, null)).toBeNull();
+    // The order's own events have no link status to choose.
+    expect(
+      webhookPaymentLinkStatusesFor(['order.status_changed'], ['paid'], ['failed']),
+    ).toBeNull();
+    expect(WEBHOOK_PAYMENT_LINK_STATUSES_NEED_THE_EVENT).toBe(
+      `Choose Payment Link statuses only for an endpoint that receives ${WEBHOOK_EVENT_INFO['payment_link.status_changed'].label}.`,
+    );
   });
 });
 

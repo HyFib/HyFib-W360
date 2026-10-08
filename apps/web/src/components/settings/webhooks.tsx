@@ -24,6 +24,8 @@ import {
   WEBHOOK_MESSAGE_STATUSES,
   WEBHOOK_ORDER_STATUS_LABELS,
   WEBHOOK_ORDER_STATUSES,
+  WEBHOOK_PAYMENT_LINK_STATUS_LABELS,
+  WEBHOOK_PAYMENT_LINK_STATUSES,
   WEBHOOK_REPLAY_PERIODS,
   WEBHOOK_RUN_END_STATUS_LABELS,
   WEBHOOK_RUN_END_STATUSES,
@@ -88,6 +90,7 @@ import {
   type WebhookMessageSender,
   type WebhookMessageStatus,
   type WebhookOrderStatus,
+  type WebhookPaymentLinkStatus,
   type WebhookOwnerChoice,
   type WebhookPipelineChoice,
   type WebhookReplayPeriod,
@@ -387,7 +390,7 @@ function ReachedStatusChoices<S extends string>({
   onChange,
 }: {
   prefix: string;
-  kind: 'campaign' | 'order' | 'template' | 'conversation' | 'run';
+  kind: 'campaign' | 'order' | 'payment_link' | 'template' | 'conversation' | 'run';
   statuses: readonly S[];
   labels: Record<S, string>;
   chosen: S[];
@@ -397,7 +400,8 @@ function ReachedStatusChoices<S extends string>({
     <fieldset className="ml-6 grid gap-1">
       <legend className="mb-1 text-xs text-muted-foreground">
         Statuses sent (all of them unless you untick some; an event is the status{' '}
-        {kind === 'order' ? 'an order' : `a ${kind}`} {kind === 'run' ? 'ended with' : 'reached'})
+        {kind === 'order' ? 'an order' : kind === 'payment_link' ? 'a Payment Link' : `a ${kind}`}{' '}
+        {kind === 'run' ? 'ended with' : 'reached'})
       </legend>
       {statuses.map((status) => {
         const id = `${prefix}-${kind}-status-${status}`;
@@ -1908,6 +1912,8 @@ function EventChoices({
   onCampaignStatusesChange,
   orderStatuses,
   onOrderStatusesChange,
+  paymentLinkStatuses,
+  onPaymentLinkStatusesChange,
   templateStatuses,
   onTemplateStatusesChange,
   conversationStatuses,
@@ -1938,6 +1944,8 @@ function EventChoices({
   onCampaignStatusesChange: (next: WebhookCampaignStatus[]) => void;
   orderStatuses: WebhookOrderStatus[];
   onOrderStatusesChange: (next: WebhookOrderStatus[]) => void;
+  paymentLinkStatuses: WebhookPaymentLinkStatus[];
+  onPaymentLinkStatusesChange: (next: WebhookPaymentLinkStatus[]) => void;
   templateStatuses: WebhookTemplateStatus[];
   onTemplateStatusesChange: (next: WebhookTemplateStatus[]) => void;
   conversationStatuses: WebhookConversationStatus[];
@@ -2058,6 +2066,16 @@ function EventChoices({
                 labels={WEBHOOK_ORDER_STATUS_LABELS}
                 chosen={orderStatuses}
                 onChange={onOrderStatusesChange}
+              />
+            ) : null}
+            {type === 'payment_link.status_changed' && chosen.includes(type) ? (
+              <ReachedStatusChoices
+                prefix={prefix}
+                kind="payment_link"
+                statuses={WEBHOOK_PAYMENT_LINK_STATUSES}
+                labels={WEBHOOK_PAYMENT_LINK_STATUS_LABELS}
+                chosen={paymentLinkStatuses}
+                onChange={onPaymentLinkStatusesChange}
               />
             ) : null}
             {type === 'campaign.status_changed' && chosen.includes(type) ? (
@@ -2341,6 +2359,8 @@ export function WebhookEndpointForm({
     automationIds: string[] | null;
     campaignStatuses: WebhookCampaignStatus[] | null;
     orderStatuses: WebhookOrderStatus[] | null;
+    /** The Payment Link statuses it takes (ADR-308); null for every status. */
+    paymentLinkStatuses: WebhookPaymentLinkStatus[] | null;
     templateStatuses: WebhookTemplateStatus[] | null;
     conversationStatuses: WebhookConversationStatus[] | null;
     runEndStatuses: WebhookRunEndStatus[] | null;
@@ -2436,6 +2456,9 @@ export function WebhookEndpointForm({
   );
   const [orderStatuses, setOrderStatuses] = useState<WebhookOrderStatus[]>(
     endpoint?.orderStatuses ?? [...WEBHOOK_ORDER_STATUSES],
+  );
+  const [paymentLinkStatuses, setPaymentLinkStatuses] = useState<WebhookPaymentLinkStatus[]>(
+    endpoint?.paymentLinkStatuses ?? [...WEBHOOK_PAYMENT_LINK_STATUSES],
   );
   const [templateStatuses, setTemplateStatuses] = useState<WebhookTemplateStatus[]>(
     endpoint?.templateStatuses ?? [...WEBHOOK_TEMPLATE_STATUSES],
@@ -2592,6 +2615,12 @@ export function WebhookEndpointForm({
           orderStatuses.length < WEBHOOK_ORDER_STATUSES.length
             ? orderStatuses
             : null;
+        // Every Payment Link status ticked takes every status (null, ADR-308).
+        const chosenPaymentLinkStatuses =
+          eventTypes.includes('payment_link.status_changed') &&
+          paymentLinkStatuses.length < WEBHOOK_PAYMENT_LINK_STATUSES.length
+            ? paymentLinkStatuses
+            : null;
         // Every template status ticked takes every status (null, ADR-148).
         const chosenTemplateStatuses =
           eventTypes.includes('template.status_changed') &&
@@ -2718,6 +2747,7 @@ export function WebhookEndpointForm({
           automationIds: chosenAutomations,
           campaignStatuses: chosenCampaignStatuses,
           orderStatuses: chosenOrderStatuses,
+          paymentLinkStatuses: chosenPaymentLinkStatuses,
           templateStatuses: chosenTemplateStatuses,
           conversationStatuses: chosenConversationStatuses,
           runEndStatuses: chosenRunEndStatuses,
@@ -2794,6 +2824,7 @@ export function WebhookEndpointForm({
               setParts([...WEBHOOK_CONTACT_PARTS]);
               setCampaignStatuses([...WEBHOOK_CAMPAIGN_STATUSES]);
               setOrderStatuses([...WEBHOOK_ORDER_STATUSES]);
+              setPaymentLinkStatuses([...WEBHOOK_PAYMENT_LINK_STATUSES]);
               setTemplateStatuses([...WEBHOOK_TEMPLATE_STATUSES]);
               setConversationStatuses([...WEBHOOK_CONVERSATION_STATUSES]);
               setRunEndStatuses([...WEBHOOK_RUN_END_STATUSES]);
@@ -2902,6 +2933,8 @@ export function WebhookEndpointForm({
         onCampaignStatusesChange={setCampaignStatuses}
         orderStatuses={orderStatuses}
         onOrderStatusesChange={setOrderStatuses}
+        paymentLinkStatuses={paymentLinkStatuses}
+        onPaymentLinkStatusesChange={setPaymentLinkStatuses}
         templateStatuses={templateStatuses}
         onTemplateStatusesChange={setTemplateStatuses}
         conversationStatuses={conversationStatuses}

@@ -1462,6 +1462,14 @@ Phase 5 rules (outgoing webhooks, P5-09):
   member, the Payment Link worker or Razorpay's payment changes it: it narrows what one endpoint
   receives and never adds an event or a delivery for another endpoint or company. Audited with the
   list. Tested.
+- An endpoint can take `payment_link.status_changed` only for some of the statuses a link reaches
+  (ADR-308), chosen with `developer.manage` in Settings or `webhooks.manage` through the API. The
+  list is checked against the six statuses the worker writes once a link is created (`creating`
+  sends no event), kept only while the endpoint takes `payment_link.status_changed` (a database
+  check too, which also refuses a null entry), and applied in `app.capture_webhook_event`, in the
+  transaction where the commerce worker writes the link's status: it narrows what one endpoint
+  receives and never adds an event or a delivery for another endpoint or company. Statuses are not
+  personal data. Audited with the list (unit tests; integration tests, run in CI only).
 - An endpoint can take `template.status_changed` only for some of the statuses reported (ADR-148),
   chosen the same way. The list is checked against the eleven statuses the event reports (HyFib's
   own steps, a deletion under way or refused and an unrecognised status are never sent), kept only

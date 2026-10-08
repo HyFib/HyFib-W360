@@ -3041,6 +3041,15 @@ numbers chosen too, an answer must pass both. To take more, tick scores under "A
 the endpoint's page, or `PATCH /webhook-endpoints/{id}` with `surveyScores` (null for every answer).
 Removing the event clears it.
 
+**A receiver misses Payment Link changes (ADR-308).** An endpoint can take the changes of chosen
+link statuses only. The endpoints list shows it ("Payment Link statuses sent: …"), and the API
+answers `paymentLinkStatuses` (null takes every status). Each change goes by the status the link
+reached (`paymentLink.status`, not `previousStatus`), and events no endpoint takes are not recorded,
+so there is nothing to replay; `GET /orders/{id}/payment-links` reads the links as they are now.
+With numbers chosen too, a change must pass both. To take more, tick statuses under the event on the
+endpoint's page, or `PATCH /webhook-endpoints/{id}` with `paymentLinkStatuses` (null for every
+status). Removing the event clears it.
+
 **A receiver misses a task's change of assignee, or doubts one (ADR-274).** Endpoints that take
 `task.assignee_changed` ("Task assignee") are sent one event each time a member gives a task to
 another member by editing it, or a key changes its `assigneeId`. Automations set an assignee only on

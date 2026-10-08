@@ -40,6 +40,8 @@ export async function createWebhookEndpointAction(
     campaignStatuses: string[] | null;
     /** The order statuses it takes (ADR-147); null takes every status. */
     orderStatuses: string[] | null;
+    /** The Payment Link statuses it takes (ADR-308); null takes every status. */
+    paymentLinkStatuses: string[] | null;
     /** The template statuses it takes (ADR-148); null takes every status. */
     templateStatuses: string[] | null;
     /** The conversation statuses it takes (ADR-149); null takes every status. */
@@ -130,6 +132,8 @@ export async function updateWebhookEndpointAction(
     campaignStatuses: string[] | null;
     /** The order statuses it takes (ADR-147); null takes every status. */
     orderStatuses: string[] | null;
+    /** The Payment Link statuses it takes (ADR-308); null takes every status. */
+    paymentLinkStatuses: string[] | null;
     /** The template statuses it takes (ADR-148); null takes every status. */
     templateStatuses: string[] | null;
     /** The conversation statuses it takes (ADR-149); null takes every status. */

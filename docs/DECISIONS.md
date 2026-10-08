@@ -11790,3 +11790,47 @@ Decision:
 Not built: the team, member and tag filters for survey answers (ADR-293 left them out), a filter by
 the buttons' words (each company words its own and can change them; the score stays), and an event
 when a survey is sent or skipped.
+
+## ADR-308 Choosing the Payment Link statuses a webhook endpoint receives (P5-09, P4-06a) (2026-10-08)
+
+Context: `payment_link.status_changed` (ADR-285) is sent for every status the commerce worker writes
+to an order's Payment Link (`created`, `partially_paid`, `paid`, `expired`, `cancelled` or
+`failed`), but an endpoint received them all. An integration that books payments wants paid and
+partly paid links only, and one that follows up links that went nowhere wants the expired, cancelled
+and failed ones; both were sent every change and had to drop the rest. ADR-285 left filters by link
+status unbuilt.
+
+Decision:
+
+- **One list per endpoint for the links' events,** `paymentLinkStatuses`: the statuses a link
+  reaches that it takes, 1 to 6 of `created`, `partially_paid`, `paid`, `expired`, `cancelled` and
+  `failed`, in that order (as Orders lists them) with repeats merged, as the event's
+  `paymentLink.status` gives them. A link is `creating` only until the worker creates it, which
+  sends no event, so the list cannot name it. Null receives every status, as before. With numbers
+  chosen too, a change must pass both. Other events are not narrowed: `order.status_changed` has its
+  own list (ADR-147). Chosen in Settings → Webhooks under the event (the status control orders use,
+  every status ticked by default, named as Orders names them), shown on the endpoint as "Payment
+  Link statuses sent: …", and through the API as `paymentLinkStatuses` on `POST /webhook-endpoints`
+  and `PATCH /webhook-endpoints/{id}` and in every endpoint the API answers.
+- **Only while the event is taken:** a list given for an endpoint that does not take
+  `payment_link.status_changed` is refused (`paymentLinkStatuses`; 422 through the API). A change
+  that drops the event clears it, and a `PATCH` that leaves it out keeps it; Settings always sends
+  it (null while every status is ticked). A check in the database holds the same rule (null, or 1 to
+  6 known statuses in one dimension without a null, with the event).
+- **Applied at capture:** `app.capture_webhook_event` matches the status the link reached, which the
+  links' trigger passes as the event's status (0204), against each active endpoint's list, in the
+  transaction where the commerce worker writes it; no row is read for it. No event is written when
+  no endpoint takes it, and stored events are unchanged.
+- **Audited and exported:** `webhook.endpoint_created` and `webhook.endpoint_updated` carry
+  `paymentLinkStatuses` when the endpoint has the list, and the company data export carries the
+  column.
+- **Permissions unchanged:** members with `developer.manage` in Settings, keys with
+  `webhooks.manage` through the API.
+- **Migration 0231:** `payment_link_statuses text[]` on `app.webhook_endpoints` with its check,
+  validated at once (a company has at most 10 endpoints), an update grant on the column for the
+  runtime role, and `app.capture_webhook_event` replaced with the same signature (0230's, with the
+  link status), so its owner and grants stay. Existing endpoints keep null; nothing is backfilled.
+
+Not built: lists by the status a link left (`previousStatus`), by amount or by who asked for payment
+(a member or a key), and events when payment is asked for or a cancellation asked (ADR-285 left them
+out).

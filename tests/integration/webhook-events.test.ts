@@ -3042,6 +3042,85 @@ describe('order events (ADR-085)', () => {
     );
   });
 
+  it('sends an endpoint that names Payment Link statuses only the links that reached one of them (ADR-308)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const agent = await fx.ctx(c, c.agent);
+    await syncedCatalog(c, '5558590');
+    /** An endpoint of the company taking the links' events with these statuses. */
+    const add = async (paymentLinkStatuses: string[] | null) => {
+      const path = `/ok/${randomBytes(6).toString('hex')}`;
+      await webhooks().create(owner, {
+        url: `http://${HOST}:${port}${path}`,
+        eventTypes: ['payment_link.status_changed'],
+        paymentLinkStatuses,
+      });
+      return path;
+    };
+    const paidOnly = await add(['paid']);
+    const endings = await add(['expired', 'cancelled', 'failed']);
+    const everyStatus = await add(null);
+
+    // The company's Razorpay account, checked.
+    const keyId = `rzp_test_orderevents${String((merchants += 1)).padStart(2, '0')}`;
+    rzp.addMerchant(keyId, 'order-events-secret');
+    await commerce().savePaymentAccount(owner, {
+      keyId,
+      keySecret: 'order-events-secret',
+      webhookSecret: 'order-events-hook',
+    });
+    const [account] = await fx.query<{ id: string }>(
+      'SELECT id FROM app.commerce_payment_accounts WHERE tenant_id = $1',
+      [c.tenant.id],
+    );
+    expect(await processPaymentAccountCheck(commerceWorker(), scopeOf(c), account!.id)).toBe(
+      'done',
+    );
+
+    // A link created and paid, and another created and then cancelled.
+    const order = await sendCart(c, waId(), '5558590', [
+      { retailerId: 'sku-1', quantity: 1, price: 10 },
+    ]);
+    const { linkId } = await commerce().requestPayment(agent, {
+      id: order.id,
+      expectedVersion: await orderVersion(order.id),
+    });
+    expect(await processPaymentLink(commerceWorker(), scopeOf(c), linkId)).toBe('done');
+    const [created] = await fx.query<{ provider_link_id: string }>(
+      'SELECT provider_link_id FROM app.commerce_payment_links WHERE id = $1',
+      [linkId],
+    );
+    rzp.payLink(created!.provider_link_id);
+    expect(await processPaymentLink(commerceWorker(), scopeOf(c), linkId)).toBe('done');
+    const second = await sendCart(c, waId(), '5558590', [
+      { retailerId: 'sku-2', quantity: 1, price: 20 },
+    ]);
+    const { linkId: cancelledId } = await commerce().requestPayment(agent, {
+      id: second.id,
+      expectedVersion: await orderVersion(second.id),
+    });
+    expect(await processPaymentLink(commerceWorker(), scopeOf(c), cancelledId)).toBe('done');
+    await commerce().cancelPaymentLink(agent, { orderId: second.id });
+    expect(await processPaymentLink(commerceWorker(), scopeOf(c), cancelledId)).toBe('done');
+
+    // Each status captured once, with a delivery to each endpoint whose list holds it.
+    const events = await eventsOf(c, 'payment_link.');
+    expect(events.map((e) => [e.status, e.deliveries])).toEqual([
+      ['created', 1],
+      ['paid', 2],
+      ['created', 1],
+      ['cancelled', 2],
+    ]);
+    await deliverDue(c);
+    const statusesAt = (path: string) =>
+      bodiesAt(path)
+        .map((b) => (b.data.paymentLink as { status: string }).status)
+        .sort();
+    expect(statusesAt(paidOnly)).toEqual(['paid']);
+    expect(statusesAt(endings)).toEqual(['cancelled']);
+    expect(statusesAt(everyStatus)).toEqual(['cancelled', 'created', 'created', 'paid']);
+  });
+
   it('sends an endpoint that names numbers only the orders sent to them (ADR-170)', async () => {
     const c = await fx.company();
     const owner = await fx.ctx(c, c.owner);

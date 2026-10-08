@@ -1351,6 +1351,100 @@ describe('order status filters (ADR-147)', () => {
   });
 });
 
+describe('Payment Link status filters (ADR-308)', () => {
+  it('are refused without payment_link.status_changed, unknown, creating or empty, kept by a change that leaves them out and cleared with the event; the database keeps them to that event', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const url = 'https://hooks.example.com/in';
+    const refused = (eventTypes: string[], paymentLinkStatuses: unknown, message: RegExp) =>
+      expectAppError(
+        webhooks().create(owner, { url, eventTypes, paymentLinkStatuses }),
+        'validation_failed',
+        message,
+      );
+    // An order's own change has no link status to choose.
+    const needsTheEvent = /only for an endpoint that receives Payment Link status/;
+    await refused(['order.status_changed'], ['paid'], needsTheEvent);
+    await refused(['payment_link.status_changed'], [], /at least one Payment Link status/);
+    await refused(['payment_link.status_changed'], ['creating'], /from the list/);
+    await refused(['payment_link.status_changed'], ['canceled'], /from the list/);
+    expect(await webhooks().list(owner)).toEqual([]);
+
+    const created = await webhooks().create(owner, {
+      url,
+      eventTypes: ['payment_link.status_changed', 'consent.changed'],
+      paymentLinkStatuses: ['failed', 'paid', 'failed'],
+    });
+    const [audit] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events WHERE tenant_id = $1 AND action = 'webhook.endpoint_created'`,
+      [c.tenant.id],
+    );
+    expect(audit?.metadata).toMatchObject({ paymentLinkStatuses: ['paid', 'failed'] });
+    const change = (fields: Record<string, unknown>) =>
+      webhooks().update(owner, {
+        endpointId: created.id,
+        url,
+        description: '',
+        eventTypes: ['payment_link.status_changed', 'consent.changed'],
+        ...fields,
+      });
+    const current = async () =>
+      (await webhooks().list(owner)).find((e) => e.id === created.id)?.paymentLinkStatuses;
+    expect(await current()).toEqual(['paid', 'failed']);
+    await change({ description: 'kept' });
+    expect(await current()).toEqual(['paid', 'failed']);
+    await change({ paymentLinkStatuses: ['expired'] });
+    expect(await current()).toEqual(['expired']);
+    const updates = await fx.query<{ metadata: { paymentLinkStatuses?: unknown } }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND action = 'webhook.endpoint_updated' ORDER BY occurred_at`,
+      [c.tenant.id],
+    );
+    expect(updates.map((u) => u.metadata.paymentLinkStatuses)).toEqual([
+      ['paid', 'failed'],
+      ['expired'],
+    ]);
+    await change({ paymentLinkStatuses: null });
+    expect(await current()).toBeNull();
+    await change({ paymentLinkStatuses: ['partially_paid'] });
+    // The database refuses an empty list, more than six entries, an unknown status, creating or a
+    // missing one from an endpoint taking the event…
+    const setInDatabase = (value: string) =>
+      fx.query(`UPDATE app.webhook_endpoints SET payment_link_statuses = ${value} WHERE id = $1`, [
+        created.id,
+      ]);
+    for (const bad of [
+      `'{}'`,
+      `'{${Array(7).fill('paid').join(',')}}'`,
+      `'{paid,creating}'`,
+      `'{paid,canceled}'`,
+      `ARRAY['paid', NULL]::text[]`,
+      `ARRAY[ARRAY['paid'], ARRAY['failed']]::text[]`,
+    ]) {
+      await expect(setInDatabase(bad), bad).rejects.toThrow(
+        /webhook_endpoints_payment_link_statuses/,
+      );
+    }
+    await change({ eventTypes: ['consent.changed'] });
+    expect(await current()).toBeNull();
+    await expectAppError(
+      change({ eventTypes: ['consent.changed'], paymentLinkStatuses: ['paid'] }),
+      'validation_failed',
+      needsTheEvent,
+    );
+    // …and any list for an endpoint that does not take it.
+    await expect(setInDatabase(`'{paid}'`)).rejects.toThrow(
+      /webhook_endpoints_payment_link_statuses/,
+    );
+    // The company role changes the list only through its column grant.
+    const [grant] = await fx.query<{ can_update: boolean }>(
+      `SELECT has_column_privilege('w360_app', 'app.webhook_endpoints', 'payment_link_statuses',
+                'UPDATE') AS can_update`,
+    );
+    expect(grant?.can_update).toBe(true);
+  });
+});
+
 describe('template status filters (ADR-148)', () => {
   /** A utility template HyFib submits and Meta's stand-in takes for review: `pending`. */
   async function submitted(c: Company, owner: TenantContext) {

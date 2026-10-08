@@ -10,6 +10,7 @@ import {
   WEBHOOK_EVENT_KEYS,
   WEBHOOK_LIMITS,
   WEBHOOK_ORDER_STATUS_LABELS,
+  WEBHOOK_PAYMENT_LINK_STATUS_LABELS,
   WEBHOOK_RUN_END_STATUS_LABELS,
   WEBHOOK_RUN_TRIGGER_LABELS,
   WEBHOOK_CONSENT_CHANGE_LABELS,
@@ -205,6 +206,14 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
                       <p className="text-xs text-muted-foreground">
                         Order statuses sent:{' '}
                         {e.orderStatuses.map((o) => WEBHOOK_ORDER_STATUS_LABELS[o]).join(', ')}
+                      </p>
+                    ) : null}
+                    {e.paymentLinkStatuses ? (
+                      <p className="text-xs text-muted-foreground">
+                        Payment Link statuses sent:{' '}
+                        {e.paymentLinkStatuses
+                          .map((s) => WEBHOOK_PAYMENT_LINK_STATUS_LABELS[s])
+                          .join(', ')}
                       </p>
                     ) : null}
                     {e.campaignStatuses ? (

@@ -1,6 +1,7 @@
 import { integer, smallint, text, timestamp, uuid } from 'drizzle-orm/pg-core';
 import { jsonb } from './columns';
 import type { AutomationEndReason } from './automations';
+import type { PaymentLinkStatus } from './commerce';
 import type { CrmChanger } from './crm';
 import type { ContactSource, MessageType } from './messaging';
 import { appSchema } from './tenancy';
@@ -82,6 +83,12 @@ export type WebhookCampaignStatus =
  */
 export type WebhookOrderStatus =
   'confirmed' | 'awaiting_payment' | 'paid' | 'fulfilled' | 'cancelled';
+
+/**
+ * The statuses a `payment_link.status_changed` event reports, which an endpoint can choose
+ * (ADR-308); a link is `creating` only until the worker creates it, which sends no event.
+ */
+export type WebhookPaymentLinkStatus = Exclude<PaymentLinkStatus, 'creating'>;
 
 /**
  * The statuses a `template.status_changed` event reports, which an endpoint can choose (ADR-148):
@@ -189,6 +196,12 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
    * every status. Set only while `order.status_changed` is among its events.
    */
   orderStatuses: text('order_statuses').array().$type<WebhookOrderStatus[]>(),
+  /**
+   * The statuses a Payment Link reaches that it takes as `payment_link.status_changed` (migration
+   * 0231, ADR-308); null takes every status. Set only while `payment_link.status_changed` is among
+   * its events.
+   */
+  paymentLinkStatuses: text('payment_link_statuses').array().$type<WebhookPaymentLinkStatus[]>(),
   /**
    * The template statuses it takes as `template.status_changed` (ADR-148); null takes every status.
    * Set only while `template.status_changed` is among its events.

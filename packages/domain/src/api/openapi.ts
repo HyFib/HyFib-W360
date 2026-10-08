@@ -31,6 +31,7 @@ import {
   WEBHOOK_SURVEY_SCORES,
   WEBHOOK_MESSAGE_STATUSES,
   WEBHOOK_ORDER_STATUSES,
+  WEBHOOK_PAYMENT_LINK_STATUSES,
   WEBHOOK_RUN_END_STATUSES,
   WEBHOOK_RUN_TRIGGERS,
   WEBHOOK_CONSENT_CHANGES,
@@ -1199,6 +1200,12 @@ export const apiWebhookEndpointSchema = z.object({
     .nullable()
     .describe(
       'The statuses an order reaches that the endpoint receives as order.status_changed; null receives every status.',
+    ),
+  paymentLinkStatuses: z
+    .array(z.enum(WEBHOOK_PAYMENT_LINK_STATUSES))
+    .nullable()
+    .describe(
+      'The statuses a Payment Link reaches that the endpoint receives as payment_link.status_changed; null receives every status.',
     ),
   templateStatuses: z
     .array(z.enum(WEBHOOK_TEMPLATE_STATUSES))
@@ -4155,7 +4162,7 @@ export function buildOpenApiDocument(serverUrl: string) {
       'payment_link.status_changed': webhook(
         'webhookPaymentLinkStatusChanged',
         WEBHOOK_EVENT_INFO['payment_link.status_changed'].label,
-        `${WEBHOOK_EVENT_INFO['payment_link.status_changed'].description} paymentLink.status and paymentLink.previousStatus are the change, as the worker wrote it from what it did at Razorpay or what Razorpay reported; the rest is the link as GET /orders/{id}/payment-links reads it when the event is delivered: its amounts, expiry, the message that sent it in the chat or why it was not sent (notSentReason), what went wrong at Razorpay, and who asked for it (a member, never which, or an API key by its id). Never the link’s address or Razorpay’s ids. Only a link Razorpay reports paid marks the order paid, which order.status_changed reports. Asking for payment and asking to cancel a link send no event of their own here: the link is \`creating\` until the worker creates it, and cancelled when Razorpay reports it. It happens on the order’s WhatsApp number, so an endpoint that names numbers receives it for those numbers only. Deliveries are not ordered: the latest change is the one with the latest createdAt.`,
+        `${WEBHOOK_EVENT_INFO['payment_link.status_changed'].description} paymentLink.status and paymentLink.previousStatus are the change, as the worker wrote it from what it did at Razorpay or what Razorpay reported; the rest is the link as GET /orders/{id}/payment-links reads it when the event is delivered: its amounts, expiry, the message that sent it in the chat or why it was not sent (notSentReason), what went wrong at Razorpay, and who asked for it (a member, never which, or an API key by its id). Never the link’s address or Razorpay’s ids. Only a link Razorpay reports paid marks the order paid, which order.status_changed reports. Asking for payment and asking to cancel a link send no event of their own here: the link is \`creating\` until the worker creates it, and cancelled when Razorpay reports it. An endpoint receives every status unless it names the statuses it takes (its \`paymentLinkStatuses\`, or the statuses ticked in Settings → Webhooks). It happens on the order’s WhatsApp number, so an endpoint that names numbers receives it for those numbers only. Deliveries are not ordered: the latest change is the one with the latest createdAt.`,
         'WebhookPaymentLinkStatusChanged',
       ),
       'campaign.status_changed': webhook(

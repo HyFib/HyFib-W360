@@ -175,6 +175,7 @@ import {
   WEBHOOK_CHANNELS_NEED_THE_EVENTS,
   WEBHOOK_CONVERSATION_STATUSES_NEED_THE_EVENT,
   WEBHOOK_ORDER_STATUSES_NEED_THE_EVENT,
+  WEBHOOK_PAYMENT_LINK_STATUSES_NEED_THE_EVENT,
   WEBHOOK_RUN_END_STATUSES_NEED_THE_EVENT,
   WEBHOOK_SENDERS_NEED_THE_EVENT,
   WEBHOOK_TEAMS_NEED_THE_EVENTS,
@@ -191,6 +192,7 @@ import {
   WEBHOOK_EVENT_KEYS,
   WEBHOOK_FAILURE_KINDS,
   WEBHOOK_LIMITS,
+  WEBHOOK_PAYMENT_LINK_STATUSES,
 } from '../webhooks/model';
 import {
   apiStartManyAutomationRuns,
@@ -1477,6 +1479,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'oauth',
       'orderStatuses',
       'ownerIds',
+      'paymentLinkStatuses',
       'pipelineIds',
       'runEndReasons',
       'runEndStatuses',
@@ -1559,6 +1562,15 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     expect(Object.keys(createBody.properties)).toContain('orderStatuses');
     expect(webhooks['order.status_changed']?.post?.description).toContain(
       'An endpoint receives every status unless it names the statuses it takes (its `orderStatuses`',
+    );
+    // The Payment Link statuses an endpoint receives (ADR-308): a list, or null.
+    const paymentLinkStatuses = (answered.properties as Record<string, { anyOf?: unknown[] }>)
+      .paymentLinkStatuses;
+    expect(paymentLinkStatuses?.anyOf).toHaveLength(2);
+    expect(answered.required).toContain('paymentLinkStatuses');
+    expect(Object.keys(createBody.properties)).toContain('paymentLinkStatuses');
+    expect(webhooks['payment_link.status_changed']?.post?.description).toContain(
+      'An endpoint receives every status unless it names the statuses it takes (its `paymentLinkStatuses`',
     );
     // The template statuses an endpoint receives (ADR-148): a list, or null.
     const templateStatuses = (answered.properties as Record<string, { anyOf?: unknown[] }>)
@@ -3289,6 +3301,58 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     expect(apiUpdateWebhookEndpointSchema.parse({ orderStatuses: ['fulfilled'] })).toEqual({
       orderStatuses: ['fulfilled'],
     });
+  });
+
+  it('take Payment Link statuses only with payment_link.status_changed, and a list of them alone is a change (ADR-308)', () => {
+    const base = {
+      url: 'https://hooks.example.com/w360',
+      events: ['payment_link.status_changed'],
+    };
+    expect(
+      apiCreateWebhookEndpointSchema.parse({
+        ...base,
+        paymentLinkStatuses: ['failed', 'paid', 'failed'],
+      }).paymentLinkStatuses,
+    ).toEqual(['paid', 'failed']);
+    const refused = apiCreateWebhookEndpointSchema.safeParse({
+      ...base,
+      events: ['order.status_changed'],
+      paymentLinkStatuses: ['paid'],
+    });
+    expect(refused.error?.issues.map((i) => [i.path.join('.'), i.message])).toEqual([
+      ['paymentLinkStatuses', WEBHOOK_PAYMENT_LINK_STATUSES_NEED_THE_EVENT],
+    ]);
+    for (const body of [
+      { ...base, paymentLinkStatuses: [] },
+      { ...base, paymentLinkStatuses: ['creating'] },
+    ]) {
+      expect(apiCreateWebhookEndpointSchema.safeParse(body).success, JSON.stringify(body)).toBe(
+        false,
+      );
+    }
+    expect(apiUpdateWebhookEndpointSchema.parse({ paymentLinkStatuses: null })).toEqual({
+      paymentLinkStatuses: null,
+    });
+    expect(apiUpdateWebhookEndpointSchema.parse({ paymentLinkStatuses: ['expired'] })).toEqual({
+      paymentLinkStatuses: ['expired'],
+    });
+    expect(apiUpdateWebhookEndpointSchema.safeParse({}).error?.issues[0]?.message).toContain(
+      'the order statuses, the Payment Link statuses, the template statuses',
+    );
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas;
+    const answered = schemas.WebhookEndpoint as {
+      properties: Record<string, { anyOf?: { items?: { enum?: string[] } }[] }>;
+    };
+    expect(answered.properties.paymentLinkStatuses?.anyOf?.[0]?.items?.enum).toEqual([
+      ...WEBHOOK_PAYMENT_LINK_STATUSES,
+    ]);
+    const given = (schemas.CreateWebhookEndpoint as { properties: Record<string, unknown> })
+      .properties;
+    expect(JSON.stringify(given.paymentLinkStatuses)).toContain(
+      'as payment_link.status_changed (created, partially_paid, paid, expired, cancelled, failed), only with the payment_link.status_changed event',
+    );
   });
 
   it('take campaign statuses only with campaign.status_changed, and a list of them alone is a change (ADR-146)', () => {

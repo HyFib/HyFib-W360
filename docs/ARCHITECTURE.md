@@ -2042,6 +2042,14 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   reached, and writes no event when none does; other types, replays and test events are unchanged.
   Settings (the same status control as campaigns) and the API (`orderStatuses`) set it; a change
   that drops the event clears it.
+- **Payment Link status filters** (migration 0231, ADR-308): `payment_link_statuses` on an endpoint
+  lists the statuses a link reaches that it takes as `payment_link.status_changed` (`created`,
+  `partially_paid`, `paid`, `expired`, `cancelled`, `failed`; a `creating` link sends no event),
+  null for every status; a check keeps it to 1 to 6 known statuses and to endpoints that take the
+  event. `app.capture_webhook_event` (replaced with the same signature) creates a link change's
+  delivery only for endpoints whose list is null or holds the status reached, which the links'
+  trigger passes, and writes no event when none does. Settings (the status control orders use) and
+  the API (`paymentLinkStatuses`) set it; a change that drops the event clears it.
 - **Template status filters** (migration 0112, ADR-148): `template_statuses` on an endpoint lists
   the statuses it takes as `template.status_changed` (the eleven the event reports, `pending` to
   `locked`; HyFib's own steps, a deletion under way or refused and an unrecognised status are never

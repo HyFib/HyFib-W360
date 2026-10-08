@@ -49,6 +49,7 @@ import {
   WEBHOOK_FAILURE_KINDS,
   WEBHOOK_LIMITS,
   WEBHOOK_ORDER_STATUSES,
+  WEBHOOK_PAYMENT_LINK_STATUSES,
   WEBHOOK_RUN_END_STATUSES,
   WEBHOOK_RUN_TRIGGERS,
   WEBHOOK_CONSENT_CHANGES,
@@ -98,6 +99,7 @@ import {
   type WebhookSurveyScore,
   type WebhookMessageStatus,
   type WebhookOrderStatus,
+  type WebhookPaymentLinkStatus,
   type WebhookRunEndStatus,
   type WebhookRunTrigger,
   type WebhookConsentChange,
@@ -408,6 +410,36 @@ export function webhookOrderStatusesFor(
   current: readonly WebhookOrderStatus[] | null,
 ): WebhookOrderStatus[] | null {
   if (!eventTypes.includes('order.status_changed')) return null;
+  const kept = given === undefined ? current : given;
+  return kept ? [...kept] : null;
+}
+
+/**
+ * The statuses a Payment Link reaches that an endpoint takes as `payment_link.status_changed`
+ * (ADR-308), in the order Orders lists them; null takes every status.
+ */
+export const webhookPaymentLinkStatusesSchema = z
+  .array(
+    z.enum(WEBHOOK_PAYMENT_LINK_STATUSES, { error: 'Choose Payment Link statuses from the list.' }),
+  )
+  .min(1, 'Choose at least one Payment Link status, or take every status.')
+  .max(WEBHOOK_PAYMENT_LINK_STATUSES.length, 'Give each Payment Link status once.')
+  .transform((chosen) => WEBHOOK_PAYMENT_LINK_STATUSES.filter((status) => chosen.includes(status)))
+  .nullable();
+
+export const WEBHOOK_PAYMENT_LINK_STATUSES_NEED_THE_EVENT =
+  'Choose Payment Link statuses only for an endpoint that receives Payment Link status.';
+
+/**
+ * The Payment Link statuses an endpoint keeps after it is added or changed: every status (null)
+ * unless it takes `payment_link.status_changed`; then those given, or else the ones it had.
+ */
+export function webhookPaymentLinkStatusesFor(
+  eventTypes: readonly WebhookEventType[],
+  given: readonly WebhookPaymentLinkStatus[] | null | undefined,
+  current: readonly WebhookPaymentLinkStatus[] | null,
+): WebhookPaymentLinkStatus[] | null {
+  if (!eventTypes.includes('payment_link.status_changed')) return null;
   const kept = given === undefined ? current : given;
   return kept ? [...kept] : null;
 }
@@ -1781,6 +1813,10 @@ const endpointFields = z.object({
   campaignStatuses: webhookCampaignStatusesSchema.optional(),
   /** Given, the order statuses it takes (null: every status, ADR-147); left out, they stay. */
   orderStatuses: webhookOrderStatusesSchema.optional(),
+  /**
+   * Given, the Payment Link statuses it takes (null: every status, ADR-308); left out, they stay.
+   */
+  paymentLinkStatuses: webhookPaymentLinkStatusesSchema.optional(),
   /** Given, the template statuses it takes (null: every status, ADR-148); left out, they stay. */
   templateStatuses: webhookTemplateStatusesSchema.optional(),
   /**
@@ -1931,6 +1967,15 @@ const orderStatusesNeedTheEvent = {
   check: (data: { eventTypes: WebhookEventType[]; orderStatuses?: unknown }) =>
     !data.orderStatuses || data.eventTypes.includes('order.status_changed'),
   options: { path: ['orderStatuses'], message: WEBHOOK_ORDER_STATUSES_NEED_THE_EVENT },
+};
+/** Payment Link statuses are chosen only for an endpoint that takes link changes (ADR-308). */
+const paymentLinkStatusesNeedTheEvent = {
+  check: (data: { eventTypes: WebhookEventType[]; paymentLinkStatuses?: unknown }) =>
+    !data.paymentLinkStatuses || data.eventTypes.includes('payment_link.status_changed'),
+  options: {
+    path: ['paymentLinkStatuses'],
+    message: WEBHOOK_PAYMENT_LINK_STATUSES_NEED_THE_EVENT,
+  },
 };
 /** Template statuses are chosen only for an endpoint that takes template changes (ADR-148). */
 const templateStatusesNeedTheEvent = {
@@ -2104,6 +2149,7 @@ const endpointSchema = endpointFields
   .refine(automationsNeedTheEvents.check, automationsNeedTheEvents.options)
   .refine(campaignStatusesNeedTheEvent.check, campaignStatusesNeedTheEvent.options)
   .refine(orderStatusesNeedTheEvent.check, orderStatusesNeedTheEvent.options)
+  .refine(paymentLinkStatusesNeedTheEvent.check, paymentLinkStatusesNeedTheEvent.options)
   .refine(templateStatusesNeedTheEvent.check, templateStatusesNeedTheEvent.options)
   .refine(conversationStatusesNeedTheEvent.check, conversationStatusesNeedTheEvent.options)
   .refine(runEndStatusesNeedTheEvent.check, runEndStatusesNeedTheEvent.options)
@@ -2140,6 +2186,7 @@ const updateSchema = endpointFields
   .refine(automationsNeedTheEvents.check, automationsNeedTheEvents.options)
   .refine(campaignStatusesNeedTheEvent.check, campaignStatusesNeedTheEvent.options)
   .refine(orderStatusesNeedTheEvent.check, orderStatusesNeedTheEvent.options)
+  .refine(paymentLinkStatusesNeedTheEvent.check, paymentLinkStatusesNeedTheEvent.options)
   .refine(templateStatusesNeedTheEvent.check, templateStatusesNeedTheEvent.options)
   .refine(conversationStatusesNeedTheEvent.check, conversationStatusesNeedTheEvent.options)
   .refine(runEndStatusesNeedTheEvent.check, runEndStatusesNeedTheEvent.options)
@@ -2215,6 +2262,8 @@ export interface WebhookEndpointView {
   campaignStatuses: WebhookCampaignStatus[] | null;
   /** The order statuses it takes (ADR-147); null takes every status. */
   orderStatuses: WebhookOrderStatus[] | null;
+  /** The Payment Link statuses it takes (ADR-308); null takes every status. */
+  paymentLinkStatuses: WebhookPaymentLinkStatus[] | null;
   /** The template statuses it takes (ADR-148); null takes every status. */
   templateStatuses: WebhookTemplateStatus[] | null;
   /** The conversation statuses it takes (ADR-149); null takes every status. */
@@ -2546,6 +2595,7 @@ export async function lockWebhookEndpoint(
       automationIds: webhookEndpoints.automationIds,
       campaignStatuses: webhookEndpoints.campaignStatuses,
       orderStatuses: webhookEndpoints.orderStatuses,
+      paymentLinkStatuses: webhookEndpoints.paymentLinkStatuses,
       templateStatuses: webhookEndpoints.templateStatuses,
       conversationStatuses: webhookEndpoints.conversationStatuses,
       runEndStatuses: webhookEndpoints.runEndStatuses,
@@ -2617,6 +2667,7 @@ export async function insertWebhookEndpoint(
     automationIds: string[] | null;
     campaignStatuses: WebhookCampaignStatus[] | null;
     orderStatuses: WebhookOrderStatus[] | null;
+    paymentLinkStatuses: WebhookPaymentLinkStatus[] | null;
     templateStatuses: WebhookTemplateStatus[] | null;
     conversationStatuses: WebhookConversationStatus[] | null;
     runEndStatuses: WebhookRunEndStatus[] | null;
@@ -2677,6 +2728,7 @@ export async function insertWebhookEndpoint(
     automationIds: input.automationIds,
     campaignStatuses: input.campaignStatuses,
     orderStatuses: input.orderStatuses,
+    paymentLinkStatuses: input.paymentLinkStatuses,
     templateStatuses: input.templateStatuses,
     conversationStatuses: input.conversationStatuses,
     runEndStatuses: input.runEndStatuses,
@@ -3086,6 +3138,7 @@ export function createWebhooksService(deps: {
               automationIds: webhookEndpoints.automationIds,
               campaignStatuses: webhookEndpoints.campaignStatuses,
               orderStatuses: webhookEndpoints.orderStatuses,
+              paymentLinkStatuses: webhookEndpoints.paymentLinkStatuses,
               templateStatuses: webhookEndpoints.templateStatuses,
               conversationStatuses: webhookEndpoints.conversationStatuses,
               runEndStatuses: webhookEndpoints.runEndStatuses,
@@ -3732,6 +3785,11 @@ export function createWebhooksService(deps: {
           null,
         );
         const orderStatuses = webhookOrderStatusesFor(data.eventTypes, data.orderStatuses, null);
+        const paymentLinkStatuses = webhookPaymentLinkStatusesFor(
+          data.eventTypes,
+          data.paymentLinkStatuses,
+          null,
+        );
         const templateStatuses = webhookTemplateStatusesFor(
           data.eventTypes,
           data.templateStatuses,
@@ -3841,6 +3899,7 @@ export function createWebhooksService(deps: {
           automationIds,
           campaignStatuses,
           orderStatuses,
+          paymentLinkStatuses,
           templateStatuses,
           conversationStatuses,
           runEndStatuses,
@@ -3889,6 +3948,7 @@ export function createWebhooksService(deps: {
               ...(automationIds ? { automationIds } : {}),
               ...(campaignStatuses ? { campaignStatuses } : {}),
               ...(orderStatuses ? { orderStatuses } : {}),
+              ...(paymentLinkStatuses ? { paymentLinkStatuses } : {}),
               ...(templateStatuses ? { templateStatuses } : {}),
               ...(conversationStatuses ? { conversationStatuses } : {}),
               ...(runEndStatuses ? { runEndStatuses } : {}),
@@ -3984,6 +4044,11 @@ export function createWebhooksService(deps: {
           data.eventTypes,
           data.orderStatuses,
           endpoint.orderStatuses,
+        );
+        const paymentLinkStatuses = webhookPaymentLinkStatusesFor(
+          data.eventTypes,
+          data.paymentLinkStatuses,
+          endpoint.paymentLinkStatuses,
         );
         const templateStatuses = webhookTemplateStatusesFor(
           data.eventTypes,
@@ -4212,6 +4277,7 @@ export function createWebhooksService(deps: {
             automationIds,
             campaignStatuses,
             orderStatuses,
+            paymentLinkStatuses,
             templateStatuses,
             conversationStatuses,
             runEndStatuses,
@@ -4271,6 +4337,7 @@ export function createWebhooksService(deps: {
               ...(automationIds ? { automationIds } : {}),
               ...(campaignStatuses ? { campaignStatuses } : {}),
               ...(orderStatuses ? { orderStatuses } : {}),
+              ...(paymentLinkStatuses ? { paymentLinkStatuses } : {}),
               ...(templateStatuses ? { templateStatuses } : {}),
               ...(conversationStatuses ? { conversationStatuses } : {}),
               ...(runEndStatuses ? { runEndStatuses } : {}),
