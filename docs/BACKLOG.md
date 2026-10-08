@@ -1210,11 +1210,14 @@ verification, app review, Embedded Signup configuration).
   **[Tag filters for satisfaction survey answers built; their database tests run only in CI]**
   (ADR-312, migration 0235: an endpoint takes the answers of contacts or conversations with chosen
   tags, as they have them when the customer answers; other events are not narrowed).
+  **[Tag filters for added and changed contacts built; their database tests run only in CI]**
+  (ADR-316, migration 0239: an endpoint takes the `contact.created` and `contact.updated` of
+  contacts with chosen tags, and the changes adding or removing one; erased and merged contacts are
+  not narrowed).
   Remaining: filters for other event types and on a message's or contact's values (such as a field's
-  value, contact events by tag, or the key that started a run or made a change), other
-  authentication (headers computed per delivery, other OAuth grants), mutual TLS, fixed egress
-  addresses, events for store orders and each step of a run, `createdAt` finer than the millisecond,
-  load tests.
+  value, or the key that started a run or made a change), other authentication (headers computed per
+  delivery, other OAuth grants), mutual TLS, fixed egress addresses, events for store orders and
+  each step of a run, `createdAt` finer than the millisecond, load tests.
 - **P5-10 Platform ops screens** **[built, locally verified with test data only]** (ADR-054):
   `/platform/ops` with Overview, Onboarding (failed and abandoned signups, failed or stuck number
   setups, new companies without a number), Integrations (current failures with host-only labels,
@@ -1276,10 +1279,14 @@ verification, app review, Embedded Signup configuration).
   gives when, never who or the note).
   **[Exports beyond the rows a tab shows built; its database tests run only in CI]** (ADR-200: a
   list's CSV gives up to 5,000 rows, 1,000 failures and 500 signups, in the tab's order; the tabs
-  keep their rows). **[Assigning failing integrations built; its database and browser tests run
-  only in CI]** (ADR-313: a platform administrator assigns a failure Current failures lists to a
-  platform administrator, themselves or another, shown with to whom, by whom and when, audited,
-  lasting while the failure is listed; the CSV leaves it out). Remaining:
+  keep their rows). **[Assigning failing integrations, emailing the assignee and listing one's own
+  and the unassigned built; their database and browser tests run only in CI]** (ADR-313: a platform
+  administrator assigns a failure Current failures lists to a platform administrator, themselves or
+  another, shown with to whom, by whom and when, audited, lasting while the failure is listed; the
+  CSV leaves it out. ADR-314: an assignee is emailed once about each failure another administrator
+  assigned them, with counts only. ADR-315: "Assigned to me" lists only the failures assigned to the
+  administrator reading. ADR-318: "Unassigned" lists only the failures assigned to nobody).
+  Remaining:
   other alert channels, longer trends and charts, Meta's quality webhook (unconfirmed),
   paging and rollups for many companies.
 - **P5-11 Account export/deletion workflow** **[built, locally verified with test data only]**
@@ -1313,7 +1320,12 @@ review; production rollout per RELEASE-CHECKLIST.
 ## Security backlog
 
 - **SEC-1** WebAuthn/passkeys for privileged roles.
-- **SEC-2** Breached-password screening at sign-up/reset (k-anonymity API or offline list).
+- **SEC-2** ~~Breached-password screening at sign-up/reset (k-anonymity API or offline list).~~
+  Settled by ADR-317: the password a sign-up, reset or change sets is checked with the Pwned
+  Passwords range API (the first five characters of its SHA-1 hash, padded answers) and refused when
+  it appears in a breach; a check that cannot be made takes it with a warning. On by default for
+  staging and production; its end-to-end test runs in CI against a stand-in, and the live API is to
+  be checked from production.
 - **SEC-3** Central SSRF-safe egress client (DNS pinning, private/metadata range blocking, redirect
   re-validation, limits) used by all outbound HTTP — _built with P4-02 (ADR-042) and used by the
   automation HTTP step, the Flows data endpoint (P4-03) and outgoing webhooks (P5-09); imports

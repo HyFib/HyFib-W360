@@ -127,6 +127,15 @@ const webSchema = baseSchema.extend({
     .min(0)
     .max(24 * 30)
     .default(72),
+  /**
+   * Screening the passwords people set against passwords exposed in data breaches (ADR-317):
+   * `pwned-passwords` checks each one with the Pwned Passwords range API, which receives only the
+   * first five characters of the password's SHA-1 hash; `off` does not. Unset, on for
+   * APP_ENV=staging|production and off for local|test.
+   */
+  PASSWORD_BREACH_CHECK: z.enum(['pwned-passwords', 'off']).optional(),
+  /** Range API origin override, allowed only for APP_ENV=local|test (a test stand-in). */
+  PWNED_PASSWORDS_BASE_URL: z.url().optional(),
 });
 
 const workerSchema = baseSchema.extend({
@@ -239,6 +248,8 @@ export function loadWebConfig(env: NodeJS.ProcessEnv = process.env): WebConfig {
   const config = parse(webSchema, env);
   assertJobSigningKeys(config);
   assertProductionSafety(config);
+  // Refuses a stand-in's origin outside local|test at start-up, not at the first sign-up.
+  passwordBreachCheckFrom(config);
   return config;
 }
 
@@ -261,6 +272,31 @@ export interface MetaConfig {
 }
 
 export const META_GRAPH_ORIGIN = 'https://graph.facebook.com';
+
+export const PWNED_PASSWORDS_ORIGIN = 'https://api.pwnedpasswords.com';
+
+/**
+ * Where the passwords people set are screened against breached ones (ADR-317), or null when they
+ * are not: the Pwned Passwords range API, or a test stand-in only with APP_ENV=local|test.
+ */
+export function passwordBreachCheckFrom(
+  config: Pick<WebConfig, 'APP_ENV' | 'PASSWORD_BREACH_CHECK' | 'PWNED_PASSWORDS_BASE_URL'>,
+): { baseUrl: string } | null {
+  const baseUrl = (config.PWNED_PASSWORDS_BASE_URL ?? PWNED_PASSWORDS_ORIGIN).replace(/\/$/, '');
+  if (
+    baseUrl !== PWNED_PASSWORDS_ORIGIN &&
+    config.APP_ENV !== 'local' &&
+    config.APP_ENV !== 'test'
+  ) {
+    throw new ConfigError(
+      `PWNED_PASSWORDS_BASE_URL must be ${PWNED_PASSWORDS_ORIGIN} in ${config.APP_ENV}`,
+    );
+  }
+  const on = config.PASSWORD_BREACH_CHECK
+    ? config.PASSWORD_BREACH_CHECK === 'pwned-passwords'
+    : config.APP_ENV === 'staging' || config.APP_ENV === 'production';
+  return on ? { baseUrl } : null;
+}
 
 /** Returns Meta configuration only when all mandatory values are present. */
 export function metaConfigFrom(config: BaseConfig): MetaConfig | null {

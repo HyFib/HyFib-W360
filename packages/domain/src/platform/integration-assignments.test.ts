@@ -3,7 +3,7 @@ import { PgDialect } from 'drizzle-orm/pg-core';
 import { isAppError } from '@w360/core';
 import type { SQL } from '@w360/db';
 import type { PlatformDatabase } from '@w360/db/platform';
-import { FAILURES_CSV_COLUMNS } from './ops-model';
+import { FAILURES_CSV_COLUMNS, integrationFailureView } from './ops-model';
 import { createPlatformOpsService } from './ops';
 import type { PlatformActor } from './service';
 
@@ -100,5 +100,29 @@ describe('assigning companies’ failing integrations (ADR-313)', () => {
 
   it('leaves assignments out of the failures’ CSV, which stays as ADR-158 wrote it', () => {
     expect(FAILURES_CSV_COLUMNS.filter((c) => /assign|administrator/i.test(c))).toEqual([]);
+  });
+});
+
+describe('the failures assigned to the administrator reading the console (ADR-315)', () => {
+  it('lists them when the query string asks for mine, and every failure for anything else', () => {
+    expect(integrationFailureView('mine')).toBe('mine');
+    // Those assigned to nobody (ADR-318).
+    expect(integrationFailureView('unassigned')).toBe('unassigned');
+    for (const value of [
+      undefined,
+      '',
+      'all',
+      'MINE',
+      ' mine',
+      'yours',
+      ['mine'],
+      1,
+      'Unassigned',
+      'unassigned ',
+      ['unassigned'],
+      'nobody',
+    ]) {
+      expect(integrationFailureView(value), JSON.stringify(value)).toBe('all');
+    }
   });
 });

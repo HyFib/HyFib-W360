@@ -97,10 +97,22 @@ export const auditQuerySchema = z.object({
     .optional(),
 });
 
+/** The lengths of a password a person sets, as the auth library enforces them. */
+export const PASSWORD_MIN_LENGTH = 12;
+export const PASSWORD_MAX_LENGTH = 128;
+
 export const passwordSchema = z
   .string()
-  .min(12, 'Use at least 12 characters')
-  .max(128, 'Use at most 128 characters');
+  .min(PASSWORD_MIN_LENGTH, `Use at least ${PASSWORD_MIN_LENGTH} characters`)
+  .max(PASSWORD_MAX_LENGTH, `Use at most ${PASSWORD_MAX_LENGTH} characters`);
+
+/**
+ * A password refused because it appears in known data breaches (ADR-317): the auth API's error
+ * code, and what the forms that set a password say.
+ */
+export const PASSWORD_BREACHED_CODE = 'PASSWORD_BREACHED';
+export const PASSWORD_BREACHED_MESSAGE =
+  'This password appears in known data breaches, so it is easy to guess. Choose a different one.';
 
 export const signUpSchema = z.object({
   name: z.string().trim().min(1, 'Required').max(200),

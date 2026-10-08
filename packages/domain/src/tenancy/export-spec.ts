@@ -1642,6 +1642,7 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
       'survey_team_ids',
       'survey_contact_tags',
       'survey_conversation_tags',
+      'contact_event_tags',
       'assignee_ids',
       'contact_tags',
       'conversation_tags',

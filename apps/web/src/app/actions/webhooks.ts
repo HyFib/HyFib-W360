@@ -106,6 +106,7 @@ export async function createWebhookEndpointAction(
     surveyContactTags: string[] | null;
     /** The conversation tags of the survey answers it takes (ADR-312); null: every answer. */
     surveyConversationTags: string[] | null;
+    contactEventTags: string[] | null;
     /** The members whose assigned conversations' events it takes (ADR-181); null: every one's. */
     assigneeIds: string[] | null;
     /** The contact tags whose conversations' events it takes (ADR-267); null: every one's. */
@@ -214,6 +215,7 @@ export async function updateWebhookEndpointAction(
     surveyContactTags: string[] | null;
     /** The conversation tags of the survey answers it takes (ADR-312); null: every answer. */
     surveyConversationTags: string[] | null;
+    contactEventTags: string[] | null;
     /** The members whose assigned conversations' events it takes (ADR-181); null: every one's. */
     assigneeIds: string[] | null;
     /** The contact tags whose conversations' events it takes (ADR-267); null: every one's. */

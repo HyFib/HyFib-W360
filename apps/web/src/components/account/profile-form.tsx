@@ -1,5 +1,10 @@
 'use client';
 import { useState } from 'react';
+import {
+  PASSWORD_BREACHED_CODE,
+  PASSWORD_BREACHED_MESSAGE,
+  PASSWORD_MIN_LENGTH,
+} from '@w360/contracts';
 import { Button, Field, Input } from '@w360/ui';
 import { authClient } from '@/lib/auth-client';
 import { FormError, FormSuccess } from '@/components/form-status';
@@ -54,8 +59,8 @@ export function ChangePasswordForm() {
     event.preventDefault();
     setError(null);
     setSaved(false);
-    if (next.length < 12) {
-      setError('Use at least 12 characters.');
+    if (next.length < PASSWORD_MIN_LENGTH) {
+      setError(`Use at least ${PASSWORD_MIN_LENGTH} characters.`);
       return;
     }
     const result = await authClient.changePassword({
@@ -63,8 +68,13 @@ export function ChangePasswordForm() {
       newPassword: next,
       revokeOtherSessions: true,
     });
-    if (result.error) setError('Current password is incorrect, or the new password was rejected.');
-    else {
+    if (result.error) {
+      setError(
+        result.error.code === PASSWORD_BREACHED_CODE
+          ? PASSWORD_BREACHED_MESSAGE
+          : 'Current password is incorrect, or the new password was rejected.',
+      );
+    } else {
       setSaved(true);
       setCurrent('');
       setNext('');

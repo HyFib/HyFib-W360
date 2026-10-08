@@ -237,6 +237,9 @@ import {
   webhookSurveyConversationTagsSchema,
   WEBHOOK_SURVEY_CONTACT_TAGS_NEED_THE_EVENT,
   WEBHOOK_SURVEY_CONVERSATION_TAGS_NEED_THE_EVENT,
+  webhookContactEventTagsFor,
+  webhookContactEventTagsSchema,
+  WEBHOOK_CONTACT_EVENT_TAGS_NEED_THE_EVENTS,
   webhookTeamIdsFor,
   webhookTeamIdsSchema,
   webhookTemplateIdsFor,
@@ -2839,6 +2842,61 @@ describe('survey tag filters (ADR-312)', () => {
     );
     expect(WEBHOOK_SURVEY_CONVERSATION_TAGS_NEED_THE_EVENT).toBe(
       `Choose the conversation tags of answered surveys only for an endpoint that receives ${event}.`,
+    );
+  });
+});
+
+describe('contact event tag filters (ADR-316)', () => {
+  it('take 1 to 50 tags as contacts carry them, once each, in the order given; null takes every contact', () => {
+    const tags = Array.from({ length: 51 }, (_, i) => `tag ${i}`);
+    const schema = webhookContactEventTagsSchema;
+    expect(schema.parse(['VIP', ' wholesale ', 'vip', 'Gold   Member'])).toEqual([
+      'vip',
+      'wholesale',
+      'gold member',
+    ]);
+    expect(schema.parse(null)).toBeNull();
+    expect(schema.parse(tags.slice(1))).toEqual(tags.slice(1));
+    const refusal = (given: unknown) => {
+      const issue = schema.safeParse(given).error?.issues[0];
+      return issue && [issue.path.join('.'), issue.message];
+    };
+    expect(refusal([])).toEqual(['', 'Give at least one tag, or take every contact.']);
+    expect(refusal(tags)).toEqual(['', 'Give at most 50 tags.']);
+    expect(refusal(['vip', 'a,b'])).toEqual([
+      '1',
+      'Tags cannot contain commas or control characters.',
+    ]);
+    expect(refusal(['vip', 42])).toEqual(['1', 'Give tags as text.']);
+    expect(schema.safeParse('vip').success).toBe(false);
+    expect(WEBHOOK_LIMITS.contactEventTags).toBe(50);
+  });
+
+  it('are kept only while the endpoint takes added or changed contacts: given, kept, or cleared', () => {
+    for (const events of [
+      ['contact.created'],
+      ['contact.updated'],
+      ['contact.created', 'contact.updated', 'message.received'],
+    ] as const) {
+      expect(webhookContactEventTagsFor([...events], ['vip'], null), events.join()).toEqual([
+        'vip',
+      ]);
+      expect(webhookContactEventTagsFor([...events], undefined, ['gold'])).toEqual(['gold']);
+      expect(webhookContactEventTagsFor([...events], null, ['gold'])).toBeNull();
+      expect(webhookContactEventTagsFor([...events], undefined, null)).toBeNull();
+    }
+    // Erased and merged contacts, and conversations' events, are not narrowed by these tags.
+    expect(
+      webhookContactEventTagsFor(
+        ['contact.erased', 'contact.merged', 'message.received'],
+        ['vip'],
+        ['vip'],
+      ),
+    ).toBeNull();
+    const added = WEBHOOK_EVENT_INFO['contact.created'].label;
+    const changed = WEBHOOK_EVENT_INFO['contact.updated'].label;
+    expect(WEBHOOK_CONTACT_EVENT_TAGS_NEED_THE_EVENTS).toBe(
+      `Choose the tags of added and changed contacts only for an endpoint that receives ${added} or ${changed}.`,
     );
   });
 });

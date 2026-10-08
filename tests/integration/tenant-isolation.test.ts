@@ -297,6 +297,21 @@ describe('database roles', () => {
     expect(await can('w360_platform', assign)).toBe(true);
     expect(await can('w360_app', assign)).toBe(false);
     expect(await can('w360_auth', assign)).toBe(false);
+    // The failures assigned to the administrator reading (0238) and to nobody (0240): platform
+    // staff only.
+    for (const fn of [
+      'ops.platform_ops_assigned_integration_failures(integer)',
+      'ops.platform_ops_unassigned_integration_failures(integer)',
+    ]) {
+      expect(await can('w360_platform', fn), fn).toBe(true);
+      expect(await can('w360_app', fn), fn).toBe(false);
+      expect(await can('w360_auth', fn), fn).toBe(false);
+    }
+    // Emailing the assignees (0237): the worker's sweep only.
+    const notices = 'ops.claim_integration_assignment_notices()';
+    expect(await can('w360_app', notices)).toBe(true);
+    expect(await can('w360_auth', notices)).toBe(false);
+    expect(await can('w360_platform', notices)).toBe(false);
     const rule = 'ops.webhook_receipt_exhausted(text,integer,timestamp with time zone)';
     expect(await can('w360_app', rule)).toBe(true);
     expect(await can('w360_platform', rule)).toBe(true);
@@ -315,6 +330,8 @@ describe('database roles', () => {
       'app.capture_webhook_event(uuid,text,uuid,uuid,uuid,uuid,text,jsonb,timestamp with time zone)',
       'app.capture_contact_webhook_event(uuid,uuid,text,text[])',
       'app.add_contact_webhook_changes(uuid,uuid,text[])',
+      // Matching the tags a change adds and removes (0239), as the capture does.
+      'app.deliver_contact_webhook_tag(uuid,uuid,text)',
     ]) {
       expect(await can('w360_app', fn), fn).toBe(true);
       expect(await can('w360_definer', fn), fn).toBe(true);

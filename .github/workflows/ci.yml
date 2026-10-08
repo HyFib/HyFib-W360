@@ -142,6 +142,11 @@ jobs:
       SHOPIFY_TEST_BASE_URL: http://127.0.0.1:4030
       E2E_SHOPIFY_PORT: '4030'
       E2E_WOO_PORT: '4040'
+      # Passwords people set are screened against the local Pwned Passwords stand-in started by the
+      # Playwright global setup (ADR-317; another origin is refused outside APP_ENV=local|test).
+      PASSWORD_BREACH_CHECK: pwned-passwords
+      PWNED_PASSWORDS_BASE_URL: http://127.0.0.1:4050
+      E2E_PWNED_PORT: '4050'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0

@@ -1688,6 +1688,287 @@ describe('contact tag changes (ADR-182)', () => {
   });
 });
 
+describe('contact event tag filters (ADR-316)', () => {
+  /** An endpoint of the company taking these contact events, narrowed by these lists. */
+  const add = async (
+    c: Company,
+    eventTypes: WebhookEventType[],
+    lists: Record<string, unknown>,
+  ) => {
+    const path = `/ok/${randomBytes(6).toString('hex')}`;
+    const owner = await fx.ctx(c, c.owner);
+    const created = await webhooks().create(owner, {
+      url: `http://${HOST}:${port}${path}`,
+      eventTypes,
+      ...lists,
+    });
+    return { ...created, path };
+  };
+  /** What an endpoint was sent, sorted: each event's type and contact, and an update's changes. */
+  const sentTo = (path: string) =>
+    bodiesAt(path)
+      .map((b) => [
+        b.type,
+        (b.data.contact as { id: string }).id,
+        (b.data.changes as string[] | undefined) ?? null,
+      ])
+      .sort((x, y) => JSON.stringify(x).localeCompare(JSON.stringify(y)));
+  const sorted = (rows: unknown[][]) =>
+    [...rows].sort((x, y) => JSON.stringify(x).localeCompare(JSON.stringify(y)));
+
+  it('sends an endpoint that names tags the changes of contacts that have one of them, and the changes adding or removing one', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const service = contactsService();
+    const vips = await add(c, ['contact.updated'], { contactEventTags: ['vip', 'gold member'] });
+    const vipNames = await add(c, ['contact.updated'], {
+      contactEventTags: ['vip'],
+      contactParts: ['name'],
+    });
+    const every = await add(c, ['contact.updated'], {});
+    const { id: hema } = await service.createContact(owner, {
+      displayName: 'Hema',
+      phone: '+919811100161',
+    });
+    const { id: ravi } = await service.createContact(owner, {
+      displayName: 'Ravi',
+      phone: '+919811100162',
+    });
+    // Tagged vip: a change adding a listed tag, sent to the endpoint taking every part.
+    await service.addTags(owner, hema, ['vip']);
+    // A change of a vip: sent, by its part too.
+    await service.updateContact(owner, hema, { displayName: 'Hema K' });
+    // Changes of a contact without a listed tag, one adding a tag no endpoint names.
+    await service.updateContact(owner, ravi, { displayName: 'Ravi S' });
+    await service.addTags(owner, ravi, ['north']);
+    // The change removing vip is sent; the next one, of a contact no longer vip, is not.
+    await service.removeTag(owner, hema, 'vip');
+    await service.updateContact(owner, hema, { displayName: 'Hema R' });
+    // A tag as contacts carry it: "Gold Member" is the endpoint's "gold member".
+    await service.addTags(owner, ravi, ['Gold   Member']);
+
+    expect(
+      (await eventsOf(c, 'contact.')).map((e) => [
+        e.type,
+        e.contact_id,
+        e.contact_changes,
+        e.deliveries,
+      ]),
+    ).toEqual([
+      ['contact.created', hema, null, 0],
+      ['contact.created', ravi, null, 0],
+      ['contact.updated', hema, ['tags'], 2],
+      ['contact.updated', hema, ['name'], 3],
+      ['contact.updated', ravi, ['name'], 1],
+      ['contact.updated', ravi, ['tags'], 1],
+      ['contact.updated', hema, ['tags'], 2],
+      ['contact.updated', hema, ['name'], 1],
+      ['contact.updated', ravi, ['tags'], 2],
+    ]);
+    await deliverDue(c);
+    expect(sentTo(vips.path)).toEqual(
+      sorted([
+        ['contact.updated', hema, ['tags']],
+        ['contact.updated', hema, ['name']],
+        ['contact.updated', hema, ['tags']],
+        ['contact.updated', ravi, ['tags']],
+      ]),
+    );
+    expect(sentTo(vipNames.path)).toEqual([['contact.updated', hema, ['name']]]);
+    expect(sentTo(every.path)).toHaveLength(7);
+    // The removal says which tag it removed.
+    expect(
+      bodiesAt(vips.path)
+        .filter((b) => (b.data.tagsRemoved as string[]).length > 0)
+        .map((b) => [b.data.tagsAdded, b.data.tagsRemoved]),
+    ).toEqual([[[], ['vip']]]);
+
+    // In one transaction, a listed tag added and removed again is a change that named it.
+    const scope = authorizedTenantScope(c.tenant.id, c.owner.id);
+    await fx.dbs.app.run(scope, async (tx) => {
+      await tx.execute(sql`insert into app.contact_tags (id, tenant_id, contact_id, tag)
+        values (gen_random_uuid(), ${c.tenant.id}::uuid, ${hema}::uuid, 'vip')`);
+      await tx.execute(sql`delete from app.contact_tags
+        where tenant_id = ${c.tenant.id}::uuid and contact_id = ${hema}::uuid and tag = 'vip'`);
+    });
+    expect((await eventsOf(c, 'contact.')).at(-1)).toMatchObject({
+      type: 'contact.updated',
+      contact_id: hema,
+      deliveries: 2,
+    });
+  });
+
+  it('sends a change that passes the parts and the tags whatever the order of the writes in its transaction', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const service = contactsService();
+    const vipNames = await add(c, ['contact.updated'], {
+      contactEventTags: ['vip'],
+      contactParts: ['name'],
+    });
+    const { id: hema } = await service.createContact(owner, {
+      displayName: 'Hema',
+      phone: '+919811100168',
+    });
+    const { id: ravi } = await service.createContact(owner, {
+      displayName: 'Ravi',
+      phone: '+919811100169',
+      tags: ['vip'],
+    });
+    const scope = authorizedTenantScope(c.tenant.id, c.owner.id);
+    const rename = (contactId: string, name: string) =>
+      sql`update app.contacts set display_name = ${name}
+        where tenant_id = ${c.tenant.id}::uuid and id = ${contactId}::uuid`;
+    const tagVip = (contactId: string) =>
+      sql`insert into app.contact_tags (id, tenant_id, contact_id, tag)
+        values (gen_random_uuid(), ${c.tenant.id}::uuid, ${contactId}::uuid, 'vip')`;
+    const untagVip = (contactId: string) =>
+      sql`delete from app.contact_tags
+        where tenant_id = ${c.tenant.id}::uuid and contact_id = ${contactId}::uuid and tag = 'vip'`;
+    // Renamed, then tagged vip, in one transaction, as the API writes a contact's change.
+    await fx.dbs.app.run(scope, async (tx) => {
+      await tx.execute(rename(hema, 'Hema K'));
+      await tx.execute(tagVip(hema));
+    });
+    // Untagged, then renamed, in one transaction: a change that removed vip.
+    await fx.dbs.app.run(scope, async (tx) => {
+      await tx.execute(untagVip(ravi));
+      await tx.execute(rename(ravi, 'Ravi S'));
+    });
+    // A change of tags alone is not a change of the name.
+    await service.addTags(owner, ravi, ['vip']);
+    expect(
+      (await eventsOf(c, 'contact.')).map((e) => [
+        e.type,
+        e.contact_id,
+        e.contact_changes,
+        e.deliveries,
+      ]),
+    ).toEqual([
+      ['contact.created', hema, null, 0],
+      ['contact.created', ravi, null, 0],
+      ['contact.updated', hema, ['name', 'tags'], 1],
+      ['contact.updated', ravi, ['name', 'tags'], 1],
+      ['contact.updated', ravi, ['tags'], 0],
+    ]);
+    await deliverDue(c);
+    expect(sentTo(vipNames.path)).toEqual(
+      sorted([
+        ['contact.updated', hema, ['name', 'tags']],
+        ['contact.updated', ravi, ['name', 'tags']],
+      ]),
+    );
+  });
+
+  it('sends a contact added with a listed tag as contact.created, by its source too, and one tagged later as contact.updated', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const service = contactsService();
+    const vipsAdded = await add(c, ['contact.created'], { contactEventTags: ['vip'] });
+    const apiVipsAdded = await add(c, ['contact.created'], {
+      contactEventTags: ['vip'],
+      contactSources: ['api'],
+    });
+    const vipsBoth = await add(c, ['contact.created', 'contact.updated'], {
+      contactEventTags: ['vip'],
+    });
+    const everyAdded = await add(c, ['contact.created'], {});
+    // Added with vip by a member, in one transaction.
+    const { id: hema } = await service.createContact(owner, {
+      displayName: 'Hema',
+      phone: '+919811100163',
+      tags: ['vip'],
+    });
+    // Added with vip from the API, in one transaction.
+    const api = uuidv7();
+    await fx.dbs.app.run(authorizedTenantScope(c.tenant.id, c.owner.id), async (tx) => {
+      await tx.execute(sql`insert into app.contacts (id, tenant_id, phone_e164, source)
+        values (${api}::uuid, ${c.tenant.id}::uuid, '+919811100164', 'api')`);
+      await tx.execute(sql`insert into app.contact_tags (id, tenant_id, contact_id, tag)
+        values (gen_random_uuid(), ${c.tenant.id}::uuid, ${api}::uuid, 'vip')`);
+    });
+    // Added without tags and tagged later: the tagging is a change.
+    const { id: ravi } = await service.createContact(owner, {
+      displayName: 'Ravi',
+      phone: '+919811100165',
+    });
+    await service.addTags(owner, ravi, ['vip']);
+
+    expect(
+      (await eventsOf(c, 'contact.')).map((e) => [e.type, e.contact_id, e.deliveries]),
+    ).toEqual([
+      ['contact.created', hema, 3],
+      ['contact.created', api, 4],
+      ['contact.created', ravi, 1],
+      ['contact.updated', ravi, 1],
+    ]);
+    await deliverDue(c);
+    expect(sentTo(vipsAdded.path)).toEqual(
+      sorted([
+        ['contact.created', hema, null],
+        ['contact.created', api, null],
+      ]),
+    );
+    expect(sentTo(apiVipsAdded.path)).toEqual([['contact.created', api, null]]);
+    expect(sentTo(vipsBoth.path)).toEqual(
+      sorted([
+        ['contact.created', hema, null],
+        ['contact.created', api, null],
+        ['contact.updated', ravi, ['tags']],
+      ]),
+    );
+    expect(sentTo(everyAdded.path)).toHaveLength(3);
+  });
+
+  it('matches tags as the definer role merging and erasing contacts: the tag a merge gives the kept contact is sent, and an erasure is sent as itself', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const service = contactsService();
+    const vips = await add(c, ['contact.updated', 'contact.erased'], {
+      contactEventTags: ['vip'],
+    });
+    const { id: kept } = await service.createContact(owner, {
+      displayName: 'Gita',
+      phone: '+919811100166',
+    });
+    const merged = await writesByUserId(c);
+    await service.addTags(owner, merged, ['vip']);
+    await deliverDue(c);
+    expect(sentTo(vips.path)).toEqual([['contact.updated', merged, ['tags']]]);
+
+    // The merge moves the tag to the kept contact as the definer role; the merged contact is gone,
+    // so its last change is not sent.
+    await createContactMergeService({ db: fx.dbs.app, clock: systemClock }).mergeContacts(owner, {
+      keepContactId: kept,
+      mergeContactId: merged,
+    });
+    await deliverDue(c);
+    const afterMerge = bodiesAt(vips.path).slice(1);
+    expect(afterMerge.map((b) => [b.type, (b.data.contact as { id: string }).id])).toEqual([
+      ['contact.updated', kept],
+    ]);
+    expect(afterMerge[0]!.data.tagsAdded).toEqual(['vip']);
+
+    // Erasing the kept contact removes its tags as the definer role: no change is sent, and the
+    // erasure is, contact.erased being narrowed by no tag.
+    await service.eraseContact(owner, { contactId: kept, suppress: false });
+    const { id: plain } = await service.createContact(owner, { phone: '+919811100167' });
+    await service.eraseContact(owner, { contactId: plain, suppress: false });
+    await deliverDue(c);
+    expect(
+      bodiesAt(vips.path)
+        .slice(2)
+        .map((b) => [b.type, (b.data.contact as { id: string }).id])
+        .sort(),
+    ).toEqual(
+      [
+        ['contact.erased', kept],
+        ['contact.erased', plain],
+      ].sort(),
+    );
+  });
+});
+
 describe('message events (ADR-082)', () => {
   it('name the message a customer quotes or reacts to, when it is in the conversation', async () => {
     const c = await fx.company();

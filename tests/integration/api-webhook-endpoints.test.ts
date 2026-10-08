@@ -294,6 +294,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       surveyTeamIds: null,
       surveyContactTags: null,
       surveyConversationTags: null,
+      contactEventTags: null,
       assigneeIds: null,
       contactTags: null,
       conversationTags: null,
@@ -2152,6 +2153,90 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     ).toMatchObject({ surveyContactTags: null, surveyConversationTags: ['refund'] });
     expect(await api().update(key.ctx, id, { surveyConversationTags: null })).toMatchObject({
       surveyConversationTags: null,
+    });
+  });
+
+  it('choose the tags of the added and changed contacts an endpoint receives, as contacts carry them, kept by changes that leave them out and cleared with both events (ADR-316)', async () => {
+    const c = await fx.company();
+    const key = await apiKey(c, ['webhooks.manage']);
+    const issueOf = async (promise: Promise<unknown>) => {
+      const error = await expectAppError(promise, 'validation_failed');
+      return isAppError(error) ? error.issues?.[0] : undefined;
+    };
+    // The list needs one of the events, at least one tag, and tags as they are written.
+    const refusals = [
+      [['contact.erased', 'contact.merged'], { contactEventTags: ['vip'] }, 'contactEventTags'],
+      [['contact.updated'], { contactEventTags: [] }, 'contactEventTags'],
+      [['contact.updated'], { contactEventTags: ['vip', 'a,b'] }, 'contactEventTags.1'],
+      [['contact.created'], { contactEventTags: ['vip', 42] }, 'contactEventTags.1'],
+    ] as const;
+    for (const [index, [events, lists, path]] of refusals.entries()) {
+      expect(
+        await issueOf(
+          api().create(
+            key.ctx,
+            { url: receiverUrl(), events, ...lists },
+            idem(`contact-event-tags-bad-${index}`, JSON.stringify(lists)),
+          ),
+        ),
+        JSON.stringify(lists),
+      ).toMatchObject({ path });
+    }
+    expect((await api().list(key.ctx)).data).toEqual([]);
+
+    const created = await addThroughApi(key.ctx, 'contact-event-tags-1', {
+      url: receiverUrl(),
+      events: ['contact.created', 'contact.updated'],
+      contactEventTags: ['VIP', 'Gold   Member', 'vip'],
+    });
+    const id = created.body.data.id;
+    expect(created.body.data).toMatchObject({
+      contactEventTags: ['vip', 'gold member'],
+      contactTags: null,
+      surveyContactTags: null,
+    });
+    expect(await api().get(key.ctx, id)).toMatchObject({
+      contactEventTags: ['vip', 'gold member'],
+    });
+    const audits = async (action: string) =>
+      (
+        await fx.query<{ metadata: { contactEventTags?: unknown } }>(
+          `SELECT metadata FROM app.audit_events
+            WHERE tenant_id = $1 AND subject_id = $2 AND action = $3 ORDER BY occurred_at, id`,
+          [c.tenant.id, id, action],
+        )
+      ).map((a) => a.metadata.contactEventTags);
+    expect(await audits('webhook.endpoint_created')).toEqual([['vip', 'gold member']]);
+    expect(await api().update(key.ctx, id, { description: 'VIP sync' })).toMatchObject({
+      contactEventTags: ['vip', 'gold member'],
+    });
+    // A list alone is a change.
+    expect(await api().update(key.ctx, id, { contactEventTags: ['Wholesale'] })).toMatchObject({
+      contactEventTags: ['wholesale'],
+    });
+    // Either event keeps it.
+    expect(await api().update(key.ctx, id, { events: ['contact.updated'] })).toMatchObject({
+      events: ['contact.updated'],
+      contactEventTags: ['wholesale'],
+    });
+    expect(await audits('webhook.endpoint_updated')).toEqual([
+      ['vip', 'gold member'],
+      ['wholesale'],
+      ['wholesale'],
+    ]);
+    // Neither event clears it, and then refuses it.
+    expect(await api().update(key.ctx, id, { events: ['contact.erased'] })).toMatchObject({
+      events: ['contact.erased'],
+      contactEventTags: null,
+    });
+    expect(await issueOf(api().update(key.ctx, id, { contactEventTags: ['vip'] }))).toMatchObject({
+      path: 'contactEventTags',
+    });
+    expect(
+      await api().update(key.ctx, id, { events: ['contact.created'], contactEventTags: ['vip'] }),
+    ).toMatchObject({ contactEventTags: ['vip'] });
+    expect(await api().update(key.ctx, id, { contactEventTags: null })).toMatchObject({
+      contactEventTags: null,
     });
   });
 

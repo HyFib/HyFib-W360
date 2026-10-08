@@ -73,6 +73,7 @@ import {
   type CompanyWithoutNumber,
   type EmailDeliveryCount,
   type IntegrationFailure,
+  type IntegrationFailureView,
   type PlatformAdministrator,
   type NumberSetupProblem,
   type OpsExportList,
@@ -468,10 +469,19 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
     );
   }
 
-  async function integrationFailures(tx: Tx, limit: number): Promise<IntegrationFailure[]> {
-    const result = await tx.execute<Row>(
-      sql`select * from ops.platform_ops_integration_failures(${limit})`,
-    );
+  async function integrationFailures(
+    tx: Tx,
+    limit: number,
+    view: IntegrationFailureView = 'all',
+  ): Promise<IntegrationFailure[]> {
+    // Narrowed before the limit, so newer failures of others leave none out (ADR-315, ADR-318).
+    const query =
+      view === 'mine'
+        ? sql`select * from ops.platform_ops_assigned_integration_failures(${limit})`
+        : view === 'unassigned'
+          ? sql`select * from ops.platform_ops_unassigned_integration_failures(${limit})`
+          : sql`select * from ops.platform_ops_integration_failures(${limit})`;
+    const result = await tx.execute<Row>(query);
     return result.rows.map((r) => {
       const acknowledgedAt = date(r.acknowledged_at);
       const assignedAt = date(r.assigned_at);
@@ -989,11 +999,14 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
       });
     },
 
-    /** Current integration failures, platform webhook receipts, quarantine and email delivery. */
-    async integrations(actor: PlatformActor) {
+    /**
+     * Current integration failures, every one, those assigned to the administrator (ADR-315) or
+     * those assigned to nobody (ADR-318), platform webhook receipts, quarantine and email delivery.
+     */
+    async integrations(actor: PlatformActor, view: IntegrationFailureView = 'all') {
       const now = clock.now();
       return platformDb.run(actor.userId, async (tx) => {
-        const failures = await integrationFailures(tx, OPS_LIST_ROWS.failures.shown);
+        const failures = await integrationFailures(tx, OPS_LIST_ROWS.failures.shown, view);
         const administrators = await platformAdministrators(tx);
         const receipts = await receiptsNeedingAttention(tx, now);
         const quarantine = await openQuarantine(tx, now);
@@ -1007,6 +1020,7 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
         const lastSent = (kind: string) => alerts.find((a) => a.kind === kind)?.lastSentAt ?? null;
         return {
           failures,
+          failuresView: view,
           administrators,
           receipts,
           lastFailureAlertAt: lastSent('failures'),

@@ -43,8 +43,11 @@ export interface IntegrationAlertResult {
 
 const plural = (n: number, one: string, many: string) => (n === 1 ? one : many);
 
-/** A kind of failure as the console labels it, such as "WhatsApp number, needs reconnecting". */
-function kindLabel(source: string, state: string): string {
+/**
+ * A kind of failure as the console labels it, such as "WhatsApp number, needs reconnecting"; the
+ * assignment notices (ADR-314) name kinds the same way.
+ */
+export function integrationKindLabel(source: string, state: string): string {
   const what = INTEGRATION_SOURCE_LABELS[source] ?? source;
   return `${what}, ${(INTEGRATION_STATE_LABELS[state] ?? state).toLowerCase()}`;
 }
@@ -56,7 +59,7 @@ export function integrationAlert(
 ): { subject: string; lines: string[]; url: string; actionLabel: string } {
   const kinds = counts
     .filter((c) => c.items > 0)
-    .map((c) => ({ name: kindLabel(c.source, c.state), items: c.items }))
+    .map((c) => ({ name: integrationKindLabel(c.source, c.state), items: c.items }))
     .sort((a, b) => b.items - a.items || a.name.localeCompare(b.name));
   const total = kinds.reduce((sum, k) => sum + k.items, 0);
   const named = kinds.slice(0, NAMED_KINDS).map((k) => `${k.name} ${k.items}`);

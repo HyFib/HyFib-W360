@@ -54,6 +54,13 @@ Business logic never lives in React components.
   through the `w360_auth` role. Tenant code can read only public profile columns of `auth.users`.
   A HyFib plugin records each completed sign-in as a security event, which the person reads back
   through `ops.my_sign_ins` (ADR-136).
+- **Breached passwords** (ADR-317): the auth API's `before` hook checks the password a sign-up,
+  reset or change sets with `checkPasswordBreaches`
+  (`packages/domain/src/account/password-breaches.ts`): the first five characters of its SHA-1 hash
+  go to the Pwned Passwords range API (`PWNED_PASSWORDS_BASE_URL`, the service's own origin outside
+  local and test), and a listed suffix refuses the request with `PASSWORD_BREACHED`; a check that
+  cannot be made takes the password and logs a warning. `PASSWORD_BREACH_CHECK` turns it on or off
+  (on by default for staging and production).
 - **Tenancy** (companies = `app.tenants`, memberships, invitations, audit) lives in schema `app`.
 - **Platform operations** (platform admins, support grants, platform audit, security events, email
   outbox) live in schema `ops`.
@@ -2210,6 +2217,15 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   when an active endpoint of the company names sources and creates a `contact.created` delivery only
   where it is listed. Settings (checkboxes under "Contact added") and the API (`contactSources`) set
   it; a change that drops the event clears it.
+- **Tag filters for added and changed contacts** (migration 0239, ADR-316): `contact_event_tags` on
+  an endpoint lists the tags of the contacts whose `contact.created` and `contact.updated` it takes,
+  as contacts carry them, null for every contact; a check keeps it to the tags' rule and to
+  endpoints taking either event. `app.capture_contact_webhook_event` (replaced with the same
+  signature) reads the contact's tags when an active endpoint names tags and creates a delivery only
+  for endpoints whose list shares a tag with the contact; the tag trigger then calls
+  `app.deliver_contact_webhook_tag`, which adds the delivery of its transaction's event for the
+  endpoints naming the tag added or removed. Settings and the API (`contactEventTags`) set it; a
+  change that drops both events clears it.
 - **Message type filters** (migration 0137, ADR-191): `message_types` on an endpoint lists the types
   of the received messages it takes as `message.received`, null for every type; a check keeps it to
   1 to 14 known types (never `template`) and to endpoints taking the event.
@@ -2463,6 +2479,22 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   and writes the platform audit entry in one transaction; the console's list returns each failure's
   assignment with the names. `ops.integration_alerts_due` keeps assignments of listed failures and
   forgets the others after an hour, as it does acknowledgements.
+- **Emailing assignees** (ADR-314, migration 0237): the worker's minute sweep, after the integration
+  alert, runs `noticeIntegrationAssignments`: `ops.claim_integration_assignment_notices` (definer,
+  worker role only) marks every row of `ops.integration_assignments` whose `notified_at` is null and
+  returns those whose failure `ops.integration_failures` still lists and whose assignee is still a
+  platform administrator, and the same transaction queues one `platform.notice` email to each
+  assignee, with counts by kind and who assigned them. `ops.platform_assign_integration_failure`
+  sets `notified_at` for a self-assignment, keeps it for the same assignee and clears it for a new
+  one.
+- **Assigned to me** (ADR-315, migration 0238): the Integrations tab's `?failures=mine` reads
+  `ops.platform_ops_assigned_integration_failures` (definer, platform role only): the console's list
+  narrowed to the assignments of the session's administrator before its limit, with the same
+  columns.
+- **Unassigned** (ADR-318, migration 0240): the Integrations tab's `?failures=unassigned` reads
+  `ops.platform_ops_unassigned_integration_failures` (definer, platform role only): the console's
+  list without the failures that have an assignment, narrowed before its limit, with the same
+  columns.
 - **Acknowledging dead letters** (ADR-169, migration 0117): `acknowledged_at`,
   `acknowledged_by_user_id` and `acknowledgement` on `ops.dead_letters`, set together (the check
   `dead_letters_acknowledged`) and written only by `ops.platform_acknowledge_dead_letter` (definer,

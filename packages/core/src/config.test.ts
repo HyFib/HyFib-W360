@@ -4,6 +4,7 @@ import {
   loadWebConfig,
   loadWorkerConfig,
   metaConfigFrom,
+  passwordBreachCheckFrom,
   razorpayConfigFrom,
   shopifyConfigFrom,
 } from './config';
@@ -195,6 +196,56 @@ describe('Shopify app configuration', () => {
     expect(() =>
       shopifyConfigFrom(loadWebConfig({ ...production, ...shopify, ...standIn })),
     ).toThrow(/SHOPIFY_TEST_BASE_URL/);
+  });
+});
+
+describe('screening passwords against breached ones (ADR-317)', () => {
+  const web = (env: Record<string, string>) =>
+    loadWebConfig({
+      ...base,
+      NODE_ENV: 'development',
+      APP_BASE_URL: 'https://w360.example.net',
+      ...env,
+    });
+
+  it('is on for staging and production and off for local and test unless set, and can be turned off or on', () => {
+    for (const APP_ENV of ['staging', 'production']) {
+      expect(passwordBreachCheckFrom(web({ APP_ENV })), APP_ENV).toEqual({
+        baseUrl: 'https://api.pwnedpasswords.com',
+      });
+      expect(passwordBreachCheckFrom(web({ APP_ENV, PASSWORD_BREACH_CHECK: 'off' }))).toBeNull();
+    }
+    for (const APP_ENV of ['local', 'test']) {
+      expect(passwordBreachCheckFrom(web({ APP_ENV })), APP_ENV).toBeNull();
+      expect(
+        passwordBreachCheckFrom(web({ APP_ENV, PASSWORD_BREACH_CHECK: 'pwned-passwords' })),
+      ).toEqual({ baseUrl: 'https://api.pwnedpasswords.com' });
+    }
+    expect(() => web({ APP_ENV: 'production', PASSWORD_BREACH_CHECK: 'yes' })).toThrow(ConfigError);
+  });
+
+  it('allows a range API stand-in only for local and test environments, refused at start-up', () => {
+    const standIn = { PWNED_PASSWORDS_BASE_URL: 'http://127.0.0.1:4050/' };
+    for (const APP_ENV of ['local', 'test']) {
+      expect(
+        passwordBreachCheckFrom(
+          web({ APP_ENV, PASSWORD_BREACH_CHECK: 'pwned-passwords', ...standIn }),
+        ),
+      ).toEqual({ baseUrl: 'http://127.0.0.1:4050' });
+    }
+    for (const APP_ENV of ['staging', 'production']) {
+      // Even with the check off: the origin is never another than the service's there.
+      for (const check of ['pwned-passwords', 'off']) {
+        expect(() => web({ APP_ENV, PASSWORD_BREACH_CHECK: check, ...standIn })).toThrow(
+          /PWNED_PASSWORDS_BASE_URL must be https:\/\/api\.pwnedpasswords\.com/,
+        );
+      }
+    }
+    expect(
+      passwordBreachCheckFrom(
+        web({ APP_ENV: 'production', PWNED_PASSWORDS_BASE_URL: 'https://api.pwnedpasswords.com/' }),
+      ),
+    ).toEqual({ baseUrl: 'https://api.pwnedpasswords.com' });
   });
 });
 

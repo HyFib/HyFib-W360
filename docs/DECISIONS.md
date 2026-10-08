@@ -12074,6 +12074,195 @@ Decision:
   replaced (each dropped by its owner and created again, as 0107 did) with their owners, search
   paths and grants as before.
 
-Not built: an email to the assignee (the alert email of ADR-139 is unchanged), assigning the
-console's other lists (dead letters, receipts, quarantine, late queues), a view of the failures
-assigned to oneself, and assignments in the CSV.
+Not built: an email to the assignee (built by ADR-314; the alert email of ADR-139 is unchanged),
+assigning the console's other lists (dead letters, receipts, quarantine, late queues), a view of the
+failures assigned to oneself (built by ADR-315), and assignments in the CSV.
+
+## ADR-314 Emailing a platform administrator the failing integrations assigned to them (P5-10) (2026-10-08)
+
+Context: since ADR-313 an administrator assigns a failure Operations → Integrations lists to
+another, who learnt of it only by opening the console; ADR-313 left the email out. The alert email
+of ADR-139 tells every administrator of each failure once, not who should handle it.
+
+Decision:
+
+- **Who is told:** the assignee, when another administrator assigns them a failure the console lists
+  or reassigns one to them. Not an administrator who assigns a failure to themselves, nor an
+  assignee who stays when the failure is assigned again (by anyone), nor the administrator who
+  assigned it. A failure reassigned to someone else and back is a new assignment, and told again.
+- **When:** by the worker's minute sweep, after the integration alert (ADR-139): one email to each
+  assignee for the failures assigned to them since its last run, so assignments made within a minute
+  share one email. When the sweep runs, an assignment whose failure the console no longer lists, or
+  whose assignee is no longer a platform administrator, is marked and never told, even once the
+  failure is listed again or they are an administrator again.
+- **What it says:** counts only, as the alert emails do (ADR-139): how many failures, by the
+  console's kinds (six named at most, the rest counted), and who assigned them (the administrator's
+  name when one did, how many administrators when several did), with a link to the Integrations tab.
+  The companies, labels, hosts and errors stay on the console behind platform sign-in, and the
+  outbox row names no company. Every line fits a platform notice with the longest name an account
+  may have and every kind.
+- **Where it is enforced:** `ops.integration_assignments.notified_at` (migration 0237) says whether
+  the assignee was told: `ops.platform_assign_integration_failure` sets it when an administrator
+  assigns a failure to themselves, keeps it when the assignee stays and clears it for a new
+  assignee. `ops.claim_integration_assignment_notices` (SECURITY DEFINER, the worker's role only)
+  marks every assignment not told yet and returns those still listed whose assignee is still an
+  administrator, with the addresses and names, in the transaction that queues the emails: a failed
+  transaction leaves them for the next sweep, and two sweeps at once tell each assignment once (the
+  second waits for the first's rows and finds them told).
+- **Migration 0237:** the column, with every assignment made before it taken as told, so nobody is
+  emailed about one made before the email existed; the assignment function replaced (dropped by its
+  owner and created again with the same signature, owner, search path and grant); and the claim
+  function.
+
+Not built: an email when an assignment is taken off or an assigned failure recovers, a way for an
+administrator to stop these emails, and assigning the console's other lists (ADR-313).
+
+## ADR-315 The failing integrations assigned to the administrator reading the console (P5-10) (2026-10-08)
+
+Context: since ADR-313 Current failures shows each failure's assignee among up to 500 failures,
+newest first. An administrator looking for the failures they handle read the whole list, and one
+assigned an older failure could find it beyond the rows shown; ADR-313 left this view out.
+
+Decision:
+
+- **What it lists:** Operations → Integrations offers "All failures" (the default, as before) and
+  "Assigned to me" (`?failures=mine`), which lists only the failures assigned to the administrator
+  reading, with the same columns, forms, order and limit. Any other value of the query string shows
+  every failure; the tab's other lists are the same in both.
+- **Where it is enforced:** `ops.platform_ops_assigned_integration_failures` (migration 0238;
+  SECURITY DEFINER, executable by the platform role only) refuses anyone who is not a platform
+  administrator, as the full list does, and narrows the list to the caller's assignments before its
+  limit, so newer failures of others leave none of theirs out. The administrator is the session's,
+  never a parameter, so nobody reads another's view.
+- **The CSV** gives every failure whichever view is shown (ADR-158), and leaves assignments out
+  (ADR-313).
+- **Migration 0238:** the function only; the full list is unchanged.
+
+Not built: counts of the failures assigned to each administrator, a view of another administrator's
+failures, and such views for the console's other lists.
+
+## ADR-316 Choosing the tags of the added and changed contacts a webhook endpoint receives (P5-09) (2026-10-08)
+
+Context: an endpoint taking `contact.created` or `contact.updated` can narrow them by where contacts
+came from (ADR-190), the parts that changed (ADR-123) and the custom fields (ADR-184), but not by
+tag; the contact tag lists of conversations' events (ADR-267) and of survey answers (ADR-312) leave
+contact events out. A receiver that keeps a segment of customers in step, a CRM list of `vip`
+contacts say, was sent every other contact's changes too and had to read each one to drop it.
+
+Decision:
+
+- **One list per endpoint for both events,** `contactEventTags`: 1 to 50 tags as contacts carry them
+  (`normalizeTag`), each once in the order given. A change is sent when the contact has any of the
+  tags when it is saved, or when it adds or removes one of them, so the change that takes a contact
+  out of the segment is sent too, with the tag it removed (`tagsRemoved`, ADR-182). A contact is
+  added without tags, so its `contact.created` is sent when the change that adds it tags it with one
+  of them (a member adding a contact with tags, or an import or API request adding one in one
+  change); one tagged later is sent as `contact.updated`. A tag no contact has yet may be named; it
+  matches nothing until a contact has it. Null receives every contact, as before. With sources,
+  parts or fields chosen too, an event must pass them all: a tag added or removed is a change of
+  `tags`, so an endpoint whose parts leave tags out is not sent it. `contact.erased` and
+  `contact.merged` are not narrowed. Chosen in Settings → Webhooks ("Tags of added and changed
+  contacts", typed separated by commas, every contact by default, shown while the endpoint takes
+  either event), shown on the endpoint as "Added and changed contacts sent, of contacts tagged: …",
+  and through the API as `contactEventTags` on `POST /webhook-endpoints` and
+  `PATCH /webhook-endpoints/{id}` and in every endpoint the API answers.
+- **Only while an event is taken:** a list given for an endpoint that takes neither event is refused
+  (422 through the API). A change that drops both events clears it, and a `PATCH` that leaves it out
+  keeps it; Settings always sends it (null while every contact is taken). A check in the database
+  holds the same rule and the tags' own (null, or 1 to 50 tags as contacts carry them, in one
+  dimension without a null, with either event).
+- **Applied at capture:** `app.capture_contact_webhook_event` reads the contact's tags only when an
+  active endpoint of the company that takes either event names tags, and creates a delivery of a
+  `contact.created` or `contact.updated` only for the endpoints whose list shares a tag with the
+  contact at that change. The tag trigger then calls `app.deliver_contact_webhook_tag` once the tag
+  is noted on the event: it adds the delivery of its transaction's event for the endpoints naming
+  the tag added or removed (for `contact.updated`, those taking changes of tags; for
+  `contact.created`, those taking the contact's source). A later write of the same transaction
+  matches the parts and fields against everything the transaction changed so far, and the tags
+  against the contact's and those the transaction removed, so the change is sent whatever the order
+  of its writes (the API changes a contact's name before its tags, for one; found by a review of
+  this slice before it was pushed). Each endpoint gets each event once. Both run as the role making
+  the change, the runtime role or the definer role merging and erasing contacts, and read nothing
+  while no active endpoint of the company names tags. Stored events and payloads are unchanged.
+- **Audited and exported:** `webhook.endpoint_created` and `webhook.endpoint_updated` carry
+  `contactEventTags` when the endpoint has it, and the company data export carries the column.
+- **Permissions unchanged:** members with `developer.manage` in Settings, keys with
+  `webhooks.manage` through the API.
+- **Migration 0239:** `contact_event_tags text[]` on `app.webhook_endpoints` with its check,
+  validated at once (a company has at most 10 endpoints), the update grant on the column for the
+  runtime role, `app.capture_contact_webhook_event` and the tag trigger's
+  `app.webhook_capture_contact_tag` replaced with the same signatures (0136's and 0129's, with the
+  tags), so their owners and grants stay, and `app.deliver_contact_webhook_tag` for the runtime and
+  definer roles. Existing endpoints keep null; nothing is backfilled.
+
+Not built: lists that leave tagged contacts out, the contact's tags at capture in the payload (it
+gives the contact as it is when delivered), and tag filters for erased and merged contacts.
+
+## ADR-317 Screening the passwords people set against breached ones (SEC-2) (2026-10-08)
+
+Context: a person could set any password of 12 to 128 characters, including ones exposed in data
+breaches, which attackers try first when they stuff credentials. SEC-2 asked to screen them at
+sign-up and reset, with a k-anonymity API or an offline list. Better Auth 1.7.6 ships a plugin for
+the Pwned Passwords range API, but it calls the service with its own fetch: tests would reach the
+live service, and production configuration could not refuse another origin.
+
+Decision:
+
+- **What is screened:** the password a request sets: signing up (`/sign-up/email`), resetting a
+  forgotten password (`/reset-password`) and changing one (`/change-password`), when its length is
+  one a person may set (12 to 128 characters; the auth library refuses the others). Signing in,
+  verifying the current password (a recent sign-in, two-factor) and every other request are not
+  screened.
+- **How:** in the auth API's `before` hook, after the NUL check (ADR-130), HyFib hashes the password
+  with SHA-1, sends the first five characters of the hash to the Pwned Passwords range API with
+  `Add-Padding: true`, and reads the count of the other 35 among the suffixes it answers; a count of
+  0 (padding) or a suffix not listed is no breach. Only the five characters leave HyFib
+  (k-anonymity), and the padding hides which range was asked for from anyone watching the size of
+  the answer. No password, hash or result is stored or logged.
+- **Refused:** a password listed at least once. The request fails with 400 and the code
+  `PASSWORD_BREACHED` before anything is created or changed, and the sign-up, reset and change forms
+  say "This password appears in known data breaches, so it is easy to guess. Choose a different
+  one." The answer is the same whether or not an account has the email, so sign-up enumeration
+  protection holds.
+- **When the check cannot be made:** a failed request, an answer other than 2xx, a redirect, a body
+  of another shape or no answer within 3 seconds takes the password unchecked (the length rules
+  still apply) and logs `password breach check unavailable` at warn with the path and why (the
+  error's class or the status, never the password). An outage of the service does not stop people
+  signing up or resetting a password: availability is chosen over screening, and turning the check
+  off is a configuration change.
+- **Configuration:** `PASSWORD_BREACH_CHECK=pwned-passwords|off`, on by default for
+  `APP_ENV=staging|production` and off for local and test. `PWNED_PASSWORDS_BASE_URL` may point at a
+  stand-in only with `APP_ENV=local|test`, as Meta's and Razorpay's origins may, and start-up
+  refuses another origin elsewhere even with the check off. The request goes to that fixed origin
+  with `fetch`, as the Graph and Razorpay clients' do, not through the egress client for
+  company-chosen URLs.
+- **Tests:** a test-only stand-in (`tests/support/pwned-passwords-stand-in.ts`) answers ranges in
+  the end-to-end run, which turns the check on; the API's shape is taken from Better Auth's plugin
+  and search summaries of the official pages, as its documentation could not be read from here
+  (`docs/research/pwned-passwords.md`).
+
+Not built: an offline list (no network dependency), screening at sign-in to ask for a new password,
+checking stored passwords (only their hashes are kept), and counting the checks that could not be
+made on the operations console.
+
+## ADR-318 The failing integrations assigned to nobody (P5-10) (2026-10-08)
+
+Context: since ADR-315 Current failures lists every failure or those assigned to the administrator
+reading. An administrator looking for the failures nobody handles yet read the whole list, up to 500
+failures newest first, and an older one could be beyond the rows shown.
+
+Decision:
+
+- **What it lists:** a third view, "Unassigned" (`?failures=unassigned`), lists only the failures
+  without an assignment, with the same columns (the assignment always empty), forms, order and
+  limit; assigning one there takes it off the view, and taking an assignment off brings it back. The
+  other views and the tab's other lists are unchanged.
+- **Where it is enforced:** `ops.platform_ops_unassigned_integration_failures` (migration 0240;
+  SECURITY DEFINER, executable by the platform role only) refuses anyone who is not a platform
+  administrator, as the full list does, and leaves out the failures with an assignment before its
+  limit, so newer assigned failures leave none of the others out.
+- **The CSV** still gives every failure (ADR-158, ADR-315).
+- **Migration 0240:** the function only.
+
+Not built: counts of the unassigned failures on the tab, and an email about failures left unassigned
+for long.

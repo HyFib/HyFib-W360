@@ -12,6 +12,7 @@ import {
   checkQueueWaits,
   createPlatformOpsService,
   deadLetterJob,
+  noticeIntegrationAssignments,
   outboxAad,
   pgBossQueueInspector,
   purgeDeadLetters,
@@ -2297,6 +2298,407 @@ describe('assigning companies’ failing integrations (ADR-313)', () => {
           'ops.platform_assign_integration_failure(text,uuid,text,text,text)'::regprocedure`,
     );
     expect(assignFn).toEqual({
+      owner: 'w360_definer',
+      definer: true,
+      config: ['search_path=pg_catalog, pg_temp'],
+    });
+  });
+});
+
+describe('emailing administrators the failures assigned to them (ADR-314)', () => {
+  async function failingEndpoint() {
+    const id = uuidv7();
+    await fx.query(
+      `INSERT INTO app.webhook_endpoints (id, tenant_id, url, event_types, secret_ciphertext,
+         created_by_user_id, failing_since, last_failure_at)
+       VALUES ($1, $2, 'https://told.example.com/hook', ARRAY['message.received'], 'sealed', $3,
+         now() - interval '1 hour', now())`,
+      [id, company.tenant.id, company.owner.id],
+    );
+    return id;
+  }
+  async function namedStaff(name: string) {
+    const user = await createUser(fx.dbs, { twoFactor: true, name });
+    await fx.dbs.ownerPool.query(
+      `INSERT INTO ops.platform_admins (user_id, role) VALUES ($1, 'platform_operator')`,
+      [user.id],
+    );
+    const actor: PlatformActor = {
+      userId: user.id,
+      role: 'platform_operator',
+      correlationId: uuidv7(),
+    };
+    return { actor, email: user.email };
+  }
+  const assign = (actor: PlatformActor, subjectId: string, assigneeUserId: string | null) =>
+    ops().assignFailure(actor, {
+      source: 'webhook_endpoint',
+      subjectId,
+      state: 'failing',
+      assigneeUserId,
+    });
+  /** The worker's minute sweep's notices. */
+  const sweep = () =>
+    noticeIntegrationAssignments({
+      db: fx.dbs.app,
+      outbox: { keyring: fx.keyring, jobs: fx.jobs(), signer: fx.signer },
+      appBaseUrl: 'https://app.w360.test',
+    });
+  async function mailTo(email: string) {
+    const rows = await fx.query<{
+      id: string;
+      tenant_id: string | null;
+      payload_ciphertext: string;
+    }>(
+      `SELECT id, tenant_id, payload_ciphertext FROM ops.email_outbox
+        WHERE to_address = $1 AND kind = 'platform.notice' ORDER BY created_at, id`,
+      [email],
+    );
+    return rows.map((r) => ({
+      tenantId: r.tenant_id,
+      payload: JSON.parse(fx.keyring.decryptString(r.payload_ciphertext, outboxAad(r.id))) as {
+        subject: string;
+        lines: string[];
+        url: string;
+        actionLabel: string;
+      },
+    }));
+  }
+  const notifiedAt = async (id: string) =>
+    (
+      await fx.query<{ notified_at: Date | null }>(
+        `SELECT notified_at FROM ops.integration_assignments WHERE subject_id = $1`,
+        [id],
+      )
+    )[0]?.notified_at;
+
+  beforeAll(async () => {
+    // Assignments the tests above made are told first, so each test counts only its own.
+    await sweep();
+  });
+
+  it('emails the assignee once about a failure another administrator assigned them, with counts and who assigned it only', async () => {
+    const id = await failingEndpoint();
+    const asha = await namedStaff('Asha Told');
+    const ravi = await namedStaff('Ravi Told');
+    await assign(asha.actor, id, ravi.actor.userId);
+    expect(await notifiedAt(id)).toBeNull();
+    // Two sweeps at once tell it once.
+    const results = await Promise.all([sweep(), sweep()]);
+    expect(results.map((r) => r.told).sort()).toEqual([0, 1]);
+    expect(results.map((r) => r.recipients).sort()).toEqual([0, 1]);
+    expect(await notifiedAt(id)).toBeInstanceOf(Date);
+    const emails = await mailTo(ravi.email);
+    expect(emails).toEqual([
+      {
+        tenantId: null,
+        payload: {
+          kind: 'platform.notice',
+          subject: 'A failing integration was assigned to you',
+          lines: [
+            'Asha Told assigned you a failing integration on the operations console.',
+            'By kind: Webhook endpoint, failing 1.',
+            'This email gives counts only: the companies and errors are on the operations console. Failures you assign to yourself are not emailed.',
+          ],
+          url: 'https://app.w360.test/platform/ops/integrations',
+          actionLabel: 'Open integrations',
+        },
+      },
+    ]);
+    // Counts only: no company, host or id.
+    const text = JSON.stringify(emails).toLowerCase();
+    for (const secret of [company.tenant.id, company.tenant.slug, 'told.example.com', id]) {
+      expect(text).not.toContain(secret.toLowerCase());
+    }
+    // Told once, and the administrator who assigned it is not emailed.
+    expect(await sweep()).toEqual({ told: 0, recipients: 0 });
+    expect(await mailTo(ravi.email)).toHaveLength(1);
+    expect(await mailTo(asha.email)).toEqual([]);
+  });
+
+  it('does not email an administrator who assigns a failure to themselves, nor an assignee again when the failure is assigned to them again', async () => {
+    const own = await failingEndpoint();
+    const again = await failingEndpoint();
+    const asha = await namedStaff('Asha Self');
+    const ravi = await namedStaff('Ravi Self');
+    await assign(ravi.actor, own, ravi.actor.userId);
+    expect(await notifiedAt(own)).toBeInstanceOf(Date);
+    // Another administrator keeps them as its assignee: they already know.
+    await assign(asha.actor, own, ravi.actor.userId);
+    expect(await sweep()).toEqual({ told: 0, recipients: 0 });
+    expect(await mailTo(ravi.email)).toEqual([]);
+    await assign(asha.actor, again, ravi.actor.userId);
+    expect(await sweep()).toEqual({ told: 1, recipients: 1 });
+    await assign(asha.actor, again, ravi.actor.userId);
+    await assign(ravi.actor, again, ravi.actor.userId);
+    expect(await sweep()).toEqual({ told: 0, recipients: 0 });
+    expect(await mailTo(ravi.email)).toHaveLength(1);
+    expect(await mailTo(asha.email)).toEqual([]);
+  });
+
+  it('tells each assignee of the failures assigned to them since the last sweep in one email, and a new assignee when one is reassigned', async () => {
+    const first = await failingEndpoint();
+    const second = await failingEndpoint();
+    const asha = await namedStaff('Asha Many');
+    const ravi = await namedStaff('Ravi Many');
+    const mei = await namedStaff('Mei Many');
+    await assign(asha.actor, first, mei.actor.userId);
+    await assign(ravi.actor, second, mei.actor.userId);
+    expect(await sweep()).toEqual({ told: 2, recipients: 1 });
+    const toMei = await mailTo(mei.email);
+    expect(toMei.map((e) => [e.payload.subject, ...e.payload.lines.slice(0, 2)])).toEqual([
+      [
+        '2 failing integrations were assigned to you',
+        '2 administrators assigned you 2 failing integrations on the operations console.',
+        'By kind: Webhook endpoint, failing 2.',
+      ],
+    ]);
+    // Reassigned to Ravi: Ravi is told, and Mei is not told again.
+    await assign(asha.actor, first, ravi.actor.userId);
+    expect(await notifiedAt(first)).toBeNull();
+    expect(await sweep()).toEqual({ told: 1, recipients: 1 });
+    expect((await mailTo(ravi.email)).map((e) => e.payload.lines[0])).toEqual([
+      'Asha Many assigned you a failing integration on the operations console.',
+    ]);
+    expect(await mailTo(mei.email)).toHaveLength(1);
+  });
+
+  it('marks and never tells an assignment whose failure recovered, or whose assignee is no longer an administrator, before the sweep', async () => {
+    const recovered = await failingEndpoint();
+    const dropped = await failingEndpoint();
+    const asha = await namedStaff('Asha Gone');
+    const ravi = await namedStaff('Ravi Gone');
+    const mei = await namedStaff('Mei Gone');
+    await assign(asha.actor, recovered, ravi.actor.userId);
+    await fx.query(`UPDATE app.webhook_endpoints SET failing_since = NULL WHERE id = $1`, [
+      recovered,
+    ]);
+    await assign(asha.actor, dropped, mei.actor.userId);
+    await fx.dbs.ownerPool.query(`DELETE FROM ops.platform_admins WHERE user_id = $1`, [
+      mei.actor.userId,
+    ]);
+    expect(await sweep()).toEqual({ told: 0, recipients: 0 });
+    expect(await notifiedAt(recovered)).toBeInstanceOf(Date);
+    expect(await notifiedAt(dropped)).toBeInstanceOf(Date);
+    // Failing again within the hour, and an administrator again: still not told.
+    await fx.query(`UPDATE app.webhook_endpoints SET failing_since = now() WHERE id = $1`, [
+      recovered,
+    ]);
+    await fx.dbs.ownerPool.query(
+      `INSERT INTO ops.platform_admins (user_id, role) VALUES ($1, 'platform_operator')`,
+      [mei.actor.userId],
+    );
+    expect(await sweep()).toEqual({ told: 0, recipients: 0 });
+    expect(await mailTo(ravi.email)).toEqual([]);
+    expect(await mailTo(mei.email)).toEqual([]);
+  });
+
+  it('keeps the notices to the worker’s definer function, which runs as its owner with a fixed search path', async () => {
+    await expect(
+      fx.dbs.platformPool.query(`SELECT * FROM ops.claim_integration_assignment_notices()`),
+    ).rejects.toThrow(/permission denied for function/);
+    const [claim] = await fx.query<{ owner: string; definer: boolean; config: unknown }>(
+      `SELECT pg_get_userbyid(p.proowner) AS owner, p.prosecdef AS definer,
+              p.proconfig AS config
+         FROM pg_proc p
+        WHERE p.oid = 'ops.claim_integration_assignment_notices()'::regprocedure`,
+    );
+    expect(claim).toEqual({
+      owner: 'w360_definer',
+      definer: true,
+      config: ['search_path=pg_catalog, pg_temp'],
+    });
+  });
+});
+
+describe('the failures assigned to the administrator reading the console (ADR-315)', () => {
+  async function failingEndpoint(hoursAgo = 1) {
+    const id = uuidv7();
+    await fx.query(
+      `INSERT INTO app.webhook_endpoints (id, tenant_id, url, event_types, secret_ciphertext,
+         created_by_user_id, failing_since, last_failure_at)
+       VALUES ($1, $2, 'https://mine.example.com/hook', ARRAY['message.received'], 'sealed', $3,
+         now() - make_interval(hours => $4), now())`,
+      [id, company.tenant.id, company.owner.id, hoursAgo],
+    );
+    return id;
+  }
+  async function namedStaff(name: string): Promise<PlatformActor> {
+    const user = await createUser(fx.dbs, { twoFactor: true, name });
+    await fx.dbs.ownerPool.query(
+      `INSERT INTO ops.platform_admins (user_id, role) VALUES ($1, 'platform_operator')`,
+      [user.id],
+    );
+    return { userId: user.id, role: 'platform_operator', correlationId: uuidv7() };
+  }
+  const assign = (actor: PlatformActor, subjectId: string, assigneeUserId: string) =>
+    ops().assignFailure(actor, {
+      source: 'webhook_endpoint',
+      subjectId,
+      state: 'failing',
+      assigneeUserId,
+    });
+  const ids = (failures: { subjectId: string }[]) => failures.map((f) => f.subjectId);
+
+  it('lists only the failures assigned to the administrator, as the full list shows them, until they recover', async () => {
+    const mine = await failingEndpoint();
+    const theirs = await failingEndpoint();
+    const nobody = await failingEndpoint();
+    const asha = await namedStaff('Asha Mine');
+    const ravi = await namedStaff('Ravi Mine');
+    await assign(ravi, mine, asha.userId);
+    await assign(asha, theirs, ravi.userId);
+    const all = await ops().integrations(asha);
+    expect(all.failuresView).toBe('all');
+    expect(ids(all.failures)).toEqual(expect.arrayContaining([mine, theirs, nobody]));
+    const assigned = await ops().integrations(asha, 'mine');
+    expect(assigned.failuresView).toBe('mine');
+    expect(assigned.failures).toEqual(all.failures.filter((f) => f.subjectId === mine));
+    expect(assigned.failures[0]?.assignment).toMatchObject({
+      assigneeUserId: asha.userId,
+      assigneeName: 'Asha Mine',
+      byName: 'Ravi Mine',
+    });
+    expect(ids((await ops().integrations(ravi, 'mine')).failures)).toEqual([theirs]);
+    // Reassigned, or recovered: no longer theirs to see.
+    await assign(asha, mine, ravi.userId);
+    expect((await ops().integrations(asha, 'mine')).failures).toEqual([]);
+    await fx.query(`UPDATE app.webhook_endpoints SET failing_since = NULL WHERE id = $1`, [theirs]);
+    expect(ids((await ops().integrations(ravi, 'mine')).failures)).toEqual([mine]);
+  });
+
+  it('narrows before the limit, so newer failures of others leave none of the administrator’s out', async () => {
+    const older = await failingEndpoint(30);
+    await failingEndpoint();
+    const mei = await namedStaff('Mei Mine');
+    await assign(staff, older, mei.userId);
+    const first = (fn: string) =>
+      fx.dbs.platform.run(mei.userId, (tx) =>
+        tx.execute<{ subject_id: string }>(sql`select subject_id from ${sql.raw(fn)}(1)`),
+      );
+    expect((await first('ops.platform_ops_assigned_integration_failures')).rows).toEqual([
+      { subject_id: older },
+    ]);
+    // The full list's newest failure is another.
+    expect((await first('ops.platform_ops_integration_failures')).rows).not.toEqual([
+      { subject_id: older },
+    ]);
+  });
+
+  it('refuses anyone who is not a platform administrator, and keeps the list to the platform role and its definer', async () => {
+    const outsider = await createUser(fx.dbs, { twoFactor: true });
+    await expectCode(
+      ops().integrations(
+        { userId: outsider.id, role: 'platform_operator', correlationId: uuidv7() },
+        'mine',
+      ),
+      'forbidden',
+    );
+    await expect(
+      fx.dbs.appPool.query(`SELECT * FROM ops.platform_ops_assigned_integration_failures(10)`),
+    ).rejects.toThrow(/permission denied for function/);
+    // The auth role has no use of the ops schema at all.
+    await expect(
+      fx.dbs.authPool.query(`SELECT * FROM ops.platform_ops_assigned_integration_failures(10)`),
+    ).rejects.toThrow(/permission denied for schema ops/);
+    const [fn] = await fx.query<{ owner: string; definer: boolean; config: unknown }>(
+      `SELECT pg_get_userbyid(p.proowner) AS owner, p.prosecdef AS definer,
+              p.proconfig AS config
+         FROM pg_proc p
+        WHERE p.oid = 'ops.platform_ops_assigned_integration_failures(integer)'::regprocedure`,
+    );
+    expect(fn).toEqual({
+      owner: 'w360_definer',
+      definer: true,
+      config: ['search_path=pg_catalog, pg_temp'],
+    });
+  });
+});
+
+describe('the failures assigned to nobody (ADR-318)', () => {
+  async function failingEndpoint(since: string) {
+    const id = uuidv7();
+    await fx.query(
+      `INSERT INTO app.webhook_endpoints (id, tenant_id, url, event_types, secret_ciphertext,
+         created_by_user_id, failing_since, last_failure_at)
+       VALUES ($1, $2, 'https://nobody.example.com/hook', ARRAY['message.received'], 'sealed', $3,
+         now() + $4::interval, now())`,
+      [id, company.tenant.id, company.owner.id, since],
+    );
+    return id;
+  }
+  const assign = (subjectId: string, assigneeUserId: string) =>
+    ops().assignFailure(staff, {
+      source: 'webhook_endpoint',
+      subjectId,
+      state: 'failing',
+      assigneeUserId,
+    });
+  const ids = (failures: { subjectId: string }[]) => failures.map((f) => f.subjectId);
+
+  it('lists only the failures assigned to nobody, as the full list shows them, narrowed before the limit', async () => {
+    const assigned = await failingEndpoint('-1 hour');
+    const nobody = await failingEndpoint('-2 hours');
+    // The newest failure of all, assigned: the full list's first row, never the unassigned one's.
+    const newest = await failingEndpoint('1 hour');
+    await assign(assigned, staff.userId);
+    await assign(newest, staff.userId);
+    const all = await ops().integrations(staff);
+    const unassigned = await ops().integrations(staff, 'unassigned');
+    expect(unassigned.failuresView).toBe('unassigned');
+    expect(ids(all.failures)).toEqual(expect.arrayContaining([assigned, nobody, newest]));
+    expect(ids(unassigned.failures)).toContain(nobody);
+    expect(ids(unassigned.failures)).not.toContain(assigned);
+    expect(ids(unassigned.failures)).not.toContain(newest);
+    expect(unassigned.failures.every((f) => f.assignment === null)).toBe(true);
+    expect(unassigned.failures.find((f) => f.subjectId === nobody)).toEqual(
+      all.failures.find((f) => f.subjectId === nobody),
+    );
+    const first = (fn: string) =>
+      fx.dbs.platform.run(staff.userId, (tx) =>
+        tx.execute<{ subject_id: string }>(sql`select subject_id from ${sql.raw(fn)}(1)`),
+      );
+    expect((await first('ops.platform_ops_integration_failures')).rows).toEqual([
+      { subject_id: newest },
+    ]);
+    expect((await first('ops.platform_ops_unassigned_integration_failures')).rows).not.toEqual([
+      { subject_id: newest },
+    ]);
+    // Taken off, it is unassigned again.
+    await ops().assignFailure(staff, {
+      source: 'webhook_endpoint',
+      subjectId: assigned,
+      state: 'failing',
+      assigneeUserId: null,
+    });
+    expect(ids((await ops().integrations(staff, 'unassigned')).failures)).toContain(assigned);
+    // The failure set in the future recovers, so later tests' lists start from the present.
+    await fx.query(`UPDATE app.webhook_endpoints SET failing_since = NULL WHERE id = $1`, [newest]);
+  });
+
+  it('refuses anyone who is not a platform administrator, and keeps the list to the platform role and its definer', async () => {
+    const outsider = await createUser(fx.dbs, { twoFactor: true });
+    await expectCode(
+      ops().integrations(
+        { userId: outsider.id, role: 'platform_operator', correlationId: uuidv7() },
+        'unassigned',
+      ),
+      'forbidden',
+    );
+    await expect(
+      fx.dbs.appPool.query(`SELECT * FROM ops.platform_ops_unassigned_integration_failures(10)`),
+    ).rejects.toThrow(/permission denied for function/);
+    // The auth role has no use of the ops schema at all.
+    await expect(
+      fx.dbs.authPool.query(`SELECT * FROM ops.platform_ops_unassigned_integration_failures(10)`),
+    ).rejects.toThrow(/permission denied for schema ops/);
+    const [fn] = await fx.query<{ owner: string; definer: boolean; config: unknown }>(
+      `SELECT pg_get_userbyid(p.proowner) AS owner, p.prosecdef AS definer,
+              p.proconfig AS config
+         FROM pg_proc p
+        WHERE p.oid = 'ops.platform_ops_unassigned_integration_failures(integer)'::regprocedure`,
+    );
+    expect(fn).toEqual({
       owner: 'w360_definer',
       definer: true,
       config: ['search_path=pg_catalog, pg_temp'],

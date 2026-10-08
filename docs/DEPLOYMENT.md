@@ -49,6 +49,11 @@ PostgreSQL 18; CI workflow authored).
   same company-allowed domains for the WhatsApp Flows data endpoint, which forwards WhatsApp's
   requests to companies' endpoints while WhatsApp waits (section below). It uses the same egress
   guard; apply the same egress proxy or firewall to the web tier.
+- The web tier also reaches `https://api.pwnedpasswords.com` to screen the passwords people set
+  (ADR-317), on by default for staging and production: allow it, or set `PASSWORD_BREACH_CHECK=off`.
+  When it cannot be reached, passwords are taken unchecked and the web log says
+  `password breach check unavailable`; `PWNED_PASSWORDS_BASE_URL` is refused outside
+  `APP_ENV=local|test`.
 
 **Pilot option (lower cost):** single web and worker replicas and a single managed PostgreSQL
 instance with PITR. Limitations: no redundancy during deploys or instance failure (brief downtime),
@@ -1106,6 +1111,32 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    and grants. Web servers of this release need it, as the Integrations tab reads the new columns;
    workers run the same check, unchanged for them. Web servers from before it show no assignments
    and ignore the new columns.
+
+   Migration 0237 (ADR-314) adds `notified_at` to `ops.integration_assignments`, set to when each
+   existing assignment was made so that none is emailed, replaces
+   `ops.platform_assign_integration_failure` with the same signature, owner and grant, and creates
+   `ops.claim_integration_assignment_notices` for the worker's role. Workers of this release need
+   it, as their minute sweep calls the new function; web servers call the assignment function as
+   before. Assignments made while workers from before it run are emailed once a worker of this
+   release runs.
+
+   Migration 0238 (ADR-315) creates `ops.platform_ops_assigned_integration_failures` for the
+   platform role and changes nothing else. Web servers of this release need it for "Assigned to me";
+   web servers from before it do not call it, and workers are unaffected.
+
+   Migration 0239 (ADR-316) adds `contact_event_tags` to `app.webhook_endpoints` with a check
+   validated by reading the table, replaces `app.capture_contact_webhook_event` (keeping 0136's
+   filters) and the tag trigger's `app.webhook_capture_contact_tag` with the same signatures, and
+   creates `app.deliver_contact_webhook_tag` for the runtime and definer roles; every endpoint
+   starts without a list. Web servers of this release need it, as their reads of endpoints name the
+   column; workers do not read it. Web servers from before it neither show nor change the column:
+   until the web rollout ends, an old server's change that drops both contact events from an
+   endpoint with a list fails on the check, its other changes keep the list, and its API refuses
+   `contactEventTags` (422) and leaves it out of the endpoints it answers.
+
+   Migration 0240 (ADR-318) creates `ops.platform_ops_unassigned_integration_failures` for the
+   platform role and changes nothing else. Web servers of this release need it for "Unassigned"; web
+   servers from before it do not call it, and workers are unaffected.
 
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.

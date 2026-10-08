@@ -97,6 +97,13 @@ sweep is not running: nobody is emailed about late queues until it does, so star
 - Post a status notice in-app (platform banner, backlog) and to affected owners.
 - After recovery, watch for `unknown_outcome` sends (section 7); open top-ups and auto-recharge
   attempts reconcile themselves through the billing sweep (section 9).
+- Pwned Passwords (ADR-317): while the range API cannot be reached, answers an error or takes over 3
+  seconds, the web log says `password breach check unavailable: the password was taken unchecked`
+  with the path and why (the error's class or the status). Sign-ups, resets and changes go on with
+  the length rules only. Check that the web tier may reach `api.pwnedpasswords.com:443`; to stop the
+  checks during a long outage, set `PASSWORD_BREACH_CHECK=off` and restart the web tier, and turn
+  them back on after. A person told their password "appears in known data breaches" should choose
+  another: the check never says which breach.
 
 ## 6. Expired or revoked provider credentials
 
@@ -2889,6 +2896,19 @@ are `contact.updated` events, which the list does not narrow. To take more, tick
 (null for every contact). Removing Contact added clears the list. A receiver that is sent its own
 contacts back should leave out `api`.
 
+**A receiver misses changes of some tagged contacts (ADR-316).** An endpoint can take the
+`contact.created` and `contact.updated` of contacts with chosen tags only. The endpoints list shows
+them ("Added and changed contacts sent, of contacts tagged: …"), and the API answers
+`contactEventTags` (null takes every contact). A change goes by the tags the contact has when it is
+saved, and a change adding or removing one of the tags is sent too (with `tagsAdded` and
+`tagsRemoved`); a contact added untagged and tagged later is sent as `contact.updated`, not
+`contact.created`. Events no endpoint takes are not recorded, so there is nothing to replay;
+`GET /contacts/{id}` gives a contact's tags as they are now. Tags are compared as contacts carry
+them (lower case, single spaces), so check the spelling. With sources, parts or fields chosen too,
+an event must pass every list, and parts that leave out tags mean a change of tags alone is not
+sent. To take more, change the tags on the endpoint's page, or `PATCH /webhook-endpoints/{id}` with
+`contactEventTags` (null for every contact). Removing both contact events clears the list.
+
 **A receiver misses consent changes (ADR-189).** An endpoint can take chosen consent changes only.
 The endpoints list shows them ("Consent changes sent: …"), and the API answers `consentChanges`
 (null takes every change). A change goes by its purpose and action (`marketing_opt_out`): the others
@@ -3617,8 +3637,25 @@ assignment off. The platform audit log keeps each change (`platform.integration_
 `platform.integration_failure_unassigned`). An assignment lasts while the failure is listed in that
 state, like an acknowledgement: a change of state starts it unassigned, and one that recovers keeps
 its assignment for an hour. "Assign the failure to a platform administrator." means the person
-chosen is no longer one; reload the page. The assignee is not emailed: tell them, or rely on the
-console. The CSV leaves assignments out.
+chosen is no longer one; reload the page. The assignee is emailed unless they assigned it themselves
+(ADR-314). The CSV leaves assignments out.
+
+**Assignment emails (ADR-314).** Within about a minute of an assignment the worker emails the
+assignee ("A failing integration was assigned to you", or how many), with counts by kind and who
+assigned them, and logs `failure assignments emailed to platform staff` with how many failures and
+recipients. Nobody is emailed about a failure they assigned themselves or one assigned to them
+again, and an assignment whose failure recovered, or whose assignee stopped being an administrator,
+before the sweep is never emailed. An assignee who got no email: check on Current failures that
+someone else assigned the failure to them, then follow the email outbox (section 3).
+
+**Assigned to me (ADR-315).** On Current failures, "Assigned to me" lists only the failures assigned
+to you, however many others are failing, with the same forms; "All failures" lists every failure
+again. Reassigning a failure to someone else takes it off your view at once. The CSV always gives
+every failure.
+
+**Unassigned (ADR-318).** On Current failures, "Unassigned" lists only the failures nobody is
+assigned, however many others are failing, with the same forms: assign one there and it leaves the
+view; take an assignment off and it comes back. The CSV always gives every failure.
 
 **Keys (ADR-134).** The configured encryption key ids, the primary first, and how many stored values
 each key seals, by kind (counts only). While another key is configured the worker seals the values

@@ -337,7 +337,10 @@ test('staff acknowledge a company’s failing integration on the console, with a
   const suffix = `${Date.now().toString(36)}${Math.floor(Math.random() * 1e4)}`;
   const slug = `ack-${suffix}`;
   const companyName = `Ack Co ${suffix}`;
-  await signUpAndVerify(page, { name: 'Anil Staff', email, password: PASSWORD });
+  // Platform administrators are shared by every run, so this one's name is its own: the
+  // Administrator list is chosen by name.
+  const staff = `Anil Staff ${suffix}`;
+  await signUpAndVerify(page, { name: staff, email, password: PASSWORD });
   await page.getByLabel('Company name').fill(companyName);
   await page.getByLabel('Company address').fill(slug);
   await page.getByRole('button', { name: 'Create company' }).click();
@@ -357,24 +360,54 @@ test('staff acknowledge a company’s failing integration on the console, with a
     .getByRole('row')
     .filter({ hasText: companyName });
   await expect(row).toContainText('Failed');
-  await expect(row).not.toContainText('By Anil Staff');
+  await expect(row).not.toContainText(`By ${staff}`);
 
   await row.getByText('Acknowledge', { exact: true }).click();
   await row
     .getByLabel('Note (what was done or found)')
     .fill('Called the owner: they will reconnect the number today.');
   await row.getByRole('button', { name: 'Acknowledge failure' }).click();
-  await expect(row).toContainText('By Anil Staff');
+  await expect(row).toContainText(`By ${staff}`);
   await expect(row).toContainText('Called the owner: they will reconnect the number today.');
   await expect(row.getByText('Replace the note', { exact: true })).toBeVisible();
+  // Unassigned (ADR-318): listed there until someone takes it.
+  const views = page.getByRole('navigation', { name: 'Failures shown' });
+  await views.getByRole('link', { name: 'Unassigned' }).click();
+  await expect(page).toHaveURL(/\/platform\/ops\/integrations\?failures=unassigned$/);
+  await expect(row).toContainText('Failed');
+  await views.getByRole('link', { name: 'All failures' }).click();
+  await expect(page).toHaveURL(/\/platform\/ops\/integrations$/);
   // Assigned to an administrator, here the one who took it (ADR-313).
-  await expect(row).not.toContainText('To Anil Staff');
+  await expect(row).not.toContainText(`To ${staff}`);
   await row.getByText('Assign', { exact: true }).click();
-  await row.getByLabel('Administrator').selectOption({ label: 'Anil Staff' });
+  await row.getByLabel('Administrator').selectOption({ label: staff });
   await row.getByRole('button', { name: 'Assign failure' }).click();
-  await expect(row).toContainText('To Anil Staff');
+  await expect(row).toContainText(`To ${staff}`);
   await expect(row.getByText('Reassign', { exact: true })).toBeVisible();
   await expectNoHorizontalOverflow(page);
+  // Assigned to me (ADR-315): this failure, the only one assigned to them.
+  await expect(views.getByRole('link', { name: 'All failures' })).toHaveAttribute(
+    'aria-current',
+    'page',
+  );
+  await views.getByRole('link', { name: 'Assigned to me' }).click();
+  await expect(page).toHaveURL(/\/platform\/ops\/integrations\?failures=mine$/);
+  await expect(views.getByRole('link', { name: 'Assigned to me' })).toHaveAttribute(
+    'aria-current',
+    'page',
+  );
+  const assigned = page.getByRole('table', { name: 'Current failures' }).getByRole('row');
+  // The header and the one failure.
+  await expect(assigned).toHaveCount(2);
+  await expect(assigned.filter({ hasText: companyName })).toContainText(`To ${staff}`);
+  await expectNoHorizontalOverflow(page);
+  // No longer unassigned.
+  await views.getByRole('link', { name: 'Unassigned' }).click();
+  await expect(page).toHaveURL(/\/platform\/ops\/integrations\?failures=unassigned$/);
+  await expect(row).toHaveCount(0);
+  await views.getByRole('link', { name: 'All failures' }).click();
+  await expect(page).toHaveURL(/\/platform\/ops\/integrations$/);
+  await expect(row).toContainText(`To ${staff}`);
   // The list as CSV (ADR-158): when the failure was acknowledged, but neither by whom nor the note,
   // and no assignment.
   const failures = await downloadCsv(page, 'Download CSV: Current failures');

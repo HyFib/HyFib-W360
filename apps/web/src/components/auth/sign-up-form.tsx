@@ -4,7 +4,7 @@ import { useState } from 'react';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import type { z } from 'zod';
-import { signUpSchema } from '@w360/contracts';
+import { PASSWORD_BREACHED_CODE, PASSWORD_BREACHED_MESSAGE, signUpSchema } from '@w360/contracts';
 import {
   Button,
   Card,
@@ -37,7 +37,9 @@ export function SignUpForm({ next }: { next: string | null }) {
       setError(
         result.error.status === 429
           ? 'Too many attempts. Try again later.'
-          : 'We could not create the account. Check the details and try again.',
+          : result.error.code === PASSWORD_BREACHED_CODE
+            ? PASSWORD_BREACHED_MESSAGE
+            : 'We could not create the account. Check the details and try again.',
       );
       return;
     }

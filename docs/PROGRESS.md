@@ -1,5 +1,211 @@
 # Progress
 
+## 2026-10-08 — The failing integrations assigned to nobody (P5-10, H-034, ADR-318)
+
+Status: **Implemented; its database and browser tests run in CI only.** Current failures could show
+every failure or one's own, but finding those nobody handled meant reading up to 500 rows. The local
+PostgreSQL is unavailable, so migration 0240, the integration tests and the changed e2e test below
+were written but not run here; migration 0240 passed the pglast parse check (syntax only).
+
+### Completed
+
+- **Design (ADR-318):** "Unassigned" (`?failures=unassigned`) on Current failures, narrowed before
+  the limit; the CSV unchanged.
+- **Database (migration 0240):** `ops.platform_ops_unassigned_integration_failures` (definer,
+  platform role only).
+- **Domain and web:** the `unassigned` view in `platform/ops-model.ts` and `platform/ops.ts`; the
+  third link on the Integrations tab, with its own empty state.
+- **Tests:** unit (1 changed in `integration-assignments.test.ts`); integration (2 new in
+  `platform-ops.test.ts`, 1 changed in `tenant-isolation.test.ts`); e2e (1 changed in
+  `platform-ops.spec.ts`: the failure under Unassigned until it is assigned). Written for CI; the
+  integration and e2e tests were not run here.
+- **Docs:** ADR-318; SECURITY; ARCHITECTURE; THREAT-MODEL T286; DEPLOYMENT and RUNBOOKS; BACKLOG
+  P5-10; feature matrix H-034.
+- **Mutation checks:** 5/5 deliberate regressions caught on the unit-tested parts. The function and
+  the page need the database and a browser, so their regressions are left to the integration and e2e
+  tests, which run in CI.
+
+### Test commands and results (local, 2026-10-08)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 140 files, 1339 tests                                           |
+| `pnpm test:integration`, e2e                       | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+| pglast 7 parse of migration 0240                   | passed (syntax only)                                            |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                  |
+
+## 2026-10-08 — Screening the passwords people set against breached ones (SEC-2, H-052, ADR-317)
+
+Status: **Implemented; its browser test runs in CI only, and the live service was not reached.** A
+person could set any password of 12 to 128 characters, breached ones included. The Pwned Passwords
+API and its documentation were refused by this environment's egress policy, so the request and
+response follow Better Auth's own plugin and search summaries of the official pages
+(`docs/research/pwned-passwords.md`).
+
+### Completed
+
+- **Design (ADR-317):** sign-up, reset and change check the new password with the range API (five
+  characters of its SHA-1 hash, padded answers); a listed one is refused with `PASSWORD_BREACHED`; a
+  check that cannot be made takes it with a warning; on by default for staging and production; the
+  origin is the service's outside local and test.
+- **Configuration:** `PASSWORD_BREACH_CHECK` and `PWNED_PASSWORDS_BASE_URL`
+  (`passwordBreachCheckFrom` in `packages/core/src/config.ts`, checked at start-up), and
+  `.env.example`.
+- **Domain and web:** `packages/domain/src/account/password-breaches.ts` (`checkPasswordBreaches`,
+  `passwordBeingSet`, `rangeBreachCount`); the auth API's `before` hook; the sign-up, reset and
+  change-password forms' message; the password lengths and the message in `@w360/contracts`.
+- **Tests:** unit (7 new in `password-breaches.test.ts` and `config.test.ts`); e2e (1 new in
+  `onboarding.spec.ts`: a breached password refused at sign-up and change) against a test-only
+  stand-in (`tests/support/pwned-passwords-stand-in.ts`), started by the Playwright global setup and
+  turned on in CI. Written for CI; the e2e test was not run here.
+- **Docs:** ADR-317; `docs/research/pwned-passwords.md`; ARCHITECTURE; SECURITY; THREAT-MODEL T285;
+  DEPLOYMENT and RUNBOOKS; BACKLOG SEC-2; feature matrix H-052.
+- **Mutation checks:** 24/24 deliberate regressions caught on the unit-tested parts. The hook and
+  the forms need a browser, so their regressions are left to the e2e test, which runs in CI.
+
+### Test commands and results (local, 2026-10-08)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 140 files, 1339 tests                                         |
+| `pnpm test:e2e`                                    | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
+## 2026-10-08 — Tag filters for added and changed contacts (P5-09, H-014, ADR-316)
+
+Status: **Implemented; its database tests run in CI only.** Endpoints taking `contact.created` or
+`contact.updated` could name sources, parts and fields, but not tags, so a receiver following a
+segment of customers took every contact's changes. The local PostgreSQL is unavailable, so the
+migration and the integration tests below were written but not run here; migration 0239 passed the
+pglast parse check (syntax only).
+
+### Completed
+
+- **Database:** migration 0239 (`contact_event_tags` on `app.webhook_endpoints` with its check and
+  update grant; `app.capture_contact_webhook_event` reading the contact's tags when an endpoint
+  names tags; `app.deliver_contact_webhook_tag`, called by the tag trigger, for the tag a change
+  adds or removes).
+- **Domain:** `WEBHOOK_LIMITS.contactEventTags`, `webhookContactEventTagsSchema` and
+  `webhookContactEventTagsFor` in `webhooks/service.ts`, the endpoint view's `contactEventTags`,
+  creation, changes, audits and the export column; the same in `api/webhook-endpoints.ts` and the
+  OpenAPI document (both events' descriptions name it).
+- **Web:** Settings → Webhooks' "Tags of added and changed contacts" while the endpoint takes either
+  event, and the endpoints list's line for it.
+- **Tests:** unit (3 new: the list's rules and keeping and clearing in `webhooks/webhooks.test.ts`;
+  the API schemas and OpenAPI entries in `api/api.test.ts`; the empty-change wording asserted where
+  the new words go); integration (6 new: capture in `webhook-events.test.ts`, one of them for a
+  rename and a tag change in one transaction in either order, added after a review found that an
+  endpoint naming parts and tags missed a name changed before a tag was added, the services in
+  `webhooks.test.ts`, the API in `api-webhook-endpoints.test.ts`; 1 changed in
+  `tenant-isolation.test.ts`). Written for CI; the integration tests were not run here. No e2e test.
+- **Docs:** ADR-316; ARCHITECTURE; SECURITY; THREAT-MODEL T284; DEPLOYMENT; RUNBOOKS; BACKLOG P5-09;
+  feature matrix H-014.
+- **Mutation checks:** 21/22 deliberate regressions caught on the unit-tested parts; the one left,
+  the export leaving out the column, is caught by the company data integration test that checks
+  every exported column against the database, run in CI only. The capture, the new function and the
+  form need the database or a browser, so their regressions are left to the integration tests, which
+  run in CI.
+
+### Test commands and results (local, 2026-10-08)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 139 files, 1332 tests                                         |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| pglast 7 parse of migration 0239                   | passed (syntax only)                                          |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
+## 2026-10-08 — The failing integrations assigned to the administrator reading (P5-10, H-034, ADR-315)
+
+Status: **Implemented; its database and browser tests run in CI only.** Current failures showed each
+failure's assignee, but an administrator found their own only by reading up to 500 rows, and an
+older one could be beyond them. The local PostgreSQL is unavailable, so migration 0238, the
+integration tests and the changed e2e test below were written but not run here; migration 0238
+passed the pglast parse check (syntax only).
+
+### Completed
+
+- **Design (ADR-315):** "All failures" and "Assigned to me" (`?failures=mine`) on Current failures;
+  the narrowed list read before the limit, for the session's administrator only; the CSV unchanged.
+- **Database (migration 0238):** `ops.platform_ops_assigned_integration_failures` (definer, platform
+  role only).
+- **Domain:** `integrationFailureView` in `platform/ops-model.ts`; `integrations(actor, view)` and
+  `failuresView` in `platform/ops.ts`.
+- **Web:** the two views on the Integrations tab, with their own empty state; the tab's text says
+  what each shows and that the CSV gives every failure.
+- **Tests:** unit (1 new in `integration-assignments.test.ts`): the query string; integration (3 new
+  in `platform-ops.test.ts`, 1 changed in `tenant-isolation.test.ts`): only the reader's
+  assignments, the limit after narrowing, the refusal, grants, owner and search path; e2e (1 changed
+  in `platform-ops.spec.ts`): the assigned failure alone under Assigned to me, then every failure
+  again. Written for CI; the integration and e2e tests were not run here.
+- **Docs:** ADR-315 (and ADR-313's "Not built" annotated); SECURITY; ARCHITECTURE; THREAT-MODEL
+  T283; DEPLOYMENT and RUNBOOKS; BACKLOG P5-10; feature matrix H-034.
+- **Mutation checks:** 4/4 deliberate regressions caught on the unit-tested parts. The function and
+  the page need the database and a browser, so their regressions are left to the integration and e2e
+  tests, which run in CI.
+
+### Test commands and results (local, 2026-10-08)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 139 files, 1329 tests                                           |
+| `pnpm test:integration`, e2e                       | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+| pglast 7 parse of migration 0238                   | passed (syntax only)                                            |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                  |
+
+## 2026-10-08 — Emailing administrators the failing integrations assigned to them (P5-10, H-034, ADR-314)
+
+Status: **Implemented; its database tests run in CI only.** Since ADR-313 an administrator assigned
+to a failure by another learnt of it only on the console. The local PostgreSQL is unavailable, so
+migration 0237 and the integration tests below were written but not run here; migration 0237 passed
+the pglast parse check (syntax only).
+
+### Completed
+
+- **Design (ADR-314):** the worker's minute sweep emails each assignee once about the failures other
+  administrators assigned them since its last run, with counts by kind and who assigned them; not
+  about a self-assignment, an assignee who stays, a failure that recovered or an assignee who is no
+  longer an administrator.
+- **Database (migration 0237):** `ops.integration_assignments.notified_at`, existing assignments
+  taken as told; `ops.platform_assign_integration_failure` replaced to set, keep or clear it;
+  `ops.claim_integration_assignment_notices` (definer, worker role only).
+- **Domain and worker:** `platform/integration-assignment-notices.ts` (`assignmentNotice`,
+  `noticeIntegrationAssignments`), the alerts' kind labels shared (`integrationKindLabel`), and the
+  call in the worker's messaging sweep.
+- **Web:** Current failures says the assignee is emailed, with counts only.
+- **Tests:** unit (6 new in `integration-assignment-notices.test.ts`): the wording for one failure,
+  several by one administrator and several by two, the longest name with every kind, and one email
+  per assignee; integration (5 new in `platform-ops.test.ts`, 1 changed in
+  `tenant-isolation.test.ts`): told once with two sweeps at once and counts only, self-assignment
+  and the same assignee, several failures in one email and reassignment, a recovered failure and a
+  removed administrator, the grants, owner and search path. Written for CI; the integration tests
+  were not run here.
+- **Docs:** ADR-314 (and ADR-313's "Not built" annotated); SECURITY; ARCHITECTURE; THREAT-MODEL
+  T282; DEPLOYMENT and RUNBOOKS; DATA-RETENTION; BACKLOG P5-10; feature matrix H-034 (and a repeated
+  phrase in ADR-313's evidence removed).
+- **Mutation checks:** 28/28 deliberate regressions caught on the unit-tested parts. The claim and
+  assignment functions need the database, so their regressions are left to the integration tests,
+  which run in CI.
+
+### Test commands and results (local, 2026-10-08)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 139 files, 1328 tests                                         |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| pglast 7 parse of migration 0237                   | passed (syntax only)                                          |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
 ## 2026-10-08 — Assigning failing integrations on the operations console (P5-10, H-034, ADR-313)
 
 Status: **Implemented; its database and browser tests run in CI only.** Administrators could

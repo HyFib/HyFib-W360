@@ -1858,8 +1858,8 @@ function CrmMemberChoices({
 }
 
 /**
- * What the contact tags' fieldset says for conversations' events (ADR-267) and satisfaction survey
- * answers (ADR-312).
+ * What the contact tags' fieldset says for conversations' events (ADR-267), satisfaction survey
+ * answers (ADR-312) and added and changed contacts (ADR-316).
  */
 const CONTACT_TAG_WORDS = {
   conversations: {
@@ -1878,13 +1878,21 @@ const CONTACT_TAG_WORDS = {
     idPart: 'survey-contact-tags',
     limit: WEBHOOK_LIMITS.surveyContactTags,
   },
+  contacts: {
+    legend: 'Tags of added and changed contacts',
+    help: 'A change of a contact is sent when the contact has any of the tags when it is saved, or when the change adds or removes one of them; a contact added and tagged with one in the same change is sent as added. With where contacts came from, the parts or the fields chosen too, an event must pass them all. Other events are sent whichever tags are given.',
+    every: 'Every contact',
+    only: 'Only the contacts who have any of these tags',
+    idPart: 'contact-event-tags',
+    limit: WEBHOOK_LIMITS.contactEventTags,
+  },
 } as const;
 
 /**
- * The contact tags whose conversations' events (ADR-267) or satisfaction survey answers (ADR-312)
- * an endpoint takes, as `kind` says: every conversation's or answer, or those whose contact has any
- * of the tags given when the event happens. Tags are typed separated by commas, as on a contact;
- * the service reads them as contacts carry them.
+ * The contact tags whose conversations' events (ADR-267), satisfaction survey answers (ADR-312) or
+ * added and changed contacts (ADR-316) an endpoint takes, as `kind` says: every conversation's,
+ * answer or contact, or those whose contact has any of the tags given when the event happens. Tags
+ * are typed separated by commas, as on a contact; the service reads them as contacts carry them.
  */
 function ContactTagChoices({
   kind,
@@ -2628,6 +2636,8 @@ export function WebhookEndpointForm({
     surveyContactTags: string[] | null;
     /** The conversation tags of the survey answers it takes (ADR-312); null: every answer. */
     surveyConversationTags: string[] | null;
+    /** The contact tags of the added and changed contacts it takes (ADR-316); null: every one. */
+    contactEventTags: string[] | null;
     /** The members it names (ADR-181), with whether they still take conversations; null: all. */
     assignees: WebhookEndpointAssignee[] | null;
     /** The contact tags it names (ADR-267); null for every conversation. */
@@ -2790,6 +2800,10 @@ export function WebhookEndpointForm({
   );
   const [surveyConversationTagsText, setSurveyConversationTagsText] = useState(
     endpoint?.surveyConversationTags?.join(', ') ?? '',
+  );
+  const [everyContactEventTag, setEveryContactEventTag] = useState(!endpoint?.contactEventTags);
+  const [contactEventTagsText, setContactEventTagsText] = useState(
+    endpoint?.contactEventTags?.join(', ') ?? '',
   );
   const [everyAssignee, setEveryAssignee] = useState(!endpoint?.assignees);
   const [everyField, setEveryField] = useState(!endpoint?.contactFields);
@@ -3014,6 +3028,15 @@ export function WebhookEndpointForm({
                 .map((tag) => tag.trim())
                 .filter((tag) => tag !== '')
             : null;
+        // Every contact unless tags are given for added and changed contacts (ADR-316).
+        const chosenContactEventTags =
+          (eventTypes.includes('contact.created') || eventTypes.includes('contact.updated')) &&
+          !everyContactEventTag
+            ? contactEventTagsText
+                .split(',')
+                .map((tag) => tag.trim())
+                .filter((tag) => tag !== '')
+            : null;
         // Every conversation's events unless the members ticked are chosen (ADR-181).
         const chosenAssignees =
           webhookTakesTeamEvents(eventTypes) && !everyAssignee ? assigneeIds : null;
@@ -3077,6 +3100,7 @@ export function WebhookEndpointForm({
           surveyTeamIds: chosenSurveyTeams,
           surveyContactTags: chosenSurveyContactTags,
           surveyConversationTags: chosenSurveyConversationTags,
+          contactEventTags: chosenContactEventTags,
           assigneeIds: chosenAssignees,
           contactTags: chosenContactTags,
           conversationTags: chosenConversationTags,
@@ -3182,6 +3206,8 @@ export function WebhookEndpointForm({
               setSurveyContactTagsText('');
               setEverySurveyConversationTag(true);
               setSurveyConversationTagsText('');
+              setEveryContactEventTag(true);
+              setContactEventTagsText('');
               setEveryAssignee(true);
               setAssigneeIds([]);
               setEveryContactTag(true);
@@ -3420,6 +3446,16 @@ export function WebhookEndpointForm({
           onEveryChange={setEverySurveyConversationTag}
           text={surveyConversationTagsText}
           onTextChange={setSurveyConversationTagsText}
+        />
+      ) : null}
+      {eventTypes.includes('contact.created') || eventTypes.includes('contact.updated') ? (
+        <ContactTagChoices
+          kind="contacts"
+          prefix={prefix}
+          every={everyContactEventTag}
+          onEveryChange={setEveryContactEventTag}
+          text={contactEventTagsText}
+          onTextChange={setContactEventTagsText}
         />
       ) : null}
       {webhookTakesPipelineEvents(eventTypes) ? (
