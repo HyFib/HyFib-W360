@@ -2471,6 +2471,10 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   assignee, with counts by kind and who assigned them. `ops.platform_assign_integration_failure`
   sets `notified_at` for a self-assignment, keeps it for the same assignee and clears it for a new
   one.
+- **Assigned to me** (ADR-315, migration 0238): the Integrations tab's `?failures=mine` reads
+  `ops.platform_ops_assigned_integration_failures` (definer, platform role only): the console's list
+  narrowed to the assignments of the session's administrator before its limit, with the same
+  columns.
 - **Acknowledging dead letters** (ADR-169, migration 0117): `acknowledged_at`,
   `acknowledged_by_user_id` and `acknowledgement` on `ops.dead_letters`, set together (the check
   `dead_letters_acknowledged`) and written only by `ops.platform_acknowledge_dead_letter` (definer,

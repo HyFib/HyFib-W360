@@ -1,5 +1,45 @@
 # Progress
 
+## 2026-10-08 — The failing integrations assigned to the administrator reading (P5-10, H-034, ADR-315)
+
+Status: **Implemented; its database and browser tests run in CI only.** Current failures showed each
+failure's assignee, but an administrator found their own only by reading up to 500 rows, and an
+older one could be beyond them. The local PostgreSQL is unavailable, so migration 0238, the
+integration tests and the changed e2e test below were written but not run here; migration 0238
+passed the pglast parse check (syntax only).
+
+### Completed
+
+- **Design (ADR-315):** "All failures" and "Assigned to me" (`?failures=mine`) on Current failures;
+  the narrowed list read before the limit, for the session's administrator only; the CSV unchanged.
+- **Database (migration 0238):** `ops.platform_ops_assigned_integration_failures` (definer, platform
+  role only).
+- **Domain:** `integrationFailureView` in `platform/ops-model.ts`; `integrations(actor, view)` and
+  `failuresView` in `platform/ops.ts`.
+- **Web:** the two views on the Integrations tab, with their own empty state; the tab's text says
+  what each shows and that the CSV gives every failure.
+- **Tests:** unit (1 new in `integration-assignments.test.ts`): the query string; integration (3 new
+  in `platform-ops.test.ts`, 1 changed in `tenant-isolation.test.ts`): only the reader's
+  assignments, the limit after narrowing, the refusal, grants, owner and search path; e2e (1 changed
+  in `platform-ops.spec.ts`): the assigned failure alone under Assigned to me, then every failure
+  again. Written for CI; the integration and e2e tests were not run here.
+- **Docs:** ADR-315 (and ADR-313's "Not built" annotated); SECURITY; ARCHITECTURE; THREAT-MODEL
+  T283; DEPLOYMENT and RUNBOOKS; BACKLOG P5-10; feature matrix H-034.
+- **Mutation checks:** 4/4 deliberate regressions caught on the unit-tested parts. The function and
+  the page need the database and a browser, so their regressions are left to the integration and e2e
+  tests, which run in CI.
+
+### Test commands and results (local, 2026-10-08)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 139 files, 1329 tests                                           |
+| `pnpm test:integration`, e2e                       | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+| pglast 7 parse of migration 0238                   | passed (syntax only)                                            |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                  |
+
 ## 2026-10-08 — Emailing administrators the failing integrations assigned to them (P5-10, H-034, ADR-314)
 
 Status: **Implemented; its database tests run in CI only.** Since ADR-313 an administrator assigned

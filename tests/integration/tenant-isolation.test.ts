@@ -297,6 +297,11 @@ describe('database roles', () => {
     expect(await can('w360_platform', assign)).toBe(true);
     expect(await can('w360_app', assign)).toBe(false);
     expect(await can('w360_auth', assign)).toBe(false);
+    // The failures assigned to the administrator reading (0238): platform staff only.
+    const assigned = 'ops.platform_ops_assigned_integration_failures(integer)';
+    expect(await can('w360_platform', assigned)).toBe(true);
+    expect(await can('w360_app', assigned)).toBe(false);
+    expect(await can('w360_auth', assigned)).toBe(false);
     // Emailing the assignees (0237): the worker's sweep only.
     const notices = 'ops.claim_integration_assignment_notices()';
     expect(await can('w360_app', notices)).toBe(true);

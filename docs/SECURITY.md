@@ -2182,6 +2182,10 @@ message text, contact details, payloads, email addresses, secrets or full URLs:
   transaction that queues the email. The email gives counts by kind and the assigning
   administrator's name only, with no company, label, host or error, and its outbox row names no
   company (unit tests; integration tests, run in CI only).
+- The failures assigned to the reader (ADR-315): `ops.platform_ops_assigned_integration_failures`
+  (SECURITY DEFINER, executable only by the platform role) refuses anyone who is not a platform
+  administrator and narrows the console's list to the session's own administrator, never one the
+  request names; it reads the full list's columns and no more (integration tests, run in CI only).
 - Acknowledging dead letters (ADR-169): through `ops.platform_acknowledge_dead_letter` (SECURITY
   DEFINER, executable only by the platform role), which checks the platform administrator, the note
   (10 to 500 characters, trimmed) and the dead letter, and writes the platform audit entry

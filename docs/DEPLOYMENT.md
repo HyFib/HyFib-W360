@@ -1115,6 +1115,10 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    before. Assignments made while workers from before it run are emailed once a worker of this
    release runs.
 
+   Migration 0238 (ADR-315) creates `ops.platform_ops_assigned_integration_failures` for the
+   platform role and changes nothing else. Web servers of this release need it for "Assigned to me";
+   web servers from before it do not call it, and workers are unaffected.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

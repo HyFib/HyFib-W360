@@ -375,6 +375,26 @@ test('staff acknowledge a company’s failing integration on the console, with a
   await expect(row).toContainText('To Anil Staff');
   await expect(row.getByText('Reassign', { exact: true })).toBeVisible();
   await expectNoHorizontalOverflow(page);
+  // Assigned to me (ADR-315): this failure, the only one assigned to them.
+  const views = page.getByRole('navigation', { name: 'Failures shown' });
+  await expect(views.getByRole('link', { name: 'All failures' })).toHaveAttribute(
+    'aria-current',
+    'page',
+  );
+  await views.getByRole('link', { name: 'Assigned to me' }).click();
+  await expect(page).toHaveURL(/\/platform\/ops\/integrations\?failures=mine$/);
+  await expect(views.getByRole('link', { name: 'Assigned to me' })).toHaveAttribute(
+    'aria-current',
+    'page',
+  );
+  const assigned = page.getByRole('table', { name: 'Current failures' }).getByRole('row');
+  // The header and the one failure.
+  await expect(assigned).toHaveCount(2);
+  await expect(assigned.filter({ hasText: companyName })).toContainText('To Anil Staff');
+  await expectNoHorizontalOverflow(page);
+  await views.getByRole('link', { name: 'All failures' }).click();
+  await expect(page).toHaveURL(/\/platform\/ops\/integrations$/);
+  await expect(row).toContainText('To Anil Staff');
   // The list as CSV (ADR-158): when the failure was acknowledged, but neither by whom nor the note,
   // and no assignment.
   const failures = await downloadCsv(page, 'Download CSV: Current failures');

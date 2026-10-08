@@ -1,4 +1,5 @@
 import type { Metadata } from 'next';
+import Link from 'next/link';
 import {
   Badge,
   Card,
@@ -20,6 +21,8 @@ import {
   QUARANTINE_REASON_LABELS,
   RECEIPT_PROBLEM_LABELS,
   WEBHOOK_PROVIDER_LABELS,
+  integrationFailureView,
+  type IntegrationFailureView,
 } from '@w360/domain';
 import { CompanyLink, ListTitle, Utc } from '@/components/platform/ops';
 import {
@@ -36,10 +39,21 @@ import { requirePlatformActor } from '@/server/session';
 export const metadata: Metadata = { title: 'Integrations · Operations' };
 export const dynamic = 'force-dynamic';
 
-export default async function OpsIntegrationsPage() {
+/** Every failure, or those assigned to the administrator reading (ADR-315). */
+const FAILURE_VIEWS: { view: IntegrationFailureView; label: string; href: string }[] = [
+  { view: 'all', label: 'All failures', href: '/platform/ops/integrations' },
+  { view: 'mine', label: 'Assigned to me', href: '/platform/ops/integrations?failures=mine' },
+];
+
+export default async function OpsIntegrationsPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ failures?: string | string[] }>;
+}) {
   const actor = await requirePlatformActor();
+  const { failures } = await searchParams;
   const { platformOps } = await getRuntime();
-  const o = await platformOps.integrations(actor);
+  const o = await platformOps.integrations(actor, integrationFailureView(failures));
   return (
     <div className="grid grid-cols-1 gap-6">
       <Card>
@@ -62,13 +76,36 @@ export default async function OpsIntegrationsPage() {
             (ADR-141). Any administrator assigns a failure to an administrator, themselves or
             another, so it is clear who handles it; the assignment lasts while the failure is listed
             too (ADR-313), and the assignee is emailed unless they assigned it themselves, with
-            counts only (ADR-314). The CSV gives when a failure was acknowledged, not by whom or the
-            note, and leaves assignments out.
+            counts only (ADR-314). Assigned to me lists only the failures assigned to you (ADR-315).
+            The CSV gives every failure with when it was acknowledged, not by whom or the note, and
+            leaves assignments out.
           </CardDescription>
         </CardHeader>
-        <CardContent>
+        <CardContent className="grid gap-4">
+          <nav aria-label="Failures shown" className="flex flex-wrap gap-2 text-sm">
+            {FAILURE_VIEWS.map((v) => (
+              <Link
+                key={v.view}
+                href={v.href}
+                aria-current={v.view === o.failuresView ? 'page' : undefined}
+                className={
+                  v.view === o.failuresView
+                    ? 'rounded-md bg-primary px-3 py-1 text-primary-foreground'
+                    : 'rounded-md border border-border px-3 py-1 text-primary hover:bg-muted'
+                }
+              >
+                {v.label}
+              </Link>
+            ))}
+          </nav>
           {o.failures.length === 0 ? (
-            <EmptyState title="No integration is failing" />
+            <EmptyState
+              title={
+                o.failuresView === 'mine'
+                  ? 'No failing integration is assigned to you'
+                  : 'No integration is failing'
+              }
+            />
           ) : (
             <Table aria-label="Current failures">
               <THead>

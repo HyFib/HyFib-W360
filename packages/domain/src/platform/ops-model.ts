@@ -674,6 +674,17 @@ export interface IntegrationFailure {
   } | null;
 }
 
+/**
+ * What Current failures lists (ADR-315): every failure, or only those assigned to the
+ * administrator reading the console.
+ */
+export type IntegrationFailureView = 'all' | 'mine';
+
+/** The view the Integrations tab's query string names (`?failures=mine`); anything else is all. */
+export function integrationFailureView(value: unknown): IntegrationFailureView {
+  return value === 'mine' ? 'mine' : 'all';
+}
+
 /** A platform administrator a failure can be assigned to (ADR-313), by account and name. */
 export interface PlatformAdministrator {
   userId: string;

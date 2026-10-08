@@ -12076,7 +12076,7 @@ Decision:
 
 Not built: an email to the assignee (built by ADR-314; the alert email of ADR-139 is unchanged),
 assigning the console's other lists (dead letters, receipts, quarantine, late queues), a view of the
-failures assigned to oneself, and assignments in the CSV.
+failures assigned to oneself (built by ADR-315), and assignments in the CSV.
 
 ## ADR-314 Emailing a platform administrator the failing integrations assigned to them (P5-10) (2026-10-08)
 
@@ -12116,3 +12116,27 @@ Decision:
 
 Not built: an email when an assignment is taken off or an assigned failure recovers, a way for an
 administrator to stop these emails, and assigning the console's other lists (ADR-313).
+
+## ADR-315 The failing integrations assigned to the administrator reading the console (P5-10) (2026-10-08)
+
+Context: since ADR-313 Current failures shows each failure's assignee among up to 500 failures,
+newest first. An administrator looking for the failures they handle read the whole list, and one
+assigned an older failure could find it beyond the rows shown; ADR-313 left this view out.
+
+Decision:
+
+- **What it lists:** Operations → Integrations offers "All failures" (the default, as before) and
+  "Assigned to me" (`?failures=mine`), which lists only the failures assigned to the administrator
+  reading, with the same columns, forms, order and limit. Any other value of the query string shows
+  every failure; the tab's other lists are the same in both.
+- **Where it is enforced:** `ops.platform_ops_assigned_integration_failures` (migration 0238;
+  SECURITY DEFINER, executable by the platform role only) refuses anyone who is not a platform
+  administrator, as the full list does, and narrows the list to the caller's assignments before its
+  limit, so newer failures of others leave none of theirs out. The administrator is the session's,
+  never a parameter, so nobody reads another's view.
+- **The CSV** gives every failure whichever view is shown (ADR-158), and leaves assignments out
+  (ADR-313).
+- **Migration 0238:** the function only; the full list is unchanged.
+
+Not built: counts of the failures assigned to each administrator, a view of another administrator's
+failures, and such views for the console's other lists.
