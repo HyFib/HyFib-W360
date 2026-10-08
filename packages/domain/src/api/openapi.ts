@@ -34,6 +34,8 @@ import {
   WEBHOOK_PAYMENT_LINK_STATUSES,
   WEBHOOK_DEAL_STATUSES,
   WEBHOOK_TASK_STATUSES,
+  WEBHOOK_DEAL_DETAILS,
+  WEBHOOK_TASK_DETAILS,
   WEBHOOK_RUN_END_STATUSES,
   WEBHOOK_RUN_TRIGGERS,
   WEBHOOK_CONSENT_CHANGES,
@@ -1220,6 +1222,18 @@ export const apiWebhookEndpointSchema = z.object({
     .nullable()
     .describe(
       'The statuses a task reaches that the endpoint receives as task.status_changed (open is a task reopened); null receives every status.',
+    ),
+  dealDetails: z
+    .array(z.enum(WEBHOOK_DEAL_DETAILS))
+    .nullable()
+    .describe(
+      'The deal details whose changes the endpoint receives as deal.updated: a change that changed one of them; null receives every change.',
+    ),
+  taskDetails: z
+    .array(z.enum(WEBHOOK_TASK_DETAILS))
+    .nullable()
+    .describe(
+      'The task details whose changes the endpoint receives as task.updated: a change that changed one of them; null receives every change.',
     ),
   templateStatuses: z
     .array(z.enum(WEBHOOK_TEMPLATE_STATUSES))
@@ -4194,7 +4208,7 @@ export function buildOpenApiDocument(serverUrl: string) {
       'deal.updated': webhook(
         'webhookDealUpdated',
         WEBHOOK_EVENT_INFO['deal.updated'].label,
-        `${WEBHOOK_EVENT_INFO['deal.updated'].description} changes names what changed (title, valueMinor, expectedCloseOn), never the values before: the deal is the deal when the event is delivered, so a deal changed again since gives its latest details, and a deal whose contact was erased is sent as erasure left it. One change can also move, reopen, close or give the deal to another owner, and then sends deal.stage_changed, deal.status_changed and deal.owner_changed as well, in the order the steps happen: reopened, moved, details changed, given to another owner, closed; they can have the same createdAt. Pipelines, stages and owners an endpoint names narrow it as the other deal events. Deliveries are not ordered: the latest change is the one with the latest createdAt.`,
+        `${WEBHOOK_EVENT_INFO['deal.updated'].description} changes names what changed (title, valueMinor, expectedCloseOn), never the values before: the deal is the deal when the event is delivered, so a deal changed again since gives its latest details, and a deal whose contact was erased is sent as erasure left it. One change can also move, reopen, close or give the deal to another owner, and then sends deal.stage_changed, deal.status_changed and deal.owner_changed as well, in the order the steps happen: reopened, moved, details changed, given to another owner, closed; they can have the same createdAt. Pipelines, stages and owners an endpoint names narrow it as the other deal events. An endpoint receives every change unless it names the details it takes (its \`dealDetails\`, or the details ticked in Settings → Webhooks): a change is sent when it changed one of them, and its changes still name every detail it changed. Deliveries are not ordered: the latest change is the one with the latest createdAt.`,
         'WebhookDealUpdated',
       ),
       'deal.stage_changed': webhook(
@@ -4224,7 +4238,7 @@ export function buildOpenApiDocument(serverUrl: string) {
       'task.updated': webhook(
         'webhookTaskUpdated',
         WEBHOOK_EVENT_INFO['task.updated'].label,
-        `${WEBHOOK_EVENT_INFO['task.updated'].description} changes names what changed (title, notes, dueAt, remindAt), never the values before: the task is the task when the event is delivered, so a task changed again since gives its latest title and due time, and its notes and reminder are never sent: read them with GET /tasks/{id} (\`tasks.read\`). One change can also give the task to another member, and one through the API can also reopen or close it, and then sends task.assignee_changed and task.status_changed as well, in the order the steps happen: reopened, details changed, given to another member, closed; they can have the same createdAt. Assignees an endpoint names narrow it as the other task events. Deliveries are not ordered: the latest change is the one with the latest createdAt.`,
+        `${WEBHOOK_EVENT_INFO['task.updated'].description} changes names what changed (title, notes, dueAt, remindAt), never the values before: the task is the task when the event is delivered, so a task changed again since gives its latest title and due time, and its notes and reminder are never sent: read them with GET /tasks/{id} (\`tasks.read\`). One change can also give the task to another member, and one through the API can also reopen or close it, and then sends task.assignee_changed and task.status_changed as well, in the order the steps happen: reopened, details changed, given to another member, closed; they can have the same createdAt. Assignees an endpoint names narrow it as the other task events. An endpoint receives every change unless it names the details it takes (its \`taskDetails\`, or the details ticked in Settings → Webhooks): a change is sent when it changed one of them, and its changes still name every detail it changed. Deliveries are not ordered: the latest change is the one with the latest createdAt.`,
         'WebhookTaskUpdated',
       ),
       'task.assignee_changed': webhook(

@@ -52,6 +52,8 @@ import {
   WEBHOOK_PAYMENT_LINK_STATUSES,
   WEBHOOK_DEAL_STATUSES,
   WEBHOOK_TASK_STATUSES,
+  WEBHOOK_DEAL_DETAILS,
+  WEBHOOK_TASK_DETAILS,
   WEBHOOK_RUN_END_STATUSES,
   WEBHOOK_RUN_TRIGGERS,
   WEBHOOK_CONSENT_CHANGES,
@@ -104,6 +106,8 @@ import {
   type WebhookPaymentLinkStatus,
   type WebhookDealStatus,
   type WebhookTaskStatus,
+  type WebhookDealDetail,
+  type WebhookTaskDetail,
   type WebhookRunEndStatus,
   type WebhookRunTrigger,
   type WebhookConsentChange,
@@ -500,6 +504,62 @@ export function webhookTaskStatusesFor(
   current: readonly WebhookTaskStatus[] | null,
 ): WebhookTaskStatus[] | null {
   if (!eventTypes.includes('task.status_changed')) return null;
+  const kept = given === undefined ? current : given;
+  return kept ? [...kept] : null;
+}
+
+/**
+ * The details whose changes an endpoint takes as `deal.updated` (ADR-310), in the order the event's
+ * `changes` lists them; null takes every change.
+ */
+export const webhookDealDetailsSchema = z
+  .array(z.enum(WEBHOOK_DEAL_DETAILS, { error: 'Choose deal details from the list.' }))
+  .min(1, 'Choose at least one deal detail, or take every change.')
+  .max(WEBHOOK_DEAL_DETAILS.length, 'Give each deal detail once.')
+  .transform((chosen) => WEBHOOK_DEAL_DETAILS.filter((detail) => chosen.includes(detail)))
+  .nullable();
+
+export const WEBHOOK_DEAL_DETAILS_NEED_THE_EVENT =
+  'Choose deal details only for an endpoint that receives Deal details.';
+
+/**
+ * The deal details an endpoint keeps after it is added or changed: every change (null) unless it
+ * takes `deal.updated`; then those given, or else the ones it had.
+ */
+export function webhookDealDetailsFor(
+  eventTypes: readonly WebhookEventType[],
+  given: readonly WebhookDealDetail[] | null | undefined,
+  current: readonly WebhookDealDetail[] | null,
+): WebhookDealDetail[] | null {
+  if (!eventTypes.includes('deal.updated')) return null;
+  const kept = given === undefined ? current : given;
+  return kept ? [...kept] : null;
+}
+
+/**
+ * The details whose changes an endpoint takes as `task.updated` (ADR-310), in the order the event's
+ * `changes` lists them; null takes every change.
+ */
+export const webhookTaskDetailsSchema = z
+  .array(z.enum(WEBHOOK_TASK_DETAILS, { error: 'Choose task details from the list.' }))
+  .min(1, 'Choose at least one task detail, or take every change.')
+  .max(WEBHOOK_TASK_DETAILS.length, 'Give each task detail once.')
+  .transform((chosen) => WEBHOOK_TASK_DETAILS.filter((detail) => chosen.includes(detail)))
+  .nullable();
+
+export const WEBHOOK_TASK_DETAILS_NEED_THE_EVENT =
+  'Choose task details only for an endpoint that receives Task details.';
+
+/**
+ * The task details an endpoint keeps after it is added or changed: every change (null) unless it
+ * takes `task.updated`; then those given, or else the ones it had.
+ */
+export function webhookTaskDetailsFor(
+  eventTypes: readonly WebhookEventType[],
+  given: readonly WebhookTaskDetail[] | null | undefined,
+  current: readonly WebhookTaskDetail[] | null,
+): WebhookTaskDetail[] | null {
+  if (!eventTypes.includes('task.updated')) return null;
   const kept = given === undefined ? current : given;
   return kept ? [...kept] : null;
 }
@@ -1881,6 +1941,16 @@ const endpointFields = z.object({
   dealStatuses: webhookDealStatusesSchema.optional(),
   /** Given, the task statuses it takes (null: every status, ADR-309); left out, they stay. */
   taskStatuses: webhookTaskStatusesSchema.optional(),
+  /**
+   * Given, the deal details whose changes it takes (null: every change, ADR-310); left out, they
+   * stay.
+   */
+  dealDetails: webhookDealDetailsSchema.optional(),
+  /**
+   * Given, the task details whose changes it takes (null: every change, ADR-310); left out, they
+   * stay.
+   */
+  taskDetails: webhookTaskDetailsSchema.optional(),
   /** Given, the template statuses it takes (null: every status, ADR-148); left out, they stay. */
   templateStatuses: webhookTemplateStatusesSchema.optional(),
   /**
@@ -2052,6 +2122,18 @@ const taskStatusesNeedTheEvent = {
   check: (data: { eventTypes: WebhookEventType[]; taskStatuses?: unknown }) =>
     !data.taskStatuses || data.eventTypes.includes('task.status_changed'),
   options: { path: ['taskStatuses'], message: WEBHOOK_TASK_STATUSES_NEED_THE_EVENT },
+};
+/** Deal details are chosen only for an endpoint that takes changes of deals' details (ADR-310). */
+const dealDetailsNeedTheEvent = {
+  check: (data: { eventTypes: WebhookEventType[]; dealDetails?: unknown }) =>
+    !data.dealDetails || data.eventTypes.includes('deal.updated'),
+  options: { path: ['dealDetails'], message: WEBHOOK_DEAL_DETAILS_NEED_THE_EVENT },
+};
+/** Task details are chosen only for an endpoint that takes changes of tasks' details (ADR-310). */
+const taskDetailsNeedTheEvent = {
+  check: (data: { eventTypes: WebhookEventType[]; taskDetails?: unknown }) =>
+    !data.taskDetails || data.eventTypes.includes('task.updated'),
+  options: { path: ['taskDetails'], message: WEBHOOK_TASK_DETAILS_NEED_THE_EVENT },
 };
 /** Template statuses are chosen only for an endpoint that takes template changes (ADR-148). */
 const templateStatusesNeedTheEvent = {
@@ -2228,6 +2310,8 @@ const endpointSchema = endpointFields
   .refine(paymentLinkStatusesNeedTheEvent.check, paymentLinkStatusesNeedTheEvent.options)
   .refine(dealStatusesNeedTheEvent.check, dealStatusesNeedTheEvent.options)
   .refine(taskStatusesNeedTheEvent.check, taskStatusesNeedTheEvent.options)
+  .refine(dealDetailsNeedTheEvent.check, dealDetailsNeedTheEvent.options)
+  .refine(taskDetailsNeedTheEvent.check, taskDetailsNeedTheEvent.options)
   .refine(templateStatusesNeedTheEvent.check, templateStatusesNeedTheEvent.options)
   .refine(conversationStatusesNeedTheEvent.check, conversationStatusesNeedTheEvent.options)
   .refine(runEndStatusesNeedTheEvent.check, runEndStatusesNeedTheEvent.options)
@@ -2267,6 +2351,8 @@ const updateSchema = endpointFields
   .refine(paymentLinkStatusesNeedTheEvent.check, paymentLinkStatusesNeedTheEvent.options)
   .refine(dealStatusesNeedTheEvent.check, dealStatusesNeedTheEvent.options)
   .refine(taskStatusesNeedTheEvent.check, taskStatusesNeedTheEvent.options)
+  .refine(dealDetailsNeedTheEvent.check, dealDetailsNeedTheEvent.options)
+  .refine(taskDetailsNeedTheEvent.check, taskDetailsNeedTheEvent.options)
   .refine(templateStatusesNeedTheEvent.check, templateStatusesNeedTheEvent.options)
   .refine(conversationStatusesNeedTheEvent.check, conversationStatusesNeedTheEvent.options)
   .refine(runEndStatusesNeedTheEvent.check, runEndStatusesNeedTheEvent.options)
@@ -2348,6 +2434,10 @@ export interface WebhookEndpointView {
   dealStatuses: WebhookDealStatus[] | null;
   /** The task statuses it takes (ADR-309); null takes every status. */
   taskStatuses: WebhookTaskStatus[] | null;
+  /** The deal details whose changes it takes (ADR-310); null takes every change. */
+  dealDetails: WebhookDealDetail[] | null;
+  /** The task details whose changes it takes (ADR-310); null takes every change. */
+  taskDetails: WebhookTaskDetail[] | null;
   /** The template statuses it takes (ADR-148); null takes every status. */
   templateStatuses: WebhookTemplateStatus[] | null;
   /** The conversation statuses it takes (ADR-149); null takes every status. */
@@ -2682,6 +2772,8 @@ export async function lockWebhookEndpoint(
       paymentLinkStatuses: webhookEndpoints.paymentLinkStatuses,
       dealStatuses: webhookEndpoints.dealStatuses,
       taskStatuses: webhookEndpoints.taskStatuses,
+      dealDetails: webhookEndpoints.dealDetails,
+      taskDetails: webhookEndpoints.taskDetails,
       templateStatuses: webhookEndpoints.templateStatuses,
       conversationStatuses: webhookEndpoints.conversationStatuses,
       runEndStatuses: webhookEndpoints.runEndStatuses,
@@ -2756,6 +2848,8 @@ export async function insertWebhookEndpoint(
     paymentLinkStatuses: WebhookPaymentLinkStatus[] | null;
     dealStatuses: WebhookDealStatus[] | null;
     taskStatuses: WebhookTaskStatus[] | null;
+    dealDetails: WebhookDealDetail[] | null;
+    taskDetails: WebhookTaskDetail[] | null;
     templateStatuses: WebhookTemplateStatus[] | null;
     conversationStatuses: WebhookConversationStatus[] | null;
     runEndStatuses: WebhookRunEndStatus[] | null;
@@ -2819,6 +2913,8 @@ export async function insertWebhookEndpoint(
     paymentLinkStatuses: input.paymentLinkStatuses,
     dealStatuses: input.dealStatuses,
     taskStatuses: input.taskStatuses,
+    dealDetails: input.dealDetails,
+    taskDetails: input.taskDetails,
     templateStatuses: input.templateStatuses,
     conversationStatuses: input.conversationStatuses,
     runEndStatuses: input.runEndStatuses,
@@ -3231,6 +3327,8 @@ export function createWebhooksService(deps: {
               paymentLinkStatuses: webhookEndpoints.paymentLinkStatuses,
               dealStatuses: webhookEndpoints.dealStatuses,
               taskStatuses: webhookEndpoints.taskStatuses,
+              dealDetails: webhookEndpoints.dealDetails,
+              taskDetails: webhookEndpoints.taskDetails,
               templateStatuses: webhookEndpoints.templateStatuses,
               conversationStatuses: webhookEndpoints.conversationStatuses,
               runEndStatuses: webhookEndpoints.runEndStatuses,
@@ -3884,6 +3982,8 @@ export function createWebhooksService(deps: {
         );
         const dealStatuses = webhookDealStatusesFor(data.eventTypes, data.dealStatuses, null);
         const taskStatuses = webhookTaskStatusesFor(data.eventTypes, data.taskStatuses, null);
+        const dealDetails = webhookDealDetailsFor(data.eventTypes, data.dealDetails, null);
+        const taskDetails = webhookTaskDetailsFor(data.eventTypes, data.taskDetails, null);
         const templateStatuses = webhookTemplateStatusesFor(
           data.eventTypes,
           data.templateStatuses,
@@ -3996,6 +4096,8 @@ export function createWebhooksService(deps: {
           paymentLinkStatuses,
           dealStatuses,
           taskStatuses,
+          dealDetails,
+          taskDetails,
           templateStatuses,
           conversationStatuses,
           runEndStatuses,
@@ -4047,6 +4149,8 @@ export function createWebhooksService(deps: {
               ...(paymentLinkStatuses ? { paymentLinkStatuses } : {}),
               ...(dealStatuses ? { dealStatuses } : {}),
               ...(taskStatuses ? { taskStatuses } : {}),
+              ...(dealDetails ? { dealDetails } : {}),
+              ...(taskDetails ? { taskDetails } : {}),
               ...(templateStatuses ? { templateStatuses } : {}),
               ...(conversationStatuses ? { conversationStatuses } : {}),
               ...(runEndStatuses ? { runEndStatuses } : {}),
@@ -4157,6 +4261,16 @@ export function createWebhooksService(deps: {
           data.eventTypes,
           data.taskStatuses,
           endpoint.taskStatuses,
+        );
+        const dealDetails = webhookDealDetailsFor(
+          data.eventTypes,
+          data.dealDetails,
+          endpoint.dealDetails,
+        );
+        const taskDetails = webhookTaskDetailsFor(
+          data.eventTypes,
+          data.taskDetails,
+          endpoint.taskDetails,
         );
         const templateStatuses = webhookTemplateStatusesFor(
           data.eventTypes,
@@ -4388,6 +4502,8 @@ export function createWebhooksService(deps: {
             paymentLinkStatuses,
             dealStatuses,
             taskStatuses,
+            dealDetails,
+            taskDetails,
             templateStatuses,
             conversationStatuses,
             runEndStatuses,
@@ -4450,6 +4566,8 @@ export function createWebhooksService(deps: {
               ...(paymentLinkStatuses ? { paymentLinkStatuses } : {}),
               ...(dealStatuses ? { dealStatuses } : {}),
               ...(taskStatuses ? { taskStatuses } : {}),
+              ...(dealDetails ? { dealDetails } : {}),
+              ...(taskDetails ? { taskDetails } : {}),
               ...(templateStatuses ? { templateStatuses } : {}),
               ...(conversationStatuses ? { conversationStatuses } : {}),
               ...(runEndStatuses ? { runEndStatuses } : {}),

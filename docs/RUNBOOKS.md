@@ -3061,6 +3061,16 @@ list. To take more, tick statuses under the event on the endpoint's page, or
 `PATCH /webhook-endpoints/{id}` with `dealStatuses` or `taskStatuses` (null for every status).
 Removing an event clears its list.
 
+**A receiver misses changes of deals' or tasks' details (ADR-310).** An endpoint can take the
+changes of chosen details only. The endpoints list shows it ("Deal details whose changes are sent:
+…", "Task details whose changes are sent: …"), and the API answers `dealDetails` and `taskDetails`
+(null takes every change). A change goes by the details it changed, as its payload's `changes` names
+them: it is sent when one of them is listed, and events no endpoint takes are not recorded, so there
+is nothing to replay; `GET /deals/{id}` and `GET /tasks/{id}` read them as they are now. With
+pipelines, stages, owners, assignees or makers chosen too, a change must pass every list. To take
+more, tick details under the event on the endpoint's page, or `PATCH /webhook-endpoints/{id}` with
+`dealDetails` or `taskDetails` (null for every change). Removing an event clears its list.
+
 **A receiver misses a task's change of assignee, or doubts one (ADR-274).** Endpoints that take
 `task.assignee_changed` ("Task assignee") are sent one event each time a member gives a task to
 another member by editing it, or a key changes its `assigneeId`. Automations set an assignee only on

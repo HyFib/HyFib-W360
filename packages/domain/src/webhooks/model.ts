@@ -14,6 +14,8 @@ import type {
   WebhookPaymentLinkStatus,
   WebhookDealStatus,
   WebhookTaskStatus,
+  WebhookDealDetail,
+  WebhookTaskDetail,
   WebhookRunEndStatus,
   WebhookReceivedMessageType,
   WebhookRunTrigger,
@@ -36,6 +38,8 @@ export type {
   WebhookPaymentLinkStatus,
   WebhookDealStatus,
   WebhookTaskStatus,
+  WebhookDealDetail,
+  WebhookTaskDetail,
   WebhookRunEndStatus,
   WebhookReceivedMessageType,
   WebhookRunTrigger,
@@ -412,6 +416,42 @@ export const WEBHOOK_TASK_STATUS_LABELS: Record<WebhookTaskStatus, string> = {
   open: 'Reopened',
   done: 'Done',
   cancelled: 'Cancelled',
+};
+
+/**
+ * The details whose change a `deal.updated` endpoint can choose (ADR-310), in the order the event's
+ * `changes` lists them.
+ */
+export const WEBHOOK_DEAL_DETAILS = [
+  'title',
+  'valueMinor',
+  'expectedCloseOn',
+] as const satisfies readonly WebhookDealDetail[];
+
+/** How Settings names each deal detail an endpoint can choose (ADR-310), as the deal form does. */
+export const WEBHOOK_DEAL_DETAIL_LABELS: Record<WebhookDealDetail, string> = {
+  title: 'Title',
+  valueMinor: 'Value',
+  expectedCloseOn: 'Expected close date',
+};
+
+/**
+ * The details whose change a `task.updated` endpoint can choose (ADR-310), in the order the event's
+ * `changes` lists them.
+ */
+export const WEBHOOK_TASK_DETAILS = [
+  'title',
+  'notes',
+  'dueAt',
+  'remindAt',
+] as const satisfies readonly WebhookTaskDetail[];
+
+/** How Settings names each task detail an endpoint can choose (ADR-310). */
+export const WEBHOOK_TASK_DETAIL_LABELS: Record<WebhookTaskDetail, string> = {
+  title: 'Title',
+  notes: 'Notes',
+  dueAt: 'Due time',
+  remindAt: 'Reminder',
 };
 
 /**

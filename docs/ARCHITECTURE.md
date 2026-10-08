@@ -2059,6 +2059,14 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   task triggers pass, and writes no event when none does. Settings (the status control orders use)
   and the API (`dealStatuses`, `taskStatuses`) set them; a change that drops an event clears its
   list.
+- **Deal and task detail filters** (migration 0233, ADR-310): `deal_details` and `task_details` on
+  an endpoint list the details whose changes it takes as `deal.updated` (`title`, `valueMinor`,
+  `expectedCloseOn`) or `task.updated` (`title`, `notes`, `dueAt`, `remindAt`), null for every
+  change; checks keep each to its known details and to endpoints that take its event.
+  `app.capture_webhook_event` (replaced with the same signature) creates a change's delivery only
+  for endpoints whose list is null or holds a detail the change changed, as the deal and task
+  triggers pass them in `changes`, and writes no event when none does. Settings and the API
+  (`dealDetails`, `taskDetails`) set them; a change that drops an event clears its list.
 - **Template status filters** (migration 0112, ADR-148): `template_statuses` on an endpoint lists
   the statuses it takes as `template.status_changed` (the eleven the event reports, `pending` to
   `locked`; HyFib's own steps, a deletion under way or refused and an unrecognised status are never

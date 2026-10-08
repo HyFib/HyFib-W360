@@ -307,6 +307,8 @@ verification, app review, Embedded Signup configuration).
   only in CI]** (ADR-306, migration 0229; recorded under P5-09).
   **[Status filters for deal and task webhook events built; their database tests run only in CI]**
   (ADR-309, migration 0232; recorded under P5-09).
+  **[Detail filters for deal and task webhook events built; their database tests run only in CI]**
+  (ADR-310, migration 0233; recorded under P5-09).
   **[Deal owner webhook events built; their database tests run only in CI]** (ADR-269, migrations
   0185 and 0186; recorded under P5-09).
   **Remaining:** custom deal fields, products on deals, deal import, CRM connectors (HubSpot,
@@ -1143,6 +1145,9 @@ verification, app review, Embedded Signup configuration).
   **[Deal and task status filters built; their database tests run only in CI]** (ADR-309, migration
   0232: an endpoint takes the deal and task status changes of chosen statuses, by the status each
   change reached; other events are not narrowed).
+  **[Deal and task detail filters built; their database tests run only in CI]** (ADR-310, migration
+  0233: an endpoint takes the deal and task detail changes that changed chosen details, by the
+  details each change names; other events are not narrowed).
   **[Contact tag filters for message and conversation events built; their database tests run only in
   CI]** (ADR-267, migration 0183: an endpoint takes the events of the conversations whose contact
   has any of 1 to 50 tags when the events happen; tags are compared as contacts carry them, and one

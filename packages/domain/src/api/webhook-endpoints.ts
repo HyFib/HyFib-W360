@@ -30,6 +30,8 @@ import {
   type WebhookPaymentLinkStatus,
   type WebhookDealStatus,
   type WebhookTaskStatus,
+  type WebhookDealDetail,
+  type WebhookTaskDetail,
   type WebhookRunEndStatus,
   type WebhookRunTrigger,
   type WebhookConsentChange,
@@ -60,6 +62,8 @@ import {
   WEBHOOK_PAYMENT_LINK_STATUSES,
   WEBHOOK_DEAL_STATUSES,
   WEBHOOK_TASK_STATUSES,
+  WEBHOOK_DEAL_DETAILS,
+  WEBHOOK_TASK_DETAILS,
   webhookTakesTeamEvents,
   webhookTakesTemplateEvents,
   type WebhookEndpointOAuth,
@@ -103,6 +107,8 @@ import {
   WEBHOOK_PAYMENT_LINK_STATUSES_NEED_THE_EVENT,
   WEBHOOK_DEAL_STATUSES_NEED_THE_EVENT,
   WEBHOOK_TASK_STATUSES_NEED_THE_EVENT,
+  WEBHOOK_DEAL_DETAILS_NEED_THE_EVENT,
+  WEBHOOK_TASK_DETAILS_NEED_THE_EVENT,
   WEBHOOK_RUN_END_STATUSES_NEED_THE_EVENT,
   WEBHOOK_RUN_TRIGGERS_NEED_THE_EVENTS,
   WEBHOOK_CONSENT_CHANGES_NEED_THE_EVENT,
@@ -215,6 +221,10 @@ import {
   webhookDealStatusesSchema,
   webhookTaskStatusesFor,
   webhookTaskStatusesSchema,
+  webhookDealDetailsFor,
+  webhookDealDetailsSchema,
+  webhookTaskDetailsFor,
+  webhookTaskDetailsSchema,
   webhookTemplateStatusesFor,
   webhookTemplateStatusesSchema,
   type WebhookDeliveryView,
@@ -336,6 +346,26 @@ const taskStatusesField = webhookTaskStatusesSchema.describe(
 const invalidTaskStatuses = () =>
   new AppError('validation_failed', WEBHOOK_TASK_STATUSES_NEED_THE_EVENT, {
     issues: [{ path: 'taskStatuses', message: WEBHOOK_TASK_STATUSES_NEED_THE_EVENT }],
+  });
+
+const dealDetailsField = webhookDealDetailsSchema.describe(
+  `The deal details whose changes the endpoint receives as deal.updated (${WEBHOOK_DEAL_DETAILS.join(', ')}, as the event's changes names them): a change is sent when it changed one of them, naming every detail it changed; only with the deal.updated event. null receives every change.`,
+);
+
+/** Deal details are chosen only for an endpoint that receives deals' detail changes (ADR-310). */
+const invalidDealDetails = () =>
+  new AppError('validation_failed', WEBHOOK_DEAL_DETAILS_NEED_THE_EVENT, {
+    issues: [{ path: 'dealDetails', message: WEBHOOK_DEAL_DETAILS_NEED_THE_EVENT }],
+  });
+
+const taskDetailsField = webhookTaskDetailsSchema.describe(
+  `The task details whose changes the endpoint receives as task.updated (${WEBHOOK_TASK_DETAILS.join(', ')}, as the event's changes names them): a change is sent when it changed one of them, naming every detail it changed; only with the task.updated event. null receives every change.`,
+);
+
+/** Task details are chosen only for an endpoint that receives tasks' detail changes (ADR-310). */
+const invalidTaskDetails = () =>
+  new AppError('validation_failed', WEBHOOK_TASK_DETAILS_NEED_THE_EVENT, {
+    issues: [{ path: 'taskDetails', message: WEBHOOK_TASK_DETAILS_NEED_THE_EVENT }],
   });
 
 const templateStatusesField = webhookTemplateStatusesSchema.describe(
@@ -637,6 +667,8 @@ export const apiCreateWebhookEndpointSchema = z
     paymentLinkStatuses: paymentLinkStatusesField.optional(),
     dealStatuses: dealStatusesField.optional(),
     taskStatuses: taskStatusesField.optional(),
+    dealDetails: dealDetailsField.optional(),
+    taskDetails: taskDetailsField.optional(),
     templateStatuses: templateStatusesField.optional(),
     conversationStatuses: conversationStatusesField.optional(),
     runEndStatuses: runEndStatusesField.optional(),
@@ -707,6 +739,14 @@ export const apiCreateWebhookEndpointSchema = z
   .refine((data) => !data.taskStatuses || data.events.includes('task.status_changed'), {
     path: ['taskStatuses'],
     message: WEBHOOK_TASK_STATUSES_NEED_THE_EVENT,
+  })
+  .refine((data) => !data.dealDetails || data.events.includes('deal.updated'), {
+    path: ['dealDetails'],
+    message: WEBHOOK_DEAL_DETAILS_NEED_THE_EVENT,
+  })
+  .refine((data) => !data.taskDetails || data.events.includes('task.updated'), {
+    path: ['taskDetails'],
+    message: WEBHOOK_TASK_DETAILS_NEED_THE_EVENT,
   })
   .refine((data) => !data.templateStatuses || data.events.includes('template.status_changed'), {
     path: ['templateStatuses'],
@@ -892,6 +932,16 @@ export const apiUpdateWebhookEndpointSchema = z
       .describe(
         'The statuses a task reaches that the endpoint receives as task.status_changed; null receives every status. Left out, they stay, unless the events no longer include task.status_changed, which clears them.',
       ),
+    dealDetails: dealDetailsField
+      .optional()
+      .describe(
+        'The deal details whose changes the endpoint receives as deal.updated; null receives every change. Left out, they stay, unless the events no longer include deal.updated, which clears them.',
+      ),
+    taskDetails: taskDetailsField
+      .optional()
+      .describe(
+        'The task details whose changes the endpoint receives as task.updated; null receives every change. Left out, they stay, unless the events no longer include task.updated, which clears them.',
+      ),
     templateStatuses: templateStatusesField
       .optional()
       .describe(
@@ -1051,6 +1101,8 @@ export const apiUpdateWebhookEndpointSchema = z
       data.paymentLinkStatuses !== undefined ||
       data.dealStatuses !== undefined ||
       data.taskStatuses !== undefined ||
+      data.dealDetails !== undefined ||
+      data.taskDetails !== undefined ||
       data.templateStatuses !== undefined ||
       data.conversationStatuses !== undefined ||
       data.runEndStatuses !== undefined ||
@@ -1079,7 +1131,7 @@ export const apiUpdateWebhookEndpointSchema = z
       data.contactTags !== undefined ||
       data.conversationTags !== undefined ||
       data.oauth !== undefined,
-    'Give the events, the description, the headers, the message statuses, who sent the messages, the contact parts, the custom fields, the automations, the campaign statuses, the order statuses, the Payment Link statuses, the template statuses, the conversation statuses, the deal statuses, the task statuses, the run end statuses, what started the runs, the consent changes, where contacts came from, the received message types, the run end reasons, the numbers, the teams, the templates, the campaigns, the pipelines, the stages, the deal owners, the task assignees, the pipelines, stages and owners of tasks’ deals and of notes’ deals, who made the CRM changes, the survey scores, the members, the contact tags, the conversation tags, the OAuth client or whether the endpoint is enabled',
+    'Give the events, the description, the headers, the message statuses, who sent the messages, the contact parts, the deal and task details, the custom fields, the automations, the campaign statuses, the order statuses, the Payment Link statuses, the template statuses, the conversation statuses, the deal statuses, the task statuses, the run end statuses, what started the runs, the consent changes, where contacts came from, the received message types, the run end reasons, the numbers, the teams, the templates, the campaigns, the pipelines, the stages, the deal owners, the task assignees, the pipelines, stages and owners of tasks’ deals and of notes’ deals, who made the CRM changes, the survey scores, the members, the contact tags, the conversation tags, the OAuth client or whether the endpoint is enabled',
   );
 
 export interface ApiWebhookEndpoint {
@@ -1118,6 +1170,10 @@ export interface ApiWebhookEndpoint {
   dealStatuses: WebhookDealStatus[] | null;
   /** The task statuses it receives (ADR-309); null receives every status. */
   taskStatuses: WebhookTaskStatus[] | null;
+  /** The deal details whose changes it receives (ADR-310); null receives every change. */
+  dealDetails: WebhookDealDetail[] | null;
+  /** The task details whose changes it receives (ADR-310); null receives every change. */
+  taskDetails: WebhookTaskDetail[] | null;
   /** The template statuses it receives (ADR-148); null receives every status. */
   templateStatuses: WebhookTemplateStatus[] | null;
   /** The conversation statuses it receives (ADR-149); null receives every status. */
@@ -1275,6 +1331,8 @@ const columns = {
   paymentLinkStatuses: webhookEndpoints.paymentLinkStatuses,
   dealStatuses: webhookEndpoints.dealStatuses,
   taskStatuses: webhookEndpoints.taskStatuses,
+  dealDetails: webhookEndpoints.dealDetails,
+  taskDetails: webhookEndpoints.taskDetails,
   templateStatuses: webhookEndpoints.templateStatuses,
   conversationStatuses: webhookEndpoints.conversationStatuses,
   runEndStatuses: webhookEndpoints.runEndStatuses,
@@ -1334,6 +1392,8 @@ type EndpointRow = Pick<
   | 'paymentLinkStatuses'
   | 'dealStatuses'
   | 'taskStatuses'
+  | 'dealDetails'
+  | 'taskDetails'
   | 'templateStatuses'
   | 'conversationStatuses'
   | 'runEndStatuses'
@@ -1398,6 +1458,8 @@ function toApiEndpoint(row: EndpointRow, now: Date): ApiWebhookEndpoint {
     paymentLinkStatuses: row.paymentLinkStatuses,
     dealStatuses: row.dealStatuses,
     taskStatuses: row.taskStatuses,
+    dealDetails: row.dealDetails,
+    taskDetails: row.taskDetails,
     templateStatuses: row.templateStatuses,
     conversationStatuses: row.conversationStatuses,
     runEndStatuses: row.runEndStatuses,
@@ -1658,6 +1720,8 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
             );
             const dealStatuses = webhookDealStatusesFor(data.events, data.dealStatuses, null);
             const taskStatuses = webhookTaskStatusesFor(data.events, data.taskStatuses, null);
+            const dealDetails = webhookDealDetailsFor(data.events, data.dealDetails, null);
+            const taskDetails = webhookTaskDetailsFor(data.events, data.taskDetails, null);
             const templateStatuses = webhookTemplateStatusesFor(
               data.events,
               data.templateStatuses,
@@ -1756,6 +1820,8 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               paymentLinkStatuses,
               dealStatuses,
               taskStatuses,
+              dealDetails,
+              taskDetails,
               templateStatuses,
               conversationStatuses,
               runEndStatuses,
@@ -1800,6 +1866,8 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               ...(paymentLinkStatuses ? { paymentLinkStatuses } : {}),
               ...(dealStatuses ? { dealStatuses } : {}),
               ...(taskStatuses ? { taskStatuses } : {}),
+              ...(dealDetails ? { dealDetails } : {}),
+              ...(taskDetails ? { taskDetails } : {}),
               ...(templateStatuses ? { templateStatuses } : {}),
               ...(conversationStatuses ? { conversationStatuses } : {}),
               ...(runEndStatuses ? { runEndStatuses } : {}),
@@ -1877,6 +1945,8 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
         if (data.taskStatuses && !events.includes('task.status_changed')) {
           throw invalidTaskStatuses();
         }
+        if (data.dealDetails && !events.includes('deal.updated')) throw invalidDealDetails();
+        if (data.taskDetails && !events.includes('task.updated')) throw invalidTaskDetails();
         if (data.templateStatuses && !events.includes('template.status_changed')) {
           throw invalidTemplateStatuses();
         }
@@ -2036,6 +2106,8 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
           data.paymentLinkStatuses !== undefined ||
           data.dealStatuses !== undefined ||
           data.taskStatuses !== undefined ||
+          data.dealDetails !== undefined ||
+          data.taskDetails !== undefined ||
           data.templateStatuses !== undefined ||
           data.conversationStatuses !== undefined ||
           data.runEndStatuses !== undefined ||
@@ -2123,6 +2195,8 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
                 data.taskStatuses,
                 endpoint.taskStatuses,
               ),
+              dealDetails: webhookDealDetailsFor(events, data.dealDetails, endpoint.dealDetails),
+              taskDetails: webhookTaskDetailsFor(events, data.taskDetails, endpoint.taskDetails),
               templateStatuses: webhookTemplateStatusesFor(
                 events,
                 data.templateStatuses,
@@ -2234,6 +2308,8 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               paymentLinkStatuses: webhookEndpoints.paymentLinkStatuses,
               dealStatuses: webhookEndpoints.dealStatuses,
               taskStatuses: webhookEndpoints.taskStatuses,
+              dealDetails: webhookEndpoints.dealDetails,
+              taskDetails: webhookEndpoints.taskDetails,
               templateStatuses: webhookEndpoints.templateStatuses,
               conversationStatuses: webhookEndpoints.conversationStatuses,
               runEndStatuses: webhookEndpoints.runEndStatuses,
@@ -2279,6 +2355,8 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               : {}),
             ...(changed.dealStatuses ? { dealStatuses: changed.dealStatuses } : {}),
             ...(changed.taskStatuses ? { taskStatuses: changed.taskStatuses } : {}),
+            ...(changed.dealDetails ? { dealDetails: changed.dealDetails } : {}),
+            ...(changed.taskDetails ? { taskDetails: changed.taskDetails } : {}),
             ...(changed.templateStatuses ? { templateStatuses: changed.templateStatuses } : {}),
             ...(changed.conversationStatuses
               ? { conversationStatuses: changed.conversationStatuses }

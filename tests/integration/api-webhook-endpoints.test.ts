@@ -264,6 +264,8 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       paymentLinkStatuses: null,
       dealStatuses: null,
       taskStatuses: null,
+      dealDetails: null,
+      taskDetails: null,
       templateStatuses: null,
       conversationStatuses: null,
       runEndStatuses: null,
@@ -1225,6 +1227,91 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     });
     expect(await issueOf(api().update(key.ctx, id, { dealStatuses: [] }))).toMatchObject({
       path: 'dealStatuses',
+    });
+  });
+
+  it('choose the deal and task details whose changes an endpoint receives, kept by changes that leave them out and cleared with the event (ADR-310)', async () => {
+    const c = await fx.company();
+    const key = await apiKey(c, ['webhooks.manage']);
+    const issueOf = async (promise: Promise<unknown>) => {
+      const error = await expectAppError(promise, 'validation_failed');
+      return isAppError(error) ? error.issues?.[0] : undefined;
+    };
+    // Details need their event, at least one, and each from the list (an unknown one by place).
+    const refusals = [
+      [['deal.created'], { dealDetails: ['title'] }, 'dealDetails'],
+      [['task.updated'], { dealDetails: ['title'] }, 'dealDetails'],
+      [['deal.updated'], { dealDetails: [] }, 'dealDetails'],
+      [['deal.updated'], { dealDetails: ['title', 'notes'] }, 'dealDetails.1'],
+      [['task.created'], { taskDetails: ['notes'] }, 'taskDetails'],
+      [['deal.updated'], { taskDetails: ['notes'] }, 'taskDetails'],
+      [['task.updated'], { taskDetails: [] }, 'taskDetails'],
+      [['task.updated'], { taskDetails: ['valueMinor'] }, 'taskDetails.0'],
+    ] as const;
+    for (const [index, [events, lists, path]] of refusals.entries()) {
+      expect(
+        await issueOf(
+          api().create(
+            key.ctx,
+            { url: receiverUrl(), events, ...lists },
+            idem(`crm-details-bad-${index}`, JSON.stringify(lists)),
+          ),
+        ),
+        JSON.stringify(lists),
+      ).toMatchObject({ path });
+    }
+    expect((await api().list(key.ctx)).data).toEqual([]);
+
+    const created = await addThroughApi(key.ctx, 'crm-details-1', {
+      url: receiverUrl(),
+      events: ['deal.updated', 'task.updated', 'message.status'],
+      dealDetails: ['expectedCloseOn', 'valueMinor', 'expectedCloseOn'],
+      taskDetails: ['remindAt', 'dueAt'],
+    });
+    const id = created.body.data.id;
+    const chosen = {
+      dealDetails: ['valueMinor', 'expectedCloseOn'],
+      taskDetails: ['dueAt', 'remindAt'],
+    };
+    expect(created.body.data).toMatchObject(chosen);
+    expect(await api().get(key.ctx, id)).toMatchObject(chosen);
+    const [audit] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND subject_id = $2 AND action = 'webhook.endpoint_created'`,
+      [c.tenant.id, id],
+    );
+    expect(audit?.metadata).toMatchObject(chosen);
+
+    expect(await api().update(key.ctx, id, { description: 'Forecast' })).toMatchObject(chosen);
+    expect(await api().update(key.ctx, id, { dealDetails: ['valueMinor'] })).toMatchObject({
+      dealDetails: ['valueMinor'],
+      taskDetails: ['dueAt', 'remindAt'],
+    });
+    const updates = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND subject_id = $2 AND action = 'webhook.endpoint_updated'
+        ORDER BY occurred_at`,
+      [c.tenant.id, id],
+    );
+    expect(updates.map((u) => [u.metadata.dealDetails, u.metadata.taskDetails])).toEqual([
+      [
+        ['valueMinor', 'expectedCloseOn'],
+        ['dueAt', 'remindAt'],
+      ],
+      [['valueMinor'], ['dueAt', 'remindAt']],
+    ]);
+    // Dropping the tasks' detail changes clears their list only.
+    expect(
+      await api().update(key.ctx, id, { events: ['deal.updated', 'message.status'] }),
+    ).toMatchObject({ dealDetails: ['valueMinor'], taskDetails: null });
+    expect(await issueOf(api().update(key.ctx, id, { taskDetails: ['notes'] }))).toMatchObject({
+      path: 'taskDetails',
+    });
+    expect(await api().update(key.ctx, id, { dealDetails: null })).toMatchObject({
+      dealDetails: null,
+    });
+    expect(await issueOf(api().update(key.ctx, id, { dealDetails: [] }))).toMatchObject({
+      path: 'dealDetails',
     });
   });
 

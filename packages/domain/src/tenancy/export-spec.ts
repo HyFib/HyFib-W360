@@ -1612,6 +1612,8 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
       'payment_link_statuses',
       'deal_statuses',
       'task_statuses',
+      'deal_details',
+      'task_details',
       'template_statuses',
       'conversation_statuses',
       'run_end_statuses',

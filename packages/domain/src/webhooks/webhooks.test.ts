@@ -74,6 +74,10 @@ import {
   WEBHOOK_DEAL_STATUSES,
   WEBHOOK_TASK_STATUS_LABELS,
   WEBHOOK_TASK_STATUSES,
+  WEBHOOK_DEAL_DETAIL_LABELS,
+  WEBHOOK_DEAL_DETAILS,
+  WEBHOOK_TASK_DETAIL_LABELS,
+  WEBHOOK_TASK_DETAILS,
   WEBHOOK_REPLAY_PERIODS,
   WEBHOOK_RETRY_SECONDS,
   WEBHOOK_TEMPLATE_STATUS_LABELS,
@@ -215,6 +219,12 @@ import {
   webhookTaskStatusesFor,
   webhookTaskStatusesSchema,
   WEBHOOK_TASK_STATUSES_NEED_THE_EVENT,
+  webhookDealDetailsFor,
+  webhookDealDetailsSchema,
+  WEBHOOK_DEAL_DETAILS_NEED_THE_EVENT,
+  webhookTaskDetailsFor,
+  webhookTaskDetailsSchema,
+  WEBHOOK_TASK_DETAILS_NEED_THE_EVENT,
   webhookTeamIdsFor,
   webhookTeamIdsSchema,
   webhookTemplateIdsFor,
@@ -2609,6 +2619,103 @@ describe('deal and task status filters (ADR-309)', () => {
     );
     expect(WEBHOOK_TASK_STATUSES_NEED_THE_EVENT).toBe(
       `Choose task statuses only for an endpoint that receives ${WEBHOOK_EVENT_INFO['task.status_changed'].label}.`,
+    );
+  });
+});
+
+describe('deal and task detail filters (ADR-310)', () => {
+  it('take 1 to 3 deal details or 1 to 4 task details, once each, in the order the events name their changes; null takes every change', () => {
+    expect(webhookDealDetailsSchema.parse(['expectedCloseOn', 'title', 'expectedCloseOn'])).toEqual(
+      ['title', 'expectedCloseOn'],
+    );
+    expect(webhookTaskDetailsSchema.parse(['remindAt', 'dueAt', 'remindAt'])).toEqual([
+      'dueAt',
+      'remindAt',
+    ]);
+    // Every detail at once, in any order.
+    expect(webhookDealDetailsSchema.parse([...WEBHOOK_DEAL_DETAILS].reverse())).toEqual([
+      ...WEBHOOK_DEAL_DETAILS,
+    ]);
+    expect(webhookTaskDetailsSchema.parse([...WEBHOOK_TASK_DETAILS].reverse())).toEqual([
+      ...WEBHOOK_TASK_DETAILS,
+    ]);
+    expect(webhookDealDetailsSchema.parse(null)).toBeNull();
+    expect(webhookTaskDetailsSchema.parse(null)).toBeNull();
+    // The details the events' changes name, in their order.
+    expect(WEBHOOK_DEAL_DETAILS).toEqual([...WEBHOOK_DEAL_DETAIL_CHANGES]);
+    expect(WEBHOOK_TASK_DETAILS).toEqual([...WEBHOOK_TASK_DETAIL_CHANGES]);
+    for (const refused of [
+      [],
+      ['value'],
+      ['notes'],
+      ['Title'],
+      'title',
+      [null],
+      Array(4).fill('title'),
+    ]) {
+      expect(webhookDealDetailsSchema.safeParse(refused).success, JSON.stringify(refused)).toBe(
+        false,
+      );
+    }
+    for (const refused of [[], ['due'], ['valueMinor'], 'notes', [null], Array(5).fill('notes')]) {
+      expect(webhookTaskDetailsSchema.safeParse(refused).success, JSON.stringify(refused)).toBe(
+        false,
+      );
+    }
+    expect(webhookDealDetailsSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one deal detail, or take every change.',
+    );
+    expect(webhookDealDetailsSchema.safeParse(['value']).error?.issues[0]?.message).toBe(
+      'Choose deal details from the list.',
+    );
+    expect(
+      webhookDealDetailsSchema.safeParse(Array(4).fill('title')).error?.issues[0]?.message,
+    ).toBe('Give each deal detail once.');
+    expect(webhookTaskDetailsSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one task detail, or take every change.',
+    );
+    expect(webhookTaskDetailsSchema.safeParse(['due']).error?.issues[0]?.message).toBe(
+      'Choose task details from the list.',
+    );
+    expect(
+      webhookTaskDetailsSchema.safeParse(Array(5).fill('notes')).error?.issues[0]?.message,
+    ).toBe('Give each task detail once.');
+    expect(WEBHOOK_DEAL_DETAIL_LABELS).toEqual({
+      title: 'Title',
+      valueMinor: 'Value',
+      expectedCloseOn: 'Expected close date',
+    });
+    expect(WEBHOOK_TASK_DETAIL_LABELS).toEqual({
+      title: 'Title',
+      notes: 'Notes',
+      dueAt: 'Due time',
+      remindAt: 'Reminder',
+    });
+  });
+
+  it('are kept only while the endpoint takes the detail changes: given, kept, or cleared', () => {
+    const deals = ['deal.updated', 'deal.created'] as const;
+    expect(webhookDealDetailsFor([...deals], ['title'], null)).toEqual(['title']);
+    expect(webhookDealDetailsFor([...deals], undefined, ['valueMinor'])).toEqual(['valueMinor']);
+    expect(webhookDealDetailsFor([...deals], null, ['valueMinor'])).toBeNull();
+    expect(webhookDealDetailsFor([...deals], undefined, null)).toBeNull();
+    // A deal's other events, and a task's detail changes, have no deal detail to choose.
+    expect(
+      webhookDealDetailsFor(['deal.created', 'task.updated'], ['title'], ['title']),
+    ).toBeNull();
+    const tasks = ['task.updated', 'task.created'] as const;
+    expect(webhookTaskDetailsFor([...tasks], ['notes'], null)).toEqual(['notes']);
+    expect(webhookTaskDetailsFor([...tasks], undefined, ['dueAt'])).toEqual(['dueAt']);
+    expect(webhookTaskDetailsFor([...tasks], null, ['dueAt'])).toBeNull();
+    expect(webhookTaskDetailsFor([...tasks], undefined, null)).toBeNull();
+    expect(
+      webhookTaskDetailsFor(['task.created', 'deal.updated'], ['title'], ['title']),
+    ).toBeNull();
+    expect(WEBHOOK_DEAL_DETAILS_NEED_THE_EVENT).toBe(
+      `Choose deal details only for an endpoint that receives ${WEBHOOK_EVENT_INFO['deal.updated'].label}.`,
+    );
+    expect(WEBHOOK_TASK_DETAILS_NEED_THE_EVENT).toBe(
+      `Choose task details only for an endpoint that receives ${WEBHOOK_EVENT_INFO['task.updated'].label}.`,
     );
   });
 });

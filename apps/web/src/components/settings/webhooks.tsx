@@ -30,6 +30,10 @@ import {
   WEBHOOK_DEAL_STATUSES,
   WEBHOOK_TASK_STATUS_LABELS,
   WEBHOOK_TASK_STATUSES,
+  WEBHOOK_DEAL_DETAIL_LABELS,
+  WEBHOOK_DEAL_DETAILS,
+  WEBHOOK_TASK_DETAIL_LABELS,
+  WEBHOOK_TASK_DETAILS,
   WEBHOOK_REPLAY_PERIODS,
   WEBHOOK_RUN_END_STATUS_LABELS,
   WEBHOOK_RUN_END_STATUSES,
@@ -97,6 +101,8 @@ import {
   type WebhookPaymentLinkStatus,
   type WebhookDealStatus,
   type WebhookTaskStatus,
+  type WebhookDealDetail,
+  type WebhookTaskDetail,
   type WebhookOwnerChoice,
   type WebhookPipelineChoice,
   type WebhookReplayPeriod,
@@ -439,6 +445,56 @@ function ReachedStatusChoices<S extends string>({
  * The parts of a contact whose change an endpoint takes as `contact.updated` (ADR-123), shown while
  * it takes the event.
  */
+/**
+ * The details of a deal or a task whose changes an endpoint takes (ADR-310), shown while it takes
+ * the event: every change unless some details are unticked.
+ */
+function DetailChoices<D extends string>({
+  prefix,
+  kind,
+  details,
+  labels,
+  chosen,
+  onChange,
+}: {
+  prefix: string;
+  kind: 'deal' | 'task';
+  details: readonly D[];
+  labels: Record<D, string>;
+  chosen: D[];
+  onChange: (next: D[]) => void;
+}) {
+  return (
+    <fieldset className="ml-6 grid gap-1">
+      <legend className="mb-1 text-xs text-muted-foreground">
+        Changes sent (all of them unless you untick some; an event names every detail of the {kind}{' '}
+        that changed)
+      </legend>
+      {details.map((detail) => {
+        const id = `${prefix}-${kind}-detail-${detail}`;
+        return (
+          <div key={detail} className="flex items-center gap-2">
+            <Checkbox
+              id={id}
+              checked={chosen.includes(detail)}
+              onChange={(e) =>
+                onChange(
+                  e.target.checked
+                    ? details.filter((d) => d === detail || chosen.includes(d))
+                    : chosen.filter((d) => d !== detail),
+                )
+              }
+            />
+            <Label htmlFor={id} className="font-normal">
+              {labels[detail]} <span className="font-mono text-xs">({detail})</span>
+            </Label>
+          </div>
+        );
+      })}
+    </fieldset>
+  );
+}
+
 function PartChoices({
   prefix,
   chosen,
@@ -1925,6 +1981,10 @@ function EventChoices({
   onDealStatusesChange,
   taskStatuses,
   onTaskStatusesChange,
+  dealDetails,
+  onDealDetailsChange,
+  taskDetails,
+  onTaskDetailsChange,
   templateStatuses,
   onTemplateStatusesChange,
   conversationStatuses,
@@ -1961,6 +2021,10 @@ function EventChoices({
   onDealStatusesChange: (next: WebhookDealStatus[]) => void;
   taskStatuses: WebhookTaskStatus[];
   onTaskStatusesChange: (next: WebhookTaskStatus[]) => void;
+  dealDetails: WebhookDealDetail[];
+  onDealDetailsChange: (next: WebhookDealDetail[]) => void;
+  taskDetails: WebhookTaskDetail[];
+  onTaskDetailsChange: (next: WebhookTaskDetail[]) => void;
   templateStatuses: WebhookTemplateStatus[];
   onTemplateStatusesChange: (next: WebhookTemplateStatus[]) => void;
   conversationStatuses: WebhookConversationStatus[];
@@ -2111,6 +2175,26 @@ function EventChoices({
                 labels={WEBHOOK_TASK_STATUS_LABELS}
                 chosen={taskStatuses}
                 onChange={onTaskStatusesChange}
+              />
+            ) : null}
+            {type === 'deal.updated' && chosen.includes(type) ? (
+              <DetailChoices
+                prefix={prefix}
+                kind="deal"
+                details={WEBHOOK_DEAL_DETAILS}
+                labels={WEBHOOK_DEAL_DETAIL_LABELS}
+                chosen={dealDetails}
+                onChange={onDealDetailsChange}
+              />
+            ) : null}
+            {type === 'task.updated' && chosen.includes(type) ? (
+              <DetailChoices
+                prefix={prefix}
+                kind="task"
+                details={WEBHOOK_TASK_DETAILS}
+                labels={WEBHOOK_TASK_DETAIL_LABELS}
+                chosen={taskDetails}
+                onChange={onTaskDetailsChange}
               />
             ) : null}
             {type === 'campaign.status_changed' && chosen.includes(type) ? (
@@ -2400,6 +2484,10 @@ export function WebhookEndpointForm({
     dealStatuses: WebhookDealStatus[] | null;
     /** The task statuses it takes (ADR-309); null for every status. */
     taskStatuses: WebhookTaskStatus[] | null;
+    /** The deal details whose changes it takes (ADR-310); null for every change. */
+    dealDetails: WebhookDealDetail[] | null;
+    /** The task details whose changes it takes (ADR-310); null for every change. */
+    taskDetails: WebhookTaskDetail[] | null;
     templateStatuses: WebhookTemplateStatus[] | null;
     conversationStatuses: WebhookConversationStatus[] | null;
     runEndStatuses: WebhookRunEndStatus[] | null;
@@ -2504,6 +2592,12 @@ export function WebhookEndpointForm({
   );
   const [taskStatuses, setTaskStatuses] = useState<WebhookTaskStatus[]>(
     endpoint?.taskStatuses ?? [...WEBHOOK_TASK_STATUSES],
+  );
+  const [dealDetails, setDealDetails] = useState<WebhookDealDetail[]>(
+    endpoint?.dealDetails ?? [...WEBHOOK_DEAL_DETAILS],
+  );
+  const [taskDetails, setTaskDetails] = useState<WebhookTaskDetail[]>(
+    endpoint?.taskDetails ?? [...WEBHOOK_TASK_DETAILS],
   );
   const [templateStatuses, setTemplateStatuses] = useState<WebhookTemplateStatus[]>(
     endpoint?.templateStatuses ?? [...WEBHOOK_TEMPLATE_STATUSES],
@@ -2677,6 +2771,15 @@ export function WebhookEndpointForm({
           taskStatuses.length < WEBHOOK_TASK_STATUSES.length
             ? taskStatuses
             : null;
+        // Every deal or task detail ticked takes every change (null, ADR-310).
+        const chosenDealDetails =
+          eventTypes.includes('deal.updated') && dealDetails.length < WEBHOOK_DEAL_DETAILS.length
+            ? dealDetails
+            : null;
+        const chosenTaskDetails =
+          eventTypes.includes('task.updated') && taskDetails.length < WEBHOOK_TASK_DETAILS.length
+            ? taskDetails
+            : null;
         // Every template status ticked takes every status (null, ADR-148).
         const chosenTemplateStatuses =
           eventTypes.includes('template.status_changed') &&
@@ -2806,6 +2909,8 @@ export function WebhookEndpointForm({
           paymentLinkStatuses: chosenPaymentLinkStatuses,
           dealStatuses: chosenDealStatuses,
           taskStatuses: chosenTaskStatuses,
+          dealDetails: chosenDealDetails,
+          taskDetails: chosenTaskDetails,
           templateStatuses: chosenTemplateStatuses,
           conversationStatuses: chosenConversationStatuses,
           runEndStatuses: chosenRunEndStatuses,
@@ -2885,6 +2990,8 @@ export function WebhookEndpointForm({
               setPaymentLinkStatuses([...WEBHOOK_PAYMENT_LINK_STATUSES]);
               setDealStatuses([...WEBHOOK_DEAL_STATUSES]);
               setTaskStatuses([...WEBHOOK_TASK_STATUSES]);
+              setDealDetails([...WEBHOOK_DEAL_DETAILS]);
+              setTaskDetails([...WEBHOOK_TASK_DETAILS]);
               setTemplateStatuses([...WEBHOOK_TEMPLATE_STATUSES]);
               setConversationStatuses([...WEBHOOK_CONVERSATION_STATUSES]);
               setRunEndStatuses([...WEBHOOK_RUN_END_STATUSES]);
@@ -2999,6 +3106,10 @@ export function WebhookEndpointForm({
         onDealStatusesChange={setDealStatuses}
         taskStatuses={taskStatuses}
         onTaskStatusesChange={setTaskStatuses}
+        dealDetails={dealDetails}
+        onDealDetailsChange={setDealDetails}
+        taskDetails={taskDetails}
+        onTaskDetailsChange={setTaskDetails}
         templateStatuses={templateStatuses}
         onTemplateStatusesChange={setTemplateStatuses}
         conversationStatuses={conversationStatuses}

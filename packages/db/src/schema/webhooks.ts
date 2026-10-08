@@ -103,6 +103,18 @@ export type WebhookDealStatus = DealStatus;
 export type WebhookTaskStatus = TaskStatus;
 
 /**
+ * The details whose change a `deal.updated` endpoint can choose (ADR-310), as the event's `changes`
+ * names them.
+ */
+export type WebhookDealDetail = 'title' | 'valueMinor' | 'expectedCloseOn';
+
+/**
+ * The details whose change a `task.updated` endpoint can choose (ADR-310), as the event's `changes`
+ * names them.
+ */
+export type WebhookTaskDetail = 'title' | 'notes' | 'dueAt' | 'remindAt';
+
+/**
  * The statuses a `template.status_changed` event reports, which an endpoint can choose (ADR-148):
  * Meta's review states and the deletion; HyFib's own steps before Meta has the template, a
  * deletion under way or refused and an unrecognised status are not sent.
@@ -224,6 +236,18 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
    * null takes every status. Set only while `task.status_changed` is among its events.
    */
   taskStatuses: text('task_statuses').array().$type<WebhookTaskStatus[]>(),
+  /**
+   * The details whose changes it takes as `deal.updated` (migration 0233, ADR-310): a change that
+   * changed any of them. null takes every change. Set only while `deal.updated` is among its
+   * events.
+   */
+  dealDetails: text('deal_details').array().$type<WebhookDealDetail[]>(),
+  /**
+   * The details whose changes it takes as `task.updated` (migration 0233, ADR-310): a change that
+   * changed any of them. null takes every change. Set only while `task.updated` is among its
+   * events.
+   */
+  taskDetails: text('task_details').array().$type<WebhookTaskDetail[]>(),
   /**
    * The template statuses it takes as `template.status_changed` (ADR-148); null takes every status.
    * Set only while `template.status_changed` is among its events.

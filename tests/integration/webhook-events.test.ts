@@ -5159,6 +5159,71 @@ describe('deal events (ADR-256)', () => {
     expect(statusesAt(setbacks)).toEqual(['lost', 'open']);
     expect(statusesAt(everyStatus)).toEqual(['lost', 'open', 'won']);
   });
+
+  it('sends an endpoint that names deal details only the changes that changed one of them, each naming every detail it changed (ADR-310)', async () => {
+    const s = await crmCompany();
+    const { c, owner } = s;
+    /** An endpoint of the company taking deals' detail changes for these details. */
+    const add = async (dealDetails: string[] | null) => {
+      const path = `/ok/${randomBytes(6).toString('hex')}`;
+      await webhooks().create(owner, {
+        url: `http://${HOST}:${port}${path}`,
+        eventTypes: ['deal.updated'],
+        dealDetails,
+      });
+      return path;
+    };
+    const forecast = await add(['valueMinor', 'expectedCloseOn']);
+    const titles = await add(['title']);
+    const everyChange = await add(null);
+    const svc = crm();
+    const jaya = await newContact(owner, 'Jaya');
+    const { id: dealId } = await svc.createDeal(owner, {
+      contactId: jaya.id,
+      pipelineId: s.salesId,
+      stageId: s.sales[0],
+      title: 'Annual plan',
+      value: '1,000',
+      ownerMembershipId: owner.membership.id,
+      expectedCloseOn: null,
+    });
+    const edit = (
+      expectedVersion: number,
+      title: string,
+      value: string,
+      expectedCloseOn: string | null,
+    ) =>
+      svc.updateDeal(owner, {
+        id: dealId,
+        expectedVersion,
+        title,
+        value,
+        ownerMembershipId: owner.membership.id,
+        expectedCloseOn,
+      });
+
+    // The deal is retitled, given another value, then retitled with a close date.
+    await edit(1, 'Annual plan 2027', '1,000', null);
+    await edit(2, 'Annual plan 2027', '1,500', null);
+    await edit(3, 'Annual plan 2027, renewed', '1,500', '2027-03-31');
+
+    // Each change captured once, with a delivery to each endpoint whose list holds a detail it
+    // changed.
+    const events = await dealEventsOf(c);
+    expect(events.map((e) => [e.type, e.detail.changes, e.deliveries])).toEqual([
+      ['deal.updated', ['title'], 2],
+      ['deal.updated', ['valueMinor'], 2],
+      ['deal.updated', ['title', 'expectedCloseOn'], 3],
+    ]);
+    await deliverDue(c);
+    const changesAt = (path: string) =>
+      bodiesAt(path)
+        .map((b) => (b.data.changes as string[]).join('+'))
+        .sort();
+    expect(changesAt(forecast)).toEqual(['title+expectedCloseOn', 'valueMinor']);
+    expect(changesAt(titles)).toEqual(['title', 'title+expectedCloseOn']);
+    expect(changesAt(everyChange)).toEqual(['title', 'title+expectedCloseOn', 'valueMinor']);
+  });
 });
 
 describe('change-maker filters for deal, task and note events (ADR-306)', () => {
@@ -6309,6 +6374,69 @@ describe('task events (ADR-261)', () => {
     expect(statusesAt(completions)).toEqual(['done']);
     expect(statusesAt(undone)).toEqual(['cancelled', 'open']);
     expect(statusesAt(everyStatus)).toEqual(['cancelled', 'done', 'open']);
+  });
+
+  it('sends an endpoint that names task details only the changes that changed one of them, each naming every detail it changed (ADR-310)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    /** An endpoint of the company taking tasks' detail changes for these details. */
+    const add = async (taskDetails: string[] | null) => {
+      const path = `/ok/${randomBytes(6).toString('hex')}`;
+      await webhooks().create(owner, {
+        url: `http://${HOST}:${port}${path}`,
+        eventTypes: ['task.updated'],
+        taskDetails,
+      });
+      return path;
+    };
+    const schedule = await add(['dueAt', 'remindAt']);
+    const writing = await add(['title', 'notes']);
+    const everyChange = await add(null);
+    const svc = crm();
+    const { id: taskId } = await svc.createTask(owner, {
+      title: 'Order brochures',
+      assigneeMembershipId: owner.membership.id,
+    });
+    const due = new Date(Date.now() + 86_400_000).toISOString();
+    const remind = new Date(Date.now() + 3_600_000).toISOString();
+    const edit = (
+      expectedVersion: number,
+      fields: {
+        title: string;
+        notes: string | null;
+        dueAt: string | null;
+        remindAt: string | null;
+      },
+    ) =>
+      svc.updateTask(owner, {
+        id: taskId,
+        expectedVersion,
+        assigneeMembershipId: owner.membership.id,
+        ...fields,
+      });
+
+    // Its notes are written, it is given a due time, then retitled with a reminder.
+    const notes = 'Ask for the 2027 prices';
+    await edit(1, { title: 'Order brochures', notes, dueAt: null, remindAt: null });
+    await edit(2, { title: 'Order brochures', notes, dueAt: due, remindAt: null });
+    await edit(3, { title: 'Order 500 brochures', notes, dueAt: due, remindAt: remind });
+
+    // Each change captured once, with a delivery to each endpoint whose list holds a detail it
+    // changed.
+    const events = await taskEventsOf(c);
+    expect(events.map((e) => [e.type, e.detail.changes, e.deliveries])).toEqual([
+      ['task.updated', ['notes'], 2],
+      ['task.updated', ['dueAt'], 2],
+      ['task.updated', ['title', 'remindAt'], 3],
+    ]);
+    await deliverDue(c);
+    const changesAt = (path: string) =>
+      bodiesAt(path)
+        .map((b) => (b.data.changes as string[]).join('+'))
+        .sort();
+    expect(changesAt(schedule)).toEqual(['dueAt', 'title+remindAt']);
+    expect(changesAt(writing)).toEqual(['notes', 'title+remindAt']);
+    expect(changesAt(everyChange)).toEqual(['dueAt', 'notes', 'title+remindAt']);
   });
 });
 

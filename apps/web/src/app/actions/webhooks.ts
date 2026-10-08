@@ -46,6 +46,10 @@ export async function createWebhookEndpointAction(
     dealStatuses: string[] | null;
     /** The task statuses it takes (ADR-309); null takes every status. */
     taskStatuses: string[] | null;
+    /** The deal details whose changes it takes (ADR-310); null takes every change. */
+    dealDetails: string[] | null;
+    /** The task details whose changes it takes (ADR-310); null takes every change. */
+    taskDetails: string[] | null;
     /** The template statuses it takes (ADR-148); null takes every status. */
     templateStatuses: string[] | null;
     /** The conversation statuses it takes (ADR-149); null takes every status. */
@@ -142,6 +146,10 @@ export async function updateWebhookEndpointAction(
     dealStatuses: string[] | null;
     /** The task statuses it takes (ADR-309); null takes every status. */
     taskStatuses: string[] | null;
+    /** The deal details whose changes it takes (ADR-310); null takes every change. */
+    dealDetails: string[] | null;
+    /** The task details whose changes it takes (ADR-310); null takes every change. */
+    taskDetails: string[] | null;
     /** The template statuses it takes (ADR-148); null takes every status. */
     templateStatuses: string[] | null;
     /** The conversation statuses it takes (ADR-149); null takes every status. */

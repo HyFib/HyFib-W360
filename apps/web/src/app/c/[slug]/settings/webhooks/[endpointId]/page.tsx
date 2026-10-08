@@ -212,6 +212,8 @@ export default async function WebhookEndpointPage({
               paymentLinkStatuses: endpoint.paymentLinkStatuses,
               dealStatuses: endpoint.dealStatuses,
               taskStatuses: endpoint.taskStatuses,
+              dealDetails: endpoint.dealDetails,
+              taskDetails: endpoint.taskDetails,
               templateStatuses: endpoint.templateStatuses,
               conversationStatuses: endpoint.conversationStatuses,
               runEndStatuses: endpoint.runEndStatuses,

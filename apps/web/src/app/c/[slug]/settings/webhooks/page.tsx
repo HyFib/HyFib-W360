@@ -13,6 +13,8 @@ import {
   WEBHOOK_PAYMENT_LINK_STATUS_LABELS,
   WEBHOOK_DEAL_STATUS_LABELS,
   WEBHOOK_TASK_STATUS_LABELS,
+  WEBHOOK_DEAL_DETAIL_LABELS,
+  WEBHOOK_TASK_DETAIL_LABELS,
   WEBHOOK_RUN_END_STATUS_LABELS,
   WEBHOOK_RUN_TRIGGER_LABELS,
   WEBHOOK_CONSENT_CHANGE_LABELS,
@@ -228,6 +230,18 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
                       <p className="text-xs text-muted-foreground">
                         Task statuses sent:{' '}
                         {e.taskStatuses.map((s) => WEBHOOK_TASK_STATUS_LABELS[s]).join(', ')}
+                      </p>
+                    ) : null}
+                    {e.dealDetails ? (
+                      <p className="text-xs text-muted-foreground">
+                        Deal details whose changes are sent:{' '}
+                        {e.dealDetails.map((d) => WEBHOOK_DEAL_DETAIL_LABELS[d]).join(', ')}
+                      </p>
+                    ) : null}
+                    {e.taskDetails ? (
+                      <p className="text-xs text-muted-foreground">
+                        Task details whose changes are sent:{' '}
+                        {e.taskDetails.map((d) => WEBHOOK_TASK_DETAIL_LABELS[d]).join(', ')}
                       </p>
                     ) : null}
                     {e.campaignStatuses ? (

@@ -11881,3 +11881,49 @@ Decision:
 Not built: lists by the status a deal or task left (`previousStatus`), a deal's lost reason, and
 statuses for the deal's and task's other events (a deal added, moved or edited, a task added, edited
 or reassigned), which report no change of status.
+
+## ADR-310 Choosing the deal and task details whose changes a webhook endpoint receives (P5-09, P4-04) (2026-10-08)
+
+Context: `deal.updated` (ADR-275) is sent whenever a deal's title, value or expected close date
+changes, and `task.updated` (ADR-276) whenever a task's title, notes, due time or reminder changes,
+each naming what changed in `changes`, but an endpoint received every one. A forecast kept in step
+with the deals wants changes of value and expected close date only, and a calendar the changes of
+tasks' due times and reminders only; each was sent every edit and had to drop the rest by reading
+`changes`.
+
+Decision:
+
+- **Two lists per endpoint, one for each event,** `dealDetails` for `deal.updated` and `taskDetails`
+  for `task.updated`: the details whose changes the endpoint takes, 1 to 3 of `title`, `valueMinor`
+  and `expectedCloseOn` for deals and 1 to 4 of `title`, `notes`, `dueAt` and `remindAt` for tasks,
+  in the order the events' `changes` lists them, with repeats merged. A change is sent when it
+  changed a detail the list holds, and its `changes` still names every detail it changed, so a
+  receiver sees a retitle that came with a new value. Null receives every change, as before. With
+  pipelines, stages, owners, assignees or makers chosen too, a change must pass every list. Other
+  events are not narrowed. Chosen in Settings → Webhooks under each event ("Changes sent", every
+  detail ticked by default, named as the deal and task forms name them), shown on the endpoint as
+  "Deal details whose changes are sent: …" and "Task details whose changes are sent: …", and through
+  the API as `dealDetails` and `taskDetails` on `POST /webhook-endpoints` and
+  `PATCH /webhook-endpoints/{id}` and in every endpoint the API answers.
+- **Only while the event is taken:** a list given for an endpoint that does not take its event is
+  refused (`dealDetails` or `taskDetails`; 422 through the API). A change that drops the event
+  clears its list, and a `PATCH` that leaves a list out keeps it; Settings always sends both (null
+  while every detail is ticked). Checks in the database hold the same rule (null, or 1 to 3 or 1 to
+  4 known details in one dimension without a null, with the event).
+- **Applied at capture:** `app.capture_webhook_event` matches the details the change changed, which
+  the deal and task triggers pass in the detail's `changes` (0192, 0194), against each active
+  endpoint's list (`?|`, any of them), in the transaction that makes the change; no row is read for
+  it. No event is written when no endpoint takes it, and stored events are unchanged.
+- **Audited and exported:** `webhook.endpoint_created` and `webhook.endpoint_updated` carry
+  `dealDetails` and `taskDetails` when the endpoint has them, and the company data export carries
+  the columns.
+- **Permissions unchanged:** members with `developer.manage` in Settings, keys with
+  `webhooks.manage` through the API.
+- **Migration 0233:** `deal_details text[]` and `task_details text[]` on `app.webhook_endpoints`
+  with their checks, validated at once (a company has at most 10 endpoints), update grants on the
+  columns for the runtime role, and `app.capture_webhook_event` replaced with the same signature
+  (0232's, with the details), so its owner and grants stay. Existing endpoints keep null; nothing is
+  backfilled.
+
+Not built: a change sent only when it changed every chosen detail (one is enough), the values before
+a change (ADR-275 and ADR-276 never send them), and details of the deal's and task's other events.

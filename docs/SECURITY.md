@@ -1478,6 +1478,14 @@ Phase 5 rules (outgoing webhooks, P5-09):
   the task, whoever changes it (a member, an automation's run or a key): it narrows what one
   endpoint receives and never adds an event or a delivery for another endpoint or company. Statuses
   are not personal data. Audited with the lists (unit tests; integration tests, run in CI only).
+- An endpoint can take `deal.updated` and `task.updated` only for the changes of some details
+  (ADR-310), chosen with `developer.manage` in Settings or `webhooks.manage` through the API. Each
+  list is checked against the details its event names, kept only while the endpoint takes its event
+  (database checks too, which also refuse a null entry), and applied in `app.capture_webhook_event`
+  against the details the change changed, in the transaction that changes the deal or the task: it
+  narrows what one endpoint receives and never adds an event or a delivery for another endpoint or
+  company, and the payload is unchanged (never the values before). Detail names are not personal
+  data. Audited with the lists (unit tests; integration tests, run in CI only).
 - An endpoint can take `template.status_changed` only for some of the statuses reported (ADR-148),
   chosen the same way. The list is checked against the eleven statuses the event reports (HyFib's
   own steps, a deletion under way or refused and an unrecognised status are never sent), kept only

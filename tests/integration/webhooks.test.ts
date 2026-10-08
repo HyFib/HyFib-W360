@@ -1568,6 +1568,129 @@ describe('deal and task status filters (ADR-309)', () => {
   }
 });
 
+describe('deal and task detail filters (ADR-310)', () => {
+  const kinds = [
+    {
+      field: 'dealDetails',
+      column: 'deal_details',
+      event: 'deal.updated',
+      other: 'deal.created',
+      crossed: 'task.updated',
+      label: /only for an endpoint that receives Deal details/,
+      unknown: 'value',
+      chosen: ['expectedCloseOn', 'title', 'expectedCloseOn'],
+      kept: ['title', 'expectedCloseOn'],
+      changed: ['valueMinor'],
+      tooMany: `'{title,valueMinor,expectedCloseOn,title}'`,
+    },
+    {
+      field: 'taskDetails',
+      column: 'task_details',
+      event: 'task.updated',
+      other: 'task.created',
+      crossed: 'deal.updated',
+      label: /only for an endpoint that receives Task details/,
+      unknown: 'due',
+      chosen: ['remindAt', 'title', 'remindAt'],
+      kept: ['title', 'remindAt'],
+      changed: ['notes'],
+      tooMany: `'{title,notes,dueAt,remindAt,title}'`,
+    },
+  ] as const;
+
+  for (const kind of kinds) {
+    it(`are refused without ${kind.event}, unknown or empty, kept by a change that leaves them out and cleared with the event; the database keeps them to that event (${kind.field})`, async () => {
+      const c = await fx.company();
+      const owner = await fx.ctx(c, c.owner);
+      const url = 'https://hooks.example.com/in';
+      const refused = (eventTypes: string[], list: unknown, message: RegExp) =>
+        expectAppError(
+          webhooks().create(owner, { url, eventTypes, [kind.field]: list }),
+          'validation_failed',
+          message,
+        );
+      // The other events of a deal or a task have no detail to choose, nor does the other's
+      // change of details.
+      await refused([kind.other], ['title'], kind.label);
+      await refused([kind.crossed], ['title'], kind.label);
+      await refused([kind.event], [], /at least one/);
+      await refused([kind.event], [kind.unknown], /from the list/);
+      expect(await webhooks().list(owner)).toEqual([]);
+
+      const created = await webhooks().create(owner, {
+        url,
+        eventTypes: [kind.event, 'consent.changed'],
+        [kind.field]: [...kind.chosen],
+      });
+      const [audit] = await fx.query<{ metadata: Record<string, unknown> }>(
+        `SELECT metadata FROM app.audit_events WHERE tenant_id = $1 AND action = 'webhook.endpoint_created'`,
+        [c.tenant.id],
+      );
+      expect(audit?.metadata).toMatchObject({ [kind.field]: [...kind.kept] });
+      const change = (fields: Record<string, unknown>) =>
+        webhooks().update(owner, {
+          endpointId: created.id,
+          url,
+          description: '',
+          eventTypes: [kind.event, 'consent.changed'],
+          ...fields,
+        });
+      const current = async () => {
+        const endpoint = (await webhooks().list(owner)).find((e) => e.id === created.id);
+        return endpoint?.[kind.field];
+      };
+      expect(await current()).toEqual([...kind.kept]);
+      await change({ description: 'kept' });
+      expect(await current()).toEqual([...kind.kept]);
+      await change({ [kind.field]: [...kind.changed] });
+      expect(await current()).toEqual([...kind.changed]);
+      const updates = await fx.query<{ metadata: Record<string, unknown> }>(
+        `SELECT metadata FROM app.audit_events
+          WHERE tenant_id = $1 AND action = 'webhook.endpoint_updated' ORDER BY occurred_at`,
+        [c.tenant.id],
+      );
+      expect(updates.map((u) => u.metadata[kind.field])).toEqual([
+        [...kind.kept],
+        [...kind.changed],
+      ]);
+      await change({ [kind.field]: null });
+      expect(await current()).toBeNull();
+      await change({ [kind.field]: [...kind.kept] });
+      // The database refuses an empty list, too many entries, an unknown detail or a missing one
+      // from an endpoint taking the event…
+      const setInDatabase = (value: string) =>
+        fx.query(`UPDATE app.webhook_endpoints SET ${kind.column} = ${value} WHERE id = $1`, [
+          created.id,
+        ]);
+      const check = new RegExp(`webhook_endpoints_${kind.column}`);
+      for (const bad of [
+        `'{}'`,
+        kind.tooMany,
+        `'{title,${kind.unknown}}'`,
+        `ARRAY['title', NULL]::text[]`,
+        `ARRAY[ARRAY['title'], ARRAY['${kind.kept[1]}']]::text[]`,
+      ]) {
+        await expect(setInDatabase(bad), bad).rejects.toThrow(check);
+      }
+      await change({ eventTypes: ['consent.changed'] });
+      expect(await current()).toBeNull();
+      await expectAppError(
+        change({ eventTypes: ['consent.changed'], [kind.field]: ['title'] }),
+        'validation_failed',
+        kind.label,
+      );
+      // …and any list for an endpoint that does not take it.
+      await expect(setInDatabase(`'{title}'`)).rejects.toThrow(check);
+      // The company role changes the list only through its column grant.
+      const [grant] = await fx.query<{ can_update: boolean }>(
+        `SELECT has_column_privilege('w360_app', 'app.webhook_endpoints', $1, 'UPDATE') AS can_update`,
+        [kind.column],
+      );
+      expect(grant?.can_update).toBe(true);
+    });
+  }
+});
+
 describe('template status filters (ADR-148)', () => {
   /** A utility template HyFib submits and Meta's stand-in takes for review: `pending`. */
   async function submitted(c: Company, owner: TenantContext) {
