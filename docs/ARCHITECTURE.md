@@ -2067,6 +2067,17 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   for endpoints whose list is null or holds a detail the change changed, as the deal and task
   triggers pass them in `changes`, and writes no event when none does. Settings and the API
   (`dealDetails`, `taskDetails`) set them; a change that drops an event clears its list.
+- **Member and team filters for satisfaction survey answers** (migration 0234, ADR-311):
+  `survey_assignee_ids` and `survey_team_ids` on an endpoint list the members credited with the
+  answers it takes (the conversation's assignee when it was resolved, as the survey keeps it) and
+  the teams whose conversations' answers it takes (the conversation's team when the customer
+  answers), null for every answer; checks keep them to 1 to 50 ids and to endpoints that take
+  `satisfaction_survey.answered`. `app.capture_webhook_event` (replaced with the same signature)
+  reads the survey's score, member and conversation's team in one query only when an active endpoint
+  names any of them, creates an answer's delivery only for endpoints whose lists hold them, and
+  writes no event when none does. Settings and the API (`surveyAssigneeIds`, `surveyTeamIds`) set
+  them, the services checking that members take conversations and teams are the company's (those a
+  list holds stay); a change that drops the event clears them.
 - **Template status filters** (migration 0112, ADR-148): `template_statuses` on an endpoint lists
   the statuses it takes as `template.status_changed` (the eleven the event reports, `pending` to
   `locked`; HyFib's own steps, a deletion under way or refused and an unrecognised status are never

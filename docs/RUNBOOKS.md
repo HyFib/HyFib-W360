@@ -2236,9 +2236,10 @@ from Meta). An approved template with `sendable` false has content HyFib cannot 
 customer taps a button of a survey that was sent, the first time: a second tap, a skipped survey
 (Settings → Inbox's surveys off, the 24-hour window closed, the customer opted out) or a
 conversation resolved through the API sends nothing. An endpoint that names numbers gets it only for
-those numbers; the team, member and tag filters do not narrow it. A tap on an old survey message
-that is not the conversation's survey records nothing. The webhook deliveries page shows each
-attempt; `GET /satisfaction-surveys?status=answered` lists the answers to compare.
+those numbers; the team, member and tag filters of conversations' events do not narrow it, while the
+lists of members credited with answers and of answered surveys' teams do (ADR-311). A tap on an old
+survey message that is not the conversation's survey records nothing. The webhook deliveries page
+shows each attempt; `GET /satisfaction-surveys?status=answered` lists the answers to compare.
 
 **A satisfaction survey request answers 403 or 422, or a survey is not listed (ADR-292).** 403
 `forbidden` names `conversations.read`, the scope the key lacks (granted by owners and
@@ -3070,6 +3071,20 @@ is nothing to replay; `GET /deals/{id}` and `GET /tasks/{id}` read them as they 
 pipelines, stages, owners, assignees or makers chosen too, a change must pass every list. To take
 more, tick details under the event on the endpoint's page, or `PATCH /webhook-endpoints/{id}` with
 `dealDetails` or `taskDetails` (null for every change). Removing an event clears its list.
+
+**A receiver misses satisfaction survey answers of some members or teams (ADR-311).** An endpoint
+can take the answers credited to chosen members, or of chosen teams' conversations, only. The
+endpoints list shows it ("Survey answers sent, credited to: …", "Survey answers sent, of
+conversations in: …"), and the API answers `surveyAssigneeIds` and `surveyTeamIds` (null takes every
+answer). An answer is credited to the member the conversation was assigned to when it was resolved
+(the payload's `survey.assigneeId`), so an answer of a conversation resolved unassigned matches no
+member list, and a reassignment afterwards does not move it; it belongs to the team the conversation
+is in when the customer answers, so a conversation moved between the survey and the answer counts
+for its new team, and one in no team matches no team list. Events no endpoint takes are not
+recorded, so there is nothing to replay; `GET /satisfaction-surveys?status=answered` lists the
+answers. With scores or numbers chosen too, an answer must pass every list. To take more, tick
+members or teams on the endpoint's page, or `PATCH /webhook-endpoints/{id}` with `surveyAssigneeIds`
+or `surveyTeamIds` (null for every answer). Removing the event clears both lists.
 
 **A receiver misses a task's change of assignee, or doubts one (ADR-274).** Endpoints that take
 `task.assignee_changed` ("Task assignee") are sent one event each time a member gives a task to

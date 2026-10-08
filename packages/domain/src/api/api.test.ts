@@ -169,6 +169,8 @@ import {
   WEBHOOK_NOTE_DEAL_OWNERS_NEED_THE_EVENTS,
   WEBHOOK_CRM_CHANGE_MAKERS_NEED_THE_EVENTS,
   WEBHOOK_SURVEY_SCORES_NEED_THE_EVENT,
+  WEBHOOK_SURVEY_ASSIGNEES_NEED_THE_EVENT,
+  WEBHOOK_SURVEY_TEAMS_NEED_THE_EVENT,
   WEBHOOK_CONTACT_TAGS_NEED_THE_EVENTS,
   WEBHOOK_CONVERSATION_TAGS_NEED_THE_EVENTS,
   WEBHOOK_CAMPAIGN_STATUSES_NEED_THE_EVENT,
@@ -1495,7 +1497,9 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'runEndStatuses',
       'runTriggers',
       'stageIds',
+      'surveyAssigneeIds',
       'surveyScores',
+      'surveyTeamIds',
       'taskAssigneeIds',
       'taskDealOwnerIds',
       'taskDetails',
@@ -1608,6 +1612,16 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       expect(Object.keys(createBody.properties)).toContain(field);
       expect(webhooks[event]?.post?.description).toContain(
         `An endpoint receives every change unless it names the details it takes (its \`${field}\``,
+      );
+    }
+    // The members credited with survey answers and the teams of their conversations (ADR-311).
+    for (const field of ['surveyAssigneeIds', 'surveyTeamIds']) {
+      const list = (answered.properties as Record<string, { anyOf?: unknown[] }>)[field];
+      expect(list?.anyOf, field).toHaveLength(2);
+      expect(answered.required).toContain(field);
+      expect(Object.keys(createBody.properties)).toContain(field);
+      expect(webhooks['satisfaction_survey.answered']?.post?.description).toContain(
+        `(its \`${field}\`: `,
       );
     }
     // The template statuses an endpoint receives (ADR-148): a list, or null.
@@ -2113,7 +2127,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       taskAssigneeIds: [dev],
     });
     expect(apiUpdateWebhookEndpointSchema.safeParse({}).error?.issues[0]?.message).toContain(
-      'the deal owners, the task assignees, the pipelines, stages and owners of tasks’ deals and of notes’ deals, who made the CRM changes, the survey scores, the members, the contact tags, the conversation tags, the OAuth client',
+      'the deal owners, the task assignees, the pipelines, stages and owners of tasks’ deals and of notes’ deals, who made the CRM changes, the survey scores, the members credited with survey answers and the teams of their conversations, the members, the contact tags, the conversation tags, the OAuth client',
     );
     const doc = buildOpenApiDocument('https://app.example.com/api/v1');
     const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
@@ -3535,6 +3549,79 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     );
     expect(JSON.stringify(given.taskDetails)).toContain(
       "as task.updated (title, notes, dueAt, remindAt, as the event's changes names them): a change is sent when it changed one of them, naming every detail it changed; only with the task.updated event",
+    );
+  });
+
+  it('take the members credited with survey answers and the teams of their conversations only with satisfaction_survey.answered, each once, and a list of them alone is a change (ADR-311)', () => {
+    const a = '0190e9a1-0000-7000-8000-00000000031a';
+    const b = '0190e9a1-0000-7000-8000-00000000031b';
+    const url = 'https://hooks.example.com/w360';
+    const answers = { url, events: ['satisfaction_survey.answered'] };
+    expect(
+      apiCreateWebhookEndpointSchema.parse({
+        ...answers,
+        surveyAssigneeIds: [b, a.toUpperCase(), b],
+        surveyTeamIds: [a, a],
+      }),
+    ).toMatchObject({ surveyAssigneeIds: [b, a], surveyTeamIds: [a] });
+    // Conversations' events take the conversations' lists, not the answers'.
+    const refused = apiCreateWebhookEndpointSchema.safeParse({
+      url,
+      events: [...WEBHOOK_TEAM_EVENTS],
+      surveyAssigneeIds: [a],
+      surveyTeamIds: [b],
+    });
+    expect(refused.error?.issues.map((i) => [i.path.join('.'), i.message])).toEqual([
+      ['surveyAssigneeIds', WEBHOOK_SURVEY_ASSIGNEES_NEED_THE_EVENT],
+      ['surveyTeamIds', WEBHOOK_SURVEY_TEAMS_NEED_THE_EVENT],
+    ]);
+    const many = Array.from(
+      { length: WEBHOOK_LIMITS.surveyAssignees + 1 },
+      (_, i) => `0190e9a1-0000-7000-8000-${String(i).padStart(12, '0')}`,
+    );
+    for (const body of [
+      { ...answers, surveyAssigneeIds: [] },
+      { ...answers, surveyAssigneeIds: ['agent@example.com'] },
+      { ...answers, surveyAssigneeIds: many },
+      { ...answers, surveyTeamIds: [] },
+      { ...answers, surveyTeamIds: ['support'] },
+      { ...answers, surveyTeamIds: many.slice(0, WEBHOOK_LIMITS.surveyTeams + 1) },
+    ]) {
+      expect(apiCreateWebhookEndpointSchema.safeParse(body).success, JSON.stringify(body)).toBe(
+        false,
+      );
+    }
+    expect(
+      apiCreateWebhookEndpointSchema.parse({ ...answers, surveyTeamIds: many.slice(0, 50) })
+        .surveyTeamIds,
+    ).toHaveLength(50);
+    for (const change of [
+      { surveyAssigneeIds: null },
+      { surveyAssigneeIds: [a] },
+      { surveyTeamIds: null },
+      { surveyTeamIds: [b] },
+    ]) {
+      expect(apiUpdateWebhookEndpointSchema.parse(change)).toEqual(change);
+    }
+    expect(apiUpdateWebhookEndpointSchema.safeParse({}).error?.issues[0]?.message).toContain(
+      'the survey scores, the members credited with survey answers and the teams of their conversations, the members,',
+    );
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas;
+    const given = (schemas.CreateWebhookEndpoint as { properties: Record<string, unknown> })
+      .properties;
+    expect(JSON.stringify(given.surveyAssigneeIds)).toContain(
+      '1 to 50 member ids (as GET /members lists them: active members who take conversations), only with satisfaction_survey.answered. An answer is credited to the member its conversation was assigned to when it was resolved',
+    );
+    expect(JSON.stringify(given.surveyTeamIds)).toContain(
+      "1 to 50 ids of the company's teams, only with satisfaction_survey.answered. An answer belongs to the team its conversation is in when the customer answers",
+    );
+    const surveyEvent = (doc.webhooks as Record<string, { post?: { description?: string } }>)[
+      'satisfaction_survey.answered'
+    ]?.post?.description;
+    expect(surveyEvent).toContain(
+      'an answer credited to no member, or of a conversation in no team, matches no such list, and with more than one list an answer must pass them all',
     );
   });
 

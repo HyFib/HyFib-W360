@@ -5463,6 +5463,210 @@ describe('score filters for satisfaction survey answers (ADR-307)', () => {
   });
 });
 
+describe('survey member and team filters (ADR-311)', () => {
+  /** A team of the company, written as the teams settings write one. */
+  async function teamOf(c: Company, name: string) {
+    const id = uuidv7();
+    await fx.query('INSERT INTO app.teams (id, tenant_id, name) VALUES ($1, $2, $3)', [
+      id,
+      c.tenant.id,
+      name,
+    ]);
+    return id;
+  }
+
+  it("are refused without satisfaction_survey.answered, empty, over 50, naming a member who takes no conversations or another company's team; kept by a change that leaves them out, a member who stopped and a deleted team included, and cleared with the event; the database keeps them to the event", async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const agent = (await fx.ctx(c, c.agent)).membership.id;
+    const ownerId = owner.membership.id;
+    // A marketer answers no conversations, and another company's member and team are not this
+    // one's.
+    const marketer = (await fx.ctx(c, c.marketer)).membership.id;
+    const other = await fx.company();
+    const elsewhere = (await fx.ctx(other, other.agent)).membership.id;
+    const support = await teamOf(c, 'Support');
+    const sales = await teamOf(c, 'Sales');
+    const otherTeam = await teamOf(other, 'Support');
+    const url = 'https://hooks.example.com/in';
+    const refused = async (
+      fields: Record<string, unknown>,
+      message: RegExp,
+      path: string,
+      eventTypes = ['satisfaction_survey.answered'],
+    ) => {
+      const error = await expectAppError(
+        webhooks().create(owner, { url, eventTypes, ...fields }),
+        'validation_failed',
+        message,
+      );
+      expect(isAppError(error) && error.issues?.[0]?.path, JSON.stringify(fields)).toBe(path);
+    };
+    // Conversations' events take the conversations' lists, not the answers'.
+    const conversationEvents = ['message.received', 'conversation.status_changed'];
+    await refused(
+      { surveyAssigneeIds: [agent] },
+      /members credited with answers only for an endpoint that receives Satisfaction survey answered/,
+      'surveyAssigneeIds',
+      conversationEvents,
+    );
+    await refused(
+      { surveyTeamIds: [support] },
+      /teams of answered surveys only for an endpoint that receives Satisfaction survey answered/,
+      'surveyTeamIds',
+      conversationEvents,
+    );
+    await refused({ surveyAssigneeIds: [] }, /at least one member/, 'surveyAssigneeIds');
+    await refused({ surveyTeamIds: [] }, /at least one team/, 'surveyTeamIds');
+    await refused({ surveyAssigneeIds: ['agent'] }, /from the list/, 'surveyAssigneeIds.0');
+    await refused(
+      { surveyTeamIds: Array.from({ length: 51 }, () => uuidv7()) },
+      /at most 50/,
+      'surveyTeamIds',
+    );
+    const takesNone = /members of this company who take conversations/;
+    await refused({ surveyAssigneeIds: [agent, marketer] }, takesNone, 'surveyAssigneeIds.1');
+    await refused({ surveyAssigneeIds: [agent, elsewhere] }, takesNone, 'surveyAssigneeIds.1');
+    await refused({ surveyTeamIds: [support, otherTeam] }, /of this company/, 'surveyTeamIds.1');
+    await refused({ surveyTeamIds: [uuidv7()] }, /of this company/, 'surveyTeamIds.0');
+    expect(await webhooks().list(owner)).toEqual([]);
+
+    const created = await webhooks().create(owner, {
+      url,
+      eventTypes: ['satisfaction_survey.answered', 'consent.changed'],
+      surveyAssigneeIds: [agent, ownerId.toUpperCase(), agent],
+      surveyTeamIds: [sales, support],
+    });
+    const audits = async (action: string) =>
+      (
+        await fx.query<{ metadata: { surveyAssigneeIds?: unknown; surveyTeamIds?: unknown } }>(
+          `SELECT metadata FROM app.audit_events
+            WHERE tenant_id = $1 AND action = $2 ORDER BY occurred_at, id`,
+          [c.tenant.id, action],
+        )
+      ).map((a) => [a.metadata.surveyAssigneeIds, a.metadata.surveyTeamIds]);
+    expect(await audits('webhook.endpoint_created')).toEqual([
+      [
+        [agent, ownerId],
+        [sales, support],
+      ],
+    ]);
+    const change = (fields: Record<string, unknown>) =>
+      webhooks().update(owner, {
+        endpointId: created.id,
+        url,
+        description: '',
+        eventTypes: ['satisfaction_survey.answered', 'consent.changed'],
+        ...fields,
+      });
+    const current = async () => {
+      const endpoint = (await webhooks().list(owner)).find((e) => e.id === created.id);
+      return { members: endpoint?.surveyAssignees, teams: endpoint?.surveyTeams };
+    };
+    expect(await current()).toEqual({
+      members: [
+        { id: agent, name: 'Agent', assignable: true },
+        { id: ownerId, name: 'Owner', assignable: true },
+      ],
+      teams: [
+        { id: sales, name: 'Sales' },
+        { id: support, name: 'Support' },
+      ],
+    });
+    // The conversations' own lists are not set by them.
+    const listed = (await webhooks().list(owner)).find((e) => e.id === created.id);
+    expect([listed?.assignees, listed?.teams]).toEqual([null, null]);
+    await change({ description: 'kept' });
+    expect(await current()).toMatchObject({
+      members: [{ id: agent }, { id: ownerId }],
+      teams: [{ id: sales }, { id: support }],
+    });
+    // A member who stops taking conversations and a team deleted since stay on the lists, and lists
+    // given again may keep them; one the lists did not hold is refused.
+    await fx.query(`UPDATE app.memberships SET roles = '{marketer}' WHERE id = $1`, [agent]);
+    await fx.query('DELETE FROM app.teams WHERE id = $1', [sales]);
+    expect(await current()).toEqual({
+      members: [
+        { id: agent, name: 'Agent', assignable: false },
+        { id: ownerId, name: 'Owner', assignable: true },
+      ],
+      teams: [
+        { id: sales, name: null },
+        { id: support, name: 'Support' },
+      ],
+    });
+    await change({ surveyAssigneeIds: [ownerId, agent], surveyTeamIds: [support, sales] });
+    expect(await current()).toMatchObject({
+      members: [{ id: ownerId }, { id: agent }],
+      teams: [{ id: support }, { id: sales }],
+    });
+    await expectAppError(
+      change({ surveyAssigneeIds: [ownerId, marketer] }),
+      'validation_failed',
+      takesNone,
+    );
+    const gone = await teamOf(c, 'Gone');
+    await fx.query('DELETE FROM app.teams WHERE id = $1', [gone]);
+    await expectAppError(
+      change({ surveyTeamIds: [support, gone] }),
+      'validation_failed',
+      /of this company/,
+    );
+    expect(await audits('webhook.endpoint_updated')).toEqual([
+      [
+        [agent, ownerId],
+        [sales, support],
+      ],
+      [
+        [ownerId, agent],
+        [support, sales],
+      ],
+    ]);
+    await change({ surveyAssigneeIds: null, surveyTeamIds: null });
+    expect(await current()).toEqual({ members: null, teams: null });
+    await change({ surveyAssigneeIds: [ownerId], surveyTeamIds: [support] });
+    // The database refuses an empty list, more than 50, a missing id or a list of lists…
+    const setInDatabase = (column: string, value: string) =>
+      fx.query(`UPDATE app.webhook_endpoints SET ${column} = ${value} WHERE id = $1`, [created.id]);
+    const many = `ARRAY[${Array.from({ length: 51 }, () => `'${uuidv7()}'`).join(',')}]::uuid[]`;
+    for (const column of ['survey_assignee_ids', 'survey_team_ids']) {
+      for (const bad of [
+        `'{}'`,
+        many,
+        `ARRAY['${ownerId}', NULL]::uuid[]`,
+        `ARRAY[['${ownerId}']]::uuid[]`,
+      ]) {
+        await expect(setInDatabase(column, bad), `${column} ${bad}`).rejects.toThrow(
+          new RegExp(`webhook_endpoints_${column}`),
+        );
+      }
+    }
+    // …leaving the event clears both lists…
+    await change({ eventTypes: ['consent.changed'] });
+    expect(await current()).toEqual({ members: null, teams: null });
+    await expectAppError(
+      change({ eventTypes: ['consent.changed'], surveyTeamIds: [support] }),
+      'validation_failed',
+      /teams of answered surveys only/,
+    );
+    // …and the database refuses either list for an endpoint that does not take the event.
+    for (const column of ['survey_assignee_ids', 'survey_team_ids']) {
+      await expect(setInDatabase(column, `ARRAY['${ownerId}']::uuid[]`)).rejects.toThrow(
+        new RegExp(`webhook_endpoints_${column}`),
+      );
+    }
+    // The company role changes the lists only through their column grants.
+    for (const column of ['survey_assignee_ids', 'survey_team_ids']) {
+      const [grant] = await fx.query<{ can_update: boolean }>(
+        `SELECT has_column_privilege('w360_app', 'app.webhook_endpoints', $1, 'UPDATE')
+                  AS can_update`,
+        [column],
+      );
+      expect(grant?.can_update, column).toBe(true);
+    }
+  });
+});
+
 describe('contact tag filters (ADR-267)', () => {
   /** Puts a tag on a contact, or takes it off, as the contacts service writes tags. */
   const tag = (c: Company, contactId: string, name: string) =>

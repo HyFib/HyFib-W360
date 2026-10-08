@@ -11927,3 +11927,58 @@ Decision:
 
 Not built: a change sent only when it changed every chosen detail (one is enough), the values before
 a change (ADR-275 and ADR-276 never send them), and details of the deal's and task's other events.
+
+## ADR-311 Choosing the members and teams whose satisfaction survey answers a webhook endpoint receives (P5-09) (2026-10-08)
+
+Context: `satisfaction_survey.answered` (ADR-293) is sent for every answer on the endpoint's
+numbers, or only for the scores it names (ADR-307), but the team, member and tag lists that narrow
+conversations' events leave answers out (ADR-293 chose so: an answer is not a conversation's event,
+and a change of those lists' meaning would change what existing endpoints receive). A team lead's
+dashboard or a coaching tool wants the answers of its own team's conversations, or those credited to
+the members it follows, and was sent every answer, with no team in the payload to drop the rest by.
+
+Decision:
+
+- **Two lists per endpoint for the event,** `surveyAssigneeIds` and `surveyTeamIds`. The first holds
+  1 to 50 members credited with the answers it takes: an answer is credited to the member its
+  conversation was assigned to when it was resolved, as the survey keeps it and its `assigneeId`
+  gives it, as Reports credits it, so a later reassignment does not move it. The second holds 1 to
+  50 of the company's teams: an answer belongs to the team its conversation is in when the customer
+  answers (the tap that answers neither reopens nor moves the conversation, ADR-032). An answer
+  credited to no member, or of a conversation in no team, matches no list. Null receives every
+  answer, as before; with scores or the other list chosen too, an answer must pass them all. The
+  conversations' `assigneeIds` and `teamIds` still do not narrow answers. Other events are not
+  narrowed. Chosen in Settings → Webhooks ("Members credited with answers" and "Teams of answered
+  surveys", every answer by default), shown on the endpoint as "Survey answers sent, credited to: …"
+  and "Survey answers sent, of conversations in: …", and through the API as `surveyAssigneeIds` and
+  `surveyTeamIds` on `POST /webhook-endpoints` and `PATCH /webhook-endpoints/{id}` and in every
+  endpoint the API answers.
+- **Checked as the conversations' lists are:** a member a list adds must take conversations now
+  (active, with a role that reads and answers them; `GET /members` lists them) and a team must be
+  the company's; members and teams a list already holds stay when they leave, lose the role or are
+  deleted (Settings marks them), so a change that keeps them is accepted. Refusals name the entry
+  (`surveyAssigneeIds.1`).
+- **Only while the event is taken:** a list given for an endpoint that does not take
+  `satisfaction_survey.answered` is refused (422 through the API). A change that drops the event
+  clears both lists, and a `PATCH` that leaves a list out keeps it; Settings always sends both (null
+  while every answer is taken). Checks in the database hold the same rule (null, or 1 to 50 ids in
+  one dimension without a null, with the event).
+- **Applied at capture:** `app.capture_webhook_event` reads the survey's score, its credited member
+  and its conversation's team in one query, only when an active endpoint of the company that takes
+  the event names scores, members or teams, in the transaction that records the answer, and creates
+  a delivery only for the endpoints whose lists hold them. No event is written when no endpoint
+  takes it, and stored events are unchanged.
+- **Audited and exported:** `webhook.endpoint_created` and `webhook.endpoint_updated` carry
+  `surveyAssigneeIds` and `surveyTeamIds` when the endpoint has them, and the company data export
+  carries the columns.
+- **Permissions unchanged:** members with `developer.manage` in Settings, keys with
+  `webhooks.manage` through the API.
+- **Migration 0234:** `survey_assignee_ids uuid[]` and `survey_team_ids uuid[]` on
+  `app.webhook_endpoints` with their checks, validated at once (a company has at most 10 endpoints),
+  update grants on the columns for the runtime role, and `app.capture_webhook_event` replaced with
+  the same signature (0233's, with the member and team), so its owner and grants stay. Existing
+  endpoints keep null; nothing is backfilled.
+
+Not built: the team at resolution (surveys do not record it; the conversation's team when the
+customer answers is used), the member who resolved (`resolvedById`) as a filter, the team in the
+payload, contact and conversation tags for answers, and an event when a survey is sent or skipped.

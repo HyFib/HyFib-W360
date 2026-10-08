@@ -290,6 +290,8 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       noteDealOwnerIds: null,
       crmChangeMakers: null,
       surveyScores: null,
+      surveyAssigneeIds: null,
+      surveyTeamIds: null,
       assigneeIds: null,
       contactTags: null,
       conversationTags: null,
@@ -1886,6 +1888,164 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     });
     expect(await issueOf(api().update(key.ctx, id, { surveyScores: [] }))).toMatchObject({
       path: 'surveyScores',
+    });
+  });
+
+  it('choose the members credited with the satisfaction survey answers an endpoint receives and the teams of their conversations, kept by changes that leave them out, a member who stopped and a deleted team included, and cleared with the event (ADR-311)', async () => {
+    const c = await fx.company();
+    const key = await apiKey(c, ['webhooks.manage']);
+    const owner = await fx.ctx(c, c.owner);
+    const agent = (await fx.ctx(c, c.agent)).membership.id;
+    const ownerId = owner.membership.id;
+    const marketer = (await fx.ctx(c, c.marketer)).membership.id;
+    const other = await fx.company();
+    const elsewhere = (await fx.ctx(other, other.agent)).membership.id;
+    const teamOf = async (company: Company, name: string) => {
+      const teamId = uuidv7();
+      await fx.query('INSERT INTO app.teams (id, tenant_id, name) VALUES ($1, $2, $3)', [
+        teamId,
+        company.tenant.id,
+        name,
+      ]);
+      return teamId;
+    };
+    const support = await teamOf(c, 'Support');
+    const sales = await teamOf(c, 'Sales');
+    const otherTeam = await teamOf(other, 'Support');
+    const issueOf = async (promise: Promise<unknown>) => {
+      const error = await expectAppError(promise, 'validation_failed');
+      return isAppError(error) ? error.issues?.[0] : undefined;
+    };
+    // The lists need the event, at least one id, members who take conversations as GET /members
+    // lists them and the company's teams (named by place).
+    const refusals = [
+      [['conversation.status_changed'], { surveyAssigneeIds: [agent] }, 'surveyAssigneeIds'],
+      [['conversation.status_changed'], { surveyTeamIds: [support] }, 'surveyTeamIds'],
+      [['satisfaction_survey.answered'], { surveyAssigneeIds: [] }, 'surveyAssigneeIds'],
+      [
+        ['satisfaction_survey.answered'],
+        { surveyTeamIds: [support, 'support'] },
+        'surveyTeamIds.1',
+      ],
+      [
+        ['satisfaction_survey.answered'],
+        { surveyAssigneeIds: [agent, marketer] },
+        'surveyAssigneeIds.1',
+      ],
+      [['satisfaction_survey.answered'], { surveyAssigneeIds: [elsewhere] }, 'surveyAssigneeIds.0'],
+      [
+        ['satisfaction_survey.answered'],
+        { surveyTeamIds: [support, otherTeam] },
+        'surveyTeamIds.1',
+      ],
+    ] as const;
+    for (const [index, [events, lists, path]] of refusals.entries()) {
+      expect(
+        await issueOf(
+          api().create(
+            key.ctx,
+            { url: receiverUrl(), events, ...lists },
+            idem(`survey-lists-bad-${index}`, JSON.stringify(lists)),
+          ),
+        ),
+        JSON.stringify(lists),
+      ).toMatchObject({ path });
+    }
+    expect((await api().list(key.ctx)).data).toEqual([]);
+
+    const created = await addThroughApi(key.ctx, 'survey-lists-1', {
+      url: receiverUrl(),
+      events: ['satisfaction_survey.answered', 'message.received'],
+      surveyAssigneeIds: [agent, ownerId.toUpperCase(), agent],
+      surveyTeamIds: [sales, support],
+    });
+    const id = created.body.data.id;
+    expect(created.body.data).toMatchObject({
+      surveyAssigneeIds: [agent, ownerId],
+      surveyTeamIds: [sales, support],
+      assigneeIds: null,
+      teamIds: null,
+    });
+    expect(await api().get(key.ctx, id)).toMatchObject({
+      surveyAssigneeIds: [agent, ownerId],
+      surveyTeamIds: [sales, support],
+    });
+    const audits = async (action: string) =>
+      (
+        await fx.query<{ metadata: { surveyAssigneeIds?: unknown; surveyTeamIds?: unknown } }>(
+          `SELECT metadata FROM app.audit_events
+            WHERE tenant_id = $1 AND subject_id = $2 AND action = $3 ORDER BY occurred_at, id`,
+          [c.tenant.id, id, action],
+        )
+      ).map((a) => [a.metadata.surveyAssigneeIds, a.metadata.surveyTeamIds]);
+    expect(await audits('webhook.endpoint_created')).toEqual([
+      [
+        [agent, ownerId],
+        [sales, support],
+      ],
+    ]);
+    // A member who stops taking conversations and a deleted team stay, and settings says so.
+    await fx.query(`UPDATE app.memberships SET status = 'suspended' WHERE id = $1`, [agent]);
+    await fx.query('DELETE FROM app.teams WHERE id = $1', [sales]);
+    const shown = (await settings().list(owner)).find((e) => e.id === id);
+    expect([shown?.surveyAssignees, shown?.surveyTeams]).toEqual([
+      [
+        { id: agent, name: 'Agent', assignable: false },
+        { id: ownerId, name: 'Owner', assignable: true },
+      ],
+      [
+        { id: sales, name: null },
+        { id: support, name: 'Support' },
+      ],
+    ]);
+    expect(await api().update(key.ctx, id, { description: 'Support leads' })).toMatchObject({
+      surveyAssigneeIds: [agent, ownerId],
+      surveyTeamIds: [sales, support],
+    });
+    expect(
+      await api().update(key.ctx, id, {
+        surveyAssigneeIds: [ownerId, agent],
+        surveyTeamIds: [support, sales],
+      }),
+    ).toMatchObject({ surveyAssigneeIds: [ownerId, agent], surveyTeamIds: [support, sales] });
+    expect(
+      await api().update(key.ctx, id, { surveyAssigneeIds: [ownerId], surveyTeamIds: [support] }),
+    ).toMatchObject({ surveyAssigneeIds: [ownerId], surveyTeamIds: [support] });
+    // Once off the lists, they are refused like any other.
+    expect(
+      await issueOf(api().update(key.ctx, id, { surveyAssigneeIds: [ownerId, agent] })),
+    ).toMatchObject({ path: 'surveyAssigneeIds.1' });
+    expect(
+      await issueOf(api().update(key.ctx, id, { surveyTeamIds: [support, sales] })),
+    ).toMatchObject({ path: 'surveyTeamIds.1' });
+    expect(await audits('webhook.endpoint_updated')).toEqual([
+      [
+        [agent, ownerId],
+        [sales, support],
+      ],
+      [
+        [ownerId, agent],
+        [support, sales],
+      ],
+      [[ownerId], [support]],
+    ]);
+    // Conversations' events alone clear the lists, and then refuse them.
+    expect(await api().update(key.ctx, id, { events: ['message.received'] })).toMatchObject({
+      events: ['message.received'],
+      surveyAssigneeIds: null,
+      surveyTeamIds: null,
+    });
+    expect(await issueOf(api().update(key.ctx, id, { surveyTeamIds: [support] }))).toMatchObject({
+      path: 'surveyTeamIds',
+    });
+    expect(
+      await api().update(key.ctx, id, {
+        events: ['satisfaction_survey.answered'],
+        surveyTeamIds: [support],
+      }),
+    ).toMatchObject({ surveyAssigneeIds: null, surveyTeamIds: [support] });
+    expect(await api().update(key.ctx, id, { surveyTeamIds: null })).toMatchObject({
+      surveyTeamIds: null,
     });
   });
 

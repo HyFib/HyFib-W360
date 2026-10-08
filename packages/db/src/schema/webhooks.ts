@@ -382,6 +382,18 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
    */
   surveyScores: smallint('survey_scores').array().$type<WebhookSurveyScore[]>(),
   /**
+   * The members credited with the satisfaction survey answers it takes (migration 0234, ADR-311):
+   * the member each answered survey's conversation was assigned to when it was resolved. null takes
+   * every answer. Set only while `satisfaction_survey.answered` is among its events.
+   */
+  surveyAssigneeIds: uuid('survey_assignee_ids').array(),
+  /**
+   * The teams whose conversations' satisfaction survey answers it takes (migration 0234, ADR-311),
+   * by the team the conversation is in when the customer answers. null takes every answer. Set only
+   * while `satisfaction_survey.answered` is among its events.
+   */
+  surveyTeamIds: uuid('survey_team_ids').array(),
+  /**
    * The consent changes it takes as `consent.changed` (ADR-189), by purpose and action; null takes
    * every change. Set only while `consent.changed` is among its events.
    */

@@ -6933,4 +6933,133 @@ describe('satisfaction survey events (ADR-293)', () => {
     expect(scoresAt(happy.path)).toEqual([2, 3]);
     expect(scoresAt(everyAnswer.path)).toEqual([1, 2, 3]);
   });
+
+  it('sends an endpoint that names members or teams only the answers credited to them or of their conversations, and captures none nobody takes (ADR-311)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const agent = (await fx.ctx(c, c.agent)).membership.id;
+    const ownerId = owner.membership.id;
+    await createCsatService({ db: fx.dbs.app, clock: systemClock }).updateCsatSettings(owner, {
+      enabled: true,
+      question: 'How did we do today?',
+      labels: ['Great', 'Okay', 'Poor'],
+    });
+    const inboxWithSends = createInboxService({
+      db: fx.dbs.app,
+      clock: systemClock,
+      jobs: fx.jobs(),
+      signer: fx.signer,
+    });
+    const teamOf = async (name: string) => {
+      const id = uuidv7();
+      await fx.query('INSERT INTO app.teams (id, tenant_id, name) VALUES ($1, $2, $3)', [
+        id,
+        c.tenant.id,
+        name,
+      ]);
+      return id;
+    };
+    const support = await teamOf('Support');
+    const sales = await teamOf('Sales');
+    /** An endpoint of the company taking the answers these lists name. */
+    const add = async (lists: Record<string, unknown>) => {
+      const path = `/ok/${randomBytes(6).toString('hex')}`;
+      const created = await webhooks().create(owner, {
+        url: `http://${HOST}:${port}${path}`,
+        eventTypes: ['satisfaction_survey.answered'],
+        ...lists,
+      });
+      return { ...created, path };
+    };
+    const agents = await add({ surveyAssigneeIds: [agent] });
+    const supportDesk = await add({ surveyTeamIds: [support] });
+    const happySupport = await add({
+      surveyScores: [3],
+      surveyAssigneeIds: [agent, ownerId],
+      surveyTeamIds: [support],
+    });
+    const everyAnswer = await add({});
+    const place = (conversationId: string, assignee: string | null, team: string | null) =>
+      fx.query(
+        'UPDATE app.conversations SET assigned_membership_id = $2, team_id = $3 WHERE id = $1',
+        [conversationId, assignee, team],
+      );
+    /**
+     * A customer writes, the conversation is assigned and put in a team, a member resolves it, the
+     * survey goes out, the conversation may be moved, and the customer taps a score.
+     */
+    const answer = async (
+      score: 1 | 2 | 3,
+      resolvedWith: [string | null, string | null],
+      answeredWith?: [string | null, string | null],
+    ) => {
+      const phone = waId();
+      const { conversation_id: conversationId } = await inbound(c, phone, 'Where is my parcel?');
+      await place(conversationId, ...resolvedWith);
+      await inboxWithSends.setStatus(owner, {
+        conversationId,
+        status: 'resolved',
+        expectedVersion: await versionOf(conversationId),
+      });
+      const [survey] = await fx.query<{ id: string; message_id: string }>(
+        `SELECT id, message_id FROM app.csat_surveys WHERE conversation_id = $1`,
+        [conversationId],
+      );
+      const [intent] = await fx.query<{ id: string }>(
+        `SELECT id FROM app.send_intents WHERE message_id = $1`,
+        [survey!.message_id],
+      );
+      await processSendIntent(
+        {
+          db: fx.dbs.app,
+          keyring: fx.keyring,
+          graph: fx.graph,
+          clock: systemClock,
+          rate: { capacity: 1000, refillPerSecond: 1000 },
+          jobs: fx.jobs(),
+          signer: fx.signer,
+        },
+        authorizedTenantScope(c.tenant.id, c.owner.id),
+        intent!.id,
+      );
+      const sent = fx.standIn.state.requests.filter((r) => r.path.endsWith('/messages')).at(-1)!;
+      if (answeredWith) await place(conversationId, ...answeredWith);
+      await tap(c, phone, `w360csat:${survey!.id}:${score}`, sent.wamid!);
+      return survey!.id;
+    };
+    const agentSupport = await answer(3, [agent, support]);
+    const agentSales = await answer(1, [agent, sales]);
+    const ownerSupport = await answer(3, [ownerId, support]);
+    const nobody = await answer(3, [null, null]);
+    // Credited to the member it was assigned to when resolved, and of the team it is in when the
+    // customer answers: reassigned and moved to Sales after the survey went out.
+    const moved = await answer(3, [agent, support], [ownerId, sales]);
+
+    // Each answer is captured once, with a delivery to each endpoint whose lists all hold it.
+    expect((await surveyEventsOf(c)).map((e) => [e.detail.surveyId, e.deliveries])).toEqual([
+      [agentSupport, 4],
+      [agentSales, 2],
+      [ownerSupport, 3],
+      [nobody, 1],
+      [moved, 2],
+    ]);
+    await deliverDue(c);
+    const surveysAt = (path: string) =>
+      bodiesAt(path).map((b) => (b.data.survey as { id: string; assigneeId: string | null }).id);
+    expect(surveysAt(agents.path).sort()).toEqual([agentSupport, agentSales, moved].sort());
+    expect(surveysAt(supportDesk.path).sort()).toEqual([agentSupport, ownerSupport].sort());
+    expect(surveysAt(happySupport.path).sort()).toEqual([agentSupport, ownerSupport].sort());
+    expect(surveysAt(everyAnswer.path)).toHaveLength(5);
+    const movedBody = bodiesAt(agents.path).find(
+      (b) => (b.data.survey as { id: string }).id === moved,
+    );
+    expect(movedBody?.data.survey).toMatchObject({ assigneeId: agent });
+
+    // With the endpoint taking every answer and the members' list off, an answer no list holds is
+    // not captured at all.
+    await webhooks().setEnabled(owner, { endpointId: everyAnswer.id, enabled: false });
+    await webhooks().setEnabled(owner, { endpointId: agents.id, enabled: false });
+    await answer(1, [ownerId, sales]);
+    expect(await surveyEventsOf(c)).toHaveLength(5);
+  });
 });

@@ -390,6 +390,18 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
                         {e.surveyScores.map((s) => WEBHOOK_SURVEY_SCORE_LABELS[s]).join(', ')}
                       </p>
                     ) : null}
+                    {e.surveyAssignees ? (
+                      <p className="text-xs text-muted-foreground">
+                        Survey answers sent, credited to:{' '}
+                        {e.surveyAssignees.map(webhookAssigneeText).join(', ')}
+                      </p>
+                    ) : null}
+                    {e.surveyTeams ? (
+                      <p className="text-xs text-muted-foreground">
+                        Survey answers sent, of conversations in:{' '}
+                        {e.surveyTeams.map(webhookTeamText).join(', ')}
+                      </p>
+                    ) : null}
                     {e.teams ? (
                       <p className="text-xs text-muted-foreground">
                         Teams whose conversations’ events are sent:{' '}

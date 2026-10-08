@@ -238,6 +238,8 @@ export default async function WebhookEndpointPage({
               noteDealOwners: endpoint.noteDealOwners,
               crmChangeMakers: endpoint.crmChangeMakers,
               surveyScores: endpoint.surveyScores,
+              surveyAssignees: endpoint.surveyAssignees,
+              surveyTeams: endpoint.surveyTeams,
               assignees: endpoint.assignees,
               contactTags: endpoint.contactTags,
               conversationTags: endpoint.conversationTags,

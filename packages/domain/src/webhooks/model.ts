@@ -781,6 +781,10 @@ export const WEBHOOK_LIMITS = {
   noteStages: 50,
   /** The members whose deals' notes' events an endpoint can choose to take (ADR-305). */
   noteDealOwners: 50,
+  /** The members credited with satisfaction survey answers an endpoint can choose (ADR-311). */
+  surveyAssignees: 50,
+  /** The teams whose conversations' survey answers an endpoint can choose (ADR-311). */
+  surveyTeams: 50,
   /** The contact tags an endpoint can choose to take the conversations' events of (ADR-267). */
   contactTags: 50,
   /** The conversation tags an endpoint can choose to take the conversations' events of (ADR-273). */

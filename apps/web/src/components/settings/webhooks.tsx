@@ -1014,11 +1014,36 @@ function ChannelChoices({
 }
 
 /**
- * The teams whose conversations' events an endpoint takes (ADR-174): every conversation's, or those
- * of the teams ticked. A team deleted since it was chosen stays listed, ticked, until it is
- * unticked: it matches no conversation.
+ * What the teams' fieldset says for conversations' events (ADR-174) and satisfaction survey answers
+ * (ADR-311).
+ */
+const TEAM_WORDS = {
+  conversations: {
+    legend: 'Teams',
+    help: 'Message and conversation events belong to the team the conversation is in when they happen, and a change of team to the team it left as well. Other events are sent whichever teams are chosen.',
+    every: 'Every conversation’s events',
+    everyHelp: 'Including teams added later, and conversations in no team.',
+    only: 'Only the events of the conversations of the teams ticked',
+    idPart: 'team',
+  },
+  surveys: {
+    legend: 'Teams of answered surveys',
+    help: 'A satisfaction survey’s answer belongs to the team its conversation is in when the customer answers; a conversation in no team belongs to none. With scores or the members credited chosen too, an answer must pass them all. Other events are sent whichever teams are chosen.',
+    every: 'Every answer',
+    everyHelp: 'Including teams added later, and conversations in no team.',
+    only: 'Only the answers of the conversations of the teams ticked',
+    idPart: 'survey-team',
+  },
+} as const;
+
+/**
+ * The teams whose conversations' events (ADR-174) or satisfaction survey answers (ADR-311) an
+ * endpoint takes, as `kind` says: every conversation's, or those of the teams ticked. A team
+ * deleted since it was chosen stays listed, ticked, until it is unticked: it matches no
+ * conversation.
  */
 function TeamChoices({
+  kind,
   prefix,
   choices,
   stored,
@@ -1027,6 +1052,7 @@ function TeamChoices({
   chosen,
   onChange,
 }: {
+  kind: keyof typeof TEAM_WORDS;
   prefix: string;
   choices: WebhookTeamChoice[];
   /** The teams the endpoint names now, so a deleted one stays listed until it is saved without. */
@@ -1040,40 +1066,35 @@ function TeamChoices({
     ...choices.map((c) => ({ id: c.id, text: c.name })),
     ...stored.filter((t) => t.name === null).map((t) => ({ id: t.id, text: webhookTeamText(t) })),
   ];
+  const words = TEAM_WORDS[kind];
   return (
     <fieldset className="grid gap-2">
-      <legend className="mb-1 text-sm font-medium">Teams</legend>
-      <p className="text-xs text-muted-foreground">
-        Message and conversation events belong to the team the conversation is in when they happen,
-        and a change of team to the team it left as well. Other events are sent whichever teams are
-        chosen.
-      </p>
+      <legend className="mb-1 text-sm font-medium">{words.legend}</legend>
+      <p className="text-xs text-muted-foreground">{words.help}</p>
       <label className="flex items-start gap-2 text-sm">
         <input
           type="radio"
-          name={`${prefix}-teams`}
+          name={`${prefix}-${words.idPart}s`}
           className="mt-1"
           checked={every}
           onChange={() => onEveryChange(true)}
         />
         <span>
-          Every conversation’s events
-          <span className="block text-xs text-muted-foreground">
-            Including teams added later, and conversations in no team.
-          </span>
+          {words.every}
+          <span className="block text-xs text-muted-foreground">{words.everyHelp}</span>
         </span>
       </label>
       <label className="flex items-start gap-2 text-sm">
         <input
           type="radio"
-          name={`${prefix}-teams`}
+          name={`${prefix}-${words.idPart}s`}
           className="mt-1"
           checked={!every}
           disabled={listed.length === 0}
           onChange={() => onEveryChange(false)}
         />
         <span>
-          Only the events of the conversations of the teams ticked
+          {words.only}
           {listed.length === 0 ? (
             <span className="block text-xs text-muted-foreground">
               The company has no team yet.
@@ -1084,7 +1105,7 @@ function TeamChoices({
       {!every ? (
         <div className="ml-6 grid gap-1">
           {listed.map((t) => {
-            const id = `${prefix}-team-${t.id}`;
+            const id = `${prefix}-${words.idPart}-${t.id}`;
             return (
               <div key={t.id} className="flex items-center gap-2">
                 <Checkbox
@@ -1113,11 +1134,36 @@ function TeamChoices({
 }
 
 /**
- * The members whose assigned conversations' events an endpoint takes (ADR-181): every
- * conversation's, or those of the conversations assigned to the members ticked. A member who no
- * longer takes conversations stays listed, ticked, until unticked: they hold none.
+ * What the members' fieldset says for conversations' events (ADR-181) and satisfaction survey
+ * answers (ADR-311).
+ */
+const ASSIGNEE_WORDS = {
+  conversations: {
+    legend: 'Members',
+    help: 'Message and conversation events belong to the member the conversation is assigned to when they happen, and a change of assignee to the member it left as well. Other events are sent whichever members are chosen.',
+    every: 'Every conversation’s events',
+    everyHelp: 'Including unassigned conversations, and members who join later.',
+    only: 'Only the events of the conversations assigned to the members ticked',
+    idPart: 'assignee',
+  },
+  surveys: {
+    legend: 'Members credited with answers',
+    help: 'A satisfaction survey’s answer is credited to the member its conversation was assigned to when it was resolved, as Reports credits it; a conversation resolved unassigned credits no one. With scores or the teams of answered surveys chosen too, an answer must pass them all. Other events are sent whichever members are chosen.',
+    every: 'Every answer',
+    everyHelp: 'Including answers credited to no one, and members who join later.',
+    only: 'Only the answers credited to the members ticked',
+    idPart: 'survey-assignee',
+  },
+} as const;
+
+/**
+ * The members whose assigned conversations' events (ADR-181), or whose credited satisfaction survey
+ * answers (ADR-311), an endpoint takes, as `kind` says: every conversation's or answer, or those of
+ * the members ticked. A member who no longer takes conversations stays listed, ticked, until
+ * unticked: they hold no conversation, and answers already credited to them still match.
  */
 function AssigneeChoices({
+  kind,
   prefix,
   choices,
   stored,
@@ -1126,6 +1172,7 @@ function AssigneeChoices({
   chosen,
   onChange,
 }: {
+  kind: keyof typeof ASSIGNEE_WORDS;
   prefix: string;
   choices: WebhookAssigneeChoice[];
   /** The members the endpoint names now, so one who stopped stays listed until saved without. */
@@ -1141,40 +1188,35 @@ function AssigneeChoices({
       .filter((m) => !choices.some((c) => c.id === m.id))
       .map((m) => ({ id: m.id, text: webhookAssigneeText(m) })),
   ];
+  const words = ASSIGNEE_WORDS[kind];
   return (
     <fieldset className="grid gap-2">
-      <legend className="mb-1 text-sm font-medium">Members</legend>
-      <p className="text-xs text-muted-foreground">
-        Message and conversation events belong to the member the conversation is assigned to when
-        they happen, and a change of assignee to the member it left as well. Other events are sent
-        whichever members are chosen.
-      </p>
+      <legend className="mb-1 text-sm font-medium">{words.legend}</legend>
+      <p className="text-xs text-muted-foreground">{words.help}</p>
       <label className="flex items-start gap-2 text-sm">
         <input
           type="radio"
-          name={`${prefix}-assignees`}
+          name={`${prefix}-${words.idPart}s`}
           className="mt-1"
           checked={every}
           onChange={() => onEveryChange(true)}
         />
         <span>
-          Every conversation’s events
-          <span className="block text-xs text-muted-foreground">
-            Including unassigned conversations, and members who join later.
-          </span>
+          {words.every}
+          <span className="block text-xs text-muted-foreground">{words.everyHelp}</span>
         </span>
       </label>
       <label className="flex items-start gap-2 text-sm">
         <input
           type="radio"
-          name={`${prefix}-assignees`}
+          name={`${prefix}-${words.idPart}s`}
           className="mt-1"
           checked={!every}
           disabled={listed.length === 0}
           onChange={() => onEveryChange(false)}
         />
         <span>
-          Only the events of the conversations assigned to the members ticked
+          {words.only}
           {listed.length === 0 ? (
             <span className="block text-xs text-muted-foreground">
               No member takes conversations yet.
@@ -1185,7 +1227,7 @@ function AssigneeChoices({
       {!every ? (
         <div className="ml-6 grid max-h-64 gap-1 overflow-y-auto">
           {listed.map((m) => {
-            const id = `${prefix}-assignee-${m.id}`;
+            const id = `${prefix}-${words.idPart}-${m.id}`;
             return (
               <div key={m.id} className="flex items-center gap-2">
                 <Checkbox
@@ -2532,6 +2574,10 @@ export function WebhookEndpointForm({
     crmChangeMakers: WebhookCrmChangeMaker[] | null;
     /** The scores of the survey answers it takes (ADR-307); null: every answer. */
     surveyScores: WebhookSurveyScore[] | null;
+    /** The members credited with the survey answers it takes (ADR-311); null: every answer. */
+    surveyAssignees: WebhookEndpointAssignee[] | null;
+    /** The teams of the survey answers it takes (ADR-311); null: every answer. */
+    surveyTeams: WebhookEndpointTeam[] | null;
     /** The members it names (ADR-181), with whether they still take conversations; null: all. */
     assignees: WebhookEndpointAssignee[] | null;
     /** The contact tags it names (ADR-267); null for every conversation. */
@@ -2676,6 +2722,14 @@ export function WebhookEndpointForm({
   );
   const [scores, setScores] = useState<WebhookSurveyScore[]>(
     endpoint?.surveyScores ?? [...WEBHOOK_SURVEY_SCORES],
+  );
+  const [everySurveyAssignee, setEverySurveyAssignee] = useState(!endpoint?.surveyAssignees);
+  const [surveyAssigneeIds, setSurveyAssigneeIds] = useState<string[]>(
+    endpoint?.surveyAssignees?.map((m) => m.id) ?? [],
+  );
+  const [everySurveyTeam, setEverySurveyTeam] = useState(!endpoint?.surveyTeams);
+  const [surveyTeamIds, setSurveyTeamIds] = useState<string[]>(
+    endpoint?.surveyTeams?.map((t) => t.id) ?? [],
   );
   const [everyAssignee, setEveryAssignee] = useState(!endpoint?.assignees);
   const [everyField, setEveryField] = useState(!endpoint?.contactFields);
@@ -2876,6 +2930,15 @@ export function WebhookEndpointForm({
           scores.length < WEBHOOK_SURVEY_SCORES.length
             ? scores
             : null;
+        // Every answer unless the members credited or the teams ticked are chosen (ADR-311).
+        const chosenSurveyAssignees =
+          eventTypes.includes('satisfaction_survey.answered') && !everySurveyAssignee
+            ? surveyAssigneeIds
+            : null;
+        const chosenSurveyTeams =
+          eventTypes.includes('satisfaction_survey.answered') && !everySurveyTeam
+            ? surveyTeamIds
+            : null;
         // Every conversation's events unless the members ticked are chosen (ADR-181).
         const chosenAssignees =
           webhookTakesTeamEvents(eventTypes) && !everyAssignee ? assigneeIds : null;
@@ -2935,6 +2998,8 @@ export function WebhookEndpointForm({
           noteDealOwnerIds: chosenNoteDealOwners,
           crmChangeMakers,
           surveyScores,
+          surveyAssigneeIds: chosenSurveyAssignees,
+          surveyTeamIds: chosenSurveyTeams,
           assigneeIds: chosenAssignees,
           contactTags: chosenContactTags,
           conversationTags: chosenConversationTags,
@@ -3032,6 +3097,10 @@ export function WebhookEndpointForm({
               setNoteDealOwnerIds([]);
               setChangeMakers([...WEBHOOK_CRM_CHANGE_MAKERS]);
               setScores([...WEBHOOK_SURVEY_SCORES]);
+              setEverySurveyAssignee(true);
+              setSurveyAssigneeIds([]);
+              setEverySurveyTeam(true);
+              setSurveyTeamIds([]);
               setEveryAssignee(true);
               setAssigneeIds([]);
               setEveryContactTag(true);
@@ -3186,6 +3255,7 @@ export function WebhookEndpointForm({
       ) : null}
       {webhookTakesTeamEvents(eventTypes) ? (
         <TeamChoices
+          kind="conversations"
           prefix={prefix}
           choices={teamChoices}
           stored={endpoint?.teams ?? []}
@@ -3197,6 +3267,7 @@ export function WebhookEndpointForm({
       ) : null}
       {webhookTakesTeamEvents(eventTypes) ? (
         <AssigneeChoices
+          kind="conversations"
           prefix={prefix}
           choices={assigneeChoices}
           stored={endpoint?.assignees ?? []}
@@ -3222,6 +3293,30 @@ export function WebhookEndpointForm({
           onEveryChange={setEveryConversationTag}
           text={conversationTagsText}
           onTextChange={setConversationTagsText}
+        />
+      ) : null}
+      {eventTypes.includes('satisfaction_survey.answered') ? (
+        <AssigneeChoices
+          kind="surveys"
+          prefix={prefix}
+          choices={assigneeChoices}
+          stored={endpoint?.surveyAssignees ?? []}
+          every={everySurveyAssignee}
+          onEveryChange={setEverySurveyAssignee}
+          chosen={surveyAssigneeIds}
+          onChange={setSurveyAssigneeIds}
+        />
+      ) : null}
+      {eventTypes.includes('satisfaction_survey.answered') ? (
+        <TeamChoices
+          kind="surveys"
+          prefix={prefix}
+          choices={teamChoices}
+          stored={endpoint?.surveyTeams ?? []}
+          every={everySurveyTeam}
+          onEveryChange={setEverySurveyTeam}
+          chosen={surveyTeamIds}
+          onChange={setSurveyTeamIds}
         />
       ) : null}
       {webhookTakesPipelineEvents(eventTypes) ? (

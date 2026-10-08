@@ -225,6 +225,12 @@ import {
   webhookTaskDetailsFor,
   webhookTaskDetailsSchema,
   WEBHOOK_TASK_DETAILS_NEED_THE_EVENT,
+  webhookSurveyAssigneeIdsFor,
+  webhookSurveyAssigneeIdsSchema,
+  webhookSurveyTeamIdsFor,
+  webhookSurveyTeamIdsSchema,
+  WEBHOOK_SURVEY_ASSIGNEES_NEED_THE_EVENT,
+  WEBHOOK_SURVEY_TEAMS_NEED_THE_EVENT,
   webhookTeamIdsFor,
   webhookTeamIdsSchema,
   webhookTemplateIdsFor,
@@ -2720,6 +2726,63 @@ describe('deal and task detail filters (ADR-310)', () => {
   });
 });
 
+describe('survey member and team filters (ADR-311)', () => {
+  const id = (i: number) => `0190e9a1-0000-7000-8000-${String(i).padStart(12, '0')}`;
+  const ids = (n: number) => Array.from({ length: n }, (_, i) => id(i));
+
+  it('take 1 to 50 members or teams, each once and in lower case; null takes every answer', () => {
+    for (const schema of [webhookSurveyAssigneeIdsSchema, webhookSurveyTeamIdsSchema]) {
+      expect(schema.parse([id(2), id(1).toUpperCase(), id(2)])).toEqual([id(2), id(1)]);
+      expect(schema.parse(null)).toBeNull();
+      expect(schema.parse(ids(50))).toEqual(ids(50));
+      for (const refused of [[], ['support'], [null], id(1), ids(51)]) {
+        expect(schema.safeParse(refused).success, JSON.stringify(refused)).toBe(false);
+      }
+    }
+    expect(WEBHOOK_LIMITS.surveyAssignees).toBe(50);
+    expect(WEBHOOK_LIMITS.surveyTeams).toBe(50);
+    expect(webhookSurveyAssigneeIdsSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one member, or take every answer.',
+    );
+    expect(webhookSurveyAssigneeIdsSchema.safeParse(['agent']).error?.issues[0]?.message).toBe(
+      'Choose members from the list.',
+    );
+    expect(webhookSurveyAssigneeIdsSchema.safeParse(ids(51)).error?.issues[0]?.message).toBe(
+      'Choose at most 50 members.',
+    );
+    expect(webhookSurveyTeamIdsSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one team, or take every answer.',
+    );
+    expect(webhookSurveyTeamIdsSchema.safeParse(['support']).error?.issues[0]?.message).toBe(
+      'Choose teams from the list.',
+    );
+    expect(webhookSurveyTeamIdsSchema.safeParse(ids(51)).error?.issues[0]?.message).toBe(
+      'Choose at most 50 teams.',
+    );
+  });
+
+  it('are kept only while the endpoint takes survey answers: given, kept, or cleared', () => {
+    const answers = ['satisfaction_survey.answered', 'conversation.status_changed'] as const;
+    for (const listFor of [webhookSurveyAssigneeIdsFor, webhookSurveyTeamIdsFor]) {
+      expect(listFor([...answers], [id(1)], null)).toEqual([id(1)]);
+      expect(listFor([...answers], undefined, [id(2)])).toEqual([id(2)]);
+      expect(listFor([...answers], null, [id(2)])).toBeNull();
+      expect(listFor([...answers], undefined, null)).toBeNull();
+      // Conversations' own events have no answer to narrow.
+      expect(
+        listFor(['conversation.status_changed', 'message.received'], [id(1)], [id(1)]),
+      ).toBeNull();
+    }
+    const event = WEBHOOK_EVENT_INFO['satisfaction_survey.answered'].label;
+    expect(WEBHOOK_SURVEY_ASSIGNEES_NEED_THE_EVENT).toBe(
+      `Choose the members credited with answers only for an endpoint that receives ${event}.`,
+    );
+    expect(WEBHOOK_SURVEY_TEAMS_NEED_THE_EVENT).toBe(
+      `Choose the teams of answered surveys only for an endpoint that receives ${event}.`,
+    );
+  });
+});
+
 describe('template status filters (ADR-148)', () => {
   it('take 1 to 11 of the statuses a template event reports, once each, in the order Templates lists them; null takes every status', () => {
     expect(webhookTemplateStatusesSchema.parse(['paused', 'rejected', 'paused'])).toEqual([
@@ -5034,7 +5097,7 @@ describe('the event of a satisfaction survey answer (ADR-293)', () => {
       'The survey is the survey as GET /satisfaction-surveys reads it when the event is delivered',
       'its score (3 for the first and best button, 1 for the third)',
       'a survey is answered once and this event is sent once for it; surveys skipped or never answered send nothing',
-      'an endpoint that names numbers receives it for those numbers only; the team, member and tag filters do not narrow it',
+      'an endpoint that names numbers receives it for those numbers only; the team, member and tag filters of conversations’ events do not narrow it',
     ]) {
       expect(described).toContain(words);
     }

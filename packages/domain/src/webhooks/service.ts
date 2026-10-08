@@ -1718,6 +1718,21 @@ export async function assertWebhookTeams(
   ids: readonly string[] | null | undefined,
   held: readonly string[] | null = null,
 ): Promise<void> {
+  await assertCompanyTeams(tx, tenantId, 'teamIds', ids, held);
+}
+
+/**
+ * Refuses teams a list (`field`) adds to an endpoint unless each is the company's, as the teams of
+ * conversations' events (ADR-174) and of survey answers (ADR-311) are chosen. Teams the list
+ * already held may have been deleted since, and stay. `tx` is in the company's scope.
+ */
+async function assertCompanyTeams(
+  tx: Tx,
+  tenantId: string,
+  field: 'teamIds' | 'surveyTeamIds',
+  ids: readonly string[] | null | undefined,
+  held: readonly string[] | null,
+): Promise<void> {
   const added = (ids ?? []).filter((id) => !held?.includes(id));
   if (added.length === 0) return;
   const rows = await tx
@@ -1728,7 +1743,7 @@ export async function assertWebhookTeams(
   const index = (ids ?? []).findIndex((id) => added.includes(id) && !found.has(id));
   if (index === -1) return;
   throw new AppError('validation_failed', WEBHOOK_TEAMS_NOT_FOUND, {
-    issues: [{ path: `teamIds.${index}`, message: WEBHOOK_TEAMS_NOT_FOUND }],
+    issues: [{ path: `${field}.${index}`, message: WEBHOOK_TEAMS_NOT_FOUND }],
   });
 }
 
@@ -1779,6 +1794,22 @@ export async function assertWebhookAssignees(
   ids: readonly string[] | null | undefined,
   held: readonly string[] | null = null,
 ): Promise<void> {
+  await assertConversationMembers(tx, tenantId, 'assigneeIds', ids, held);
+}
+
+/**
+ * Refuses members a list (`field`) adds to an endpoint unless conversations can be assigned to each
+ * now, as the members of conversations' events (ADR-181) and those credited with survey answers
+ * (ADR-311) are chosen. Members the list already held may have left or lost that role since, and
+ * stay. `tx` is in the company's scope.
+ */
+async function assertConversationMembers(
+  tx: Tx,
+  tenantId: string,
+  field: 'assigneeIds' | 'surveyAssigneeIds',
+  ids: readonly string[] | null | undefined,
+  held: readonly string[] | null,
+): Promise<void> {
   const added = (ids ?? []).filter((id) => !held?.includes(id));
   if (added.length === 0) return;
   const rows = await tx
@@ -1791,8 +1822,93 @@ export async function assertWebhookAssignees(
   const index = (ids ?? []).findIndex((id) => added.includes(id) && !found.has(id));
   if (index === -1) return;
   throw new AppError('validation_failed', WEBHOOK_ASSIGNEES_NOT_FOUND, {
-    issues: [{ path: `assigneeIds.${index}`, message: WEBHOOK_ASSIGNEES_NOT_FOUND }],
+    issues: [{ path: `${field}.${index}`, message: WEBHOOK_ASSIGNEES_NOT_FOUND }],
   });
+}
+
+/**
+ * The members credited with the satisfaction survey answers an endpoint takes (ADR-311), each once:
+ * the member an answered survey's conversation was assigned to when it was resolved, as the
+ * survey's `assigneeId` names them; null takes every answer, including those credited to no one.
+ */
+export const webhookSurveyAssigneeIdsSchema = z
+  .array(z.uuid({ error: 'Choose members from the list.' }))
+  .min(1, 'Choose at least one member, or take every answer.')
+  .max(WEBHOOK_LIMITS.surveyAssignees, `Choose at most ${WEBHOOK_LIMITS.surveyAssignees} members.`)
+  .transform((ids) => [...new Set(ids.map((id) => id.toLowerCase()))])
+  .nullable();
+
+export const WEBHOOK_SURVEY_ASSIGNEES_NEED_THE_EVENT =
+  'Choose the members credited with answers only for an endpoint that receives Satisfaction survey answered.';
+
+/**
+ * The members credited with answers an endpoint keeps after it is added or changed: every answer
+ * (null) unless it takes `satisfaction_survey.answered`; then those given, or else the ones it had.
+ */
+export function webhookSurveyAssigneeIdsFor(
+  eventTypes: readonly WebhookEventType[],
+  given: readonly string[] | null | undefined,
+  current: readonly string[] | null,
+): string[] | null {
+  if (!eventTypes.includes('satisfaction_survey.answered')) return null;
+  const kept = given === undefined ? current : given;
+  return kept ? [...kept] : null;
+}
+
+/**
+ * Refuses members a list of those credited with answers adds unless conversations can be assigned
+ * to each now (ADR-311). Members the list already held may have left or lost that role since, and
+ * stay: the answers still credited to them match.
+ */
+export async function assertWebhookSurveyAssignees(
+  tx: Tx,
+  tenantId: string,
+  ids: readonly string[] | null | undefined,
+  held: readonly string[] | null = null,
+): Promise<void> {
+  await assertConversationMembers(tx, tenantId, 'surveyAssigneeIds', ids, held);
+}
+
+/**
+ * The teams whose conversations' satisfaction survey answers an endpoint takes (ADR-311), each
+ * once, by the team a conversation is in when the customer answers; null takes every answer,
+ * including those of conversations in no team.
+ */
+export const webhookSurveyTeamIdsSchema = z
+  .array(z.uuid({ error: 'Choose teams from the list.' }))
+  .min(1, 'Choose at least one team, or take every answer.')
+  .max(WEBHOOK_LIMITS.surveyTeams, `Choose at most ${WEBHOOK_LIMITS.surveyTeams} teams.`)
+  .transform((ids) => [...new Set(ids.map((id) => id.toLowerCase()))])
+  .nullable();
+
+export const WEBHOOK_SURVEY_TEAMS_NEED_THE_EVENT =
+  'Choose the teams of answered surveys only for an endpoint that receives Satisfaction survey answered.';
+
+/**
+ * The teams of answered surveys an endpoint keeps after it is added or changed: every answer (null)
+ * unless it takes `satisfaction_survey.answered`; then those given, or else the ones it had.
+ */
+export function webhookSurveyTeamIdsFor(
+  eventTypes: readonly WebhookEventType[],
+  given: readonly string[] | null | undefined,
+  current: readonly string[] | null,
+): string[] | null {
+  if (!eventTypes.includes('satisfaction_survey.answered')) return null;
+  const kept = given === undefined ? current : given;
+  return kept ? [...kept] : null;
+}
+
+/**
+ * Refuses teams a list of answered surveys' teams adds unless each is the company's (ADR-311).
+ * Teams the list already held may have been deleted since, and stay: they match no conversation.
+ */
+export async function assertWebhookSurveyTeams(
+  tx: Tx,
+  tenantId: string,
+  ids: readonly string[] | null | undefined,
+  held: readonly string[] | null = null,
+): Promise<void> {
+  await assertCompanyTeams(tx, tenantId, 'surveyTeamIds', ids, held);
 }
 
 /**
@@ -2049,6 +2165,16 @@ const endpointFields = z.object({
    */
   surveyScores: webhookSurveyScoresSchema.optional(),
   /**
+   * Given, the members credited with the satisfaction survey answers it takes (null: every answer,
+   * ADR-311); left out, they stay.
+   */
+  surveyAssigneeIds: webhookSurveyAssigneeIdsSchema.optional(),
+  /**
+   * Given, the teams whose conversations' satisfaction survey answers it takes (null: every
+   * answer, ADR-311); left out, they stay.
+   */
+  surveyTeamIds: webhookSurveyTeamIdsSchema.optional(),
+  /**
    * Given, the members whose assigned conversations' events it takes (null: every conversation's,
    * ADR-181); left out, they stay.
    */
@@ -2282,6 +2408,18 @@ const surveyScoresNeedTheEvent = {
     !data.surveyScores || data.eventTypes.includes('satisfaction_survey.answered'),
   options: { path: ['surveyScores'], message: WEBHOOK_SURVEY_SCORES_NEED_THE_EVENT },
 };
+/** The members credited with answers are chosen only for an endpoint that takes them (ADR-311). */
+const surveyAssigneesNeedTheEvent = {
+  check: (data: { eventTypes: WebhookEventType[]; surveyAssigneeIds?: unknown }) =>
+    !data.surveyAssigneeIds || data.eventTypes.includes('satisfaction_survey.answered'),
+  options: { path: ['surveyAssigneeIds'], message: WEBHOOK_SURVEY_ASSIGNEES_NEED_THE_EVENT },
+};
+/** The teams of answered surveys are chosen only for an endpoint that takes answers (ADR-311). */
+const surveyTeamsNeedTheEvent = {
+  check: (data: { eventTypes: WebhookEventType[]; surveyTeamIds?: unknown }) =>
+    !data.surveyTeamIds || data.eventTypes.includes('satisfaction_survey.answered'),
+  options: { path: ['surveyTeamIds'], message: WEBHOOK_SURVEY_TEAMS_NEED_THE_EVENT },
+};
 /** Members are chosen only for an endpoint that takes events of conversations (ADR-181). */
 const assigneesNeedTheEvents = {
   check: (data: { eventTypes: WebhookEventType[]; assigneeIds?: unknown }) =>
@@ -2336,6 +2474,8 @@ const endpointSchema = endpointFields
   .refine(noteDealOwnersNeedTheEvents.check, noteDealOwnersNeedTheEvents.options)
   .refine(crmChangeMakersNeedTheEvents.check, crmChangeMakersNeedTheEvents.options)
   .refine(surveyScoresNeedTheEvent.check, surveyScoresNeedTheEvent.options)
+  .refine(surveyAssigneesNeedTheEvent.check, surveyAssigneesNeedTheEvent.options)
+  .refine(surveyTeamsNeedTheEvent.check, surveyTeamsNeedTheEvent.options)
   .refine(assigneesNeedTheEvents.check, assigneesNeedTheEvents.options)
   .refine(contactTagsNeedTheEvents.check, contactTagsNeedTheEvents.options)
   .refine(conversationTagsNeedTheEvents.check, conversationTagsNeedTheEvents.options);
@@ -2377,6 +2517,8 @@ const updateSchema = endpointFields
   .refine(noteDealOwnersNeedTheEvents.check, noteDealOwnersNeedTheEvents.options)
   .refine(crmChangeMakersNeedTheEvents.check, crmChangeMakersNeedTheEvents.options)
   .refine(surveyScoresNeedTheEvent.check, surveyScoresNeedTheEvent.options)
+  .refine(surveyAssigneesNeedTheEvent.check, surveyAssigneesNeedTheEvent.options)
+  .refine(surveyTeamsNeedTheEvent.check, surveyTeamsNeedTheEvent.options)
   .refine(assigneesNeedTheEvents.check, assigneesNeedTheEvents.options)
   .refine(contactTagsNeedTheEvents.check, contactTagsNeedTheEvents.options)
   .refine(conversationTagsNeedTheEvents.check, conversationTagsNeedTheEvents.options);
@@ -2531,6 +2673,16 @@ export interface WebhookEndpointView {
    * takes every answer.
    */
   surveyScores: WebhookSurveyScore[] | null;
+  /**
+   * The members credited with the satisfaction survey answers it takes (ADR-311), as stored, named,
+   * with whether conversations can still be assigned to them; null takes every answer.
+   */
+  surveyAssignees: WebhookEndpointAssignee[] | null;
+  /**
+   * The teams whose conversations' satisfaction survey answers it takes (ADR-311), as stored,
+   * named; null takes every answer.
+   */
+  surveyTeams: WebhookEndpointTeam[] | null;
   /**
    * The members whose assigned conversations' events it takes (ADR-181), as stored, named, with
    * whether conversations can still be assigned to them; null takes every conversation's.
@@ -2798,6 +2950,8 @@ export async function lockWebhookEndpoint(
       noteDealOwnerIds: webhookEndpoints.noteDealOwnerIds,
       crmChangeMakers: webhookEndpoints.crmChangeMakers,
       surveyScores: webhookEndpoints.surveyScores,
+      surveyAssigneeIds: webhookEndpoints.surveyAssigneeIds,
+      surveyTeamIds: webhookEndpoints.surveyTeamIds,
       assigneeIds: webhookEndpoints.assigneeIds,
       contactTags: webhookEndpoints.contactTags,
       conversationTags: webhookEndpoints.conversationTags,
@@ -2874,6 +3028,8 @@ export async function insertWebhookEndpoint(
     noteDealOwnerIds: string[] | null;
     crmChangeMakers: WebhookCrmChangeMaker[] | null;
     surveyScores: WebhookSurveyScore[] | null;
+    surveyAssigneeIds: string[] | null;
+    surveyTeamIds: string[] | null;
     assigneeIds: string[] | null;
     contactTags: string[] | null;
     conversationTags: string[] | null;
@@ -2939,6 +3095,8 @@ export async function insertWebhookEndpoint(
     noteDealOwnerIds: input.noteDealOwnerIds,
     crmChangeMakers: input.crmChangeMakers,
     surveyScores: input.surveyScores,
+    surveyAssigneeIds: input.surveyAssigneeIds,
+    surveyTeamIds: input.surveyTeamIds,
     assigneeIds: input.assigneeIds,
     contactTags: input.contactTags,
     conversationTags: input.conversationTags,
@@ -3353,6 +3511,8 @@ export function createWebhooksService(deps: {
               noteDealOwnerIds: webhookEndpoints.noteDealOwnerIds,
               crmChangeMakers: webhookEndpoints.crmChangeMakers,
               surveyScores: webhookEndpoints.surveyScores,
+              surveyAssigneeIds: webhookEndpoints.surveyAssigneeIds,
+              surveyTeamIds: webhookEndpoints.surveyTeamIds,
               assigneeIds: webhookEndpoints.assigneeIds,
               contactTags: webhookEndpoints.contactTags,
               conversationTags: webhookEndpoints.conversationTags,
@@ -3420,8 +3580,11 @@ export function createWebhooksService(deps: {
                     ),
                   );
           const numberById = new Map(numbered.map((n) => [n.id, n]));
-          // The teams endpoints chose (ADR-174); one deleted since is named by its absence.
-          const teamIds = [...new Set(rows.flatMap((r) => r.teamIds ?? []))];
+          // The teams endpoints chose for conversations (ADR-174) and survey answers (ADR-311); one
+          // deleted since is named by its absence.
+          const teamIds = [
+            ...new Set(rows.flatMap((r) => [...(r.teamIds ?? []), ...(r.surveyTeamIds ?? [])])),
+          ];
           const namedTeams =
             teamIds.length === 0
               ? []
@@ -3562,8 +3725,13 @@ export function createWebhooksService(deps: {
             const member = crmMemberById.get(id);
             return { id, name: member?.name ?? null, active: member?.active ?? false };
           };
-          // The members endpoints chose (ADR-181), and whether they still take conversations.
-          const assigneeIds = [...new Set(rows.flatMap((r) => r.assigneeIds ?? []))];
+          // The members endpoints chose for conversations (ADR-181) and survey answers (ADR-311),
+          // and whether they still take conversations.
+          const assigneeIds = [
+            ...new Set(
+              rows.flatMap((r) => [...(r.assigneeIds ?? []), ...(r.surveyAssigneeIds ?? [])]),
+            ),
+          ];
           const namedAssignees =
             assigneeIds.length === 0
               ? []
@@ -3625,6 +3793,8 @@ export function createWebhooksService(deps: {
               noteStageIds: chosenNoteStages,
               noteDealOwnerIds: chosenNoteDealOwners,
               assigneeIds: chosenAssignees,
+              surveyAssigneeIds: chosenSurveyAssignees,
+              surveyTeamIds: chosenSurveyTeams,
               contactFieldKeys: chosenFields,
               oauthTokenUrl,
               oauthClientId,
@@ -3680,6 +3850,15 @@ export function createWebhooksService(deps: {
                     (id): WebhookEndpointAssignee =>
                       assigneeById.get(id) ?? { id, name: null, assignable: false },
                   )
+                : null,
+              surveyAssignees: chosenSurveyAssignees
+                ? chosenSurveyAssignees.map(
+                    (id): WebhookEndpointAssignee =>
+                      assigneeById.get(id) ?? { id, name: null, assignable: false },
+                  )
+                : null,
+              surveyTeams: chosenSurveyTeams
+                ? chosenSurveyTeams.map((id) => ({ id, name: teamNameById.get(id) ?? null }))
                 : null,
               automations: automationIds
                 ? automationIds.map((id) => {
@@ -4065,6 +4244,14 @@ export function createWebhooksService(deps: {
           null,
         );
         const surveyScores = webhookSurveyScoresFor(data.eventTypes, data.surveyScores, null);
+        const surveyAssigneeIds = webhookSurveyAssigneeIdsFor(
+          data.eventTypes,
+          data.surveyAssigneeIds,
+          null,
+        );
+        await assertWebhookSurveyAssignees(tx, ctx.tenant.id, surveyAssigneeIds);
+        const surveyTeamIds = webhookSurveyTeamIdsFor(data.eventTypes, data.surveyTeamIds, null);
+        await assertWebhookSurveyTeams(tx, ctx.tenant.id, surveyTeamIds);
         const assigneeIds = webhookAssigneeIdsFor(data.eventTypes, data.assigneeIds, null);
         await assertWebhookAssignees(tx, ctx.tenant.id, assigneeIds);
         const contactTags = webhookContactTagsFor(data.eventTypes, data.contactTags, null);
@@ -4122,6 +4309,8 @@ export function createWebhooksService(deps: {
           noteDealOwnerIds,
           crmChangeMakers,
           surveyScores,
+          surveyAssigneeIds,
+          surveyTeamIds,
           assigneeIds,
           contactTags,
           conversationTags,
@@ -4175,6 +4364,8 @@ export function createWebhooksService(deps: {
               ...(noteDealOwnerIds ? { noteDealOwnerIds } : {}),
               ...(crmChangeMakers ? { crmChangeMakers } : {}),
               ...(surveyScores ? { surveyScores } : {}),
+              ...(surveyAssigneeIds ? { surveyAssigneeIds } : {}),
+              ...(surveyTeamIds ? { surveyTeamIds } : {}),
               ...(assigneeIds ? { assigneeIds } : {}),
               ...(contactTags ? { contactTags } : {}),
               ...(conversationTags ? { conversationTags } : {}),
@@ -4457,6 +4648,29 @@ export function createWebhooksService(deps: {
           data.surveyScores,
           endpoint.surveyScores,
         );
+        const surveyAssigneeIds = webhookSurveyAssigneeIdsFor(
+          data.eventTypes,
+          data.surveyAssigneeIds,
+          endpoint.surveyAssigneeIds,
+        );
+        // And the members and teams of answers it adds: those it held may have left or been
+        // deleted since (ADR-311).
+        if (data.surveyAssigneeIds !== undefined) {
+          await assertWebhookSurveyAssignees(
+            tx,
+            ctx.tenant.id,
+            surveyAssigneeIds,
+            endpoint.surveyAssigneeIds,
+          );
+        }
+        const surveyTeamIds = webhookSurveyTeamIdsFor(
+          data.eventTypes,
+          data.surveyTeamIds,
+          endpoint.surveyTeamIds,
+        );
+        if (data.surveyTeamIds !== undefined) {
+          await assertWebhookSurveyTeams(tx, ctx.tenant.id, surveyTeamIds, endpoint.surveyTeamIds);
+        }
         const assigneeIds = webhookAssigneeIdsFor(
           data.eventTypes,
           data.assigneeIds,
@@ -4528,6 +4742,8 @@ export function createWebhooksService(deps: {
             noteDealOwnerIds,
             crmChangeMakers,
             surveyScores,
+            surveyAssigneeIds,
+            surveyTeamIds,
             assigneeIds,
             contactTags,
             conversationTags,
@@ -4592,6 +4808,8 @@ export function createWebhooksService(deps: {
               ...(noteDealOwnerIds ? { noteDealOwnerIds } : {}),
               ...(crmChangeMakers ? { crmChangeMakers } : {}),
               ...(surveyScores ? { surveyScores } : {}),
+              ...(surveyAssigneeIds ? { surveyAssigneeIds } : {}),
+              ...(surveyTeamIds ? { surveyTeamIds } : {}),
               ...(assigneeIds ? { assigneeIds } : {}),
               ...(contactTags ? { contactTags } : {}),
               ...(conversationTags ? { conversationTags } : {}),
