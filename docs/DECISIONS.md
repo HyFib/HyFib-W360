@@ -12177,10 +12177,13 @@ Decision:
   contact at that change. The tag trigger then calls `app.deliver_contact_webhook_tag` once the tag
   is noted on the event: it adds the delivery of its transaction's event for the endpoints naming
   the tag added or removed (for `contact.updated`, those taking changes of tags; for
-  `contact.created`, those taking the contact's source). Each endpoint gets each event once. Both
-  run as the role making the change, the runtime role or the definer role merging and erasing
-  contacts, and read nothing while no active endpoint of the company names tags. Stored events and
-  payloads are unchanged.
+  `contact.created`, those taking the contact's source). A later write of the same transaction
+  matches the parts and fields against everything the transaction changed so far, and the tags
+  against the contact's and those the transaction removed, so the change is sent whatever the order
+  of its writes (the API changes a contact's name before its tags, for one; found by a review of
+  this slice before it was pushed). Each endpoint gets each event once. Both run as the role making
+  the change, the runtime role or the definer role merging and erasing contacts, and read nothing
+  while no active endpoint of the company names tags. Stored events and payloads are unchanged.
 - **Audited and exported:** `webhook.endpoint_created` and `webhook.endpoint_updated` carry
   `contactEventTags` when the endpoint has it, and the company data export carries the column.
 - **Permissions unchanged:** members with `developer.manage` in Settings, keys with

@@ -7,10 +7,11 @@
 -- events it takes (contact_event_tags). Null keeps every contact, as before; a list holds 1 to 50
 -- tags as contacts carry them (the same rule as 0183's contact_tags), and only while the endpoint
 -- takes contact.created or contact.updated, so a list never outlives them. A change is sent when
--- the contact has one of the tags at that change, or when the change adds or removes one of them;
--- a contact is added without tags, so its contact.created is sent when its transaction tags it
--- with one of them. contact.erased and contact.merged are not narrowed. A company has at most 10
--- endpoints, so the table is small and the check is validated here.
+-- the contact has one of the tags at one of its writes, or when it adds or removes one of them,
+-- whatever the order of the writes in its transaction; a contact is added without tags, so its
+-- contact.created is sent when its transaction tags it with one of them. contact.erased and
+-- contact.merged are not narrowed. A company has at most 10 endpoints, so the table is small and
+-- the check is validated here.
 ALTER TABLE app.webhook_endpoints
   ADD COLUMN contact_event_tags text[],
   ADD CONSTRAINT webhook_endpoints_contact_event_tags CHECK (
@@ -32,9 +33,13 @@ GRANT UPDATE (contact_event_tags) ON app.webhook_endpoints TO w360_app;
 
 -- 0136's capture with the tag filter: a contact.created or contact.updated delivery is created only
 -- for the active endpoints whose list is null or shares a tag with the contact, read from its tags
--- when an endpoint names tags. The tags a change adds and removes are matched by
--- app.deliver_contact_webhook_tag below, which the tag trigger calls once the tag is noted.
--- Everything else as in 0136; same signature, so its owner and grants stay.
+-- when an endpoint names tags. A later write of the same transaction matches the parts and fields
+-- against everything the transaction changed so far, and the tags against the contact's and those
+-- the transaction removed, so an endpoint naming parts and tags takes the change whatever the
+-- order of the writes (a name changed before a tag is added, as the API writes them). The tag a
+-- write adds or removes is matched by app.deliver_contact_webhook_tag below, which the tag trigger
+-- calls once the tag is noted. Everything else as in 0136; same signature, so its owner and grants
+-- stay.
 CREATE OR REPLACE FUNCTION app.capture_contact_webhook_event(p_tenant uuid, p_contact uuid,
   p_type text, p_changes text[])
   RETURNS void
@@ -46,6 +51,8 @@ DECLARE
   v_captured text;
   v_source text;
   v_tags text[];
+  v_changes text[];
+  v_removed text[];
 BEGIN
   IF p_type NOT IN ('contact.created', 'contact.updated', 'contact.erased') THEN
     RAISE EXCEPTION 'not a contact event: %', p_type;
@@ -88,19 +95,25 @@ BEGIN
     IF FOUND THEN
       IF v_captured = 'contact.updated' AND p_type = 'contact.updated' THEN
         PERFORM app.add_contact_webhook_changes(p_tenant, v_event, p_changes);
+        -- Everything the transaction changed so far, and the tags it removed (0129 notes them).
+        SELECT e.contact_changes, coalesce(e.tags_removed, '{}'::text[])
+          INTO v_changes, v_removed
+          FROM app.webhook_events e
+         WHERE e.tenant_id = p_tenant AND e.id = v_event;
         INSERT INTO app.webhook_deliveries (id, tenant_id, endpoint_id, event_id)
         SELECT gen_random_uuid(), p_tenant, e.id, v_event
           FROM app.webhook_endpoints e
          WHERE e.tenant_id = p_tenant AND e.state = 'active'
            AND 'contact.updated' = ANY (e.event_types)
            AND ((e.contact_parts IS NULL AND e.contact_field_keys IS NULL)
-                OR EXISTS (SELECT 1 FROM unnest(p_changes) AS c
+                OR EXISTS (SELECT 1 FROM unnest(v_changes) AS c
                             WHERE (e.contact_parts IS NULL
                                    OR split_part(c, '.', 1) = ANY (e.contact_parts))
                               AND (e.contact_field_keys IS NULL
                                    OR split_part(c, '.', 1) <> 'fields'
                                    OR split_part(c, '.', 2) = ANY (e.contact_field_keys))))
-           AND (e.contact_event_tags IS NULL OR v_tags && e.contact_event_tags)
+           AND (e.contact_event_tags IS NULL
+                OR (v_tags || v_removed) && e.contact_event_tags)
            AND NOT EXISTS (SELECT 1 FROM app.webhook_deliveries d
                             WHERE d.tenant_id = p_tenant AND d.event_id = v_event
                               AND d.endpoint_id = e.id);
@@ -145,13 +158,14 @@ $$;
 
 -- A tag added to or removed from a contact, matched against the endpoints that name it, once the
 -- tag trigger has captured the change and noted the tag (0129): the contact.updated of the calling
--- transaction goes to the active endpoints that take it, name the tag and take changes of tags (no
--- parts, or `tags` among them); a contact.created of the calling transaction (a tag given to a
--- contact as it is added) goes to the active endpoints that take it, name the tag and take its
--- source (0136). Each endpoint gets each event once. Nothing is read while no active endpoint of
--- the company names tags. Run as the role making the change, as the capture is: the definer role
--- changes tags when it merges and erases contacts, but adds no contact, so it never reads a source
--- here (as in 0136's capture, a contact.created is captured by the runtime role only).
+-- transaction goes to the active endpoints that take it, name the tag and take one of the changes
+-- the transaction made so far (by their parts and fields, as the capture matches them); a
+-- contact.created of the calling transaction (a tag given to a contact as it is added) goes to the
+-- active endpoints that take it, name the tag and take its source (0136). Each endpoint gets each
+-- event once. Nothing is read while no active endpoint of the company names tags. Run as the role
+-- making the change, as the capture is: the definer role changes tags when it merges and erases
+-- contacts, but adds no contact, so it never reads a source here (as in 0136's capture, a
+-- contact.created is captured by the runtime role only).
 CREATE FUNCTION app.deliver_contact_webhook_tag(p_tenant uuid, p_contact uuid, p_tag text)
   RETURNS void
   LANGUAGE plpgsql
@@ -160,6 +174,7 @@ CREATE FUNCTION app.deliver_contact_webhook_tag(p_tenant uuid, p_contact uuid, p
 DECLARE
   v_event uuid;
   v_captured text;
+  v_changes text[];
   v_source text;
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM app.webhook_endpoints e
@@ -167,7 +182,7 @@ BEGIN
                     AND p_tag = ANY (e.contact_event_tags)) THEN
     RETURN;
   END IF;
-  SELECT e.id, e.type INTO v_event, v_captured
+  SELECT e.id, e.type, e.contact_changes INTO v_event, v_captured, v_changes
     FROM app.webhook_events e
    WHERE e.tenant_id = p_tenant AND e.contact_id = p_contact
      AND e.captured_xact = pg_catalog.pg_current_xact_id()
@@ -186,8 +201,13 @@ BEGIN
    WHERE e.tenant_id = p_tenant AND e.state = 'active'
      AND v_captured = ANY (e.event_types)
      AND p_tag = ANY (e.contact_event_tags)
-     AND (v_captured <> 'contact.updated' OR e.contact_parts IS NULL
-          OR 'tags' = ANY (e.contact_parts))
+     AND (v_captured <> 'contact.updated'
+          OR (e.contact_parts IS NULL AND e.contact_field_keys IS NULL)
+          OR EXISTS (SELECT 1 FROM unnest(v_changes) AS c
+                      WHERE (e.contact_parts IS NULL
+                             OR split_part(c, '.', 1) = ANY (e.contact_parts))
+                        AND (e.contact_field_keys IS NULL OR split_part(c, '.', 1) <> 'fields'
+                             OR split_part(c, '.', 2) = ANY (e.contact_field_keys))))
      AND (v_captured <> 'contact.created' OR e.contact_sources IS NULL
           OR v_source = ANY (e.contact_sources))
      AND NOT EXISTS (SELECT 1 FROM app.webhook_deliveries d

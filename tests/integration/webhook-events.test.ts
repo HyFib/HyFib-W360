@@ -1798,6 +1798,68 @@ describe('contact event tag filters (ADR-316)', () => {
     });
   });
 
+  it('sends a change that passes the parts and the tags whatever the order of the writes in its transaction', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const service = contactsService();
+    const vipNames = await add(c, ['contact.updated'], {
+      contactEventTags: ['vip'],
+      contactParts: ['name'],
+    });
+    const { id: hema } = await service.createContact(owner, {
+      displayName: 'Hema',
+      phone: '+919811100168',
+    });
+    const { id: ravi } = await service.createContact(owner, {
+      displayName: 'Ravi',
+      phone: '+919811100169',
+      tags: ['vip'],
+    });
+    const scope = authorizedTenantScope(c.tenant.id, c.owner.id);
+    const rename = (contactId: string, name: string) =>
+      sql`update app.contacts set display_name = ${name}
+        where tenant_id = ${c.tenant.id}::uuid and id = ${contactId}::uuid`;
+    const tagVip = (contactId: string) =>
+      sql`insert into app.contact_tags (id, tenant_id, contact_id, tag)
+        values (gen_random_uuid(), ${c.tenant.id}::uuid, ${contactId}::uuid, 'vip')`;
+    const untagVip = (contactId: string) =>
+      sql`delete from app.contact_tags
+        where tenant_id = ${c.tenant.id}::uuid and contact_id = ${contactId}::uuid and tag = 'vip'`;
+    // Renamed, then tagged vip, in one transaction, as the API writes a contact's change.
+    await fx.dbs.app.run(scope, async (tx) => {
+      await tx.execute(rename(hema, 'Hema K'));
+      await tx.execute(tagVip(hema));
+    });
+    // Untagged, then renamed, in one transaction: a change that removed vip.
+    await fx.dbs.app.run(scope, async (tx) => {
+      await tx.execute(untagVip(ravi));
+      await tx.execute(rename(ravi, 'Ravi S'));
+    });
+    // A change of tags alone is not a change of the name.
+    await service.addTags(owner, ravi, ['vip']);
+    expect(
+      (await eventsOf(c, 'contact.')).map((e) => [
+        e.type,
+        e.contact_id,
+        e.contact_changes,
+        e.deliveries,
+      ]),
+    ).toEqual([
+      ['contact.created', hema, null, 0],
+      ['contact.created', ravi, null, 0],
+      ['contact.updated', hema, ['name', 'tags'], 1],
+      ['contact.updated', ravi, ['name', 'tags'], 1],
+      ['contact.updated', ravi, ['tags'], 0],
+    ]);
+    await deliverDue(c);
+    expect(sentTo(vipNames.path)).toEqual(
+      sorted([
+        ['contact.updated', hema, ['name', 'tags']],
+        ['contact.updated', ravi, ['name', 'tags']],
+      ]),
+    );
+  });
+
   it('sends a contact added with a listed tag as contact.created, by its source too, and one tagged later as contact.updated', async () => {
     const c = await fx.company();
     const owner = await fx.ctx(c, c.owner);

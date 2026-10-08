@@ -97,7 +97,9 @@ pglast parse check (syntax only).
   event, and the endpoints list's line for it.
 - **Tests:** unit (3 new: the list's rules and keeping and clearing in `webhooks/webhooks.test.ts`;
   the API schemas and OpenAPI entries in `api/api.test.ts`; the empty-change wording asserted where
-  the new words go); integration (5 new: capture in `webhook-events.test.ts`, the services in
+  the new words go); integration (6 new: capture in `webhook-events.test.ts`, one of them for a
+  rename and a tag change in one transaction in either order, added after a review found that an
+  endpoint naming parts and tags missed a name changed before a tag was added, the services in
   `webhooks.test.ts`, the API in `api-webhook-endpoints.test.ts`; 1 changed in
   `tenant-isolation.test.ts`). Written for CI; the integration tests were not run here. No e2e test.
 - **Docs:** ADR-316; ARCHITECTURE; SECURITY; THREAT-MODEL T284; DEPLOYMENT; RUNBOOKS; BACKLOG P5-09;
