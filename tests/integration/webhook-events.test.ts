@@ -5103,6 +5103,62 @@ describe('deal events (ADR-256)', () => {
         .sort(),
     );
   });
+
+  it('sends an endpoint that names deal statuses only the closes and reopenings that reached one of them (ADR-309)', async () => {
+    const s = await crmCompany();
+    const { c, owner } = s;
+    /** An endpoint of the company taking deals' status changes with these statuses. */
+    const add = async (dealStatuses: string[] | null) => {
+      const path = `/ok/${randomBytes(6).toString('hex')}`;
+      await webhooks().create(owner, {
+        url: `http://${HOST}:${port}${path}`,
+        eventTypes: ['deal.status_changed'],
+        dealStatuses,
+      });
+      return path;
+    };
+    const wins = await add(['won']);
+    const setbacks = await add(['open', 'lost']);
+    const everyStatus = await add(null);
+    const svc = crm();
+    const jaya = await newContact(owner, 'Jaya');
+
+    // A deal won, reopened, then lost.
+    const { id: dealId } = await svc.createDeal(owner, {
+      contactId: jaya.id,
+      pipelineId: s.salesId,
+      stageId: s.sales[0],
+      title: 'Annual plan',
+      value: '1,000',
+      ownerMembershipId: owner.membership.id,
+      expectedCloseOn: null,
+    });
+    await svc.closeDeal(owner, { id: dealId, expectedVersion: 1, outcome: 'won' });
+    await svc.reopenDeal(owner, { id: dealId, expectedVersion: 2 });
+    await svc.closeDeal(owner, {
+      id: dealId,
+      expectedVersion: 3,
+      outcome: 'lost',
+      lostReason: 'Budget cut',
+    });
+
+    // Each change captured once, with a delivery to each endpoint whose list holds the status
+    // reached; the addition, which no endpoint takes, is not recorded.
+    const events = await dealEventsOf(c);
+    expect(events.map((e) => [e.type, e.status, e.deliveries])).toEqual([
+      ['deal.status_changed', 'won', 2],
+      ['deal.status_changed', 'open', 2],
+      ['deal.status_changed', 'lost', 2],
+    ]);
+    await deliverDue(c);
+    const statusesAt = (path: string) =>
+      bodiesAt(path)
+        .map((b) => dealIn(b).status as string)
+        .sort();
+    expect(statusesAt(wins)).toEqual(['won']);
+    expect(statusesAt(setbacks)).toEqual(['lost', 'open']);
+    expect(statusesAt(everyStatus)).toEqual(['lost', 'open', 'won']);
+  });
 });
 
 describe('change-maker filters for deal, task and note events (ADR-306)', () => {
@@ -6208,6 +6264,51 @@ describe('task events (ADR-261)', () => {
     await expect(set(`changed_by = 'api', changed_by_api_key_id = '${uuidv7()}'`)).rejects.toThrow(
       /crm_tasks_changed_by_api_key_fk/,
     );
+  });
+
+  it('sends an endpoint that names task statuses only the completions, cancellations and reopenings that reached one of them (ADR-309)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    /** An endpoint of the company taking tasks' status changes with these statuses. */
+    const add = async (taskStatuses: string[] | null) => {
+      const path = `/ok/${randomBytes(6).toString('hex')}`;
+      await webhooks().create(owner, {
+        url: `http://${HOST}:${port}${path}`,
+        eventTypes: ['task.status_changed'],
+        taskStatuses,
+      });
+      return path;
+    };
+    const completions = await add(['done']);
+    const undone = await add(['open', 'cancelled']);
+    const everyStatus = await add(null);
+    const svc = crm();
+
+    // A task about nobody completed, reopened, then cancelled.
+    const { id: taskId } = await svc.createTask(owner, {
+      title: 'Order brochures',
+      assigneeMembershipId: owner.membership.id,
+    });
+    await svc.completeTask(owner, { id: taskId, expectedVersion: 1 });
+    await svc.reopenTask(owner, { id: taskId, expectedVersion: 2 });
+    await svc.cancelTask(owner, { id: taskId, expectedVersion: 3 });
+
+    // Each change captured once, with a delivery to each endpoint whose list holds the status
+    // reached; the addition, which no endpoint takes, is not recorded.
+    const events = await taskEventsOf(c);
+    expect(events.map((e) => [e.type, e.status, e.deliveries])).toEqual([
+      ['task.status_changed', 'done', 2],
+      ['task.status_changed', 'open', 2],
+      ['task.status_changed', 'cancelled', 2],
+    ]);
+    await deliverDue(c);
+    const statusesAt = (path: string) =>
+      bodiesAt(path)
+        .map((b) => taskIn(b).status as string)
+        .sort();
+    expect(statusesAt(completions)).toEqual(['done']);
+    expect(statusesAt(undone)).toEqual(['cancelled', 'open']);
+    expect(statusesAt(everyStatus)).toEqual(['cancelled', 'done', 'open']);
   });
 });
 

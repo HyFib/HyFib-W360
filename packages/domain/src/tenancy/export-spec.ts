@@ -1610,6 +1610,8 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
       'campaign_statuses',
       'order_statuses',
       'payment_link_statuses',
+      'deal_statuses',
+      'task_statuses',
       'template_statuses',
       'conversation_statuses',
       'run_end_statuses',

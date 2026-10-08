@@ -2,7 +2,7 @@ import { integer, smallint, text, timestamp, uuid } from 'drizzle-orm/pg-core';
 import { jsonb } from './columns';
 import type { AutomationEndReason } from './automations';
 import type { PaymentLinkStatus } from './commerce';
-import type { CrmChanger } from './crm';
+import type { CrmChanger, DealStatus, TaskStatus } from './crm';
 import type { ContactSource, MessageType } from './messaging';
 import { appSchema } from './tenancy';
 
@@ -89,6 +89,18 @@ export type WebhookOrderStatus =
  * (ADR-308); a link is `creating` only until the worker creates it, which sends no event.
  */
 export type WebhookPaymentLinkStatus = Exclude<PaymentLinkStatus, 'creating'>;
+
+/**
+ * The statuses a `deal.status_changed` event reports, which an endpoint can choose (ADR-309): a
+ * deal won, lost, or reopened (`open`).
+ */
+export type WebhookDealStatus = DealStatus;
+
+/**
+ * The statuses a `task.status_changed` event reports, which an endpoint can choose (ADR-309): a
+ * task done, cancelled, or reopened (`open`).
+ */
+export type WebhookTaskStatus = TaskStatus;
 
 /**
  * The statuses a `template.status_changed` event reports, which an endpoint can choose (ADR-148):
@@ -202,6 +214,16 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
    * its events.
    */
   paymentLinkStatuses: text('payment_link_statuses').array().$type<WebhookPaymentLinkStatus[]>(),
+  /**
+   * The statuses a deal reaches that it takes as `deal.status_changed` (migration 0232, ADR-309);
+   * null takes every status. Set only while `deal.status_changed` is among its events.
+   */
+  dealStatuses: text('deal_statuses').array().$type<WebhookDealStatus[]>(),
+  /**
+   * The statuses a task reaches that it takes as `task.status_changed` (migration 0232, ADR-309);
+   * null takes every status. Set only while `task.status_changed` is among its events.
+   */
+  taskStatuses: text('task_statuses').array().$type<WebhookTaskStatus[]>(),
   /**
    * The template statuses it takes as `template.status_changed` (ADR-148); null takes every status.
    * Set only while `template.status_changed` is among its events.

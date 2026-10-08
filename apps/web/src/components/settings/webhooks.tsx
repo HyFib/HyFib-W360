@@ -26,6 +26,10 @@ import {
   WEBHOOK_ORDER_STATUSES,
   WEBHOOK_PAYMENT_LINK_STATUS_LABELS,
   WEBHOOK_PAYMENT_LINK_STATUSES,
+  WEBHOOK_DEAL_STATUS_LABELS,
+  WEBHOOK_DEAL_STATUSES,
+  WEBHOOK_TASK_STATUS_LABELS,
+  WEBHOOK_TASK_STATUSES,
   WEBHOOK_REPLAY_PERIODS,
   WEBHOOK_RUN_END_STATUS_LABELS,
   WEBHOOK_RUN_END_STATUSES,
@@ -91,6 +95,8 @@ import {
   type WebhookMessageStatus,
   type WebhookOrderStatus,
   type WebhookPaymentLinkStatus,
+  type WebhookDealStatus,
+  type WebhookTaskStatus,
   type WebhookOwnerChoice,
   type WebhookPipelineChoice,
   type WebhookReplayPeriod,
@@ -390,7 +396,8 @@ function ReachedStatusChoices<S extends string>({
   onChange,
 }: {
   prefix: string;
-  kind: 'campaign' | 'order' | 'payment_link' | 'template' | 'conversation' | 'run';
+  kind:
+    'campaign' | 'order' | 'payment_link' | 'deal' | 'task' | 'template' | 'conversation' | 'run';
   statuses: readonly S[];
   labels: Record<S, string>;
   chosen: S[];
@@ -1914,6 +1921,10 @@ function EventChoices({
   onOrderStatusesChange,
   paymentLinkStatuses,
   onPaymentLinkStatusesChange,
+  dealStatuses,
+  onDealStatusesChange,
+  taskStatuses,
+  onTaskStatusesChange,
   templateStatuses,
   onTemplateStatusesChange,
   conversationStatuses,
@@ -1946,6 +1957,10 @@ function EventChoices({
   onOrderStatusesChange: (next: WebhookOrderStatus[]) => void;
   paymentLinkStatuses: WebhookPaymentLinkStatus[];
   onPaymentLinkStatusesChange: (next: WebhookPaymentLinkStatus[]) => void;
+  dealStatuses: WebhookDealStatus[];
+  onDealStatusesChange: (next: WebhookDealStatus[]) => void;
+  taskStatuses: WebhookTaskStatus[];
+  onTaskStatusesChange: (next: WebhookTaskStatus[]) => void;
   templateStatuses: WebhookTemplateStatus[];
   onTemplateStatusesChange: (next: WebhookTemplateStatus[]) => void;
   conversationStatuses: WebhookConversationStatus[];
@@ -2076,6 +2091,26 @@ function EventChoices({
                 labels={WEBHOOK_PAYMENT_LINK_STATUS_LABELS}
                 chosen={paymentLinkStatuses}
                 onChange={onPaymentLinkStatusesChange}
+              />
+            ) : null}
+            {type === 'deal.status_changed' && chosen.includes(type) ? (
+              <ReachedStatusChoices
+                prefix={prefix}
+                kind="deal"
+                statuses={WEBHOOK_DEAL_STATUSES}
+                labels={WEBHOOK_DEAL_STATUS_LABELS}
+                chosen={dealStatuses}
+                onChange={onDealStatusesChange}
+              />
+            ) : null}
+            {type === 'task.status_changed' && chosen.includes(type) ? (
+              <ReachedStatusChoices
+                prefix={prefix}
+                kind="task"
+                statuses={WEBHOOK_TASK_STATUSES}
+                labels={WEBHOOK_TASK_STATUS_LABELS}
+                chosen={taskStatuses}
+                onChange={onTaskStatusesChange}
               />
             ) : null}
             {type === 'campaign.status_changed' && chosen.includes(type) ? (
@@ -2361,6 +2396,10 @@ export function WebhookEndpointForm({
     orderStatuses: WebhookOrderStatus[] | null;
     /** The Payment Link statuses it takes (ADR-308); null for every status. */
     paymentLinkStatuses: WebhookPaymentLinkStatus[] | null;
+    /** The deal statuses it takes (ADR-309); null for every status. */
+    dealStatuses: WebhookDealStatus[] | null;
+    /** The task statuses it takes (ADR-309); null for every status. */
+    taskStatuses: WebhookTaskStatus[] | null;
     templateStatuses: WebhookTemplateStatus[] | null;
     conversationStatuses: WebhookConversationStatus[] | null;
     runEndStatuses: WebhookRunEndStatus[] | null;
@@ -2459,6 +2498,12 @@ export function WebhookEndpointForm({
   );
   const [paymentLinkStatuses, setPaymentLinkStatuses] = useState<WebhookPaymentLinkStatus[]>(
     endpoint?.paymentLinkStatuses ?? [...WEBHOOK_PAYMENT_LINK_STATUSES],
+  );
+  const [dealStatuses, setDealStatuses] = useState<WebhookDealStatus[]>(
+    endpoint?.dealStatuses ?? [...WEBHOOK_DEAL_STATUSES],
+  );
+  const [taskStatuses, setTaskStatuses] = useState<WebhookTaskStatus[]>(
+    endpoint?.taskStatuses ?? [...WEBHOOK_TASK_STATUSES],
   );
   const [templateStatuses, setTemplateStatuses] = useState<WebhookTemplateStatus[]>(
     endpoint?.templateStatuses ?? [...WEBHOOK_TEMPLATE_STATUSES],
@@ -2621,6 +2666,17 @@ export function WebhookEndpointForm({
           paymentLinkStatuses.length < WEBHOOK_PAYMENT_LINK_STATUSES.length
             ? paymentLinkStatuses
             : null;
+        // Every deal or task status ticked takes every status (null, ADR-309).
+        const chosenDealStatuses =
+          eventTypes.includes('deal.status_changed') &&
+          dealStatuses.length < WEBHOOK_DEAL_STATUSES.length
+            ? dealStatuses
+            : null;
+        const chosenTaskStatuses =
+          eventTypes.includes('task.status_changed') &&
+          taskStatuses.length < WEBHOOK_TASK_STATUSES.length
+            ? taskStatuses
+            : null;
         // Every template status ticked takes every status (null, ADR-148).
         const chosenTemplateStatuses =
           eventTypes.includes('template.status_changed') &&
@@ -2748,6 +2804,8 @@ export function WebhookEndpointForm({
           campaignStatuses: chosenCampaignStatuses,
           orderStatuses: chosenOrderStatuses,
           paymentLinkStatuses: chosenPaymentLinkStatuses,
+          dealStatuses: chosenDealStatuses,
+          taskStatuses: chosenTaskStatuses,
           templateStatuses: chosenTemplateStatuses,
           conversationStatuses: chosenConversationStatuses,
           runEndStatuses: chosenRunEndStatuses,
@@ -2825,6 +2883,8 @@ export function WebhookEndpointForm({
               setCampaignStatuses([...WEBHOOK_CAMPAIGN_STATUSES]);
               setOrderStatuses([...WEBHOOK_ORDER_STATUSES]);
               setPaymentLinkStatuses([...WEBHOOK_PAYMENT_LINK_STATUSES]);
+              setDealStatuses([...WEBHOOK_DEAL_STATUSES]);
+              setTaskStatuses([...WEBHOOK_TASK_STATUSES]);
               setTemplateStatuses([...WEBHOOK_TEMPLATE_STATUSES]);
               setConversationStatuses([...WEBHOOK_CONVERSATION_STATUSES]);
               setRunEndStatuses([...WEBHOOK_RUN_END_STATUSES]);
@@ -2935,6 +2995,10 @@ export function WebhookEndpointForm({
         onOrderStatusesChange={setOrderStatuses}
         paymentLinkStatuses={paymentLinkStatuses}
         onPaymentLinkStatusesChange={setPaymentLinkStatuses}
+        dealStatuses={dealStatuses}
+        onDealStatusesChange={setDealStatuses}
+        taskStatuses={taskStatuses}
+        onTaskStatusesChange={setTaskStatuses}
         templateStatuses={templateStatuses}
         onTemplateStatusesChange={setTemplateStatuses}
         conversationStatuses={conversationStatuses}

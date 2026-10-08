@@ -1,5 +1,44 @@
 # Progress
 
+## 2026-10-08 — Deal and task status filters for webhook endpoints (P5-09, P4-04, H-014, W-138, ADR-309)
+
+Status: **Implemented; its database tests run in CI only.** Endpoints taking `deal.status_changed`
+or `task.status_changed` received every win, loss, completion, cancellation and reopening, so an
+integration booking revenue or following up dropped work had to drop the rest. The local PostgreSQL
+is unavailable, so the migration and the integration tests below were written but not run here;
+migration 0232 passed the pglast parse check (syntax only).
+
+### Completed
+
+- **Database:** migration 0232 (`deal_statuses` and `task_statuses` on `app.webhook_endpoints` with
+  their checks and update grants; `app.capture_webhook_event` matching the status the deal and task
+  triggers pass).
+- **Domain:** `WEBHOOK_DEAL_STATUSES`, `WEBHOOK_TASK_STATUSES` and their labels in
+  `webhooks/model.ts`; their schemas and `webhookDealStatusesFor` and `webhookTaskStatusesFor` in
+  `webhooks/service.ts`, the endpoint view's `dealStatuses` and `taskStatuses`, creation, changes,
+  audits and the export columns; both in `api/webhook-endpoints.ts` and the OpenAPI document.
+- **Web:** Settings → Webhooks' status choices under the deal and task status events (every status
+  ticked by default) and the endpoints list's lines for them.
+- **Tests:** unit (3 new: both lists' rules, order, labels, keeping and clearing in
+  `webhooks/webhooks.test.ts`; the API schemas and OpenAPI entries in `api/api.test.ts`);
+  integration (5 new: capture of deals and of tasks in `webhook-events.test.ts`, the services for
+  each list in `webhooks.test.ts`, the API in `api-webhook-endpoints.test.ts`). Written for CI; the
+  integration tests were not run here. No e2e test.
+- **Docs:** ADR-309; ARCHITECTURE; SECURITY; THREAT-MODEL T277; DEPLOYMENT; RUNBOOKS; BACKLOG P4-04
+  and P5-09; feature matrix H-014 and W-138.
+- **Mutation checks:** 50/50 deliberate regressions caught (one after a test was added).
+
+### Test commands and results (local, 2026-10-08)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 137 files, 1310 tests                                         |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| pglast 7 parse of migration 0232                   | passed (syntax only)                                          |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
 ## 2026-10-08 — Payment Link status filters for webhook endpoints (P5-09, P4-06a, H-014, W-138, ADR-308)
 
 Status: **Implemented; its database tests run in CI only.** Endpoints taking

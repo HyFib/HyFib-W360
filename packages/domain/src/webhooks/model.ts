@@ -12,6 +12,8 @@ import type {
   WebhookMessageStatus,
   WebhookOrderStatus,
   WebhookPaymentLinkStatus,
+  WebhookDealStatus,
+  WebhookTaskStatus,
   WebhookRunEndStatus,
   WebhookReceivedMessageType,
   WebhookRunTrigger,
@@ -32,6 +34,8 @@ export type {
   WebhookMessageStatus,
   WebhookOrderStatus,
   WebhookPaymentLinkStatus,
+  WebhookDealStatus,
+  WebhookTaskStatus,
   WebhookRunEndStatus,
   WebhookReceivedMessageType,
   WebhookRunTrigger,
@@ -374,6 +378,40 @@ export const WEBHOOK_PAYMENT_LINK_STATUS_LABELS: Record<WebhookPaymentLinkStatus
   expired: 'Expired',
   cancelled: 'Cancelled',
   failed: 'Not created',
+};
+
+/**
+ * The statuses a `deal.status_changed` event reports, which an endpoint can choose (ADR-309), in
+ * the order the CRM lists them: `open` is a deal reopened.
+ */
+export const WEBHOOK_DEAL_STATUSES = [
+  'open',
+  'won',
+  'lost',
+] as const satisfies readonly WebhookDealStatus[];
+
+/** How Settings names each deal status an endpoint can choose (ADR-309): the change it reports. */
+export const WEBHOOK_DEAL_STATUS_LABELS: Record<WebhookDealStatus, string> = {
+  open: 'Reopened',
+  won: 'Won',
+  lost: 'Lost',
+};
+
+/**
+ * The statuses a `task.status_changed` event reports, which an endpoint can choose (ADR-309), in
+ * the order the CRM lists them: `open` is a task reopened.
+ */
+export const WEBHOOK_TASK_STATUSES = [
+  'open',
+  'done',
+  'cancelled',
+] as const satisfies readonly WebhookTaskStatus[];
+
+/** How Settings names each task status an endpoint can choose (ADR-309): the change it reports. */
+export const WEBHOOK_TASK_STATUS_LABELS: Record<WebhookTaskStatus, string> = {
+  open: 'Reopened',
+  done: 'Done',
+  cancelled: 'Cancelled',
 };
 
 /**

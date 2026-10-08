@@ -11834,3 +11834,50 @@ Decision:
 Not built: lists by the status a link left (`previousStatus`), by amount or by who asked for payment
 (a member or a key), and events when payment is asked for or a cancellation asked (ADR-285 left them
 out).
+
+## ADR-309 Choosing the deal and task statuses a webhook endpoint receives (P5-09, P4-04) (2026-10-08)
+
+Context: `deal.status_changed` (ADR-256) is sent whenever a deal is won, lost or reopened, and
+`task.status_changed` (ADR-261) whenever a task is done, cancelled or reopened, but an endpoint
+received every one. An integration that books revenue wants won deals only, one that chases lost
+business lost deals only, and one that follows up dropped work cancelled tasks only; each was sent
+every change and had to drop the rest. ADR-256 left deal events by status unbuilt (pipelines, stages
+and owners came with ADR-263 to ADR-265), and ADR-261 left filters for task events unbuilt.
+
+Decision:
+
+- **Two lists per endpoint, one for each event,** `dealStatuses` for `deal.status_changed` and
+  `taskStatuses` for `task.status_changed`: the statuses a change reaches that the endpoint takes, 1
+  to 3 of `open`, `won` and `lost` for deals and of `open`, `done` and `cancelled` for tasks, in
+  that order (as the CRM lists them) with repeats merged, as the event's `deal.status` or
+  `task.status` gives them; `open` is a reopening. Null receives every status, as before. With
+  pipelines, stages, owners, assignees or makers chosen too, a change must pass every list. Other
+  events are not narrowed, the deal's and task's other events among them. Chosen in Settings →
+  Webhooks under each event (the status control orders use, every status ticked by default, named by
+  the change each reports: "Reopened", "Won", "Lost", "Done", "Cancelled"), shown on the endpoint as
+  "Deal statuses sent: …" and "Task statuses sent: …", and through the API as `dealStatuses` and
+  `taskStatuses` on `POST /webhook-endpoints` and `PATCH /webhook-endpoints/{id}` and in every
+  endpoint the API answers.
+- **Only while the event is taken:** a list given for an endpoint that does not take its event is
+  refused (`dealStatuses` or `taskStatuses`; 422 through the API). A change that drops the event
+  clears its list, and a `PATCH` that leaves a list out keeps it; Settings always sends both (null
+  while every status is ticked). Checks in the database hold the same rule (null, or 1 to 3 known
+  statuses in one dimension without a null, with the event).
+- **Applied at capture:** `app.capture_webhook_event` matches the status the change reached, which
+  the deal and task triggers pass as the event's status (0171, 0177), against each active endpoint's
+  list, in the transaction that makes the change; no row is read for it. No event is written when no
+  endpoint takes it, and stored events are unchanged.
+- **Audited and exported:** `webhook.endpoint_created` and `webhook.endpoint_updated` carry
+  `dealStatuses` and `taskStatuses` when the endpoint has them, and the company data export carries
+  the columns.
+- **Permissions unchanged:** members with `developer.manage` in Settings, keys with
+  `webhooks.manage` through the API.
+- **Migration 0232:** `deal_statuses text[]` and `task_statuses text[]` on `app.webhook_endpoints`
+  with their checks, validated at once (a company has at most 10 endpoints), update grants on the
+  columns for the runtime role, and `app.capture_webhook_event` replaced with the same signature
+  (0231's, with the deal and task statuses), so its owner and grants stay. Existing endpoints keep
+  null; nothing is backfilled.
+
+Not built: lists by the status a deal or task left (`previousStatus`), a deal's lost reason, and
+statuses for the deal's and task's other events (a deal added, moved or edited, a task added, edited
+or reassigned), which report no change of status.

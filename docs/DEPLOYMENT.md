@@ -1061,6 +1061,15 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    keep it, and its API refuses `paymentLinkStatuses` (422) and leaves it out of the endpoints it
    answers.
 
+   Migration 0232 (ADR-309) adds `deal_statuses` and `task_statuses` to `app.webhook_endpoints` with
+   checks validated by reading the table, and replaces `app.capture_webhook_event` (keeping 0231's
+   filters) with the same signature; every endpoint starts with neither list. Web servers of this
+   release need it, as their reads of endpoints name the columns; workers do not read them. Web
+   servers from before it neither show nor change the columns: until the web rollout ends, an old
+   server's change that drops `deal.status_changed` or `task.status_changed` from an endpoint with
+   that event's list fails on the check, its other changes keep the lists, and its API refuses
+   `dealStatuses` and `taskStatuses` (422) and leaves them out of the endpoints it answers.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

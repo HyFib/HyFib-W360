@@ -32,6 +32,8 @@ import {
   WEBHOOK_MESSAGE_STATUSES,
   WEBHOOK_ORDER_STATUSES,
   WEBHOOK_PAYMENT_LINK_STATUSES,
+  WEBHOOK_DEAL_STATUSES,
+  WEBHOOK_TASK_STATUSES,
   WEBHOOK_RUN_END_STATUSES,
   WEBHOOK_RUN_TRIGGERS,
   WEBHOOK_CONSENT_CHANGES,
@@ -1206,6 +1208,18 @@ export const apiWebhookEndpointSchema = z.object({
     .nullable()
     .describe(
       'The statuses a Payment Link reaches that the endpoint receives as payment_link.status_changed; null receives every status.',
+    ),
+  dealStatuses: z
+    .array(z.enum(WEBHOOK_DEAL_STATUSES))
+    .nullable()
+    .describe(
+      'The statuses a deal reaches that the endpoint receives as deal.status_changed (open is a deal reopened); null receives every status.',
+    ),
+  taskStatuses: z
+    .array(z.enum(WEBHOOK_TASK_STATUSES))
+    .nullable()
+    .describe(
+      'The statuses a task reaches that the endpoint receives as task.status_changed (open is a task reopened); null receives every status.',
     ),
   templateStatuses: z
     .array(z.enum(WEBHOOK_TEMPLATE_STATUSES))
@@ -4198,7 +4212,7 @@ export function buildOpenApiDocument(serverUrl: string) {
       'deal.status_changed': webhook(
         'webhookDealStatusChanged',
         WEBHOOK_EVENT_INFO['deal.status_changed'].label,
-        `${WEBHOOK_EVENT_INFO['deal.status_changed'].description} deal.status and deal.previousStatus are the change (open, won or lost), with the stage and pipeline it was in; the rest is the deal when the event is delivered, so deal.lostReason is its reason then. A change that also moves the deal sends deal.stage_changed as well (see it for their order). Deliveries are not ordered: the latest change is the one with the latest createdAt.`,
+        `${WEBHOOK_EVENT_INFO['deal.status_changed'].description} deal.status and deal.previousStatus are the change (open, won or lost), with the stage and pipeline it was in; the rest is the deal when the event is delivered, so deal.lostReason is its reason then. A change that also moves the deal sends deal.stage_changed as well (see it for their order). An endpoint receives every status unless it names the statuses it takes (its \`dealStatuses\`, or the statuses ticked in Settings → Webhooks). Deliveries are not ordered: the latest change is the one with the latest createdAt.`,
         'WebhookDealStatusChanged',
       ),
       'task.created': webhook(
@@ -4222,7 +4236,7 @@ export function buildOpenApiDocument(serverUrl: string) {
       'task.status_changed': webhook(
         'webhookTaskStatusChanged',
         WEBHOOK_EVENT_INFO['task.status_changed'].label,
-        `${WEBHOOK_EVENT_INFO['task.status_changed'].description} task.status and task.previousStatus are the change (open, done or cancelled); the rest is the task when the event is delivered. Editing its title, notes, due time or reminder sends task.updated, and giving it to another member task.assignee_changed. Deliveries are not ordered: the latest change is the one with the latest createdAt.`,
+        `${WEBHOOK_EVENT_INFO['task.status_changed'].description} task.status and task.previousStatus are the change (open, done or cancelled); the rest is the task when the event is delivered. An endpoint receives every status unless it names the statuses it takes (its \`taskStatuses\`, or the statuses ticked in Settings → Webhooks). Editing its title, notes, due time or reminder sends task.updated, and giving it to another member task.assignee_changed. Deliveries are not ordered: the latest change is the one with the latest createdAt.`,
         'WebhookTaskStatusChanged',
       ),
       'note.created': webhook(

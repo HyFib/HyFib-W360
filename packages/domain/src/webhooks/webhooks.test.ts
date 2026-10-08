@@ -70,6 +70,10 @@ import {
   WEBHOOK_ORDER_STATUSES,
   WEBHOOK_PAYMENT_LINK_STATUS_LABELS,
   WEBHOOK_PAYMENT_LINK_STATUSES,
+  WEBHOOK_DEAL_STATUS_LABELS,
+  WEBHOOK_DEAL_STATUSES,
+  WEBHOOK_TASK_STATUS_LABELS,
+  WEBHOOK_TASK_STATUSES,
   WEBHOOK_REPLAY_PERIODS,
   WEBHOOK_RETRY_SECONDS,
   WEBHOOK_TEMPLATE_STATUS_LABELS,
@@ -205,6 +209,12 @@ import {
   webhookPaymentLinkStatusesFor,
   webhookPaymentLinkStatusesSchema,
   WEBHOOK_PAYMENT_LINK_STATUSES_NEED_THE_EVENT,
+  webhookDealStatusesFor,
+  webhookDealStatusesSchema,
+  WEBHOOK_DEAL_STATUSES_NEED_THE_EVENT,
+  webhookTaskStatusesFor,
+  webhookTaskStatusesSchema,
+  WEBHOOK_TASK_STATUSES_NEED_THE_EVENT,
   webhookTeamIdsFor,
   webhookTeamIdsSchema,
   webhookTemplateIdsFor,
@@ -2508,6 +2518,97 @@ describe('Payment Link status filters (ADR-308)', () => {
     ).toBeNull();
     expect(WEBHOOK_PAYMENT_LINK_STATUSES_NEED_THE_EVENT).toBe(
       `Choose Payment Link statuses only for an endpoint that receives ${WEBHOOK_EVENT_INFO['payment_link.status_changed'].label}.`,
+    );
+  });
+});
+
+describe('deal and task status filters (ADR-309)', () => {
+  it('take 1 to 3 of the statuses a deal or a task reaches, once each, in the order the CRM lists them; null takes every status', () => {
+    expect(webhookDealStatusesSchema.parse(['lost', 'won', 'lost'])).toEqual(['won', 'lost']);
+    expect(webhookTaskStatusesSchema.parse(['cancelled', 'open', 'cancelled'])).toEqual([
+      'open',
+      'cancelled',
+    ]);
+    expect(webhookDealStatusesSchema.parse(null)).toBeNull();
+    expect(webhookTaskStatusesSchema.parse(null)).toBeNull();
+    // Every status a deal or a task has: a change reaches any of them (`open` when reopened).
+    expect(WEBHOOK_DEAL_STATUSES).toEqual([...DEAL_STATUSES]);
+    expect(WEBHOOK_TASK_STATUSES).toEqual([...TASK_STATUSES]);
+    for (const refused of [
+      [],
+      ['closed'],
+      ['Won'],
+      ['won', 'done'],
+      'won',
+      [null],
+      Array(4).fill('won'),
+    ]) {
+      expect(webhookDealStatusesSchema.safeParse(refused).success, JSON.stringify(refused)).toBe(
+        false,
+      );
+    }
+    for (const refused of [
+      [],
+      ['completed'],
+      ['done', 'won'],
+      'done',
+      [null],
+      Array(4).fill('done'),
+    ]) {
+      expect(webhookTaskStatusesSchema.safeParse(refused).success, JSON.stringify(refused)).toBe(
+        false,
+      );
+    }
+    expect(webhookDealStatusesSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one deal status, or take every status.',
+    );
+    expect(webhookDealStatusesSchema.safeParse(['closed']).error?.issues[0]?.message).toBe(
+      'Choose deal statuses from the list.',
+    );
+    expect(
+      webhookDealStatusesSchema.safeParse(Array(4).fill('won')).error?.issues[0]?.message,
+    ).toBe('Give each deal status once.');
+    expect(webhookTaskStatusesSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one task status, or take every status.',
+    );
+    expect(webhookTaskStatusesSchema.safeParse(['completed']).error?.issues[0]?.message).toBe(
+      'Choose task statuses from the list.',
+    );
+    expect(
+      webhookTaskStatusesSchema.safeParse(Array(4).fill('done')).error?.issues[0]?.message,
+    ).toBe('Give each task status once.');
+    // Named by the change each reports.
+    expect(WEBHOOK_DEAL_STATUS_LABELS).toEqual({ open: 'Reopened', won: 'Won', lost: 'Lost' });
+    expect(WEBHOOK_TASK_STATUS_LABELS).toEqual({
+      open: 'Reopened',
+      done: 'Done',
+      cancelled: 'Cancelled',
+    });
+  });
+
+  it('are kept only while the endpoint takes the status changes: given, kept, or cleared', () => {
+    const deals = ['deal.status_changed', 'deal.created'] as const;
+    expect(webhookDealStatusesFor([...deals], ['won'], null)).toEqual(['won']);
+    expect(webhookDealStatusesFor([...deals], undefined, ['lost'])).toEqual(['lost']);
+    expect(webhookDealStatusesFor([...deals], null, ['lost'])).toBeNull();
+    expect(webhookDealStatusesFor([...deals], undefined, null)).toBeNull();
+    // A deal's other events, and a task's status changes, have no deal status to choose.
+    expect(
+      webhookDealStatusesFor(['deal.created', 'task.status_changed'], ['won'], ['lost']),
+    ).toBeNull();
+    const tasks = ['task.status_changed', 'task.created'] as const;
+    expect(webhookTaskStatusesFor([...tasks], ['done'], null)).toEqual(['done']);
+    expect(webhookTaskStatusesFor([...tasks], undefined, ['cancelled'])).toEqual(['cancelled']);
+    expect(webhookTaskStatusesFor([...tasks], null, ['cancelled'])).toBeNull();
+    expect(webhookTaskStatusesFor([...tasks], undefined, null)).toBeNull();
+    expect(
+      webhookTaskStatusesFor(['task.created', 'deal.status_changed'], ['done'], ['open']),
+    ).toBeNull();
+    expect(WEBHOOK_DEAL_STATUSES_NEED_THE_EVENT).toBe(
+      `Choose deal statuses only for an endpoint that receives ${WEBHOOK_EVENT_INFO['deal.status_changed'].label}.`,
+    );
+    expect(WEBHOOK_TASK_STATUSES_NEED_THE_EVENT).toBe(
+      `Choose task statuses only for an endpoint that receives ${WEBHOOK_EVENT_INFO['task.status_changed'].label}.`,
     );
   });
 });

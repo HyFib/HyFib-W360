@@ -176,6 +176,8 @@ import {
   WEBHOOK_CONVERSATION_STATUSES_NEED_THE_EVENT,
   WEBHOOK_ORDER_STATUSES_NEED_THE_EVENT,
   WEBHOOK_PAYMENT_LINK_STATUSES_NEED_THE_EVENT,
+  WEBHOOK_DEAL_STATUSES_NEED_THE_EVENT,
+  WEBHOOK_TASK_STATUSES_NEED_THE_EVENT,
   WEBHOOK_RUN_END_STATUSES_NEED_THE_EVENT,
   WEBHOOK_SENDERS_NEED_THE_EVENT,
   WEBHOOK_TEAMS_NEED_THE_EVENTS,
@@ -193,6 +195,8 @@ import {
   WEBHOOK_FAILURE_KINDS,
   WEBHOOK_LIMITS,
   WEBHOOK_PAYMENT_LINK_STATUSES,
+  WEBHOOK_DEAL_STATUSES,
+  WEBHOOK_TASK_STATUSES,
 } from '../webhooks/model';
 import {
   apiStartManyAutomationRuns,
@@ -1466,6 +1470,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'conversationStatuses',
       'conversationTags',
       'crmChangeMakers',
+      'dealStatuses',
       'description',
       'enabled',
       'events',
@@ -1490,6 +1495,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'taskDealOwnerIds',
       'taskPipelineIds',
       'taskStageIds',
+      'taskStatuses',
       'teamIds',
       'templateIds',
       'templateStatuses',
@@ -1572,6 +1578,19 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     expect(webhooks['payment_link.status_changed']?.post?.description).toContain(
       'An endpoint receives every status unless it names the statuses it takes (its `paymentLinkStatuses`',
     );
+    // The deal and task statuses an endpoint receives (ADR-309): lists, or null.
+    for (const [field, event] of [
+      ['dealStatuses', 'deal.status_changed'],
+      ['taskStatuses', 'task.status_changed'],
+    ] as const) {
+      const list = (answered.properties as Record<string, { anyOf?: unknown[] }>)[field];
+      expect(list?.anyOf, field).toHaveLength(2);
+      expect(answered.required).toContain(field);
+      expect(Object.keys(createBody.properties)).toContain(field);
+      expect(webhooks[event]?.post?.description).toContain(
+        `An endpoint receives every status unless it names the statuses it takes (its \`${field}\``,
+      );
+    }
     // The template statuses an endpoint receives (ADR-148): a list, or null.
     const templateStatuses = (answered.properties as Record<string, { anyOf?: unknown[] }>)
       .templateStatuses;
@@ -3352,6 +3371,77 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       .properties;
     expect(JSON.stringify(given.paymentLinkStatuses)).toContain(
       'as payment_link.status_changed (created, partially_paid, paid, expired, cancelled, failed), only with the payment_link.status_changed event',
+    );
+  });
+
+  it('take deal and task statuses only with their status changes, and a list of them alone is a change (ADR-309)', () => {
+    const url = 'https://hooks.example.com/w360';
+    expect(
+      apiCreateWebhookEndpointSchema.parse({
+        url,
+        events: ['deal.status_changed', 'task.status_changed'],
+        dealStatuses: ['lost', 'won', 'lost'],
+        taskStatuses: ['cancelled', 'open'],
+      }),
+    ).toMatchObject({ dealStatuses: ['won', 'lost'], taskStatuses: ['open', 'cancelled'] });
+    const refused = apiCreateWebhookEndpointSchema.safeParse({
+      url,
+      events: ['deal.created', 'task.created'],
+      dealStatuses: ['won'],
+      taskStatuses: ['done'],
+    });
+    expect(refused.error?.issues.map((i) => [i.path.join('.'), i.message])).toEqual([
+      ['dealStatuses', WEBHOOK_DEAL_STATUSES_NEED_THE_EVENT],
+      ['taskStatuses', WEBHOOK_TASK_STATUSES_NEED_THE_EVENT],
+    ]);
+    // Each list needs its own event: a deal's status changes take no task statuses, and back.
+    for (const [events, lists, path] of [
+      [['deal.status_changed'], { taskStatuses: ['done'] }, 'taskStatuses'],
+      [['task.status_changed'], { dealStatuses: ['won'] }, 'dealStatuses'],
+    ] as const) {
+      const crossed = apiCreateWebhookEndpointSchema.safeParse({ url, events, ...lists });
+      expect(crossed.error?.issues.map((i) => i.path.join('.'))).toEqual([path]);
+    }
+    for (const body of [
+      { url, events: ['deal.status_changed'], dealStatuses: [] },
+      { url, events: ['deal.status_changed'], dealStatuses: ['done'] },
+      { url, events: ['task.status_changed'], taskStatuses: [] },
+      { url, events: ['task.status_changed'], taskStatuses: ['won'] },
+    ]) {
+      expect(apiCreateWebhookEndpointSchema.safeParse(body).success, JSON.stringify(body)).toBe(
+        false,
+      );
+    }
+    for (const change of [
+      { dealStatuses: null },
+      { dealStatuses: ['open'] },
+      { taskStatuses: null },
+      { taskStatuses: ['done'] },
+    ]) {
+      expect(apiUpdateWebhookEndpointSchema.parse(change)).toEqual(change);
+    }
+    expect(apiUpdateWebhookEndpointSchema.safeParse({}).error?.issues[0]?.message).toContain(
+      'the conversation statuses, the deal statuses, the task statuses, the run end statuses',
+    );
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas;
+    const answered = schemas.WebhookEndpoint as {
+      properties: Record<string, { anyOf?: { items?: { enum?: string[] } }[] }>;
+    };
+    expect(answered.properties.dealStatuses?.anyOf?.[0]?.items?.enum).toEqual([
+      ...WEBHOOK_DEAL_STATUSES,
+    ]);
+    expect(answered.properties.taskStatuses?.anyOf?.[0]?.items?.enum).toEqual([
+      ...WEBHOOK_TASK_STATUSES,
+    ]);
+    const given = (schemas.CreateWebhookEndpoint as { properties: Record<string, unknown> })
+      .properties;
+    expect(JSON.stringify(given.dealStatuses)).toContain(
+      'as deal.status_changed (open, won, lost; open is a deal reopened), only with the deal.status_changed event',
+    );
+    expect(JSON.stringify(given.taskStatuses)).toContain(
+      'as task.status_changed (open, done, cancelled; open is a task reopened), only with the task.status_changed event',
     );
   });
 
