@@ -963,4 +963,28 @@ describe('the administrators the Assign list offers (ADR-325)', () => {
     ]);
     expect(new Set(choices.map((c) => c.label)).size).toBe(choices.length);
   });
+
+  it('never gives two the same label, whatever names administrators choose', () => {
+    const since = at('2026-10-01T09:30:00Z');
+    const choices = platformAdministratorChoices(
+      [
+        { userId: 'u-me', name: 'Asha', since },
+        { userId: 'u-b', name: 'Asha (you)', since },
+        { userId: 'u-c', name: 'Asha (you) #1', since },
+        { userId: 'u-d', name: 'Ravi #1', since },
+        { userId: 'u-e', name: 'Ravi', since },
+        { userId: 'u-f', name: 'Ravi', since },
+      ],
+      'u-me',
+    );
+    expect(choices.map((c) => c.label)).toEqual([
+      'Asha (you) #2',
+      'Asha (you) #3',
+      'Asha (you) #1',
+      'Ravi #1',
+      'Ravi (administrator since 2026-10-01 09:30 UTC) #1',
+      'Ravi (administrator since 2026-10-01 09:30 UTC) #2',
+    ]);
+    expect(new Set(choices.map((c) => c.label)).size).toBe(choices.length);
+  });
 });

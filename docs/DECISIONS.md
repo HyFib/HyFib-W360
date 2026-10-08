@@ -12358,7 +12358,7 @@ Decision:
   the list out keeps it. A check in the database holds the same rule and the list's shape (null, or
   1 to 20 ids in one dimension without a null, with `message.status`).
 - **Applied at capture:** the message trigger now passes the key that sent the message (`apiKeyId`,
-  absent for any other message) with `message.status`, and `app.capture_webhook_event` reads the
+  null for any other message) with `message.status`, and `app.capture_webhook_event` reads the
   key's rotations only when an active endpoint of the company taking the event names keys for
   messages, then creates a delivery only for the endpoints whose list is null or shares one of them.
   The rotations are read by `app.webhook_api_key_family`, which both key filters now share: a plain
@@ -12565,7 +12565,7 @@ Decision:
   database holds the same rule and the list's shape (null, or 1 to 20 ids in one dimension without a
   null, with `payment_link.status_changed`).
 - **Applied at capture:** the link trigger now passes the key that asked for the link (`apiKeyId`,
-  absent for a member's link) with `payment_link.status_changed`, and `app.capture_webhook_event`
+  null for a member's link) with `payment_link.status_changed`, and `app.capture_webhook_event`
   reads the key's rotations through `app.webhook_api_key_family` only when an active endpoint of the
   company taking the event names keys for links, then creates a delivery only for the endpoints
   whose list is null or shares one of them. The key is taken out of the stored detail: the payload
@@ -12599,9 +12599,10 @@ Decision:
 - **A shared name gets when they became an administrator:** any other administrator whose name
   another one has gets "(administrator since YYYY-MM-DD HH:MM UTC)", from
   `ops.platform_admins.created_at`, which platform administrators can already read; administrators
-  still alike after that get "#1", "#2"… in the list's order (by name, then account). An
-  administrator without a name is "An administrator without a name", told apart the same way. No two
-  choices read the same.
+  still alike after that get "#1", "#2"… in the list's order (by name, then account), and so does a
+  label that would read like another one, since names are the administrators' own (one could be
+  named "Asha (you)"). An administrator without a name is "An administrator without a name", told
+  apart the same way. No two choices read the same.
 - **Names only where they were shown:** the rows still say "To …" and "By …" by name, the CSV still
   leaves assignments out, and nothing new is read about an administrator but when they became one.
   Built in `platformAdministratorChoices` (`platform/ops-model.ts`); the Integrations tab's

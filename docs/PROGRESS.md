@@ -13,20 +13,20 @@ below were changed but not run here.
   shared name followed by when the account became an administrator, then a place);
   `PlatformAdministrator.since`; the Integrations tab's administrators carry the label.
 - **Web:** the Assign form's options read the label.
-- **Tests:** unit (2 new in `platform/ops-model.test.ts`); integration (1 changed: assigning
+- **Tests:** unit (3 new in `platform/ops-model.test.ts`, one with names chosen to read like another's label); integration (1 changed: assigning
   failures in `platform-ops.test.ts` checks the reader's mark, two administrators of one name and
   that every label differs); e2e (1 changed: `platform-ops.spec.ts` chooses its administrator as
   "(you)"). The integration and e2e tests were not run here.
 - **Docs:** ADR-325; ARCHITECTURE; SECURITY; THREAT-MODEL T293; RUNBOOKS; BACKLOG P5-10; feature
   matrix H-034.
-- **Mutation checks:** 8/8 deliberate regressions caught on the unit-tested parts.
+- **Mutation checks:** 9/9 deliberate regressions caught on the unit-tested parts.
 
 ### Test commands and results (local, 2026-10-08)
 
 | Command                                            | Result                                                          |
 | -------------------------------------------------- | --------------------------------------------------------------- |
 | `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
-| `pnpm test` (unit)                                 | 140 files, 1364 tests passed                                    |
+| `pnpm test` (unit)                                 | 140 files, 1365 tests passed                                    |
 | `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
 | `pnpm build`                                       | passed                                                          |
 | gitleaks 8.30.1 on the staged changes              | no leaks found                                                  |

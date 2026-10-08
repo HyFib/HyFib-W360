@@ -1020,7 +1020,7 @@ const API_KEY_WORDS = {
   },
   paymentLinks: {
     legend: 'Payment Links asked for through the API',
-    help: 'A Payment Link asked for through the API belongs to the key that asked for it, and to the keys that key was rotated from or into; a link a member asked for belongs to none. With Payment Link statuses chosen too, a change must pass both.',
+    help: 'A Payment Link asked for through the API belongs to the key that asked for it, and to the keys that key was rotated from or into; a link a member asked for belongs to none. With Payment Link statuses or numbers chosen too, a change must pass them all.',
     every: 'Every Payment Link’s changes',
     everyHelp: 'Including links members asked for, and by keys added later.',
     only: 'Only the changes of the links the API keys ticked asked for',
@@ -1034,9 +1034,9 @@ const API_KEY_WORDS = {
  * deal, task and note changes (ADR-321) or order changes (ADR-323) it leaves out, or whose Payment
  * Links' changes it takes (ADR-324), as `kind` says,
  * shown while it takes their events: every run, message or change, or only those of the keys
- * ticked, or all but theirs. The keys that can start automations, send messages or change deals,
- * tasks, notes or orders, work and were not rotated are offered; one the endpoint already names
- * stays listed, ticked, until it is unticked.
+ * ticked, or all but theirs. The keys that can start automations, send messages, change deals,
+ * tasks, notes or orders, or ask customers to pay, work and were not rotated are offered; one the
+ * endpoint already names stays listed, ticked, until it is unticked.
  */
 function ApiKeyChoices({
   kind,

@@ -724,10 +724,20 @@ export function platformAdministratorChoices(
           ? `${nameOf(a)} (administrator since ${csvMinute(a.since)} UTC)`
           : nameOf(a),
   }));
+  // Names are the administrators' own, so a place is added until the label is one no other choice
+  // has or could have: never a label already given, nor one another choice reads before its place.
+  const plain = new Set(labelled.map((c) => c.label));
+  const given = new Set<string>();
   return labelled.map((c) => {
-    const alike = labelled.filter((d) => d.label === c.label);
-    if (alike.length === 1) return c;
-    return { ...c, label: `${c.label} #${alike.indexOf(c) + 1}` };
+    const alike = labelled.filter((d) => d.label === c.label).length > 1;
+    let label = c.label;
+    let place = 0;
+    while ((alike && place === 0) || given.has(label) || (place > 0 && plain.has(label))) {
+      place += 1;
+      label = `${c.label} #${place}`;
+    }
+    given.add(label);
+    return { ...c, label };
   });
 }
 
