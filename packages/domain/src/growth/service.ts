@@ -144,6 +144,51 @@ export interface AdSourceView {
   lastAt: string;
 }
 
+/**
+ * The click-to-WhatsApp ads customers wrote from in the last 30 days, as Growth → Ads lists them and
+ * the public API gives them (ADR-302): one row for each id, type, headline and web address Meta sent,
+ * those that started the most conversations first, then the latest, at most `GROWTH_LIMITS.adsShown`.
+ */
+export async function readAdSources(tx: Tx, tenantId: string): Promise<AdSourceView[]> {
+  const conversationCount = sql`count(distinct ${conversationSources.conversationId})`;
+  const lastAt = sql`max(${conversationSources.occurredAt})`;
+  const rows = await tx
+    .select({
+      sourceId: conversationSources.adSourceId,
+      sourceType: conversationSources.adSourceType,
+      headline: conversationSources.adHeadline,
+      sourceUrl: conversationSources.adSourceUrl,
+      conversations: sql<number>`${conversationCount}::int`,
+      messages: sql<number>`count(*)::int`,
+      lastAt: sql<Date>`${lastAt}`,
+    })
+    .from(conversationSources)
+    .where(
+      and(
+        eq(conversationSources.tenantId, tenantId),
+        eq(conversationSources.kind, 'ad'),
+        sql`${conversationSources.occurredAt} > now() - interval '30 days'`,
+      ),
+    )
+    .groupBy(
+      conversationSources.adSourceId,
+      conversationSources.adSourceType,
+      conversationSources.adHeadline,
+      conversationSources.adSourceUrl,
+    )
+    // Ties broken by every grouped column, so the order is the same on every read.
+    .orderBy(
+      sql`${conversationCount} desc`,
+      sql`${lastAt} desc`,
+      sql`${conversationSources.adSourceId} asc nulls last`,
+      sql`${conversationSources.adSourceType} asc nulls last`,
+      sql`${conversationSources.adHeadline} asc nulls last`,
+      sql`${conversationSources.adSourceUrl} asc nulls last`,
+    )
+    .limit(GROWTH_LIMITS.adsShown);
+  return rows.map((r) => ({ ...r, lastAt: new Date(r.lastAt).toISOString() }));
+}
+
 const channelName = sql<string>`coalesce(${channelAccounts.verifiedName}, ${channelAccounts.displayPhoneNumber}, ${channelAccounts.phoneNumberId})`;
 
 /**
@@ -684,38 +729,9 @@ export function createGrowthService(deps: { db: Database; clock: Clock }) {
     /** Click-to-WhatsApp ads that started conversations in the last 30 days, busiest first. */
     async adSources(ctx: TenantContext): Promise<AdSourceView[]> {
       readable(ctx);
-      const rows = await db.run(
-        ctx.scope,
-        (tx) =>
-          tx
-            .select({
-              sourceId: conversationSources.adSourceId,
-              sourceType: conversationSources.adSourceType,
-              headline: conversationSources.adHeadline,
-              sourceUrl: conversationSources.adSourceUrl,
-              conversations: sql<number>`count(distinct ${conversationSources.conversationId})::int`,
-              messages: sql<number>`count(*)::int`,
-              lastAt: sql<Date>`max(${conversationSources.occurredAt})`,
-            })
-            .from(conversationSources)
-            .where(
-              and(
-                eq(conversationSources.tenantId, ctx.tenant.id),
-                eq(conversationSources.kind, 'ad'),
-                sql`${conversationSources.occurredAt} > now() - interval '30 days'`,
-              ),
-            )
-            .groupBy(
-              conversationSources.adSourceId,
-              conversationSources.adSourceType,
-              conversationSources.adHeadline,
-              conversationSources.adSourceUrl,
-            )
-            .orderBy(sql`count(distinct ${conversationSources.conversationId}) desc`)
-            .limit(200),
-        { accessMode: 'read only' },
-      );
-      return rows.map((r) => ({ ...r, lastAt: new Date(r.lastAt).toISOString() }));
+      return db.run(ctx.scope, (tx) => readAdSources(tx, ctx.tenant.id), {
+        accessMode: 'read only',
+      });
     },
   };
 }

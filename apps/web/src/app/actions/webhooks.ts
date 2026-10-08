@@ -40,6 +40,8 @@ export async function createWebhookEndpointAction(
     campaignStatuses: string[] | null;
     /** The order statuses it takes (ADR-147); null takes every status. */
     orderStatuses: string[] | null;
+    /** The Payment Link statuses it takes (ADR-308); null takes every status. */
+    paymentLinkStatuses: string[] | null;
     /** The template statuses it takes (ADR-148); null takes every status. */
     templateStatuses: string[] | null;
     /** The conversation statuses it takes (ADR-149); null takes every status. */
@@ -72,6 +74,22 @@ export async function createWebhookEndpointAction(
     ownerIds: string[] | null;
     /** The members whose tasks' events it takes (ADR-266); null takes every task's. */
     taskAssigneeIds: string[] | null;
+    /** The CRM pipelines whose deals' tasks' events it takes (ADR-303); null: every task's. */
+    taskPipelineIds: string[] | null;
+    /** The CRM stages whose deals' tasks' events it takes (ADR-304); null: every task's. */
+    taskStageIds: string[] | null;
+    /** The members whose deals' tasks' events it takes (ADR-304); null: every task's. */
+    taskDealOwnerIds: string[] | null;
+    /** The CRM pipelines whose deals' notes' events it takes (ADR-305); null: every note's. */
+    notePipelineIds: string[] | null;
+    /** The CRM stages whose deals' notes' events it takes (ADR-305); null: every note's. */
+    noteStageIds: string[] | null;
+    /** The members whose deals' notes' events it takes (ADR-305); null: every note's. */
+    noteDealOwnerIds: string[] | null;
+    /** Who made the changes whose deal, task and note events it takes (ADR-306); null: all. */
+    crmChangeMakers: string[] | null;
+    /** The scores of the satisfaction survey answers it takes (ADR-307); null: every answer. */
+    surveyScores: number[] | null;
     /** The members whose assigned conversations' events it takes (ADR-181); null: every one's. */
     assigneeIds: string[] | null;
     /** The contact tags whose conversations' events it takes (ADR-267); null: every one's. */
@@ -114,6 +132,8 @@ export async function updateWebhookEndpointAction(
     campaignStatuses: string[] | null;
     /** The order statuses it takes (ADR-147); null takes every status. */
     orderStatuses: string[] | null;
+    /** The Payment Link statuses it takes (ADR-308); null takes every status. */
+    paymentLinkStatuses: string[] | null;
     /** The template statuses it takes (ADR-148); null takes every status. */
     templateStatuses: string[] | null;
     /** The conversation statuses it takes (ADR-149); null takes every status. */
@@ -146,6 +166,22 @@ export async function updateWebhookEndpointAction(
     ownerIds: string[] | null;
     /** The members whose tasks' events it takes (ADR-266); null takes every task's. */
     taskAssigneeIds: string[] | null;
+    /** The CRM pipelines whose deals' tasks' events it takes (ADR-303); null: every task's. */
+    taskPipelineIds: string[] | null;
+    /** The CRM stages whose deals' tasks' events it takes (ADR-304); null: every task's. */
+    taskStageIds: string[] | null;
+    /** The members whose deals' tasks' events it takes (ADR-304); null: every task's. */
+    taskDealOwnerIds: string[] | null;
+    /** The CRM pipelines whose deals' notes' events it takes (ADR-305); null: every note's. */
+    notePipelineIds: string[] | null;
+    /** The CRM stages whose deals' notes' events it takes (ADR-305); null: every note's. */
+    noteStageIds: string[] | null;
+    /** The members whose deals' notes' events it takes (ADR-305); null: every note's. */
+    noteDealOwnerIds: string[] | null;
+    /** Who made the changes whose deal, task and note events it takes (ADR-306); null: all. */
+    crmChangeMakers: string[] | null;
+    /** The scores of the satisfaction survey answers it takes (ADR-307); null: every answer. */
+    surveyScores: number[] | null;
     /** The members whose assigned conversations' events it takes (ADR-181); null: every one's. */
     assigneeIds: string[] | null;
     /** The contact tags whose conversations' events it takes (ADR-267); null: every one's. */

@@ -11495,3 +11495,342 @@ Decision:
 
 Not built: a conversation's earlier sources, sources in webhook events, and the ads that brought
 conversations, which members see under Growth → Ads.
+
+## ADR-302 Click-to-WhatsApp ads through the public API (P5-08) (2026-10-07)
+
+Context: Growth → Ads lists the click-to-WhatsApp ads customers wrote from in the last 30 days, with
+the conversations each started (ADR-044), and keys read each conversation's source (ADR-301), but
+not the ads themselves or an ad's conversations, so a company could not compare its ads in its own
+tools or follow an ad's conversations there.
+
+Decision:
+
+- **An `ads.read` scope** ("Read ads"), reading, granted only by members who hold `campaigns.read`,
+  as the Growth pages need. Existing keys and plans that chose their scopes do not gain it. With it
+  the API has 39 scopes; migration 0225 replaces the keys' and plans' scope checks, validated at
+  once.
+- **`GET /api/v1/ads`** (`listAds`) gives the ads as Growth → Ads lists them, by the page's reader,
+  now shared (`readAdSources` in `growth/service.ts`): one row for each id, type, headline and web
+  address Meta sent with an ad, those that started the most conversations first, then the latest, at
+  most 200, each with the conversations it started and the customers' messages that came from it in
+  the last 30 days and when the latest arrived. Ties are now broken by every grouped column, so the
+  page and the API keep one order. It takes no parameters (422 for any), reads in a read-only
+  transaction, and works while the company is suspended.
+- **`adId` on `GET /conversations`** and on the conversations a change finds (ADR-166): the
+  conversations whose customer wrote from the ad with that id, at any time, among the sources
+  ADR-301 filters by; trimmed, 1 to 128 characters, as ids are kept.
+- **Nothing more is kept or given:** HyFib keeps only what identifies an ad (ADR-044), never the ad
+  click id, image or video addresses or the ad's text, and connects no ad account, so spend and cost
+  per conversation are not given.
+
+Not built: ads over other periods, ads of one number, and ad spend, which needs an ad account HyFib
+does not connect.
+
+## ADR-303 Choosing the CRM pipelines whose deals' tasks' events a webhook endpoint receives (P5-09, P4-04) (2026-10-07)
+
+Context: an endpoint taking task events (ADR-261) received those of every task of the company unless
+it named the members the tasks are assigned to (ADR-266); the deal filters (ADR-263 to ADR-265)
+narrow deal events only. A company that runs a pipeline per team (sales and renewals, say) and
+connects each to its own system had every pipeline's tasks sent to every receiver, which had to read
+`task.dealId`, look the deal up and drop the rest. ADR-263 and ADR-266 left task events by their
+deal's pipeline unbuilt.
+
+Decision:
+
+- **A list of pipelines per endpoint for its task events,** apart from its deals' (`pipelineIds`,
+  ADR-263), for the four task events: null receives every task's, as before; a list holds 1 to 50 of
+  the company's pipelines, by id, in the order given with repeats merged. A task's event counts when
+  the task is about a deal and that deal's pipeline is listed when the event happens: a task about a
+  contact alone, or about nobody, is in no pipeline. A task's deal never changes, but the deal may
+  move to another pipeline, and the task's later events go by the new one. With task assignees too
+  (ADR-266), an event must pass both. Deal events and every other event are not narrowed, and the
+  deals' pipelines do not narrow task events. Chosen in Settings → Webhooks ("Pipelines of tasks’
+  deals": every task's events, or only those of the tasks about deals in the pipelines ticked),
+  shown on the endpoint as "Pipelines whose deals’ tasks’ events are sent: …", and through the API
+  as `taskPipelineIds` on `POST /webhook-endpoints` and `PATCH /webhook-endpoints/{id}` and in every
+  endpoint the API answers.
+- **The company's pipelines, archived ones too,** as for deals: a list given now may hold only
+  pipelines of the company, checked in its scope by the deals' check, now shared; pipelines are
+  archived, never deleted, so a list never names one that is gone, and an archived pipeline has no
+  open deal to take tasks for until it is restored. Settings offers the pipelines the company uses,
+  in board order, and keeps listing an archived one the endpoint already names, marked as archived;
+  the API takes any of the company's, as `GET /pipelines` lists them.
+- **Only while a task event is taken:** a list given for an endpoint that takes none is refused
+  (`taskPipelineIds`; 422 through the API). A change that drops all four clears it, and a `PATCH`
+  that leaves it out keeps it; Settings always sends it. A check in the database holds the same rule
+  (null, or 1 to 50 ids in one dimension without a null, with a task event).
+- **Applied at capture:** `app.capture_webhook_event` reads the pipeline of the task's deal, from
+  `app.crm_tasks` and `app.crm_deals` by the task the trigger stores in the event's detail and as
+  the transaction sees them, only when an active endpoint of the company that takes the event names
+  pipelines of tasks' deals, and matches it against each endpoint's list. The task trigger runs as
+  whoever changes the task, in the company's scope. No event is written when no endpoint takes it,
+  and stored events are unchanged.
+- **Audited and exported:** `webhook.endpoint_created` and `webhook.endpoint_updated` carry
+  `taskPipelineIds` when the endpoint has a list, and the company data export carries the column.
+- **Permissions unchanged:** members with `developer.manage` in Settings, keys with
+  `webhooks.manage` through the API.
+- **Migration 0226:** `task_pipeline_ids uuid[]` on `app.webhook_endpoints` with the check,
+  validated at once (a company has at most 10 endpoints), an update grant on the column for the
+  runtime role, and `app.capture_webhook_event` replaced with the same signature (0215's, with the
+  pipeline of the task's deal), so its owner and grants stay. Existing endpoints keep null; nothing
+  is backfilled.
+
+Not built: task events by their deal's stage or owner, and pipelines chosen per task event (one list
+serves the four events).
+
+## ADR-304 Choosing the CRM stages and deal owners whose deals' tasks' events a webhook endpoint receives (P5-09, P4-04) (2026-10-07)
+
+Context: an endpoint taking task events could name the members the tasks are assigned to (ADR-266)
+and the pipelines of their deals (ADR-303), but not their deals' stages or owners, which the deal
+events can be narrowed by (ADR-264, ADR-265). A receiver serving one stage of a pipeline (the
+proposals desk, say) or one sales rep's deals, whoever the tasks are assigned to, was sent every
+task and had to look each deal up. ADR-303 left task events by their deal's stage or owner unbuilt.
+
+Decision:
+
+- **Two more lists per endpoint for its task events,** apart from its deals' (`stageIds`,
+  `ownerIds`): the stages of tasks' deals (`taskStageIds`) and the members owning them
+  (`taskDealOwnerIds`), for the four task events. Null receives every task's, as before; a list
+  holds 1 to 50 of the company's stages, or of its members, by id, in the order given with repeats
+  merged. A task's event counts when the task is about a deal and that deal's stage, or owner, is
+  listed when the event happens: a task about a contact alone or about nobody matches neither list,
+  and a deal without an owner matches no list of owners. A task's deal never changes, but the deal
+  may move to another stage or be given to another owner, and the task's later events go by the new
+  ones. With task assignees or the pipelines of tasks' deals too, an event must pass every list.
+  Deal events and every other event are not narrowed, and the deals' stages and owners do not narrow
+  task events. Chosen in Settings → Webhooks ("Stages of tasks’ deals" and "Owners of tasks’
+  deals"), shown on the endpoint as "Stages whose deals’ tasks’ events are sent: …" and "Members
+  whose deals’ tasks’ events are sent: …", and through the API as `taskStageIds` and
+  `taskDealOwnerIds` on `POST /webhook-endpoints` and `PATCH /webhook-endpoints/{id}` and in every
+  endpoint the API answers.
+- **Chosen as the deals' are:** a stage list may hold only the company's stages, removed ones and
+  those of archived pipelines included, by the deals' check, now shared; an owner list may add only
+  members who can own deals now (active, with access to the CRM), by the check deal owners and task
+  assignees already share, and keeps members it held who have left or lost the access since,
+  matching the deals they still own. Settings offers the stages in use and the members who can own
+  deals, and keeps listing what the endpoint already names, marked as removed or as no longer using
+  the CRM.
+- **Only while a task event is taken:** a list given for an endpoint that takes none is refused
+  (`taskStageIds` or `taskDealOwnerIds`; 422 through the API). A change that drops all four events
+  clears both, and a `PATCH` that leaves one out keeps it; Settings always sends them. A check in
+  the database holds the same rule for each (null, or 1 to 50 ids in one dimension without a null,
+  with a task event).
+- **Applied at capture:** `app.capture_webhook_event` reads the pipeline, stage and owner of the
+  task's deal in one query (`app.crm_tasks` joined to `app.crm_deals`, by the task the trigger
+  stores in the event's detail and as the transaction sees them), only when an active endpoint of
+  the company that takes the event names pipelines, stages or owners of tasks' deals, and matches
+  each endpoint's lists. The task trigger runs as whoever changes the task, in the company's scope.
+  No event is written when no endpoint takes it, and stored events are unchanged.
+- **Audited and exported:** `webhook.endpoint_created` and `webhook.endpoint_updated` carry
+  `taskStageIds` and `taskDealOwnerIds` when the endpoint has the lists, and the company data export
+  carries the columns.
+- **Permissions unchanged:** members with `developer.manage` in Settings, keys with
+  `webhooks.manage` through the API.
+- **Migration 0227:** `task_stage_ids uuid[]` and `task_deal_owner_ids uuid[]` on
+  `app.webhook_endpoints` with their checks, validated at once (a company has at most 10 endpoints),
+  an update grant on both columns for the runtime role, and `app.capture_webhook_event` replaced
+  with the same signature (0226's, with the stage and owner of the task's deal), so its owner and
+  grants stay. Existing endpoints keep null; nothing is backfilled.
+
+Not built: stages and owners chosen per task event (each list serves the four events), and note
+events narrowed by their deal.
+
+## ADR-305 Choosing the CRM pipelines, stages and deal owners whose deals' notes' events a webhook endpoint receives (P5-09, P4-04) (2026-10-07)
+
+Context: an endpoint taking `note.created` (ADR-280) received every note, while the deal and task
+events can be narrowed by the deal's pipeline, stage and owner (ADR-263 to ADR-265, ADR-303,
+ADR-304). A receiver serving one pipeline, one stage of it or one sales rep's deals was sent the
+notes of every deal and of contacts alone, and had to look each deal up. ADR-304 left note events
+narrowed by their deal unbuilt.
+
+Decision:
+
+- **Three lists per endpoint for its note events,** apart from the deals' and the tasks': the
+  pipelines of notes' deals (`notePipelineIds`), their stages (`noteStageIds`) and the members
+  owning them (`noteDealOwnerIds`), for `note.created`. Null receives every note's, as before; a
+  list holds 1 to 50 of the company's pipelines, stages or members, by id, in the order given with
+  repeats merged. A note's event counts when the note is about a deal and that deal's pipeline,
+  stage or owner is listed when the note is added: a note about a contact alone matches no list, and
+  a deal without an owner matches no list of owners. Notes are never changed, so a note has one
+  event, matched once, by its deal as it is then; a deal moved or given away later takes its later
+  notes with it. With more than one list, an event must pass them all. Deal, task and every other
+  event are not narrowed, and the deals' and tasks' lists do not narrow note events. Chosen in
+  Settings → Webhooks ("Pipelines of notes’ deals", "Stages of notes’ deals" and "Owners of notes’
+  deals"), shown on the endpoint as "Pipelines whose deals’ notes’ events are sent: …", "Stages
+  whose deals’ notes’ events are sent: …" and "Members whose deals’ notes’ events are sent: …", and
+  through the API as `notePipelineIds`, `noteStageIds` and `noteDealOwnerIds` on
+  `POST /webhook-endpoints` and `PATCH /webhook-endpoints/{id}` and in every endpoint the API
+  answers.
+- **Chosen as the deals' are:** a pipeline list may hold only the company's pipelines, archived ones
+  included, and a stage list only its stages, removed ones and those of archived pipelines included,
+  by the checks the deals' and tasks' lists share; an owner list may add only members who can own
+  deals now (active, with access to the CRM), by the check deal owners, task assignees and the
+  owners of tasks' deals share, and keeps members it held who have left or lost the access since,
+  matching the deals they still own. Settings offers the pipelines and stages in use and the members
+  who can own deals, and keeps listing what the endpoint already names, marked as archived, removed
+  or no longer using the CRM.
+- **Only while `note.created` is taken:** a list given for an endpoint that does not take it is
+  refused (`notePipelineIds`, `noteStageIds` or `noteDealOwnerIds`; 422 through the API). A change
+  that drops the event clears all three, and a `PATCH` that leaves one out keeps it; Settings always
+  sends them. A check in the database holds the same rule for each (null, or 1 to 50 ids in one
+  dimension without a null, with `note.created`).
+- **Applied at capture:** `app.capture_webhook_event` reads the pipeline, stage and owner of the
+  note's deal in one query (`app.crm_activities` joined to `app.crm_deals`, by the note the trigger
+  stores in the event's detail, as the transaction sees them), only when an active endpoint of the
+  company that takes `note.created` names any of the three lists, and matches each endpoint's lists.
+  The note trigger runs as whoever adds the note (a member or a key, the runtime role in the
+  company's scope). No event is written when no endpoint takes it, and stored events are unchanged.
+- **Audited and exported:** `webhook.endpoint_created` and `webhook.endpoint_updated` carry
+  `notePipelineIds`, `noteStageIds` and `noteDealOwnerIds` when the endpoint has the lists, and the
+  company data export carries the columns.
+- **Wording put right on the way:** the descriptions of the deals' stage list (since ADR-265) and of
+  the pipelines of tasks' deals (since ADR-304), in Settings, the API's fields and the OpenAPI
+  document, said an event must pass "both" lists where three or four may be chosen; they now say
+  every list. The OpenAPI overview also names note events among those the numbers do not narrow.
+- **Permissions unchanged:** members with `developer.manage` in Settings, keys with
+  `webhooks.manage` through the API.
+- **Migration 0228:** `note_pipeline_ids uuid[]`, `note_stage_ids uuid[]` and
+  `note_deal_owner_ids uuid[]` on `app.webhook_endpoints` with their checks, validated at once (a
+  company has at most 10 endpoints), an update grant on the three columns for the runtime role, and
+  `app.capture_webhook_event` replaced with the same signature (0227's, with the note's deal), so
+  its owner and grants stay. Existing endpoints keep null; nothing is backfilled.
+
+Not built: note events narrowed by who wrote them (a member, or the key by its id, which the payload
+already gives) or by the contact's values.
+
+## ADR-306 Choosing who made the changes whose deal, task and note events a webhook endpoint receives (P5-09, P4-04) (2026-10-08)
+
+Context: deal and task events name who made each change (`changedBy`: a member, an automation's run
+or an API key, ADR-277) and note events who wrote the note (`writtenBy`, ADR-280), so an integration
+could tell its own changes from others', but an endpoint received them all. An integration that
+keeps deals, tasks or notes in step with another system, changing them through the API and taking
+their events, was sent back every change it had just made and had to drop each one. ADR-305 left
+note events by who wrote them unbuilt.
+
+Decision:
+
+- **One list per endpoint for its deal, task and note events,** `crmChangeMakers`: who made the
+  changes it takes, 1 to 3 of `member`, `automation` and `api`, in that order with repeats merged,
+  as the events name them. Null receives every change, as before. An addition's maker is whoever
+  added the deal or task (its creator: a key, else an automation's run, else a member), a note's
+  whoever wrote it (a member or a key; automations write none), and any other change's the maker
+  recorded with it. A change that recorded no maker (`changedBy` null: erasure retitling a deal, or
+  a change written during a rollout) is sent whatever the list holds, so no endpoint loses an event
+  because HyFib cannot say who made it. With pipelines, stages, owners or assignees chosen too, an
+  event must pass every list. Other events are not narrowed. Chosen in Settings → Webhooks ("Changes
+  made by", every maker ticked by default, untick API keys to leave out what integrations change
+  through the API), shown on the endpoint as "Deal, task and note changes sent, made by: …", and
+  through the API as `crmChangeMakers` on `POST /webhook-endpoints` and
+  `PATCH /webhook-endpoints/{id}` and in every endpoint the API answers.
+- **Every key at once:** the list names kinds of maker, not keys: an integration that ticks members
+  and automations leaves out every key's changes, its own and other integrations'. Narrowing by one
+  key is not built.
+- **Only while a deal, task or note event is taken:** a list given for an endpoint that takes none
+  is refused (`crmChangeMakers`; 422 through the API). A change that drops every such event clears
+  it, and a `PATCH` that leaves it out keeps it; Settings always sends it. A check in the database
+  holds the same rule (null, or 1 to 3 known makers in one dimension without a null, with a deal,
+  task or note event).
+- **Applied at capture:** `app.capture_webhook_event` reads the maker only when an active endpoint
+  of the company that takes the event names makers: an addition's from the deal's or task's creator
+  columns, a note's from the note (its member, else the key its data names), and any other change's
+  from the detail the deal and task triggers already record (ADR-277). The triggers run as whoever
+  makes the change (the runtime role in the company's scope; the definer role for erasure, whose
+  changes record no maker), and only additions and notes, which the runtime role makes, read a row.
+  No event is written when no endpoint takes it, and stored events are unchanged.
+- **Audited and exported:** `webhook.endpoint_created` and `webhook.endpoint_updated` carry
+  `crmChangeMakers` when the endpoint has the list, and the company data export carries the column.
+- **Permissions unchanged:** members with `developer.manage` in Settings, keys with
+  `webhooks.manage` through the API.
+- **Migration 0229:** `crm_change_makers text[]` on `app.webhook_endpoints` with its check,
+  validated at once (a company has at most 10 endpoints), an update grant on the column for the
+  runtime role, and `app.capture_webhook_event` replaced with the same signature (0228's, with the
+  maker), so its owner and grants stay. Existing endpoints keep null; nothing is backfilled.
+
+Not built: narrowing by one key (the payload names it in `apiKeyId`), makers chosen per event type
+(one list serves the deal, task and note events), and makers for other events (`message.status` has
+its senders since ADR-172; order events name their changer since ADR-270).
+
+## ADR-307 Choosing the scores of the satisfaction survey answers a webhook endpoint receives (P5-09) (2026-10-08)
+
+Context: `satisfaction_survey.answered` (ADR-293) gives each answer's score (3 for the first and
+best button, 2 for the second, 1 for the third, whatever the company's buttons say), but an endpoint
+received every answer. An integration that follows up poor ratings only (a ticket for each answer on
+the third button) was sent every answer and had to drop the rest, and one that asks pleased
+customers for a review wanted the best only. ADR-293 left a filter by score unbuilt.
+
+Decision:
+
+- **One list per endpoint for the survey answers,** `surveyScores`: the scores of the answers it
+  takes, 1 to 3 of `3`, `2` and `1`, in that order with repeats merged, as the survey's `score`
+  gives them. Null receives every answer, as before. With numbers chosen too, an answer must pass
+  both. Other events are not narrowed. Chosen in Settings → Webhooks under the event ("Answers
+  scored", every score ticked by default, the buttons named by their place, "First button (best)",
+  "Second button" and "Third button", since each company words its own), shown on the endpoint as
+  "Survey answers sent: …", and through the API as `surveyScores` on `POST /webhook-endpoints` and
+  `PATCH /webhook-endpoints/{id}` and in every endpoint the API answers.
+- **Only while the answers are taken:** a list given for an endpoint that does not take
+  `satisfaction_survey.answered` is refused (`surveyScores`; 422 through the API). A change that
+  drops the event clears it, and a `PATCH` that leaves it out keeps it; Settings always sends it
+  (null while every score is ticked). A check in the database holds the same rule (null, or 1 to 3
+  entries, each 1, 2 or 3, in one dimension without a null, with the event).
+- **Applied at capture:** `app.capture_webhook_event` reads the answer's score from its survey only
+  when an active endpoint of the company that takes the event names scores. The trigger runs as
+  whoever records the answer (the runtime role in the company's scope, as the ingestion of the
+  customer's tap writes it) and reads the survey as that transaction sees it, after the answer is
+  written. No event is written when no endpoint takes it, and stored events are unchanged.
+- **Audited and exported:** `webhook.endpoint_created` and `webhook.endpoint_updated` carry
+  `surveyScores` when the endpoint has the list, and the company data export carries the column.
+- **Permissions unchanged:** members with `developer.manage` in Settings, keys with
+  `webhooks.manage` through the API.
+- **Migration 0230:** `survey_scores smallint[]` on `app.webhook_endpoints` with its check,
+  validated at once (a company has at most 10 endpoints), an update grant on the column for the
+  runtime role, and `app.capture_webhook_event` replaced with the same signature (0229's, with the
+  score), so its owner and grants stay. Existing endpoints keep null; nothing is backfilled.
+
+Not built: the team, member and tag filters for survey answers (ADR-293 left them out), a filter by
+the buttons' words (each company words its own and can change them; the score stays), and an event
+when a survey is sent or skipped.
+
+## ADR-308 Choosing the Payment Link statuses a webhook endpoint receives (P5-09, P4-06a) (2026-10-08)
+
+Context: `payment_link.status_changed` (ADR-285) is sent for every status the commerce worker writes
+to an order's Payment Link (`created`, `partially_paid`, `paid`, `expired`, `cancelled` or
+`failed`), but an endpoint received them all. An integration that books payments wants paid and
+partly paid links only, and one that follows up links that went nowhere wants the expired, cancelled
+and failed ones; both were sent every change and had to drop the rest. ADR-285 left filters by link
+status unbuilt.
+
+Decision:
+
+- **One list per endpoint for the links' events,** `paymentLinkStatuses`: the statuses a link
+  reaches that it takes, 1 to 6 of `created`, `partially_paid`, `paid`, `expired`, `cancelled` and
+  `failed`, in that order (as Orders lists them) with repeats merged, as the event's
+  `paymentLink.status` gives them. A link is `creating` only until the worker creates it, which
+  sends no event, so the list cannot name it. Null receives every status, as before. With numbers
+  chosen too, a change must pass both. Other events are not narrowed: `order.status_changed` has its
+  own list (ADR-147). Chosen in Settings → Webhooks under the event (the status control orders use,
+  every status ticked by default, named as Orders names them), shown on the endpoint as "Payment
+  Link statuses sent: …", and through the API as `paymentLinkStatuses` on `POST /webhook-endpoints`
+  and `PATCH /webhook-endpoints/{id}` and in every endpoint the API answers.
+- **Only while the event is taken:** a list given for an endpoint that does not take
+  `payment_link.status_changed` is refused (`paymentLinkStatuses`; 422 through the API). A change
+  that drops the event clears it, and a `PATCH` that leaves it out keeps it; Settings always sends
+  it (null while every status is ticked). A check in the database holds the same rule (null, or 1 to
+  6 known statuses in one dimension without a null, with the event).
+- **Applied at capture:** `app.capture_webhook_event` matches the status the link reached, which the
+  links' trigger passes as the event's status (0204), against each active endpoint's list, in the
+  transaction where the commerce worker writes it; no row is read for it. No event is written when
+  no endpoint takes it, and stored events are unchanged.
+- **Audited and exported:** `webhook.endpoint_created` and `webhook.endpoint_updated` carry
+  `paymentLinkStatuses` when the endpoint has the list, and the company data export carries the
+  column.
+- **Permissions unchanged:** members with `developer.manage` in Settings, keys with
+  `webhooks.manage` through the API.
+- **Migration 0231:** `payment_link_statuses text[]` on `app.webhook_endpoints` with its check,
+  validated at once (a company has at most 10 endpoints), an update grant on the column for the
+  runtime role, and `app.capture_webhook_event` replaced with the same signature (0230's, with the
+  link status), so its owner and grants stay. Existing endpoints keep null; nothing is backfilled.
+
+Not built: lists by the status a link left (`previousStatus`), by amount or by who asked for payment
+(a member or a key), and events when payment is asked for or a cancellation asked (ADR-285 left them
+out).

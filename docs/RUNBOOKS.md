@@ -2140,6 +2140,14 @@ a stage of another pipeline, an owner who cannot use the CRM, or a lost reason w
 asks for the deal as it already is changes nothing and answers 200. The timeline shows each change
 "through the API"; the audit log has `crm.deal_updated` with the key and what changed.
 
+**`GET /api/v1/ads` answers 403 or 422, or misses an ad (ADR-302).** 403: the key lacks `ads.read`
+(its creator needed `campaigns.read`), or the plan leaves it out (reason `not_in_plan`). 422: a
+parameter was given; the list takes none. It lists the last 30 days only, at most 200 ads, as Growth
+→ Ads does: an ad is there only when a customer's message arrived from it with its referral
+(ADR-044), and an ad whose headline or address changed is listed once for each.
+`GET /conversations?adId=` finds an ad's conversations at any time; an id over 128 characters
+answers 422.
+
 **A conversation's `source` is null, or the `source` and `chatLinkId` filters miss a conversation
 (ADR-301).** A source is recorded only when the customer's message carries a link's reference, "(ref
 CODE)", on the number the link opens, or arrives from a click-to-WhatsApp ad with its referral
@@ -2965,6 +2973,82 @@ list, "(no longer uses the CRM)", matching the tasks still assigned to them; ass
 someone else. To take more, tick members under "Task assignees" on the endpoint's page or choose
 "Every task’s events", or `PATCH /webhook-endpoints/{id}` with `taskAssigneeIds` (null for every
 task). Removing every task event clears the list.
+
+**A receiver misses the tasks of a pipeline it follows (ADR-303).** An endpoint can take the events
+of the tasks about the deals of chosen pipelines only. The endpoints list shows them ("Pipelines
+whose deals’ tasks’ events are sent: …"), and the API answers `taskPipelineIds` (null takes every
+task's). A task's events go by the pipeline of its deal when each happens: a task about a contact
+alone, or about nobody, is in no pipeline; a deal moved to another pipeline takes its tasks' later
+events with it; and events no endpoint takes are not recorded, so there is nothing to replay. With
+task assignees chosen too, an event must pass both lists. The payload's `task.dealId` names the
+deal, and `GET /deals/{id}` gives its pipeline now. An archived pipeline stays on a list,
+"(archived)", and has no open deal until it is restored. To take more, tick pipelines under
+"Pipelines of tasks’ deals" on the endpoint's page or choose "Every task’s events", or
+`PATCH /webhook-endpoints/{id}` with `taskPipelineIds` (null for every task). Removing every task
+event clears the list.
+
+**A receiver misses the tasks of a stage or a deal owner it follows (ADR-304).** An endpoint can
+take the events of the tasks about the deals in chosen stages, or owned by chosen members, only. The
+endpoints list shows them ("Stages whose deals’ tasks’ events are sent: …", "Members whose deals’
+tasks’ events are sent: …"), and the API answers `taskStageIds` and `taskDealOwnerIds` (null takes
+every task's). A task's events go by its deal's stage and owner when each happens: a task about a
+contact alone or about nobody matches neither list, a deal without an owner matches no list of
+owners, a deal moved or given away takes its tasks' later events with it, and events no endpoint
+takes are not recorded, so there is nothing to replay. With task assignees or the pipelines of
+tasks' deals chosen too, an event must pass every list. The payload's `task.dealId` names the deal,
+and `GET /deals/{id}` gives its stage and owner now. A removed stage stays on a list, "(removed)",
+and a member who left, "(no longer uses the CRM)", matching the deals they still own. To take more,
+tick stages or members under "Stages of tasks’ deals" or "Owners of tasks’ deals" on the endpoint's
+page or choose "Every task’s events", or `PATCH /webhook-endpoints/{id}` with `taskStageIds` or
+`taskDealOwnerIds` (null for every task). Removing every task event clears both lists.
+
+**A receiver misses the notes of a pipeline, stage or deal owner it follows (ADR-305).** An endpoint
+can take the events of the notes about the deals in chosen pipelines or stages, or owned by chosen
+members, only. The endpoints list shows them ("Pipelines whose deals’ notes’ events are sent: …",
+"Stages whose deals’ notes’ events are sent: …", "Members whose deals’ notes’ events are sent: …"),
+and the API answers `notePipelineIds`, `noteStageIds` and `noteDealOwnerIds` (null takes every
+note's). A note's event goes by its deal's pipeline, stage and owner when the note is added: a note
+about a contact alone matches no list, a deal without an owner matches no list of owners, a deal
+moved or given away takes its later notes with it, and events no endpoint takes are not recorded, so
+there is nothing to replay. With more than one list chosen, an event must pass them all. The
+payload's `note.dealId` names the deal, and `GET /deals/{id}` gives its pipeline, stage and owner
+now. An archived pipeline stays on a list, "(archived)", a removed stage, "(removed)", and a member
+who left, "(no longer uses the CRM)", matching the deals they still own. To take more, tick
+pipelines, stages or members under "Pipelines of notes’ deals", "Stages of notes’ deals" or "Owners
+of notes’ deals" on the endpoint's page or choose "Every note’s events", or
+`PATCH /webhook-endpoints/{id}` with `notePipelineIds`, `noteStageIds` or `noteDealOwnerIds` (null
+for every note). Removing Note added clears the three lists.
+
+**A receiver misses deal, task or note changes, or gets back its own (ADR-306).** An endpoint can
+take the deal, task and note events of the changes made by chosen kinds of maker only. The endpoints
+list shows it ("Deal, task and note changes sent, made by: …"), and the API answers
+`crmChangeMakers` (null takes every change). Each event goes by the maker its payload names:
+`deal.changedBy` and `task.changedBy` (for an addition, whoever added it) and `note.writtenBy`; a
+change whose maker was not recorded (`changedBy` null) is sent whatever is ticked, and events no
+endpoint takes are not recorded, so there is nothing to replay. The list names kinds, not keys:
+leaving out API keys leaves out every integration's changes, not only the endpoint's own; to drop
+only its own, a receiver compares the payload's `apiKeyId` with its key. With pipelines, stages,
+owners or assignees chosen too, an event must pass every list. To take more, tick makers under
+"Changes made by" on the endpoint's page, or `PATCH /webhook-endpoints/{id}` with `crmChangeMakers`
+(null for every change). Removing every deal, task and note event clears it.
+
+**A receiver misses satisfaction survey answers (ADR-307).** An endpoint can take the answers of
+chosen scores only. The endpoints list shows it ("Survey answers sent: …"), and the API answers
+`surveyScores` (null takes every answer). Each answer goes by the score its payload gives
+(`survey.score`: 3 for the first button, 2 for the second, 1 for the third, whatever the company's
+buttons say), and events no endpoint takes are not recorded, so there is nothing to replay. With
+numbers chosen too, an answer must pass both. To take more, tick scores under "Answers scored" on
+the endpoint's page, or `PATCH /webhook-endpoints/{id}` with `surveyScores` (null for every answer).
+Removing the event clears it.
+
+**A receiver misses Payment Link changes (ADR-308).** An endpoint can take the changes of chosen
+link statuses only. The endpoints list shows it ("Payment Link statuses sent: …"), and the API
+answers `paymentLinkStatuses` (null takes every status). Each change goes by the status the link
+reached (`paymentLink.status`, not `previousStatus`), and events no endpoint takes are not recorded,
+so there is nothing to replay; `GET /orders/{id}/payment-links` reads the links as they are now.
+With numbers chosen too, a change must pass both. To take more, tick statuses under the event on the
+endpoint's page, or `PATCH /webhook-endpoints/{id}` with `paymentLinkStatuses` (null for every
+status). Removing the event clears it.
 
 **A receiver misses a task's change of assignee, or doubts one (ADR-274).** Endpoints that take
 `task.assignee_changed` ("Task assignee") are sent one event each time a member gives a task to

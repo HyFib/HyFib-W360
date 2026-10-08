@@ -297,8 +297,16 @@ verification, app review, Embedded Signup configuration).
   tests run only in CI]** (ADR-264, migration 0180; recorded under P5-09). **[Owner filters for deal
   webhook events built; their database tests run only in CI]** (ADR-265, migration 0181; recorded
   under P5-09). **[Assignee filters for task webhook events built; their database tests run only in
-  CI]** (ADR-266, migration 0182; recorded under P5-09). **[Deal owner webhook events built; their
-  database tests run only in CI]** (ADR-269, migrations 0185 and 0186; recorded under P5-09).
+  CI]** (ADR-266, migration 0182; recorded under P5-09). **[Pipeline filters for task webhook events
+  built; their database tests run only in CI]** (ADR-303, migration 0226; recorded under P5-09).
+  **[Stage and owner filters for task webhook events built; their database tests run only in CI]**
+  (ADR-304, migration 0227; recorded under P5-09).
+  **[Pipeline, stage and owner filters for note webhook events built; their database tests run only
+  in CI]** (ADR-305, migration 0228; recorded under P5-09).
+  **[Change-maker filters for deal, task and note webhook events built; their database tests run
+  only in CI]** (ADR-306, migration 0229; recorded under P5-09).
+  **[Deal owner webhook events built; their database tests run only in CI]** (ADR-269, migrations
+  0185 and 0186; recorded under P5-09).
   **Remaining:** custom deal fields, products on deals, deal import, CRM connectors (HubSpot,
   Salesforce, Zoho: integrations), reminder emails through the production SMTP provider (release
   checklist).
@@ -927,6 +935,10 @@ verification, app review, Embedded Signup configuration).
   **[Where conversations came from, through the public API, built; its database tests run only in
   CI]** (ADR-301, no migration: conversations give their latest source, a chat link or a
   click-to-WhatsApp ad, as the inbox shows it, and are listed and changed by source and chat link).
+  **[Click-to-WhatsApp ads through the public API built; its database tests run only in CI]**
+  (ADR-302, migration 0225: `ads.read` lists the ads customers wrote from in the last 30 days as
+  Growth → Ads lists them, by the page's reader, and `GET /conversations` finds an ad's
+  conversations by `adId`).
   **[Reading CRM tasks built; its database tests run only in CI]** (ADR-258, migrations 0173 and
   0174: `tasks.read` lists the company's tasks newest first on exact pages, filtered by status,
   assignee, contact, deal and time, and reads each one, with the reminder and the assignee, contact
@@ -1105,6 +1117,27 @@ verification, app review, Embedded Signup configuration).
   migration 0182: an endpoint takes the events of the tasks assigned to 1 to 50 chosen members when
   the events happen; a list adds only members who can be assigned tasks and keeps those who left;
   deal and other events are not narrowed).
+  **[Pipeline filters for task events built; their database tests run only in CI]** (ADR-303,
+  migration 0226: an endpoint takes the events of the tasks about the deals of 1 to 50 of the
+  company's pipelines when the events happen, archived ones included; a task about no deal is in
+  none; with task assignees too, an event must pass both; deal and other events are not narrowed).
+  **[Stage and owner filters for task events built; their database tests run only in CI]** (ADR-304,
+  migration 0227: an endpoint takes the events of the tasks about the deals in 1 to 50 of the
+  company's stages, removed ones included, or owned by 1 to 50 chosen members, when the events
+  happen; an owner list adds only members who can own deals and keeps those who left; a task about
+  no deal matches neither list; with task assignees or pipelines too, an event must pass every list;
+  deal and other events are not narrowed).
+  **[Pipeline, stage and owner filters for note events built; their database tests run only in CI]**
+  (ADR-305, migration 0228: an endpoint takes the events of the notes about the deals in 1 to 50 of
+  the company's pipelines or stages, archived and removed ones included, or owned by 1 to 50 chosen
+  members, when each note is added; an owner list adds only members who can own deals and keeps
+  those who left; a note about a contact alone matches no list; with more than one list, an event
+  must pass them all; deal, task and other events are not narrowed).
+  **[Change-maker filters for deal, task and note events built; their database tests run only in
+  CI]** (ADR-306, migration 0229: an endpoint takes the deal, task and note events of the changes
+  members, automations' runs or API keys made, by the maker each event names, an addition's creator
+  and a note's writer; a change that recorded no maker is always sent; other events are not
+  narrowed).
   **[Contact tag filters for message and conversation events built; their database tests run only in
   CI]** (ADR-267, migration 0183: an endpoint takes the events of the conversations whose contact
   has any of 1 to 50 tags when the events happen; tags are compared as contacts carry them, and one
@@ -1151,13 +1184,19 @@ verification, app review, Embedded Signup configuration).
   0205: `payment_link.status_changed` for every status the commerce worker writes, with the link as
   `GET /orders/{id}/payment-links` reads it, never its address or Razorpay's ids, narrowed by the
   order's number like the order events).
+  **[Payment Link status filters built; their database tests run only in CI]** (ADR-308, migration
+  0231: an endpoint takes the changes of chosen link statuses, by the status each change reached;
+  order and other events are not narrowed).
   **[Satisfaction survey events built; their database tests run only in CI]** (ADR-293, migrations
   0213 and 0214: `satisfaction_survey.answered` once for each survey a customer answers, with the
   survey as `GET /satisfaction-surveys` reads it, narrowed by the conversation's number).
-  Remaining: filters for other event types (task events by their deal's pipeline, stage or owner,
-  among them) and on a message's or contact's values (such as a field's value, contact events by
-  tag, or the key that started a run), other authentication (headers computed per delivery, other
-  OAuth grants), mutual TLS, fixed egress addresses, events for store orders and each step of a run,
+  **[Score filters for satisfaction survey answers built; their database tests run only in CI]**
+  (ADR-307, migration 0230: an endpoint takes the answers of chosen scores, 3, 2 or 1, by the score
+  each answered survey records; other events are not narrowed).
+  Remaining: filters for other event types (survey answers by team or member, among them) and on a
+  message's or contact's values (such as a field's value, contact events by tag, or the key that
+  started a run or made a change), other authentication (headers computed per delivery, other OAuth
+  grants), mutual TLS, fixed egress addresses, events for store orders and each step of a run,
   `createdAt` finer than the millisecond, load tests.
 - **P5-10 Platform ops screens** **[built, locally verified with test data only]** (ADR-054):
   `/platform/ops` with Overview, Onboarding (failed and abandoned signups, failed or stuck number

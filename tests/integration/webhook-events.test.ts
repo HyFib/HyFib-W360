@@ -81,6 +81,7 @@ import {
   type TemplateDefinition,
   type TenantContext,
   type WebhookContactPart,
+  type WebhookCrmChangeMaker,
   type WebhookEventType,
 } from '@w360/domain';
 import { startRazorpayStandIn, type RazorpayStandIn } from '../support/razorpay-stand-in';
@@ -3041,6 +3042,85 @@ describe('order events (ADR-085)', () => {
     );
   });
 
+  it('sends an endpoint that names Payment Link statuses only the links that reached one of them (ADR-308)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const agent = await fx.ctx(c, c.agent);
+    await syncedCatalog(c, '5558590');
+    /** An endpoint of the company taking the links' events with these statuses. */
+    const add = async (paymentLinkStatuses: string[] | null) => {
+      const path = `/ok/${randomBytes(6).toString('hex')}`;
+      await webhooks().create(owner, {
+        url: `http://${HOST}:${port}${path}`,
+        eventTypes: ['payment_link.status_changed'],
+        paymentLinkStatuses,
+      });
+      return path;
+    };
+    const paidOnly = await add(['paid']);
+    const endings = await add(['expired', 'cancelled', 'failed']);
+    const everyStatus = await add(null);
+
+    // The company's Razorpay account, checked.
+    const keyId = `rzp_test_orderevents${String((merchants += 1)).padStart(2, '0')}`;
+    rzp.addMerchant(keyId, 'order-events-secret');
+    await commerce().savePaymentAccount(owner, {
+      keyId,
+      keySecret: 'order-events-secret',
+      webhookSecret: 'order-events-hook',
+    });
+    const [account] = await fx.query<{ id: string }>(
+      'SELECT id FROM app.commerce_payment_accounts WHERE tenant_id = $1',
+      [c.tenant.id],
+    );
+    expect(await processPaymentAccountCheck(commerceWorker(), scopeOf(c), account!.id)).toBe(
+      'done',
+    );
+
+    // A link created and paid, and another created and then cancelled.
+    const order = await sendCart(c, waId(), '5558590', [
+      { retailerId: 'sku-1', quantity: 1, price: 10 },
+    ]);
+    const { linkId } = await commerce().requestPayment(agent, {
+      id: order.id,
+      expectedVersion: await orderVersion(order.id),
+    });
+    expect(await processPaymentLink(commerceWorker(), scopeOf(c), linkId)).toBe('done');
+    const [created] = await fx.query<{ provider_link_id: string }>(
+      'SELECT provider_link_id FROM app.commerce_payment_links WHERE id = $1',
+      [linkId],
+    );
+    rzp.payLink(created!.provider_link_id);
+    expect(await processPaymentLink(commerceWorker(), scopeOf(c), linkId)).toBe('done');
+    const second = await sendCart(c, waId(), '5558590', [
+      { retailerId: 'sku-2', quantity: 1, price: 20 },
+    ]);
+    const { linkId: cancelledId } = await commerce().requestPayment(agent, {
+      id: second.id,
+      expectedVersion: await orderVersion(second.id),
+    });
+    expect(await processPaymentLink(commerceWorker(), scopeOf(c), cancelledId)).toBe('done');
+    await commerce().cancelPaymentLink(agent, { orderId: second.id });
+    expect(await processPaymentLink(commerceWorker(), scopeOf(c), cancelledId)).toBe('done');
+
+    // Each status captured once, with a delivery to each endpoint whose list holds it.
+    const events = await eventsOf(c, 'payment_link.');
+    expect(events.map((e) => [e.status, e.deliveries])).toEqual([
+      ['created', 1],
+      ['paid', 2],
+      ['created', 1],
+      ['cancelled', 2],
+    ]);
+    await deliverDue(c);
+    const statusesAt = (path: string) =>
+      bodiesAt(path)
+        .map((b) => (b.data.paymentLink as { status: string }).status)
+        .sort();
+    expect(statusesAt(paidOnly)).toEqual(['paid']);
+    expect(statusesAt(endings)).toEqual(['cancelled']);
+    expect(statusesAt(everyStatus)).toEqual(['cancelled', 'created', 'created', 'paid']);
+  });
+
   it('sends an endpoint that names numbers only the orders sent to them (ADR-170)', async () => {
     const c = await fx.company();
     const owner = await fx.ctx(c, c.owner);
@@ -5025,6 +5105,166 @@ describe('deal events (ADR-256)', () => {
   });
 });
 
+describe('change-maker filters for deal, task and note events (ADR-306)', () => {
+  const crm = () =>
+    createCrmService({ db: fx.dbs.app, clock: systemClock, jobs: fx.jobs(), signer: fx.signer });
+
+  it('sends an endpoint that names who made the changes only the deal, task and note events of their changes, each addition by whoever added it and each note by whoever wrote it, and every change whose maker was not recorded', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const svc = crm();
+    const { id: salesId } = await svc.createPipeline(owner, {
+      name: 'Sales',
+      currency: 'INR',
+      stages: ['New', 'Qualified'],
+    });
+    const [sales] = (await svc.listPipelines(owner)).filter((p) => p.id === salesId);
+    const [fresh, qualified] = sales!.stages.map((st) => st.id);
+    const eventTypes: WebhookEventType[] = [
+      'deal.created',
+      'deal.updated',
+      'deal.stage_changed',
+      'task.created',
+      'note.created',
+    ];
+    /** An endpoint of the company taking the CRM events of the changes the makers made. */
+    const add = async (crmChangeMakers: WebhookCrmChangeMaker[] | null) => {
+      const path = `/ok/${randomBytes(6).toString('hex')}`;
+      const created = await webhooks().create(owner, {
+        url: `http://${HOST}:${port}${path}`,
+        eventTypes,
+        crmChangeMakers,
+      });
+      return { ...created, path };
+    };
+    const people = await add(['member', 'automation']);
+    const keys = await add(['api']);
+    const everyone = await add(null);
+    const phone = `+${waId()}`;
+    const { id: jaya } = await contactsService().createContact(owner, {
+      displayName: 'Jaya',
+      phone,
+    });
+    const issued = await createApiKeysService({ db: fx.dbs.app, clock: systemClock }).create(
+      owner,
+      { name: 'CRM sync', scopes: ['deals.write', 'tasks.write', 'notes.write'], expiresInDays: 0 },
+    );
+    const key = await authenticateApiToken(fx.dbs.app, issued.token, uuidv7());
+    if (!key) throw new Error('a new key does not authenticate');
+    const apiDeps = { db: fx.dbs.app, clock: systemClock, jobs: fx.jobs(), signer: fx.signer };
+
+    // A member adds a deal and the key another; the member moves the key's and the key retitles
+    // the member's.
+    const { id: membersDeal } = await svc.createDeal(owner, {
+      contactId: jaya,
+      pipelineId: salesId,
+      stageId: fresh,
+      title: 'Annual plan',
+      ownerMembershipId: null,
+    });
+    const response = await apiCreateDeal(
+      apiDeps,
+      key,
+      { contactId: jaya, pipelineId: salesId, title: 'Web order' },
+      null,
+    );
+    const keysDeal = (response.body as { data: { id: string } }).data.id;
+    await svc.moveDeal(owner, { id: keysDeal, expectedVersion: 1, stageId: qualified });
+    await apiUpdateDeal(apiDeps, key, membersDeal, { title: 'Annual plan 2027' });
+    // An automation's run changes the value, recording itself as runs do (no key: the key's
+    // retitle was recorded before), and a change that records no maker retitles the key's deal.
+    const set = (id: string, assignments: string) =>
+      fx.query(`UPDATE app.crm_deals SET ${assignments} WHERE id = $1`, [id]);
+    await set(
+      membersDeal,
+      `value_minor = 100000, changed_by = 'automation', changed_by_api_key_id = NULL,
+       changed_xact = pg_catalog.pg_current_xact_id()`,
+    );
+    await set(keysDeal, `title = 'Web order 1001'`);
+    // The key adds a task and a member another; the member writes a note and the key another.
+    const taskResponse = await apiCreateTask(
+      apiDeps,
+      key,
+      { title: 'Confirm the delivery', assigneeId: owner.membership.id, contactId: jaya },
+      null,
+    );
+    const keysTask = (taskResponse.body as { data: { id: string } }).data.id;
+    const { id: membersTask } = await svc.createTask(owner, {
+      title: 'Send the quote',
+      assigneeMembershipId: owner.membership.id,
+      dealId: membersDeal,
+    });
+    const membersNote = await svc.addNote(owner, { dealId: membersDeal, body: 'Wants a discount' });
+    const noteResponse = await apiCreateNote(
+      apiDeps,
+      key,
+      { body: 'Synced from the shop', dealId: keysDeal },
+      null,
+    );
+    const keysNote = (noteResponse.body as { data: { id: string } }).data.id;
+
+    // Each event is captured once, with a delivery to each endpoint its maker reaches; a change
+    // that recorded no maker reaches all three.
+    const captured = await fx.query<{ type: string; subject: string; deliveries: number }>(
+      `SELECT e.type, coalesce(e.detail ->> 'dealId', e.detail ->> 'taskId', e.detail ->> 'noteId')
+              AS subject,
+              (SELECT count(*)::int FROM app.webhook_deliveries d
+                WHERE d.tenant_id = e.tenant_id AND d.event_id = e.id) AS deliveries
+         FROM app.webhook_events e
+        WHERE e.tenant_id = $1 ORDER BY e.occurred_at, e.id`,
+      [c.tenant.id],
+    );
+    expect(captured.map((e) => [e.type, e.subject, e.deliveries])).toEqual([
+      ['deal.created', membersDeal, 2],
+      ['deal.created', keysDeal, 2],
+      ['deal.stage_changed', keysDeal, 2],
+      ['deal.updated', membersDeal, 2],
+      ['deal.updated', membersDeal, 2],
+      ['deal.updated', keysDeal, 3],
+      ['task.created', keysTask, 2],
+      ['task.created', membersTask, 2],
+      ['note.created', membersNote.id, 2],
+      ['note.created', keysNote, 2],
+    ]);
+    await deliverDue(c);
+    // Each payload names its maker as the endpoint chose it.
+    const madeBy = (path: string) =>
+      bodiesAt(path)
+        .map((b) => {
+          const data = b.data as {
+            deal?: { changedBy: string | null };
+            task?: { changedBy: string | null };
+            note?: { writtenBy: string };
+          };
+          return [
+            b.type,
+            data.deal?.changedBy ?? data.task?.changedBy ?? data.note?.writtenBy ?? null,
+          ];
+        })
+        .sort();
+    expect(madeBy(people.path)).toEqual(
+      [
+        ['deal.created', 'member'],
+        ['deal.stage_changed', 'member'],
+        ['deal.updated', 'automation'],
+        ['deal.updated', null],
+        ['task.created', 'member'],
+        ['note.created', 'member'],
+      ].sort(),
+    );
+    expect(madeBy(keys.path)).toEqual(
+      [
+        ['deal.created', 'api'],
+        ['deal.updated', 'api'],
+        ['deal.updated', null],
+        ['task.created', 'api'],
+        ['note.created', 'api'],
+      ].sort(),
+    );
+    expect(madeBy(everyone.path)).toHaveLength(10);
+  });
+});
+
 describe('task events (ADR-261)', () => {
   const crm = () =>
     createCrmService({ db: fx.dbs.app, clock: systemClock, jobs: fx.jobs(), signer: fx.signer });
@@ -5449,6 +5689,219 @@ describe('task events (ADR-261)', () => {
     expect(bodiesAt(agents.path).filter((b) => b.type === 'contact.created')).toHaveLength(1);
   });
 
+  it("sends an endpoint that names pipelines of tasks' deals only the events of the tasks about deals in them when the events happen, and with assignees too only those passing both (ADR-303)", async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const agent = await fx.ctx(c, c.agent);
+    const svc = crm();
+    const pipeline = async (name: string, stages: string[]) =>
+      (await svc.createPipeline(owner, { name, currency: 'INR', stages })).id;
+    const salesId = await pipeline('Sales', ['New', 'Won']);
+    const renewalsId = await pipeline('Renewals', ['Due', 'Signed']);
+    const firstStage = async (pipelineId: string) =>
+      (await svc.listPipelines(owner)).find((p) => p.id === pipelineId)!.stages[0]!.id;
+    /** An endpoint of the company taking the task events of the tasks of the pipelines' deals. */
+    const add = async (
+      eventTypes: WebhookEventType[],
+      taskPipelineIds: string[] | null,
+      taskAssigneeIds: string[] | null = null,
+    ) => {
+      const path = `/ok/${randomBytes(6).toString('hex')}`;
+      const created = await webhooks().create(owner, {
+        url: `http://${HOST}:${port}${path}`,
+        eventTypes,
+        taskPipelineIds,
+        taskAssigneeIds,
+      });
+      return { ...created, path };
+    };
+    const salesTasks = await add([...TASK_EVENTS, 'deal.created'], [salesId]);
+    const renewalsTasks = await add(TASK_EVENTS, [renewalsId]);
+    const agentsRenewals = await add(TASK_EVENTS, [renewalsId], [agent.membership.id]);
+    const everyTask = await add(TASK_EVENTS, null);
+    const jaya = await newContact(owner, 'Jaya');
+    const { id: sale } = await svc.createDeal(owner, {
+      contactId: jaya.id,
+      pipelineId: salesId,
+      stageId: await firstStage(salesId),
+      title: 'Annual plan',
+    });
+    const { id: renewal } = await svc.createDeal(owner, {
+      contactId: jaya.id,
+      pipelineId: renewalsId,
+      stageId: await firstStage(renewalsId),
+      title: 'Renewal 2027',
+    });
+
+    // A task about each deal, one about Jaya alone and one about nobody, the owner's; the agent's
+    // about the renewal. The sale then moves to Renewals and its task is completed: Renewals' now.
+    const addTask = async (title: string, about: Record<string, string>, assignee = owner) =>
+      (
+        await svc.createTask(owner, {
+          title,
+          assigneeMembershipId: assignee.membership.id,
+          ...about,
+        })
+      ).id;
+    const quote = await addTask('Send the quote', { dealId: sale });
+    const invoice = await addTask('Send the renewal invoice', { dealId: renewal });
+    const call = await addTask('Call Jaya', { contactId: jaya.id });
+    const brochures = await addTask('Order brochures', {});
+    const visit = await addTask('Visit for the renewal', { dealId: renewal }, agent);
+    await svc.moveDeal(owner, {
+      id: sale,
+      expectedVersion: 1,
+      stageId: await firstStage(renewalsId),
+      pipelineId: renewalsId,
+    });
+    await svc.completeTask(owner, { id: quote, expectedVersion: 1 });
+
+    // Each task event is captured once, with a delivery to each endpoint its deal's pipeline (and
+    // assignee, where one is named) reaches; a task about no deal reaches only the endpoint taking
+    // every task.
+    expect((await taskEventsOf(c)).map((e) => [e.type, e.detail.taskId, e.deliveries])).toEqual([
+      ['task.created', quote, 2],
+      ['task.created', invoice, 2],
+      ['task.created', call, 1],
+      ['task.created', brochures, 1],
+      ['task.created', visit, 3],
+      ['task.status_changed', quote, 2],
+    ]);
+    await deliverDue(c);
+    const tasksAt = (path: string) =>
+      bodiesAt(path)
+        .filter((b) => b.type.startsWith('task.'))
+        .map((b) => [b.type, taskIn(b).id])
+        .sort();
+    expect(tasksAt(salesTasks.path)).toEqual([['task.created', quote]]);
+    expect(tasksAt(renewalsTasks.path)).toEqual(
+      [
+        ['task.created', invoice],
+        ['task.created', visit],
+        ['task.status_changed', quote],
+      ].sort(),
+    );
+    expect(tasksAt(agentsRenewals.path)).toEqual([['task.created', visit]]);
+    expect(tasksAt(everyTask.path)).toHaveLength(6);
+    // The payload gives the task's deal.
+    const [quoteAdded] = bodiesAt(salesTasks.path).filter((b) => b.type === 'task.created');
+    expect(taskIn(quoteAdded).dealId).toBe(sale);
+    // Deal events are not narrowed by the pipelines of tasks' deals.
+    expect(bodiesAt(salesTasks.path).filter((b) => b.type === 'deal.created')).toHaveLength(2);
+  });
+
+  it("sends an endpoint that names stages or owners of tasks' deals only the events of the tasks about deals in those stages or owned by those members when the events happen, and with both only those passing both (ADR-304)", async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const agent = await fx.ctx(c, c.agent);
+    const svc = crm();
+    const { id: salesId } = await svc.createPipeline(owner, {
+      name: 'Sales',
+      currency: 'INR',
+      stages: ['New', 'Proposal'],
+    });
+    const [sales] = (await svc.listPipelines(owner)).filter((p) => p.id === salesId);
+    const stage = (name: string) => sales!.stages.find((st) => st.name === name)!.id;
+    const [fresh, proposal] = [stage('New'), stage('Proposal')];
+    /** An endpoint of the company taking the events of the tasks of the stages' and owners' deals. */
+    const add = async (
+      eventTypes: WebhookEventType[],
+      taskStageIds: string[] | null,
+      taskDealOwnerIds: string[] | null,
+    ) => {
+      const path = `/ok/${randomBytes(6).toString('hex')}`;
+      const created = await webhooks().create(owner, {
+        url: `http://${HOST}:${port}${path}`,
+        eventTypes,
+        taskStageIds,
+        taskDealOwnerIds,
+      });
+      return { ...created, path };
+    };
+    const proposals = await add([...TASK_EVENTS, 'deal.created'], [proposal], null);
+    const agentsDeals = await add(TASK_EVENTS, null, [agent.membership.id]);
+    const agentsProposals = await add(TASK_EVENTS, [proposal], [agent.membership.id]);
+    const everyTask = await add(TASK_EVENTS, null, null);
+    const jaya = await newContact(owner, 'Jaya');
+    // The agent's deal is new; the other is a proposal nobody owns.
+    const { id: big } = await svc.createDeal(owner, {
+      contactId: jaya.id,
+      pipelineId: salesId,
+      stageId: fresh,
+      title: 'Annual plan',
+      ownerMembershipId: agent.membership.id,
+    });
+    const { id: small } = await svc.createDeal(owner, {
+      contactId: jaya.id,
+      pipelineId: salesId,
+      stageId: proposal,
+      title: 'Starter plan',
+    });
+    const addTask = async (title: string, about: Record<string, string>) =>
+      (
+        await svc.createTask(owner, {
+          title,
+          assigneeMembershipId: owner.membership.id,
+          ...about,
+        })
+      ).id;
+    const call = await addTask('Call about the annual plan', { dealId: big });
+    const quote = await addTask('Send the starter quote', { dealId: small });
+    const brochures = await addTask('Order brochures', {});
+    // The agent's deal becomes a proposal, and the other deal is given to the agent; then both
+    // tasks are completed: each in Proposal and the agent's by then.
+    await svc.moveDeal(owner, { id: big, expectedVersion: 1, stageId: proposal });
+    await svc.updateDeal(owner, {
+      id: small,
+      expectedVersion: 1,
+      title: 'Starter plan',
+      value: '',
+      ownerMembershipId: agent.membership.id,
+      expectedCloseOn: null,
+    });
+    await svc.completeTask(owner, { id: call, expectedVersion: 1 });
+    await svc.completeTask(owner, { id: quote, expectedVersion: 1 });
+
+    // Each task event is captured once, with a delivery to each endpoint its deal's stage and owner
+    // reach; a task about no deal, or of a deal without an owner, reaches no list of owners.
+    expect((await taskEventsOf(c)).map((e) => [e.type, e.detail.taskId, e.deliveries])).toEqual([
+      ['task.created', call, 2],
+      ['task.created', quote, 2],
+      ['task.created', brochures, 1],
+      ['task.status_changed', call, 4],
+      ['task.status_changed', quote, 4],
+    ]);
+    await deliverDue(c);
+    const tasksAt = (path: string) =>
+      bodiesAt(path)
+        .filter((b) => b.type.startsWith('task.'))
+        .map((b) => [b.type, taskIn(b).id])
+        .sort();
+    expect(tasksAt(proposals.path)).toEqual(
+      [
+        ['task.created', quote],
+        ['task.status_changed', call],
+        ['task.status_changed', quote],
+      ].sort(),
+    );
+    expect(tasksAt(agentsDeals.path)).toEqual(
+      [
+        ['task.created', call],
+        ['task.status_changed', call],
+        ['task.status_changed', quote],
+      ].sort(),
+    );
+    expect(tasksAt(agentsProposals.path)).toEqual(
+      [
+        ['task.status_changed', call],
+        ['task.status_changed', quote],
+      ].sort(),
+    );
+    expect(tasksAt(everyTask.path)).toHaveLength(5);
+    // Deal events are not narrowed by the stages or owners of tasks' deals.
+    expect(bodiesAt(proposals.path).filter((b) => b.type === 'deal.created')).toHaveLength(2);
+  });
+
   it('sends a change of assignee with both assignees, to the endpoints of either assignee, in its place among one request’s steps (ADR-274)', async () => {
     const c = await fx.company();
     const owner = await fx.ctx(c, c.owner);
@@ -5862,6 +6315,112 @@ describe('note events (ADR-280)', () => {
     expect(bodiesAt(tasksOnly.path)).toEqual([]);
   });
 
+  it("sends an endpoint that names pipelines, stages or owners of notes' deals only the notes about deals in them or owned by them when each note is added, and with more than one only those passing them all (ADR-305)", async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const agent = await fx.ctx(c, c.agent);
+    const svc = crm();
+    const { id: salesId } = await svc.createPipeline(owner, {
+      name: 'Sales',
+      currency: 'INR',
+      stages: ['New', 'Proposal'],
+    });
+    const { id: supportId } = await svc.createPipeline(owner, {
+      name: 'Support',
+      currency: 'INR',
+      stages: ['Open'],
+    });
+    const pipelines = await svc.listPipelines(owner);
+    const stageOf = (pipelineId: string, name: string) =>
+      pipelines.find((p) => p.id === pipelineId)!.stages.find((st) => st.name === name)!.id;
+    const [fresh, proposal, open] = [
+      stageOf(salesId, 'New'),
+      stageOf(salesId, 'Proposal'),
+      stageOf(supportId, 'Open'),
+    ];
+    /** An endpoint of the company taking the notes of the lists' deals. */
+    const add = async (
+      eventTypes: WebhookEventType[],
+      notePipelineIds: string[] | null,
+      noteStageIds: string[] | null,
+      noteDealOwnerIds: string[] | null,
+    ) => {
+      const path = `/ok/${randomBytes(6).toString('hex')}`;
+      const created = await webhooks().create(owner, {
+        url: `http://${HOST}:${port}${path}`,
+        eventTypes,
+        notePipelineIds,
+        noteStageIds,
+        noteDealOwnerIds,
+      });
+      return { ...created, path };
+    };
+    const salesNotes = await add(['note.created', 'deal.created'], [salesId], null, null);
+    const proposalNotes = await add(['note.created'], null, [proposal], null);
+    const agentsNotes = await add(['note.created'], null, null, [agent.membership.id]);
+    const agentsSalesProposals = await add(
+      ['note.created'],
+      [salesId],
+      [proposal],
+      [agent.membership.id],
+    );
+    const everyNote = await add(['note.created'], null, null, null);
+    const jaya = await newContact(owner, 'Jaya');
+    // A new sales deal of the agent's, and a support deal nobody owns.
+    const { id: big } = await svc.createDeal(owner, {
+      contactId: jaya.id,
+      pipelineId: salesId,
+      stageId: fresh,
+      title: 'Annual plan',
+      ownerMembershipId: agent.membership.id,
+    });
+    const { id: ticket } = await svc.createDeal(owner, {
+      contactId: jaya.id,
+      pipelineId: supportId,
+      stageId: open,
+      title: 'Login help',
+    });
+    const first = await svc.addNote(owner, { dealId: big, body: 'Asked for a call' });
+    const onSupport = await svc.addNote(owner, { dealId: ticket, body: 'Cannot sign in' });
+    const onContact = await svc.addNote(owner, { contactId: jaya.id, body: 'Prefers mornings' });
+    // The agent's deal becomes a proposal and the support deal is given to the agent: the notes
+    // added after go by the new stage and owner.
+    await svc.moveDeal(owner, { id: big, expectedVersion: 1, stageId: proposal });
+    await svc.updateDeal(owner, {
+      id: ticket,
+      expectedVersion: 1,
+      title: 'Login help',
+      value: '',
+      ownerMembershipId: agent.membership.id,
+      expectedCloseOn: null,
+    });
+    const later = await svc.addNote(owner, { dealId: big, body: 'Sent the proposal' });
+    const given = await svc.addNote(owner, { dealId: ticket, body: 'Called back' });
+
+    // Each note is captured once, with a delivery to each endpoint its deal's pipeline, stage and
+    // owner reach when it is added; a note about the contact alone reaches no list.
+    expect((await noteEventsOf(c)).map((e) => [e.detail.noteId, e.deliveries])).toEqual([
+      [first.id, 3],
+      [onSupport.id, 1],
+      [onContact.id, 1],
+      [later.id, 5],
+      [given.id, 2],
+    ]);
+    await deliverDue(c);
+    const notesAt = (path: string) =>
+      bodiesAt(path)
+        .filter((b) => b.type === 'note.created')
+        .map((b) => (b.data.note as { id: string }).id)
+        .sort();
+    expect(notesAt(salesNotes.path)).toEqual([first.id, later.id].sort());
+    expect(notesAt(proposalNotes.path)).toEqual([later.id]);
+    expect(notesAt(agentsNotes.path)).toEqual([first.id, later.id, given.id].sort());
+    expect(notesAt(agentsSalesProposals.path)).toEqual([later.id]);
+    expect(notesAt(everyNote.path)).toHaveLength(5);
+    // Deal events are not narrowed by the pipelines of notes' deals.
+    expect(bodiesAt(salesNotes.path).filter((b) => b.type === 'deal.created')).toHaveLength(2);
+  });
+
   it('gives a moved note with the contact kept, and sends nothing for a note erasure deleted', async () => {
     const c = await fx.company();
     const owner = await fx.ctx(c, c.owner);
@@ -6063,5 +6622,86 @@ describe('satisfaction survey events (ADR-293)', () => {
     const others = bodiesAt(conversationsOnly.path).map((b) => b.type);
     expect(others.length).toBeGreaterThan(0);
     expect(new Set(others)).toEqual(new Set(['conversation.status_changed']));
+  });
+
+  it('sends an endpoint that names scores only the answers that recorded one of them (ADR-307)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    await createCsatService({ db: fx.dbs.app, clock: systemClock }).updateCsatSettings(owner, {
+      enabled: true,
+      question: 'How did we do today?',
+      labels: ['Great', 'Okay', 'Poor'],
+    });
+    const inboxWithSends = createInboxService({
+      db: fx.dbs.app,
+      clock: systemClock,
+      jobs: fx.jobs(),
+      signer: fx.signer,
+    });
+    /** An endpoint of the company taking the answers with these scores. */
+    const add = async (surveyScores: (1 | 2 | 3)[] | null) => {
+      const path = `/ok/${randomBytes(6).toString('hex')}`;
+      const created = await webhooks().create(owner, {
+        url: `http://${HOST}:${port}${path}`,
+        eventTypes: ['satisfaction_survey.answered'],
+        surveyScores,
+      });
+      return { ...created, path };
+    };
+    const unhappy = await add([1]);
+    const happy = await add([3, 2]);
+    const everyAnswer = await add(null);
+    /** A customer writes, a member resolves, the survey goes out and the customer taps a score. */
+    const answer = async (score: 1 | 2 | 3) => {
+      const phone = waId();
+      const { conversation_id: conversationId } = await inbound(c, phone, 'Where is my parcel?');
+      await inboxWithSends.setStatus(owner, {
+        conversationId,
+        status: 'resolved',
+        expectedVersion: await versionOf(conversationId),
+      });
+      const [survey] = await fx.query<{ id: string; message_id: string }>(
+        `SELECT id, message_id FROM app.csat_surveys WHERE conversation_id = $1`,
+        [conversationId],
+      );
+      const [intent] = await fx.query<{ id: string }>(
+        `SELECT id FROM app.send_intents WHERE message_id = $1`,
+        [survey!.message_id],
+      );
+      await processSendIntent(
+        {
+          db: fx.dbs.app,
+          keyring: fx.keyring,
+          graph: fx.graph,
+          clock: systemClock,
+          rate: { capacity: 1000, refillPerSecond: 1000 },
+          jobs: fx.jobs(),
+          signer: fx.signer,
+        },
+        authorizedTenantScope(c.tenant.id, c.owner.id),
+        intent!.id,
+      );
+      const sent = fx.standIn.state.requests.filter((r) => r.path.endsWith('/messages')).at(-1)!;
+      await tap(c, phone, `w360csat:${survey!.id}:${score}`, sent.wamid!);
+      return survey!.id;
+    };
+    const great = await answer(3);
+    const okay = await answer(2);
+    const poor = await answer(1);
+
+    // Each answer is captured once, with a delivery to each endpoint whose list holds its score.
+    expect((await surveyEventsOf(c)).map((e) => [e.detail.surveyId, e.deliveries])).toEqual([
+      [great, 2],
+      [okay, 2],
+      [poor, 2],
+    ]);
+    await deliverDue(c);
+    const scoresAt = (path: string) =>
+      bodiesAt(path)
+        .map((b) => (b.data.survey as { score: number }).score)
+        .sort();
+    expect(scoresAt(unhappy.path)).toEqual([1]);
+    expect(scoresAt(happy.path)).toEqual([2, 3]);
+    expect(scoresAt(everyAnswer.path)).toEqual([1, 2, 3]);
   });
 });

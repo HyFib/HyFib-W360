@@ -27,8 +27,11 @@ import {
   WEBHOOK_EVENT_KEYS,
   WEBHOOK_LIMITS,
   WEBHOOK_MESSAGE_SENDERS,
+  WEBHOOK_CRM_CHANGE_MAKERS,
+  WEBHOOK_SURVEY_SCORES,
   WEBHOOK_MESSAGE_STATUSES,
   WEBHOOK_ORDER_STATUSES,
+  WEBHOOK_PAYMENT_LINK_STATUSES,
   WEBHOOK_RUN_END_STATUSES,
   WEBHOOK_RUN_TRIGGERS,
   WEBHOOK_CONSENT_CHANGES,
@@ -146,6 +149,7 @@ import {
   apiCreateChatLinkSchema,
   apiUpdateChatLinkSchema,
 } from './chat-links';
+import { apiAdSchema } from './ads';
 import { MAX_PERIOD_DAYS, PERIOD_PRESETS } from '../reports/period';
 import { apiCreateTeamSchema, apiUpdateTeamSchema } from './teams';
 import { apiUpdateMemberSchema } from './members';
@@ -1197,6 +1201,12 @@ export const apiWebhookEndpointSchema = z.object({
     .describe(
       'The statuses an order reaches that the endpoint receives as order.status_changed; null receives every status.',
     ),
+  paymentLinkStatuses: z
+    .array(z.enum(WEBHOOK_PAYMENT_LINK_STATUSES))
+    .nullable()
+    .describe(
+      'The statuses a Payment Link reaches that the endpoint receives as payment_link.status_changed; null receives every status.',
+    ),
   templateStatuses: z
     .array(z.enum(WEBHOOK_TEMPLATE_STATUSES))
     .nullable()
@@ -1279,7 +1289,7 @@ export const apiWebhookEndpointSchema = z.object({
     .array(z.uuid())
     .nullable()
     .describe(
-      "The CRM stages whose deals' events (deal.created, deal.updated, deal.stage_changed, deal.owner_changed, deal.status_changed) the endpoint receives, by the stage an event gives (deal.stage_changed also by the stage the deal left); null receives every stage's. With pipelineIds too, an event must pass both. Other events are not narrowed.",
+      "The CRM stages whose deals' events (deal.created, deal.updated, deal.stage_changed, deal.owner_changed, deal.status_changed) the endpoint receives, by the stage an event gives (deal.stage_changed also by the stage the deal left); null receives every stage's. With pipelineIds or ownerIds too, an event must pass them all. Other events are not narrowed.",
     ),
   ownerIds: z
     .array(z.uuid())
@@ -1292,6 +1302,54 @@ export const apiWebhookEndpointSchema = z.object({
     .nullable()
     .describe(
       "The members whose tasks' events (task.created, task.updated, task.assignee_changed, task.status_changed) the endpoint receives, by the member a task is assigned to when an event happens (task.assignee_changed also by the member it left). null receives every task's. Other events are not narrowed.",
+    ),
+  taskPipelineIds: z
+    .array(z.uuid())
+    .nullable()
+    .describe(
+      "The CRM pipelines whose deals' tasks' events (task.created, task.updated, task.assignee_changed, task.status_changed) the endpoint receives, by the pipeline of the task's deal when an event happens; a task without a deal is on no list. null receives every task's. With taskAssigneeIds, taskStageIds or taskDealOwnerIds too, an event must pass them all. Other events are not narrowed.",
+    ),
+  taskStageIds: z
+    .array(z.uuid())
+    .nullable()
+    .describe(
+      "The CRM stages whose deals' tasks' events (task.created, task.updated, task.assignee_changed, task.status_changed) the endpoint receives, by the stage of the task's deal when an event happens; a task without a deal is on no list. null receives every task's. With taskAssigneeIds, taskPipelineIds or taskDealOwnerIds too, an event must pass them all. Other events are not narrowed.",
+    ),
+  taskDealOwnerIds: z
+    .array(z.uuid())
+    .nullable()
+    .describe(
+      "The members whose deals' tasks' events (task.created, task.updated, task.assignee_changed, task.status_changed) the endpoint receives, by the owner of the task's deal when an event happens; a task without a deal, or of a deal without an owner, is on no list. null receives every task's. With taskAssigneeIds, taskPipelineIds or taskStageIds too, an event must pass them all. Other events are not narrowed.",
+    ),
+  notePipelineIds: z
+    .array(z.uuid())
+    .nullable()
+    .describe(
+      "The CRM pipelines whose deals' notes' events (note.created) the endpoint receives, by the pipeline of the note's deal when the note is added; a note about a contact alone is on no list. null receives every note's. With noteStageIds or noteDealOwnerIds too, an event must pass them all. Other events are not narrowed.",
+    ),
+  noteStageIds: z
+    .array(z.uuid())
+    .nullable()
+    .describe(
+      "The CRM stages whose deals' notes' events (note.created) the endpoint receives, by the stage of the note's deal when the note is added; a note about a contact alone is on no list. null receives every note's. With notePipelineIds or noteDealOwnerIds too, an event must pass them all. Other events are not narrowed.",
+    ),
+  noteDealOwnerIds: z
+    .array(z.uuid())
+    .nullable()
+    .describe(
+      "The members whose deals' notes' events (note.created) the endpoint receives, by the owner of the note's deal when the note is added; a note about a contact alone, or of a deal without an owner, is on no list. null receives every note's. With notePipelineIds or noteStageIds too, an event must pass them all. Other events are not narrowed.",
+    ),
+  crmChangeMakers: z
+    .array(z.enum(WEBHOOK_CRM_CHANGE_MAKERS))
+    .nullable()
+    .describe(
+      "Who made the changes whose deal, task and note events the endpoint receives, as deal.changedBy, task.changedBy and note.writtenBy name them: an addition's maker is whoever added the deal or task, a note's whoever wrote it. A change HyFib did not record the maker of (changedBy null) is sent whoever is listed. null receives every change. Other events are not narrowed.",
+    ),
+  surveyScores: z
+    .array(z.literal(WEBHOOK_SURVEY_SCORES))
+    .nullable()
+    .describe(
+      'The scores of the satisfaction survey answers (satisfaction_survey.answered) the endpoint receives, as survey.score gives them (3 for the first and best button, 1 for the third); null receives every answer. Other events are not narrowed.',
     ),
   assigneeIds: z
     .array(z.uuid())
@@ -1541,7 +1599,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         '',
         `POST /messages needs an \`Idempotency-Key\` header: a retry with the same key and body returns the first response (header \`Idempotent-Replayed: true\`) and never sends twice; responses are kept ${API_LIMITS.idempotencyHours} hours. Delivery itself follows WhatsApp: read the status with GET /messages/{id}.`,
         '',
-        `Webhooks: endpoints added in Settings → Webhooks receive the events below as signed JSON POSTs. \`W360-Signature: t=<unix time>,v1=<hex HMAC-SHA256 of "<t>.<raw body>" with the endpoint secret>\` (two \`v1\` values for ${WEBHOOK_LIMITS.previousSecretHours} hours after the secret is rotated); reject a time more than 5 minutes from yours. Answer with a 2xx status within 10 seconds; anything else is retried (${retrySchedule}; ${WEBHOOK_LIMITS.attempts} attempts). Delivery is at least once and unordered: deduplicate on the event id. An endpoint failing for ${WEBHOOK_LIMITS.disableAfterHours} hours is turned off. An endpoint can also send up to ${WEBHOOK_LIMITS.headers} headers of its own with every delivery, such as an \`Authorization\` header its receiver issued; they never replace HyFib's. Or it can get an access token from its receiver's authorization server (OAuth 2.0 client credentials) and send it as \`Authorization: Bearer <token>\`. An endpoint receives the events of every WhatsApp number unless it names the numbers it takes (its \`channelIds\`, or the numbers chosen in Settings → Webhooks): then it receives the message, conversation, automation run, order and campaign events of those numbers only (a campaign's are those of the number it sends from), and still every consent, contact, template, deal and task event it takes. It can likewise name teams (its \`teamIds\`, or the teams chosen in Settings → Webhooks): then it receives the message and conversation events of those teams' conversations only, by the team a conversation is in when the event happens, or members (its \`assigneeIds\`): then those of the conversations assigned to them only, by the member a conversation is assigned to when the event happens, or contact tags (its \`contactTags\`): then those of the conversations whose contact has any of the tags when the event happens only, or conversation tags (its \`conversationTags\`): then those of the conversations that have any of the tags when the event happens only. And it can name templates (its \`templateIds\`): then it receives the statuses of the messages sent with them and their changes only, or campaigns (its \`campaignIds\`): then the statuses of the messages they sent and their changes only. And it can name CRM pipelines (its \`pipelineIds\`): then it receives the events of those pipelines' deals only, by the pipeline an event gives, a move to another pipeline reaching the endpoints of the pipeline it left as well, or stages (its \`stageIds\`): then those of the deals in those stages only, a move reaching the endpoints of the stage it left as well, or the deals' owners (its \`ownerIds\`): then those of the deals the members own when the event happens only, a change of owner reaching the endpoints of the owner it left as well; with more than one of these, an event must pass them all. And it can name the members whose tasks it takes (its \`taskAssigneeIds\`): then it receives the events of the tasks assigned to them when the event happens only, a change of assignee reaching the endpoints of the member it left as well.`,
+        `Webhooks: endpoints added in Settings → Webhooks receive the events below as signed JSON POSTs. \`W360-Signature: t=<unix time>,v1=<hex HMAC-SHA256 of "<t>.<raw body>" with the endpoint secret>\` (two \`v1\` values for ${WEBHOOK_LIMITS.previousSecretHours} hours after the secret is rotated); reject a time more than 5 minutes from yours. Answer with a 2xx status within 10 seconds; anything else is retried (${retrySchedule}; ${WEBHOOK_LIMITS.attempts} attempts). Delivery is at least once and unordered: deduplicate on the event id. An endpoint failing for ${WEBHOOK_LIMITS.disableAfterHours} hours is turned off. An endpoint can also send up to ${WEBHOOK_LIMITS.headers} headers of its own with every delivery, such as an \`Authorization\` header its receiver issued; they never replace HyFib's. Or it can get an access token from its receiver's authorization server (OAuth 2.0 client credentials) and send it as \`Authorization: Bearer <token>\`. An endpoint receives the events of every WhatsApp number unless it names the numbers it takes (its \`channelIds\`, or the numbers chosen in Settings → Webhooks): then it receives the message, conversation, automation run, order and campaign events of those numbers only (a campaign's are those of the number it sends from), and still every consent, contact, template, deal, task and note event it takes. It can likewise name teams (its \`teamIds\`, or the teams chosen in Settings → Webhooks): then it receives the message and conversation events of those teams' conversations only, by the team a conversation is in when the event happens, or members (its \`assigneeIds\`): then those of the conversations assigned to them only, by the member a conversation is assigned to when the event happens, or contact tags (its \`contactTags\`): then those of the conversations whose contact has any of the tags when the event happens only, or conversation tags (its \`conversationTags\`): then those of the conversations that have any of the tags when the event happens only. And it can name templates (its \`templateIds\`): then it receives the statuses of the messages sent with them and their changes only, or campaigns (its \`campaignIds\`): then the statuses of the messages they sent and their changes only. And it can name CRM pipelines (its \`pipelineIds\`): then it receives the events of those pipelines' deals only, by the pipeline an event gives, a move to another pipeline reaching the endpoints of the pipeline it left as well, or stages (its \`stageIds\`): then those of the deals in those stages only, a move reaching the endpoints of the stage it left as well, or the deals' owners (its \`ownerIds\`): then those of the deals the members own when the event happens only, a change of owner reaching the endpoints of the owner it left as well; with more than one of these, an event must pass them all. And it can name the members whose tasks it takes (its \`taskAssigneeIds\`): then it receives the events of the tasks assigned to them when the event happens only, a change of assignee reaching the endpoints of the member it left as well, or the pipelines, stages or owners of the deals whose tasks it takes (its \`taskPipelineIds\`, \`taskStageIds\` and \`taskDealOwnerIds\`): then those of the tasks about deals in those pipelines or stages, or owned by those members, when the event happens only; with more than one of these, an event must pass them all. And it can name the pipelines, stages or owners of the deals whose notes it takes (its \`notePipelineIds\`, \`noteStageIds\` and \`noteDealOwnerIds\`): then it receives the events of the notes about deals in those pipelines or stages, or owned by those members, when the note is added only; with more than one of these, an event must pass them all. And it can name who made the changes whose deal, task and note events it takes (its \`crmChangeMakers\`: members, automations or API keys, as \`changedBy\` and \`writtenBy\` name them): then it receives the events of the changes they made only, and those HyFib did not record the maker of, so an integration can leave out the changes its own key makes.`,
       ].join('\n'),
     },
     servers: [{ url: serverUrl }],
@@ -2203,6 +2261,13 @@ export function buildOpenApiDocument(serverUrl: string) {
               description:
                 'Only the conversations whose customer sent this chat link’s reference (GET /chat-links), whenever in the conversation; a link’s `last30Days.conversations` counts those of the last 30 days.',
             },
+            {
+              name: 'adId',
+              in: 'query',
+              schema: { type: 'string', minLength: 1, maxLength: 128 },
+              description:
+                'Only the conversations whose customer wrote from this click-to-WhatsApp ad (its `id` in GET /ads), whenever in the conversation; an ad’s `last30Days.conversations` counts those of the last 30 days.',
+            },
           ],
           responses: {
             '200': { description: 'A page of conversations.', content: pageOf('Conversation') },
@@ -2473,6 +2538,20 @@ export function buildOpenApiDocument(serverUrl: string) {
           responses: {
             '200': { description: 'The chat link now.', content: json(dataOf(ref('ChatLink'))) },
             ...errors(400, 401, 403, 404, 409, 415, 422, 423, 429, 500),
+          },
+        },
+      },
+      '/ads': {
+        get: {
+          operationId: 'listAds',
+          summary: 'Click-to-WhatsApp ads customers wrote from',
+          description: `${scopeNote('ads.read')} The click-to-WhatsApp ads customers wrote from in the last 30 days, as Growth → Ads lists them: at most ${GROWTH_LIMITS.adsShown}, those that started the most conversations first, then the latest, each with the conversations it started and the customers’ messages that came from it. An ad is listed once for each id, type, headline and web address Meta sent with it. HyFib keeps only what identifies an ad, never the ad click id, its image or video addresses or its text, and connects no ad account, so spend and costs are not given. \`GET /conversations?adId=\` finds an ad’s conversations.`,
+          responses: {
+            '200': {
+              description: 'The ads of the last 30 days.',
+              content: json(dataOf({ type: 'array', items: ref('Ad') })),
+            },
+            ...errors(401, 403, 422, 429, 500),
           },
         },
       },
@@ -4029,7 +4108,7 @@ export function buildOpenApiDocument(serverUrl: string) {
       'satisfaction_survey.answered': webhook(
         'webhookSatisfactionSurveyAnswered',
         WEBHOOK_EVENT_INFO['satisfaction_survey.answered'].label,
-        `${WEBHOOK_EVENT_INFO['satisfaction_survey.answered'].description} The survey is the survey as GET /satisfaction-surveys reads it when the event is delivered: its score (3 for the first and best button, 1 for the third), the customer’s tap and the survey message by id among the conversation’s messages, and the members credited and resolving by id. Only the customer’s first tap answers a survey, so a survey is answered once and this event is sent once for it; surveys skipped or never answered send nothing. It happens on the conversation’s WhatsApp number, so an endpoint that names numbers receives it for those numbers only; the team, member and tag filters do not narrow it. Deliveries are not ordered.`,
+        `${WEBHOOK_EVENT_INFO['satisfaction_survey.answered'].description} The survey is the survey as GET /satisfaction-surveys reads it when the event is delivered: its score (3 for the first and best button, 1 for the third), the customer’s tap and the survey message by id among the conversation’s messages, and the members credited and resolving by id. Only the customer’s first tap answers a survey, so a survey is answered once and this event is sent once for it; surveys skipped or never answered send nothing. It happens on the conversation’s WhatsApp number, so an endpoint that names numbers receives it for those numbers only; the team, member and tag filters do not narrow it. An endpoint receives every answer unless it names the scores it takes (its \`surveyScores\`, or the scores ticked in Settings → Webhooks). Deliveries are not ordered.`,
         'WebhookSatisfactionSurveyAnswered',
       ),
       'contact.created': webhook(
@@ -4083,7 +4162,7 @@ export function buildOpenApiDocument(serverUrl: string) {
       'payment_link.status_changed': webhook(
         'webhookPaymentLinkStatusChanged',
         WEBHOOK_EVENT_INFO['payment_link.status_changed'].label,
-        `${WEBHOOK_EVENT_INFO['payment_link.status_changed'].description} paymentLink.status and paymentLink.previousStatus are the change, as the worker wrote it from what it did at Razorpay or what Razorpay reported; the rest is the link as GET /orders/{id}/payment-links reads it when the event is delivered: its amounts, expiry, the message that sent it in the chat or why it was not sent (notSentReason), what went wrong at Razorpay, and who asked for it (a member, never which, or an API key by its id). Never the link’s address or Razorpay’s ids. Only a link Razorpay reports paid marks the order paid, which order.status_changed reports. Asking for payment and asking to cancel a link send no event of their own here: the link is \`creating\` until the worker creates it, and cancelled when Razorpay reports it. It happens on the order’s WhatsApp number, so an endpoint that names numbers receives it for those numbers only. Deliveries are not ordered: the latest change is the one with the latest createdAt.`,
+        `${WEBHOOK_EVENT_INFO['payment_link.status_changed'].description} paymentLink.status and paymentLink.previousStatus are the change, as the worker wrote it from what it did at Razorpay or what Razorpay reported; the rest is the link as GET /orders/{id}/payment-links reads it when the event is delivered: its amounts, expiry, the message that sent it in the chat or why it was not sent (notSentReason), what went wrong at Razorpay, and who asked for it (a member, never which, or an API key by its id). Never the link’s address or Razorpay’s ids. Only a link Razorpay reports paid marks the order paid, which order.status_changed reports. Asking for payment and asking to cancel a link send no event of their own here: the link is \`creating\` until the worker creates it, and cancelled when Razorpay reports it. An endpoint receives every status unless it names the statuses it takes (its \`paymentLinkStatuses\`, or the statuses ticked in Settings → Webhooks). It happens on the order’s WhatsApp number, so an endpoint that names numbers receives it for those numbers only. Deliveries are not ordered: the latest change is the one with the latest createdAt.`,
         'WebhookPaymentLinkStatusChanged',
       ),
       'campaign.status_changed': webhook(
@@ -4149,7 +4228,7 @@ export function buildOpenApiDocument(serverUrl: string) {
       'note.created': webhook(
         'webhookNoteCreated',
         WEBHOOK_EVENT_INFO['note.created'].label,
-        `${WEBHOOK_EVENT_INFO['note.created'].description} The note is the note when the event is delivered: the deal it is about, who wrote it (\`note.writtenBy\`: a member, never which, or an API key, named by note.apiKeyId, so an integration that adds notes through the API can tell its own from members’), and its contact, the contact kept when a merge has moved it. Never the note’s text, which may hold anything a member wrote: read the note with GET /notes/{id} (\`notes.read\`). Notes are never changed, so no other note event is sent; erasing a contact deletes its notes, so the events of an erased contact’s notes are no longer delivered. No endpoint filter narrows it.`,
+        `${WEBHOOK_EVENT_INFO['note.created'].description} The note is the note when the event is delivered: the deal it is about, who wrote it (\`note.writtenBy\`: a member, never which, or an API key, named by note.apiKeyId, so an integration that adds notes through the API can tell its own from members’), and its contact, the contact kept when a merge has moved it. Never the note’s text, which may hold anything a member wrote: read the note with GET /notes/{id} (\`notes.read\`). Notes are never changed, so no other note event is sent; erasing a contact deletes its notes, so the events of an erased contact’s notes are no longer delivered. An endpoint can narrow it by the pipeline, stage or owner of the note’s deal when the note is added (\`notePipelineIds\`, \`noteStageIds\`, \`noteDealOwnerIds\`): a note about a contact alone then matches none.`,
         'WebhookNoteCreated',
       ),
       ping: webhook(
@@ -4344,6 +4423,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         Report: jsonSchema(apiReportSchema),
         Flow: jsonSchema(apiFlowSchema),
         FlowResponse: jsonSchema(apiFlowResponseSchema),
+        Ad: jsonSchema(apiAdSchema),
         ChatLink: jsonSchema(apiChatLinkSchema),
         ChatLinkDetail: jsonSchema(apiChatLinkDetailSchema),
         CreateChatLink: jsonSchema(apiCreateChatLinkSchema, 'input'),
@@ -4500,6 +4580,7 @@ export const API_ROUTES = [
   ['post', '/chat-links'],
   ['get', '/chat-links/{id}'],
   ['patch', '/chat-links/{id}'],
+  ['get', '/ads'],
   ['get', '/members'],
   ['patch', '/members/{id}'],
   ['get', '/business-hours'],

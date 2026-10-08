@@ -1685,6 +1685,12 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   `latestConversationSource` reads it for the inbox; `toApiSource` shapes it.
   `conversationFilterSql` adds an `exists` over the conversation's sources for `source` and
   `chatLinkId`, so listing and changing by a filter find the same conversations.
+- **Click-to-WhatsApp ads through the API (ADR-302):** `apiListAds` in `api/ads.ts` reads with
+  `readAdSources` (`growth/service.ts`), the query Growth → Ads now calls too: the company's
+  `conversation_sources` rows of kind `ad` in the last 30 days, grouped by the ad's id, type,
+  headline and web address, ordered by conversations, the latest message and then every grouped
+  column, at most `GROWTH_LIMITS.adsShown`. `conversationFilterSql` matches `adId` against
+  `ad_source_id` in the same `exists` as `source` and `chatLinkId`.
 - **Many conversations at once (ADR-120):** `POST /conversations/update-many`
   (`apiUpdateManyConversations`) takes 1 to 100 `conversationIds` and the same fields. In one
   transaction it locks the member first (as a suspension does before releasing its conversations),
@@ -2036,6 +2042,14 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   reached, and writes no event when none does; other types, replays and test events are unchanged.
   Settings (the same status control as campaigns) and the API (`orderStatuses`) set it; a change
   that drops the event clears it.
+- **Payment Link status filters** (migration 0231, ADR-308): `payment_link_statuses` on an endpoint
+  lists the statuses a link reaches that it takes as `payment_link.status_changed` (`created`,
+  `partially_paid`, `paid`, `expired`, `cancelled`, `failed`; a `creating` link sends no event),
+  null for every status; a check keeps it to 1 to 6 known statuses and to endpoints that take the
+  event. `app.capture_webhook_event` (replaced with the same signature) creates a link change's
+  delivery only for endpoints whose list is null or holds the status reached, which the links'
+  trigger passes, and writes no event when none does. Settings (the status control orders use) and
+  the API (`paymentLinkStatuses`) set it; a change that drops the event clears it.
 - **Template status filters** (migration 0112, ADR-148): `template_statuses` on an endpoint lists
   the statuses it takes as `template.status_changed` (the eleven the event reports, `pending` to
   `locked`; HyFib's own steps, a deletion under way or refused and an unrecognised status are never
@@ -2214,6 +2228,53 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   and members it held stay; a change that drops every task event clears it. For
   `task.assignee_changed` (ADR-274) it also matches the `previousAssigneeId` the trigger stores, so
   the endpoints of the member a task left hear the change too.
+- **Pipeline filters for task events** (migration 0226, ADR-303): `task_pipeline_ids` on an endpoint
+  lists the pipelines whose deals' tasks' events it takes, null for every task's; a check keeps it
+  to 1 to 50 ids and to endpoints taking a task event. `app.capture_webhook_event` (replaced with
+  the same signature) reads the pipeline of the task's deal (`app.crm_tasks.deal_id` joined to
+  `app.crm_deals`) by the detail's `taskId` only when an active endpoint of the company taking the
+  event names such pipelines, and matches it against each list; a task without a deal matches none.
+  Settings (radio buttons and checkboxes under "Pipelines of tasks’ deals", the deals' fieldset
+  given a `kind`) and the API (`taskPipelineIds`) set it; the services check the pipelines given as
+  they check the deals' (one shared check), and a change that drops every task event clears it.
+- **Stage and owner filters for task events** (migration 0227, ADR-304): `task_stage_ids` and
+  `task_deal_owner_ids` on an endpoint list the stages, and the members owning the deals, whose
+  deals' tasks' events it takes, null for every task's; checks keep each to 1 to 50 ids and to
+  endpoints taking a task event. `app.capture_webhook_event` reads the task's deal's pipeline, stage
+  and owner in one query, only when an active endpoint of the company taking the event names any of
+  the three lists, and matches each; a task without a deal, or of a deal without an owner, matches
+  none of the lists that need them. Settings ("Stages of tasks’ deals", the stages' fieldset given a
+  `kind`, and "Owners of tasks’ deals", the members' fieldset's third kind) and the API
+  (`taskStageIds`, `taskDealOwnerIds`) set them; the services check stages as they check the deals'
+  (one shared check) and members as they check deal owners and task assignees, and a change that
+  drops every task event clears both.
+- **Pipeline, stage and owner filters for note events** (migration 0228, ADR-305):
+  `note_pipeline_ids`, `note_stage_ids` and `note_deal_owner_ids` on an endpoint list the pipelines,
+  stages and members owning the deals whose notes' events it takes, null for every note's; checks
+  keep each to 1 to 50 ids and to endpoints taking `note.created`. `app.capture_webhook_event` reads
+  the note's deal's pipeline, stage and owner in one query (the note's row in `app.crm_activities`
+  joined to its deal), only when an active endpoint of the company taking the event names any of the
+  three lists, and matches each; a note about a contact alone, or of a deal without an owner,
+  matches none of the lists that need them. Settings (the pipelines', stages' and members' fieldsets
+  given a `notes` kind) and the API (`notePipelineIds`, `noteStageIds`, `noteDealOwnerIds`) set
+  them; the services check them with the deals' and tasks' shared checks, and a change that drops
+  `note.created` clears all three.
+- **Change-maker filters for deal, task and note events** (migration 0229, ADR-306):
+  `crm_change_makers` on an endpoint lists who made the changes whose deal, task and note events it
+  takes (`member`, `automation`, `api`), null for every change; a check keeps it to 1 to 3 known
+  makers and to endpoints taking such an event. `app.capture_webhook_event` reads the maker only
+  when an active endpoint of the company taking the event names makers (an addition's from the
+  deal's or task's creator columns, a note's from the note, any other change's from the `changedBy`
+  its trigger records), and an event whose change recorded no maker passes every list. Settings
+  ("Changes made by") and the API (`crmChangeMakers`) set it; a change that drops every deal, task
+  and note event clears it.
+- **Score filters for satisfaction survey answers** (migration 0230, ADR-307): `survey_scores` on an
+  endpoint lists the scores of the `satisfaction_survey.answered` events it takes (3, 2 and 1: the
+  survey's first, second and third button), null for every answer; a check keeps it to 1 to 3 known
+  scores and to endpoints taking the event. `app.capture_webhook_event` reads the answer's score
+  from `app.csat_surveys` only when an active endpoint of the company taking the event names scores.
+  Settings ("Answers scored") and the API (`surveyScores`) set it; a change that drops the event
+  clears it.
 - **Contact tag filters** (migration 0183, ADR-267): `contact_tags` on an endpoint lists the contact
   tags whose conversations' message and conversation events it takes, null for every conversation's;
   a check keeps it to 1 to 50 tags in `app.contact_tags`' form and to endpoints taking such an

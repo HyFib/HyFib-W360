@@ -6,13 +6,16 @@ import type {
   WebhookConsentChange,
   WebhookContactPart,
   WebhookConversationStatus,
+  WebhookCrmChangeMaker,
   WebhookEventType,
   WebhookMessageSender,
   WebhookMessageStatus,
   WebhookOrderStatus,
+  WebhookPaymentLinkStatus,
   WebhookRunEndStatus,
   WebhookReceivedMessageType,
   WebhookRunTrigger,
+  WebhookSurveyScore,
   WebhookTemplateStatus,
 } from '@w360/db';
 
@@ -23,13 +26,16 @@ export type {
   WebhookConsentChange,
   WebhookContactPart,
   WebhookConversationStatus,
+  WebhookCrmChangeMaker,
   WebhookEventType,
   WebhookMessageSender,
   WebhookMessageStatus,
   WebhookOrderStatus,
+  WebhookPaymentLinkStatus,
   WebhookRunEndStatus,
   WebhookReceivedMessageType,
   WebhookRunTrigger,
+  WebhookSurveyScore,
   WebhookTemplateStatus,
 } from '@w360/db';
 
@@ -348,6 +354,29 @@ export const WEBHOOK_ORDER_STATUS_LABELS: Record<WebhookOrderStatus, string> = {
 };
 
 /**
+ * The statuses a `payment_link.status_changed` event reports, which an endpoint can choose
+ * (ADR-308), in the order Orders lists them; a link that is `creating` sends no event.
+ */
+export const WEBHOOK_PAYMENT_LINK_STATUSES = [
+  'created',
+  'partially_paid',
+  'paid',
+  'expired',
+  'cancelled',
+  'failed',
+] as const satisfies readonly WebhookPaymentLinkStatus[];
+
+/** How Settings names each Payment Link status an endpoint can choose (ADR-308), as Orders does. */
+export const WEBHOOK_PAYMENT_LINK_STATUS_LABELS: Record<WebhookPaymentLinkStatus, string> = {
+  created: 'Waiting for payment',
+  partially_paid: 'Partly paid',
+  paid: 'Paid',
+  expired: 'Expired',
+  cancelled: 'Cancelled',
+  failed: 'Not created',
+};
+
+/**
  * The statuses a `template.status_changed` event reports, which an endpoint can choose (ADR-148), in
  * the order Templates lists them: Meta's review states, then the deletion and Meta's limits.
  */
@@ -662,6 +691,18 @@ export const WEBHOOK_LIMITS = {
   owners: 50,
   /** The members an endpoint can choose to take the events of their assigned tasks (ADR-266). */
   taskAssignees: 50,
+  /** The CRM pipelines an endpoint can choose to take the events of their deals' tasks (ADR-303). */
+  taskPipelines: 50,
+  /** The CRM stages an endpoint can choose to take the events of their deals' tasks (ADR-304). */
+  taskStages: 50,
+  /** The members an endpoint can choose to take the events of the tasks of their deals (ADR-304). */
+  taskDealOwners: 50,
+  /** The CRM pipelines whose deals' notes' events an endpoint can choose to take (ADR-305). */
+  notePipelines: 50,
+  /** The CRM stages whose deals' notes' events an endpoint can choose to take (ADR-305). */
+  noteStages: 50,
+  /** The members whose deals' notes' events an endpoint can choose to take (ADR-305). */
+  noteDealOwners: 50,
   /** The contact tags an endpoint can choose to take the conversations' events of (ADR-267). */
   contactTags: 50,
   /** The conversation tags an endpoint can choose to take the conversations' events of (ADR-273). */
@@ -987,7 +1028,11 @@ export const webhookStageText = (stage: {
  * events belong to the member it is assigned to when they happen, and a change of assignee
  * (ADR-274) to the member it left as well; a change of details (ADR-276) is one of them. Tasks are
  * assigned to the members who can own deals, so an assignee is chosen and stored as a deal owner
- * is (`WebhookOwnerChoice`, `WebhookEndpointOwner`, `webhookOwnerText`).
+ * is (`WebhookOwnerChoice`, `WebhookEndpointOwner`, `webhookOwnerText`). They can also be taken for
+ * the tasks of the deals in chosen pipelines (ADR-303) or stages, or owned by chosen members
+ * (ADR-304), chosen and stored as the deals' pipelines, stages and owners are
+ * (`WebhookPipelineChoice`, `WebhookEndpointPipeline`, `webhookPipelineText`, and the stages' and
+ * owners' own).
  */
 export const WEBHOOK_TASK_EVENTS = [
   'task.created',
@@ -999,6 +1044,60 @@ export const WEBHOOK_TASK_EVENTS = [
 /** Whether an endpoint with these events takes task events, and can choose assignees. */
 export function webhookTakesTaskEvents(eventTypes: readonly WebhookEventType[]): boolean {
   return WEBHOOK_TASK_EVENTS.some((type) => eventTypes.includes(type));
+}
+
+/**
+ * Whether an endpoint with these events takes note events (ADR-280), and can choose the pipelines,
+ * stages and owners of the notes' deals (ADR-305), chosen and stored as the deals' are
+ * (`WebhookPipelineChoice`, `WebhookEndpointPipeline`, `webhookPipelineText`, and the stages' and
+ * owners' own).
+ */
+export function webhookTakesNoteEvents(eventTypes: readonly WebhookEventType[]): boolean {
+  return eventTypes.includes('note.created');
+}
+
+/**
+ * Who made the changes the deal, task and note events report, which an endpoint can choose
+ * (ADR-306), in the order Settings lists them, as the events' `changedBy` and a note's `writtenBy`
+ * name them: an addition's maker is whoever added the deal or task, a note's whoever wrote it.
+ */
+export const WEBHOOK_CRM_CHANGE_MAKERS = [
+  'member',
+  'automation',
+  'api',
+] as const satisfies readonly WebhookCrmChangeMaker[];
+
+/** How Settings names each maker an endpoint can choose (ADR-306). */
+export const WEBHOOK_CRM_CHANGE_MAKER_LABELS: Record<WebhookCrmChangeMaker, string> = {
+  member: 'Members',
+  automation: 'Automations',
+  api: 'API keys',
+};
+
+/**
+ * The scores of the satisfaction survey answers an endpoint can choose (ADR-307), in the order
+ * Settings lists them, as the survey's `score` gives them: 3 for the first (best) button, 2 for the
+ * second, 1 for the third, whatever the company's buttons say.
+ */
+export const WEBHOOK_SURVEY_SCORES = [3, 2, 1] as const satisfies readonly WebhookSurveyScore[];
+
+/** How Settings names each score an endpoint can choose (ADR-307). */
+export const WEBHOOK_SURVEY_SCORE_LABELS: Record<WebhookSurveyScore, string> = {
+  3: 'First button (best)',
+  2: 'Second button',
+  1: 'Third button',
+};
+
+/**
+ * Whether an endpoint with these events takes deal, task or note events, and can choose who made
+ * the changes they report (ADR-306).
+ */
+export function webhookTakesCrmChanges(eventTypes: readonly WebhookEventType[]): boolean {
+  return (
+    webhookTakesPipelineEvents(eventTypes) ||
+    webhookTakesTaskEvents(eventTypes) ||
+    webhookTakesNoteEvents(eventTypes)
+  );
 }
 
 /**

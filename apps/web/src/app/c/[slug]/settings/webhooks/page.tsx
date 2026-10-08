@@ -10,6 +10,7 @@ import {
   WEBHOOK_EVENT_KEYS,
   WEBHOOK_LIMITS,
   WEBHOOK_ORDER_STATUS_LABELS,
+  WEBHOOK_PAYMENT_LINK_STATUS_LABELS,
   WEBHOOK_RUN_END_STATUS_LABELS,
   WEBHOOK_RUN_TRIGGER_LABELS,
   WEBHOOK_CONSENT_CHANGE_LABELS,
@@ -17,6 +18,8 @@ import {
   WEBHOOK_RECEIVED_MESSAGE_TYPE_LABELS,
   WEBHOOK_RUN_END_REASON_LABELS,
   WEBHOOK_MESSAGE_SENDER_LABELS,
+  WEBHOOK_CRM_CHANGE_MAKER_LABELS,
+  WEBHOOK_SURVEY_SCORE_LABELS,
   WEBHOOK_MESSAGE_STATUS_LABELS,
   WEBHOOK_TEMPLATE_STATUS_LABELS,
   webhookAssigneeText,
@@ -205,6 +208,14 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
                         {e.orderStatuses.map((o) => WEBHOOK_ORDER_STATUS_LABELS[o]).join(', ')}
                       </p>
                     ) : null}
+                    {e.paymentLinkStatuses ? (
+                      <p className="text-xs text-muted-foreground">
+                        Payment Link statuses sent:{' '}
+                        {e.paymentLinkStatuses
+                          .map((s) => WEBHOOK_PAYMENT_LINK_STATUS_LABELS[s])
+                          .join(', ')}
+                      </p>
+                    ) : null}
                     {e.campaignStatuses ? (
                       <p className="text-xs text-muted-foreground">
                         Campaign statuses sent:{' '}
@@ -299,6 +310,56 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
                       <p className="text-xs break-all text-muted-foreground">
                         Members whose tasks’ events are sent:{' '}
                         {e.taskAssignees.map(webhookOwnerText).join(', ')}
+                      </p>
+                    ) : null}
+                    {e.taskPipelines ? (
+                      <p className="text-xs break-all text-muted-foreground">
+                        Pipelines whose deals’ tasks’ events are sent:{' '}
+                        {e.taskPipelines.map(webhookPipelineText).join(', ')}
+                      </p>
+                    ) : null}
+                    {e.taskStages ? (
+                      <p className="text-xs break-all text-muted-foreground">
+                        Stages whose deals’ tasks’ events are sent:{' '}
+                        {e.taskStages.map(webhookStageText).join(', ')}
+                      </p>
+                    ) : null}
+                    {e.taskDealOwners ? (
+                      <p className="text-xs break-all text-muted-foreground">
+                        Members whose deals’ tasks’ events are sent:{' '}
+                        {e.taskDealOwners.map(webhookOwnerText).join(', ')}
+                      </p>
+                    ) : null}
+                    {e.notePipelines ? (
+                      <p className="text-xs break-all text-muted-foreground">
+                        Pipelines whose deals’ notes’ events are sent:{' '}
+                        {e.notePipelines.map(webhookPipelineText).join(', ')}
+                      </p>
+                    ) : null}
+                    {e.noteStages ? (
+                      <p className="text-xs break-all text-muted-foreground">
+                        Stages whose deals’ notes’ events are sent:{' '}
+                        {e.noteStages.map(webhookStageText).join(', ')}
+                      </p>
+                    ) : null}
+                    {e.noteDealOwners ? (
+                      <p className="text-xs break-all text-muted-foreground">
+                        Members whose deals’ notes’ events are sent:{' '}
+                        {e.noteDealOwners.map(webhookOwnerText).join(', ')}
+                      </p>
+                    ) : null}
+                    {e.crmChangeMakers ? (
+                      <p className="text-xs text-muted-foreground">
+                        Deal, task and note changes sent, made by:{' '}
+                        {e.crmChangeMakers
+                          .map((m) => WEBHOOK_CRM_CHANGE_MAKER_LABELS[m])
+                          .join(', ')}
+                      </p>
+                    ) : null}
+                    {e.surveyScores ? (
+                      <p className="text-xs text-muted-foreground">
+                        Survey answers sent:{' '}
+                        {e.surveyScores.map((s) => WEBHOOK_SURVEY_SCORE_LABELS[s]).join(', ')}
                       </p>
                     ) : null}
                     {e.teams ? (

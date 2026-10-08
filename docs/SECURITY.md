@@ -173,25 +173,28 @@ Phase 3 rules on top of the matrix (enforced in domain services and re-checked w
   for that company alone, and only when one of its active endpoints takes it; erasing a contact
   deletes its tasks, so their pending events are not delivered (`event_gone`). No number, team,
   member or deal filter narrows task events, which Settings and the OpenAPI document say; an
-  endpoint's list of assignees does (ADR-266). A change of assignee (`task.assignee_changed`,
-  ADR-274) gives the ids of the member the task left and of the one it was given to, both the
-  company's own members (the assignee's foreign key goes through the company's id), never who made
-  the change, and reaches the endpoints naming either member, so an endpoint following a member
-  hears a task leave them; automations, erasure and merges never change an assignee, so they send
-  none. A change of details (`task.updated`, ADR-276) names which of the title, notes, due time and
-  reminder changed, never their values, and the task it gives carries neither its notes nor its
-  reminder, so a change of notes is named without a word of them; members and keys capture it as the
-  runtime role, in the company's scope, since no definer function changes these columns. Deal and
-  task events name who made each change (`changedBy`: a member, never which; an automation; or a
-  key, with its id, ADR-277), a key of the company's own only (a foreign key through the company's
-  id), so an integration can ignore its own changes; a change that does not record its maker names
-  nobody, never the maker of an earlier change, since the database clears a changer another
-  transaction recorded. A note's event (`note.created`, ADR-280) gives the note's id, deal id and
-  who wrote it (a member, never which, or a key by its id) with its contact as the API describes it,
-  never its text: endpoints take events without scopes, so a note's text is read only with
-  `notes.read`. Members and keys capture it as the runtime role in the company's scope; erasing a
-  contact deletes its notes, so their pending events are not delivered (`event_gone`). A Payment
-  Link's event (`payment_link.status_changed`, ADR-285) gives the link as
+  endpoint's list of assignees does (ADR-266), and so do its lists of the pipelines (ADR-303),
+  stages and owners (ADR-304) of tasks' deals, matched against the task's own deal read in the
+  company's scope. A change of assignee (`task.assignee_changed`, ADR-274) gives the ids of the
+  member the task left and of the one it was given to, both the company's own members (the
+  assignee's foreign key goes through the company's id), never who made the change, and reaches the
+  endpoints naming either member, so an endpoint following a member hears a task leave them;
+  automations, erasure and merges never change an assignee, so they send none. A change of details
+  (`task.updated`, ADR-276) names which of the title, notes, due time and reminder changed, never
+  their values, and the task it gives carries neither its notes nor its reminder, so a change of
+  notes is named without a word of them; members and keys capture it as the runtime role, in the
+  company's scope, since no definer function changes these columns. Deal and task events name who
+  made each change (`changedBy`: a member, never which; an automation; or a key, with its id,
+  ADR-277), a key of the company's own only (a foreign key through the company's id), so an
+  integration can ignore its own changes; a change that does not record its maker names nobody,
+  never the maker of an earlier change, since the database clears a changer another transaction
+  recorded. A note's event (`note.created`, ADR-280) gives the note's id, deal id and who wrote it
+  (a member, never which, or a key by its id) with its contact as the API describes it, never its
+  text: endpoints take events without scopes, so a note's text is read only with `notes.read`.
+  Members and keys capture it as the runtime role in the company's scope, which also reads the
+  note's own deal when an endpoint names the pipelines, stages or owners of notes' deals (ADR-305);
+  erasing a contact deletes its notes, so their pending events are not delivered (`event_gone`). A
+  Payment Link's event (`payment_link.status_changed`, ADR-285) gives the link as
   `GET /orders/{id}/payment-links` reads it (who asked: a member never by name, or a key by its id),
   never its address or Razorpay's ids; the commerce worker captures it as the runtime role in the
   company's scope, and an endpoint that names numbers hears it only for its order's number.
@@ -636,10 +639,11 @@ Phase 5 rules (Public API, P5-08):
   and `orders.request_payment` (ADR-283), `channels.read` for the scope of the same name (ADR-171),
   `reports.read` for the scope of the same name (ADR-297), `flows.read` for the scope of the same
   name (ADR-298), `campaigns.read` for `chat_links.read` (ADR-299), `campaigns.write` for
-  `chat_links.write` (ADR-300), `crm.read` for `deals.read` (ADR-253), `tasks.read` (ADR-258) and
-  `notes.read` (ADR-279), and `crm.write` for `deals.write` (ADR-254, ADR-255), `tasks.write`
-  (ADR-259) and `notes.write` (ADR-268). Nobody grants a key more than they hold, and rotating needs
-  the same. A key keeps the scopes it was created with.
+  `chat_links.write` (ADR-300), `campaigns.read` for `ads.read` (ADR-302), `crm.read` for
+  `deals.read` (ADR-253), `tasks.read` (ADR-258) and `notes.read` (ADR-279), and `crm.write` for
+  `deals.write` (ADR-254, ADR-255), `tasks.write` (ADR-259) and `notes.write` (ADR-268). Nobody
+  grants a key more than they hold, and rotating needs the same. A key keeps the scopes it was
+  created with.
 - A request acts for the key's company only, as the key: its company comes from the key found by
   the token's hash, never from the path, body or headers, and data access runs in that company's
   scope (RLS). Audit rows name the key (`api_key`). Writing scopes are refused while the company is
@@ -1233,6 +1237,12 @@ Phase 5 rules (Public API, P5-08):
   a source names only the company's own link. The ad click id, media addresses and ad text are never
   stored (ADR-044), so never given. The filters are checked before any query (one of the two kinds,
   a UUID); another company's link finds nothing (unit tests; integration tests, run in CI only).
+- Click-to-WhatsApp ads (ADR-302): `GET /ads` needs `ads.read`, granted only by members who hold
+  `campaigns.read`, checked before any query, as is the request (no parameters). It reads under row
+  security in the key's company, read only, and gives only what HyFib keeps of an ad (ADR-044):
+  Meta's id and type, the headline and an http(s) address, never the ad click id, which is not
+  stored. The `adId` filter is bounded (1 to 128 characters) and matches within the company (unit
+  tests; integration tests, run in CI only).
 - Reading a deal's history (ADR-281): `GET /deals/{id}/history` needs `deals.read` and the CRM in
   the plan, checked before anything is read; it reads the key's company's deal only (another
   company's answers 404, as an unknown one does; an id that is not a UUID is refused before any
@@ -1452,6 +1462,14 @@ Phase 5 rules (outgoing webhooks, P5-09):
   member, the Payment Link worker or Razorpay's payment changes it: it narrows what one endpoint
   receives and never adds an event or a delivery for another endpoint or company. Audited with the
   list. Tested.
+- An endpoint can take `payment_link.status_changed` only for some of the statuses a link reaches
+  (ADR-308), chosen with `developer.manage` in Settings or `webhooks.manage` through the API. The
+  list is checked against the six statuses the worker writes once a link is created (`creating`
+  sends no event), kept only while the endpoint takes `payment_link.status_changed` (a database
+  check too, which also refuses a null entry), and applied in `app.capture_webhook_event`, in the
+  transaction where the commerce worker writes the link's status: it narrows what one endpoint
+  receives and never adds an event or a delivery for another endpoint or company. Statuses are not
+  personal data. Audited with the list (unit tests; integration tests, run in CI only).
 - An endpoint can take `template.status_changed` only for some of the statuses reported (ADR-148),
   chosen the same way. The list is checked against the eleven statuses the event reports (HyFib's
   own steps, a deletion under way or refused and an unrecognised status are never sent), kept only
@@ -1597,6 +1615,50 @@ Phase 5 rules (outgoing webhooks, P5-09):
   `app.capture_webhook_event` to the assignee it reads from the task in the company's scope: it
   narrows what one endpoint receives and never adds an event or a delivery for another endpoint or
   company. Audited with the list (unit tests; integration tests, run in CI only).
+- An endpoint can take the events of the tasks about the deals of chosen pipelines only (ADR-303),
+  chosen the same way. A list holds only pipelines of the endpoint's company, archived ones included
+  (checked in its scope, as the deals' pipelines are), is kept only while the endpoint takes a task
+  event (a database check too, which also refuses a null entry), and is applied in
+  `app.capture_webhook_event` to the pipeline it reads from the task's deal in the company's scope,
+  a task without a deal matching none: it narrows what one endpoint receives and never adds an event
+  or a delivery for another endpoint or company. Audited with the list (unit tests; integration
+  tests, run in CI only).
+- An endpoint can take the events of the tasks about the deals in chosen stages, or owned by chosen
+  members, only (ADR-304), chosen the same way. A stage list holds only stages of the endpoint's
+  company, removed ones included, and an owner list may add only members of the company who can own
+  deals (active, with access to the CRM), both checked in its scope; each is kept only while the
+  endpoint takes a task event (a database check too, which also refuses a null entry), and both are
+  applied in `app.capture_webhook_event` to the stage and owner it reads from the task's deal in the
+  company's scope, a task without a deal matching neither: they narrow what one endpoint receives
+  and never add an event or a delivery for another endpoint or company. Audited with the lists (unit
+  tests; integration tests, run in CI only).
+- An endpoint can take the events of the notes about the deals in chosen pipelines or stages, or
+  owned by chosen members, only (ADR-305), chosen as the deals' and tasks' lists are. The pipeline
+  and stage lists hold only the endpoint's company's, archived and removed ones included, and an
+  owner list may add only members of the company who can own deals (active, with access to the CRM),
+  all checked in its scope; each is kept only while the endpoint takes `note.created` (a database
+  check too, which also refuses a null entry), and all are applied in `app.capture_webhook_event` to
+  the pipeline, stage and owner it reads from the note's own deal in the company's scope, a note
+  about a contact alone matching none: they narrow what one endpoint receives and never add an event
+  or a delivery for another endpoint or company. Audited with the lists (unit tests; integration
+  tests, run in CI only).
+- An endpoint can take the deal, task and note events of the changes made by chosen kinds of maker
+  only (members, automations' runs or API keys; ADR-306), chosen with `developer.manage` in Settings
+  or `webhooks.manage` through the API. The list holds only those three values and is kept only
+  while the endpoint takes a deal, task or note event (a database check too, which also refuses a
+  null entry); `app.capture_webhook_event` matches it against the maker the change recorded in the
+  company's scope, or an addition's creator and a note's writer read there, and a change that
+  recorded no maker (erasure's among them) passes every list, so the filter never hides an erasure's
+  changes from a receiver that took the record. It narrows what one endpoint receives and never adds
+  an event or a delivery for another endpoint or company. Audited with the list (unit tests;
+  integration tests, run in CI only).
+- An endpoint can take the satisfaction survey answers of chosen scores only (ADR-307), chosen with
+  `developer.manage` in Settings or `webhooks.manage` through the API. The list holds only the
+  scores 1, 2 and 3 and is kept only while the endpoint takes `satisfaction_survey.answered` (a
+  database check too, which also refuses a null entry); `app.capture_webhook_event` reads the
+  answer's score from its survey in the company's scope. It narrows what one endpoint receives and
+  never adds an event or a delivery for another endpoint or company. Audited with the list (unit
+  tests; integration tests, run in CI only).
 - An endpoint can take the message and conversation events of the conversations whose contact has
   chosen tags only (ADR-267), chosen the same way. A list holds tags in the form contacts carry them
   (the services normalise them; a database check holds the form, the count and the events, and

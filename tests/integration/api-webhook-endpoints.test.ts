@@ -261,6 +261,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       automationIds: null,
       campaignStatuses: null,
       orderStatuses: null,
+      paymentLinkStatuses: null,
       templateStatuses: null,
       conversationStatuses: null,
       runEndStatuses: null,
@@ -277,6 +278,14 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       stageIds: null,
       ownerIds: null,
       taskAssigneeIds: null,
+      taskPipelineIds: null,
+      taskStageIds: null,
+      taskDealOwnerIds: null,
+      notePipelineIds: null,
+      noteStageIds: null,
+      noteDealOwnerIds: null,
+      crmChangeMakers: null,
+      surveyScores: null,
       assigneeIds: null,
       contactTags: null,
       conversationTags: null,
@@ -1043,6 +1052,87 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     });
   });
 
+  it('choose the Payment Link statuses an endpoint receives, kept by changes that leave them out and cleared with the event (ADR-308)', async () => {
+    const c = await fx.company();
+    const key = await apiKey(c, ['webhooks.manage']);
+    const issueOf = async (promise: Promise<unknown>) => {
+      const error = await expectAppError(promise, 'validation_failed');
+      return isAppError(error) ? error.issues?.[0] : undefined;
+    };
+    // Statuses need the event, at least one, and each from the list (creating or an unknown one by
+    // place).
+    const refusals = [
+      [['order.status_changed'], ['paid'], 'paymentLinkStatuses'],
+      [['payment_link.status_changed'], [], 'paymentLinkStatuses'],
+      [['payment_link.status_changed'], ['paid', 'creating'], 'paymentLinkStatuses.1'],
+      [['payment_link.status_changed'], ['canceled'], 'paymentLinkStatuses.0'],
+    ] as const;
+    for (const [index, [events, paymentLinkStatuses, path]] of refusals.entries()) {
+      expect(
+        await issueOf(
+          api().create(
+            key.ctx,
+            { url: receiverUrl(), events, paymentLinkStatuses },
+            idem(`link-statuses-bad-${index}`, JSON.stringify(paymentLinkStatuses)),
+          ),
+        ),
+        JSON.stringify(paymentLinkStatuses),
+      ).toMatchObject({ path });
+    }
+    expect((await api().list(key.ctx)).data).toEqual([]);
+
+    const created = await addThroughApi(key.ctx, 'link-statuses-1', {
+      url: receiverUrl(),
+      events: ['payment_link.status_changed', 'order.status_changed'],
+      paymentLinkStatuses: ['failed', 'paid', 'failed'],
+    });
+    const id = created.body.data.id;
+    expect(created.body.data.paymentLinkStatuses).toEqual(['paid', 'failed']);
+    expect((await api().get(key.ctx, id)).paymentLinkStatuses).toEqual(['paid', 'failed']);
+    const [audit] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND subject_id = $2 AND action = 'webhook.endpoint_created'`,
+      [c.tenant.id, id],
+    );
+    expect(audit?.metadata).toMatchObject({ paymentLinkStatuses: ['paid', 'failed'] });
+
+    expect(await api().update(key.ctx, id, { description: 'Payments' })).toMatchObject({
+      paymentLinkStatuses: ['paid', 'failed'],
+    });
+    expect(await api().update(key.ctx, id, { paymentLinkStatuses: ['expired'] })).toMatchObject({
+      paymentLinkStatuses: ['expired'],
+    });
+    const updates = await fx.query<{ metadata: { paymentLinkStatuses?: unknown } }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND subject_id = $2 AND action = 'webhook.endpoint_updated'
+        ORDER BY occurred_at`,
+      [c.tenant.id, id],
+    );
+    expect(updates.map((u) => u.metadata.paymentLinkStatuses)).toEqual([
+      ['paid', 'failed'],
+      ['expired'],
+    ]);
+    expect(await api().update(key.ctx, id, { events: ['order.status_changed'] })).toMatchObject({
+      events: ['order.status_changed'],
+      paymentLinkStatuses: null,
+    });
+    expect(
+      await issueOf(api().update(key.ctx, id, { paymentLinkStatuses: ['paid'] })),
+    ).toMatchObject({ path: 'paymentLinkStatuses' });
+    expect(
+      await api().update(key.ctx, id, {
+        events: ['payment_link.status_changed'],
+        paymentLinkStatuses: ['partially_paid'],
+      }),
+    ).toMatchObject({ paymentLinkStatuses: ['partially_paid'] });
+    expect(await api().update(key.ctx, id, { paymentLinkStatuses: null })).toMatchObject({
+      paymentLinkStatuses: null,
+    });
+    expect(await issueOf(api().update(key.ctx, id, { paymentLinkStatuses: [] }))).toMatchObject({
+      path: 'paymentLinkStatuses',
+    });
+  });
+
   it('choose the template statuses an endpoint receives, kept by changes that leave them out and cleared with the event (ADR-148)', async () => {
     const c = await fx.company();
     const key = await apiKey(c, ['webhooks.manage']);
@@ -1456,6 +1546,164 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     });
     expect(await issueOf(api().update(key.ctx, id, { messageSenders: [] }))).toMatchObject({
       path: 'messageSenders',
+    });
+  });
+
+  it('choose who made the changes whose deal, task and note events an endpoint receives, kept by changes that leave them out and cleared with the events (ADR-306)', async () => {
+    const c = await fx.company();
+    const key = await apiKey(c, ['webhooks.manage']);
+    const issueOf = async (promise: Promise<unknown>) => {
+      const error = await expectAppError(promise, 'validation_failed');
+      return isAppError(error) ? error.issues?.[0] : undefined;
+    };
+    // The makers need a deal, task or note event, at least one, and each from the list (by place).
+    const refusals = [
+      [['contact.updated'], ['api'], 'crmChangeMakers'],
+      [['deal.created'], [], 'crmChangeMakers'],
+      [['task.created'], ['api', 'contact'], 'crmChangeMakers.1'],
+      [['note.created'], ['agent'], 'crmChangeMakers.0'],
+    ] as const;
+    for (const [index, [events, crmChangeMakers, path]] of refusals.entries()) {
+      expect(
+        await issueOf(
+          api().create(
+            key.ctx,
+            { url: receiverUrl(), events, crmChangeMakers },
+            idem(`crm-makers-bad-${index}`, JSON.stringify(crmChangeMakers)),
+          ),
+        ),
+        JSON.stringify(crmChangeMakers),
+      ).toMatchObject({ path });
+    }
+    expect((await api().list(key.ctx)).data).toEqual([]);
+
+    const created = await addThroughApi(key.ctx, 'crm-makers-1', {
+      url: receiverUrl(),
+      events: ['deal.updated', 'note.created', 'message.received'],
+      crmChangeMakers: ['api', 'member'],
+    });
+    const id = created.body.data.id;
+    expect(created.body.data.crmChangeMakers).toEqual(['member', 'api']);
+    expect((await api().get(key.ctx, id)).crmChangeMakers).toEqual(['member', 'api']);
+    const [audit] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND subject_id = $2 AND action = 'webhook.endpoint_created'`,
+      [c.tenant.id, id],
+    );
+    expect(audit?.metadata).toMatchObject({ crmChangeMakers: ['member', 'api'] });
+
+    expect(await api().update(key.ctx, id, { description: 'Not my own changes' })).toMatchObject({
+      crmChangeMakers: ['member', 'api'],
+    });
+    expect(
+      await api().update(key.ctx, id, { crmChangeMakers: ['member', 'automation'] }),
+    ).toMatchObject({ crmChangeMakers: ['member', 'automation'] });
+    const updates = await fx.query<{ metadata: { crmChangeMakers?: unknown } }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND subject_id = $2 AND action = 'webhook.endpoint_updated'
+        ORDER BY occurred_at`,
+      [c.tenant.id, id],
+    );
+    expect(updates.map((u) => u.metadata.crmChangeMakers)).toEqual([
+      ['member', 'api'],
+      ['member', 'automation'],
+    ]);
+    // A note event keeps the list; events without a deal, task or note event clear it.
+    expect(await api().update(key.ctx, id, { events: ['note.created'] })).toMatchObject({
+      crmChangeMakers: ['member', 'automation'],
+    });
+    expect(await api().update(key.ctx, id, { events: ['message.received'] })).toMatchObject({
+      events: ['message.received'],
+      crmChangeMakers: null,
+    });
+    expect(await issueOf(api().update(key.ctx, id, { crmChangeMakers: ['api'] }))).toMatchObject({
+      path: 'crmChangeMakers',
+    });
+    expect(
+      await api().update(key.ctx, id, { events: ['task.updated'], crmChangeMakers: ['api'] }),
+    ).toMatchObject({ crmChangeMakers: ['api'] });
+    expect(await api().update(key.ctx, id, { crmChangeMakers: null })).toMatchObject({
+      crmChangeMakers: null,
+    });
+    expect(await issueOf(api().update(key.ctx, id, { crmChangeMakers: [] }))).toMatchObject({
+      path: 'crmChangeMakers',
+    });
+  });
+
+  it('choose the scores of the satisfaction survey answers an endpoint receives, kept by changes that leave them out and cleared with the event (ADR-307)', async () => {
+    const c = await fx.company();
+    const key = await apiKey(c, ['webhooks.manage']);
+    const issueOf = async (promise: Promise<unknown>) => {
+      const error = await expectAppError(promise, 'validation_failed');
+      return isAppError(error) ? error.issues?.[0] : undefined;
+    };
+    // The scores need the event, at least one, and each from the list (by place).
+    const refusals = [
+      [['conversation.status_changed'], [1], 'surveyScores'],
+      [['satisfaction_survey.answered'], [], 'surveyScores'],
+      [['satisfaction_survey.answered'], [1, 4], 'surveyScores.1'],
+      [['satisfaction_survey.answered'], ['3'], 'surveyScores.0'],
+    ] as const;
+    for (const [index, [events, surveyScores, path]] of refusals.entries()) {
+      expect(
+        await issueOf(
+          api().create(
+            key.ctx,
+            { url: receiverUrl(), events, surveyScores },
+            idem(`survey-scores-bad-${index}`, JSON.stringify(surveyScores)),
+          ),
+        ),
+        JSON.stringify(surveyScores),
+      ).toMatchObject({ path });
+    }
+    expect((await api().list(key.ctx)).data).toEqual([]);
+
+    const created = await addThroughApi(key.ctx, 'survey-scores-1', {
+      url: receiverUrl(),
+      events: ['satisfaction_survey.answered', 'message.received'],
+      surveyScores: [1, 2],
+    });
+    const id = created.body.data.id;
+    expect(created.body.data.surveyScores).toEqual([2, 1]);
+    expect((await api().get(key.ctx, id)).surveyScores).toEqual([2, 1]);
+    const [audit] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND subject_id = $2 AND action = 'webhook.endpoint_created'`,
+      [c.tenant.id, id],
+    );
+    expect(audit?.metadata).toMatchObject({ surveyScores: [2, 1] });
+
+    expect(await api().update(key.ctx, id, { description: 'Unhappy customers' })).toMatchObject({
+      surveyScores: [2, 1],
+    });
+    expect(await api().update(key.ctx, id, { surveyScores: [1] })).toMatchObject({
+      surveyScores: [1],
+    });
+    const updates = await fx.query<{ metadata: { surveyScores?: unknown } }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND subject_id = $2 AND action = 'webhook.endpoint_updated'
+        ORDER BY occurred_at`,
+      [c.tenant.id, id],
+    );
+    expect(updates.map((u) => u.metadata.surveyScores)).toEqual([[2, 1], [1]]);
+    expect(await api().update(key.ctx, id, { events: ['message.received'] })).toMatchObject({
+      events: ['message.received'],
+      surveyScores: null,
+    });
+    expect(await issueOf(api().update(key.ctx, id, { surveyScores: [1] }))).toMatchObject({
+      path: 'surveyScores',
+    });
+    expect(
+      await api().update(key.ctx, id, {
+        events: ['satisfaction_survey.answered'],
+        surveyScores: [3],
+      }),
+    ).toMatchObject({ surveyScores: [3] });
+    expect(await api().update(key.ctx, id, { surveyScores: null })).toMatchObject({
+      surveyScores: null,
+    });
+    expect(await issueOf(api().update(key.ctx, id, { surveyScores: [] }))).toMatchObject({
+      path: 'surveyScores',
     });
   });
 
@@ -2815,6 +3063,471 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     });
     expect(await issueOf(api().update(key.ctx, id, { taskAssigneeIds: [] }))).toMatchObject({
       path: 'taskAssigneeIds',
+    });
+  });
+
+  it("choose the pipelines whose deals' tasks' events an endpoint receives, archived ones too, apart from the deals' pipelines, kept by changes that leave them out and cleared with the events (ADR-303)", async () => {
+    const c = await fx.company();
+    const key = await apiKey(c, ['webhooks.manage']);
+    const crm = createCrmService({
+      db: fx.dbs.app,
+      clock: systemClock,
+      jobs: fx.jobs(),
+      signer: fx.signer,
+    });
+    const pipelineOf = async (company: Company, name: string) => {
+      const owner = await fx.ctx(company, company.owner);
+      return (await crm.createPipeline(owner, { name, currency: 'INR', stages: ['New'] })).id;
+    };
+    const sales = await pipelineOf(c, 'Sales');
+    const renewals = await pipelineOf(c, 'Renewals');
+    const elsewhere = await pipelineOf(await fx.company(), 'Sales');
+    const owner = await fx.ctx(c, c.owner);
+    const [listed] = (await crm.listPipelines(owner)).filter((p) => p.id === renewals);
+    await crm.archivePipeline(owner, { id: renewals, expectedVersion: listed!.version });
+    const issueOf = async (promise: Promise<unknown>) => {
+      const error = await expectAppError(promise, 'validation_failed');
+      return isAppError(error) ? error.issues?.[0] : undefined;
+    };
+    // The pipelines of tasks' deals need a task event (deal events take pipelineIds), at least
+    // one, each an id of the company's pipelines (named by place).
+    const refusals = [
+      [['deal.created', 'deal.status_changed'], [sales], 'taskPipelineIds'],
+      [['task.created'], [], 'taskPipelineIds'],
+      [['task.created'], [sales, 'Renewals'], 'taskPipelineIds.1'],
+      [['task.updated'], [sales, elsewhere], 'taskPipelineIds.1'],
+      [['task.status_changed'], [uuidv7()], 'taskPipelineIds.0'],
+    ] as const;
+    for (const [index, [events, taskPipelineIds, path]] of refusals.entries()) {
+      expect(
+        await issueOf(
+          api().create(
+            key.ctx,
+            { url: receiverUrl(), events, taskPipelineIds },
+            idem(`task-pipelines-bad-${index}`, JSON.stringify(taskPipelineIds)),
+          ),
+        ),
+        JSON.stringify(taskPipelineIds),
+      ).toMatchObject({ path });
+    }
+    expect((await api().list(key.ctx)).data).toEqual([]);
+
+    const created = await addThroughApi(key.ctx, 'task-pipelines-1', {
+      url: receiverUrl(),
+      events: ['task.created', 'deal.created'],
+      pipelineIds: [sales],
+      taskPipelineIds: [renewals, sales.toUpperCase(), renewals],
+    });
+    const id = created.body.data.id;
+    expect(created.body.data.taskPipelineIds).toEqual([renewals, sales]);
+    expect(created.body.data.pipelineIds).toEqual([sales]);
+    expect((await api().get(key.ctx, id)).taskPipelineIds).toEqual([renewals, sales]);
+    const audits = async (action: string) =>
+      (
+        await fx.query<{ metadata: { taskPipelineIds?: unknown } }>(
+          `SELECT metadata FROM app.audit_events
+            WHERE tenant_id = $1 AND subject_id = $2 AND action = $3 ORDER BY occurred_at, id`,
+          [c.tenant.id, id, action],
+        )
+      ).map((a) => a.metadata.taskPipelineIds);
+    expect(await audits('webhook.endpoint_created')).toEqual([[renewals, sales]]);
+    // Settings names them, the archived one as archived.
+    expect((await settings().list(owner)).find((e) => e.id === id)?.taskPipelines).toEqual([
+      { id: renewals, name: 'Renewals', archived: true },
+      { id: sales, name: 'Sales', archived: false },
+    ]);
+    expect(await api().update(key.ctx, id, { description: 'Tasks sync' })).toMatchObject({
+      taskPipelineIds: [renewals, sales],
+      pipelineIds: [sales],
+    });
+    expect(await api().update(key.ctx, id, { taskPipelineIds: [sales] })).toMatchObject({
+      taskPipelineIds: [sales],
+      pipelineIds: [sales],
+    });
+    expect(await audits('webhook.endpoint_updated')).toEqual([[renewals, sales], [sales]]);
+    // Any task event keeps the list; events without one clear it.
+    expect(await api().update(key.ctx, id, { events: ['task.assignee_changed'] })).toMatchObject({
+      taskPipelineIds: [sales],
+      pipelineIds: null,
+    });
+    expect(await api().update(key.ctx, id, { events: ['deal.created'] })).toMatchObject({
+      events: ['deal.created'],
+      taskPipelineIds: null,
+    });
+    expect(await issueOf(api().update(key.ctx, id, { taskPipelineIds: [sales] }))).toMatchObject({
+      path: 'taskPipelineIds',
+    });
+    expect(
+      await api().update(key.ctx, id, { events: ['task.updated'], taskPipelineIds: [renewals] }),
+    ).toMatchObject({ taskPipelineIds: [renewals] });
+    // A list given again is checked again, changing nothing when it is refused.
+    expect(
+      await issueOf(api().update(key.ctx, id, { taskPipelineIds: [elsewhere] })),
+    ).toMatchObject({ path: 'taskPipelineIds.0' });
+    expect((await api().get(key.ctx, id)).taskPipelineIds).toEqual([renewals]);
+    expect(await api().update(key.ctx, id, { taskPipelineIds: null })).toMatchObject({
+      taskPipelineIds: null,
+    });
+    expect(await issueOf(api().update(key.ctx, id, { taskPipelineIds: [] }))).toMatchObject({
+      path: 'taskPipelineIds',
+    });
+  });
+
+  it("choose the stages and owners of the deals whose tasks' events an endpoint receives, removed stages and members who left too, kept by changes that leave them out and cleared with the events (ADR-304)", async () => {
+    const c = await fx.company();
+    const key = await apiKey(c, ['webhooks.manage']);
+    const owner = await fx.ctx(c, c.owner);
+    const ownerId = owner.membership.id;
+    const agent = (await fx.ctx(c, c.agent)).membership.id;
+    const marketer = (await fx.ctx(c, c.marketer)).membership.id;
+    const other = await fx.company();
+    const elsewhereMember = (await fx.ctx(other, other.agent)).membership.id;
+    const crm = createCrmService({
+      db: fx.dbs.app,
+      clock: systemClock,
+      jobs: fx.jobs(),
+      signer: fx.signer,
+    });
+    const stagesOf = async (company: Company) => {
+      const companyOwner = await fx.ctx(company, company.owner);
+      const { id } = await crm.createPipeline(companyOwner, {
+        name: 'Sales',
+        currency: 'INR',
+        stages: ['New', 'Proposal', 'Lost'],
+      });
+      const [sales] = (await crm.listPipelines(companyOwner)).filter((p) => p.id === id);
+      const stage = (name: string) => sales!.stages.find((st) => st.name === name)!.id;
+      return { fresh: stage('New'), proposal: stage('Proposal'), lost: stage('Lost') };
+    };
+    const { fresh, proposal, lost } = await stagesOf(c);
+    const elsewhereStage = (await stagesOf(other)).proposal;
+    // Lost is removed from the pipeline: a list may still name it.
+    const [sales] = (await crm.listPipelines(owner)).filter((p) =>
+      p.stages.some((st) => st.id === lost),
+    );
+    await crm.updatePipeline(owner, {
+      id: sales!.id,
+      expectedVersion: sales!.version,
+      name: 'Sales',
+      stages: sales!.stages.slice(0, 2).map((st) => ({ id: st.id, name: st.name })),
+    });
+    const issueOf = async (promise: Promise<unknown>) => {
+      const error = await expectAppError(promise, 'validation_failed');
+      return isAppError(error) ? error.issues?.[0] : undefined;
+    };
+    // They need a task event (deal events take stageIds and ownerIds), at least one, each the
+    // company's stage, or a member of it who can own deals (named by place).
+    const refusals = [
+      ['taskStageIds', ['deal.created'], [proposal], 'taskStageIds'],
+      ['taskStageIds', ['task.created'], [], 'taskStageIds'],
+      ['taskStageIds', ['task.created'], [proposal, 'Proposal'], 'taskStageIds.1'],
+      ['taskStageIds', ['task.updated'], [proposal, elsewhereStage], 'taskStageIds.1'],
+      ['taskDealOwnerIds', ['deal.created'], [agent], 'taskDealOwnerIds'],
+      ['taskDealOwnerIds', ['task.created'], [], 'taskDealOwnerIds'],
+      ['taskDealOwnerIds', ['task.created'], [agent, 'agent@example.com'], 'taskDealOwnerIds.1'],
+      ['taskDealOwnerIds', ['task.status_changed'], [agent, marketer], 'taskDealOwnerIds.1'],
+      ['taskDealOwnerIds', ['task.created'], [elsewhereMember], 'taskDealOwnerIds.0'],
+    ] as const;
+    for (const [index, [field, events, ids, path]] of refusals.entries()) {
+      expect(
+        await issueOf(
+          api().create(
+            key.ctx,
+            { url: receiverUrl(), events, [field]: ids },
+            idem(`task-deal-bad-${index}`, JSON.stringify(ids)),
+          ),
+        ),
+        `${field} ${JSON.stringify(ids)}`,
+      ).toMatchObject({ path });
+    }
+    expect((await api().list(key.ctx)).data).toEqual([]);
+
+    const created = await addThroughApi(key.ctx, 'task-deals-1', {
+      url: receiverUrl(),
+      events: ['task.created', 'deal.created'],
+      stageIds: [fresh],
+      ownerIds: [ownerId],
+      taskStageIds: [lost, proposal.toUpperCase(), lost],
+      taskDealOwnerIds: [agent, ownerId.toUpperCase(), agent],
+    });
+    const id = created.body.data.id;
+    expect(created.body.data).toMatchObject({
+      stageIds: [fresh],
+      ownerIds: [ownerId],
+      taskStageIds: [lost, proposal],
+      taskDealOwnerIds: [agent, ownerId],
+    });
+    expect(await api().get(key.ctx, id)).toMatchObject({
+      taskStageIds: [lost, proposal],
+      taskDealOwnerIds: [agent, ownerId],
+    });
+    const audits = async (action: string) =>
+      (
+        await fx.query<{ metadata: { taskStageIds?: unknown; taskDealOwnerIds?: unknown } }>(
+          `SELECT metadata FROM app.audit_events
+            WHERE tenant_id = $1 AND subject_id = $2 AND action = $3 ORDER BY occurred_at, id`,
+          [c.tenant.id, id, action],
+        )
+      ).map((a) => [a.metadata.taskStageIds ?? null, a.metadata.taskDealOwnerIds ?? null]);
+    expect(await audits('webhook.endpoint_created')).toEqual([
+      [
+        [lost, proposal],
+        [agent, ownerId],
+      ],
+    ]);
+    // Settings names them: the removed stage as removed, and the agent, gone, as no longer using
+    // the CRM, still on the list.
+    await fx.query(`UPDATE app.memberships SET status = 'removed' WHERE id = $1`, [agent]);
+    const shown = (await settings().list(owner)).find((e) => e.id === id);
+    expect(shown?.taskStages?.map((st) => [st.id, st.removed])).toEqual([
+      [lost, true],
+      [proposal, false],
+    ]);
+    expect(shown?.taskDealOwners).toEqual([
+      { id: agent, name: 'Agent', active: false },
+      { id: ownerId, name: 'Owner', active: true },
+    ]);
+    expect(await api().update(key.ctx, id, { description: 'Tasks of deals' })).toMatchObject({
+      taskStageIds: [lost, proposal],
+      taskDealOwnerIds: [agent, ownerId],
+    });
+    // Given again, a list keeps a member it held; one it adds must be able to own deals.
+    expect(
+      await api().update(key.ctx, id, {
+        taskStageIds: [proposal],
+        taskDealOwnerIds: [agent, ownerId],
+      }),
+    ).toMatchObject({ taskStageIds: [proposal], taskDealOwnerIds: [agent, ownerId] });
+    expect(
+      await issueOf(api().update(key.ctx, id, { taskDealOwnerIds: [ownerId, marketer] })),
+    ).toMatchObject({ path: 'taskDealOwnerIds.1' });
+    expect(
+      await issueOf(api().update(key.ctx, id, { taskStageIds: [elsewhereStage] })),
+    ).toMatchObject({ path: 'taskStageIds.0' });
+    expect(await api().update(key.ctx, id, { taskDealOwnerIds: [ownerId] })).toMatchObject({
+      taskStageIds: [proposal],
+      taskDealOwnerIds: [ownerId],
+    });
+    expect(await audits('webhook.endpoint_updated')).toEqual([
+      [
+        [lost, proposal],
+        [agent, ownerId],
+      ],
+      [[proposal], [agent, ownerId]],
+      [[proposal], [ownerId]],
+    ]);
+    // Any task event keeps the lists; events without one clear them.
+    expect(await api().update(key.ctx, id, { events: ['task.status_changed'] })).toMatchObject({
+      taskStageIds: [proposal],
+      taskDealOwnerIds: [ownerId],
+      stageIds: null,
+      ownerIds: null,
+    });
+    expect(await api().update(key.ctx, id, { events: ['deal.created'] })).toMatchObject({
+      events: ['deal.created'],
+      taskStageIds: null,
+      taskDealOwnerIds: null,
+    });
+    for (const field of ['taskStageIds', 'taskDealOwnerIds'] as const) {
+      expect(
+        await issueOf(
+          api().update(key.ctx, id, { [field]: [field === 'taskStageIds' ? fresh : ownerId] }),
+        ),
+        field,
+      ).toMatchObject({ path: field });
+    }
+    expect(
+      await api().update(key.ctx, id, {
+        events: ['task.updated'],
+        taskStageIds: [fresh],
+        taskDealOwnerIds: [ownerId],
+      }),
+    ).toMatchObject({ taskStageIds: [fresh], taskDealOwnerIds: [ownerId] });
+    expect(
+      await api().update(key.ctx, id, { taskStageIds: null, taskDealOwnerIds: null }),
+    ).toMatchObject({ taskStageIds: null, taskDealOwnerIds: null });
+    expect(await issueOf(api().update(key.ctx, id, { taskStageIds: [] }))).toMatchObject({
+      path: 'taskStageIds',
+    });
+  });
+
+  it("choose the pipelines, stages and owners of the deals whose notes' events an endpoint receives, a member who left too, kept by changes that leave them out and cleared with the event (ADR-305)", async () => {
+    const c = await fx.company();
+    const key = await apiKey(c, ['webhooks.manage']);
+    const owner = await fx.ctx(c, c.owner);
+    const ownerId = owner.membership.id;
+    const agent = (await fx.ctx(c, c.agent)).membership.id;
+    const marketer = (await fx.ctx(c, c.marketer)).membership.id;
+    const other = await fx.company();
+    const crm = createCrmService({
+      db: fx.dbs.app,
+      clock: systemClock,
+      jobs: fx.jobs(),
+      signer: fx.signer,
+    });
+    const salesOf = async (company: Company) => {
+      const companyOwner = await fx.ctx(company, company.owner);
+      const { id } = await crm.createPipeline(companyOwner, {
+        name: 'Sales',
+        currency: 'INR',
+        stages: ['New', 'Proposal'],
+      });
+      const [sales] = (await crm.listPipelines(companyOwner)).filter((p) => p.id === id);
+      return { pipeline: id, proposal: sales!.stages.find((st) => st.name === 'Proposal')!.id };
+    };
+    const { pipeline: sales, proposal } = await salesOf(c);
+    const theirs = await salesOf(other);
+    const issueOf = async (promise: Promise<unknown>) => {
+      const error = await expectAppError(promise, 'validation_failed');
+      return isAppError(error) ? error.issues?.[0] : undefined;
+    };
+    // They need note.created (deal and task events take lists of their own), at least one, each the
+    // company's pipeline or stage, or a member of it who can own deals (named by place).
+    const refusals = [
+      ['notePipelineIds', ['deal.created', 'task.created'], [sales], 'notePipelineIds'],
+      ['notePipelineIds', ['note.created'], [], 'notePipelineIds'],
+      ['notePipelineIds', ['note.created'], [sales, theirs.pipeline], 'notePipelineIds.1'],
+      ['noteStageIds', ['task.created'], [proposal], 'noteStageIds'],
+      ['noteStageIds', ['note.created'], [proposal, 'Proposal'], 'noteStageIds.1'],
+      ['noteStageIds', ['note.created'], [theirs.proposal], 'noteStageIds.0'],
+      ['noteDealOwnerIds', ['deal.created'], [agent], 'noteDealOwnerIds'],
+      ['noteDealOwnerIds', ['note.created'], [agent, marketer], 'noteDealOwnerIds.1'],
+    ] as const;
+    for (const [index, [field, events, ids, path]] of refusals.entries()) {
+      expect(
+        await issueOf(
+          api().create(
+            key.ctx,
+            { url: receiverUrl(), events, [field]: ids },
+            idem(`note-deal-bad-${index}`, JSON.stringify(ids)),
+          ),
+        ),
+        `${field} ${JSON.stringify(ids)}`,
+      ).toMatchObject({ path });
+    }
+    expect((await api().list(key.ctx)).data).toEqual([]);
+
+    const created = await addThroughApi(key.ctx, 'note-deals-1', {
+      url: receiverUrl(),
+      events: ['note.created', 'deal.created'],
+      pipelineIds: [sales],
+      notePipelineIds: [sales.toUpperCase(), sales],
+      noteStageIds: [proposal],
+      noteDealOwnerIds: [agent, ownerId.toUpperCase(), agent],
+    });
+    const id = created.body.data.id;
+    expect(created.body.data).toMatchObject({
+      pipelineIds: [sales],
+      taskPipelineIds: null,
+      notePipelineIds: [sales],
+      noteStageIds: [proposal],
+      noteDealOwnerIds: [agent, ownerId],
+    });
+    expect(await api().get(key.ctx, id)).toMatchObject({
+      notePipelineIds: [sales],
+      noteStageIds: [proposal],
+      noteDealOwnerIds: [agent, ownerId],
+    });
+    const audits = async (action: string) =>
+      (
+        await fx.query<{ metadata: Record<string, unknown> }>(
+          `SELECT metadata FROM app.audit_events
+            WHERE tenant_id = $1 AND subject_id = $2 AND action = $3 ORDER BY occurred_at, id`,
+          [c.tenant.id, id, action],
+        )
+      ).map((a) => [
+        a.metadata.notePipelineIds ?? null,
+        a.metadata.noteStageIds ?? null,
+        a.metadata.noteDealOwnerIds ?? null,
+      ]);
+    expect(await audits('webhook.endpoint_created')).toEqual([
+      [[sales], [proposal], [agent, ownerId]],
+    ]);
+    // Settings names them, and the agent, gone, as no longer using the CRM, still on the list.
+    await fx.query(`UPDATE app.memberships SET status = 'removed' WHERE id = $1`, [agent]);
+    const shown = (await settings().list(owner)).find((e) => e.id === id);
+    expect([
+      shown?.notePipelines,
+      shown?.noteStages?.map((st) => st.id),
+      shown?.noteDealOwners,
+    ]).toEqual([
+      [{ id: sales, name: 'Sales', archived: false }],
+      [proposal],
+      [
+        { id: agent, name: 'Agent', active: false },
+        { id: ownerId, name: 'Owner', active: true },
+      ],
+    ]);
+    expect(await api().update(key.ctx, id, { description: 'Notes of deals' })).toMatchObject({
+      notePipelineIds: [sales],
+      noteStageIds: [proposal],
+      noteDealOwnerIds: [agent, ownerId],
+    });
+    // Given again, a list keeps a member it held; one it adds must be able to own deals.
+    expect(
+      await api().update(key.ctx, id, { noteStageIds: null, noteDealOwnerIds: [agent, ownerId] }),
+    ).toMatchObject({ noteStageIds: null, noteDealOwnerIds: [agent, ownerId] });
+    expect(
+      await issueOf(api().update(key.ctx, id, { noteDealOwnerIds: [ownerId, marketer] })),
+    ).toMatchObject({ path: 'noteDealOwnerIds.1' });
+    expect(
+      await issueOf(api().update(key.ctx, id, { notePipelineIds: [theirs.pipeline] })),
+    ).toMatchObject({ path: 'notePipelineIds.0' });
+    expect(
+      await issueOf(api().update(key.ctx, id, { noteStageIds: [theirs.proposal] })),
+    ).toMatchObject({ path: 'noteStageIds.0' });
+    expect(await api().update(key.ctx, id, { noteDealOwnerIds: [ownerId] })).toMatchObject({
+      notePipelineIds: [sales],
+      noteStageIds: null,
+      noteDealOwnerIds: [ownerId],
+    });
+    expect(await audits('webhook.endpoint_updated')).toEqual([
+      [[sales], [proposal], [agent, ownerId]],
+      [[sales], null, [agent, ownerId]],
+      [[sales], null, [ownerId]],
+    ]);
+    // note.created keeps the lists; events without it clear them.
+    expect(await api().update(key.ctx, id, { events: ['note.created'] })).toMatchObject({
+      notePipelineIds: [sales],
+      noteDealOwnerIds: [ownerId],
+      pipelineIds: null,
+    });
+    expect(await api().update(key.ctx, id, { events: ['deal.created'] })).toMatchObject({
+      events: ['deal.created'],
+      notePipelineIds: null,
+      noteStageIds: null,
+      noteDealOwnerIds: null,
+    });
+    for (const [field, value] of [
+      ['notePipelineIds', sales],
+      ['noteStageIds', proposal],
+      ['noteDealOwnerIds', ownerId],
+    ] as const) {
+      expect(await issueOf(api().update(key.ctx, id, { [field]: [value] })), field).toMatchObject({
+        path: field,
+      });
+    }
+    expect(
+      await api().update(key.ctx, id, {
+        events: ['note.created'],
+        notePipelineIds: [sales],
+        noteStageIds: [proposal],
+        noteDealOwnerIds: [ownerId],
+      }),
+    ).toMatchObject({
+      notePipelineIds: [sales],
+      noteStageIds: [proposal],
+      noteDealOwnerIds: [ownerId],
+    });
+    expect(
+      await api().update(key.ctx, id, {
+        notePipelineIds: null,
+        noteStageIds: null,
+        noteDealOwnerIds: null,
+      }),
+    ).toMatchObject({ notePipelineIds: null, noteStageIds: null, noteDealOwnerIds: null });
+    expect(await issueOf(api().update(key.ctx, id, { notePipelineIds: [] }))).toMatchObject({
+      path: 'notePipelineIds',
     });
   });
 

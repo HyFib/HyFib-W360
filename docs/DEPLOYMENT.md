@@ -1000,6 +1000,67 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    ends, an old web server still takes away, when it saves a team, the places of members who cannot
    answer conversations now; rolling web servers back does the same.
 
+   Migration 0225 (ADR-302) replaces the API keys' and plans' scope checks with `ads.read`
+   (validated at once). Until the web rollout ends, an old web server answers Settings → API keys
+   with an error for a company with a key holding `ads.read`, answers `GET /api/v1/ads` with 404,
+   and refuses the `adId` filter of `GET /api/v1/conversations` and
+   `POST /api/v1/conversations/update-matching` (422); rolling web servers back does the same.
+   Workers are unaffected.
+
+   Migration 0226 (ADR-303) adds `task_pipeline_ids` to `app.webhook_endpoints` with a check
+   validated by reading the table, and replaces `app.capture_webhook_event` (keeping 0215's filters)
+   with the same signature; every endpoint starts with none. Web servers of this release need it, as
+   their reads of endpoints name the column; workers do not read it. Web servers from before it
+   neither show nor change the column: until the web rollout ends, an old server's change that drops
+   every task event from an endpoint with a list of pipelines of tasks' deals fails on the check,
+   its other changes keep it, and its API refuses `taskPipelineIds` (422) and leaves it out of the
+   endpoints it answers.
+
+   Migration 0227 (ADR-304) adds `task_stage_ids` and `task_deal_owner_ids` to
+   `app.webhook_endpoints` with checks validated by reading the table, and replaces
+   `app.capture_webhook_event` (keeping 0226's filters) with the same signature; every endpoint
+   starts with neither list. Web servers of this release need it, as their reads of endpoints name
+   the columns; workers do not read them. Web servers from before it neither show nor change the
+   columns: until the web rollout ends, an old server's change that drops every task event from an
+   endpoint with either list fails on the checks, its other changes keep them, and its API refuses
+   `taskStageIds` and `taskDealOwnerIds` (422) and leaves them out of the endpoints it answers.
+
+   Migration 0228 (ADR-305) adds `note_pipeline_ids`, `note_stage_ids` and `note_deal_owner_ids` to
+   `app.webhook_endpoints` with checks validated by reading the table, and replaces
+   `app.capture_webhook_event` (keeping 0227's filters) with the same signature; every endpoint
+   starts with none of the lists. Web servers of this release need it, as their reads of endpoints
+   name the columns; workers do not read them. Web servers from before it neither show nor change
+   the columns: until the web rollout ends, an old server's change that drops `note.created` from an
+   endpoint with any of the lists fails on the checks, its other changes keep them, and its API
+   refuses `notePipelineIds`, `noteStageIds` and `noteDealOwnerIds` (422) and leaves them out of the
+   endpoints it answers.
+
+   Migration 0229 (ADR-306) adds `crm_change_makers` to `app.webhook_endpoints` with a check
+   validated by reading the table, and replaces `app.capture_webhook_event` (keeping 0228's filters)
+   with the same signature; every endpoint starts with no list. Web servers of this release need it,
+   as their reads of endpoints name the column; workers do not read it. Web servers from before it
+   neither show nor change the column: until the web rollout ends, an old server's change that drops
+   every deal, task and note event from an endpoint with a list fails on the check, its other
+   changes keep it, and its API refuses `crmChangeMakers` (422) and leaves it out of the endpoints
+   it answers.
+
+   Migration 0230 (ADR-307) adds `survey_scores` to `app.webhook_endpoints` with a check validated
+   by reading the table, and replaces `app.capture_webhook_event` (keeping 0229's filters) with the
+   same signature; every endpoint starts with no list. Web servers of this release need it, as their
+   reads of endpoints name the column; workers do not read it. Web servers from before it neither
+   show nor change the column: until the web rollout ends, an old server's change that drops
+   `satisfaction_survey.answered` from an endpoint with a list fails on the check, its other changes
+   keep it, and its API refuses `surveyScores` (422) and leaves it out of the endpoints it answers.
+
+   Migration 0231 (ADR-308) adds `payment_link_statuses` to `app.webhook_endpoints` with a check
+   validated by reading the table, and replaces `app.capture_webhook_event` (keeping 0230's filters)
+   with the same signature; every endpoint starts with no list. Web servers of this release need it,
+   as their reads of endpoints name the column; workers do not read it. Web servers from before it
+   neither show nor change the column: until the web rollout ends, an old server's change that drops
+   `payment_link.status_changed` from an endpoint with a list fails on the check, its other changes
+   keep it, and its API refuses `paymentLinkStatuses` (422) and leaves it out of the endpoints it
+   answers.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

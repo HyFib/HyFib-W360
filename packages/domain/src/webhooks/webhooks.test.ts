@@ -68,6 +68,8 @@ import {
   WEBHOOK_MESSAGE_STATUSES,
   WEBHOOK_ORDER_STATUS_LABELS,
   WEBHOOK_ORDER_STATUSES,
+  WEBHOOK_PAYMENT_LINK_STATUS_LABELS,
+  WEBHOOK_PAYMENT_LINK_STATUSES,
   WEBHOOK_REPLAY_PERIODS,
   WEBHOOK_RETRY_SECONDS,
   WEBHOOK_TEMPLATE_STATUS_LABELS,
@@ -90,6 +92,12 @@ import {
   webhookTakesChannelEvents,
   webhookTakesPipelineEvents,
   webhookTakesTaskEvents,
+  webhookTakesNoteEvents,
+  webhookTakesCrmChanges,
+  WEBHOOK_CRM_CHANGE_MAKERS,
+  WEBHOOK_CRM_CHANGE_MAKER_LABELS,
+  WEBHOOK_SURVEY_SCORES,
+  WEBHOOK_SURVEY_SCORE_LABELS,
   webhookTakesTeamEvents,
   webhookTakesTemplateEvents,
   webhookTeamText,
@@ -194,6 +202,9 @@ import {
   webhookMessageStatusesSchema,
   webhookOrderStatusesFor,
   webhookOrderStatusesSchema,
+  webhookPaymentLinkStatusesFor,
+  webhookPaymentLinkStatusesSchema,
+  WEBHOOK_PAYMENT_LINK_STATUSES_NEED_THE_EVENT,
   webhookTeamIdsFor,
   webhookTeamIdsSchema,
   webhookTemplateIdsFor,
@@ -212,6 +223,30 @@ import {
   webhookTaskAssigneeIdsFor,
   webhookTaskAssigneeIdsSchema,
   WEBHOOK_TASK_ASSIGNEES_NEED_THE_EVENTS,
+  webhookTaskPipelineIdsFor,
+  webhookTaskPipelineIdsSchema,
+  WEBHOOK_TASK_PIPELINES_NEED_THE_EVENTS,
+  webhookTaskStageIdsFor,
+  webhookTaskStageIdsSchema,
+  WEBHOOK_TASK_STAGES_NEED_THE_EVENTS,
+  webhookTaskDealOwnerIdsFor,
+  webhookTaskDealOwnerIdsSchema,
+  WEBHOOK_TASK_DEAL_OWNERS_NEED_THE_EVENTS,
+  webhookNotePipelineIdsFor,
+  webhookNotePipelineIdsSchema,
+  WEBHOOK_NOTE_PIPELINES_NEED_THE_EVENTS,
+  webhookNoteStageIdsFor,
+  webhookNoteStageIdsSchema,
+  WEBHOOK_NOTE_STAGES_NEED_THE_EVENTS,
+  webhookNoteDealOwnerIdsFor,
+  webhookNoteDealOwnerIdsSchema,
+  WEBHOOK_NOTE_DEAL_OWNERS_NEED_THE_EVENTS,
+  webhookCrmChangeMakersFor,
+  webhookCrmChangeMakersSchema,
+  WEBHOOK_CRM_CHANGE_MAKERS_NEED_THE_EVENTS,
+  webhookSurveyScoresFor,
+  webhookSurveyScoresSchema,
+  WEBHOOK_SURVEY_SCORES_NEED_THE_EVENT,
   webhookContactTagsFor,
   webhookContactTagsSchema,
   WEBHOOK_CONTACT_TAGS_NEED_THE_EVENTS,
@@ -1741,7 +1776,7 @@ describe('the OpenAPI document', () => {
     // No number filter narrows them: an endpoint that names numbers still receives every one it
     // takes (pipelines can, ADR-263).
     expect(doc.info.description).toContain(
-      'still every consent, contact, template, deal and task event it takes',
+      'still every consent, contact, template, deal, task and note event it takes',
     );
     const schemas = doc.components.schemas as unknown as Record<
       string,
@@ -2407,6 +2442,73 @@ describe('order status filters (ADR-147)', () => {
     expect(webhookOrderStatusesFor([...both], undefined, null)).toBeNull();
     expect(webhookOrderStatusesFor(['order.received'], ['paid'], ['fulfilled'])).toBeNull();
     expect(webhookOrderStatusesFor(['campaign.status_changed'], undefined, ['paid'])).toBeNull();
+  });
+});
+
+describe('Payment Link status filters (ADR-308)', () => {
+  it('take 1 to 6 of the statuses a link reaches once created, once each, in the order Orders lists them; null takes every status', () => {
+    expect(webhookPaymentLinkStatusesSchema.parse(['failed', 'paid', 'failed'])).toEqual([
+      'paid',
+      'failed',
+    ]);
+    expect(webhookPaymentLinkStatusesSchema.parse(null)).toBeNull();
+    expect(
+      webhookPaymentLinkStatusesSchema.parse([...WEBHOOK_PAYMENT_LINK_STATUSES].reverse()),
+    ).toEqual([...WEBHOOK_PAYMENT_LINK_STATUSES]);
+    // Every link status but `creating`, which sends no event.
+    expect(WEBHOOK_PAYMENT_LINK_STATUSES).toEqual(
+      PAYMENT_LINK_STATUSES.filter((s) => s !== 'creating'),
+    );
+    for (const refused of [
+      [],
+      ['creating'],
+      ['canceled'],
+      ['Paid'],
+      'paid',
+      [null],
+      Array(7).fill('paid'),
+    ]) {
+      expect(
+        webhookPaymentLinkStatusesSchema.safeParse(refused).success,
+        JSON.stringify(refused),
+      ).toBe(false);
+    }
+    expect(webhookPaymentLinkStatusesSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one Payment Link status, or take every status.',
+    );
+    expect(webhookPaymentLinkStatusesSchema.safeParse(['creating']).error?.issues[0]?.message).toBe(
+      'Choose Payment Link statuses from the list.',
+    );
+    expect(
+      webhookPaymentLinkStatusesSchema.safeParse(Array(7).fill('paid')).error?.issues[0]?.message,
+    ).toBe('Give each Payment Link status once.');
+    // Named as Orders names them.
+    expect(WEBHOOK_PAYMENT_LINK_STATUS_LABELS).toEqual({
+      created: 'Waiting for payment',
+      partially_paid: 'Partly paid',
+      paid: 'Paid',
+      expired: 'Expired',
+      cancelled: 'Cancelled',
+      failed: 'Not created',
+    });
+    expect(Object.keys(WEBHOOK_PAYMENT_LINK_STATUS_LABELS)).toEqual([
+      ...WEBHOOK_PAYMENT_LINK_STATUSES,
+    ]);
+  });
+
+  it('are kept only while the endpoint takes payment_link.status_changed: given, kept, or cleared', () => {
+    const both = ['payment_link.status_changed', 'order.status_changed'] as const;
+    expect(webhookPaymentLinkStatusesFor([...both], ['paid'], null)).toEqual(['paid']);
+    expect(webhookPaymentLinkStatusesFor([...both], undefined, ['failed'])).toEqual(['failed']);
+    expect(webhookPaymentLinkStatusesFor([...both], null, ['failed'])).toBeNull();
+    expect(webhookPaymentLinkStatusesFor([...both], undefined, null)).toBeNull();
+    // The order's own events have no link status to choose.
+    expect(
+      webhookPaymentLinkStatusesFor(['order.status_changed'], ['paid'], ['failed']),
+    ).toBeNull();
+    expect(WEBHOOK_PAYMENT_LINK_STATUSES_NEED_THE_EVENT).toBe(
+      `Choose Payment Link statuses only for an endpoint that receives ${WEBHOOK_EVENT_INFO['payment_link.status_changed'].label}.`,
+    );
   });
 });
 
@@ -3483,6 +3585,293 @@ describe('task assignee filters (ADR-266)', () => {
   });
 });
 
+describe('pipeline filters for task events (ADR-303)', () => {
+  const sales = 'a8b9c0d1-e2f3-4e6f-8a7b-8c9d0e1f2a3b';
+  const renewals = 'b9c0d1e2-f3a4-4f7a-9b8c-9d0e1f2a3b4c';
+
+  it('take 1 to 50 pipelines, once each and in lower case, in the order given; null takes every task', () => {
+    expect(
+      webhookTaskPipelineIdsSchema.parse([renewals, sales.toUpperCase(), renewals, sales]),
+    ).toEqual([renewals, sales]);
+    expect(webhookTaskPipelineIdsSchema.parse(null)).toBeNull();
+    const ids = Array.from(
+      { length: WEBHOOK_LIMITS.taskPipelines + 1 },
+      (_, i) => `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`,
+    );
+    expect(WEBHOOK_LIMITS.taskPipelines).toBe(50);
+    expect(webhookTaskPipelineIdsSchema.parse(ids.slice(1))).toEqual(ids.slice(1));
+    for (const refused of [[], ids, ['Sales'], [sales, null], sales, [42]]) {
+      expect(webhookTaskPipelineIdsSchema.safeParse(refused).success, JSON.stringify(refused)).toBe(
+        false,
+      );
+    }
+    expect(webhookTaskPipelineIdsSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one pipeline, or take every task.',
+    );
+    expect(webhookTaskPipelineIdsSchema.safeParse(ids).error?.issues[0]?.message).toBe(
+      'Choose at most 50 pipelines.',
+    );
+    expect(webhookTaskPipelineIdsSchema.safeParse(['Sales']).error?.issues[0]?.message).toBe(
+      'Choose pipelines from the list.',
+    );
+  });
+
+  it('are kept only while the endpoint takes a task event: given, kept, or cleared', () => {
+    for (const type of WEBHOOK_TASK_EVENTS) {
+      expect(webhookTaskPipelineIdsFor([type], [sales], null), type).toEqual([sales]);
+      expect(webhookTaskPipelineIdsFor([type], undefined, [renewals]), type).toEqual([renewals]);
+    }
+    expect(webhookTaskPipelineIdsFor(['task.created'], null, [renewals])).toBeNull();
+    expect(webhookTaskPipelineIdsFor(['task.status_changed'], undefined, null)).toBeNull();
+    // Deal events have pipelines of their own (ADR-263): a task list goes with the task events.
+    expect(
+      webhookTaskPipelineIdsFor(['deal.created', 'contact.created'], [sales], [renewals]),
+    ).toBeNull();
+    // The refusal names the events as Settings lists them.
+    for (const type of WEBHOOK_TASK_EVENTS) {
+      expect(WEBHOOK_TASK_PIPELINES_NEED_THE_EVENTS).toContain(WEBHOOK_EVENT_INFO[type].label);
+    }
+  });
+});
+
+describe('stage and owner filters for task events (ADR-304)', () => {
+  const proposal = 'c0d1e2f3-a4b5-4a8b-8c9d-0e1f2a3b4c5d';
+  const signed = 'd1e2f3a4-b5c6-4b9c-9d0e-1f2a3b4c5d6e';
+  const asha = 'e2f3a4b5-c6d7-4cad-8e1f-2a3b4c5d6e7f';
+  const dev = 'f3a4b5c6-d7e8-4dbe-9f2a-3b4c5d6e7f8a';
+  const many = (n: number) =>
+    Array.from({ length: n }, (_, i) => `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`);
+
+  it('take 1 to 50 stages or members, once each and in lower case, in the order given; null takes every task', () => {
+    expect(webhookTaskStageIdsSchema.parse([signed, proposal.toUpperCase(), signed])).toEqual([
+      signed,
+      proposal,
+    ]);
+    expect(webhookTaskDealOwnerIdsSchema.parse([dev, asha.toUpperCase(), dev])).toEqual([
+      dev,
+      asha,
+    ]);
+    expect(webhookTaskStageIdsSchema.parse(null)).toBeNull();
+    expect(webhookTaskDealOwnerIdsSchema.parse(null)).toBeNull();
+    expect(WEBHOOK_LIMITS.taskStages).toBe(50);
+    expect(WEBHOOK_LIMITS.taskDealOwners).toBe(50);
+    expect(webhookTaskStageIdsSchema.parse(many(51).slice(1))).toEqual(many(51).slice(1));
+    expect(webhookTaskDealOwnerIdsSchema.parse(many(51).slice(1))).toEqual(many(51).slice(1));
+    for (const refused of [[], many(51), ['Proposal'], [proposal, null], proposal, [42]]) {
+      expect(webhookTaskStageIdsSchema.safeParse(refused).success, JSON.stringify(refused)).toBe(
+        false,
+      );
+      expect(
+        webhookTaskDealOwnerIdsSchema.safeParse(refused).success,
+        JSON.stringify(refused),
+      ).toBe(false);
+    }
+    expect(webhookTaskStageIdsSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one stage, or take every task.',
+    );
+    expect(webhookTaskStageIdsSchema.safeParse(many(51)).error?.issues[0]?.message).toBe(
+      'Choose at most 50 stages.',
+    );
+    expect(webhookTaskStageIdsSchema.safeParse(['Proposal']).error?.issues[0]?.message).toBe(
+      'Choose stages from the list.',
+    );
+    expect(webhookTaskDealOwnerIdsSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one member, or take every task.',
+    );
+    expect(webhookTaskDealOwnerIdsSchema.safeParse(many(51)).error?.issues[0]?.message).toBe(
+      'Choose at most 50 members.',
+    );
+    expect(
+      webhookTaskDealOwnerIdsSchema.safeParse(['asha@example.com']).error?.issues[0]?.message,
+    ).toBe('Choose members from the list.');
+  });
+
+  it('are kept only while the endpoint takes a task event: given, kept, or cleared', () => {
+    for (const [keep, given, current] of [
+      [webhookTaskStageIdsFor, proposal, signed],
+      [webhookTaskDealOwnerIdsFor, asha, dev],
+    ] as const) {
+      for (const type of WEBHOOK_TASK_EVENTS) {
+        expect(keep([type], [given], null), type).toEqual([given]);
+        expect(keep([type], undefined, [current]), type).toEqual([current]);
+      }
+      expect(keep(['task.created'], null, [current])).toBeNull();
+      expect(keep(['task.status_changed'], undefined, null)).toBeNull();
+      // Deal events have stages and owners of their own (ADR-264, ADR-265).
+      expect(keep(['deal.created', 'contact.created'], [given], [current])).toBeNull();
+    }
+    // The refusals name the events as Settings lists them.
+    for (const type of WEBHOOK_TASK_EVENTS) {
+      expect(WEBHOOK_TASK_STAGES_NEED_THE_EVENTS).toContain(WEBHOOK_EVENT_INFO[type].label);
+      expect(WEBHOOK_TASK_DEAL_OWNERS_NEED_THE_EVENTS).toContain(WEBHOOK_EVENT_INFO[type].label);
+    }
+  });
+});
+
+describe('pipeline, stage and owner filters for note events (ADR-305)', () => {
+  const sales = 'a4b5c6d7-e8f9-4a0b-8c1d-2e3f4a5b6c7d';
+  const proposal = 'b5c6d7e8-f9a0-4b1c-9d2e-3f4a5b6c7d8e';
+  const asha = 'c6d7e8f9-a0b1-4c2d-8e3f-4a5b6c7d8e9f';
+  const dev = 'd7e8f9a0-b1c2-4d3e-9f4a-5b6c7d8e9f0a';
+  const many = (n: number) =>
+    Array.from({ length: n }, (_, i) => `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`);
+
+  it('take 1 to 50 pipelines, stages or members, once each and in lower case, in the order given; null takes every note', () => {
+    for (const [schema, first, second, noun] of [
+      [webhookNotePipelineIdsSchema, sales, proposal, 'pipeline'],
+      [webhookNoteStageIdsSchema, proposal, sales, 'stage'],
+      [webhookNoteDealOwnerIdsSchema, dev, asha, 'member'],
+    ] as const) {
+      expect(schema.parse([second, first.toUpperCase(), second]), noun).toEqual([second, first]);
+      expect(schema.parse(null), noun).toBeNull();
+      expect(schema.parse(many(51).slice(1)), noun).toEqual(many(51).slice(1));
+      for (const refused of [[], many(51), ['Sales'], [first, null], first, [42]]) {
+        expect(schema.safeParse(refused).success, `${noun} ${JSON.stringify(refused)}`).toBe(false);
+      }
+      expect(schema.safeParse([]).error?.issues[0]?.message).toBe(
+        `Choose at least one ${noun}, or take every note.`,
+      );
+      expect(schema.safeParse(many(51)).error?.issues[0]?.message).toBe(
+        `Choose at most 50 ${noun}s.`,
+      );
+      expect(schema.safeParse(['Sales']).error?.issues[0]?.message).toBe(
+        `Choose ${noun}s from the list.`,
+      );
+    }
+    expect(WEBHOOK_LIMITS.notePipelines).toBe(50);
+    expect(WEBHOOK_LIMITS.noteStages).toBe(50);
+    expect(WEBHOOK_LIMITS.noteDealOwners).toBe(50);
+  });
+
+  it('are kept only while the endpoint takes note events: given, kept, or cleared', () => {
+    expect(webhookTakesNoteEvents(['note.created'])).toBe(true);
+    expect(webhookTakesNoteEvents(['contact.created', 'note.created'])).toBe(true);
+    expect(webhookTakesNoteEvents(['deal.created', ...WEBHOOK_TASK_EVENTS])).toBe(false);
+    for (const [keep, given, current] of [
+      [webhookNotePipelineIdsFor, sales, proposal],
+      [webhookNoteStageIdsFor, proposal, sales],
+      [webhookNoteDealOwnerIdsFor, asha, dev],
+    ] as const) {
+      expect(keep(['note.created'], [given], null)).toEqual([given]);
+      expect(keep(['contact.created', 'note.created'], undefined, [current])).toEqual([current]);
+      expect(keep(['note.created'], null, [current])).toBeNull();
+      expect(keep(['note.created'], undefined, null)).toBeNull();
+      // Deal and task events have lists of their own.
+      expect(keep(['deal.created', 'task.created'], [given], [current])).toBeNull();
+    }
+    // The refusals name the event as Settings lists it.
+    for (const message of [
+      WEBHOOK_NOTE_PIPELINES_NEED_THE_EVENTS,
+      WEBHOOK_NOTE_STAGES_NEED_THE_EVENTS,
+      WEBHOOK_NOTE_DEAL_OWNERS_NEED_THE_EVENTS,
+    ]) {
+      expect(message).toContain(WEBHOOK_EVENT_INFO['note.created'].label);
+    }
+  });
+});
+
+describe('change-maker filters for deal, task and note events (ADR-306)', () => {
+  it('take members, automations or API keys, once each in the order Settings lists them; null takes every change', () => {
+    expect(WEBHOOK_CRM_CHANGE_MAKERS).toEqual(['member', 'automation', 'api']);
+    expect(WEBHOOK_CRM_CHANGE_MAKER_LABELS).toEqual({
+      member: 'Members',
+      automation: 'Automations',
+      api: 'API keys',
+    });
+    expect(webhookCrmChangeMakersSchema.parse(['api', 'member', 'api'])).toEqual(['member', 'api']);
+    expect(webhookCrmChangeMakersSchema.parse(['automation'])).toEqual(['automation']);
+    expect(webhookCrmChangeMakersSchema.parse(null)).toBeNull();
+    for (const refused of [
+      [],
+      ['agent'],
+      ['api', 'contact'],
+      'api',
+      [null],
+      ['api', 'api', 'api', 'api'],
+    ]) {
+      expect(webhookCrmChangeMakersSchema.safeParse(refused).success, JSON.stringify(refused)).toBe(
+        false,
+      );
+    }
+    expect(webhookCrmChangeMakersSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one maker, or take every change.',
+    );
+    expect(webhookCrmChangeMakersSchema.safeParse(['bot']).error?.issues[0]?.message).toBe(
+      'Choose who made the changes from the list.',
+    );
+    expect(
+      webhookCrmChangeMakersSchema.safeParse(['api', 'api', 'api', 'api']).error?.issues[0]
+        ?.message,
+    ).toBe('Give each maker once.');
+  });
+
+  it('are kept only while the endpoint takes a deal, task or note event: given, kept, or cleared', () => {
+    for (const type of [
+      ...WEBHOOK_PIPELINE_EVENTS,
+      ...WEBHOOK_TASK_EVENTS,
+      'note.created',
+    ] as const) {
+      expect(webhookTakesCrmChanges([type]), type).toBe(true);
+      expect(webhookCrmChangeMakersFor([type], ['api'], null), type).toEqual(['api']);
+      expect(webhookCrmChangeMakersFor([type], undefined, ['member']), type).toEqual(['member']);
+    }
+    expect(webhookCrmChangeMakersFor(['deal.created'], null, ['member'])).toBeNull();
+    expect(webhookCrmChangeMakersFor(['note.created'], undefined, null)).toBeNull();
+    // Contact, message and other events have no maker to choose.
+    expect(
+      webhookTakesCrmChanges(['contact.updated', 'message.status', 'order.status_changed']),
+    ).toBe(false);
+    expect(
+      webhookCrmChangeMakersFor(['contact.updated', 'message.status'], ['api'], ['member']),
+    ).toBeNull();
+    expect(WEBHOOK_CRM_CHANGE_MAKERS_NEED_THE_EVENTS).toBe(
+      'Choose who made the changes only for an endpoint that receives deal, task or note events.',
+    );
+  });
+});
+
+describe('score filters for satisfaction survey answers (ADR-307)', () => {
+  it('take scores 3, 2 or 1, once each in the order Settings lists them; null takes every answer', () => {
+    expect(WEBHOOK_SURVEY_SCORES).toEqual([3, 2, 1]);
+    expect(WEBHOOK_SURVEY_SCORE_LABELS).toEqual({
+      3: 'First button (best)',
+      2: 'Second button',
+      1: 'Third button',
+    });
+    expect(webhookSurveyScoresSchema.parse([1, 3, 1])).toEqual([3, 1]);
+    expect(webhookSurveyScoresSchema.parse([2])).toEqual([2]);
+    expect(webhookSurveyScoresSchema.parse(null)).toBeNull();
+    for (const refused of [[], [0], [4], ['3'], [2.5], [1, null], 3, [1, 1, 1, 1]]) {
+      expect(webhookSurveyScoresSchema.safeParse(refused).success, JSON.stringify(refused)).toBe(
+        false,
+      );
+    }
+    expect(webhookSurveyScoresSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one score, or take every answer.',
+    );
+    expect(webhookSurveyScoresSchema.safeParse([4]).error?.issues[0]?.message).toBe(
+      'Choose scores from the list.',
+    );
+    expect(webhookSurveyScoresSchema.safeParse([1, 1, 1, 1]).error?.issues[0]?.message).toBe(
+      'Give each score once.',
+    );
+  });
+
+  it('are kept only while the endpoint takes the answers: given, kept, or cleared', () => {
+    expect(webhookSurveyScoresFor(['satisfaction_survey.answered'], [1], null)).toEqual([1]);
+    expect(
+      webhookSurveyScoresFor(['satisfaction_survey.answered', 'message.received'], undefined, [3]),
+    ).toEqual([3]);
+    expect(webhookSurveyScoresFor(['satisfaction_survey.answered'], null, [3])).toBeNull();
+    expect(webhookSurveyScoresFor(['satisfaction_survey.answered'], undefined, null)).toBeNull();
+    // Conversation events have no score to choose.
+    expect(webhookSurveyScoresFor(['conversation.status_changed'], [1], [3])).toBeNull();
+    expect(WEBHOOK_SURVEY_SCORES_NEED_THE_EVENT).toBe(
+      `Choose the scores only for an endpoint that receives ${WEBHOOK_EVENT_INFO['satisfaction_survey.answered'].label}.`,
+    );
+  });
+});
+
 describe('assignee filters (ADR-181)', () => {
   const mira = '6e7f8091-a2b3-44c5-96e7-f8091a2b3c4d';
   const ravi = '7f8091a2-b3c4-45d6-a7f8-091a2b3c4d5e';
@@ -4138,7 +4527,7 @@ describe('the event of a CRM note (ADR-280)', () => {
       'Never the note’s text, which may hold anything a member wrote: read the note with GET /notes/{id} (`notes.read`).',
       'Notes are never changed, so no other note event is sent',
       'erasing a contact deletes its notes, so the events of an erased contact’s notes are no longer delivered',
-      'No endpoint filter narrows it.',
+      'An endpoint can narrow it by the pipeline, stage or owner of the note’s deal when the note is added',
     ]) {
       expect(described).toContain(words);
     }

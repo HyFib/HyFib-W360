@@ -1,6 +1,8 @@
 import { integer, smallint, text, timestamp, uuid } from 'drizzle-orm/pg-core';
 import { jsonb } from './columns';
 import type { AutomationEndReason } from './automations';
+import type { PaymentLinkStatus } from './commerce';
+import type { CrmChanger } from './crm';
 import type { ContactSource, MessageType } from './messaging';
 import { appSchema } from './tenancy';
 
@@ -53,6 +55,19 @@ export type WebhookMessageStatus =
 export type WebhookMessageSender = 'agent' | 'bot' | 'campaign' | 'api' | 'system';
 
 /**
+ * Who made a change a deal, task or note event reports, as an endpoint can choose them (ADR-306): a
+ * member, an automation's run or an API key, as the events' `changedBy` and a note's `writtenBy`
+ * name them.
+ */
+export type WebhookCrmChangeMaker = CrmChanger;
+
+/**
+ * The score of a satisfaction survey answer, which an endpoint can choose to take (ADR-307), as the
+ * survey's `score` gives it: 3 for the first (best) button, 2 for the second, 1 for the third.
+ */
+export type WebhookSurveyScore = 3 | 2 | 1;
+
+/**
  * The parts of a contact whose change a `contact.updated` endpoint can choose (ADR-123); `fields`
  * is a change of any custom field.
  */
@@ -68,6 +83,12 @@ export type WebhookCampaignStatus =
  */
 export type WebhookOrderStatus =
   'confirmed' | 'awaiting_payment' | 'paid' | 'fulfilled' | 'cancelled';
+
+/**
+ * The statuses a `payment_link.status_changed` event reports, which an endpoint can choose
+ * (ADR-308); a link is `creating` only until the worker creates it, which sends no event.
+ */
+export type WebhookPaymentLinkStatus = Exclude<PaymentLinkStatus, 'creating'>;
 
 /**
  * The statuses a `template.status_changed` event reports, which an endpoint can choose (ADR-148):
@@ -176,6 +197,12 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
    */
   orderStatuses: text('order_statuses').array().$type<WebhookOrderStatus[]>(),
   /**
+   * The statuses a Payment Link reaches that it takes as `payment_link.status_changed` (migration
+   * 0231, ADR-308); null takes every status. Set only while `payment_link.status_changed` is among
+   * its events.
+   */
+  paymentLinkStatuses: text('payment_link_statuses').array().$type<WebhookPaymentLinkStatus[]>(),
+  /**
    * The template statuses it takes as `template.status_changed` (ADR-148); null takes every status.
    * Set only while `template.status_changed` is among its events.
    */
@@ -258,6 +285,56 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
    * its events.
    */
   taskAssigneeIds: uuid('task_assignee_ids').array(),
+  /**
+   * The CRM pipelines whose deals' tasks' events it takes (migration 0226, ADR-303), by the pipeline
+   * of the task's deal when the event happens; a task without a deal is in none. null takes every
+   * task's. Set only while a task event is among its events.
+   */
+  taskPipelineIds: uuid('task_pipeline_ids').array(),
+  /**
+   * The CRM stages whose deals' tasks' events it takes (migration 0227, ADR-304), by the stage of the
+   * task's deal when the event happens; a task without a deal is in none. null takes every task's.
+   * Set only while a task event is among its events.
+   */
+  taskStageIds: uuid('task_stage_ids').array(),
+  /**
+   * The members (memberships) whose deals' tasks' events it takes (migration 0227, ADR-304), by the
+   * owner of the task's deal when the event happens; a task without a deal, or of a deal without an
+   * owner, has none. null takes every task's. Set only while a task event is among its events.
+   */
+  taskDealOwnerIds: uuid('task_deal_owner_ids').array(),
+  /**
+   * The CRM pipelines whose deals' notes' events it takes (migration 0228, ADR-305), by the
+   * pipeline of the note's deal when the note is added; a note about a contact alone is in none.
+   * null takes every note's. Set only while `note.created` is among its events.
+   */
+  notePipelineIds: uuid('note_pipeline_ids').array(),
+  /**
+   * The CRM stages whose deals' notes' events it takes (migration 0228, ADR-305), by the stage of
+   * the note's deal when the note is added; a note about a contact alone is in none. null takes
+   * every note's. Set only while `note.created` is among its events.
+   */
+  noteStageIds: uuid('note_stage_ids').array(),
+  /**
+   * The members (memberships) whose deals' notes' events it takes (migration 0228, ADR-305), by the
+   * owner of the note's deal when the note is added; a note about a contact alone, or of a deal
+   * without an owner, has none. null takes every note's. Set only while `note.created` is among its
+   * events.
+   */
+  noteDealOwnerIds: uuid('note_deal_owner_ids').array(),
+  /**
+   * Who made the changes whose deal, task and note events it takes (migration 0229, ADR-306): an
+   * addition's maker is whoever added the deal or task, a note's whoever wrote it, and any other
+   * change's the one it recorded. null takes every change; a change whose maker was not recorded is
+   * taken whoever is listed. Set only while a deal, task or note event is among its events.
+   */
+  crmChangeMakers: text('crm_change_makers').array().$type<WebhookCrmChangeMaker[]>(),
+  /**
+   * The scores of the satisfaction survey answers it takes (migration 0230, ADR-307), by the score
+   * the customer's tap recorded; null takes every answer. Set only while
+   * `satisfaction_survey.answered` is among its events.
+   */
+  surveyScores: smallint('survey_scores').array().$type<WebhookSurveyScore[]>(),
   /**
    * The consent changes it takes as `consent.changed` (ADR-189), by purpose and action; null takes
    * every change. Set only while `consent.changed` is among its events.

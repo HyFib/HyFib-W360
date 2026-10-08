@@ -25,6 +25,7 @@ export const API_SCOPES = [
   'campaigns.resume',
   'chat_links.read',
   'chat_links.write',
+  'ads.read',
   'automations.start',
   'flows.read',
   'orders.read',
