@@ -167,6 +167,7 @@ import {
   WEBHOOK_NOTE_PIPELINES_NEED_THE_EVENTS,
   WEBHOOK_NOTE_STAGES_NEED_THE_EVENTS,
   WEBHOOK_NOTE_DEAL_OWNERS_NEED_THE_EVENTS,
+  WEBHOOK_CRM_CHANGE_MAKERS_NEED_THE_EVENTS,
   WEBHOOK_CONTACT_TAGS_NEED_THE_EVENTS,
   WEBHOOK_CONVERSATION_TAGS_NEED_THE_EVENTS,
   WEBHOOK_CAMPAIGN_STATUSES_NEED_THE_EVENT,
@@ -1461,6 +1462,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'contactTags',
       'conversationStatuses',
       'conversationTags',
+      'crmChangeMakers',
       'description',
       'enabled',
       'events',
@@ -2059,7 +2061,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       taskAssigneeIds: [dev],
     });
     expect(apiUpdateWebhookEndpointSchema.safeParse({}).error?.issues[0]?.message).toContain(
-      'the deal owners, the task assignees, the pipelines, stages and owners of tasks’ deals and of notes’ deals, the members, the contact tags, the conversation tags, the OAuth client',
+      'the deal owners, the task assignees, the pipelines, stages and owners of tasks’ deals and of notes’ deals, who made the CRM changes, the members, the contact tags, the conversation tags, the OAuth client',
     );
     const doc = buildOpenApiDocument('https://app.example.com/api/v1');
     const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
@@ -2375,6 +2377,71 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'An endpoint can narrow it by the pipeline, stage or owner of the note’s deal when the note is added (`notePipelineIds`, `noteStageIds`, `noteDealOwnerIds`): a note about a contact alone then matches none.',
     );
     expect(noteEvent).not.toContain('No endpoint filter narrows it.');
+  });
+
+  it('take who made the CRM changes only with a deal, task or note event, once each, and a list of them alone is a change (ADR-306)', () => {
+    const base = { url: 'https://hooks.example.com/w360' };
+    for (const events of [['deal.updated'], ['task.created'], ['note.created']]) {
+      expect(
+        apiCreateWebhookEndpointSchema.parse({
+          ...base,
+          events,
+          crmChangeMakers: ['api', 'member', 'api'],
+        }).crmChangeMakers,
+        events[0],
+      ).toEqual(['member', 'api']);
+    }
+    const refused = apiCreateWebhookEndpointSchema.safeParse({
+      ...base,
+      events: ['contact.updated', 'message.status'],
+      crmChangeMakers: ['member'],
+    });
+    expect(refused.error?.issues.map((i) => [i.path.join('.'), i.message])).toEqual([
+      ['crmChangeMakers', WEBHOOK_CRM_CHANGE_MAKERS_NEED_THE_EVENTS],
+    ]);
+    for (const value of [[], ['agent'], ['api', 'api', 'api', 'api']]) {
+      expect(
+        apiCreateWebhookEndpointSchema.safeParse({
+          ...base,
+          events: ['deal.created'],
+          crmChangeMakers: value,
+        }).success,
+        JSON.stringify(value),
+      ).toBe(false);
+    }
+    expect(apiUpdateWebhookEndpointSchema.parse({ crmChangeMakers: null })).toEqual({
+      crmChangeMakers: null,
+    });
+    expect(apiUpdateWebhookEndpointSchema.parse({ crmChangeMakers: ['automation'] })).toEqual({
+      crmChangeMakers: ['automation'],
+    });
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas;
+    const answered = schemas.WebhookEndpoint as {
+      properties: Record<string, { anyOf?: { items?: { enum?: string[] } }[] }>;
+      required?: string[];
+    };
+    expect(answered.properties.crmChangeMakers?.anyOf?.[0]?.items?.enum).toEqual([
+      'member',
+      'automation',
+      'api',
+    ]);
+    expect(answered.required).toContain('crmChangeMakers');
+    expect(JSON.stringify(answered.properties.crmChangeMakers)).toContain(
+      'A change HyFib did not record the maker of (changedBy null) is sent whoever is listed.',
+    );
+    const given = (schemas.CreateWebhookEndpoint as { properties: Record<string, unknown> })
+      .properties;
+    expect(JSON.stringify(given.crmChangeMakers)).toContain(
+      'one or more of `member`, `automation`, `api`, as the events name them (`deal.changedBy`, `task.changedBy`, `note.writtenBy`), only with a deal, task or note event',
+    );
+    expect(JSON.stringify(given.crmChangeMakers)).toContain(
+      'An addition belongs to whoever added the deal or task, a note to whoever wrote it',
+    );
+    expect(doc.info.description).toContain(
+      'And it can name who made the changes whose deal, task and note events it takes (its `crmChangeMakers`: members, automations or API keys, as `changedBy` and `writtenBy` name them): then it receives the events of the changes they made only, and those HyFib did not record the maker of',
+    );
   });
 
   it('take contact tags only with an event of a conversation, as contacts carry them, and a list of them alone is a change (ADR-267)', () => {

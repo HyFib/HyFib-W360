@@ -231,6 +231,7 @@ export default async function WebhookEndpointPage({
               notePipelines: endpoint.notePipelines,
               noteStages: endpoint.noteStages,
               noteDealOwners: endpoint.noteDealOwners,
+              crmChangeMakers: endpoint.crmChangeMakers,
               assignees: endpoint.assignees,
               contactTags: endpoint.contactTags,
               conversationTags: endpoint.conversationTags,

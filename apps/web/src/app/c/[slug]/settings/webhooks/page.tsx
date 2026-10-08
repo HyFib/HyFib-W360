@@ -17,6 +17,7 @@ import {
   WEBHOOK_RECEIVED_MESSAGE_TYPE_LABELS,
   WEBHOOK_RUN_END_REASON_LABELS,
   WEBHOOK_MESSAGE_SENDER_LABELS,
+  WEBHOOK_CRM_CHANGE_MAKER_LABELS,
   WEBHOOK_MESSAGE_STATUS_LABELS,
   WEBHOOK_TEMPLATE_STATUS_LABELS,
   webhookAssigneeText,
@@ -335,6 +336,14 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
                       <p className="text-xs break-all text-muted-foreground">
                         Members whose deals’ notes’ events are sent:{' '}
                         {e.noteDealOwners.map(webhookOwnerText).join(', ')}
+                      </p>
+                    ) : null}
+                    {e.crmChangeMakers ? (
+                      <p className="text-xs text-muted-foreground">
+                        Deal, task and note changes sent, made by:{' '}
+                        {e.crmChangeMakers
+                          .map((m) => WEBHOOK_CRM_CHANGE_MAKER_LABELS[m])
+                          .join(', ')}
                       </p>
                     ) : null}
                     {e.teams ? (

@@ -4939,6 +4939,102 @@ describe('pipeline, stage and owner filters for note events (ADR-305)', () => {
   });
 });
 
+describe('change-maker filters for deal, task and note events (ADR-306)', () => {
+  it('are refused without a deal, task or note event, unknown or empty, kept by a change that leaves them out and cleared with the events; the database keeps them to those events', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const url = 'https://hooks.example.com/in';
+    const refused = (eventTypes: string[], crmChangeMakers: unknown, message: RegExp) =>
+      expectAppError(
+        webhooks().create(owner, { url, eventTypes, crmChangeMakers }),
+        'validation_failed',
+        message,
+      );
+    // Contact and message events have no maker to choose; a contact makes no CRM change.
+    const needsTheEvents = /only for an endpoint that receives deal, task or note events/;
+    await refused(['contact.updated', 'message.status'], ['api'], needsTheEvents);
+    await refused(['deal.created'], [], /at least one maker/);
+    await refused(['task.created'], ['contact'], /from the list/);
+    await refused(['note.created'], ['agent'], /from the list/);
+    expect(await webhooks().list(owner)).toEqual([]);
+
+    const created = await webhooks().create(owner, {
+      url,
+      eventTypes: ['deal.updated', 'consent.changed'],
+      crmChangeMakers: ['api', 'member', 'api'],
+    });
+    const [audit] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events WHERE tenant_id = $1 AND action = 'webhook.endpoint_created'`,
+      [c.tenant.id],
+    );
+    expect(audit?.metadata).toMatchObject({ crmChangeMakers: ['member', 'api'] });
+    const change = (fields: Record<string, unknown>) =>
+      webhooks().update(owner, {
+        endpointId: created.id,
+        url,
+        description: '',
+        eventTypes: ['deal.updated', 'consent.changed'],
+        ...fields,
+      });
+    const current = async () =>
+      (await webhooks().list(owner)).find((e) => e.id === created.id)?.crmChangeMakers;
+    expect(await current()).toEqual(['member', 'api']);
+    await change({ description: 'kept' });
+    expect(await current()).toEqual(['member', 'api']);
+    await change({ crmChangeMakers: ['automation'] });
+    expect(await current()).toEqual(['automation']);
+    const updates = await fx.query<{ metadata: { crmChangeMakers?: unknown } }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND action = 'webhook.endpoint_updated' ORDER BY occurred_at`,
+      [c.tenant.id],
+    );
+    expect(updates.map((u) => u.metadata.crmChangeMakers)).toEqual([
+      ['member', 'api'],
+      ['automation'],
+    ]);
+    await change({ crmChangeMakers: null });
+    expect(await current()).toBeNull();
+    // Any deal, task or note event keeps the list.
+    await change({ crmChangeMakers: ['member'] });
+    for (const eventTypes of [['task.status_changed'], ['note.created'], ['deal.owner_changed']]) {
+      await change({ eventTypes });
+      expect(await current(), eventTypes[0]).toEqual(['member']);
+    }
+    // The database refuses an empty list, more than three entries, an unknown maker or a missing one
+    // from an endpoint taking those events…
+    const setInDatabase = (value: string) =>
+      fx.query(`UPDATE app.webhook_endpoints SET crm_change_makers = ${value} WHERE id = $1`, [
+        created.id,
+      ]);
+    for (const bad of [
+      `'{}'`,
+      `'{member,automation,api,api}'`,
+      `'{api,contact}'`,
+      `'{api,agent}'`,
+      `ARRAY['api', NULL]::text[]`,
+      `ARRAY[ARRAY['api'], ARRAY['member']]`,
+    ]) {
+      await expect(setInDatabase(bad), bad).rejects.toThrow(/webhook_endpoints_crm_change_makers/);
+    }
+    await change({ eventTypes: ['consent.changed'] });
+    expect(await current()).toBeNull();
+    await expectAppError(
+      change({ eventTypes: ['consent.changed'], crmChangeMakers: ['api'] }),
+      'validation_failed',
+      needsTheEvents,
+    );
+    // …and any list for an endpoint that does not take them, contact events included.
+    await change({ eventTypes: ['contact.updated'] });
+    await expect(setInDatabase(`'{api}'`)).rejects.toThrow(/webhook_endpoints_crm_change_makers/);
+    // The company role changes the list only through its column grant.
+    const [grant] = await fx.query<{ can_update: boolean }>(
+      `SELECT has_column_privilege('w360_app', 'app.webhook_endpoints', 'crm_change_makers',
+                'UPDATE') AS can_update`,
+    );
+    expect(grant?.can_update).toBe(true);
+  });
+});
+
 describe('contact tag filters (ADR-267)', () => {
   /** Puts a tag on a contact, or takes it off, as the contacts service writes tags. */
   const tag = (c: Company, contactId: string, name: string) =>

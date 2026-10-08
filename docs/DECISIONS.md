@@ -11697,3 +11697,55 @@ Decision:
 
 Not built: note events narrowed by who wrote them (a member, or the key by its id, which the payload
 already gives) or by the contact's values.
+
+## ADR-306 Choosing who made the changes whose deal, task and note events a webhook endpoint receives (P5-09, P4-04) (2026-10-08)
+
+Context: deal and task events name who made each change (`changedBy`: a member, an automation's run
+or an API key, ADR-277) and note events who wrote the note (`writtenBy`, ADR-280), so an integration
+could tell its own changes from others', but an endpoint received them all. An integration that
+keeps deals, tasks or notes in step with another system, changing them through the API and taking
+their events, was sent back every change it had just made and had to drop each one. ADR-305 left
+note events by who wrote them unbuilt.
+
+Decision:
+
+- **One list per endpoint for its deal, task and note events,** `crmChangeMakers`: who made the
+  changes it takes, 1 to 3 of `member`, `automation` and `api`, in that order with repeats merged,
+  as the events name them. Null receives every change, as before. An addition's maker is whoever
+  added the deal or task (its creator: a key, else an automation's run, else a member), a note's
+  whoever wrote it (a member or a key; automations write none), and any other change's the maker
+  recorded with it. A change that recorded no maker (`changedBy` null: erasure retitling a deal, or
+  a change written during a rollout) is sent whatever the list holds, so no endpoint loses an event
+  because HyFib cannot say who made it. With pipelines, stages, owners or assignees chosen too, an
+  event must pass every list. Other events are not narrowed. Chosen in Settings → Webhooks ("Changes
+  made by", every maker ticked by default, untick API keys to leave out what integrations change
+  through the API), shown on the endpoint as "Deal, task and note changes sent, made by: …", and
+  through the API as `crmChangeMakers` on `POST /webhook-endpoints` and
+  `PATCH /webhook-endpoints/{id}` and in every endpoint the API answers.
+- **Every key at once:** the list names kinds of maker, not keys: an integration that ticks members
+  and automations leaves out every key's changes, its own and other integrations'. Narrowing by one
+  key is not built.
+- **Only while a deal, task or note event is taken:** a list given for an endpoint that takes none
+  is refused (`crmChangeMakers`; 422 through the API). A change that drops every such event clears
+  it, and a `PATCH` that leaves it out keeps it; Settings always sends it. A check in the database
+  holds the same rule (null, or 1 to 3 known makers in one dimension without a null, with a deal,
+  task or note event).
+- **Applied at capture:** `app.capture_webhook_event` reads the maker only when an active endpoint
+  of the company that takes the event names makers: an addition's from the deal's or task's creator
+  columns, a note's from the note (its member, else the key its data names), and any other change's
+  from the detail the deal and task triggers already record (ADR-277). The triggers run as whoever
+  makes the change (the runtime role in the company's scope; the definer role for erasure, whose
+  changes record no maker), and only additions and notes, which the runtime role makes, read a row.
+  No event is written when no endpoint takes it, and stored events are unchanged.
+- **Audited and exported:** `webhook.endpoint_created` and `webhook.endpoint_updated` carry
+  `crmChangeMakers` when the endpoint has the list, and the company data export carries the column.
+- **Permissions unchanged:** members with `developer.manage` in Settings, keys with
+  `webhooks.manage` through the API.
+- **Migration 0229:** `crm_change_makers text[]` on `app.webhook_endpoints` with its check,
+  validated at once (a company has at most 10 endpoints), an update grant on the column for the
+  runtime role, and `app.capture_webhook_event` replaced with the same signature (0228's, with the
+  maker), so its owner and grants stay. Existing endpoints keep null; nothing is backfilled.
+
+Not built: narrowing by one key (the payload names it in `apiKeyId`), makers chosen per event type
+(one list serves the deal, task and note events), and makers for other events (`message.status` has
+its senders since ADR-172; order events name their changer since ADR-270).

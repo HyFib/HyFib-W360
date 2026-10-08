@@ -1634,6 +1634,16 @@ Phase 5 rules (outgoing webhooks, P5-09):
   about a contact alone matching none: they narrow what one endpoint receives and never add an event
   or a delivery for another endpoint or company. Audited with the lists (unit tests; integration
   tests, run in CI only).
+- An endpoint can take the deal, task and note events of the changes made by chosen kinds of maker
+  only (members, automations' runs or API keys; ADR-306), chosen with `developer.manage` in Settings
+  or `webhooks.manage` through the API. The list holds only those three values and is kept only
+  while the endpoint takes a deal, task or note event (a database check too, which also refuses a
+  null entry); `app.capture_webhook_event` matches it against the maker the change recorded in the
+  company's scope, or an addition's creator and a note's writer read there, and a change that
+  recorded no maker (erasure's among them) passes every list, so the filter never hides an erasure's
+  changes from a receiver that took the record. It narrows what one endpoint receives and never adds
+  an event or a delivery for another endpoint or company. Audited with the list (unit tests;
+  integration tests, run in CI only).
 - An endpoint can take the message and conversation events of the conversations whose contact has
   chosen tags only (ADR-267), chosen the same way. A list holds tags in the form contacts carry them
   (the services normalise them; a database check holds the form, the count and the events, and

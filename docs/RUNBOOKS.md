@@ -3019,6 +3019,19 @@ of notes’ deals" on the endpoint's page or choose "Every note’s events", or
 `PATCH /webhook-endpoints/{id}` with `notePipelineIds`, `noteStageIds` or `noteDealOwnerIds` (null
 for every note). Removing Note added clears the three lists.
 
+**A receiver misses deal, task or note changes, or gets back its own (ADR-306).** An endpoint can
+take the deal, task and note events of the changes made by chosen kinds of maker only. The endpoints
+list shows it ("Deal, task and note changes sent, made by: …"), and the API answers
+`crmChangeMakers` (null takes every change). Each event goes by the maker its payload names:
+`deal.changedBy` and `task.changedBy` (for an addition, whoever added it) and `note.writtenBy`; a
+change whose maker was not recorded (`changedBy` null) is sent whatever is ticked, and events no
+endpoint takes are not recorded, so there is nothing to replay. The list names kinds, not keys:
+leaving out API keys leaves out every integration's changes, not only the endpoint's own; to drop
+only its own, a receiver compares the payload's `apiKeyId` with its key. With pipelines, stages,
+owners or assignees chosen too, an event must pass every list. To take more, tick makers under
+"Changes made by" on the endpoint's page, or `PATCH /webhook-endpoints/{id}` with `crmChangeMakers`
+(null for every change). Removing every deal, task and note event clears it.
+
 **A receiver misses a task's change of assignee, or doubts one (ADR-274).** Endpoints that take
 `task.assignee_changed` ("Task assignee") are sent one event each time a member gives a task to
 another member by editing it, or a key changes its `assigneeId`. Automations set an assignee only on

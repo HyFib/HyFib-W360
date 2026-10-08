@@ -15,6 +15,8 @@ import {
   WEBHOOK_FAILURE_LABELS,
   WEBHOOK_LIMITS,
   WEBHOOK_MESSAGE_SENDER_LABELS,
+  WEBHOOK_CRM_CHANGE_MAKER_LABELS,
+  WEBHOOK_CRM_CHANGE_MAKERS,
   WEBHOOK_MESSAGE_SENDERS,
   WEBHOOK_MESSAGE_STATUS_LABELS,
   WEBHOOK_MESSAGE_STATUSES,
@@ -55,6 +57,7 @@ import {
   webhookTakesPipelineEvents,
   webhookTakesTaskEvents,
   webhookTakesNoteEvents,
+  webhookTakesCrmChanges,
   webhookTakesTeamEvents,
   webhookTakesTemplateEvents,
   webhookTeamText,
@@ -66,6 +69,7 @@ import {
   type WebhookChannelChoice,
   type WebhookCampaignChoice,
   type WebhookContactPart,
+  type WebhookCrmChangeMaker,
   type WebhookConversationStatus,
   type WebhookEndpointAssignee,
   type WebhookEndpointCampaign,
@@ -217,6 +221,55 @@ function SenderChoices({
             <Label htmlFor={id} className="font-normal">
               {WEBHOOK_MESSAGE_SENDER_LABELS[sender]}{' '}
               <span className="font-mono text-xs">({sender})</span>
+            </Label>
+          </div>
+        );
+      })}
+    </fieldset>
+  );
+}
+
+/**
+ * Who made the changes whose deal, task and note events an endpoint takes (ADR-306), shown while it
+ * takes one of those events: every change unless some makers are unticked. A change whose maker was
+ * not recorded is sent whichever are ticked.
+ */
+function ChangeMakerChoices({
+  prefix,
+  chosen,
+  onChange,
+}: {
+  prefix: string;
+  chosen: WebhookCrmChangeMaker[];
+  onChange: (next: WebhookCrmChangeMaker[]) => void;
+}) {
+  return (
+    <fieldset className="grid gap-2">
+      <legend className="mb-1 text-sm font-medium">Changes made by</legend>
+      <p className="text-xs text-muted-foreground">
+        A deal’s or task’s events belong to whoever made the change (an addition to whoever added
+        it), and a note’s to whoever wrote it. Untick API keys to leave out what your integrations
+        change through the API. A change HyFib did not record the maker of is sent whichever are
+        ticked. Other events are sent whoever made them.
+      </p>
+      {WEBHOOK_CRM_CHANGE_MAKERS.map((maker) => {
+        const id = `${prefix}-change-maker-${maker}`;
+        return (
+          <div key={maker} className="flex items-center gap-2">
+            <Checkbox
+              id={id}
+              checked={chosen.includes(maker)}
+              onChange={(e) =>
+                onChange(
+                  e.target.checked
+                    ? WEBHOOK_CRM_CHANGE_MAKERS.filter((m) => m === maker || chosen.includes(m))
+                    : chosen.filter((m) => m !== maker),
+                )
+              }
+            />
+            <Label htmlFor={id} className="font-normal">
+              {WEBHOOK_CRM_CHANGE_MAKER_LABELS[maker]}{' '}
+              <span className="font-mono text-xs">({maker})</span>
             </Label>
           </div>
         );
@@ -2274,6 +2327,8 @@ export function WebhookEndpointForm({
     noteStages: WebhookEndpointStage[] | null;
     /** The members whose deals' notes it takes (ADR-305), and if they can own deals; null: all. */
     noteDealOwners: WebhookEndpointOwner[] | null;
+    /** Who made the changes whose deal, task and note events it takes (ADR-306); null: all. */
+    crmChangeMakers: WebhookCrmChangeMaker[] | null;
     /** The members it names (ADR-181), with whether they still take conversations; null: all. */
     assignees: WebhookEndpointAssignee[] | null;
     /** The contact tags it names (ADR-267); null for every conversation. */
@@ -2397,6 +2452,9 @@ export function WebhookEndpointForm({
   const [everyNoteDealOwner, setEveryNoteDealOwner] = useState(!endpoint?.noteDealOwners);
   const [noteDealOwnerIds, setNoteDealOwnerIds] = useState<string[]>(
     endpoint?.noteDealOwners?.map((m) => m.id) ?? [],
+  );
+  const [changeMakers, setChangeMakers] = useState<WebhookCrmChangeMaker[]>(
+    endpoint?.crmChangeMakers ?? [...WEBHOOK_CRM_CHANGE_MAKERS],
   );
   const [everyAssignee, setEveryAssignee] = useState(!endpoint?.assignees);
   const [everyField, setEveryField] = useState(!endpoint?.contactFields);
@@ -2559,6 +2617,12 @@ export function WebhookEndpointForm({
           webhookTakesNoteEvents(eventTypes) && !everyNoteStage ? noteStageIds : null;
         const chosenNoteDealOwners =
           webhookTakesNoteEvents(eventTypes) && !everyNoteDealOwner ? noteDealOwnerIds : null;
+        // Every maker ticked takes every change (null, ADR-306).
+        const crmChangeMakers =
+          webhookTakesCrmChanges(eventTypes) &&
+          changeMakers.length < WEBHOOK_CRM_CHANGE_MAKERS.length
+            ? changeMakers
+            : null;
         // Every conversation's events unless the members ticked are chosen (ADR-181).
         const chosenAssignees =
           webhookTakesTeamEvents(eventTypes) && !everyAssignee ? assigneeIds : null;
@@ -2611,6 +2675,7 @@ export function WebhookEndpointForm({
           notePipelineIds: chosenNotePipelines,
           noteStageIds: chosenNoteStages,
           noteDealOwnerIds: chosenNoteDealOwners,
+          crmChangeMakers,
           assigneeIds: chosenAssignees,
           contactTags: chosenContactTags,
           conversationTags: chosenConversationTags,
@@ -2701,6 +2766,7 @@ export function WebhookEndpointForm({
               setNoteStageIds([]);
               setEveryNoteDealOwner(true);
               setNoteDealOwnerIds([]);
+              setChangeMakers([...WEBHOOK_CRM_CHANGE_MAKERS]);
               setEveryAssignee(true);
               setAssigneeIds([]);
               setEveryContactTag(true);
@@ -3000,6 +3066,9 @@ export function WebhookEndpointForm({
           chosen={noteDealOwnerIds}
           onChange={setNoteDealOwnerIds}
         />
+      ) : null}
+      {webhookTakesCrmChanges(eventTypes) ? (
+        <ChangeMakerChoices prefix={prefix} chosen={changeMakers} onChange={setChangeMakers} />
       ) : null}
       <fieldset className="grid gap-2">
         <legend className="mb-1 text-sm font-medium">Headers</legend>

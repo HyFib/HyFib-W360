@@ -6,6 +6,7 @@ import type {
   WebhookConsentChange,
   WebhookContactPart,
   WebhookConversationStatus,
+  WebhookCrmChangeMaker,
   WebhookEventType,
   WebhookMessageSender,
   WebhookMessageStatus,
@@ -23,6 +24,7 @@ export type {
   WebhookConsentChange,
   WebhookContactPart,
   WebhookConversationStatus,
+  WebhookCrmChangeMaker,
   WebhookEventType,
   WebhookMessageSender,
   WebhookMessageStatus,
@@ -1025,6 +1027,36 @@ export function webhookTakesTaskEvents(eventTypes: readonly WebhookEventType[]):
  */
 export function webhookTakesNoteEvents(eventTypes: readonly WebhookEventType[]): boolean {
   return eventTypes.includes('note.created');
+}
+
+/**
+ * Who made the changes the deal, task and note events report, which an endpoint can choose
+ * (ADR-306), in the order Settings lists them, as the events' `changedBy` and a note's `writtenBy`
+ * name them: an addition's maker is whoever added the deal or task, a note's whoever wrote it.
+ */
+export const WEBHOOK_CRM_CHANGE_MAKERS = [
+  'member',
+  'automation',
+  'api',
+] as const satisfies readonly WebhookCrmChangeMaker[];
+
+/** How Settings names each maker an endpoint can choose (ADR-306). */
+export const WEBHOOK_CRM_CHANGE_MAKER_LABELS: Record<WebhookCrmChangeMaker, string> = {
+  member: 'Members',
+  automation: 'Automations',
+  api: 'API keys',
+};
+
+/**
+ * Whether an endpoint with these events takes deal, task or note events, and can choose who made
+ * the changes they report (ADR-306).
+ */
+export function webhookTakesCrmChanges(eventTypes: readonly WebhookEventType[]): boolean {
+  return (
+    webhookTakesPipelineEvents(eventTypes) ||
+    webhookTakesTaskEvents(eventTypes) ||
+    webhookTakesNoteEvents(eventTypes)
+  );
 }
 
 /**

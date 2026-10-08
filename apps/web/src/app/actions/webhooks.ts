@@ -84,6 +84,8 @@ export async function createWebhookEndpointAction(
     noteStageIds: string[] | null;
     /** The members whose deals' notes' events it takes (ADR-305); null: every note's. */
     noteDealOwnerIds: string[] | null;
+    /** Who made the changes whose deal, task and note events it takes (ADR-306); null: all. */
+    crmChangeMakers: string[] | null;
     /** The members whose assigned conversations' events it takes (ADR-181); null: every one's. */
     assigneeIds: string[] | null;
     /** The contact tags whose conversations' events it takes (ADR-267); null: every one's. */
@@ -170,6 +172,8 @@ export async function updateWebhookEndpointAction(
     noteStageIds: string[] | null;
     /** The members whose deals' notes' events it takes (ADR-305); null: every note's. */
     noteDealOwnerIds: string[] | null;
+    /** Who made the changes whose deal, task and note events it takes (ADR-306); null: all. */
+    crmChangeMakers: string[] | null;
     /** The members whose assigned conversations' events it takes (ADR-181); null: every one's. */
     assigneeIds: string[] | null;
     /** The contact tags whose conversations' events it takes (ADR-267); null: every one's. */

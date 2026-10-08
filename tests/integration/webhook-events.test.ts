@@ -81,6 +81,7 @@ import {
   type TemplateDefinition,
   type TenantContext,
   type WebhookContactPart,
+  type WebhookCrmChangeMaker,
   type WebhookEventType,
 } from '@w360/domain';
 import { startRazorpayStandIn, type RazorpayStandIn } from '../support/razorpay-stand-in';
@@ -5022,6 +5023,166 @@ describe('deal events (ADR-256)', () => {
         )
         .sort(),
     );
+  });
+});
+
+describe('change-maker filters for deal, task and note events (ADR-306)', () => {
+  const crm = () =>
+    createCrmService({ db: fx.dbs.app, clock: systemClock, jobs: fx.jobs(), signer: fx.signer });
+
+  it('sends an endpoint that names who made the changes only the deal, task and note events of their changes, each addition by whoever added it and each note by whoever wrote it, and every change whose maker was not recorded', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const svc = crm();
+    const { id: salesId } = await svc.createPipeline(owner, {
+      name: 'Sales',
+      currency: 'INR',
+      stages: ['New', 'Qualified'],
+    });
+    const [sales] = (await svc.listPipelines(owner)).filter((p) => p.id === salesId);
+    const [fresh, qualified] = sales!.stages.map((st) => st.id);
+    const eventTypes: WebhookEventType[] = [
+      'deal.created',
+      'deal.updated',
+      'deal.stage_changed',
+      'task.created',
+      'note.created',
+    ];
+    /** An endpoint of the company taking the CRM events of the changes the makers made. */
+    const add = async (crmChangeMakers: WebhookCrmChangeMaker[] | null) => {
+      const path = `/ok/${randomBytes(6).toString('hex')}`;
+      const created = await webhooks().create(owner, {
+        url: `http://${HOST}:${port}${path}`,
+        eventTypes,
+        crmChangeMakers,
+      });
+      return { ...created, path };
+    };
+    const people = await add(['member', 'automation']);
+    const keys = await add(['api']);
+    const everyone = await add(null);
+    const phone = `+${waId()}`;
+    const { id: jaya } = await contactsService().createContact(owner, {
+      displayName: 'Jaya',
+      phone,
+    });
+    const issued = await createApiKeysService({ db: fx.dbs.app, clock: systemClock }).create(
+      owner,
+      { name: 'CRM sync', scopes: ['deals.write', 'tasks.write', 'notes.write'], expiresInDays: 0 },
+    );
+    const key = await authenticateApiToken(fx.dbs.app, issued.token, uuidv7());
+    if (!key) throw new Error('a new key does not authenticate');
+    const apiDeps = { db: fx.dbs.app, clock: systemClock, jobs: fx.jobs(), signer: fx.signer };
+
+    // A member adds a deal and the key another; the member moves the key's and the key retitles
+    // the member's.
+    const { id: membersDeal } = await svc.createDeal(owner, {
+      contactId: jaya,
+      pipelineId: salesId,
+      stageId: fresh,
+      title: 'Annual plan',
+      ownerMembershipId: null,
+    });
+    const response = await apiCreateDeal(
+      apiDeps,
+      key,
+      { contactId: jaya, pipelineId: salesId, title: 'Web order' },
+      null,
+    );
+    const keysDeal = (response.body as { data: { id: string } }).data.id;
+    await svc.moveDeal(owner, { id: keysDeal, expectedVersion: 1, stageId: qualified });
+    await apiUpdateDeal(apiDeps, key, membersDeal, { title: 'Annual plan 2027' });
+    // An automation's run changes the value, recording itself as runs do, and a change that
+    // records no maker retitles the key's deal.
+    const set = (id: string, assignments: string) =>
+      fx.query(`UPDATE app.crm_deals SET ${assignments} WHERE id = $1`, [id]);
+    await set(
+      membersDeal,
+      `value_minor = 100000, changed_by = 'automation',
+       changed_xact = pg_catalog.pg_current_xact_id()`,
+    );
+    await set(keysDeal, `title = 'Web order 1001'`);
+    // The key adds a task and a member another; the member writes a note and the key another.
+    const taskResponse = await apiCreateTask(
+      apiDeps,
+      key,
+      { title: 'Confirm the delivery', assigneeId: owner.membership.id, contactId: jaya },
+      null,
+    );
+    const keysTask = (taskResponse.body as { data: { id: string } }).data.id;
+    const { id: membersTask } = await svc.createTask(owner, {
+      title: 'Send the quote',
+      assigneeMembershipId: owner.membership.id,
+      dealId: membersDeal,
+    });
+    const membersNote = await svc.addNote(owner, { dealId: membersDeal, body: 'Wants a discount' });
+    const noteResponse = await apiCreateNote(
+      apiDeps,
+      key,
+      { body: 'Synced from the shop', dealId: keysDeal },
+      null,
+    );
+    const keysNote = (noteResponse.body as { data: { id: string } }).data.id;
+
+    // Each event is captured once, with a delivery to each endpoint its maker reaches; a change
+    // that recorded no maker reaches all three.
+    const captured = await fx.query<{ type: string; subject: string; deliveries: number }>(
+      `SELECT e.type, coalesce(e.detail ->> 'dealId', e.detail ->> 'taskId', e.detail ->> 'noteId')
+              AS subject,
+              (SELECT count(*)::int FROM app.webhook_deliveries d
+                WHERE d.tenant_id = e.tenant_id AND d.event_id = e.id) AS deliveries
+         FROM app.webhook_events e
+        WHERE e.tenant_id = $1 ORDER BY e.occurred_at, e.id`,
+      [c.tenant.id],
+    );
+    expect(captured.map((e) => [e.type, e.subject, e.deliveries])).toEqual([
+      ['deal.created', membersDeal, 2],
+      ['deal.created', keysDeal, 2],
+      ['deal.stage_changed', keysDeal, 2],
+      ['deal.updated', membersDeal, 2],
+      ['deal.updated', membersDeal, 2],
+      ['deal.updated', keysDeal, 3],
+      ['task.created', keysTask, 2],
+      ['task.created', membersTask, 2],
+      ['note.created', membersNote.id, 2],
+      ['note.created', keysNote, 2],
+    ]);
+    await deliverDue(c);
+    // Each payload names its maker as the endpoint chose it.
+    const madeBy = (path: string) =>
+      bodiesAt(path)
+        .map((b) => {
+          const data = b.data as {
+            deal?: { changedBy: string | null };
+            task?: { changedBy: string | null };
+            note?: { writtenBy: string };
+          };
+          return [
+            b.type,
+            data.deal?.changedBy ?? data.task?.changedBy ?? data.note?.writtenBy ?? null,
+          ];
+        })
+        .sort();
+    expect(madeBy(people.path)).toEqual(
+      [
+        ['deal.created', 'member'],
+        ['deal.stage_changed', 'member'],
+        ['deal.updated', 'automation'],
+        ['deal.updated', null],
+        ['task.created', 'member'],
+        ['note.created', 'member'],
+      ].sort(),
+    );
+    expect(madeBy(keys.path)).toEqual(
+      [
+        ['deal.created', 'api'],
+        ['deal.updated', 'api'],
+        ['deal.updated', null],
+        ['task.created', 'api'],
+        ['note.created', 'api'],
+      ].sort(),
+    );
+    expect(madeBy(everyone.path)).toHaveLength(10);
   });
 });
 

@@ -2251,6 +2251,15 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   given a `notes` kind) and the API (`notePipelineIds`, `noteStageIds`, `noteDealOwnerIds`) set
   them; the services check them with the deals' and tasks' shared checks, and a change that drops
   `note.created` clears all three.
+- **Change-maker filters for deal, task and note events** (migration 0229, ADR-306):
+  `crm_change_makers` on an endpoint lists who made the changes whose deal, task and note events it
+  takes (`member`, `automation`, `api`), null for every change; a check keeps it to 1 to 3 known
+  makers and to endpoints taking such an event. `app.capture_webhook_event` reads the maker only
+  when an active endpoint of the company taking the event names makers (an addition's from the
+  deal's or task's creator columns, a note's from the note, any other change's from the `changedBy`
+  its trigger records), and an event whose change recorded no maker passes every list. Settings
+  ("Changes made by") and the API (`crmChangeMakers`) set it; a change that drops every deal, task
+  and note event clears it.
 - **Contact tag filters** (migration 0183, ADR-267): `contact_tags` on an endpoint lists the contact
   tags whose conversations' message and conversation events it takes, null for every conversation's;
   a check keeps it to 1 to 50 tags in `app.contact_tags`' form and to endpoints taking such an

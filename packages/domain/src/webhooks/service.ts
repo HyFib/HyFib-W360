@@ -69,6 +69,8 @@ import {
   webhookRunEndTakesReason,
   webhookTakesTaskEvents,
   webhookTakesNoteEvents,
+  webhookTakesCrmChanges,
+  WEBHOOK_CRM_CHANGE_MAKERS,
   webhookTakesTeamEvents,
   webhookTakesTemplateEvents,
   type WebhookAssigneeChoice,
@@ -91,6 +93,7 @@ import {
   type WebhookEndpointTeam,
   type WebhookFailureKind,
   type WebhookMessageSender,
+  type WebhookCrmChangeMaker,
   type WebhookMessageStatus,
   type WebhookOrderStatus,
   type WebhookRunEndStatus,
@@ -1464,6 +1467,35 @@ export async function assertWebhookNoteDealOwners(
 }
 
 /**
+ * Who made the changes whose deal, task and note events an endpoint takes (ADR-306), in the order
+ * Settings lists them; null takes every change. A change HyFib did not record the maker of is taken
+ * whoever is chosen.
+ */
+export const webhookCrmChangeMakersSchema = z
+  .array(z.enum(WEBHOOK_CRM_CHANGE_MAKERS, { error: 'Choose who made the changes from the list.' }))
+  .min(1, 'Choose at least one maker, or take every change.')
+  .max(WEBHOOK_CRM_CHANGE_MAKERS.length, 'Give each maker once.')
+  .transform((chosen) => WEBHOOK_CRM_CHANGE_MAKERS.filter((maker) => chosen.includes(maker)))
+  .nullable();
+
+export const WEBHOOK_CRM_CHANGE_MAKERS_NEED_THE_EVENTS =
+  'Choose who made the changes only for an endpoint that receives deal, task or note events.';
+
+/**
+ * The makers an endpoint keeps after it is added or changed: every change (null) unless it takes a
+ * deal, task or note event; then those given, or else the ones it had.
+ */
+export function webhookCrmChangeMakersFor(
+  eventTypes: readonly WebhookEventType[],
+  given: readonly WebhookCrmChangeMaker[] | null | undefined,
+  current: readonly WebhookCrmChangeMaker[] | null,
+): WebhookCrmChangeMaker[] | null {
+  if (!webhookTakesCrmChanges(eventTypes)) return null;
+  const kept = given === undefined ? current : given;
+  return kept ? [...kept] : null;
+}
+
+/**
  * The teams whose conversations' message and conversation events an endpoint takes (ADR-174), each
  * once; null takes every conversation's, including those of teams added later.
  */
@@ -1807,6 +1839,11 @@ const endpointFields = z.object({
    */
   noteDealOwnerIds: webhookNoteDealOwnerIdsSchema.optional(),
   /**
+   * Given, who made the changes whose deal, task and note events it takes (null: every change,
+   * ADR-306); left out, they stay.
+   */
+  crmChangeMakers: webhookCrmChangeMakersSchema.optional(),
+  /**
    * Given, the members whose assigned conversations' events it takes (null: every conversation's,
    * ADR-181); left out, they stay.
    */
@@ -1995,6 +2032,12 @@ const noteDealOwnersNeedTheEvents = {
     !data.noteDealOwnerIds || webhookTakesNoteEvents(data.eventTypes),
   options: { path: ['noteDealOwnerIds'], message: WEBHOOK_NOTE_DEAL_OWNERS_NEED_THE_EVENTS },
 };
+/** Who made the changes is chosen only for an endpoint that takes CRM events (ADR-306). */
+const crmChangeMakersNeedTheEvents = {
+  check: (data: { eventTypes: WebhookEventType[]; crmChangeMakers?: unknown }) =>
+    !data.crmChangeMakers || webhookTakesCrmChanges(data.eventTypes),
+  options: { path: ['crmChangeMakers'], message: WEBHOOK_CRM_CHANGE_MAKERS_NEED_THE_EVENTS },
+};
 /** Members are chosen only for an endpoint that takes events of conversations (ADR-181). */
 const assigneesNeedTheEvents = {
   check: (data: { eventTypes: WebhookEventType[]; assigneeIds?: unknown }) =>
@@ -2042,6 +2085,7 @@ const endpointSchema = endpointFields
   .refine(notePipelinesNeedTheEvents.check, notePipelinesNeedTheEvents.options)
   .refine(noteStagesNeedTheEvents.check, noteStagesNeedTheEvents.options)
   .refine(noteDealOwnersNeedTheEvents.check, noteDealOwnersNeedTheEvents.options)
+  .refine(crmChangeMakersNeedTheEvents.check, crmChangeMakersNeedTheEvents.options)
   .refine(assigneesNeedTheEvents.check, assigneesNeedTheEvents.options)
   .refine(contactTagsNeedTheEvents.check, contactTagsNeedTheEvents.options)
   .refine(conversationTagsNeedTheEvents.check, conversationTagsNeedTheEvents.options);
@@ -2076,6 +2120,7 @@ const updateSchema = endpointFields
   .refine(notePipelinesNeedTheEvents.check, notePipelinesNeedTheEvents.options)
   .refine(noteStagesNeedTheEvents.check, noteStagesNeedTheEvents.options)
   .refine(noteDealOwnersNeedTheEvents.check, noteDealOwnersNeedTheEvents.options)
+  .refine(crmChangeMakersNeedTheEvents.check, crmChangeMakersNeedTheEvents.options)
   .refine(assigneesNeedTheEvents.check, assigneesNeedTheEvents.options)
   .refine(contactTagsNeedTheEvents.check, contactTagsNeedTheEvents.options)
   .refine(conversationTagsNeedTheEvents.check, conversationTagsNeedTheEvents.options);
@@ -2210,6 +2255,11 @@ export interface WebhookEndpointView {
    * can own deals now; null takes every note's.
    */
   noteDealOwners: WebhookEndpointOwner[] | null;
+  /**
+   * Who made the changes whose deal, task and note events it takes (ADR-306), in Settings' order;
+   * null takes every change.
+   */
+  crmChangeMakers: WebhookCrmChangeMaker[] | null;
   /**
    * The members whose assigned conversations' events it takes (ADR-181), as stored, named, with
    * whether conversations can still be assigned to them; null takes every conversation's.
@@ -2470,6 +2520,7 @@ export async function lockWebhookEndpoint(
       notePipelineIds: webhookEndpoints.notePipelineIds,
       noteStageIds: webhookEndpoints.noteStageIds,
       noteDealOwnerIds: webhookEndpoints.noteDealOwnerIds,
+      crmChangeMakers: webhookEndpoints.crmChangeMakers,
       assigneeIds: webhookEndpoints.assigneeIds,
       contactTags: webhookEndpoints.contactTags,
       conversationTags: webhookEndpoints.conversationTags,
@@ -2539,6 +2590,7 @@ export async function insertWebhookEndpoint(
     notePipelineIds: string[] | null;
     noteStageIds: string[] | null;
     noteDealOwnerIds: string[] | null;
+    crmChangeMakers: WebhookCrmChangeMaker[] | null;
     assigneeIds: string[] | null;
     contactTags: string[] | null;
     conversationTags: string[] | null;
@@ -2597,6 +2649,7 @@ export async function insertWebhookEndpoint(
     notePipelineIds: input.notePipelineIds,
     noteStageIds: input.noteStageIds,
     noteDealOwnerIds: input.noteDealOwnerIds,
+    crmChangeMakers: input.crmChangeMakers,
     assigneeIds: input.assigneeIds,
     contactTags: input.contactTags,
     conversationTags: input.conversationTags,
@@ -3004,6 +3057,7 @@ export function createWebhooksService(deps: {
               notePipelineIds: webhookEndpoints.notePipelineIds,
               noteStageIds: webhookEndpoints.noteStageIds,
               noteDealOwnerIds: webhookEndpoints.noteDealOwnerIds,
+              crmChangeMakers: webhookEndpoints.crmChangeMakers,
               assigneeIds: webhookEndpoints.assigneeIds,
               contactTags: webhookEndpoints.contactTags,
               conversationTags: webhookEndpoints.conversationTags,
@@ -3701,6 +3755,11 @@ export function createWebhooksService(deps: {
           null,
         );
         await assertWebhookNoteDealOwners(tx, ctx.tenant.id, noteDealOwnerIds);
+        const crmChangeMakers = webhookCrmChangeMakersFor(
+          data.eventTypes,
+          data.crmChangeMakers,
+          null,
+        );
         const assigneeIds = webhookAssigneeIdsFor(data.eventTypes, data.assigneeIds, null);
         await assertWebhookAssignees(tx, ctx.tenant.id, assigneeIds);
         const contactTags = webhookContactTagsFor(data.eventTypes, data.contactTags, null);
@@ -3751,6 +3810,7 @@ export function createWebhooksService(deps: {
           notePipelineIds,
           noteStageIds,
           noteDealOwnerIds,
+          crmChangeMakers,
           assigneeIds,
           contactTags,
           conversationTags,
@@ -3797,6 +3857,7 @@ export function createWebhooksService(deps: {
               ...(notePipelineIds ? { notePipelineIds } : {}),
               ...(noteStageIds ? { noteStageIds } : {}),
               ...(noteDealOwnerIds ? { noteDealOwnerIds } : {}),
+              ...(crmChangeMakers ? { crmChangeMakers } : {}),
               ...(assigneeIds ? { assigneeIds } : {}),
               ...(contactTags ? { contactTags } : {}),
               ...(conversationTags ? { conversationTags } : {}),
@@ -4044,6 +4105,11 @@ export function createWebhooksService(deps: {
             endpoint.noteDealOwnerIds,
           );
         }
+        const crmChangeMakers = webhookCrmChangeMakersFor(
+          data.eventTypes,
+          data.crmChangeMakers,
+          endpoint.crmChangeMakers,
+        );
         const assigneeIds = webhookAssigneeIdsFor(
           data.eventTypes,
           data.assigneeIds,
@@ -4108,6 +4174,7 @@ export function createWebhooksService(deps: {
             notePipelineIds,
             noteStageIds,
             noteDealOwnerIds,
+            crmChangeMakers,
             assigneeIds,
             contactTags,
             conversationTags,
@@ -4165,6 +4232,7 @@ export function createWebhooksService(deps: {
               ...(notePipelineIds ? { notePipelineIds } : {}),
               ...(noteStageIds ? { noteStageIds } : {}),
               ...(noteDealOwnerIds ? { noteDealOwnerIds } : {}),
+              ...(crmChangeMakers ? { crmChangeMakers } : {}),
               ...(assigneeIds ? { assigneeIds } : {}),
               ...(contactTags ? { contactTags } : {}),
               ...(conversationTags ? { conversationTags } : {}),

@@ -1035,6 +1035,15 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    refuses `notePipelineIds`, `noteStageIds` and `noteDealOwnerIds` (422) and leaves them out of the
    endpoints it answers.
 
+   Migration 0229 (ADR-306) adds `crm_change_makers` to `app.webhook_endpoints` with a check
+   validated by reading the table, and replaces `app.capture_webhook_event` (keeping 0228's filters)
+   with the same signature; every endpoint starts with no list. Web servers of this release need it,
+   as their reads of endpoints name the column; workers do not read it. Web servers from before it
+   neither show nor change the column: until the web rollout ends, an old server's change that drops
+   every deal, task and note event from an endpoint with a list fails on the check, its other
+   changes keep it, and its API refuses `crmChangeMakers` (422) and leaves it out of the endpoints
+   it answers.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

@@ -1,6 +1,7 @@
 import { integer, smallint, text, timestamp, uuid } from 'drizzle-orm/pg-core';
 import { jsonb } from './columns';
 import type { AutomationEndReason } from './automations';
+import type { CrmChanger } from './crm';
 import type { ContactSource, MessageType } from './messaging';
 import { appSchema } from './tenancy';
 
@@ -51,6 +52,13 @@ export type WebhookMessageStatus =
  * `message.sentBy` says: a member, an automation, a campaign, the API, or HyFib itself.
  */
 export type WebhookMessageSender = 'agent' | 'bot' | 'campaign' | 'api' | 'system';
+
+/**
+ * Who made a change a deal, task or note event reports, as an endpoint can choose them (ADR-306): a
+ * member, an automation's run or an API key, as the events' `changedBy` and a note's `writtenBy`
+ * name them.
+ */
+export type WebhookCrmChangeMaker = CrmChanger;
 
 /**
  * The parts of a contact whose change a `contact.updated` endpoint can choose (ADR-123); `fields`
@@ -295,6 +303,13 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
    * events.
    */
   noteDealOwnerIds: uuid('note_deal_owner_ids').array(),
+  /**
+   * Who made the changes whose deal, task and note events it takes (migration 0229, ADR-306): an
+   * addition's maker is whoever added the deal or task, a note's whoever wrote it, and any other
+   * change's the one it recorded. null takes every change; a change whose maker was not recorded is
+   * taken whoever is listed. Set only while a deal, task or note event is among its events.
+   */
+  crmChangeMakers: text('crm_change_makers').array().$type<WebhookCrmChangeMaker[]>(),
   /**
    * The consent changes it takes as `consent.changed` (ADR-189), by purpose and action; null takes
    * every change. Set only while `consent.changed` is among its events.

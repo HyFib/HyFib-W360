@@ -283,6 +283,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       notePipelineIds: null,
       noteStageIds: null,
       noteDealOwnerIds: null,
+      crmChangeMakers: null,
       assigneeIds: null,
       contactTags: null,
       conversationTags: null,
@@ -1462,6 +1463,87 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     });
     expect(await issueOf(api().update(key.ctx, id, { messageSenders: [] }))).toMatchObject({
       path: 'messageSenders',
+    });
+  });
+
+  it('choose who made the changes whose deal, task and note events an endpoint receives, kept by changes that leave them out and cleared with the events (ADR-306)', async () => {
+    const c = await fx.company();
+    const key = await apiKey(c, ['webhooks.manage']);
+    const issueOf = async (promise: Promise<unknown>) => {
+      const error = await expectAppError(promise, 'validation_failed');
+      return isAppError(error) ? error.issues?.[0] : undefined;
+    };
+    // The makers need a deal, task or note event, at least one, and each from the list (by place).
+    const refusals = [
+      [['contact.updated'], ['api'], 'crmChangeMakers'],
+      [['deal.created'], [], 'crmChangeMakers'],
+      [['task.created'], ['api', 'contact'], 'crmChangeMakers.1'],
+      [['note.created'], ['agent'], 'crmChangeMakers.0'],
+    ] as const;
+    for (const [index, [events, crmChangeMakers, path]] of refusals.entries()) {
+      expect(
+        await issueOf(
+          api().create(
+            key.ctx,
+            { url: receiverUrl(), events, crmChangeMakers },
+            idem(`crm-makers-bad-${index}`, JSON.stringify(crmChangeMakers)),
+          ),
+        ),
+        JSON.stringify(crmChangeMakers),
+      ).toMatchObject({ path });
+    }
+    expect((await api().list(key.ctx)).data).toEqual([]);
+
+    const created = await addThroughApi(key.ctx, 'crm-makers-1', {
+      url: receiverUrl(),
+      events: ['deal.updated', 'note.created', 'message.received'],
+      crmChangeMakers: ['api', 'member'],
+    });
+    const id = created.body.data.id;
+    expect(created.body.data.crmChangeMakers).toEqual(['member', 'api']);
+    expect((await api().get(key.ctx, id)).crmChangeMakers).toEqual(['member', 'api']);
+    const [audit] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND subject_id = $2 AND action = 'webhook.endpoint_created'`,
+      [c.tenant.id, id],
+    );
+    expect(audit?.metadata).toMatchObject({ crmChangeMakers: ['member', 'api'] });
+
+    expect(await api().update(key.ctx, id, { description: 'Not my own changes' })).toMatchObject({
+      crmChangeMakers: ['member', 'api'],
+    });
+    expect(
+      await api().update(key.ctx, id, { crmChangeMakers: ['member', 'automation'] }),
+    ).toMatchObject({ crmChangeMakers: ['member', 'automation'] });
+    const updates = await fx.query<{ metadata: { crmChangeMakers?: unknown } }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND subject_id = $2 AND action = 'webhook.endpoint_updated'
+        ORDER BY occurred_at`,
+      [c.tenant.id, id],
+    );
+    expect(updates.map((u) => u.metadata.crmChangeMakers)).toEqual([
+      ['member', 'api'],
+      ['member', 'automation'],
+    ]);
+    // A note event keeps the list; events without a deal, task or note event clear it.
+    expect(await api().update(key.ctx, id, { events: ['note.created'] })).toMatchObject({
+      crmChangeMakers: ['member', 'automation'],
+    });
+    expect(await api().update(key.ctx, id, { events: ['message.received'] })).toMatchObject({
+      events: ['message.received'],
+      crmChangeMakers: null,
+    });
+    expect(await issueOf(api().update(key.ctx, id, { crmChangeMakers: ['api'] }))).toMatchObject({
+      path: 'crmChangeMakers',
+    });
+    expect(
+      await api().update(key.ctx, id, { events: ['task.updated'], crmChangeMakers: ['api'] }),
+    ).toMatchObject({ crmChangeMakers: ['api'] });
+    expect(await api().update(key.ctx, id, { crmChangeMakers: null })).toMatchObject({
+      crmChangeMakers: null,
+    });
+    expect(await issueOf(api().update(key.ctx, id, { crmChangeMakers: [] }))).toMatchObject({
+      path: 'crmChangeMakers',
     });
   });
 

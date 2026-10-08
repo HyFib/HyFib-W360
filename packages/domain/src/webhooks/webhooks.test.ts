@@ -91,6 +91,9 @@ import {
   webhookTakesPipelineEvents,
   webhookTakesTaskEvents,
   webhookTakesNoteEvents,
+  webhookTakesCrmChanges,
+  WEBHOOK_CRM_CHANGE_MAKERS,
+  WEBHOOK_CRM_CHANGE_MAKER_LABELS,
   webhookTakesTeamEvents,
   webhookTakesTemplateEvents,
   webhookTeamText,
@@ -231,6 +234,9 @@ import {
   webhookNoteDealOwnerIdsFor,
   webhookNoteDealOwnerIdsSchema,
   WEBHOOK_NOTE_DEAL_OWNERS_NEED_THE_EVENTS,
+  webhookCrmChangeMakersFor,
+  webhookCrmChangeMakersSchema,
+  WEBHOOK_CRM_CHANGE_MAKERS_NEED_THE_EVENTS,
   webhookContactTagsFor,
   webhookContactTagsSchema,
   WEBHOOK_CONTACT_TAGS_NEED_THE_EVENTS,
@@ -3684,6 +3690,66 @@ describe('pipeline, stage and owner filters for note events (ADR-305)', () => {
     ]) {
       expect(message).toContain(WEBHOOK_EVENT_INFO['note.created'].label);
     }
+  });
+});
+
+describe('change-maker filters for deal, task and note events (ADR-306)', () => {
+  it('take members, automations or API keys, once each in the order Settings lists them; null takes every change', () => {
+    expect(WEBHOOK_CRM_CHANGE_MAKERS).toEqual(['member', 'automation', 'api']);
+    expect(WEBHOOK_CRM_CHANGE_MAKER_LABELS).toEqual({
+      member: 'Members',
+      automation: 'Automations',
+      api: 'API keys',
+    });
+    expect(webhookCrmChangeMakersSchema.parse(['api', 'member', 'api'])).toEqual(['member', 'api']);
+    expect(webhookCrmChangeMakersSchema.parse(['automation'])).toEqual(['automation']);
+    expect(webhookCrmChangeMakersSchema.parse(null)).toBeNull();
+    for (const refused of [
+      [],
+      ['agent'],
+      ['api', 'contact'],
+      'api',
+      [null],
+      ['api', 'api', 'api', 'api'],
+    ]) {
+      expect(webhookCrmChangeMakersSchema.safeParse(refused).success, JSON.stringify(refused)).toBe(
+        false,
+      );
+    }
+    expect(webhookCrmChangeMakersSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one maker, or take every change.',
+    );
+    expect(webhookCrmChangeMakersSchema.safeParse(['bot']).error?.issues[0]?.message).toBe(
+      'Choose who made the changes from the list.',
+    );
+    expect(
+      webhookCrmChangeMakersSchema.safeParse(['api', 'api', 'api', 'api']).error?.issues[0]
+        ?.message,
+    ).toBe('Give each maker once.');
+  });
+
+  it('are kept only while the endpoint takes a deal, task or note event: given, kept, or cleared', () => {
+    for (const type of [
+      ...WEBHOOK_PIPELINE_EVENTS,
+      ...WEBHOOK_TASK_EVENTS,
+      'note.created',
+    ] as const) {
+      expect(webhookTakesCrmChanges([type]), type).toBe(true);
+      expect(webhookCrmChangeMakersFor([type], ['api'], null), type).toEqual(['api']);
+      expect(webhookCrmChangeMakersFor([type], undefined, ['member']), type).toEqual(['member']);
+    }
+    expect(webhookCrmChangeMakersFor(['deal.created'], null, ['member'])).toBeNull();
+    expect(webhookCrmChangeMakersFor(['note.created'], undefined, null)).toBeNull();
+    // Contact, message and other events have no maker to choose.
+    expect(
+      webhookTakesCrmChanges(['contact.updated', 'message.status', 'order.status_changed']),
+    ).toBe(false);
+    expect(
+      webhookCrmChangeMakersFor(['contact.updated', 'message.status'], ['api'], ['member']),
+    ).toBeNull();
+    expect(WEBHOOK_CRM_CHANGE_MAKERS_NEED_THE_EVENTS).toBe(
+      'Choose who made the changes only for an endpoint that receives deal, task or note events.',
+    );
   });
 });
 
