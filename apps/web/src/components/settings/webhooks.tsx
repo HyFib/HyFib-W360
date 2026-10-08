@@ -3432,6 +3432,10 @@ export function WebhookEndpointForm({
               setRunEndReasons([...WEBHOOK_RUN_END_REASONS]);
               setEveryAutomation(true);
               setAutomationIds([]);
+              setEveryRunApiKey(true);
+              setRunApiKeyIds([]);
+              setEveryMessageApiKey(true);
+              setMessageApiKeyIds([]);
               setEveryChannel(true);
               setChannelIds([]);
               setEveryTeam(true);
@@ -3461,6 +3465,8 @@ export function WebhookEndpointForm({
               setEveryNoteDealOwner(true);
               setNoteDealOwnerIds([]);
               setChangeMakers([...WEBHOOK_CRM_CHANGE_MAKERS]);
+              setEveryCrmChange(true);
+              setCrmExcludedApiKeyIds([]);
               setScores([...WEBHOOK_SURVEY_SCORES]);
               setEverySurveyAssignee(true);
               setSurveyAssigneeIds([]);

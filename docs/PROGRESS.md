@@ -29,6 +29,12 @@ pglast parse check (syntax only).
   integration tests were not run here. No e2e test.
 - **Docs:** ADR-323; ARCHITECTURE; SECURITY; THREAT-MODEL T291; DEPLOYMENT; RUNBOOKS; BACKLOG P5-09;
   feature matrix H-014.
+- **Review before the push:** a review of ADR-321 to ADR-323 found that the ADR-322 capture test set
+  a Payment Link change on an order whose key the database check would refuse to keep (the test now
+  clears it, as the worker does), that Settings' add form kept the run, message and CRM key lists
+  after an endpoint was added (it now starts afresh with every list, as for orders), and that no
+  test sent a payment request by a key past an endpoint leaving that key out (`commerce.test.ts` now
+  does). All three are fixed in their own commit.
 - **Mutation checks:** 16/16 deliberate regressions caught on the unit-tested parts. The capture,
   the key checks against the database and the form need the database or a browser, so their
   regressions are left to the integration tests, which run in CI.

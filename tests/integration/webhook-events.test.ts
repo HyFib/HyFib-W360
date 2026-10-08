@@ -3604,6 +3604,7 @@ describe('order events (ADR-085)', () => {
     await fx.query(
       `UPDATE app.commerce_orders
           SET status = 'paid', status_changed_by = 'payment_link',
+              status_changed_by_api_key_id = NULL,
               status_changed_xact = pg_catalog.pg_current_xact_id()
         WHERE id = $1`,
       [second.id],
