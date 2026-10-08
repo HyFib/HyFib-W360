@@ -2093,6 +2093,217 @@ describe('acknowledging companies’ failing integrations (ADR-141)', () => {
   });
 });
 
+describe('assigning companies’ failing integrations (ADR-313)', () => {
+  async function failingEndpoint() {
+    const id = uuidv7();
+    await fx.query(
+      `INSERT INTO app.webhook_endpoints (id, tenant_id, url, event_types, secret_ciphertext,
+         created_by_user_id, failing_since, last_failure_at)
+       VALUES ($1, $2, 'https://assigned.example.com/hook', ARRAY['message.received'], 'sealed',
+         $3, now() - interval '1 hour', now())`,
+      [id, company.tenant.id, company.owner.id],
+    );
+    return id;
+  }
+  async function namedStaff(name: string): Promise<PlatformActor> {
+    const user = await createUser(fx.dbs, { twoFactor: true, name });
+    await fx.dbs.ownerPool.query(
+      `INSERT INTO ops.platform_admins (user_id, role) VALUES ($1, 'platform_operator')`,
+      [user.id],
+    );
+    return { userId: user.id, role: 'platform_operator', correlationId: uuidv7() };
+  }
+  const listed = async (id: string) =>
+    (await ops().integrations(staff)).failures.find((f) => f.subjectId === id);
+  const assign = (
+    actor: PlatformActor,
+    subjectId: string,
+    assigneeUserId: string | null,
+    state = 'failing',
+  ) => ops().assignFailure(actor, { source: 'webhook_endpoint', subjectId, state, assigneeUserId });
+  /** The minute sweep's check (ADR-139), which keeps and forgets assignments too. */
+  const check = () =>
+    fx.dbs.app.run(systemScope, (tx) => tx.execute(sql`select ops.integration_alerts_due()`));
+  const stored = (id: string) =>
+    fx.query<{ assignee_user_id: string; assigned_by_user_id: string; listed_at: Date }>(
+      `SELECT assignee_user_id, assigned_by_user_id, listed_at FROM ops.integration_assignments
+        WHERE subject_id = $1`,
+      [id],
+    );
+  const audited = (id: string) =>
+    fx.query<{
+      action: string;
+      actor_user_id: string;
+      target_tenant_id: string;
+      reason: string | null;
+      metadata: unknown;
+      correlation_id: string;
+    }>(
+      `SELECT action, actor_user_id, target_tenant_id, reason, metadata, correlation_id
+         FROM ops.platform_audit_events
+        WHERE action IN ('platform.integration_failure_assigned',
+                         'platform.integration_failure_unassigned')
+          AND metadata->>'subjectId' = $1
+        ORDER BY occurred_at, id`,
+      [id],
+    );
+
+  it('assigns a listed failure to an administrator, themselves or another, reassigns it and takes it off; each change is audited and the console names who', async () => {
+    const id = await failingEndpoint();
+    expect((await listed(id))?.assignment).toBeNull();
+    const asha = await namedStaff('Asha Ops');
+    const ravi = await namedStaff('Ravi Ops');
+    // Every platform administrator is offered, by name.
+    const offered = (await ops().integrations(staff)).administrators;
+    expect(offered).toEqual(
+      expect.arrayContaining([
+        { userId: asha.userId, name: 'Asha Ops' },
+        { userId: ravi.userId, name: 'Ravi Ops' },
+        expect.objectContaining({ userId: staff.userId }),
+      ]),
+    );
+    expect(offered.findIndex((a) => a.userId === asha.userId)).toBeLessThan(
+      offered.findIndex((a) => a.userId === ravi.userId),
+    );
+
+    await assign(asha, id, ravi.userId);
+    const first = (await listed(id))!.assignment!;
+    expect(first).toMatchObject({
+      assigneeUserId: ravi.userId,
+      assigneeName: 'Ravi Ops',
+      byName: 'Asha Ops',
+    });
+    expect(Date.now() - first.at.getTime()).toBeLessThan(60_000);
+    await assign(ravi, id, ravi.userId);
+    expect((await listed(id))!.assignment).toMatchObject({
+      assigneeName: 'Ravi Ops',
+      byName: 'Ravi Ops',
+    });
+    await assign(ravi, id, asha.userId);
+    expect((await listed(id))!.assignment).toMatchObject({
+      assigneeUserId: asha.userId,
+      assigneeName: 'Asha Ops',
+      byName: 'Ravi Ops',
+    });
+    expect(await stored(id)).toEqual([
+      expect.objectContaining({ assignee_user_id: asha.userId, assigned_by_user_id: ravi.userId }),
+    ]);
+    // The acknowledgement is its own: an assignment neither makes nor clears one.
+    expect((await listed(id))?.acknowledgement).toBeNull();
+    await assign(asha, id, null);
+    expect((await listed(id))?.assignment).toBeNull();
+    expect(await stored(id)).toEqual([]);
+    // Taking off an assignment nobody made changes nothing and is not audited.
+    await assign(asha, id, null);
+
+    const scope = { source: 'webhook_endpoint', subjectId: id, state: 'failing' };
+    const audits = await audited(id);
+    expect(audits.map((a) => [a.action, a.actor_user_id, a.correlation_id, a.metadata])).toEqual([
+      [
+        'platform.integration_failure_assigned',
+        asha.userId,
+        asha.correlationId,
+        { ...scope, assigneeUserId: ravi.userId },
+      ],
+      [
+        'platform.integration_failure_assigned',
+        ravi.userId,
+        ravi.correlationId,
+        { ...scope, assigneeUserId: ravi.userId },
+      ],
+      [
+        'platform.integration_failure_assigned',
+        ravi.userId,
+        ravi.correlationId,
+        { ...scope, assigneeUserId: asha.userId },
+      ],
+      ['platform.integration_failure_unassigned', asha.userId, asha.correlationId, scope],
+    ]);
+    expect(audits.map((a) => [a.target_tenant_id, a.reason])).toEqual(
+      audits.map(() => [company.tenant.id, null]),
+    );
+  });
+
+  it('refuses a failure not listed in that state, an assignee who is not a platform administrator, a malformed request and anyone who is not an administrator', async () => {
+    const id = await failingEndpoint();
+    await expectCode(assign(staff, id, staff.userId, 'disabled'), 'not_found');
+    await expectCode(assign(staff, uuidv7(), staff.userId), 'not_found');
+    const outsider = await createUser(fx.dbs, { twoFactor: true });
+    await expectCode(assign(staff, id, outsider.id), 'precondition_failed');
+    await expectCode(assign(staff, id, 'no-such-account'), 'precondition_failed');
+    await expectCode(
+      assign({ userId: outsider.id, role: 'platform_operator', correlationId: uuidv7() }, id, null),
+      'forbidden',
+    );
+    for (const input of [
+      { source: 'webhook_endpoint', subjectId: id, state: 'failing', assigneeUserId: '' },
+      { source: 'webhook_endpoint', subjectId: 'f1', state: 'failing', assigneeUserId: null },
+      { source: 'webhook_endpoint', subjectId: id, state: 'failing' },
+    ]) {
+      await expectCode(ops().assignFailure(staff, input), 'validation_failed');
+    }
+    expect(await stored(id)).toEqual([]);
+    expect(await audited(id)).toEqual([]);
+    // Once it recovers, it can no longer be assigned.
+    await fx.query(`UPDATE app.webhook_endpoints SET failing_since = NULL WHERE id = $1`, [id]);
+    await expectCode(assign(staff, id, staff.userId), 'not_found');
+  });
+
+  it('keeps an assignment while the failure is listed and forgets it an hour after, so a later failure starts unassigned', async () => {
+    const id = await failingEndpoint();
+    await assign(staff, id, staff.userId);
+    const lastListed = (minutesAgo: number) =>
+      fx.query(
+        `UPDATE ops.integration_assignments
+            SET listed_at = now() - make_interval(mins => $2) WHERE subject_id = $1`,
+        [id, minutesAgo],
+      );
+    // Still listed: the check finds it before it forgets, however old its mark.
+    await lastListed(120);
+    await check();
+    expect(Date.now() - (await stored(id))[0]!.listed_at.getTime()).toBeLessThan(60_000);
+    // Recovered: kept within the hour, forgotten after it.
+    await fx.query(`UPDATE app.webhook_endpoints SET failing_since = NULL WHERE id = $1`, [id]);
+    await lastListed(59);
+    await check();
+    expect(await stored(id)).toHaveLength(1);
+    // Back within the hour: listed with its assignment.
+    await fx.query(`UPDATE app.webhook_endpoints SET failing_since = now() WHERE id = $1`, [id]);
+    expect((await listed(id))?.assignment?.assigneeUserId).toBe(staff.userId);
+    await fx.query(`UPDATE app.webhook_endpoints SET failing_since = NULL WHERE id = $1`, [id]);
+    await lastListed(61);
+    await check();
+    expect(await stored(id)).toEqual([]);
+    // It fails again later: listed without an assignment.
+    await fx.query(`UPDATE app.webhook_endpoints SET failing_since = now() WHERE id = $1`, [id]);
+    expect((await listed(id))?.assignment).toBeNull();
+  });
+
+  it('keeps the assignments to the definer functions, which run as their owner with a fixed search path', async () => {
+    for (const pool of [fx.dbs.appPool, fx.dbs.platformPool]) {
+      await expect(pool.query(`SELECT * FROM ops.integration_assignments`)).rejects.toThrow(
+        /permission denied for table/,
+      );
+    }
+    const [assignFn] = await fx.query<{
+      owner: string;
+      definer: boolean;
+      config: unknown;
+    }>(
+      `SELECT pg_get_userbyid(p.proowner) AS owner, p.prosecdef AS definer,
+              p.proconfig AS config
+         FROM pg_proc p
+        WHERE p.oid =
+          'ops.platform_assign_integration_failure(text,uuid,text,text,text)'::regprocedure`,
+    );
+    expect(assignFn).toEqual({
+      owner: 'w360_definer',
+      definer: true,
+      config: ['search_path=pg_catalog, pg_temp'],
+    });
+  });
+});
+
 describe('acknowledging dead letters (ADR-169)', () => {
   /**
    * A dead letter already emailed about, so the alert tests of this file count only theirs. One

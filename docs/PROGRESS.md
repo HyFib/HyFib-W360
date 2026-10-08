@@ -1,5 +1,47 @@
 # Progress
 
+## 2026-10-08 — Assigning failing integrations on the operations console (P5-10, H-034, ADR-313)
+
+Status: **Implemented; its database and browser tests run in CI only.** Administrators could
+acknowledge a failing integration with a note, but not say who handles it from now on. The local
+PostgreSQL is unavailable, so migration 0236, the integration tests and the changed e2e test below
+were written but not run here; migration 0236 passed the pglast parse check (syntax only).
+
+### Completed
+
+- **Design (ADR-313):** any platform administrator assigns a listed failure to a platform
+  administrator, themselves or another, reassigns it or takes it off; shown with to whom, by whom
+  and when; audited; lasting while the failure is listed, forgotten an hour after; the CSV
+  unchanged.
+- **Database (migration 0236):** `ops.integration_assignments` and
+  `ops.platform_assign_integration_failure` (definer, platform role only); the console's list and
+  the sweep's check replaced with the assignments.
+- **Domain:** `assignFailure`, the failures' `assignment` and the Integrations tab's
+  `administrators` in `platform/ops.ts`.
+- **Web:** the Integrations tab's Assigned column and form (Assign, Reassign, "Nobody").
+- **Tests:** unit (3 new in `integration-assignments.test.ts`, 1 changed in `ops-model.test.ts`):
+  the input, the definer call and the CSV columns; integration (4 new in `platform-ops.test.ts`, 1
+  changed in `tenant-isolation.test.ts`): assigning, reassigning and taking off with the audit,
+  refusals, retention, grants and the definer function; e2e (1 changed in `platform-ops.spec.ts`):
+  the failure assigned to the administrator who took it, left out of the CSV, and in the platform
+  audit log. Written for CI; the integration and e2e tests were not run here.
+- **Docs:** ADR-313 (and ADR-141's "Not built" annotated); SECURITY; ARCHITECTURE; THREAT-MODEL
+  T281; DEPLOYMENT and RUNBOOKS; DATA-RETENTION; BACKLOG P5-10; feature matrix H-034.
+- **Mutation checks:** 17/17 deliberate regressions caught on the unit-tested parts. The definer
+  function and the listing need the database, so their regressions are left to the integration and
+  e2e tests, which run in CI.
+
+### Test commands and results (local, 2026-10-08)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 138 files, 1322 tests                                           |
+| `pnpm test:integration`, e2e                       | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+| pglast 7 parse of migration 0236                   | passed (syntax only)                                            |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                  |
+
 ## 2026-10-08 — Tag filters for satisfaction survey answers (P5-09, H-014, W-138, ADR-312)
 
 Status: **Implemented; its database tests run in CI only.** Endpoints taking

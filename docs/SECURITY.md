@@ -2165,6 +2165,16 @@ message text, contact details, payloads, email addresses, secrets or full URLs:
   list returns the administrator's name and the note to platform administrators only, and the
   company never sees them. An acknowledgement is forgotten an hour after its failure stops being
   listed.
+- Assigning integration failures (ADR-313): a platform administrator assigns a listed failure to a
+  platform administrator through `ops.platform_assign_integration_failure` (SECURITY DEFINER,
+  executable only by the platform role), which checks the administrator, that the assignee is a
+  platform administrator and that the console lists the failure in that state now, and writes the
+  platform audit entry (`platform.integration_failure_assigned` with the assignee's account, or
+  `platform.integration_failure_unassigned`) in the same transaction; a request naming anyone else,
+  or a failure no longer listed, changes nothing. Only the definer role reads and writes
+  `ops.integration_assignments` (the failure's ids and two platform accounts, no company data),
+  which the sweep forgets an hour after the failure stops being listed; the failures' CSV leaves
+  assignments out (unit tests; integration and e2e tests, run in CI only).
 - Acknowledging dead letters (ADR-169): through `ops.platform_acknowledge_dead_letter` (SECURITY
   DEFINER, executable only by the platform role), which checks the platform administrator, the note
   (10 to 500 characters, trimmed) and the dead letter, and writes the platform audit entry

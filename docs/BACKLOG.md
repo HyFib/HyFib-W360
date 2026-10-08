@@ -1276,9 +1276,12 @@ verification, app review, Embedded Signup configuration).
   gives when, never who or the note).
   **[Exports beyond the rows a tab shows built; its database tests run only in CI]** (ADR-200: a
   list's CSV gives up to 5,000 rows, 1,000 failures and 500 signups, in the tab's order; the tabs
-  keep their rows). Remaining:
+  keep their rows). **[Assigning failing integrations built; its database and browser tests run
+  only in CI]** (ADR-313: a platform administrator assigns a failure Current failures lists to a
+  platform administrator, themselves or another, shown with to whom, by whom and when, audited,
+  lasting while the failure is listed; the CSV leaves it out). Remaining:
   other alert channels, longer trends and charts, Meta's quality webhook (unconfirmed),
-  assigning failures, paging and rollups for many companies.
+  paging and rollups for many companies.
 - **P5-11 Account export/deletion workflow** **[built, locally verified with test data only]**
   (ADR-055): Settings → Company data for owners. A streamed, gzip-compressed JSON Lines export of
   every company table from one read-only transaction (each table and column exported or excluded

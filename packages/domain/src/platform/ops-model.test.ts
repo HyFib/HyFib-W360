@@ -507,7 +507,7 @@ describe('the onboarding, integrations and queues lists as CSV (ADR-158)', () =>
     ]);
   });
 
-  it('writes current failures with an acknowledgement’s time but neither who made it nor the note', () => {
+  it('writes current failures with an acknowledgement’s time but neither who made it nor the note, and no assignment', () => {
     const failure = {
       tenantId: 't1',
       tenantName: 'Acme',
@@ -523,6 +523,13 @@ describe('the onboarding, integrations and queues lists as CSV (ADR-158)', () =>
         byName: 'Priya Admin',
         note: 'Called the shop; their server is down until noon.',
       },
+      // Assignments stay on the console (ADR-313).
+      assignment: {
+        at: at('2026-10-05T06:20:00Z'),
+        assigneeUserId: 'u-ravi',
+        assigneeName: 'Ravi Ops',
+        byName: 'Priya Admin',
+      },
     };
     const csv = failuresCsv([
       failure,
@@ -536,6 +543,7 @@ describe('the onboarding, integrations and queues lists as CSV (ADR-158)', () =>
         error: '-Meta rejected the stored token.',
         since: null,
         acknowledgement: null,
+        assignment: null,
       },
       { ...failure, source: 'fax_line', label: null, state: 'jammed', error: 'Out of paper' },
     ]);
@@ -549,6 +557,8 @@ describe('the onboarding, integrations and queues lists as CSV (ADR-158)', () =>
     ]);
     expect(csv).not.toContain('Priya');
     expect(csv).not.toContain('server is down');
+    expect(csv).not.toContain('Ravi');
+    expect(csv).not.toContain('06:20');
   });
 
   it('writes receipts (when one was acknowledged, never who or the note), quarantine entries and email counts as the Integrations tab words them', () => {

@@ -1099,6 +1099,14 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    changes keep the lists, and its API refuses `surveyContactTags` and `surveyConversationTags`
    (422) and leaves them out of the endpoints it answers.
 
+   Migration 0236 (ADR-313) creates `ops.integration_assignments` (empty) and
+   `ops.platform_assign_integration_failure`, and replaces the console's
+   `ops.platform_ops_integration_failures` (four columns more) and the sweep's
+   `ops.integration_alerts_due` (which now keeps and forgets assignments too) with the same owners
+   and grants. Web servers of this release need it, as the Integrations tab reads the new columns;
+   workers run the same check, unchanged for them. Web servers from before it show no assignments
+   and ignore the new columns.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

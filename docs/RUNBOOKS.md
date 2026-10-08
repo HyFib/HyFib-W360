@@ -3610,6 +3610,16 @@ unacknowledged, and one that recovers keeps its acknowledgement for an hour, in 
 changed state since the page loaded. Acknowledging does not stop the alert email, which tells each
 failure once anyway.
 
+**Assigning failures (ADR-313).** On Current failures, open Assign on a failure's row, choose the
+platform administrator who handles it (yourself or a colleague) and press "Assign failure"; the row
+then shows to whom, by whom and when, and Reassign changes it. Choosing "Nobody" takes the
+assignment off. The platform audit log keeps each change (`platform.integration_failure_assigned`,
+`platform.integration_failure_unassigned`). An assignment lasts while the failure is listed in that
+state, like an acknowledgement: a change of state starts it unassigned, and one that recovers keeps
+its assignment for an hour. "Assign the failure to a platform administrator." means the person
+chosen is no longer one; reload the page. The assignee is not emailed: tell them, or rely on the
+console. The CSV leaves assignments out.
+
 **Keys (ADR-134).** The configured encryption key ids, the primary first, and how many stored values
 each key seals, by kind (counts only). While another key is configured the worker seals the values
 it sealed again with the primary key, up to 500 a minute, and logs `sealed values re-encrypted under

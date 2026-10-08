@@ -5629,10 +5629,10 @@ automation runs' period on Usage were blank, and failed onboarding sessions show
 page view as their start. The console now parses them (an integration test compares them with the
 stored times).
 
-Not built: assigning a failure to someone, acknowledging the console's other lists (dead letters,
-built by ADR-169; receipts, built by ADR-179; quarantine; late queues, built by ADR-177), editing or
-deleting a note (a new acknowledgement replaces it), and leaving acknowledged failures out of the
-alert email (each failure is emailed once anyway).
+Not built: assigning a failure to someone (built by ADR-313), acknowledging the console's other
+lists (dead letters, built by ADR-169; receipts, built by ADR-179; quarantine; late queues, built by
+ADR-177), editing or deleting a note (a new acknowledgement replaces it), and leaving acknowledged
+failures out of the alert email (each failure is emailed once anyway).
 
 ## ADR-142 Clearing the braces advisory from the Next.js ESLint plugin (2026-10-04)
 
@@ -12034,3 +12034,46 @@ Decision:
 
 Not built: lists that leave tagged answers out, tags at the time the conversation was resolved (the
 tags when the customer answers are used), and the tags in the payload.
+
+## ADR-313 Assigning companies' failing integrations to a platform administrator (P5-10) (2026-10-08)
+
+Context: since ADR-141 a platform administrator acknowledges a failure Operations → Integrations
+lists, with a note, so the others see who took it and what was found. A note says what was done, not
+who handles the failure from now on: a lead who wants a colleague to take a failure, or an
+administrator handing one over at the end of a shift, had nowhere to say so but the note, and
+ADR-141 left assigning out.
+
+Decision:
+
+- **Assigned to a platform administrator:** on Current failures, any platform administrator assigns
+  a listed failure to a platform administrator, themselves or another, owners and operators alike;
+  reassigns it; or takes the assignment off ("Nobody"). The row shows to whom, by whom and when. The
+  platform audit log keeps each change (`platform.integration_failure_assigned`, with the assignee's
+  account, and `platform.integration_failure_unassigned`), with the company and the failure's
+  source, subject and state; taking off an assignment nobody made changes nothing and is not
+  audited.
+- **What is assigned:** a failure as ADR-139 tells it, by its integration (source and subject) and
+  state, in `ops.integration_assignments` (migration 0236), as acknowledgements are: a new state of
+  the same integration starts unassigned. Only a failure the console lists at that moment can be
+  assigned ("This integration is no longer failing in that state. Reload the page."), and only to a
+  platform administrator ("Assign the failure to a platform administrator."). An assignment is its
+  own: it neither makes nor clears an acknowledgement.
+- **How long:** while the console lists the failure; forgotten an hour after it stops being listed,
+  by the minute sweep's check, with the acknowledgements and the alert marks, so a failure that
+  comes back within the hour keeps its assignment and one that fails again later starts unassigned.
+- **Where it is enforced:** `ops.platform_assign_integration_failure` (SECURITY DEFINER, executable
+  by the platform role only) checks the administrator, the assignee and that
+  `ops.integration_failures` lists the failure in that state now, then records the assignment and
+  the audit entry in one transaction. The console's `ops.platform_ops_integration_failures` returns
+  each failure's assignment (when, the assignee's account and name, and who assigned it). Only the
+  definer role reads and writes the table, which holds the failure's ids and the two accounts; the
+  company never sees it. The Integrations tab offers every platform administrator by name.
+- **Left out of the CSV:** the failures' CSV (ADR-158) is unchanged; assignments, like who
+  acknowledged and the notes, stay on the console.
+- **Migration 0236:** the table and the function, and the console's list and the sweep's check
+  replaced (each dropped by its owner and created again, as 0107 did) with their owners, search
+  paths and grants as before.
+
+Not built: an email to the assignee (the alert email of ADR-139 is unchanged), assigning the
+console's other lists (dead letters, receipts, quarantine, late queues), a view of the failures
+assigned to oneself, and assignments in the CSV.
