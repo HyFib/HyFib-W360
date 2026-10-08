@@ -196,6 +196,12 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
    */
   messageSenders: text('message_senders').array().$type<WebhookMessageSender[]>(),
   /**
+   * The API keys whose sent messages' `message.status` it takes (migration 0242, ADR-320): the
+   * messages one of them sent through the API, or a key one of them was rotated from or into. null
+   * takes every message's. Set only while `message.status` is among its events.
+   */
+  messageApiKeyIds: uuid('message_api_key_ids').array(),
+  /**
    * The parts of a contact whose change it takes as `contact.updated` (ADR-123); null takes every
    * change. Set only while `contact.updated` is among its events.
    */

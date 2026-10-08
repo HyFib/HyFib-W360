@@ -2194,6 +2194,270 @@ describe('message sender filters (ADR-172)', () => {
   });
 });
 
+describe('API key filters of message statuses (ADR-320)', () => {
+  it('are refused without message.status, or naming keys that are not the company’s or cannot send messages, kept by a change that leaves them out and cleared with the event; the database keeps them to it', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const keys = createApiKeysService({ db: fx.dbs.app, clock: systemClock });
+    const shop = await keys.create(owner, {
+      name: 'Shop',
+      scopes: ['messages.send'],
+      expiresInDays: 0,
+    });
+    const desk = await keys.create(owner, {
+      name: 'Helpdesk',
+      scopes: ['contacts.read', 'messages.reply'],
+      expiresInDays: 30,
+    });
+    const runner = await keys.create(owner, {
+      name: 'Runner',
+      scopes: ['automations.start'],
+      expiresInDays: 0,
+    });
+    const other = await fx.company();
+    const theirs = await keys.create(await fx.ctx(other, other.owner), {
+      name: 'Theirs',
+      scopes: ['messages.send'],
+      expiresInDays: 0,
+    });
+    const url = 'https://hooks.example.com/in';
+    const refused = (eventTypes: string[], messageApiKeyIds: unknown, message: RegExp) =>
+      expectAppError(
+        webhooks().create(owner, { url, eventTypes, messageApiKeyIds }),
+        'validation_failed',
+        message,
+      );
+    const needsTheEvent = /only for an endpoint that receives Message status/;
+    const notTheirs = /API keys of this company that can send messages/;
+    await refused(['message.received'], [shop.id], needsTheEvent);
+    await refused(['message.status'], [], /at least one API key/);
+    await refused(['message.status'], [shop.keyPrefix], /from the list/);
+    await refused(['message.status'], [shop.id, runner.id], notTheirs);
+    await refused(['message.status'], [theirs.id], notTheirs);
+    expect(await webhooks().list(owner)).toEqual([]);
+    // Settings offers the keys that can send messages and work, by name, and for runs the key that
+    // can start them.
+    expect(await webhooks().messageApiKeyChoices(owner)).toEqual([
+      { id: desk.id, name: 'Helpdesk', keyPrefix: desk.keyPrefix },
+      { id: shop.id, name: 'Shop', keyPrefix: shop.keyPrefix },
+    ]);
+    expect((await webhooks().runApiKeyChoices(owner)).map((k) => k.id)).toEqual([runner.id]);
+
+    const created = await webhooks().create(owner, {
+      url,
+      eventTypes: ['message.status', 'message.received'],
+      messageApiKeyIds: [shop.id, desk.id, shop.id.toUpperCase()],
+    });
+    const [audit] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events WHERE tenant_id = $1 AND action = 'webhook.endpoint_created'`,
+      [c.tenant.id],
+    );
+    expect(audit?.metadata).toMatchObject({ messageApiKeyIds: [shop.id, desk.id] });
+    const change = (fields: Record<string, unknown>) =>
+      webhooks().update(owner, {
+        endpointId: created.id,
+        url,
+        description: '',
+        eventTypes: ['message.status', 'message.received'],
+        ...fields,
+      });
+    const current = async () =>
+      (await webhooks().list(owner)).find((e) => e.id === created.id)?.messageApiKeys;
+    const named = (key: { id: string; keyPrefix: string }, name: string, state: string) => ({
+      id: key.id,
+      name,
+      keyPrefix: key.keyPrefix,
+      state,
+    });
+    expect(await current()).toEqual([
+      named(shop, 'Shop', 'active'),
+      named(desk, 'Helpdesk', 'active'),
+    ]);
+    await change({ description: 'kept' });
+    expect((await current())?.map((k) => k.id)).toEqual([shop.id, desk.id]);
+    // A key revoked since stays named, and allowed: the messages it sent still change status.
+    await keys.revoke(owner, { keyId: desk.id });
+    expect(await current()).toEqual([
+      named(shop, 'Shop', 'active'),
+      named(desk, 'Helpdesk', 'revoked'),
+    ]);
+    await change({ messageApiKeyIds: [desk.id] });
+    expect((await current())?.map((k) => k.id)).toEqual([desk.id]);
+    const updates = await fx.query<{ metadata: { messageApiKeyIds?: unknown } }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND action = 'webhook.endpoint_updated' ORDER BY occurred_at`,
+      [c.tenant.id],
+    );
+    expect(updates.map((u) => u.metadata.messageApiKeyIds)).toEqual([
+      [shop.id, desk.id],
+      [desk.id],
+    ]);
+    await change({ messageApiKeyIds: null });
+    expect(await current()).toBeNull();
+    await change({ messageApiKeyIds: [shop.id] });
+    // Received messages alone do not keep the list.
+    await change({ eventTypes: ['message.received'] });
+    expect(await current()).toBeNull();
+    await expectAppError(
+      change({ eventTypes: ['message.received'], messageApiKeyIds: [shop.id] }),
+      'validation_failed',
+      needsTheEvent,
+    );
+    // The database refuses an empty list, more than 20 keys, a missing one or a list of lists from
+    // an endpoint taking message.status…
+    await change({ eventTypes: ['message.status'], messageApiKeyIds: [shop.id] });
+    const setInDatabase = (value: string) =>
+      fx.query(`UPDATE app.webhook_endpoints SET message_api_key_ids = ${value} WHERE id = $1`, [
+        created.id,
+      ]);
+    const many = Array.from({ length: 21 }, () => `'${uuidv7()}'`).join(', ');
+    for (const bad of [
+      `'{}'`,
+      `ARRAY[${many}]::uuid[]`,
+      `ARRAY['${shop.id}', NULL]::uuid[]`,
+      `ARRAY[ARRAY['${shop.id}']]::uuid[]`,
+    ]) {
+      await expect(setInDatabase(bad), bad).rejects.toThrow(
+        /webhook_endpoints_message_api_key_ids/,
+      );
+    }
+    // …and any list from an endpoint taking received messages only.
+    await change({ eventTypes: ['message.received'] });
+    await expect(setInDatabase(`ARRAY['${shop.id}']::uuid[]`)).rejects.toThrow(
+      /webhook_endpoints_message_api_key_ids/,
+    );
+    // The company role changes the list only through its column grant.
+    const [grant] = await fx.query<{ can_update: boolean }>(
+      `SELECT has_column_privilege('w360_app', 'app.webhook_endpoints', 'message_api_key_ids',
+                'UPDATE') AS can_update`,
+    );
+    expect(grant?.can_update).toBe(true);
+  });
+
+  it('sends an endpoint that names API keys the statuses of the messages they sent, across a rotation either way, and of no message sent otherwise', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const from = waId();
+    const msg = await inbound(c, from, 'Hi');
+    const keys = createApiKeysService({ db: fx.dbs.app, clock: systemClock });
+    const desk = await keys.create(owner, {
+      name: 'Helpdesk',
+      scopes: ['messages.reply'],
+      expiresInDays: 0,
+    });
+    const bot = await keys.create(owner, {
+      name: 'Bot',
+      scopes: ['messages.reply'],
+      expiresInDays: 0,
+    });
+    const add = async (messageApiKeyIds: string[] | null) =>
+      (
+        await webhooks().create(owner, {
+          url: `http://${HOST}:${port}/ok/${randomBytes(6).toString('hex')}`,
+          eventTypes: ['message.status'],
+          messageApiKeyIds,
+        })
+      ).id;
+    const every = await add(null);
+    const byDesk = await add([desk.id]);
+    const byBot = await add([bot.id]);
+    // The helpdesk's key is rotated: the old key works for a day more. An endpoint names the new
+    // one.
+    const rotated = await keys.rotate(owner, { keyId: desk.id, overlapHours: 24 });
+    const byRotated = await add([rotated.id]);
+    const deps = { db: fx.dbs.app, jobs: fx.jobs(), signer: fx.signer, clock: systemClock };
+    /** A text reply sent through the API with this token's key, accepted by the stand-in. */
+    const reply = async (token: string, text: string) => {
+      const key = await authenticateApiToken(fx.dbs.app, token, uuidv7());
+      if (!key) throw new Error('a key does not authenticate');
+      const sent = await apiSendMessage(
+        deps,
+        key,
+        { type: 'text', to: `+${from}`, text },
+        { key: `reply-${randomBytes(6).toString('hex')}`, requestHash: sha256Hex(text) },
+      );
+      expect(sent.status).toBe(201);
+      const messageId = (sent.body as { data: { id: string } }).data.id;
+      fx.standIn.state.sendQueue.push({
+        kind: 'accept',
+        wamid: `wamid.api.${randomBytes(8).toString('hex')}`,
+      });
+      const [intent] = await fx.query<{ id: string }>(
+        'SELECT id FROM app.send_intents WHERE message_id = $1',
+        [messageId],
+      );
+      if (!intent) throw new Error('no send intent');
+      const result = await processSendIntent(
+        {
+          ...deps,
+          keyring: fx.keyring,
+          graph: fx.graph,
+          rate: { capacity: 100, refillPerSecond: 100 },
+        },
+        authorizedTenantScope(c.tenant.id, null),
+        intent.id,
+      );
+      expect(result.outcome).toBe('accepted');
+      return messageId;
+    };
+    const byOldKey = await reply(desk.token, 'From the old key.');
+    const byNewKey = await reply(rotated.token, 'From the new key.');
+    const byOtherKey = await reply(bot.token, 'From the bot.');
+    // A member's reply belongs to no key.
+    await sendReply(c, msg.conversation_id, 'A member replies.');
+    const [memberReply] = await fx.query<{ id: string }>(
+      `SELECT id FROM app.messages WHERE conversation_id = $1 AND sender_type = 'agent'`,
+      [msg.conversation_id],
+    );
+    if (!memberReply) throw new Error('no member reply');
+
+    const sent = await fx.query<{
+      message: string;
+      endpoint: string;
+      detail: Record<string, unknown>;
+    }>(
+      `SELECT e.message_id AS message, d.endpoint_id AS endpoint, e.detail
+         FROM app.webhook_deliveries d
+         JOIN app.webhook_events e ON e.tenant_id = d.tenant_id AND e.id = d.event_id
+        WHERE d.tenant_id = $1 AND e.type = 'message.status'`,
+      [c.tenant.id],
+    );
+    const endpointName = new Map([
+      [every, 'every message'],
+      [byDesk, 'old key'],
+      [byBot, 'bot key'],
+      [byRotated, 'new key'],
+    ]);
+    const messageName = new Map([
+      [byOldKey, 'old key'],
+      [byNewKey, 'new key'],
+      [byOtherKey, 'bot'],
+      [memberReply.id, 'member'],
+    ]);
+    const sorted = (rows: unknown[][]) =>
+      [...rows].sort((x, y) => JSON.stringify(x).localeCompare(JSON.stringify(y)));
+    expect(
+      sorted(sent.map((s) => [messageName.get(s.message), endpointName.get(s.endpoint)])),
+    ).toEqual(
+      sorted([
+        // The old key's message reaches the list naming the key it was rotated into…
+        ['old key', 'every message'],
+        ['old key', 'old key'],
+        ['old key', 'new key'],
+        // …and the new key's the list naming the key it replaced.
+        ['new key', 'every message'],
+        ['new key', 'old key'],
+        ['new key', 'new key'],
+        ['bot', 'every message'],
+        ['bot', 'bot key'],
+        ['member', 'every message'],
+      ]),
+    );
+    // The key travels for the filter only: the payload reads it from the message.
+    expect(sent.filter((s) => 'apiKeyId' in s.detail)).toEqual([]);
+  });
+});
+
 describe('run end filters (ADR-151)', () => {
   it('are refused without automation.run_ended, unknown, active or empty, kept by a change that leaves them out and cleared with the event; the database keeps them to that event', async () => {
     const c = await fx.company();

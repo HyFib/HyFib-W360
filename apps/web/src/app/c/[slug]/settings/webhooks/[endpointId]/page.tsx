@@ -46,6 +46,7 @@ export default async function WebhookEndpointPage({
     deliveries,
     automationChoices,
     runApiKeyChoices,
+    messageApiKeyChoices,
     channelChoices,
     teamChoices,
     templateChoices,
@@ -59,6 +60,7 @@ export default async function WebhookEndpointPage({
     webhooks.deliveries(ctx, { endpointId, failedOnly }),
     webhooks.automationChoices(ctx),
     webhooks.runApiKeyChoices(ctx),
+    webhooks.messageApiKeyChoices(ctx),
     webhooks.channelChoices(ctx),
     webhooks.teamChoices(ctx),
     webhooks.templateChoices(ctx),
@@ -206,6 +208,7 @@ export default async function WebhookEndpointPage({
               headerNames: endpoint.headerNames,
               messageStatuses: endpoint.messageStatuses,
               messageSenders: endpoint.messageSenders,
+              messageApiKeys: endpoint.messageApiKeys,
               contactParts: endpoint.contactParts,
               contactFields: endpoint.contactFields,
               automationIds: endpoint.automations?.map((a) => a.id) ?? null,
@@ -253,6 +256,7 @@ export default async function WebhookEndpointPage({
             }}
             automationChoices={automationChoices}
             runApiKeyChoices={runApiKeyChoices}
+            messageApiKeyChoices={messageApiKeyChoices}
             channelChoices={channelChoices}
             teamChoices={teamChoices}
             templateChoices={templateChoices}

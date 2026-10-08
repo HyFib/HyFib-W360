@@ -1175,6 +1175,12 @@ export const apiWebhookEndpointSchema = z.object({
     .describe(
       'Who sent the messages whose message.status the endpoint receives, as message.sentBy names them; null receives the statuses of every message.',
     ),
+  messageApiKeyIds: z
+    .array(z.uuid())
+    .nullable()
+    .describe(
+      "The API keys whose sent messages' message.status the endpoint receives, as message.apiKeyId names them: the messages one of them sent through the API, or a key one of them was rotated from or into. A message sent otherwise is not received. null receives the statuses of every message.",
+    ),
   contactParts: z
     .array(z.enum(WEBHOOK_CONTACT_PARTS))
     .nullable()
@@ -4136,7 +4142,7 @@ export function buildOpenApiDocument(serverUrl: string) {
       'message.status': webhook(
         'webhookMessageStatus',
         WEBHOOK_EVENT_INFO['message.status'].label,
-        `${WEBHOOK_EVENT_INFO['message.status'].description} An endpoint receives every status unless it names the ones it takes (its \`messageStatuses\`, or the statuses ticked in Settings → Webhooks), and the statuses of every message unless it names who sent them (its \`messageSenders\`, as message.sentBy names them, or the senders ticked in Settings → Webhooks); a status no endpoint takes is not recorded.`,
+        `${WEBHOOK_EVENT_INFO['message.status'].description} An endpoint receives every status unless it names the ones it takes (its \`messageStatuses\`, or the statuses ticked in Settings → Webhooks), and the statuses of every message unless it names who sent them (its \`messageSenders\`, as message.sentBy names them, or the senders ticked in Settings → Webhooks) or the API keys that sent them (its \`messageApiKeyIds\`, as message.apiKeyId names them, a key rotated from or into one of them included, or the keys ticked in Settings → Webhooks); a status no endpoint takes is not recorded.`,
         'WebhookMessageStatus',
       ),
       'consent.changed': webhook(

@@ -96,7 +96,7 @@ import {
   webhookOwnerText,
   webhookPipelineText,
   webhookRetryDelaySeconds,
-  webhookRunApiKeyText,
+  webhookApiKeyText,
   webhookTakesAutomationRuns,
   webhookTakesCampaignEvents,
   webhookTakesChannelEvents,
@@ -196,6 +196,8 @@ import {
   webhookRunTriggersSchema,
   webhookRunApiKeyIdsFor,
   webhookRunApiKeyIdsSchema,
+  webhookMessageApiKeyIdsFor,
+  webhookMessageApiKeyIdsSchema,
   webhookConsentChangesFor,
   webhookConsentChangesSchema,
   webhookContactSourcesFor,
@@ -2445,16 +2447,56 @@ describe('API key filters of run events (ADR-319)', () => {
 
   it('name a key as the list of endpoints names the key that added one, and say why it stopped working', () => {
     const key = { id: store, name: 'Store', keyPrefix: 'w360_aaaaaaaaaaaa' };
-    expect(webhookRunApiKeyText({ ...key, state: 'active' })).toBe('“Store” (w360_aaaaaaaaaaaa_…)');
-    expect(webhookRunApiKeyText({ ...key, state: 'revoked' })).toBe(
+    expect(webhookApiKeyText({ ...key, state: 'active' })).toBe('“Store” (w360_aaaaaaaaaaaa_…)');
+    expect(webhookApiKeyText({ ...key, state: 'revoked' })).toBe(
       '“Store” (w360_aaaaaaaaaaaa_…), revoked',
     );
-    expect(webhookRunApiKeyText({ ...key, state: 'expired' })).toBe(
+    expect(webhookApiKeyText({ ...key, state: 'expired' })).toBe(
       '“Store” (w360_aaaaaaaaaaaa_…), expired',
     );
-    expect(webhookRunApiKeyText({ id: store, name: null, keyPrefix: null, state: null })).toBe(
+    expect(webhookApiKeyText({ id: store, name: null, keyPrefix: null, state: null })).toBe(
       'Unknown API key',
     );
+  });
+});
+
+describe('API key filters of message statuses (ADR-320)', () => {
+  const store = '0e1a2b3c-4d5e-4f60-8172-8394a5b6c7d8';
+  const crm = '1f2e3d4c-5b6a-4978-8695-a4b3c2d1e0f9';
+
+  it('take 1 to 20 key ids, once each, in lower case; null takes every message', () => {
+    expect(webhookMessageApiKeyIdsSchema.parse([crm.toUpperCase(), store, crm])).toEqual([
+      crm,
+      store,
+    ]);
+    expect(webhookMessageApiKeyIdsSchema.parse(null)).toBeNull();
+    expect(WEBHOOK_LIMITS.messageApiKeys).toBe(API_KEY_LIMITS.activeKeys);
+    const ids = Array.from(
+      { length: 21 },
+      (_, i) => `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`,
+    );
+    expect(webhookMessageApiKeyIdsSchema.safeParse(ids.slice(1)).success).toBe(true);
+    expect(webhookMessageApiKeyIdsSchema.safeParse(ids).error?.issues[0]?.message).toBe(
+      'Choose at most 20 API keys.',
+    );
+    expect(webhookMessageApiKeyIdsSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one API key, or take every message.',
+    );
+    expect(
+      webhookMessageApiKeyIdsSchema.safeParse(['w360_aaaaaaaaaaaa']).error?.issues[0]?.message,
+    ).toBe('Choose API keys from the list.');
+  });
+
+  it('are kept only while the endpoint takes message.status: given, kept, or cleared', () => {
+    expect(webhookMessageApiKeyIdsFor(['message.status'], [store], null)).toEqual([store]);
+    expect(
+      webhookMessageApiKeyIdsFor(['message.status', 'message.received'], undefined, [crm]),
+    ).toEqual([crm]);
+    expect(webhookMessageApiKeyIdsFor(['message.status'], null, [crm])).toBeNull();
+    expect(webhookMessageApiKeyIdsFor(['message.status'], undefined, null)).toBeNull();
+    // Received messages are not narrowed by key: the list goes with message.status.
+    expect(webhookMessageApiKeyIdsFor(['message.received'], [store], [crm])).toBeNull();
+    expect(webhookMessageApiKeyIdsFor(['automation.run_started'], undefined, [crm])).toBeNull();
   });
 });
 

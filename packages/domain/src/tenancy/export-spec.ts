@@ -1604,6 +1604,7 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
       'header_names',
       'message_statuses',
       'message_senders',
+      'message_api_key_ids',
       'contact_parts',
       'contact_field_keys',
       'automation_ids',

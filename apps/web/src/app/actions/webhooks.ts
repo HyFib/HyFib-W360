@@ -30,6 +30,8 @@ export async function createWebhookEndpointAction(
     messageStatuses: string[] | null;
     /** Who sent the messages whose statuses it takes (ADR-172); null takes every sender. */
     messageSenders: string[] | null;
+    /** The API keys whose sent messages' statuses it takes (ADR-320); null: every message. */
+    messageApiKeyIds: string[] | null;
     /** The contact parts it takes as contact.updated; null takes every change. */
     contactParts: string[] | null;
     /** The custom fields whose changes it takes (ADR-184); null takes every field's. */
@@ -141,6 +143,8 @@ export async function updateWebhookEndpointAction(
     messageStatuses: string[] | null;
     /** Who sent the messages whose statuses it takes (ADR-172); null takes every sender. */
     messageSenders: string[] | null;
+    /** The API keys whose sent messages' statuses it takes (ADR-320); null: every message. */
+    messageApiKeyIds: string[] | null;
     /** The contact parts it takes as contact.updated; null takes every change. */
     contactParts: string[] | null;
     /** The custom fields whose changes it takes (ADR-184); null takes every field's. */

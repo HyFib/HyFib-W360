@@ -73,6 +73,7 @@ import {
   assertWebhookAuthorization,
   assertWebhookAutomations,
   assertWebhookRunApiKeys,
+  assertWebhookMessageApiKeys,
   assertWebhookCampaigns,
   assertWebhookChannels,
   assertWebhookPipelines,
@@ -121,6 +122,7 @@ import {
   WEBHOOK_RUN_END_REASONS_NEED_THE_EVENT,
   WEBHOOK_RUN_END_REASONS_NEED_THE_ENDS,
   WEBHOOK_SENDERS_NEED_THE_EVENT,
+  WEBHOOK_MESSAGE_API_KEYS_NEED_THE_EVENT,
   WEBHOOK_TEAMS_NEED_THE_EVENTS,
   WEBHOOK_TEMPLATES_NEED_THE_EVENTS,
   WEBHOOK_CAMPAIGNS_NEED_THE_EVENTS,
@@ -229,6 +231,8 @@ import {
   webhookHeadersSchema,
   webhookMessageSendersFor,
   webhookMessageSendersSchema,
+  webhookMessageApiKeyIdsFor,
+  webhookMessageApiKeyIdsSchema,
   webhookMessageStatusesFor,
   webhookMessageStatusesSchema,
   webhookOAuthAudit,
@@ -291,6 +295,16 @@ const messageSendersField = webhookMessageSendersSchema.describe(
 const invalidSenders = () =>
   new AppError('validation_failed', WEBHOOK_SENDERS_NEED_THE_EVENT, {
     issues: [{ path: 'messageSenders', message: WEBHOOK_SENDERS_NEED_THE_EVENT }],
+  });
+
+const messageApiKeyIdsField = webhookMessageApiKeyIdsSchema.describe(
+  `The API keys whose sent messages' message.status the endpoint receives: 1 to ${WEBHOOK_LIMITS.messageApiKeys} ids of the company's keys that can send messages (messages.send, messages.send_marketing or messages.reply), as message.apiKeyId names them (a key that adds an endpoint finds its own id in the endpoint's apiKeyId), only with the message.status event. A status is received when the key that sent the message through the API is listed, or a key it was rotated from or into, so a list keeps an integration's messages across rotations; a revoked or expired key stays allowed, as the messages it sent still change status. A message sent otherwise (by a member, an automation, a campaign or HyFib itself) belongs to no key and its statuses are not received. With the statuses or who sent the messages too, a status must pass them all. null receives the statuses of every message.`,
+);
+
+/** Keys for messages are chosen only for an endpoint that receives `message.status` (ADR-320). */
+const invalidMessageApiKeys = () =>
+  new AppError('validation_failed', WEBHOOK_MESSAGE_API_KEYS_NEED_THE_EVENT, {
+    issues: [{ path: 'messageApiKeyIds', message: WEBHOOK_MESSAGE_API_KEYS_NEED_THE_EVENT }],
   });
 
 const contactPartsField = webhookContactPartsSchema.describe(
@@ -745,6 +759,7 @@ export const apiCreateWebhookEndpointSchema = z
     headers: headersField.optional(),
     messageStatuses: messageStatusesField.optional(),
     messageSenders: messageSendersField.optional(),
+    messageApiKeyIds: messageApiKeyIdsField.optional(),
     contactParts: contactPartsField.optional(),
     contactFieldKeys: contactFieldKeysField.optional(),
     automationIds: automationIdsField.optional(),
@@ -798,6 +813,10 @@ export const apiCreateWebhookEndpointSchema = z
   .refine((data) => !data.messageSenders || data.events.includes('message.status'), {
     path: ['messageSenders'],
     message: WEBHOOK_SENDERS_NEED_THE_EVENT,
+  })
+  .refine((data) => !data.messageApiKeyIds || data.events.includes('message.status'), {
+    path: ['messageApiKeyIds'],
+    message: WEBHOOK_MESSAGE_API_KEYS_NEED_THE_EVENT,
   })
   .refine((data) => !data.contactParts || data.events.includes('contact.updated'), {
     path: ['contactParts'],
@@ -1010,6 +1029,11 @@ export const apiUpdateWebhookEndpointSchema = z
       .optional()
       .describe(
         'Who sent the messages whose message.status the endpoint receives; null receives the statuses of every message. Left out, they stay, unless the events no longer include message.status, which clears them.',
+      ),
+    messageApiKeyIds: messageApiKeyIdsField
+      .optional()
+      .describe(
+        "The API keys whose sent messages' message.status the endpoint receives (the company's keys that can send messages, whatever their state); null receives the statuses of every message. Left out, they stay, unless the events no longer include message.status, which clears them.",
       ),
     contactParts: contactPartsField
       .optional()
@@ -1242,6 +1266,7 @@ export const apiUpdateWebhookEndpointSchema = z
       data.headers !== undefined ||
       data.messageStatuses !== undefined ||
       data.messageSenders !== undefined ||
+      data.messageApiKeyIds !== undefined ||
       data.contactParts !== undefined ||
       data.contactFieldKeys !== undefined ||
       data.automationIds !== undefined ||
@@ -1286,7 +1311,7 @@ export const apiUpdateWebhookEndpointSchema = z
       data.contactTags !== undefined ||
       data.conversationTags !== undefined ||
       data.oauth !== undefined,
-    'Give the events, the description, the headers, the message statuses, who sent the messages, the contact parts, the deal and task details, the custom fields, the automations, the campaign statuses, the order statuses, the Payment Link statuses, the template statuses, the conversation statuses, the deal statuses, the task statuses, the run end statuses, what started the runs, the API keys that started them, the consent changes, where contacts came from, the received message types, the run end reasons, the numbers, the teams, the templates, the campaigns, the pipelines, the stages, the deal owners, the task assignees, the pipelines, stages and owners of tasks’ deals and of notes’ deals, who made the CRM changes, the survey scores, the members credited with survey answers and the teams of their conversations, the contact and conversation tags of survey answers, the tags of added and changed contacts, the members, the contact tags, the conversation tags, the OAuth client or whether the endpoint is enabled',
+    'Give the events, the description, the headers, the message statuses, who sent the messages, the API keys that sent them, the contact parts, the deal and task details, the custom fields, the automations, the campaign statuses, the order statuses, the Payment Link statuses, the template statuses, the conversation statuses, the deal statuses, the task statuses, the run end statuses, what started the runs, the API keys that started them, the consent changes, where contacts came from, the received message types, the run end reasons, the numbers, the teams, the templates, the campaigns, the pipelines, the stages, the deal owners, the task assignees, the pipelines, stages and owners of tasks’ deals and of notes’ deals, who made the CRM changes, the survey scores, the members credited with survey answers and the teams of their conversations, the contact and conversation tags of survey answers, the tags of added and changed contacts, the members, the contact tags, the conversation tags, the OAuth client or whether the endpoint is enabled',
   );
 
 export interface ApiWebhookEndpoint {
@@ -1309,6 +1334,8 @@ export interface ApiWebhookEndpoint {
   messageStatuses: WebhookMessageStatus[] | null;
   /** Who sent the messages whose statuses it receives (ADR-172); null receives every sender's. */
   messageSenders: WebhookMessageSender[] | null;
+  /** The API keys whose messages' statuses it receives (ADR-320); null receives every message's. */
+  messageApiKeyIds: string[] | null;
   /** The contact parts it receives as `contact.updated` (ADR-123); null receives every change. */
   contactParts: WebhookContactPart[] | null;
   /** The custom fields whose changes it receives (ADR-184); null receives every field's. */
@@ -1490,6 +1517,7 @@ const columns = {
   headerNames: webhookEndpoints.headerNames,
   messageStatuses: webhookEndpoints.messageStatuses,
   messageSenders: webhookEndpoints.messageSenders,
+  messageApiKeyIds: webhookEndpoints.messageApiKeyIds,
   contactParts: webhookEndpoints.contactParts,
   contactFieldKeys: webhookEndpoints.contactFieldKeys,
   automationIds: webhookEndpoints.automationIds,
@@ -1557,6 +1585,7 @@ type EndpointRow = Pick<
   | 'headerNames'
   | 'messageStatuses'
   | 'messageSenders'
+  | 'messageApiKeyIds'
   | 'contactParts'
   | 'contactFieldKeys'
   | 'automationIds'
@@ -1629,6 +1658,7 @@ function toApiEndpoint(row: EndpointRow, now: Date): ApiWebhookEndpoint {
     headers: row.headerNames.map((name) => ({ name })),
     messageStatuses: row.messageStatuses,
     messageSenders: row.messageSenders,
+    messageApiKeyIds: row.messageApiKeyIds,
     contactParts: row.contactParts,
     contactFieldKeys: row.contactFieldKeys,
     automationIds: row.automationIds,
@@ -1882,6 +1912,12 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               null,
             );
             const messageSenders = webhookMessageSendersFor(data.events, data.messageSenders, null);
+            const messageApiKeyIds = webhookMessageApiKeyIdsFor(
+              data.events,
+              data.messageApiKeyIds,
+              null,
+            );
+            await assertWebhookMessageApiKeys(tx, ctx.tenant.id, messageApiKeyIds);
             const contactParts = webhookContactPartsFor(data.events, data.contactParts, null);
             const contactFieldKeys = webhookContactFieldKeysFor(
               data.events,
@@ -2022,6 +2058,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               headers,
               messageStatuses,
               messageSenders,
+              messageApiKeyIds,
               contactParts,
               contactFieldKeys,
               automationIds,
@@ -2074,6 +2111,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               ...(headers.length > 0 ? { headers: headers.map((h) => h.name) } : {}),
               ...(messageStatuses ? { messageStatuses } : {}),
               ...(messageSenders ? { messageSenders } : {}),
+              ...(messageApiKeyIds ? { messageApiKeyIds } : {}),
               ...(contactParts ? { contactParts } : {}),
               ...(contactFieldKeys ? { contactFieldKeys } : {}),
               ...(automationIds ? { automationIds } : {}),
@@ -2145,6 +2183,9 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
         const events = data.events ?? endpoint.eventTypes;
         if (data.messageStatuses && !events.includes('message.status')) throw invalidStatuses();
         if (data.messageSenders && !events.includes('message.status')) throw invalidSenders();
+        if (data.messageApiKeyIds && !events.includes('message.status')) {
+          throw invalidMessageApiKeys();
+        }
         if (data.contactParts && !events.includes('contact.updated')) throw invalidParts();
         // Fields narrow field changes only, given the parts the endpoint keeps (ADR-184).
         const parts = webhookContactPartsFor(events, data.contactParts, endpoint.contactParts);
@@ -2246,6 +2287,10 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
         // And the API keys likewise (ADR-319).
         if (data.runApiKeyIds !== undefined) {
           await assertWebhookRunApiKeys(tx, ctx.tenant.id, data.runApiKeyIds);
+        }
+        // And those for messages (ADR-320).
+        if (data.messageApiKeyIds !== undefined) {
+          await assertWebhookMessageApiKeys(tx, ctx.tenant.id, data.messageApiKeyIds);
         }
         // And the numbers likewise (ADR-170).
         if (data.channelIds !== undefined) {
@@ -2362,6 +2407,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
           data.headers !== undefined ||
           data.messageStatuses !== undefined ||
           data.messageSenders !== undefined ||
+          data.messageApiKeyIds !== undefined ||
           data.contactParts !== undefined ||
           data.contactFieldKeys !== undefined ||
           data.automationIds !== undefined ||
@@ -2427,6 +2473,11 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
                 events,
                 data.messageSenders,
                 endpoint.messageSenders,
+              ),
+              messageApiKeyIds: webhookMessageApiKeyIdsFor(
+                events,
+                data.messageApiKeyIds,
+                endpoint.messageApiKeyIds,
               ),
               contactParts: parts,
               contactFieldKeys: webhookContactFieldKeysFor(
@@ -2600,6 +2651,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               eventTypes: webhookEndpoints.eventTypes,
               messageStatuses: webhookEndpoints.messageStatuses,
               messageSenders: webhookEndpoints.messageSenders,
+              messageApiKeyIds: webhookEndpoints.messageApiKeyIds,
               contactParts: webhookEndpoints.contactParts,
               contactFieldKeys: webhookEndpoints.contactFieldKeys,
               automationIds: webhookEndpoints.automationIds,
@@ -2651,6 +2703,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
             ...(data.headers !== undefined ? { headers: data.headers.map((h) => h.name) } : {}),
             ...(changed.messageStatuses ? { messageStatuses: changed.messageStatuses } : {}),
             ...(changed.messageSenders ? { messageSenders: changed.messageSenders } : {}),
+            ...(changed.messageApiKeyIds ? { messageApiKeyIds: changed.messageApiKeyIds } : {}),
             ...(changed.contactParts ? { contactParts: changed.contactParts } : {}),
             ...(changed.contactFieldKeys ? { contactFieldKeys: changed.contactFieldKeys } : {}),
             ...(changed.automationIds ? { automationIds: changed.automationIds } : {}),

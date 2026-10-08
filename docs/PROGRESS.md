@@ -1,5 +1,49 @@
 # Progress
 
+## 2026-10-08 — API key filters for message statuses (P5-09, H-014, ADR-320)
+
+Status: **Implemented; its database tests run in CI only.** Endpoints taking `message.status` could
+name statuses and senders, but every message sent through the API has the sender `api`, so a
+receiver of one integration took the statuses of the messages every other key sent. The local
+PostgreSQL is unavailable, so the migration and the integration tests below were written but not run
+here; migration 0242 passed the pglast parse check (syntax only).
+
+### Completed
+
+- **Database:** migration 0242 (`message_api_key_ids` on `app.webhook_endpoints` with its check and
+  update grant; `app.webhook_api_key_family`, the key rotations both key filters now read; the
+  message trigger passing the message's key; `app.capture_webhook_event` matching it and leaving it
+  out of the stored detail).
+- **Domain:** `WEBHOOK_LIMITS.messageApiKeys`, `webhookMessageApiKeyIdsSchema`,
+  `webhookMessageApiKeyIdsFor` and `assertWebhookMessageApiKeys` in `webhooks/service.ts`, sharing
+  the list's schema and the key check with ADR-319's; `messageApiKeyChoices`; the endpoint view's
+  `messageApiKeys`; creation, changes, audits and the export column; the same in
+  `api/webhook-endpoints.ts` and the OpenAPI document (`message.status`'s description names it). The
+  key types and `webhookApiKeyText` lost their run-only names.
+- **Web:** Settings → Webhooks' "Messages sent through the API" while the endpoint takes Message
+  status (one fieldset for both key lists), and the endpoints list's line for it.
+- **Tests:** unit (3 new: the list's rules and keeping and clearing in `webhooks/webhooks.test.ts`;
+  the API schemas and OpenAPI entries in `api/api.test.ts`; 1 assertion there updated for the new
+  field); integration (3 new: the services and capture in `webhooks.test.ts`, the API in
+  `api-webhook-endpoints.test.ts`; 1 changed in `tenant-isolation.test.ts`). Written for CI; the
+  integration tests were not run here. No e2e test.
+- **Docs:** ADR-320; ARCHITECTURE; SECURITY; THREAT-MODEL T288; DEPLOYMENT; RUNBOOKS; BACKLOG P5-09;
+  feature matrix H-014.
+- **Mutation checks:** 20/20 deliberate regressions caught on the unit-tested parts. The capture,
+  the rotation function, the key checks against the database and the form need the database or a
+  browser, so their regressions are left to the integration tests, which run in CI.
+
+### Test commands and results (local, 2026-10-08)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 140 files, 1346 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| pglast 7 parse of migration 0242                   | passed (syntax only)                                          |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
 ## 2026-10-08 — API key filters for run events (P5-09, H-014, ADR-319)
 
 Status: **Implemented; its database tests run in CI only.** Endpoints taking automation run events
@@ -16,8 +60,8 @@ migration 0241 passed the pglast parse check (syntax only).
 - **Domain:** `WEBHOOK_LIMITS.runApiKeys`, `webhookRunApiKeyIdsSchema`, `webhookRunApiKeyIdsFor` and
   `assertWebhookRunApiKeys` in `webhooks/service.ts`, `runApiKeyChoices`, the endpoint view's
   `runApiKeys` (named, with each key's state), creation, changes, audits and the export column;
-  `webhookRunApiKeyText` in `webhooks/model.ts`; the same in `api/webhook-endpoints.ts` and the
-  OpenAPI document (both run events' descriptions name it).
+  `webhookApiKeyText` (named for runs until ADR-320) in `webhooks/model.ts`; the same in
+  `api/webhook-endpoints.ts` and the OpenAPI document (both run events' descriptions name it).
 - **Web:** Settings → Webhooks' "Runs started through the API" while the endpoint takes either run
   event, and the endpoints list's line for it.
 - **Tests:** unit (4 new: the list's rules, keeping and clearing and the key as Settings names it in

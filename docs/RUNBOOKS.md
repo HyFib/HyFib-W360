@@ -3233,6 +3233,19 @@ chosen too, a run must pass every list. To take more, tick the keys under "Runs 
 API" on the endpoint's page, or `PATCH /webhook-endpoints/{id}` with `runApiKeyIds` (null for every
 run). Removing both Automation started and Automation ended clears the list.
 
+**A receiver misses the statuses of an API key's messages (ADR-320).** An endpoint can take the
+statuses of the messages chosen API keys sent only. The endpoints list shows them ("Statuses of
+messages sent through the API by: …"), and the API answers `messageApiKeyIds` (null takes every
+message's). A status goes by the key that sent its message, as `message.apiKeyId` names it, and by
+the keys that key was rotated from or into; a message a member, an automation (a run a key started
+among them), a campaign or HyFib sent belongs to no key and its statuses are not sent to a list. A
+key revoked or expired since stays on the list, and Settings says so. Events no endpoint takes are
+not recorded, so there is nothing to replay; `GET /messages/{id}` reads the status of a message sent
+through the API now. With statuses or senders chosen too, a status must pass every list. To take
+more, tick the keys under "Messages sent through the API" on the endpoint's page, or
+`PATCH /webhook-endpoints/{id}` with `messageApiKeyIds` (null for every message). Removing Message
+status clears the list.
+
 **A receiver misses the events of a member's conversations (ADR-181).** An endpoint can take the
 message and conversation events of the conversations assigned to chosen members only. The endpoints
 list shows them ("Members whose conversations’ events are sent: …"), and the API answers

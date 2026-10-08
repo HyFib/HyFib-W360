@@ -150,6 +150,7 @@ import {
   WEBHOOK_FIELDS_NEED_THE_PART,
   WEBHOOK_RUN_TRIGGERS_NEED_THE_EVENTS,
   WEBHOOK_RUN_API_KEYS_NEED_THE_EVENTS,
+  WEBHOOK_MESSAGE_API_KEYS_NEED_THE_EVENT,
   WEBHOOK_CONSENT_CHANGES_NEED_THE_EVENT,
   WEBHOOK_CONTACT_SOURCES_NEED_THE_EVENT,
   WEBHOOK_MESSAGE_TYPES_NEED_THE_EVENT,
@@ -1487,6 +1488,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'enabled',
       'events',
       'headers',
+      'messageApiKeyIds',
       'messageSenders',
       'messageStatuses',
       'messageTypes',
@@ -3938,6 +3940,62 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     const webhooks = doc.webhooks as Record<string, { post?: { description?: string } }>;
     expect(webhooks['automation.run_started']?.post?.description).toContain(
       'and every run unless it names the API keys whose runs it takes (its `runApiKeyIds`',
+    );
+  });
+
+  it('take API keys for messages only with message.status, each once, and a list of them alone is a change (ADR-320)', () => {
+    const store = '0E1A2B3C-4D5E-4F60-8172-8394A5B6C7D8';
+    const crm = '1f2e3d4c-5b6a-4978-8695-a4b3c2d1e0f9';
+    const base = { url: 'https://hooks.example.com/w360', events: ['message.status'] };
+    expect(
+      apiCreateWebhookEndpointSchema.parse({
+        ...base,
+        messageApiKeyIds: [store, crm, store.toLowerCase()],
+      }).messageApiKeyIds,
+    ).toEqual([store.toLowerCase(), crm]);
+    expect(
+      apiCreateWebhookEndpointSchema.parse({ ...base, messageApiKeyIds: null }).messageApiKeyIds,
+    ).toBeNull();
+    for (const body of [
+      { ...base, messageApiKeyIds: [] },
+      { ...base, messageApiKeyIds: ['w360_aaaaaaaaaaaa'] },
+      { ...base, messageApiKeyIds: store },
+    ]) {
+      expect(apiCreateWebhookEndpointSchema.safeParse(body).success, JSON.stringify(body)).toBe(
+        false,
+      );
+    }
+    // Received messages are not narrowed by key, so they cannot keep a list.
+    const refused = apiCreateWebhookEndpointSchema.safeParse({
+      ...base,
+      events: ['message.received'],
+      messageApiKeyIds: [store],
+    });
+    expect(refused.error?.issues.map((i) => [i.path.join('.'), i.message])).toEqual([
+      ['messageApiKeyIds', WEBHOOK_MESSAGE_API_KEYS_NEED_THE_EVENT],
+    ]);
+    for (const change of [{ messageApiKeyIds: null }, { messageApiKeyIds: [crm] }]) {
+      expect(apiUpdateWebhookEndpointSchema.parse(change)).toEqual(change);
+    }
+    expect(apiUpdateWebhookEndpointSchema.safeParse({}).error?.issues[0]?.message).toContain(
+      'who sent the messages, the API keys that sent them, the contact parts,',
+    );
+    // Answered as a list of key ids, or null, and set out with the event.
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas;
+    const answered = schemas.WebhookEndpoint as {
+      properties: Record<string, { anyOf?: unknown[] }>;
+      required?: string[];
+    };
+    expect(answered.properties.messageApiKeyIds?.anyOf).toHaveLength(2);
+    expect(answered.required).toContain('messageApiKeyIds');
+    expect(
+      Object.keys((schemas.CreateWebhookEndpoint as { properties: object }).properties),
+    ).toContain('messageApiKeyIds');
+    const webhooks = doc.webhooks as Record<string, { post?: { description?: string } }>;
+    expect(webhooks['message.status']?.post?.description).toContain(
+      'or the API keys that sent them (its `messageApiKeyIds`',
     );
   });
 });

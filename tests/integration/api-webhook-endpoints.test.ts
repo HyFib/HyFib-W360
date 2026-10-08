@@ -1760,6 +1760,96 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     });
   });
 
+  it('choose the API keys whose sent messages’ statuses an endpoint receives, kept by changes that leave them out and cleared with the event (ADR-320)', async () => {
+    const c = await fx.company();
+    // The key adding the endpoint sends messages too; another key only replies; one cannot send.
+    const key = await apiKey(c, ['webhooks.manage', 'messages.send'], 'Shop');
+    const desk = await apiKey(c, ['messages.reply'], 'Helpdesk');
+    const runner = await apiKey(c, ['automations.start'], 'Runner');
+    const elsewhere = await apiKey(await fx.company(), ['messages.send'], 'Elsewhere');
+    const issueOf = async (promise: Promise<unknown>) => {
+      const error = await expectAppError(promise, 'validation_failed');
+      return isAppError(error) ? error.issues?.[0] : undefined;
+    };
+    // Keys need message.status, at least one, each an id of the company's keys that can send
+    // messages (named by place).
+    const refusals = [
+      [['message.received'], [key.id], 'messageApiKeyIds'],
+      [['message.status'], [], 'messageApiKeyIds'],
+      [['message.status'], [key.id, key.keyPrefix], 'messageApiKeyIds.1'],
+      [['message.status'], [key.id, runner.id], 'messageApiKeyIds.1'],
+      [['message.status'], [elsewhere.id], 'messageApiKeyIds.0'],
+    ] as const;
+    for (const [index, [events, messageApiKeyIds, path]] of refusals.entries()) {
+      expect(
+        await issueOf(
+          api().create(
+            key.ctx,
+            { url: receiverUrl(), events, messageApiKeyIds },
+            idem(`message-keys-bad-${index}`, JSON.stringify(messageApiKeyIds)),
+          ),
+        ),
+        JSON.stringify(messageApiKeyIds),
+      ).toMatchObject({ path });
+    }
+    expect((await api().list(key.ctx)).data).toEqual([]);
+
+    const created = await addThroughApi(key.ctx, 'message-keys-1', {
+      url: receiverUrl(),
+      events: ['message.status'],
+      messageApiKeyIds: [key.id, desk.id, key.id.toUpperCase()],
+    });
+    const id = created.body.data.id;
+    expect(created.body.data.messageApiKeyIds).toEqual([key.id, desk.id]);
+    expect((await api().get(key.ctx, id)).messageApiKeyIds).toEqual([key.id, desk.id]);
+    const [audit] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND subject_id = $2 AND action = 'webhook.endpoint_created'`,
+      [c.tenant.id, id],
+    );
+    expect(audit?.metadata).toMatchObject({ messageApiKeyIds: [key.id, desk.id] });
+    // Settings names them, with whether they still work.
+    const owner = await fx.ctx(c, c.owner);
+    await keys.revoke(owner, { keyId: desk.id });
+    expect((await settings().list(owner)).find((e) => e.id === id)?.messageApiKeys).toEqual([
+      { id: key.id, name: 'Shop', keyPrefix: key.keyPrefix, state: 'active' },
+      { id: desk.id, name: 'Helpdesk', keyPrefix: desk.keyPrefix, state: 'revoked' },
+    ]);
+
+    expect(await api().update(key.ctx, id, { description: 'Statuses' })).toMatchObject({
+      messageApiKeyIds: [key.id, desk.id],
+    });
+    // A revoked key stays allowed: the messages it sent still change status.
+    expect(await api().update(key.ctx, id, { messageApiKeyIds: [desk.id] })).toMatchObject({
+      messageApiKeyIds: [desk.id],
+    });
+    const updates = await fx.query<{ metadata: { messageApiKeyIds?: unknown } }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND subject_id = $2 AND action = 'webhook.endpoint_updated'
+        ORDER BY occurred_at`,
+      [c.tenant.id, id],
+    );
+    expect(updates.map((u) => u.metadata.messageApiKeyIds)).toEqual([[key.id, desk.id], [desk.id]]);
+    expect(await api().update(key.ctx, id, { events: ['message.received'] })).toMatchObject({
+      events: ['message.received'],
+      messageApiKeyIds: null,
+    });
+    expect(await issueOf(api().update(key.ctx, id, { messageApiKeyIds: [key.id] }))).toMatchObject({
+      path: 'messageApiKeyIds',
+    });
+    expect(
+      await api().update(key.ctx, id, { events: ['message.status'], messageApiKeyIds: [key.id] }),
+    ).toMatchObject({ messageApiKeyIds: [key.id] });
+    // A list given again is checked again, changing nothing when it is refused.
+    expect(
+      await issueOf(api().update(key.ctx, id, { messageApiKeyIds: [runner.id] })),
+    ).toMatchObject({ path: 'messageApiKeyIds.0' });
+    expect((await api().get(key.ctx, id)).messageApiKeyIds).toEqual([key.id]);
+    expect(await api().update(key.ctx, id, { messageApiKeyIds: null })).toMatchObject({
+      messageApiKeyIds: null,
+    });
+  });
+
   it('choose who sent the messages whose statuses an endpoint receives, kept by changes that leave them out and cleared with the event (ADR-172)', async () => {
     const c = await fx.company();
     const key = await apiKey(c, ['webhooks.manage']);

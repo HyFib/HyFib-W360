@@ -35,7 +35,7 @@ import {
   type WebhookDeliveryState,
   type WebhookEventType,
 } from '@w360/db';
-import { apiKeyState } from '../api/model';
+import { API_SEND_SCOPES, apiKeyState } from '../api/model';
 import { recordAudit, type RequestMeta } from '../audit';
 import { assertCan, type TenantContext } from '../authz/context';
 import { assertRecentSignIn } from '../authz/step-up';
@@ -84,8 +84,8 @@ import {
   webhookTakesTemplateEvents,
   type WebhookAssigneeChoice,
   type WebhookAutomationChoice,
-  type WebhookEndpointRunApiKey,
-  type WebhookRunApiKeyChoice,
+  type WebhookEndpointApiKey,
+  type WebhookApiKeyChoice,
   type WebhookCampaignChoice,
   type WebhookCampaignStatus,
   type WebhookChannelChoice,
@@ -369,6 +369,97 @@ export function webhookMessageSendersFor(
   if (!eventTypes.includes('message.status')) return null;
   const kept = given === undefined ? current : given;
   return kept ? [...kept] : null;
+}
+
+/**
+ * A list of the company's API keys an endpoint names, for runs (ADR-319) or messages (ADR-320):
+ * 1 to `limit` ids, each once in lower case; null takes `every`.
+ */
+function webhookApiKeyIdsSchema(limit: number, every: string) {
+  return z
+    .array(z.uuid({ error: 'Choose API keys from the list.' }))
+    .min(1, `Choose at least one API key, or take ${every}.`)
+    .max(limit, `Choose at most ${limit} API keys.`)
+    .transform((ids) => [...new Set(ids.map((id) => id.toLowerCase()))])
+    .nullable();
+}
+
+/**
+ * Refuses the first of `ids` that is not one of the company's API keys holding one of `scopes`,
+ * named by its place in `field`, whatever the key's state (ADR-319, ADR-320). Keys are never
+ * deleted and keep their scopes, so a list never names a key that is gone or lost the scope. `tx`
+ * is in the company's scope.
+ */
+async function assertCompanyApiKeys(
+  tx: Tx,
+  tenantId: string,
+  ids: readonly string[] | null | undefined,
+  scopes: readonly ApiScope[],
+  field: string,
+  messages: { notFound: string },
+): Promise<void> {
+  if (!ids || ids.length === 0) return;
+  const rows = await tx
+    .select({ id: apiKeys.id })
+    .from(apiKeys)
+    .where(
+      and(
+        eq(apiKeys.tenantId, tenantId),
+        inArray(apiKeys.id, [...ids]),
+        sql`${apiKeys.scopes} && ${sql.param([...scopes])}::text[]`,
+      ),
+    );
+  const found = new Set(rows.map((r) => r.id));
+  const index = ids.findIndex((id) => !found.has(id));
+  if (index === -1) return;
+  throw new AppError('validation_failed', messages.notFound, {
+    issues: [{ path: `${field}.${index}`, message: messages.notFound }],
+  });
+}
+
+/**
+ * The API keys whose sent messages' statuses an endpoint takes as `message.status` (ADR-320), each
+ * once: the messages one of them sent through the API, or a key one of them was rotated from or
+ * into. null takes every message's, those sent otherwise among them.
+ */
+export const webhookMessageApiKeyIdsSchema = webhookApiKeyIdsSchema(
+  WEBHOOK_LIMITS.messageApiKeys,
+  'every message',
+);
+
+export const WEBHOOK_MESSAGE_API_KEYS_NEED_THE_EVENT =
+  'Choose API keys only for an endpoint that receives Message status.';
+
+export const WEBHOOK_MESSAGE_API_KEYS_NOT_FOUND =
+  'Choose API keys of this company that can send messages.';
+
+/**
+ * The API keys an endpoint keeps after it is added or changed: every message (null) unless it takes
+ * `message.status`; then those given, or else the ones it had.
+ */
+export function webhookMessageApiKeyIdsFor(
+  eventTypes: readonly WebhookEventType[],
+  given: readonly string[] | null | undefined,
+  current: readonly string[] | null,
+): string[] | null {
+  if (!eventTypes.includes('message.status')) return null;
+  const kept = given === undefined ? current : given;
+  return kept ? [...kept] : null;
+}
+
+/**
+ * Refuses API keys given for an endpoint unless each is the company's and holds a scope that sends
+ * messages (ADR-320), whatever its state: a revoked or expired key's messages still change status,
+ * and a rotated key's messages match the key that replaced it. `tx` is in the company's scope.
+ */
+export async function assertWebhookMessageApiKeys(
+  tx: Tx,
+  tenantId: string,
+  ids: readonly string[] | null | undefined,
+): Promise<void> {
+  await assertCompanyApiKeys(tx, tenantId, ids, API_SEND_SCOPES, 'messageApiKeyIds', {
+    notFound: WEBHOOK_MESSAGE_API_KEYS_NOT_FOUND,
+  });
 }
 
 /**
@@ -692,12 +783,10 @@ const RUN_STARTING_SCOPE: ApiScope = 'automations.start';
  * key one of them was rotated from or into. null takes every run, those started otherwise among
  * them.
  */
-export const webhookRunApiKeyIdsSchema = z
-  .array(z.uuid({ error: 'Choose API keys from the list.' }))
-  .min(1, 'Choose at least one API key, or take every run.')
-  .max(WEBHOOK_LIMITS.runApiKeys, `Choose at most ${WEBHOOK_LIMITS.runApiKeys} API keys.`)
-  .transform((ids) => [...new Set(ids.map((id) => id.toLowerCase()))])
-  .nullable();
+export const webhookRunApiKeyIdsSchema = webhookApiKeyIdsSchema(
+  WEBHOOK_LIMITS.runApiKeys,
+  'every run',
+);
 
 export const WEBHOOK_RUN_API_KEYS_NEED_THE_EVENTS =
   'Choose API keys only for an endpoint that receives Automation started or Automation ended.';
@@ -731,23 +820,30 @@ export async function assertWebhookRunApiKeys(
   tenantId: string,
   ids: readonly string[] | null | undefined,
 ): Promise<void> {
-  if (!ids || ids.length === 0) return;
-  const rows = await tx
-    .select({ id: apiKeys.id })
+  await assertCompanyApiKeys(tx, tenantId, ids, [RUN_STARTING_SCOPE], 'runApiKeyIds', {
+    notFound: WEBHOOK_RUN_API_KEYS_NOT_FOUND,
+  });
+}
+
+/**
+ * The company's API keys holding one of `scopes` that work at `now` and were not rotated, by name:
+ * those Settings offers an endpoint for runs (ADR-319) or messages (ADR-320). A rotated key's runs
+ * and messages match the key that replaced it, which is offered instead.
+ */
+function workingApiKeys(tx: Tx, tenantId: string, scopes: readonly ApiScope[], now: Date) {
+  return tx
+    .select({ id: apiKeys.id, name: apiKeys.name, keyPrefix: apiKeys.keyPrefix })
     .from(apiKeys)
     .where(
       and(
         eq(apiKeys.tenantId, tenantId),
-        inArray(apiKeys.id, [...ids]),
-        sql`${RUN_STARTING_SCOPE}::text = any(${apiKeys.scopes})`,
+        sql`${apiKeys.scopes} && ${sql.param([...scopes])}::text[]`,
+        isNull(apiKeys.revokedAt),
+        isNull(apiKeys.replacedByKeyId),
+        or(isNull(apiKeys.expiresAt), gt(apiKeys.expiresAt, now)),
       ),
-    );
-  const found = new Set(rows.map((r) => r.id));
-  const index = ids.findIndex((id) => !found.has(id));
-  if (index === -1) return;
-  throw new AppError('validation_failed', WEBHOOK_RUN_API_KEYS_NOT_FOUND, {
-    issues: [{ path: `runApiKeyIds.${index}`, message: WEBHOOK_RUN_API_KEYS_NOT_FOUND }],
-  });
+    )
+    .orderBy(asc(apiKeys.name), asc(apiKeys.createdAt), asc(apiKeys.id));
 }
 
 /**
@@ -2185,6 +2281,11 @@ const endpointFields = z.object({
    */
   messageSenders: webhookMessageSendersSchema.optional(),
   /**
+   * Given, the API keys whose sent messages' statuses it takes (null: every message, ADR-320); left
+   * out, they stay.
+   */
+  messageApiKeyIds: webhookMessageApiKeyIdsSchema.optional(),
+  /**
    * Given, the contact parts it takes as `contact.updated` (null: every change); left out, they
    * stay.
    */
@@ -2376,6 +2477,12 @@ const sendersNeedTheEvent = {
   check: (data: { eventTypes: WebhookEventType[]; messageSenders?: unknown }) =>
     !data.messageSenders || data.eventTypes.includes('message.status'),
   options: { path: ['messageSenders'], message: WEBHOOK_SENDERS_NEED_THE_EVENT },
+};
+/** API keys for messages are chosen only for an endpoint that takes `message.status` (ADR-320). */
+const messageApiKeysNeedTheEvent = {
+  check: (data: { eventTypes: WebhookEventType[]; messageApiKeyIds?: unknown }) =>
+    !data.messageApiKeyIds || data.eventTypes.includes('message.status'),
+  options: { path: ['messageApiKeyIds'], message: WEBHOOK_MESSAGE_API_KEYS_NEED_THE_EVENT },
 };
 /** Contact parts are chosen only for an endpoint that takes `contact.updated` (ADR-123). */
 const partsNeedTheEvent = {
@@ -2643,6 +2750,7 @@ const conversationTagsNeedTheEvents = {
 const endpointSchema = endpointFields
   .refine(statusesNeedTheEvent.check, statusesNeedTheEvent.options)
   .refine(sendersNeedTheEvent.check, sendersNeedTheEvent.options)
+  .refine(messageApiKeysNeedTheEvent.check, messageApiKeysNeedTheEvent.options)
   .refine(partsNeedTheEvent.check, partsNeedTheEvent.options)
   .refine(automationsNeedTheEvents.check, automationsNeedTheEvents.options)
   .refine(campaignStatusesNeedTheEvent.check, campaignStatusesNeedTheEvent.options)
@@ -2690,6 +2798,7 @@ const updateSchema = endpointFields
   .extend({ endpointId: z.uuid() })
   .refine(statusesNeedTheEvent.check, statusesNeedTheEvent.options)
   .refine(sendersNeedTheEvent.check, sendersNeedTheEvent.options)
+  .refine(messageApiKeysNeedTheEvent.check, messageApiKeysNeedTheEvent.options)
   .refine(partsNeedTheEvent.check, partsNeedTheEvent.options)
   .refine(automationsNeedTheEvents.check, automationsNeedTheEvents.options)
   .refine(campaignStatusesNeedTheEvent.check, campaignStatusesNeedTheEvent.options)
@@ -2764,6 +2873,11 @@ export interface WebhookEndpointView {
   messageStatuses: WebhookMessageStatus[] | null;
   /** Who sent the messages whose statuses it takes (ADR-172); null takes every sender. */
   messageSenders: WebhookMessageSender[] | null;
+  /**
+   * The API keys whose sent messages' statuses it takes (ADR-320), as stored, named, with whether
+   * they still work; null takes every message's.
+   */
+  messageApiKeys: WebhookEndpointApiKey[] | null;
   /** The contact parts it takes as `contact.updated` (ADR-123); null takes every change. */
   contactParts: WebhookContactPart[] | null;
   /**
@@ -2802,7 +2916,7 @@ export interface WebhookEndpointView {
    * The API keys whose runs' events it takes (ADR-319), as stored, named, with whether they still
    * work; null takes every run's.
    */
-  runApiKeys: WebhookEndpointRunApiKey[] | null;
+  runApiKeys: WebhookEndpointApiKey[] | null;
   /** The consent changes it takes as `consent.changed` (ADR-189); null takes every change. */
   consentChanges: WebhookConsentChange[] | null;
   /** Where the contacts whose `contact.created` it takes came from (ADR-190); null: every contact. */
@@ -3146,6 +3260,7 @@ export async function lockWebhookEndpoint(
       eventTypes: webhookEndpoints.eventTypes,
       messageStatuses: webhookEndpoints.messageStatuses,
       messageSenders: webhookEndpoints.messageSenders,
+      messageApiKeyIds: webhookEndpoints.messageApiKeyIds,
       contactParts: webhookEndpoints.contactParts,
       contactFieldKeys: webhookEndpoints.contactFieldKeys,
       automationIds: webhookEndpoints.automationIds,
@@ -3228,6 +3343,7 @@ export async function insertWebhookEndpoint(
     headers: readonly WebhookHeader[];
     messageStatuses: WebhookMessageStatus[] | null;
     messageSenders: WebhookMessageSender[] | null;
+    messageApiKeyIds: string[] | null;
     contactParts: WebhookContactPart[] | null;
     contactFieldKeys: string[] | null;
     automationIds: string[] | null;
@@ -3299,6 +3415,7 @@ export async function insertWebhookEndpoint(
     ...sealWebhookHeaders(keyring, tenantId, id, input.headers),
     messageStatuses: input.messageStatuses,
     messageSenders: input.messageSenders,
+    messageApiKeyIds: input.messageApiKeyIds,
     contactParts: input.contactParts,
     contactFieldKeys: input.contactFieldKeys,
     automationIds: input.automationIds,
@@ -3719,6 +3836,7 @@ export function createWebhooksService(deps: {
               headerNames: webhookEndpoints.headerNames,
               messageStatuses: webhookEndpoints.messageStatuses,
               messageSenders: webhookEndpoints.messageSenders,
+              messageApiKeyIds: webhookEndpoints.messageApiKeyIds,
               contactParts: webhookEndpoints.contactParts,
               contactFieldKeys: webhookEndpoints.contactFieldKeys,
               automationIds: webhookEndpoints.automationIds,
@@ -3996,10 +4114,15 @@ export function createWebhooksService(deps: {
                     ),
                   );
           const assigneeById = new Map(namedAssignees.map((m) => [m.id, m]));
-          // The API keys endpoints chose for runs (ADR-319), and whether they still work.
-          const runApiKeyIds = [...new Set(rows.flatMap((r) => r.runApiKeyIds ?? []))];
-          const namedRunApiKeys =
-            runApiKeyIds.length === 0
+          // The API keys endpoints chose for runs (ADR-319) and messages (ADR-320), and whether
+          // they still work.
+          const apiKeyIds = [
+            ...new Set(
+              rows.flatMap((r) => [...(r.runApiKeyIds ?? []), ...(r.messageApiKeyIds ?? [])]),
+            ),
+          ];
+          const namedApiKeys =
+            apiKeyIds.length === 0
               ? []
               : await tx
                   .select({
@@ -4010,10 +4133,14 @@ export function createWebhooksService(deps: {
                     expiresAt: apiKeys.expiresAt,
                   })
                   .from(apiKeys)
-                  .where(
-                    and(eq(apiKeys.tenantId, ctx.tenant.id), inArray(apiKeys.id, runApiKeyIds)),
-                  );
-          const runApiKeyById = new Map(namedRunApiKeys.map((k) => [k.id, k]));
+                  .where(and(eq(apiKeys.tenantId, ctx.tenant.id), inArray(apiKeys.id, apiKeyIds)));
+          const apiKeyById = new Map(namedApiKeys.map((k) => [k.id, k]));
+          const namedApiKey = (id: string): WebhookEndpointApiKey => {
+            const key = apiKeyById.get(id);
+            return key
+              ? { id, name: key.name, keyPrefix: key.keyPrefix, state: apiKeyState(key, now) }
+              : { id, name: null, keyPrefix: null, state: null };
+          };
           // The custom fields endpoints chose (ADR-184); one deleted since is named by its absence.
           const fieldKeys = [...new Set(rows.flatMap((r) => r.contactFieldKeys ?? []))];
           const namedFields =
@@ -4043,6 +4170,7 @@ export function createWebhooksService(deps: {
               keyPrefix,
               automationIds,
               runApiKeyIds: chosenRunApiKeys,
+              messageApiKeyIds: chosenMessageApiKeys,
               channelAccountIds,
               teamIds: chosenTeams,
               templateIds: chosenTemplates,
@@ -4135,19 +4263,8 @@ export function createWebhooksService(deps: {
                     };
                   })
                 : null,
-              runApiKeys: chosenRunApiKeys
-                ? chosenRunApiKeys.map((id): WebhookEndpointRunApiKey => {
-                    const key = runApiKeyById.get(id);
-                    return key
-                      ? {
-                          id,
-                          name: key.name,
-                          keyPrefix: key.keyPrefix,
-                          state: apiKeyState(key, now),
-                        }
-                      : { id, name: null, keyPrefix: null, state: null };
-                  })
-                : null,
+              runApiKeys: chosenRunApiKeys ? chosenRunApiKeys.map(namedApiKey) : null,
+              messageApiKeys: chosenMessageApiKeys ? chosenMessageApiKeys.map(namedApiKey) : null,
               createdByKey: keyName && keyPrefix ? { name: keyName, keyPrefix } : null,
               previousSecretExpiresAt: previousSigns ? r.previousSecretExpiresAt : null,
               recent,
@@ -4200,27 +4317,29 @@ export function createWebhooksService(deps: {
      * any of the company's keys that hold the scope, and Settings keeps showing one an endpoint
      * names.
      */
-    async runApiKeyChoices(ctx: TenantContext): Promise<WebhookRunApiKeyChoice[]> {
+    async runApiKeyChoices(ctx: TenantContext): Promise<WebhookApiKeyChoice[]> {
       assertCan(ctx, 'developer.manage');
       const now = clock.now();
       return db.run(
         ctx.scope,
-        (tx) =>
-          tx
-            .select({ id: apiKeys.id, name: apiKeys.name, keyPrefix: apiKeys.keyPrefix })
-            .from(apiKeys)
-            .where(
-              and(
-                eq(apiKeys.tenantId, ctx.tenant.id),
-                sql`${RUN_STARTING_SCOPE}::text = any(${apiKeys.scopes})`,
-                isNull(apiKeys.revokedAt),
-                isNull(apiKeys.replacedByKeyId),
-                or(isNull(apiKeys.expiresAt), gt(apiKeys.expiresAt, now)),
-              ),
-            )
-            .orderBy(asc(apiKeys.name), asc(apiKeys.createdAt), asc(apiKeys.id)),
-        { accessMode: 'read only' },
+        (tx) => workingApiKeys(tx, ctx.tenant.id, [RUN_STARTING_SCOPE], now),
+        {
+          accessMode: 'read only',
+        },
       );
+    },
+
+    /**
+     * The API keys an endpoint can choose to take the statuses of the messages they send of
+     * (ADR-320): the company's keys holding a scope that sends messages, working and not rotated,
+     * by name, as for runs.
+     */
+    async messageApiKeyChoices(ctx: TenantContext): Promise<WebhookApiKeyChoice[]> {
+      assertCan(ctx, 'developer.manage');
+      const now = clock.now();
+      return db.run(ctx.scope, (tx) => workingApiKeys(tx, ctx.tenant.id, API_SEND_SCOPES, now), {
+        accessMode: 'read only',
+      });
     },
 
     /**
@@ -4442,6 +4561,12 @@ export function createWebhooksService(deps: {
           null,
         );
         const messageSenders = webhookMessageSendersFor(data.eventTypes, data.messageSenders, null);
+        const messageApiKeyIds = webhookMessageApiKeyIdsFor(
+          data.eventTypes,
+          data.messageApiKeyIds,
+          null,
+        );
+        await assertWebhookMessageApiKeys(tx, ctx.tenant.id, messageApiKeyIds);
         const contactParts = webhookContactPartsFor(data.eventTypes, data.contactParts, null);
         // Fields narrow field changes only: refused for parts that take none (ADR-184).
         if (data.contactFieldKeys && !webhookTakesFieldChanges(data.eventTypes, contactParts)) {
@@ -4601,6 +4726,7 @@ export function createWebhooksService(deps: {
           headers,
           messageStatuses,
           messageSenders,
+          messageApiKeyIds,
           contactParts,
           contactFieldKeys,
           automationIds,
@@ -4660,6 +4786,7 @@ export function createWebhooksService(deps: {
               ...(headers.length > 0 ? { headers: headers.map((h) => h.name) } : {}),
               ...(messageStatuses ? { messageStatuses } : {}),
               ...(messageSenders ? { messageSenders } : {}),
+              ...(messageApiKeyIds ? { messageApiKeyIds } : {}),
               ...(contactParts ? { contactParts } : {}),
               ...(contactFieldKeys ? { contactFieldKeys } : {}),
               ...(automationIds ? { automationIds } : {}),
@@ -4729,6 +4856,15 @@ export function createWebhooksService(deps: {
           data.messageSenders,
           endpoint.messageSenders,
         );
+        const messageApiKeyIds = webhookMessageApiKeyIdsFor(
+          data.eventTypes,
+          data.messageApiKeyIds,
+          endpoint.messageApiKeyIds,
+        );
+        // Only a list given now is checked: the keys kept were checked when chosen.
+        if (data.messageApiKeyIds !== undefined) {
+          await assertWebhookMessageApiKeys(tx, ctx.tenant.id, messageApiKeyIds);
+        }
         const contactParts = webhookContactPartsFor(
           data.eventTypes,
           data.contactParts,
@@ -5066,6 +5202,7 @@ export function createWebhooksService(deps: {
             eventTypes: data.eventTypes,
             messageStatuses,
             messageSenders,
+            messageApiKeyIds,
             contactParts,
             contactFieldKeys,
             automationIds,
@@ -5136,6 +5273,7 @@ export function createWebhooksService(deps: {
               ...(data.headers ? { headers: data.headers.map((h) => h.name) } : {}),
               ...(messageStatuses ? { messageStatuses } : {}),
               ...(messageSenders ? { messageSenders } : {}),
+              ...(messageApiKeyIds ? { messageApiKeyIds } : {}),
               ...(contactParts ? { contactParts } : {}),
               ...(contactFieldKeys ? { contactFieldKeys } : {}),
               ...(automationIds ? { automationIds } : {}),

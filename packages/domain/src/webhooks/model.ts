@@ -793,6 +793,8 @@ export const WEBHOOK_LIMITS = {
   contactEventTags: 50,
   /** The API keys whose automation runs an endpoint can choose (ADR-319): a company's most keys. */
   runApiKeys: 20,
+  /** The API keys whose sent messages' statuses an endpoint can choose (ADR-320), as for runs. */
+  messageApiKeys: 20,
   /** The contact tags an endpoint can choose to take the conversations' events of (ADR-267). */
   contactTags: 50,
   /** The conversation tags an endpoint can choose to take the conversations' events of (ADR-273). */
@@ -833,32 +835,33 @@ export function webhookTakesAutomationRuns(eventTypes: readonly WebhookEventType
 }
 
 /**
- * An API key of the company that can start automations (`automations.start`), works and was not
- * rotated, which an endpoint can choose to take the runs it starts of (ADR-319). The API also takes
- * a revoked, expired or rotated key that holds the scope; Settings lists one only while an endpoint
- * names it.
+ * An API key of the company that works and was not rotated, which an endpoint can choose to take
+ * the runs it starts (ADR-319, a key holding `automations.start`) or the statuses of the messages
+ * it sends (ADR-320, a key holding a scope that sends messages). The API also takes a revoked,
+ * expired or rotated key that holds the scope; Settings lists one only while an endpoint names it.
  */
-export interface WebhookRunApiKeyChoice {
+export interface WebhookApiKeyChoice {
   id: string;
   name: string;
   keyPrefix: string;
 }
 
-/** An API key an endpoint takes the runs of (ADR-319), as stored. */
-export interface WebhookEndpointRunApiKey {
+/** An API key an endpoint names for runs (ADR-319) or messages' statuses (ADR-320), as stored. */
+export interface WebhookEndpointApiKey {
   id: string;
   /** Null only for a key the company no longer had, which cannot happen: keys are never deleted. */
   name: string | null;
   keyPrefix: string | null;
   /**
-   * Whether the key works now. A revoked or expired key starts no more runs, though those it
-   * started still end, and a rotated key's runs match the key that replaced it: it stays chosen.
+   * Whether the key works now. A revoked or expired key starts and sends no more, though its runs
+   * still end and its messages' statuses still change, and a rotated key's runs and messages match
+   * the key that replaced it: it stays chosen.
    */
   state: 'active' | 'revoked' | 'expired' | null;
 }
 
 /** An API key as Settings → Webhooks names it, as it names the key that added an endpoint. */
-export const webhookRunApiKeyText = (key: WebhookEndpointRunApiKey): string => {
+export const webhookApiKeyText = (key: WebhookEndpointApiKey): string => {
   if (!key.name || !key.keyPrefix) return 'Unknown API key';
   const named = `“${key.name}” (${key.keyPrefix}_…)`;
   return key.state === 'revoked' || key.state === 'expired' ? `${named}, ${key.state}` : named;

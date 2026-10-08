@@ -34,7 +34,7 @@ import {
   webhookHost,
   webhookOwnerText,
   webhookPipelineText,
-  webhookRunApiKeyText,
+  webhookApiKeyText,
   webhookStageText,
   webhookTeamText,
   webhookTemplateText,
@@ -71,6 +71,7 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
     endpoints,
     automationChoices,
     runApiKeyChoices,
+    messageApiKeyChoices,
     channelChoices,
     teamChoices,
     templateChoices,
@@ -84,6 +85,7 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
     webhooks.list(ctx),
     webhooks.automationChoices(ctx),
     webhooks.runApiKeyChoices(ctx),
+    webhooks.messageApiKeyChoices(ctx),
     webhooks.channelChoices(ctx),
     webhooks.teamChoices(ctx),
     webhooks.templateChoices(ctx),
@@ -179,6 +181,12 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
                       <p className="text-xs text-muted-foreground">
                         Statuses of messages sent by:{' '}
                         {e.messageSenders.map((s) => WEBHOOK_MESSAGE_SENDER_LABELS[s]).join(', ')}
+                      </p>
+                    ) : null}
+                    {e.messageApiKeys ? (
+                      <p className="text-xs break-all text-muted-foreground">
+                        Statuses of messages sent through the API by:{' '}
+                        {e.messageApiKeys.map(webhookApiKeyText).join(', ')}
                       </p>
                     ) : null}
                     {e.templateStatuses ? (
@@ -278,7 +286,7 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
                     {e.runApiKeys ? (
                       <p className="text-xs break-all text-muted-foreground">
                         Automation runs sent, started through the API by:{' '}
-                        {e.runApiKeys.map(webhookRunApiKeyText).join(', ')}
+                        {e.runApiKeys.map(webhookApiKeyText).join(', ')}
                       </p>
                     ) : null}
                     {e.consentChanges ? (
@@ -571,6 +579,7 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
             slug={ctx.tenant.slug}
             automationChoices={automationChoices}
             runApiKeyChoices={runApiKeyChoices}
+            messageApiKeyChoices={messageApiKeyChoices}
             channelChoices={channelChoices}
             teamChoices={teamChoices}
             templateChoices={templateChoices}

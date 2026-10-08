@@ -12324,3 +12324,55 @@ Decision:
 
 Not built: lists that leave chosen keys' runs out, filters by the key that sent a message or made a
 CRM change (their events name it), and the key's name in the payload.
+
+## ADR-320 Choosing the API keys whose sent messages' statuses a webhook endpoint receives (P5-09) (2026-10-08)
+
+Context: an endpoint taking `message.status` can narrow it by status (ADR-119) and by who sent the
+messages (ADR-172), but every message sent through the API has the sender `api`. A company that
+gives each integration its own key (a shop sending order updates, a helpdesk replying) sent each
+integration's endpoint the statuses of the messages the other keys sent too, and each receiver read
+`message.apiKeyId` to drop them. ADR-319 named keys for runs only.
+
+Decision:
+
+- **One list per endpoint,** `messageApiKeyIds`: 1 to 20 ids of the company's API keys, each once. A
+  status is sent when the key that sent its message through the API (`message.apiKeyId`) is on the
+  list, or a key it was rotated from or into, however many rotations away, as for runs (ADR-319). A
+  message a member, an automation, a campaign or HyFib sent belongs to no key, and neither does one
+  an automation sent for a run a key started: it is the automation's. Null receives every message's
+  statuses, as before. With statuses or senders chosen too, a status must pass them all; received
+  messages are not narrowed. Chosen in Settings → Webhooks ("Messages sent through the API": every
+  message's statuses by default, or only those of the messages the keys ticked sent; shown while the
+  endpoint takes Message status), shown on the endpoint as "Statuses of messages sent through the
+  API by: …", and through the API as `messageApiKeyIds` on `POST /webhook-endpoints` and
+  `PATCH /webhook-endpoints/{id}` and in every endpoint the API answers.
+- **Which keys:** the services refuse an id that is not one of the company's keys holding a scope
+  that sends messages (`messages.send`, `messages.send_marketing` or `messages.reply`), named by
+  place, whatever the key's state: a revoked or expired key's messages still change status, and a
+  rotated key's messages match the key that replaced it. Settings offers the keys that work and were
+  not rotated, and keeps naming a key an endpoint has, with "revoked" or "expired" once it stops
+  working.
+- **Only while `message.status` is taken:** a list given for an endpoint that does not take it is
+  refused (422 through the API); a change that drops it clears the list, and a `PATCH` that leaves
+  the list out keeps it. A check in the database holds the same rule and the list's shape (null, or
+  1 to 20 ids in one dimension without a null, with `message.status`).
+- **Applied at capture:** the message trigger now passes the key that sent the message (`apiKeyId`,
+  absent for any other message) with `message.status`, and `app.capture_webhook_event` reads the
+  key's rotations only when an active endpoint of the company taking the event names keys for
+  messages, then creates a delivery only for the endpoints whose list is null or shares one of them.
+  The rotations are read by `app.webhook_api_key_family`, which both key filters now share: a plain
+  SQL function, run as the capture's caller, following `replaced_by_key_id` both ways within the
+  company. The key is taken out of the stored detail: the payload reads `message.apiKeyId` from the
+  message, as before.
+- **Audited, exported, permissions unchanged,** as for runs: `webhook.endpoint_created` and
+  `webhook.endpoint_updated` carry `messageApiKeyIds` when the endpoint has it, and the company data
+  export carries the column.
+- **Migration 0242:** `message_api_key_ids uuid[]` on `app.webhook_endpoints` with its check,
+  validated at once (a company has at most 10 endpoints), the update grant on the column for the
+  runtime role, `app.webhook_api_key_family` for the runtime and definer roles, and the message
+  trigger's `app.webhook_capture_message` and `app.capture_webhook_event` replaced with the same
+  signatures (0133's and 0241's, with the key), so their owners and grants stay. Existing endpoints
+  keep null; nothing is backfilled.
+
+Not built: lists that leave chosen keys' messages out, the statuses of the messages an automation
+sent for a key's run, and filters by the key that made a CRM or order change.
