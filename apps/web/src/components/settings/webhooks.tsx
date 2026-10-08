@@ -412,8 +412,8 @@ function TriggerChoices({
     <fieldset className="grid gap-1">
       <legend className="mb-1 text-sm font-medium">Runs started by</legend>
       <p className="text-xs text-muted-foreground">
-        Automation started and Automation ended are sent for the runs started by the ways ticked
-        (all of them unless you untick some).
+        Automation started, Automation ended and Automation step are sent for the runs started by
+        the ways ticked (all of them unless you untick some).
       </p>
       {WEBHOOK_RUN_TRIGGERS.map((trigger) => {
         const id = `${prefix}-run-trigger-${trigger}`;

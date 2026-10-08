@@ -12612,3 +12612,55 @@ Decision:
 
 Not built: the same marks on the rows' "To …" and "By …", and choosing administrators by anything
 but the list.
+
+## ADR-326 A webhook event for each step of an automation run (P5-09) (2026-10-08)
+
+Context: `automation.run_started` and `automation.run_ended` (ADR-078) say when a live run starts
+and how it ends, but nothing of what it did between: a reporting integration could not tell which
+messages a run sent, which questions were answered or went unanswered, where it waited or which CRM
+change it made without a member reading the run's page. The run's log (`app.automation_run_steps`,
+migration 0011) records each step with its number, node, outcome, branch, message and a short
+detail. The backlog listed an event for each step of a run as remaining.
+
+Decision:
+
+- **`automation.run_step`, one event for each step a live run records:** its start (step 0, outside
+  a node), each node's outcome (a message sent; a question asked, answered, asked again or left
+  unanswered in time; a condition checked; the contact or conversation updated; a wait started or
+  ended; a web request made and finished; a CRM task or deal created, moved or closed, or a CRM step
+  skipped; a hand-off, an end node, a failure) and the run being stopped or taken over. A run
+  completed by its last message being accepted records no step for that, so no event. Members' test
+  runs send none, as for the run events. Settings → Webhooks lists it as "Automation step"; the API
+  takes it in `events`.
+- **What it gives:** the run (id, automation and its name when delivered, what started it, the API
+  key for a run started through the API, when it started); the step (`number` from 0, `nodeType` as
+  the builder names nodes or null outside a node, `outcome`, and `messageId`, the message the step
+  sent, null for a step that sent none or once the message is erased); the conversation, the contact
+  (without personal data once erased, as the other events) and the number. Deliveries are not
+  ordered: an integration orders a run's steps by `number`.
+- **Never the branch or the detail.** An answered question's branch is the title of the button the
+  customer tapped, which is their answer, and the run events never send a run's answers (ADR-078).
+  The detail is a note for the people reading the run's page (what started the run, a web request's
+  status, why a send was refused or a CRM step skipped) with no fixed vocabulary. The node type,
+  outcome and number say what happened in fixed terms.
+- **Narrowed as the run events are:** the automations chosen (ADR-145), what started the run
+  (ADR-183), the API keys whose runs are taken, across rotations (ADR-319), and the numbers
+  (ADR-170) apply to a run's steps, and each of those lists is kept while the endpoint takes any of
+  the three run events. A run's end statuses and end reasons (ADR-151, ADR-192) do not narrow its
+  steps. No other filter applies.
+- **Captured by a trigger on the log:** an `AFTER INSERT` trigger on `app.automation_run_steps`
+  reads the step's run in the company's scope as the role writing the step (only the runtime role
+  writes steps) and, for a live run, calls `app.capture_webhook_event` with the step's outcome as
+  the status and the step, run and automation ids in the detail, plus the run's number, trigger and
+  key for the filters only (taken out before the event is stored). As for every type, nothing is
+  written when no active endpoint of the company takes the event. The payload reads the step and the
+  run when the event is delivered; a step whose run is gone fails its delivery as `event_gone`.
+- **Migrations 0247 and 0248:** the endpoints' event, number, automation, trigger and run API key
+  checks replaced with `automation.run_step` added (validated at once: a company has at most 10
+  endpoints), the events' type check replaced NOT VALID and validated by 0248 while captures go on,
+  the trigger and its function (not executable by PUBLIC), and `app.capture_webhook_event` replaced
+  with the same signature (0246's, with the step event among the run events), so its owner and
+  grants stay.
+
+Not built: narrowing steps by outcome or node type, the step's branch or detail in any form, and a
+step event for members' test runs.

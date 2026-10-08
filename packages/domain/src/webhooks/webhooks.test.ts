@@ -6,6 +6,7 @@ import {
   ACTIVE_RUN_STATUSES,
   AUTOMATION_END_REASONS,
   AUTOMATION_RUN_STATUSES,
+  AUTOMATION_STEP_OUTCOMES,
   CAMPAIGN_COMPLETION_REASONS,
   CAMPAIGN_PAUSE_REASONS,
   CAMPAIGN_STATUSES,
@@ -27,6 +28,7 @@ import { API_KEY_LIMITS } from '../api/model';
 import { apiContactSchema } from '../api/contact-view';
 import { apiSatisfactionSurveySchema } from '../api/satisfaction-survey-view';
 import { buildOpenApiDocument } from '../api/openapi';
+import { NODE_TYPES } from '../automations/graph';
 import {
   campaignResultsSchema,
   toCampaignResults,
@@ -126,6 +128,7 @@ import {
   paymentLinkStatusChangedPayloadSchema,
   automationRunEndedPayloadSchema,
   automationRunStartedPayloadSchema,
+  automationRunStepPayloadSchema,
   buildWebhookPayload,
   WebhookEventGoneError,
   capturedCrmChanger,
@@ -264,6 +267,9 @@ import {
   webhookContactEventTagsFor,
   webhookContactEventTagsSchema,
   WEBHOOK_CONTACT_EVENT_TAGS_NEED_THE_EVENTS,
+  WEBHOOK_AUTOMATIONS_NEED_THE_EVENTS,
+  WEBHOOK_RUN_TRIGGERS_NEED_THE_EVENTS,
+  WEBHOOK_RUN_API_KEYS_NEED_THE_EVENTS,
   webhookTeamIdsFor,
   webhookTeamIdsSchema,
   webhookTemplateIdsFor,
@@ -1782,6 +1788,7 @@ describe('the OpenAPI document', () => {
       'contact.merged',
       'automation.run_started',
       'automation.run_ended',
+      'automation.run_step',
       'order.received',
       'order.status_changed',
       'payment_link.status_changed',
@@ -2396,9 +2403,14 @@ describe('automation filters (ADR-145)', () => {
     );
   });
 
-  it('apply to the two automation run events and no other', () => {
-    expect(WEBHOOK_AUTOMATION_EVENTS).toEqual(['automation.run_started', 'automation.run_ended']);
+  it('apply to the three automation run events and no other', () => {
+    expect(WEBHOOK_AUTOMATION_EVENTS).toEqual([
+      'automation.run_started',
+      'automation.run_ended',
+      'automation.run_step',
+    ]);
     expect(webhookTakesAutomationRuns(['automation.run_started'])).toBe(true);
+    expect(webhookTakesAutomationRuns(['automation.run_step'])).toBe(true);
     expect(webhookTakesAutomationRuns(['consent.changed', 'automation.run_ended'])).toBe(true);
     for (const type of WEBHOOK_EVENT_KEYS.filter((t) => !t.startsWith('automation.'))) {
       expect(webhookTakesAutomationRuns([type]), type).toBe(false);
@@ -2414,6 +2426,10 @@ describe('automation filters (ADR-145)', () => {
     expect(webhookAutomationIdsFor([...both], undefined, null)).toBeNull();
     // One of the two events is enough to keep the list.
     expect(webhookAutomationIdsFor(['automation.run_ended'], undefined, [farewell])).toEqual([
+      farewell,
+    ]);
+    // A run's steps narrow alike (ADR-326).
+    expect(webhookAutomationIdsFor(['automation.run_step'], undefined, [farewell])).toEqual([
       farewell,
     ]);
     expect(webhookAutomationIdsFor(['consent.changed'], [greeter], [farewell])).toBeNull();
@@ -2459,6 +2475,7 @@ describe('API key filters of run events (ADR-319)', () => {
     // One of the two events is enough to keep the list.
     expect(webhookRunApiKeyIdsFor(['automation.run_started'], undefined, [crm])).toEqual([crm]);
     expect(webhookRunApiKeyIdsFor(['automation.run_ended'], undefined, [crm])).toEqual([crm]);
+    expect(webhookRunApiKeyIdsFor(['automation.run_step'], undefined, [crm])).toEqual([crm]);
     expect(webhookRunApiKeyIdsFor(['consent.changed'], [store], [crm])).toBeNull();
     expect(webhookRunApiKeyIdsFor(['message.received'], undefined, [crm])).toBeNull();
   });
@@ -3433,6 +3450,7 @@ describe('number filters (ADR-170)', () => {
       'satisfaction_survey.answered',
       'automation.run_started',
       'automation.run_ended',
+      'automation.run_step',
       'order.received',
       'order.status_changed',
       'payment_link.status_changed',
@@ -3453,6 +3471,7 @@ describe('number filters (ADR-170)', () => {
       'contact.merged': contactMergedPayloadSchema,
       'automation.run_started': automationRunStartedPayloadSchema,
       'automation.run_ended': automationRunEndedPayloadSchema,
+      'automation.run_step': automationRunStepPayloadSchema,
       'order.received': orderReceivedPayloadSchema,
       'order.status_changed': orderStatusChangedPayloadSchema,
       'payment_link.status_changed': paymentLinkStatusChangedPayloadSchema,
@@ -4795,7 +4814,11 @@ describe('run trigger filters (ADR-183)', () => {
   });
 
   it('are the triggers the run events report, each named as the automation pages name it', () => {
-    for (const schema of [automationRunStartedPayloadSchema, automationRunEndedPayloadSchema]) {
+    for (const schema of [
+      automationRunStartedPayloadSchema,
+      automationRunEndedPayloadSchema,
+      automationRunStepPayloadSchema,
+    ]) {
       expect(schema.shape.data.shape.run.shape.trigger.options).toEqual([...WEBHOOK_RUN_TRIGGERS]);
     }
     expect(WEBHOOK_RUN_TRIGGER_LABELS).toEqual({
@@ -4810,6 +4833,9 @@ describe('run trigger filters (ADR-183)', () => {
   it('are kept only while the endpoint takes a run event: given, kept, or cleared', () => {
     expect(webhookRunTriggersFor(['automation.run_started'], ['api'], null)).toEqual(['api']);
     expect(webhookRunTriggersFor(['automation.run_ended'], undefined, ['keyword'])).toEqual([
+      'keyword',
+    ]);
+    expect(webhookRunTriggersFor(['automation.run_step'], undefined, ['keyword'])).toEqual([
       'keyword',
     ]);
     expect(
@@ -5552,6 +5578,243 @@ describe('the event of a satisfaction survey answer (ADR-293)', () => {
       'an endpoint that names numbers receives it for those numbers only; the team, member and tag filters of conversations’ events do not narrow it',
     ]) {
       expect(described).toContain(words);
+    }
+  });
+});
+
+describe('the event of an automation run step (ADR-326)', () => {
+  const id = '0192f1d5-9f3c-7d2e-8b4f-6c7d8e9fa001';
+  const tenantId = '0192f1d5-9f3c-7d2e-8b4f-6c7d8e9fa002';
+  const [run, automation, conversation, contact, channel, message, key] = [
+    '0192f1d5-9f3c-7d2e-8b4f-6c7d8e9fa003',
+    '0192f1d5-9f3c-7d2e-8b4f-6c7d8e9fa004',
+    '0192f1d5-9f3c-7d2e-8b4f-6c7d8e9fa005',
+    '0192f1d5-9f3c-7d2e-8b4f-6c7d8e9fa006',
+    '0192f1d5-9f3c-7d2e-8b4f-6c7d8e9fa007',
+    '0192f1d5-9f3c-7d2e-8b4f-6c7d8e9fa008',
+    '0192f1d5-9f3c-7d2e-8b4f-6c7d8e9fa009',
+  ];
+  const at = new Date('2026-10-08T09:00:00.000Z');
+  const startedAt = new Date('2026-10-08T08:59:00.000Z');
+
+  /** A transaction that answers its reads, in order, with `answers`; another read fails the test. */
+  function answering(answers: unknown[][]) {
+    const queue = [...answers];
+    const chain = {
+      from: () => chain,
+      innerJoin: () => chain,
+      leftJoin: () => chain,
+      where: () => {
+        const rows = queue.shift();
+        if (!rows) throw new Error('an unexpected read');
+        return Promise.resolve(rows);
+      },
+    };
+    return {
+      tx: { select: () => chain } as unknown as Parameters<typeof buildWebhookPayload>[0],
+      unread: () => queue.length,
+    };
+  }
+
+  const event = (stepId: unknown) =>
+    ({
+      id,
+      tenantId,
+      type: 'automation.run_step',
+      messageId: null,
+      conversationId: conversation,
+      contactId: contact,
+      templateId: null,
+      status: 'sent',
+      detail: { stepId, runId: run, automationId: automation },
+      contactChanges: null,
+      tagsAdded: null,
+      tagsRemoved: null,
+      occurredAt: at,
+    }) as unknown as Parameters<typeof buildWebhookPayload>[1];
+
+  const runRow = {
+    id: run,
+    automationId: automation,
+    automationName: 'Welcome',
+    triggerType: 'api',
+    apiKeyId: key,
+    startedAt,
+    conversationId: conversation,
+    contactId: contact,
+    channelId: channel,
+    channelPhone: '+91 80 4567 8901',
+  };
+
+  it('gives the step by its number, node type, outcome and message, never its detail or branch', () => {
+    const data = automationRunStepPayloadSchema.shape.data.shape;
+    expect(Object.keys(data)).toEqual(['run', 'step', 'conversation', 'contact', 'channel']);
+    expect(Object.keys(data.step.shape)).toEqual(['number', 'nodeType', 'outcome', 'messageId']);
+    expect(Object.keys(data.run.shape)).toEqual([
+      'id',
+      'automationId',
+      'automationName',
+      'trigger',
+      'apiKeyId',
+      'startedAt',
+    ]);
+    // Every kind of node and every outcome a run's log records.
+    expect(data.step.shape.nodeType.unwrap().options).toEqual([...NODE_TYPES]);
+    expect(data.step.shape.outcome.options).toEqual([...AUTOMATION_STEP_OUTCOMES]);
+    const body = (step: Record<string, unknown>) => ({
+      id,
+      type: 'automation.run_step',
+      createdAt: at.toISOString(),
+      data: {
+        run: {
+          id: run,
+          automationId: automation,
+          automationName: 'Welcome',
+          trigger: 'keyword',
+          apiKeyId: null,
+          startedAt: startedAt.toISOString(),
+        },
+        step: { number: 2, nodeType: 'ask_buttons', outcome: 'asked', messageId: message, ...step },
+        conversation: { id: conversation },
+        contact: { id: contact, phone: '+919845012345', name: 'Asha' },
+        channel: { id: channel, phone: '+91 80 4567 8901' },
+      },
+    });
+    expect(automationRunStepPayloadSchema.safeParse(body({})).success).toBe(true);
+    // The run's start, outside a node and sending nothing.
+    expect(
+      automationRunStepPayloadSchema.safeParse(
+        body({ number: 0, nodeType: null, outcome: 'started', messageId: null }),
+      ).success,
+    ).toBe(true);
+    for (const step of [
+      { number: -1 },
+      { number: 1.5 },
+      { nodeType: 'keyword' },
+      { outcome: 'queued' },
+      { messageId: 'w360_aaaaaaaaaaaa' },
+    ]) {
+      expect(
+        automationRunStepPayloadSchema.safeParse(body(step)).success,
+        JSON.stringify(step),
+      ).toBe(false);
+    }
+    expect(
+      automationRunStepPayloadSchema.safeParse({ ...body({}), type: 'automation.run_started' })
+        .success,
+    ).toBe(false);
+  });
+
+  it('builds the body from the step as the run’s log recorded it and the run as it is now', async () => {
+    // What the log holds besides: the reads ask only for what the body gives.
+    const step = {
+      runId: run,
+      seq: 3,
+      nodeType: 'send_text',
+      outcome: 'sent',
+      messageId: message,
+      detail: 'deal_owner_unavailable',
+      branch: 'Yes, cancel my order',
+    };
+    const reads = answering([
+      [step],
+      [runRow],
+      [{ phone: '+919845012345', name: 'Asha', erasedAt: null }],
+    ]);
+    const built = await buildWebhookPayload(reads.tx, event(id), 'endpoint');
+    expect(built).toEqual({
+      id,
+      type: 'automation.run_step',
+      createdAt: '2026-10-08T09:00:00.000Z',
+      data: {
+        run: {
+          id: run,
+          automationId: automation,
+          automationName: 'Welcome',
+          trigger: 'api',
+          apiKeyId: key,
+          startedAt: '2026-10-08T08:59:00.000Z',
+        },
+        step: { number: 3, nodeType: 'send_text', outcome: 'sent', messageId: message },
+        conversation: { id: conversation },
+        contact: { id: contact, phone: '+919845012345', name: 'Asha' },
+        channel: { id: channel, phone: '+91 80 4567 8901' },
+      },
+    });
+    expect(automationRunStepPayloadSchema.safeParse(built).success).toBe(true);
+    expect(JSON.stringify(built)).not.toMatch(/deal_owner_unavailable|cancel my order/);
+    expect(reads.unread()).toBe(0);
+    // An erased message leaves the step without its id, and a deleted automation without its name.
+    const erased = answering([
+      [{ ...step, seq: 5, nodeType: 'ask_text', outcome: 'asked', messageId: null }],
+      [{ ...runRow, automationName: null, apiKeyId: null, triggerType: 'keyword' }],
+      [{ phone: '+919845012345', name: 'Asha', erasedAt: at }],
+    ]);
+    const after = await buildWebhookPayload(erased.tx, event(id), 'endpoint');
+    expect(after.data).toMatchObject({
+      run: { automationName: null, apiKeyId: null, trigger: 'keyword' },
+      step: { number: 5, nodeType: 'ask_text', outcome: 'asked', messageId: null },
+      contact: { id: contact, phone: null, name: null },
+    });
+    expect(erased.unread()).toBe(0);
+  });
+
+  it('sends nothing for a step or a run that is gone, reading nothing for an id that is not one', async () => {
+    const gone = answering([[]]);
+    await expect(buildWebhookPayload(gone.tx, event(id), 'endpoint')).rejects.toBeInstanceOf(
+      WebhookEventGoneError,
+    );
+    expect(gone.unread()).toBe(0);
+    const runGone = answering([
+      [{ runId: run, seq: 0, nodeType: null, outcome: 'started', messageId: null }],
+      [],
+    ]);
+    await expect(buildWebhookPayload(runGone.tx, event(id), 'endpoint')).rejects.toBeInstanceOf(
+      WebhookEventGoneError,
+    );
+    expect(runGone.unread()).toBe(0);
+    for (const stepId of ['step', null, 7]) {
+      const none = answering([]);
+      await expect(buildWebhookPayload(none.tx, event(stepId), 'endpoint')).rejects.toBeInstanceOf(
+        WebhookEventGoneError,
+      );
+    }
+  });
+
+  it('is described: a step’s number, kind, outcome and message, narrowed as the run events are', () => {
+    expect(WEBHOOK_EVENT_INFO['automation.run_step'].label).toBe('Automation step');
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const described = doc.webhooks['automation.run_step'].post.description;
+    for (const words of [
+      'Members’ test runs are not sent.',
+      'One event for each step a live run records in its log, its start included (step 0)',
+      'never the branch it took (for an answered question, the title of the button the customer tapped, which is their answer',
+      "order a run's steps by step.number",
+      "receives only those runs' steps, as for automation.run_started",
+      "a run's end statuses and end reasons do not narrow its steps",
+    ]) {
+      expect(described).toContain(words);
+    }
+    const schemas = doc.components.schemas as Record<
+      string,
+      { properties?: Record<string, { description?: string }> }
+    >;
+    // The run filters name the step event wherever they are described, and in their refusals.
+    for (const schema of ['WebhookEndpoint', 'CreateWebhookEndpoint', 'UpdateWebhookEndpoint']) {
+      for (const field of ['automationIds', 'runTriggers', 'runApiKeyIds']) {
+        expect(schemas[schema]?.properties?.[field]?.description, `${schema}.${field}`).toContain(
+          'automation.run_step',
+        );
+      }
+    }
+    for (const refusal of [
+      WEBHOOK_AUTOMATIONS_NEED_THE_EVENTS,
+      WEBHOOK_RUN_TRIGGERS_NEED_THE_EVENTS,
+      WEBHOOK_RUN_API_KEYS_NEED_THE_EVENTS,
+    ]) {
+      expect(refusal).toMatch(
+        /only for an endpoint that receives Automation started, Automation ended or Automation step\.$/,
+      );
     }
   });
 });

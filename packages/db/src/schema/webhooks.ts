@@ -10,7 +10,7 @@ const tz = (name: string) => timestamp(name, { withTimezone: true, mode: 'date' 
 
 /**
  * Event types an endpoint can receive (ADR-053, ADR-074, ADR-078, ADR-085, ADR-225, ADR-256,
- * ADR-261); `ping` is only sent as a test.
+ * ADR-261, ADR-326); `ping` is only sent as a test.
  */
 export const WEBHOOK_EVENT_TYPES = [
   'message.received',
@@ -27,6 +27,7 @@ export const WEBHOOK_EVENT_TYPES = [
   'contact.merged',
   'automation.run_started',
   'automation.run_ended',
+  'automation.run_step',
   'order.received',
   'order.status_changed',
   'payment_link.status_changed',
@@ -219,8 +220,9 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
    */
   contactFieldKeys: text('contact_field_keys').array(),
   /**
-   * The automations whose runs it takes as `automation.run_started` and `automation.run_ended`
-   * (ADR-145); null takes every automation. Set only while one of those is among its events.
+   * The automations whose runs it takes as `automation.run_started`, `automation.run_ended` and
+   * `automation.run_step` (ADR-145, ADR-326); null takes every automation. Set only while one of
+   * those is among its events.
    */
   automationIds: uuid('automation_ids').array(),
   /**
@@ -296,13 +298,14 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
   runEndStatuses: text('run_end_statuses').array().$type<WebhookRunEndStatus[]>(),
   /**
    * What started the runs whose events it takes (ADR-183); null takes every run's. Set only while
-   * `automation.run_started` or `automation.run_ended` is among its events.
+   * `automation.run_started`, `automation.run_ended` or `automation.run_step` is among its events.
    */
   runTriggers: text('run_triggers').array().$type<WebhookRunTrigger[]>(),
   /**
    * The API keys whose runs' events it takes (migration 0241, ADR-319): the runs one of them
    * started through the API, or a key one of them was rotated from or into. null takes every run.
-   * Set only while `automation.run_started` or `automation.run_ended` is among its events.
+   * Set only while `automation.run_started`, `automation.run_ended` or `automation.run_step` is
+   * among its events.
    */
   runApiKeyIds: uuid('run_api_key_ids').array(),
   /**

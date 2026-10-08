@@ -32,6 +32,7 @@ import {
   authenticateApiToken,
   automationRunEndedPayloadSchema,
   automationRunStartedPayloadSchema,
+  automationRunStepPayloadSchema,
   campaignStatusChangedPayloadSchema,
   contactCreatedPayloadSchema,
   contactErasedPayloadSchema,
@@ -2872,6 +2873,287 @@ describe('automation run events (ADR-078)', () => {
     );
     // The key travels for the filter only: the payload reads it from the run.
     expect(sent.filter((s) => 'apiKeyId' in s.detail)).toEqual([]);
+  });
+
+  /** The steps a run's log holds, in their order. */
+  const stepsOf = (runId: string) =>
+    fx.query<{
+      id: string;
+      seq: number;
+      node_type: string | null;
+      outcome: string;
+      message_id: string | null;
+      detail: string | null;
+    }>(
+      `SELECT id, seq, node_type, outcome, message_id, detail FROM app.automation_run_steps
+        WHERE run_id = $1 ORDER BY seq`,
+      [runId],
+    );
+
+  it('sends each step of a live run to the endpoints that take steps, never its detail or branch, and nothing for a member’s test run (ADR-326)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const steps = await addEndpoint(c, ['automation.run_step']);
+    const runsOnly = await addEndpoint(c, ['automation.run_started', 'automation.run_ended']);
+    const automationId = await publishAutomation(
+      owner,
+      'Brochure',
+      keyword('brochure'),
+      sayGraph('Here is our brochure.'),
+    );
+    const { conversation_id: conversationId, contact_id: contactId } = await inbound(
+      c,
+      waId(),
+      'brochure please',
+    );
+    const [run] = await runsIn(conversationId);
+    if (!run) throw new Error('no run started');
+    expect(await driveRun(c, run.id)).toBe('ended');
+    // The log starts with the run's start, outside a node, and holds the message it sent.
+    const logged = await stepsOf(run.id);
+    expect(logged[0]).toMatchObject({ seq: 0, node_type: null, outcome: 'started' });
+    const said = logged.find((step) => step.outcome === 'sent');
+    expect(said).toMatchObject({ node_type: 'send_text' });
+    expect(said?.message_id).toEqual(expect.any(String));
+    // One event for each step, its outcome as the status, delivered to the endpoint taking steps
+    // only; the run's number and what started it travel for the filters only.
+    const stepEvents = (await eventsOf(c, 'automation.')).filter(
+      (e) => e.type === 'automation.run_step',
+    );
+    const byStep = (rows: unknown[][]) =>
+      [...rows].sort((x, y) => JSON.stringify(x).localeCompare(JSON.stringify(y)));
+    expect(
+      byStep(
+        stepEvents.map((e) => [e.detail, e.status, e.conversation_id, e.contact_id, e.deliveries]),
+      ),
+    ).toEqual(
+      byStep(
+        logged.map((step) => [
+          { stepId: step.id, runId: run.id, automationId },
+          step.outcome,
+          conversationId,
+          contactId,
+          1,
+        ]),
+      ),
+    );
+
+    await deliverDue(c);
+    const raw = bodiesAt(steps.path);
+    expect(raw.map((b) => b.type)).toEqual(logged.map(() => 'automation.run_step'));
+    // The body has no field for a step's detail or branch.
+    for (const body of raw) {
+      expect(Object.keys(body.data)).toEqual(['run', 'step', 'conversation', 'contact', 'channel']);
+      expect(Object.keys(body.data.step as object)).toEqual([
+        'number',
+        'nodeType',
+        'outcome',
+        'messageId',
+      ]);
+    }
+    const person = await personOf(contactId);
+    const bodies = raw
+      .map((b) => automationRunStepPayloadSchema.parse(b))
+      .sort((x, y) => x.data.step.number - y.data.step.number);
+    expect(bodies.map((b) => b.data.step)).toEqual(
+      logged.map((step) => ({
+        number: step.seq,
+        nodeType: step.node_type,
+        outcome: step.outcome,
+        messageId: step.message_id,
+      })),
+    );
+    for (const body of bodies) {
+      expect(body.data).toMatchObject({
+        run: {
+          id: run.id,
+          automationId,
+          automationName: 'Brochure',
+          trigger: 'keyword',
+          apiKeyId: null,
+          startedAt: run.started_at.toISOString(),
+        },
+        conversation: { id: conversationId },
+        contact: { id: contactId, phone: person.phone_e164, name: person.display_name },
+        channel: { id: c.channelAccountId, phone: '+91 90000 00000' },
+      });
+    }
+    expect(
+      bodiesAt(runsOnly.path)
+        .map((b) => b.type)
+        .sort(),
+    ).toEqual(['automation.run_ended', 'automation.run_started']);
+
+    // A member's test run of a draft, in the same conversation, records steps but sends none.
+    const svc = automationService();
+    const { id: draftId } = await svc.createAutomation(owner, { name: 'Draft' });
+    const draft = await svc.updateAutomation(owner, {
+      id: draftId,
+      expectedVersion: 0,
+      name: 'Draft',
+      description: null,
+      channelAccountId: null,
+      trigger: keyword('draft'),
+      graph: sayGraph('Testing.'),
+    });
+    const { runId: testRunId } = await svc.startTestRun(owner, {
+      id: draftId,
+      expectedVersion: draft.version,
+      conversationId,
+    });
+    expect(await driveRun(c, testRunId)).toBe('ended');
+    expect((await stepsOf(testRunId)).length).toBeGreaterThan(1);
+    expect(
+      (await eventsOf(c, 'automation.')).filter((e) => e.type === 'automation.run_step'),
+    ).toHaveLength(logged.length);
+  });
+
+  it('sends an endpoint that names automations, numbers, what started the runs or API keys only those runs’ steps (ADR-326)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const outlet = await fx.addNumber(c, { phone: '+91 90000 54321' });
+    const templateId = await approvedTemplate(c, {
+      category: 'UTILITY',
+      header: { type: 'none' },
+      body: { text: 'Hi {{1}}, your order {{2}} has shipped.', examples: ['Asha', 'A-1001'] },
+      footer: null,
+      buttons: [],
+    });
+    // Two keyword automations for every number, and one the API starts on the main number.
+    const greeter = await publishAutomation(
+      owner,
+      'Greeter',
+      keyword('hello'),
+      sayGraph('Hello there.'),
+    );
+    await publishAutomation(owner, 'Farewell', keyword('bye'), sayGraph('Goodbye for now.'));
+    const shipping = await publishAutomation(
+      owner,
+      'Shipping update',
+      { type: 'api', inputs: ['first_name', 'order'] },
+      {
+        version: 1,
+        start: 'shipped',
+        nodes: [
+          {
+            id: 'shipped',
+            type: 'send_template',
+            templateId,
+            header: [],
+            body: ['{{input.first_name}}', '{{input.order}}'],
+            next: null,
+          },
+        ],
+      },
+      c.channelAccountId,
+    );
+    const keys = createApiKeysService({ db: fx.dbs.app, clock: systemClock });
+    const store = await keys.create(owner, {
+      name: 'Store',
+      scopes: ['automations.start'],
+      expiresInDays: 0,
+    });
+    const crm = await keys.create(owner, {
+      name: 'CRM',
+      scopes: ['automations.start'],
+      expiresInDays: 0,
+    });
+    // Each endpoint takes the steps only, and names one filter of the run events.
+    const add = async (filters: Record<string, string[]>) =>
+      (
+        await webhooks().create(owner, {
+          url: `http://${HOST}:${port}/ok/${randomBytes(6).toString('hex')}`,
+          eventTypes: ['automation.run_step'],
+          ...filters,
+        })
+      ).id;
+    const endpoints = new Map([
+      [await add({}), 'every run'],
+      [await add({ automationIds: [greeter] }), 'greeter'],
+      [await add({ channelIds: [outlet.channelAccountId] }), 'outlet'],
+      [await add({ runTriggers: ['api'] }), 'api'],
+      [await add({ runApiKeyIds: [store.id] }), 'store key'],
+      [await add({ runApiKeyIds: [crm.id] }), 'crm key'],
+    ]);
+    const keywordRun = async (at: Company, text: string) => {
+      const [run] = await runsIn((await inbound(at, waId(), text)).conversation_id);
+      if (!run) throw new Error(`no run started by “${text}”`);
+      expect(await driveRun(c, run.id)).toBe('ended');
+      return run.id;
+    };
+    const runs = new Map([
+      [await keywordRun(c, 'hello'), 'hello on main'],
+      [await keywordRun(c, 'bye'), 'bye on main'],
+      [await keywordRun(outlet, 'hello'), 'hello on outlet'],
+    ]);
+    const ctx = await authenticateApiToken(fx.dbs.app, store.token, uuidv7());
+    if (!ctx) throw new Error('a new key does not authenticate');
+    const answer = await apiStartAutomationRun(
+      { db: fx.dbs.app, clock: systemClock, jobs: fx.jobs(), signer: fx.signer },
+      ctx,
+      shipping,
+      { to: '+91 98111 00072', inputs: { first_name: 'Asha', order: 'A-1002' } },
+      { key: 'ship-steps', requestHash: sha256Hex('ship-steps') },
+    );
+    const apiRun = (answer.body.data as { id: string }).id;
+    expect(await driveRun(c, apiRun)).toBe('ended');
+    runs.set(apiRun, 'api');
+
+    const sent = await fx.query<{
+      run: string;
+      endpoint: string;
+      steps: number;
+    }>(
+      `SELECT e.detail ->> 'runId' AS run, d.endpoint_id AS endpoint, count(*)::int AS steps
+         FROM app.webhook_deliveries d
+         JOIN app.webhook_events e ON e.tenant_id = d.tenant_id AND e.id = d.event_id
+        WHERE d.tenant_id = $1 AND e.type = 'automation.run_step'
+        GROUP BY 1, 2`,
+      [c.tenant.id],
+    );
+    const counts = new Map<string, number>();
+    for (const [runId, name] of runs) counts.set(name, (await stepsOf(runId)).length);
+    const sorted = (rows: unknown[][]) =>
+      [...rows].sort((x, y) => JSON.stringify(x).localeCompare(JSON.stringify(y)));
+    const each = (name: string, endpoint: string) => [name, endpoint, counts.get(name)];
+    // Every step of a run reaches the endpoints whose filters the run passes, and no other.
+    expect(sorted(sent.map((s) => [runs.get(s.run), endpoints.get(s.endpoint), s.steps]))).toEqual(
+      sorted([
+        each('hello on main', 'every run'),
+        each('hello on main', 'greeter'),
+        each('bye on main', 'every run'),
+        each('hello on outlet', 'every run'),
+        each('hello on outlet', 'greeter'),
+        each('hello on outlet', 'outlet'),
+        each('api', 'every run'),
+        each('api', 'api'),
+        each('api', 'store key'),
+      ]),
+    );
+    // The run's key, number and what started it travel for the filters only.
+    const stored = await fx.query<{ detail: Record<string, unknown> }>(
+      `SELECT detail FROM app.webhook_events WHERE tenant_id = $1 AND type = 'automation.run_step'`,
+      [c.tenant.id],
+    );
+    for (const { detail } of stored) {
+      expect(Object.keys(detail).sort()).toEqual(['automationId', 'runId', 'stepId']);
+    }
+
+    // The API run's steps name the key that started it.
+    await deliverDue(c);
+    const apiSteps = received
+      .map((r) => JSON.parse(r.body) as { type: string; data: { run?: { id?: string } } })
+      .filter((b) => b.type === 'automation.run_step' && b.data.run?.id === apiRun)
+      .map((b) => automationRunStepPayloadSchema.parse(b));
+    expect(apiSteps).toHaveLength(3 * (counts.get('api') ?? 0));
+    for (const body of apiSteps) {
+      expect(body.data.run).toMatchObject({
+        automationName: 'Shipping update',
+        trigger: 'api',
+        apiKeyId: store.id,
+      });
+    }
+    expect(apiSteps.map((b) => b.data.step.nodeType)).toContain('send_template');
   });
 
   it('reports a run that fails, with its reason', async () => {

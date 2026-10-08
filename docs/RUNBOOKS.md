@@ -3295,6 +3295,16 @@ too, a change must pass both. To take more, tick the keys under "Payment Links a
 API" on the endpoint's page, or `PATCH /webhook-endpoints/{id}` with `paymentLinkApiKeyIds` (null
 for every link). Removing Payment Link status clears the list.
 
+**A receiver misses a run's steps, or asks what a step said (ADR-326).** `automation.run_step` is
+sent for each step a live run records, its start included; members' test runs send none, and a run
+completed by its last message being accepted records no step for that (its `automation.run_ended`
+says so). An endpoint that names automations, what started the runs, API keys or numbers receives
+only those runs' steps, as for the run events. Steps arrive in any order: `step.number` orders them.
+A step's branch and detail are never sent: an answered question's branch is the button the customer
+tapped, their answer; members read both on the run's page in Automations. Events no endpoint takes
+are not recorded, so there is nothing to replay for steps recorded before the endpoint took the
+event; the run's page lists them.
+
 **A receiver misses the events of a member's conversations (ADR-181).** An endpoint can take the
 message and conversation events of the conversations assigned to chosen members only. The endpoints
 list shows them ("Members whose conversations’ events are sent: …"), and the API answers

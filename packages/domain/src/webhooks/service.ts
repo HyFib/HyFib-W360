@@ -803,7 +803,7 @@ export const webhookRunTriggersSchema = z
   .nullable();
 
 export const WEBHOOK_RUN_TRIGGERS_NEED_THE_EVENTS =
-  'Choose what started the runs only for an endpoint that receives Automation started or Automation ended.';
+  'Choose what started the runs only for an endpoint that receives Automation started, Automation ended or Automation step.';
 
 /**
  * The run triggers an endpoint keeps after it is added or changed: every run (null) unless it takes
@@ -823,10 +823,10 @@ export function webhookRunTriggersFor(
 const RUN_STARTING_SCOPE: ApiScope = 'automations.start';
 
 /**
- * The API keys whose runs an endpoint takes as `automation.run_started` and
- * `automation.run_ended` (ADR-319), each once: the runs one of them started through the API, or a
- * key one of them was rotated from or into. null takes every run, those started otherwise among
- * them.
+ * The API keys whose runs an endpoint takes as `automation.run_started`, `automation.run_ended`
+ * and `automation.run_step` (ADR-319, ADR-326), each once: the runs one of them started through the
+ * API, or a key one of them was rotated from or into. null takes every run, those started otherwise
+ * among them.
  */
 export const webhookRunApiKeyIdsSchema = webhookApiKeyIdsSchema(
   WEBHOOK_LIMITS.runApiKeys,
@@ -834,7 +834,7 @@ export const webhookRunApiKeyIdsSchema = webhookApiKeyIdsSchema(
 );
 
 export const WEBHOOK_RUN_API_KEYS_NEED_THE_EVENTS =
-  'Choose API keys only for an endpoint that receives Automation started or Automation ended.';
+  'Choose API keys only for an endpoint that receives Automation started, Automation ended or Automation step.';
 
 export const WEBHOOK_RUN_API_KEYS_NOT_FOUND =
   'Choose API keys of this company that can start automations.';
@@ -1126,7 +1126,7 @@ export const webhookAutomationIdsSchema = z
   .nullable();
 
 export const WEBHOOK_AUTOMATIONS_NEED_THE_EVENTS =
-  'Choose automations only for an endpoint that receives Automation started or Automation ended.';
+  'Choose automations only for an endpoint that receives Automation started, Automation ended or Automation step.';
 
 export const WEBHOOK_AUTOMATIONS_NOT_PUBLISHED =
   'Choose automations of this company that have been published.';
