@@ -1,0 +1,3 @@
+-- 0248_validate_webhook_automation_step_event_type: validates the event type check 0247 replaced
+-- NOT VALID (ADR-326). Validation reads the table without blocking its writes.
+ALTER TABLE app.webhook_events VALIDATE CONSTRAINT webhook_events_type_check;

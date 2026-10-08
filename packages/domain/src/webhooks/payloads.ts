@@ -4,6 +4,8 @@ import {
   asc,
   AUTOMATION_END_REASONS,
   AUTOMATION_RUN_STATUSES,
+  AUTOMATION_STEP_OUTCOMES,
+  automationRunSteps,
   automationRuns,
   automations,
   CAMPAIGN_COMPLETION_REASONS,
@@ -38,6 +40,7 @@ import {
   type WebhookEventType,
 } from '@w360/db';
 import { apiContactColumns, apiContactSchema, toApiContact } from '../api/contact-view';
+import { NODE_TYPES } from '../automations/graph';
 import {
   apiPaymentLinkSchema,
   paymentLinkColumns,
@@ -447,6 +450,58 @@ export const automationRunStartedPayloadSchema = envelope(
 export const automationRunEndedPayloadSchema = envelope(
   'automation.run_ended',
   webhookRunDataSchema,
+);
+
+/**
+ * A step of an automation run (ADR-326): its number, the kind of node it ran, its outcome and the
+ * message it sent, as the run's log recorded them. Never the branch it took (for an answered
+ * question, the title of the button the customer tapped: their answer, withheld as a run's answers
+ * are) or the step's detail (a note for the run's page).
+ */
+const webhookRunStepSchema = z.object({
+  number: z
+    .number()
+    .int()
+    .min(0)
+    .describe(
+      'The step’s place in its run, from 0 (the run starting). Deliveries are not ordered: order a run’s steps by it.',
+    ),
+  nodeType: z
+    .enum(NODE_TYPES)
+    .nullable()
+    .describe(
+      'The kind of node the step ran, as the automation builder names it (send_text, ask_buttons, condition, http_request, create_deal…); null for what happened to the run outside a node: it started, it was stopped or taken over, or it failed between steps (it expired, say).',
+    ),
+  outcome: z
+    .enum(AUTOMATION_STEP_OUTCOMES)
+    .describe(
+      'What the step did, as the run’s page in Automations lists it: started; sent a message; asked the customer, got an answer (answered), asked again (retried) or had no reply in time (timed_out); checked a condition (branched); updated the contact or conversation; started waiting or the wait ended (resumed); made a web request (requested) and had it finish (responded); created, moved or closed in the CRM, or skipped a CRM step; handed_off, completed, failed, stopped or taken_over.',
+    ),
+  messageId: z
+    .uuid()
+    .nullable()
+    .describe(
+      'The message the step sent (a message, a question, a template or a form), whose message.status events follow it; null for a step that sent none. Erasing the contact redacts the message and keeps its id.',
+    ),
+});
+export const automationRunStepPayloadSchema = envelope(
+  'automation.run_step',
+  z.object({
+    run: webhookRunSchema
+      .pick({
+        id: true,
+        automationId: true,
+        automationName: true,
+        trigger: true,
+        apiKeyId: true,
+        startedAt: true,
+      })
+      .describe('The run the step belongs to, as it is when the event is delivered.'),
+    step: webhookRunStepSchema,
+    conversation: z.object({ id: z.uuid() }),
+    contact: contactSchema,
+    channel: channelSchema,
+  }),
 );
 
 const orderStatusSchema = z.enum(ORDER_STATUSES);
@@ -1213,6 +1268,25 @@ async function runOf(tx: Tx, tenantId: string, runId: string | null) {
   return row ?? null;
 }
 
+/**
+ * A run's step as its event gives it (ADR-326), or null once its run is gone. Steps are never
+ * changed.
+ */
+async function runStepOf(tx: Tx, tenantId: string, stepId: string | null) {
+  if (!stepId || !z.uuid().safeParse(stepId).success) return null;
+  const [row] = await tx
+    .select({
+      runId: automationRunSteps.runId,
+      seq: automationRunSteps.seq,
+      nodeType: automationRunSteps.nodeType,
+      outcome: automationRunSteps.outcome,
+      messageId: automationRunSteps.messageId,
+    })
+    .from(automationRunSteps)
+    .where(and(eq(automationRunSteps.tenantId, tenantId), eq(automationRunSteps.id, stepId)));
+  return row ?? null;
+}
+
 /** A deal with what its events give as it is now (ADR-256), or null once it is gone. */
 async function dealOf(tx: Tx, tenantId: string, dealId: string | null) {
   if (!dealId || !z.uuid().safeParse(dealId).success) return null;
@@ -1602,6 +1676,34 @@ export async function buildWebhookPayload(
             endReason: ended ? str(event.detail.endReason) : null,
             startedAt: run.startedAt.toISOString(),
             endedAt: ended ? event.occurredAt.toISOString() : null,
+          },
+          conversation: { id: run.conversationId },
+          contact: await contactOf(tx, tenantId, run.contactId),
+          channel: { id: run.channelId, phone: run.channelPhone ?? null },
+        },
+      };
+    }
+    case 'automation.run_step': {
+      // The step as its run's log recorded it, never its detail or branch; the run as it is now.
+      const step = await runStepOf(tx, tenantId, str(event.detail.stepId));
+      const run = step ? await runOf(tx, tenantId, step.runId) : null;
+      if (!step || !run) throw new WebhookEventGoneError();
+      return {
+        ...base,
+        data: {
+          run: {
+            id: run.id,
+            automationId: run.automationId,
+            automationName: run.automationName ?? null,
+            trigger: run.triggerType,
+            apiKeyId: run.apiKeyId,
+            startedAt: run.startedAt.toISOString(),
+          },
+          step: {
+            number: step.seq,
+            nodeType: step.nodeType,
+            outcome: step.outcome,
+            messageId: step.messageId,
           },
           conversation: { id: run.conversationId },
           contact: await contactOf(tx, tenantId, run.contactId),

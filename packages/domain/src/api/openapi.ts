@@ -49,6 +49,7 @@ import {
 import {
   automationRunEndedPayloadSchema,
   automationRunStartedPayloadSchema,
+  automationRunStepPayloadSchema,
   campaignStatusChangedPayloadSchema,
   dealCreatedPayloadSchema,
   dealUpdatedPayloadSchema,
@@ -1198,7 +1199,7 @@ export const apiWebhookEndpointSchema = z.object({
     .array(z.uuid())
     .nullable()
     .describe(
-      "The automations whose runs the endpoint receives as automation.run_started and automation.run_ended; null receives every automation's runs, including automations published later.",
+      "The automations whose runs the endpoint receives as automation.run_started, automation.run_ended and automation.run_step; null receives every automation's runs, including automations published later.",
     ),
   campaignStatuses: z
     .array(z.enum(WEBHOOK_CAMPAIGN_STATUSES))
@@ -1282,13 +1283,13 @@ export const apiWebhookEndpointSchema = z.object({
     .array(z.enum(WEBHOOK_RUN_TRIGGERS))
     .nullable()
     .describe(
-      'What started the runs whose events (automation.run_started and automation.run_ended) the endpoint receives, as run.trigger names it; null receives every run.',
+      'What started the runs whose events (automation.run_started, automation.run_ended and automation.run_step) the endpoint receives, as run.trigger names it; null receives every run.',
     ),
   runApiKeyIds: z
     .array(z.uuid())
     .nullable()
     .describe(
-      'The API keys whose runs (automation.run_started and automation.run_ended) the endpoint receives, as run.apiKeyId names them: the runs one of them started through the API, or a key one of them was rotated from or into. A run started otherwise is not received. null receives every run.',
+      'The API keys whose runs (automation.run_started, automation.run_ended and automation.run_step) the endpoint receives, as run.apiKeyId names them: the runs one of them started through the API, or a key one of them was rotated from or into. A run started otherwise is not received. null receives every run.',
     ),
   consentChanges: z
     .array(z.enum(WEBHOOK_CONSENT_CHANGES))
@@ -4242,6 +4243,12 @@ export function buildOpenApiDocument(serverUrl: string) {
         `${WEBHOOK_EVENT_INFO['automation.run_ended'].description} Deliveries are not ordered: the end of a short run can arrive before its start, so compare run.startedAt and run.endedAt. An endpoint that names the automations or API keys it takes receives only their runs, as for automation.run_started, and an endpoint receives every end unless it names the statuses it takes (its \`runEndStatuses\`, or the endings ticked in Settings → Webhooks).`,
         'WebhookAutomationRunEnded',
       ),
+      'automation.run_step': webhook(
+        'webhookAutomationRunStep',
+        WEBHOOK_EVENT_INFO['automation.run_step'].label,
+        `${WEBHOOK_EVENT_INFO['automation.run_step'].description} One event for each step a live run records in its log, its start included (step 0), alongside the run's automation.run_started and automation.run_ended. The step gives its number in the run, the kind of node it ran, its outcome and the message it sent; never the branch it took (for an answered question, the title of the button the customer tapped, which is their answer: run events never send a run's answers) or the step's detail (a note for the run's page in Automations, such as what started the run, a web request's status or why a send was refused). Deliveries are not ordered: order a run's steps by step.number. An endpoint that names the automations, what started the runs, the API keys or the numbers it takes receives only those runs' steps, as for automation.run_started; a run's end statuses and end reasons do not narrow its steps.`,
+        'WebhookAutomationRunStep',
+      ),
       'order.received': webhook(
         'webhookOrderReceived',
         WEBHOOK_EVENT_INFO['order.received'].label,
@@ -4605,6 +4612,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         WebhookContactMerged: jsonSchema(contactMergedPayloadSchema),
         WebhookAutomationRunStarted: jsonSchema(automationRunStartedPayloadSchema),
         WebhookAutomationRunEnded: jsonSchema(automationRunEndedPayloadSchema),
+        WebhookAutomationRunStep: jsonSchema(automationRunStepPayloadSchema),
         WebhookOrderReceived: jsonSchema(orderReceivedPayloadSchema),
         WebhookOrderStatusChanged: jsonSchema(orderStatusChangedPayloadSchema),
         WebhookPaymentLinkStatusChanged: jsonSchema(paymentLinkStatusChangedPayloadSchema),

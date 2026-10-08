@@ -1,5 +1,48 @@
 # Progress
 
+## 2026-10-08 — A webhook event for each step of an automation run (P5-09, H-014, ADR-326)
+
+Status: **Implemented; its database tests run in CI only.** The run events said when a run started
+and how it ended, not what it did between. The local PostgreSQL is unavailable, so the migrations
+and the integration tests below were written but not run here; migrations 0247 and 0248 passed the
+pglast parse check (syntax only).
+
+### Completed
+
+- **Database:** migration 0247 (the event, number, automation, trigger and run API key checks with
+  `automation.run_step`; the events' type check NOT VALID; the trigger on
+  `app.automation_run_steps`; `app.capture_webhook_event` with the step event among the run events)
+  and 0248 (validating the events' type check).
+- **Domain:** `automation.run_step` in `WEBHOOK_EVENT_TYPES`, `WEBHOOK_EVENT_KEYS`,
+  `WEBHOOK_EVENT_INFO` ("Automation step"), `WEBHOOK_AUTOMATION_EVENTS` and
+  `WEBHOOK_CHANNEL_EVENTS`; `automationRunStepPayloadSchema` and its builder in
+  `webhooks/payloads.ts`, reading the step and its run; the OpenAPI entry and the run filters'
+  descriptions; the refusals' wording for the run filters.
+- **Web:** Settings → Webhooks lists the event; the "Runs started by" help names it.
+- **Tests:** unit (4 new in `webhooks/webhooks.test.ts`: the body's fields and values, the builder,
+  a step or run gone, the OpenAPI text and the run filters' refusals; 7 changed there for the event
+  lists, the run filters and the triggers the run events report); integration (2 new in
+  `webhook-events.test.ts`: every step of a live run and none of a test run, and the run filters on
+  steps; 4 assertions changed in `webhooks.test.ts` for the refusals' wording). Written for CI; the
+  integration tests were not run here. No e2e test.
+- **Docs:** ADR-326; ARCHITECTURE; SECURITY; THREAT-MODEL T294; DEPLOYMENT; RUNBOOKS;
+  DATA-RETENTION; BACKLOG P5-09; feature matrix H-014.
+- **Mutation checks:** 29/29 deliberate regressions caught on the unit-tested parts, two of them
+  after assertions were added (the run filters' refusals and the API's description of runTriggers).
+  The trigger, the capture and the checks need the database, so their regressions are left to the
+  integration tests, which run in CI.
+
+### Test commands and results (local, 2026-10-08)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 140 files, 1369 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| pglast 7 parse of migrations 0247 and 0248         | passed (syntax only)                                          |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
 ## 2026-10-08 — Administrators told apart in the Assign list (P5-10, H-034, ADR-325)
 
 Status: **Implemented; its database and browser tests run in CI only.** CI's end-to-end run of PR

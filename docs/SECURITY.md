@@ -1821,6 +1821,14 @@ Phase 5 rules (outgoing webhooks, P5-09):
   company. Payloads say what started the run, the API key for runs started through the API (as the
   inbox names keys), the status and end reason, and the contact as message events do; never the
   run's answers or API inputs, which can hold personal data.
+- Automation step events (ADR-326) follow the same rules: captured for live runs only, by a trigger
+  running as the role that records the step (only the runtime role, in the company's scope), so each
+  event stays in the run's company. The payload gives the step's number, node type, outcome and the
+  id of the message it sent, read from the append-only log when delivered; never the branch it took
+  (for an answered question, the title of the button the customer tapped, which is their answer,
+  withheld as the run's answers are) or its detail. The run filters narrow it as they narrow the run
+  events, and the run's number, trigger and key are taken out of the stored detail (unit tests;
+  integration tests, run in CI only).
 - Order events (ADR-085) follow the same rules. Triggers on WhatsApp orders run as the role that
   adds the order or changes its status (only the runtime role, in the company's scope), so each
   event stays in the order's company and holds the order id, the statuses and who changed it only.

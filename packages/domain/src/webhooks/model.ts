@@ -70,6 +70,7 @@ export const WEBHOOK_EVENT_KEYS = [
   'contact.merged',
   'automation.run_started',
   'automation.run_ended',
+  'automation.run_step',
   'order.received',
   'order.status_changed',
   'payment_link.status_changed',
@@ -154,6 +155,11 @@ export const WEBHOOK_EVENT_INFO: Record<WebhookEventType, { label: string; descr
       label: 'Automation ended',
       description:
         'An automation run ended: completed, handed to people, taken over, stopped or failed, with the reason.',
+    },
+    'automation.run_step': {
+      label: 'Automation step',
+      description:
+        'An automation run took a step: it sent a message, asked a question and had it answered, took a branch, waited, called a web address, changed a contact or the CRM, or was stopped, taken over or failed. Members’ test runs are not sent.',
     },
     'order.received': {
       label: 'Order received',
@@ -834,10 +840,14 @@ export const WEBHOOK_LIMITS = {
   oauthTokenLength: 4000,
 } as const;
 
-/** The events of automation runs, which an endpoint can take for chosen automations (ADR-145). */
+/**
+ * The events of automation runs, which an endpoint can take for chosen automations (ADR-145): a
+ * run's start, its end and its steps (ADR-326).
+ */
 export const WEBHOOK_AUTOMATION_EVENTS = [
   'automation.run_started',
   'automation.run_ended',
+  'automation.run_step',
 ] as const satisfies readonly WebhookEventType[];
 
 /** An automation an endpoint takes the runs of (ADR-145). */
@@ -895,8 +905,8 @@ export const webhookApiKeyText = (key: WebhookEndpointApiKey): string => {
 /**
  * The events that happen on a WhatsApp number, which an endpoint can take for chosen numbers
  * (ADR-170): a campaign's are on the number it sends from, a Payment Link's on its order's (ADR-285),
- * a survey's answer on its conversation's (ADR-293). Consent, contact, template, deal, task and note
- * events belong to no number.
+ * a survey's answer on its conversation's (ADR-293), a run's step on its run's (ADR-326). Consent,
+ * contact, template, deal, task and note events belong to no number.
  */
 export const WEBHOOK_CHANNEL_EVENTS = [
   'message.received',
@@ -907,6 +917,7 @@ export const WEBHOOK_CHANNEL_EVENTS = [
   'satisfaction_survey.answered',
   'automation.run_started',
   'automation.run_ended',
+  'automation.run_step',
   'order.received',
   'order.status_changed',
   'payment_link.status_changed',

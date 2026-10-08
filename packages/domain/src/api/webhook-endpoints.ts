@@ -339,7 +339,7 @@ const contactFieldKeysField = webhookContactFieldKeysSchema.describe(
 );
 
 const automationIdsField = webhookAutomationIdsSchema.describe(
-  `The automations whose runs the endpoint receives as automation.run_started and automation.run_ended, 1 to ${WEBHOOK_LIMITS.automations} ids of the company's automations that have been published (an archived one stays allowed), only with one of those events; null receives every automation's runs, including automations published later.`,
+  `The automations whose runs the endpoint receives as automation.run_started, automation.run_ended and automation.run_step, 1 to ${WEBHOOK_LIMITS.automations} ids of the company's automations that have been published (an archived one stays allowed), only with one of those events; null receives every automation's runs, including automations published later.`,
 );
 
 /** Automations are chosen only for an endpoint that receives automation runs (ADR-145). */
@@ -487,7 +487,7 @@ const invalidRunEndStatuses = () =>
   });
 
 const runTriggersField = webhookRunTriggersSchema.describe(
-  'What started the runs whose events the endpoint receives, as `run.trigger` names it (keyword, conversation_started, any_message, store_event, api), only with automation.run_started or automation.run_ended; both events are narrowed alike. null receives every run.',
+  'What started the runs whose events the endpoint receives, as `run.trigger` names it (keyword, conversation_started, any_message, store_event, api), only with automation.run_started, automation.run_ended or automation.run_step; the three events are narrowed alike. null receives every run.',
 );
 
 /** What started the runs is chosen only for an endpoint that receives run events (ADR-183). */
@@ -497,7 +497,7 @@ const invalidRunTriggers = () =>
   });
 
 const runApiKeyIdsField = webhookRunApiKeyIdsSchema.describe(
-  `The API keys whose runs the endpoint receives as automation.run_started and automation.run_ended: 1 to ${WEBHOOK_LIMITS.runApiKeys} ids of the company's keys that can start automations (automations.start), as run.apiKeyId names them (a key that adds an endpoint finds its own id in the endpoint's apiKeyId), only with one of those events. A run started through the API is received when the key that started it is listed, or a key it was rotated from or into, so a list keeps an integration's runs across rotations; a revoked or expired key stays allowed, as the runs it started still end. A run started otherwise belongs to no key and is not received. With the automations or what started the runs too, a run must pass them all. null receives every run.`,
+  `The API keys whose runs the endpoint receives as automation.run_started, automation.run_ended and automation.run_step: 1 to ${WEBHOOK_LIMITS.runApiKeys} ids of the company's keys that can start automations (automations.start), as run.apiKeyId names them (a key that adds an endpoint finds its own id in the endpoint's apiKeyId), only with one of those events. A run started through the API is received when the key that started it is listed, or a key it was rotated from or into, so a list keeps an integration's runs across rotations; a revoked or expired key stays allowed, as the runs it started still end. A run started otherwise belongs to no key and is not received. With the automations or what started the runs too, a run must pass them all. null receives every run.`,
 );
 
 /** API keys are chosen only for an endpoint that receives run events (ADR-319). */
@@ -1131,7 +1131,7 @@ export const apiUpdateWebhookEndpointSchema = z
     automationIds: automationIdsField
       .optional()
       .describe(
-        "The automations whose runs the endpoint receives (the company's published automations); null receives every automation's runs. Left out, they stay, unless the events no longer include automation.run_started or automation.run_ended, which clears them.",
+        "The automations whose runs the endpoint receives (the company's published automations); null receives every automation's runs. Left out, they stay, unless the events no longer include automation.run_started, automation.run_ended or automation.run_step, which clears them.",
       ),
     campaignStatuses: campaignStatusesField
       .optional()
@@ -1201,12 +1201,12 @@ export const apiUpdateWebhookEndpointSchema = z
     runTriggers: runTriggersField
       .optional()
       .describe(
-        'What started the runs whose events the endpoint receives; null receives every run. Left out, they stay, unless the events no longer include automation.run_started or automation.run_ended, which clears them.',
+        'What started the runs whose events the endpoint receives; null receives every run. Left out, they stay, unless the events no longer include automation.run_started, automation.run_ended or automation.run_step, which clears them.',
       ),
     runApiKeyIds: runApiKeyIdsField
       .optional()
       .describe(
-        "The API keys whose runs the endpoint receives (the company's keys that can start automations, whatever their state); null receives every run. Left out, they stay, unless the events no longer include automation.run_started or automation.run_ended, which clears them.",
+        "The API keys whose runs the endpoint receives (the company's keys that can start automations, whatever their state); null receives every run. Left out, they stay, unless the events no longer include automation.run_started, automation.run_ended or automation.run_step, which clears them.",
       ),
     consentChanges: consentChangesField
       .optional()

@@ -3149,7 +3149,7 @@ describe('automation filters (ADR-145)', () => {
     await refused(
       ['consent.changed'],
       [greeter.id],
-      /only for an endpoint that receives Automation started or Automation ended/,
+      /only for an endpoint that receives Automation started, Automation ended or Automation step/,
     );
     await refused(runs, [], /at least one automation/);
     await refused(runs, ['greeter'], /from the list/, 'automationIds.0');
@@ -3244,7 +3244,7 @@ describe('automation filters (ADR-145)', () => {
     await expectAppError(
       change({ eventTypes: ['consent.changed'], automationIds: [farewell.id] }),
       'validation_failed',
-      /only for an endpoint that receives Automation started or Automation ended/,
+      /only for an endpoint that receives Automation started, Automation ended or Automation step/,
     );
     // …and any list for an endpoint that takes neither.
     await expect(setInDatabase(`ARRAY['${farewell.id}']::uuid[]`)).rejects.toThrow(
@@ -4243,7 +4243,7 @@ describe('run trigger filters (ADR-183)', () => {
         message,
       );
     const needsTheEvents =
-      /only for an endpoint that receives Automation started or Automation ended/;
+      /only for an endpoint that receives Automation started, Automation ended or Automation step/;
     await refused(['message.received', 'order.received'], ['api'], needsTheEvents);
     await refused(['automation.run_started'], [], /at least one way a run starts/);
     // Members' test runs send no events, so `test` is not a choice.
@@ -4358,7 +4358,7 @@ describe('API key filters of run events (ADR-319)', () => {
         message,
       );
     const needsTheEvents =
-      /only for an endpoint that receives Automation started or Automation ended/;
+      /only for an endpoint that receives Automation started, Automation ended or Automation step/;
     const notTheirs = /API keys of this company that can start automations/;
     await refused(['message.received', 'order.received'], [store.id], needsTheEvents);
     await refused(['automation.run_started'], [], /at least one API key/);

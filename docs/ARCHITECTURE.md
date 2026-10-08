@@ -1869,6 +1869,15 @@ true`); the same key with another request (method, path and body hashed) answers
   when delivered: the run (what started it, the API key for `api` runs, the automation's name now,
   the status and end as captured), the conversation id, the contact and the number; never the run's
   answers or inputs.
+- **Automation step events** (migrations 0247–0248, ADR-326): an `AFTER INSERT` trigger on
+  `app.automation_run_steps` (`app.webhook_capture_automation_step`) captures `automation.run_step`
+  for each step a live run records, through `app.capture_webhook_event` (replaced with the same
+  signature): the step's outcome as the status; the step, run and automation ids in `detail`; the
+  run's number, trigger and key for the filters only. The automation, trigger, run API key and
+  number filters apply as for the run events, and their checks keep each list while the endpoint
+  takes any of the three. The payload is built when delivered from the step and the run: the step's
+  number, node type, outcome and message id, never its branch or detail; the run's id, automation,
+  trigger, key and start; the conversation, contact and number.
 - **Order events** (migrations 0063–0064, ADR-085): triggers on `app.commerce_orders` capture
   `order.received` when a WhatsApp order is recorded and `order.status_changed` when an update
   changes its status (a member, or the payment worker applying a Payment Link's outcome), through
