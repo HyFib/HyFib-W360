@@ -171,6 +171,8 @@ import {
   WEBHOOK_SURVEY_SCORES_NEED_THE_EVENT,
   WEBHOOK_SURVEY_ASSIGNEES_NEED_THE_EVENT,
   WEBHOOK_SURVEY_TEAMS_NEED_THE_EVENT,
+  WEBHOOK_SURVEY_CONTACT_TAGS_NEED_THE_EVENT,
+  WEBHOOK_SURVEY_CONVERSATION_TAGS_NEED_THE_EVENT,
   WEBHOOK_CONTACT_TAGS_NEED_THE_EVENTS,
   WEBHOOK_CONVERSATION_TAGS_NEED_THE_EVENTS,
   WEBHOOK_CAMPAIGN_STATUSES_NEED_THE_EVENT,
@@ -1498,6 +1500,8 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'runTriggers',
       'stageIds',
       'surveyAssigneeIds',
+      'surveyContactTags',
+      'surveyConversationTags',
       'surveyScores',
       'surveyTeamIds',
       'taskAssigneeIds',
@@ -1624,6 +1628,16 @@ describe('webhook endpoints through the API (ADR-081)', () => {
         `(its \`${field}\`: `,
       );
     }
+    // The contact and conversation tags of survey answers (ADR-312).
+    for (const field of ['surveyContactTags', 'surveyConversationTags']) {
+      const list = (answered.properties as Record<string, { anyOf?: unknown[] }>)[field];
+      expect(list?.anyOf, field).toHaveLength(2);
+      expect(answered.required).toContain(field);
+      expect(Object.keys(createBody.properties)).toContain(field);
+    }
+    expect(webhooks['satisfaction_survey.answered']?.post?.description).toContain(
+      'Tags narrow it too (its `surveyContactTags` and `surveyConversationTags`',
+    );
     // The template statuses an endpoint receives (ADR-148): a list, or null.
     const templateStatuses = (answered.properties as Record<string, { anyOf?: unknown[] }>)
       .templateStatuses;
@@ -2127,7 +2141,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       taskAssigneeIds: [dev],
     });
     expect(apiUpdateWebhookEndpointSchema.safeParse({}).error?.issues[0]?.message).toContain(
-      'the deal owners, the task assignees, the pipelines, stages and owners of tasks’ deals and of notes’ deals, who made the CRM changes, the survey scores, the members credited with survey answers and the teams of their conversations, the members, the contact tags, the conversation tags, the OAuth client',
+      'the deal owners, the task assignees, the pipelines, stages and owners of tasks’ deals and of notes’ deals, who made the CRM changes, the survey scores, the members credited with survey answers and the teams of their conversations, the contact and conversation tags of survey answers, the members, the contact tags, the conversation tags, the OAuth client',
     );
     const doc = buildOpenApiDocument('https://app.example.com/api/v1');
     const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
@@ -3604,7 +3618,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       expect(apiUpdateWebhookEndpointSchema.parse(change)).toEqual(change);
     }
     expect(apiUpdateWebhookEndpointSchema.safeParse({}).error?.issues[0]?.message).toContain(
-      'the survey scores, the members credited with survey answers and the teams of their conversations, the members,',
+      'the survey scores, the members credited with survey answers and the teams of their conversations,',
     );
     const doc = buildOpenApiDocument('https://app.example.com/api/v1');
     const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
@@ -3622,6 +3636,73 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     ]?.post?.description;
     expect(surveyEvent).toContain(
       'an answer credited to no member, or of a conversation in no team, matches no such list, and with more than one list an answer must pass them all',
+    );
+  });
+
+  it('take the contact and conversation tags of survey answers only with satisfaction_survey.answered, as contacts and conversations carry them, and a list of them alone is a change (ADR-312)', () => {
+    const url = 'https://hooks.example.com/w360';
+    const answers = { url, events: ['satisfaction_survey.answered'] };
+    expect(
+      apiCreateWebhookEndpointSchema.parse({
+        ...answers,
+        surveyContactTags: ['VIP', 'Gold   Member', 'vip'],
+        surveyConversationTags: [' Refund '],
+      }),
+    ).toMatchObject({
+      surveyContactTags: ['vip', 'gold member'],
+      surveyConversationTags: ['refund'],
+    });
+    // Conversations' events take the conversations' tag lists, not the answers'.
+    const refused = apiCreateWebhookEndpointSchema.safeParse({
+      url,
+      events: [...WEBHOOK_TEAM_EVENTS],
+      surveyContactTags: ['vip'],
+      surveyConversationTags: ['refund'],
+    });
+    expect(refused.error?.issues.map((i) => [i.path.join('.'), i.message])).toEqual([
+      ['surveyContactTags', WEBHOOK_SURVEY_CONTACT_TAGS_NEED_THE_EVENT],
+      ['surveyConversationTags', WEBHOOK_SURVEY_CONVERSATION_TAGS_NEED_THE_EVENT],
+    ]);
+    const many = Array.from({ length: WEBHOOK_LIMITS.surveyContactTags + 1 }, (_, i) => `tag ${i}`);
+    for (const body of [
+      { ...answers, surveyContactTags: [] },
+      { ...answers, surveyContactTags: ['a,b'] },
+      { ...answers, surveyContactTags: many },
+      { ...answers, surveyConversationTags: [] },
+      { ...answers, surveyConversationTags: [42] },
+      { ...answers, surveyConversationTags: many },
+    ]) {
+      expect(apiCreateWebhookEndpointSchema.safeParse(body).success, JSON.stringify(body)).toBe(
+        false,
+      );
+    }
+    for (const change of [
+      { surveyContactTags: null },
+      { surveyContactTags: ['vip'] },
+      { surveyConversationTags: null },
+      { surveyConversationTags: ['refund'] },
+    ]) {
+      expect(apiUpdateWebhookEndpointSchema.parse(change)).toEqual(change);
+    }
+    expect(apiUpdateWebhookEndpointSchema.safeParse({}).error?.issues[0]?.message).toContain(
+      'the teams of their conversations, the contact and conversation tags of survey answers, the members,',
+    );
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas;
+    const given = (schemas.CreateWebhookEndpoint as { properties: Record<string, unknown> })
+      .properties;
+    expect(JSON.stringify(given.surveyContactTags)).toContain(
+      '1 to 50 tags as contacts carry them (as GET /contacts gives them: compared as tags are written, in lower case with single spaces, each up to 40 characters without commas), only with satisfaction_survey.answered. An answer counts when the answering contact has any of the tags when they answer',
+    );
+    expect(JSON.stringify(given.surveyConversationTags)).toContain(
+      'only with satisfaction_survey.answered. An answer counts when its conversation has any of the tags when the customer answers',
+    );
+    const surveyEvent = (doc.webhooks as Record<string, { post?: { description?: string } }>)[
+      'satisfaction_survey.answered'
+    ]?.post?.description;
+    expect(surveyEvent).toContain(
+      'an answer is sent when the answering contact, or its conversation, has any of the tags when the customer answers.',
     );
   });
 

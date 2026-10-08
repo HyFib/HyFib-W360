@@ -1391,6 +1391,18 @@ export const apiWebhookEndpointSchema = z.object({
     .describe(
       "The teams whose conversations' satisfaction survey answers (satisfaction_survey.answered) the endpoint receives, by the team the conversation is in when the customer answers; null receives every answer. Other events are not narrowed.",
     ),
+  surveyContactTags: z
+    .array(z.string())
+    .nullable()
+    .describe(
+      'The contact tags whose satisfaction survey answers (satisfaction_survey.answered) the endpoint receives, by the tags the answering contact has when they answer, as contacts carry them; null receives every answer. Other events are not narrowed.',
+    ),
+  surveyConversationTags: z
+    .array(z.string())
+    .nullable()
+    .describe(
+      'The conversation tags whose satisfaction survey answers (satisfaction_survey.answered) the endpoint receives, by the tags the conversation has when the customer answers, as conversations carry them; null receives every answer. Other events are not narrowed.',
+    ),
   assigneeIds: z
     .array(z.uuid())
     .nullable()
@@ -4148,7 +4160,7 @@ export function buildOpenApiDocument(serverUrl: string) {
       'satisfaction_survey.answered': webhook(
         'webhookSatisfactionSurveyAnswered',
         WEBHOOK_EVENT_INFO['satisfaction_survey.answered'].label,
-        `${WEBHOOK_EVENT_INFO['satisfaction_survey.answered'].description} The survey is the survey as GET /satisfaction-surveys reads it when the event is delivered: its score (3 for the first and best button, 1 for the third), the customer’s tap and the survey message by id among the conversation’s messages, and the members credited and resolving by id. Only the customer’s first tap answers a survey, so a survey is answered once and this event is sent once for it; surveys skipped or never answered send nothing. It happens on the conversation’s WhatsApp number, so an endpoint that names numbers receives it for those numbers only; the team, member and tag filters of conversations’ events do not narrow it. An endpoint receives every answer unless it names the scores it takes (its \`surveyScores\`, or the scores ticked in Settings → Webhooks). It can name as well the members credited with the answers it takes (its \`surveyAssigneeIds\`: the member the conversation was assigned to when it was resolved, the survey’s assigneeId) and the teams whose conversations’ answers it takes (its \`surveyTeamIds\`: the team the conversation is in when the customer answers), in Settings → Webhooks too; an answer credited to no member, or of a conversation in no team, matches no such list, and with more than one list an answer must pass them all. Deliveries are not ordered.`,
+        `${WEBHOOK_EVENT_INFO['satisfaction_survey.answered'].description} The survey is the survey as GET /satisfaction-surveys reads it when the event is delivered: its score (3 for the first and best button, 1 for the third), the customer’s tap and the survey message by id among the conversation’s messages, and the members credited and resolving by id. Only the customer’s first tap answers a survey, so a survey is answered once and this event is sent once for it; surveys skipped or never answered send nothing. It happens on the conversation’s WhatsApp number, so an endpoint that names numbers receives it for those numbers only; the team, member and tag filters of conversations’ events do not narrow it. An endpoint receives every answer unless it names the scores it takes (its \`surveyScores\`, or the scores ticked in Settings → Webhooks). It can name as well the members credited with the answers it takes (its \`surveyAssigneeIds\`: the member the conversation was assigned to when it was resolved, the survey’s assigneeId) and the teams whose conversations’ answers it takes (its \`surveyTeamIds\`: the team the conversation is in when the customer answers), in Settings → Webhooks too; an answer credited to no member, or of a conversation in no team, matches no such list, and with more than one list an answer must pass them all. Tags narrow it too (its \`surveyContactTags\` and \`surveyConversationTags\`, or the tags given in Settings → Webhooks): an answer is sent when the answering contact, or its conversation, has any of the tags when the customer answers. Deliveries are not ordered.`,
         'WebhookSatisfactionSurveyAnswered',
       ),
       'contact.created': webhook(

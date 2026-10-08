@@ -2078,6 +2078,16 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   writes no event when none does. Settings and the API (`surveyAssigneeIds`, `surveyTeamIds`) set
   them, the services checking that members take conversations and teams are the company's (those a
   list holds stay); a change that drops the event clears them.
+- **Tag filters for satisfaction survey answers** (migration 0235, ADR-312): `survey_contact_tags`
+  and `survey_conversation_tags` on an endpoint list the tags of the contacts whose answers it takes
+  and of the conversations answered, as contacts and conversations carry them, null for every
+  answer; checks keep them to the tags' rule and to endpoints that take
+  `satisfaction_survey.answered`. `app.capture_webhook_event` (replaced with the same signature)
+  reads the contact's and the conversation's tags only when an active endpoint names tags for
+  answers, creates an answer's delivery only for endpoints whose lists share a tag with them, and
+  writes no event when none does. Settings and the API (`surveyContactTags`,
+  `surveyConversationTags`) set them; a change that drops the event clears them. The four tag lists
+  share one schema.
 - **Template status filters** (migration 0112, ADR-148): `template_statuses` on an endpoint lists
   the statuses it takes as `template.status_changed` (the eleven the event reports, `pending` to
   `locked`; HyFib's own steps, a deletion under way or refused and an unrecognised status are never

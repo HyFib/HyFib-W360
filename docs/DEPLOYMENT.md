@@ -1089,6 +1089,16 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    changes keep the lists, and its API refuses `surveyAssigneeIds` and `surveyTeamIds` (422) and
    leaves them out of the endpoints it answers.
 
+   Migration 0235 (ADR-312) adds `survey_contact_tags` and `survey_conversation_tags` to
+   `app.webhook_endpoints` with checks validated by reading the table, and replaces
+   `app.capture_webhook_event` (keeping 0234's filters) with the same signature; every endpoint
+   starts with neither list. Web servers of this release need it, as their reads of endpoints name
+   the columns; workers do not read them. Web servers from before it neither show nor change the
+   columns: until the web rollout ends, an old server's change that drops
+   `satisfaction_survey.answered` from an endpoint with either list fails on the check, its other
+   changes keep the lists, and its API refuses `surveyContactTags` and `surveyConversationTags`
+   (422) and leaves them out of the endpoints it answers.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

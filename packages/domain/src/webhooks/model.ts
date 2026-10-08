@@ -785,6 +785,10 @@ export const WEBHOOK_LIMITS = {
   surveyAssignees: 50,
   /** The teams whose conversations' survey answers an endpoint can choose (ADR-311). */
   surveyTeams: 50,
+  /** The contact tags whose survey answers an endpoint can choose (ADR-312). */
+  surveyContactTags: 50,
+  /** The conversation tags whose survey answers an endpoint can choose (ADR-312). */
+  surveyConversationTags: 50,
   /** The contact tags an endpoint can choose to take the conversations' events of (ADR-267). */
   contactTags: 50,
   /** The conversation tags an endpoint can choose to take the conversations' events of (ADR-273). */

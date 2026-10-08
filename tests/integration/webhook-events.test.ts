@@ -7062,4 +7062,134 @@ describe('satisfaction survey events (ADR-293)', () => {
     await answer(1, [ownerId, sales]);
     expect(await surveyEventsOf(c)).toHaveLength(5);
   });
+
+  it('sends an endpoint that names contact or conversation tags only the answers of contacts or conversations that have one of them when the customer answers, and captures none nobody takes (ADR-312)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    await createCsatService({ db: fx.dbs.app, clock: systemClock }).updateCsatSettings(owner, {
+      enabled: true,
+      question: 'How did we do today?',
+      labels: ['Great', 'Okay', 'Poor'],
+    });
+    const inboxWithSends = createInboxService({
+      db: fx.dbs.app,
+      clock: systemClock,
+      jobs: fx.jobs(),
+      signer: fx.signer,
+    });
+    /** An endpoint of the company taking the answers these lists name. */
+    const add = async (lists: Record<string, unknown>) => {
+      const path = `/ok/${randomBytes(6).toString('hex')}`;
+      const created = await webhooks().create(owner, {
+        url: `http://${HOST}:${port}${path}`,
+        eventTypes: ['satisfaction_survey.answered'],
+        ...lists,
+      });
+      return { ...created, path };
+    };
+    const vips = await add({ surveyContactTags: ['vip'] });
+    const refunds = await add({ surveyConversationTags: ['refund', 'delivery delay'] });
+    const unhappyVipRefunds = await add({
+      surveyScores: [1],
+      surveyContactTags: ['vip'],
+      surveyConversationTags: ['refund'],
+    });
+    const everyAnswer = await add({});
+    const tagContact = (contactId: string, tag: string) =>
+      fx.query(
+        'INSERT INTO app.contact_tags (id, tenant_id, contact_id, tag) VALUES ($1, $2, $3, $4)',
+        [uuidv7(), c.tenant.id, contactId, tag],
+      );
+    const untagContact = (contactId: string, tag: string) =>
+      fx.query(
+        'DELETE FROM app.contact_tags WHERE tenant_id = $1 AND contact_id = $2 AND tag = $3',
+        [c.tenant.id, contactId, tag],
+      );
+    const tagConversation = (conversationId: string, tag: string) =>
+      fx.query(
+        'INSERT INTO app.conversation_tags (id, tenant_id, conversation_id, tag) VALUES ($1, $2, $3, $4)',
+        [uuidv7(), c.tenant.id, conversationId, tag],
+      );
+    type Tags = { contact?: string[]; conversation?: string[]; untag?: string[] };
+    /**
+     * A customer writes, the contact and conversation are tagged, a member resolves it, the survey
+     * goes out, tags change, and the customer taps a score.
+     */
+    const answer = async (score: 1 | 2 | 3, before: Tags, later: Tags = {}) => {
+      const phone = waId();
+      const { conversation_id: conversationId, contact_id: contactId } = await inbound(
+        c,
+        phone,
+        'Where is my parcel?',
+      );
+      for (const tag of before.contact ?? []) await tagContact(contactId, tag);
+      for (const tag of before.conversation ?? []) await tagConversation(conversationId, tag);
+      await inboxWithSends.setStatus(owner, {
+        conversationId,
+        status: 'resolved',
+        expectedVersion: await versionOf(conversationId),
+      });
+      const [survey] = await fx.query<{ id: string; message_id: string }>(
+        `SELECT id, message_id FROM app.csat_surveys WHERE conversation_id = $1`,
+        [conversationId],
+      );
+      const [intent] = await fx.query<{ id: string }>(
+        `SELECT id FROM app.send_intents WHERE message_id = $1`,
+        [survey!.message_id],
+      );
+      await processSendIntent(
+        {
+          db: fx.dbs.app,
+          keyring: fx.keyring,
+          graph: fx.graph,
+          clock: systemClock,
+          rate: { capacity: 1000, refillPerSecond: 1000 },
+          jobs: fx.jobs(),
+          signer: fx.signer,
+        },
+        authorizedTenantScope(c.tenant.id, c.owner.id),
+        intent!.id,
+      );
+      const sent = fx.standIn.state.requests.filter((r) => r.path.endsWith('/messages')).at(-1)!;
+      for (const tag of later.contact ?? []) await tagContact(contactId, tag);
+      for (const tag of later.conversation ?? []) await tagConversation(conversationId, tag);
+      for (const tag of later.untag ?? []) await untagContact(contactId, tag);
+      await tap(c, phone, `w360csat:${survey!.id}:${score}`, sent.wamid!);
+      return survey!.id;
+    };
+    const unhappyVipRefund = await answer(1, { contact: ['vip'], conversation: ['refund'] });
+    const happyVip = await answer(3, { contact: ['vip'] });
+    const unhappyDelay = await answer(1, { conversation: ['delivery delay'] });
+    const untagged = await answer(1, {});
+    // Tags count as the contact and conversation have them when the customer answers: added after
+    // the survey went out, or removed by then.
+    const taggedLater = await answer(1, {}, { contact: ['vip'], conversation: ['refund'] });
+    const untaggedLater = await answer(1, { contact: ['vip'] }, { untag: ['vip'] });
+
+    // Each answer is captured once, with a delivery to each endpoint whose lists all hold it.
+    expect((await surveyEventsOf(c)).map((e) => [e.detail.surveyId, e.deliveries])).toEqual([
+      [unhappyVipRefund, 4],
+      [happyVip, 2],
+      [unhappyDelay, 2],
+      [untagged, 1],
+      [taggedLater, 4],
+      [untaggedLater, 1],
+    ]);
+    await deliverDue(c);
+    const surveysAt = (path: string) =>
+      bodiesAt(path)
+        .map((b) => (b.data.survey as { id: string }).id)
+        .sort();
+    expect(surveysAt(vips.path)).toEqual([unhappyVipRefund, happyVip, taggedLater].sort());
+    expect(surveysAt(refunds.path)).toEqual([unhappyVipRefund, unhappyDelay, taggedLater].sort());
+    expect(surveysAt(unhappyVipRefunds.path)).toEqual([unhappyVipRefund, taggedLater].sort());
+    expect(surveysAt(everyAnswer.path)).toHaveLength(6);
+
+    // With the endpoints taking every answer and every vip's off, an answer no list holds is not
+    // captured at all.
+    await webhooks().setEnabled(owner, { endpointId: everyAnswer.id, enabled: false });
+    await webhooks().setEnabled(owner, { endpointId: vips.id, enabled: false });
+    await answer(3, { contact: ['vip'] });
+    expect(await surveyEventsOf(c)).toHaveLength(6);
+  });
 });

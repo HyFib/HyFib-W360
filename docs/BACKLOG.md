@@ -1207,11 +1207,14 @@ verification, app review, Embedded Signup configuration).
   CI]** (ADR-311, migration 0234: an endpoint takes the answers credited to chosen members, the
   conversation's assignee when it was resolved, or of chosen teams' conversations, the team when the
   customer answers; other events are not narrowed).
-  Remaining: filters for other event types (survey answers by contact or conversation tags, among
-  them) and on a message's or contact's values (such as a field's value, contact events by tag, or
-  the key that started a run or made a change), other authentication (headers computed per delivery,
-  other OAuth grants), mutual TLS, fixed egress addresses, events for store orders and each step of
-  a run, `createdAt` finer than the millisecond, load tests.
+  **[Tag filters for satisfaction survey answers built; their database tests run only in CI]**
+  (ADR-312, migration 0235: an endpoint takes the answers of contacts or conversations with chosen
+  tags, as they have them when the customer answers; other events are not narrowed).
+  Remaining: filters for other event types and on a message's or contact's values (such as a field's
+  value, contact events by tag, or the key that started a run or made a change), other
+  authentication (headers computed per delivery, other OAuth grants), mutual TLS, fixed egress
+  addresses, events for store orders and each step of a run, `createdAt` finer than the millisecond,
+  load tests.
 - **P5-10 Platform ops screens** **[built, locally verified with test data only]** (ADR-054):
   `/platform/ops` with Overview, Onboarding (failed and abandoned signups, failed or stuck number
   setups, new companies without a number), Integrations (current failures with host-only labels,

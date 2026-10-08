@@ -1912,26 +1912,92 @@ export async function assertWebhookSurveyTeams(
 }
 
 /**
+ * A list of 1 to `limit` tags as contacts and conversations carry them (`normalizeTag`, ADR-220),
+ * each once in the order given, refused at the first entry that is not a tag; null takes `every`.
+ */
+function webhookTagsSchema(limit: number, every: string) {
+  return z
+    .array(z.string({ error: 'Give tags as text.' }))
+    .min(1, `Give at least one tag, or take ${every}.`)
+    .max(limit, `Give at most ${limit} tags.`)
+    .transform((given, ctx) => {
+      const tags: string[] = [];
+      for (const [index, raw] of given.entries()) {
+        const tag = normalizeTag(raw);
+        if (!tag.ok) {
+          ctx.addIssue({ code: 'custom', message: tag.message, path: [index] });
+          return z.NEVER;
+        }
+        if (!tags.includes(tag.tag)) tags.push(tag.tag);
+      }
+      return tags;
+    })
+    .nullable();
+}
+
+/**
+ * The contact tags whose satisfaction survey answers an endpoint takes (ADR-312), as contacts carry
+ * them, each once, by the tags the answering contact has when they answer; null takes every answer,
+ * including those of contacts without tags.
+ */
+export const webhookSurveyContactTagsSchema = webhookTagsSchema(
+  WEBHOOK_LIMITS.surveyContactTags,
+  'every answer',
+);
+
+export const WEBHOOK_SURVEY_CONTACT_TAGS_NEED_THE_EVENT =
+  'Choose the contact tags of answered surveys only for an endpoint that receives Satisfaction survey answered.';
+
+/**
+ * The contact tags of answered surveys an endpoint keeps after it is added or changed: every answer
+ * (null) unless it takes `satisfaction_survey.answered`; then those given, or else the ones it had.
+ */
+export function webhookSurveyContactTagsFor(
+  eventTypes: readonly WebhookEventType[],
+  given: readonly string[] | null | undefined,
+  current: readonly string[] | null,
+): string[] | null {
+  if (!eventTypes.includes('satisfaction_survey.answered')) return null;
+  const kept = given === undefined ? current : given;
+  return kept ? [...kept] : null;
+}
+
+/**
+ * The conversation tags whose satisfaction survey answers an endpoint takes (ADR-312), as
+ * conversations carry them, each once, by the tags the conversation has when the customer answers;
+ * null takes every answer, including those of conversations without tags.
+ */
+export const webhookSurveyConversationTagsSchema = webhookTagsSchema(
+  WEBHOOK_LIMITS.surveyConversationTags,
+  'every answer',
+);
+
+export const WEBHOOK_SURVEY_CONVERSATION_TAGS_NEED_THE_EVENT =
+  'Choose the conversation tags of answered surveys only for an endpoint that receives Satisfaction survey answered.';
+
+/**
+ * The conversation tags of answered surveys an endpoint keeps after it is added or changed: every
+ * answer (null) unless it takes `satisfaction_survey.answered`; then those given, or else the ones
+ * it had.
+ */
+export function webhookSurveyConversationTagsFor(
+  eventTypes: readonly WebhookEventType[],
+  given: readonly string[] | null | undefined,
+  current: readonly string[] | null,
+): string[] | null {
+  if (!eventTypes.includes('satisfaction_survey.answered')) return null;
+  const kept = given === undefined ? current : given;
+  return kept ? [...kept] : null;
+}
+
+/**
  * The contact tags whose conversations' message and conversation events an endpoint takes
  * (ADR-267), as contacts carry them (`normalizeTag`), each once; null takes every conversation's.
  */
-export const webhookContactTagsSchema = z
-  .array(z.string({ error: 'Give tags as text.' }))
-  .min(1, 'Give at least one tag, or take every conversation.')
-  .max(WEBHOOK_LIMITS.contactTags, `Give at most ${WEBHOOK_LIMITS.contactTags} tags.`)
-  .transform((given, ctx) => {
-    const tags: string[] = [];
-    for (const [index, raw] of given.entries()) {
-      const tag = normalizeTag(raw);
-      if (!tag.ok) {
-        ctx.addIssue({ code: 'custom', message: tag.message, path: [index] });
-        return z.NEVER;
-      }
-      if (!tags.includes(tag.tag)) tags.push(tag.tag);
-    }
-    return tags;
-  })
-  .nullable();
+export const webhookContactTagsSchema = webhookTagsSchema(
+  WEBHOOK_LIMITS.contactTags,
+  'every conversation',
+);
 
 export const WEBHOOK_CONTACT_TAGS_NEED_THE_EVENTS =
   'Choose contact tags only for an endpoint that receives message or conversation events.';
@@ -1955,23 +2021,10 @@ export function webhookContactTagsFor(
  * conversations carry them (`normalizeTag`, as contact tags, ADR-220), each once; null takes every
  * conversation's.
  */
-export const webhookConversationTagsSchema = z
-  .array(z.string({ error: 'Give tags as text.' }))
-  .min(1, 'Give at least one tag, or take every conversation.')
-  .max(WEBHOOK_LIMITS.conversationTags, `Give at most ${WEBHOOK_LIMITS.conversationTags} tags.`)
-  .transform((given, ctx) => {
-    const tags: string[] = [];
-    for (const [index, raw] of given.entries()) {
-      const tag = normalizeTag(raw);
-      if (!tag.ok) {
-        ctx.addIssue({ code: 'custom', message: tag.message, path: [index] });
-        return z.NEVER;
-      }
-      if (!tags.includes(tag.tag)) tags.push(tag.tag);
-    }
-    return tags;
-  })
-  .nullable();
+export const webhookConversationTagsSchema = webhookTagsSchema(
+  WEBHOOK_LIMITS.conversationTags,
+  'every conversation',
+);
 
 export const WEBHOOK_CONVERSATION_TAGS_NEED_THE_EVENTS =
   'Choose conversation tags only for an endpoint that receives message or conversation events.';
@@ -2174,6 +2227,16 @@ const endpointFields = z.object({
    * answer, ADR-311); left out, they stay.
    */
   surveyTeamIds: webhookSurveyTeamIdsSchema.optional(),
+  /**
+   * Given, the contact tags whose satisfaction survey answers it takes (null: every answer,
+   * ADR-312); left out, they stay.
+   */
+  surveyContactTags: webhookSurveyContactTagsSchema.optional(),
+  /**
+   * Given, the conversation tags whose satisfaction survey answers it takes (null: every answer,
+   * ADR-312); left out, they stay.
+   */
+  surveyConversationTags: webhookSurveyConversationTagsSchema.optional(),
   /**
    * Given, the members whose assigned conversations' events it takes (null: every conversation's,
    * ADR-181); left out, they stay.
@@ -2420,6 +2483,21 @@ const surveyTeamsNeedTheEvent = {
     !data.surveyTeamIds || data.eventTypes.includes('satisfaction_survey.answered'),
   options: { path: ['surveyTeamIds'], message: WEBHOOK_SURVEY_TEAMS_NEED_THE_EVENT },
 };
+/** Contact tags of answered surveys are chosen only for an endpoint that takes them (ADR-312). */
+const surveyContactTagsNeedTheEvent = {
+  check: (data: { eventTypes: WebhookEventType[]; surveyContactTags?: unknown }) =>
+    !data.surveyContactTags || data.eventTypes.includes('satisfaction_survey.answered'),
+  options: { path: ['surveyContactTags'], message: WEBHOOK_SURVEY_CONTACT_TAGS_NEED_THE_EVENT },
+};
+/** The conversation tags of answered surveys likewise (ADR-312). */
+const surveyConversationTagsNeedTheEvent = {
+  check: (data: { eventTypes: WebhookEventType[]; surveyConversationTags?: unknown }) =>
+    !data.surveyConversationTags || data.eventTypes.includes('satisfaction_survey.answered'),
+  options: {
+    path: ['surveyConversationTags'],
+    message: WEBHOOK_SURVEY_CONVERSATION_TAGS_NEED_THE_EVENT,
+  },
+};
 /** Members are chosen only for an endpoint that takes events of conversations (ADR-181). */
 const assigneesNeedTheEvents = {
   check: (data: { eventTypes: WebhookEventType[]; assigneeIds?: unknown }) =>
@@ -2476,6 +2554,8 @@ const endpointSchema = endpointFields
   .refine(surveyScoresNeedTheEvent.check, surveyScoresNeedTheEvent.options)
   .refine(surveyAssigneesNeedTheEvent.check, surveyAssigneesNeedTheEvent.options)
   .refine(surveyTeamsNeedTheEvent.check, surveyTeamsNeedTheEvent.options)
+  .refine(surveyContactTagsNeedTheEvent.check, surveyContactTagsNeedTheEvent.options)
+  .refine(surveyConversationTagsNeedTheEvent.check, surveyConversationTagsNeedTheEvent.options)
   .refine(assigneesNeedTheEvents.check, assigneesNeedTheEvents.options)
   .refine(contactTagsNeedTheEvents.check, contactTagsNeedTheEvents.options)
   .refine(conversationTagsNeedTheEvents.check, conversationTagsNeedTheEvents.options);
@@ -2519,6 +2599,8 @@ const updateSchema = endpointFields
   .refine(surveyScoresNeedTheEvent.check, surveyScoresNeedTheEvent.options)
   .refine(surveyAssigneesNeedTheEvent.check, surveyAssigneesNeedTheEvent.options)
   .refine(surveyTeamsNeedTheEvent.check, surveyTeamsNeedTheEvent.options)
+  .refine(surveyContactTagsNeedTheEvent.check, surveyContactTagsNeedTheEvent.options)
+  .refine(surveyConversationTagsNeedTheEvent.check, surveyConversationTagsNeedTheEvent.options)
   .refine(assigneesNeedTheEvents.check, assigneesNeedTheEvents.options)
   .refine(contactTagsNeedTheEvents.check, contactTagsNeedTheEvents.options)
   .refine(conversationTagsNeedTheEvents.check, conversationTagsNeedTheEvents.options);
@@ -2683,6 +2765,16 @@ export interface WebhookEndpointView {
    * named; null takes every answer.
    */
   surveyTeams: WebhookEndpointTeam[] | null;
+  /**
+   * The contact tags whose satisfaction survey answers it takes (ADR-312), as stored; null takes
+   * every answer.
+   */
+  surveyContactTags: string[] | null;
+  /**
+   * The conversation tags whose satisfaction survey answers it takes (ADR-312), as stored; null
+   * takes every answer.
+   */
+  surveyConversationTags: string[] | null;
   /**
    * The members whose assigned conversations' events it takes (ADR-181), as stored, named, with
    * whether conversations can still be assigned to them; null takes every conversation's.
@@ -2952,6 +3044,8 @@ export async function lockWebhookEndpoint(
       surveyScores: webhookEndpoints.surveyScores,
       surveyAssigneeIds: webhookEndpoints.surveyAssigneeIds,
       surveyTeamIds: webhookEndpoints.surveyTeamIds,
+      surveyContactTags: webhookEndpoints.surveyContactTags,
+      surveyConversationTags: webhookEndpoints.surveyConversationTags,
       assigneeIds: webhookEndpoints.assigneeIds,
       contactTags: webhookEndpoints.contactTags,
       conversationTags: webhookEndpoints.conversationTags,
@@ -3030,6 +3124,8 @@ export async function insertWebhookEndpoint(
     surveyScores: WebhookSurveyScore[] | null;
     surveyAssigneeIds: string[] | null;
     surveyTeamIds: string[] | null;
+    surveyContactTags: string[] | null;
+    surveyConversationTags: string[] | null;
     assigneeIds: string[] | null;
     contactTags: string[] | null;
     conversationTags: string[] | null;
@@ -3097,6 +3193,8 @@ export async function insertWebhookEndpoint(
     surveyScores: input.surveyScores,
     surveyAssigneeIds: input.surveyAssigneeIds,
     surveyTeamIds: input.surveyTeamIds,
+    surveyContactTags: input.surveyContactTags,
+    surveyConversationTags: input.surveyConversationTags,
     assigneeIds: input.assigneeIds,
     contactTags: input.contactTags,
     conversationTags: input.conversationTags,
@@ -3513,6 +3611,8 @@ export function createWebhooksService(deps: {
               surveyScores: webhookEndpoints.surveyScores,
               surveyAssigneeIds: webhookEndpoints.surveyAssigneeIds,
               surveyTeamIds: webhookEndpoints.surveyTeamIds,
+              surveyContactTags: webhookEndpoints.surveyContactTags,
+              surveyConversationTags: webhookEndpoints.surveyConversationTags,
               assigneeIds: webhookEndpoints.assigneeIds,
               contactTags: webhookEndpoints.contactTags,
               conversationTags: webhookEndpoints.conversationTags,
@@ -4252,6 +4352,17 @@ export function createWebhooksService(deps: {
         await assertWebhookSurveyAssignees(tx, ctx.tenant.id, surveyAssigneeIds);
         const surveyTeamIds = webhookSurveyTeamIdsFor(data.eventTypes, data.surveyTeamIds, null);
         await assertWebhookSurveyTeams(tx, ctx.tenant.id, surveyTeamIds);
+        // Tags are labels: any tag may be named, one no contact or conversation has yet included.
+        const surveyContactTags = webhookSurveyContactTagsFor(
+          data.eventTypes,
+          data.surveyContactTags,
+          null,
+        );
+        const surveyConversationTags = webhookSurveyConversationTagsFor(
+          data.eventTypes,
+          data.surveyConversationTags,
+          null,
+        );
         const assigneeIds = webhookAssigneeIdsFor(data.eventTypes, data.assigneeIds, null);
         await assertWebhookAssignees(tx, ctx.tenant.id, assigneeIds);
         const contactTags = webhookContactTagsFor(data.eventTypes, data.contactTags, null);
@@ -4311,6 +4422,8 @@ export function createWebhooksService(deps: {
           surveyScores,
           surveyAssigneeIds,
           surveyTeamIds,
+          surveyContactTags,
+          surveyConversationTags,
           assigneeIds,
           contactTags,
           conversationTags,
@@ -4366,6 +4479,8 @@ export function createWebhooksService(deps: {
               ...(surveyScores ? { surveyScores } : {}),
               ...(surveyAssigneeIds ? { surveyAssigneeIds } : {}),
               ...(surveyTeamIds ? { surveyTeamIds } : {}),
+              ...(surveyContactTags ? { surveyContactTags } : {}),
+              ...(surveyConversationTags ? { surveyConversationTags } : {}),
               ...(assigneeIds ? { assigneeIds } : {}),
               ...(contactTags ? { contactTags } : {}),
               ...(conversationTags ? { conversationTags } : {}),
@@ -4671,6 +4786,16 @@ export function createWebhooksService(deps: {
         if (data.surveyTeamIds !== undefined) {
           await assertWebhookSurveyTeams(tx, ctx.tenant.id, surveyTeamIds, endpoint.surveyTeamIds);
         }
+        const surveyContactTags = webhookSurveyContactTagsFor(
+          data.eventTypes,
+          data.surveyContactTags,
+          endpoint.surveyContactTags,
+        );
+        const surveyConversationTags = webhookSurveyConversationTagsFor(
+          data.eventTypes,
+          data.surveyConversationTags,
+          endpoint.surveyConversationTags,
+        );
         const assigneeIds = webhookAssigneeIdsFor(
           data.eventTypes,
           data.assigneeIds,
@@ -4744,6 +4869,8 @@ export function createWebhooksService(deps: {
             surveyScores,
             surveyAssigneeIds,
             surveyTeamIds,
+            surveyContactTags,
+            surveyConversationTags,
             assigneeIds,
             contactTags,
             conversationTags,
@@ -4810,6 +4937,8 @@ export function createWebhooksService(deps: {
               ...(surveyScores ? { surveyScores } : {}),
               ...(surveyAssigneeIds ? { surveyAssigneeIds } : {}),
               ...(surveyTeamIds ? { surveyTeamIds } : {}),
+              ...(surveyContactTags ? { surveyContactTags } : {}),
+              ...(surveyConversationTags ? { surveyConversationTags } : {}),
               ...(assigneeIds ? { assigneeIds } : {}),
               ...(contactTags ? { contactTags } : {}),
               ...(conversationTags ? { conversationTags } : {}),

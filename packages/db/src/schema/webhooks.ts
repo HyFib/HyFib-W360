@@ -394,6 +394,18 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
    */
   surveyTeamIds: uuid('survey_team_ids').array(),
   /**
+   * The contact tags whose satisfaction survey answers it takes (migration 0235, ADR-312), by the
+   * tags the answering contact has when they answer, as contacts carry them. null takes every
+   * answer. Set only while `satisfaction_survey.answered` is among its events.
+   */
+  surveyContactTags: text('survey_contact_tags').array(),
+  /**
+   * The conversation tags whose satisfaction survey answers it takes (migration 0235, ADR-312), by
+   * the tags the conversation has when the customer answers. null takes every answer. Set only
+   * while `satisfaction_survey.answered` is among its events.
+   */
+  surveyConversationTags: text('survey_conversation_tags').array(),
+  /**
    * The consent changes it takes as `consent.changed` (ADR-189), by purpose and action; null takes
    * every change. Set only while `consent.changed` is among its events.
    */

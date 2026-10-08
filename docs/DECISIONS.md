@@ -11982,3 +11982,55 @@ Decision:
 Not built: the team at resolution (surveys do not record it; the conversation's team when the
 customer answers is used), the member who resolved (`resolvedById`) as a filter, the team in the
 payload, contact and conversation tags for answers, and an event when a survey is sent or skipped.
+
+## ADR-312 Choosing the contact and conversation tags whose satisfaction survey answers a webhook endpoint receives (P5-09) (2026-10-08)
+
+Context: an endpoint taking `satisfaction_survey.answered` can name the scores (ADR-307), the
+members credited and the teams (ADR-311) of the answers it takes, but the contact and conversation
+tag lists that narrow conversations' events (ADR-267, ADR-273) leave answers out (ADR-293 chose so).
+A desk that follows a segment of customers, `vip` say, or a kind of conversation, `refund`, was sent
+every answer and had to read each contact and conversation to drop the rest.
+
+Decision:
+
+- **Two lists per endpoint for the event,** `surveyContactTags` and `surveyConversationTags`: 1 to
+  50 tags each, as contacts and conversations carry them (`normalizeTag`: lower case, single spaces,
+  up to 40 characters without commas or control characters), each once in the order given. An answer
+  is sent when the answering contact, or the conversation answered, has any of the list's tags when
+  the customer answers, so a tag added after the survey went out counts and one removed by then does
+  not; a contact or conversation without tags matches no list. A tag no contact or conversation has
+  yet may be named; it matches nothing until one has it. Null receives every answer, as before; with
+  scores, members, teams or the other tag list chosen too, an answer must pass them all. The
+  conversations' `contactTags` and `conversationTags` still do not narrow answers. Other events are
+  not narrowed. Chosen in Settings → Webhooks ("Contact tags of answered surveys" and "Conversation
+  tags of answered surveys", typed separated by commas, every answer by default), shown on the
+  endpoint as "Survey answers sent, of contacts tagged: …" and "Survey answers sent, of
+  conversations tagged: …", and through the API as `surveyContactTags` and `surveyConversationTags`
+  on `POST /webhook-endpoints` and `PATCH /webhook-endpoints/{id}` and in every endpoint the API
+  answers.
+- **One rule for every tag list:** the four tag lists' schemas now share one definition
+  (`webhookTagsSchema`), so the conversations' lists keep their words and limits and the answers'
+  lists refuse what they refuse, naming the entry (`surveyConversationTags.1`).
+- **Only while the event is taken:** a list given for an endpoint that does not take
+  `satisfaction_survey.answered` is refused (422 through the API). A change that drops the event
+  clears both lists, and a `PATCH` that leaves a list out keeps it; Settings always sends both (null
+  while every answer is taken). Checks in the database hold the same rule and the tags' own (null,
+  or 1 to 50 tags as contacts carry them, in one dimension without a null, with the event).
+- **Applied at capture:** `app.capture_webhook_event` reads the answering contact's and the
+  conversation's tags only when an active endpoint of the company that takes the event names tags
+  for answers, in the transaction that records the answer, and creates a delivery only for the
+  endpoints whose lists share a tag with them (`&&`). No event is written when no endpoint takes it,
+  and stored events are unchanged; the payload does not carry the tags.
+- **Audited and exported:** `webhook.endpoint_created` and `webhook.endpoint_updated` carry
+  `surveyContactTags` and `surveyConversationTags` when the endpoint has them, and the company data
+  export carries the columns.
+- **Permissions unchanged:** members with `developer.manage` in Settings, keys with
+  `webhooks.manage` through the API.
+- **Migration 0235:** `survey_contact_tags text[]` and `survey_conversation_tags text[]` on
+  `app.webhook_endpoints` with their checks, validated at once (a company has at most 10 endpoints),
+  update grants on the columns for the runtime role, and `app.capture_webhook_event` replaced with
+  the same signature (0234's, with the tags), so its owner and grants stay. Existing endpoints keep
+  null; nothing is backfilled.
+
+Not built: lists that leave tagged answers out, tags at the time the conversation was resolved (the
+tags when the customer answers are used), and the tags in the payload.

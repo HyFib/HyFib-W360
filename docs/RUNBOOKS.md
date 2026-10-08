@@ -2237,9 +2237,10 @@ customer taps a button of a survey that was sent, the first time: a second tap, 
 (Settings → Inbox's surveys off, the 24-hour window closed, the customer opted out) or a
 conversation resolved through the API sends nothing. An endpoint that names numbers gets it only for
 those numbers; the team, member and tag filters of conversations' events do not narrow it, while the
-lists of members credited with answers and of answered surveys' teams do (ADR-311). A tap on an old
-survey message that is not the conversation's survey records nothing. The webhook deliveries page
-shows each attempt; `GET /satisfaction-surveys?status=answered` lists the answers to compare.
+lists of members credited with answers and of answered surveys' teams (ADR-311) and of their
+contacts' and conversations' tags (ADR-312) do. A tap on an old survey message that is not the
+conversation's survey records nothing. The webhook deliveries page shows each attempt;
+`GET /satisfaction-surveys?status=answered` lists the answers to compare.
 
 **A satisfaction survey request answers 403 or 422, or a survey is not listed (ADR-292).** 403
 `forbidden` names `conversations.read`, the scope the key lacks (granted by owners and
@@ -3085,6 +3086,20 @@ recorded, so there is nothing to replay; `GET /satisfaction-surveys?status=answe
 answers. With scores or numbers chosen too, an answer must pass every list. To take more, tick
 members or teams on the endpoint's page, or `PATCH /webhook-endpoints/{id}` with `surveyAssigneeIds`
 or `surveyTeamIds` (null for every answer). Removing the event clears both lists.
+
+**A receiver misses satisfaction survey answers of some tagged contacts or conversations
+(ADR-312).** An endpoint can take the answers of contacts or conversations with chosen tags only.
+The endpoints list shows it ("Survey answers sent, of contacts tagged: …", "Survey answers sent, of
+conversations tagged: …"), and the API answers `surveyContactTags` and `surveyConversationTags`
+(null takes every answer). An answer goes by the tags the contact and the conversation have when the
+customer answers (`GET /contacts/{id}` and `GET /conversations/{id}` give them as they are now): a
+tag added later does not bring back an answer already recorded, and events no endpoint takes are not
+recorded, so there is nothing to replay; `GET /satisfaction-surveys?status=answered` lists the
+answers. Tags are compared as contacts carry them (lower case, single spaces), so check the
+spelling. With scores, members, teams or numbers chosen too, an answer must pass every list. To take
+more, change the tags on the endpoint's page, or `PATCH /webhook-endpoints/{id}` with
+`surveyContactTags` or `surveyConversationTags` (null for every answer). Removing the event clears
+both lists.
 
 **A receiver misses a task's change of assignee, or doubts one (ADR-274).** Endpoints that take
 `task.assignee_changed` ("Task assignee") are sent one event each time a member gives a task to

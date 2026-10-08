@@ -231,6 +231,12 @@ import {
   webhookSurveyTeamIdsSchema,
   WEBHOOK_SURVEY_ASSIGNEES_NEED_THE_EVENT,
   WEBHOOK_SURVEY_TEAMS_NEED_THE_EVENT,
+  webhookSurveyContactTagsFor,
+  webhookSurveyContactTagsSchema,
+  webhookSurveyConversationTagsFor,
+  webhookSurveyConversationTagsSchema,
+  WEBHOOK_SURVEY_CONTACT_TAGS_NEED_THE_EVENT,
+  WEBHOOK_SURVEY_CONVERSATION_TAGS_NEED_THE_EVENT,
   webhookTeamIdsFor,
   webhookTeamIdsSchema,
   webhookTemplateIdsFor,
@@ -2779,6 +2785,60 @@ describe('survey member and team filters (ADR-311)', () => {
     );
     expect(WEBHOOK_SURVEY_TEAMS_NEED_THE_EVENT).toBe(
       `Choose the teams of answered surveys only for an endpoint that receives ${event}.`,
+    );
+  });
+});
+
+describe('survey tag filters (ADR-312)', () => {
+  it('take 1 to 50 tags as contacts and conversations carry them, once each, in the order given; null takes every answer', () => {
+    const tags = Array.from({ length: 51 }, (_, i) => `tag ${i}`);
+    for (const schema of [webhookSurveyContactTagsSchema, webhookSurveyConversationTagsSchema]) {
+      expect(schema.parse(['VIP', ' wholesale ', 'vip', 'Gold   Member'])).toEqual([
+        'vip',
+        'wholesale',
+        'gold member',
+      ]);
+      expect(schema.parse(null)).toBeNull();
+      expect(schema.parse(tags.slice(1))).toEqual(tags.slice(1));
+      const refusal = (given: unknown) => {
+        const issue = schema.safeParse(given).error?.issues[0];
+        return issue && [issue.path.join('.'), issue.message];
+      };
+      expect(refusal([])).toEqual(['', 'Give at least one tag, or take every answer.']);
+      expect(refusal(tags)).toEqual(['', 'Give at most 50 tags.']);
+      expect(refusal(['vip', 'a,b'])).toEqual([
+        '1',
+        'Tags cannot contain commas or control characters.',
+      ]);
+      expect(refusal(['vip', 42])).toEqual(['1', 'Give tags as text.']);
+      // Refused at the first entry that is not a tag, once.
+      expect(schema.safeParse(['a,b', '   ']).error?.issues.map((i) => i.path.join('.'))).toEqual([
+        '0',
+      ]);
+      expect(schema.safeParse('vip').success).toBe(false);
+    }
+    expect(WEBHOOK_LIMITS.surveyContactTags).toBe(50);
+    expect(WEBHOOK_LIMITS.surveyConversationTags).toBe(50);
+  });
+
+  it('are kept only while the endpoint takes survey answers: given, kept, or cleared', () => {
+    const answers = ['satisfaction_survey.answered', 'message.received'] as const;
+    for (const listFor of [webhookSurveyContactTagsFor, webhookSurveyConversationTagsFor]) {
+      expect(listFor([...answers], ['vip'], null)).toEqual(['vip']);
+      expect(listFor([...answers], undefined, ['gold'])).toEqual(['gold']);
+      expect(listFor([...answers], null, ['gold'])).toBeNull();
+      expect(listFor([...answers], undefined, null)).toBeNull();
+      // Conversations' own events take the conversations' tag lists, not the answers'.
+      expect(
+        listFor(['message.received', 'conversation.status_changed'], ['vip'], ['vip']),
+      ).toBeNull();
+    }
+    const event = WEBHOOK_EVENT_INFO['satisfaction_survey.answered'].label;
+    expect(WEBHOOK_SURVEY_CONTACT_TAGS_NEED_THE_EVENT).toBe(
+      `Choose the contact tags of answered surveys only for an endpoint that receives ${event}.`,
+    );
+    expect(WEBHOOK_SURVEY_CONVERSATION_TAGS_NEED_THE_EVENT).toBe(
+      `Choose the conversation tags of answered surveys only for an endpoint that receives ${event}.`,
     );
   });
 });

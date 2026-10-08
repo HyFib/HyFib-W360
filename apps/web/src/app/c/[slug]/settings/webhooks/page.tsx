@@ -402,6 +402,17 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
                         {e.surveyTeams.map(webhookTeamText).join(', ')}
                       </p>
                     ) : null}
+                    {e.surveyContactTags ? (
+                      <p className="text-xs break-all text-muted-foreground">
+                        Survey answers sent, of contacts tagged: {e.surveyContactTags.join(', ')}
+                      </p>
+                    ) : null}
+                    {e.surveyConversationTags ? (
+                      <p className="text-xs break-all text-muted-foreground">
+                        Survey answers sent, of conversations tagged:{' '}
+                        {e.surveyConversationTags.join(', ')}
+                      </p>
+                    ) : null}
                     {e.teams ? (
                       <p className="text-xs text-muted-foreground">
                         Teams whose conversations’ events are sent:{' '}

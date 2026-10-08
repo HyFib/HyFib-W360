@@ -5667,6 +5667,160 @@ describe('survey member and team filters (ADR-311)', () => {
   });
 });
 
+describe('survey tag filters (ADR-312)', () => {
+  it('are refused without satisfaction_survey.answered, empty, over 50 or not as tags are written; kept as contacts and conversations carry them, kept by a change that leaves them out and cleared with the event; the database keeps them to the event and to tags as they are written', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const url = 'https://hooks.example.com/in';
+    const refused = async (
+      fields: Record<string, unknown>,
+      message: RegExp,
+      path: string,
+      eventTypes = ['satisfaction_survey.answered'],
+    ) => {
+      const error = await expectAppError(
+        webhooks().create(owner, { url, eventTypes, ...fields }),
+        'validation_failed',
+        message,
+      );
+      expect(isAppError(error) && error.issues?.[0]?.path, JSON.stringify(fields)).toBe(path);
+    };
+    // Conversations' events take the conversations' tag lists, not the answers'.
+    const conversationEvents = ['message.received', 'conversation.status_changed'];
+    await refused(
+      { surveyContactTags: ['vip'] },
+      /contact tags of answered surveys only for an endpoint that receives Satisfaction survey answered/,
+      'surveyContactTags',
+      conversationEvents,
+    );
+    await refused(
+      { surveyConversationTags: ['refund'] },
+      /conversation tags of answered surveys only for an endpoint that receives Satisfaction survey answered/,
+      'surveyConversationTags',
+      conversationEvents,
+    );
+    await refused(
+      { surveyContactTags: [] },
+      /at least one tag, or take every answer/,
+      'surveyContactTags',
+    );
+    await refused(
+      { surveyConversationTags: ['refund', 'a,b'] },
+      /commas/,
+      'surveyConversationTags.1',
+    );
+    await refused(
+      { surveyContactTags: Array.from({ length: 51 }, (_, i) => `tag ${i}`) },
+      /at most 50/,
+      'surveyContactTags',
+    );
+    expect(await webhooks().list(owner)).toEqual([]);
+
+    const created = await webhooks().create(owner, {
+      url,
+      eventTypes: ['satisfaction_survey.answered', 'message.received'],
+      surveyContactTags: ['VIP', ' vip', 'Gold   Member'],
+      surveyConversationTags: ['Refund'],
+    });
+    const audits = async (action: string) =>
+      (
+        await fx.query<{
+          metadata: { surveyContactTags?: unknown; surveyConversationTags?: unknown };
+        }>(
+          `SELECT metadata FROM app.audit_events
+            WHERE tenant_id = $1 AND action = $2 ORDER BY occurred_at, id`,
+          [c.tenant.id, action],
+        )
+      ).map((a) => [a.metadata.surveyContactTags, a.metadata.surveyConversationTags]);
+    expect(await audits('webhook.endpoint_created')).toEqual([
+      [['vip', 'gold member'], ['refund']],
+    ]);
+    const current = async () => {
+      const endpoint = (await webhooks().list(owner)).find((e) => e.id === created.id);
+      return {
+        contact: endpoint?.surveyContactTags,
+        conversation: endpoint?.surveyConversationTags,
+      };
+    };
+    expect(await current()).toEqual({ contact: ['vip', 'gold member'], conversation: ['refund'] });
+    // The conversations' own tag lists are not set by them.
+    const listed = (await webhooks().list(owner)).find((e) => e.id === created.id);
+    expect([listed?.contactTags, listed?.conversationTags]).toEqual([null, null]);
+    const change = (fields: Record<string, unknown>) =>
+      webhooks().update(owner, {
+        endpointId: created.id,
+        url,
+        description: '',
+        eventTypes: ['satisfaction_survey.answered', 'message.received'],
+        ...fields,
+      });
+    await change({ description: 'kept' });
+    expect(await current()).toEqual({ contact: ['vip', 'gold member'], conversation: ['refund'] });
+    await change({ surveyContactTags: ['Gold'] });
+    expect(await current()).toEqual({ contact: ['gold'], conversation: ['refund'] });
+    await change({ surveyContactTags: null, surveyConversationTags: null });
+    expect(await current()).toEqual({ contact: null, conversation: null });
+    await change({ surveyContactTags: ['gold'], surveyConversationTags: ['refund'] });
+    expect(await audits('webhook.endpoint_updated')).toEqual([
+      [['vip', 'gold member'], ['refund']],
+      [['gold'], ['refund']],
+      [undefined, undefined],
+      [['gold'], ['refund']],
+    ]);
+    // The database refuses an empty list, more than 50, a missing tag, a list of lists, and tags
+    // not as they are written (capitals, a comma, spaces around, over 40 characters, a control
+    // character, an empty tag)…
+    const setInDatabase = (column: string, value: string) =>
+      fx.query(`UPDATE app.webhook_endpoints SET ${column} = ${value} WHERE id = $1`, [created.id]);
+    const many = `ARRAY[${Array.from({ length: 51 }, (_, i) => `'tag ${i}'`).join(',')}]`;
+    for (const column of ['survey_contact_tags', 'survey_conversation_tags']) {
+      for (const bad of [
+        `'{}'::text[]`,
+        many,
+        `ARRAY['vip', NULL]`,
+        `ARRAY[ARRAY['vip'], ARRAY['gold']]`,
+        `ARRAY['VIP']`,
+        `ARRAY['gold', 'a,b']`,
+        `ARRAY[' vip']`,
+        `ARRAY['vip ']`,
+        `ARRAY['${'x'.repeat(41)}']`,
+        `ARRAY[E'vi\\tp']`,
+        `ARRAY['vip', '']`,
+      ]) {
+        await expect(setInDatabase(column, bad), `${column} ${bad}`).rejects.toThrow(
+          new RegExp(`webhook_endpoints_${column}`),
+        );
+      }
+      // Tags as they are written, spaces inside and 40 characters included, are kept.
+      await setInDatabase(column, `ARRAY['gold member', '${'x'.repeat(40)}', 'vip']`);
+    }
+    expect(await current()).toEqual({
+      contact: ['gold member', 'x'.repeat(40), 'vip'],
+      conversation: ['gold member', 'x'.repeat(40), 'vip'],
+    });
+    // …leaving the event clears both lists…
+    await change({ eventTypes: ['message.received'] });
+    expect(await current()).toEqual({ contact: null, conversation: null });
+    await expectAppError(
+      change({ eventTypes: ['message.received'], surveyContactTags: ['vip'] }),
+      'validation_failed',
+      /contact tags of answered surveys only/,
+    );
+    // …and the database refuses either list for an endpoint that does not take the event.
+    for (const column of ['survey_contact_tags', 'survey_conversation_tags']) {
+      await expect(setInDatabase(column, `ARRAY['vip']`)).rejects.toThrow(
+        new RegExp(`webhook_endpoints_${column}`),
+      );
+      const [grant] = await fx.query<{ can_update: boolean }>(
+        `SELECT has_column_privilege('w360_app', 'app.webhook_endpoints', $1, 'UPDATE')
+                  AS can_update`,
+        [column],
+      );
+      expect(grant?.can_update, column).toBe(true);
+    }
+  });
+});
+
 describe('contact tag filters (ADR-267)', () => {
   /** Puts a tag on a contact, or takes it off, as the contacts service writes tags. */
   const tag = (c: Company, contactId: string, name: string) =>

@@ -1497,6 +1497,18 @@ Phase 5 rules (outgoing webhooks, P5-09):
   records the answer: they narrow what one endpoint receives and never add an event or a delivery
   for another endpoint or company, and the payload is unchanged. Audited with the lists (unit tests;
   integration tests, run in CI only).
+- An endpoint can take `satisfaction_survey.answered` only for the answers of contacts or
+  conversations with some tags (ADR-312), chosen with `developer.manage` in Settings or
+  `webhooks.manage` through the API. Tags are labels: any tag may be named, checked only to be
+  written as contacts and conversations carry them, and reading a list tells nothing about which
+  contacts have it. The lists are kept only while the endpoint takes the event (database checks too,
+  which also refuse a null entry and tags not as they are written) and applied in
+  `app.capture_webhook_event` against the contact's and the conversation's tags, read under the
+  company's row-level security in the transaction that records the answer: they narrow what one
+  endpoint receives and never add an event or a delivery for another endpoint or company, and the
+  payload is unchanged. Tag names can say something about a person, so the lists are in the company
+  data export and the audits as the other tag lists are (unit tests; integration tests, run in CI
+  only).
 - An endpoint can take `template.status_changed` only for some of the statuses reported (ADR-148),
   chosen the same way. The list is checked against the eleven statuses the event reports (HyFib's
   own steps, a deletion under way or refused and an unrecognised status are never sent), kept only

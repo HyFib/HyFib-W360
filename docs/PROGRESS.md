@@ -1,5 +1,49 @@
 # Progress
 
+## 2026-10-08 — Tag filters for satisfaction survey answers (P5-09, H-014, W-138, ADR-312)
+
+Status: **Implemented; its database tests run in CI only.** Endpoints taking
+`satisfaction_survey.answered` could name scores, members and teams, but not tags, as the
+conversations' tag lists do not narrow answers, so a desk following tagged customers or
+conversations took every answer. The local PostgreSQL is unavailable, so the migration and the
+integration tests below were written but not run here; migration 0235 passed the pglast parse check
+(syntax only).
+
+### Completed
+
+- **Database:** migration 0235 (`survey_contact_tags` and `survey_conversation_tags` on
+  `app.webhook_endpoints` with their checks and update grants; `app.capture_webhook_event` reading
+  the contact's and the conversation's tags when an endpoint names tags for answers).
+- **Domain:** `WEBHOOK_LIMITS.surveyContactTags` and `surveyConversationTags`; one schema for every
+  tag list (`webhookTagsSchema`), the survey lists' schemas, `webhookSurveyContactTagsFor` and
+  `webhookSurveyConversationTagsFor` in `webhooks/service.ts`, the endpoint view's
+  `surveyContactTags` and `surveyConversationTags`, creation, changes, audits and the export
+  columns; both in `api/webhook-endpoints.ts` and the OpenAPI document (the event's description
+  names them).
+- **Web:** Settings → Webhooks' "Contact tags of answered surveys" and "Conversation tags of
+  answered surveys" while the endpoint takes the event (the conversations' tag fieldsets now share
+  their words by kind), the endpoints list's lines for them, and the survey member and team help
+  naming the other lists of answers.
+- **Tests:** unit (3 new: both lists' rules, keeping and clearing in `webhooks/webhooks.test.ts`;
+  the API schemas and OpenAPI entries in `api/api.test.ts`; the empty-change and event wording
+  asserted where the new words go); integration (3 new: capture in `webhook-events.test.ts`, the
+  services in `webhooks.test.ts`, the API in `api-webhook-endpoints.test.ts`). Written for CI; the
+  integration tests were not run here. No e2e test.
+- **Docs:** ADR-312; ARCHITECTURE; SECURITY; THREAT-MODEL T280; DEPLOYMENT; RUNBOOKS; BACKLOG P5-09;
+  feature matrix H-014 and W-138.
+- **Mutation checks:** 38/38 deliberate regressions caught (one after a test was added).
+
+### Test commands and results (local, 2026-10-08)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 137 files, 1319 tests                                         |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| pglast 7 parse of migration 0235                   | passed (syntax only)                                          |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
 ## 2026-10-08 — Member and team filters for satisfaction survey answers (P5-09, H-014, W-138, ADR-311)
 
 Status: **Implemented; its database tests run in CI only.** Endpoints taking

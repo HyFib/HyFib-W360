@@ -1028,7 +1028,7 @@ const TEAM_WORDS = {
   },
   surveys: {
     legend: 'Teams of answered surveys',
-    help: 'A satisfaction survey’s answer belongs to the team its conversation is in when the customer answers; a conversation in no team belongs to none. With scores or the members credited chosen too, an answer must pass them all. Other events are sent whichever teams are chosen.',
+    help: 'A satisfaction survey’s answer belongs to the team its conversation is in when the customer answers; a conversation in no team belongs to none. With scores or the other lists of answers chosen too, an answer must pass them all. Other events are sent whichever teams are chosen.',
     every: 'Every answer',
     everyHelp: 'Including teams added later, and conversations in no team.',
     only: 'Only the answers of the conversations of the teams ticked',
@@ -1148,7 +1148,7 @@ const ASSIGNEE_WORDS = {
   },
   surveys: {
     legend: 'Members credited with answers',
-    help: 'A satisfaction survey’s answer is credited to the member its conversation was assigned to when it was resolved, as Reports credits it; a conversation resolved unassigned credits no one. With scores or the teams of answered surveys chosen too, an answer must pass them all. Other events are sent whichever members are chosen.',
+    help: 'A satisfaction survey’s answer is credited to the member its conversation was assigned to when it was resolved, as Reports credits it; a conversation resolved unassigned credits no one. With scores or the other lists of answers chosen too, an answer must pass them all. Other events are sent whichever members are chosen.',
     every: 'Every answer',
     everyHelp: 'Including answers credited to no one, and members who join later.',
     only: 'Only the answers credited to the members ticked',
@@ -1858,41 +1858,64 @@ function CrmMemberChoices({
 }
 
 /**
- * The contact tags whose conversations' events an endpoint takes (ADR-267): every conversation's, or
- * those of the conversations whose contact has any of the tags given when the events happen. Tags
- * are typed separated by commas, as on a contact; the service reads them as contacts carry them.
+ * What the contact tags' fieldset says for conversations' events (ADR-267) and satisfaction survey
+ * answers (ADR-312).
+ */
+const CONTACT_TAG_WORDS = {
+  conversations: {
+    legend: 'Contact tags',
+    help: 'Message and conversation events belong to the tags the conversation’s contact has when they happen. With numbers, teams or members chosen too, an event must pass them all. Other events are sent whichever tags are given.',
+    every: 'Every conversation’s events',
+    only: 'Only the events of the conversations whose contact has any of these tags',
+    idPart: 'contact-tags',
+    limit: WEBHOOK_LIMITS.contactTags,
+  },
+  surveys: {
+    legend: 'Contact tags of answered surveys',
+    help: 'A satisfaction survey’s answer belongs to the tags the answering contact has when they answer. With scores or the other lists of answers chosen too, an answer must pass them all. Other events are sent whichever tags are given.',
+    every: 'Every answer',
+    only: 'Only the answers of the contacts who have any of these tags',
+    idPart: 'survey-contact-tags',
+    limit: WEBHOOK_LIMITS.surveyContactTags,
+  },
+} as const;
+
+/**
+ * The contact tags whose conversations' events (ADR-267) or satisfaction survey answers (ADR-312)
+ * an endpoint takes, as `kind` says: every conversation's or answer, or those whose contact has any
+ * of the tags given when the event happens. Tags are typed separated by commas, as on a contact;
+ * the service reads them as contacts carry them.
  */
 function ContactTagChoices({
+  kind,
   prefix,
   every,
   onEveryChange,
   text,
   onTextChange,
 }: {
+  kind: keyof typeof CONTACT_TAG_WORDS;
   prefix: string;
   every: boolean;
   onEveryChange: (next: boolean) => void;
   text: string;
   onTextChange: (next: string) => void;
 }) {
+  const words = CONTACT_TAG_WORDS[kind];
   return (
     <fieldset className="grid gap-2">
-      <legend className="mb-1 text-sm font-medium">Contact tags</legend>
-      <p className="text-xs text-muted-foreground">
-        Message and conversation events belong to the tags the conversation’s contact has when they
-        happen. With numbers, teams or members chosen too, an event must pass them all. Other events
-        are sent whichever tags are given.
-      </p>
+      <legend className="mb-1 text-sm font-medium">{words.legend}</legend>
+      <p className="text-xs text-muted-foreground">{words.help}</p>
       <label className="flex items-start gap-2 text-sm">
         <input
           type="radio"
-          name={`${prefix}-contact-tags-every`}
+          name={`${prefix}-${words.idPart}-every`}
           className="mt-1"
           checked={every}
           onChange={() => onEveryChange(true)}
         />
         <span>
-          Every conversation’s events
+          {words.every}
           <span className="block text-xs text-muted-foreground">
             Including contacts without tags.
           </span>
@@ -1901,19 +1924,19 @@ function ContactTagChoices({
       <label className="flex items-start gap-2 text-sm">
         <input
           type="radio"
-          name={`${prefix}-contact-tags-every`}
+          name={`${prefix}-${words.idPart}-every`}
           className="mt-1"
           checked={!every}
           onChange={() => onEveryChange(false)}
         />
-        <span>Only the events of the conversations whose contact has any of these tags</span>
+        <span>{words.only}</span>
       </label>
       {!every ? (
         <div className="ml-6">
           <Field
-            id={`${prefix}-contact-tags`}
+            id={`${prefix}-${words.idPart}`}
             label="Tags"
-            description={`Separate tags with commas, up to ${WEBHOOK_LIMITS.contactTags}. A tag no contact has yet matches nothing until one has it.`}
+            description={`Separate tags with commas, up to ${words.limit}. A tag no contact has yet matches nothing until one has it.`}
           >
             {(aria) => (
               <Input
@@ -1931,41 +1954,64 @@ function ContactTagChoices({
 }
 
 /**
- * The conversation tags whose events an endpoint takes (ADR-273): every conversation's, or those of
- * the conversations that have any of the tags given when the events happen. Tags are typed separated
- * by commas, as in the inbox; the service reads them as conversations carry them.
+ * What the conversation tags' fieldset says for conversations' events (ADR-273) and satisfaction
+ * survey answers (ADR-312).
+ */
+const CONVERSATION_TAG_WORDS = {
+  conversations: {
+    legend: 'Conversation tags',
+    help: 'Message and conversation events belong to the tags the conversation has when they happen. With numbers, teams, members or contact tags chosen too, an event must pass them all. Other events are sent whichever tags are given.',
+    every: 'Every conversation’s events',
+    only: 'Only the events of the conversations that have any of these tags',
+    idPart: 'conversation-tags',
+    limit: WEBHOOK_LIMITS.conversationTags,
+  },
+  surveys: {
+    legend: 'Conversation tags of answered surveys',
+    help: 'A satisfaction survey’s answer belongs to the tags its conversation has when the customer answers. With scores or the other lists of answers chosen too, an answer must pass them all. Other events are sent whichever tags are given.',
+    every: 'Every answer',
+    only: 'Only the answers of the conversations that have any of these tags',
+    idPart: 'survey-conversation-tags',
+    limit: WEBHOOK_LIMITS.surveyConversationTags,
+  },
+} as const;
+
+/**
+ * The conversation tags whose events (ADR-273) or satisfaction survey answers (ADR-312) an endpoint
+ * takes, as `kind` says: every conversation's or answer, or those of the conversations that have
+ * any of the tags given when the event happens. Tags are typed separated by commas, as in the
+ * inbox; the service reads them as conversations carry them.
  */
 function ConversationTagChoices({
+  kind,
   prefix,
   every,
   onEveryChange,
   text,
   onTextChange,
 }: {
+  kind: keyof typeof CONVERSATION_TAG_WORDS;
   prefix: string;
   every: boolean;
   onEveryChange: (next: boolean) => void;
   text: string;
   onTextChange: (next: string) => void;
 }) {
+  const words = CONVERSATION_TAG_WORDS[kind];
   return (
     <fieldset className="grid gap-2">
-      <legend className="mb-1 text-sm font-medium">Conversation tags</legend>
-      <p className="text-xs text-muted-foreground">
-        Message and conversation events belong to the tags the conversation has when they happen.
-        With numbers, teams, members or contact tags chosen too, an event must pass them all. Other
-        events are sent whichever tags are given.
-      </p>
+      <legend className="mb-1 text-sm font-medium">{words.legend}</legend>
+      <p className="text-xs text-muted-foreground">{words.help}</p>
       <label className="flex items-start gap-2 text-sm">
         <input
           type="radio"
-          name={`${prefix}-conversation-tags-every`}
+          name={`${prefix}-${words.idPart}-every`}
           className="mt-1"
           checked={every}
           onChange={() => onEveryChange(true)}
         />
         <span>
-          Every conversation’s events
+          {words.every}
           <span className="block text-xs text-muted-foreground">
             Including conversations without tags.
           </span>
@@ -1974,19 +2020,19 @@ function ConversationTagChoices({
       <label className="flex items-start gap-2 text-sm">
         <input
           type="radio"
-          name={`${prefix}-conversation-tags-every`}
+          name={`${prefix}-${words.idPart}-every`}
           className="mt-1"
           checked={!every}
           onChange={() => onEveryChange(false)}
         />
-        <span>Only the events of the conversations that have any of these tags</span>
+        <span>{words.only}</span>
       </label>
       {!every ? (
         <div className="ml-6">
           <Field
-            id={`${prefix}-conversation-tags`}
+            id={`${prefix}-${words.idPart}`}
             label="Tags"
-            description={`Separate tags with commas, up to ${WEBHOOK_LIMITS.conversationTags}. A tag no conversation has yet matches nothing until one has it.`}
+            description={`Separate tags with commas, up to ${words.limit}. A tag no conversation has yet matches nothing until one has it.`}
           >
             {(aria) => (
               <Input
@@ -2578,6 +2624,10 @@ export function WebhookEndpointForm({
     surveyAssignees: WebhookEndpointAssignee[] | null;
     /** The teams of the survey answers it takes (ADR-311); null: every answer. */
     surveyTeams: WebhookEndpointTeam[] | null;
+    /** The contact tags of the survey answers it takes (ADR-312); null: every answer. */
+    surveyContactTags: string[] | null;
+    /** The conversation tags of the survey answers it takes (ADR-312); null: every answer. */
+    surveyConversationTags: string[] | null;
     /** The members it names (ADR-181), with whether they still take conversations; null: all. */
     assignees: WebhookEndpointAssignee[] | null;
     /** The contact tags it names (ADR-267); null for every conversation. */
@@ -2730,6 +2780,16 @@ export function WebhookEndpointForm({
   const [everySurveyTeam, setEverySurveyTeam] = useState(!endpoint?.surveyTeams);
   const [surveyTeamIds, setSurveyTeamIds] = useState<string[]>(
     endpoint?.surveyTeams?.map((t) => t.id) ?? [],
+  );
+  const [everySurveyContactTag, setEverySurveyContactTag] = useState(!endpoint?.surveyContactTags);
+  const [surveyContactTagsText, setSurveyContactTagsText] = useState(
+    endpoint?.surveyContactTags?.join(', ') ?? '',
+  );
+  const [everySurveyConversationTag, setEverySurveyConversationTag] = useState(
+    !endpoint?.surveyConversationTags,
+  );
+  const [surveyConversationTagsText, setSurveyConversationTagsText] = useState(
+    endpoint?.surveyConversationTags?.join(', ') ?? '',
   );
   const [everyAssignee, setEveryAssignee] = useState(!endpoint?.assignees);
   const [everyField, setEveryField] = useState(!endpoint?.contactFields);
@@ -2939,6 +2999,21 @@ export function WebhookEndpointForm({
           eventTypes.includes('satisfaction_survey.answered') && !everySurveyTeam
             ? surveyTeamIds
             : null;
+        // Every answer unless contact or conversation tags are given for answers (ADR-312).
+        const chosenSurveyContactTags =
+          eventTypes.includes('satisfaction_survey.answered') && !everySurveyContactTag
+            ? surveyContactTagsText
+                .split(',')
+                .map((tag) => tag.trim())
+                .filter((tag) => tag !== '')
+            : null;
+        const chosenSurveyConversationTags =
+          eventTypes.includes('satisfaction_survey.answered') && !everySurveyConversationTag
+            ? surveyConversationTagsText
+                .split(',')
+                .map((tag) => tag.trim())
+                .filter((tag) => tag !== '')
+            : null;
         // Every conversation's events unless the members ticked are chosen (ADR-181).
         const chosenAssignees =
           webhookTakesTeamEvents(eventTypes) && !everyAssignee ? assigneeIds : null;
@@ -3000,6 +3075,8 @@ export function WebhookEndpointForm({
           surveyScores,
           surveyAssigneeIds: chosenSurveyAssignees,
           surveyTeamIds: chosenSurveyTeams,
+          surveyContactTags: chosenSurveyContactTags,
+          surveyConversationTags: chosenSurveyConversationTags,
           assigneeIds: chosenAssignees,
           contactTags: chosenContactTags,
           conversationTags: chosenConversationTags,
@@ -3101,6 +3178,10 @@ export function WebhookEndpointForm({
               setSurveyAssigneeIds([]);
               setEverySurveyTeam(true);
               setSurveyTeamIds([]);
+              setEverySurveyContactTag(true);
+              setSurveyContactTagsText('');
+              setEverySurveyConversationTag(true);
+              setSurveyConversationTagsText('');
               setEveryAssignee(true);
               setAssigneeIds([]);
               setEveryContactTag(true);
@@ -3279,6 +3360,7 @@ export function WebhookEndpointForm({
       ) : null}
       {webhookTakesTeamEvents(eventTypes) ? (
         <ContactTagChoices
+          kind="conversations"
           prefix={prefix}
           every={everyContactTag}
           onEveryChange={setEveryContactTag}
@@ -3288,6 +3370,7 @@ export function WebhookEndpointForm({
       ) : null}
       {webhookTakesTeamEvents(eventTypes) ? (
         <ConversationTagChoices
+          kind="conversations"
           prefix={prefix}
           every={everyConversationTag}
           onEveryChange={setEveryConversationTag}
@@ -3317,6 +3400,26 @@ export function WebhookEndpointForm({
           onEveryChange={setEverySurveyTeam}
           chosen={surveyTeamIds}
           onChange={setSurveyTeamIds}
+        />
+      ) : null}
+      {eventTypes.includes('satisfaction_survey.answered') ? (
+        <ContactTagChoices
+          kind="surveys"
+          prefix={prefix}
+          every={everySurveyContactTag}
+          onEveryChange={setEverySurveyContactTag}
+          text={surveyContactTagsText}
+          onTextChange={setSurveyContactTagsText}
+        />
+      ) : null}
+      {eventTypes.includes('satisfaction_survey.answered') ? (
+        <ConversationTagChoices
+          kind="surveys"
+          prefix={prefix}
+          every={everySurveyConversationTag}
+          onEveryChange={setEverySurveyConversationTag}
+          text={surveyConversationTagsText}
+          onTextChange={setSurveyConversationTagsText}
         />
       ) : null}
       {webhookTakesPipelineEvents(eventTypes) ? (

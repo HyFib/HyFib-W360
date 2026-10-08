@@ -292,6 +292,8 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       surveyScores: null,
       surveyAssigneeIds: null,
       surveyTeamIds: null,
+      surveyContactTags: null,
+      surveyConversationTags: null,
       assigneeIds: null,
       contactTags: null,
       conversationTags: null,
@@ -2046,6 +2048,110 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     ).toMatchObject({ surveyAssigneeIds: null, surveyTeamIds: [support] });
     expect(await api().update(key.ctx, id, { surveyTeamIds: null })).toMatchObject({
       surveyTeamIds: null,
+    });
+  });
+
+  it('choose the contact and conversation tags of the satisfaction survey answers an endpoint receives, as contacts and conversations carry them, kept by changes that leave them out and cleared with the event (ADR-312)', async () => {
+    const c = await fx.company();
+    const key = await apiKey(c, ['webhooks.manage']);
+    const issueOf = async (promise: Promise<unknown>) => {
+      const error = await expectAppError(promise, 'validation_failed');
+      return isAppError(error) ? error.issues?.[0] : undefined;
+    };
+    // The lists need the event, at least one tag, and tags as they are written (named by place).
+    const refusals = [
+      [['conversation.status_changed'], { surveyContactTags: ['vip'] }, 'surveyContactTags'],
+      [
+        ['conversation.status_changed'],
+        { surveyConversationTags: ['refund'] },
+        'surveyConversationTags',
+      ],
+      [['satisfaction_survey.answered'], { surveyContactTags: [] }, 'surveyContactTags'],
+      [
+        ['satisfaction_survey.answered'],
+        { surveyConversationTags: ['refund', 'a,b'] },
+        'surveyConversationTags.1',
+      ],
+      [['satisfaction_survey.answered'], { surveyContactTags: ['vip', 42] }, 'surveyContactTags.1'],
+    ] as const;
+    for (const [index, [events, lists, path]] of refusals.entries()) {
+      expect(
+        await issueOf(
+          api().create(
+            key.ctx,
+            { url: receiverUrl(), events, ...lists },
+            idem(`survey-tags-bad-${index}`, JSON.stringify(lists)),
+          ),
+        ),
+        JSON.stringify(lists),
+      ).toMatchObject({ path });
+    }
+    expect((await api().list(key.ctx)).data).toEqual([]);
+
+    const created = await addThroughApi(key.ctx, 'survey-tags-1', {
+      url: receiverUrl(),
+      events: ['satisfaction_survey.answered', 'message.received'],
+      surveyContactTags: ['VIP', 'Gold   Member', 'vip'],
+      surveyConversationTags: ['Refund'],
+    });
+    const id = created.body.data.id;
+    expect(created.body.data).toMatchObject({
+      surveyContactTags: ['vip', 'gold member'],
+      surveyConversationTags: ['refund'],
+      contactTags: null,
+      conversationTags: null,
+    });
+    expect(await api().get(key.ctx, id)).toMatchObject({
+      surveyContactTags: ['vip', 'gold member'],
+      surveyConversationTags: ['refund'],
+    });
+    const audits = async (action: string) =>
+      (
+        await fx.query<{
+          metadata: { surveyContactTags?: unknown; surveyConversationTags?: unknown };
+        }>(
+          `SELECT metadata FROM app.audit_events
+            WHERE tenant_id = $1 AND subject_id = $2 AND action = $3 ORDER BY occurred_at, id`,
+          [c.tenant.id, id, action],
+        )
+      ).map((a) => [a.metadata.surveyContactTags, a.metadata.surveyConversationTags]);
+    expect(await audits('webhook.endpoint_created')).toEqual([
+      [['vip', 'gold member'], ['refund']],
+    ]);
+    expect(await api().update(key.ctx, id, { description: 'VIP desk' })).toMatchObject({
+      surveyContactTags: ['vip', 'gold member'],
+      surveyConversationTags: ['refund'],
+    });
+    expect(
+      await api().update(key.ctx, id, { surveyConversationTags: ['Delivery Delay', 'refund'] }),
+    ).toMatchObject({
+      surveyContactTags: ['vip', 'gold member'],
+      surveyConversationTags: ['delivery delay', 'refund'],
+    });
+    expect(await audits('webhook.endpoint_updated')).toEqual([
+      [['vip', 'gold member'], ['refund']],
+      [
+        ['vip', 'gold member'],
+        ['delivery delay', 'refund'],
+      ],
+    ]);
+    // Conversations' events alone clear the lists, and then refuse them.
+    expect(await api().update(key.ctx, id, { events: ['message.received'] })).toMatchObject({
+      events: ['message.received'],
+      surveyContactTags: null,
+      surveyConversationTags: null,
+    });
+    expect(await issueOf(api().update(key.ctx, id, { surveyContactTags: ['vip'] }))).toMatchObject({
+      path: 'surveyContactTags',
+    });
+    expect(
+      await api().update(key.ctx, id, {
+        events: ['satisfaction_survey.answered'],
+        surveyConversationTags: ['refund'],
+      }),
+    ).toMatchObject({ surveyContactTags: null, surveyConversationTags: ['refund'] });
+    expect(await api().update(key.ctx, id, { surveyConversationTags: null })).toMatchObject({
+      surveyConversationTags: null,
     });
   });
 
