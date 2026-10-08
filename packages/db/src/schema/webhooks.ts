@@ -246,6 +246,12 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
    */
   orderChangeMakers: text('order_change_makers').array().$type<WebhookOrderChangeMaker[]>(),
   /**
+   * The API keys whose order status changes it leaves out (migration 0245, ADR-323): the changes
+   * one of them made through the API, or a key one of them was rotated from or into. null leaves
+   * nothing out. Set only while `order.status_changed` is among its events.
+   */
+  orderExcludedApiKeyIds: uuid('order_excluded_api_key_ids').array(),
+  /**
    * The statuses a deal reaches that it takes as `deal.status_changed` (migration 0232, ADR-309);
    * null takes every status. Set only while `deal.status_changed` is among its events.
    */

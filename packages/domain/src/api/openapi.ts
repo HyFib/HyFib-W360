@@ -1224,6 +1224,12 @@ export const apiWebhookEndpointSchema = z.object({
     .describe(
       "Who made the order status changes the endpoint receives as order.status_changed, as the event's changedBy names them; a change HyFib did not record the maker of is received whoever is listed. null receives every change.",
     ),
+  orderExcludedApiKeyIds: z
+    .array(z.uuid())
+    .nullable()
+    .describe(
+      "The API keys whose order status changes the endpoint does not receive as order.status_changed, as the event's apiKeyId names the key that made a change: the changes one of them made through the API, or a key one of them was rotated from or into. Changes members and Payment Links made, and those HyFib did not record the maker of, are never left out. null leaves nothing out.",
+    ),
   dealStatuses: z
     .array(z.enum(WEBHOOK_DEAL_STATUSES))
     .nullable()
@@ -4239,7 +4245,7 @@ export function buildOpenApiDocument(serverUrl: string) {
       'order.status_changed': webhook(
         'webhookOrderStatusChanged',
         WEBHOOK_EVENT_INFO['order.status_changed'].label,
-        `${WEBHOOK_EVENT_INFO['order.status_changed'].description} order.status and order.previousStatus are the change, and order.changedBy who made it: a member, an API key (order.apiKeyId names it, so an integration can tell its own changes from others') or HyFib applying the order’s Payment Link; the rest is the order when the event is delivered. Deliveries are not ordered: the latest change is the one with the latest createdAt. An endpoint receives every status unless it names the statuses it takes (its \`orderStatuses\`, or the statuses ticked in Settings → Webhooks), and every change unless it names who made the changes it takes (its \`orderChangeMakers\`, or the makers ticked in Settings → Webhooks): then the changes they made only, and those HyFib did not record the maker of, so an integration that moves orders through the API can leave out the changes keys make.`,
+        `${WEBHOOK_EVENT_INFO['order.status_changed'].description} order.status and order.previousStatus are the change, and order.changedBy who made it: a member, an API key (order.apiKeyId names it, so an integration can tell its own changes from others') or HyFib applying the order’s Payment Link; the rest is the order when the event is delivered. Deliveries are not ordered: the latest change is the one with the latest createdAt. An endpoint receives every status unless it names the statuses it takes (its \`orderStatuses\`, or the statuses ticked in Settings → Webhooks), and every change unless it names who made the changes it takes (its \`orderChangeMakers\`, or the makers ticked in Settings → Webhooks): then the changes they made only, and those HyFib did not record the maker of, so an integration that moves orders through the API can leave out the changes keys make; or it can leave out only the changes chosen keys made (its \`orderExcludedApiKeyIds\`, a key rotated from or into one of them included), to be sent every change but its own.`,
         'WebhookOrderStatusChanged',
       ),
       'payment_link.status_changed': webhook(

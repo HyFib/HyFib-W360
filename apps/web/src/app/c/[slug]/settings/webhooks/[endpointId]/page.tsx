@@ -48,6 +48,7 @@ export default async function WebhookEndpointPage({
     runApiKeyChoices,
     messageApiKeyChoices,
     crmApiKeyChoices,
+    orderApiKeyChoices,
     channelChoices,
     teamChoices,
     templateChoices,
@@ -63,6 +64,7 @@ export default async function WebhookEndpointPage({
     webhooks.runApiKeyChoices(ctx),
     webhooks.messageApiKeyChoices(ctx),
     webhooks.crmApiKeyChoices(ctx),
+    webhooks.orderApiKeyChoices(ctx),
     webhooks.channelChoices(ctx),
     webhooks.teamChoices(ctx),
     webhooks.templateChoices(ctx),
@@ -218,6 +220,7 @@ export default async function WebhookEndpointPage({
               orderStatuses: endpoint.orderStatuses,
               paymentLinkStatuses: endpoint.paymentLinkStatuses,
               orderChangeMakers: endpoint.orderChangeMakers,
+              orderExcludedApiKeys: endpoint.orderExcludedApiKeys,
               dealStatuses: endpoint.dealStatuses,
               taskStatuses: endpoint.taskStatuses,
               dealDetails: endpoint.dealDetails,
@@ -262,6 +265,7 @@ export default async function WebhookEndpointPage({
             runApiKeyChoices={runApiKeyChoices}
             messageApiKeyChoices={messageApiKeyChoices}
             crmApiKeyChoices={crmApiKeyChoices}
+            orderApiKeyChoices={orderApiKeyChoices}
             channelChoices={channelChoices}
             teamChoices={teamChoices}
             templateChoices={templateChoices}

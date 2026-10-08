@@ -1626,6 +1626,15 @@ Phase 5 rules (outgoing webhooks, P5-09):
   another endpoint or company; a change without a recorded maker reaches every list, nothing new is
   stored, and the payload is unchanged. Audited with the list and in the company data export (unit
   tests; integration tests, run in CI only).
+- An endpoint can leave out the order status changes chosen API keys made (ADR-323). A list holds
+  only the company's keys holding `orders.write` or `orders.request_payment` (checked by the
+  services, whatever the key's state), is kept only while the endpoint takes `order.status_changed`
+  (a database check too), and is applied in `app.capture_webhook_event` to the key the order's own
+  row recorded with the change (0187) and to that key's rotations, read by
+  `app.webhook_api_key_family` (ADR-320) under the caller's row-level security. It only narrows what
+  one endpoint receives and never adds an event or a delivery for another endpoint or company;
+  nothing new is stored, and the payload is unchanged. Audited with the list and in the company data
+  export (unit tests; integration tests, run in CI only).
 - An endpoint can take the changes of chosen custom fields only (ADR-184), chosen the same way. A
   list may add only keys of the endpoint's company's fields (checked in its scope), is kept only
   while the endpoint takes field changes (a database check too, which also refuses a malformed key

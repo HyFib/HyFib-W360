@@ -203,6 +203,10 @@ import {
   WEBHOOK_CRM_KEY_SCOPES,
   webhookCrmExcludedApiKeyIdsFor,
   webhookCrmExcludedApiKeyIdsSchema,
+  WEBHOOK_ORDER_KEY_SCOPES,
+  WEBHOOK_ORDER_EXCLUDED_API_KEYS_NEED_THE_EVENT,
+  webhookOrderExcludedApiKeyIdsFor,
+  webhookOrderExcludedApiKeyIdsSchema,
   webhookMessageApiKeyIdsFor,
   webhookMessageApiKeyIdsSchema,
   webhookConsentChangesFor,
@@ -2560,6 +2564,56 @@ describe('API keys left out of deal, task and note events (ADR-321)', () => {
     expect(webhookCrmExcludedApiKeyIdsFor(['deal.created'], undefined, null)).toBeNull();
     expect(webhookCrmExcludedApiKeyIdsFor(['contact.updated'], [store], [crm])).toBeNull();
     expect(webhookCrmExcludedApiKeyIdsFor(['automation.run_started'], undefined, [crm])).toBeNull();
+  });
+});
+
+describe('API keys left out of order changes (ADR-323)', () => {
+  const shop = '2a3b4c5d-6e7f-4a8b-9c0d-1e2f3a4b5c6d';
+  const erp = '3b4c5d6e-7f8a-4b9c-8d0e-2f3a4b5c6d7e';
+
+  it('take 1 to 20 key ids, once each, in lower case; null leaves nothing out', () => {
+    expect(webhookOrderExcludedApiKeyIdsSchema.parse([erp.toUpperCase(), shop, erp])).toEqual([
+      erp,
+      shop,
+    ]);
+    expect(webhookOrderExcludedApiKeyIdsSchema.parse(null)).toBeNull();
+    expect(WEBHOOK_LIMITS.orderExcludedApiKeys).toBe(API_KEY_LIMITS.activeKeys);
+    const ids = Array.from(
+      { length: 21 },
+      (_, i) => `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`,
+    );
+    expect(webhookOrderExcludedApiKeyIdsSchema.safeParse(ids.slice(1)).success).toBe(true);
+    expect(webhookOrderExcludedApiKeyIdsSchema.safeParse(ids).error?.issues[0]?.message).toBe(
+      'Choose at most 20 API keys.',
+    );
+    expect(webhookOrderExcludedApiKeyIdsSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one API key, or take every order change.',
+    );
+  });
+
+  it('name the keys that change orders, asking for payment included', () => {
+    expect([...WEBHOOK_ORDER_KEY_SCOPES].sort()).toEqual([
+      'orders.request_payment',
+      'orders.write',
+    ]);
+  });
+
+  it('are kept only while the endpoint takes order.status_changed: given, kept, or cleared', () => {
+    const both = ['order.status_changed', 'order.received'] as const;
+    expect(webhookOrderExcludedApiKeyIdsFor([...both], [shop], null)).toEqual([shop]);
+    expect(webhookOrderExcludedApiKeyIdsFor([...both], undefined, [erp])).toEqual([erp]);
+    expect(webhookOrderExcludedApiKeyIdsFor([...both], null, [erp])).toBeNull();
+    expect(webhookOrderExcludedApiKeyIdsFor([...both], undefined, null)).toBeNull();
+    expect(
+      webhookOrderExcludedApiKeyIdsFor(
+        ['order.received', 'payment_link.status_changed'],
+        [shop],
+        [erp],
+      ),
+    ).toBeNull();
+    expect(WEBHOOK_ORDER_EXCLUDED_API_KEYS_NEED_THE_EVENT).toBe(
+      `Leave out the order changes of API keys only for an endpoint that receives ${WEBHOOK_EVENT_INFO['order.status_changed'].label}.`,
+    );
   });
 });
 

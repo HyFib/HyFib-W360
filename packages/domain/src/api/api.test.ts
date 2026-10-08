@@ -185,6 +185,7 @@ import {
   WEBHOOK_ORDER_STATUSES_NEED_THE_EVENT,
   WEBHOOK_PAYMENT_LINK_STATUSES_NEED_THE_EVENT,
   WEBHOOK_ORDER_CHANGE_MAKERS_NEED_THE_EVENT,
+  WEBHOOK_ORDER_EXCLUDED_API_KEYS_NEED_THE_EVENT,
   WEBHOOK_DEAL_STATUSES_NEED_THE_EVENT,
   WEBHOOK_TASK_STATUSES_NEED_THE_EVENT,
   WEBHOOK_DEAL_DETAILS_NEED_THE_EVENT,
@@ -1501,6 +1502,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'noteStageIds',
       'oauth',
       'orderChangeMakers',
+      'orderExcludedApiKeyIds',
       'orderStatuses',
       'ownerIds',
       'paymentLinkStatuses',
@@ -3425,7 +3427,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       paymentLinkStatuses: ['expired'],
     });
     expect(apiUpdateWebhookEndpointSchema.safeParse({}).error?.issues[0]?.message).toContain(
-      'the order statuses, who made the order changes, the Payment Link statuses, the template statuses',
+      'the order statuses, who made the order changes, the API keys whose order changes are left out, the Payment Link statuses, the template statuses',
     );
     const doc = buildOpenApiDocument('https://app.example.com/api/v1');
     const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
@@ -3474,7 +3476,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       orderChangeMakers: ['api'],
     });
     expect(apiUpdateWebhookEndpointSchema.safeParse({}).error?.issues[0]?.message).toContain(
-      'the order statuses, who made the order changes, the Payment Link statuses',
+      'the order statuses, who made the order changes, the API keys whose order changes are left out, the Payment Link statuses',
     );
     const doc = buildOpenApiDocument('https://app.example.com/api/v1');
     const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
@@ -3492,6 +3494,63 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     );
     expect(JSON.stringify(doc.webhooks)).toContain(
       'every change unless it names who made the changes it takes (its `orderChangeMakers`',
+    );
+  });
+
+  it('leave out API keys only with order.status_changed, each once, and a list of them alone is a change (ADR-323)', () => {
+    const shop = '2A3B4C5D-6E7F-4A8B-9C0D-1E2F3A4B5C6D';
+    const erp = '3b4c5d6e-7f8a-4b9c-8d0e-2f3a4b5c6d7e';
+    const base = { url: 'https://hooks.example.com/w360', events: ['order.status_changed'] };
+    expect(
+      apiCreateWebhookEndpointSchema.parse({
+        ...base,
+        orderExcludedApiKeyIds: [shop, erp, shop.toLowerCase()],
+      }).orderExcludedApiKeyIds,
+    ).toEqual([shop.toLowerCase(), erp]);
+    expect(
+      apiCreateWebhookEndpointSchema.parse({ ...base, orderExcludedApiKeyIds: null })
+        .orderExcludedApiKeyIds,
+    ).toBeNull();
+    for (const body of [
+      { ...base, orderExcludedApiKeyIds: [] },
+      { ...base, orderExcludedApiKeyIds: ['w360_aaaaaaaaaaaa'] },
+      { ...base, orderExcludedApiKeyIds: erp },
+    ]) {
+      expect(apiCreateWebhookEndpointSchema.safeParse(body).success, JSON.stringify(body)).toBe(
+        false,
+      );
+    }
+    const refused = apiCreateWebhookEndpointSchema.safeParse({
+      ...base,
+      events: ['order.received', 'payment_link.status_changed'],
+      orderExcludedApiKeyIds: [erp],
+    });
+    expect(refused.error?.issues.map((i) => [i.path.join('.'), i.message])).toEqual([
+      ['orderExcludedApiKeyIds', WEBHOOK_ORDER_EXCLUDED_API_KEYS_NEED_THE_EVENT],
+    ]);
+    for (const change of [{ orderExcludedApiKeyIds: null }, { orderExcludedApiKeyIds: [erp] }]) {
+      expect(apiUpdateWebhookEndpointSchema.parse(change)).toEqual(change);
+    }
+    expect(apiUpdateWebhookEndpointSchema.safeParse({}).error?.issues[0]?.message).toContain(
+      'who made the order changes, the API keys whose order changes are left out, the Payment Link statuses',
+    );
+    // Answered as a list of key ids, or null, and set out with the order event.
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas;
+    const answered = schemas.WebhookEndpoint as {
+      properties: Record<string, { anyOf?: unknown[] }>;
+      required?: string[];
+    };
+    expect(answered.properties.orderExcludedApiKeyIds?.anyOf).toHaveLength(2);
+    expect(answered.required).toContain('orderExcludedApiKeyIds');
+    const given = (schemas.CreateWebhookEndpoint as { properties: Record<string, unknown> })
+      .properties;
+    expect(JSON.stringify(given.orderExcludedApiKeyIds)).toContain(
+      '(orders.write, or orders.request_payment, whose request leaves an order waiting for payment)',
+    );
+    expect(JSON.stringify(doc.webhooks)).toContain(
+      'or it can leave out only the changes chosen keys made (its `orderExcludedApiKeyIds`',
     );
   });
 

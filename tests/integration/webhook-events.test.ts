@@ -3675,6 +3675,109 @@ describe('order events (ADR-085)', () => {
     );
   });
 
+  it('leaves out of an endpoint the order changes the keys it names made, across a rotation either way, and sends every other change (ADR-323)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    await syncedCatalog(c, '5558592');
+    const keys = createApiKeysService({ db: fx.dbs.app, clock: systemClock });
+    const shop = await keys.create(owner, {
+      name: 'Shop',
+      scopes: ['orders.write'],
+      expiresInDays: 0,
+    });
+    const erp = await keys.create(owner, {
+      name: 'ERP',
+      scopes: ['orders.write'],
+      expiresInDays: 0,
+    });
+    const add = async (orderExcludedApiKeyIds: string[] | null) =>
+      (
+        await webhooks().create(owner, {
+          url: `http://${HOST}:${port}/ok/${randomBytes(6).toString('hex')}`,
+          eventTypes: ['order.received', 'order.status_changed'],
+          orderExcludedApiKeyIds,
+        })
+      ).id;
+    const every = await add(null);
+    const notShop = await add([shop.id]);
+    const notErp = await add([erp.id]);
+    // The shop's key is rotated: the old key works for a day more. An endpoint names the new one.
+    const shop2 = await keys.rotate(owner, { keyId: shop.id, overlapHours: 24 });
+    const notShop2 = await add([shop2.id]);
+    const keyCtx = async (token: string) => {
+      const ctx = await authenticateApiToken(fx.dbs.app, token, uuidv7());
+      if (!ctx) throw new Error('a key does not authenticate');
+      return ctx;
+    };
+    const apiDeps = { db: fx.dbs.app, clock: systemClock };
+
+    // A member confirms the first order and the old key fulfils it.
+    const first = await sendCart(c, waId(), '5558592', [
+      { retailerId: 'sku-1', quantity: 1, price: 10 },
+    ]);
+    await setOrderStatus(owner, first.id, 'confirmed');
+    await apiUpdateOrder(apiDeps, await keyCtx(shop.token), first.id, { status: 'fulfilled' });
+    // The new key confirms the second and the ERP's key cancels it.
+    const second = await sendCart(c, waId(), '5558592', [
+      { retailerId: 'sku-2', quantity: 1, price: 20 },
+    ]);
+    await apiUpdateOrder(apiDeps, await keyCtx(shop2.token), second.id, { status: 'confirmed' });
+    await apiUpdateOrder(apiDeps, await keyCtx(erp.token), second.id, { status: 'cancelled' });
+    // The third is confirmed by a change that records no maker.
+    const third = await sendCart(c, waId(), '5558592', [
+      { retailerId: 'sku-1', quantity: 2, price: 10 },
+    ]);
+    await fx.query(`UPDATE app.commerce_orders SET status = 'confirmed' WHERE id = $1`, [third.id]);
+
+    const sent = await fx.query<{ type: string; order: string; status: string; endpoint: string }>(
+      `SELECT e.type, e.detail ->> 'orderId' AS order, e.status, d.endpoint_id AS endpoint
+         FROM app.webhook_deliveries d
+         JOIN app.webhook_events e ON e.tenant_id = d.tenant_id AND e.id = d.event_id
+        WHERE d.tenant_id = $1`,
+      [c.tenant.id],
+    );
+    const endpointName = new Map([
+      [every, 'every change'],
+      [notShop, 'not the old key'],
+      [notErp, 'not the ERP key'],
+      [notShop2, 'not the new key'],
+    ]);
+    const orderName = new Map([
+      [first.id, 'first'],
+      [second.id, 'second'],
+      [third.id, 'third'],
+    ]);
+    const sorted = (rows: unknown[][]) =>
+      [...rows].sort((x, y) => JSON.stringify(x).localeCompare(JSON.stringify(y)));
+    const all = ['every change', 'not the old key', 'not the ERP key', 'not the new key'];
+    const to = (type: string, order: string, status: string, endpoints: string[]) =>
+      endpoints.map((endpoint) => [type, order, status, endpoint]);
+    expect(
+      sorted(
+        sent.map((s) => [s.type, orderName.get(s.order), s.status, endpointName.get(s.endpoint)]),
+      ),
+    ).toEqual(
+      sorted([
+        // New orders, and a member's change, reach every endpoint.
+        ...to('order.received', 'first', 'received', all),
+        ...to('order.received', 'second', 'received', all),
+        ...to('order.received', 'third', 'received', all),
+        ...to('order.status_changed', 'first', 'confirmed', all),
+        // The old key's change is left out by the lists naming it and the key it was rotated into…
+        ...to('order.status_changed', 'first', 'fulfilled', ['every change', 'not the ERP key']),
+        // …and the new key's by the lists naming it and the key it replaced.
+        ...to('order.status_changed', 'second', 'confirmed', ['every change', 'not the ERP key']),
+        ...to('order.status_changed', 'second', 'cancelled', [
+          'every change',
+          'not the old key',
+          'not the new key',
+        ]),
+        // A change that recorded no maker is left out by no list.
+        ...to('order.status_changed', 'third', 'confirmed', all),
+      ]),
+    );
+  });
+
   it('sends an endpoint that names numbers only the orders sent to them (ADR-170)', async () => {
     const c = await fx.company();
     const owner = await fx.ctx(c, c.owner);

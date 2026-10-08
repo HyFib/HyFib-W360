@@ -12482,3 +12482,54 @@ Decision:
 Not built: leaving out chosen keys' order changes, makers for Payment Link events
 (`payment_link.status_changed` names who asked for the link), and filters by the key that asked for
 an order's payment.
+
+## ADR-323 Choosing the API keys whose order status changes a webhook endpoint leaves out (P5-09) (2026-10-08)
+
+Context: an endpoint taking `order.status_changed` can choose who made the changes it receives
+(ADR-322): members, API keys, Payment Links. An order system that moves orders through the API and
+takes the event could leave out every key's changes, but then lost every other integration's too (a
+fulfilment service's and a payments service's, say), and the receiver read `apiKeyId` to drop its
+own. ADR-322 left leaving out chosen keys' order changes unbuilt.
+
+Decision:
+
+- **One list per endpoint,** `orderExcludedApiKeyIds`: 1 to 20 ids of the company's API keys, each
+  once, whose order status changes the endpoint does not receive. A change is left out when the key
+  that made it, as the event's `apiKeyId` names it, is on the list, or a key it was rotated from or
+  into, however many rotations away, as for runs, messages and CRM changes (ADR-319 to ADR-321). A
+  change a member or a Payment Link made, or one HyFib recorded no maker for, is left out by no
+  list, and `order.received` is not narrowed. Null leaves nothing out, as before. With order
+  statuses, who made the changes or numbers chosen too, an event must pass them all. Chosen in
+  Settings → Webhooks ("Order changes made through the API": every order change by default, or all
+  but those the keys ticked made; shown while the endpoint takes Order status), shown on the
+  endpoint as "Order changes left out, made through the API by: …", and through the API as
+  `orderExcludedApiKeyIds` on `POST /webhook-endpoints` and `PATCH /webhook-endpoints/{id}` and in
+  every endpoint the API answers.
+- **Which keys:** the services refuse an id that is not one of the company's keys holding a scope
+  that changes an order's status: `orders.write`, or `orders.request_payment`, whose request leaves
+  the order waiting for payment (ADR-270 records that change as the key's). Named by place, whatever
+  the key's state: a key revoked or expired since it was ticked makes no more changes but does not
+  stop the endpoint being saved, and a rotated key's changes match the key that replaced it.
+  Settings offers the keys that work and were not rotated, and keeps naming a key an endpoint has,
+  with "revoked" or "expired" once it stops working.
+- **Only while `order.status_changed` is taken:** a list given for an endpoint that does not take it
+  is refused (422 through the API); a change that drops the event clears the list, a `PATCH` that
+  leaves the list out keeps it, and one that gives only the list is a change. A check in the
+  database holds the same rule and the list's shape (null, or 1 to 20 ids in one dimension without a
+  null, with `order.status_changed`).
+- **Applied at capture:** the order trigger already passes the key that made a change in the detail
+  (0187), and the payload reads it there, so the key stays in the stored detail.
+  `app.capture_webhook_event` reads the key's rotations through `app.webhook_api_key_family` (0242),
+  as for runs and messages, only when an active endpoint of the company taking the event leaves out
+  keys, and creates no delivery for an endpoint whose list shares one of them.
+- **Audited, exported, permissions unchanged,** as for the other key lists:
+  `webhook.endpoint_created` and `webhook.endpoint_updated` carry `orderExcludedApiKeyIds` when the
+  endpoint has it, and the company data export carries the column.
+- **Migration 0245:** `order_excluded_api_key_ids uuid[]` on `app.webhook_endpoints` with its check,
+  validated at once (a company has at most 10 endpoints), the update grant on the column for the
+  runtime role, and `app.capture_webhook_event` replaced with the same signature (0244's, with the
+  exclusion), so its owner and grants stay. Existing endpoints keep null; nothing is backfilled.
+
+Not built: lists that take only chosen keys' order changes, lists that leave chosen keys' runs or
+messages out, makers and keys for Payment Link events (`payment_link.status_changed` names who asked
+for the link), and the statuses of the messages an automation sent for a key's run.

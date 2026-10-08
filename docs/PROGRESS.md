@@ -1,5 +1,49 @@
 # Progress
 
+## 2026-10-08 — API key exclusions for order changes (P5-09, H-014, ADR-323)
+
+Status: **Implemented; its database tests run in CI only.** Endpoints taking `order.status_changed`
+could choose who made the changes, but an order system moving orders through the API was sent back
+its own changes unless it left out every key's. The local PostgreSQL is unavailable, so the
+migration and the integration tests below were written but not run here; migration 0245 passed the
+pglast parse check (syntax only).
+
+### Completed
+
+- **Database:** migration 0245 (`order_excluded_api_key_ids` on `app.webhook_endpoints` with its
+  check and update grant; `app.capture_webhook_event` reading the rotations of the key that made an
+  order change when an endpoint leaves out keys, and leaving the event out of those endpoints).
+- **Domain:** `WEBHOOK_LIMITS.orderExcludedApiKeys`, `webhookOrderExcludedApiKeyIdsSchema`,
+  `WEBHOOK_ORDER_KEY_SCOPES`, `webhookOrderExcludedApiKeyIdsFor` and
+  `assertWebhookOrderExcludedApiKeys` in `webhooks/service.ts`, sharing the list's schema and the
+  key check with ADR-319's; `orderApiKeyChoices`; the endpoint view's `orderExcludedApiKeys`;
+  creation, changes, audits and the export column; the same in `api/webhook-endpoints.ts` and the
+  OpenAPI document (the endpoint's answer, and `order.status_changed`'s description).
+- **Web:** Settings → Webhooks' "Order changes made through the API" while the endpoint takes Order
+  status (the fieldset the other key lists use), and the endpoints list's line for it.
+- **Tests:** unit (4 new: the list's rules, the scopes, and keeping and clearing in
+  `webhooks/webhooks.test.ts`; the API schemas and OpenAPI entries in `api/api.test.ts`; 3
+  assertions there updated for the new field); integration (3 new: the services in
+  `webhooks.test.ts`, capture in `webhook-events.test.ts`, the API in
+  `api-webhook-endpoints.test.ts`; 1 changed: the full endpoint answer there). Written for CI; the
+  integration tests were not run here. No e2e test.
+- **Docs:** ADR-323; ARCHITECTURE; SECURITY; THREAT-MODEL T291; DEPLOYMENT; RUNBOOKS; BACKLOG P5-09;
+  feature matrix H-014.
+- **Mutation checks:** 16/16 deliberate regressions caught on the unit-tested parts. The capture,
+  the key checks against the database and the form need the database or a browser, so their
+  regressions are left to the integration tests, which run in CI.
+
+### Test commands and results (local, 2026-10-08)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 140 files, 1358 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| pglast 7 parse of migration 0245                   | passed (syntax only)                                          |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
 ## 2026-10-08 — Order change maker filters (P5-09, H-014, ADR-322)
 
 Status: **Implemented; its database tests run in CI only.** `order.status_changed` names who made

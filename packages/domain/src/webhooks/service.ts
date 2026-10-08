@@ -1915,6 +1915,67 @@ export async function assertWebhookCrmExcludedApiKeys(
 }
 
 /**
+ * The API keys whose order status changes an endpoint leaves out (ADR-323), each once: the changes
+ * one of them made through the API, or a key one of them was rotated from or into, so that an
+ * order system is not sent back what it changed. null leaves nothing out.
+ */
+export const webhookOrderExcludedApiKeyIdsSchema = webhookApiKeyIdsSchema(
+  WEBHOOK_LIMITS.orderExcludedApiKeys,
+  'every order change',
+);
+
+export const WEBHOOK_ORDER_EXCLUDED_API_KEYS_NEED_THE_EVENT =
+  'Leave out the order changes of API keys only for an endpoint that receives Order status.';
+
+export const WEBHOOK_ORDER_EXCLUDED_API_KEYS_NOT_FOUND =
+  'Choose API keys of this company that can change orders.';
+
+/**
+ * The scopes whose keys change an order's status through the API (ADR-323): moving it on, and
+ * asking for its payment, which leaves it waiting for payment.
+ */
+export const WEBHOOK_ORDER_KEY_SCOPES = [
+  'orders.write',
+  'orders.request_payment',
+] as const satisfies readonly ApiScope[];
+
+/**
+ * The API keys an endpoint keeps leaving out of order changes after it is added or changed: none
+ * (null) unless it takes `order.status_changed`; then those given, or else the ones it had.
+ */
+export function webhookOrderExcludedApiKeyIdsFor(
+  eventTypes: readonly WebhookEventType[],
+  given: readonly string[] | null | undefined,
+  current: readonly string[] | null,
+): string[] | null {
+  if (!eventTypes.includes('order.status_changed')) return null;
+  const kept = given === undefined ? current : given;
+  return kept ? [...kept] : null;
+}
+
+/**
+ * Refuses API keys given for an endpoint to leave out of order changes unless each is the
+ * company's and holds a scope that changes orders (ADR-323), whatever its state: a rotated key's
+ * changes match the key that replaced it. `tx` is in the company's scope.
+ */
+export async function assertWebhookOrderExcludedApiKeys(
+  tx: Tx,
+  tenantId: string,
+  ids: readonly string[] | null | undefined,
+): Promise<void> {
+  await assertCompanyApiKeys(
+    tx,
+    tenantId,
+    ids,
+    WEBHOOK_ORDER_KEY_SCOPES,
+    'orderExcludedApiKeyIds',
+    {
+      notFound: WEBHOOK_ORDER_EXCLUDED_API_KEYS_NOT_FOUND,
+    },
+  );
+}
+
+/**
  * The scores of the satisfaction survey answers an endpoint takes (ADR-307), in the order Settings
  * lists them; null takes every answer.
  */
@@ -2412,6 +2473,11 @@ const endpointFields = z.object({
    * stay.
    */
   orderChangeMakers: webhookOrderChangeMakersSchema.optional(),
+  /**
+   * Given, the API keys whose order status changes it leaves out (null: none, ADR-323); left out,
+   * they stay.
+   */
+  orderExcludedApiKeyIds: webhookOrderExcludedApiKeyIdsSchema.optional(),
   /** Given, the deal statuses it takes (null: every status, ADR-309); left out, they stay. */
   dealStatuses: webhookDealStatusesSchema.optional(),
   /** Given, the task statuses it takes (null: every status, ADR-309); left out, they stay. */
@@ -2629,6 +2695,15 @@ const orderChangeMakersNeedTheEvent = {
   check: (data: { eventTypes: WebhookEventType[]; orderChangeMakers?: unknown }) =>
     !data.orderChangeMakers || data.eventTypes.includes('order.status_changed'),
   options: { path: ['orderChangeMakers'], message: WEBHOOK_ORDER_CHANGE_MAKERS_NEED_THE_EVENT },
+};
+/** Keys are left out of order changes only for an endpoint that takes them (ADR-323). */
+const orderExcludedApiKeysNeedTheEvent = {
+  check: (data: { eventTypes: WebhookEventType[]; orderExcludedApiKeyIds?: unknown }) =>
+    !data.orderExcludedApiKeyIds || data.eventTypes.includes('order.status_changed'),
+  options: {
+    path: ['orderExcludedApiKeyIds'],
+    message: WEBHOOK_ORDER_EXCLUDED_API_KEYS_NEED_THE_EVENT,
+  },
 };
 /** Deal statuses are chosen only for an endpoint that takes deal status changes (ADR-309). */
 const dealStatusesNeedTheEvent = {
@@ -2879,6 +2954,7 @@ const endpointSchema = endpointFields
   .refine(orderStatusesNeedTheEvent.check, orderStatusesNeedTheEvent.options)
   .refine(paymentLinkStatusesNeedTheEvent.check, paymentLinkStatusesNeedTheEvent.options)
   .refine(orderChangeMakersNeedTheEvent.check, orderChangeMakersNeedTheEvent.options)
+  .refine(orderExcludedApiKeysNeedTheEvent.check, orderExcludedApiKeysNeedTheEvent.options)
   .refine(dealStatusesNeedTheEvent.check, dealStatusesNeedTheEvent.options)
   .refine(taskStatusesNeedTheEvent.check, taskStatusesNeedTheEvent.options)
   .refine(dealDetailsNeedTheEvent.check, dealDetailsNeedTheEvent.options)
@@ -2929,6 +3005,7 @@ const updateSchema = endpointFields
   .refine(orderStatusesNeedTheEvent.check, orderStatusesNeedTheEvent.options)
   .refine(paymentLinkStatusesNeedTheEvent.check, paymentLinkStatusesNeedTheEvent.options)
   .refine(orderChangeMakersNeedTheEvent.check, orderChangeMakersNeedTheEvent.options)
+  .refine(orderExcludedApiKeysNeedTheEvent.check, orderExcludedApiKeysNeedTheEvent.options)
   .refine(dealStatusesNeedTheEvent.check, dealStatusesNeedTheEvent.options)
   .refine(taskStatusesNeedTheEvent.check, taskStatusesNeedTheEvent.options)
   .refine(dealDetailsNeedTheEvent.check, dealDetailsNeedTheEvent.options)
@@ -3024,6 +3101,11 @@ export interface WebhookEndpointView {
   paymentLinkStatuses: WebhookPaymentLinkStatus[] | null;
   /** Who made the order status changes it takes (ADR-322), in Settings' order; null: all. */
   orderChangeMakers: WebhookOrderChangeMaker[] | null;
+  /**
+   * The API keys whose order status changes it leaves out (ADR-323), as stored, named, with whether
+   * they still work; null leaves nothing out.
+   */
+  orderExcludedApiKeys: WebhookEndpointApiKey[] | null;
   /** The deal statuses it takes (ADR-309); null takes every status. */
   dealStatuses: WebhookDealStatus[] | null;
   /** The task statuses it takes (ADR-309); null takes every status. */
@@ -3401,6 +3483,7 @@ export async function lockWebhookEndpoint(
       orderStatuses: webhookEndpoints.orderStatuses,
       paymentLinkStatuses: webhookEndpoints.paymentLinkStatuses,
       orderChangeMakers: webhookEndpoints.orderChangeMakers,
+      orderExcludedApiKeyIds: webhookEndpoints.orderExcludedApiKeyIds,
       dealStatuses: webhookEndpoints.dealStatuses,
       taskStatuses: webhookEndpoints.taskStatuses,
       dealDetails: webhookEndpoints.dealDetails,
@@ -3486,6 +3569,7 @@ export async function insertWebhookEndpoint(
     orderStatuses: WebhookOrderStatus[] | null;
     paymentLinkStatuses: WebhookPaymentLinkStatus[] | null;
     orderChangeMakers: WebhookOrderChangeMaker[] | null;
+    orderExcludedApiKeyIds: string[] | null;
     dealStatuses: WebhookDealStatus[] | null;
     taskStatuses: WebhookTaskStatus[] | null;
     dealDetails: WebhookDealDetail[] | null;
@@ -3560,6 +3644,7 @@ export async function insertWebhookEndpoint(
     orderStatuses: input.orderStatuses,
     paymentLinkStatuses: input.paymentLinkStatuses,
     orderChangeMakers: input.orderChangeMakers,
+    orderExcludedApiKeyIds: input.orderExcludedApiKeyIds,
     dealStatuses: input.dealStatuses,
     taskStatuses: input.taskStatuses,
     dealDetails: input.dealDetails,
@@ -3983,6 +4068,7 @@ export function createWebhooksService(deps: {
               orderStatuses: webhookEndpoints.orderStatuses,
               paymentLinkStatuses: webhookEndpoints.paymentLinkStatuses,
               orderChangeMakers: webhookEndpoints.orderChangeMakers,
+              orderExcludedApiKeyIds: webhookEndpoints.orderExcludedApiKeyIds,
               dealStatuses: webhookEndpoints.dealStatuses,
               taskStatuses: webhookEndpoints.taskStatuses,
               dealDetails: webhookEndpoints.dealDetails,
@@ -4256,13 +4342,14 @@ export function createWebhooksService(deps: {
                   );
           const assigneeById = new Map(namedAssignees.map((m) => [m.id, m]));
           // The API keys endpoints chose for runs (ADR-319) and messages (ADR-320) and left out of
-          // CRM changes (ADR-321), and whether they still work.
+          // CRM changes (ADR-321) and order changes (ADR-323), and whether they still work.
           const apiKeyIds = [
             ...new Set(
               rows.flatMap((r) => [
                 ...(r.runApiKeyIds ?? []),
                 ...(r.messageApiKeyIds ?? []),
                 ...(r.crmExcludedApiKeyIds ?? []),
+                ...(r.orderExcludedApiKeyIds ?? []),
               ]),
             ),
           ];
@@ -4317,6 +4404,7 @@ export function createWebhooksService(deps: {
               runApiKeyIds: chosenRunApiKeys,
               messageApiKeyIds: chosenMessageApiKeys,
               crmExcludedApiKeyIds: chosenCrmExcludedApiKeys,
+              orderExcludedApiKeyIds: chosenOrderExcludedApiKeys,
               channelAccountIds,
               teamIds: chosenTeams,
               templateIds: chosenTemplates,
@@ -4414,6 +4502,9 @@ export function createWebhooksService(deps: {
               crmExcludedApiKeys: chosenCrmExcludedApiKeys
                 ? chosenCrmExcludedApiKeys.map(namedApiKey)
                 : null,
+              orderExcludedApiKeys: chosenOrderExcludedApiKeys
+                ? chosenOrderExcludedApiKeys.map(namedApiKey)
+                : null,
               createdByKey: keyName && keyPrefix ? { name: keyName, keyPrefix } : null,
               previousSecretExpiresAt: previousSigns ? r.previousSecretExpiresAt : null,
               recent,
@@ -4506,6 +4597,21 @@ export function createWebhooksService(deps: {
       return db.run(
         ctx.scope,
         (tx) => workingApiKeys(tx, ctx.tenant.id, WEBHOOK_CRM_KEY_SCOPES, now),
+        { accessMode: 'read only' },
+      );
+    },
+
+    /**
+     * The API keys an endpoint can choose to leave out the order status changes of (ADR-323): the
+     * company's keys holding a scope that changes orders, working and not rotated, by name, as for
+     * runs.
+     */
+    async orderApiKeyChoices(ctx: TenantContext): Promise<WebhookApiKeyChoice[]> {
+      assertCan(ctx, 'developer.manage');
+      const now = clock.now();
+      return db.run(
+        ctx.scope,
+        (tx) => workingApiKeys(tx, ctx.tenant.id, WEBHOOK_ORDER_KEY_SCOPES, now),
         { accessMode: 'read only' },
       );
     },
@@ -4765,6 +4871,12 @@ export function createWebhooksService(deps: {
           data.orderChangeMakers,
           null,
         );
+        const orderExcludedApiKeyIds = webhookOrderExcludedApiKeyIdsFor(
+          data.eventTypes,
+          data.orderExcludedApiKeyIds,
+          null,
+        );
+        await assertWebhookOrderExcludedApiKeys(tx, ctx.tenant.id, orderExcludedApiKeyIds);
         const dealStatuses = webhookDealStatusesFor(data.eventTypes, data.dealStatuses, null);
         const taskStatuses = webhookTaskStatusesFor(data.eventTypes, data.taskStatuses, null);
         const dealDetails = webhookDealDetailsFor(data.eventTypes, data.dealDetails, null);
@@ -4913,6 +5025,7 @@ export function createWebhooksService(deps: {
           orderStatuses,
           paymentLinkStatuses,
           orderChangeMakers,
+          orderExcludedApiKeyIds,
           dealStatuses,
           taskStatuses,
           dealDetails,
@@ -4975,6 +5088,7 @@ export function createWebhooksService(deps: {
               ...(orderStatuses ? { orderStatuses } : {}),
               ...(paymentLinkStatuses ? { paymentLinkStatuses } : {}),
               ...(orderChangeMakers ? { orderChangeMakers } : {}),
+              ...(orderExcludedApiKeyIds ? { orderExcludedApiKeyIds } : {}),
               ...(dealStatuses ? { dealStatuses } : {}),
               ...(taskStatuses ? { taskStatuses } : {}),
               ...(dealDetails ? { dealDetails } : {}),
@@ -5101,6 +5215,15 @@ export function createWebhooksService(deps: {
           data.orderChangeMakers,
           endpoint.orderChangeMakers,
         );
+        const orderExcludedApiKeyIds = webhookOrderExcludedApiKeyIdsFor(
+          data.eventTypes,
+          data.orderExcludedApiKeyIds,
+          endpoint.orderExcludedApiKeyIds,
+        );
+        // Only a list given now is checked: the keys kept were checked when chosen.
+        if (data.orderExcludedApiKeyIds !== undefined) {
+          await assertWebhookOrderExcludedApiKeys(tx, ctx.tenant.id, orderExcludedApiKeyIds);
+        }
         const dealStatuses = webhookDealStatusesFor(
           data.eventTypes,
           data.dealStatuses,
@@ -5407,6 +5530,7 @@ export function createWebhooksService(deps: {
             orderStatuses,
             paymentLinkStatuses,
             orderChangeMakers,
+            orderExcludedApiKeyIds,
             dealStatuses,
             taskStatuses,
             dealDetails,
@@ -5480,6 +5604,7 @@ export function createWebhooksService(deps: {
               ...(orderStatuses ? { orderStatuses } : {}),
               ...(paymentLinkStatuses ? { paymentLinkStatuses } : {}),
               ...(orderChangeMakers ? { orderChangeMakers } : {}),
+              ...(orderExcludedApiKeyIds ? { orderExcludedApiKeyIds } : {}),
               ...(dealStatuses ? { dealStatuses } : {}),
               ...(taskStatuses ? { taskStatuses } : {}),
               ...(dealDetails ? { dealDetails } : {}),

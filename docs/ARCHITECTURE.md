@@ -2222,6 +2222,15 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   the detail (0187), and for every endpoint when the change recorded none. Settings (checkboxes
   under "Order changes made by") and the API (`orderChangeMakers`) set it; a change that drops
   `order.status_changed` clears it.
+- **Order API key exclusions** (migration 0245, ADR-323): `order_excluded_api_key_ids` on an
+  endpoint lists the API keys whose `order.status_changed` changes it does not take, null for none;
+  a check keeps it to 1 to 20 ids and to endpoints that take `order.status_changed`.
+  `app.capture_webhook_event` (replaced with the same signature), when an active endpoint taking the
+  event leaves out keys, reads the rotations of the key the order trigger put in the detail through
+  `app.webhook_api_key_family`, and creates no delivery for an endpoint whose list shares one of
+  them; a change without a key is left out by no list, and the key stays in the stored detail for
+  the payload. Settings (checkboxes under "Order changes made through the API") and the API
+  (`orderExcludedApiKeyIds`) set it; a change that drops `order.status_changed` clears it.
 - **Custom field filters** (migration 0132, ADR-184): `contact_field_keys` on an endpoint lists the
   custom fields whose changes it takes as `contact.updated`, null for every field's; a check keeps
   it to 1 to 50 well-formed keys and to endpoints taking `contact.updated` for every part or for

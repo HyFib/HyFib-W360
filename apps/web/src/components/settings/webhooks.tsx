@@ -977,7 +977,10 @@ function AutomationChoices({
   );
 }
 
-/** What the API keys' fieldset says for runs (ADR-319) and for messages' statuses (ADR-320). */
+/**
+ * What the API keys' fieldset says for runs (ADR-319), messages' statuses (ADR-320), and the CRM
+ * (ADR-321) and order (ADR-323) changes left out.
+ */
 const API_KEY_WORDS = {
   runs: {
     legend: 'Runs started through the API',
@@ -1006,14 +1009,24 @@ const API_KEY_WORDS = {
     none: 'No API key can change deals, tasks or notes yet.',
     idPart: 'crm-api-key',
   },
+  orders: {
+    legend: 'Order changes made through the API',
+    help: 'Leave out the order status changes chosen keys made, so that an order system is not sent back what it changed: a change made through the API belongs to the key that made it (asking for payment included), and to the keys that key was rotated from or into. Changes members and Payment Links make are never left out here. With who made the order changes chosen too, a change must pass both.',
+    every: 'Every order change',
+    everyHelp: 'Whichever key made it.',
+    only: 'Leave out the order changes the API keys ticked made',
+    none: 'No API key can change orders yet.',
+    idPart: 'order-api-key',
+  },
 } as const;
 
 /**
  * The API keys whose runs (ADR-319) or messages' statuses (ADR-320) an endpoint takes, or whose
- * deal, task and note changes it leaves out (ADR-321), as `kind` says, shown while it takes their
- * events: every run, message or change, or only those of the keys ticked, or all but theirs.
- * The keys that can start automations, send messages or change deals, tasks or notes, work and were
- * not rotated are offered; one the endpoint already names stays listed, ticked, until it is unticked.
+ * deal, task and note changes (ADR-321) or order changes (ADR-323) it leaves out, as `kind` says,
+ * shown while it takes their events: every run, message or change, or only those of the keys
+ * ticked, or all but theirs. The keys that can start automations, send messages or change deals,
+ * tasks, notes or orders, work and were not rotated are offered; one the endpoint already names
+ * stays listed, ticked, until it is unticked.
  */
 function ApiKeyChoices({
   kind,
@@ -2733,6 +2746,7 @@ export function WebhookEndpointForm({
   runApiKeyChoices,
   messageApiKeyChoices,
   crmApiKeyChoices,
+  orderApiKeyChoices,
   channelChoices,
   teamChoices,
   templateChoices,
@@ -2765,6 +2779,8 @@ export function WebhookEndpointForm({
     paymentLinkStatuses: WebhookPaymentLinkStatus[] | null;
     /** Who made the order status changes it takes (ADR-322); null for every change. */
     orderChangeMakers: WebhookOrderChangeMaker[] | null;
+    /** The API keys whose order changes it leaves out (ADR-323), and if they work; null: none. */
+    orderExcludedApiKeys: WebhookEndpointApiKey[] | null;
     /** The deal statuses it takes (ADR-309); null for every status. */
     dealStatuses: WebhookDealStatus[] | null;
     /** The task statuses it takes (ADR-309); null for every status. */
@@ -2847,6 +2863,8 @@ export function WebhookEndpointForm({
   messageApiKeyChoices: WebhookApiKeyChoice[];
   /** The company's API keys that change deals, tasks or notes, which an endpoint can leave out. */
   crmApiKeyChoices: WebhookApiKeyChoice[];
+  /** The company's API keys that change orders, which an endpoint can leave out (ADR-323). */
+  orderApiKeyChoices: WebhookApiKeyChoice[];
   /** The company's WhatsApp numbers, which an endpoint can choose (ADR-170). */
   channelChoices: WebhookChannelChoice[];
   /** The company's teams, which an endpoint can choose (ADR-174). */
@@ -2894,6 +2912,10 @@ export function WebhookEndpointForm({
   );
   const [orderChangeMakers, setOrderChangeMakers] = useState<WebhookOrderChangeMaker[]>(
     endpoint?.orderChangeMakers ?? [...WEBHOOK_ORDER_CHANGE_MAKERS],
+  );
+  const [everyOrderChange, setEveryOrderChange] = useState(!endpoint?.orderExcludedApiKeys);
+  const [orderExcludedApiKeyIds, setOrderExcludedApiKeyIds] = useState<string[]>(
+    endpoint?.orderExcludedApiKeys?.map((k) => k.id) ?? [],
   );
   const [dealStatuses, setDealStatuses] = useState<WebhookDealStatus[]>(
     endpoint?.dealStatuses ?? [...WEBHOOK_DEAL_STATUSES],
@@ -3111,6 +3133,11 @@ export function WebhookEndpointForm({
           orderChangeMakers.length < WEBHOOK_ORDER_CHANGE_MAKERS.length
             ? orderChangeMakers
             : null;
+        // Every order change unless the API keys ticked are left out (ADR-323).
+        const chosenOrderExcludedApiKeys =
+          eventTypes.includes('order.status_changed') && !everyOrderChange
+            ? orderExcludedApiKeyIds
+            : null;
         // Every deal or task status ticked takes every status (null, ADR-309).
         const chosenDealStatuses =
           eventTypes.includes('deal.status_changed') &&
@@ -3299,6 +3326,7 @@ export function WebhookEndpointForm({
           orderStatuses: chosenOrderStatuses,
           paymentLinkStatuses: chosenPaymentLinkStatuses,
           orderChangeMakers: chosenOrderChangeMakers,
+          orderExcludedApiKeyIds: chosenOrderExcludedApiKeys,
           dealStatuses: chosenDealStatuses,
           taskStatuses: chosenTaskStatuses,
           dealDetails: chosenDealDetails,
@@ -3388,6 +3416,8 @@ export function WebhookEndpointForm({
               setOrderStatuses([...WEBHOOK_ORDER_STATUSES]);
               setPaymentLinkStatuses([...WEBHOOK_PAYMENT_LINK_STATUSES]);
               setOrderChangeMakers([...WEBHOOK_ORDER_CHANGE_MAKERS]);
+              setEveryOrderChange(true);
+              setOrderExcludedApiKeyIds([]);
               setDealStatuses([...WEBHOOK_DEAL_STATUSES]);
               setTaskStatuses([...WEBHOOK_TASK_STATUSES]);
               setDealDetails([...WEBHOOK_DEAL_DETAILS]);
@@ -3667,6 +3697,18 @@ export function WebhookEndpointForm({
           prefix={prefix}
           chosen={orderChangeMakers}
           onChange={setOrderChangeMakers}
+        />
+      ) : null}
+      {eventTypes.includes('order.status_changed') ? (
+        <ApiKeyChoices
+          kind="orders"
+          prefix={prefix}
+          choices={orderApiKeyChoices}
+          stored={endpoint?.orderExcludedApiKeys ?? []}
+          every={everyOrderChange}
+          onEveryChange={setEveryOrderChange}
+          chosen={orderExcludedApiKeyIds}
+          onChange={setOrderExcludedApiKeyIds}
         />
       ) : null}
       {eventTypes.includes('satisfaction_survey.answered') ? (

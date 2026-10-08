@@ -3270,6 +3270,19 @@ With order statuses or numbers chosen too, an event must pass every list. To tak
 makers under "Order changes made by" on the endpoint's page, or `PATCH /webhook-endpoints/{id}` with
 `orderChangeMakers` (null for every change). Removing Order status clears the list.
 
+**A receiver misses the order changes of an API key (ADR-323).** An endpoint can leave out the order
+status changes chosen API keys made. The endpoints list shows them ("Order changes left out, made
+through the API by: …"), and the API answers `orderExcludedApiKeyIds` (null leaves nothing out). A
+change goes by the key that made it, as the event's `apiKeyId` names it (asking for payment
+included), and by the keys that key was rotated from or into, so a list naming an integration's old
+key leaves out its new key's changes too. Changes members and Payment Links make, those without a
+recorded maker, and new orders are never left out by a list. Events no endpoint takes are not
+recorded, so there is nothing to replay; `GET /orders/{id}` reads the order as it is now. With order
+statuses or who made the changes chosen too, an event must pass both. To take a key's changes again,
+untick it under "Order changes made through the API" on the endpoint's page, or
+`PATCH /webhook-endpoints/{id}` with `orderExcludedApiKeyIds` (null for every change). Removing
+Order status clears the list.
+
 **A receiver misses the events of a member's conversations (ADR-181).** An endpoint can take the
 message and conversation events of the conversations assigned to chosen members only. The endpoints
 list shows them ("Members whose conversations’ events are sent: …"), and the API answers

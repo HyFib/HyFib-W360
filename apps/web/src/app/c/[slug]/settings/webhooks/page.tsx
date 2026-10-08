@@ -74,6 +74,7 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
     runApiKeyChoices,
     messageApiKeyChoices,
     crmApiKeyChoices,
+    orderApiKeyChoices,
     channelChoices,
     teamChoices,
     templateChoices,
@@ -89,6 +90,7 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
     webhooks.runApiKeyChoices(ctx),
     webhooks.messageApiKeyChoices(ctx),
     webhooks.crmApiKeyChoices(ctx),
+    webhooks.orderApiKeyChoices(ctx),
     webhooks.channelChoices(ctx),
     webhooks.teamChoices(ctx),
     webhooks.templateChoices(ctx),
@@ -232,6 +234,12 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
                         {e.orderChangeMakers
                           .map((m) => WEBHOOK_ORDER_CHANGE_MAKER_LABELS[m])
                           .join(', ')}
+                      </p>
+                    ) : null}
+                    {e.orderExcludedApiKeys ? (
+                      <p className="text-xs break-all text-muted-foreground">
+                        Order changes left out, made through the API by:{' '}
+                        {e.orderExcludedApiKeys.map(webhookApiKeyText).join(', ')}
                       </p>
                     ) : null}
                     {e.paymentLinkStatuses ? (
@@ -598,6 +606,7 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
             runApiKeyChoices={runApiKeyChoices}
             messageApiKeyChoices={messageApiKeyChoices}
             crmApiKeyChoices={crmApiKeyChoices}
+            orderApiKeyChoices={orderApiKeyChoices}
             channelChoices={channelChoices}
             teamChoices={teamChoices}
             templateChoices={templateChoices}

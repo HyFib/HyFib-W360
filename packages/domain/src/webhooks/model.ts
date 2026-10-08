@@ -816,6 +816,8 @@ export const WEBHOOK_LIMITS = {
   messageApiKeys: 20,
   /** The API keys whose CRM changes an endpoint can leave out (ADR-321), as for runs. */
   crmExcludedApiKeys: 20,
+  /** The API keys whose order changes an endpoint can leave out (ADR-323), as for runs. */
+  orderExcludedApiKeys: 20,
   /** The contact tags an endpoint can choose to take the conversations' events of (ADR-267). */
   contactTags: 50,
   /** The conversation tags an endpoint can choose to take the conversations' events of (ADR-273). */

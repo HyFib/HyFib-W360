@@ -264,6 +264,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       orderStatuses: null,
       paymentLinkStatuses: null,
       orderChangeMakers: null,
+      orderExcludedApiKeyIds: null,
       dealStatuses: null,
       taskStatuses: null,
       dealDetails: null,
@@ -2024,6 +2025,103 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     expect((await api().get(key.ctx, id)).crmExcludedApiKeyIds).toEqual([key.id]);
     expect(await api().update(key.ctx, id, { crmExcludedApiKeyIds: null })).toMatchObject({
       crmExcludedApiKeyIds: null,
+    });
+  });
+
+  it('choose the API keys whose order changes an endpoint leaves out, kept by changes that leave them out and cleared with the event (ADR-323)', async () => {
+    const c = await fx.company();
+    // The key adding the endpoint moves orders too; another asks for payments; one only reads.
+    const key = await apiKey(c, ['webhooks.manage', 'orders.write'], 'Shop');
+    const payments = await apiKey(c, ['orders.request_payment'], 'Payments');
+    const reader = await apiKey(c, ['orders.read'], 'Reader');
+    const elsewhere = await apiKey(await fx.company(), ['orders.write'], 'Elsewhere');
+    const issueOf = async (promise: Promise<unknown>) => {
+      const error = await expectAppError(promise, 'validation_failed');
+      return isAppError(error) ? error.issues?.[0] : undefined;
+    };
+    // Keys need order.status_changed, at least one, each an id of the company's keys that can
+    // change orders (named by place).
+    const refusals = [
+      [['order.received'], [key.id], 'orderExcludedApiKeyIds'],
+      [['order.status_changed'], [], 'orderExcludedApiKeyIds'],
+      [['order.status_changed'], [key.id, key.keyPrefix], 'orderExcludedApiKeyIds.1'],
+      [['order.status_changed'], [key.id, reader.id], 'orderExcludedApiKeyIds.1'],
+      [['order.status_changed'], [elsewhere.id], 'orderExcludedApiKeyIds.0'],
+    ] as const;
+    for (const [index, [events, orderExcludedApiKeyIds, path]] of refusals.entries()) {
+      expect(
+        await issueOf(
+          api().create(
+            key.ctx,
+            { url: receiverUrl(), events, orderExcludedApiKeyIds },
+            idem(`order-keys-bad-${index}`, JSON.stringify(orderExcludedApiKeyIds)),
+          ),
+        ),
+        JSON.stringify(orderExcludedApiKeyIds),
+      ).toMatchObject({ path });
+    }
+    expect((await api().list(key.ctx)).data).toEqual([]);
+
+    // The key leaves its own changes out, as the endpoint's apiKeyId names it.
+    const created = await addThroughApi(key.ctx, 'order-keys-1', {
+      url: receiverUrl(),
+      events: ['order.status_changed', 'order.received'],
+      orderExcludedApiKeyIds: [key.id, payments.id, key.id.toUpperCase()],
+    });
+    const id = created.body.data.id;
+    expect(created.body.data.apiKeyId).toBe(key.id);
+    expect(created.body.data.orderExcludedApiKeyIds).toEqual([key.id, payments.id]);
+    expect((await api().get(key.ctx, id)).orderExcludedApiKeyIds).toEqual([key.id, payments.id]);
+    const [audit] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND subject_id = $2 AND action = 'webhook.endpoint_created'`,
+      [c.tenant.id, id],
+    );
+    expect(audit?.metadata).toMatchObject({ orderExcludedApiKeyIds: [key.id, payments.id] });
+    // Settings names them, with whether they still work.
+    const owner = await fx.ctx(c, c.owner);
+    await keys.revoke(owner, { keyId: payments.id });
+    expect((await settings().list(owner)).find((e) => e.id === id)?.orderExcludedApiKeys).toEqual([
+      { id: key.id, name: 'Shop', keyPrefix: key.keyPrefix, state: 'active' },
+      { id: payments.id, name: 'Payments', keyPrefix: payments.keyPrefix, state: 'revoked' },
+    ]);
+
+    expect(await api().update(key.ctx, id, { description: 'Order sync' })).toMatchObject({
+      orderExcludedApiKeyIds: [key.id, payments.id],
+    });
+    expect(await api().update(key.ctx, id, { orderExcludedApiKeyIds: [key.id] })).toMatchObject({
+      orderExcludedApiKeyIds: [key.id],
+    });
+    const updates = await fx.query<{ metadata: { orderExcludedApiKeyIds?: unknown } }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND subject_id = $2 AND action = 'webhook.endpoint_updated'
+        ORDER BY occurred_at`,
+      [c.tenant.id, id],
+    );
+    expect(updates.map((u) => u.metadata.orderExcludedApiKeyIds)).toEqual([
+      [key.id, payments.id],
+      [key.id],
+    ]);
+    expect(await api().update(key.ctx, id, { events: ['order.received'] })).toMatchObject({
+      events: ['order.received'],
+      orderExcludedApiKeyIds: null,
+    });
+    expect(
+      await issueOf(api().update(key.ctx, id, { orderExcludedApiKeyIds: [key.id] })),
+    ).toMatchObject({ path: 'orderExcludedApiKeyIds' });
+    expect(
+      await api().update(key.ctx, id, {
+        events: ['order.status_changed'],
+        orderExcludedApiKeyIds: [key.id],
+      }),
+    ).toMatchObject({ orderExcludedApiKeyIds: [key.id] });
+    // A list given again is checked again, changing nothing when it is refused.
+    expect(
+      await issueOf(api().update(key.ctx, id, { orderExcludedApiKeyIds: [reader.id] })),
+    ).toMatchObject({ path: 'orderExcludedApiKeyIds.0' });
+    expect((await api().get(key.ctx, id)).orderExcludedApiKeyIds).toEqual([key.id]);
+    expect(await api().update(key.ctx, id, { orderExcludedApiKeyIds: null })).toMatchObject({
+      orderExcludedApiKeyIds: null,
     });
   });
 

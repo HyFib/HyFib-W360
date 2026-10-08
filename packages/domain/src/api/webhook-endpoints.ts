@@ -77,6 +77,7 @@ import {
   assertWebhookRunApiKeys,
   assertWebhookMessageApiKeys,
   assertWebhookCrmExcludedApiKeys,
+  assertWebhookOrderExcludedApiKeys,
   assertWebhookCampaigns,
   assertWebhookChannels,
   assertWebhookPipelines,
@@ -113,6 +114,7 @@ import {
   WEBHOOK_ORDER_STATUSES_NEED_THE_EVENT,
   WEBHOOK_PAYMENT_LINK_STATUSES_NEED_THE_EVENT,
   WEBHOOK_ORDER_CHANGE_MAKERS_NEED_THE_EVENT,
+  WEBHOOK_ORDER_EXCLUDED_API_KEYS_NEED_THE_EVENT,
   WEBHOOK_DEAL_STATUSES_NEED_THE_EVENT,
   WEBHOOK_TASK_STATUSES_NEED_THE_EVENT,
   WEBHOOK_DEAL_DETAILS_NEED_THE_EVENT,
@@ -251,6 +253,8 @@ import {
   webhookPaymentLinkStatusesSchema,
   webhookOrderChangeMakersFor,
   webhookOrderChangeMakersSchema,
+  webhookOrderExcludedApiKeyIdsFor,
+  webhookOrderExcludedApiKeyIdsSchema,
   webhookDealStatusesFor,
   webhookDealStatusesSchema,
   webhookTaskStatusesFor,
@@ -380,6 +384,18 @@ const orderChangeMakersField = webhookOrderChangeMakersSchema.describe(
 const invalidOrderChangeMakers = () =>
   new AppError('validation_failed', WEBHOOK_ORDER_CHANGE_MAKERS_NEED_THE_EVENT, {
     issues: [{ path: 'orderChangeMakers', message: WEBHOOK_ORDER_CHANGE_MAKERS_NEED_THE_EVENT }],
+  });
+
+const orderExcludedApiKeyIdsField = webhookOrderExcludedApiKeyIdsSchema.describe(
+  `The API keys whose order status changes the endpoint does not receive as order.status_changed: 1 to ${WEBHOOK_LIMITS.orderExcludedApiKeys} ids of the company's keys that can change orders (orders.write, or orders.request_payment, whose request leaves an order waiting for payment), as the event's apiKeyId names the key that made a change, only with the order.status_changed event. A change is left out when the key that made it is listed, or a key it was rotated from or into, so an order system that moves orders through the API is not sent back what it changed, across rotations, while it is sent the changes of members, Payment Links and other keys. A change HyFib did not record the maker of is never left out, and order.received is not narrowed. With order statuses, who made the changes or other lists too, an event must pass them all. null leaves nothing out.`,
+);
+
+/** Keys are left out of order changes only for an endpoint that receives them (ADR-323). */
+const invalidOrderExcludedApiKeys = () =>
+  new AppError('validation_failed', WEBHOOK_ORDER_EXCLUDED_API_KEYS_NEED_THE_EVENT, {
+    issues: [
+      { path: 'orderExcludedApiKeyIds', message: WEBHOOK_ORDER_EXCLUDED_API_KEYS_NEED_THE_EVENT },
+    ],
   });
 
 const dealStatusesField = webhookDealStatusesSchema.describe(
@@ -798,6 +814,7 @@ export const apiCreateWebhookEndpointSchema = z
     orderStatuses: orderStatusesField.optional(),
     paymentLinkStatuses: paymentLinkStatusesField.optional(),
     orderChangeMakers: orderChangeMakersField.optional(),
+    orderExcludedApiKeyIds: orderExcludedApiKeyIdsField.optional(),
     dealStatuses: dealStatusesField.optional(),
     taskStatuses: taskStatusesField.optional(),
     dealDetails: dealDetailsField.optional(),
@@ -879,6 +896,10 @@ export const apiCreateWebhookEndpointSchema = z
   .refine((data) => !data.orderChangeMakers || data.events.includes('order.status_changed'), {
     path: ['orderChangeMakers'],
     message: WEBHOOK_ORDER_CHANGE_MAKERS_NEED_THE_EVENT,
+  })
+  .refine((data) => !data.orderExcludedApiKeyIds || data.events.includes('order.status_changed'), {
+    path: ['orderExcludedApiKeyIds'],
+    message: WEBHOOK_ORDER_EXCLUDED_API_KEYS_NEED_THE_EVENT,
   })
   .refine((data) => !data.dealStatuses || data.events.includes('deal.status_changed'), {
     path: ['dealStatuses'],
@@ -1111,6 +1132,11 @@ export const apiUpdateWebhookEndpointSchema = z
       .describe(
         'Who made the order status changes the endpoint receives as order.status_changed; null receives every change. Left out, they stay, unless the events no longer include order.status_changed, which clears them.',
       ),
+    orderExcludedApiKeyIds: orderExcludedApiKeyIdsField
+      .optional()
+      .describe(
+        "The API keys whose order status changes the endpoint does not receive (the company's keys that can change orders, whatever their state); null leaves nothing out. Left out, they stay, unless the events no longer include order.status_changed, which clears them.",
+      ),
     dealStatuses: dealStatusesField
       .optional()
       .describe(
@@ -1325,6 +1351,7 @@ export const apiUpdateWebhookEndpointSchema = z
       data.orderStatuses !== undefined ||
       data.paymentLinkStatuses !== undefined ||
       data.orderChangeMakers !== undefined ||
+      data.orderExcludedApiKeyIds !== undefined ||
       data.dealStatuses !== undefined ||
       data.taskStatuses !== undefined ||
       data.dealDetails !== undefined ||
@@ -1364,7 +1391,7 @@ export const apiUpdateWebhookEndpointSchema = z
       data.contactTags !== undefined ||
       data.conversationTags !== undefined ||
       data.oauth !== undefined,
-    'Give the events, the description, the headers, the message statuses, who sent the messages, the API keys that sent them, the contact parts, the deal and task details, the custom fields, the automations, the campaign statuses, the order statuses, who made the order changes, the Payment Link statuses, the template statuses, the conversation statuses, the deal statuses, the task statuses, the run end statuses, what started the runs, the API keys that started them, the consent changes, where contacts came from, the received message types, the run end reasons, the numbers, the teams, the templates, the campaigns, the pipelines, the stages, the deal owners, the task assignees, the pipelines, stages and owners of tasks’ deals and of notes’ deals, who made the CRM changes, the API keys whose CRM changes are left out, the survey scores, the members credited with survey answers and the teams of their conversations, the contact and conversation tags of survey answers, the tags of added and changed contacts, the members, the contact tags, the conversation tags, the OAuth client or whether the endpoint is enabled',
+    'Give the events, the description, the headers, the message statuses, who sent the messages, the API keys that sent them, the contact parts, the deal and task details, the custom fields, the automations, the campaign statuses, the order statuses, who made the order changes, the API keys whose order changes are left out, the Payment Link statuses, the template statuses, the conversation statuses, the deal statuses, the task statuses, the run end statuses, what started the runs, the API keys that started them, the consent changes, where contacts came from, the received message types, the run end reasons, the numbers, the teams, the templates, the campaigns, the pipelines, the stages, the deal owners, the task assignees, the pipelines, stages and owners of tasks’ deals and of notes’ deals, who made the CRM changes, the API keys whose CRM changes are left out, the survey scores, the members credited with survey answers and the teams of their conversations, the contact and conversation tags of survey answers, the tags of added and changed contacts, the members, the contact tags, the conversation tags, the OAuth client or whether the endpoint is enabled',
   );
 
 export interface ApiWebhookEndpoint {
@@ -1403,6 +1430,8 @@ export interface ApiWebhookEndpoint {
   paymentLinkStatuses: WebhookPaymentLinkStatus[] | null;
   /** Who made the order status changes it receives (ADR-322); null receives every change. */
   orderChangeMakers: WebhookOrderChangeMaker[] | null;
+  /** The API keys whose order status changes it leaves out (ADR-323); null: none. */
+  orderExcludedApiKeyIds: string[] | null;
   /** The deal statuses it receives (ADR-309); null receives every status. */
   dealStatuses: WebhookDealStatus[] | null;
   /** The task statuses it receives (ADR-309); null receives every status. */
@@ -1582,6 +1611,7 @@ const columns = {
   orderStatuses: webhookEndpoints.orderStatuses,
   paymentLinkStatuses: webhookEndpoints.paymentLinkStatuses,
   orderChangeMakers: webhookEndpoints.orderChangeMakers,
+  orderExcludedApiKeyIds: webhookEndpoints.orderExcludedApiKeyIds,
   dealStatuses: webhookEndpoints.dealStatuses,
   taskStatuses: webhookEndpoints.taskStatuses,
   dealDetails: webhookEndpoints.dealDetails,
@@ -1652,6 +1682,7 @@ type EndpointRow = Pick<
   | 'orderStatuses'
   | 'paymentLinkStatuses'
   | 'orderChangeMakers'
+  | 'orderExcludedApiKeyIds'
   | 'dealStatuses'
   | 'taskStatuses'
   | 'dealDetails'
@@ -1727,6 +1758,7 @@ function toApiEndpoint(row: EndpointRow, now: Date): ApiWebhookEndpoint {
     orderStatuses: row.orderStatuses,
     paymentLinkStatuses: row.paymentLinkStatuses,
     orderChangeMakers: row.orderChangeMakers,
+    orderExcludedApiKeyIds: row.orderExcludedApiKeyIds,
     dealStatuses: row.dealStatuses,
     taskStatuses: row.taskStatuses,
     dealDetails: row.dealDetails,
@@ -2007,6 +2039,12 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               data.orderChangeMakers,
               null,
             );
+            const orderExcludedApiKeyIds = webhookOrderExcludedApiKeyIdsFor(
+              data.events,
+              data.orderExcludedApiKeyIds,
+              null,
+            );
+            await assertWebhookOrderExcludedApiKeys(tx, ctx.tenant.id, orderExcludedApiKeyIds);
             const dealStatuses = webhookDealStatusesFor(data.events, data.dealStatuses, null);
             const taskStatuses = webhookTaskStatusesFor(data.events, data.taskStatuses, null);
             const dealDetails = webhookDealDetailsFor(data.events, data.dealDetails, null);
@@ -2140,6 +2178,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               orderStatuses,
               paymentLinkStatuses,
               orderChangeMakers,
+              orderExcludedApiKeyIds,
               dealStatuses,
               taskStatuses,
               dealDetails,
@@ -2195,6 +2234,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               ...(orderStatuses ? { orderStatuses } : {}),
               ...(paymentLinkStatuses ? { paymentLinkStatuses } : {}),
               ...(orderChangeMakers ? { orderChangeMakers } : {}),
+              ...(orderExcludedApiKeyIds ? { orderExcludedApiKeyIds } : {}),
               ...(dealStatuses ? { dealStatuses } : {}),
               ...(taskStatuses ? { taskStatuses } : {}),
               ...(dealDetails ? { dealDetails } : {}),
@@ -2282,6 +2322,9 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
         }
         if (data.orderChangeMakers && !events.includes('order.status_changed')) {
           throw invalidOrderChangeMakers();
+        }
+        if (data.orderExcludedApiKeyIds && !events.includes('order.status_changed')) {
+          throw invalidOrderExcludedApiKeys();
         }
         if (data.dealStatuses && !events.includes('deal.status_changed')) {
           throw invalidDealStatuses();
@@ -2379,6 +2422,10 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
         // And those left out of CRM changes (ADR-321).
         if (data.crmExcludedApiKeyIds !== undefined) {
           await assertWebhookCrmExcludedApiKeys(tx, ctx.tenant.id, data.crmExcludedApiKeyIds);
+        }
+        // And those left out of order changes (ADR-323).
+        if (data.orderExcludedApiKeyIds !== undefined) {
+          await assertWebhookOrderExcludedApiKeys(tx, ctx.tenant.id, data.orderExcludedApiKeyIds);
         }
         // And the numbers likewise (ADR-170).
         if (data.channelIds !== undefined) {
@@ -2503,6 +2550,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
           data.orderStatuses !== undefined ||
           data.paymentLinkStatuses !== undefined ||
           data.orderChangeMakers !== undefined ||
+          data.orderExcludedApiKeyIds !== undefined ||
           data.dealStatuses !== undefined ||
           data.taskStatuses !== undefined ||
           data.dealDetails !== undefined ||
@@ -2600,6 +2648,11 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
                 events,
                 data.orderChangeMakers,
                 endpoint.orderChangeMakers,
+              ),
+              orderExcludedApiKeyIds: webhookOrderExcludedApiKeyIdsFor(
+                events,
+                data.orderExcludedApiKeyIds,
+                endpoint.orderExcludedApiKeyIds,
               ),
               dealStatuses: webhookDealStatusesFor(
                 events,
@@ -2759,6 +2812,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               orderStatuses: webhookEndpoints.orderStatuses,
               paymentLinkStatuses: webhookEndpoints.paymentLinkStatuses,
               orderChangeMakers: webhookEndpoints.orderChangeMakers,
+              orderExcludedApiKeyIds: webhookEndpoints.orderExcludedApiKeyIds,
               dealStatuses: webhookEndpoints.dealStatuses,
               taskStatuses: webhookEndpoints.taskStatuses,
               dealDetails: webhookEndpoints.dealDetails,
@@ -2815,6 +2869,9 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               ? { paymentLinkStatuses: changed.paymentLinkStatuses }
               : {}),
             ...(changed.orderChangeMakers ? { orderChangeMakers: changed.orderChangeMakers } : {}),
+            ...(changed.orderExcludedApiKeyIds
+              ? { orderExcludedApiKeyIds: changed.orderExcludedApiKeyIds }
+              : {}),
             ...(changed.dealStatuses ? { dealStatuses: changed.dealStatuses } : {}),
             ...(changed.taskStatuses ? { taskStatuses: changed.taskStatuses } : {}),
             ...(changed.dealDetails ? { dealDetails: changed.dealDetails } : {}),
