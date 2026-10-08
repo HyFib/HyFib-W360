@@ -1166,6 +1166,15 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    changes keep the list, and its API refuses `crmExcludedApiKeyIds` (422) and leaves it out of the
    endpoints it answers.
 
+   Migration 0244 (ADR-322) adds `order_change_makers` to `app.webhook_endpoints` with a check
+   validated by reading the table, and replaces `app.capture_webhook_event` with the same signature
+   (keeping 0243's filters); every endpoint starts without a list. Web servers of this release need
+   it, as their reads of endpoints name the column; workers do not read it. Web servers from before
+   it neither show nor change the column: until the web rollout ends, an old server's change that
+   drops `order.status_changed` from an endpoint with a list fails on the check, its other changes
+   keep the list, and its API refuses `orderChangeMakers` (422) and leaves it out of the endpoints
+   it answers.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

@@ -263,6 +263,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       campaignStatuses: null,
       orderStatuses: null,
       paymentLinkStatuses: null,
+      orderChangeMakers: null,
       dealStatuses: null,
       taskStatuses: null,
       dealDetails: null,
@@ -1142,6 +1143,85 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     });
     expect(await issueOf(api().update(key.ctx, id, { paymentLinkStatuses: [] }))).toMatchObject({
       path: 'paymentLinkStatuses',
+    });
+  });
+
+  it('choose who made the order changes an endpoint receives, kept by changes that leave them out and cleared with the event (ADR-322)', async () => {
+    const c = await fx.company();
+    const key = await apiKey(c, ['webhooks.manage']);
+    const issueOf = async (promise: Promise<unknown>) => {
+      const error = await expectAppError(promise, 'validation_failed');
+      return isAppError(error) ? error.issues?.[0] : undefined;
+    };
+    // Makers need the event, at least one, and each from the list (an unknown one by place).
+    const refusals = [
+      [['order.received', 'payment_link.status_changed'], ['member'], 'orderChangeMakers'],
+      [['order.status_changed'], [], 'orderChangeMakers'],
+      [['order.status_changed'], ['member', 'automation'], 'orderChangeMakers.1'],
+    ] as const;
+    for (const [index, [events, orderChangeMakers, path]] of refusals.entries()) {
+      expect(
+        await issueOf(
+          api().create(
+            key.ctx,
+            { url: receiverUrl(), events, orderChangeMakers },
+            idem(`order-makers-bad-${index}`, JSON.stringify(orderChangeMakers)),
+          ),
+        ),
+        JSON.stringify(orderChangeMakers),
+      ).toMatchObject({ path });
+    }
+    expect((await api().list(key.ctx)).data).toEqual([]);
+
+    const created = await addThroughApi(key.ctx, 'order-makers-1', {
+      url: receiverUrl(),
+      events: ['order.status_changed', 'order.received'],
+      orderChangeMakers: ['payment_link', 'member', 'payment_link'],
+    });
+    const id = created.body.data.id;
+    expect(created.body.data.orderChangeMakers).toEqual(['member', 'payment_link']);
+    expect((await api().get(key.ctx, id)).orderChangeMakers).toEqual(['member', 'payment_link']);
+    const [audit] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND subject_id = $2 AND action = 'webhook.endpoint_created'`,
+      [c.tenant.id, id],
+    );
+    expect(audit?.metadata).toMatchObject({ orderChangeMakers: ['member', 'payment_link'] });
+
+    expect(await api().update(key.ctx, id, { description: 'Orders' })).toMatchObject({
+      orderChangeMakers: ['member', 'payment_link'],
+    });
+    expect(await api().update(key.ctx, id, { orderChangeMakers: ['api'] })).toMatchObject({
+      orderChangeMakers: ['api'],
+    });
+    const updates = await fx.query<{ metadata: { orderChangeMakers?: unknown } }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND subject_id = $2 AND action = 'webhook.endpoint_updated'
+        ORDER BY occurred_at`,
+      [c.tenant.id, id],
+    );
+    expect(updates.map((u) => u.metadata.orderChangeMakers)).toEqual([
+      ['member', 'payment_link'],
+      ['api'],
+    ]);
+    expect(await api().update(key.ctx, id, { events: ['order.received'] })).toMatchObject({
+      events: ['order.received'],
+      orderChangeMakers: null,
+    });
+    expect(
+      await issueOf(api().update(key.ctx, id, { orderChangeMakers: ['member'] })),
+    ).toMatchObject({ path: 'orderChangeMakers' });
+    expect(
+      await api().update(key.ctx, id, {
+        events: ['order.status_changed'],
+        orderChangeMakers: ['payment_link'],
+      }),
+    ).toMatchObject({ orderChangeMakers: ['payment_link'] });
+    expect(await api().update(key.ctx, id, { orderChangeMakers: null })).toMatchObject({
+      orderChangeMakers: null,
+    });
+    expect(await issueOf(api().update(key.ctx, id, { orderChangeMakers: [] }))).toMatchObject({
+      path: 'orderChangeMakers',
     });
   });
 

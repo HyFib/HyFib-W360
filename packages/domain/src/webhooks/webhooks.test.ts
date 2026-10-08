@@ -15,6 +15,7 @@ import {
   CRM_CHANGERS,
   DEAL_STATUSES,
   MESSAGE_TYPES,
+  ORDER_STATUS_CHANGERS,
   ORDER_STATUSES,
   PAYMENT_LINK_STATUSES,
   TASK_STATUSES,
@@ -71,6 +72,8 @@ import {
   WEBHOOK_ORDER_STATUSES,
   WEBHOOK_PAYMENT_LINK_STATUS_LABELS,
   WEBHOOK_PAYMENT_LINK_STATUSES,
+  WEBHOOK_ORDER_CHANGE_MAKER_LABELS,
+  WEBHOOK_ORDER_CHANGE_MAKERS,
   WEBHOOK_DEAL_STATUS_LABELS,
   WEBHOOK_DEAL_STATUSES,
   WEBHOOK_TASK_STATUS_LABELS,
@@ -223,6 +226,9 @@ import {
   webhookPaymentLinkStatusesFor,
   webhookPaymentLinkStatusesSchema,
   WEBHOOK_PAYMENT_LINK_STATUSES_NEED_THE_EVENT,
+  webhookOrderChangeMakersFor,
+  webhookOrderChangeMakersSchema,
+  WEBHOOK_ORDER_CHANGE_MAKERS_NEED_THE_EVENT,
   webhookDealStatusesFor,
   webhookDealStatusesSchema,
   WEBHOOK_DEAL_STATUSES_NEED_THE_EVENT,
@@ -2703,6 +2709,68 @@ describe('Payment Link status filters (ADR-308)', () => {
     ).toBeNull();
     expect(WEBHOOK_PAYMENT_LINK_STATUSES_NEED_THE_EVENT).toBe(
       `Choose Payment Link statuses only for an endpoint that receives ${WEBHOOK_EVENT_INFO['payment_link.status_changed'].label}.`,
+    );
+  });
+});
+
+describe('who made the order changes (ADR-322)', () => {
+  it('take 1 to 3 makers, once each, in the order Settings lists them; null takes every change', () => {
+    expect(
+      webhookOrderChangeMakersSchema.parse(['payment_link', 'member', 'payment_link']),
+    ).toEqual(['member', 'payment_link']);
+    expect(webhookOrderChangeMakersSchema.parse(['api'])).toEqual(['api']);
+    expect(webhookOrderChangeMakersSchema.parse(null)).toBeNull();
+    // Every maker an order status change records, as order.status_changed's changedBy names them.
+    expect(WEBHOOK_ORDER_CHANGE_MAKERS).toEqual([...ORDER_STATUS_CHANGERS]);
+    for (const refused of [
+      [],
+      ['automation'],
+      ['Member'],
+      ['member', 'customer'],
+      'member',
+      [null],
+      Array(4).fill('api'),
+    ]) {
+      expect(
+        webhookOrderChangeMakersSchema.safeParse(refused).success,
+        JSON.stringify(refused),
+      ).toBe(false);
+    }
+    expect(webhookOrderChangeMakersSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one maker, or take every order change.',
+    );
+    expect(webhookOrderChangeMakersSchema.safeParse(['automation']).error?.issues[0]?.message).toBe(
+      'Choose who made the order changes from the list.',
+    );
+    expect(
+      webhookOrderChangeMakersSchema.safeParse(Array(4).fill('api')).error?.issues[0]?.message,
+    ).toBe('Give each maker once.');
+    expect(WEBHOOK_ORDER_CHANGE_MAKER_LABELS).toEqual({
+      member: 'Members',
+      api: 'API keys',
+      payment_link: 'Payment Links',
+    });
+    expect(Object.keys(WEBHOOK_ORDER_CHANGE_MAKER_LABELS)).toEqual([
+      ...WEBHOOK_ORDER_CHANGE_MAKERS,
+    ]);
+  });
+
+  it('are kept only while the endpoint takes order.status_changed: given, kept, or cleared', () => {
+    const both = ['order.status_changed', 'order.received'] as const;
+    expect(webhookOrderChangeMakersFor([...both], ['member'], null)).toEqual(['member']);
+    expect(webhookOrderChangeMakersFor([...both], undefined, ['api'])).toEqual(['api']);
+    expect(webhookOrderChangeMakersFor([...both], null, ['api'])).toBeNull();
+    expect(webhookOrderChangeMakersFor([...both], undefined, null)).toBeNull();
+    // A new order has no maker to choose, nor has a Payment Link's change.
+    expect(
+      webhookOrderChangeMakersFor(
+        ['order.received', 'payment_link.status_changed'],
+        ['member'],
+        ['api'],
+      ),
+    ).toBeNull();
+    expect(WEBHOOK_ORDER_CHANGE_MAKERS_NEED_THE_EVENT).toBe(
+      `Choose who made the order changes only for an endpoint that receives ${WEBHOOK_EVENT_INFO['order.status_changed'].label}.`,
     );
   });
 });

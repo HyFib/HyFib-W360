@@ -10,6 +10,7 @@ import type {
   WebhookEventType,
   WebhookMessageSender,
   WebhookMessageStatus,
+  WebhookOrderChangeMaker,
   WebhookOrderStatus,
   WebhookPaymentLinkStatus,
   WebhookDealStatus,
@@ -34,6 +35,7 @@ export type {
   WebhookEventType,
   WebhookMessageSender,
   WebhookMessageStatus,
+  WebhookOrderChangeMaker,
   WebhookOrderStatus,
   WebhookPaymentLinkStatus,
   WebhookDealStatus,
@@ -359,6 +361,23 @@ export const WEBHOOK_ORDER_STATUS_LABELS: Record<WebhookOrderStatus, string> = {
   paid: 'Paid',
   fulfilled: 'Fulfilled',
   cancelled: 'Cancelled',
+};
+
+/**
+ * Who made the order status changes `order.status_changed` reports, which an endpoint can choose
+ * (ADR-322), in the order Settings lists them, as the event's `changedBy` names them.
+ */
+export const WEBHOOK_ORDER_CHANGE_MAKERS = [
+  'member',
+  'api',
+  'payment_link',
+] as const satisfies readonly WebhookOrderChangeMaker[];
+
+/** How Settings names each maker of an order status change an endpoint can choose (ADR-322). */
+export const WEBHOOK_ORDER_CHANGE_MAKER_LABELS: Record<WebhookOrderChangeMaker, string> = {
+  member: 'Members',
+  api: 'API keys',
+  payment_link: 'Payment Links',
 };
 
 /**

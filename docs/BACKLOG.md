@@ -1223,6 +1223,9 @@ verification, app review, Embedded Signup configuration).
   **[API key exclusions for deal, task and note events built; their database tests run only in CI]**
   (ADR-321, migration 0243: an endpoint leaves out the changes chosen API keys made, the keys they
   were rotated from or into included; changes made otherwise are never left out).
+  **[Order change maker filters built; their database tests run only in CI]** (ADR-322, migration
+  0244: an endpoint takes the order status changes of chosen makers, members, API keys or Payment
+  Links; changes without a recorded maker and new orders are not narrowed).
   Remaining: filters for other event types and on a message's or contact's values (such as a field's
   value, or the key that made an order change), other authentication (headers computed per delivery,
   other OAuth grants), mutual TLS, fixed egress addresses, events for store orders and each step of

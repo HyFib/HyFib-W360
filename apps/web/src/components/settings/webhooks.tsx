@@ -26,6 +26,8 @@ import {
   WEBHOOK_ORDER_STATUSES,
   WEBHOOK_PAYMENT_LINK_STATUS_LABELS,
   WEBHOOK_PAYMENT_LINK_STATUSES,
+  WEBHOOK_ORDER_CHANGE_MAKER_LABELS,
+  WEBHOOK_ORDER_CHANGE_MAKERS,
   WEBHOOK_DEAL_STATUS_LABELS,
   WEBHOOK_DEAL_STATUSES,
   WEBHOOK_TASK_STATUS_LABELS,
@@ -101,6 +103,7 @@ import {
   type WebhookMessageStatus,
   type WebhookOrderStatus,
   type WebhookPaymentLinkStatus,
+  type WebhookOrderChangeMaker,
   type WebhookDealStatus,
   type WebhookTaskStatus,
   type WebhookDealDetail,
@@ -334,6 +337,55 @@ function ChangeMakerChoices({
             />
             <Label htmlFor={id} className="font-normal">
               {WEBHOOK_CRM_CHANGE_MAKER_LABELS[maker]}{' '}
+              <span className="font-mono text-xs">({maker})</span>
+            </Label>
+          </div>
+        );
+      })}
+    </fieldset>
+  );
+}
+
+/**
+ * Who made the order status changes an endpoint takes (ADR-322), shown while it takes Order status:
+ * every change unless some makers are unticked. A change whose maker was not recorded is sent
+ * whichever are ticked.
+ */
+function OrderChangeMakerChoices({
+  prefix,
+  chosen,
+  onChange,
+}: {
+  prefix: string;
+  chosen: WebhookOrderChangeMaker[];
+  onChange: (next: WebhookOrderChangeMaker[]) => void;
+}) {
+  return (
+    <fieldset className="grid gap-2">
+      <legend className="mb-1 text-sm font-medium">Order changes made by</legend>
+      <p className="text-xs text-muted-foreground">
+        An order’s status change belongs to whoever made it: a member on the order page, an API key,
+        or HyFib applying what Razorpay reports for the order’s Payment Link. Untick API keys to
+        leave out what your integrations change through the API. A change HyFib did not record the
+        maker of is sent whichever are ticked, and new orders are sent whoever is ticked.
+      </p>
+      {WEBHOOK_ORDER_CHANGE_MAKERS.map((maker) => {
+        const id = `${prefix}-order-change-maker-${maker}`;
+        return (
+          <div key={maker} className="flex items-center gap-2">
+            <Checkbox
+              id={id}
+              checked={chosen.includes(maker)}
+              onChange={(e) =>
+                onChange(
+                  e.target.checked
+                    ? WEBHOOK_ORDER_CHANGE_MAKERS.filter((m) => m === maker || chosen.includes(m))
+                    : chosen.filter((m) => m !== maker),
+                )
+              }
+            />
+            <Label htmlFor={id} className="font-normal">
+              {WEBHOOK_ORDER_CHANGE_MAKER_LABELS[maker]}{' '}
               <span className="font-mono text-xs">({maker})</span>
             </Label>
           </div>
@@ -2711,6 +2763,8 @@ export function WebhookEndpointForm({
     orderStatuses: WebhookOrderStatus[] | null;
     /** The Payment Link statuses it takes (ADR-308); null for every status. */
     paymentLinkStatuses: WebhookPaymentLinkStatus[] | null;
+    /** Who made the order status changes it takes (ADR-322); null for every change. */
+    orderChangeMakers: WebhookOrderChangeMaker[] | null;
     /** The deal statuses it takes (ADR-309); null for every status. */
     dealStatuses: WebhookDealStatus[] | null;
     /** The task statuses it takes (ADR-309); null for every status. */
@@ -2837,6 +2891,9 @@ export function WebhookEndpointForm({
   );
   const [paymentLinkStatuses, setPaymentLinkStatuses] = useState<WebhookPaymentLinkStatus[]>(
     endpoint?.paymentLinkStatuses ?? [...WEBHOOK_PAYMENT_LINK_STATUSES],
+  );
+  const [orderChangeMakers, setOrderChangeMakers] = useState<WebhookOrderChangeMaker[]>(
+    endpoint?.orderChangeMakers ?? [...WEBHOOK_ORDER_CHANGE_MAKERS],
   );
   const [dealStatuses, setDealStatuses] = useState<WebhookDealStatus[]>(
     endpoint?.dealStatuses ?? [...WEBHOOK_DEAL_STATUSES],
@@ -3048,6 +3105,12 @@ export function WebhookEndpointForm({
           paymentLinkStatuses.length < WEBHOOK_PAYMENT_LINK_STATUSES.length
             ? paymentLinkStatuses
             : null;
+        // Every maker ticked takes every order change (null, ADR-322).
+        const chosenOrderChangeMakers =
+          eventTypes.includes('order.status_changed') &&
+          orderChangeMakers.length < WEBHOOK_ORDER_CHANGE_MAKERS.length
+            ? orderChangeMakers
+            : null;
         // Every deal or task status ticked takes every status (null, ADR-309).
         const chosenDealStatuses =
           eventTypes.includes('deal.status_changed') &&
@@ -3235,6 +3298,7 @@ export function WebhookEndpointForm({
           campaignStatuses: chosenCampaignStatuses,
           orderStatuses: chosenOrderStatuses,
           paymentLinkStatuses: chosenPaymentLinkStatuses,
+          orderChangeMakers: chosenOrderChangeMakers,
           dealStatuses: chosenDealStatuses,
           taskStatuses: chosenTaskStatuses,
           dealDetails: chosenDealDetails,
@@ -3323,6 +3387,7 @@ export function WebhookEndpointForm({
               setCampaignStatuses([...WEBHOOK_CAMPAIGN_STATUSES]);
               setOrderStatuses([...WEBHOOK_ORDER_STATUSES]);
               setPaymentLinkStatuses([...WEBHOOK_PAYMENT_LINK_STATUSES]);
+              setOrderChangeMakers([...WEBHOOK_ORDER_CHANGE_MAKERS]);
               setDealStatuses([...WEBHOOK_DEAL_STATUSES]);
               setTaskStatuses([...WEBHOOK_TASK_STATUSES]);
               setDealDetails([...WEBHOOK_DEAL_DETAILS]);
@@ -3595,6 +3660,13 @@ export function WebhookEndpointForm({
           onEveryChange={setEveryConversationTag}
           text={conversationTagsText}
           onTextChange={setConversationTagsText}
+        />
+      ) : null}
+      {eventTypes.includes('order.status_changed') ? (
+        <OrderChangeMakerChoices
+          prefix={prefix}
+          chosen={orderChangeMakers}
+          onChange={setOrderChangeMakers}
         />
       ) : null}
       {eventTypes.includes('satisfaction_survey.answered') ? (

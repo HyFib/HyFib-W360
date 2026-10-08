@@ -12433,3 +12433,52 @@ Decision:
 Not built: lists that take only chosen keys' CRM changes, lists that leave chosen keys' runs or
 messages out, the statuses of the messages an automation sent for a key's run, and filters by the
 key that made an order change.
+
+## ADR-322 Choosing who made the order status changes a webhook endpoint receives (P5-09) (2026-10-08)
+
+Context: `order.status_changed` names who made each change (`changedBy`: a member on the order page,
+an API key, or HyFib applying what Razorpay reports for the order's Payment Link, ADR-270), so an
+integration could tell its own changes from others', but an endpoint received them all. An
+integration that moves orders through the API (an order system confirming and fulfilling them) was
+sent back every change it had just made and had to drop each one. ADR-306 left makers for order
+events unbuilt.
+
+Decision:
+
+- **One list per endpoint for its order status changes,** `orderChangeMakers`: 1 to 3 of `member`,
+  `api` and `payment_link`, in that order with repeats merged, as the event's `changedBy` names
+  them. Null receives every change, as before. A change that recorded no maker (`changedBy` null:
+  one written during ADR-270's rollout by code from before it) is sent whatever the list holds, so
+  no endpoint loses an event because HyFib cannot say who made it. `order.received` is not narrowed:
+  a new order is the customer's. With order statuses or numbers chosen too, an event must pass every
+  list. Chosen in Settings → Webhooks ("Order changes made by", every maker ticked by default;
+  untick API keys to leave out what integrations change through the API; shown while the endpoint
+  takes Order status), shown on the endpoint as "Order changes sent, made by: …", and through the
+  API as `orderChangeMakers` on `POST /webhook-endpoints` and `PATCH /webhook-endpoints/{id}` and in
+  every endpoint the API answers.
+- **Every key at once:** as for CRM changes (ADR-306), the list names kinds of maker, not keys: an
+  integration that unticks API keys leaves out every key's order changes, its own and other
+  integrations'. Leaving out chosen keys only, as ADR-321 does for CRM changes, is not built for
+  orders.
+- **Only while `order.status_changed` is taken:** a list given for an endpoint that does not take it
+  is refused (`orderChangeMakers`; 422 through the API). A change that drops the event clears the
+  list, a `PATCH` that leaves it out keeps it, and one that gives only the list is a change. A check
+  in the database holds the same rule (null, or 1 to 3 known makers in one dimension without a null,
+  with `order.status_changed`).
+- **Applied at capture:** `app.capture_webhook_event` matches the maker the order trigger puts in
+  the event's detail (0187: recorded with the status by the change's own transaction), with no
+  further read, and creates a delivery only for the endpoints whose list is null or holds it; a
+  change without a maker reaches every list. No event is written when no endpoint takes it, and
+  stored events are unchanged.
+- **Audited, exported, permissions unchanged:** `webhook.endpoint_created` and
+  `webhook.endpoint_updated` carry `orderChangeMakers` when the endpoint has the list, and the
+  company data export carries the column; members with `developer.manage` in Settings, keys with
+  `webhooks.manage` through the API.
+- **Migration 0244:** `order_change_makers text[]` on `app.webhook_endpoints` with its check,
+  validated at once (a company has at most 10 endpoints), the update grant on the column for the
+  runtime role, and `app.capture_webhook_event` replaced with the same signature (0243's, with the
+  maker), so its owner and grants stay. Existing endpoints keep null; nothing is backfilled.
+
+Not built: leaving out chosen keys' order changes, makers for Payment Link events
+(`payment_link.status_changed` names who asked for the link), and filters by the key that asked for
+an order's payment.

@@ -10,6 +10,7 @@ import {
   WEBHOOK_EVENT_KEYS,
   WEBHOOK_LIMITS,
   WEBHOOK_ORDER_STATUS_LABELS,
+  WEBHOOK_ORDER_CHANGE_MAKER_LABELS,
   WEBHOOK_PAYMENT_LINK_STATUS_LABELS,
   WEBHOOK_DEAL_STATUS_LABELS,
   WEBHOOK_TASK_STATUS_LABELS,
@@ -223,6 +224,14 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
                       <p className="text-xs text-muted-foreground">
                         Order statuses sent:{' '}
                         {e.orderStatuses.map((o) => WEBHOOK_ORDER_STATUS_LABELS[o]).join(', ')}
+                      </p>
+                    ) : null}
+                    {e.orderChangeMakers ? (
+                      <p className="text-xs text-muted-foreground">
+                        Order changes sent, made by:{' '}
+                        {e.orderChangeMakers
+                          .map((m) => WEBHOOK_ORDER_CHANGE_MAKER_LABELS[m])
+                          .join(', ')}
                       </p>
                     ) : null}
                     {e.paymentLinkStatuses ? (

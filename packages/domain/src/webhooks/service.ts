@@ -53,6 +53,7 @@ import {
   WEBHOOK_LIMITS,
   WEBHOOK_ORDER_STATUSES,
   WEBHOOK_PAYMENT_LINK_STATUSES,
+  WEBHOOK_ORDER_CHANGE_MAKERS,
   WEBHOOK_DEAL_STATUSES,
   WEBHOOK_TASK_STATUSES,
   WEBHOOK_DEAL_DETAILS,
@@ -109,6 +110,7 @@ import {
   type WebhookMessageStatus,
   type WebhookOrderStatus,
   type WebhookPaymentLinkStatus,
+  type WebhookOrderChangeMaker,
   type WebhookDealStatus,
   type WebhookTaskStatus,
   type WebhookDealDetail,
@@ -554,6 +556,39 @@ export function webhookPaymentLinkStatusesFor(
   current: readonly WebhookPaymentLinkStatus[] | null,
 ): WebhookPaymentLinkStatus[] | null {
   if (!eventTypes.includes('payment_link.status_changed')) return null;
+  const kept = given === undefined ? current : given;
+  return kept ? [...kept] : null;
+}
+
+/**
+ * Who made the order status changes an endpoint takes as `order.status_changed` (ADR-322), in the
+ * order Settings lists them; null takes every change. A change HyFib did not record the maker of is
+ * taken whoever is chosen.
+ */
+export const webhookOrderChangeMakersSchema = z
+  .array(
+    z.enum(WEBHOOK_ORDER_CHANGE_MAKERS, {
+      error: 'Choose who made the order changes from the list.',
+    }),
+  )
+  .min(1, 'Choose at least one maker, or take every order change.')
+  .max(WEBHOOK_ORDER_CHANGE_MAKERS.length, 'Give each maker once.')
+  .transform((chosen) => WEBHOOK_ORDER_CHANGE_MAKERS.filter((maker) => chosen.includes(maker)))
+  .nullable();
+
+export const WEBHOOK_ORDER_CHANGE_MAKERS_NEED_THE_EVENT =
+  'Choose who made the order changes only for an endpoint that receives Order status.';
+
+/**
+ * The makers of order changes an endpoint keeps after it is added or changed: every change (null)
+ * unless it takes `order.status_changed`; then those given, or else the ones it had.
+ */
+export function webhookOrderChangeMakersFor(
+  eventTypes: readonly WebhookEventType[],
+  given: readonly WebhookOrderChangeMaker[] | null | undefined,
+  current: readonly WebhookOrderChangeMaker[] | null,
+): WebhookOrderChangeMaker[] | null {
+  if (!eventTypes.includes('order.status_changed')) return null;
   const kept = given === undefined ? current : given;
   return kept ? [...kept] : null;
 }
@@ -2372,6 +2407,11 @@ const endpointFields = z.object({
    * Given, the Payment Link statuses it takes (null: every status, ADR-308); left out, they stay.
    */
   paymentLinkStatuses: webhookPaymentLinkStatusesSchema.optional(),
+  /**
+   * Given, who made the order status changes it takes (null: every change, ADR-322); left out, they
+   * stay.
+   */
+  orderChangeMakers: webhookOrderChangeMakersSchema.optional(),
   /** Given, the deal statuses it takes (null: every status, ADR-309); left out, they stay. */
   dealStatuses: webhookDealStatusesSchema.optional(),
   /** Given, the task statuses it takes (null: every status, ADR-309); left out, they stay. */
@@ -2583,6 +2623,12 @@ const paymentLinkStatusesNeedTheEvent = {
     path: ['paymentLinkStatuses'],
     message: WEBHOOK_PAYMENT_LINK_STATUSES_NEED_THE_EVENT,
   },
+};
+/** Who made the order changes is chosen only for an endpoint that takes them (ADR-322). */
+const orderChangeMakersNeedTheEvent = {
+  check: (data: { eventTypes: WebhookEventType[]; orderChangeMakers?: unknown }) =>
+    !data.orderChangeMakers || data.eventTypes.includes('order.status_changed'),
+  options: { path: ['orderChangeMakers'], message: WEBHOOK_ORDER_CHANGE_MAKERS_NEED_THE_EVENT },
 };
 /** Deal statuses are chosen only for an endpoint that takes deal status changes (ADR-309). */
 const dealStatusesNeedTheEvent = {
@@ -2832,6 +2878,7 @@ const endpointSchema = endpointFields
   .refine(campaignStatusesNeedTheEvent.check, campaignStatusesNeedTheEvent.options)
   .refine(orderStatusesNeedTheEvent.check, orderStatusesNeedTheEvent.options)
   .refine(paymentLinkStatusesNeedTheEvent.check, paymentLinkStatusesNeedTheEvent.options)
+  .refine(orderChangeMakersNeedTheEvent.check, orderChangeMakersNeedTheEvent.options)
   .refine(dealStatusesNeedTheEvent.check, dealStatusesNeedTheEvent.options)
   .refine(taskStatusesNeedTheEvent.check, taskStatusesNeedTheEvent.options)
   .refine(dealDetailsNeedTheEvent.check, dealDetailsNeedTheEvent.options)
@@ -2881,6 +2928,7 @@ const updateSchema = endpointFields
   .refine(campaignStatusesNeedTheEvent.check, campaignStatusesNeedTheEvent.options)
   .refine(orderStatusesNeedTheEvent.check, orderStatusesNeedTheEvent.options)
   .refine(paymentLinkStatusesNeedTheEvent.check, paymentLinkStatusesNeedTheEvent.options)
+  .refine(orderChangeMakersNeedTheEvent.check, orderChangeMakersNeedTheEvent.options)
   .refine(dealStatusesNeedTheEvent.check, dealStatusesNeedTheEvent.options)
   .refine(taskStatusesNeedTheEvent.check, taskStatusesNeedTheEvent.options)
   .refine(dealDetailsNeedTheEvent.check, dealDetailsNeedTheEvent.options)
@@ -2974,6 +3022,8 @@ export interface WebhookEndpointView {
   orderStatuses: WebhookOrderStatus[] | null;
   /** The Payment Link statuses it takes (ADR-308); null takes every status. */
   paymentLinkStatuses: WebhookPaymentLinkStatus[] | null;
+  /** Who made the order status changes it takes (ADR-322), in Settings' order; null: all. */
+  orderChangeMakers: WebhookOrderChangeMaker[] | null;
   /** The deal statuses it takes (ADR-309); null takes every status. */
   dealStatuses: WebhookDealStatus[] | null;
   /** The task statuses it takes (ADR-309); null takes every status. */
@@ -3350,6 +3400,7 @@ export async function lockWebhookEndpoint(
       campaignStatuses: webhookEndpoints.campaignStatuses,
       orderStatuses: webhookEndpoints.orderStatuses,
       paymentLinkStatuses: webhookEndpoints.paymentLinkStatuses,
+      orderChangeMakers: webhookEndpoints.orderChangeMakers,
       dealStatuses: webhookEndpoints.dealStatuses,
       taskStatuses: webhookEndpoints.taskStatuses,
       dealDetails: webhookEndpoints.dealDetails,
@@ -3434,6 +3485,7 @@ export async function insertWebhookEndpoint(
     campaignStatuses: WebhookCampaignStatus[] | null;
     orderStatuses: WebhookOrderStatus[] | null;
     paymentLinkStatuses: WebhookPaymentLinkStatus[] | null;
+    orderChangeMakers: WebhookOrderChangeMaker[] | null;
     dealStatuses: WebhookDealStatus[] | null;
     taskStatuses: WebhookTaskStatus[] | null;
     dealDetails: WebhookDealDetail[] | null;
@@ -3507,6 +3559,7 @@ export async function insertWebhookEndpoint(
     campaignStatuses: input.campaignStatuses,
     orderStatuses: input.orderStatuses,
     paymentLinkStatuses: input.paymentLinkStatuses,
+    orderChangeMakers: input.orderChangeMakers,
     dealStatuses: input.dealStatuses,
     taskStatuses: input.taskStatuses,
     dealDetails: input.dealDetails,
@@ -3929,6 +3982,7 @@ export function createWebhooksService(deps: {
               campaignStatuses: webhookEndpoints.campaignStatuses,
               orderStatuses: webhookEndpoints.orderStatuses,
               paymentLinkStatuses: webhookEndpoints.paymentLinkStatuses,
+              orderChangeMakers: webhookEndpoints.orderChangeMakers,
               dealStatuses: webhookEndpoints.dealStatuses,
               taskStatuses: webhookEndpoints.taskStatuses,
               dealDetails: webhookEndpoints.dealDetails,
@@ -4706,6 +4760,11 @@ export function createWebhooksService(deps: {
           data.paymentLinkStatuses,
           null,
         );
+        const orderChangeMakers = webhookOrderChangeMakersFor(
+          data.eventTypes,
+          data.orderChangeMakers,
+          null,
+        );
         const dealStatuses = webhookDealStatusesFor(data.eventTypes, data.dealStatuses, null);
         const taskStatuses = webhookTaskStatusesFor(data.eventTypes, data.taskStatuses, null);
         const dealDetails = webhookDealDetailsFor(data.eventTypes, data.dealDetails, null);
@@ -4853,6 +4912,7 @@ export function createWebhooksService(deps: {
           campaignStatuses,
           orderStatuses,
           paymentLinkStatuses,
+          orderChangeMakers,
           dealStatuses,
           taskStatuses,
           dealDetails,
@@ -4914,6 +4974,7 @@ export function createWebhooksService(deps: {
               ...(campaignStatuses ? { campaignStatuses } : {}),
               ...(orderStatuses ? { orderStatuses } : {}),
               ...(paymentLinkStatuses ? { paymentLinkStatuses } : {}),
+              ...(orderChangeMakers ? { orderChangeMakers } : {}),
               ...(dealStatuses ? { dealStatuses } : {}),
               ...(taskStatuses ? { taskStatuses } : {}),
               ...(dealDetails ? { dealDetails } : {}),
@@ -5034,6 +5095,11 @@ export function createWebhooksService(deps: {
           data.eventTypes,
           data.paymentLinkStatuses,
           endpoint.paymentLinkStatuses,
+        );
+        const orderChangeMakers = webhookOrderChangeMakersFor(
+          data.eventTypes,
+          data.orderChangeMakers,
+          endpoint.orderChangeMakers,
         );
         const dealStatuses = webhookDealStatusesFor(
           data.eventTypes,
@@ -5340,6 +5406,7 @@ export function createWebhooksService(deps: {
             campaignStatuses,
             orderStatuses,
             paymentLinkStatuses,
+            orderChangeMakers,
             dealStatuses,
             taskStatuses,
             dealDetails,
@@ -5412,6 +5479,7 @@ export function createWebhooksService(deps: {
               ...(campaignStatuses ? { campaignStatuses } : {}),
               ...(orderStatuses ? { orderStatuses } : {}),
               ...(paymentLinkStatuses ? { paymentLinkStatuses } : {}),
+              ...(orderChangeMakers ? { orderChangeMakers } : {}),
               ...(dealStatuses ? { dealStatuses } : {}),
               ...(taskStatuses ? { taskStatuses } : {}),
               ...(dealDetails ? { dealDetails } : {}),

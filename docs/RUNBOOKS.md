@@ -3259,6 +3259,17 @@ changes made through the API" on the endpoint's page, or `PATCH /webhook-endpoin
 `crmExcludedApiKeyIds` (null for every change). Removing every deal, task and note event clears the
 list.
 
+**A receiver misses order status changes (ADR-322).** An endpoint can take the order status changes
+of chosen makers only. The endpoints list shows them ("Order changes sent, made by: …"), and the API
+answers `orderChangeMakers` (null takes every change). A change goes by the `changedBy` its event
+names: a member on the order page, an API key, or a Payment Link (HyFib applying what Razorpay
+reports: paid, or back to confirmed when a link ended unpaid); a change without a recorded maker is
+sent to every list, and new orders are not narrowed. Events no endpoint takes are not recorded, so
+there is nothing to replay; `GET /orders/{id}` reads the order's status and who changed it last.
+With order statuses or numbers chosen too, an event must pass every list. To take more, tick the
+makers under "Order changes made by" on the endpoint's page, or `PATCH /webhook-endpoints/{id}` with
+`orderChangeMakers` (null for every change). Removing Order status clears the list.
+
 **A receiver misses the events of a member's conversations (ADR-181).** An endpoint can take the
 message and conversation events of the conversations assigned to chosen members only. The endpoints
 list shows them ("Members whose conversations’ events are sent: …"), and the API answers

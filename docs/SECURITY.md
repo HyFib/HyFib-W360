@@ -1617,6 +1617,15 @@ Phase 5 rules (outgoing webhooks, P5-09):
   It only narrows what one endpoint receives and never adds an event or a delivery for another
   endpoint or company; nothing new is stored, and the payload is unchanged. Audited with the list
   and in the company data export (unit tests; integration tests, run in CI only).
+- An endpoint can take the order status changes of chosen makers only (ADR-322): members, API keys,
+  or HyFib applying the order's Payment Link. The list holds only those makers (the services and a
+  database check), is kept only while the endpoint takes `order.status_changed`, and is applied in
+  `app.capture_webhook_event` to the maker the order trigger recorded with the change (0187: kept
+  only when the change's own transaction recorded it, so a later change never inherits an earlier
+  maker). It only narrows what one endpoint receives and never adds an event or a delivery for
+  another endpoint or company; a change without a recorded maker reaches every list, nothing new is
+  stored, and the payload is unchanged. Audited with the list and in the company data export (unit
+  tests; integration tests, run in CI only).
 - An endpoint can take the changes of chosen custom fields only (ADR-184), chosen the same way. A
   list may add only keys of the endpoint's company's fields (checked in its scope), is kept only
   while the endpoint takes field changes (a database check too, which also refuses a malformed key

@@ -184,6 +184,7 @@ import {
   WEBHOOK_CONVERSATION_STATUSES_NEED_THE_EVENT,
   WEBHOOK_ORDER_STATUSES_NEED_THE_EVENT,
   WEBHOOK_PAYMENT_LINK_STATUSES_NEED_THE_EVENT,
+  WEBHOOK_ORDER_CHANGE_MAKERS_NEED_THE_EVENT,
   WEBHOOK_DEAL_STATUSES_NEED_THE_EVENT,
   WEBHOOK_TASK_STATUSES_NEED_THE_EVENT,
   WEBHOOK_DEAL_DETAILS_NEED_THE_EVENT,
@@ -205,6 +206,7 @@ import {
   WEBHOOK_FAILURE_KINDS,
   WEBHOOK_LIMITS,
   WEBHOOK_PAYMENT_LINK_STATUSES,
+  WEBHOOK_ORDER_CHANGE_MAKERS,
   WEBHOOK_DEAL_STATUSES,
   WEBHOOK_TASK_STATUSES,
   WEBHOOK_DEAL_DETAILS,
@@ -1498,6 +1500,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'notePipelineIds',
       'noteStageIds',
       'oauth',
+      'orderChangeMakers',
       'orderStatuses',
       'ownerIds',
       'paymentLinkStatuses',
@@ -3422,7 +3425,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       paymentLinkStatuses: ['expired'],
     });
     expect(apiUpdateWebhookEndpointSchema.safeParse({}).error?.issues[0]?.message).toContain(
-      'the order statuses, the Payment Link statuses, the template statuses',
+      'the order statuses, who made the order changes, the Payment Link statuses, the template statuses',
     );
     const doc = buildOpenApiDocument('https://app.example.com/api/v1');
     const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
@@ -3437,6 +3440,58 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       .properties;
     expect(JSON.stringify(given.paymentLinkStatuses)).toContain(
       'as payment_link.status_changed (created, partially_paid, paid, expired, cancelled, failed), only with the payment_link.status_changed event',
+    );
+  });
+
+  it('take who made the order changes only with order.status_changed, and a list of them alone is a change (ADR-322)', () => {
+    const base = { url: 'https://hooks.example.com/w360', events: ['order.status_changed'] };
+    expect(
+      apiCreateWebhookEndpointSchema.parse({
+        ...base,
+        orderChangeMakers: ['payment_link', 'member', 'payment_link'],
+      }).orderChangeMakers,
+    ).toEqual(['member', 'payment_link']);
+    const refused = apiCreateWebhookEndpointSchema.safeParse({
+      ...base,
+      events: ['order.received', 'payment_link.status_changed'],
+      orderChangeMakers: ['member'],
+    });
+    expect(refused.error?.issues.map((i) => [i.path.join('.'), i.message])).toEqual([
+      ['orderChangeMakers', WEBHOOK_ORDER_CHANGE_MAKERS_NEED_THE_EVENT],
+    ]);
+    for (const body of [
+      { ...base, orderChangeMakers: [] },
+      { ...base, orderChangeMakers: ['automation'] },
+    ]) {
+      expect(apiCreateWebhookEndpointSchema.safeParse(body).success, JSON.stringify(body)).toBe(
+        false,
+      );
+    }
+    expect(apiUpdateWebhookEndpointSchema.parse({ orderChangeMakers: null })).toEqual({
+      orderChangeMakers: null,
+    });
+    expect(apiUpdateWebhookEndpointSchema.parse({ orderChangeMakers: ['api'] })).toEqual({
+      orderChangeMakers: ['api'],
+    });
+    expect(apiUpdateWebhookEndpointSchema.safeParse({}).error?.issues[0]?.message).toContain(
+      'the order statuses, who made the order changes, the Payment Link statuses',
+    );
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas;
+    const answered = schemas.WebhookEndpoint as {
+      properties: Record<string, { anyOf?: { items?: { enum?: string[] } }[] }>;
+    };
+    expect(answered.properties.orderChangeMakers?.anyOf?.[0]?.items?.enum).toEqual([
+      ...WEBHOOK_ORDER_CHANGE_MAKERS,
+    ]);
+    const given = (schemas.CreateWebhookEndpoint as { properties: Record<string, unknown> })
+      .properties;
+    expect(JSON.stringify(given.orderChangeMakers)).toContain(
+      "as the event's changedBy names them (member, api, payment_link)",
+    );
+    expect(JSON.stringify(doc.webhooks)).toContain(
+      'every change unless it names who made the changes it takes (its `orderChangeMakers`',
     );
   });
 

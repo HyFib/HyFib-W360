@@ -26,6 +26,7 @@ import {
   apiStopAutomationRun,
   apiUpdateConversation,
   apiUpdateDeal,
+  apiUpdateOrder,
   apiUpdateTask,
   authenticateApiToken,
   automationRunEndedPayloadSchema,
@@ -3561,6 +3562,117 @@ describe('order events (ADR-085)', () => {
     expect(statusesAt(paidOnly)).toEqual(['paid']);
     expect(statusesAt(endings)).toEqual(['cancelled']);
     expect(statusesAt(everyStatus)).toEqual(['cancelled', 'created', 'created', 'paid']);
+  });
+
+  it('sends an endpoint that names who made the order changes only theirs, and every change that recorded no maker (ADR-322)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    await syncedCatalog(c, '5558591');
+    const add = async (orderChangeMakers: string[] | null) =>
+      (
+        await webhooks().create(owner, {
+          url: `http://${HOST}:${port}/ok/${randomBytes(6).toString('hex')}`,
+          eventTypes: ['order.received', 'order.status_changed'],
+          orderChangeMakers,
+        })
+      ).id;
+    const every = await add(null);
+    const members = await add(['member']);
+    const notKeys = await add(['member', 'payment_link']);
+    const keysOnly = await add(['api']);
+    const payments = await add(['payment_link']);
+    const created = await createApiKeysService({ db: fx.dbs.app, clock: systemClock }).create(
+      owner,
+      { name: 'Order system', scopes: ['orders.write'], expiresInDays: 0 },
+    );
+    const key = await authenticateApiToken(fx.dbs.app, created.token, uuidv7());
+    if (!key) throw new Error('the key does not authenticate');
+    const apiDeps = { db: fx.dbs.app, clock: systemClock };
+
+    // The first order is confirmed by a member and fulfilled through the API.
+    const first = await sendCart(c, waId(), '5558591', [
+      { retailerId: 'sku-1', quantity: 1, price: 10 },
+    ]);
+    await setOrderStatus(owner, first.id, 'confirmed');
+    await apiUpdateOrder(apiDeps, key, first.id, { status: 'fulfilled' });
+    // The second is confirmed through the API, paid through its Payment Link (as the worker records
+    // it), then changed without recording a maker.
+    const second = await sendCart(c, waId(), '5558591', [
+      { retailerId: 'sku-2', quantity: 1, price: 20 },
+    ]);
+    await apiUpdateOrder(apiDeps, key, second.id, { status: 'confirmed' });
+    await fx.query(
+      `UPDATE app.commerce_orders
+          SET status = 'paid', status_changed_by = 'payment_link',
+              status_changed_xact = pg_catalog.pg_current_xact_id()
+        WHERE id = $1`,
+      [second.id],
+    );
+    await fx.query(`UPDATE app.commerce_orders SET status = 'fulfilled' WHERE id = $1`, [
+      second.id,
+    ]);
+
+    const sent = await fx.query<{
+      type: string;
+      order: string;
+      status: string;
+      maker: string | null;
+      endpoint: string;
+    }>(
+      `SELECT e.type, e.detail ->> 'orderId' AS order, e.status, e.detail ->> 'changedBy' AS maker,
+              d.endpoint_id AS endpoint
+         FROM app.webhook_deliveries d
+         JOIN app.webhook_events e ON e.tenant_id = d.tenant_id AND e.id = d.event_id
+        WHERE d.tenant_id = $1`,
+      [c.tenant.id],
+    );
+    const endpointName = new Map([
+      [every, 'every change'],
+      [members, 'members'],
+      [notKeys, 'members and payments'],
+      [keysOnly, 'keys'],
+      [payments, 'payments'],
+    ]);
+    const orderName = new Map([
+      [first.id, 'first'],
+      [second.id, 'second'],
+    ]);
+    const sorted = (rows: unknown[][]) =>
+      [...rows].sort((x, y) => JSON.stringify(x).localeCompare(JSON.stringify(y)));
+    const all = ['every change', 'members', 'members and payments', 'keys', 'payments'];
+    const to = (type: string, order: string, status: string, maker: string | null, at: string[]) =>
+      at.map((endpoint) => [type, order, status, maker, endpoint]);
+    expect(
+      sorted(
+        sent.map((s) => [
+          s.type,
+          orderName.get(s.order),
+          s.status,
+          s.maker,
+          endpointName.get(s.endpoint),
+        ]),
+      ),
+    ).toEqual(
+      sorted([
+        // A new order reaches every endpoint: it has no maker to choose.
+        ...to('order.received', 'first', 'received', null, all),
+        ...to('order.received', 'second', 'received', null, all),
+        ...to('order.status_changed', 'first', 'confirmed', 'member', [
+          'every change',
+          'members',
+          'members and payments',
+        ]),
+        ...to('order.status_changed', 'first', 'fulfilled', 'api', ['every change', 'keys']),
+        ...to('order.status_changed', 'second', 'confirmed', 'api', ['every change', 'keys']),
+        ...to('order.status_changed', 'second', 'paid', 'payment_link', [
+          'every change',
+          'members and payments',
+          'payments',
+        ]),
+        // A change that recorded no maker reaches every endpoint, whoever is listed.
+        ...to('order.status_changed', 'second', 'fulfilled', null, all),
+      ]),
+    );
   });
 
   it('sends an endpoint that names numbers only the orders sent to them (ADR-170)', async () => {

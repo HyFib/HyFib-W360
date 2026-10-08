@@ -1,7 +1,7 @@
 import { integer, smallint, text, timestamp, uuid } from 'drizzle-orm/pg-core';
 import { jsonb } from './columns';
 import type { AutomationEndReason } from './automations';
-import type { PaymentLinkStatus } from './commerce';
+import type { OrderStatusChanger, PaymentLinkStatus } from './commerce';
 import type { CrmChanger, DealStatus, TaskStatus } from './crm';
 import type { ContactSource, MessageType } from './messaging';
 import { appSchema } from './tenancy';
@@ -89,6 +89,13 @@ export type WebhookOrderStatus =
  * (ADR-308); a link is `creating` only until the worker creates it, which sends no event.
  */
 export type WebhookPaymentLinkStatus = Exclude<PaymentLinkStatus, 'creating'>;
+
+/**
+ * Who made an order status change `order.status_changed` reports, as an endpoint can choose them
+ * (ADR-322): a member on the order page, an API key, or HyFib applying what Razorpay reports for
+ * the order's Payment Link, as the event's `changedBy` names them.
+ */
+export type WebhookOrderChangeMaker = OrderStatusChanger;
 
 /**
  * The statuses a `deal.status_changed` event reports, which an endpoint can choose (ADR-309): a
@@ -232,6 +239,12 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
    * its events.
    */
   paymentLinkStatuses: text('payment_link_statuses').array().$type<WebhookPaymentLinkStatus[]>(),
+  /**
+   * Who made the order status changes it takes as `order.status_changed` (migration 0244, ADR-322);
+   * null takes every change, and a change whose maker was not recorded is taken whoever is listed.
+   * Set only while `order.status_changed` is among its events.
+   */
+  orderChangeMakers: text('order_change_makers').array().$type<WebhookOrderChangeMaker[]>(),
   /**
    * The statuses a deal reaches that it takes as `deal.status_changed` (migration 0232, ADR-309);
    * null takes every status. Set only while `deal.status_changed` is among its events.
