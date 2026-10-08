@@ -18,6 +18,7 @@ import type {
   WebhookDealDetail,
   WebhookTaskDetail,
   WebhookRunEndStatus,
+  WebhookRunStepOutcome,
   WebhookReceivedMessageType,
   WebhookRunTrigger,
   WebhookSurveyScore,
@@ -43,6 +44,7 @@ export type {
   WebhookDealDetail,
   WebhookTaskDetail,
   WebhookRunEndStatus,
+  WebhookRunStepOutcome,
   WebhookReceivedMessageType,
   WebhookRunTrigger,
   WebhookSurveyScore,
@@ -546,6 +548,59 @@ export const WEBHOOK_RUN_END_STATUS_LABELS: Record<WebhookRunEndStatus, string> 
   taken_over: 'Taken over',
   stopped: 'Stopped',
   failed: 'Failed',
+};
+
+/**
+ * The outcomes a run's step can have, which an endpoint taking `automation.run_step` can choose
+ * (ADR-327), in the order the run's log names them (as the event's `step.outcome` does).
+ */
+export const WEBHOOK_RUN_STEP_OUTCOMES = [
+  'started',
+  'sent',
+  'asked',
+  'answered',
+  'retried',
+  'timed_out',
+  'branched',
+  'updated',
+  'waiting',
+  'resumed',
+  'handed_off',
+  'completed',
+  'failed',
+  'stopped',
+  'taken_over',
+  'requested',
+  'responded',
+  'created',
+  'skipped',
+  'moved',
+  'closed',
+] as const satisfies readonly WebhookRunStepOutcome[];
+
+/** How Settings names each step outcome an endpoint can choose (ADR-327), as a run's page does. */
+export const WEBHOOK_RUN_STEP_OUTCOME_LABELS: Record<WebhookRunStepOutcome, string> = {
+  started: 'Started',
+  sent: 'Sent a message',
+  asked: 'Asked the customer',
+  answered: 'Got an answer',
+  retried: 'Asked again',
+  timed_out: 'No reply in time',
+  branched: 'Checked a condition',
+  updated: 'Updated the contact',
+  waiting: 'Started waiting',
+  resumed: 'Wait ended',
+  handed_off: 'Handed off',
+  completed: 'Completed',
+  failed: 'Failed',
+  stopped: 'Stopped',
+  taken_over: 'Taken over',
+  requested: 'Made a web request',
+  responded: 'Web request finished',
+  created: 'Created in the CRM',
+  skipped: 'Skipped the step',
+  moved: 'Moved the deal',
+  closed: 'Closed the deal',
 };
 
 /**

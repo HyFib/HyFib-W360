@@ -12664,3 +12664,42 @@ Decision:
 
 Not built: narrowing steps by outcome or node type, the step's branch or detail in any form, and a
 step event for members' test runs.
+
+## ADR-327 Choosing the outcomes of the run steps a webhook endpoint receives (P5-09) (2026-10-08)
+
+Context: `automation.run_step` (ADR-326) sends every step a live run records, so an endpoint taking
+it received each start, message, answer, wait and web request of every run it takes. An integration
+that only watches for failures, or only books the messages runs send, had to drop the rest itself,
+and a busy company's runs send many steps. The backlog listed filters of a run's steps by outcome or
+node as remaining.
+
+Decision:
+
+- **One list per endpoint,** `runStepOutcomes`: 1 to 21 of the outcomes a run's log records
+  (started, sent, asked, answered, retried, timed_out, branched, updated, waiting, resumed,
+  handed_off, completed, failed, stopped, taken_over, requested, responded, created, skipped, moved,
+  closed), each once, kept in the log's order. A step is sent when its outcome, as `step.outcome`
+  names it, is on the list; null receives every step, as before. With the automations, what started
+  the runs, their API keys or the numbers chosen too (ADR-326), a step must pass them all. Chosen in
+  Settings → Webhooks ("Steps sent" under Automation step, every outcome ticked by default, each
+  named as the run's page names it), shown on the endpoint as "Automation steps sent: …", and
+  through the API as `runStepOutcomes` on `POST /webhook-endpoints` and
+  `PATCH /webhook-endpoints/{id}` and in every endpoint the API answers.
+- **Only while `automation.run_step` is taken:** a list given for an endpoint that does not take it
+  is refused (422 through the API), whatever other run events it takes; a change that drops the
+  event clears the list, a `PATCH` that leaves the list out keeps it, and one that gives only the
+  list is a change. A check in the database holds the same rule and the list's shape (null, or 1 to
+  21 known outcomes in one dimension without a null, with `automation.run_step`).
+- **Applied at capture:** `app.capture_webhook_event` creates a step's delivery only for the
+  endpoints whose list is null or holds the step's outcome, the event's status, and writes no event
+  when no active endpoint takes it.
+- **Audited, exported, permissions unchanged,** as for the other lists: `webhook.endpoint_created`
+  and `webhook.endpoint_updated` carry `runStepOutcomes` when the endpoint has it, and the company
+  data export carries the column.
+- **Migration 0249:** `run_step_outcomes text[]` on `app.webhook_endpoints` with its check,
+  validated at once (a company has at most 10 endpoints), the update grant on the column for the
+  runtime role, and `app.capture_webhook_event` replaced with the same signature (0247's, with the
+  outcome), so its owner and grants stay. Existing endpoints keep null; nothing is backfilled.
+
+Not built: choosing steps by node type, lists that leave chosen outcomes out, and narrowing the run
+events by their steps.

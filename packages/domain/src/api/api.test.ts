@@ -184,6 +184,7 @@ import {
   WEBHOOK_CONVERSATION_STATUSES_NEED_THE_EVENT,
   WEBHOOK_ORDER_STATUSES_NEED_THE_EVENT,
   WEBHOOK_PAYMENT_LINK_STATUSES_NEED_THE_EVENT,
+  WEBHOOK_RUN_STEP_OUTCOMES_NEED_THE_EVENT,
   WEBHOOK_ORDER_CHANGE_MAKERS_NEED_THE_EVENT,
   WEBHOOK_ORDER_EXCLUDED_API_KEYS_NEED_THE_EVENT,
   WEBHOOK_PAYMENT_LINK_API_KEYS_NEED_THE_EVENT,
@@ -208,6 +209,7 @@ import {
   WEBHOOK_FAILURE_KINDS,
   WEBHOOK_LIMITS,
   WEBHOOK_PAYMENT_LINK_STATUSES,
+  WEBHOOK_RUN_STEP_OUTCOMES,
   WEBHOOK_ORDER_CHANGE_MAKERS,
   WEBHOOK_DEAL_STATUSES,
   WEBHOOK_TASK_STATUSES,
@@ -1512,6 +1514,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'runApiKeyIds',
       'runEndReasons',
       'runEndStatuses',
+      'runStepOutcomes',
       'runTriggers',
       'stageIds',
       'surveyAssigneeIds',
@@ -1606,6 +1609,15 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     expect(Object.keys(createBody.properties)).toContain('paymentLinkStatuses');
     expect(webhooks['payment_link.status_changed']?.post?.description).toContain(
       'An endpoint receives every status unless it names the statuses it takes (its `paymentLinkStatuses`',
+    );
+    // The outcomes of the run steps an endpoint receives (ADR-327): a list, or null.
+    const runStepOutcomes = (answered.properties as Record<string, { anyOf?: unknown[] }>)
+      .runStepOutcomes;
+    expect(runStepOutcomes?.anyOf).toHaveLength(2);
+    expect(answered.required).toContain('runStepOutcomes');
+    expect(Object.keys(createBody.properties)).toContain('runStepOutcomes');
+    expect(webhooks['automation.run_step']?.post?.description).toContain(
+      'An endpoint receives every step unless it names the outcomes it takes (its `runStepOutcomes`',
     );
     // The deal and task statuses an endpoint receives (ADR-309): lists, or null.
     for (const [field, event] of [
@@ -3393,6 +3405,60 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     expect(apiUpdateWebhookEndpointSchema.parse({ orderStatuses: ['fulfilled'] })).toEqual({
       orderStatuses: ['fulfilled'],
     });
+  });
+
+  it('take step outcomes only with automation.run_step, and a list of them alone is a change (ADR-327)', () => {
+    const base = { url: 'https://hooks.example.com/w360', events: ['automation.run_step'] };
+    expect(
+      apiCreateWebhookEndpointSchema.parse({
+        ...base,
+        runStepOutcomes: ['failed', 'sent', 'failed'],
+      }).runStepOutcomes,
+    ).toEqual(['sent', 'failed']);
+    const refused = apiCreateWebhookEndpointSchema.safeParse({
+      ...base,
+      events: ['automation.run_ended'],
+      runStepOutcomes: ['failed'],
+    });
+    expect(refused.error?.issues.map((i) => [i.path.join('.'), i.message])).toEqual([
+      ['runStepOutcomes', WEBHOOK_RUN_STEP_OUTCOMES_NEED_THE_EVENT],
+    ]);
+    for (const body of [
+      { ...base, runStepOutcomes: [] },
+      { ...base, runStepOutcomes: ['running'] },
+    ]) {
+      expect(apiCreateWebhookEndpointSchema.safeParse(body).success, JSON.stringify(body)).toBe(
+        false,
+      );
+    }
+    expect(apiUpdateWebhookEndpointSchema.parse({ runStepOutcomes: null })).toEqual({
+      runStepOutcomes: null,
+    });
+    expect(apiUpdateWebhookEndpointSchema.parse({ runStepOutcomes: ['timed_out'] })).toEqual({
+      runStepOutcomes: ['timed_out'],
+    });
+    expect(apiUpdateWebhookEndpointSchema.safeParse({}).error?.issues[0]?.message).toContain(
+      'the run end statuses, the step outcomes, what started the runs',
+    );
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas;
+    const answered = schemas.WebhookEndpoint as {
+      properties: Record<string, { anyOf?: { items?: { enum?: string[] } }[] }>;
+    };
+    expect(answered.properties.runStepOutcomes?.anyOf?.[0]?.items?.enum).toEqual([
+      ...WEBHOOK_RUN_STEP_OUTCOMES,
+    ]);
+    const given = (schemas.CreateWebhookEndpoint as { properties: Record<string, unknown> })
+      .properties;
+    expect(JSON.stringify(given.runStepOutcomes)).toContain(
+      `as automation.run_step (${WEBHOOK_RUN_STEP_OUTCOMES.join(', ')}), as step.outcome names them, only with the automation.run_step event`,
+    );
+    const changed = (schemas.UpdateWebhookEndpoint as { properties: Record<string, unknown> })
+      .properties;
+    expect(JSON.stringify(changed.runStepOutcomes)).toContain(
+      'unless the events no longer include automation.run_step, which clears them',
+    );
   });
 
   it('take Payment Link statuses only with payment_link.status_changed, and a list of them alone is a change (ADR-308)', () => {

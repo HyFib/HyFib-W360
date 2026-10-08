@@ -74,6 +74,8 @@ import {
   WEBHOOK_ORDER_STATUSES,
   WEBHOOK_PAYMENT_LINK_STATUS_LABELS,
   WEBHOOK_PAYMENT_LINK_STATUSES,
+  WEBHOOK_RUN_STEP_OUTCOME_LABELS,
+  WEBHOOK_RUN_STEP_OUTCOMES,
   WEBHOOK_ORDER_CHANGE_MAKER_LABELS,
   WEBHOOK_ORDER_CHANGE_MAKERS,
   WEBHOOK_DEAL_STATUS_LABELS,
@@ -237,6 +239,9 @@ import {
   webhookPaymentLinkStatusesFor,
   webhookPaymentLinkStatusesSchema,
   WEBHOOK_PAYMENT_LINK_STATUSES_NEED_THE_EVENT,
+  webhookRunStepOutcomesFor,
+  webhookRunStepOutcomesSchema,
+  WEBHOOK_RUN_STEP_OUTCOMES_NEED_THE_EVENT,
   webhookOrderChangeMakersFor,
   webhookOrderChangeMakersSchema,
   WEBHOOK_ORDER_CHANGE_MAKERS_NEED_THE_EVENT,
@@ -2832,6 +2837,73 @@ describe('Payment Link status filters (ADR-308)', () => {
     ).toBeNull();
     expect(WEBHOOK_PAYMENT_LINK_STATUSES_NEED_THE_EVENT).toBe(
       `Choose Payment Link statuses only for an endpoint that receives ${WEBHOOK_EVENT_INFO['payment_link.status_changed'].label}.`,
+    );
+  });
+});
+
+describe('run step outcome filters (ADR-327)', () => {
+  it('take 1 to 21 of the outcomes a run’s log records, once each, in the log’s order; null takes every step', () => {
+    expect(webhookRunStepOutcomesSchema.parse(['failed', 'sent', 'failed'])).toEqual([
+      'sent',
+      'failed',
+    ]);
+    expect(webhookRunStepOutcomesSchema.parse(null)).toBeNull();
+    expect(webhookRunStepOutcomesSchema.parse([...WEBHOOK_RUN_STEP_OUTCOMES].reverse())).toEqual([
+      ...WEBHOOK_RUN_STEP_OUTCOMES,
+    ]);
+    // Every outcome the log records, as automation.run_step's step.outcome names them.
+    expect(WEBHOOK_RUN_STEP_OUTCOMES).toEqual([...AUTOMATION_STEP_OUTCOMES]);
+    expect(WEBHOOK_RUN_STEP_OUTCOMES).toHaveLength(21);
+    for (const refused of [
+      [],
+      ['running'],
+      ['Sent'],
+      ['sent', 'queued'],
+      'sent',
+      [null],
+      Array(22).fill('sent'),
+    ]) {
+      expect(webhookRunStepOutcomesSchema.safeParse(refused).success, JSON.stringify(refused)).toBe(
+        false,
+      );
+    }
+    expect(webhookRunStepOutcomesSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one step outcome, or take every step.',
+    );
+    expect(webhookRunStepOutcomesSchema.safeParse(['running']).error?.issues[0]?.message).toBe(
+      'Choose step outcomes from the list.',
+    );
+    expect(
+      webhookRunStepOutcomesSchema.safeParse(Array(22).fill('sent')).error?.issues[0]?.message,
+    ).toBe('Give each step outcome once.');
+    // Named as a run's page names them, in the list's order.
+    expect(Object.keys(WEBHOOK_RUN_STEP_OUTCOME_LABELS)).toEqual([...WEBHOOK_RUN_STEP_OUTCOMES]);
+    expect(WEBHOOK_RUN_STEP_OUTCOME_LABELS).toMatchObject({
+      sent: 'Sent a message',
+      answered: 'Got an answer',
+      timed_out: 'No reply in time',
+      failed: 'Failed',
+      requested: 'Made a web request',
+      skipped: 'Skipped the step',
+    });
+  });
+
+  it('are kept only while the endpoint takes automation.run_step: given, kept, or cleared', () => {
+    const both = ['automation.run_step', 'automation.run_ended'] as const;
+    expect(webhookRunStepOutcomesFor([...both], ['failed'], null)).toEqual(['failed']);
+    expect(webhookRunStepOutcomesFor([...both], undefined, ['sent'])).toEqual(['sent']);
+    expect(webhookRunStepOutcomesFor([...both], null, ['sent'])).toBeNull();
+    expect(webhookRunStepOutcomesFor([...both], undefined, null)).toBeNull();
+    // The run's own events have no step outcome to choose.
+    expect(
+      webhookRunStepOutcomesFor(
+        ['automation.run_started', 'automation.run_ended'],
+        ['failed'],
+        ['sent'],
+      ),
+    ).toBeNull();
+    expect(WEBHOOK_RUN_STEP_OUTCOMES_NEED_THE_EVENT).toBe(
+      `Choose step outcomes only for an endpoint that receives ${WEBHOOK_EVENT_INFO['automation.run_step'].label}.`,
     );
   });
 });

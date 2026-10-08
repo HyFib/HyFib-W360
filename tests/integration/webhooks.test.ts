@@ -2062,6 +2062,108 @@ describe('deal and task detail filters (ADR-310)', () => {
   }
 });
 
+describe('run step outcome filters (ADR-327)', () => {
+  it('are refused without automation.run_step, unknown or empty, kept by a change that leaves them out and cleared with the event; the database keeps them to that event', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const url = 'https://hooks.example.com/in';
+    const refused = (eventTypes: string[], runStepOutcomes: unknown, message: RegExp) =>
+      expectAppError(
+        webhooks().create(owner, { url, eventTypes, runStepOutcomes }),
+        'validation_failed',
+        message,
+      );
+    // A run's start and end have no step outcome to choose.
+    const needsTheEvent = /only for an endpoint that receives Automation step/;
+    await refused(['automation.run_started', 'automation.run_ended'], ['failed'], needsTheEvent);
+    await refused(['automation.run_step'], [], /at least one step outcome/);
+    await refused(['automation.run_step'], ['running'], /from the list/);
+    await refused(['automation.run_step'], ['Failed'], /from the list/);
+    expect(await webhooks().list(owner)).toEqual([]);
+
+    const created = await webhooks().create(owner, {
+      url,
+      eventTypes: ['automation.run_step', 'consent.changed'],
+      runStepOutcomes: ['failed', 'sent', 'failed'],
+    });
+    const [audit] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events WHERE tenant_id = $1 AND action = 'webhook.endpoint_created'`,
+      [c.tenant.id],
+    );
+    expect(audit?.metadata).toMatchObject({ runStepOutcomes: ['sent', 'failed'] });
+    const change = (fields: Record<string, unknown>) =>
+      webhooks().update(owner, {
+        endpointId: created.id,
+        url,
+        description: '',
+        eventTypes: ['automation.run_step', 'consent.changed'],
+        ...fields,
+      });
+    const current = async () =>
+      (await webhooks().list(owner)).find((e) => e.id === created.id)?.runStepOutcomes;
+    expect(await current()).toEqual(['sent', 'failed']);
+    await change({ description: 'kept' });
+    expect(await current()).toEqual(['sent', 'failed']);
+    await change({ runStepOutcomes: ['timed_out'] });
+    expect(await current()).toEqual(['timed_out']);
+    const updates = await fx.query<{ metadata: { runStepOutcomes?: unknown } }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND action = 'webhook.endpoint_updated' ORDER BY occurred_at`,
+      [c.tenant.id],
+    );
+    expect(updates.map((u) => u.metadata.runStepOutcomes)).toEqual([
+      ['sent', 'failed'],
+      ['timed_out'],
+    ]);
+    await change({ runStepOutcomes: null });
+    expect(await current()).toBeNull();
+    await change({ runStepOutcomes: ['closed'] });
+    // The database refuses an empty list, more than 21 entries, an unknown outcome, a missing one
+    // or a nested list from an endpoint taking the event…
+    const setInDatabase = (value: string) =>
+      fx.query(`UPDATE app.webhook_endpoints SET run_step_outcomes = ${value} WHERE id = $1`, [
+        created.id,
+      ]);
+    for (const bad of [
+      `'{}'`,
+      `'{${Array(22).fill('sent').join(',')}}'`,
+      `'{sent,running}'`,
+      `'{sent,Failed}'`,
+      `ARRAY['sent', NULL]::text[]`,
+      `ARRAY[ARRAY['sent'], ARRAY['failed']]::text[]`,
+    ]) {
+      await expect(setInDatabase(bad), bad).rejects.toThrow(/webhook_endpoints_run_step_outcomes/);
+    }
+    // Every outcome at once is a list the database takes.
+    await setInDatabase(
+      `ARRAY['started', 'sent', 'asked', 'answered', 'retried', 'timed_out', 'branched', 'updated',
+             'waiting', 'resumed', 'handed_off', 'completed', 'failed', 'stopped', 'taken_over',
+             'requested', 'responded', 'created', 'skipped', 'moved', 'closed']::text[]`,
+    );
+    await change({ eventTypes: ['consent.changed'] });
+    expect(await current()).toBeNull();
+    await expectAppError(
+      change({ eventTypes: ['consent.changed'], runStepOutcomes: ['failed'] }),
+      'validation_failed',
+      needsTheEvent,
+    );
+    // …and any list for an endpoint that does not take it, a run's other events included.
+    await expect(setInDatabase(`'{failed}'`)).rejects.toThrow(
+      /webhook_endpoints_run_step_outcomes/,
+    );
+    await change({ eventTypes: ['automation.run_ended'] });
+    await expect(setInDatabase(`'{failed}'`)).rejects.toThrow(
+      /webhook_endpoints_run_step_outcomes/,
+    );
+    // The company role changes the list only through its column grant.
+    const [grant] = await fx.query<{ can_update: boolean }>(
+      `SELECT has_column_privilege('w360_app', 'app.webhook_endpoints', 'run_step_outcomes',
+                'UPDATE') AS can_update`,
+    );
+    expect(grant?.can_update).toBe(true);
+  });
+});
+
 describe('template status filters (ADR-148)', () => {
   /** A utility template HyFib submits and Meta's stand-in takes for review: `pending`. */
   async function submitted(c: Company, owner: TenantContext) {

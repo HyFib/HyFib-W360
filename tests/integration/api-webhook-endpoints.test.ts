@@ -263,6 +263,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       campaignStatuses: null,
       orderStatuses: null,
       paymentLinkStatuses: null,
+      runStepOutcomes: null,
       orderChangeMakers: null,
       orderExcludedApiKeyIds: null,
       paymentLinkApiKeyIds: null,
@@ -1064,6 +1065,87 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     });
     expect(await issueOf(api().update(key.ctx, id, { orderStatuses: [] }))).toMatchObject({
       path: 'orderStatuses',
+    });
+  });
+
+  it('choose the outcomes of the run steps an endpoint receives, kept by changes that leave them out and cleared with the event (ADR-327)', async () => {
+    const c = await fx.company();
+    const key = await apiKey(c, ['webhooks.manage']);
+    const issueOf = async (promise: Promise<unknown>) => {
+      const error = await expectAppError(promise, 'validation_failed');
+      return isAppError(error) ? error.issues?.[0] : undefined;
+    };
+    // Outcomes need the step event, at least one, and each from the list (by place).
+    const refusals = [
+      [['automation.run_ended'], ['failed'], 'runStepOutcomes'],
+      [['automation.run_step'], [], 'runStepOutcomes'],
+      [['automation.run_step'], ['failed', 'running'], 'runStepOutcomes.1'],
+      [['automation.run_step'], ['Sent'], 'runStepOutcomes.0'],
+    ] as const;
+    for (const [index, [events, runStepOutcomes, path]] of refusals.entries()) {
+      expect(
+        await issueOf(
+          api().create(
+            key.ctx,
+            { url: receiverUrl(), events, runStepOutcomes },
+            idem(`step-outcomes-bad-${index}`, JSON.stringify(runStepOutcomes)),
+          ),
+        ),
+        JSON.stringify(runStepOutcomes),
+      ).toMatchObject({ path });
+    }
+    expect((await api().list(key.ctx)).data).toEqual([]);
+
+    const created = await addThroughApi(key.ctx, 'step-outcomes-1', {
+      url: receiverUrl(),
+      events: ['automation.run_step', 'automation.run_ended'],
+      runStepOutcomes: ['failed', 'sent', 'failed'],
+    });
+    const id = created.body.data.id;
+    expect(created.body.data.runStepOutcomes).toEqual(['sent', 'failed']);
+    expect((await api().get(key.ctx, id)).runStepOutcomes).toEqual(['sent', 'failed']);
+    const [audit] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND subject_id = $2 AND action = 'webhook.endpoint_created'`,
+      [c.tenant.id, id],
+    );
+    expect(audit?.metadata).toMatchObject({ runStepOutcomes: ['sent', 'failed'] });
+
+    expect(await api().update(key.ctx, id, { description: 'Run steps' })).toMatchObject({
+      runStepOutcomes: ['sent', 'failed'],
+    });
+    // A list alone is a change.
+    expect(await api().update(key.ctx, id, { runStepOutcomes: ['timed_out'] })).toMatchObject({
+      runStepOutcomes: ['timed_out'],
+    });
+    const updates = await fx.query<{ metadata: { runStepOutcomes?: unknown } }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND subject_id = $2 AND action = 'webhook.endpoint_updated'
+        ORDER BY occurred_at`,
+      [c.tenant.id, id],
+    );
+    expect(updates.map((u) => u.metadata.runStepOutcomes)).toEqual([
+      ['sent', 'failed'],
+      ['timed_out'],
+    ]);
+    expect(await api().update(key.ctx, id, { events: ['automation.run_ended'] })).toMatchObject({
+      events: ['automation.run_ended'],
+      runStepOutcomes: null,
+    });
+    expect(await issueOf(api().update(key.ctx, id, { runStepOutcomes: ['failed'] }))).toMatchObject(
+      { path: 'runStepOutcomes' },
+    );
+    expect(
+      await api().update(key.ctx, id, {
+        events: ['automation.run_step'],
+        runStepOutcomes: ['closed'],
+      }),
+    ).toMatchObject({ runStepOutcomes: ['closed'] });
+    expect(await api().update(key.ctx, id, { runStepOutcomes: null })).toMatchObject({
+      runStepOutcomes: null,
+    });
+    expect(await issueOf(api().update(key.ctx, id, { runStepOutcomes: [] }))).toMatchObject({
+      path: 'runStepOutcomes',
     });
   });
 

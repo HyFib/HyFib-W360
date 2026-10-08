@@ -221,6 +221,7 @@ export default async function WebhookEndpointPage({
               campaignStatuses: endpoint.campaignStatuses,
               orderStatuses: endpoint.orderStatuses,
               paymentLinkStatuses: endpoint.paymentLinkStatuses,
+              runStepOutcomes: endpoint.runStepOutcomes,
               orderChangeMakers: endpoint.orderChangeMakers,
               orderExcludedApiKeys: endpoint.orderExcludedApiKeys,
               paymentLinkApiKeys: endpoint.paymentLinkApiKeys,

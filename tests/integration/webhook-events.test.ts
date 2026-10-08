@@ -3156,6 +3156,85 @@ describe('automation run events (ADR-078)', () => {
     expect(apiSteps.map((b) => b.data.step.nodeType)).toContain('send_template');
   });
 
+  it('sends an endpoint that names step outcomes only the steps with them, and captures no step nobody takes (ADR-327)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    await publishAutomation(owner, 'Brochure', keyword('brochure'), sayGraph('Here it is.'));
+    const add = async (runStepOutcomes: string[] | null) =>
+      (
+        await webhooks().create(owner, {
+          url: `http://${HOST}:${port}/ok/${randomBytes(6).toString('hex')}`,
+          eventTypes: ['automation.run_step'],
+          runStepOutcomes,
+        })
+      ).id;
+    const lists = new Map<string, string[] | null>([
+      ['every step', null],
+      ['failures', ['failed']],
+      ['sends', ['sent']],
+      ['starts and failures', ['started', 'failed']],
+    ]);
+    const endpoints = new Map<string, string>();
+    for (const [name, list] of lists) endpoints.set(await add(list), name);
+    const run = async (clock: Clock = systemClock) => {
+      const [started] = await runsIn((await inbound(c, waId(), 'brochure')).conversation_id);
+      if (!started) throw new Error('no run started');
+      expect(await driveRun(c, started.id, clock)).toBe('ended');
+      return started.id;
+    };
+    const sent = await run();
+    // A day later the customer's window has closed: the text cannot be sent and the run fails.
+    const failed = await run({ now: () => new Date(Date.now() + 25 * 3600_000) });
+    const runs = new Map([
+      [sent, 'sent'],
+      [failed, 'failed'],
+    ]);
+    const logged = new Map<string, string[]>();
+    for (const [runId, name] of runs) {
+      logged.set(
+        name,
+        (await stepsOf(runId)).map((step) => step.outcome),
+      );
+    }
+    expect(logged.get('sent')).toContain('sent');
+    expect(logged.get('failed')).toContain('failed');
+
+    const delivered = await fx.query<{ run: string; endpoint: string; outcome: string }>(
+      `SELECT e.detail ->> 'runId' AS run, d.endpoint_id AS endpoint, e.status AS outcome
+         FROM app.webhook_deliveries d
+         JOIN app.webhook_events e ON e.tenant_id = d.tenant_id AND e.id = d.event_id
+        WHERE d.tenant_id = $1 AND e.type = 'automation.run_step'`,
+      [c.tenant.id],
+    );
+    const sorted = (rows: unknown[][]) =>
+      [...rows].sort((x, y) => JSON.stringify(x).localeCompare(JSON.stringify(y)));
+    // Each step reaches the endpoints whose list is null or holds its outcome, and no other.
+    const expected: unknown[][] = [];
+    for (const [runName, outcomes] of logged) {
+      for (const outcome of outcomes) {
+        for (const [endpoint, list] of lists) {
+          if (!list || list.includes(outcome)) expected.push([runName, endpoint, outcome]);
+        }
+      }
+    }
+    expect(
+      sorted(delivered.map((d) => [runs.get(d.run), endpoints.get(d.endpoint), d.outcome])),
+    ).toEqual(sorted(expected));
+
+    // With the endpoint for every step and the one for starts turned off, a run's start is taken by
+    // no endpoint and is not recorded; its message still is.
+    const idOf = (name: string) => [...endpoints].find(([, n]) => n === name)?.[0] ?? '';
+    await webhooks().setEnabled(owner, { endpointId: idOf('every step'), enabled: false });
+    await webhooks().setEnabled(owner, { endpointId: idOf('starts and failures'), enabled: false });
+    const quiet = await run();
+    const recorded = await fx.query<{ status: string }>(
+      `SELECT status FROM app.webhook_events
+        WHERE tenant_id = $1 AND type = 'automation.run_step' AND detail ->> 'runId' = $2`,
+      [c.tenant.id, quiet],
+    );
+    expect(recorded.map((r) => r.status)).toEqual(['sent']);
+  });
+
   it('reports a run that fails, with its reason', async () => {
     const c = await fx.company();
     const owner = await fx.ctx(c, c.owner);

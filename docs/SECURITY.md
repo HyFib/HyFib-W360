@@ -1829,6 +1829,13 @@ Phase 5 rules (outgoing webhooks, P5-09):
   withheld as the run's answers are) or its detail. The run filters narrow it as they narrow the run
   events, and the run's number, trigger and key are taken out of the stored detail (unit tests;
   integration tests, run in CI only).
+- An endpoint can take the run steps of chosen outcomes only (ADR-327). The list holds only the
+  outcomes a run's log records (checked by the services and the database), is kept only while the
+  endpoint takes `automation.run_step` (a database check too), and is applied in
+  `app.capture_webhook_event` to the step's outcome, which the step trigger takes from the
+  append-only log. It only narrows what one endpoint receives and never adds an event or a delivery
+  for another endpoint or company; the payload is unchanged. Audited with the list and in the
+  company data export (unit tests; integration tests, run in CI only).
 - Order events (ADR-085) follow the same rules. Triggers on WhatsApp orders run as the role that
   adds the order or changes its status (only the runtime role, in the company's scope), so each
   event stays in the order's company and holds the order id, the statuses and who changed it only.
