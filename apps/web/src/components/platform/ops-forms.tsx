@@ -382,7 +382,8 @@ export function AssignFailureForm({
   state: string;
   /** Who the failure is assigned to now; null while nobody. */
   assigneeUserId: string | null;
-  administrators: readonly { userId: string; name: string | null }[];
+  /** The administrators to choose from, each named so no two read the same (ADR-325). */
+  administrators: readonly { userId: string; label: string }[];
 }) {
   const [chosen, setChosen] = useState(assigneeUserId ?? '');
   const [busy, setBusy] = useState(false);
@@ -414,7 +415,7 @@ export function AssignFailureForm({
               <option value="">Nobody</option>
               {administrators.map((a) => (
                 <option key={a.userId} value={a.userId}>
-                  {a.name ?? 'An administrator without a name'}
+                  {a.label}
                 </option>
               ))}
             </Select>

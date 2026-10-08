@@ -3731,6 +3731,11 @@ every failure.
 assigned, however many others are failing, with the same forms: assign one there and it leaves the
 view; take an assignment off and it comes back. The CSV always gives every failure.
 
+**Two administrators with one name (ADR-325).** The Assign list shows your own name as "… (you)".
+Another administrator whose name someone else also has is shown with when they became an
+administrator (UTC), and with "#1", "#2" if that is the same minute too. To make the list plainer,
+ask one of them to change their name in Account & security → Profile.
+
 **Keys (ADR-134).** The configured encryption key ids, the primary first, and how many stored values
 each key seals, by kind (counts only). While another key is configured the worker seals the values
 it sealed again with the primary key, up to 500 a minute, and logs `sealed values re-encrypted under

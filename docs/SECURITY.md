@@ -2263,6 +2263,11 @@ message text, contact details, payloads, email addresses, secrets or full URLs:
   (SECURITY DEFINER, executable only by the platform role) refuses anyone who is not a platform
   administrator and reads the full list's columns and no more, without the assignments (integration
   tests, run in CI only).
+- Telling administrators apart (ADR-325): the Assign list names the reader "(you)" and an
+  administrator who shares a name by when they became one (`ops.platform_admins.created_at`, which
+  the platform role already reads), never by email address (ADR-054), so a failure is not assigned
+  to the wrong administrator of the same name. Nothing new is written or audited (unit tests;
+  integration and e2e tests, run in CI only).
 - Acknowledging dead letters (ADR-169): through `ops.platform_acknowledge_dead_letter` (SECURITY
   DEFINER, executable only by the platform role), which checks the platform administrator, the note
   (10 to 500 characters, trimmed) and the dead letter, and writes the platform audit entry

@@ -12582,3 +12582,30 @@ Decision:
 Not built: lists that leave chosen keys' links out, choosing links by who asked for them (a member
 or any key) without naming keys, and the statuses of the messages an automation sent for a key's
 run.
+
+## ADR-325 Telling platform administrators apart in the Assign list (P5-10) (2026-10-08)
+
+Context: the Administrator list a failure is assigned from (ADR-313) named each platform
+administrator by name only. Two administrators with the same name read the same, ordered by account
+id, so an administrator could assign a failure to someone other than the one they meant: CI's
+end-to-end run, which signs up several administrators of one name, did exactly that, and the failure
+went to an administrator who never saw it under "Assigned to me". The console shows no email
+addresses (ADR-054), so the name alone has to tell them apart.
+
+Decision:
+
+- **The reader is "(you)":** the administrator reading the console sees their own name followed by
+  "(you)", whoever shares it, since assigning oneself is the common case.
+- **A shared name gets when they became an administrator:** any other administrator whose name
+  another one has gets "(administrator since YYYY-MM-DD HH:MM UTC)", from
+  `ops.platform_admins.created_at`, which platform administrators can already read; administrators
+  still alike after that get "#1", "#2"… in the list's order (by name, then account). An
+  administrator without a name is "An administrator without a name", told apart the same way. No two
+  choices read the same.
+- **Names only where they were shown:** the rows still say "To …" and "By …" by name, the CSV still
+  leaves assignments out, and nothing new is read about an administrator but when they became one.
+  Built in `platformAdministratorChoices` (`platform/ops-model.ts`); the Integrations tab's
+  `administrators` now carry the label; no migration.
+
+Not built: the same marks on the rows' "To …" and "By …", and choosing administrators by anything
+but the list.

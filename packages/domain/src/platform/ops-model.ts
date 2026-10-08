@@ -692,6 +692,43 @@ export function integrationFailureView(value: unknown): IntegrationFailureView {
 export interface PlatformAdministrator {
   userId: string;
   name: string | null;
+  /** When the account became a platform administrator. */
+  since: Date;
+}
+
+/** An administrator as the Assign list offers them (ADR-325): the account and what it reads. */
+export interface PlatformAdministratorChoice {
+  userId: string;
+  label: string;
+}
+
+/**
+ * How the Assign list names each administrator (ADR-325): by name, the reader marked "(you)", and
+ * any other administrator whose name another one shares with when they became one, to the minute
+ * (UTC), and their place among those still alike, so no two choices read the same. Never an email
+ * address: the console shows none (ADR-054). In the order given.
+ */
+export function platformAdministratorChoices(
+  administrators: readonly PlatformAdministrator[],
+  readerUserId: string,
+): PlatformAdministratorChoice[] {
+  const nameOf = (a: PlatformAdministrator) => a.name?.trim() || 'An administrator without a name';
+  const shared = (a: PlatformAdministrator) =>
+    administrators.some((b) => b.userId !== a.userId && nameOf(b) === nameOf(a));
+  const labelled = administrators.map((a) => ({
+    userId: a.userId,
+    label:
+      a.userId === readerUserId
+        ? `${nameOf(a)} (you)`
+        : shared(a)
+          ? `${nameOf(a)} (administrator since ${csvMinute(a.since)} UTC)`
+          : nameOf(a),
+  }));
+  return labelled.map((c) => {
+    const alike = labelled.filter((d) => d.label === c.label);
+    if (alike.length === 1) return c;
+    return { ...c, label: `${c.label} #${alike.indexOf(c) + 1}` };
+  });
 }
 
 export type ReceiptProblem = 'exhausted' | 'waiting';

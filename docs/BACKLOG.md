@@ -1304,6 +1304,9 @@ verification, app review, Embedded Signup configuration).
   CSV leaves it out. ADR-314: an assignee is emailed once about each failure another administrator
   assigned them, with counts only. ADR-315: "Assigned to me" lists only the failures assigned to the
   administrator reading. ADR-318: "Unassigned" lists only the failures assigned to nobody).
+  **[Administrators told apart in the Assign list built; its database and browser tests run only in
+  CI]** (ADR-325: the reader marked "(you)", a shared name followed by when the account became an
+  administrator; no migration).
   Remaining:
   other alert channels, longer trends and charts, Meta's quality webhook (unconfirmed),
   paging and rollups for many companies.

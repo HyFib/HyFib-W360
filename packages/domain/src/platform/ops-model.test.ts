@@ -27,6 +27,7 @@ import {
   numberSetupsCsv,
   opsCsvFilename,
   opsExportAction,
+  platformAdministratorChoices,
   qualityRank,
   quarantineCsv,
   quarantineExternalIds,
@@ -912,5 +913,54 @@ describe('how many rows the console’s lists export (ADR-200)', () => {
       quarantine: { shown: 100, exported: 5000 },
       deadLetters: { shown: 100, exported: 5000 },
     });
+  });
+});
+
+describe('the administrators the Assign list offers (ADR-325)', () => {
+  const at = (iso: string) => new Date(iso);
+  it('names each by name, the reader as "you", in the order given', () => {
+    expect(
+      platformAdministratorChoices(
+        [
+          { userId: 'u-asha', name: 'Asha Ops', since: at('2026-10-01T09:30:00Z') },
+          { userId: 'u-ravi', name: ' Ravi Ops ', since: at('2026-10-02T09:30:00Z') },
+          { userId: 'u-anon', name: null, since: at('2026-10-03T09:30:00Z') },
+        ],
+        'u-ravi',
+      ),
+    ).toEqual([
+      { userId: 'u-asha', label: 'Asha Ops' },
+      { userId: 'u-ravi', label: 'Ravi Ops (you)' },
+      { userId: 'u-anon', label: 'An administrator without a name' },
+    ]);
+  });
+
+  it('tells apart administrators who share a name by when they became one, then by place', () => {
+    const choices = platformAdministratorChoices(
+      [
+        { userId: 'u-1', name: 'Anil Staff', since: at('2026-10-01T09:30:59Z') },
+        { userId: 'u-2', name: 'Anil Staff', since: at('2026-10-05T14:05:00Z') },
+        { userId: 'u-3', name: 'Anil Staff', since: at('2026-10-05T14:05:30Z') },
+        { userId: 'u-me', name: 'Anil Staff', since: at('2026-10-06T08:00:00Z') },
+        { userId: 'u-x', name: '', since: at('2026-10-06T08:00:00Z') },
+        { userId: 'u-y', name: null, since: at('2026-10-07T08:00:00Z') },
+      ],
+      'u-me',
+    );
+    expect(choices).toEqual([
+      { userId: 'u-1', label: 'Anil Staff (administrator since 2026-10-01 09:30 UTC)' },
+      { userId: 'u-2', label: 'Anil Staff (administrator since 2026-10-05 14:05 UTC) #1' },
+      { userId: 'u-3', label: 'Anil Staff (administrator since 2026-10-05 14:05 UTC) #2' },
+      { userId: 'u-me', label: 'Anil Staff (you)' },
+      {
+        userId: 'u-x',
+        label: 'An administrator without a name (administrator since 2026-10-06 08:00 UTC)',
+      },
+      {
+        userId: 'u-y',
+        label: 'An administrator without a name (administrator since 2026-10-07 08:00 UTC)',
+      },
+    ]);
+    expect(new Set(choices.map((c) => c.label)).size).toBe(choices.length);
   });
 });

@@ -1,5 +1,36 @@
 # Progress
 
+## 2026-10-08 — Administrators told apart in the Assign list (P5-10, H-034, ADR-325)
+
+Status: **Implemented; its database and browser tests run in CI only.** CI's end-to-end run of PR
+#46 showed that two platform administrators of one name read the same in the Assign list, so a
+failure went to the wrong one. The local PostgreSQL is unavailable, so the integration and e2e tests
+below were changed but not run here.
+
+### Completed
+
+- **Domain:** `platformAdministratorChoices` in `platform/ops-model.ts` (the reader "(you)", a
+  shared name followed by when the account became an administrator, then a place);
+  `PlatformAdministrator.since`; the Integrations tab's administrators carry the label.
+- **Web:** the Assign form's options read the label.
+- **Tests:** unit (2 new in `platform/ops-model.test.ts`); integration (1 changed: assigning
+  failures in `platform-ops.test.ts` checks the reader's mark, two administrators of one name and
+  that every label differs); e2e (1 changed: `platform-ops.spec.ts` chooses its administrator as
+  "(you)"). The integration and e2e tests were not run here.
+- **Docs:** ADR-325; ARCHITECTURE; SECURITY; THREAT-MODEL T293; RUNBOOKS; BACKLOG P5-10; feature
+  matrix H-034.
+- **Mutation checks:** 8/8 deliberate regressions caught on the unit-tested parts.
+
+### Test commands and results (local, 2026-10-08)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 140 files, 1364 tests passed                                    |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                  |
+
 ## 2026-10-08 — API key filters for Payment Link events (P5-09, H-014, ADR-324)
 
 Status: **Implemented; its database tests run in CI only.** `payment_link.status_changed` names who
