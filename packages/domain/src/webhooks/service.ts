@@ -448,16 +448,26 @@ export function webhookMessageApiKeyIdsFor(
 }
 
 /**
- * Refuses API keys given for an endpoint unless each is the company's and holds a scope that sends
- * messages (ADR-320), whatever its state: a revoked or expired key's messages still change status,
- * and a rotated key's messages match the key that replaced it. `tx` is in the company's scope.
+ * The scopes whose messages carry the key (ADR-320): sending and replying through the API, and
+ * asking for a payment, whose Payment Link is sent in the chat as the key (ADR-283).
+ */
+export const WEBHOOK_MESSAGE_KEY_SCOPES = [
+  ...API_SEND_SCOPES,
+  'orders.request_payment',
+] as const satisfies readonly ApiScope[];
+
+/**
+ * Refuses API keys given for an endpoint unless each is the company's and holds a scope whose
+ * messages carry the key (ADR-320), whatever its state: a revoked or expired key's messages still
+ * change status, and a rotated key's messages match the key that replaced it. `tx` is in the
+ * company's scope.
  */
 export async function assertWebhookMessageApiKeys(
   tx: Tx,
   tenantId: string,
   ids: readonly string[] | null | undefined,
 ): Promise<void> {
-  await assertCompanyApiKeys(tx, tenantId, ids, API_SEND_SCOPES, 'messageApiKeyIds', {
+  await assertCompanyApiKeys(tx, tenantId, ids, WEBHOOK_MESSAGE_KEY_SCOPES, 'messageApiKeyIds', {
     notFound: WEBHOOK_MESSAGE_API_KEYS_NOT_FOUND,
   });
 }
@@ -4331,15 +4341,19 @@ export function createWebhooksService(deps: {
 
     /**
      * The API keys an endpoint can choose to take the statuses of the messages they send of
-     * (ADR-320): the company's keys holding a scope that sends messages, working and not rotated,
-     * by name, as for runs.
+     * (ADR-320): the company's keys holding a scope whose messages carry them (sending, replying or
+     * asking for payment), working and not rotated, by name, as for runs.
      */
     async messageApiKeyChoices(ctx: TenantContext): Promise<WebhookApiKeyChoice[]> {
       assertCan(ctx, 'developer.manage');
       const now = clock.now();
-      return db.run(ctx.scope, (tx) => workingApiKeys(tx, ctx.tenant.id, API_SEND_SCOPES, now), {
-        accessMode: 'read only',
-      });
+      return db.run(
+        ctx.scope,
+        (tx) => workingApiKeys(tx, ctx.tenant.id, WEBHOOK_MESSAGE_KEY_SCOPES, now),
+        {
+          accessMode: 'read only',
+        },
+      );
     },
 
     /**

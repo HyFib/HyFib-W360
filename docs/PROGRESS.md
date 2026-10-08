@@ -22,11 +22,14 @@ here; migration 0242 passed the pglast parse check (syntax only).
   key types and `webhookApiKeyText` lost their run-only names.
 - **Web:** Settings → Webhooks' "Messages sent through the API" while the endpoint takes Message
   status (one fieldset for both key lists), and the endpoints list's line for it.
-- **Tests:** unit (3 new: the list's rules and keeping and clearing in `webhooks/webhooks.test.ts`;
-  the API schemas and OpenAPI entries in `api/api.test.ts`; 1 assertion there updated for the new
-  field); integration (3 new: the services and capture in `webhooks.test.ts`, the API in
-  `api-webhook-endpoints.test.ts`; 1 changed in `tenant-isolation.test.ts`). Written for CI; the
-  integration tests were not run here. No e2e test.
+- **Tests:** unit (4 new: the list's rules, keeping and clearing and the scopes whose messages carry
+  the key in `webhooks/webhooks.test.ts`; the API schemas and OpenAPI entries in `api/api.test.ts`;
+  1 assertion there updated for the new field); integration (3 new: the services and capture in
+  `webhooks.test.ts`, the API in `api-webhook-endpoints.test.ts`; 1 extended: `commerce.test.ts`
+  sends the statuses of a Payment Link a key asked for to an endpoint naming the key; 2 changed: the
+  helper's grants in `tenant-isolation.test.ts`, and both key lists in the full endpoint answer of
+  `api-webhook-endpoints.test.ts`, which a review before the push found missing, as were the keys
+  asking for payment). Written for CI; the integration tests were not run here. No e2e test.
 - **Docs:** ADR-320; ARCHITECTURE; SECURITY; THREAT-MODEL T288; DEPLOYMENT; RUNBOOKS; BACKLOG P5-09;
   feature matrix H-014.
 - **Mutation checks:** 20/20 deliberate regressions caught on the unit-tested parts. The capture,

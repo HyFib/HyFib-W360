@@ -12347,7 +12347,8 @@ Decision:
   API by: …", and through the API as `messageApiKeyIds` on `POST /webhook-endpoints` and
   `PATCH /webhook-endpoints/{id}` and in every endpoint the API answers.
 - **Which keys:** the services refuse an id that is not one of the company's keys holding a scope
-  that sends messages (`messages.send`, `messages.send_marketing` or `messages.reply`), named by
+  whose messages carry the key (`messages.send`, `messages.send_marketing` or `messages.reply`, or
+  `orders.request_payment`, whose Payment Link is sent in the chat as the key, ADR-283), named by
   place, whatever the key's state: a revoked or expired key's messages still change status, and a
   rotated key's messages match the key that replaced it. Settings offers the keys that work and were
   not rotated, and keeps naming a key an endpoint has, with "revoked" or "expired" once it stops

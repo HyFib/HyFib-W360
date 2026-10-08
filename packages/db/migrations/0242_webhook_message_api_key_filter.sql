@@ -7,10 +7,10 @@
 -- takes (message_api_key_ids). Null keeps every message's, as before; a list holds 1 to 20 key
 -- ids, and only while the endpoint takes message.status, so a list never outlives it. A message
 -- matches when the key that sent it is on the list, or a key it was rotated from or into, as a
--- run's key does since 0241; a message sent otherwise (by a member, an automation, a campaign or
--- HyFib) matches no list. The services check that a list names the company's keys; the database
--- checks its shape. A company has at most 10 endpoints, so the table is small and the check is
--- validated here.
+-- run's key does since 0241; a Payment Link a key asked for is sent as that key (ADR-283), and a
+-- message sent otherwise (by a member, an automation, a campaign or HyFib) matches no list. The
+-- services check that a list names the company's keys; the database checks its shape. A company
+-- has at most 10 endpoints, so the table is small and the check is validated here.
 ALTER TABLE app.webhook_endpoints
   ADD COLUMN message_api_key_ids uuid[],
   ADD CONSTRAINT webhook_endpoints_message_api_key_ids CHECK (

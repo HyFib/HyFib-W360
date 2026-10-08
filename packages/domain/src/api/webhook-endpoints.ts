@@ -298,7 +298,7 @@ const invalidSenders = () =>
   });
 
 const messageApiKeyIdsField = webhookMessageApiKeyIdsSchema.describe(
-  `The API keys whose sent messages' message.status the endpoint receives: 1 to ${WEBHOOK_LIMITS.messageApiKeys} ids of the company's keys that can send messages (messages.send, messages.send_marketing or messages.reply), as message.apiKeyId names them (a key that adds an endpoint finds its own id in the endpoint's apiKeyId), only with the message.status event. A status is received when the key that sent the message through the API is listed, or a key it was rotated from or into, so a list keeps an integration's messages across rotations; a revoked or expired key stays allowed, as the messages it sent still change status. A message sent otherwise (by a member, an automation, a campaign or HyFib itself) belongs to no key and its statuses are not received. With the statuses or who sent the messages too, a status must pass them all. null receives the statuses of every message.`,
+  `The API keys whose sent messages' message.status the endpoint receives: 1 to ${WEBHOOK_LIMITS.messageApiKeys} ids of the company's keys whose messages carry them (messages.send, messages.send_marketing, messages.reply, or orders.request_payment, whose Payment Link is sent in the chat as the key), as message.apiKeyId names them (a key that adds an endpoint finds its own id in the endpoint's apiKeyId), only with the message.status event. A status is received when the key that sent the message through the API is listed, or a key it was rotated from or into, so a list keeps an integration's messages across rotations; a revoked or expired key stays allowed, as the messages it sent still change status. A message sent otherwise (by a member, an automation, a campaign or HyFib itself) belongs to no key and its statuses are not received. With the statuses or who sent the messages too, a status must pass them all. null receives the statuses of every message.`,
 );
 
 /** Keys for messages are chosen only for an endpoint that receives `message.status` (ADR-320). */
@@ -1033,7 +1033,7 @@ export const apiUpdateWebhookEndpointSchema = z
     messageApiKeyIds: messageApiKeyIdsField
       .optional()
       .describe(
-        "The API keys whose sent messages' message.status the endpoint receives (the company's keys that can send messages, whatever their state); null receives the statuses of every message. Left out, they stay, unless the events no longer include message.status, which clears them.",
+        "The API keys whose sent messages' message.status the endpoint receives (the company's keys whose messages carry them, whatever their state); null receives the statuses of every message. Left out, they stay, unless the events no longer include message.status, which clears them.",
       ),
     contactParts: contactPartsField
       .optional()

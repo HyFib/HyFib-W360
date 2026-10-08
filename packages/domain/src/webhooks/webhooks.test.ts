@@ -196,6 +196,7 @@ import {
   webhookRunTriggersSchema,
   webhookRunApiKeyIdsFor,
   webhookRunApiKeyIdsSchema,
+  WEBHOOK_MESSAGE_KEY_SCOPES,
   webhookMessageApiKeyIdsFor,
   webhookMessageApiKeyIdsSchema,
   webhookConsentChangesFor,
@@ -2485,6 +2486,15 @@ describe('API key filters of message statuses (ADR-320)', () => {
     expect(
       webhookMessageApiKeyIdsSchema.safeParse(['w360_aaaaaaaaaaaa']).error?.issues[0]?.message,
     ).toBe('Choose API keys from the list.');
+  });
+
+  it('name the keys whose messages carry them: those sending or replying through the API, and those asking for payment', () => {
+    expect([...WEBHOOK_MESSAGE_KEY_SCOPES].sort()).toEqual([
+      'messages.reply',
+      'messages.send',
+      'messages.send_marketing',
+      'orders.request_payment',
+    ]);
   });
 
   it('are kept only while the endpoint takes message.status: given, kept, or cleared', () => {

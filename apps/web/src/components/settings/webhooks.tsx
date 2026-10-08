@@ -938,7 +938,7 @@ const API_KEY_WORDS = {
   },
   messages: {
     legend: 'Messages sent through the API',
-    help: 'A message sent through the API belongs to the key that sent it, and to the keys that key was rotated from or into; a message a member, an automation, a campaign or HyFib sent belongs to none. With statuses or senders chosen too, a status must pass them all.',
+    help: 'A message sent through the API belongs to the key that sent it (a Payment Link, to the key that asked for it), and to the keys that key was rotated from or into; a message a member, an automation, a campaign or HyFib sent belongs to none. With statuses or senders chosen too, a status must pass them all.',
     every: 'Every message’s statuses',
     everyHelp: 'Including messages sent otherwise, and by keys added later.',
     only: 'Only the statuses of the messages the API keys ticked sent',
@@ -2776,7 +2776,7 @@ export function WebhookEndpointForm({
   automationChoices: WebhookAutomationChoice[];
   /** The company's API keys that can start runs, which an endpoint can choose (ADR-319). */
   runApiKeyChoices: WebhookApiKeyChoice[];
-  /** The company's API keys that can send messages, which an endpoint can choose (ADR-320). */
+  /** The company's API keys whose messages carry them, which an endpoint can choose (ADR-320). */
   messageApiKeyChoices: WebhookApiKeyChoice[];
   /** The company's WhatsApp numbers, which an endpoint can choose (ADR-170). */
   channelChoices: WebhookChannelChoice[];

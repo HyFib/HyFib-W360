@@ -837,7 +837,7 @@ export function webhookTakesAutomationRuns(eventTypes: readonly WebhookEventType
 /**
  * An API key of the company that works and was not rotated, which an endpoint can choose to take
  * the runs it starts (ADR-319, a key holding `automations.start`) or the statuses of the messages
- * it sends (ADR-320, a key holding a scope that sends messages). The API also takes a revoked,
+ * it sends (ADR-320, a key that sends, replies or asks for payment). The API also takes a revoked,
  * expired or rotated key that holds the scope; Settings lists one only while an endpoint names it.
  */
 export interface WebhookApiKeyChoice {
