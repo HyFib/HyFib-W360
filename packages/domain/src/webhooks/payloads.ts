@@ -481,7 +481,7 @@ const webhookRunStepSchema = z.object({
     .uuid()
     .nullable()
     .describe(
-      'The message the step sent (a message, a question, a template or a form), whose message.status events follow it; null for a step that sent none, and once the message is erased.',
+      'The message the step sent (a message, a question, a template or a form), whose message.status events follow it; null for a step that sent none. Erasing the contact redacts the message and keeps its id.',
     ),
 });
 export const automationRunStepPayloadSchema = envelope(
@@ -1270,7 +1270,7 @@ async function runOf(tx: Tx, tenantId: string, runId: string | null) {
 
 /**
  * A run's step as its event gives it (ADR-326), or null once its run is gone. Steps are never
- * changed, but erasing a message clears the id of the step that sent it.
+ * changed.
  */
 async function runStepOf(tx: Tx, tenantId: string, stepId: string | null) {
   if (!stepId || !z.uuid().safeParse(stepId).success) return null;

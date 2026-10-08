@@ -12635,9 +12635,9 @@ Decision:
 - **What it gives:** the run (id, automation and its name when delivered, what started it, the API
   key for a run started through the API, when it started); the step (`number` from 0, `nodeType` as
   the builder names nodes or null outside a node, `outcome`, and `messageId`, the message the step
-  sent, null for a step that sent none or once the message is erased); the conversation, the contact
-  (without personal data once erased, as the other events) and the number. Deliveries are not
-  ordered: an integration orders a run's steps by `number`.
+  sent, null for a step that sent none, kept when the contact is erased); the conversation, the
+  contact (without personal data once erased, as the other events) and the number. Deliveries are
+  not ordered: an integration orders a run's steps by `number`.
 - **Never the branch or the detail.** An answered question's branch is the title of the button the
   customer tapped, which is their answer, and the run events never send a run's answers (ADR-078).
   The detail is a note for the people reading the run's page (what started the run, a web request's

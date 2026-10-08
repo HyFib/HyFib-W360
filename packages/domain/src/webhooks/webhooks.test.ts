@@ -5744,16 +5744,16 @@ describe('the event of an automation run step (ADR-326)', () => {
     expect(automationRunStepPayloadSchema.safeParse(built).success).toBe(true);
     expect(JSON.stringify(built)).not.toMatch(/deal_owner_unavailable|cancel my order/);
     expect(reads.unread()).toBe(0);
-    // An erased message leaves the step without its id, and a deleted automation without its name.
+    // A step that sent no message, of a run whose automation is not found and contact was erased.
     const erased = answering([
-      [{ ...step, seq: 5, nodeType: 'ask_text', outcome: 'asked', messageId: null }],
+      [{ ...step, seq: 5, nodeType: 'ask_text', outcome: 'answered', messageId: null }],
       [{ ...runRow, automationName: null, apiKeyId: null, triggerType: 'keyword' }],
       [{ phone: '+919845012345', name: 'Asha', erasedAt: at }],
     ]);
     const after = await buildWebhookPayload(erased.tx, event(id), 'endpoint');
     expect(after.data).toMatchObject({
       run: { automationName: null, apiKeyId: null, trigger: 'keyword' },
-      step: { number: 5, nodeType: 'ask_text', outcome: 'asked', messageId: null },
+      step: { number: 5, nodeType: 'ask_text', outcome: 'answered', messageId: null },
       contact: { id: contact, phone: null, name: null },
     });
     expect(erased.unread()).toBe(0);

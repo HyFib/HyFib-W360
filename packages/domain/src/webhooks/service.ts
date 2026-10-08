@@ -1114,9 +1114,9 @@ export async function assertWebhookContactFields(
 }
 
 /**
- * The automations whose runs an endpoint takes as `automation.run_started` and
- * `automation.run_ended` (ADR-145), each once; null takes every automation, including automations
- * published later.
+ * The automations whose runs an endpoint takes as `automation.run_started`, `automation.run_ended`
+ * and `automation.run_step` (ADR-145, ADR-326), each once; null takes every automation, including
+ * automations published later.
  */
 export const webhookAutomationIdsSchema = z
   .array(z.uuid({ error: 'Choose automations from the list.' }))
