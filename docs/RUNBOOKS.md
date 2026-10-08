@@ -97,6 +97,13 @@ sweep is not running: nobody is emailed about late queues until it does, so star
 - Post a status notice in-app (platform banner, backlog) and to affected owners.
 - After recovery, watch for `unknown_outcome` sends (section 7); open top-ups and auto-recharge
   attempts reconcile themselves through the billing sweep (section 9).
+- Pwned Passwords (ADR-317): while the range API cannot be reached, answers an error or takes over 3
+  seconds, the web log says `password breach check unavailable: the password was taken unchecked`
+  with the path and why (the error's class or the status). Sign-ups, resets and changes go on with
+  the length rules only. Check that the web tier may reach `api.pwnedpasswords.com:443`; to stop the
+  checks during a long outage, set `PASSWORD_BREACH_CHECK=off` and restart the web tier, and turn
+  them back on after. A person told their password "appears in known data breaches" should choose
+  another: the check never says which breach.
 
 ## 6. Expired or revoked provider credentials
 

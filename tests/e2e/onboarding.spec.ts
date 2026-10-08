@@ -1,3 +1,4 @@
+import { E2E_BREACHED_PASSWORD } from '../support/pwned-passwords-stand-in';
 import { expect, test } from './fixtures';
 import { firstLink, signUpAndVerify, uniqueEmail, waitForEmail } from './support';
 
@@ -147,4 +148,37 @@ test('a sign-up holding the NUL character is refused with a clear message before
   expect(await response.json()).toMatchObject({
     message: 'Text cannot hold the NUL character (U+0000).',
   });
+});
+
+test('a password found in known data breaches is refused when signing up and when changing it (ADR-317)', async ({
+  page,
+}) => {
+  test.skip(
+    process.env.PASSWORD_BREACH_CHECK !== 'pwned-passwords' || !process.env.E2E_PWNED_PORT,
+    'Pwned Passwords stand-in not configured',
+  );
+  const breached =
+    'This password appears in known data breaches, so it is easy to guess. Choose a different one.';
+  const email = uniqueEmail('breach');
+  await page.goto('/sign-up');
+  await page.getByLabel('Your name').fill('Bea Breach');
+  await page.getByLabel('Work email').fill(email);
+  await page.getByLabel('Password').fill(E2E_BREACHED_PASSWORD);
+  await page.getByRole('button', { name: 'Create account' }).click();
+  await expect(page.getByText(breached)).toBeVisible();
+  // Another password goes through.
+  await page.getByLabel('Password').fill(PASSWORD);
+  await page.getByRole('button', { name: 'Create account' }).click();
+  await expect(page.getByText('Check your email')).toBeVisible();
+  await page.goto(firstLink(await waitForEmail(email, 'Confirm your email')));
+  await expect(page.getByRole('heading', { name: 'Create your company' })).toBeVisible();
+
+  // Changing it to a breached password is refused too, and the password stays.
+  await page.goto('/account');
+  // The first "Current password" is the two-factor card's (the password card comes after it).
+  await page.getByLabel('Current password').nth(1).fill(PASSWORD);
+  await page.getByLabel('New password').fill(E2E_BREACHED_PASSWORD);
+  await page.getByRole('button', { name: 'Change password' }).click();
+  await expect(page.getByText(breached)).toBeVisible();
+  await expect(page.getByText('Password changed.')).toHaveCount(0);
 });

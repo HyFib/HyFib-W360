@@ -1319,7 +1319,12 @@ review; production rollout per RELEASE-CHECKLIST.
 ## Security backlog
 
 - **SEC-1** WebAuthn/passkeys for privileged roles.
-- **SEC-2** Breached-password screening at sign-up/reset (k-anonymity API or offline list).
+- **SEC-2** ~~Breached-password screening at sign-up/reset (k-anonymity API or offline list).~~
+  Settled by ADR-317: the password a sign-up, reset or change sets is checked with the Pwned
+  Passwords range API (the first five characters of its SHA-1 hash, padded answers) and refused when
+  it appears in a breach; a check that cannot be made takes it with a warning. On by default for
+  staging and production; its end-to-end test runs in CI against a stand-in, and the live API is to
+  be checked from production.
 - **SEC-3** Central SSRF-safe egress client (DNS pinning, private/metadata range blocking, redirect
   re-validation, limits) used by all outbound HTTP — _built with P4-02 (ADR-042) and used by the
   automation HTTP step, the Flows data endpoint (P4-03) and outgoing webhooks (P5-09); imports

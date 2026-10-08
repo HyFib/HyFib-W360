@@ -7,8 +7,15 @@ import { twoFactor } from 'better-auth/plugins/two-factor';
 import { drizzle } from 'drizzle-orm/node-postgres';
 import type pg from 'pg';
 import {
+  PASSWORD_BREACHED_CODE,
+  PASSWORD_BREACHED_MESSAGE,
+  PASSWORD_MAX_LENGTH,
+  PASSWORD_MIN_LENGTH,
+} from '@w360/contracts';
+import {
   isDatabaseQueryError,
   logLibraryLine,
+  passwordBreachCheckFrom,
   withoutDriverErrors,
   withoutDriverErrorsFrom,
   type Logger,
@@ -16,9 +23,11 @@ import {
 } from '@w360/core';
 import { betterAuthSchema, systemScope, type Database } from '@w360/db';
 import {
+  checkPasswordBreaches,
   enqueueEmail,
   NUL_CHARACTER_MESSAGE,
   nulCharacterPathIn,
+  passwordBeingSet,
   RECENT_SIGN_IN_MINUTES,
   recordSecurityEvent,
   type OutboxDeps,
@@ -52,6 +61,9 @@ export function createAuth(deps: {
       .filter(Boolean),
   ];
 
+  // Screening the passwords people set against breached ones (ADR-317), or null when it is off.
+  const breachCheck = passwordBreachCheckFrom(config);
+
   const queueEmail = async (to: string, payload: Parameters<typeof enqueueEmail>[2]['payload']) => {
     await db.run(systemScope, (tx) =>
       enqueueEmail(outbox, tx, { to, payload }).then(() => undefined),
@@ -72,8 +84,8 @@ export function createAuth(deps: {
       enabled: true,
       requireEmailVerification: true,
       autoSignIn: false,
-      minPasswordLength: 12,
-      maxPasswordLength: 128,
+      minPasswordLength: PASSWORD_MIN_LENGTH,
+      maxPasswordLength: PASSWORD_MAX_LENGTH,
       resetPasswordTokenExpiresIn: 60 * 60,
       revokeSessionsOnPasswordReset: true,
       sendResetPassword: async ({ user, url }) => {
@@ -150,11 +162,28 @@ export function createAuth(deps: {
     },
     // Members' auth forms (names, emails, passwords, tokens) are refused when they hold the NUL
     // character, as every other form is (ADR-130): PostgreSQL text cannot store it, so the query
-    // would otherwise fail.
+    // would otherwise fail. A password being set that appears in known data breaches is refused
+    // too (ADR-317); one that could not be checked is taken, and the check's failure logged.
     hooks: {
       before: createAuthMiddleware(async (ctx) => {
         if (nulCharacterPathIn({ body: ctx.body, query: ctx.query, params: ctx.params }) !== null) {
           throw new APIError('BAD_REQUEST', { message: NUL_CHARACTER_MESSAGE });
+        }
+        const password = breachCheck ? passwordBeingSet(ctx.path, ctx.body) : null;
+        if (breachCheck && password !== null) {
+          const result = await checkPasswordBreaches(password, breachCheck);
+          if (result.status === 'breached') {
+            throw new APIError('BAD_REQUEST', {
+              message: PASSWORD_BREACHED_MESSAGE,
+              code: PASSWORD_BREACHED_CODE,
+            });
+          }
+          if (result.status === 'unavailable') {
+            logger.warn(
+              { path: ctx.path, reason: result.reason },
+              'password breach check unavailable: the password was taken unchecked',
+            );
+          }
         }
       }),
     },

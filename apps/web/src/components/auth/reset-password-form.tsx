@@ -4,7 +4,7 @@ import { useState } from 'react';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
-import { passwordSchema } from '@w360/contracts';
+import { PASSWORD_BREACHED_CODE, PASSWORD_BREACHED_MESSAGE, passwordSchema } from '@w360/contracts';
 import {
   Button,
   Card,
@@ -39,7 +39,11 @@ export function ResetPasswordForm({ token, invalid }: { token: string | null; in
     setError(null);
     const result = await authClient.resetPassword({ newPassword: password, token });
     if (result.error) {
-      setError('This reset link is invalid or has expired. Request a new one.');
+      setError(
+        result.error.code === PASSWORD_BREACHED_CODE
+          ? PASSWORD_BREACHED_MESSAGE
+          : 'This reset link is invalid or has expired. Request a new one.',
+      );
       return;
     }
     setDone(true);

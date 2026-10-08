@@ -54,6 +54,13 @@ Business logic never lives in React components.
   through the `w360_auth` role. Tenant code can read only public profile columns of `auth.users`.
   A HyFib plugin records each completed sign-in as a security event, which the person reads back
   through `ops.my_sign_ins` (ADR-136).
+- **Breached passwords** (ADR-317): the auth API's `before` hook checks the password a sign-up,
+  reset or change sets with `checkPasswordBreaches`
+  (`packages/domain/src/account/password-breaches.ts`): the first five characters of its SHA-1 hash
+  go to the Pwned Passwords range API (`PWNED_PASSWORDS_BASE_URL`, the service's own origin outside
+  local and test), and a listed suffix refuses the request with `PASSWORD_BREACHED`; a check that
+  cannot be made takes the password and logs a warning. `PASSWORD_BREACH_CHECK` turns it on or off
+  (on by default for staging and production).
 - **Tenancy** (companies = `app.tenants`, memberships, invitations, audit) lives in schema `app`.
 - **Platform operations** (platform admins, support grants, platform audit, security events, email
   outbox) live in schema `ops`.

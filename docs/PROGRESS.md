@@ -1,5 +1,44 @@
 # Progress
 
+## 2026-10-08 — Screening the passwords people set against breached ones (SEC-2, H-052, ADR-317)
+
+Status: **Implemented; its browser test runs in CI only, and the live service was not reached.** A
+person could set any password of 12 to 128 characters, breached ones included. The Pwned Passwords
+API and its documentation were refused by this environment's egress policy, so the request and
+response follow Better Auth's own plugin and search summaries of the official pages
+(`docs/research/pwned-passwords.md`).
+
+### Completed
+
+- **Design (ADR-317):** sign-up, reset and change check the new password with the range API (five
+  characters of its SHA-1 hash, padded answers); a listed one is refused with `PASSWORD_BREACHED`; a
+  check that cannot be made takes it with a warning; on by default for staging and production; the
+  origin is the service's outside local and test.
+- **Configuration:** `PASSWORD_BREACH_CHECK` and `PWNED_PASSWORDS_BASE_URL`
+  (`passwordBreachCheckFrom` in `packages/core/src/config.ts`, checked at start-up), and
+  `.env.example`.
+- **Domain and web:** `packages/domain/src/account/password-breaches.ts` (`checkPasswordBreaches`,
+  `passwordBeingSet`, `rangeBreachCount`); the auth API's `before` hook; the sign-up, reset and
+  change-password forms' message; the password lengths and the message in `@w360/contracts`.
+- **Tests:** unit (7 new in `password-breaches.test.ts` and `config.test.ts`); e2e (1 new in
+  `onboarding.spec.ts`: a breached password refused at sign-up and change) against a test-only
+  stand-in (`tests/support/pwned-passwords-stand-in.ts`), started by the Playwright global setup and
+  turned on in CI. Written for CI; the e2e test was not run here.
+- **Docs:** ADR-317; `docs/research/pwned-passwords.md`; ARCHITECTURE; SECURITY; THREAT-MODEL T285;
+  DEPLOYMENT and RUNBOOKS; BACKLOG SEC-2; feature matrix H-052.
+- **Mutation checks:** 24/24 deliberate regressions caught on the unit-tested parts. The hook and
+  the forms need a browser, so their regressions are left to the e2e test, which runs in CI.
+
+### Test commands and results (local, 2026-10-08)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 140 files, 1339 tests                                         |
+| `pnpm test:e2e`                                    | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
 ## 2026-10-08 — Tag filters for added and changed contacts (P5-09, H-014, ADR-316)
 
 Status: **Implemented; its database tests run in CI only.** Endpoints taking `contact.created` or

@@ -12194,3 +12194,50 @@ Decision:
 
 Not built: lists that leave tagged contacts out, the contact's tags at capture in the payload (it
 gives the contact as it is when delivered), and tag filters for erased and merged contacts.
+
+## ADR-317 Screening the passwords people set against breached ones (SEC-2) (2026-10-08)
+
+Context: a person could set any password of 12 to 128 characters, including ones exposed in data
+breaches, which attackers try first when they stuff credentials. SEC-2 asked to screen them at
+sign-up and reset, with a k-anonymity API or an offline list. Better Auth 1.7.6 ships a plugin for
+the Pwned Passwords range API, but it calls the service with its own fetch: tests would reach the
+live service, and production configuration could not refuse another origin.
+
+Decision:
+
+- **What is screened:** the password a request sets: signing up (`/sign-up/email`), resetting a
+  forgotten password (`/reset-password`) and changing one (`/change-password`), when its length is
+  one a person may set (12 to 128 characters; the auth library refuses the others). Signing in,
+  verifying the current password (a recent sign-in, two-factor) and every other request are not
+  screened.
+- **How:** in the auth API's `before` hook, after the NUL check (ADR-130), HyFib hashes the password
+  with SHA-1, sends the first five characters of the hash to the Pwned Passwords range API with
+  `Add-Padding: true`, and reads the count of the other 35 among the suffixes it answers; a count of
+  0 (padding) or a suffix not listed is no breach. Only the five characters leave HyFib
+  (k-anonymity), and the padding hides which range was asked for from anyone watching the size of
+  the answer. No password, hash or result is stored or logged.
+- **Refused:** a password listed at least once. The request fails with 400 and the code
+  `PASSWORD_BREACHED` before anything is created or changed, and the sign-up, reset and change forms
+  say "This password appears in known data breaches, so it is easy to guess. Choose a different
+  one." The answer is the same whether or not an account has the email, so sign-up enumeration
+  protection holds.
+- **When the check cannot be made:** a failed request, an answer other than 2xx, a redirect, a body
+  of another shape or no answer within 3 seconds takes the password unchecked (the length rules
+  still apply) and logs `password breach check unavailable` at warn with the path and why (the
+  error's class or the status, never the password). An outage of the service does not stop people
+  signing up or resetting a password: availability is chosen over screening, and turning the check
+  off is a configuration change.
+- **Configuration:** `PASSWORD_BREACH_CHECK=pwned-passwords|off`, on by default for
+  `APP_ENV=staging|production` and off for local and test. `PWNED_PASSWORDS_BASE_URL` may point at a
+  stand-in only with `APP_ENV=local|test`, as Meta's and Razorpay's origins may, and start-up
+  refuses another origin elsewhere even with the check off. The request goes to that fixed origin
+  with `fetch`, as the Graph and Razorpay clients' do, not through the egress client for
+  company-chosen URLs.
+- **Tests:** a test-only stand-in (`tests/support/pwned-passwords-stand-in.ts`) answers ranges in
+  the end-to-end run, which turns the check on; the API's shape is taken from Better Auth's plugin
+  and search summaries of the official pages, as its documentation could not be read from here
+  (`docs/research/pwned-passwords.md`).
+
+Not built: an offline list (no network dependency), screening at sign-in to ask for a new password,
+checking stored passwords (only their hashes are kept), and counting the checks that could not be
+made on the operations console.

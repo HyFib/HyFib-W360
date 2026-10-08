@@ -49,6 +49,11 @@ PostgreSQL 18; CI workflow authored).
   same company-allowed domains for the WhatsApp Flows data endpoint, which forwards WhatsApp's
   requests to companies' endpoints while WhatsApp waits (section below). It uses the same egress
   guard; apply the same egress proxy or firewall to the web tier.
+- The web tier also reaches `https://api.pwnedpasswords.com` to screen the passwords people set
+  (ADR-317), on by default for staging and production: allow it, or set `PASSWORD_BREACH_CHECK=off`.
+  When it cannot be reached, passwords are taken unchecked and the web log says
+  `password breach check unavailable`; `PWNED_PASSWORDS_BASE_URL` is refused outside
+  `APP_ENV=local|test`.
 
 **Pilot option (lower cost):** single web and worker replicas and a single managed PostgreSQL
 instance with PITR. Limitations: no redundancy during deploys or instance failure (brief downtime),
