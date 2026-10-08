@@ -168,6 +168,7 @@ import {
   WEBHOOK_NOTE_STAGES_NEED_THE_EVENTS,
   WEBHOOK_NOTE_DEAL_OWNERS_NEED_THE_EVENTS,
   WEBHOOK_CRM_CHANGE_MAKERS_NEED_THE_EVENTS,
+  WEBHOOK_SURVEY_SCORES_NEED_THE_EVENT,
   WEBHOOK_CONTACT_TAGS_NEED_THE_EVENTS,
   WEBHOOK_CONVERSATION_TAGS_NEED_THE_EVENTS,
   WEBHOOK_CAMPAIGN_STATUSES_NEED_THE_EVENT,
@@ -1481,6 +1482,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'runEndStatuses',
       'runTriggers',
       'stageIds',
+      'surveyScores',
       'taskAssigneeIds',
       'taskDealOwnerIds',
       'taskPipelineIds',
@@ -2061,7 +2063,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       taskAssigneeIds: [dev],
     });
     expect(apiUpdateWebhookEndpointSchema.safeParse({}).error?.issues[0]?.message).toContain(
-      'the deal owners, the task assignees, the pipelines, stages and owners of tasks’ deals and of notes’ deals, who made the CRM changes, the members, the contact tags, the conversation tags, the OAuth client',
+      'the deal owners, the task assignees, the pipelines, stages and owners of tasks’ deals and of notes’ deals, who made the CRM changes, the survey scores, the members, the contact tags, the conversation tags, the OAuth client',
     );
     const doc = buildOpenApiDocument('https://app.example.com/api/v1');
     const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
@@ -2441,6 +2443,55 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     );
     expect(doc.info.description).toContain(
       'And it can name who made the changes whose deal, task and note events it takes (its `crmChangeMakers`: members, automations or API keys, as `changedBy` and `writtenBy` name them): then it receives the events of the changes they made only, and those HyFib did not record the maker of',
+    );
+  });
+
+  it('take survey scores only with satisfaction_survey.answered, once each, and a list of them alone is a change (ADR-307)', () => {
+    const base = {
+      url: 'https://hooks.example.com/w360',
+      events: ['satisfaction_survey.answered'],
+    };
+    expect(
+      apiCreateWebhookEndpointSchema.parse({ ...base, surveyScores: [1, 3, 1] }).surveyScores,
+    ).toEqual([3, 1]);
+    const refused = apiCreateWebhookEndpointSchema.safeParse({
+      ...base,
+      events: ['conversation.status_changed'],
+      surveyScores: [1],
+    });
+    expect(refused.error?.issues.map((i) => [i.path.join('.'), i.message])).toEqual([
+      ['surveyScores', WEBHOOK_SURVEY_SCORES_NEED_THE_EVENT],
+    ]);
+    for (const value of [[], [0], ['1'], [1, 1, 1, 1]]) {
+      expect(
+        apiCreateWebhookEndpointSchema.safeParse({ ...base, surveyScores: value }).success,
+        JSON.stringify(value),
+      ).toBe(false);
+    }
+    expect(apiUpdateWebhookEndpointSchema.parse({ surveyScores: null })).toEqual({
+      surveyScores: null,
+    });
+    expect(apiUpdateWebhookEndpointSchema.parse({ surveyScores: [1] })).toEqual({
+      surveyScores: [1],
+    });
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas;
+    const answered = schemas.WebhookEndpoint as {
+      properties: Record<string, { anyOf?: { items?: { enum?: number[] } }[] }>;
+      required?: string[];
+    };
+    expect(answered.properties.surveyScores?.anyOf?.[0]?.items?.enum).toEqual([3, 2, 1]);
+    expect(answered.required).toContain('surveyScores');
+    const given = (schemas.CreateWebhookEndpoint as { properties: Record<string, unknown> })
+      .properties;
+    expect(JSON.stringify(given.surveyScores)).toContain('one or more of 3, 2, 1, as the survey');
+    expect(JSON.stringify(given.surveyScores)).toContain('only with satisfaction_survey.answered');
+    const surveyEvent = (doc.webhooks as Record<string, { post?: { description?: string } }>)[
+      'satisfaction_survey.answered'
+    ]?.post?.description;
+    expect(surveyEvent).toContain(
+      'An endpoint receives every answer unless it names the scores it takes (its `surveyScores`, or the scores ticked in Settings → Webhooks).',
     );
   });
 

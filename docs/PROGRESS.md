@@ -1,5 +1,44 @@
 # Progress
 
+## 2026-10-08 — Score filters for satisfaction survey answer webhook events (P5-09, H-014, W-138, ADR-307)
+
+Status: **Implemented; its database tests run in CI only.** Endpoints taking
+`satisfaction_survey.answered` received every answer, so an integration following up poor ratings
+only had to drop the rest. The local PostgreSQL is unavailable, so the migration and the integration
+tests below were written but not run here; migration 0230 passed the pglast parse check (syntax
+only).
+
+### Completed
+
+- **Database:** migration 0230 (`survey_scores` on `app.webhook_endpoints` with its check and update
+  grant; `app.capture_webhook_event` with the answer's score, read from its survey only when an
+  endpoint names scores).
+- **Domain:** `WEBHOOK_SURVEY_SCORES` and their labels in `webhooks/model.ts`;
+  `webhookSurveyScoresSchema` and `webhookSurveyScoresFor` in `webhooks/service.ts`, the endpoint
+  view's `surveyScores`, creation, changes, audits and the export column; `surveyScores` in
+  `api/webhook-endpoints.ts` and the OpenAPI document.
+- **Web:** Settings → Webhooks' "Answers scored" under the survey event (every score ticked by
+  default) and the endpoints list's line for it.
+- **Tests:** unit (3 new: the list's rules, order, keeping and clearing in
+  `webhooks/webhooks.test.ts`; the API schemas and OpenAPI entries in `api/api.test.ts`);
+  integration (3 new: capture in `webhook-events.test.ts`, the services in `webhooks.test.ts`, the
+  API in `api-webhook-endpoints.test.ts`). Written for CI; the integration tests were not run here.
+  No e2e test.
+- **Docs:** ADR-307; ARCHITECTURE; SECURITY; THREAT-MODEL T275; DEPLOYMENT; RUNBOOKS; BACKLOG P5-09;
+  feature matrix H-014 and W-138.
+- **Mutation checks:** 26/26 deliberate regressions caught.
+
+### Test commands and results (local, 2026-10-08)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 137 files, 1304 tests                                         |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| pglast 7 parse of migration 0230                   | passed (syntax only)                                          |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
 ## 2026-10-08 — Change-maker filters for deal, task and note webhook events (P5-09, P4-04, H-014, W-138, ADR-306)
 
 Status: **Implemented; its database tests run in CI only.** Endpoints taking deal, task or note

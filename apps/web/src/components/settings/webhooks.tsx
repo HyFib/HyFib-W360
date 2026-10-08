@@ -17,6 +17,8 @@ import {
   WEBHOOK_MESSAGE_SENDER_LABELS,
   WEBHOOK_CRM_CHANGE_MAKER_LABELS,
   WEBHOOK_CRM_CHANGE_MAKERS,
+  WEBHOOK_SURVEY_SCORE_LABELS,
+  WEBHOOK_SURVEY_SCORES,
   WEBHOOK_MESSAGE_SENDERS,
   WEBHOOK_MESSAGE_STATUS_LABELS,
   WEBHOOK_MESSAGE_STATUSES,
@@ -70,6 +72,7 @@ import {
   type WebhookCampaignChoice,
   type WebhookContactPart,
   type WebhookCrmChangeMaker,
+  type WebhookSurveyScore,
   type WebhookConversationStatus,
   type WebhookEndpointAssignee,
   type WebhookEndpointCampaign,
@@ -221,6 +224,50 @@ function SenderChoices({
             <Label htmlFor={id} className="font-normal">
               {WEBHOOK_MESSAGE_SENDER_LABELS[sender]}{' '}
               <span className="font-mono text-xs">({sender})</span>
+            </Label>
+          </div>
+        );
+      })}
+    </fieldset>
+  );
+}
+
+/**
+ * The scores of the satisfaction survey answers an endpoint takes (ADR-307), shown while it takes
+ * the event: every answer unless some scores are unticked.
+ */
+function ScoreChoices({
+  prefix,
+  chosen,
+  onChange,
+}: {
+  prefix: string;
+  chosen: WebhookSurveyScore[];
+  onChange: (next: WebhookSurveyScore[]) => void;
+}) {
+  return (
+    <fieldset className="ml-6 grid gap-1">
+      <legend className="mb-1 text-xs text-muted-foreground">
+        Answers scored (all of them unless you untick some)
+      </legend>
+      {WEBHOOK_SURVEY_SCORES.map((score) => {
+        const id = `${prefix}-survey-score-${score}`;
+        return (
+          <div key={score} className="flex items-center gap-2">
+            <Checkbox
+              id={id}
+              checked={chosen.includes(score)}
+              onChange={(e) =>
+                onChange(
+                  e.target.checked
+                    ? WEBHOOK_SURVEY_SCORES.filter((s) => s === score || chosen.includes(s))
+                    : chosen.filter((s) => s !== score),
+                )
+              }
+            />
+            <Label htmlFor={id} className="font-normal">
+              {WEBHOOK_SURVEY_SCORE_LABELS[score]}{' '}
+              <span className="font-mono text-xs">({score})</span>
             </Label>
           </div>
         );
@@ -1875,6 +1922,8 @@ function EventChoices({
   onMessageTypesChange,
   runEndReasons,
   onRunEndReasonsChange,
+  scores,
+  onScoresChange,
 }: {
   prefix: string;
   chosen: WebhookEventType[];
@@ -1903,6 +1952,8 @@ function EventChoices({
   onMessageTypesChange: (next: WebhookReceivedMessageType[]) => void;
   runEndReasons: AutomationEndReason[];
   onRunEndReasonsChange: (next: AutomationEndReason[]) => void;
+  scores: WebhookSurveyScore[];
+  onScoresChange: (next: WebhookSurveyScore[]) => void;
 }) {
   return (
     <fieldset className="grid gap-2">
@@ -1934,6 +1985,9 @@ function EventChoices({
                 chosen={messageTypes}
                 onChange={onMessageTypesChange}
               />
+            ) : null}
+            {type === 'satisfaction_survey.answered' && chosen.includes(type) ? (
+              <ScoreChoices prefix={prefix} chosen={scores} onChange={onScoresChange} />
             ) : null}
             {type === 'message.status' && chosen.includes(type) ? (
               <>
@@ -2329,6 +2383,8 @@ export function WebhookEndpointForm({
     noteDealOwners: WebhookEndpointOwner[] | null;
     /** Who made the changes whose deal, task and note events it takes (ADR-306); null: all. */
     crmChangeMakers: WebhookCrmChangeMaker[] | null;
+    /** The scores of the survey answers it takes (ADR-307); null: every answer. */
+    surveyScores: WebhookSurveyScore[] | null;
     /** The members it names (ADR-181), with whether they still take conversations; null: all. */
     assignees: WebhookEndpointAssignee[] | null;
     /** The contact tags it names (ADR-267); null for every conversation. */
@@ -2455,6 +2511,9 @@ export function WebhookEndpointForm({
   );
   const [changeMakers, setChangeMakers] = useState<WebhookCrmChangeMaker[]>(
     endpoint?.crmChangeMakers ?? [...WEBHOOK_CRM_CHANGE_MAKERS],
+  );
+  const [scores, setScores] = useState<WebhookSurveyScore[]>(
+    endpoint?.surveyScores ?? [...WEBHOOK_SURVEY_SCORES],
   );
   const [everyAssignee, setEveryAssignee] = useState(!endpoint?.assignees);
   const [everyField, setEveryField] = useState(!endpoint?.contactFields);
@@ -2623,6 +2682,12 @@ export function WebhookEndpointForm({
           changeMakers.length < WEBHOOK_CRM_CHANGE_MAKERS.length
             ? changeMakers
             : null;
+        // Every score ticked takes every answer (null, ADR-307).
+        const surveyScores =
+          eventTypes.includes('satisfaction_survey.answered') &&
+          scores.length < WEBHOOK_SURVEY_SCORES.length
+            ? scores
+            : null;
         // Every conversation's events unless the members ticked are chosen (ADR-181).
         const chosenAssignees =
           webhookTakesTeamEvents(eventTypes) && !everyAssignee ? assigneeIds : null;
@@ -2676,6 +2741,7 @@ export function WebhookEndpointForm({
           noteStageIds: chosenNoteStages,
           noteDealOwnerIds: chosenNoteDealOwners,
           crmChangeMakers,
+          surveyScores,
           assigneeIds: chosenAssignees,
           contactTags: chosenContactTags,
           conversationTags: chosenConversationTags,
@@ -2767,6 +2833,7 @@ export function WebhookEndpointForm({
               setEveryNoteDealOwner(true);
               setNoteDealOwnerIds([]);
               setChangeMakers([...WEBHOOK_CRM_CHANGE_MAKERS]);
+              setScores([...WEBHOOK_SURVEY_SCORES]);
               setEveryAssignee(true);
               setAssigneeIds([]);
               setEveryContactTag(true);
@@ -2849,6 +2916,8 @@ export function WebhookEndpointForm({
         onMessageTypesChange={setMessageTypes}
         runEndReasons={runEndReasons}
         onRunEndReasonsChange={setRunEndReasons}
+        scores={scores}
+        onScoresChange={setScores}
       />
       {webhookTakesFieldChanges(eventTypes, parts) ? (
         <FieldChoices

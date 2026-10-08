@@ -5035,6 +5035,94 @@ describe('change-maker filters for deal, task and note events (ADR-306)', () => 
   });
 });
 
+describe('score filters for satisfaction survey answers (ADR-307)', () => {
+  it('are refused without the event, unknown or empty, kept by a change that leaves them out and cleared with the event; the database keeps them to that event', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const url = 'https://hooks.example.com/in';
+    const refused = (eventTypes: string[], surveyScores: unknown, message: RegExp) =>
+      expectAppError(
+        webhooks().create(owner, { url, eventTypes, surveyScores }),
+        'validation_failed',
+        message,
+      );
+    // A resolved conversation has no score to choose.
+    const needsTheEvent = /only for an endpoint that receives Satisfaction survey answered/;
+    await refused(['conversation.status_changed'], [1], needsTheEvent);
+    await refused(['satisfaction_survey.answered'], [], /at least one score/);
+    await refused(['satisfaction_survey.answered'], [4], /from the list/);
+    await refused(['satisfaction_survey.answered'], ['3'], /from the list/);
+    expect(await webhooks().list(owner)).toEqual([]);
+
+    const created = await webhooks().create(owner, {
+      url,
+      eventTypes: ['satisfaction_survey.answered', 'consent.changed'],
+      surveyScores: [1, 2, 1],
+    });
+    const [audit] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events WHERE tenant_id = $1 AND action = 'webhook.endpoint_created'`,
+      [c.tenant.id],
+    );
+    expect(audit?.metadata).toMatchObject({ surveyScores: [2, 1] });
+    const change = (fields: Record<string, unknown>) =>
+      webhooks().update(owner, {
+        endpointId: created.id,
+        url,
+        description: '',
+        eventTypes: ['satisfaction_survey.answered', 'consent.changed'],
+        ...fields,
+      });
+    const current = async () =>
+      (await webhooks().list(owner)).find((e) => e.id === created.id)?.surveyScores;
+    expect(await current()).toEqual([2, 1]);
+    await change({ description: 'kept' });
+    expect(await current()).toEqual([2, 1]);
+    await change({ surveyScores: [1] });
+    expect(await current()).toEqual([1]);
+    const updates = await fx.query<{ metadata: { surveyScores?: unknown } }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND action = 'webhook.endpoint_updated' ORDER BY occurred_at`,
+      [c.tenant.id],
+    );
+    expect(updates.map((u) => u.metadata.surveyScores)).toEqual([[2, 1], [1]]);
+    await change({ surveyScores: null });
+    expect(await current()).toBeNull();
+    await change({ surveyScores: [3] });
+    // The database refuses an empty list, more than three entries, an unknown score or a missing
+    // one from an endpoint taking the event…
+    const setInDatabase = (value: string) =>
+      fx.query(`UPDATE app.webhook_endpoints SET survey_scores = ${value} WHERE id = $1`, [
+        created.id,
+      ]);
+    for (const bad of [
+      `'{}'`,
+      `'{1,2,3,3}'`,
+      `'{0}'`,
+      `'{3,4}'`,
+      `ARRAY[3, NULL]::smallint[]`,
+      `ARRAY[ARRAY[3], ARRAY[1]]::smallint[]`,
+    ]) {
+      await expect(setInDatabase(bad), bad).rejects.toThrow(/webhook_endpoints_survey_scores/);
+    }
+    await change({ eventTypes: ['consent.changed'] });
+    expect(await current()).toBeNull();
+    await expectAppError(
+      change({ eventTypes: ['consent.changed'], surveyScores: [1] }),
+      'validation_failed',
+      needsTheEvent,
+    );
+    // …and any list for an endpoint that does not take it.
+    await change({ eventTypes: ['conversation.status_changed'] });
+    await expect(setInDatabase(`'{1}'`)).rejects.toThrow(/webhook_endpoints_survey_scores/);
+    // The company role changes the list only through its column grant.
+    const [grant] = await fx.query<{ can_update: boolean }>(
+      `SELECT has_column_privilege('w360_app', 'app.webhook_endpoints', 'survey_scores',
+                'UPDATE') AS can_update`,
+    );
+    expect(grant?.can_update).toBe(true);
+  });
+});
+
 describe('contact tag filters (ADR-267)', () => {
   /** Puts a tag on a contact, or takes it off, as the contacts service writes tags. */
   const tag = (c: Company, contactId: string, name: string) =>

@@ -61,6 +61,12 @@ export type WebhookMessageSender = 'agent' | 'bot' | 'campaign' | 'api' | 'syste
 export type WebhookCrmChangeMaker = CrmChanger;
 
 /**
+ * The score of a satisfaction survey answer, which an endpoint can choose to take (ADR-307), as the
+ * survey's `score` gives it: 3 for the first (best) button, 2 for the second, 1 for the third.
+ */
+export type WebhookSurveyScore = 3 | 2 | 1;
+
+/**
  * The parts of a contact whose change a `contact.updated` endpoint can choose (ADR-123); `fields`
  * is a change of any custom field.
  */
@@ -310,6 +316,12 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
    * taken whoever is listed. Set only while a deal, task or note event is among its events.
    */
   crmChangeMakers: text('crm_change_makers').array().$type<WebhookCrmChangeMaker[]>(),
+  /**
+   * The scores of the satisfaction survey answers it takes (migration 0230, ADR-307), by the score
+   * the customer's tap recorded; null takes every answer. Set only while
+   * `satisfaction_survey.answered` is among its events.
+   */
+  surveyScores: smallint('survey_scores').array().$type<WebhookSurveyScore[]>(),
   /**
    * The consent changes it takes as `consent.changed` (ADR-189), by purpose and action; null takes
    * every change. Set only while `consent.changed` is among its events.

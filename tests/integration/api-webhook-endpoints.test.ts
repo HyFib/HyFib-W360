@@ -284,6 +284,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       noteStageIds: null,
       noteDealOwnerIds: null,
       crmChangeMakers: null,
+      surveyScores: null,
       assigneeIds: null,
       contactTags: null,
       conversationTags: null,
@@ -1544,6 +1545,83 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     });
     expect(await issueOf(api().update(key.ctx, id, { crmChangeMakers: [] }))).toMatchObject({
       path: 'crmChangeMakers',
+    });
+  });
+
+  it('choose the scores of the satisfaction survey answers an endpoint receives, kept by changes that leave them out and cleared with the event (ADR-307)', async () => {
+    const c = await fx.company();
+    const key = await apiKey(c, ['webhooks.manage']);
+    const issueOf = async (promise: Promise<unknown>) => {
+      const error = await expectAppError(promise, 'validation_failed');
+      return isAppError(error) ? error.issues?.[0] : undefined;
+    };
+    // The scores need the event, at least one, and each from the list (by place).
+    const refusals = [
+      [['conversation.status_changed'], [1], 'surveyScores'],
+      [['satisfaction_survey.answered'], [], 'surveyScores'],
+      [['satisfaction_survey.answered'], [1, 4], 'surveyScores.1'],
+      [['satisfaction_survey.answered'], ['3'], 'surveyScores.0'],
+    ] as const;
+    for (const [index, [events, surveyScores, path]] of refusals.entries()) {
+      expect(
+        await issueOf(
+          api().create(
+            key.ctx,
+            { url: receiverUrl(), events, surveyScores },
+            idem(`survey-scores-bad-${index}`, JSON.stringify(surveyScores)),
+          ),
+        ),
+        JSON.stringify(surveyScores),
+      ).toMatchObject({ path });
+    }
+    expect((await api().list(key.ctx)).data).toEqual([]);
+
+    const created = await addThroughApi(key.ctx, 'survey-scores-1', {
+      url: receiverUrl(),
+      events: ['satisfaction_survey.answered', 'message.received'],
+      surveyScores: [1, 2],
+    });
+    const id = created.body.data.id;
+    expect(created.body.data.surveyScores).toEqual([2, 1]);
+    expect((await api().get(key.ctx, id)).surveyScores).toEqual([2, 1]);
+    const [audit] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND subject_id = $2 AND action = 'webhook.endpoint_created'`,
+      [c.tenant.id, id],
+    );
+    expect(audit?.metadata).toMatchObject({ surveyScores: [2, 1] });
+
+    expect(await api().update(key.ctx, id, { description: 'Unhappy customers' })).toMatchObject({
+      surveyScores: [2, 1],
+    });
+    expect(await api().update(key.ctx, id, { surveyScores: [1] })).toMatchObject({
+      surveyScores: [1],
+    });
+    const updates = await fx.query<{ metadata: { surveyScores?: unknown } }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND subject_id = $2 AND action = 'webhook.endpoint_updated'
+        ORDER BY occurred_at`,
+      [c.tenant.id, id],
+    );
+    expect(updates.map((u) => u.metadata.surveyScores)).toEqual([[2, 1], [1]]);
+    expect(await api().update(key.ctx, id, { events: ['message.received'] })).toMatchObject({
+      events: ['message.received'],
+      surveyScores: null,
+    });
+    expect(await issueOf(api().update(key.ctx, id, { surveyScores: [1] }))).toMatchObject({
+      path: 'surveyScores',
+    });
+    expect(
+      await api().update(key.ctx, id, {
+        events: ['satisfaction_survey.answered'],
+        surveyScores: [3],
+      }),
+    ).toMatchObject({ surveyScores: [3] });
+    expect(await api().update(key.ctx, id, { surveyScores: null })).toMatchObject({
+      surveyScores: null,
+    });
+    expect(await issueOf(api().update(key.ctx, id, { surveyScores: [] }))).toMatchObject({
+      path: 'surveyScores',
     });
   });
 

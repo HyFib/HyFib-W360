@@ -94,6 +94,8 @@ import {
   webhookTakesCrmChanges,
   WEBHOOK_CRM_CHANGE_MAKERS,
   WEBHOOK_CRM_CHANGE_MAKER_LABELS,
+  WEBHOOK_SURVEY_SCORES,
+  WEBHOOK_SURVEY_SCORE_LABELS,
   webhookTakesTeamEvents,
   webhookTakesTemplateEvents,
   webhookTeamText,
@@ -237,6 +239,9 @@ import {
   webhookCrmChangeMakersFor,
   webhookCrmChangeMakersSchema,
   WEBHOOK_CRM_CHANGE_MAKERS_NEED_THE_EVENTS,
+  webhookSurveyScoresFor,
+  webhookSurveyScoresSchema,
+  WEBHOOK_SURVEY_SCORES_NEED_THE_EVENT,
   webhookContactTagsFor,
   webhookContactTagsSchema,
   WEBHOOK_CONTACT_TAGS_NEED_THE_EVENTS,
@@ -3749,6 +3754,48 @@ describe('change-maker filters for deal, task and note events (ADR-306)', () => 
     ).toBeNull();
     expect(WEBHOOK_CRM_CHANGE_MAKERS_NEED_THE_EVENTS).toBe(
       'Choose who made the changes only for an endpoint that receives deal, task or note events.',
+    );
+  });
+});
+
+describe('score filters for satisfaction survey answers (ADR-307)', () => {
+  it('take scores 3, 2 or 1, once each in the order Settings lists them; null takes every answer', () => {
+    expect(WEBHOOK_SURVEY_SCORES).toEqual([3, 2, 1]);
+    expect(WEBHOOK_SURVEY_SCORE_LABELS).toEqual({
+      3: 'First button (best)',
+      2: 'Second button',
+      1: 'Third button',
+    });
+    expect(webhookSurveyScoresSchema.parse([1, 3, 1])).toEqual([3, 1]);
+    expect(webhookSurveyScoresSchema.parse([2])).toEqual([2]);
+    expect(webhookSurveyScoresSchema.parse(null)).toBeNull();
+    for (const refused of [[], [0], [4], ['3'], [2.5], [1, null], 3, [1, 1, 1, 1]]) {
+      expect(webhookSurveyScoresSchema.safeParse(refused).success, JSON.stringify(refused)).toBe(
+        false,
+      );
+    }
+    expect(webhookSurveyScoresSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one score, or take every answer.',
+    );
+    expect(webhookSurveyScoresSchema.safeParse([4]).error?.issues[0]?.message).toBe(
+      'Choose scores from the list.',
+    );
+    expect(webhookSurveyScoresSchema.safeParse([1, 1, 1, 1]).error?.issues[0]?.message).toBe(
+      'Give each score once.',
+    );
+  });
+
+  it('are kept only while the endpoint takes the answers: given, kept, or cleared', () => {
+    expect(webhookSurveyScoresFor(['satisfaction_survey.answered'], [1], null)).toEqual([1]);
+    expect(
+      webhookSurveyScoresFor(['satisfaction_survey.answered', 'message.received'], undefined, [3]),
+    ).toEqual([3]);
+    expect(webhookSurveyScoresFor(['satisfaction_survey.answered'], null, [3])).toBeNull();
+    expect(webhookSurveyScoresFor(['satisfaction_survey.answered'], undefined, null)).toBeNull();
+    // Conversation events have no score to choose.
+    expect(webhookSurveyScoresFor(['conversation.status_changed'], [1], [3])).toBeNull();
+    expect(WEBHOOK_SURVEY_SCORES_NEED_THE_EVENT).toBe(
+      `Choose the scores only for an endpoint that receives ${WEBHOOK_EVENT_INFO['satisfaction_survey.answered'].label}.`,
     );
   });
 });

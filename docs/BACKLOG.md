@@ -1187,7 +1187,10 @@ verification, app review, Embedded Signup configuration).
   **[Satisfaction survey events built; their database tests run only in CI]** (ADR-293, migrations
   0213 and 0214: `satisfaction_survey.answered` once for each survey a customer answers, with the
   survey as `GET /satisfaction-surveys` reads it, narrowed by the conversation's number).
-  Remaining: filters for other event types (survey answers by their rating, among them) and on a
+  **[Score filters for satisfaction survey answers built; their database tests run only in CI]**
+  (ADR-307, migration 0230: an endpoint takes the answers of chosen scores, 3, 2 or 1, by the score
+  each answered survey records; other events are not narrowed).
+  Remaining: filters for other event types (survey answers by team or member, among them) and on a
   message's or contact's values (such as a field's value, contact events by tag, or the key that
   started a run or made a change), other authentication (headers computed per delivery, other OAuth
   grants), mutual TLS, fixed egress addresses, events for store orders and each step of a run,

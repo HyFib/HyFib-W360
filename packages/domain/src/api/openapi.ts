@@ -28,6 +28,7 @@ import {
   WEBHOOK_LIMITS,
   WEBHOOK_MESSAGE_SENDERS,
   WEBHOOK_CRM_CHANGE_MAKERS,
+  WEBHOOK_SURVEY_SCORES,
   WEBHOOK_MESSAGE_STATUSES,
   WEBHOOK_ORDER_STATUSES,
   WEBHOOK_RUN_END_STATUSES,
@@ -1336,6 +1337,12 @@ export const apiWebhookEndpointSchema = z.object({
     .nullable()
     .describe(
       "Who made the changes whose deal, task and note events the endpoint receives, as deal.changedBy, task.changedBy and note.writtenBy name them: an addition's maker is whoever added the deal or task, a note's whoever wrote it. A change HyFib did not record the maker of (changedBy null) is sent whoever is listed. null receives every change. Other events are not narrowed.",
+    ),
+  surveyScores: z
+    .array(z.literal(WEBHOOK_SURVEY_SCORES))
+    .nullable()
+    .describe(
+      'The scores of the satisfaction survey answers (satisfaction_survey.answered) the endpoint receives, as survey.score gives them (3 for the first and best button, 1 for the third); null receives every answer. Other events are not narrowed.',
     ),
   assigneeIds: z
     .array(z.uuid())
@@ -4094,7 +4101,7 @@ export function buildOpenApiDocument(serverUrl: string) {
       'satisfaction_survey.answered': webhook(
         'webhookSatisfactionSurveyAnswered',
         WEBHOOK_EVENT_INFO['satisfaction_survey.answered'].label,
-        `${WEBHOOK_EVENT_INFO['satisfaction_survey.answered'].description} The survey is the survey as GET /satisfaction-surveys reads it when the event is delivered: its score (3 for the first and best button, 1 for the third), the customer’s tap and the survey message by id among the conversation’s messages, and the members credited and resolving by id. Only the customer’s first tap answers a survey, so a survey is answered once and this event is sent once for it; surveys skipped or never answered send nothing. It happens on the conversation’s WhatsApp number, so an endpoint that names numbers receives it for those numbers only; the team, member and tag filters do not narrow it. Deliveries are not ordered.`,
+        `${WEBHOOK_EVENT_INFO['satisfaction_survey.answered'].description} The survey is the survey as GET /satisfaction-surveys reads it when the event is delivered: its score (3 for the first and best button, 1 for the third), the customer’s tap and the survey message by id among the conversation’s messages, and the members credited and resolving by id. Only the customer’s first tap answers a survey, so a survey is answered once and this event is sent once for it; surveys skipped or never answered send nothing. It happens on the conversation’s WhatsApp number, so an endpoint that names numbers receives it for those numbers only; the team, member and tag filters do not narrow it. An endpoint receives every answer unless it names the scores it takes (its \`surveyScores\`, or the scores ticked in Settings → Webhooks). Deliveries are not ordered.`,
         'WebhookSatisfactionSurveyAnswered',
       ),
       'contact.created': webhook(

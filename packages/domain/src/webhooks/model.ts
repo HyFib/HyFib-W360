@@ -14,6 +14,7 @@ import type {
   WebhookRunEndStatus,
   WebhookReceivedMessageType,
   WebhookRunTrigger,
+  WebhookSurveyScore,
   WebhookTemplateStatus,
 } from '@w360/db';
 
@@ -32,6 +33,7 @@ export type {
   WebhookRunEndStatus,
   WebhookReceivedMessageType,
   WebhookRunTrigger,
+  WebhookSurveyScore,
   WebhookTemplateStatus,
 } from '@w360/db';
 
@@ -1045,6 +1047,20 @@ export const WEBHOOK_CRM_CHANGE_MAKER_LABELS: Record<WebhookCrmChangeMaker, stri
   member: 'Members',
   automation: 'Automations',
   api: 'API keys',
+};
+
+/**
+ * The scores of the satisfaction survey answers an endpoint can choose (ADR-307), in the order
+ * Settings lists them, as the survey's `score` gives them: 3 for the first (best) button, 2 for the
+ * second, 1 for the third, whatever the company's buttons say.
+ */
+export const WEBHOOK_SURVEY_SCORES = [3, 2, 1] as const satisfies readonly WebhookSurveyScore[];
+
+/** How Settings names each score an endpoint can choose (ADR-307). */
+export const WEBHOOK_SURVEY_SCORE_LABELS: Record<WebhookSurveyScore, string> = {
+  3: 'First button (best)',
+  2: 'Second button',
+  1: 'Third button',
 };
 
 /**

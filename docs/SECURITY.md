@@ -1644,6 +1644,13 @@ Phase 5 rules (outgoing webhooks, P5-09):
   changes from a receiver that took the record. It narrows what one endpoint receives and never adds
   an event or a delivery for another endpoint or company. Audited with the list (unit tests;
   integration tests, run in CI only).
+- An endpoint can take the satisfaction survey answers of chosen scores only (ADR-307), chosen with
+  `developer.manage` in Settings or `webhooks.manage` through the API. The list holds only the
+  scores 1, 2 and 3 and is kept only while the endpoint takes `satisfaction_survey.answered` (a
+  database check too, which also refuses a null entry); `app.capture_webhook_event` reads the
+  answer's score from its survey in the company's scope. It narrows what one endpoint receives and
+  never adds an event or a delivery for another endpoint or company. Audited with the list (unit
+  tests; integration tests, run in CI only).
 - An endpoint can take the message and conversation events of the conversations whose contact has
   chosen tags only (ADR-267), chosen the same way. A list holds tags in the form contacts carry them
   (the services normalise them; a database check holds the form, the count and the events, and

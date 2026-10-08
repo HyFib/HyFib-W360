@@ -3032,6 +3032,15 @@ owners or assignees chosen too, an event must pass every list. To take more, tic
 "Changes made by" on the endpoint's page, or `PATCH /webhook-endpoints/{id}` with `crmChangeMakers`
 (null for every change). Removing every deal, task and note event clears it.
 
+**A receiver misses satisfaction survey answers (ADR-307).** An endpoint can take the answers of
+chosen scores only. The endpoints list shows it ("Survey answers sent: …"), and the API answers
+`surveyScores` (null takes every answer). Each answer goes by the score its payload gives
+(`survey.score`: 3 for the first button, 2 for the second, 1 for the third, whatever the company's
+buttons say), and events no endpoint takes are not recorded, so there is nothing to replay. With
+numbers chosen too, an answer must pass both. To take more, tick scores under "Answers scored" on
+the endpoint's page, or `PATCH /webhook-endpoints/{id}` with `surveyScores` (null for every answer).
+Removing the event clears it.
+
 **A receiver misses a task's change of assignee, or doubts one (ADR-274).** Endpoints that take
 `task.assignee_changed` ("Task assignee") are sent one event each time a member gives a task to
 another member by editing it, or a key changes its `assigneeId`. Automations set an assignee only on

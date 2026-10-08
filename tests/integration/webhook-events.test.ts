@@ -6544,4 +6544,85 @@ describe('satisfaction survey events (ADR-293)', () => {
     expect(others.length).toBeGreaterThan(0);
     expect(new Set(others)).toEqual(new Set(['conversation.status_changed']));
   });
+
+  it('sends an endpoint that names scores only the answers that recorded one of them (ADR-307)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    await createCsatService({ db: fx.dbs.app, clock: systemClock }).updateCsatSettings(owner, {
+      enabled: true,
+      question: 'How did we do today?',
+      labels: ['Great', 'Okay', 'Poor'],
+    });
+    const inboxWithSends = createInboxService({
+      db: fx.dbs.app,
+      clock: systemClock,
+      jobs: fx.jobs(),
+      signer: fx.signer,
+    });
+    /** An endpoint of the company taking the answers with these scores. */
+    const add = async (surveyScores: (1 | 2 | 3)[] | null) => {
+      const path = `/ok/${randomBytes(6).toString('hex')}`;
+      const created = await webhooks().create(owner, {
+        url: `http://${HOST}:${port}${path}`,
+        eventTypes: ['satisfaction_survey.answered'],
+        surveyScores,
+      });
+      return { ...created, path };
+    };
+    const unhappy = await add([1]);
+    const happy = await add([3, 2]);
+    const everyAnswer = await add(null);
+    /** A customer writes, a member resolves, the survey goes out and the customer taps a score. */
+    const answer = async (score: 1 | 2 | 3) => {
+      const phone = waId();
+      const { conversation_id: conversationId } = await inbound(c, phone, 'Where is my parcel?');
+      await inboxWithSends.setStatus(owner, {
+        conversationId,
+        status: 'resolved',
+        expectedVersion: await versionOf(conversationId),
+      });
+      const [survey] = await fx.query<{ id: string; message_id: string }>(
+        `SELECT id, message_id FROM app.csat_surveys WHERE conversation_id = $1`,
+        [conversationId],
+      );
+      const [intent] = await fx.query<{ id: string }>(
+        `SELECT id FROM app.send_intents WHERE message_id = $1`,
+        [survey!.message_id],
+      );
+      await processSendIntent(
+        {
+          db: fx.dbs.app,
+          keyring: fx.keyring,
+          graph: fx.graph,
+          clock: systemClock,
+          rate: { capacity: 1000, refillPerSecond: 1000 },
+          jobs: fx.jobs(),
+          signer: fx.signer,
+        },
+        authorizedTenantScope(c.tenant.id, c.owner.id),
+        intent!.id,
+      );
+      const sent = fx.standIn.state.requests.filter((r) => r.path.endsWith('/messages')).at(-1)!;
+      await tap(c, phone, `w360csat:${survey!.id}:${score}`, sent.wamid!);
+      return survey!.id;
+    };
+    const great = await answer(3);
+    const okay = await answer(2);
+    const poor = await answer(1);
+
+    // Each answer is captured once, with a delivery to each endpoint whose list holds its score.
+    expect((await surveyEventsOf(c)).map((e) => [e.detail.surveyId, e.deliveries])).toEqual([
+      [great, 2],
+      [okay, 2],
+      [poor, 2],
+    ]);
+    await deliverDue(c);
+    const scoresAt = (path: string) =>
+      bodiesAt(path)
+        .map((b) => (b.data.survey as { score: number }).score)
+        .sort();
+    expect(scoresAt(unhappy.path)).toEqual([1]);
+    expect(scoresAt(happy.path)).toEqual([2, 3]);
+    expect(scoresAt(everyAnswer.path)).toEqual([1, 2, 3]);
+  });
 });

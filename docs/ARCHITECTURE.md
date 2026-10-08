@@ -2260,6 +2260,13 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   its trigger records), and an event whose change recorded no maker passes every list. Settings
   ("Changes made by") and the API (`crmChangeMakers`) set it; a change that drops every deal, task
   and note event clears it.
+- **Score filters for satisfaction survey answers** (migration 0230, ADR-307): `survey_scores` on an
+  endpoint lists the scores of the `satisfaction_survey.answered` events it takes (3, 2 and 1: the
+  survey's first, second and third button), null for every answer; a check keeps it to 1 to 3 known
+  scores and to endpoints taking the event. `app.capture_webhook_event` reads the answer's score
+  from `app.csat_surveys` only when an active endpoint of the company taking the event names scores.
+  Settings ("Answers scored") and the API (`surveyScores`) set it; a change that drops the event
+  clears it.
 - **Contact tag filters** (migration 0183, ADR-267): `contact_tags` on an endpoint lists the contact
   tags whose conversations' message and conversation events it takes, null for every conversation's;
   a check keeps it to 1 to 50 tags in `app.contact_tags`' form and to endpoints taking such an

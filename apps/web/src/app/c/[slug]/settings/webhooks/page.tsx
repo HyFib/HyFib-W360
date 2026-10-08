@@ -18,6 +18,7 @@ import {
   WEBHOOK_RUN_END_REASON_LABELS,
   WEBHOOK_MESSAGE_SENDER_LABELS,
   WEBHOOK_CRM_CHANGE_MAKER_LABELS,
+  WEBHOOK_SURVEY_SCORE_LABELS,
   WEBHOOK_MESSAGE_STATUS_LABELS,
   WEBHOOK_TEMPLATE_STATUS_LABELS,
   webhookAssigneeText,
@@ -344,6 +345,12 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
                         {e.crmChangeMakers
                           .map((m) => WEBHOOK_CRM_CHANGE_MAKER_LABELS[m])
                           .join(', ')}
+                      </p>
+                    ) : null}
+                    {e.surveyScores ? (
+                      <p className="text-xs text-muted-foreground">
+                        Survey answers sent:{' '}
+                        {e.surveyScores.map((s) => WEBHOOK_SURVEY_SCORE_LABELS[s]).join(', ')}
                       </p>
                     ) : null}
                     {e.teams ? (

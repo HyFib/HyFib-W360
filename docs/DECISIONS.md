@@ -11749,3 +11749,44 @@ Decision:
 Not built: narrowing by one key (the payload names it in `apiKeyId`), makers chosen per event type
 (one list serves the deal, task and note events), and makers for other events (`message.status` has
 its senders since ADR-172; order events name their changer since ADR-270).
+
+## ADR-307 Choosing the scores of the satisfaction survey answers a webhook endpoint receives (P5-09) (2026-10-08)
+
+Context: `satisfaction_survey.answered` (ADR-293) gives each answer's score (3 for the first and
+best button, 2 for the second, 1 for the third, whatever the company's buttons say), but an endpoint
+received every answer. An integration that follows up poor ratings only (a ticket for each answer on
+the third button) was sent every answer and had to drop the rest, and one that asks pleased
+customers for a review wanted the best only. ADR-293 left a filter by score unbuilt.
+
+Decision:
+
+- **One list per endpoint for the survey answers,** `surveyScores`: the scores of the answers it
+  takes, 1 to 3 of `3`, `2` and `1`, in that order with repeats merged, as the survey's `score`
+  gives them. Null receives every answer, as before. With numbers chosen too, an answer must pass
+  both. Other events are not narrowed. Chosen in Settings → Webhooks under the event ("Answers
+  scored", every score ticked by default, the buttons named by their place, "First button (best)",
+  "Second button" and "Third button", since each company words its own), shown on the endpoint as
+  "Survey answers sent: …", and through the API as `surveyScores` on `POST /webhook-endpoints` and
+  `PATCH /webhook-endpoints/{id}` and in every endpoint the API answers.
+- **Only while the answers are taken:** a list given for an endpoint that does not take
+  `satisfaction_survey.answered` is refused (`surveyScores`; 422 through the API). A change that
+  drops the event clears it, and a `PATCH` that leaves it out keeps it; Settings always sends it
+  (null while every score is ticked). A check in the database holds the same rule (null, or 1 to 3
+  entries, each 1, 2 or 3, in one dimension without a null, with the event).
+- **Applied at capture:** `app.capture_webhook_event` reads the answer's score from its survey only
+  when an active endpoint of the company that takes the event names scores. The trigger runs as
+  whoever records the answer (the runtime role in the company's scope, as the ingestion of the
+  customer's tap writes it) and reads the survey as that transaction sees it, after the answer is
+  written. No event is written when no endpoint takes it, and stored events are unchanged.
+- **Audited and exported:** `webhook.endpoint_created` and `webhook.endpoint_updated` carry
+  `surveyScores` when the endpoint has the list, and the company data export carries the column.
+- **Permissions unchanged:** members with `developer.manage` in Settings, keys with
+  `webhooks.manage` through the API.
+- **Migration 0230:** `survey_scores smallint[]` on `app.webhook_endpoints` with its check,
+  validated at once (a company has at most 10 endpoints), an update grant on the column for the
+  runtime role, and `app.capture_webhook_event` replaced with the same signature (0229's, with the
+  score), so its owner and grants stay. Existing endpoints keep null; nothing is backfilled.
+
+Not built: the team, member and tag filters for survey answers (ADR-293 left them out), a filter by
+the buttons' words (each company words its own and can change them; the score stays), and an event
+when a survey is sent or skipped.
