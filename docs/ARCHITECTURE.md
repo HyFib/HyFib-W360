@@ -2491,6 +2491,10 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   `ops.platform_ops_assigned_integration_failures` (definer, platform role only): the console's list
   narrowed to the assignments of the session's administrator before its limit, with the same
   columns.
+- **Unassigned** (ADR-318, migration 0240): the Integrations tab's `?failures=unassigned` reads
+  `ops.platform_ops_unassigned_integration_failures` (definer, platform role only): the console's
+  list without the failures that have an assignment, narrowed before its limit, with the same
+  columns.
 - **Acknowledging dead letters** (ADR-169, migration 0117): `acknowledged_at`,
   `acknowledged_by_user_id` and `acknowledgement` on `ops.dead_letters`, set together (the check
   `dead_letters_acknowledged`) and written only by `ops.platform_acknowledge_dead_letter` (definer,

@@ -2613,6 +2613,95 @@ describe('the failures assigned to the administrator reading the console (ADR-31
   });
 });
 
+describe('the failures assigned to nobody (ADR-318)', () => {
+  async function failingEndpoint(since: string) {
+    const id = uuidv7();
+    await fx.query(
+      `INSERT INTO app.webhook_endpoints (id, tenant_id, url, event_types, secret_ciphertext,
+         created_by_user_id, failing_since, last_failure_at)
+       VALUES ($1, $2, 'https://nobody.example.com/hook', ARRAY['message.received'], 'sealed', $3,
+         now() + $4::interval, now())`,
+      [id, company.tenant.id, company.owner.id, since],
+    );
+    return id;
+  }
+  const assign = (subjectId: string, assigneeUserId: string) =>
+    ops().assignFailure(staff, {
+      source: 'webhook_endpoint',
+      subjectId,
+      state: 'failing',
+      assigneeUserId,
+    });
+  const ids = (failures: { subjectId: string }[]) => failures.map((f) => f.subjectId);
+
+  it('lists only the failures assigned to nobody, as the full list shows them, narrowed before the limit', async () => {
+    const assigned = await failingEndpoint('-1 hour');
+    const nobody = await failingEndpoint('-2 hours');
+    // The newest failure of all, assigned: the full list's first row, never the unassigned one's.
+    const newest = await failingEndpoint('1 hour');
+    await assign(assigned, staff.userId);
+    await assign(newest, staff.userId);
+    const all = await ops().integrations(staff);
+    const unassigned = await ops().integrations(staff, 'unassigned');
+    expect(unassigned.failuresView).toBe('unassigned');
+    expect(ids(all.failures)).toEqual(expect.arrayContaining([assigned, nobody, newest]));
+    expect(ids(unassigned.failures)).toContain(nobody);
+    expect(ids(unassigned.failures)).not.toContain(assigned);
+    expect(ids(unassigned.failures)).not.toContain(newest);
+    expect(unassigned.failures.every((f) => f.assignment === null)).toBe(true);
+    expect(unassigned.failures.find((f) => f.subjectId === nobody)).toEqual(
+      all.failures.find((f) => f.subjectId === nobody),
+    );
+    const first = (fn: string) =>
+      fx.dbs.platform.run(staff.userId, (tx) =>
+        tx.execute<{ subject_id: string }>(sql`select subject_id from ${sql.raw(fn)}(1)`),
+      );
+    expect((await first('ops.platform_ops_integration_failures')).rows).toEqual([
+      { subject_id: newest },
+    ]);
+    expect((await first('ops.platform_ops_unassigned_integration_failures')).rows).not.toEqual([
+      { subject_id: newest },
+    ]);
+    // Taken off, it is unassigned again.
+    await ops().assignFailure(staff, {
+      source: 'webhook_endpoint',
+      subjectId: assigned,
+      state: 'failing',
+      assigneeUserId: null,
+    });
+    expect(ids((await ops().integrations(staff, 'unassigned')).failures)).toContain(assigned);
+    // The failure set in the future recovers, so later tests' lists start from the present.
+    await fx.query(`UPDATE app.webhook_endpoints SET failing_since = NULL WHERE id = $1`, [newest]);
+  });
+
+  it('refuses anyone who is not a platform administrator, and keeps the list to the platform role and its definer', async () => {
+    const outsider = await createUser(fx.dbs, { twoFactor: true });
+    await expectCode(
+      ops().integrations(
+        { userId: outsider.id, role: 'platform_operator', correlationId: uuidv7() },
+        'unassigned',
+      ),
+      'forbidden',
+    );
+    for (const pool of [fx.dbs.appPool, fx.dbs.authPool]) {
+      await expect(
+        pool.query(`SELECT * FROM ops.platform_ops_unassigned_integration_failures(10)`),
+      ).rejects.toThrow(/permission denied for function/);
+    }
+    const [fn] = await fx.query<{ owner: string; definer: boolean; config: unknown }>(
+      `SELECT pg_get_userbyid(p.proowner) AS owner, p.prosecdef AS definer,
+              p.proconfig AS config
+         FROM pg_proc p
+        WHERE p.oid = 'ops.platform_ops_unassigned_integration_failures(integer)'::regprocedure`,
+    );
+    expect(fn).toEqual({
+      owner: 'w360_definer',
+      definer: true,
+      config: ['search_path=pg_catalog, pg_temp'],
+    });
+  });
+});
+
 describe('acknowledging dead letters (ADR-169)', () => {
   /**
    * A dead letter already emailed about, so the alert tests of this file count only theirs. One

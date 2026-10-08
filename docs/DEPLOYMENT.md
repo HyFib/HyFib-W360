@@ -1134,6 +1134,10 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    endpoint with a list fails on the check, its other changes keep the list, and its API refuses
    `contactEventTags` (422) and leaves it out of the endpoints it answers.
 
+   Migration 0240 (ADR-318) creates `ops.platform_ops_unassigned_integration_failures` for the
+   platform role and changes nothing else. Web servers of this release need it for "Unassigned"; web
+   servers from before it do not call it, and workers are unaffected.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

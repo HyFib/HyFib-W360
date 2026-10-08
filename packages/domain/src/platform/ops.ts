@@ -474,12 +474,14 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
     limit: number,
     view: IntegrationFailureView = 'all',
   ): Promise<IntegrationFailure[]> {
-    const result = await tx.execute<Row>(
+    // Narrowed before the limit, so newer failures of others leave none out (ADR-315, ADR-318).
+    const query =
       view === 'mine'
-        ? // Narrowed before the limit, so older failures of others leave none out (ADR-315).
-          sql`select * from ops.platform_ops_assigned_integration_failures(${limit})`
-        : sql`select * from ops.platform_ops_integration_failures(${limit})`,
-    );
+        ? sql`select * from ops.platform_ops_assigned_integration_failures(${limit})`
+        : view === 'unassigned'
+          ? sql`select * from ops.platform_ops_unassigned_integration_failures(${limit})`
+          : sql`select * from ops.platform_ops_integration_failures(${limit})`;
+    const result = await tx.execute<Row>(query);
     return result.rows.map((r) => {
       const acknowledgedAt = date(r.acknowledged_at);
       const assignedAt = date(r.assigned_at);
@@ -998,8 +1000,8 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
     },
 
     /**
-     * Current integration failures, every one or those assigned to the administrator (ADR-315),
-     * platform webhook receipts, quarantine and email delivery.
+     * Current integration failures, every one, those assigned to the administrator (ADR-315) or
+     * those assigned to nobody (ADR-318), platform webhook receipts, quarantine and email delivery.
      */
     async integrations(actor: PlatformActor, view: IntegrationFailureView = 'all') {
       const now = clock.now();

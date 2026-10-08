@@ -12241,3 +12241,25 @@ Decision:
 Not built: an offline list (no network dependency), screening at sign-in to ask for a new password,
 checking stored passwords (only their hashes are kept), and counting the checks that could not be
 made on the operations console.
+
+## ADR-318 The failing integrations assigned to nobody (P5-10) (2026-10-08)
+
+Context: since ADR-315 Current failures lists every failure or those assigned to the administrator
+reading. An administrator looking for the failures nobody handles yet read the whole list, up to 500
+failures newest first, and an older one could be beyond the rows shown.
+
+Decision:
+
+- **What it lists:** a third view, "Unassigned" (`?failures=unassigned`), lists only the failures
+  without an assignment, with the same columns (the assignment always empty), forms, order and
+  limit; assigning one there takes it off the view, and taking an assignment off brings it back. The
+  other views and the tab's other lists are unchanged.
+- **Where it is enforced:** `ops.platform_ops_unassigned_integration_failures` (migration 0240;
+  SECURITY DEFINER, executable by the platform role only) refuses anyone who is not a platform
+  administrator, as the full list does, and leaves out the failures with an assignment before its
+  limit, so newer assigned failures leave none of the others out.
+- **The CSV** still gives every failure (ADR-158, ADR-315).
+- **Migration 0240:** the function only.
+
+Not built: counts of the unassigned failures on the tab, and an email about failures left unassigned
+for long.

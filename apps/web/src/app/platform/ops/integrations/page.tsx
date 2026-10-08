@@ -39,11 +39,25 @@ import { requirePlatformActor } from '@/server/session';
 export const metadata: Metadata = { title: 'Integrations · Operations' };
 export const dynamic = 'force-dynamic';
 
-/** Every failure, or those assigned to the administrator reading (ADR-315). */
+/**
+ * Every failure, those assigned to the administrator reading (ADR-315), or those assigned to
+ * nobody (ADR-318).
+ */
 const FAILURE_VIEWS: { view: IntegrationFailureView; label: string; href: string }[] = [
   { view: 'all', label: 'All failures', href: '/platform/ops/integrations' },
   { view: 'mine', label: 'Assigned to me', href: '/platform/ops/integrations?failures=mine' },
+  {
+    view: 'unassigned',
+    label: 'Unassigned',
+    href: '/platform/ops/integrations?failures=unassigned',
+  },
 ];
+
+const EMPTY_FAILURES: Record<IntegrationFailureView, string> = {
+  all: 'No integration is failing',
+  mine: 'No failing integration is assigned to you',
+  unassigned: 'Every failing integration is assigned',
+};
 
 export default async function OpsIntegrationsPage({
   searchParams,
@@ -76,9 +90,9 @@ export default async function OpsIntegrationsPage({
             (ADR-141). Any administrator assigns a failure to an administrator, themselves or
             another, so it is clear who handles it; the assignment lasts while the failure is listed
             too (ADR-313), and the assignee is emailed unless they assigned it themselves, with
-            counts only (ADR-314). Assigned to me lists only the failures assigned to you (ADR-315).
-            The CSV gives every failure with when it was acknowledged, not by whom or the note, and
-            leaves assignments out.
+            counts only (ADR-314). Assigned to me lists only the failures assigned to you (ADR-315),
+            and Unassigned those assigned to nobody (ADR-318). The CSV gives every failure with when
+            it was acknowledged, not by whom or the note, and leaves assignments out.
           </CardDescription>
         </CardHeader>
         <CardContent className="grid gap-4">
@@ -99,13 +113,7 @@ export default async function OpsIntegrationsPage({
             ))}
           </nav>
           {o.failures.length === 0 ? (
-            <EmptyState
-              title={
-                o.failuresView === 'mine'
-                  ? 'No failing integration is assigned to you'
-                  : 'No integration is failing'
-              }
-            />
+            <EmptyState title={EMPTY_FAILURES[o.failuresView]} />
           ) : (
             <Table aria-label="Current failures">
               <THead>

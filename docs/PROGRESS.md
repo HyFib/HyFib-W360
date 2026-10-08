@@ -1,5 +1,41 @@
 # Progress
 
+## 2026-10-08 — The failing integrations assigned to nobody (P5-10, H-034, ADR-318)
+
+Status: **Implemented; its database and browser tests run in CI only.** Current failures could show
+every failure or one's own, but finding those nobody handled meant reading up to 500 rows. The local
+PostgreSQL is unavailable, so migration 0240, the integration tests and the changed e2e test below
+were written but not run here; migration 0240 passed the pglast parse check (syntax only).
+
+### Completed
+
+- **Design (ADR-318):** "Unassigned" (`?failures=unassigned`) on Current failures, narrowed before
+  the limit; the CSV unchanged.
+- **Database (migration 0240):** `ops.platform_ops_unassigned_integration_failures` (definer,
+  platform role only).
+- **Domain and web:** the `unassigned` view in `platform/ops-model.ts` and `platform/ops.ts`; the
+  third link on the Integrations tab, with its own empty state.
+- **Tests:** unit (1 changed in `integration-assignments.test.ts`); integration (2 new in
+  `platform-ops.test.ts`, 1 changed in `tenant-isolation.test.ts`); e2e (1 changed in
+  `platform-ops.spec.ts`: the failure under Unassigned until it is assigned). Written for CI; the
+  integration and e2e tests were not run here.
+- **Docs:** ADR-318; SECURITY; ARCHITECTURE; THREAT-MODEL T286; DEPLOYMENT and RUNBOOKS; BACKLOG
+  P5-10; feature matrix H-034.
+- **Mutation checks:** 5/5 deliberate regressions caught on the unit-tested parts. The function and
+  the page need the database and a browser, so their regressions are left to the integration and e2e
+  tests, which run in CI.
+
+### Test commands and results (local, 2026-10-08)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 140 files, 1339 tests                                           |
+| `pnpm test:integration`, e2e                       | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+| pglast 7 parse of migration 0240                   | passed (syntax only)                                            |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                  |
+
 ## 2026-10-08 — Screening the passwords people set against breached ones (SEC-2, H-052, ADR-317)
 
 Status: **Implemented; its browser test runs in CI only, and the live service was not reached.** A

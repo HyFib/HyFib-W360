@@ -1280,12 +1280,13 @@ verification, app review, Embedded Signup configuration).
   **[Exports beyond the rows a tab shows built; its database tests run only in CI]** (ADR-200: a
   list's CSV gives up to 5,000 rows, 1,000 failures and 500 signups, in the tab's order; the tabs
   keep their rows). **[Assigning failing integrations, emailing the assignee and listing one's own
-  built; their database and browser tests run only in CI]** (ADR-313: a platform administrator
-  assigns a failure Current failures lists to a platform administrator, themselves or another, shown
-  with to whom, by whom and when, audited, lasting while the failure is listed; the CSV leaves it
-  out. ADR-314: an assignee is emailed once about each failure another administrator assigned them,
-  with counts only. ADR-315: "Assigned to me" lists only the failures assigned to the administrator
-  reading). Remaining:
+  and the unassigned built; their database and browser tests run only in CI]** (ADR-313: a platform
+  administrator assigns a failure Current failures lists to a platform administrator, themselves or
+  another, shown with to whom, by whom and when, audited, lasting while the failure is listed; the
+  CSV leaves it out. ADR-314: an assignee is emailed once about each failure another administrator
+  assigned them, with counts only. ADR-315: "Assigned to me" lists only the failures assigned to the
+  administrator reading. ADR-318: "Unassigned" lists only the failures assigned to nobody).
+  Remaining:
   other alert channels, longer trends and charts, Meta's quality webhook (unconfirmed),
   paging and rollups for many companies.
 - **P5-11 Account export/deletion workflow** **[built, locally verified with test data only]**

@@ -106,7 +106,22 @@ describe('assigning companies’ failing integrations (ADR-313)', () => {
 describe('the failures assigned to the administrator reading the console (ADR-315)', () => {
   it('lists them when the query string asks for mine, and every failure for anything else', () => {
     expect(integrationFailureView('mine')).toBe('mine');
-    for (const value of [undefined, '', 'all', 'MINE', ' mine', 'yours', ['mine'], 1]) {
+    // Those assigned to nobody (ADR-318).
+    expect(integrationFailureView('unassigned')).toBe('unassigned');
+    for (const value of [
+      undefined,
+      '',
+      'all',
+      'MINE',
+      ' mine',
+      'yours',
+      ['mine'],
+      1,
+      'Unassigned',
+      'unassigned ',
+      ['unassigned'],
+      'nobody',
+    ]) {
       expect(integrationFailureView(value), JSON.stringify(value)).toBe('all');
     }
   });

@@ -3653,6 +3653,10 @@ to you, however many others are failing, with the same forms; "All failures" lis
 again. Reassigning a failure to someone else takes it off your view at once. The CSV always gives
 every failure.
 
+**Unassigned (ADR-318).** On Current failures, "Unassigned" lists only the failures nobody is
+assigned, however many others are failing, with the same forms: assign one there and it leaves the
+view; take an assignment off and it comes back. The CSV always gives every failure.
+
 **Keys (ADR-134).** The configured encryption key ids, the primary first, and how many stored values
 each key seals, by kind (counts only). While another key is configured the worker seals the values
 it sealed again with the primary key, up to 500 a minute, and logs `sealed values re-encrypted under
