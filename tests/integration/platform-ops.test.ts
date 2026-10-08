@@ -2594,11 +2594,13 @@ describe('the failures assigned to the administrator reading the console (ADR-31
       ),
       'forbidden',
     );
-    for (const pool of [fx.dbs.appPool, fx.dbs.authPool]) {
-      await expect(
-        pool.query(`SELECT * FROM ops.platform_ops_assigned_integration_failures(10)`),
-      ).rejects.toThrow(/permission denied for function/);
-    }
+    await expect(
+      fx.dbs.appPool.query(`SELECT * FROM ops.platform_ops_assigned_integration_failures(10)`),
+    ).rejects.toThrow(/permission denied for function/);
+    // The auth role has no use of the ops schema at all.
+    await expect(
+      fx.dbs.authPool.query(`SELECT * FROM ops.platform_ops_assigned_integration_failures(10)`),
+    ).rejects.toThrow(/permission denied for schema ops/);
     const [fn] = await fx.query<{ owner: string; definer: boolean; config: unknown }>(
       `SELECT pg_get_userbyid(p.proowner) AS owner, p.prosecdef AS definer,
               p.proconfig AS config
@@ -2683,11 +2685,13 @@ describe('the failures assigned to nobody (ADR-318)', () => {
       ),
       'forbidden',
     );
-    for (const pool of [fx.dbs.appPool, fx.dbs.authPool]) {
-      await expect(
-        pool.query(`SELECT * FROM ops.platform_ops_unassigned_integration_failures(10)`),
-      ).rejects.toThrow(/permission denied for function/);
-    }
+    await expect(
+      fx.dbs.appPool.query(`SELECT * FROM ops.platform_ops_unassigned_integration_failures(10)`),
+    ).rejects.toThrow(/permission denied for function/);
+    // The auth role has no use of the ops schema at all.
+    await expect(
+      fx.dbs.authPool.query(`SELECT * FROM ops.platform_ops_unassigned_integration_failures(10)`),
+    ).rejects.toThrow(/permission denied for schema ops/);
     const [fn] = await fx.query<{ owner: string; definer: boolean; config: unknown }>(
       `SELECT pg_get_userbyid(p.proowner) AS owner, p.prosecdef AS definer,
               p.proconfig AS config
