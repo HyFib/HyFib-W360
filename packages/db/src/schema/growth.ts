@@ -20,7 +20,9 @@ export const chatLinks = appSchema.table('chat_links', {
   slug: text('slug').notNull(),
   archivedAt: tz('archived_at'),
   version: integer('version').notNull().default(1),
-  createdByMembershipId: uuid('created_by_membership_id').notNull(),
+  /** Who added it: a member, or a key through the API (ADR-300); exactly one of the two. */
+  createdByMembershipId: uuid('created_by_membership_id'),
+  createdByApiKeyId: uuid('created_by_api_key_id'),
   createdAt: tz('created_at').notNull().defaultNow(),
   updatedAt: tz('updated_at').notNull().defaultNow(),
 });

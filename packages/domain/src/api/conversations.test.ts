@@ -240,6 +240,8 @@ describe('changing the conversations a filter finds (ADR-166)', () => {
       'teamId',
       'updatedSince',
       'tag',
+      'source',
+      'chatLinkId',
     ]);
     expect(Object.keys(schema.properties.change.properties)).toEqual([
       'status',

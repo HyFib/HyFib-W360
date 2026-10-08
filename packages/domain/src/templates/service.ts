@@ -18,6 +18,7 @@ import {
   type TemplateStatus,
   type TenantScope,
   type Tx,
+  isUniqueViolation,
 } from '@w360/db';
 import { assertCan, can, type TenantContext } from '../authz/context';
 import { recordAudit, recordSystemAudit, type RequestMeta } from '../audit';
@@ -83,16 +84,20 @@ export function mapProviderTemplateStatus(status: string | null | undefined): Te
 const LOCAL_STATES: readonly TemplateStatus[] = ['draft', 'submitting', 'submit_failed'];
 const EDITABLE_STATES: readonly TemplateStatus[] = ['draft', 'submit_failed'];
 
+/** A template's name and language, as the Templates page and the API take them (ADR-295). */
+export const templateNameSchema = z
+  .string()
+  .trim()
+  .regex(TEMPLATE_NAME_RE, 'Use lower-case letters, digits and underscores for the name');
+export const templateLanguageSchema = z
+  .string()
+  .trim()
+  .regex(TEMPLATE_LANGUAGE_RE, 'Enter a language code such as en or en_US');
+
 export const draftInputSchema = z.object({
   whatsappAccountId: z.uuid(),
-  name: z
-    .string()
-    .trim()
-    .regex(TEMPLATE_NAME_RE, 'Use lower-case letters, digits and underscores for the name'),
-  language: z
-    .string()
-    .trim()
-    .regex(TEMPLATE_LANGUAGE_RE, 'Enter a language code such as en or en_US'),
+  name: templateNameSchema,
+  language: templateLanguageSchema,
   definition: templateDefinitionSchema,
 });
 
@@ -108,7 +113,8 @@ export interface TemplateDeps {
   clock: Clock;
 }
 
-function assertValidDefinition(def: TemplateDefinition) {
+/** Refuses a definition with variables, examples or buttons Meta would not take (422). */
+export function assertValidDefinition(def: TemplateDefinition) {
   const issues = validateDefinition(def);
   if (issues.length > 0) {
     throw new AppError('validation_failed', issues[0]?.message ?? 'Invalid template', { issues });
@@ -154,6 +160,299 @@ async function requestSyncTx(tx: Tx, tenantId: string, whatsappAccountId: string
     );
 }
 
+/** Who adds a draft: a member, or a key through the API (ADR-295). */
+export type TemplateAuthor = { userId: string } | { apiKeyId: string };
+
+/**
+ * Adds a draft for the WhatsApp Business account, as the Templates page and the API do (ADR-295):
+ * a deleted draft Meta never received under the same name and language becomes a draft again, by
+ * its new author; any other template of that name and language answers 409. The caller checks the
+ * account is the company's and the definition is valid, and maps a name taken at the same moment
+ * with `templateNameError`.
+ */
+export async function writeCreateTemplateDraft(
+  tx: Tx,
+  tenantId: string,
+  data: {
+    whatsappAccountId: string;
+    name: string;
+    language: string;
+    definition: TemplateDefinition;
+  },
+  author: TemplateAuthor,
+): Promise<string> {
+  const components = toMetaComponents(data.definition);
+  const creator = {
+    createdByUserId: 'userId' in author ? author.userId : null,
+    createdByApiKeyId: 'apiKeyId' in author ? author.apiKeyId : null,
+  };
+  const [existing] = await tx
+    .select({
+      id: messageTemplates.id,
+      status: messageTemplates.status,
+      providerTemplateId: messageTemplates.providerTemplateId,
+    })
+    .from(messageTemplates)
+    .where(
+      and(
+        eq(messageTemplates.tenantId, tenantId),
+        eq(messageTemplates.whatsappAccountId, data.whatsappAccountId),
+        eq(messageTemplates.name, data.name),
+        eq(messageTemplates.language, data.language),
+      ),
+    )
+    .for('update');
+  if (existing) {
+    // A deleted local draft (never known to Meta) may be reused; anything else is taken.
+    if (existing.status !== 'deleted' || existing.providerTemplateId !== null) {
+      throw new AppError('conflict', 'A template with this name and language already exists.');
+    }
+    await tx
+      .update(messageTemplates)
+      .set({
+        components,
+        category: data.definition.category,
+        status: 'draft',
+        submitError: null,
+        ...creator,
+        version: sql`${messageTemplates.version} + 1`,
+      })
+      .where(and(eq(messageTemplates.tenantId, tenantId), eq(messageTemplates.id, existing.id)));
+    return existing.id;
+  }
+  const id = uuidv7();
+  await tx.insert(messageTemplates).values({
+    id,
+    tenantId,
+    whatsappAccountId: data.whatsappAccountId,
+    name: data.name,
+    language: data.language,
+    category: data.definition.category,
+    components,
+    status: 'draft',
+    origin: 'local',
+    ...creator,
+  });
+  return id;
+}
+
+/** A name and language the account's other template took at the same moment, as a conflict. */
+export function templateNameError(error: unknown): unknown {
+  return isUniqueViolation(error, 'message_templates_name_language_uq')
+    ? new AppError('conflict', 'A template with this name and language already exists.')
+    : error;
+}
+
+/** Whether a template is a draft that can still change: one Meta never received (ADR-295). */
+export function isEditableDraft(row: {
+  status: TemplateStatus;
+  providerTemplateId: string | null;
+}): boolean {
+  return EDITABLE_STATES.includes(row.status) && row.providerTemplateId === null;
+}
+
+/**
+ * Sets a locked draft's content, as the Templates page and the API save it (ADR-295): it becomes a
+ * `draft` again and its version moves on. The caller checks it is an editable draft, its version
+ * and the definition.
+ */
+export async function writeUpdateTemplateDraft(
+  tx: Tx,
+  tenantId: string,
+  templateId: string,
+  definition: TemplateDefinition,
+): Promise<void> {
+  await tx
+    .update(messageTemplates)
+    .set({
+      components: toMetaComponents(definition),
+      category: definition.category,
+      status: 'draft',
+      submitError: null,
+      version: sql`${messageTemplates.version} + 1`,
+    })
+    .where(and(eq(messageTemplates.tenantId, tenantId), eq(messageTemplates.id, templateId)));
+}
+
+/**
+ * Deletes a locked template Meta never received, as the Templates page and the API do (ADR-295),
+ * with its status change. The caller checks Meta never received it and it is not being submitted.
+ */
+export async function writeDeleteLocalTemplate(
+  tx: Tx,
+  tenantId: string,
+  templateId: string,
+  actorUserId: string | null,
+  at: Date,
+): Promise<void> {
+  await tx
+    .update(messageTemplates)
+    .set({ status: 'deleted', version: sql`${messageTemplates.version} + 1` })
+    .where(and(eq(messageTemplates.tenantId, tenantId), eq(messageTemplates.id, templateId)));
+  await insertStatusEvent(tx, tenantId, {
+    templateId,
+    status: 'deleted',
+    source: 'delete',
+    actorUserId,
+    at,
+  });
+}
+
+/** Queues a template job, signed for the company and who asked: a member, or none for a key. */
+async function enqueueTemplateJob(
+  tx: Tx | null,
+  deps: Pick<TemplateDeps, 'jobs' | 'signer'>,
+  kind: 'template.submit' | 'template.delete' | 'template.sync',
+  tenantId: string,
+  actorUserId: string | null,
+  ref: string,
+  singletonKey: string,
+  priority?: number,
+) {
+  const queue =
+    kind === 'template.submit'
+      ? QUEUES.templateSubmit.name
+      : kind === 'template.delete'
+        ? QUEUES.templateDelete.name
+        : QUEUES.templateSync.name;
+  await deps.jobs.enqueue(tx, queue, deps.signer.sign({ kind, tenantId, actorUserId, ref }), {
+    singletonKey,
+    ...(priority !== undefined ? { priority } : {}),
+  });
+  // A job already waiting under the key stands for this one, at the priority asked (ADR-178).
+  if (priority !== undefined) await deps.jobs.raisePriority(tx, queue, singletonKey, priority);
+}
+
+/** The company's WhatsApp Business account (404 for none). */
+async function templateAccount(tx: Tx, tenantId: string, whatsappAccountId: string) {
+  const [waba] = await tx
+    .select({
+      id: whatsappAccounts.id,
+      status: whatsappAccounts.status,
+      name: whatsappAccounts.name,
+    })
+    .from(whatsappAccounts)
+    .where(
+      and(eq(whatsappAccounts.tenantId, tenantId), eq(whatsappAccounts.id, whatsappAccountId)),
+    );
+  if (!waba) throw notFound('WhatsApp account');
+  return waba;
+}
+
+/**
+ * Submits a locked draft to Meta for review, as the Templates page and the API do (ADR-296): only a
+ * draft Meta never received (412), whose content HyFib can send and Meta would take, for a
+ * connected account (412). It is marked `submitting` before Meta hears of it (write-ahead), with
+ * its status change, and the create request is queued. `actorUserId` is the member, null for a key.
+ */
+export async function writeSubmitTemplate(
+  tx: Tx,
+  deps: Pick<TemplateDeps, 'jobs' | 'signer'>,
+  tenantId: string,
+  row: Pick<
+    typeof messageTemplates.$inferSelect,
+    'id' | 'status' | 'providerTemplateId' | 'category' | 'components' | 'whatsappAccountId'
+  >,
+  actorUserId: string | null,
+  at: Date,
+): Promise<void> {
+  if (!isEditableDraft(row)) {
+    throw new AppError('precondition_failed', 'This template has already been sent to Meta.');
+  }
+  const def = fromMetaComponents(row.category, row.components);
+  if (!def) throw new AppError('unsupported', 'This template cannot be submitted from HyFib.');
+  assertValidDefinition(def);
+  const waba = await templateAccount(tx, tenantId, row.whatsappAccountId);
+  if (waba.status !== 'connected') {
+    throw new AppError(
+      'precondition_failed',
+      'Reconnect this WhatsApp account before submitting templates.',
+    );
+  }
+  const [updated] = await tx
+    .update(messageTemplates)
+    .set({
+      status: 'submitting',
+      submittedAt: at,
+      submitError: null,
+      version: sql`${messageTemplates.version} + 1`,
+    })
+    .where(and(eq(messageTemplates.tenantId, tenantId), eq(messageTemplates.id, row.id)))
+    .returning({ version: messageTemplates.version });
+  await insertStatusEvent(tx, tenantId, {
+    templateId: row.id,
+    status: 'submitting',
+    source: 'submit',
+    actorUserId,
+    at,
+  });
+  await enqueueTemplateJob(
+    tx,
+    deps,
+    'template.submit',
+    tenantId,
+    actorUserId,
+    row.id,
+    `${row.id}:${updated?.version ?? 0}`,
+  );
+}
+
+/**
+ * How a locked template is deleted, as the Templates page and the API delete it (ADR-296): `local`
+ * for one Meta never received, `meta` for one Meta has, which also needs `templates.submit`. One
+ * already deleted, or being deleted, answers 409; one being submitted, 412.
+ */
+export function templateDeletion(row: {
+  status: TemplateStatus;
+  providerTemplateId: string | null;
+}): 'local' | 'meta' {
+  if (row.status === 'deleted' || row.status === 'pending_deletion') {
+    throw new AppError('conflict', 'This template is already deleted.');
+  }
+  if (row.status === 'submitting') {
+    throw new AppError(
+      'precondition_failed',
+      'Wait until Meta confirms the submission before deleting.',
+    );
+  }
+  return row.providerTemplateId === null ? 'local' : 'meta';
+}
+
+/**
+ * Deletes a locked template Meta has, as the Templates page and the API do (ADR-296): it is
+ * `pending_deletion`, with its status change, until the queued request to Meta settles it. The
+ * caller checks it may be deleted (`templateDeletion`).
+ */
+export async function writeDeleteTemplateAtMeta(
+  tx: Tx,
+  deps: Pick<TemplateDeps, 'jobs' | 'signer'>,
+  tenantId: string,
+  templateId: string,
+  actorUserId: string | null,
+  at: Date,
+): Promise<void> {
+  await tx
+    .update(messageTemplates)
+    .set({ status: 'pending_deletion', version: sql`${messageTemplates.version} + 1` })
+    .where(and(eq(messageTemplates.tenantId, tenantId), eq(messageTemplates.id, templateId)));
+  await insertStatusEvent(tx, tenantId, {
+    templateId,
+    status: 'pending_deletion',
+    source: 'delete',
+    actorUserId,
+    at,
+  });
+  await enqueueTemplateJob(
+    tx,
+    deps,
+    'template.delete',
+    tenantId,
+    actorUserId,
+    templateId,
+    `${templateId}:delete`,
+  );
+}
+
 export function createTemplatesService(deps: TemplateDeps) {
   const { db, clock } = deps;
 
@@ -168,46 +467,8 @@ export function createTemplatesService(deps: TemplateDeps) {
     return row;
   }
 
-  async function connectedWaba(tx: Tx, ctx: TenantContext, whatsappAccountId: string) {
-    const [waba] = await tx
-      .select({
-        id: whatsappAccounts.id,
-        status: whatsappAccounts.status,
-        name: whatsappAccounts.name,
-      })
-      .from(whatsappAccounts)
-      .where(
-        and(
-          eq(whatsappAccounts.tenantId, ctx.tenant.id),
-          eq(whatsappAccounts.id, whatsappAccountId),
-        ),
-      );
-    if (!waba) throw notFound('WhatsApp account');
-    return waba;
-  }
-
-  async function enqueue(
-    tx: Tx | null,
-    kind: 'template.submit' | 'template.delete' | 'template.sync',
-    tenantId: string,
-    actorUserId: string | null,
-    ref: string,
-    singletonKey: string,
-    priority?: number,
-  ) {
-    const queue =
-      kind === 'template.submit'
-        ? QUEUES.templateSubmit.name
-        : kind === 'template.delete'
-          ? QUEUES.templateDelete.name
-          : QUEUES.templateSync.name;
-    await deps.jobs.enqueue(tx, queue, deps.signer.sign({ kind, tenantId, actorUserId, ref }), {
-      singletonKey,
-      ...(priority !== undefined ? { priority } : {}),
-    });
-    // A job already waiting under the key stands for this one, at the priority asked (ADR-178).
-    if (priority !== undefined) await deps.jobs.raisePriority(tx, queue, singletonKey, priority);
-  }
+  const connectedWaba = (tx: Tx, ctx: TenantContext, whatsappAccountId: string) =>
+    templateAccount(tx, ctx.tenant.id, whatsappAccountId);
 
   return {
     async listTemplates(
@@ -300,7 +561,7 @@ export function createTemplatesService(deps: TemplateDeps) {
           return {
             template: row,
             definition,
-            editable: EDITABLE_STATES.includes(row.status) && row.providerTemplateId === null,
+            editable: isEditableDraft(row),
             preview: definition ? renderExample(definition) : null,
             sendable: row.status === 'approved' && spec.supported,
             unsupportedReason: spec.supported ? null : spec.reason,
@@ -315,73 +576,28 @@ export function createTemplatesService(deps: TemplateDeps) {
       assertCan(ctx, 'templates.write');
       const data = parseInput(draftInputSchema, input);
       assertValidDefinition(data.definition);
-      const components = toMetaComponents(data.definition);
-      return db.run(ctx.scope, async (tx) => {
-        await connectedWaba(tx, ctx, data.whatsappAccountId);
-        const [existing] = await tx
-          .select({
-            id: messageTemplates.id,
-            status: messageTemplates.status,
-            providerTemplateId: messageTemplates.providerTemplateId,
-          })
-          .from(messageTemplates)
-          .where(
-            and(
-              eq(messageTemplates.tenantId, ctx.tenant.id),
-              eq(messageTemplates.whatsappAccountId, data.whatsappAccountId),
-              eq(messageTemplates.name, data.name),
-              eq(messageTemplates.language, data.language),
-            ),
-          )
-          .for('update');
-        let id: string;
-        if (existing) {
-          // A deleted local draft (never known to Meta) may be reused; anything else is taken.
-          if (existing.status !== 'deleted' || existing.providerTemplateId !== null) {
-            throw new AppError(
-              'conflict',
-              'A template with this name and language already exists.',
-            );
-          }
-          id = existing.id;
-          await tx
-            .update(messageTemplates)
-            .set({
-              components,
-              category: data.definition.category,
-              status: 'draft',
-              submitError: null,
-              version: sql`${messageTemplates.version} + 1`,
-            })
-            .where(and(eq(messageTemplates.tenantId, ctx.tenant.id), eq(messageTemplates.id, id)));
-        } else {
-          id = uuidv7();
-          await tx.insert(messageTemplates).values({
-            id,
-            tenantId: ctx.tenant.id,
-            whatsappAccountId: data.whatsappAccountId,
-            name: data.name,
-            language: data.language,
-            category: data.definition.category,
-            components,
-            status: 'draft',
-            origin: 'local',
-            createdByUserId: ctx.user.id,
+      try {
+        return await db.run(ctx.scope, async (tx) => {
+          await connectedWaba(tx, ctx, data.whatsappAccountId);
+          const id = await writeCreateTemplateDraft(tx, ctx.tenant.id, data, {
+            userId: ctx.user.id,
           });
-        }
-        await recordAudit(
-          tx,
-          ctx,
-          {
-            action: 'template.draft_saved',
-            subjectType: 'template',
-            subjectId: id,
-            metadata: { name: data.name, language: data.language },
-          },
-          meta,
-        );
-        return { id };
-      });
+          await recordAudit(
+            tx,
+            ctx,
+            {
+              action: 'template.draft_saved',
+              subjectType: 'template',
+              subjectId: id,
+              metadata: { name: data.name, language: data.language },
+            },
+            meta,
+          );
+          return { id };
+        });
+      } catch (error) {
+        throw templateNameError(error);
+      }
     },
 
     async updateDraft(ctx: TenantContext, templateId: string, input: unknown) {
@@ -390,7 +606,7 @@ export function createTemplatesService(deps: TemplateDeps) {
       assertValidDefinition(data.definition);
       await db.run(ctx.scope, async (tx) => {
         const row = await loadForUpdate(tx, ctx, templateId);
-        if (!EDITABLE_STATES.includes(row.status) || row.providerTemplateId !== null) {
+        if (!isEditableDraft(row)) {
           throw new AppError(
             'precondition_failed',
             'Only drafts that Meta has not received can be edited.',
@@ -402,18 +618,7 @@ export function createTemplatesService(deps: TemplateDeps) {
             'Someone else changed this template. Reload and try again.',
           );
         }
-        await tx
-          .update(messageTemplates)
-          .set({
-            components: toMetaComponents(data.definition),
-            category: data.definition.category,
-            status: 'draft',
-            submitError: null,
-            version: sql`${messageTemplates.version} + 1`,
-          })
-          .where(
-            and(eq(messageTemplates.tenantId, ctx.tenant.id), eq(messageTemplates.id, templateId)),
-          );
+        await writeUpdateTemplateDraft(tx, ctx.tenant.id, templateId, data.definition);
       });
     },
 
@@ -422,40 +627,7 @@ export function createTemplatesService(deps: TemplateDeps) {
       assertCan(ctx, 'templates.submit');
       await db.run(ctx.scope, async (tx) => {
         const row = await loadForUpdate(tx, ctx, templateId);
-        if (!EDITABLE_STATES.includes(row.status) || row.providerTemplateId !== null) {
-          throw new AppError('precondition_failed', 'This template has already been sent to Meta.');
-        }
-        const def = fromMetaComponents(row.category, row.components);
-        if (!def)
-          throw new AppError('unsupported', 'This template cannot be submitted from HyFib.');
-        assertValidDefinition(def);
-        const waba = await connectedWaba(tx, ctx, row.whatsappAccountId);
-        if (waba.status !== 'connected') {
-          throw new AppError(
-            'precondition_failed',
-            'Reconnect this WhatsApp account before submitting templates.',
-          );
-        }
-        const now = clock.now();
-        const [updated] = await tx
-          .update(messageTemplates)
-          .set({
-            status: 'submitting',
-            submittedAt: now,
-            submitError: null,
-            version: sql`${messageTemplates.version} + 1`,
-          })
-          .where(
-            and(eq(messageTemplates.tenantId, ctx.tenant.id), eq(messageTemplates.id, templateId)),
-          )
-          .returning({ version: messageTemplates.version });
-        await insertStatusEvent(tx, ctx.tenant.id, {
-          templateId,
-          status: 'submitting',
-          source: 'submit',
-          actorUserId: ctx.user.id,
-          at: now,
-        });
+        await writeSubmitTemplate(tx, deps, ctx.tenant.id, row, ctx.user.id, clock.now());
         await recordAudit(
           tx,
           ctx,
@@ -466,14 +638,6 @@ export function createTemplatesService(deps: TemplateDeps) {
             metadata: { name: row.name, language: row.language, category: row.category },
           },
           meta,
-        );
-        await enqueue(
-          tx,
-          'template.submit',
-          ctx.tenant.id,
-          ctx.user.id,
-          templateId,
-          `${templateId}:${updated?.version ?? 0}`,
         );
       });
     },
@@ -487,58 +651,11 @@ export function createTemplatesService(deps: TemplateDeps) {
       await db.run(ctx.scope, async (tx) => {
         const row = await loadForUpdate(tx, ctx, templateId);
         const now = clock.now();
-        if (row.status === 'deleted' || row.status === 'pending_deletion') {
-          throw new AppError('conflict', 'This template is already deleted.');
-        }
-        if (row.status === 'submitting') {
-          throw new AppError(
-            'precondition_failed',
-            'Wait until Meta confirms the submission before deleting.',
-          );
-        }
-        if (row.providerTemplateId === null) {
-          await tx
-            .update(messageTemplates)
-            .set({ status: 'deleted', version: sql`${messageTemplates.version} + 1` })
-            .where(
-              and(
-                eq(messageTemplates.tenantId, ctx.tenant.id),
-                eq(messageTemplates.id, templateId),
-              ),
-            );
-          await insertStatusEvent(tx, ctx.tenant.id, {
-            templateId,
-            status: 'deleted',
-            source: 'delete',
-            actorUserId: ctx.user.id,
-            at: now,
-          });
+        if (templateDeletion(row) === 'local') {
+          await writeDeleteLocalTemplate(tx, ctx.tenant.id, templateId, ctx.user.id, now);
         } else {
           assertCan(ctx, 'templates.submit');
-          await tx
-            .update(messageTemplates)
-            .set({ status: 'pending_deletion', version: sql`${messageTemplates.version} + 1` })
-            .where(
-              and(
-                eq(messageTemplates.tenantId, ctx.tenant.id),
-                eq(messageTemplates.id, templateId),
-              ),
-            );
-          await insertStatusEvent(tx, ctx.tenant.id, {
-            templateId,
-            status: 'pending_deletion',
-            source: 'delete',
-            actorUserId: ctx.user.id,
-            at: now,
-          });
-          await enqueue(
-            tx,
-            'template.delete',
-            ctx.tenant.id,
-            ctx.user.id,
-            templateId,
-            `${templateId}:delete`,
-          );
+          await writeDeleteTemplateAtMeta(tx, deps, ctx.tenant.id, templateId, ctx.user.id, now);
         }
         await recordAudit(
           tx,
@@ -565,8 +682,9 @@ export function createTemplatesService(deps: TemplateDeps) {
         }
         await requestSyncTx(tx, ctx.tenant.id, whatsappAccountId, clock.now());
         // A member waits for it, so it goes before the sweep's routine syncs (ADR-178).
-        await enqueue(
+        await enqueueTemplateJob(
           tx,
+          deps,
           'template.sync',
           ctx.tenant.id,
           null,

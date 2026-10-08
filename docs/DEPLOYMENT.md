@@ -945,6 +945,61 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    step. Only the database changes: workers and web servers of any version keep working, and stored
    events and payloads are unchanged.
 
+   Migration 0216 (ADR-295) replaces the API keys' and plans' scope checks (validated at once: one
+   row per key and per plan version) with `templates.write` and a bound of 64 scopes, adds
+   `message_templates.created_by_api_key_id` with its foreign key and the author check (NOT VALID;
+   0217 validates them while writes go on), and grants the runtime role the update of both author
+   columns. Until the web rollout ends, an old web server answers Settings → API keys with an error
+   for a company with a key holding `templates.write`, answers `POST /api/v1/message-templates` and
+   `PATCH` and `DELETE /api/v1/message-templates/{id}` with 405, gives templates without
+   `createdBy`, and uses a deleted draft again under its earlier author; rolling web servers back
+   does the same.
+
+   Migration 0218 (ADR-296) replaces the API keys' and plans' scope checks with `templates.submit`
+   (validated at once). Until the web rollout ends, an old web server answers Settings → API keys
+   with an error for a company with a key holding `templates.submit` and answers
+   `POST /api/v1/message-templates/{id}/submit` with 404; one with ADR-295 but not ADR-296 refuses
+   deleting a template Meta has through the API (412) and answers a deletion without `status`.
+   Rolling web servers back does the same. Workers need no change: they already run template jobs
+   that name no member.
+
+   Migration 0219 (ADR-297) replaces the API keys' and plans' scope checks with `reports.read`
+   (validated at once). Until the web rollout ends, an old web server answers Settings → API keys
+   with an error for a company with a key holding `reports.read`, and answers `GET /api/v1/reports`
+   with 404; rolling web servers back does the same. Workers are unaffected.
+
+   Migration 0220 (ADR-298) replaces the API keys' and plans' scope checks with `flows.read`
+   (validated at once); 0221 builds `flow_responses_received_idx` concurrently, outside a
+   transaction (if it fails, drop the INVALID index with
+   `DROP INDEX CONCURRENTLY app.flow_responses_received_idx;` and run the migrations again). Until
+   the web rollout ends, an old web server answers Settings → API keys with an error for a company
+   with a key holding `flows.read`, and answers `GET /api/v1/flows` and `GET /api/v1/flow-responses`
+   with 404; rolling web servers back does the same. Workers are unaffected.
+
+   Migration 0222 (ADR-299) replaces the API keys' and plans' scope checks with `chat_links.read`
+   (validated at once). Until the web rollout ends, an old web server answers Settings → API keys
+   with an error for a company with a key holding `chat_links.read`, and answers
+   `GET /api/v1/chat-links` and `GET /api/v1/chat-links/{id}` with 404; rolling web servers back
+   does the same. Workers are unaffected.
+
+   Migration 0223 (ADR-300) replaces the API keys' and plans' scope checks with `chat_links.write`
+   (validated at once), drops NOT NULL from `chat_links.created_by_membership_id` and adds
+   `created_by_api_key_id` with its composite foreign key to the company's keys and the one-author
+   check, both NOT VALID (brief locks; no row is read); 0224 validates them, reading the table
+   without blocking its writes. Until the web rollout ends, an old web server answers Settings → API
+   keys with an error for a company with a key holding `chat_links.write`, answers
+   `POST /api/v1/chat-links` and `PATCH /api/v1/chat-links/{id}` with 404 (405 on one with ADR-299
+   but not ADR-300), and gives links without `createdBy`; it always names the member who adds a
+   link, so the check holds. Rolling web servers back does the same. Workers are unaffected.
+
+   ADR-301 has no migration. Until the web rollout ends, an old web server gives conversations
+   without `source` and refuses the `source` and `chatLinkId` filters of `GET /api/v1/conversations`
+   and `POST /api/v1/conversations/update-matching` (422); rolling web servers back does the same.
+
+   The team places fix (review of PR #40, ADR-287 amended) has no migration. Until the web rollout
+   ends, an old web server still takes away, when it saves a team, the places of members who cannot
+   answer conversations now; rolling web servers back does the same.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

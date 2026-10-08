@@ -10965,6 +10965,15 @@ Not built: webhook events for changes to teams, setting members' availability th
 (members set their own, and supervisors theirs in Settings), the round robin's place, and a version
 check on teams (a change applies to the team as it is when the request runs, its row locked).
 
+Amended (2026-10-07, found in review of PR #40): saving a team, in Settings or through the API with
+or without `memberIds`, removed the places of the members who could not answer conversations at the
+time (suspended, or given another role), since neither lists nor accepts them; a member back from a
+suspension was then in none of their teams. A save now takes away only the places of members who
+answer conversations and are left out, and those of removed members, who must be invited again; the
+others keep their place and are the team's members again when they can answer conversations
+(`droppedTeamMembers` in `inbox/teams.ts`). No migration; places a save took away before are not
+restored.
+
 ## ADR-288 A CRM pipeline's weighted forecast through the public API (P5-08, P4-04) (2026-10-07)
 
 Context: members see a pipeline's open deals weighed by each stage's chance of winning on the board
@@ -11214,3 +11223,275 @@ Decision:
 
 Not built: creating, changing, submitting and deleting templates through the API, template content
 HyFib cannot represent given raw, and the members who made each change.
+
+## ADR-295 Template drafts through the public API (P5-08) (2026-10-07)
+
+Context: ADR-294 lets keys read every template with Meta's review, but a company that keeps its
+templates in another system (a marketing tool, a translation workflow) still typed each draft into
+the template editor by hand. Members with `templates.write` add drafts, change them and delete
+drafts Meta never received on the Templates page; submission to Meta and deletion there need
+`templates.submit` as well.
+
+Decision:
+
+- **A `templates.write` scope** ("Write templates"), granted only by members who hold
+  `templates.write` (owners and administrators, who create keys, do), writing, so refused while the
+  company is suspended or restricted. Existing keys and plans that chose their scopes do not gain
+  it. With it the API has 33 scopes, and a key or plan may hold up to 64 (the database checks
+  counted up to 32).
+- **`POST /api/v1/message-templates`** (`createMessageTemplate`) adds a draft as the template editor
+  saves one: the number (`channelId`) chooses the WhatsApp Business account, since the API names
+  numbers and never Meta's account ids (another company's number, or an unknown one, answers 404);
+  the name and language are unique in the account (409), and a deleted draft Meta never received
+  under them is used again, as on the Templates page; the content is checked as the editor checks it
+  (422 with each problem's path). Once per `Idempotency-Key` when one is given. It answers the
+  template as `GET /message-templates/{id}` reads it.
+- **`PATCH /api/v1/message-templates/{id}`** (`updateMessageTemplate`) sets a draft's whole content,
+  as the editor saves it: only a draft Meta never received (`draft` or `submit_failed`, 412
+  otherwise), from `expectedVersion` when given (409 for another version). Content the draft already
+  has, compared with sorted keys as the database gives its components back, writes nothing and adds
+  no audit entry, so a retry needs no key; otherwise the draft becomes a `draft` again and its
+  version moves on. Its name and language stay.
+- **`DELETE /api/v1/message-templates/{id}`** (`deleteMessageTemplate`) deletes a draft Meta never
+  received, as the Templates page does, with its status change; one being submitted, or one Meta
+  has, answers 412, and one already deleted 409.
+- **Shared writes:** the Templates page's draft writes are now functions both use
+  (`writeCreateTemplateDraft`, `writeUpdateTemplateDraft`, `writeDeleteLocalTemplate`,
+  `isEditableDraft`), so their rules hold for keys; a name and language taken by another addition at
+  the same moment now answer with the same message as one taken before (409), on the page too.
+- **Who added it:** `message_templates.created_by_api_key_id` names the key, and a template's
+  `createdBy` (`member`, never which, or `api` with `createdByApiKeyId`; null for one found at Meta)
+  says so through the API. A deleted draft used again names whoever added it again. The audit log
+  names the key (`template.draft_saved`, `template.deleted`, with `source: api`); status changes
+  made by a key name no member.
+- **Migrations 0216 and 0217:** 0216 replaces the scope checks of keys and plans (with the new scope
+  and the bound of 64, validated at once), adds the column with its composite foreign key to the
+  company's keys and a check that a template names at most one author (both NOT VALID), and lets the
+  runtime role update both author columns; 0217 validates them.
+
+Not built: submitting drafts to Meta and deleting templates Meta has through the API (they need
+`templates.submit`), drafts with media headers or named variables (the editor has neither), and
+changing a draft's name or language.
+
+## ADR-296 Template submission and deletion at Meta through the public API (P5-08) (2026-10-07)
+
+Context: ADR-295 lets keys add and change drafts, but each draft still waited for a member to submit
+it on the Templates page, and a template Meta has could be deleted only there. Members submit drafts
+with `templates.submit` and delete a template Meta has with `templates.write` and
+`templates.submit`. Submission is write-ahead and Meta's listing is the source of truth (ADR-019); a
+deletion whose job runs out of retries ends where the company sees it (ADR-111).
+
+Decision:
+
+- **A `templates.submit` scope** ("Submit templates"), granted only by members who hold
+  `templates.submit` (owners, administrators and marketers do), writing, so refused while the
+  company is suspended or restricted. Existing keys and plans that chose their scopes do not gain
+  it. With it the API has 34 scopes.
+- **`POST /api/v1/message-templates/{id}/submit`** (`submitMessageTemplate`) submits a draft as the
+  Templates page does: only a draft Meta never received (`draft` or `submit_failed`; 412 otherwise,
+  as for one submitted already), with content HyFib can send, checked again as the editor checks it
+  (422), for a connected WhatsApp Business account (412). In one transaction the template becomes
+  `submitting` (its version moves on and its submission error is cleared), its status change is
+  recorded and the create request is queued; the worker sends it and records Meta's answer as for
+  members, and the sync settles a lost answer (ADR-019). It answers the template, `submitting`, once
+  per `Idempotency-Key` when one is given; without one, a second submission answers 412. No body: it
+  submits the content the draft has.
+- **`DELETE /api/v1/message-templates/{id}`** also deletes a template Meta has when the key holds
+  `templates.submit` too (403 naming it otherwise), as the Templates page does: in one transaction
+  the template becomes `pending_deletion`, with its status change, and the request to Meta is
+  queued. Meta's answer makes it `deleted`; a refusal gives it back the status Meta lists, with a
+  `delete_failed` change (ADR-111). The answer gives `status` (`deleted`, or `pending_deletion`
+  while Meta deletes it), and `deleted` says whether it is deleted now. One being submitted answers
+  412, and one already deleted, or being deleted, 409, as before.
+- **Shared writes:** the Templates page's submission and deletion are now `writeSubmitTemplate`,
+  `templateDeletion` and `writeDeleteTemplateAtMeta`, with `enqueueTemplateJob`, so the page and
+  keys share their checks, status changes and queued requests. A key's job is signed for the company
+  with no member (the template workers already run jobs without one), and its status changes name no
+  member. The audit log names the key (`template.submitted` with the category, `template.deleted`,
+  with `source: api`).
+- **Migration 0218** replaces the scope checks of keys and plans with the new scope, validated at
+  once.
+
+Not built: changing a template Meta has (members change it in WhatsApp Manager), submitting many
+drafts in one call, and a webhook event for `submitting` or `submit_failed` (template.status_changed
+reports Meta's decisions).
+
+## ADR-297 The Reports page's numbers through the public API (P5-08) (2026-10-07)
+
+Context: members with `reports.read` see on the Reports page messaging outcomes, estimated Meta
+charges, the inbox's reply and resolution times, satisfaction surveys, automation runs, CRM deals
+and forecasts, each member's activity and campaign funnels, computed on request under persisted
+definitions (ADR-026), and members with `reports.export` download each section as CSV. A company
+that keeps its numbers in a BI tool or a spreadsheet downloaded those files by hand: keys read the
+records (messages, conversations, deals, campaigns) but not the page's numbers, whose denominators,
+time-zone days and missing-data rules a reader would have had to repeat.
+
+Decision:
+
+- **A `reports.read` scope** ("Read reports"), granted only by members who hold `reports.read`
+  (owners, administrators, marketers and analysts do), reading, so a suspended or restricted
+  company's keys read reports as its members do. Existing keys and plans that chose their scopes do
+  not gain it. With it the API has 35 scopes.
+- **`GET /api/v1/reports`** (`getReport`) answers the report for a period as the page's form chooses
+  it: a preset (`last_7_days` by default, `last_30_days`, `this_month` or `last_month`) or `custom`
+  days `from` and `to`, at most 92 days and not after today, in the company's time zone (422
+  otherwise, and for any other query parameter). It gives every section the page shows (`messaging`,
+  `costs`, `inbox`, `csat`, `automations`, `deals`, `members`, `campaigns`) and `definitions`, the
+  latest version of every metric definition.
+- **One reader:** the page's report is now `readReport`, which both run in one repeatable-read,
+  read-only transaction (ADR-026), so the API's numbers are the page's for the same period and
+  moment; an integration test compares them.
+- **What the API gives differently:** times in ISO 8601; members by id, as `GET /members` names
+  them, and name, without their roles or membership status; estimated Meta charges in millionths of
+  the currency's main unit, as the exports give them (`estimated_cost_micros`), never rounded sums;
+  each pipeline's forecast as `GET /pipelines/{id}/forecast` gives it (ADR-288); definitions without
+  the page's wording of when numbers are computed. Deals are given whatever the plan, as the page
+  shows them.
+- **Migration 0219** replaces the scope checks of keys and plans with the new scope, validated at
+  once. The forecast's API schema moved next to its endpoint (`api/pipeline-forecast.ts`), so the
+  report reuses it.
+
+Not built: reading one section alone, periods longer than 92 days (read several), and the CSV
+exports through the API.
+
+## ADR-298 WhatsApp Flows and their responses through the public API (P5-08) (2026-10-07)
+
+Context: members with `flows.read` see on the Flows page the company's WhatsApp Flows (ADR-045), the
+forms members send in chats, with Meta's status, the answers each returns and where they go on the
+contact, and each flow's completed forms; only members who also hold `contacts.read` see who
+completed them and what they typed. A company that follows completed forms up elsewhere (a CRM, a
+spreadsheet, its own systems) could read them only on the page: keys read contacts and messages, not
+which forms customers completed or what their answers did to the contact.
+
+Decision:
+
+- **A `flows.read` scope** ("Read flows"), granted only by members who hold `flows.read` (owners,
+  administrators, supervisors, marketers and analysts do), reading, so a suspended or restricted
+  company's keys read flows as its members do. Existing keys and plans that chose their scopes do
+  not gain it. With it the API has 36 scopes.
+- **`GET /api/v1/flows`** (`listFlows`) lists the flows in use, or the archived ones with
+  `archived=true`, newest first on exact keyset pages, each with Meta's status (lower case; null
+  before HyFib has created it at Meta), its categories, the keys of its answers, where each answer
+  goes on the contact (`name`, `email` or `field:<custom field key>`) and the company's active
+  numbers that can send it (its WhatsApp Business account's). Never the Flow JSON, its data endpoint
+  or keys.
+- **`GET /api/v1/flow-responses`** (`listFlowResponses`) lists completed forms newest first by when
+  they were received, on exact keyset pages, by flow, contact and time, each with what each mapped
+  answer did to the contact (`applied`, `missing`, `invalid` with the reason, `skipped`). A form
+  whose token matched no form HyFib sent has no flow and changed no contact. Erasing a contact
+  deletes its responses, as before.
+- **Who and what only with `contacts.read`:** a response's contact, conversation and message (who
+  completed it) and its answers (what they typed) are given only when the key and the plan also hold
+  `contacts.read`, as the page shows them only to members with that permission; other keys get null,
+  and their `contactId` filter is refused (403). Answers are given as the form returned them, each
+  any JSON value (`JsonValue` in the OpenAPI document); the outcomes name fields, never the values
+  typed.
+- **Migrations:** 0220 replaces the scope checks of keys and plans with the new scope, validated at
+  once; 0221 builds `flow_responses_received_idx` concurrently, so pages of all of a company's
+  responses, and of those since a time, read an index.
+
+Not built: reading one flow or one response by id, the Flow JSON, and creating, publishing or
+sending flows through the API.
+
+## ADR-299 Chat links through the public API (P5-08) (2026-10-07)
+
+Context: members who read campaigns see under Growth → Chat links the company's chat links
+(ADR-044): short links and QR codes that open a chat with one of its numbers with a message ready to
+send, each with its clicks per day and the conversations that sent its reference. A company that
+puts these links in emails, ads or a website builder, or reports on them elsewhere, copied them and
+their counts from the pages: keys could not read them.
+
+Decision:
+
+- **A `chat_links.read` scope** ("Read chat links"), granted only by members who hold
+  `campaigns.read` (owners, administrators, supervisors, marketers and analysts do), as the Growth
+  pages need, reading, so a suspended or restricted company's keys read links as its members do.
+  Existing keys and plans that chose their scopes do not gain it. With it the API has 37 scopes.
+- **`GET /api/v1/chat-links`** (`listChatLinks`) lists the links in use, or the archived ones with
+  `archived=true`, newest first on exact keyset pages, each with its name, message, reference and
+  whether the message carries it, the short link (`shortUrl`, on HyFib's address, which the QR code
+  opens too), the wa.me address it opens (null while the number has no phone number), its number and
+  whether that number is active, and `last30Days`: the clicks on the company's last 30 days, today
+  included, and the conversations it started in the last 30 days (null for a link without its
+  reference, which counts none), counted by the same SQL as the pages (`linkClicks30`,
+  `linkConversations30` in `growth/service.ts`).
+- **`GET /api/v1/chat-links/{id}`** (`getChatLink`) reads one link, archived or not, with the days
+  of the last 30 it was clicked on, in the company's time zone, newest first, as the link's page
+  lists them (days without clicks are left out). Another company's link answers 404, as an unknown
+  one does.
+- **What the counts are:** as ADR-044 sets out, clicks include repeated clicks and automated visits,
+  and nothing identifies a visitor; a conversation counts when the customer's message carries the
+  link's reference on the link's number, so the count is a lower bound. The descriptions say so.
+- **Migration 0222** replaces the scope checks of keys and plans with the new scope, validated at
+  once. The links' list index (`chat_links_list_idx`, 0016) serves the pages; no new index.
+
+Not built: creating, changing, archiving and restoring links through the API (next), website
+buttons, the ads that started conversations, and which conversations a link started.
+
+## ADR-300 Chat links written through the public API (P5-08) (2026-10-07)
+
+Context: keys read the company's chat links since ADR-299, but a company that makes a link for each
+email, ad or product page from its own tools still created each one under Growth → Chat links, and
+archived it there when the campaign ended.
+
+Decision:
+
+- **A `chat_links.write` scope** ("Write chat links"), granted only by members who hold
+  `campaigns.write` (owners, administrators and marketers do), writing, so a suspended or restricted
+  company's keys are refused (423), as its members' writes are. Existing keys and plans that chose
+  their scopes do not gain it. With it the API has 38 scopes.
+- **`POST /api/v1/chat-links`** (`createChatLink`) adds a link as members do: a name, one of the
+  company's active numbers (`channelId`; 422 otherwise, another company's number included), a
+  message (none by default) and whether it carries the reference (yes by default), with a new
+  reference and short link, within the 500 links in use (409 at the limit). With an
+  `Idempotency-Key`, a retry answers the first response. It answers the link as
+  `GET /chat-links/{id}` gives it (201).
+- **`PATCH /api/v1/chat-links/{id}`** (`updateChatLink`) changes what is given (name, number,
+  message, reference), the rest kept, with the same checks; an archived link is changed only once
+  restored (409); `archived` archives or restores it, in a request of its own (422 otherwise). With
+  `expectedVersion`, a link changed since is refused (409), as deals are. A change that leaves the
+  link as it is writes nothing and adds no audit entry.
+- **One set of writes:** the Growth pages' add, edit and archive now run the same transaction-level
+  writers (`writeCreateChatLink`, `writeUpdateChatLink`, `writeSetChatLinkArchived` and
+  `assertLinkChannel` in `growth/service.ts`), so a key's link is checked and stored as a member's.
+  The audit log has `growth.link_created`, `growth.link_updated`, `growth.link_archived` and
+  `growth.link_restored` with the key as actor and `source: api`.
+- **Who added a link:** migration 0223 adds `chat_links.created_by_api_key_id` with a composite
+  foreign key to the company's keys and a check that exactly one author is set (both NOT VALID; 0224
+  validates them), and drops NOT NULL from `created_by_membership_id`. Links give `createdBy`
+  (`member` or `api`) and `createdByApiKeyId`; a member is never named.
+
+Not built: deleting links (members archive them too), website buttons through the API, and choosing
+a link's reference or short link.
+
+## ADR-301 Where conversations came from, through the public API (P5-08) (2026-10-07)
+
+Context: the inbox shows where a conversation came from (ADR-044): the chat link whose reference the
+customer sent, or the click-to-WhatsApp ad they wrote from. Keys read conversations (ADR-072) and
+chat links with the conversations they started (ADR-299), but not which conversations those were, so
+a company could not take a campaign's conversations into its own tools or work through them there.
+
+Decision:
+
+- **Each conversation gives `source`**, its latest source as the inbox's source line shows it:
+  `kind` (`link` or `ad`), `at` (when the customer's message that carried it arrived), `chatLink`
+  (its `id` and `name`) for a link, and `ad` (Meta's `id` and `type` for it, its `headline` and web
+  address, as Meta sent them) for an ad; null when the conversation has neither.
+  `GET /conversations` and `GET /conversations/{id}` give it, as do the answers of the changes
+  (`PATCH /conversations/{id}`, `update-many`, `update-matching`). The ad click id, media addresses
+  and the ad's text are never stored (ADR-044), so never given.
+- **Two filters**, `source` (`link` or `ad`) and `chatLinkId`, on `GET /conversations` and on the
+  conversations a change finds (ADR-166): a conversation matches when any of its sources does, not
+  only the latest, so one a link started is still found after its customer writes from an ad; given
+  together, one source must match both. An unknown kind or an id that is not a UUID is refused
+  (422); another company's link finds nothing. A link's `last30Days.conversations` (ADR-299) counts
+  those of the last 30 days.
+- **No new scope:** the source comes with `conversations.read`, granted with `inbox.read_all`, as
+  members who read every conversation see the source line; a link's reference, short link and counts
+  still need `chat_links.read`.
+- **No migration:** the source is read with each conversation by one subquery on
+  `conversation_sources_conversation_idx` (0016), as the inbox reads it (`conversationSourceOf` in
+  `growth/sources.ts`), and the filters probe the same index for each conversation.
+
+Not built: a conversation's earlier sources, sources in webhook events, and the ads that brought
+conversations, which members see under Growth → Ads.

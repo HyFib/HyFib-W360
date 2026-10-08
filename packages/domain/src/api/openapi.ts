@@ -4,6 +4,7 @@ import {
   AUTOMATION_RUN_STATUSES,
   CAMPAIGN_STATUSES,
   CHANNEL_STATUSES,
+  CONVERSATION_SOURCE_KINDS,
   CONVERSATION_STATUSES,
   CRM_CHANGERS,
   DEAL_STATUSES,
@@ -76,11 +77,14 @@ import { RECIPIENT_OUTCOMES } from '../campaigns/outcomes';
 import { SEGMENT_LIMITS } from '../campaigns/segments';
 import { ORDER_REFERENCE_RE } from '../commerce/model';
 import { CRM_LIMITS } from '../crm/common';
-import { CLOSE_BUCKETS } from '../crm/forecast';
 import { CONTACT_FIELD_KEY_RE } from '../contacts/field-definitions';
 import { MAX_CONTACT_FIELDS } from '../contacts/fields';
 import { MAX_TAGS_PER_CONVERSATION } from '../inbox/conversation-tags';
 import { TEMPLATE_HEADER_MEDIA } from '../templates/definition';
+import {
+  apiCreateMessageTemplateSchema,
+  apiUpdateMessageTemplateSchema,
+} from './message-template-drafts';
 import { MESSAGE_TEMPLATE_HISTORY } from './message-templates';
 import {
   apiStartAutomationSchema,
@@ -133,11 +137,22 @@ import {
 } from './deals';
 import { API_NOTE_MAX_LENGTH, apiCreateNoteSchema } from './notes';
 import { apiCreatePipelineSchema, apiUpdatePipelineSchema } from './pipelines';
+import { apiPipelineForecastSchema } from './pipeline-forecast';
+import { apiReportSchema } from './reports';
+import { apiFlowResponseSchema, apiFlowSchema, apiJsonValueSchema } from './flows';
+import {
+  apiChatLinkDetailSchema,
+  apiChatLinkSchema,
+  apiCreateChatLinkSchema,
+  apiUpdateChatLinkSchema,
+} from './chat-links';
+import { MAX_PERIOD_DAYS, PERIOD_PRESETS } from '../reports/period';
 import { apiCreateTeamSchema, apiUpdateTeamSchema } from './teams';
 import { apiUpdateMemberSchema } from './members';
 import { apiCreateClosedDaySchema, apiUpdateBusinessHoursSchema } from './business-hours';
 import { MAX_RANGES_PER_DAY } from '../inbox/business-hours';
 import { MAX_SAVED_REPLIES } from '../inbox/saved-replies';
+import { GROWTH_LIMITS } from '../growth/model';
 import {
   SATISFACTION_SURVEY_STATUSES,
   apiSatisfactionSurveySchema,
@@ -299,6 +314,32 @@ export const apiConversationSchema = z.object({
     .describe(
       'The conversation’s tags, alphabetically, as members and keys put them on it (lower-cased, without commas).',
     ),
+  source: z
+    .object({
+      kind: z.enum(CONVERSATION_SOURCE_KINDS),
+      at: z.iso.datetime().describe('When the customer’s message that carried it arrived.'),
+      chatLink: z
+        .object({ id: z.uuid(), name: z.string() })
+        .nullable()
+        .describe(
+          'The chat link whose reference the customer sent (`link`), as GET /chat-links names it.',
+        ),
+      ad: z
+        .object({
+          id: z.string().nullable(),
+          type: z.string().nullable(),
+          headline: z.string().nullable(),
+          url: z.string().nullable(),
+        })
+        .nullable()
+        .describe(
+          'The click-to-WhatsApp ad the customer wrote from (`ad`): Meta’s id and type for it, its headline and web address, as Meta sent them; never the ad click id.',
+        ),
+    })
+    .nullable()
+    .describe(
+      'Where the conversation came from, as the inbox shows it: its latest source, the chat link whose reference the customer sent or the click-to-WhatsApp ad they wrote from; null for neither.',
+    ),
   unreadCount: z.number().int(),
   lastMessageAt: z.iso.datetime().nullable(),
   lastInboundAt: z.iso.datetime().nullable().describe('When the contact last wrote.'),
@@ -446,57 +487,6 @@ export const apiPipelineSchema = z.object({
     .nullable()
     .describe('With `createdBy` `api`, the key that added it; null otherwise.'),
   createdAt: z.iso.datetime(),
-});
-
-/** A CRM pipeline's weighted forecast (ADR-288). */
-export const apiPipelineForecastSchema = z.object({
-  pipelineId: z.uuid(),
-  currency: z.string().describe('ISO 4217, like INR: the currency of every value.'),
-  timeZone: z
-    .string()
-    .describe('The company’s time zone, like Asia/Kolkata: the months are its calendar months.'),
-  months: z
-    .array(z.string())
-    .length(3)
-    .describe('This month and the next two, YYYY-MM: the months of the first three buckets.'),
-  asOf: z.iso.datetime().describe('When the forecast was read.'),
-  hasChances: z
-    .boolean()
-    .describe(
-      'Whether any active stage of the pipeline has a chance of winning; without one nothing is weighed and every `weightedMinor` is null.',
-    ),
-  buckets: z
-    .array(
-      z.object({
-        bucket: z
-          .enum(CLOSE_BUCKETS)
-          .describe(
-            'When the deals are expected to close: `this_month` (dates already past included, as on the board), `next_month`, `month_after`, `later`, or `undated`.',
-          ),
-        deals: z.number().int().min(0),
-        valueMinor: z
-          .number()
-          .int()
-          .min(0)
-          .describe(
-            'Their value in the currency’s minor units (paise for INR); deals without a value count 0.',
-          ),
-        weightedMinor: z
-          .number()
-          .int()
-          .min(0)
-          .nullable()
-          .describe(
-            'Each stage’s value in the bucket times its chance, rounded to the minor unit; stages without a chance add nothing. Null when no stage has a chance.',
-          ),
-      }),
-    )
-    .describe('The five buckets, always in this order: `this_month` to `undated`.'),
-  dealsWithoutChance: z
-    .number()
-    .int()
-    .min(0)
-    .describe('Deals counted in the buckets but not weighed: their stage has no chance.'),
 });
 
 /** A CRM deal (ADR-253). */
@@ -876,10 +866,17 @@ export const apiMessageTemplateSchema = z.object({
   submitError: z
     .string()
     .nullable()
-    .describe('Why HyFib could not submit it, while its status is `submit_failed`.'),
+    .describe(
+      'Why HyFib could not submit it, while its status is `submit_failed`; while it is `submitting`, that HyFib is waiting for Meta to confirm it.',
+    ),
   origin: z
     .enum(['local', 'synced'])
     .describe('`local`: added in HyFib; `synced`: found at Meta, added in WhatsApp Manager.'),
+  createdBy: z
+    .enum(['member', 'api'])
+    .nullable()
+    .describe('Who added it in HyFib: a member (never which) or a key; null when found at Meta.'),
+  createdByApiKeyId: z.uuid().nullable().describe('The key that added it, when a key did.'),
   version: z.number().int().describe('Changes with every change HyFib records.'),
   sendable: z
     .boolean()
@@ -1001,7 +998,9 @@ export const apiTeamSettingsSchema = z.object({
     .describe('Words in a customer’s first message that route the conversation to the team.'),
   memberIds: z
     .array(z.uuid())
-    .describe('The team’s active members, as GET /members lists them, in the order they joined.'),
+    .describe(
+      'The team’s members who answer conversations now, as GET /members lists them, in the order they joined; a member suspended or given another role is left out until they can again.',
+    ),
   channelIds: z
     .array(z.uuid())
     .describe('The WhatsApp numbers whose new conversations go to the team (GET /channels).'),
@@ -1416,7 +1415,11 @@ export const apiErrorSchema = z.object({
 });
 
 function jsonSchema(schema: z.ZodType, io: 'input' | 'output' = 'output') {
-  const { $schema: _ignored, ...rest } = z.toJSONSchema(schema, { io }) as Record<string, unknown>;
+  const { $schema: _ignored, ...rest } = z.toJSONSchema(schema, {
+    io,
+    // Any JSON value (a form's answers) is the JsonValue component; nothing else is unnamed.
+    unrepresentable: (ctx) => (ctx.zodSchema === apiJsonValueSchema ? ref('JsonValue') : 'throw'),
+  }) as Record<string, unknown>;
   return rest;
 }
 
@@ -1590,6 +1593,20 @@ export function buildOpenApiDocument(serverUrl: string) {
             ...errors(401, 403, 422, 429, 500),
           },
         },
+        post: {
+          operationId: 'createMessageTemplate',
+          summary: 'Add a template draft',
+          description: `${scopeNote('templates.write')} A draft as members add one on the Templates page, for the WhatsApp Business account of one of the company’s numbers (\`channelId\`; 404 for another company’s number or an unknown one): a name of lower-case letters, digits and underscores and a language code, unique together in the account (409 otherwise; a deleted draft Meta never received is used again), and its content, checked as the template editor checks it (422 with the problems otherwise). It stays a draft until it is submitted to Meta (POST /message-templates/{id}/submit, or on the Templates page). The audit log names the key, and the template gives \`createdBy: "api"\`. With an \`Idempotency-Key\`, a retry answers the first response.`,
+          parameters: [{ $ref: '#/components/parameters/IdempotencyKeyOptional' }],
+          requestBody: { required: true, content: json(ref('CreateMessageTemplate')) },
+          responses: {
+            '201': {
+              description: 'The draft.',
+              content: json(dataOf(ref('MessageTemplateDetail'))),
+            },
+            ...errors(400, 401, 403, 404, 409, 415, 422, 423, 429, 500),
+          },
+        },
       },
       '/message-templates/{id}': {
         get: {
@@ -1603,6 +1620,67 @@ export function buildOpenApiDocument(serverUrl: string) {
               content: json(dataOf(ref('MessageTemplateDetail'))),
             },
             ...errors(401, 403, 404, 429, 500),
+          },
+        },
+        patch: {
+          operationId: 'updateMessageTemplate',
+          summary: 'Change a draft’s content',
+          description: `${scopeNote('templates.write')} Sets a draft’s whole content as members save it on the Templates page, checked as when adding one: only a draft Meta never received (\`draft\` or \`submit_failed\`; 412 otherwise), from \`expectedVersion\` when given (409 for another version). Its name and language stay. Content the draft already has answers it as it is, with no audit entry, so a retry needs no \`Idempotency-Key\`; otherwise it becomes a \`draft\` again, its version moves on and the audit log names the key.`,
+          parameters: [{ $ref: '#/components/parameters/Id' }],
+          requestBody: { required: true, content: json(ref('UpdateMessageTemplate')) },
+          responses: {
+            '200': {
+              description: 'The draft now.',
+              content: json(dataOf(ref('MessageTemplateDetail'))),
+            },
+            ...errors(400, 401, 403, 404, 409, 412, 415, 422, 423, 429, 500),
+          },
+        },
+        delete: {
+          operationId: 'deleteMessageTemplate',
+          summary: 'Delete a template',
+          description: `${scopeNote('templates.write')} Deletes a template as members do on the Templates page. A draft Meta never received is deleted at once: it is then listed with \`status=deleted\`, and its name and language can be used again. One Meta has also needs \`templates.submit\` (403 naming it otherwise): HyFib asks Meta to delete it, and it is \`pending_deletion\` until Meta answers, then \`deleted\`, when it can no longer be sent (messages already sent are not affected), or, when Meta refuses, back to the status Meta reports, with a \`delete_failed\` change in its history. One being submitted answers 412; one already deleted, or being deleted, 409. The audit log names the key.`,
+          parameters: [{ $ref: '#/components/parameters/Id' }],
+          responses: {
+            '200': {
+              description: 'Deleted, or being deleted at Meta.',
+              content: json(
+                dataOf({
+                  type: 'object',
+                  properties: {
+                    id: { type: 'string', format: 'uuid' },
+                    deleted: {
+                      type: 'boolean',
+                      description: 'Whether it is deleted now: false while Meta deletes it.',
+                    },
+                    status: { type: 'string', enum: ['deleted', 'pending_deletion'] },
+                  },
+                  required: ['id', 'deleted', 'status'],
+                }),
+              ),
+            },
+            ...errors(401, 403, 404, 409, 412, 423, 429, 500),
+          },
+        },
+      },
+      '/message-templates/{id}/submit': {
+        post: {
+          operationId: 'submitMessageTemplate',
+          summary: 'Submit a draft to Meta for review',
+          description: [
+            `${scopeNote('templates.submit')} Submits a draft as members do on the Templates page: only a draft Meta never received (\`draft\` or \`submit_failed\`; 412 otherwise, as for one submitted already), whose WhatsApp Business account is connected (412 otherwise), its content checked again as the template editor checks it (422). It is \`submitting\` until HyFib has Meta’s answer, then as Meta reports it: \`pending\` while Meta reviews it, then \`approved\` or \`rejected\` with Meta’s reason, which GET /message-templates/{id} gives and template.status_changed webhook events report; or \`submit_failed\`, with \`submitError\` saying why, when Meta did not take it, to be changed and submitted again. Its content no longer changes once Meta has it. The audit log names the key.`,
+            'With an `Idempotency-Key`, a retry answers the first response; without one, submitting it again is refused with 412.',
+          ].join('\n\n'),
+          parameters: [
+            { $ref: '#/components/parameters/Id' },
+            { $ref: '#/components/parameters/IdempotencyKeyOptional' },
+          ],
+          responses: {
+            '200': {
+              description: 'The template, being submitted.',
+              content: json(dataOf(ref('MessageTemplateDetail'))),
+            },
+            ...errors(400, 401, 403, 404, 412, 422, 423, 429, 500),
           },
         },
       },
@@ -2111,6 +2189,20 @@ export function buildOpenApiDocument(serverUrl: string) {
               description:
                 'Only the conversations with this tag, however its letters are cased. A value that cannot be a tag (over 40 characters, or with a comma) is refused (422).',
             },
+            {
+              name: 'source',
+              in: 'query',
+              schema: { type: 'string', enum: [...CONVERSATION_SOURCE_KINDS] },
+              description:
+                'Only the conversations that came from a chat link (`link`: the customer sent its reference) or from a click-to-WhatsApp ad (`ad`), whenever in the conversation.',
+            },
+            {
+              name: 'chatLinkId',
+              in: 'query',
+              schema: { type: 'string', format: 'uuid' },
+              description:
+                'Only the conversations whose customer sent this chat link’s reference (GET /chat-links), whenever in the conversation; a link’s `last30Days.conversations` counts those of the last 30 days.',
+            },
           ],
           responses: {
             '200': { description: 'A page of conversations.', content: pageOf('Conversation') },
@@ -2268,6 +2360,156 @@ export function buildOpenApiDocument(serverUrl: string) {
           ],
           responses: {
             '200': { description: 'A page of surveys.', content: pageOf('SatisfactionSurvey') },
+            ...errors(401, 403, 422, 429, 500),
+          },
+        },
+      },
+      '/flows': {
+        get: {
+          operationId: 'listFlows',
+          summary: 'WhatsApp Flows, newest first',
+          description: `${scopeNote('flows.read')} The company’s WhatsApp Flows, the forms members send in chats, as the Flows page lists them: those in use, or archived ones with \`archived=true\`, newest first on pages that never skip or repeat a flow. Each with Meta’s status, the keys of its answers, where each answer goes on the contact and the numbers that can send it. Never the Flow JSON or its data endpoint.`,
+          parameters: [
+            ...pageParams,
+            {
+              name: 'archived',
+              in: 'query',
+              schema: { type: 'string', enum: ['true', 'false'] },
+              description: '`true`: only archived flows; otherwise only those in use.',
+            },
+          ],
+          responses: {
+            '200': { description: 'A page of flows.', content: pageOf('Flow') },
+            ...errors(401, 403, 422, 429, 500),
+          },
+        },
+      },
+      '/flow-responses': {
+        get: {
+          operationId: 'listFlowResponses',
+          summary: 'Completed forms, newest first',
+          description: [
+            `${scopeNote('flows.read')} The forms customers completed with the company’s flows, newest first by when they were received, on pages that never skip or repeat one, by flow, contact and time; filters combine. Each with what each mapped answer did to the contact. Erasing a contact deletes its responses.`,
+            `Who completed a form (\`contactId\`, \`conversationId\` and \`messageId\`, the customer’s message that completed it) and what they typed (\`answers\`) are given only to keys with \`contacts.read\` too, as members see them on the Flows page only with that permission: other keys get null and may not filter by contact. A form whose token matched no form HyFib sent has no flow (\`flowId\` null) and changed no contact.`,
+          ].join('\n\n'),
+          parameters: [
+            ...pageParams,
+            {
+              name: 'flowId',
+              in: 'query',
+              schema: { type: 'string', format: 'uuid' },
+              description: 'Only this flow’s responses.',
+            },
+            {
+              name: 'contactId',
+              in: 'query',
+              schema: { type: 'string', format: 'uuid' },
+              description: 'Only this contact’s responses; needs `contacts.read` too.',
+            },
+            {
+              name: 'receivedSince',
+              in: 'query',
+              schema: { type: 'string', format: 'date-time' },
+              description: 'Only the responses received at or after this time.',
+            },
+          ],
+          responses: {
+            '200': { description: 'A page of responses.', content: pageOf('FlowResponse') },
+            ...errors(401, 403, 422, 429, 500),
+          },
+        },
+      },
+      '/chat-links': {
+        get: {
+          operationId: 'listChatLinks',
+          summary: 'Chat links, newest first',
+          description: `${scopeNote('chat_links.read')} The company’s chat links, as the Growth pages list them: short links and QR codes that open a chat with one of its numbers with a message ready to send. Those in use, or archived ones with \`archived=true\`, newest first on pages that never skip or repeat a link. Each with its short link, the wa.me address it opens, its number, and its clicks and the conversations it started in the last 30 days. Visitors are never identified: clicks are counted per link and day only, repeated clicks and automated visits included.`,
+          parameters: [
+            ...pageParams,
+            {
+              name: 'archived',
+              in: 'query',
+              schema: { type: 'string', enum: ['true', 'false'] },
+              description: '`true`: only archived links; otherwise only those in use.',
+            },
+          ],
+          responses: {
+            '200': { description: 'A page of chat links.', content: pageOf('ChatLink') },
+            ...errors(401, 403, 422, 429, 500),
+          },
+        },
+        post: {
+          operationId: 'createChatLink',
+          summary: 'Add a chat link',
+          description: `${scopeNote('chat_links.write')} As members who write campaigns add one under Growth → Chat links: on one of the company’s active numbers (422 otherwise), with a new reference and short link. A company keeps at most ${GROWTH_LIMITS.links} links in use (409 at the limit: archive some first). The link names the key as its author (\`createdBy\` \`api\`), and the audit log names it too. With an \`Idempotency-Key\`, a retry answers the first response.`,
+          parameters: [{ $ref: '#/components/parameters/IdempotencyKeyOptional' }],
+          requestBody: { required: true, content: json(ref('CreateChatLink')) },
+          responses: {
+            '201': { description: 'The chat link.', content: json(dataOf(ref('ChatLink'))) },
+            ...errors(400, 401, 403, 409, 415, 422, 423, 429, 500),
+          },
+        },
+      },
+      '/chat-links/{id}': {
+        get: {
+          operationId: 'getChatLink',
+          summary: 'A chat link with its clicks per day',
+          description: `${scopeNote('chat_links.read')} As GET /chat-links gives it, archived or not, with the days of the last 30 it was clicked on, in the company’s time zone, newest first. A conversation counts for a link when the customer’s message carries the link’s reference (“(ref CODE)”) on the link’s number, so the count is a lower bound: customers can edit the message, and a link without its reference counts none.`,
+          parameters: [{ $ref: '#/components/parameters/Id' }],
+          responses: {
+            '200': {
+              description: 'The chat link.',
+              content: json(dataOf(ref('ChatLinkDetail'))),
+            },
+            ...errors(401, 403, 404, 429, 500),
+          },
+        },
+        patch: {
+          operationId: 'updateChatLink',
+          summary: 'Change, archive or restore a chat link',
+          description: `${scopeNote('chat_links.write')} As members edit one under Growth → Chat links: what is given changes and the rest stays as it is, with the same checks as when adding one; a new number must be active. An archived link is changed only once restored (409): \`archived\` archives or restores it, in a request of its own. Its short link, QR code and buttons open nothing while it is archived. With \`expectedVersion\`, a link changed since is refused (409). A change that leaves the link as it is answers it as it is, with no audit entry, so a retry needs no \`Idempotency-Key\`; otherwise the audit log names the key.`,
+          parameters: [{ $ref: '#/components/parameters/Id' }],
+          requestBody: { required: true, content: json(ref('UpdateChatLink')) },
+          responses: {
+            '200': { description: 'The chat link now.', content: json(dataOf(ref('ChatLink'))) },
+            ...errors(400, 401, 403, 404, 409, 415, 422, 423, 429, 500),
+          },
+        },
+      },
+      '/reports': {
+        get: {
+          operationId: 'getReport',
+          summary: 'The company’s report for a period',
+          description: [
+            `${scopeNote('reports.read')} The numbers the Reports page shows, for one period: messaging outcomes, estimated Meta charges, the inbox and its reply and resolution times, satisfaction surveys, automation runs, CRM deals with each pipeline’s forecast, each member’s activity and the funnel of the campaigns started in the period, with what each metric counts (\`definitions\`). Read as the Reports page reads them, in the company’s time zone and in one snapshot, so they agree with each other and with the page at that moment. Members are named by id and name only, as GET /members names them.`,
+            `A period is a preset (\`last_7_days\` by default, \`last_30_days\`, \`this_month\` or \`last_month\`) or \`custom\` days \`from\` and \`to\`, at most ${MAX_PERIOD_DAYS} days and not after today (422 otherwise). Numbers are computed from HyFib’s records when asked: statuses Meta reports late change them later, and the inbox (\`inbox.now\`) and open deals are as they are when asked. Estimated charges are estimates from the published rates, never an invoice.`,
+          ].join('\n\n'),
+          parameters: [
+            {
+              name: 'preset',
+              in: 'query',
+              schema: {
+                type: 'string',
+                enum: [...PERIOD_PRESETS, 'custom'],
+                default: 'last_7_days',
+              },
+              description: 'The period, ending today, or `custom` for the days `from` and `to`.',
+            },
+            {
+              name: 'from',
+              in: 'query',
+              schema: { type: 'string', format: 'date' },
+              description: 'With `custom`: the first day, YYYY-MM-DD, in the company’s time zone.',
+            },
+            {
+              name: 'to',
+              in: 'query',
+              schema: { type: 'string', format: 'date' },
+              description: 'With `custom`: the last day, included, YYYY-MM-DD.',
+            },
+          ],
+          responses: {
+            '200': { description: 'The report.', content: json(dataOf(ref('Report'))) },
             ...errors(401, 403, 422, 429, 500),
           },
         },
@@ -2523,7 +2765,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         patch: {
           operationId: 'updateTeam',
           summary: 'Change a team',
-          description: `${scopeNote('teams.manage')} As members save a team in Settings → Teams: the settings given change and the rest stay as they are; \`memberIds\` and \`channelIds\` replace the team’s lists. The same checks as when adding one apply (409 for a name in use, 422 naming \`memberIds\` or \`channelIds\`). Waiting conversations are routed again. A change that leaves the team as it is answers it as it is, with no audit entry, so a retry needs no \`Idempotency-Key\`; otherwise the audit log names the key.`,
+          description: `${scopeNote('teams.manage')} As members save a team in Settings → Teams: the settings given change and the rest stay as they are; \`memberIds\` and \`channelIds\` replace the team’s lists, though members who cannot answer conversations now (suspended, or given another role) are never in \`memberIds\` and keep their place in the team. The same checks as when adding one apply (409 for a name in use, 422 naming \`memberIds\` or \`channelIds\`). Waiting conversations are routed again. A change that leaves the team as it is answers it as it is, with no audit entry, so a retry needs no \`Idempotency-Key\`; otherwise the audit log names the key.`,
           parameters: [{ $ref: '#/components/parameters/Id' }],
           requestBody: { required: true, content: json(ref('UpdateTeam')) },
           responses: {
@@ -4099,8 +4341,29 @@ export function buildOpenApiDocument(serverUrl: string) {
         UpdateBusinessHours: jsonSchema(apiUpdateBusinessHoursSchema, 'input'),
         ClosedDay: jsonSchema(apiClosedDaySchema),
         SatisfactionSurvey: jsonSchema(apiSatisfactionSurveySchema),
+        Report: jsonSchema(apiReportSchema),
+        Flow: jsonSchema(apiFlowSchema),
+        FlowResponse: jsonSchema(apiFlowResponseSchema),
+        ChatLink: jsonSchema(apiChatLinkSchema),
+        ChatLinkDetail: jsonSchema(apiChatLinkDetailSchema),
+        CreateChatLink: jsonSchema(apiCreateChatLinkSchema, 'input'),
+        UpdateChatLink: jsonSchema(apiUpdateChatLinkSchema, 'input'),
+        JsonValue: {
+          description:
+            'Any JSON value: text, a number, true or false, null, a list of JSON values or an object of them.',
+          anyOf: [
+            { type: 'string' },
+            { type: 'number' },
+            { type: 'boolean' },
+            { type: 'null' },
+            { type: 'array', items: ref('JsonValue') },
+            { type: 'object', additionalProperties: ref('JsonValue') },
+          ],
+        },
         MessageTemplate: jsonSchema(apiMessageTemplateSchema),
         MessageTemplateDetail: jsonSchema(apiMessageTemplateDetailSchema),
+        CreateMessageTemplate: jsonSchema(apiCreateMessageTemplateSchema, 'input'),
+        UpdateMessageTemplate: jsonSchema(apiUpdateMessageTemplateSchema, 'input'),
         SavedReply: jsonSchema(apiSavedReplySchema),
         CreateSavedReply: jsonSchema(apiCreateSavedReplySchema, 'input'),
         UpdateSavedReply: jsonSchema(apiUpdateSavedReplySchema, 'input'),
@@ -4192,7 +4455,11 @@ export function buildOpenApiDocument(serverUrl: string) {
 export const API_ROUTES = [
   ['get', '/templates'],
   ['get', '/message-templates'],
+  ['post', '/message-templates'],
   ['get', '/message-templates/{id}'],
+  ['patch', '/message-templates/{id}'],
+  ['delete', '/message-templates/{id}'],
+  ['post', '/message-templates/{id}/submit'],
   ['get', '/channels'],
   ['get', '/contacts'],
   ['post', '/contacts'],
@@ -4226,6 +4493,13 @@ export const API_ROUTES = [
   ['get', '/conversations/{id}/notes'],
   ['get', '/conversations/{id}/messages'],
   ['get', '/satisfaction-surveys'],
+  ['get', '/reports'],
+  ['get', '/flows'],
+  ['get', '/flow-responses'],
+  ['get', '/chat-links'],
+  ['post', '/chat-links'],
+  ['get', '/chat-links/{id}'],
+  ['patch', '/chat-links/{id}'],
   ['get', '/members'],
   ['patch', '/members/{id}'],
   ['get', '/business-hours'],

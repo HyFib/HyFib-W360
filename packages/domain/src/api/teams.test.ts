@@ -1,7 +1,10 @@
+import { PgDialect } from 'drizzle-orm/pg-core';
 import { describe, expect, it } from 'vitest';
 import { isAppError } from '@w360/core';
 import { API_SCOPES, type Database } from '@w360/db';
 import { ROLE_PERMISSIONS } from '../authz/permissions';
+import { INBOX_WORKER_ROLES } from '../inbox/routing';
+import { droppedTeamMembers } from '../inbox/teams';
 import type { ApiContext } from './context';
 import { apiListTeams } from './members';
 import { API_SCOPE_INFO, API_SCOPE_KEYS } from './model';
@@ -338,5 +341,34 @@ describe('managing teams through the API (ADR-287)', () => {
       'createdAt',
       'updatedAt',
     ]);
+  });
+
+  it('keep the place of members who cannot answer conversations now when a team is saved', () => {
+    // Settings and keys list and choose only members who answer conversations, so a save takes
+    // away only their places and those of removed members: a member suspended or given another
+    // role keeps theirs and is back in the team when they can answer conversations again.
+    const render = (memberIds: string[]) => {
+      const { sql: text, params } = new PgDialect().sqlToQuery(
+        droppedTeamMembers(TENANT, TEAM, memberIds)!,
+      );
+      return [text.replace(/\s+/g, ' '), params];
+    };
+    const gone = (first: number) =>
+      `exists (select 1 from "app"."memberships" where ("app"."memberships"."tenant_id" = "app"."team_members"."tenant_id" and "app"."memberships"."id" = "app"."team_members"."membership_id" and (("app"."memberships"."status" = $${first} and "app"."memberships"."roles" && $${first + 1}::text[]) or "app"."memberships"."status" = $${first + 2})))`;
+    expect(render([AGENT, SUPERVISOR])).toEqual([
+      `("app"."team_members"."tenant_id" = $1 and "app"."team_members"."team_id" = $2 and "app"."team_members"."membership_id" not in ($3, $4) and ${gone(5)})`,
+      [TENANT, TEAM, AGENT, SUPERVISOR, 'active', [...INBOX_WORKER_ROLES], 'removed'],
+    ]);
+    // A team saved without members keeps the places of members who cannot answer conversations.
+    expect(render([])).toEqual([
+      `("app"."team_members"."tenant_id" = $1 and "app"."team_members"."team_id" = $2 and ${gone(3)})`,
+      [TENANT, TEAM, 'active', [...INBOX_WORKER_ROLES], 'removed'],
+    ]);
+    const doc = buildOpenApiDocument('https://example.test/api/v1') as unknown as {
+      paths: Record<string, Record<string, { description: string }>>;
+    };
+    expect(doc.paths['/teams/{id}']?.patch?.description).toContain(
+      'members who cannot answer conversations now (suspended, or given another role) are never in `memberIds` and keep their place in the team',
+    );
   });
 });

@@ -1,5 +1,282 @@
 # Progress
 
+## 2026-10-07 — Review fix: saving a team keeps the places of members who cannot answer now (ADR-287 amended)
+
+Status: **Implemented; its database test runs in CI only.** The Codex review of PR #40 found that
+saving a team, in Settings or with `PATCH /teams/{id}` (members given or not), took away the places
+of members suspended or given another role at the time, so they were in none of their teams when
+they came back. No migration. The local PostgreSQL is unavailable, so the integration test below was
+written but not run here.
+
+### Completed
+
+- **Domain:** `droppedTeamMembers` in `inbox/teams.ts`, the places a save takes away: those of
+  members who answer conversations and are left out, and of removed members; the shared writer
+  deletes only those. The `memberIds` descriptions and `PATCH /teams/{id}` say so.
+- **Tests:** unit (`api/teams.test.ts`, 1 new: the condition with and without members, the
+  description); integration (1 new in `api.test.ts`: a suspended member and one given another role
+  keep their places through API changes, with members and without, and a Settings save, and are the
+  team's again when restored; a member left out and a removed member lose theirs). Written for CI;
+  the integration test was not run here.
+- **Docs:** ADR-287 amended; ARCHITECTURE; RUNBOOKS; DEPLOYMENT; feature matrix W-037.
+- **Mutation checks:** 10/10 deliberate regressions caught.
+- **Not changed:** the second finding of that review (forecast sums as JavaScript numbers, exact up
+  to 2^53 − 1 minor units) is answered on its thread: it needs open deals worth more than about 9 ×
+  10^15 minor units in one stage and month (₹90 trillion in a rupee pipeline), and money sums are
+  numbers throughout the board, Reports and the API; the call is the project owner's.
+
+### Test commands and results (local, 2026-10-07)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 136 files, 1285 tests                                         |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
+## 2026-10-07 — Where conversations came from, through the public API (P5-08, H-033, W-160, ADR-301)
+
+Status: **Implemented; its database tests run in CI only.** The inbox showed the chat link or
+click-to-WhatsApp ad a conversation came from, but keys could not read it or find a link's
+conversations. No migration. The local PostgreSQL is unavailable, so the integration test below was
+written but not run here.
+
+### Completed
+
+- **Domain:** `conversationSourceOf` in `growth/sources.ts` (the inbox's latest source as one SQL
+  subquery); `source` on every conversation the API gives (`ApiConversationSource`, `toApiSource`)
+  and the `source` and `chatLinkId` filters (`conversationFilterSql`) in `api/conversations.ts`; the
+  OpenAPI schema and parameters.
+- **Tests:** unit (`api/conversation-sources.test.ts`, 3 new: the filters and their SQL, the latest
+  source for a link, an ad and none, the OpenAPI entries); integration (1 new in
+  `api-chat-links.test.ts`; the exact conversation in `api.test.ts` gives `source: null`). Written
+  for CI; the integration test was not run here. No e2e test.
+- **Docs:** ADR-301; ARCHITECTURE; SECURITY; THREAT-MODEL T269; DEPLOYMENT; RUNBOOKS; BACKLOG P5-08;
+  feature matrix H-033 and W-160.
+- **Mutation checks:** 30/30 deliberate regressions caught, two after the tests were tightened.
+
+### Test commands and results (local, 2026-10-07)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 136 files, 1284 tests                                         |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
+## 2026-10-07 — Chat links written through the public API (P5-08, H-033, W-160, ADR-300)
+
+Status: **Implemented; its database tests run in CI only.** Keys read the company's chat links
+(ADR-299) but could not add or archive them. The local PostgreSQL is unavailable, so the migrations
+and the integration test below were written but not run here; migrations 0223 and 0224 passed the
+pglast parse check (syntax only).
+
+### Completed
+
+- **Database:** migration 0223 (`chat_links.write` in the scope checks;
+  `chat_links.created_by_api_key_id` with its foreign key and the one-author check, NOT VALID;
+  `created_by_membership_id` nullable); 0224 (validates them).
+- **Domain:** `apiCreateChatLink`, `apiUpdateChatLink` and their schemas in `api/chat-links.ts`;
+  links give `createdBy` and `createdByApiKeyId`; the Growth pages' writers shared from
+  `growth/service.ts` (`writeCreateChatLink`, `writeUpdateChatLink`, `writeSetChatLinkArchived`,
+  `assertLinkChannel`, `lockChatLink`, `withFreshIds`); the scope; the export of
+  `created_by_api_key_id`; the OpenAPI operations and components.
+- **Web:** `POST /api/v1/chat-links`, `PATCH /api/v1/chat-links/{id}`.
+- **Tests:** unit (`api/chat-links.test.ts`, 5 new: the scope and its refusals, the addition, the
+  changes, archiving and restoring, the OpenAPI entries); integration (1 new in
+  `api-chat-links.test.ts`). Written for CI; the integration test was not run here. No e2e test.
+- **Docs:** ADR-300; ARCHITECTURE; SECURITY; THREAT-MODEL T268; DEPLOYMENT; RUNBOOKS; BACKLOG P5-08;
+  feature matrix H-033 and W-160.
+- **Mutation checks:** 43/43 deliberate regressions caught, one after a test was added.
+
+### Test commands and results (local, 2026-10-07)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 135 files, 1281 tests                                         |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| pglast 7 parse of migrations 0223 and 0224         | passed (syntax only)                                          |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
+## 2026-10-07 — Chat links through the public API (P5-08, H-033, W-160, ADR-299)
+
+Status: **Implemented; its database tests run in CI only.** Keys could not read the company's chat
+links or their counts, which only the Growth pages showed. The local PostgreSQL is unavailable, so
+the migration and the integration test below were written but not run here; migration 0222 passed
+the pglast parse check (syntax only).
+
+### Completed
+
+- **Database:** migration 0222 (`chat_links.read` in the scope checks of keys and plans).
+- **Domain:** `api/chat-links.ts` (`apiListChatLinks`, `apiGetChatLink`, their schemas); the 30-day
+  counts shared from `growth/service.ts` (`linkClicks30`, `linkConversations30`); the scope; the
+  OpenAPI operations and components.
+- **Web:** `GET /api/v1/chat-links`, `GET /api/v1/chat-links/{id}`.
+- **Tests:** unit (`api/chat-links.test.ts`, 4: the scope and its refusals, the pages with the
+  counts' SQL, one link with its clicks per day, the OpenAPI entries); integration
+  (`api-chat-links.test.ts`, 1). Written for CI; the integration test was not run here. No e2e test.
+- **Docs:** ADR-299; ARCHITECTURE; SECURITY; THREAT-MODEL T267; DEPLOYMENT; RUNBOOKS; BACKLOG P5-08;
+  feature matrix H-033 and W-160.
+- **Mutation checks:** 34/34 deliberate regressions caught.
+
+### Test commands and results (local, 2026-10-07)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 135 files, 1276 tests                                         |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| pglast 7 parse of migration 0222                   | passed (syntax only)                                          |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
+## 2026-10-07 — WhatsApp Flows and their responses through the public API (P5-08, H-033, W-085, ADR-298)
+
+Status: **Implemented; its database tests run in CI only.** Keys read contacts and messages but not
+the company's flows or the forms customers completed with them, which only the Flows page showed.
+The local PostgreSQL is unavailable, so the migrations and the integration test below were written
+but not run here; migrations 0220 and 0221 passed the pglast parse check (syntax only).
+
+### Completed
+
+- **Database:** migration 0220 (`flows.read` in the scope checks of keys and plans); 0221
+  (`flow_responses_received_idx`, built concurrently).
+- **Domain:** `api/flows.ts` (`apiListFlows`, `apiListFlowResponses`, their query and item schemas,
+  `apiJsonValueSchema` for answers, which the OpenAPI document names `JsonValue`); `activeNumbers`
+  shared from `api/message-templates.ts`; the scope; the OpenAPI operations and components.
+- **Web:** `GET /api/v1/flows`, `GET /api/v1/flow-responses`.
+- **Tests:** unit (`api/flows.test.ts`, 4: the scopes and queries, the flows' pages with their
+  numbers, the responses' pages with who and what only with `contacts.read` in the key and the plan,
+  the OpenAPI entries); integration (1 new in `api.test.ts`). Written for CI; the integration test
+  was not run here. No e2e test.
+- **Docs:** ADR-298; ARCHITECTURE; SECURITY; THREAT-MODEL T266; DEPLOYMENT; RUNBOOKS; BACKLOG P5-08;
+  feature matrix H-033 and W-085.
+- **Mutation checks:** 46/46 deliberate regressions caught, one after a test was added.
+
+### Test commands and results (local, 2026-10-07)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 134 files, 1272 tests                                         |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| pglast 7 parse of migrations 0220 and 0221         | passed (syntax only)                                          |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
+## 2026-10-07 — The Reports page's numbers through the public API (P5-08, H-033, W-157, ADR-297)
+
+Status: **Implemented; its database tests run in CI only.** Keys read the records but not the
+Reports page's numbers, so a company feeding a BI tool downloaded the CSV exports by hand. The local
+PostgreSQL is unavailable, so the migration and the integration tests below were written but not run
+here; migration 0219 passed the pglast parse check (syntax only).
+
+### Completed
+
+- **Database:** migration 0219 (`reports.read` in the scope checks of keys and plans).
+- **Domain:** `api/reports.ts` (`apiGetReport`, `apiReportQuerySchema`, `apiReportSchema`,
+  `toApiReport`); `readReport` shared from `reports/service.ts` with the page's `getReport`; the
+  forecast's API schema moved to `api/pipeline-forecast.ts`; the scope; the OpenAPI operation and
+  component.
+- **Web:** `GET /api/v1/reports`.
+- **Tests:** unit (`api/reports.test.ts`, 5: the scope, the query, the period cut in the company's
+  time zone, the snapshot, the mapping and its schema, the OpenAPI entry); integration (2 new in
+  `api.test.ts`). Written for CI; the integration tests were not run here. No e2e test.
+- **Docs:** ADR-297; ARCHITECTURE; SECURITY; THREAT-MODEL T265; DEPLOYMENT; RUNBOOKS; BACKLOG P5-08;
+  feature matrix H-033 and W-157.
+- **Mutation checks:** 28/28 deliberate regressions caught.
+
+### Test commands and results (local, 2026-10-07)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 133 files, 1268 tests                                         |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| pglast 7 parse of migration 0219                   | passed (syntax only)                                          |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
+## 2026-10-07 — Template submission and deletion at Meta through the public API (P5-08, H-033, W-059, ADR-296)
+
+Status: **Implemented; its database tests run in CI only.** Keys could add and change drafts
+(ADR-295) but each waited for a member to submit it, and only members deleted templates Meta has.
+The local PostgreSQL is unavailable, so the migration and the integration tests below were written
+but not run here; migration 0218 passed the pglast parse check (syntax only).
+
+### Completed
+
+- **Database:** migration 0218 (`templates.submit` in the scope checks of keys and plans).
+- **Domain:** `apiSubmitMessageTemplate` and the deletion of templates Meta has in
+  `api/message-template-drafts.ts`; the Templates page's submission and deletion shared from
+  `templates/service.ts` (`writeSubmitTemplate`, `templateDeletion`, `writeDeleteTemplateAtMeta`,
+  `enqueueTemplateJob`); the scope; the OpenAPI operation and the deletion's answer.
+- **Web:** `POST /api/v1/message-templates/{id}/submit`; `DELETE /api/v1/message-templates/{id}`
+  deletes templates Meta has too.
+- **Tests:** unit (6 new in `api/message-template-drafts.test.ts`: the scope, refusals before any
+  query, the reads, writes and queued job of a submission and of a deletion at Meta, in their
+  transaction, as the key and as a member, the refusals, the OpenAPI entries; the ADR-295 tests and
+  the API scope tests updated); integration (3 new in `api.test.ts`, the ADR-295 tests updated).
+  Written for CI; the integration tests were not run here. No e2e test.
+- **Docs:** ADR-296; ARCHITECTURE; SECURITY; THREAT-MODEL T264; DEPLOYMENT; RUNBOOKS; BACKLOG P5-08;
+  feature matrix H-033 and W-059.
+- **Mutation checks:** 52/52 deliberate regressions caught.
+
+### Test commands and results (local, 2026-10-07)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 132 files, 1263 tests                                         |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| pglast 7 parse of migration 0218                   | passed (syntax only)                                          |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
+## 2026-10-07 — Template drafts through the public API (P5-08, H-033, W-059, ADR-295)
+
+Status: **Implemented; its database tests run in CI only.** Keys could read every template (ADR-294)
+but not add one: a company keeping its templates elsewhere typed each draft into the editor. The
+local PostgreSQL is unavailable, so the migrations and the integration tests below were written but
+not run here; migrations 0216 and 0217 passed the pglast parse check (syntax only).
+
+### Completed
+
+- **Database:** migrations 0216 (`templates.write` in the scope checks, which now allow 64 scopes;
+  `message_templates.created_by_api_key_id` with its foreign key and author check; the update grant
+  on both author columns) and 0217 (validating them).
+- **Domain:** `api/message-template-drafts.ts` (`apiCreateMessageTemplate`,
+  `apiUpdateMessageTemplate`, `apiDeleteMessageTemplate` and their schemas); the Templates page's
+  draft writes shared from `templates/service.ts`; `readApiMessageTemplate` and `createdBy` in
+  `api/message-templates.ts`; the scope; the OpenAPI operations and input components; the export of
+  the new column.
+- **Web:** `POST /api/v1/message-templates`, `PATCH` and `DELETE /api/v1/message-templates/{id}`.
+- **Tests:** unit (`api/message-template-drafts.test.ts`, 10: the scope, the parameters, refusals
+  before any query, each operation's reads and writes, the author, the reuse of a deleted draft, the
+  conflicts, the OpenAPI entries; the API scope tests and the template read tests updated);
+  integration (2 new in `api.test.ts`). Written for CI; the integration tests were not run here. No
+  e2e test.
+- **Docs:** ADR-295; ARCHITECTURE; SECURITY; THREAT-MODEL T263; DEPLOYMENT; RUNBOOKS; BACKLOG P5-08;
+  feature matrix H-033 and W-059.
+- **Mutation checks:** 43/44 deliberate regressions caught (one after a test was improved); the
+  survivor is equivalent: the database's one-author check keeps a template from naming both a member
+  and a key.
+
+### Test commands and results (local, 2026-10-07)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 132 files, 1257 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| pglast 7 parse of migrations 0216 and 0217         | passed (syntax only)                                          |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
 ## 2026-10-07 — Review fix: deal and task events matched against the owner and assignee at their step (P5-09, P4-04, H-014, ADR-275, ADR-276)
 
 Status: **Implemented; its database tests run in CI only.** The Codex review of PR #39 found that

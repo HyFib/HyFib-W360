@@ -12,18 +12,23 @@ import {
   MAX_SAVED_REPLIES,
   CRM_LIMITS,
   RUN_BUDGETS,
+  STARTER_FLOW_JSON,
   advanceAutomationRun,
+  authorizeJob,
   apiAddConversationNote,
   apiCreateClosedDay,
   apiCreateSavedReply,
   apiCreateContact,
   apiCreateDeal,
+  apiCreateMessageTemplate,
   apiCreateNote,
   apiCreatePipeline,
   apiCreateTask,
   apiCreateTeam,
   apiDeleteTeam,
   apiDeleteClosedDay,
+  apiDeleteMessageTemplate,
+  apiSubmitMessageTemplate,
   apiDeleteSavedReply,
   apiErrorResponse,
   apiGetAutomationRun,
@@ -33,6 +38,7 @@ import {
   apiGetDeal,
   apiGetOrder,
   apiGetPipelineForecast,
+  apiGetReport,
   apiGetMessage,
   apiGetMessageTemplate,
   apiGetNote,
@@ -44,6 +50,8 @@ import {
   apiListClosedDays,
   apiListSavedReplies,
   apiListContacts,
+  apiListFlowResponses,
+  apiListFlows,
   apiListConversationMessages,
   apiListConversationNotes,
   apiListConversations,
@@ -65,6 +73,7 @@ import {
   apiSendTemplate,
   apiUpdateConversation,
   apiUpdateBusinessHours,
+  apiUpdateMessageTemplate,
   apiUpdateSavedReply,
   apiUpdateDeal,
   apiUpdatePipeline,
@@ -91,6 +100,7 @@ import {
   createContactsService,
   createCrmService,
   createCsatService,
+  createFlowsService,
   createInboxService,
   createPlanAdminService,
   createReportsService,
@@ -107,6 +117,7 @@ import {
   outboxAad,
   processCommerceSync,
   processSendIntent,
+  processTemplateDelete,
   processTemplateSubmit,
   purgeApiIdempotencyKeys,
   queueTemplateMessage,
@@ -115,6 +126,7 @@ import {
   remindExpiringApiKeys,
   routeDueConversations,
   syncTemplates,
+  toApiReport,
   type ApiAutomationRun,
   type ApiAutomationRunStart,
   type ApiContext,
@@ -6770,6 +6782,7 @@ describe('conversation reads (ADR-072)', () => {
       updatedAt: row!.updated_at.toISOString(),
       resolvedAt: null,
       tags: [],
+      source: null,
     });
     expect(await apiGetConversation(deps(), ctx, assigned.id)).toEqual(shown);
     expect(listed.find((x) => x.id === resolved.id)).toMatchObject({
@@ -8719,6 +8732,57 @@ describe('assigning conversations (ADR-093)', () => {
     );
   });
 
+  it('keep the places of members who cannot answer conversations when a team is saved (ADR-287)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const agent = await fx.ctx(c, c.agent);
+    const supervisor = await joined(c, 'supervisor', 'Sam Supervisor');
+    const manager = await apiKey(c, ['teams.manage']);
+    const { teamId } = await teams().createTeam(owner, {
+      name: 'Support',
+      memberIds: [agent.membership.id, supervisor.membership.id],
+    });
+    const both = [agent.membership.id, supervisor.membership.id].sort();
+    const members = async () =>
+      [...(await apiGetTeam(deps(), manager.ctx, teamId)).memberIds].sort();
+    const places = async () =>
+      (
+        await fx.query<{ membership_id: string }>(
+          'SELECT membership_id FROM app.team_members WHERE team_id = $1 ORDER BY membership_id',
+          [teamId],
+        )
+      ).map((r) => r.membership_id);
+    const setMember = (id: string, column: 'status' | 'roles', value: string | string[]) =>
+      fx.query(`UPDATE app.memberships SET ${column} = $2 WHERE id = $1`, [id, value]);
+
+    // Suspended, or given a role that cannot answer conversations, neither is the team's member;
+    // changes through the API, without members or with none, and a save in Settings keep their
+    // places.
+    await setMember(supervisor.membership.id, 'status', 'suspended');
+    await setMember(agent.membership.id, 'roles', ['marketer']);
+    expect(await members()).toEqual([]);
+    expect(
+      (await apiUpdateTeam(deps(), manager.ctx, teamId, { name: 'Customer care' })).memberIds,
+    ).toEqual([]);
+    await apiUpdateTeam(deps(), manager.ctx, teamId, { memberIds: [], description: 'Orders' });
+    await teams().updateTeam(owner, teamId, { name: 'Customer care', memberIds: [] });
+    expect(await places()).toEqual(both);
+
+    // Back as they were, they are the team's members again.
+    await setMember(supervisor.membership.id, 'status', 'active');
+    await setMember(agent.membership.id, 'roles', ['agent']);
+    expect(await members()).toEqual(both);
+
+    // A member who answers conversations and is left out loses the place, and so does a removed
+    // member at the next save.
+    await apiUpdateTeam(deps(), manager.ctx, teamId, { memberIds: [agent.membership.id] });
+    expect(await places()).toEqual([agent.membership.id]);
+    await apiUpdateTeam(deps(), manager.ctx, teamId, { memberIds: both });
+    await setMember(supervisor.membership.id, 'status', 'removed');
+    await apiUpdateTeam(deps(), manager.ctx, teamId, { description: 'Orders and returns' });
+    expect(await places()).toEqual([agent.membership.id]);
+  });
+
   it('set whether members take conversations as Settings does, as the key (ADR-289)', async () => {
     const c = await fx.company();
     const other = await fx.company();
@@ -9373,6 +9437,806 @@ describe('message templates of every status (ADR-294)', () => {
       apiListMessageTemplates(deps(), sender.ctx, {}),
       'forbidden',
       /templates\.read/,
+    );
+  });
+});
+
+describe('template drafts through the API (ADR-295)', () => {
+  const shipped: TemplateDefinition = {
+    category: 'UTILITY',
+    header: { type: 'none' },
+    body: { text: 'Hi {{1}}, your order has shipped.', examples: ['Asha'] },
+    footer: null,
+    buttons: [],
+  };
+  const delayed: TemplateDefinition = {
+    ...shipped,
+    body: { text: 'Hi {{1}}, your order is delayed.', examples: ['Asha'] },
+  };
+  type Detail = { id: string; status: string; version: number };
+  const auditOf = (id: string) =>
+    fx.query<{ actor_type: string; actor_id: string | null; action: string; metadata: unknown }>(
+      `SELECT actor_type, actor_id, action, metadata FROM app.audit_events
+        WHERE subject_type = 'template' AND subject_id = $1 ORDER BY occurred_at, id`,
+      [id],
+    );
+
+  it('adds, changes and deletes drafts as the key, through the writes of the Templates page (ADR-295)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const writer = await apiKey(c, ['templates.write']);
+    const reader = await apiKey(c, ['templates.read']);
+    const templates = createTemplatesService({
+      db: fx.dbs.app,
+      jobs: fx.jobs(),
+      signer: fx.signer,
+      clock: systemClock,
+    });
+    const name = `api_draft_${Date.now().toString(36)}`;
+    const draft = { channelId: c.channelAccountId, name, language: 'en', definition: shipped };
+
+    // Added for the number's account as the key's, once per Idempotency-Key.
+    const added = await apiCreateMessageTemplate(
+      deps(),
+      writer.ctx,
+      draft,
+      idem('draft-1', JSON.stringify(draft)),
+    );
+    expect(added).toMatchObject({
+      status: 201,
+      replayed: false,
+      body: {
+        data: {
+          name,
+          status: 'draft',
+          origin: 'local',
+          createdBy: 'api',
+          createdByApiKeyId: writer.id,
+          version: 0,
+          definition: shipped,
+          channels: [expect.objectContaining({ id: c.channelAccountId })],
+          history: [],
+        },
+      },
+    });
+    const id = (added.body as { data: Detail }).data.id;
+    expect(
+      await apiCreateMessageTemplate(
+        deps(),
+        writer.ctx,
+        draft,
+        idem('draft-1', JSON.stringify(draft)),
+      ),
+    ).toMatchObject({ replayed: true, body: added.body });
+    expect(
+      await fx.query(
+        `SELECT whatsapp_account_id, created_by_user_id, created_by_api_key_id
+           FROM app.message_templates WHERE id = $1`,
+        [id],
+      ),
+    ).toEqual([
+      {
+        whatsapp_account_id: c.whatsappAccountId,
+        created_by_user_id: null,
+        created_by_api_key_id: writer.id,
+      },
+    ]);
+    // The name and language are the account's: taken, in the API and on the Templates page.
+    await expectAppError(
+      apiCreateMessageTemplate(deps(), writer.ctx, draft, null),
+      'conflict',
+      /already exists/,
+    );
+    await expectAppError(
+      templates.createDraft(owner, {
+        whatsappAccountId: c.whatsappAccountId,
+        name,
+        language: 'en',
+        definition: shipped,
+      }),
+      'conflict',
+      /already exists/,
+    );
+
+    // Changed from its version, as the Templates page edits it; the same content writes nothing.
+    const changed = await apiUpdateMessageTemplate(deps(), writer.ctx, id, {
+      definition: delayed,
+      expectedVersion: 0,
+    });
+    expect(changed).toMatchObject({ id, status: 'draft', version: 1, definition: delayed });
+    expect(
+      await apiUpdateMessageTemplate(deps(), writer.ctx, id, { definition: delayed }),
+    ).toMatchObject({
+      version: 1,
+    });
+    await expectAppError(
+      apiUpdateMessageTemplate(deps(), writer.ctx, id, { definition: shipped, expectedVersion: 0 }),
+      'conflict',
+    );
+    const page = await templates.getTemplate(owner, id);
+    expect(page).toMatchObject({ editable: true, definition: delayed });
+    expect((await auditOf(id)).map((a) => [a.actor_type, a.actor_id, a.action])).toEqual([
+      ['api_key', writer.id, 'template.draft_saved'],
+      ['api_key', writer.id, 'template.draft_saved'],
+    ]);
+
+    // Deleted as the Templates page deletes drafts: listed as deleted, and its name free again.
+    expect(await apiDeleteMessageTemplate(deps(), writer.ctx, id)).toEqual({
+      id,
+      deleted: true,
+      status: 'deleted',
+    });
+    expect(await apiGetMessageTemplate(deps(), reader.ctx, id)).toMatchObject({
+      status: 'deleted',
+      history: [expect.objectContaining({ status: 'deleted', source: 'delete' })],
+    });
+    await expectAppError(apiDeleteMessageTemplate(deps(), writer.ctx, id), 'conflict');
+    await expectAppError(
+      apiUpdateMessageTemplate(deps(), writer.ctx, id, { definition: shipped }),
+      'precondition_failed',
+    );
+    expect((await auditOf(id)).at(-1)).toMatchObject({
+      actor_type: 'api_key',
+      action: 'template.deleted',
+      metadata: { name, language: 'en', source: 'api' },
+    });
+    // A member adds it again: the same template, now the member's.
+    const again = await templates.createDraft(owner, {
+      whatsappAccountId: c.whatsappAccountId,
+      name,
+      language: 'en',
+      definition: shipped,
+    });
+    expect(again.id).toBe(id);
+    expect(await apiGetMessageTemplate(deps(), reader.ctx, id)).toMatchObject({
+      status: 'draft',
+      createdBy: 'member',
+      createdByApiKeyId: null,
+    });
+  });
+
+  it('leaves templates Meta has to the Templates page, and writes only with templates.write in an active company (ADR-295)', async () => {
+    const c = await fx.company();
+    const other = await fx.company();
+    const writer = await apiKey(c, ['templates.write']);
+    const reader = await apiKey(c, ['templates.read']);
+
+    // A template Meta has is not changed through the API, nor deleted without templates.submit
+    // (ADR-296).
+    const approved = await approvedTemplate(c, shipped);
+    await expectAppError(
+      apiUpdateMessageTemplate(deps(), writer.ctx, approved.id, { definition: delayed }),
+      'precondition_failed',
+      /Meta has not received/,
+    );
+    await expectAppError(
+      apiDeleteMessageTemplate(deps(), writer.ctx, approved.id),
+      'forbidden',
+      /templates\.submit/,
+    );
+    expect(await apiGetMessageTemplate(deps(), reader.ctx, approved.id)).toMatchObject({
+      status: 'approved',
+    });
+
+    // Another company's number and template are not found; nothing is added for them.
+    await expectAppError(
+      apiCreateMessageTemplate(
+        deps(),
+        writer.ctx,
+        { channelId: other.channelAccountId, name: 'theirs', language: 'en', definition: shipped },
+        null,
+      ),
+      'not_found',
+    );
+    const theirs = await approvedTemplate(other, shipped);
+    for (const write of [
+      () => apiUpdateMessageTemplate(deps(), writer.ctx, theirs.id, { definition: delayed }),
+      () => apiDeleteMessageTemplate(deps(), writer.ctx, theirs.id),
+    ]) {
+      await expectAppError(write(), 'not_found');
+    }
+
+    // A key that reads templates writes none; a suspended company's keys write none.
+    await expectAppError(
+      apiCreateMessageTemplate(
+        deps(),
+        reader.ctx,
+        { channelId: c.channelAccountId, name: 'mine', language: 'en', definition: shipped },
+        null,
+      ),
+      'forbidden',
+      /templates\.write/,
+    );
+    const suspended: ApiContext = {
+      ...writer.ctx,
+      tenant: { ...writer.ctx.tenant, status: 'suspended' as const },
+    };
+    await expectAppError(
+      apiCreateMessageTemplate(
+        deps(),
+        suspended,
+        { channelId: c.channelAccountId, name: 'mine', language: 'en', definition: shipped },
+        null,
+      ),
+      'tenant_suspended',
+    );
+    expect((await apiListMessageTemplates(deps(), reader.ctx, { status: 'draft' })).data).toEqual(
+      [],
+    );
+
+    // Granting it needs the permission members write templates with.
+    const owner = await fx.ctx(c, c.owner);
+    const narrower: TenantContext = {
+      ...owner,
+      permissions: new Set([...owner.permissions].filter((p) => p !== 'templates.write')),
+    };
+    await expectAppError(
+      keys.create(narrower, { name: 'Templates', scopes: ['templates.write'], expiresInDays: 30 }),
+      'forbidden',
+      /Write templates/,
+    );
+  });
+});
+
+describe('template submission and deletion at Meta through the API (ADR-296)', () => {
+  const shipped: TemplateDefinition = {
+    category: 'UTILITY',
+    header: { type: 'none' },
+    body: { text: 'Hi {{1}}, your order has shipped.', examples: ['Asha'] },
+    footer: null,
+    buttons: [],
+  };
+  type Detail = { id: string; status: string; version: number };
+  const graphDeps = () => ({ ...deps(), keyring: fx.keyring, graph: fx.graph });
+  /** The jobs queued for a template under a singleton key, as the worker receives them. */
+  const queued = (queue: string, singletonKey: string) =>
+    fx.query<{ data: unknown }>(
+      `SELECT data FROM pgboss.job WHERE name = $1 AND singleton_key = $2`,
+      [queue, singletonKey],
+    );
+  const auditOf = (id: string) =>
+    fx.query<{ actor_type: string; actor_id: string | null; action: string; metadata: unknown }>(
+      `SELECT actor_type, actor_id, action, metadata FROM app.audit_events
+        WHERE subject_type = 'template' AND subject_id = $1 ORDER BY occurred_at, id`,
+      [id],
+    );
+  /** The worker's check of a queued job, then its run, as the template handlers do. */
+  async function runJob(kind: 'template.submit' | 'template.delete', data: unknown) {
+    const auth = await authorizeJob({ db: fx.dbs.app, signer: fx.signer }, data, {
+      expectedKind: kind,
+      requireActiveTenant: true,
+      requireActiveActor: false,
+    });
+    if (auth.outcome !== 'authorized' || !auth.scope) {
+      throw new Error(`the job is not authorized: ${auth.outcome}`);
+    }
+    return kind === 'template.submit'
+      ? processTemplateSubmit(graphDeps(), auth.scope, auth.envelope.ref)
+      : processTemplateDelete(graphDeps(), auth.scope, auth.envelope.ref);
+  }
+
+  it('submits a draft as the key, write-ahead, once per Idempotency-Key, and follows Meta’s review', async () => {
+    const c = await fx.company();
+    const writer = await apiKey(c, ['templates.write']);
+    const submitter = await apiKey(c, ['templates.submit']);
+    const reader = await apiKey(c, ['templates.read']);
+    const name = `api_submit_${Date.now().toString(36)}`;
+    const added = await apiCreateMessageTemplate(
+      deps(),
+      writer.ctx,
+      { channelId: c.channelAccountId, name, language: 'en', definition: shipped },
+      null,
+    );
+    const id = (added.body as { data: Detail }).data.id;
+
+    const submitted = await apiSubmitMessageTemplate(
+      deps(),
+      submitter.ctx,
+      id,
+      idem('submit-1', 'submit'),
+    );
+    expect(submitted).toMatchObject({
+      status: 200,
+      replayed: false,
+      body: {
+        data: {
+          id,
+          status: 'submitting',
+          version: 1,
+          createdBy: 'api',
+          createdByApiKeyId: writer.id,
+          history: [{ status: 'submitting', reason: null, source: 'submit' }],
+        },
+      },
+    });
+    expect(
+      await apiSubmitMessageTemplate(deps(), submitter.ctx, id, idem('submit-1', 'submit')),
+    ).toMatchObject({ replayed: true, body: submitted.body });
+    // Without a key, a second submission is refused: Meta has it, or is about to.
+    await expectAppError(
+      apiSubmitMessageTemplate(deps(), submitter.ctx, id, null),
+      'precondition_failed',
+      /already been sent to Meta/,
+    );
+    await expectAppError(
+      apiUpdateMessageTemplate(deps(), writer.ctx, id, { definition: shipped }),
+      'precondition_failed',
+    );
+    // Nothing reached Meta yet: one request is queued, signed for the company, by no member.
+    expect(fx.standIn.state.templates.get(c.wabaId)?.some((t) => t.name === name) ?? false).toBe(
+      false,
+    );
+    const jobs = await queued(QUEUES.templateSubmit.name, `${id}:1`);
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0]?.data).toMatchObject({
+      kind: 'template.submit',
+      tenantId: c.tenant.id,
+      actorUserId: null,
+      ref: id,
+    });
+
+    // The worker sends it to Meta, which reviews it; the sync reads Meta's decision.
+    expect(await runJob('template.submit', jobs[0]?.data)).toBe('done');
+    const create = fx.standIn.state.requests
+      .filter((r) => r.method === 'POST' && r.path.endsWith('/message_templates'))
+      .at(-1);
+    expect(create?.body).toMatchObject({ name, language: 'en', category: 'UTILITY' });
+    expect(await apiGetMessageTemplate(deps(), reader.ctx, id)).toMatchObject({
+      status: 'pending',
+    });
+    const atMeta = fx.standIn.state.templates.get(c.wabaId)?.find((t) => t.name === name);
+    if (!atMeta) throw new Error('the template did not reach the stand-in');
+    atMeta.status = 'APPROVED';
+    await syncTemplates(graphDeps(), authorizedTenantScope(c.tenant.id, null), c.whatsappAccountId);
+    const approved = await apiGetMessageTemplate(deps(), reader.ctx, id);
+    expect(approved).toMatchObject({ status: 'approved', sendable: true });
+    expect(approved.history.map((h) => h.status)).toEqual(['approved', 'pending', 'submitting']);
+    expect(
+      (await auditOf(id)).map((a) => [a.actor_type, a.actor_id, a.action, a.metadata]),
+    ).toEqual([
+      ['api_key', writer.id, 'template.draft_saved', { name, language: 'en', source: 'api' }],
+      [
+        'api_key',
+        submitter.id,
+        'template.submitted',
+        { name, language: 'en', category: 'UTILITY', source: 'api' },
+      ],
+    ]);
+  });
+
+  it('deletes a template Meta has with templates.submit too, waiting for Meta, and takes Meta’s refusal back', async () => {
+    const c = await fx.company();
+    const writer = await apiKey(c, ['templates.write']);
+    const deleter = await apiKey(c, ['templates.write', 'templates.submit']);
+    const reader = await apiKey(c, ['templates.read']);
+    const { id, name } = await approvedTemplate(c, shipped);
+
+    // Without templates.submit nothing changes.
+    await expectAppError(
+      apiDeleteMessageTemplate(deps(), writer.ctx, id),
+      'forbidden',
+      /templates\.submit/,
+    );
+    expect(await apiGetMessageTemplate(deps(), reader.ctx, id)).toMatchObject({
+      status: 'approved',
+    });
+    expect(await queued(QUEUES.templateDelete.name, `${id}:delete`)).toEqual([]);
+
+    // Meta refuses the first deletion: the sync gives the template back its status.
+    expect(await apiDeleteMessageTemplate(deps(), deleter.ctx, id)).toEqual({
+      id,
+      deleted: false,
+      status: 'pending_deletion',
+    });
+    await expectAppError(apiDeleteMessageTemplate(deps(), deleter.ctx, id), 'conflict');
+    const [first] = await queued(QUEUES.templateDelete.name, `${id}:delete`);
+    expect(first?.data).toMatchObject({ kind: 'template.delete', actorUserId: null, ref: id });
+    fx.standIn.state.templateDeleteError = {
+      status: 400,
+      code: 100,
+      message: 'Template cannot be deleted',
+    };
+    try {
+      expect(await runJob('template.delete', first?.data)).toBe('done');
+    } finally {
+      fx.standIn.state.templateDeleteError = null;
+    }
+    await syncTemplates(graphDeps(), authorizedTenantScope(c.tenant.id, null), c.whatsappAccountId);
+    const refused = await apiGetMessageTemplate(deps(), reader.ctx, id);
+    expect(refused.status).toBe('approved');
+    expect(refused.history.slice(0, 3).map((h) => [h.status, h.source])).toEqual([
+      ['approved', 'sync'],
+      ['delete_failed', 'delete'],
+      ['pending_deletion', 'delete'],
+    ]);
+
+    // Asked again, Meta deletes it. A worker would have taken the first job (run here directly),
+    // so it no longer waits under the key.
+    await fx.query(`DELETE FROM pgboss.job WHERE name = $1 AND singleton_key = $2`, [
+      QUEUES.templateDelete.name,
+      `${id}:delete`,
+    ]);
+    expect(await apiDeleteMessageTemplate(deps(), deleter.ctx, id)).toMatchObject({
+      status: 'pending_deletion',
+    });
+    const [second] = await queued(QUEUES.templateDelete.name, `${id}:delete`);
+    expect(await runJob('template.delete', second?.data)).toBe('done');
+    expect(await apiGetMessageTemplate(deps(), reader.ctx, id)).toMatchObject({
+      status: 'deleted',
+      sendable: false,
+    });
+    expect(fx.standIn.state.templates.get(c.wabaId)?.some((t) => t.name === name)).toBe(false);
+    expect(
+      (await auditOf(id)).filter((a) => a.action === 'template.deleted').map((a) => a.actor_id),
+    ).toEqual([deleter.id, deleter.id]);
+  });
+
+  it('refuses what the Templates page refuses, and submits nothing for a key or company that may not', async () => {
+    const c = await fx.company();
+    const other = await fx.company();
+    const writer = await apiKey(c, ['templates.write']);
+    const submitter = await apiKey(c, ['templates.submit']);
+    const added = await apiCreateMessageTemplate(
+      deps(),
+      writer.ctx,
+      {
+        channelId: c.channelAccountId,
+        name: `api_refused_${Date.now().toString(36)}`,
+        language: 'en',
+        definition: shipped,
+      },
+      null,
+    );
+    const id = (added.body as { data: Detail }).data.id;
+
+    // An account to reconnect first.
+    await fx.query(`UPDATE app.whatsapp_accounts SET status = 'needs_reconnect' WHERE id = $1`, [
+      c.whatsappAccountId,
+    ]);
+    try {
+      await expectAppError(
+        apiSubmitMessageTemplate(deps(), submitter.ctx, id, idem('submit-r', 'r')),
+        'precondition_failed',
+        /Reconnect this WhatsApp account/,
+      );
+    } finally {
+      await fx.query(`UPDATE app.whatsapp_accounts SET status = 'connected' WHERE id = $1`, [
+        c.whatsappAccountId,
+      ]);
+    }
+    // Another company's template, a key without the scope, a suspended company.
+    const theirs = await approvedTemplate(other, shipped);
+    await expectAppError(
+      apiSubmitMessageTemplate(deps(), submitter.ctx, theirs.id, null),
+      'not_found',
+    );
+    await expectAppError(
+      apiSubmitMessageTemplate(deps(), writer.ctx, id, null),
+      'forbidden',
+      /templates\.submit/,
+    );
+    const suspended: ApiContext = {
+      ...submitter.ctx,
+      tenant: { ...submitter.ctx.tenant, status: 'suspended' as const },
+    };
+    await expectAppError(apiSubmitMessageTemplate(deps(), suspended, id, null), 'tenant_suspended');
+    // None of it changed the draft, queued a request or used the Idempotency-Key.
+    expect(
+      await fx.query(`SELECT status, version FROM app.message_templates WHERE id = $1`, [id]),
+    ).toEqual([{ status: 'draft', version: 0 }]);
+    expect(
+      await fx.query(`SELECT 1 FROM pgboss.job WHERE name = $1 AND data->>'ref' = $2`, [
+        QUEUES.templateSubmit.name,
+        id,
+      ]),
+    ).toEqual([]);
+    expect(
+      await apiSubmitMessageTemplate(deps(), submitter.ctx, id, idem('submit-r', 'r')),
+    ).toMatchObject({ status: 200, replayed: false, body: { data: { status: 'submitting' } } });
+
+    // Granting it needs the permission members submit templates with.
+    const owner = await fx.ctx(c, c.owner);
+    const narrower: TenantContext = {
+      ...owner,
+      permissions: new Set([...owner.permissions].filter((p) => p !== 'templates.submit')),
+    };
+    await expectAppError(
+      keys.create(narrower, { name: 'Submit', scopes: ['templates.submit'], expiresInDays: 30 }),
+      'forbidden',
+      /Submit templates/,
+    );
+  });
+});
+
+describe('reports through the API (ADR-297)', () => {
+  it('read the Reports page’s numbers for a period, as the page reads them, for the company only', async () => {
+    const c = await fx.company();
+    const other = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const reader = await apiKey(c, ['reports.read']);
+    // Customers write to both companies, and the company has an open deal.
+    await inbound(c, '919811100301', [{ text: 'Is my order on its way?' }]);
+    await inbound(other, '919811100302', [{ text: 'Hello' }, { text: 'Anyone there?' }]);
+    const crm = createCrmService({
+      db: fx.dbs.app,
+      clock: systemClock,
+      jobs: fx.jobs(),
+      signer: fx.signer,
+    });
+    const { id: pipelineId } = await crm.createPipeline(owner, {
+      name: 'Sales',
+      currency: 'INR',
+      stages: [{ name: 'New', winPercent: 20 }],
+    });
+    const stageId = (await crm.listPipelines(owner)).find((p) => p.id === pipelineId)!.stages[0]!
+      .id;
+    const { id: contactId } = await createContactsService({
+      db: fx.dbs.app,
+      clock: systemClock,
+    }).createContact(owner, { displayName: 'Ira', phone: '+919811100303' });
+    await crm.createDeal(owner, {
+      contactId,
+      pipelineId,
+      stageId,
+      title: 'Annual plan',
+      value: '1,000',
+      expectedCloseOn: null,
+    });
+
+    // The same numbers as the page, read at the same moment.
+    const when = at(new Date());
+    const query = { preset: 'last_30_days' };
+    const api = await apiGetReport(deps(when), reader.ctx, query);
+    const page = await createReportsService({ db: fx.dbs.app, clock: when }).getReport(
+      owner,
+      query,
+    );
+    expect(api).toEqual(toApiReport(page));
+    expect(api.period).toMatchObject({
+      preset: 'last_30_days',
+      timeZone: owner.tenant.timezone,
+      inProgress: true,
+    });
+    expect(api.period.days).toHaveLength(30);
+    // The company's own: one customer message, its deal, its members.
+    expect(api.messaging.totals.inbound).toBe(1);
+    expect(api.deals.pipelines).toEqual([
+      expect.objectContaining({
+        id: pipelineId,
+        name: 'Sales',
+        currency: 'INR',
+        stages: [expect.objectContaining({ id: stageId, deals: 1, valueMinor: 100_000 })],
+      }),
+    ]);
+    const agent = await fx.ctx(c, c.agent);
+    const theirAgent = await fx.ctx(other, other.agent);
+    const members = api.members.map((m) => m.memberId);
+    expect(members).toContain(agent.membership.id);
+    expect(members).not.toContain(theirAgent.membership.id);
+    expect(Object.keys(api.members[0]!).sort()).toEqual([
+      'csatAnswered',
+      'csatBest',
+      'medianSeconds',
+      'memberId',
+      'name',
+      'replies',
+      'resolved',
+      'templates',
+      'turnsAnswered',
+    ]);
+
+    // A custom period, read while the company is suspended too.
+    const suspended: ApiContext = {
+      ...reader.ctx,
+      tenant: { ...reader.ctx.tenant, status: 'suspended' as const },
+    };
+    const custom = await apiGetReport(deps(when), suspended, {
+      preset: 'custom',
+      from: api.period.to,
+      to: api.period.to,
+    });
+    expect(custom.period).toMatchObject({ preset: 'custom', days: [api.period.to] });
+    expect(custom.messaging.totals.inbound).toBe(1);
+  });
+
+  it('refuse a key without the scope, periods the page refuses, and need reports.read to grant', async () => {
+    const c = await fx.company();
+    const reader = await apiKey(c, ['reports.read']);
+    const other = await apiKey(c, ['deals.read', 'conversations.read']);
+    await expectAppError(apiGetReport(deps(), other.ctx, {}), 'forbidden', /reports\.read/);
+    for (const query of [
+      { preset: 'custom', from: '2099-01-01', to: '2099-01-02' },
+      { preset: 'custom', from: '2026-01-01', to: '2026-06-30' },
+      { preset: 'custom', from: '2026-03-02', to: '2026-03-01' },
+      { preset: 'custom' },
+      { preset: 'last_7_days', section: 'inbox' },
+    ]) {
+      await expectAppError(apiGetReport(deps(), reader.ctx, query), 'validation_failed');
+    }
+    const owner = await fx.ctx(c, c.owner);
+    const narrower: TenantContext = {
+      ...owner,
+      permissions: new Set([...owner.permissions].filter((p) => p !== 'reports.read')),
+    };
+    await expectAppError(
+      keys.create(narrower, { name: 'BI', scopes: ['reports.read'], expiresInDays: 30 }),
+      'forbidden',
+      /Read reports/,
+    );
+  });
+});
+
+describe('WhatsApp Flows and their responses through the API (ADR-298)', () => {
+  /** The customer completes a form: an nfm_reply message with its answers (M-166). */
+  const completion = (c: Company, from: string, answers: Record<string, unknown>, at: number) =>
+    fx.deliver(
+      fx.messagesBody(c, {
+        messages: [
+          {
+            waId: from,
+            type: 'interactive',
+            timestamp: Math.floor(at / 1000),
+            extra: {
+              interactive: {
+                type: 'nfm_reply',
+                nfm_reply: { name: 'flow', body: 'Sent', response_json: JSON.stringify(answers) },
+              },
+            },
+          },
+        ],
+      }),
+    );
+  const flowsOf = () =>
+    createFlowsService({
+      db: fx.dbs.app,
+      clock: systemClock,
+      jobs: fx.jobs(),
+      signer: fx.signer,
+      appBaseUrl: 'https://app.example.test',
+      allowInsecureHttp: true,
+    });
+
+  it('list the flows and the forms customers completed, newest first on exact pages, who and what only with contacts.read', async () => {
+    const c = await fx.company();
+    const other = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const reader = await apiKey(c, ['flows.read']);
+    const full = await apiKey(c, ['flows.read', 'contacts.read']);
+    const { id: flowId } = await flowsOf().create(owner, {
+      whatsappAccountId: c.whatsappAccountId,
+      name: 'Lead form',
+      categories: ['LEAD_GENERATION'],
+      json: STARTER_FLOW_JSON,
+    });
+    await flowsOf().create(await fx.ctx(other, other.owner), {
+      whatsappAccountId: other.whatsappAccountId,
+      name: 'Their form',
+      categories: ['OTHER'],
+      json: STARTER_FLOW_JSON,
+    });
+
+    // The flow, not yet created at Meta, with the number that can send it; none archived.
+    const listed = await apiListFlows(deps(), reader.ctx, {});
+    expect(listed).toEqual({
+      data: [
+        expect.objectContaining({
+          id: flowId,
+          name: 'Lead form',
+          status: null,
+          categories: ['LEAD_GENERATION'],
+          answerMapping: [],
+          channels: [expect.objectContaining({ id: c.channelAccountId })],
+          archived: false,
+        }),
+      ],
+      nextCursor: null,
+    });
+    expect([...listed.data[0]!.answerKeys].sort()).toEqual(['email', 'full_name']);
+    expect((await apiListFlows(deps(), reader.ctx, { archived: 'true' })).data).toEqual([]);
+
+    // A form the company sent completed by its contact, then one whose token matched none.
+    const priya = '919811100401';
+    await inbound(c, priya, [{ text: 'I would like a quote' }]);
+    const conv = await conversationOf(c, priya);
+    const [asked] = await fx.query<{ id: string }>(
+      `SELECT id FROM app.messages WHERE conversation_id = $1 LIMIT 1`,
+      [conv.id],
+    );
+    const token = Buffer.from(uuidv7()).toString('base64url').slice(0, 43);
+    await fx.query(
+      `INSERT INTO app.flow_sends (id, tenant_id, flow_id, conversation_id, contact_id, message_id,
+         token, mode, expires_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'published', now() + interval '1 day')`,
+      [uuidv7(), c.tenant.id, flowId, conv.id, conv.contact_id, asked!.id, token],
+    );
+    const now = Date.now();
+    await completion(
+      c,
+      priya,
+      { flow_token: token, full_name: 'Priya Sharma', email: 'priya@example.test' },
+      now - 60_000,
+    );
+    await completion(c, priya, { flow_token: 'unused', note: 'Call me' }, now - 30_000);
+    await completion(other, '919811100402', { flow_token: 'unused', note: 'Theirs' }, now);
+
+    // Without contacts.read, who completed a form and what they typed stay out.
+    const hidden = { contactId: null, conversationId: null, messageId: null, answers: null };
+    const plain = await apiListFlowResponses(deps(), reader.ctx, {});
+    expect(plain.data).toEqual([
+      expect.objectContaining({ ...hidden, flowId: null, applied: [] }),
+      expect.objectContaining({ ...hidden, flowId }),
+    ]);
+    expect(plain.nextCursor).toBeNull();
+    const withAnswers = await apiListFlowResponses(deps(), full.ctx, {});
+    expect(withAnswers.data).toEqual([
+      expect.objectContaining({
+        id: plain.data[0]!.id,
+        contactId: conv.contact_id,
+        conversationId: conv.id,
+        answers: { note: 'Call me' },
+      }),
+      expect.objectContaining({
+        id: plain.data[1]!.id,
+        contactId: conv.contact_id,
+        conversationId: conv.id,
+        answers: { full_name: 'Priya Sharma', email: 'priya@example.test' },
+      }),
+    ]);
+    // Each response's message is the customer's form message in its conversation.
+    const [completed] = await fx.query<{ conversation_id: string; direction: string }>(
+      `SELECT conversation_id, direction FROM app.messages WHERE id = $1`,
+      [withAnswers.data[1]!.messageId],
+    );
+    expect(completed).toEqual({ conversation_id: conv.id, direction: 'inbound' });
+
+    // Exact pages, and filters that combine.
+    const first = await apiListFlowResponses(deps(), reader.ctx, { limit: '1' });
+    expect(first.data.map((r) => r.id)).toEqual([plain.data[0]!.id]);
+    const second = await apiListFlowResponses(deps(), reader.ctx, {
+      limit: '1',
+      cursor: first.nextCursor!,
+    });
+    expect(second).toEqual({ data: [plain.data[1]], nextCursor: null });
+    expect(
+      (await apiListFlowResponses(deps(), reader.ctx, { flowId })).data.map((r) => r.id),
+    ).toEqual([plain.data[1]!.id]);
+    expect(
+      (await apiListFlowResponses(deps(), full.ctx, { contactId: conv.contact_id })).data,
+    ).toHaveLength(2);
+    expect(
+      (
+        await apiListFlowResponses(deps(), full.ctx, {
+          contactId: conv.contact_id,
+          receivedSince: new Date(now + 60_000).toISOString(),
+        })
+      ).data,
+    ).toEqual([]);
+    await expectAppError(
+      apiListFlowResponses(deps(), reader.ctx, { contactId: conv.contact_id }),
+      'forbidden',
+      /contacts\.read/,
+    );
+
+    // Read while the company is suspended too; another key reads nothing; granting needs flows.read.
+    const suspended: ApiContext = {
+      ...reader.ctx,
+      tenant: { ...reader.ctx.tenant, status: 'suspended' as const },
+    };
+    expect((await apiListFlowResponses(deps(), suspended, {})).data).toHaveLength(2);
+    const contactsOnly = await apiKey(c, ['contacts.read']);
+    await expectAppError(
+      apiListFlowResponses(deps(), contactsOnly.ctx, {}),
+      'forbidden',
+      /flows\.read/,
+    );
+    const narrower: TenantContext = {
+      ...owner,
+      permissions: new Set([...owner.permissions].filter((p) => p !== 'flows.read')),
+    };
+    await expectAppError(
+      keys.create(narrower, { name: 'Forms', scopes: ['flows.read'], expiresInDays: 30 }),
+      'forbidden',
+      /Read flows/,
     );
   });
 });

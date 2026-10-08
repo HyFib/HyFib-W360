@@ -11,6 +11,8 @@ export type { ApiScope } from '@w360/db';
 export const API_SCOPE_KEYS = [
   'channels.read',
   'templates.read',
+  'templates.write',
+  'templates.submit',
   'contacts.read',
   'contacts.write',
   'contacts.merge',
@@ -24,7 +26,10 @@ export const API_SCOPE_KEYS = [
   'campaigns.write',
   'campaigns.stop',
   'campaigns.resume',
+  'chat_links.read',
+  'chat_links.write',
   'automations.start',
+  'flows.read',
   'orders.read',
   'orders.write',
   'orders.request_payment',
@@ -40,6 +45,7 @@ export const API_SCOPE_KEYS = [
   'business_hours.read',
   'business_hours.manage',
   'saved_replies.manage',
+  'reports.read',
   'webhooks.manage',
 ] as const satisfies readonly ApiScope[];
 
@@ -64,6 +70,20 @@ export const API_SCOPE_INFO: Record<
       "List approved templates and their variables, and read every template of the company, drafts and those Meta reviews included, with Meta's review and each template's latest status changes.",
     permission: 'templates.read',
     writes: false,
+  },
+  'templates.write': {
+    label: 'Write templates',
+    description:
+      'Add template drafts, change their content and delete drafts Meta never received, as members who write templates do on the Templates page, recorded as added through the API and in the audit log as done by the key. Deleting templates Meta has also needs the scope that submits them to Meta.',
+    permission: 'templates.write',
+    writes: true,
+  },
+  'templates.submit': {
+    label: 'Submit templates',
+    description:
+      'Submit template drafts to Meta for review and, with the scope that writes templates, delete templates Meta has, which can then no longer be sent, as members who submit templates do on the Templates page, in the audit log as done by the key.',
+    permission: 'templates.submit',
+    writes: true,
   },
   'contacts.read': {
     label: 'Read contacts',
@@ -156,12 +176,33 @@ export const API_SCOPE_INFO: Record<
     permission: 'campaigns.send',
     writes: true,
   },
+  'chat_links.read': {
+    label: 'Read chat links',
+    description:
+      "List the company's chat links, the short links and QR codes that open a chat with one of its numbers with a message ready to send, and read each one with its clicks per day and the conversations it started in the last 30 days.",
+    permission: 'campaigns.read',
+    writes: false,
+  },
+  'chat_links.write': {
+    label: 'Write chat links',
+    description:
+      "Create chat links on the company's active numbers, change their name, number and message and whether the message carries the link's reference, and archive or restore them, as members who write campaigns do on the Growth pages. Links a key creates name it as their author.",
+    permission: 'campaigns.write',
+    writes: true,
+  },
   'automations.start': {
     label: 'Start automations',
     description:
       'Start published automations made to start through the API, for one contact at a time with the inputs they need, and read and stop the runs keys started. They message contacts who have not written first, with templates.',
     permission: 'automations.publish',
     writes: true,
+  },
+  'flows.read': {
+    label: 'Read flows',
+    description:
+      "List the company's WhatsApp Flows, the forms members send in chats, and the forms customers completed with them, newest first. Who completed them and what they typed are given only to keys that also hold the scope that reads contacts, as members see them.",
+    permission: 'flows.read',
+    writes: false,
   },
   'orders.read': {
     label: 'Read WhatsApp orders',
@@ -267,6 +308,13 @@ export const API_SCOPE_INFO: Record<
       "Read, add, change and delete the company's saved replies, the answers members put in the reply box, as members who supervise the inbox do in Settings → Saved replies, recorded as changed through the API and in the audit log as done by the key. Keys that send replies read them too.",
     permission: 'inbox.supervise',
     writes: true,
+  },
+  'reports.read': {
+    label: 'Read reports',
+    description:
+      "Read the numbers the Reports page shows for a period: messaging outcomes, estimated Meta charges, the inbox's reply and resolution times, satisfaction surveys, automation runs, CRM deals and forecasts, each member's activity and the funnel of campaigns, with what each metric counts. Counts, with the names of members, campaigns, automations and pipelines: never a message, contact or conversation.",
+    permission: 'reports.read',
+    writes: false,
   },
   'webhooks.manage': {
     label: 'Manage webhook endpoints',

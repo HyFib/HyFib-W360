@@ -2140,6 +2140,81 @@ a stage of another pipeline, an owner who cannot use the CRM, or a lost reason w
 asks for the deal as it already is changes nothing and answers 200. The timeline shows each change
 "through the API"; the audit log has `crm.deal_updated` with the key and what changed.
 
+**A conversation's `source` is null, or the `source` and `chatLinkId` filters miss a conversation
+(ADR-301).** A source is recorded only when the customer's message carries a link's reference, "(ref
+CODE)", on the number the link opens, or arrives from a click-to-WhatsApp ad with its referral
+(ADR-044): a customer who deletes the reference from the message is not attributed, and a link
+without its reference counts nothing. Erasing a contact deletes its sources. `source` gives the
+latest source; the filters match any of them. An unknown kind or an id that is not a UUID answers
+422; so do the filters on an old web server during a rollout, which also gives no `source`.
+
+**Adding or changing a chat link through the API answers 403, 404, 409, 422 or 423 (ADR-300).** 403:
+the key lacks `chat_links.write` (its creator needed `campaigns.write`), or the plan leaves it out
+(reason `not_in_plan`). 404: the id is not one of the company's links. 409: the company has 500
+links in use (archive some first), the link is archived (restore it with `archived: false` first),
+or `expectedVersion` is not the link's version (read it again). 422: the number is not one of the
+company's active numbers (Settings → WhatsApp numbers), a field is missing, too long or unknown, or
+`archived` came with other changes. 423: the company is suspended or restricted. The audit log shows
+each change with the key (`growth.link_created`, `growth.link_updated`, `growth.link_archived`,
+`growth.link_restored`, source `api`).
+
+**A chat-links request answers 403, 404 or 422, or its counts differ from the Growth pages
+(ADR-299).** 403: the key lacks `chat_links.read` (its creator needed `campaigns.read`), or the plan
+leaves it out (reason `not_in_plan`). 404: the id is not one of the company's links. 422: a filter
+is not one the endpoint takes (`archived` is `true` or `false`) or the cursor is not one it gave. A
+link missing from the list is archived (`archived=true`). The counts are the pages' for the same
+moment: clicks on the company's last 30 days (Settings → Company time zone), today included,
+repeated clicks and automated visits too; conversations only for links whose message carries the
+reference (null otherwise), and only those whose customer sent it on the link's number, so fewer
+than the chats the link opened.
+
+**A flows or flow-responses request answers 403 or 422, or a response has no contact or answers
+(ADR-298).** 403: the key lacks `flows.read` (its creator needed that permission), or the plan
+leaves it out (reason `not_in_plan`); filtering responses by `contactId` needs `contacts.read` too.
+422: a filter is not one the endpoint takes (`archived` is `true` or `false`; `flowId` and
+`contactId` are UUIDs; `receivedSince` is an ISO 8601 date and time) or the cursor is not one it
+gave. `contactId`, `conversationId`, `messageId` and `answers` are null for a key without
+`contacts.read` (in the key or the plan), as the Flows page hides who completed a form and what they
+typed from members without that permission. `flowId` is null for a form whose token matched no form
+HyFib sent: it changed no contact. A flow missing from the list is archived (`archived=true`); the
+responses of an erased contact are deleted.
+
+**Migration 0221 failed.** It builds `app.flow_responses_received_idx` concurrently. If it failed,
+an INVALID index can remain: run `DROP INDEX CONCURRENTLY app.flow_responses_received_idx;` and run
+the migrations again.
+
+**A report request answers 403 or 422, or its numbers differ from the Reports page (ADR-297).** 403:
+the key lacks `reports.read` (its creator needed that permission), or the plan leaves it out (reason
+`not_in_plan`). 422: the period is not one the page takes: a preset, or `custom` with `from` and
+`to` (YYYY-MM-DD) spanning at most 92 days, the last not after today in the company's time zone, and
+no other query parameter. The API and the page read the same report for the same period: numbers
+differ only when read at different moments (statuses Meta reports late, the inbox and open deals
+now) or when the period differs, for example a key's `custom` dates read in another time zone than
+the company's (Settings → Company).
+
+**A template submission or deletion at Meta answers 403, 404, 409, 412 or 422, or a template stays
+`submitting` or `pending_deletion` (ADR-296).** 403: the key lacks `templates.submit` (its creator
+needed that permission), or, deleting, `templates.write`. 404: another company's template, or an id
+that is none. 409: the template is already deleted, or being deleted. 412: it is not a draft Meta
+never received (submitted already: a retry without the first `Idempotency-Key` is refused), its
+WhatsApp Business account needs reconnecting, or, deleting, it is being submitted. 422: its content
+breaks the editor's rules. 423: the company is suspended or its plan has ended. A template stays
+`submitting` until the worker has Meta's answer: `submitError` says when HyFib waits for Meta to
+confirm it, and the sync adopts it or fails it after 10 minutes (ADR-019). One stays
+`pending_deletion` until Meta answers; a refusal gives it back the status Meta lists, with a
+`delete_failed` change, and the sweep ends a deletion whose job ran out of retries (ADR-111). The
+worker logs each `template job` with its outcome.
+
+**A template draft request answers 403, 404, 409, 412 or 422 (ADR-295).** 403: the key lacks
+`templates.write` (its creator needed that permission), or, deleting a template Meta has,
+`templates.submit` (ADR-296). 404: another company's number or template, or an id that is none. 409:
+the account has a template of that name and language (a deleted draft Meta never received is used
+again instead), `expectedVersion` is not the draft's version (read it again), or the draft is
+already deleted. 412: the template is being submitted, or, to change it, Meta has it (change it in
+WhatsApp Manager). 422: the content breaks the editor's rules; `issues` gives each problem's path.
+423: the company is suspended or its plan has ended. A change that leaves the content as it is
+answers it without a new version.
+
 **A template request answers 403, 404 or 422, or a template is not listed (ADR-294).** 403: the key
 lacks `templates.read` (its creator needed that permission). 404: another company's template, or an
 id that is none. 422: an unknown parameter or status, or a page size over 100. Deleted templates are
@@ -2221,8 +2296,10 @@ conversations (a marketer, analyst or billing manager, or a member suspended or 
 `GET /members` lists those who can), `channelIds` for a number that is not the company's
 (`GET /channels` lists them), or `routingKeywords` for a keyword over 40 characters or more than 20.
 423 means the company is suspended or its plan has ended; `GET /teams/{id}` still reads. A member
-left out of a team's `memberIds` after their role changed cannot answer conversations; the team's
-next change drops them. The audit log has each change with the key, and deleting a team sends
+left out of a team's `memberIds` after a suspension or a change of role cannot answer conversations
+now; they keep their place and are listed again when they can (since the review fix of 2026-10-07; a
+place a save took away before it is gone, so add the member again). A removed member's place goes at
+the team's next save. The audit log has each change with the key, and deleting a team sends
 `conversation.team_changed` for each of its conversations.
 
 **`POST /api/v1/pipelines` or `PATCH /api/v1/pipelines/{id}` answers 403, 404, 409, 422 or 423

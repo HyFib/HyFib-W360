@@ -245,6 +245,8 @@ describe('API scopes', () => {
   it('mark exactly the changing scopes as writes (refused while a company is not active)', () => {
     const writes = API_SCOPE_KEYS.filter((s) => API_SCOPE_INFO[s].writes);
     expect(writes).toEqual([
+      'templates.write',
+      'templates.submit',
       'contacts.write',
       'contacts.merge',
       'contact_fields.manage',
@@ -255,6 +257,7 @@ describe('API scopes', () => {
       'campaigns.write',
       'campaigns.stop',
       'campaigns.resume',
+      'chat_links.write',
       'automations.start',
       'orders.write',
       'orders.request_payment',
@@ -275,6 +278,10 @@ describe('API scopes', () => {
     // Members see the company's numbers in Settings → Channels with channels.read (ADR-171).
     expect(API_SCOPE_INFO['channels.read'].permission).toBe('channels.read');
     expect(API_SCOPE_INFO['messages.send'].permission).toBe('inbox.reply');
+    // Members add and change drafts on the Templates page with templates.write (ADR-295).
+    expect(API_SCOPE_INFO['templates.write'].permission).toBe('templates.write');
+    // And submit them to Meta, and delete those Meta has, with templates.submit (ADR-296).
+    expect(API_SCOPE_INFO['templates.submit'].permission).toBe('templates.submit');
     expect(API_SCOPE_INFO['messages.send_marketing'].permission).toBe('campaigns.send');
     expect(API_SCOPE_INFO['messages.reply'].permission).toBe('inbox.reply');
     expect(API_SCOPE_INFO['contacts.write'].permission).toBe('contacts.write');

@@ -622,22 +622,24 @@ Phase 5 rules (Public API, P5-08):
 
 - Members with `developer.manage` (owners and administrators) create, rotate and revoke the
   company's API keys; a key belongs to the company, not to its author. Each scope needs the
-  permission a member needs for the same work: `templates.read`, `contacts.read`, `contacts.write`,
-  `inbox.reply` for `messages.send` (utility templates) and `messages.reply` (text replies,
-  ADR-070), `campaigns.send` for `messages.send_marketing`, `inbox.read_all` for
-  `conversations.read` (ADR-072), `inbox.supervise` for `conversations.write` (ADR-075),
-  `teams.manage` (ADR-287) and `saved_replies.manage` (ADR-291), `inbox.assign` for
-  `availability.write` (ADR-289), `automations.publish` for `automations.start` (ADR-077),
-  `tenant.settings.manage` for `contact_fields.manage` (ADR-115), `pipelines.manage` (ADR-286) and
-  `business_hours.manage` (ADR-290), `tenant.read` for `business_hours.read` (ADR-290),
-  `campaigns.read` and `campaigns.write` for the scopes of the same names (ADR-125, ADR-186),
-  `campaigns.send` for `campaigns.stop` (ADR-128) and `campaigns.resume` (ADR-176), `commerce.read`
-  for `orders.read` (ADR-167), `inbox.reply` for `orders.write` (ADR-168) and
-  `orders.request_payment` (ADR-283), `channels.read` for the scope of the same name (ADR-171),
-  `crm.read` for `deals.read` (ADR-253), `tasks.read` (ADR-258) and `notes.read` (ADR-279), and
-  `crm.write` for `deals.write` (ADR-254, ADR-255), `tasks.write` (ADR-259) and `notes.write`
-  (ADR-268). Nobody grants a key more than they hold, and rotating needs the same. A key keeps the
-  scopes it was created with.
+  permission a member needs for the same work: `templates.read`, `templates.write` (ADR-295),
+  `templates.submit` (ADR-296), `contacts.read`, `contacts.write`, `inbox.reply` for `messages.send`
+  (utility templates) and `messages.reply` (text replies, ADR-070), `campaigns.send` for
+  `messages.send_marketing`, `inbox.read_all` for `conversations.read` (ADR-072), `inbox.supervise`
+  for `conversations.write` (ADR-075), `teams.manage` (ADR-287) and `saved_replies.manage`
+  (ADR-291), `inbox.assign` for `availability.write` (ADR-289), `automations.publish` for
+  `automations.start` (ADR-077), `tenant.settings.manage` for `contact_fields.manage` (ADR-115),
+  `pipelines.manage` (ADR-286) and `business_hours.manage` (ADR-290), `tenant.read` for
+  `business_hours.read` (ADR-290), `campaigns.read` and `campaigns.write` for the scopes of the same
+  names (ADR-125, ADR-186), `campaigns.send` for `campaigns.stop` (ADR-128) and `campaigns.resume`
+  (ADR-176), `commerce.read` for `orders.read` (ADR-167), `inbox.reply` for `orders.write` (ADR-168)
+  and `orders.request_payment` (ADR-283), `channels.read` for the scope of the same name (ADR-171),
+  `reports.read` for the scope of the same name (ADR-297), `flows.read` for the scope of the same
+  name (ADR-298), `campaigns.read` for `chat_links.read` (ADR-299), `campaigns.write` for
+  `chat_links.write` (ADR-300), `crm.read` for `deals.read` (ADR-253), `tasks.read` (ADR-258) and
+  `notes.read` (ADR-279), and `crm.write` for `deals.write` (ADR-254, ADR-255), `tasks.write`
+  (ADR-259) and `notes.write` (ADR-268). Nobody grants a key more than they hold, and rotating needs
+  the same. A key keeps the scopes it was created with.
 - A request acts for the key's company only, as the key: its company comes from the key found by
   the token's hash, never from the path, body or headers, and data access runs in that company's
   scope (RLS). Audit rows name the key (`api_key`). Writing scopes are refused while the company is
@@ -1181,6 +1183,56 @@ Phase 5 rules (Public API, P5-08):
   submission errors as the Templates page shows them, never Meta's template id, the raw components,
   the account's credentials or the members who made each change (unit tests; an integration test,
   run in CI only).
+- Template drafts (ADR-295): `POST /message-templates` and `PATCH` and
+  `DELETE /message-templates/{id}` need `templates.write`, granted only by members who hold it,
+  checked before any query and refused while the company is suspended or restricted; they write
+  under row security in the key's company, through the Templates page's writes and checks. The
+  number that picks the account is looked up in the key's company (another company's answers 404), a
+  key changes and deletes only drafts Meta never received (412 otherwise), and nothing reaches Meta
+  without `templates.submit` (ADR-296). The audit log names the key (unit tests; integration tests,
+  run in CI only).
+- Template submission and deletion at Meta (ADR-296): `POST /message-templates/{id}/submit` needs
+  `templates.submit`, and deleting a template Meta has needs it as well as `templates.write`, each
+  granted only by members who hold it and refused while the company is suspended or restricted. The
+  template is read and locked under row security in the key's company (another company's answers
+  404); only a draft Meta never received is submitted, for a connected account, its content checked
+  again. The status change and the request to Meta are written in one transaction; the job is signed
+  for the company with no member, and the worker checks its signature, kind and company before it
+  calls Meta with the account's stored credential, which keys never see. The audit log names the key
+  (unit tests; integration tests, run in CI only).
+- Reports (ADR-297): `GET /reports` needs `reports.read`, granted only by members who hold it,
+  checked before any query; the query is checked before any query too, and the period in the
+  company's time zone read from the database, never from the request. The report is read under row
+  security in the key's company, in one read-only snapshot, and holds counts and the names of
+  members, campaigns, automations, pipelines and stages: never a message, a contact, a conversation,
+  a member's role or email (unit tests; integration tests, run in CI only).
+- Flows (ADR-298): `GET /flows` and `GET /flow-responses` need `flows.read`, granted only by members
+  who hold it, checked before any query, as is the query. Both read under row security in the key's
+  company, read only, on bounded pages, and never select the Flow JSON, the data endpoint, keys or
+  flow tokens. Who completed a form (its contact, conversation and message) and what they typed are
+  given only when the key and the plan hold `contacts.read`, as members see them; without it the
+  contact filter is refused before any query, so a key cannot learn which forms a contact completed
+  (unit tests; integration tests, run in CI only).
+- Chat links (ADR-299): `GET /chat-links` and `GET /chat-links/{id}` need `chat_links.read`, granted
+  only by members who hold `campaigns.read`, checked before any query, as are the query and the id.
+  Both read under row security in the key's company, read only, on bounded pages; the company's time
+  zone is read from the database, never from the request. They give the counts the pages give and
+  nothing about visitors, which HyFib does not keep (ADR-044); another company's link answers 404
+  (unit tests; integration tests, run in CI only).
+- Chat links written (ADR-300): `POST /chat-links` and `PATCH /chat-links/{id}` need
+  `chat_links.write`, granted only by members who hold `campaigns.write`, refused while the company
+  is suspended or restricted, checked before any query, as are the body and the id. A link is
+  written under row security in the key's company, only on one of its active numbers (another
+  company's number answers 422, as an inactive one does), with the reference and short link HyFib
+  generates, never ones given; the link names the key (`created_by_api_key_id`, a composite foreign
+  key to the company's keys, and a check of exactly one author), and the audit log names the key
+  (unit tests; integration tests, run in CI only).
+- Where conversations came from (ADR-301): no new scope; the source comes with `conversations.read`
+  (granted with `inbox.read_all`, whose members see the inbox's source line), read under row
+  security in the key's company, the source and its link joined on the company as well as the id, so
+  a source names only the company's own link. The ad click id, media addresses and ad text are never
+  stored (ADR-044), so never given. The filters are checked before any query (one of the two kinds,
+  a UUID); another company's link finds nothing (unit tests; integration tests, run in CI only).
 - Reading a deal's history (ADR-281): `GET /deals/{id}/history` needs `deals.read` and the CRM in
   the plan, checked before anything is read; it reads the key's company's deal only (another
   company's answers 404, as an unknown one does; an id that is not a UUID is refused before any

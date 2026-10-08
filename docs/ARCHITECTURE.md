@@ -1587,10 +1587,11 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   `PATCH /teams/{id}` and `DELETE /teams/{id}` (`api/teams.ts`, `teams.manage`) call the writes the
   Settings operations now call too (`inbox/teams.ts`): `writeCreateTeam` (the plan's limit of teams
   under its lock, the members and numbers checked, then the team with its members and numbers),
-  `writeUpdateTeam` (the team's row locked, the same checks, then the lists replaced) and
-  `writeDeleteTeam` (the conversations leave the team first, in routing's lock order); each caller
-  audits, then routes waiting conversations (`routeWaitingConversations`). `PATCH` reads the team
-  with `readTeamSettings` under its row lock, merges the settings given, normalizes them with the
+  `writeUpdateTeam` (the team's row locked, the same checks, then the lists replaced, keeping the
+  places of members who cannot answer conversations now, `droppedTeamMembers`) and `writeDeleteTeam`
+  (the conversations leave the team first, in routing's lock order); each caller audits, then routes
+  waiting conversations (`routeWaitingConversations`). `PATCH` reads the team with
+  `readTeamSettings` under its row lock, merges the settings given, normalizes them with the
   Settings schema (`teamSettingsOf`), and writes nothing when `sameTeamSettings` finds the team
   unchanged (members and numbers compared as sets). A team's members are those
   `answersConversations` finds (active, `INBOX_WORKER_ROLES`) in the check, in `readTeamSettings`
@@ -1637,6 +1638,53 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   the latest 50 rows of `app.template_status_events`); `toApiMessageTemplate` gives the content
   through `sendSpecFor` with media headers, as `GET /templates` reads it, and the account's active
   numbers.
+- **Template drafts through the API (ADR-295):** `api/message-template-drafts.ts` adds, changes and
+  deletes drafts with `templates.write` through the writes the Templates page now shares in
+  `templates/service.ts` (`writeCreateTemplateDraft` with the author, `writeUpdateTemplateDraft`,
+  `writeDeleteLocalTemplate`, `isEditableDraft`, `templateNameError`); the number's
+  `whatsapp_account_id` picks the account; an unchanged content is found with `canonicalJson` of the
+  components; answers are read with `readApiMessageTemplate` from `api/message-templates.ts`.
+  `message_templates.created_by_api_key_id` (0216) names the key.
+- **Template submission and deletion at Meta through the API (ADR-296):** `apiSubmitMessageTemplate`
+  in `api/message-template-drafts.ts` submits with `templates.submit`, and
+  `apiDeleteMessageTemplate` deletes a template Meta has with it too, through the writes the
+  Templates page now shares in `templates/service.ts` (`writeSubmitTemplate`, `templateDeletion`,
+  `writeDeleteTemplateAtMeta`, `enqueueTemplateJob`): each queues its `template.submit` or
+  `template.delete` job in the write's transaction, signed for the company with no member, and the
+  template workers run it as before.
+- **Reports through the API (ADR-297):** `api/reports.ts` reads with `reports.read` the report the
+  Reports page shows: `readReport` in `reports/service.ts`, now shared with the page's `getReport`,
+  run in one repeatable-read, read-only transaction for a period `resolvePeriod` cuts in the
+  company's time zone (read from `tenants`); `toApiReport` maps it (ISO times, members by id and
+  name, the forecast through `toApiPipelineForecast`), and `apiReportSchema` describes it in the
+  OpenAPI document.
+- **Flows through the API (ADR-298):** `api/flows.ts` lists with `flows.read` the company's flows
+  (`apiListFlows`: in use or archived, keyset pages on `created_at, id`, each flow's numbers from
+  `activeNumbers`, shared with the template endpoints) and completed forms (`apiListFlowResponses`:
+  keyset pages on `received_at, id`, served by `flow_responses_received_idx` from migration 0221),
+  each in one read-only transaction. A response's contact, conversation, message and answers are
+  mapped only when the key and the plan hold `contacts.read` (`hasScope`), as the Flows service
+  gives them to members only with that permission.
+- **Chat links through the API (ADR-299):** `api/chat-links.ts` lists with `chat_links.read` the
+  company's chat links (`apiListChatLinks`: in use or archived, keyset pages on `created_at, id`,
+  served by `chat_links_list_idx`) and reads one with its clicks per day (`apiGetChatLink`), each in
+  one read-only transaction that reads the company's time zone from `tenants` first. The 30-day
+  counts are the Growth pages' SQL, now shared from `growth/service.ts` (`linkClicks30`,
+  `linkConversations30`); the short link is built on `APP_BASE_URL`, which the route passes, as the
+  link's page builds it.
+- **Chat links written through the API (ADR-300):** `apiCreateChatLink` and `apiUpdateChatLink` in
+  `api/chat-links.ts` run the Growth pages' writers, now shared in `growth/service.ts`
+  (`writeCreateChatLink` with its author, a member or a key; `writeUpdateChatLink`;
+  `writeSetChatLinkArchived`; `assertLinkChannel`, which names the field it refuses), in one
+  transaction with the idempotency claim and the audit entry (`recordSystemAudit` as the key). A new
+  link's random reference and slug can collide with another's, which aborts the transaction, so
+  `withFreshIds` runs it again, claim included.
+- **Where conversations came from (ADR-301):** `conversationColumns` in `api/conversations.ts`
+  selects `conversationSourceOf` (`growth/sources.ts`): the conversation's latest
+  `conversation_sources` row with its link's name, as one JSON object, in the order
+  `latestConversationSource` reads it for the inbox; `toApiSource` shapes it.
+  `conversationFilterSql` adds an `exists` over the conversation's sources for `source` and
+  `chatLinkId`, so listing and changing by a filter find the same conversations.
 - **Many conversations at once (ADR-120):** `POST /conversations/update-many`
   (`apiUpdateManyConversations`) takes 1 to 100 `conversationIds` and the same fields. In one
   transaction it locks the member first (as a suspension does before releasing its conversations),

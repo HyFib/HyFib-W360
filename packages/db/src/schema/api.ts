@@ -8,6 +8,8 @@ const tz = (name: string) => timestamp(name, { withTimezone: true, mode: 'date' 
 export const API_SCOPES = [
   'channels.read',
   'templates.read',
+  'templates.write',
+  'templates.submit',
   'contacts.read',
   'contacts.write',
   'contacts.merge',
@@ -21,7 +23,10 @@ export const API_SCOPES = [
   'campaigns.write',
   'campaigns.stop',
   'campaigns.resume',
+  'chat_links.read',
+  'chat_links.write',
   'automations.start',
+  'flows.read',
   'orders.read',
   'orders.write',
   'orders.request_payment',
@@ -37,6 +42,7 @@ export const API_SCOPES = [
   'business_hours.read',
   'business_hours.manage',
   'saved_replies.manage',
+  'reports.read',
   'webhooks.manage',
 ] as const;
 export type ApiScope = (typeof API_SCOPES)[number];

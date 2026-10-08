@@ -903,6 +903,30 @@ verification, app review, Embedded Signup configuration).
   (ADR-294, no migration: keys with `templates.read` list the company's templates newest first on
   exact pages, drafts, those Meta reviews, rejected, paused, disabled and, when asked, deleted ones,
   by status, number and name, and read each with its latest 50 status changes).
+  **[Template drafts through the public API built; their database tests run only in CI]** (ADR-295,
+  migrations 0216 and 0217: `templates.write` adds drafts for a number's account, changes their
+  content from a version and deletes drafts Meta never received, through the Templates page's
+  writes, recorded as the key's).
+  **[Template submission and deletion at Meta through the public API built; their database tests run
+  only in CI]** (ADR-296, migration 0218: `templates.submit` submits drafts to Meta for review and,
+  with `templates.write`, deletes templates Meta has, through the Templates page's writes, the
+  requests to Meta queued with the change).
+  **[Reports through the public API built; their database tests run only in CI]** (ADR-297,
+  migration 0219: `reports.read` reads the numbers the Reports page shows for a period, by the
+  page's reader in one snapshot, with members by id and name).
+  **[Flows and their responses through the public API built; their database tests run only in CI]**
+  (ADR-298, migrations 0220 and 0221: `flows.read` lists the company's flows and the forms customers
+  completed with them, newest first on exact pages; who completed them and what they typed only with
+  `contacts.read`).
+  **[Reading chat links through the public API built; its database tests run only in CI]** (ADR-299,
+  migration 0222: `chat_links.read` lists the company's chat links newest first on exact pages and
+  reads each one with its clicks per day, counted as the Growth pages count them).
+  **[Writing chat links through the public API built; its database tests run only in CI]** (ADR-300,
+  migrations 0223 and 0224: `chat_links.write` adds links on the company's active numbers, changes,
+  archives and restores them through the Growth pages' writes, recorded as the key's).
+  **[Where conversations came from, through the public API, built; its database tests run only in
+  CI]** (ADR-301, no migration: conversations give their latest source, a chat link or a
+  click-to-WhatsApp ad, as the inbox shows it, and are listed and changed by source and chat link).
   **[Reading CRM tasks built; its database tests run only in CI]** (ADR-258, migrations 0173 and
   0174: `tasks.read` lists the company's tasks newest first on exact pages, filtered by status,
   assignee, contact, deal and time, and reads each one, with the reminder and the assignee, contact
@@ -916,8 +940,7 @@ verification, app review, Embedded Signup configuration).
   **[Adding CRM notes built; its database tests run only in CI]** (ADR-268, migration 0184:
   `notes.write` adds a note to a contact's or a deal's timeline as members do, recorded as written
   through the API; notes are not read through the API).
-  Remaining: creating, changing, submitting and deleting templates through the API,
-  call-to-action messages through the API, taking
+  Remaining: call-to-action messages through the API, taking
   reactions back,
   changing a field's type,
   which fields of a contact changed in the contact feed (webhooks name them since ADR-121),

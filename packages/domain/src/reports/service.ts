@@ -1464,6 +1464,43 @@ export interface ReportsDeps {
   clock: Clock;
 }
 
+/**
+ * The company's report for a period, as Reports shows it and the API reads it (ADR-297). The
+ * caller runs it in one repeatable-read, read-only transaction, so every number comes from the same
+ * moment.
+ */
+export async function readReport(
+  tx: Tx,
+  tenantId: string,
+  timezone: string,
+  period: ReportPeriod,
+  now: Date,
+): Promise<Report> {
+  const settings = await loadReportSettings(tx, tenantId, timezone);
+  const messaging = await messagingReport(tx, tenantId, period);
+  const costs = await estimateMetaCharges(tx, tenantId, period, settings.costCurrency);
+  const inbox = await inboxReport(tx, tenantId, period, now, settings.target);
+  const csat = await csatReport(tx, tenantId, period, settings.csatEnabled);
+  const automations = await automationReport(tx, tenantId, period);
+  const deals = await dealReport(tx, tenantId, period, now);
+  const agents = await agentReport(tx, tenantId, period);
+  const campaigns = await campaignFunnel(tx, tenantId, period, settings.costCurrency);
+  const definitions = await loadDefinitions(tx);
+  return {
+    period,
+    generatedAt: now,
+    messaging,
+    costs,
+    inbox,
+    csat,
+    automations,
+    deals,
+    agents,
+    campaigns,
+    definitions,
+  };
+}
+
 export function createReportsService(deps: ReportsDeps) {
   const { db, clock } = deps;
 
@@ -1473,31 +1510,7 @@ export function createReportsService(deps: ReportsDeps) {
     const period = resolvePeriod(input, ctx.tenant.timezone, now);
     return db.run(
       ctx.scope,
-      async (tx) => {
-        const settings = await loadReportSettings(tx, ctx.tenant.id, ctx.tenant.timezone);
-        const messaging = await messagingReport(tx, ctx.tenant.id, period);
-        const costs = await estimateMetaCharges(tx, ctx.tenant.id, period, settings.costCurrency);
-        const inbox = await inboxReport(tx, ctx.tenant.id, period, now, settings.target);
-        const csat = await csatReport(tx, ctx.tenant.id, period, settings.csatEnabled);
-        const automations = await automationReport(tx, ctx.tenant.id, period);
-        const deals = await dealReport(tx, ctx.tenant.id, period, now);
-        const agents = await agentReport(tx, ctx.tenant.id, period);
-        const campaigns = await campaignFunnel(tx, ctx.tenant.id, period, settings.costCurrency);
-        const definitions = await loadDefinitions(tx);
-        return {
-          period,
-          generatedAt: now,
-          messaging,
-          costs,
-          inbox,
-          csat,
-          automations,
-          deals,
-          agents,
-          campaigns,
-          definitions,
-        };
-      },
+      (tx) => readReport(tx, ctx.tenant.id, ctx.tenant.timezone, period, now),
       { isolationLevel: 'repeatable read', accessMode: 'read only' },
     );
   }
