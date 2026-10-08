@@ -1,5 +1,50 @@
 # Progress
 
+## 2026-10-08 — Emailing administrators the failing integrations assigned to them (P5-10, H-034, ADR-314)
+
+Status: **Implemented; its database tests run in CI only.** Since ADR-313 an administrator assigned
+to a failure by another learnt of it only on the console. The local PostgreSQL is unavailable, so
+migration 0237 and the integration tests below were written but not run here; migration 0237 passed
+the pglast parse check (syntax only).
+
+### Completed
+
+- **Design (ADR-314):** the worker's minute sweep emails each assignee once about the failures other
+  administrators assigned them since its last run, with counts by kind and who assigned them; not
+  about a self-assignment, an assignee who stays, a failure that recovered or an assignee who is no
+  longer an administrator.
+- **Database (migration 0237):** `ops.integration_assignments.notified_at`, existing assignments
+  taken as told; `ops.platform_assign_integration_failure` replaced to set, keep or clear it;
+  `ops.claim_integration_assignment_notices` (definer, worker role only).
+- **Domain and worker:** `platform/integration-assignment-notices.ts` (`assignmentNotice`,
+  `noticeIntegrationAssignments`), the alerts' kind labels shared (`integrationKindLabel`), and the
+  call in the worker's messaging sweep.
+- **Web:** Current failures says the assignee is emailed, with counts only.
+- **Tests:** unit (6 new in `integration-assignment-notices.test.ts`): the wording for one failure,
+  several by one administrator and several by two, the longest name with every kind, and one email
+  per assignee; integration (5 new in `platform-ops.test.ts`, 1 changed in
+  `tenant-isolation.test.ts`): told once with two sweeps at once and counts only, self-assignment
+  and the same assignee, several failures in one email and reassignment, a recovered failure and a
+  removed administrator, the grants, owner and search path. Written for CI; the integration tests
+  were not run here.
+- **Docs:** ADR-314 (and ADR-313's "Not built" annotated); SECURITY; ARCHITECTURE; THREAT-MODEL
+  T282; DEPLOYMENT and RUNBOOKS; DATA-RETENTION; BACKLOG P5-10; feature matrix H-034 (and a repeated
+  phrase in ADR-313's evidence removed).
+- **Mutation checks:** 28/28 deliberate regressions caught on the unit-tested parts. The claim and
+  assignment functions need the database, so their regressions are left to the integration tests,
+  which run in CI.
+
+### Test commands and results (local, 2026-10-08)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 139 files, 1328 tests                                         |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| pglast 7 parse of migration 0237                   | passed (syntax only)                                          |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
 ## 2026-10-08 — Assigning failing integrations on the operations console (P5-10, H-034, ADR-313)
 
 Status: **Implemented; its database and browser tests run in CI only.** Administrators could

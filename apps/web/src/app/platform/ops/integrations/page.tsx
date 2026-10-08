@@ -61,8 +61,9 @@ export default async function OpsIntegrationsPage() {
             took it and what was found; the acknowledgement lasts while the failure is listed
             (ADR-141). Any administrator assigns a failure to an administrator, themselves or
             another, so it is clear who handles it; the assignment lasts while the failure is listed
-            too (ADR-313). The CSV gives when a failure was acknowledged, not by whom or the note,
-            and leaves assignments out.
+            too (ADR-313), and the assignee is emailed unless they assigned it themselves, with
+            counts only (ADR-314). The CSV gives when a failure was acknowledged, not by whom or the
+            note, and leaves assignments out.
           </CardDescription>
         </CardHeader>
         <CardContent>

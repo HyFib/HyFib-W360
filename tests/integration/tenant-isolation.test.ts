@@ -297,6 +297,11 @@ describe('database roles', () => {
     expect(await can('w360_platform', assign)).toBe(true);
     expect(await can('w360_app', assign)).toBe(false);
     expect(await can('w360_auth', assign)).toBe(false);
+    // Emailing the assignees (0237): the worker's sweep only.
+    const notices = 'ops.claim_integration_assignment_notices()';
+    expect(await can('w360_app', notices)).toBe(true);
+    expect(await can('w360_auth', notices)).toBe(false);
+    expect(await can('w360_platform', notices)).toBe(false);
     const rule = 'ops.webhook_receipt_exhausted(text,integer,timestamp with time zone)';
     expect(await can('w360_app', rule)).toBe(true);
     expect(await can('w360_platform', rule)).toBe(true);

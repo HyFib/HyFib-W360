@@ -140,6 +140,7 @@ export * from './platform/ops-model';
 export * from './platform/ops';
 export * from './platform/failure-alerts';
 export * from './platform/integration-alerts';
+export * from './platform/integration-assignment-notices';
 export * from './platform/queue-waits';
 export * from './platform/dead-letter-retries';
 export * from './platform/billing';

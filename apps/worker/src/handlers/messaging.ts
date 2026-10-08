@@ -16,6 +16,7 @@ import {
   newResealState,
   newResignState,
   noticeApiKeyUsageDue,
+  noticeIntegrationAssignments,
   noticeOverdueReplies,
   processChannelOnboarding,
   processMetaWebhookReceipt,
@@ -437,6 +438,19 @@ export function messagingSweepHandler(rt: WorkerRuntime) {
       rt.logger.warn(
         { failures: integrations.unsent },
         'company integrations are failing but there is no platform administrator to email',
+      );
+    }
+    // Failures an administrator assigned to another (ADR-313): each assignee hears of those assigned
+    // since the last run once, with counts only (ADR-314).
+    const assigned = await noticeIntegrationAssignments({
+      db: rt.db,
+      outbox: rt.notices.outbox,
+      appBaseUrl: rt.notices.appBaseUrl,
+    });
+    if (assigned.told > 0) {
+      rt.logger.info(
+        { failures: assigned.told, recipients: assigned.recipients },
+        'failure assignments emailed to platform staff',
       );
     }
   };

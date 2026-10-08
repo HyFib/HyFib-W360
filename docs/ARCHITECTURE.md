@@ -2463,6 +2463,14 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   and writes the platform audit entry in one transaction; the console's list returns each failure's
   assignment with the names. `ops.integration_alerts_due` keeps assignments of listed failures and
   forgets the others after an hour, as it does acknowledgements.
+- **Emailing assignees** (ADR-314, migration 0237): the worker's minute sweep, after the integration
+  alert, runs `noticeIntegrationAssignments`: `ops.claim_integration_assignment_notices` (definer,
+  worker role only) marks every row of `ops.integration_assignments` whose `notified_at` is null and
+  returns those whose failure `ops.integration_failures` still lists and whose assignee is still a
+  platform administrator, and the same transaction queues one `platform.notice` email to each
+  assignee, with counts by kind and who assigned them. `ops.platform_assign_integration_failure`
+  sets `notified_at` for a self-assignment, keeps it for the same assignee and clears it for a new
+  one.
 - **Acknowledging dead letters** (ADR-169, migration 0117): `acknowledged_at`,
   `acknowledged_by_user_id` and `acknowledgement` on `ops.dead_letters`, set together (the check
   `dead_letters_acknowledged`) and written only by `ops.platform_acknowledge_dead_letter` (definer,

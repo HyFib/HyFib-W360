@@ -12074,6 +12074,45 @@ Decision:
   replaced (each dropped by its owner and created again, as 0107 did) with their owners, search
   paths and grants as before.
 
-Not built: an email to the assignee (the alert email of ADR-139 is unchanged), assigning the
-console's other lists (dead letters, receipts, quarantine, late queues), a view of the failures
-assigned to oneself, and assignments in the CSV.
+Not built: an email to the assignee (built by ADR-314; the alert email of ADR-139 is unchanged),
+assigning the console's other lists (dead letters, receipts, quarantine, late queues), a view of the
+failures assigned to oneself, and assignments in the CSV.
+
+## ADR-314 Emailing a platform administrator the failing integrations assigned to them (P5-10) (2026-10-08)
+
+Context: since ADR-313 an administrator assigns a failure Operations → Integrations lists to
+another, who learnt of it only by opening the console; ADR-313 left the email out. The alert email
+of ADR-139 tells every administrator of each failure once, not who should handle it.
+
+Decision:
+
+- **Who is told:** the assignee, when another administrator assigns them a failure the console lists
+  or reassigns one to them. Not an administrator who assigns a failure to themselves, nor an
+  assignee who stays when the failure is assigned again (by anyone), nor the administrator who
+  assigned it. A failure reassigned to someone else and back is a new assignment, and told again.
+- **When:** by the worker's minute sweep, after the integration alert (ADR-139): one email to each
+  assignee for the failures assigned to them since its last run, so assignments made within a minute
+  share one email. When the sweep runs, an assignment whose failure the console no longer lists, or
+  whose assignee is no longer a platform administrator, is marked and never told, even once the
+  failure is listed again or they are an administrator again.
+- **What it says:** counts only, as the alert emails do (ADR-139): how many failures, by the
+  console's kinds (six named at most, the rest counted), and who assigned them (the administrator's
+  name when one did, how many administrators when several did), with a link to the Integrations tab.
+  The companies, labels, hosts and errors stay on the console behind platform sign-in, and the
+  outbox row names no company. Every line fits a platform notice with the longest name an account
+  may have and every kind.
+- **Where it is enforced:** `ops.integration_assignments.notified_at` (migration 0237) says whether
+  the assignee was told: `ops.platform_assign_integration_failure` sets it when an administrator
+  assigns a failure to themselves, keeps it when the assignee stays and clears it for a new
+  assignee. `ops.claim_integration_assignment_notices` (SECURITY DEFINER, the worker's role only)
+  marks every assignment not told yet and returns those still listed whose assignee is still an
+  administrator, with the addresses and names, in the transaction that queues the emails: a failed
+  transaction leaves them for the next sweep, and two sweeps at once tell each assignment once (the
+  second waits for the first's rows and finds them told).
+- **Migration 0237:** the column, with every assignment made before it taken as told, so nobody is
+  emailed about one made before the email existed; the assignment function replaced (dropped by its
+  owner and created again with the same signature, owner, search path and grant); and the claim
+  function.
+
+Not built: an email when an assignment is taken off or an assigned failure recovers, a way for an
+administrator to stop these emails, and assigning the console's other lists (ADR-313).

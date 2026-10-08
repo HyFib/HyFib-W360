@@ -2175,6 +2175,13 @@ message text, contact details, payloads, email addresses, secrets or full URLs:
   `ops.integration_assignments` (the failure's ids and two platform accounts, no company data),
   which the sweep forgets an hour after the failure stops being listed; the failures' CSV leaves
   assignments out (unit tests; integration and e2e tests, run in CI only).
+- Emailing assignees (ADR-314): the worker's sweep emails an assignee the failures other
+  administrators assigned to them through `ops.claim_integration_assignment_notices` (SECURITY
+  DEFINER, executable only by the worker's role), which tells only an assignee who is still a
+  platform administrator, only of failures the console still lists, and each assignment once, in the
+  transaction that queues the email. The email gives counts by kind and the assigning
+  administrator's name only, with no company, label, host or error, and its outbox row names no
+  company (unit tests; integration tests, run in CI only).
 - Acknowledging dead letters (ADR-169): through `ops.platform_acknowledge_dead_letter` (SECURITY
   DEFINER, executable only by the platform role), which checks the platform administrator, the note
   (10 to 500 characters, trimmed) and the dead letter, and writes the platform audit entry

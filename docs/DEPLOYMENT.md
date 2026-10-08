@@ -1107,6 +1107,14 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    workers run the same check, unchanged for them. Web servers from before it show no assignments
    and ignore the new columns.
 
+   Migration 0237 (ADR-314) adds `notified_at` to `ops.integration_assignments`, set to when each
+   existing assignment was made so that none is emailed, replaces
+   `ops.platform_assign_integration_failure` with the same signature, owner and grant, and creates
+   `ops.claim_integration_assignment_notices` for the worker's role. Workers of this release need
+   it, as their minute sweep calls the new function; web servers call the assignment function as
+   before. Assignments made while workers from before it run are emailed once a worker of this
+   release runs.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

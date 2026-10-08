@@ -3617,8 +3617,16 @@ assignment off. The platform audit log keeps each change (`platform.integration_
 `platform.integration_failure_unassigned`). An assignment lasts while the failure is listed in that
 state, like an acknowledgement: a change of state starts it unassigned, and one that recovers keeps
 its assignment for an hour. "Assign the failure to a platform administrator." means the person
-chosen is no longer one; reload the page. The assignee is not emailed: tell them, or rely on the
-console. The CSV leaves assignments out.
+chosen is no longer one; reload the page. The assignee is emailed unless they assigned it themselves
+(ADR-314). The CSV leaves assignments out.
+
+**Assignment emails (ADR-314).** Within about a minute of an assignment the worker emails the
+assignee ("A failing integration was assigned to you", or how many), with counts by kind and who
+assigned them, and logs `failure assignments emailed to platform staff` with how many failures and
+recipients. Nobody is emailed about a failure they assigned themselves or one assigned to them
+again, and an assignment whose failure recovered, or whose assignee stopped being an administrator,
+before the sweep is never emailed. An assignee who got no email: check on Current failures that
+someone else assigned the failure to them, then follow the email outbox (section 3).
 
 **Keys (ADR-134).** The configured encryption key ids, the primary first, and how many stored values
 each key seals, by kind (counts only). While another key is configured the worker seals the values
