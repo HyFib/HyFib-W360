@@ -5171,13 +5171,13 @@ describe('change-maker filters for deal, task and note events (ADR-306)', () => 
     const keysDeal = (response.body as { data: { id: string } }).data.id;
     await svc.moveDeal(owner, { id: keysDeal, expectedVersion: 1, stageId: qualified });
     await apiUpdateDeal(apiDeps, key, membersDeal, { title: 'Annual plan 2027' });
-    // An automation's run changes the value, recording itself as runs do, and a change that
-    // records no maker retitles the key's deal.
+    // An automation's run changes the value, recording itself as runs do (no key: the key's
+    // retitle was recorded before), and a change that records no maker retitles the key's deal.
     const set = (id: string, assignments: string) =>
       fx.query(`UPDATE app.crm_deals SET ${assignments} WHERE id = $1`, [id]);
     await set(
       membersDeal,
-      `value_minor = 100000, changed_by = 'automation',
+      `value_minor = 100000, changed_by = 'automation', changed_by_api_key_id = NULL,
        changed_xact = pg_catalog.pg_current_xact_id()`,
     );
     await set(keysDeal, `title = 'Web order 1001'`);
