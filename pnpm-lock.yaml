@@ -19,8 +19,8 @@ importers:
         specifier: 10.0.1
         version: 10.0.1(eslint@10.11.0(jiti@2.7.0)(supports-color@7.2.0))
       '@next/eslint-plugin-next':
-        specifier: 16.3.6
-        version: 16.3.6(patch_hash=46243f56fff2d559f7e0530625b12153538f073738493a352e04d250aec9fb95)(eslint@10.11.0(jiti@2.7.0)(supports-color@7.2.0))
+        specifier: 16.3.8
+        version: 16.3.8(eslint@10.11.0(jiti@2.7.0)(supports-color@7.2.0))
       '@playwright/test':
         specifier: 1.63.0
         version: 1.63.0
@@ -1025,6 +1025,9 @@ packages:
 
   '@next/eslint-plugin-next@16.3.6':
     resolution: {integrity: sha512-jowwDX+7DOlDIjJLgTMxudw+k37QnWu1JkZLkSi9MaJBfDYcfhAPMKBhXL0idYzFN/AGg//axnOR4cLkHX/Rng==}
+
+  '@next/eslint-plugin-next@16.3.8':
+    resolution: {integrity: sha512-eCR9RcLTZrVS+K3+VOhi0xMdUUGNuriCHHhU1ZoABC/QQ/Gp0OWbLKQxV2/9DkmihYdYRcQWFmZXW8M1AMUXYw==}
 
   '@next/swc-darwin-arm64@16.3.8':
     resolution: {integrity: sha512-2JPRMh2nmQG5CiL7cXGL9AGwnPWJQ//cTtAUCT+w511QHk79SYz3LGv/pc5X643B/WEO0rvu3Yww0hqwt3kgeA==}
@@ -4692,6 +4695,12 @@ snapshots:
   '@next/env@16.3.8': {}
 
   '@next/eslint-plugin-next@16.3.6(patch_hash=46243f56fff2d559f7e0530625b12153538f073738493a352e04d250aec9fb95)(eslint@10.11.0(jiti@2.7.0)(supports-color@7.2.0))':
+    dependencies:
+      '@eslint-community/eslint-utils': 4.9.1(eslint@10.11.0(jiti@2.7.0)(supports-color@7.2.0))
+    transitivePeerDependencies:
+      - eslint
+
+  '@next/eslint-plugin-next@16.3.8(eslint@10.11.0(jiti@2.7.0)(supports-color@7.2.0))':
     dependencies:
       '@eslint-community/eslint-utils': 4.9.1(eslint@10.11.0(jiti@2.7.0)(supports-color@7.2.0))
     transitivePeerDependencies:
