@@ -406,6 +406,13 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
    */
   surveyConversationTags: text('survey_conversation_tags').array(),
   /**
+   * The contact tags whose `contact.created` and `contact.updated` it takes (migration 0239,
+   * ADR-316): the changes of a contact that has one of them, and those adding or removing one, as
+   * contacts carry them. null takes every contact. Set only while one of the two is among its
+   * events.
+   */
+  contactEventTags: text('contact_event_tags').array(),
+  /**
    * The consent changes it takes as `consent.changed` (ADR-189), by purpose and action; null takes
    * every change. Set only while `consent.changed` is among its events.
    */

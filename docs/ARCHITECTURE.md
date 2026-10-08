@@ -2210,6 +2210,15 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   when an active endpoint of the company names sources and creates a `contact.created` delivery only
   where it is listed. Settings (checkboxes under "Contact added") and the API (`contactSources`) set
   it; a change that drops the event clears it.
+- **Tag filters for added and changed contacts** (migration 0239, ADR-316): `contact_event_tags` on
+  an endpoint lists the tags of the contacts whose `contact.created` and `contact.updated` it takes,
+  as contacts carry them, null for every contact; a check keeps it to the tags' rule and to
+  endpoints taking either event. `app.capture_contact_webhook_event` (replaced with the same
+  signature) reads the contact's tags when an active endpoint names tags and creates a delivery only
+  for endpoints whose list shares a tag with the contact; the tag trigger then calls
+  `app.deliver_contact_webhook_tag`, which adds the delivery of its transaction's event for the
+  endpoints naming the tag added or removed. Settings and the API (`contactEventTags`) set it; a
+  change that drops both events clears it.
 - **Message type filters** (migration 0137, ADR-191): `message_types` on an endpoint lists the types
   of the received messages it takes as `message.received`, null for every type; a check keeps it to
   1 to 14 known types (never `template`) and to endpoints taking the event.

@@ -413,6 +413,12 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
                         {e.surveyConversationTags.join(', ')}
                       </p>
                     ) : null}
+                    {e.contactEventTags ? (
+                      <p className="text-xs break-all text-muted-foreground">
+                        Added and changed contacts sent, of contacts tagged:{' '}
+                        {e.contactEventTags.join(', ')}
+                      </p>
+                    ) : null}
                     {e.teams ? (
                       <p className="text-xs text-muted-foreground">
                         Teams whose conversations’ events are sent:{' '}

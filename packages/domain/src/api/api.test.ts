@@ -173,6 +173,7 @@ import {
   WEBHOOK_SURVEY_TEAMS_NEED_THE_EVENT,
   WEBHOOK_SURVEY_CONTACT_TAGS_NEED_THE_EVENT,
   WEBHOOK_SURVEY_CONVERSATION_TAGS_NEED_THE_EVENT,
+  WEBHOOK_CONTACT_EVENT_TAGS_NEED_THE_EVENTS,
   WEBHOOK_CONTACT_TAGS_NEED_THE_EVENTS,
   WEBHOOK_CONVERSATION_TAGS_NEED_THE_EVENTS,
   WEBHOOK_CAMPAIGN_STATUSES_NEED_THE_EVENT,
@@ -1471,6 +1472,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'campaignStatuses',
       'channelIds',
       'consentChanges',
+      'contactEventTags',
       'contactFieldKeys',
       'contactParts',
       'contactSources',
@@ -1638,6 +1640,17 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     expect(webhooks['satisfaction_survey.answered']?.post?.description).toContain(
       'Tags narrow it too (its `surveyContactTags` and `surveyConversationTags`',
     );
+    // The tags of added and changed contacts (ADR-316).
+    const contactEventTags = (answered.properties as Record<string, { anyOf?: unknown[] }>)
+      .contactEventTags;
+    expect(contactEventTags?.anyOf).toHaveLength(2);
+    expect(answered.required).toContain('contactEventTags');
+    expect(Object.keys(createBody.properties)).toContain('contactEventTags');
+    for (const event of ['contact.created', 'contact.updated']) {
+      expect(webhooks[event]?.post?.description, event).toContain(
+        'An endpoint that names tags (its `contactEventTags`',
+      );
+    }
     // The template statuses an endpoint receives (ADR-148): a list, or null.
     const templateStatuses = (answered.properties as Record<string, { anyOf?: unknown[] }>)
       .templateStatuses;
@@ -2141,7 +2154,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       taskAssigneeIds: [dev],
     });
     expect(apiUpdateWebhookEndpointSchema.safeParse({}).error?.issues[0]?.message).toContain(
-      'the deal owners, the task assignees, the pipelines, stages and owners of tasks’ deals and of notes’ deals, who made the CRM changes, the survey scores, the members credited with survey answers and the teams of their conversations, the contact and conversation tags of survey answers, the members, the contact tags, the conversation tags, the OAuth client',
+      'the deal owners, the task assignees, the pipelines, stages and owners of tasks’ deals and of notes’ deals, who made the CRM changes, the survey scores, the members credited with survey answers and the teams of their conversations, the contact and conversation tags of survey answers, the tags of added and changed contacts, the members, the contact tags, the conversation tags, the OAuth client',
     );
     const doc = buildOpenApiDocument('https://app.example.com/api/v1');
     const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
@@ -3685,7 +3698,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       expect(apiUpdateWebhookEndpointSchema.parse(change)).toEqual(change);
     }
     expect(apiUpdateWebhookEndpointSchema.safeParse({}).error?.issues[0]?.message).toContain(
-      'the teams of their conversations, the contact and conversation tags of survey answers, the members,',
+      'the teams of their conversations, the contact and conversation tags of survey answers,',
     );
     const doc = buildOpenApiDocument('https://app.example.com/api/v1');
     const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
@@ -3703,6 +3716,65 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     ]?.post?.description;
     expect(surveyEvent).toContain(
       'an answer is sent when the answering contact, or its conversation, has any of the tags when the customer answers.',
+    );
+  });
+
+  it('take the tags of added and changed contacts only with contact.created or contact.updated, as contacts carry them, and a list of them alone is a change (ADR-316)', () => {
+    const url = 'https://hooks.example.com/w360';
+    for (const events of [
+      ['contact.created'],
+      ['contact.updated'],
+      ['contact.created', 'contact.updated'],
+    ]) {
+      expect(
+        apiCreateWebhookEndpointSchema.parse({
+          url,
+          events,
+          contactEventTags: ['VIP', 'Gold   Member', 'vip'],
+        }),
+        events.join(),
+      ).toMatchObject({ contactEventTags: ['vip', 'gold member'] });
+    }
+    // Erased and merged contacts, and conversations' events, take no such list.
+    const refused = apiCreateWebhookEndpointSchema.safeParse({
+      url,
+      events: ['contact.erased', 'contact.merged', 'message.received'],
+      contactEventTags: ['vip'],
+    });
+    expect(refused.error?.issues.map((i) => [i.path.join('.'), i.message])).toEqual([
+      ['contactEventTags', WEBHOOK_CONTACT_EVENT_TAGS_NEED_THE_EVENTS],
+    ]);
+    const contacts = { url, events: ['contact.updated'] };
+    const many = Array.from({ length: WEBHOOK_LIMITS.contactEventTags + 1 }, (_, i) => `tag ${i}`);
+    for (const body of [
+      { ...contacts, contactEventTags: [] },
+      { ...contacts, contactEventTags: ['a,b'] },
+      { ...contacts, contactEventTags: [42] },
+      { ...contacts, contactEventTags: many },
+    ]) {
+      expect(apiCreateWebhookEndpointSchema.safeParse(body).success, JSON.stringify(body)).toBe(
+        false,
+      );
+    }
+    for (const change of [{ contactEventTags: null }, { contactEventTags: ['vip'] }]) {
+      expect(apiUpdateWebhookEndpointSchema.parse(change)).toEqual(change);
+    }
+    expect(apiUpdateWebhookEndpointSchema.safeParse({}).error?.issues[0]?.message).toContain(
+      'the contact and conversation tags of survey answers, the tags of added and changed contacts, the members,',
+    );
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas;
+    const given = (schemas.CreateWebhookEndpoint as { properties: Record<string, unknown> })
+      .properties;
+    expect(JSON.stringify(given.contactEventTags)).toContain(
+      '1 to 50 tags as contacts carry them (as GET /contacts gives them: compared as tags are written, in lower case with single spaces, each up to 40 characters without commas), only with contact.created or contact.updated. A change is sent when the contact has any of the tags when it is saved, or when it adds or removes one of them.',
+    );
+    const updated = (doc.webhooks as Record<string, { post?: { description?: string } }>)[
+      'contact.updated'
+    ]?.post?.description;
+    expect(updated).toContain(
+      'receives the changes of contacts that have one of them when they are saved, and the changes that add or remove one.',
     );
   });
 

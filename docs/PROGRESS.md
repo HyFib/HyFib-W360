@@ -1,5 +1,49 @@
 # Progress
 
+## 2026-10-08 — Tag filters for added and changed contacts (P5-09, H-014, ADR-316)
+
+Status: **Implemented; its database tests run in CI only.** Endpoints taking `contact.created` or
+`contact.updated` could name sources, parts and fields, but not tags, so a receiver following a
+segment of customers took every contact's changes. The local PostgreSQL is unavailable, so the
+migration and the integration tests below were written but not run here; migration 0239 passed the
+pglast parse check (syntax only).
+
+### Completed
+
+- **Database:** migration 0239 (`contact_event_tags` on `app.webhook_endpoints` with its check and
+  update grant; `app.capture_contact_webhook_event` reading the contact's tags when an endpoint
+  names tags; `app.deliver_contact_webhook_tag`, called by the tag trigger, for the tag a change
+  adds or removes).
+- **Domain:** `WEBHOOK_LIMITS.contactEventTags`, `webhookContactEventTagsSchema` and
+  `webhookContactEventTagsFor` in `webhooks/service.ts`, the endpoint view's `contactEventTags`,
+  creation, changes, audits and the export column; the same in `api/webhook-endpoints.ts` and the
+  OpenAPI document (both events' descriptions name it).
+- **Web:** Settings → Webhooks' "Tags of added and changed contacts" while the endpoint takes either
+  event, and the endpoints list's line for it.
+- **Tests:** unit (3 new: the list's rules and keeping and clearing in `webhooks/webhooks.test.ts`;
+  the API schemas and OpenAPI entries in `api/api.test.ts`; the empty-change wording asserted where
+  the new words go); integration (5 new: capture in `webhook-events.test.ts`, the services in
+  `webhooks.test.ts`, the API in `api-webhook-endpoints.test.ts`; 1 changed in
+  `tenant-isolation.test.ts`). Written for CI; the integration tests were not run here. No e2e test.
+- **Docs:** ADR-316; ARCHITECTURE; SECURITY; THREAT-MODEL T284; DEPLOYMENT; RUNBOOKS; BACKLOG P5-09;
+  feature matrix H-014.
+- **Mutation checks:** 21/22 deliberate regressions caught on the unit-tested parts; the one left,
+  the export leaving out the column, is caught by the company data integration test that checks
+  every exported column against the database, run in CI only. The capture, the new function and the
+  form need the database or a browser, so their regressions are left to the integration tests, which
+  run in CI.
+
+### Test commands and results (local, 2026-10-08)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 139 files, 1332 tests                                         |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| pglast 7 parse of migration 0239                   | passed (syntax only)                                          |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
 ## 2026-10-08 — The failing integrations assigned to the administrator reading (P5-10, H-034, ADR-315)
 
 Status: **Implemented; its database and browser tests run in CI only.** Current failures showed each

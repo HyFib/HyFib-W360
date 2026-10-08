@@ -12140,3 +12140,57 @@ Decision:
 
 Not built: counts of the failures assigned to each administrator, a view of another administrator's
 failures, and such views for the console's other lists.
+
+## ADR-316 Choosing the tags of the added and changed contacts a webhook endpoint receives (P5-09) (2026-10-08)
+
+Context: an endpoint taking `contact.created` or `contact.updated` can narrow them by where contacts
+came from (ADR-190), the parts that changed (ADR-123) and the custom fields (ADR-184), but not by
+tag; the contact tag lists of conversations' events (ADR-267) and of survey answers (ADR-312) leave
+contact events out. A receiver that keeps a segment of customers in step, a CRM list of `vip`
+contacts say, was sent every other contact's changes too and had to read each one to drop it.
+
+Decision:
+
+- **One list per endpoint for both events,** `contactEventTags`: 1 to 50 tags as contacts carry them
+  (`normalizeTag`), each once in the order given. A change is sent when the contact has any of the
+  tags when it is saved, or when it adds or removes one of them, so the change that takes a contact
+  out of the segment is sent too, with the tag it removed (`tagsRemoved`, ADR-182). A contact is
+  added without tags, so its `contact.created` is sent when the change that adds it tags it with one
+  of them (a member adding a contact with tags, or an import or API request adding one in one
+  change); one tagged later is sent as `contact.updated`. A tag no contact has yet may be named; it
+  matches nothing until a contact has it. Null receives every contact, as before. With sources,
+  parts or fields chosen too, an event must pass them all: a tag added or removed is a change of
+  `tags`, so an endpoint whose parts leave tags out is not sent it. `contact.erased` and
+  `contact.merged` are not narrowed. Chosen in Settings → Webhooks ("Tags of added and changed
+  contacts", typed separated by commas, every contact by default, shown while the endpoint takes
+  either event), shown on the endpoint as "Added and changed contacts sent, of contacts tagged: …",
+  and through the API as `contactEventTags` on `POST /webhook-endpoints` and
+  `PATCH /webhook-endpoints/{id}` and in every endpoint the API answers.
+- **Only while an event is taken:** a list given for an endpoint that takes neither event is refused
+  (422 through the API). A change that drops both events clears it, and a `PATCH` that leaves it out
+  keeps it; Settings always sends it (null while every contact is taken). A check in the database
+  holds the same rule and the tags' own (null, or 1 to 50 tags as contacts carry them, in one
+  dimension without a null, with either event).
+- **Applied at capture:** `app.capture_contact_webhook_event` reads the contact's tags only when an
+  active endpoint of the company that takes either event names tags, and creates a delivery of a
+  `contact.created` or `contact.updated` only for the endpoints whose list shares a tag with the
+  contact at that change. The tag trigger then calls `app.deliver_contact_webhook_tag` once the tag
+  is noted on the event: it adds the delivery of its transaction's event for the endpoints naming
+  the tag added or removed (for `contact.updated`, those taking changes of tags; for
+  `contact.created`, those taking the contact's source). Each endpoint gets each event once. Both
+  run as the role making the change, the runtime role or the definer role merging and erasing
+  contacts, and read nothing while no active endpoint of the company names tags. Stored events and
+  payloads are unchanged.
+- **Audited and exported:** `webhook.endpoint_created` and `webhook.endpoint_updated` carry
+  `contactEventTags` when the endpoint has it, and the company data export carries the column.
+- **Permissions unchanged:** members with `developer.manage` in Settings, keys with
+  `webhooks.manage` through the API.
+- **Migration 0239:** `contact_event_tags text[]` on `app.webhook_endpoints` with its check,
+  validated at once (a company has at most 10 endpoints), the update grant on the column for the
+  runtime role, `app.capture_contact_webhook_event` and the tag trigger's
+  `app.webhook_capture_contact_tag` replaced with the same signatures (0136's and 0129's, with the
+  tags), so their owners and grants stay, and `app.deliver_contact_webhook_tag` for the runtime and
+  definer roles. Existing endpoints keep null; nothing is backfilled.
+
+Not built: lists that leave tagged contacts out, the contact's tags at capture in the payload (it
+gives the contact as it is when delivered), and tag filters for erased and merged contacts.

@@ -1403,6 +1403,12 @@ export const apiWebhookEndpointSchema = z.object({
     .describe(
       'The conversation tags whose satisfaction survey answers (satisfaction_survey.answered) the endpoint receives, by the tags the conversation has when the customer answers, as conversations carry them; null receives every answer. Other events are not narrowed.',
     ),
+  contactEventTags: z
+    .array(z.string())
+    .nullable()
+    .describe(
+      'The contact tags whose contact.created and contact.updated the endpoint receives, as contacts carry them: the changes of a contact that has one of them when they are saved, and those adding or removing one; a contact.created is received when the change that adds the contact tags it with one. null receives every contact. Other events are not narrowed.',
+    ),
   assigneeIds: z
     .array(z.uuid())
     .nullable()
@@ -4166,13 +4172,13 @@ export function buildOpenApiDocument(serverUrl: string) {
       'contact.created': webhook(
         'webhookContactCreated',
         WEBHOOK_EVENT_INFO['contact.created'].label,
-        `${WEBHOOK_EVENT_INFO['contact.created'].description} An import sends one per contact added.`,
+        `${WEBHOOK_EVENT_INFO['contact.created'].description} An import sends one per contact added. An endpoint that names tags (its \`contactEventTags\`, or the tags given in Settings → Webhooks) receives it for a contact the change that adds it tags with one of them.`,
         'WebhookContactCreated',
       ),
       'contact.updated': webhook(
         'webhookContactUpdated',
         WEBHOOK_EVENT_INFO['contact.updated'].label,
-        `${WEBHOOK_EVENT_INFO['contact.updated'].description} One event per contact for each change saved; a contact added in the same change is sent as contact.created only. An endpoint receives every change unless it names the parts it takes (its \`contactParts\`, or the parts ticked in Settings → Webhooks): then it receives the events whose changes name one of them, each naming every part that changed.`,
+        `${WEBHOOK_EVENT_INFO['contact.updated'].description} One event per contact for each change saved; a contact added in the same change is sent as contact.created only. An endpoint receives every change unless it names the parts it takes (its \`contactParts\`, or the parts ticked in Settings → Webhooks): then it receives the events whose changes name one of them, each naming every part that changed. An endpoint that names tags (its \`contactEventTags\`) receives the changes of contacts that have one of them when they are saved, and the changes that add or remove one.`,
         'WebhookContactUpdated',
       ),
       'contact.erased': webhook(

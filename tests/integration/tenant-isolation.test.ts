@@ -325,6 +325,8 @@ describe('database roles', () => {
       'app.capture_webhook_event(uuid,text,uuid,uuid,uuid,uuid,text,jsonb,timestamp with time zone)',
       'app.capture_contact_webhook_event(uuid,uuid,text,text[])',
       'app.add_contact_webhook_changes(uuid,uuid,text[])',
+      // Matching the tags a change adds and removes (0239), as the capture does.
+      'app.deliver_contact_webhook_tag(uuid,uuid,text)',
     ]) {
       expect(await can('w360_app', fn), fn).toBe(true);
       expect(await can('w360_definer', fn), fn).toBe(true);

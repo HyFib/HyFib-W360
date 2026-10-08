@@ -1612,6 +1612,17 @@ Phase 5 rules (outgoing webhooks, P5-09):
   company's scope: it narrows what one endpoint receives and never adds an event or a delivery for
   another endpoint or company. Audited with the list (unit tests; integration and e2e tests, run in
   CI only).
+- An endpoint can take the added and changed contacts with chosen tags only (ADR-316), chosen with
+  `developer.manage` in Settings or `webhooks.manage` through the API. Tags are labels: any tag may
+  be named, checked only to be written as contacts carry them. The list is kept only while the
+  endpoint takes `contact.created` or `contact.updated` (a database check too) and applied in
+  `app.capture_contact_webhook_event` and `app.deliver_contact_webhook_tag` against the contact's
+  tags and the tag a change adds or removes. Neither is a definer function: they run as the role
+  making the change, under the company's row-level security, or as the definer role merging and
+  erasing contacts, reading only the tables the capture already read. They narrow what one endpoint
+  receives and never add an event or a delivery for another endpoint or company, and the payload is
+  unchanged. Tag names can say something about a person, so the list is in the company data export
+  and the audits as the other tag lists are (unit tests; integration tests, run in CI only).
 - An endpoint can take the received messages of chosen types only (ADR-191), chosen the same way. A
   list holds only the fourteen types a received message has, is kept only while the endpoint takes
   `message.received` (a database check too, which also refuses a null entry), and is applied in

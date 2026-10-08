@@ -5821,6 +5821,137 @@ describe('survey tag filters (ADR-312)', () => {
   });
 });
 
+describe('contact event tag filters (ADR-316)', () => {
+  it('are refused without contact.created or contact.updated, empty, over 50 or not as tags are written; kept as contacts carry them, kept by a change that leaves them out and cleared with both events; the database keeps them to the events and to tags as they are written', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const url = 'https://hooks.example.com/in';
+    const refused = async (
+      fields: Record<string, unknown>,
+      message: RegExp,
+      path: string,
+      eventTypes = ['contact.updated'],
+    ) => {
+      const error = await expectAppError(
+        webhooks().create(owner, { url, eventTypes, ...fields }),
+        'validation_failed',
+        message,
+      );
+      expect(isAppError(error) && error.issues?.[0]?.path, JSON.stringify(fields)).toBe(path);
+    };
+    // Erased and merged contacts, and conversations' events, take no such list.
+    await refused(
+      { contactEventTags: ['vip'] },
+      /tags of added and changed contacts only for an endpoint that receives Contact added or Contact changed/,
+      'contactEventTags',
+      ['contact.erased', 'contact.merged', 'message.received'],
+    );
+    await refused(
+      { contactEventTags: [] },
+      /at least one tag, or take every contact/,
+      'contactEventTags',
+    );
+    await refused({ contactEventTags: ['vip', 'a,b'] }, /commas/, 'contactEventTags.1');
+    await refused(
+      { contactEventTags: Array.from({ length: 51 }, (_, i) => `tag ${i}`) },
+      /at most 50/,
+      'contactEventTags',
+    );
+    expect(await webhooks().list(owner)).toEqual([]);
+
+    const created = await webhooks().create(owner, {
+      url,
+      eventTypes: ['contact.created', 'contact.updated', 'contact.erased'],
+      contactEventTags: ['VIP', ' vip', 'Gold   Member'],
+    });
+    const audits = async (action: string) =>
+      (
+        await fx.query<{ metadata: { contactEventTags?: unknown } }>(
+          `SELECT metadata FROM app.audit_events
+            WHERE tenant_id = $1 AND action = $2 ORDER BY occurred_at, id`,
+          [c.tenant.id, action],
+        )
+      ).map((a) => a.metadata.contactEventTags);
+    expect(await audits('webhook.endpoint_created')).toEqual([['vip', 'gold member']]);
+    const current = async () =>
+      (await webhooks().list(owner)).find((e) => e.id === created.id)?.contactEventTags;
+    expect(await current()).toEqual(['vip', 'gold member']);
+    // The other tag lists are not set by it.
+    const listed = (await webhooks().list(owner)).find((e) => e.id === created.id);
+    expect([listed?.contactTags, listed?.surveyContactTags]).toEqual([null, null]);
+    const change = (fields: Record<string, unknown>) =>
+      webhooks().update(owner, {
+        endpointId: created.id,
+        url,
+        description: '',
+        eventTypes: ['contact.created', 'contact.updated', 'contact.erased'],
+        ...fields,
+      });
+    await change({ description: 'kept' });
+    expect(await current()).toEqual(['vip', 'gold member']);
+    await change({ contactEventTags: ['Gold'] });
+    expect(await current()).toEqual(['gold']);
+    // Either event keeps the list.
+    await change({ eventTypes: ['contact.created'] });
+    expect(await current()).toEqual(['gold']);
+    await change({ eventTypes: ['contact.updated'], contactEventTags: ['vip'] });
+    expect(await current()).toEqual(['vip']);
+    await change({ eventTypes: ['contact.updated'], contactEventTags: null });
+    expect(await current()).toBeNull();
+    await change({ eventTypes: ['contact.updated'], contactEventTags: ['gold'] });
+    expect(await audits('webhook.endpoint_updated')).toEqual([
+      ['vip', 'gold member'],
+      ['gold'],
+      ['gold'],
+      ['vip'],
+      undefined,
+      ['gold'],
+    ]);
+    // The database refuses an empty list, more than 50, a missing tag, a list of lists, and tags
+    // not as they are written…
+    const setInDatabase = (value: string) =>
+      fx.query(`UPDATE app.webhook_endpoints SET contact_event_tags = ${value} WHERE id = $1`, [
+        created.id,
+      ]);
+    const many = `ARRAY[${Array.from({ length: 51 }, (_, i) => `'tag ${i}'`).join(',')}]`;
+    for (const bad of [
+      `'{}'::text[]`,
+      many,
+      `ARRAY['vip', NULL]`,
+      `ARRAY[ARRAY['vip'], ARRAY['gold']]`,
+      `ARRAY['VIP']`,
+      `ARRAY['gold', 'a,b']`,
+      `ARRAY[' vip']`,
+      `ARRAY['vip ']`,
+      `ARRAY['${'x'.repeat(41)}']`,
+      `ARRAY[E'vi\\tp']`,
+      `ARRAY['vip', '']`,
+    ]) {
+      await expect(setInDatabase(bad), bad).rejects.toThrow(/webhook_endpoints_contact_event_tags/);
+    }
+    // Tags as they are written, spaces inside and 40 characters included, are kept.
+    await setInDatabase(`ARRAY['gold member', '${'x'.repeat(40)}', 'vip']`);
+    expect(await current()).toEqual(['gold member', 'x'.repeat(40), 'vip']);
+    // …leaving both events clears the list…
+    await change({ eventTypes: ['contact.erased'] });
+    expect(await current()).toBeNull();
+    await expectAppError(
+      change({ eventTypes: ['contact.erased'], contactEventTags: ['vip'] }),
+      'validation_failed',
+      /tags of added and changed contacts only/,
+    );
+    // …and the database refuses it for an endpoint that takes neither.
+    await expect(setInDatabase(`ARRAY['vip']`)).rejects.toThrow(
+      /webhook_endpoints_contact_event_tags/,
+    );
+    const [grant] = await fx.query<{ can_update: boolean }>(
+      `SELECT has_column_privilege('w360_app', 'app.webhook_endpoints', 'contact_event_tags',
+                'UPDATE') AS can_update`,
+    );
+    expect(grant?.can_update).toBe(true);
+  });
+});
+
 describe('contact tag filters (ADR-267)', () => {
   /** Puts a tag on a contact, or takes it off, as the contacts service writes tags. */
   const tag = (c: Company, contactId: string, name: string) =>

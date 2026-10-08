@@ -2889,6 +2889,19 @@ are `contact.updated` events, which the list does not narrow. To take more, tick
 (null for every contact). Removing Contact added clears the list. A receiver that is sent its own
 contacts back should leave out `api`.
 
+**A receiver misses changes of some tagged contacts (ADR-316).** An endpoint can take the
+`contact.created` and `contact.updated` of contacts with chosen tags only. The endpoints list shows
+them ("Added and changed contacts sent, of contacts tagged: …"), and the API answers
+`contactEventTags` (null takes every contact). A change goes by the tags the contact has when it is
+saved, and a change adding or removing one of the tags is sent too (with `tagsAdded` and
+`tagsRemoved`); a contact added untagged and tagged later is sent as `contact.updated`, not
+`contact.created`. Events no endpoint takes are not recorded, so there is nothing to replay;
+`GET /contacts/{id}` gives a contact's tags as they are now. Tags are compared as contacts carry
+them (lower case, single spaces), so check the spelling. With sources, parts or fields chosen too,
+an event must pass every list, and parts that leave out tags mean a change of tags alone is not
+sent. To take more, change the tags on the endpoint's page, or `PATCH /webhook-endpoints/{id}` with
+`contactEventTags` (null for every contact). Removing both contact events clears the list.
+
 **A receiver misses consent changes (ADR-189).** An endpoint can take chosen consent changes only.
 The endpoints list shows them ("Consent changes sent: …"), and the API answers `consentChanges`
 (null takes every change). A change goes by its purpose and action (`marketing_opt_out`): the others
