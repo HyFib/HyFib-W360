@@ -1583,6 +1583,68 @@ Phase 5 rules (outgoing webhooks, P5-09):
   which no role can change: it narrows what one endpoint receives and never adds an event or a
   delivery for another endpoint or company. The trigger passed is not stored with the event. Audited
   with the list (unit tests; integration and e2e tests, run in CI only).
+- An endpoint can take the run events of the runs chosen API keys started only (ADR-319), chosen
+  with `developer.manage` in Settings or `webhooks.manage` through the API. A list holds only the
+  company's keys that hold `automations.start` (checked by the services, whatever the key's state,
+  as its runs still end), is kept only while the endpoint takes a run event (a database check too),
+  and is applied in `app.capture_webhook_event` to the key the run's own row names, which no role
+  can change, and to that key's rotations, read from `app.api_keys` within the company. The capture
+  is not a definer function: it runs as the role writing the run, under the company's row-level
+  security, or as the definer role under the policy it already had on the keys (0024), and reads
+  their ids and rotations only, never their hashes. It narrows what one endpoint receives and never
+  adds an event or a delivery for another endpoint or company; the key is not stored with the event,
+  and the payload is unchanged. A refused id tells a key only whether it names one of the company's
+  keys that can start automations, whose ids keys already see in run events. Audited with the list
+  and in the company data export (unit tests; integration tests, run in CI only).
+- An endpoint can take the statuses of the messages chosen API keys sent only (ADR-320), chosen the
+  same way. A list holds only the company's keys holding a scope whose messages carry the key
+  (sending, replying or asking for payment) (checked by the services, whatever the key's state), is
+  kept only while the endpoint takes `message.status` (a database check too), and is applied in
+  `app.capture_webhook_event` to the key the message's own row names, which no role can change, and
+  to that key's rotations. These are read by `app.webhook_api_key_family`, executable by the runtime
+  and definer roles only and not a definer function: it runs as the capture's caller, under the
+  company's row-level security or the definer role's policy on the keys (0024), and reads their ids
+  and rotations only. It narrows what one endpoint receives and never adds an event or a delivery
+  for another endpoint or company; the key is not stored with the event, and the payload is
+  unchanged. Audited with the list and in the company data export (unit tests; integration tests,
+  run in CI only).
+- An endpoint can leave out the deal, task and note changes chosen API keys made (ADR-321). A list
+  holds only the company's keys holding a scope that changes deals, tasks or notes (checked by the
+  services, whatever the key's state), is kept only while the endpoint takes such an event (a
+  database check too), and is applied in `app.capture_webhook_event` to the key the deal's, task's
+  or note's own row names, or the change triggers pass from the change being made, and to that key's
+  rotations, read by `app.webhook_api_key_family` (ADR-320) under the caller's row-level security.
+  It only narrows what one endpoint receives and never adds an event or a delivery for another
+  endpoint or company; nothing new is stored, and the payload is unchanged. Audited with the list
+  and in the company data export (unit tests; integration tests, run in CI only).
+- An endpoint can take the order status changes of chosen makers only (ADR-322): members, API keys,
+  or HyFib applying the order's Payment Link. The list holds only those makers (the services and a
+  database check), is kept only while the endpoint takes `order.status_changed`, and is applied in
+  `app.capture_webhook_event` to the maker the order trigger recorded with the change (0187: kept
+  only when the change's own transaction recorded it, so a later change never inherits an earlier
+  maker). It only narrows what one endpoint receives and never adds an event or a delivery for
+  another endpoint or company; a change without a recorded maker reaches every list, nothing new is
+  stored, and the payload is unchanged. Audited with the list and in the company data export (unit
+  tests; integration tests, run in CI only).
+- An endpoint can leave out the order status changes chosen API keys made (ADR-323). A list holds
+  only the company's keys holding `orders.write` or `orders.request_payment` (checked by the
+  services, whatever the key's state), is kept only while the endpoint takes `order.status_changed`
+  (a database check too), and is applied in `app.capture_webhook_event` to the key the order's own
+  row recorded with the change (0187) and to that key's rotations, read by
+  `app.webhook_api_key_family` (ADR-320) under the caller's row-level security. It only narrows what
+  one endpoint receives and never adds an event or a delivery for another endpoint or company;
+  nothing new is stored, and the payload is unchanged. Audited with the list and in the company data
+  export (unit tests; integration tests, run in CI only).
+- An endpoint can take the changes of the Payment Links chosen API keys asked for only (ADR-324). A
+  list holds only the company's keys holding `orders.request_payment` (checked by the services,
+  whatever the key's state), is kept only while the endpoint takes `payment_link.status_changed` (a
+  database check too), and is applied in `app.capture_webhook_event` to the key the link's own row
+  names (`created_by_api_key_id`, which neither the runtime nor the definer role can change after
+  the link is asked for) and to that key's rotations, read by `app.webhook_api_key_family` (ADR-320)
+  under the caller's row-level security. It only narrows what one endpoint receives and never adds
+  an event or a delivery for another endpoint or company; the key is not stored with the event, and
+  the payload is unchanged. Audited with the list and in the company data export (unit tests;
+  integration tests, run in CI only).
 - An endpoint can take the changes of chosen custom fields only (ADR-184), chosen the same way. A
   list may add only keys of the endpoint's company's fields (checked in its scope), is kept only
   while the endpoint takes field changes (a database check too, which also refuses a malformed key
@@ -2201,6 +2263,11 @@ message text, contact details, payloads, email addresses, secrets or full URLs:
   (SECURITY DEFINER, executable only by the platform role) refuses anyone who is not a platform
   administrator and reads the full list's columns and no more, without the assignments (integration
   tests, run in CI only).
+- Telling administrators apart (ADR-325): the Assign list names the reader "(you)" and an
+  administrator who shares a name by when they became one (`ops.platform_admins.created_at`, which
+  the platform role already reads), never by email address (ADR-054), so a failure is not assigned
+  to the wrong administrator of the same name. Nothing new is written or audited (unit tests;
+  integration and e2e tests, run in CI only).
 - Acknowledging dead letters (ADR-169): through `ops.platform_acknowledge_dead_letter` (SECURITY
   DEFINER, executable only by the platform role), which checks the platform administrator, the note
   (10 to 500 characters, trimmed) and the dead letter, and writes the platform audit entry

@@ -12,6 +12,7 @@ import {
   createCommerceService,
   createContactsService,
   createPlanAdminService,
+  createWebhooksService,
   dayOf,
   findDueCommerceWork,
   giveUpCommerceSync,
@@ -1174,6 +1175,24 @@ describe('payment links', () => {
       /orders\.request_payment/,
     );
 
+    // An endpoint leaving out the key's order changes is not sent the change its request makes;
+    // one taking every change is (ADR-323).
+    const orderHooks = createWebhooksService({
+      db: fx.dbs.app,
+      clock: systemClock,
+      keyring: fx.keyring,
+      egressPolicy: { allowLoopbackForTests: true },
+    });
+    const everyOrderChange = await orderHooks.create(owner, {
+      url: 'https://hooks.receiver.test/orders',
+      eventTypes: ['order.status_changed'],
+    });
+    const notThePayer = await orderHooks.create(owner, {
+      url: 'https://hooks.receiver.test/orders-elsewhere',
+      eventTypes: ['order.status_changed'],
+      orderExcludedApiKeyIds: [payer.key.id],
+    });
+
     // Asked for as the key: the order waits for payment, recorded as the key's change; a retry
     // with the same Idempotency-Key answers the first, and asking again without one is refused.
     const first = await ask(orderId, retry);
@@ -1185,6 +1204,17 @@ describe('payment links', () => {
       statusChangedByApiKeyId: payer.key.id,
       subtotalMinor: 3000,
     });
+    const orderChangesTo = (endpointId: string) =>
+      fx.query<{ status: string; changed_by: string | null }>(
+        `SELECT e.status, e.detail ->> 'changedBy' AS changed_by FROM app.webhook_deliveries d
+           JOIN app.webhook_events e ON e.tenant_id = d.tenant_id AND e.id = d.event_id
+          WHERE d.endpoint_id = $1 AND e.type = 'order.status_changed'`,
+        [endpointId],
+      );
+    expect(await orderChangesTo(everyOrderChange.id)).toEqual([
+      { status: 'awaiting_payment', changed_by: 'api' },
+    ]);
+    expect(await orderChangesTo(notThePayer.id)).toEqual([]);
     const again = await ask(orderId, retry);
     expect([again.replayed, again.body]).toEqual([true, first.body]);
     await expectAppError(
@@ -1222,6 +1252,30 @@ describe('payment links', () => {
       },
     ]);
 
+    // An endpoint naming the key takes the statuses of the messages sent as the key, the Payment
+    // Link among them, though the key cannot send messages itself; one naming another key does not
+    // (ADR-320).
+    const webhooks = createWebhooksService({
+      db: fx.dbs.app,
+      clock: systemClock,
+      keyring: fx.keyring,
+      egressPolicy: { allowLoopbackForTests: true },
+    });
+    const sender = await apiKeyOf(c, ['messages.send']);
+    expect((await webhooks.messageApiKeyChoices(owner)).map((k) => k.id).sort()).toEqual(
+      [payer.key.id, sender.key.id].sort(),
+    );
+    const byPayer = await webhooks.create(owner, {
+      url: 'https://hooks.receiver.test/payments',
+      eventTypes: ['message.status'],
+      messageApiKeyIds: [payer.key.id],
+    });
+    const bySender = await webhooks.create(owner, {
+      url: 'https://hooks.receiver.test/sends',
+      eventTypes: ['message.status'],
+      messageApiKeyIds: [sender.key.id],
+    });
+
     // The worker creates it once at Razorpay and sends it in the chat, as the key; the order page
     // says a key asked.
     expect(await processPaymentLink(workerDeps(), scopeOf(c), link.id as string)).toBe('done');
@@ -1245,6 +1299,17 @@ describe('payment links', () => {
       `Pay ₹30.00 for order ${order.reference as string}: ${link.short_url as string}`,
     );
     expect(await sendQueued(c, conv.id)).toEqual(['accepted']);
+    const statusesTo = (endpointId: string) =>
+      fx.query<{ message_id: string; status: string }>(
+        `SELECT e.message_id, e.status FROM app.webhook_deliveries d
+           JOIN app.webhook_events e ON e.tenant_id = d.tenant_id AND e.id = d.event_id
+          WHERE d.endpoint_id = $1 AND e.type = 'message.status'`,
+        [endpointId],
+      );
+    expect(await statusesTo(byPayer.id)).toEqual([
+      { message_id: link.message_id, status: 'accepted' },
+    ]);
+    expect(await statusesTo(bySender.id)).toEqual([]);
     const shown = await svc.order(owner, orderId);
     expect(shown.links.map((l) => [l.status, l.throughApi])).toEqual([['created', true]]);
 

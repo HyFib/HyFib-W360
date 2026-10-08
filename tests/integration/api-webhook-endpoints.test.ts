@@ -256,12 +256,16 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       headers: [],
       messageStatuses: null,
       messageSenders: null,
+      messageApiKeyIds: null,
       contactParts: null,
       contactFieldKeys: null,
       automationIds: null,
       campaignStatuses: null,
       orderStatuses: null,
       paymentLinkStatuses: null,
+      orderChangeMakers: null,
+      orderExcludedApiKeyIds: null,
+      paymentLinkApiKeyIds: null,
       dealStatuses: null,
       taskStatuses: null,
       dealDetails: null,
@@ -270,6 +274,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       conversationStatuses: null,
       runEndStatuses: null,
       runTriggers: null,
+      runApiKeyIds: null,
       consentChanges: null,
       contactSources: null,
       messageTypes: null,
@@ -289,6 +294,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       noteStageIds: null,
       noteDealOwnerIds: null,
       crmChangeMakers: null,
+      crmExcludedApiKeyIds: null,
       surveyScores: null,
       surveyAssigneeIds: null,
       surveyTeamIds: null,
@@ -1142,6 +1148,85 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     });
   });
 
+  it('choose who made the order changes an endpoint receives, kept by changes that leave them out and cleared with the event (ADR-322)', async () => {
+    const c = await fx.company();
+    const key = await apiKey(c, ['webhooks.manage']);
+    const issueOf = async (promise: Promise<unknown>) => {
+      const error = await expectAppError(promise, 'validation_failed');
+      return isAppError(error) ? error.issues?.[0] : undefined;
+    };
+    // Makers need the event, at least one, and each from the list (an unknown one by place).
+    const refusals = [
+      [['order.received', 'payment_link.status_changed'], ['member'], 'orderChangeMakers'],
+      [['order.status_changed'], [], 'orderChangeMakers'],
+      [['order.status_changed'], ['member', 'automation'], 'orderChangeMakers.1'],
+    ] as const;
+    for (const [index, [events, orderChangeMakers, path]] of refusals.entries()) {
+      expect(
+        await issueOf(
+          api().create(
+            key.ctx,
+            { url: receiverUrl(), events, orderChangeMakers },
+            idem(`order-makers-bad-${index}`, JSON.stringify(orderChangeMakers)),
+          ),
+        ),
+        JSON.stringify(orderChangeMakers),
+      ).toMatchObject({ path });
+    }
+    expect((await api().list(key.ctx)).data).toEqual([]);
+
+    const created = await addThroughApi(key.ctx, 'order-makers-1', {
+      url: receiverUrl(),
+      events: ['order.status_changed', 'order.received'],
+      orderChangeMakers: ['payment_link', 'member', 'payment_link'],
+    });
+    const id = created.body.data.id;
+    expect(created.body.data.orderChangeMakers).toEqual(['member', 'payment_link']);
+    expect((await api().get(key.ctx, id)).orderChangeMakers).toEqual(['member', 'payment_link']);
+    const [audit] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND subject_id = $2 AND action = 'webhook.endpoint_created'`,
+      [c.tenant.id, id],
+    );
+    expect(audit?.metadata).toMatchObject({ orderChangeMakers: ['member', 'payment_link'] });
+
+    expect(await api().update(key.ctx, id, { description: 'Orders' })).toMatchObject({
+      orderChangeMakers: ['member', 'payment_link'],
+    });
+    expect(await api().update(key.ctx, id, { orderChangeMakers: ['api'] })).toMatchObject({
+      orderChangeMakers: ['api'],
+    });
+    const updates = await fx.query<{ metadata: { orderChangeMakers?: unknown } }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND subject_id = $2 AND action = 'webhook.endpoint_updated'
+        ORDER BY occurred_at`,
+      [c.tenant.id, id],
+    );
+    expect(updates.map((u) => u.metadata.orderChangeMakers)).toEqual([
+      ['member', 'payment_link'],
+      ['api'],
+    ]);
+    expect(await api().update(key.ctx, id, { events: ['order.received'] })).toMatchObject({
+      events: ['order.received'],
+      orderChangeMakers: null,
+    });
+    expect(
+      await issueOf(api().update(key.ctx, id, { orderChangeMakers: ['member'] })),
+    ).toMatchObject({ path: 'orderChangeMakers' });
+    expect(
+      await api().update(key.ctx, id, {
+        events: ['order.status_changed'],
+        orderChangeMakers: ['payment_link'],
+      }),
+    ).toMatchObject({ orderChangeMakers: ['payment_link'] });
+    expect(await api().update(key.ctx, id, { orderChangeMakers: null })).toMatchObject({
+      orderChangeMakers: null,
+    });
+    expect(await issueOf(api().update(key.ctx, id, { orderChangeMakers: [] }))).toMatchObject({
+      path: 'orderChangeMakers',
+    });
+  });
+
   it('choose the deal and task statuses an endpoint receives, kept by changes that leave them out and cleared with the event (ADR-309)', async () => {
     const c = await fx.company();
     const key = await apiKey(c, ['webhooks.manage']);
@@ -1658,6 +1743,483 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     });
     expect(await issueOf(api().update(key.ctx, id, { automationIds: [] }))).toMatchObject({
       path: 'automationIds',
+    });
+  });
+
+  it('choose the API keys whose runs an endpoint receives, kept by changes that leave them out and cleared with the events (ADR-319)', async () => {
+    const c = await fx.company();
+    // The key adding the endpoint starts runs too; another key only starts them; one cannot.
+    const key = await apiKey(c, ['webhooks.manage', 'automations.start'], 'Store');
+    const crm = await apiKey(c, ['automations.start'], 'CRM');
+    const reader = await apiKey(c, ['contacts.read'], 'Reader');
+    const elsewhere = await apiKey(await fx.company(), ['automations.start'], 'Elsewhere');
+    const issueOf = async (promise: Promise<unknown>) => {
+      const error = await expectAppError(promise, 'validation_failed');
+      return isAppError(error) ? error.issues?.[0] : undefined;
+    };
+    const runs = ['automation.run_started', 'automation.run_ended'];
+    // Keys need a run event, at least one, each an id of the company's keys that can start
+    // automations (named by place).
+    const refusals = [
+      [['consent.changed'], [key.id], 'runApiKeyIds'],
+      [runs, [], 'runApiKeyIds'],
+      [runs, [key.id, key.keyPrefix], 'runApiKeyIds.1'],
+      [runs, [key.id, reader.id], 'runApiKeyIds.1'],
+      [['automation.run_ended'], [elsewhere.id], 'runApiKeyIds.0'],
+    ] as const;
+    for (const [index, [events, runApiKeyIds, path]] of refusals.entries()) {
+      expect(
+        await issueOf(
+          api().create(
+            key.ctx,
+            { url: receiverUrl(), events, runApiKeyIds },
+            idem(`run-keys-bad-${index}`, JSON.stringify(runApiKeyIds)),
+          ),
+        ),
+        JSON.stringify(runApiKeyIds),
+      ).toMatchObject({ path });
+    }
+    expect((await api().list(key.ctx)).data).toEqual([]);
+
+    const created = await addThroughApi(key.ctx, 'run-keys-1', {
+      url: receiverUrl(),
+      events: runs,
+      runApiKeyIds: [key.id, crm.id, key.id.toUpperCase()],
+    });
+    const id = created.body.data.id;
+    // The key finds its own id as the endpoint's.
+    expect(created.body.data.apiKeyId).toBe(key.id);
+    expect(created.body.data.runApiKeyIds).toEqual([key.id, crm.id]);
+    expect((await api().get(key.ctx, id)).runApiKeyIds).toEqual([key.id, crm.id]);
+    const [audit] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND subject_id = $2 AND action = 'webhook.endpoint_created'`,
+      [c.tenant.id, id],
+    );
+    expect(audit?.metadata).toMatchObject({ runApiKeyIds: [key.id, crm.id] });
+    // Settings names them, with whether they still work.
+    const owner = await fx.ctx(c, c.owner);
+    await keys.revoke(owner, { keyId: crm.id });
+    expect((await settings().list(owner)).find((e) => e.id === id)?.runApiKeys).toEqual([
+      { id: key.id, name: 'Store', keyPrefix: key.keyPrefix, state: 'active' },
+      { id: crm.id, name: 'CRM', keyPrefix: crm.keyPrefix, state: 'revoked' },
+    ]);
+
+    expect(await api().update(key.ctx, id, { description: 'Runs' })).toMatchObject({
+      runApiKeyIds: [key.id, crm.id],
+    });
+    // A revoked key stays allowed: the runs it started still end.
+    expect(await api().update(key.ctx, id, { runApiKeyIds: [crm.id] })).toMatchObject({
+      runApiKeyIds: [crm.id],
+    });
+    const updates = await fx.query<{ metadata: { runApiKeyIds?: unknown } }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND subject_id = $2 AND action = 'webhook.endpoint_updated'
+        ORDER BY occurred_at`,
+      [c.tenant.id, id],
+    );
+    expect(updates.map((u) => u.metadata.runApiKeyIds)).toEqual([[key.id, crm.id], [crm.id]]);
+    expect(await api().update(key.ctx, id, { events: ['automation.run_ended'] })).toMatchObject({
+      runApiKeyIds: [crm.id],
+    });
+    expect(await api().update(key.ctx, id, { events: ['consent.changed'] })).toMatchObject({
+      events: ['consent.changed'],
+      runApiKeyIds: null,
+    });
+    expect(await issueOf(api().update(key.ctx, id, { runApiKeyIds: [key.id] }))).toMatchObject({
+      path: 'runApiKeyIds',
+    });
+    expect(
+      await api().update(key.ctx, id, {
+        events: ['automation.run_started'],
+        runApiKeyIds: [key.id],
+      }),
+    ).toMatchObject({ runApiKeyIds: [key.id] });
+    // A list given again is checked again, changing nothing when it is refused.
+    expect(await issueOf(api().update(key.ctx, id, { runApiKeyIds: [reader.id] }))).toMatchObject({
+      path: 'runApiKeyIds.0',
+    });
+    expect((await api().get(key.ctx, id)).runApiKeyIds).toEqual([key.id]);
+    expect(await api().update(key.ctx, id, { runApiKeyIds: null })).toMatchObject({
+      runApiKeyIds: null,
+    });
+  });
+
+  it('choose the API keys whose sent messages’ statuses an endpoint receives, kept by changes that leave them out and cleared with the event (ADR-320)', async () => {
+    const c = await fx.company();
+    // The key adding the endpoint sends messages too; another key only replies; one cannot send.
+    const key = await apiKey(c, ['webhooks.manage', 'messages.send'], 'Shop');
+    const desk = await apiKey(c, ['messages.reply'], 'Helpdesk');
+    const runner = await apiKey(c, ['automations.start'], 'Runner');
+    const elsewhere = await apiKey(await fx.company(), ['messages.send'], 'Elsewhere');
+    const issueOf = async (promise: Promise<unknown>) => {
+      const error = await expectAppError(promise, 'validation_failed');
+      return isAppError(error) ? error.issues?.[0] : undefined;
+    };
+    // Keys need message.status, at least one, each an id of the company's keys that can send
+    // messages (named by place).
+    const refusals = [
+      [['message.received'], [key.id], 'messageApiKeyIds'],
+      [['message.status'], [], 'messageApiKeyIds'],
+      [['message.status'], [key.id, key.keyPrefix], 'messageApiKeyIds.1'],
+      [['message.status'], [key.id, runner.id], 'messageApiKeyIds.1'],
+      [['message.status'], [elsewhere.id], 'messageApiKeyIds.0'],
+    ] as const;
+    for (const [index, [events, messageApiKeyIds, path]] of refusals.entries()) {
+      expect(
+        await issueOf(
+          api().create(
+            key.ctx,
+            { url: receiverUrl(), events, messageApiKeyIds },
+            idem(`message-keys-bad-${index}`, JSON.stringify(messageApiKeyIds)),
+          ),
+        ),
+        JSON.stringify(messageApiKeyIds),
+      ).toMatchObject({ path });
+    }
+    expect((await api().list(key.ctx)).data).toEqual([]);
+
+    const created = await addThroughApi(key.ctx, 'message-keys-1', {
+      url: receiverUrl(),
+      events: ['message.status'],
+      messageApiKeyIds: [key.id, desk.id, key.id.toUpperCase()],
+    });
+    const id = created.body.data.id;
+    expect(created.body.data.messageApiKeyIds).toEqual([key.id, desk.id]);
+    expect((await api().get(key.ctx, id)).messageApiKeyIds).toEqual([key.id, desk.id]);
+    const [audit] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND subject_id = $2 AND action = 'webhook.endpoint_created'`,
+      [c.tenant.id, id],
+    );
+    expect(audit?.metadata).toMatchObject({ messageApiKeyIds: [key.id, desk.id] });
+    // Settings names them, with whether they still work.
+    const owner = await fx.ctx(c, c.owner);
+    await keys.revoke(owner, { keyId: desk.id });
+    expect((await settings().list(owner)).find((e) => e.id === id)?.messageApiKeys).toEqual([
+      { id: key.id, name: 'Shop', keyPrefix: key.keyPrefix, state: 'active' },
+      { id: desk.id, name: 'Helpdesk', keyPrefix: desk.keyPrefix, state: 'revoked' },
+    ]);
+
+    expect(await api().update(key.ctx, id, { description: 'Statuses' })).toMatchObject({
+      messageApiKeyIds: [key.id, desk.id],
+    });
+    // A revoked key stays allowed: the messages it sent still change status.
+    expect(await api().update(key.ctx, id, { messageApiKeyIds: [desk.id] })).toMatchObject({
+      messageApiKeyIds: [desk.id],
+    });
+    const updates = await fx.query<{ metadata: { messageApiKeyIds?: unknown } }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND subject_id = $2 AND action = 'webhook.endpoint_updated'
+        ORDER BY occurred_at`,
+      [c.tenant.id, id],
+    );
+    expect(updates.map((u) => u.metadata.messageApiKeyIds)).toEqual([[key.id, desk.id], [desk.id]]);
+    expect(await api().update(key.ctx, id, { events: ['message.received'] })).toMatchObject({
+      events: ['message.received'],
+      messageApiKeyIds: null,
+    });
+    expect(await issueOf(api().update(key.ctx, id, { messageApiKeyIds: [key.id] }))).toMatchObject({
+      path: 'messageApiKeyIds',
+    });
+    expect(
+      await api().update(key.ctx, id, { events: ['message.status'], messageApiKeyIds: [key.id] }),
+    ).toMatchObject({ messageApiKeyIds: [key.id] });
+    // A list given again is checked again, changing nothing when it is refused.
+    expect(
+      await issueOf(api().update(key.ctx, id, { messageApiKeyIds: [runner.id] })),
+    ).toMatchObject({ path: 'messageApiKeyIds.0' });
+    expect((await api().get(key.ctx, id)).messageApiKeyIds).toEqual([key.id]);
+    expect(await api().update(key.ctx, id, { messageApiKeyIds: null })).toMatchObject({
+      messageApiKeyIds: null,
+    });
+  });
+
+  it('choose the API keys whose deal, task and note changes an endpoint leaves out, kept by changes that leave them out and cleared with the events (ADR-321)', async () => {
+    const c = await fx.company();
+    // The key adding the endpoint changes deals too; another key changes tasks; one only reads.
+    const key = await apiKey(c, ['webhooks.manage', 'deals.write'], 'Shop');
+    const tasks = await apiKey(c, ['tasks.write'], 'Tasks');
+    const reader = await apiKey(c, ['deals.read'], 'Reader');
+    const elsewhere = await apiKey(await fx.company(), ['deals.write'], 'Elsewhere');
+    const issueOf = async (promise: Promise<unknown>) => {
+      const error = await expectAppError(promise, 'validation_failed');
+      return isAppError(error) ? error.issues?.[0] : undefined;
+    };
+    // Keys need a deal, task or note event, at least one, each an id of the company's keys that can
+    // change them (named by place).
+    const refusals = [
+      [['contact.updated'], [key.id], 'crmExcludedApiKeyIds'],
+      [['deal.updated'], [], 'crmExcludedApiKeyIds'],
+      [['deal.updated'], [key.id, key.keyPrefix], 'crmExcludedApiKeyIds.1'],
+      [['task.created'], [key.id, reader.id], 'crmExcludedApiKeyIds.1'],
+      [['note.created'], [elsewhere.id], 'crmExcludedApiKeyIds.0'],
+    ] as const;
+    for (const [index, [events, crmExcludedApiKeyIds, path]] of refusals.entries()) {
+      expect(
+        await issueOf(
+          api().create(
+            key.ctx,
+            { url: receiverUrl(), events, crmExcludedApiKeyIds },
+            idem(`crm-keys-bad-${index}`, JSON.stringify(crmExcludedApiKeyIds)),
+          ),
+        ),
+        JSON.stringify(crmExcludedApiKeyIds),
+      ).toMatchObject({ path });
+    }
+    expect((await api().list(key.ctx)).data).toEqual([]);
+
+    // The key leaves its own changes out, as the endpoint's apiKeyId names it.
+    const created = await addThroughApi(key.ctx, 'crm-keys-1', {
+      url: receiverUrl(),
+      events: ['deal.created', 'deal.updated'],
+      crmExcludedApiKeyIds: [key.id, tasks.id, key.id.toUpperCase()],
+    });
+    const id = created.body.data.id;
+    expect(created.body.data.apiKeyId).toBe(key.id);
+    expect(created.body.data.crmExcludedApiKeyIds).toEqual([key.id, tasks.id]);
+    expect((await api().get(key.ctx, id)).crmExcludedApiKeyIds).toEqual([key.id, tasks.id]);
+    const [audit] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND subject_id = $2 AND action = 'webhook.endpoint_created'`,
+      [c.tenant.id, id],
+    );
+    expect(audit?.metadata).toMatchObject({ crmExcludedApiKeyIds: [key.id, tasks.id] });
+    // Settings names them, with whether they still work.
+    const owner = await fx.ctx(c, c.owner);
+    await keys.revoke(owner, { keyId: tasks.id });
+    expect((await settings().list(owner)).find((e) => e.id === id)?.crmExcludedApiKeys).toEqual([
+      { id: key.id, name: 'Shop', keyPrefix: key.keyPrefix, state: 'active' },
+      { id: tasks.id, name: 'Tasks', keyPrefix: tasks.keyPrefix, state: 'revoked' },
+    ]);
+
+    expect(await api().update(key.ctx, id, { description: 'CRM sync' })).toMatchObject({
+      crmExcludedApiKeyIds: [key.id, tasks.id],
+    });
+    expect(await api().update(key.ctx, id, { crmExcludedApiKeyIds: [key.id] })).toMatchObject({
+      crmExcludedApiKeyIds: [key.id],
+    });
+    const updates = await fx.query<{ metadata: { crmExcludedApiKeyIds?: unknown } }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND subject_id = $2 AND action = 'webhook.endpoint_updated'
+        ORDER BY occurred_at`,
+      [c.tenant.id, id],
+    );
+    expect(updates.map((u) => u.metadata.crmExcludedApiKeyIds)).toEqual([
+      [key.id, tasks.id],
+      [key.id],
+    ]);
+    expect(await api().update(key.ctx, id, { events: ['contact.updated'] })).toMatchObject({
+      events: ['contact.updated'],
+      crmExcludedApiKeyIds: null,
+    });
+    expect(
+      await issueOf(api().update(key.ctx, id, { crmExcludedApiKeyIds: [key.id] })),
+    ).toMatchObject({ path: 'crmExcludedApiKeyIds' });
+    expect(
+      await api().update(key.ctx, id, { events: ['task.created'], crmExcludedApiKeyIds: [key.id] }),
+    ).toMatchObject({ crmExcludedApiKeyIds: [key.id] });
+    // A list given again is checked again, changing nothing when it is refused.
+    expect(
+      await issueOf(api().update(key.ctx, id, { crmExcludedApiKeyIds: [reader.id] })),
+    ).toMatchObject({ path: 'crmExcludedApiKeyIds.0' });
+    expect((await api().get(key.ctx, id)).crmExcludedApiKeyIds).toEqual([key.id]);
+    expect(await api().update(key.ctx, id, { crmExcludedApiKeyIds: null })).toMatchObject({
+      crmExcludedApiKeyIds: null,
+    });
+  });
+
+  it('choose the API keys whose order changes an endpoint leaves out, kept by changes that leave them out and cleared with the event (ADR-323)', async () => {
+    const c = await fx.company();
+    // The key adding the endpoint moves orders too; another asks for payments; one only reads.
+    const key = await apiKey(c, ['webhooks.manage', 'orders.write'], 'Shop');
+    const payments = await apiKey(c, ['orders.request_payment'], 'Payments');
+    const reader = await apiKey(c, ['orders.read'], 'Reader');
+    const elsewhere = await apiKey(await fx.company(), ['orders.write'], 'Elsewhere');
+    const issueOf = async (promise: Promise<unknown>) => {
+      const error = await expectAppError(promise, 'validation_failed');
+      return isAppError(error) ? error.issues?.[0] : undefined;
+    };
+    // Keys need order.status_changed, at least one, each an id of the company's keys that can
+    // change orders (named by place).
+    const refusals = [
+      [['order.received'], [key.id], 'orderExcludedApiKeyIds'],
+      [['order.status_changed'], [], 'orderExcludedApiKeyIds'],
+      [['order.status_changed'], [key.id, key.keyPrefix], 'orderExcludedApiKeyIds.1'],
+      [['order.status_changed'], [key.id, reader.id], 'orderExcludedApiKeyIds.1'],
+      [['order.status_changed'], [elsewhere.id], 'orderExcludedApiKeyIds.0'],
+    ] as const;
+    for (const [index, [events, orderExcludedApiKeyIds, path]] of refusals.entries()) {
+      expect(
+        await issueOf(
+          api().create(
+            key.ctx,
+            { url: receiverUrl(), events, orderExcludedApiKeyIds },
+            idem(`order-keys-bad-${index}`, JSON.stringify(orderExcludedApiKeyIds)),
+          ),
+        ),
+        JSON.stringify(orderExcludedApiKeyIds),
+      ).toMatchObject({ path });
+    }
+    expect((await api().list(key.ctx)).data).toEqual([]);
+
+    // The key leaves its own changes out, as the endpoint's apiKeyId names it.
+    const created = await addThroughApi(key.ctx, 'order-keys-1', {
+      url: receiverUrl(),
+      events: ['order.status_changed', 'order.received'],
+      orderExcludedApiKeyIds: [key.id, payments.id, key.id.toUpperCase()],
+    });
+    const id = created.body.data.id;
+    expect(created.body.data.apiKeyId).toBe(key.id);
+    expect(created.body.data.orderExcludedApiKeyIds).toEqual([key.id, payments.id]);
+    expect((await api().get(key.ctx, id)).orderExcludedApiKeyIds).toEqual([key.id, payments.id]);
+    const [audit] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND subject_id = $2 AND action = 'webhook.endpoint_created'`,
+      [c.tenant.id, id],
+    );
+    expect(audit?.metadata).toMatchObject({ orderExcludedApiKeyIds: [key.id, payments.id] });
+    // Settings names them, with whether they still work.
+    const owner = await fx.ctx(c, c.owner);
+    await keys.revoke(owner, { keyId: payments.id });
+    expect((await settings().list(owner)).find((e) => e.id === id)?.orderExcludedApiKeys).toEqual([
+      { id: key.id, name: 'Shop', keyPrefix: key.keyPrefix, state: 'active' },
+      { id: payments.id, name: 'Payments', keyPrefix: payments.keyPrefix, state: 'revoked' },
+    ]);
+
+    expect(await api().update(key.ctx, id, { description: 'Order sync' })).toMatchObject({
+      orderExcludedApiKeyIds: [key.id, payments.id],
+    });
+    expect(await api().update(key.ctx, id, { orderExcludedApiKeyIds: [key.id] })).toMatchObject({
+      orderExcludedApiKeyIds: [key.id],
+    });
+    const updates = await fx.query<{ metadata: { orderExcludedApiKeyIds?: unknown } }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND subject_id = $2 AND action = 'webhook.endpoint_updated'
+        ORDER BY occurred_at`,
+      [c.tenant.id, id],
+    );
+    expect(updates.map((u) => u.metadata.orderExcludedApiKeyIds)).toEqual([
+      [key.id, payments.id],
+      [key.id],
+    ]);
+    expect(await api().update(key.ctx, id, { events: ['order.received'] })).toMatchObject({
+      events: ['order.received'],
+      orderExcludedApiKeyIds: null,
+    });
+    expect(
+      await issueOf(api().update(key.ctx, id, { orderExcludedApiKeyIds: [key.id] })),
+    ).toMatchObject({ path: 'orderExcludedApiKeyIds' });
+    expect(
+      await api().update(key.ctx, id, {
+        events: ['order.status_changed'],
+        orderExcludedApiKeyIds: [key.id],
+      }),
+    ).toMatchObject({ orderExcludedApiKeyIds: [key.id] });
+    // A list given again is checked again, changing nothing when it is refused.
+    expect(
+      await issueOf(api().update(key.ctx, id, { orderExcludedApiKeyIds: [reader.id] })),
+    ).toMatchObject({ path: 'orderExcludedApiKeyIds.0' });
+    expect((await api().get(key.ctx, id)).orderExcludedApiKeyIds).toEqual([key.id]);
+    expect(await api().update(key.ctx, id, { orderExcludedApiKeyIds: null })).toMatchObject({
+      orderExcludedApiKeyIds: null,
+    });
+  });
+
+  it('choose the API keys whose Payment Links’ changes an endpoint receives, kept by changes that leave them out and cleared with the event (ADR-324)', async () => {
+    const c = await fx.company();
+    // The key adding the endpoint asks for payments too; another one does; one only moves orders.
+    const key = await apiKey(c, ['webhooks.manage', 'orders.request_payment'], 'Shop');
+    const billing = await apiKey(c, ['orders.request_payment'], 'Billing');
+    const mover = await apiKey(c, ['orders.write'], 'Mover');
+    const elsewhere = await apiKey(await fx.company(), ['orders.request_payment'], 'Elsewhere');
+    const issueOf = async (promise: Promise<unknown>) => {
+      const error = await expectAppError(promise, 'validation_failed');
+      return isAppError(error) ? error.issues?.[0] : undefined;
+    };
+    // Keys need payment_link.status_changed, at least one, each an id of the company's keys that
+    // ask customers to pay (named by place).
+    const refusals = [
+      [['order.status_changed'], [key.id], 'paymentLinkApiKeyIds'],
+      [['payment_link.status_changed'], [], 'paymentLinkApiKeyIds'],
+      [['payment_link.status_changed'], [key.id, key.keyPrefix], 'paymentLinkApiKeyIds.1'],
+      [['payment_link.status_changed'], [key.id, mover.id], 'paymentLinkApiKeyIds.1'],
+      [['payment_link.status_changed'], [elsewhere.id], 'paymentLinkApiKeyIds.0'],
+    ] as const;
+    for (const [index, [events, paymentLinkApiKeyIds, path]] of refusals.entries()) {
+      expect(
+        await issueOf(
+          api().create(
+            key.ctx,
+            { url: receiverUrl(), events, paymentLinkApiKeyIds },
+            idem(`link-keys-bad-${index}`, JSON.stringify(paymentLinkApiKeyIds)),
+          ),
+        ),
+        JSON.stringify(paymentLinkApiKeyIds),
+      ).toMatchObject({ path });
+    }
+    expect((await api().list(key.ctx)).data).toEqual([]);
+
+    // The key takes its own links' changes, as the endpoint's apiKeyId names it.
+    const created = await addThroughApi(key.ctx, 'link-keys-1', {
+      url: receiverUrl(),
+      events: ['payment_link.status_changed', 'order.status_changed'],
+      paymentLinkApiKeyIds: [key.id, billing.id, key.id.toUpperCase()],
+    });
+    const id = created.body.data.id;
+    expect(created.body.data.apiKeyId).toBe(key.id);
+    expect(created.body.data.paymentLinkApiKeyIds).toEqual([key.id, billing.id]);
+    expect((await api().get(key.ctx, id)).paymentLinkApiKeyIds).toEqual([key.id, billing.id]);
+    const [audit] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND subject_id = $2 AND action = 'webhook.endpoint_created'`,
+      [c.tenant.id, id],
+    );
+    expect(audit?.metadata).toMatchObject({ paymentLinkApiKeyIds: [key.id, billing.id] });
+    // Settings names them, with whether they still work.
+    const owner = await fx.ctx(c, c.owner);
+    await keys.revoke(owner, { keyId: billing.id });
+    expect((await settings().list(owner)).find((e) => e.id === id)?.paymentLinkApiKeys).toEqual([
+      { id: key.id, name: 'Shop', keyPrefix: key.keyPrefix, state: 'active' },
+      { id: billing.id, name: 'Billing', keyPrefix: billing.keyPrefix, state: 'revoked' },
+    ]);
+
+    expect(await api().update(key.ctx, id, { description: 'Payments' })).toMatchObject({
+      paymentLinkApiKeyIds: [key.id, billing.id],
+    });
+    expect(await api().update(key.ctx, id, { paymentLinkApiKeyIds: [key.id] })).toMatchObject({
+      paymentLinkApiKeyIds: [key.id],
+    });
+    const updates = await fx.query<{ metadata: { paymentLinkApiKeyIds?: unknown } }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND subject_id = $2 AND action = 'webhook.endpoint_updated'
+        ORDER BY occurred_at`,
+      [c.tenant.id, id],
+    );
+    expect(updates.map((u) => u.metadata.paymentLinkApiKeyIds)).toEqual([
+      [key.id, billing.id],
+      [key.id],
+    ]);
+    expect(await api().update(key.ctx, id, { events: ['order.status_changed'] })).toMatchObject({
+      events: ['order.status_changed'],
+      paymentLinkApiKeyIds: null,
+    });
+    expect(
+      await issueOf(api().update(key.ctx, id, { paymentLinkApiKeyIds: [key.id] })),
+    ).toMatchObject({ path: 'paymentLinkApiKeyIds' });
+    expect(
+      await api().update(key.ctx, id, {
+        events: ['payment_link.status_changed'],
+        paymentLinkApiKeyIds: [key.id],
+      }),
+    ).toMatchObject({ paymentLinkApiKeyIds: [key.id] });
+    // A list given again is checked again, changing nothing when it is refused.
+    expect(
+      await issueOf(api().update(key.ctx, id, { paymentLinkApiKeyIds: [mover.id] })),
+    ).toMatchObject({ path: 'paymentLinkApiKeyIds.0' });
+    expect((await api().get(key.ctx, id)).paymentLinkApiKeyIds).toEqual([key.id]);
+    expect(await api().update(key.ctx, id, { paymentLinkApiKeyIds: null })).toMatchObject({
+      paymentLinkApiKeyIds: null,
     });
   });
 

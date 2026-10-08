@@ -30,6 +30,8 @@ export async function createWebhookEndpointAction(
     messageStatuses: string[] | null;
     /** Who sent the messages whose statuses it takes (ADR-172); null takes every sender. */
     messageSenders: string[] | null;
+    /** The API keys whose sent messages' statuses it takes (ADR-320); null: every message. */
+    messageApiKeyIds: string[] | null;
     /** The contact parts it takes as contact.updated; null takes every change. */
     contactParts: string[] | null;
     /** The custom fields whose changes it takes (ADR-184); null takes every field's. */
@@ -42,6 +44,12 @@ export async function createWebhookEndpointAction(
     orderStatuses: string[] | null;
     /** The Payment Link statuses it takes (ADR-308); null takes every status. */
     paymentLinkStatuses: string[] | null;
+    /** Who made the order status changes it takes (ADR-322); null takes every change. */
+    orderChangeMakers: string[] | null;
+    /** The API keys whose order status changes it leaves out (ADR-323); null: none. */
+    orderExcludedApiKeyIds: string[] | null;
+    /** The API keys whose Payment Links' changes it takes (ADR-324); null: every link's. */
+    paymentLinkApiKeyIds: string[] | null;
     /** The deal statuses it takes (ADR-309); null takes every status. */
     dealStatuses: string[] | null;
     /** The task statuses it takes (ADR-309); null takes every status. */
@@ -58,6 +66,8 @@ export async function createWebhookEndpointAction(
     runEndStatuses: string[] | null;
     /** What started the runs whose events it takes (ADR-183); null takes every run's. */
     runTriggers: string[] | null;
+    /** The API keys whose runs it takes (ADR-319); null takes every run. */
+    runApiKeyIds: string[] | null;
     /** The consent changes it takes as `consent.changed` (ADR-189); null takes every change. */
     consentChanges: string[] | null;
     /** Where the contacts whose `contact.created` it takes came from (ADR-190); null: every one. */
@@ -96,6 +106,8 @@ export async function createWebhookEndpointAction(
     noteDealOwnerIds: string[] | null;
     /** Who made the changes whose deal, task and note events it takes (ADR-306); null: all. */
     crmChangeMakers: string[] | null;
+    /** The API keys whose deal, task and note changes it leaves out (ADR-321); null: none. */
+    crmExcludedApiKeyIds: string[] | null;
     /** The scores of the satisfaction survey answers it takes (ADR-307); null: every answer. */
     surveyScores: number[] | null;
     /** The members credited with the survey answers it takes (ADR-311); null: every answer. */
@@ -139,6 +151,8 @@ export async function updateWebhookEndpointAction(
     messageStatuses: string[] | null;
     /** Who sent the messages whose statuses it takes (ADR-172); null takes every sender. */
     messageSenders: string[] | null;
+    /** The API keys whose sent messages' statuses it takes (ADR-320); null: every message. */
+    messageApiKeyIds: string[] | null;
     /** The contact parts it takes as contact.updated; null takes every change. */
     contactParts: string[] | null;
     /** The custom fields whose changes it takes (ADR-184); null takes every field's. */
@@ -151,6 +165,12 @@ export async function updateWebhookEndpointAction(
     orderStatuses: string[] | null;
     /** The Payment Link statuses it takes (ADR-308); null takes every status. */
     paymentLinkStatuses: string[] | null;
+    /** Who made the order status changes it takes (ADR-322); null takes every change. */
+    orderChangeMakers: string[] | null;
+    /** The API keys whose order status changes it leaves out (ADR-323); null: none. */
+    orderExcludedApiKeyIds: string[] | null;
+    /** The API keys whose Payment Links' changes it takes (ADR-324); null: every link's. */
+    paymentLinkApiKeyIds: string[] | null;
     /** The deal statuses it takes (ADR-309); null takes every status. */
     dealStatuses: string[] | null;
     /** The task statuses it takes (ADR-309); null takes every status. */
@@ -167,6 +187,8 @@ export async function updateWebhookEndpointAction(
     runEndStatuses: string[] | null;
     /** What started the runs whose events it takes (ADR-183); null takes every run's. */
     runTriggers: string[] | null;
+    /** The API keys whose runs it takes (ADR-319); null takes every run. */
+    runApiKeyIds: string[] | null;
     /** The consent changes it takes as `consent.changed` (ADR-189); null takes every change. */
     consentChanges: string[] | null;
     /** Where the contacts whose `contact.created` it takes came from (ADR-190); null: every one. */
@@ -205,6 +227,8 @@ export async function updateWebhookEndpointAction(
     noteDealOwnerIds: string[] | null;
     /** Who made the changes whose deal, task and note events it takes (ADR-306); null: all. */
     crmChangeMakers: string[] | null;
+    /** The API keys whose deal, task and note changes it leaves out (ADR-321); null: none. */
+    crmExcludedApiKeyIds: string[] | null;
     /** The scores of the satisfaction survey answers it takes (ADR-307); null: every answer. */
     surveyScores: number[] | null;
     /** The members credited with the survey answers it takes (ADR-311); null: every answer. */

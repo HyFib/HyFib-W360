@@ -74,6 +74,7 @@ import {
   type EmailDeliveryCount,
   type IntegrationFailure,
   type IntegrationFailureView,
+  platformAdministratorChoices,
   type PlatformAdministrator,
   type NumberSetupProblem,
   type OpsExportList,
@@ -517,7 +518,7 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
   /** The platform administrators a failure can be assigned to (ADR-313), by name. */
   async function platformAdministrators(tx: Tx): Promise<PlatformAdministrator[]> {
     return tx
-      .select({ userId: platformAdmins.userId, name: users.name })
+      .select({ userId: platformAdmins.userId, name: users.name, since: platformAdmins.createdAt })
       .from(platformAdmins)
       .innerJoin(users, eq(users.id, platformAdmins.userId))
       .orderBy(asc(users.name), asc(platformAdmins.userId));
@@ -1007,7 +1008,11 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
       const now = clock.now();
       return platformDb.run(actor.userId, async (tx) => {
         const failures = await integrationFailures(tx, OPS_LIST_ROWS.failures.shown, view);
-        const administrators = await platformAdministrators(tx);
+        // Named so the reader and administrators who share a name are told apart (ADR-325).
+        const administrators = platformAdministratorChoices(
+          await platformAdministrators(tx),
+          actor.userId,
+        );
         const receipts = await receiptsNeedingAttention(tx, now);
         const quarantine = await openQuarantine(tx, now);
         const emails = await emailDelivery(tx, now);

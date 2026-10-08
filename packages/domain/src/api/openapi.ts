@@ -32,6 +32,7 @@ import {
   WEBHOOK_MESSAGE_STATUSES,
   WEBHOOK_ORDER_STATUSES,
   WEBHOOK_PAYMENT_LINK_STATUSES,
+  WEBHOOK_ORDER_CHANGE_MAKERS,
   WEBHOOK_DEAL_STATUSES,
   WEBHOOK_TASK_STATUSES,
   WEBHOOK_DEAL_DETAILS,
@@ -1175,6 +1176,12 @@ export const apiWebhookEndpointSchema = z.object({
     .describe(
       'Who sent the messages whose message.status the endpoint receives, as message.sentBy names them; null receives the statuses of every message.',
     ),
+  messageApiKeyIds: z
+    .array(z.uuid())
+    .nullable()
+    .describe(
+      "The API keys whose sent messages' message.status the endpoint receives, as message.apiKeyId names them: the messages one of them sent through the API, or a key one of them was rotated from or into. A message sent otherwise is not received. null receives the statuses of every message.",
+    ),
   contactParts: z
     .array(z.enum(WEBHOOK_CONTACT_PARTS))
     .nullable()
@@ -1210,6 +1217,24 @@ export const apiWebhookEndpointSchema = z.object({
     .nullable()
     .describe(
       'The statuses a Payment Link reaches that the endpoint receives as payment_link.status_changed; null receives every status.',
+    ),
+  orderChangeMakers: z
+    .array(z.enum(WEBHOOK_ORDER_CHANGE_MAKERS))
+    .nullable()
+    .describe(
+      "Who made the order status changes the endpoint receives as order.status_changed, as the event's changedBy names them; a change HyFib did not record the maker of is received whoever is listed. null receives every change.",
+    ),
+  orderExcludedApiKeyIds: z
+    .array(z.uuid())
+    .nullable()
+    .describe(
+      "The API keys whose order status changes the endpoint does not receive as order.status_changed, as the event's apiKeyId names the key that made a change: the changes one of them made through the API, or a key one of them was rotated from or into. Changes members and Payment Links made, and those HyFib did not record the maker of, are never left out. null leaves nothing out.",
+    ),
+  paymentLinkApiKeyIds: z
+    .array(z.uuid())
+    .nullable()
+    .describe(
+      "The API keys whose Payment Links' payment_link.status_changed the endpoint receives, as the event's paymentLink.requestedByApiKeyId names the key that asked for a link: the links one of them asked for through the API, or a key one of them was rotated from or into. A link a member asked for matches no list. null receives every link's changes.",
     ),
   dealStatuses: z
     .array(z.enum(WEBHOOK_DEAL_STATUSES))
@@ -1258,6 +1283,12 @@ export const apiWebhookEndpointSchema = z.object({
     .nullable()
     .describe(
       'What started the runs whose events (automation.run_started and automation.run_ended) the endpoint receives, as run.trigger names it; null receives every run.',
+    ),
+  runApiKeyIds: z
+    .array(z.uuid())
+    .nullable()
+    .describe(
+      'The API keys whose runs (automation.run_started and automation.run_ended) the endpoint receives, as run.apiKeyId names them: the runs one of them started through the API, or a key one of them was rotated from or into. A run started otherwise is not received. null receives every run.',
     ),
   consentChanges: z
     .array(z.enum(WEBHOOK_CONSENT_CHANGES))
@@ -1372,6 +1403,12 @@ export const apiWebhookEndpointSchema = z.object({
     .nullable()
     .describe(
       "Who made the changes whose deal, task and note events the endpoint receives, as deal.changedBy, task.changedBy and note.writtenBy name them: an addition's maker is whoever added the deal or task, a note's whoever wrote it. A change HyFib did not record the maker of (changedBy null) is sent whoever is listed. null receives every change. Other events are not narrowed.",
+    ),
+  crmExcludedApiKeyIds: z
+    .array(z.uuid())
+    .nullable()
+    .describe(
+      "The API keys whose deal, task and note changes the endpoint does not receive, as the events' apiKeyId names the key that made a change: the changes one of them made through the API, or a key one of them was rotated from or into. Changes members and automations made, and those HyFib did not record the maker of, are never left out. null leaves nothing out. Other events are not narrowed.",
     ),
   surveyScores: z
     .array(z.literal(WEBHOOK_SURVEY_SCORES))
@@ -1657,7 +1694,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         '',
         `POST /messages needs an \`Idempotency-Key\` header: a retry with the same key and body returns the first response (header \`Idempotent-Replayed: true\`) and never sends twice; responses are kept ${API_LIMITS.idempotencyHours} hours. Delivery itself follows WhatsApp: read the status with GET /messages/{id}.`,
         '',
-        `Webhooks: endpoints added in Settings → Webhooks receive the events below as signed JSON POSTs. \`W360-Signature: t=<unix time>,v1=<hex HMAC-SHA256 of "<t>.<raw body>" with the endpoint secret>\` (two \`v1\` values for ${WEBHOOK_LIMITS.previousSecretHours} hours after the secret is rotated); reject a time more than 5 minutes from yours. Answer with a 2xx status within 10 seconds; anything else is retried (${retrySchedule}; ${WEBHOOK_LIMITS.attempts} attempts). Delivery is at least once and unordered: deduplicate on the event id. An endpoint failing for ${WEBHOOK_LIMITS.disableAfterHours} hours is turned off. An endpoint can also send up to ${WEBHOOK_LIMITS.headers} headers of its own with every delivery, such as an \`Authorization\` header its receiver issued; they never replace HyFib's. Or it can get an access token from its receiver's authorization server (OAuth 2.0 client credentials) and send it as \`Authorization: Bearer <token>\`. An endpoint receives the events of every WhatsApp number unless it names the numbers it takes (its \`channelIds\`, or the numbers chosen in Settings → Webhooks): then it receives the message, conversation, automation run, order and campaign events of those numbers only (a campaign's are those of the number it sends from), and still every consent, contact, template, deal, task and note event it takes. It can likewise name teams (its \`teamIds\`, or the teams chosen in Settings → Webhooks): then it receives the message and conversation events of those teams' conversations only, by the team a conversation is in when the event happens, or members (its \`assigneeIds\`): then those of the conversations assigned to them only, by the member a conversation is assigned to when the event happens, or contact tags (its \`contactTags\`): then those of the conversations whose contact has any of the tags when the event happens only, or conversation tags (its \`conversationTags\`): then those of the conversations that have any of the tags when the event happens only. And it can name templates (its \`templateIds\`): then it receives the statuses of the messages sent with them and their changes only, or campaigns (its \`campaignIds\`): then the statuses of the messages they sent and their changes only. And it can name CRM pipelines (its \`pipelineIds\`): then it receives the events of those pipelines' deals only, by the pipeline an event gives, a move to another pipeline reaching the endpoints of the pipeline it left as well, or stages (its \`stageIds\`): then those of the deals in those stages only, a move reaching the endpoints of the stage it left as well, or the deals' owners (its \`ownerIds\`): then those of the deals the members own when the event happens only, a change of owner reaching the endpoints of the owner it left as well; with more than one of these, an event must pass them all. And it can name the members whose tasks it takes (its \`taskAssigneeIds\`): then it receives the events of the tasks assigned to them when the event happens only, a change of assignee reaching the endpoints of the member it left as well, or the pipelines, stages or owners of the deals whose tasks it takes (its \`taskPipelineIds\`, \`taskStageIds\` and \`taskDealOwnerIds\`): then those of the tasks about deals in those pipelines or stages, or owned by those members, when the event happens only; with more than one of these, an event must pass them all. And it can name the pipelines, stages or owners of the deals whose notes it takes (its \`notePipelineIds\`, \`noteStageIds\` and \`noteDealOwnerIds\`): then it receives the events of the notes about deals in those pipelines or stages, or owned by those members, when the note is added only; with more than one of these, an event must pass them all. And it can name who made the changes whose deal, task and note events it takes (its \`crmChangeMakers\`: members, automations or API keys, as \`changedBy\` and \`writtenBy\` name them): then it receives the events of the changes they made only, and those HyFib did not record the maker of, so an integration can leave out the changes its own key makes.`,
+        `Webhooks: endpoints added in Settings → Webhooks receive the events below as signed JSON POSTs. \`W360-Signature: t=<unix time>,v1=<hex HMAC-SHA256 of "<t>.<raw body>" with the endpoint secret>\` (two \`v1\` values for ${WEBHOOK_LIMITS.previousSecretHours} hours after the secret is rotated); reject a time more than 5 minutes from yours. Answer with a 2xx status within 10 seconds; anything else is retried (${retrySchedule}; ${WEBHOOK_LIMITS.attempts} attempts). Delivery is at least once and unordered: deduplicate on the event id. An endpoint failing for ${WEBHOOK_LIMITS.disableAfterHours} hours is turned off. An endpoint can also send up to ${WEBHOOK_LIMITS.headers} headers of its own with every delivery, such as an \`Authorization\` header its receiver issued; they never replace HyFib's. Or it can get an access token from its receiver's authorization server (OAuth 2.0 client credentials) and send it as \`Authorization: Bearer <token>\`. An endpoint receives the events of every WhatsApp number unless it names the numbers it takes (its \`channelIds\`, or the numbers chosen in Settings → Webhooks): then it receives the message, conversation, automation run, order and campaign events of those numbers only (a campaign's are those of the number it sends from), and still every consent, contact, template, deal, task and note event it takes. It can likewise name teams (its \`teamIds\`, or the teams chosen in Settings → Webhooks): then it receives the message and conversation events of those teams' conversations only, by the team a conversation is in when the event happens, or members (its \`assigneeIds\`): then those of the conversations assigned to them only, by the member a conversation is assigned to when the event happens, or contact tags (its \`contactTags\`): then those of the conversations whose contact has any of the tags when the event happens only, or conversation tags (its \`conversationTags\`): then those of the conversations that have any of the tags when the event happens only. And it can name templates (its \`templateIds\`): then it receives the statuses of the messages sent with them and their changes only, or campaigns (its \`campaignIds\`): then the statuses of the messages they sent and their changes only. And it can name CRM pipelines (its \`pipelineIds\`): then it receives the events of those pipelines' deals only, by the pipeline an event gives, a move to another pipeline reaching the endpoints of the pipeline it left as well, or stages (its \`stageIds\`): then those of the deals in those stages only, a move reaching the endpoints of the stage it left as well, or the deals' owners (its \`ownerIds\`): then those of the deals the members own when the event happens only, a change of owner reaching the endpoints of the owner it left as well; with more than one of these, an event must pass them all. And it can name the members whose tasks it takes (its \`taskAssigneeIds\`): then it receives the events of the tasks assigned to them when the event happens only, a change of assignee reaching the endpoints of the member it left as well, or the pipelines, stages or owners of the deals whose tasks it takes (its \`taskPipelineIds\`, \`taskStageIds\` and \`taskDealOwnerIds\`): then those of the tasks about deals in those pipelines or stages, or owned by those members, when the event happens only; with more than one of these, an event must pass them all. And it can name the pipelines, stages or owners of the deals whose notes it takes (its \`notePipelineIds\`, \`noteStageIds\` and \`noteDealOwnerIds\`): then it receives the events of the notes about deals in those pipelines or stages, or owned by those members, when the note is added only; with more than one of these, an event must pass them all. And it can name who made the changes whose deal, task and note events it takes (its \`crmChangeMakers\`: members, automations or API keys, as \`changedBy\` and \`writtenBy\` name them): then it receives the events of the changes they made only, and those HyFib did not record the maker of, so an integration can leave out the changes keys make; or it can leave out only the changes chosen keys made (its \`crmExcludedApiKeyIds\`, a key rotated from or into one of them included), to be sent every change but its own.`,
       ].join('\n'),
     },
     servers: [{ url: serverUrl }],
@@ -4130,7 +4167,7 @@ export function buildOpenApiDocument(serverUrl: string) {
       'message.status': webhook(
         'webhookMessageStatus',
         WEBHOOK_EVENT_INFO['message.status'].label,
-        `${WEBHOOK_EVENT_INFO['message.status'].description} An endpoint receives every status unless it names the ones it takes (its \`messageStatuses\`, or the statuses ticked in Settings → Webhooks), and the statuses of every message unless it names who sent them (its \`messageSenders\`, as message.sentBy names them, or the senders ticked in Settings → Webhooks); a status no endpoint takes is not recorded.`,
+        `${WEBHOOK_EVENT_INFO['message.status'].description} An endpoint receives every status unless it names the ones it takes (its \`messageStatuses\`, or the statuses ticked in Settings → Webhooks), and the statuses of every message unless it names who sent them (its \`messageSenders\`, as message.sentBy names them, or the senders ticked in Settings → Webhooks) or the API keys that sent them (its \`messageApiKeyIds\`, as message.apiKeyId names them, a key rotated from or into one of them included, or the keys ticked in Settings → Webhooks); a status no endpoint takes is not recorded.`,
         'WebhookMessageStatus',
       ),
       'consent.changed': webhook(
@@ -4196,13 +4233,13 @@ export function buildOpenApiDocument(serverUrl: string) {
       'automation.run_started': webhook(
         'webhookAutomationRunStarted',
         WEBHOOK_EVENT_INFO['automation.run_started'].label,
-        `${WEBHOOK_EVENT_INFO['automation.run_started'].description} For a run started through the API, run.id is the id POST /automations/{id}/runs answered and run.apiKeyId names the key that called it. An endpoint receives every automation's runs unless it names the automations it takes (its \`automationIds\`, or the automations chosen in Settings → Webhooks).`,
+        `${WEBHOOK_EVENT_INFO['automation.run_started'].description} For a run started through the API, run.id is the id POST /automations/{id}/runs answered and run.apiKeyId names the key that called it. An endpoint receives every automation's runs unless it names the automations it takes (its \`automationIds\`, or the automations chosen in Settings → Webhooks), and every run unless it names the API keys whose runs it takes (its \`runApiKeyIds\`, or the keys ticked in Settings → Webhooks): then it receives the runs those keys started, or a key rotated from or into one of them.`,
         'WebhookAutomationRunStarted',
       ),
       'automation.run_ended': webhook(
         'webhookAutomationRunEnded',
         WEBHOOK_EVENT_INFO['automation.run_ended'].label,
-        `${WEBHOOK_EVENT_INFO['automation.run_ended'].description} Deliveries are not ordered: the end of a short run can arrive before its start, so compare run.startedAt and run.endedAt. An endpoint that names the automations it takes receives only their runs, as for automation.run_started, and an endpoint receives every end unless it names the statuses it takes (its \`runEndStatuses\`, or the endings ticked in Settings → Webhooks).`,
+        `${WEBHOOK_EVENT_INFO['automation.run_ended'].description} Deliveries are not ordered: the end of a short run can arrive before its start, so compare run.startedAt and run.endedAt. An endpoint that names the automations or API keys it takes receives only their runs, as for automation.run_started, and an endpoint receives every end unless it names the statuses it takes (its \`runEndStatuses\`, or the endings ticked in Settings → Webhooks).`,
         'WebhookAutomationRunEnded',
       ),
       'order.received': webhook(
@@ -4214,13 +4251,13 @@ export function buildOpenApiDocument(serverUrl: string) {
       'order.status_changed': webhook(
         'webhookOrderStatusChanged',
         WEBHOOK_EVENT_INFO['order.status_changed'].label,
-        `${WEBHOOK_EVENT_INFO['order.status_changed'].description} order.status and order.previousStatus are the change, and order.changedBy who made it: a member, an API key (order.apiKeyId names it, so an integration can tell its own changes from others') or HyFib applying the order’s Payment Link; the rest is the order when the event is delivered. Deliveries are not ordered: the latest change is the one with the latest createdAt. An endpoint receives every status unless it names the statuses it takes (its \`orderStatuses\`, or the statuses ticked in Settings → Webhooks).`,
+        `${WEBHOOK_EVENT_INFO['order.status_changed'].description} order.status and order.previousStatus are the change, and order.changedBy who made it: a member, an API key (order.apiKeyId names it, so an integration can tell its own changes from others') or HyFib applying the order’s Payment Link; the rest is the order when the event is delivered. Deliveries are not ordered: the latest change is the one with the latest createdAt. An endpoint receives every status unless it names the statuses it takes (its \`orderStatuses\`, or the statuses ticked in Settings → Webhooks), and every change unless it names who made the changes it takes (its \`orderChangeMakers\`, or the makers ticked in Settings → Webhooks): then the changes they made only, and those HyFib did not record the maker of, so an integration that moves orders through the API can leave out the changes keys make; or it can leave out only the changes chosen keys made (its \`orderExcludedApiKeyIds\`, a key rotated from or into one of them included), to be sent every change but its own.`,
         'WebhookOrderStatusChanged',
       ),
       'payment_link.status_changed': webhook(
         'webhookPaymentLinkStatusChanged',
         WEBHOOK_EVENT_INFO['payment_link.status_changed'].label,
-        `${WEBHOOK_EVENT_INFO['payment_link.status_changed'].description} paymentLink.status and paymentLink.previousStatus are the change, as the worker wrote it from what it did at Razorpay or what Razorpay reported; the rest is the link as GET /orders/{id}/payment-links reads it when the event is delivered: its amounts, expiry, the message that sent it in the chat or why it was not sent (notSentReason), what went wrong at Razorpay, and who asked for it (a member, never which, or an API key by its id). Never the link’s address or Razorpay’s ids. Only a link Razorpay reports paid marks the order paid, which order.status_changed reports. Asking for payment and asking to cancel a link send no event of their own here: the link is \`creating\` until the worker creates it, and cancelled when Razorpay reports it. An endpoint receives every status unless it names the statuses it takes (its \`paymentLinkStatuses\`, or the statuses ticked in Settings → Webhooks). It happens on the order’s WhatsApp number, so an endpoint that names numbers receives it for those numbers only. Deliveries are not ordered: the latest change is the one with the latest createdAt.`,
+        `${WEBHOOK_EVENT_INFO['payment_link.status_changed'].description} paymentLink.status and paymentLink.previousStatus are the change, as the worker wrote it from what it did at Razorpay or what Razorpay reported; the rest is the link as GET /orders/{id}/payment-links reads it when the event is delivered: its amounts, expiry, the message that sent it in the chat or why it was not sent (notSentReason), what went wrong at Razorpay, and who asked for it (a member, never which, or an API key by its id). Never the link’s address or Razorpay’s ids. Only a link Razorpay reports paid marks the order paid, which order.status_changed reports. Asking for payment and asking to cancel a link send no event of their own here: the link is \`creating\` until the worker creates it, and cancelled when Razorpay reports it. An endpoint receives every status unless it names the statuses it takes (its \`paymentLinkStatuses\`, or the statuses ticked in Settings → Webhooks), and every link's changes unless it names the API keys whose links it takes (its \`paymentLinkApiKeyIds\`, a key rotated from or into one of them included): then those of the links they asked for only. It happens on the order’s WhatsApp number, so an endpoint that names numbers receives it for those numbers only. Deliveries are not ordered: the latest change is the one with the latest createdAt.`,
         'WebhookPaymentLinkStatusChanged',
       ),
       'campaign.status_changed': webhook(

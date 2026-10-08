@@ -1138,6 +1138,62 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    platform role and changes nothing else. Web servers of this release need it for "Unassigned"; web
    servers from before it do not call it, and workers are unaffected.
 
+   Migration 0241 (ADR-319) adds `run_api_key_ids` to `app.webhook_endpoints` with a check validated
+   by reading the table, and replaces the run trigger's `app.webhook_capture_automation_run` and
+   `app.capture_webhook_event` with the same signatures (keeping 0235's filters); every endpoint
+   starts without a list. Web servers of this release need it, as their reads of endpoints name the
+   column; workers do not read it. Web servers from before it neither show nor change the column:
+   until the web rollout ends, an old server's change that drops both run events from an endpoint
+   with a list fails on the check, its other changes keep the list, and its API refuses
+   `runApiKeyIds` (422) and leaves it out of the endpoints it answers.
+
+   Migration 0242 (ADR-320) adds `message_api_key_ids` to `app.webhook_endpoints` with a check
+   validated by reading the table, creates `app.webhook_api_key_family` for the runtime and definer
+   roles, and replaces the message trigger's `app.webhook_capture_message` and
+   `app.capture_webhook_event` with the same signatures (keeping 0241's filters); every endpoint
+   starts without a list. Web servers of this release need it, as their reads of endpoints name the
+   column; workers do not read it. Web servers from before it neither show nor change the column:
+   until the web rollout ends, an old server's change that drops `message.status` from an endpoint
+   with a list fails on the check, its other changes keep the list, and its API refuses
+   `messageApiKeyIds` (422) and leaves it out of the endpoints it answers.
+
+   Migration 0243 (ADR-321) adds `crm_excluded_api_key_ids` to `app.webhook_endpoints` with a check
+   validated by reading the table, and replaces `app.capture_webhook_event` with the same signature
+   (keeping 0242's filters); every endpoint starts without a list. Web servers of this release need
+   it, as their reads of endpoints name the column; workers do not read it. Web servers from before
+   it neither show nor change the column: until the web rollout ends, an old server's change that
+   drops every deal, task and note event from an endpoint with a list fails on the check, its other
+   changes keep the list, and its API refuses `crmExcludedApiKeyIds` (422) and leaves it out of the
+   endpoints it answers.
+
+   Migration 0244 (ADR-322) adds `order_change_makers` to `app.webhook_endpoints` with a check
+   validated by reading the table, and replaces `app.capture_webhook_event` with the same signature
+   (keeping 0243's filters); every endpoint starts without a list. Web servers of this release need
+   it, as their reads of endpoints name the column; workers do not read it. Web servers from before
+   it neither show nor change the column: until the web rollout ends, an old server's change that
+   drops `order.status_changed` from an endpoint with a list fails on the check, its other changes
+   keep the list, and its API refuses `orderChangeMakers` (422) and leaves it out of the endpoints
+   it answers.
+
+   Migration 0245 (ADR-323) adds `order_excluded_api_key_ids` to `app.webhook_endpoints` with a
+   check validated by reading the table, and replaces `app.capture_webhook_event` with the same
+   signature (keeping 0244's filters); every endpoint starts without a list. Web servers of this
+   release need it, as their reads of endpoints name the column; workers do not read it. Web servers
+   from before it neither show nor change the column: until the web rollout ends, an old server's
+   change that drops `order.status_changed` from an endpoint with a list fails on the check, its
+   other changes keep the list, and its API refuses `orderExcludedApiKeyIds` (422) and leaves it out
+   of the endpoints it answers.
+
+   Migration 0246 (ADR-324) adds `payment_link_api_key_ids` to `app.webhook_endpoints` with a check
+   validated by reading the table, and replaces the link trigger's
+   `app.webhook_capture_payment_link` and `app.capture_webhook_event` with the same signatures
+   (keeping 0245's filters); every endpoint starts without a list. Web servers of this release need
+   it, as their reads of endpoints name the column; workers do not read it. Web servers from before
+   it neither show nor change the column: until the web rollout ends, an old server's change that
+   drops `payment_link.status_changed` from an endpoint with a list fails on the check, its other
+   changes keep the list, and its API refuses `paymentLinkApiKeyIds` (422) and leaves it out of the
+   endpoints it answers.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

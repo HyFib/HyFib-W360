@@ -3221,6 +3221,80 @@ To take more, tick the triggers under "Runs started by" on the endpoint's page, 
 `PATCH /webhook-endpoints/{id}` with `runTriggers` (null for every run). Removing both Automation
 started and Automation ended clears the list.
 
+**A receiver misses the runs of an API key (ADR-319).** An endpoint can take the run events of the
+runs chosen API keys started only. The endpoints list shows them ("Automation runs sent, started
+through the API by: …"), and the API answers `runApiKeyIds` (null takes every run). A run goes by
+the key that started it, as `run.apiKeyId` names it, and by the keys that key was rotated from or
+into; a run a keyword, a store event or a conversation started belongs to no key and is not sent to
+a list. A key revoked or expired since stays on the list, and Settings says so: the runs it started
+still end. Events no endpoint takes are not recorded, so there is nothing to replay;
+`GET /automation-runs/{id}` reads a run a key started. With automations, triggers, ends or reasons
+chosen too, a run must pass every list. To take more, tick the keys under "Runs started through the
+API" on the endpoint's page, or `PATCH /webhook-endpoints/{id}` with `runApiKeyIds` (null for every
+run). Removing both Automation started and Automation ended clears the list.
+
+**A receiver misses the statuses of an API key's messages (ADR-320).** An endpoint can take the
+statuses of the messages chosen API keys sent only. The endpoints list shows them ("Statuses of
+messages sent through the API by: …"), and the API answers `messageApiKeyIds` (null takes every
+message's). A status goes by the key that sent its message, as `message.apiKeyId` names it, and by
+the keys that key was rotated from or into; a message a member, an automation (a run a key started
+among them), a campaign or HyFib sent belongs to no key and its statuses are not sent to a list. A
+key revoked or expired since stays on the list, and Settings says so. Events no endpoint takes are
+not recorded, so there is nothing to replay; `GET /messages/{id}` reads the status of a message sent
+through the API now. With statuses or senders chosen too, a status must pass every list. To take
+more, tick the keys under "Messages sent through the API" on the endpoint's page, or
+`PATCH /webhook-endpoints/{id}` with `messageApiKeyIds` (null for every message). Removing Message
+status clears the list.
+
+**A receiver misses the deal, task or note changes of an API key (ADR-321).** An endpoint can leave
+out the changes chosen API keys made. The endpoints list shows them ("Deal, task and note changes
+left out, made through the API by: …"), and the API answers `crmExcludedApiKeyIds` (null leaves
+nothing out). A change goes by the key that made it, as the event's `apiKeyId` names it, and by the
+keys that key was rotated from or into, so a list naming an integration's old key leaves out its new
+key's changes too. Changes members and automations' runs make, and those without a recorded maker,
+are never left out by a list. Events no endpoint takes are not recorded, so there is nothing to
+replay; the API reads the deals, tasks and notes as they are now. With who made the changes chosen
+too, an event must pass both. To take a key's changes again, untick it under "Deal, task and note
+changes made through the API" on the endpoint's page, or `PATCH /webhook-endpoints/{id}` with
+`crmExcludedApiKeyIds` (null for every change). Removing every deal, task and note event clears the
+list.
+
+**A receiver misses order status changes (ADR-322).** An endpoint can take the order status changes
+of chosen makers only. The endpoints list shows them ("Order changes sent, made by: …"), and the API
+answers `orderChangeMakers` (null takes every change). A change goes by the `changedBy` its event
+names: a member on the order page, an API key, or a Payment Link (HyFib applying what Razorpay
+reports: paid, or back to confirmed when a link ended unpaid); a change without a recorded maker is
+sent to every list, and new orders are not narrowed. Events no endpoint takes are not recorded, so
+there is nothing to replay; `GET /orders/{id}` reads the order's status and who changed it last.
+With order statuses or numbers chosen too, an event must pass every list. To take more, tick the
+makers under "Order changes made by" on the endpoint's page, or `PATCH /webhook-endpoints/{id}` with
+`orderChangeMakers` (null for every change). Removing Order status clears the list.
+
+**A receiver misses the order changes of an API key (ADR-323).** An endpoint can leave out the order
+status changes chosen API keys made. The endpoints list shows them ("Order changes left out, made
+through the API by: …"), and the API answers `orderExcludedApiKeyIds` (null leaves nothing out). A
+change goes by the key that made it, as the event's `apiKeyId` names it (asking for payment
+included), and by the keys that key was rotated from or into, so a list naming an integration's old
+key leaves out its new key's changes too. Changes members and Payment Links make, those without a
+recorded maker, and new orders are never left out by a list. Events no endpoint takes are not
+recorded, so there is nothing to replay; `GET /orders/{id}` reads the order as it is now. With order
+statuses or who made the changes chosen too, an event must pass both. To take a key's changes again,
+untick it under "Order changes made through the API" on the endpoint's page, or
+`PATCH /webhook-endpoints/{id}` with `orderExcludedApiKeyIds` (null for every change). Removing
+Order status clears the list.
+
+**A receiver misses the Payment Links' changes of an API key (ADR-324).** An endpoint can take the
+changes of the links chosen API keys asked for only. The endpoints list shows them ("Payment Links
+sent, asked for through the API by: …"), and the API answers `paymentLinkApiKeyIds` (null takes
+every link's). A change goes by the key that asked for its link, as
+`paymentLink.requestedByApiKeyId` names it, and by the keys that key was rotated from or into; a
+link a member asked for is not sent to a list. A key revoked or expired since stays on the list, and
+Settings says so. Events no endpoint takes are not recorded, so there is nothing to replay;
+`GET /orders/{id}/payment-links` reads the links as they are now. With Payment Link statuses chosen
+too, a change must pass both. To take more, tick the keys under "Payment Links asked for through the
+API" on the endpoint's page, or `PATCH /webhook-endpoints/{id}` with `paymentLinkApiKeyIds` (null
+for every link). Removing Payment Link status clears the list.
+
 **A receiver misses the events of a member's conversations (ADR-181).** An endpoint can take the
 message and conversation events of the conversations assigned to chosen members only. The endpoints
 list shows them ("Members whose conversations’ events are sent: …"), and the API answers
@@ -3656,6 +3730,11 @@ every failure.
 **Unassigned (ADR-318).** On Current failures, "Unassigned" lists only the failures nobody is
 assigned, however many others are failing, with the same forms: assign one there and it leaves the
 view; take an assignment off and it comes back. The CSV always gives every failure.
+
+**Two administrators with one name (ADR-325).** The Assign list shows your own name as "… (you)".
+Another administrator whose name someone else also has is shown with when they became an
+administrator (UTC), and with "#1", "#2" if that is the same minute too. To make the list plainer,
+ask one of them to change their name in Account & security → Profile.
 
 **Keys (ADR-134).** The configured encryption key ids, the primary first, and how many stored values
 each key seals, by kind (counts only). While another key is configured the worker seals the values

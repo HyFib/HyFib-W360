@@ -26,6 +26,8 @@ import {
   WEBHOOK_ORDER_STATUSES,
   WEBHOOK_PAYMENT_LINK_STATUS_LABELS,
   WEBHOOK_PAYMENT_LINK_STATUSES,
+  WEBHOOK_ORDER_CHANGE_MAKER_LABELS,
+  WEBHOOK_ORDER_CHANGE_MAKERS,
   WEBHOOK_DEAL_STATUS_LABELS,
   WEBHOOK_DEAL_STATUSES,
   WEBHOOK_TASK_STATUS_LABELS,
@@ -59,6 +61,7 @@ import {
   webhookPipelineText,
   webhookReplayAllSummary,
   webhookReplaySummary,
+  webhookApiKeyText,
   webhookRunEndReasonsChosen,
   webhookRunEndReasonsTicked,
   webhookStageText,
@@ -90,6 +93,7 @@ import {
   type WebhookEndpointOAuth,
   type WebhookEndpointOwner,
   type WebhookEndpointPipeline,
+  type WebhookEndpointApiKey,
   type WebhookEndpointStage,
   type WebhookEndpointTeam,
   type WebhookEventType,
@@ -99,6 +103,7 @@ import {
   type WebhookMessageStatus,
   type WebhookOrderStatus,
   type WebhookPaymentLinkStatus,
+  type WebhookOrderChangeMaker,
   type WebhookDealStatus,
   type WebhookTaskStatus,
   type WebhookDealDetail,
@@ -106,6 +111,7 @@ import {
   type WebhookOwnerChoice,
   type WebhookPipelineChoice,
   type WebhookReplayPeriod,
+  type WebhookApiKeyChoice,
   type WebhookStageChoice,
   type WebhookRunEndStatus,
   type WebhookRunTrigger,
@@ -331,6 +337,55 @@ function ChangeMakerChoices({
             />
             <Label htmlFor={id} className="font-normal">
               {WEBHOOK_CRM_CHANGE_MAKER_LABELS[maker]}{' '}
+              <span className="font-mono text-xs">({maker})</span>
+            </Label>
+          </div>
+        );
+      })}
+    </fieldset>
+  );
+}
+
+/**
+ * Who made the order status changes an endpoint takes (ADR-322), shown while it takes Order status:
+ * every change unless some makers are unticked. A change whose maker was not recorded is sent
+ * whichever are ticked.
+ */
+function OrderChangeMakerChoices({
+  prefix,
+  chosen,
+  onChange,
+}: {
+  prefix: string;
+  chosen: WebhookOrderChangeMaker[];
+  onChange: (next: WebhookOrderChangeMaker[]) => void;
+}) {
+  return (
+    <fieldset className="grid gap-2">
+      <legend className="mb-1 text-sm font-medium">Order changes made by</legend>
+      <p className="text-xs text-muted-foreground">
+        An order’s status change belongs to whoever made it: a member on the order page, an API key,
+        or HyFib applying what Razorpay reports for the order’s Payment Link. Untick API keys to
+        leave out what your integrations change through the API. A change HyFib did not record the
+        maker of is sent whichever are ticked, and new orders are sent whoever is ticked.
+      </p>
+      {WEBHOOK_ORDER_CHANGE_MAKERS.map((maker) => {
+        const id = `${prefix}-order-change-maker-${maker}`;
+        return (
+          <div key={maker} className="flex items-center gap-2">
+            <Checkbox
+              id={id}
+              checked={chosen.includes(maker)}
+              onChange={(e) =>
+                onChange(
+                  e.target.checked
+                    ? WEBHOOK_ORDER_CHANGE_MAKERS.filter((m) => m === maker || chosen.includes(m))
+                    : chosen.filter((m) => m !== maker),
+                )
+              }
+            />
+            <Label htmlFor={id} className="font-normal">
+              {WEBHOOK_ORDER_CHANGE_MAKER_LABELS[maker]}{' '}
               <span className="font-mono text-xs">({maker})</span>
             </Label>
           </div>
@@ -912,6 +967,156 @@ function AutomationChoices({
                     : a.status === 'paused'
                       ? ' (paused)'
                       : ''}
+                </Label>
+              </div>
+            );
+          })}
+        </div>
+      ) : null}
+    </fieldset>
+  );
+}
+
+/**
+ * What the API keys' fieldset says for runs (ADR-319), messages' statuses (ADR-320) and Payment
+ * Links (ADR-324), and the CRM (ADR-321) and order (ADR-323) changes left out.
+ */
+const API_KEY_WORDS = {
+  runs: {
+    legend: 'Runs started through the API',
+    help: 'A run started through the API belongs to the key that started it, and to the keys that key was rotated from or into; a run started otherwise belongs to none. With automations or what started the runs chosen too, a run must pass them all.',
+    every: 'Every run',
+    everyHelp: 'Including runs started otherwise, and by keys added later.',
+    only: 'Only the runs the API keys ticked started',
+    none: 'No API key can start automations yet.',
+    idPart: 'run-api-key',
+  },
+  messages: {
+    legend: 'Messages sent through the API',
+    help: 'A message sent through the API belongs to the key that sent it (a Payment Link, to the key that asked for it), and to the keys that key was rotated from or into; a message a member, an automation, a campaign or HyFib sent belongs to none. With statuses or senders chosen too, a status must pass them all.',
+    every: 'Every message’s statuses',
+    everyHelp: 'Including messages sent otherwise, and by keys added later.',
+    only: 'Only the statuses of the messages the API keys ticked sent',
+    none: 'No API key can send messages yet.',
+    idPart: 'message-api-key',
+  },
+  crm: {
+    legend: 'Deal, task and note changes made through the API',
+    help: 'Leave out the changes chosen keys made, so that an integration is not sent back what it wrote: a change made through the API belongs to the key that made it, and to the keys that key was rotated from or into. Changes members and automations make are never left out here. With who made the changes chosen too, an event must pass both.',
+    every: 'Every change',
+    everyHelp: 'Whichever key made it.',
+    only: 'Leave out the changes the API keys ticked made',
+    none: 'No API key can change deals, tasks or notes yet.',
+    idPart: 'crm-api-key',
+  },
+  orders: {
+    legend: 'Order changes made through the API',
+    help: 'Leave out the order status changes chosen keys made, so that an order system is not sent back what it changed: a change made through the API belongs to the key that made it (asking for payment included), and to the keys that key was rotated from or into. Changes members and Payment Links make are never left out here. With who made the order changes chosen too, a change must pass both.',
+    every: 'Every order change',
+    everyHelp: 'Whichever key made it.',
+    only: 'Leave out the order changes the API keys ticked made',
+    none: 'No API key can change orders yet.',
+    idPart: 'order-api-key',
+  },
+  paymentLinks: {
+    legend: 'Payment Links asked for through the API',
+    help: 'A Payment Link asked for through the API belongs to the key that asked for it, and to the keys that key was rotated from or into; a link a member asked for belongs to none. With Payment Link statuses or numbers chosen too, a change must pass them all.',
+    every: 'Every Payment Link’s changes',
+    everyHelp: 'Including links members asked for, and by keys added later.',
+    only: 'Only the changes of the links the API keys ticked asked for',
+    none: 'No API key can ask customers to pay yet.',
+    idPart: 'payment-link-api-key',
+  },
+} as const;
+
+/**
+ * The API keys whose runs (ADR-319) or messages' statuses (ADR-320) an endpoint takes, or whose
+ * deal, task and note changes (ADR-321) or order changes (ADR-323) it leaves out, or whose Payment
+ * Links' changes it takes (ADR-324), as `kind` says,
+ * shown while it takes their events: every run, message or change, or only those of the keys
+ * ticked, or all but theirs. The keys that can start automations, send messages, change deals,
+ * tasks, notes or orders, or ask customers to pay, work and were not rotated are offered; one the
+ * endpoint already names stays listed, ticked, until it is unticked.
+ */
+function ApiKeyChoices({
+  kind,
+  prefix,
+  choices,
+  stored,
+  every,
+  onEveryChange,
+  chosen,
+  onChange,
+}: {
+  kind: keyof typeof API_KEY_WORDS;
+  prefix: string;
+  choices: WebhookApiKeyChoice[];
+  /** The keys the endpoint names now, so one that stopped working stays listed until saved. */
+  stored: readonly WebhookEndpointApiKey[];
+  every: boolean;
+  onEveryChange: (next: boolean) => void;
+  chosen: string[];
+  onChange: (next: string[]) => void;
+}) {
+  const listed: WebhookEndpointApiKey[] = [
+    ...choices.map((c): WebhookEndpointApiKey => ({ ...c, state: 'active' })),
+    ...stored.filter((s) => !choices.some((c) => c.id === s.id)),
+  ];
+  const words = API_KEY_WORDS[kind];
+  return (
+    <fieldset className="grid gap-2">
+      <legend className="mb-1 text-sm font-medium">{words.legend}</legend>
+      <p className="text-xs text-muted-foreground">{words.help}</p>
+      <label className="flex items-start gap-2 text-sm">
+        <input
+          type="radio"
+          name={`${prefix}-${words.idPart}s`}
+          className="mt-1"
+          checked={every}
+          onChange={() => onEveryChange(true)}
+        />
+        <span>
+          {words.every}
+          <span className="block text-xs text-muted-foreground">{words.everyHelp}</span>
+        </span>
+      </label>
+      <label className="flex items-start gap-2 text-sm">
+        <input
+          type="radio"
+          name={`${prefix}-${words.idPart}s`}
+          className="mt-1"
+          checked={!every}
+          disabled={listed.length === 0}
+          onChange={() => onEveryChange(false)}
+        />
+        <span>
+          {words.only}
+          {listed.length === 0 ? (
+            <span className="block text-xs text-muted-foreground">{words.none}</span>
+          ) : null}
+        </span>
+      </label>
+      {!every ? (
+        <div className="ml-6 grid max-h-64 gap-1 overflow-y-auto">
+          {listed.map((k) => {
+            const id = `${prefix}-${words.idPart}-${k.id}`;
+            return (
+              <div key={k.id} className="flex items-center gap-2">
+                <Checkbox
+                  id={id}
+                  checked={chosen.includes(k.id)}
+                  onChange={(e) =>
+                    onChange(
+                      e.target.checked
+                        ? listed
+                            .filter((l) => l.id === k.id || chosen.includes(l.id))
+                            .map((l) => l.id)
+                        : chosen.filter((x) => x !== k.id),
+                    )
+                  }
+                />
+                <Label htmlFor={id} className="font-normal break-all">
+                  {webhookApiKeyText(k)}
                 </Label>
               </div>
             );
@@ -2548,6 +2753,11 @@ export function WebhookEndpointForm({
   slug,
   endpoint,
   automationChoices,
+  runApiKeyChoices,
+  messageApiKeyChoices,
+  crmApiKeyChoices,
+  orderApiKeyChoices,
+  paymentLinkApiKeyChoices,
   channelChoices,
   teamChoices,
   templateChoices,
@@ -2568,6 +2778,8 @@ export function WebhookEndpointForm({
     headerNames: string[];
     messageStatuses: WebhookMessageStatus[] | null;
     messageSenders: WebhookMessageSender[] | null;
+    /** The API keys whose sent messages' statuses it takes (ADR-320); null: every message. */
+    messageApiKeys: WebhookEndpointApiKey[] | null;
     contactParts: WebhookContactPart[] | null;
     /** The custom fields it names (ADR-184), deleted ones without a label; null for every field. */
     contactFields: WebhookEndpointField[] | null;
@@ -2576,6 +2788,12 @@ export function WebhookEndpointForm({
     orderStatuses: WebhookOrderStatus[] | null;
     /** The Payment Link statuses it takes (ADR-308); null for every status. */
     paymentLinkStatuses: WebhookPaymentLinkStatus[] | null;
+    /** Who made the order status changes it takes (ADR-322); null for every change. */
+    orderChangeMakers: WebhookOrderChangeMaker[] | null;
+    /** The API keys whose order changes it leaves out (ADR-323), and if they work; null: none. */
+    orderExcludedApiKeys: WebhookEndpointApiKey[] | null;
+    /** The keys whose Payment Links' changes it takes (ADR-324), and if they work; null: all. */
+    paymentLinkApiKeys: WebhookEndpointApiKey[] | null;
     /** The deal statuses it takes (ADR-309); null for every status. */
     dealStatuses: WebhookDealStatus[] | null;
     /** The task statuses it takes (ADR-309); null for every status. */
@@ -2589,6 +2807,8 @@ export function WebhookEndpointForm({
     runEndStatuses: WebhookRunEndStatus[] | null;
     /** What started the runs it takes (ADR-183); null for every run. */
     runTriggers: WebhookRunTrigger[] | null;
+    /** The API keys whose runs it takes (ADR-319), and whether they work; null: every run. */
+    runApiKeys: WebhookEndpointApiKey[] | null;
     /** The consent changes it takes (ADR-189); null for every change. */
     consentChanges: WebhookConsentChange[] | null;
     /** Where the contacts it takes as `contact.created` came from (ADR-190); null for every one. */
@@ -2626,6 +2846,8 @@ export function WebhookEndpointForm({
     noteDealOwners: WebhookEndpointOwner[] | null;
     /** Who made the changes whose deal, task and note events it takes (ADR-306); null: all. */
     crmChangeMakers: WebhookCrmChangeMaker[] | null;
+    /** The API keys whose CRM changes it leaves out (ADR-321), and if they work; null: none. */
+    crmExcludedApiKeys: WebhookEndpointApiKey[] | null;
     /** The scores of the survey answers it takes (ADR-307); null: every answer. */
     surveyScores: WebhookSurveyScore[] | null;
     /** The members credited with the survey answers it takes (ADR-311); null: every answer. */
@@ -2648,6 +2870,16 @@ export function WebhookEndpointForm({
   };
   /** The company's published automations, which an endpoint can choose (ADR-145). */
   automationChoices: WebhookAutomationChoice[];
+  /** The company's API keys that can start runs, which an endpoint can choose (ADR-319). */
+  runApiKeyChoices: WebhookApiKeyChoice[];
+  /** The company's API keys whose messages carry them, which an endpoint can choose (ADR-320). */
+  messageApiKeyChoices: WebhookApiKeyChoice[];
+  /** The company's API keys that change deals, tasks or notes, which an endpoint can leave out. */
+  crmApiKeyChoices: WebhookApiKeyChoice[];
+  /** The company's API keys that change orders, which an endpoint can leave out (ADR-323). */
+  orderApiKeyChoices: WebhookApiKeyChoice[];
+  /** The company's API keys that ask customers to pay, which an endpoint can choose (ADR-324). */
+  paymentLinkApiKeyChoices: WebhookApiKeyChoice[];
   /** The company's WhatsApp numbers, which an endpoint can choose (ADR-170). */
   channelChoices: WebhookChannelChoice[];
   /** The company's teams, which an endpoint can choose (ADR-174). */
@@ -2693,6 +2925,19 @@ export function WebhookEndpointForm({
   const [paymentLinkStatuses, setPaymentLinkStatuses] = useState<WebhookPaymentLinkStatus[]>(
     endpoint?.paymentLinkStatuses ?? [...WEBHOOK_PAYMENT_LINK_STATUSES],
   );
+  const [orderChangeMakers, setOrderChangeMakers] = useState<WebhookOrderChangeMaker[]>(
+    endpoint?.orderChangeMakers ?? [...WEBHOOK_ORDER_CHANGE_MAKERS],
+  );
+  const [everyOrderChange, setEveryOrderChange] = useState(!endpoint?.orderExcludedApiKeys);
+  const [orderExcludedApiKeyIds, setOrderExcludedApiKeyIds] = useState<string[]>(
+    endpoint?.orderExcludedApiKeys?.map((k) => k.id) ?? [],
+  );
+  const [everyPaymentLinkApiKey, setEveryPaymentLinkApiKey] = useState(
+    !endpoint?.paymentLinkApiKeys,
+  );
+  const [paymentLinkApiKeyIds, setPaymentLinkApiKeyIds] = useState<string[]>(
+    endpoint?.paymentLinkApiKeys?.map((k) => k.id) ?? [],
+  );
   const [dealStatuses, setDealStatuses] = useState<WebhookDealStatus[]>(
     endpoint?.dealStatuses ?? [...WEBHOOK_DEAL_STATUSES],
   );
@@ -2731,6 +2976,18 @@ export function WebhookEndpointForm({
   );
   const [everyAutomation, setEveryAutomation] = useState(!endpoint?.automationIds);
   const [automationIds, setAutomationIds] = useState<string[]>(endpoint?.automationIds ?? []);
+  const [everyRunApiKey, setEveryRunApiKey] = useState(!endpoint?.runApiKeys);
+  const [runApiKeyIds, setRunApiKeyIds] = useState<string[]>(
+    endpoint?.runApiKeys?.map((k) => k.id) ?? [],
+  );
+  const [everyMessageApiKey, setEveryMessageApiKey] = useState(!endpoint?.messageApiKeys);
+  const [messageApiKeyIds, setMessageApiKeyIds] = useState<string[]>(
+    endpoint?.messageApiKeys?.map((k) => k.id) ?? [],
+  );
+  const [everyCrmChange, setEveryCrmChange] = useState(!endpoint?.crmExcludedApiKeys);
+  const [crmExcludedApiKeyIds, setCrmExcludedApiKeyIds] = useState<string[]>(
+    endpoint?.crmExcludedApiKeys?.map((k) => k.id) ?? [],
+  );
   const [everyChannel, setEveryChannel] = useState(!endpoint?.channelIds);
   const [channelIds, setChannelIds] = useState<string[]>(endpoint?.channelIds ?? []);
   const [everyTeam, setEveryTeam] = useState(!endpoint?.teams);
@@ -2859,6 +3116,9 @@ export function WebhookEndpointForm({
           eventTypes.includes('message.status') && senders.length < WEBHOOK_MESSAGE_SENDERS.length
             ? senders
             : null;
+        // Every message's statuses unless the API keys ticked are chosen (ADR-320).
+        const chosenMessageApiKeys =
+          eventTypes.includes('message.status') && !everyMessageApiKey ? messageApiKeyIds : null;
         // Every part ticked takes every change, including parts added later (null).
         const contactParts =
           eventTypes.includes('contact.updated') && parts.length < WEBHOOK_CONTACT_PARTS.length
@@ -2887,6 +3147,22 @@ export function WebhookEndpointForm({
           eventTypes.includes('payment_link.status_changed') &&
           paymentLinkStatuses.length < WEBHOOK_PAYMENT_LINK_STATUSES.length
             ? paymentLinkStatuses
+            : null;
+        // Every maker ticked takes every order change (null, ADR-322).
+        const chosenOrderChangeMakers =
+          eventTypes.includes('order.status_changed') &&
+          orderChangeMakers.length < WEBHOOK_ORDER_CHANGE_MAKERS.length
+            ? orderChangeMakers
+            : null;
+        // Every order change unless the API keys ticked are left out (ADR-323).
+        const chosenOrderExcludedApiKeys =
+          eventTypes.includes('order.status_changed') && !everyOrderChange
+            ? orderExcludedApiKeyIds
+            : null;
+        // Every Payment Link's changes unless the API keys ticked are chosen (ADR-324).
+        const chosenPaymentLinkApiKeys =
+          eventTypes.includes('payment_link.status_changed') && !everyPaymentLinkApiKey
+            ? paymentLinkApiKeyIds
             : null;
         // Every deal or task status ticked takes every status (null, ADR-309).
         const chosenDealStatuses =
@@ -2931,6 +3207,9 @@ export function WebhookEndpointForm({
           webhookTakesAutomationRuns(eventTypes) && runTriggers.length < WEBHOOK_RUN_TRIGGERS.length
             ? runTriggers
             : null;
+        // Every run unless the API keys ticked are chosen (ADR-319).
+        const chosenRunApiKeys =
+          webhookTakesAutomationRuns(eventTypes) && !everyRunApiKey ? runApiKeyIds : null;
         // Every consent change ticked takes every change (null, ADR-189).
         const chosenConsentChanges =
           eventTypes.includes('consent.changed') &&
@@ -2998,6 +3277,9 @@ export function WebhookEndpointForm({
           changeMakers.length < WEBHOOK_CRM_CHANGE_MAKERS.length
             ? changeMakers
             : null;
+        // Every change unless the API keys ticked are left out (ADR-321).
+        const chosenCrmExcludedApiKeys =
+          webhookTakesCrmChanges(eventTypes) && !everyCrmChange ? crmExcludedApiKeyIds : null;
         // Every score ticked takes every answer (null, ADR-307).
         const surveyScores =
           eventTypes.includes('satisfaction_survey.answered') &&
@@ -3062,12 +3344,16 @@ export function WebhookEndpointForm({
           eventTypes,
           messageStatuses,
           messageSenders,
+          messageApiKeyIds: chosenMessageApiKeys,
           contactParts,
           contactFieldKeys: chosenFields,
           automationIds: chosenAutomations,
           campaignStatuses: chosenCampaignStatuses,
           orderStatuses: chosenOrderStatuses,
           paymentLinkStatuses: chosenPaymentLinkStatuses,
+          orderChangeMakers: chosenOrderChangeMakers,
+          orderExcludedApiKeyIds: chosenOrderExcludedApiKeys,
+          paymentLinkApiKeyIds: chosenPaymentLinkApiKeys,
           dealStatuses: chosenDealStatuses,
           taskStatuses: chosenTaskStatuses,
           dealDetails: chosenDealDetails,
@@ -3076,6 +3362,7 @@ export function WebhookEndpointForm({
           conversationStatuses: chosenConversationStatuses,
           runEndStatuses: chosenRunEndStatuses,
           runTriggers: chosenRunTriggers,
+          runApiKeyIds: chosenRunApiKeys,
           consentChanges: chosenConsentChanges,
           contactSources: chosenContactSources,
           messageTypes: chosenMessageTypes,
@@ -3095,6 +3382,7 @@ export function WebhookEndpointForm({
           noteStageIds: chosenNoteStages,
           noteDealOwnerIds: chosenNoteDealOwners,
           crmChangeMakers,
+          crmExcludedApiKeyIds: chosenCrmExcludedApiKeys,
           surveyScores,
           surveyAssigneeIds: chosenSurveyAssignees,
           surveyTeamIds: chosenSurveyTeams,
@@ -3154,6 +3442,11 @@ export function WebhookEndpointForm({
               setCampaignStatuses([...WEBHOOK_CAMPAIGN_STATUSES]);
               setOrderStatuses([...WEBHOOK_ORDER_STATUSES]);
               setPaymentLinkStatuses([...WEBHOOK_PAYMENT_LINK_STATUSES]);
+              setOrderChangeMakers([...WEBHOOK_ORDER_CHANGE_MAKERS]);
+              setEveryOrderChange(true);
+              setOrderExcludedApiKeyIds([]);
+              setEveryPaymentLinkApiKey(true);
+              setPaymentLinkApiKeyIds([]);
               setDealStatuses([...WEBHOOK_DEAL_STATUSES]);
               setTaskStatuses([...WEBHOOK_TASK_STATUSES]);
               setDealDetails([...WEBHOOK_DEAL_DETAILS]);
@@ -3168,6 +3461,10 @@ export function WebhookEndpointForm({
               setRunEndReasons([...WEBHOOK_RUN_END_REASONS]);
               setEveryAutomation(true);
               setAutomationIds([]);
+              setEveryRunApiKey(true);
+              setRunApiKeyIds([]);
+              setEveryMessageApiKey(true);
+              setMessageApiKeyIds([]);
               setEveryChannel(true);
               setChannelIds([]);
               setEveryTeam(true);
@@ -3197,6 +3494,8 @@ export function WebhookEndpointForm({
               setEveryNoteDealOwner(true);
               setNoteDealOwnerIds([]);
               setChangeMakers([...WEBHOOK_CRM_CHANGE_MAKERS]);
+              setEveryCrmChange(true);
+              setCrmExcludedApiKeyIds([]);
               setScores([...WEBHOOK_SURVEY_SCORES]);
               setEverySurveyAssignee(true);
               setSurveyAssigneeIds([]);
@@ -3303,6 +3602,18 @@ export function WebhookEndpointForm({
         scores={scores}
         onScoresChange={setScores}
       />
+      {eventTypes.includes('message.status') ? (
+        <ApiKeyChoices
+          kind="messages"
+          prefix={prefix}
+          choices={messageApiKeyChoices}
+          stored={endpoint?.messageApiKeys ?? []}
+          every={everyMessageApiKey}
+          onEveryChange={setEveryMessageApiKey}
+          chosen={messageApiKeyIds}
+          onChange={setMessageApiKeyIds}
+        />
+      ) : null}
       {webhookTakesFieldChanges(eventTypes, parts) ? (
         <FieldChoices
           prefix={prefix}
@@ -3327,6 +3638,18 @@ export function WebhookEndpointForm({
       ) : null}
       {webhookTakesAutomationRuns(eventTypes) ? (
         <TriggerChoices prefix={prefix} chosen={runTriggers} onChange={setRunTriggers} />
+      ) : null}
+      {webhookTakesAutomationRuns(eventTypes) ? (
+        <ApiKeyChoices
+          kind="runs"
+          prefix={prefix}
+          choices={runApiKeyChoices}
+          stored={endpoint?.runApiKeys ?? []}
+          every={everyRunApiKey}
+          onEveryChange={setEveryRunApiKey}
+          chosen={runApiKeyIds}
+          onChange={setRunApiKeyIds}
+        />
       ) : null}
       {webhookTakesChannelEvents(eventTypes) ? (
         <ChannelChoices
@@ -3402,6 +3725,37 @@ export function WebhookEndpointForm({
           onEveryChange={setEveryConversationTag}
           text={conversationTagsText}
           onTextChange={setConversationTagsText}
+        />
+      ) : null}
+      {eventTypes.includes('order.status_changed') ? (
+        <OrderChangeMakerChoices
+          prefix={prefix}
+          chosen={orderChangeMakers}
+          onChange={setOrderChangeMakers}
+        />
+      ) : null}
+      {eventTypes.includes('order.status_changed') ? (
+        <ApiKeyChoices
+          kind="orders"
+          prefix={prefix}
+          choices={orderApiKeyChoices}
+          stored={endpoint?.orderExcludedApiKeys ?? []}
+          every={everyOrderChange}
+          onEveryChange={setEveryOrderChange}
+          chosen={orderExcludedApiKeyIds}
+          onChange={setOrderExcludedApiKeyIds}
+        />
+      ) : null}
+      {eventTypes.includes('payment_link.status_changed') ? (
+        <ApiKeyChoices
+          kind="paymentLinks"
+          prefix={prefix}
+          choices={paymentLinkApiKeyChoices}
+          stored={endpoint?.paymentLinkApiKeys ?? []}
+          every={everyPaymentLinkApiKey}
+          onEveryChange={setEveryPaymentLinkApiKey}
+          chosen={paymentLinkApiKeyIds}
+          onChange={setPaymentLinkApiKeyIds}
         />
       ) : null}
       {eventTypes.includes('satisfaction_survey.answered') ? (
@@ -3580,6 +3934,18 @@ export function WebhookEndpointForm({
       ) : null}
       {webhookTakesCrmChanges(eventTypes) ? (
         <ChangeMakerChoices prefix={prefix} chosen={changeMakers} onChange={setChangeMakers} />
+      ) : null}
+      {webhookTakesCrmChanges(eventTypes) ? (
+        <ApiKeyChoices
+          kind="crm"
+          prefix={prefix}
+          choices={crmApiKeyChoices}
+          stored={endpoint?.crmExcludedApiKeys ?? []}
+          every={everyCrmChange}
+          onEveryChange={setEveryCrmChange}
+          chosen={crmExcludedApiKeyIds}
+          onChange={setCrmExcludedApiKeyIds}
+        />
       ) : null}
       <fieldset className="grid gap-2">
         <legend className="mb-1 text-sm font-medium">Headers</legend>

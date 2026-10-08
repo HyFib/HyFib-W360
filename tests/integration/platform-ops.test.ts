@@ -2154,15 +2154,19 @@ describe('assigning companies’ failing integrations (ADR-313)', () => {
     expect((await listed(id))?.assignment).toBeNull();
     const asha = await namedStaff('Asha Ops');
     const ravi = await namedStaff('Ravi Ops');
-    // Every platform administrator is offered, by name.
+    const namesake = await namedStaff('Asha Ops');
+    // Every platform administrator is offered, by name, each told apart from the others (ADR-325):
+    // the reader as "you", and administrators who share a name by when they became one.
     const offered = (await ops().integrations(staff)).administrators;
-    expect(offered).toEqual(
-      expect.arrayContaining([
-        { userId: asha.userId, name: 'Asha Ops' },
-        { userId: ravi.userId, name: 'Ravi Ops' },
-        expect.objectContaining({ userId: staff.userId }),
-      ]),
-    );
+    const labelOf = (userId: string) => offered.find((a) => a.userId === userId)?.label;
+    expect(labelOf(staff.userId)).toMatch(/ \(you\)$/);
+    for (const shared of [asha, namesake]) {
+      expect(labelOf(shared.userId)).toMatch(
+        /^Asha Ops \(administrator since \d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC\)( #\d+)?$/,
+      );
+    }
+    expect(labelOf(ravi.userId)).toMatch(/^Ravi Ops/);
+    expect(new Set(offered.map((a) => a.label)).size).toBe(offered.length);
     expect(offered.findIndex((a) => a.userId === asha.userId)).toBeLessThan(
       offered.findIndex((a) => a.userId === ravi.userId),
     );

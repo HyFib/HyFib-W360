@@ -1,7 +1,7 @@
 import { integer, smallint, text, timestamp, uuid } from 'drizzle-orm/pg-core';
 import { jsonb } from './columns';
 import type { AutomationEndReason } from './automations';
-import type { PaymentLinkStatus } from './commerce';
+import type { OrderStatusChanger, PaymentLinkStatus } from './commerce';
 import type { CrmChanger, DealStatus, TaskStatus } from './crm';
 import type { ContactSource, MessageType } from './messaging';
 import { appSchema } from './tenancy';
@@ -89,6 +89,13 @@ export type WebhookOrderStatus =
  * (ADR-308); a link is `creating` only until the worker creates it, which sends no event.
  */
 export type WebhookPaymentLinkStatus = Exclude<PaymentLinkStatus, 'creating'>;
+
+/**
+ * Who made an order status change `order.status_changed` reports, as an endpoint can choose them
+ * (ADR-322): a member on the order page, an API key, or HyFib applying what Razorpay reports for
+ * the order's Payment Link, as the event's `changedBy` names them.
+ */
+export type WebhookOrderChangeMaker = OrderStatusChanger;
 
 /**
  * The statuses a `deal.status_changed` event reports, which an endpoint can choose (ADR-309): a
@@ -196,6 +203,12 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
    */
   messageSenders: text('message_senders').array().$type<WebhookMessageSender[]>(),
   /**
+   * The API keys whose sent messages' `message.status` it takes (migration 0242, ADR-320): the
+   * messages one of them sent through the API, or a key one of them was rotated from or into. null
+   * takes every message's. Set only while `message.status` is among its events.
+   */
+  messageApiKeyIds: uuid('message_api_key_ids').array(),
+  /**
    * The parts of a contact whose change it takes as `contact.updated` (ADR-123); null takes every
    * change. Set only while `contact.updated` is among its events.
    */
@@ -226,6 +239,24 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
    * its events.
    */
   paymentLinkStatuses: text('payment_link_statuses').array().$type<WebhookPaymentLinkStatus[]>(),
+  /**
+   * Who made the order status changes it takes as `order.status_changed` (migration 0244, ADR-322);
+   * null takes every change, and a change whose maker was not recorded is taken whoever is listed.
+   * Set only while `order.status_changed` is among its events.
+   */
+  orderChangeMakers: text('order_change_makers').array().$type<WebhookOrderChangeMaker[]>(),
+  /**
+   * The API keys whose order status changes it leaves out (migration 0245, ADR-323): the changes
+   * one of them made through the API, or a key one of them was rotated from or into. null leaves
+   * nothing out. Set only while `order.status_changed` is among its events.
+   */
+  orderExcludedApiKeyIds: uuid('order_excluded_api_key_ids').array(),
+  /**
+   * The API keys whose Payment Links' changes it takes as `payment_link.status_changed` (migration
+   * 0246, ADR-324): the links one of them asked for, or a key one of them was rotated from or into.
+   * null takes every link's. Set only while `payment_link.status_changed` is among its events.
+   */
+  paymentLinkApiKeyIds: uuid('payment_link_api_key_ids').array(),
   /**
    * The statuses a deal reaches that it takes as `deal.status_changed` (migration 0232, ADR-309);
    * null takes every status. Set only while `deal.status_changed` is among its events.
@@ -268,6 +299,12 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
    * `automation.run_started` or `automation.run_ended` is among its events.
    */
   runTriggers: text('run_triggers').array().$type<WebhookRunTrigger[]>(),
+  /**
+   * The API keys whose runs' events it takes (migration 0241, ADR-319): the runs one of them
+   * started through the API, or a key one of them was rotated from or into. null takes every run.
+   * Set only while `automation.run_started` or `automation.run_ended` is among its events.
+   */
+  runApiKeyIds: uuid('run_api_key_ids').array(),
   /**
    * The WhatsApp numbers (channel accounts) whose events it takes (ADR-170): message,
    * conversation, automation run, order and campaign events; null takes every number. Set only
@@ -375,6 +412,12 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
    * taken whoever is listed. Set only while a deal, task or note event is among its events.
    */
   crmChangeMakers: text('crm_change_makers').array().$type<WebhookCrmChangeMaker[]>(),
+  /**
+   * The API keys whose deal, task and note changes it leaves out (migration 0243, ADR-321): the
+   * changes one of them made through the API, or a key one of them was rotated from or into. null
+   * leaves nothing out. Set only while a deal, task or note event is among its events.
+   */
+  crmExcludedApiKeyIds: uuid('crm_excluded_api_key_ids').array(),
   /**
    * The scores of the satisfaction survey answers it takes (migration 0230, ADR-307), by the score
    * the customer's tap recorded; null takes every answer. Set only while

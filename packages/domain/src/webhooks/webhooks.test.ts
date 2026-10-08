@@ -15,6 +15,7 @@ import {
   CRM_CHANGERS,
   DEAL_STATUSES,
   MESSAGE_TYPES,
+  ORDER_STATUS_CHANGERS,
   ORDER_STATUSES,
   PAYMENT_LINK_STATUSES,
   TASK_STATUSES,
@@ -22,6 +23,7 @@ import {
   WEBHOOK_EVENT_TYPES,
 } from '@w360/db';
 import { apiCampaignResultsSchema } from '../api/campaigns';
+import { API_KEY_LIMITS } from '../api/model';
 import { apiContactSchema } from '../api/contact-view';
 import { apiSatisfactionSurveySchema } from '../api/satisfaction-survey-view';
 import { buildOpenApiDocument } from '../api/openapi';
@@ -70,6 +72,8 @@ import {
   WEBHOOK_ORDER_STATUSES,
   WEBHOOK_PAYMENT_LINK_STATUS_LABELS,
   WEBHOOK_PAYMENT_LINK_STATUSES,
+  WEBHOOK_ORDER_CHANGE_MAKER_LABELS,
+  WEBHOOK_ORDER_CHANGE_MAKERS,
   WEBHOOK_DEAL_STATUS_LABELS,
   WEBHOOK_DEAL_STATUSES,
   WEBHOOK_TASK_STATUS_LABELS,
@@ -95,6 +99,7 @@ import {
   webhookOwnerText,
   webhookPipelineText,
   webhookRetryDelaySeconds,
+  webhookApiKeyText,
   webhookTakesAutomationRuns,
   webhookTakesCampaignEvents,
   webhookTakesChannelEvents,
@@ -192,6 +197,22 @@ import {
   webhookRunEndStatusesSchema,
   webhookRunTriggersFor,
   webhookRunTriggersSchema,
+  webhookRunApiKeyIdsFor,
+  webhookRunApiKeyIdsSchema,
+  WEBHOOK_MESSAGE_KEY_SCOPES,
+  WEBHOOK_CRM_KEY_SCOPES,
+  webhookCrmExcludedApiKeyIdsFor,
+  webhookCrmExcludedApiKeyIdsSchema,
+  WEBHOOK_ORDER_KEY_SCOPES,
+  WEBHOOK_PAYMENT_LINK_KEY_SCOPES,
+  WEBHOOK_PAYMENT_LINK_API_KEYS_NEED_THE_EVENT,
+  webhookPaymentLinkApiKeyIdsFor,
+  webhookPaymentLinkApiKeyIdsSchema,
+  WEBHOOK_ORDER_EXCLUDED_API_KEYS_NEED_THE_EVENT,
+  webhookOrderExcludedApiKeyIdsFor,
+  webhookOrderExcludedApiKeyIdsSchema,
+  webhookMessageApiKeyIdsFor,
+  webhookMessageApiKeyIdsSchema,
   webhookConsentChangesFor,
   webhookConsentChangesSchema,
   webhookContactSourcesFor,
@@ -213,6 +234,9 @@ import {
   webhookPaymentLinkStatusesFor,
   webhookPaymentLinkStatusesSchema,
   WEBHOOK_PAYMENT_LINK_STATUSES_NEED_THE_EVENT,
+  webhookOrderChangeMakersFor,
+  webhookOrderChangeMakersSchema,
+  WEBHOOK_ORDER_CHANGE_MAKERS_NEED_THE_EVENT,
   webhookDealStatusesFor,
   webhookDealStatusesSchema,
   WEBHOOK_DEAL_STATUSES_NEED_THE_EVENT,
@@ -2397,6 +2421,254 @@ describe('automation filters (ADR-145)', () => {
   });
 });
 
+describe('API key filters of run events (ADR-319)', () => {
+  const store = '0e1a2b3c-4d5e-4f60-8172-8394a5b6c7d8';
+  const crm = '1f2e3d4c-5b6a-4978-8695-a4b3c2d1e0f9';
+
+  it('take 1 to 20 key ids, once each, in lower case; null takes every run', () => {
+    expect(webhookRunApiKeyIdsSchema.parse([store.toUpperCase(), crm, store])).toEqual([
+      store,
+      crm,
+    ]);
+    expect(webhookRunApiKeyIdsSchema.parse(null)).toBeNull();
+    // As many as a company can have working keys.
+    expect(WEBHOOK_LIMITS.runApiKeys).toBe(API_KEY_LIMITS.activeKeys);
+    const ids = Array.from(
+      { length: 21 },
+      (_, i) => `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`,
+    );
+    expect(webhookRunApiKeyIdsSchema.safeParse(ids.slice(1)).success).toBe(true);
+    expect(webhookRunApiKeyIdsSchema.safeParse(ids).error?.issues[0]?.message).toBe(
+      'Choose at most 20 API keys.',
+    );
+    expect(webhookRunApiKeyIdsSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one API key, or take every run.',
+    );
+    // A key's prefix is not its id.
+    expect(
+      webhookRunApiKeyIdsSchema.safeParse(['w360_aaaaaaaaaaaa']).error?.issues[0]?.message,
+    ).toBe('Choose API keys from the list.');
+  });
+
+  it('are kept only while the endpoint takes an automation run event: given, kept, or cleared', () => {
+    const both = ['automation.run_started', 'automation.run_ended'] as const;
+    expect(webhookRunApiKeyIdsFor([...both], [store], null)).toEqual([store]);
+    expect(webhookRunApiKeyIdsFor([...both], undefined, [crm])).toEqual([crm]);
+    expect(webhookRunApiKeyIdsFor([...both], null, [crm])).toBeNull();
+    expect(webhookRunApiKeyIdsFor([...both], undefined, null)).toBeNull();
+    // One of the two events is enough to keep the list.
+    expect(webhookRunApiKeyIdsFor(['automation.run_started'], undefined, [crm])).toEqual([crm]);
+    expect(webhookRunApiKeyIdsFor(['automation.run_ended'], undefined, [crm])).toEqual([crm]);
+    expect(webhookRunApiKeyIdsFor(['consent.changed'], [store], [crm])).toBeNull();
+    expect(webhookRunApiKeyIdsFor(['message.received'], undefined, [crm])).toBeNull();
+  });
+
+  it('name a key as the list of endpoints names the key that added one, and say why it stopped working', () => {
+    const key = { id: store, name: 'Store', keyPrefix: 'w360_aaaaaaaaaaaa' };
+    expect(webhookApiKeyText({ ...key, state: 'active' })).toBe('“Store” (w360_aaaaaaaaaaaa_…)');
+    expect(webhookApiKeyText({ ...key, state: 'revoked' })).toBe(
+      '“Store” (w360_aaaaaaaaaaaa_…), revoked',
+    );
+    expect(webhookApiKeyText({ ...key, state: 'expired' })).toBe(
+      '“Store” (w360_aaaaaaaaaaaa_…), expired',
+    );
+    expect(webhookApiKeyText({ id: store, name: null, keyPrefix: null, state: null })).toBe(
+      'Unknown API key',
+    );
+  });
+});
+
+describe('API key filters of message statuses (ADR-320)', () => {
+  const store = '0e1a2b3c-4d5e-4f60-8172-8394a5b6c7d8';
+  const crm = '1f2e3d4c-5b6a-4978-8695-a4b3c2d1e0f9';
+
+  it('take 1 to 20 key ids, once each, in lower case; null takes every message', () => {
+    expect(webhookMessageApiKeyIdsSchema.parse([crm.toUpperCase(), store, crm])).toEqual([
+      crm,
+      store,
+    ]);
+    expect(webhookMessageApiKeyIdsSchema.parse(null)).toBeNull();
+    expect(WEBHOOK_LIMITS.messageApiKeys).toBe(API_KEY_LIMITS.activeKeys);
+    const ids = Array.from(
+      { length: 21 },
+      (_, i) => `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`,
+    );
+    expect(webhookMessageApiKeyIdsSchema.safeParse(ids.slice(1)).success).toBe(true);
+    expect(webhookMessageApiKeyIdsSchema.safeParse(ids).error?.issues[0]?.message).toBe(
+      'Choose at most 20 API keys.',
+    );
+    expect(webhookMessageApiKeyIdsSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one API key, or take every message.',
+    );
+    expect(
+      webhookMessageApiKeyIdsSchema.safeParse(['w360_aaaaaaaaaaaa']).error?.issues[0]?.message,
+    ).toBe('Choose API keys from the list.');
+  });
+
+  it('name the keys whose messages carry them: those sending or replying through the API, and those asking for payment', () => {
+    expect([...WEBHOOK_MESSAGE_KEY_SCOPES].sort()).toEqual([
+      'messages.reply',
+      'messages.send',
+      'messages.send_marketing',
+      'orders.request_payment',
+    ]);
+  });
+
+  it('are kept only while the endpoint takes message.status: given, kept, or cleared', () => {
+    expect(webhookMessageApiKeyIdsFor(['message.status'], [store], null)).toEqual([store]);
+    expect(
+      webhookMessageApiKeyIdsFor(['message.status', 'message.received'], undefined, [crm]),
+    ).toEqual([crm]);
+    expect(webhookMessageApiKeyIdsFor(['message.status'], null, [crm])).toBeNull();
+    expect(webhookMessageApiKeyIdsFor(['message.status'], undefined, null)).toBeNull();
+    // Received messages are not narrowed by key: the list goes with message.status.
+    expect(webhookMessageApiKeyIdsFor(['message.received'], [store], [crm])).toBeNull();
+    expect(webhookMessageApiKeyIdsFor(['automation.run_started'], undefined, [crm])).toBeNull();
+  });
+});
+
+describe('API keys left out of deal, task and note events (ADR-321)', () => {
+  const store = '0e1a2b3c-4d5e-4f60-8172-8394a5b6c7d8';
+  const crm = '1f2e3d4c-5b6a-4978-8695-a4b3c2d1e0f9';
+
+  it('take 1 to 20 key ids, once each, in lower case; null leaves nothing out', () => {
+    expect(webhookCrmExcludedApiKeyIdsSchema.parse([crm.toUpperCase(), store, crm])).toEqual([
+      crm,
+      store,
+    ]);
+    expect(webhookCrmExcludedApiKeyIdsSchema.parse(null)).toBeNull();
+    expect(WEBHOOK_LIMITS.crmExcludedApiKeys).toBe(API_KEY_LIMITS.activeKeys);
+    const ids = Array.from(
+      { length: 21 },
+      (_, i) => `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`,
+    );
+    expect(webhookCrmExcludedApiKeyIdsSchema.safeParse(ids.slice(1)).success).toBe(true);
+    expect(webhookCrmExcludedApiKeyIdsSchema.safeParse(ids).error?.issues[0]?.message).toBe(
+      'Choose at most 20 API keys.',
+    );
+    expect(webhookCrmExcludedApiKeyIdsSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one API key, or take every change.',
+    );
+  });
+
+  it('name the keys that change deals, tasks or notes', () => {
+    expect([...WEBHOOK_CRM_KEY_SCOPES].sort()).toEqual([
+      'deals.write',
+      'notes.write',
+      'tasks.write',
+    ]);
+  });
+
+  it('are kept only while the endpoint takes a deal, task or note event: given, kept, or cleared', () => {
+    for (const type of ['deal.updated', 'task.created', 'note.created'] as const) {
+      expect(webhookCrmExcludedApiKeyIdsFor([type], [store], null), type).toEqual([store]);
+      expect(webhookCrmExcludedApiKeyIdsFor([type], undefined, [crm]), type).toEqual([crm]);
+    }
+    expect(webhookCrmExcludedApiKeyIdsFor(['deal.created'], null, [crm])).toBeNull();
+    expect(webhookCrmExcludedApiKeyIdsFor(['deal.created'], undefined, null)).toBeNull();
+    expect(webhookCrmExcludedApiKeyIdsFor(['contact.updated'], [store], [crm])).toBeNull();
+    expect(webhookCrmExcludedApiKeyIdsFor(['automation.run_started'], undefined, [crm])).toBeNull();
+  });
+});
+
+describe('API keys left out of order changes (ADR-323)', () => {
+  const shop = '2a3b4c5d-6e7f-4a8b-9c0d-1e2f3a4b5c6d';
+  const erp = '3b4c5d6e-7f8a-4b9c-8d0e-2f3a4b5c6d7e';
+
+  it('take 1 to 20 key ids, once each, in lower case; null leaves nothing out', () => {
+    expect(webhookOrderExcludedApiKeyIdsSchema.parse([erp.toUpperCase(), shop, erp])).toEqual([
+      erp,
+      shop,
+    ]);
+    expect(webhookOrderExcludedApiKeyIdsSchema.parse(null)).toBeNull();
+    expect(WEBHOOK_LIMITS.orderExcludedApiKeys).toBe(API_KEY_LIMITS.activeKeys);
+    const ids = Array.from(
+      { length: 21 },
+      (_, i) => `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`,
+    );
+    expect(webhookOrderExcludedApiKeyIdsSchema.safeParse(ids.slice(1)).success).toBe(true);
+    expect(webhookOrderExcludedApiKeyIdsSchema.safeParse(ids).error?.issues[0]?.message).toBe(
+      'Choose at most 20 API keys.',
+    );
+    expect(webhookOrderExcludedApiKeyIdsSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one API key, or take every order change.',
+    );
+  });
+
+  it('name the keys that change orders, asking for payment included', () => {
+    expect([...WEBHOOK_ORDER_KEY_SCOPES].sort()).toEqual([
+      'orders.request_payment',
+      'orders.write',
+    ]);
+  });
+
+  it('are kept only while the endpoint takes order.status_changed: given, kept, or cleared', () => {
+    const both = ['order.status_changed', 'order.received'] as const;
+    expect(webhookOrderExcludedApiKeyIdsFor([...both], [shop], null)).toEqual([shop]);
+    expect(webhookOrderExcludedApiKeyIdsFor([...both], undefined, [erp])).toEqual([erp]);
+    expect(webhookOrderExcludedApiKeyIdsFor([...both], null, [erp])).toBeNull();
+    expect(webhookOrderExcludedApiKeyIdsFor([...both], undefined, null)).toBeNull();
+    expect(
+      webhookOrderExcludedApiKeyIdsFor(
+        ['order.received', 'payment_link.status_changed'],
+        [shop],
+        [erp],
+      ),
+    ).toBeNull();
+    expect(WEBHOOK_ORDER_EXCLUDED_API_KEYS_NEED_THE_EVENT).toBe(
+      `Leave out the order changes of API keys only for an endpoint that receives ${WEBHOOK_EVENT_INFO['order.status_changed'].label}.`,
+    );
+  });
+});
+
+describe('API key filters of Payment Link events (ADR-324)', () => {
+  const payments = '4c5d6e7f-8a9b-4c0d-9e1f-3a4b5c6d7e8f';
+  const shop = '5d6e7f8a-9b0c-4d1e-8f2a-4b5c6d7e8f9a';
+
+  it('take 1 to 20 key ids, once each, in lower case; null takes every link', () => {
+    expect(webhookPaymentLinkApiKeyIdsSchema.parse([shop.toUpperCase(), payments, shop])).toEqual([
+      shop,
+      payments,
+    ]);
+    expect(webhookPaymentLinkApiKeyIdsSchema.parse(null)).toBeNull();
+    expect(WEBHOOK_LIMITS.paymentLinkApiKeys).toBe(API_KEY_LIMITS.activeKeys);
+    const ids = Array.from(
+      { length: 21 },
+      (_, i) => `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`,
+    );
+    expect(webhookPaymentLinkApiKeyIdsSchema.safeParse(ids.slice(1)).success).toBe(true);
+    expect(webhookPaymentLinkApiKeyIdsSchema.safeParse(ids).error?.issues[0]?.message).toBe(
+      'Choose at most 20 API keys.',
+    );
+    expect(webhookPaymentLinkApiKeyIdsSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one API key, or take every Payment Link.',
+    );
+  });
+
+  it('name the keys that ask customers to pay', () => {
+    expect([...WEBHOOK_PAYMENT_LINK_KEY_SCOPES]).toEqual(['orders.request_payment']);
+  });
+
+  it('are kept only while the endpoint takes payment_link.status_changed: given, kept, or cleared', () => {
+    const both = ['payment_link.status_changed', 'order.status_changed'] as const;
+    expect(webhookPaymentLinkApiKeyIdsFor([...both], [shop], null)).toEqual([shop]);
+    expect(webhookPaymentLinkApiKeyIdsFor([...both], undefined, [payments])).toEqual([payments]);
+    expect(webhookPaymentLinkApiKeyIdsFor([...both], null, [payments])).toBeNull();
+    expect(webhookPaymentLinkApiKeyIdsFor([...both], undefined, null)).toBeNull();
+    // An order's own events have no link asked for.
+    expect(
+      webhookPaymentLinkApiKeyIdsFor(
+        ['order.status_changed', 'order.received'],
+        [shop],
+        [payments],
+      ),
+    ).toBeNull();
+    expect(WEBHOOK_PAYMENT_LINK_API_KEYS_NEED_THE_EVENT).toBe(
+      `Choose API keys only for an endpoint that receives ${WEBHOOK_EVENT_INFO['payment_link.status_changed'].label}.`,
+    );
+  });
+});
+
 describe('campaign status filters (ADR-146)', () => {
   it('take 1 to 7 campaign statuses, once each, in the order a campaign reaches them; null takes every status', () => {
     expect(webhookCampaignStatusesSchema.parse(['completed', 'paused', 'completed'])).toEqual([
@@ -2543,6 +2815,68 @@ describe('Payment Link status filters (ADR-308)', () => {
     ).toBeNull();
     expect(WEBHOOK_PAYMENT_LINK_STATUSES_NEED_THE_EVENT).toBe(
       `Choose Payment Link statuses only for an endpoint that receives ${WEBHOOK_EVENT_INFO['payment_link.status_changed'].label}.`,
+    );
+  });
+});
+
+describe('who made the order changes (ADR-322)', () => {
+  it('take 1 to 3 makers, once each, in the order Settings lists them; null takes every change', () => {
+    expect(
+      webhookOrderChangeMakersSchema.parse(['payment_link', 'member', 'payment_link']),
+    ).toEqual(['member', 'payment_link']);
+    expect(webhookOrderChangeMakersSchema.parse(['api'])).toEqual(['api']);
+    expect(webhookOrderChangeMakersSchema.parse(null)).toBeNull();
+    // Every maker an order status change records, as order.status_changed's changedBy names them.
+    expect(WEBHOOK_ORDER_CHANGE_MAKERS).toEqual([...ORDER_STATUS_CHANGERS]);
+    for (const refused of [
+      [],
+      ['automation'],
+      ['Member'],
+      ['member', 'customer'],
+      'member',
+      [null],
+      Array(4).fill('api'),
+    ]) {
+      expect(
+        webhookOrderChangeMakersSchema.safeParse(refused).success,
+        JSON.stringify(refused),
+      ).toBe(false);
+    }
+    expect(webhookOrderChangeMakersSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one maker, or take every order change.',
+    );
+    expect(webhookOrderChangeMakersSchema.safeParse(['automation']).error?.issues[0]?.message).toBe(
+      'Choose who made the order changes from the list.',
+    );
+    expect(
+      webhookOrderChangeMakersSchema.safeParse(Array(4).fill('api')).error?.issues[0]?.message,
+    ).toBe('Give each maker once.');
+    expect(WEBHOOK_ORDER_CHANGE_MAKER_LABELS).toEqual({
+      member: 'Members',
+      api: 'API keys',
+      payment_link: 'Payment Links',
+    });
+    expect(Object.keys(WEBHOOK_ORDER_CHANGE_MAKER_LABELS)).toEqual([
+      ...WEBHOOK_ORDER_CHANGE_MAKERS,
+    ]);
+  });
+
+  it('are kept only while the endpoint takes order.status_changed: given, kept, or cleared', () => {
+    const both = ['order.status_changed', 'order.received'] as const;
+    expect(webhookOrderChangeMakersFor([...both], ['member'], null)).toEqual(['member']);
+    expect(webhookOrderChangeMakersFor([...both], undefined, ['api'])).toEqual(['api']);
+    expect(webhookOrderChangeMakersFor([...both], null, ['api'])).toBeNull();
+    expect(webhookOrderChangeMakersFor([...both], undefined, null)).toBeNull();
+    // A new order has no maker to choose, nor has a Payment Link's change.
+    expect(
+      webhookOrderChangeMakersFor(
+        ['order.received', 'payment_link.status_changed'],
+        ['member'],
+        ['api'],
+      ),
+    ).toBeNull();
+    expect(WEBHOOK_ORDER_CHANGE_MAKERS_NEED_THE_EVENT).toBe(
+      `Choose who made the order changes only for an endpoint that receives ${WEBHOOK_EVENT_INFO['order.status_changed'].label}.`,
     );
   });
 });

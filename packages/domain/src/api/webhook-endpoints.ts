@@ -28,6 +28,7 @@ import {
   type WebhookMessageStatus,
   type WebhookOrderStatus,
   type WebhookPaymentLinkStatus,
+  type WebhookOrderChangeMaker,
   type WebhookDealStatus,
   type WebhookTaskStatus,
   type WebhookDealDetail,
@@ -60,6 +61,7 @@ import {
   WEBHOOK_CRM_CHANGE_MAKERS,
   WEBHOOK_SURVEY_SCORES,
   WEBHOOK_PAYMENT_LINK_STATUSES,
+  WEBHOOK_ORDER_CHANGE_MAKERS,
   WEBHOOK_DEAL_STATUSES,
   WEBHOOK_TASK_STATUSES,
   WEBHOOK_DEAL_DETAILS,
@@ -72,6 +74,11 @@ import {
   assertWebhookAssignees,
   assertWebhookAuthorization,
   assertWebhookAutomations,
+  assertWebhookRunApiKeys,
+  assertWebhookMessageApiKeys,
+  assertWebhookCrmExcludedApiKeys,
+  assertWebhookOrderExcludedApiKeys,
+  assertWebhookPaymentLinkApiKeys,
   assertWebhookCampaigns,
   assertWebhookChannels,
   assertWebhookPipelines,
@@ -107,18 +114,23 @@ import {
   WEBHOOK_CONVERSATION_STATUSES_NEED_THE_EVENT,
   WEBHOOK_ORDER_STATUSES_NEED_THE_EVENT,
   WEBHOOK_PAYMENT_LINK_STATUSES_NEED_THE_EVENT,
+  WEBHOOK_ORDER_CHANGE_MAKERS_NEED_THE_EVENT,
+  WEBHOOK_ORDER_EXCLUDED_API_KEYS_NEED_THE_EVENT,
+  WEBHOOK_PAYMENT_LINK_API_KEYS_NEED_THE_EVENT,
   WEBHOOK_DEAL_STATUSES_NEED_THE_EVENT,
   WEBHOOK_TASK_STATUSES_NEED_THE_EVENT,
   WEBHOOK_DEAL_DETAILS_NEED_THE_EVENT,
   WEBHOOK_TASK_DETAILS_NEED_THE_EVENT,
   WEBHOOK_RUN_END_STATUSES_NEED_THE_EVENT,
   WEBHOOK_RUN_TRIGGERS_NEED_THE_EVENTS,
+  WEBHOOK_RUN_API_KEYS_NEED_THE_EVENTS,
   WEBHOOK_CONSENT_CHANGES_NEED_THE_EVENT,
   WEBHOOK_CONTACT_SOURCES_NEED_THE_EVENT,
   WEBHOOK_MESSAGE_TYPES_NEED_THE_EVENT,
   WEBHOOK_RUN_END_REASONS_NEED_THE_EVENT,
   WEBHOOK_RUN_END_REASONS_NEED_THE_ENDS,
   WEBHOOK_SENDERS_NEED_THE_EVENT,
+  WEBHOOK_MESSAGE_API_KEYS_NEED_THE_EVENT,
   WEBHOOK_TEAMS_NEED_THE_EVENTS,
   WEBHOOK_TEMPLATES_NEED_THE_EVENTS,
   WEBHOOK_CAMPAIGNS_NEED_THE_EVENTS,
@@ -133,6 +145,7 @@ import {
   WEBHOOK_NOTE_STAGES_NEED_THE_EVENTS,
   WEBHOOK_NOTE_DEAL_OWNERS_NEED_THE_EVENTS,
   WEBHOOK_CRM_CHANGE_MAKERS_NEED_THE_EVENTS,
+  WEBHOOK_CRM_EXCLUDED_API_KEYS_NEED_THE_EVENTS,
   WEBHOOK_SURVEY_SCORES_NEED_THE_EVENT,
   WEBHOOK_SURVEY_ASSIGNEES_NEED_THE_EVENT,
   WEBHOOK_SURVEY_TEAMS_NEED_THE_EVENT,
@@ -161,6 +174,8 @@ import {
   webhookRunEndStatusesSchema,
   webhookRunTriggersFor,
   webhookRunTriggersSchema,
+  webhookRunApiKeyIdsFor,
+  webhookRunApiKeyIdsSchema,
   webhookConsentChangesFor,
   webhookConsentChangesSchema,
   webhookContactSourcesFor,
@@ -198,6 +213,8 @@ import {
   webhookNoteDealOwnerIdsSchema,
   webhookCrmChangeMakersFor,
   webhookCrmChangeMakersSchema,
+  webhookCrmExcludedApiKeyIdsFor,
+  webhookCrmExcludedApiKeyIdsSchema,
   webhookSurveyScoresFor,
   webhookSurveyScoresSchema,
   webhookSurveyAssigneeIdsFor,
@@ -225,6 +242,8 @@ import {
   webhookHeadersSchema,
   webhookMessageSendersFor,
   webhookMessageSendersSchema,
+  webhookMessageApiKeyIdsFor,
+  webhookMessageApiKeyIdsSchema,
   webhookMessageStatusesFor,
   webhookMessageStatusesSchema,
   webhookOAuthAudit,
@@ -234,6 +253,12 @@ import {
   webhookOrderStatusesSchema,
   webhookPaymentLinkStatusesFor,
   webhookPaymentLinkStatusesSchema,
+  webhookOrderChangeMakersFor,
+  webhookOrderChangeMakersSchema,
+  webhookOrderExcludedApiKeyIdsFor,
+  webhookOrderExcludedApiKeyIdsSchema,
+  webhookPaymentLinkApiKeyIdsFor,
+  webhookPaymentLinkApiKeyIdsSchema,
   webhookDealStatusesFor,
   webhookDealStatusesSchema,
   webhookTaskStatusesFor,
@@ -289,6 +314,16 @@ const invalidSenders = () =>
     issues: [{ path: 'messageSenders', message: WEBHOOK_SENDERS_NEED_THE_EVENT }],
   });
 
+const messageApiKeyIdsField = webhookMessageApiKeyIdsSchema.describe(
+  `The API keys whose sent messages' message.status the endpoint receives: 1 to ${WEBHOOK_LIMITS.messageApiKeys} ids of the company's keys whose messages carry them (messages.send, messages.send_marketing, messages.reply, or orders.request_payment, whose Payment Link is sent in the chat as the key), as message.apiKeyId names them (a key that adds an endpoint finds its own id in the endpoint's apiKeyId), only with the message.status event. A status is received when the key that sent the message through the API is listed, or a key it was rotated from or into, so a list keeps an integration's messages across rotations; a revoked or expired key stays allowed, as the messages it sent still change status. A message sent otherwise (by a member, an automation, a campaign or HyFib itself) belongs to no key and its statuses are not received. With the statuses or who sent the messages too, a status must pass them all. null receives the statuses of every message.`,
+);
+
+/** Keys for messages are chosen only for an endpoint that receives `message.status` (ADR-320). */
+const invalidMessageApiKeys = () =>
+  new AppError('validation_failed', WEBHOOK_MESSAGE_API_KEYS_NEED_THE_EVENT, {
+    issues: [{ path: 'messageApiKeyIds', message: WEBHOOK_MESSAGE_API_KEYS_NEED_THE_EVENT }],
+  });
+
 const contactPartsField = webhookContactPartsSchema.describe(
   'The parts of a contact whose change the endpoint receives as contact.updated (name, phone, email, tags, fields: a change of any custom field), only with the contact.updated event: an event is sent when its change names one of them, and names every part that changed; null receives every change, including parts added later.',
 );
@@ -342,6 +377,40 @@ const invalidPaymentLinkStatuses = () =>
   new AppError('validation_failed', WEBHOOK_PAYMENT_LINK_STATUSES_NEED_THE_EVENT, {
     issues: [
       { path: 'paymentLinkStatuses', message: WEBHOOK_PAYMENT_LINK_STATUSES_NEED_THE_EVENT },
+    ],
+  });
+
+const orderChangeMakersField = webhookOrderChangeMakersSchema.describe(
+  `Who made the order status changes the endpoint receives as order.status_changed, as the event's changedBy names them (${WEBHOOK_ORDER_CHANGE_MAKERS.join(', ')}): a member on the order page, an API key, or HyFib applying what Razorpay reports for the order's Payment Link; only with the order.status_changed event. A change HyFib did not record the maker of is received whoever is listed, so an integration that moves orders through the API can leave out api and still receive members' and payments' changes. order.received is not narrowed. null receives every change.`,
+);
+
+/** Who made the order changes is chosen only for an endpoint that receives them (ADR-322). */
+const invalidOrderChangeMakers = () =>
+  new AppError('validation_failed', WEBHOOK_ORDER_CHANGE_MAKERS_NEED_THE_EVENT, {
+    issues: [{ path: 'orderChangeMakers', message: WEBHOOK_ORDER_CHANGE_MAKERS_NEED_THE_EVENT }],
+  });
+
+const orderExcludedApiKeyIdsField = webhookOrderExcludedApiKeyIdsSchema.describe(
+  `The API keys whose order status changes the endpoint does not receive as order.status_changed: 1 to ${WEBHOOK_LIMITS.orderExcludedApiKeys} ids of the company's keys that can change orders (orders.write, or orders.request_payment, whose request leaves an order waiting for payment), as the event's apiKeyId names the key that made a change, only with the order.status_changed event. A change is left out when the key that made it is listed, or a key it was rotated from or into, so an order system that moves orders through the API is not sent back what it changed, across rotations, while it is sent the changes of members, Payment Links and other keys. A change HyFib did not record the maker of is never left out, and order.received is not narrowed. With order statuses, who made the changes or other lists too, an event must pass them all. null leaves nothing out.`,
+);
+
+/** Keys are left out of order changes only for an endpoint that receives them (ADR-323). */
+const invalidOrderExcludedApiKeys = () =>
+  new AppError('validation_failed', WEBHOOK_ORDER_EXCLUDED_API_KEYS_NEED_THE_EVENT, {
+    issues: [
+      { path: 'orderExcludedApiKeyIds', message: WEBHOOK_ORDER_EXCLUDED_API_KEYS_NEED_THE_EVENT },
+    ],
+  });
+
+const paymentLinkApiKeyIdsField = webhookPaymentLinkApiKeyIdsSchema.describe(
+  `The API keys whose Payment Links' payment_link.status_changed the endpoint receives: 1 to ${WEBHOOK_LIMITS.paymentLinkApiKeys} ids of the company's keys that ask customers to pay (orders.request_payment), as the event's paymentLink.requestedByApiKeyId names the key that asked for a link (a key that adds an endpoint finds its own id in the endpoint's apiKeyId), only with the payment_link.status_changed event. A link matches when the key that asked for it is listed, or a key it was rotated from or into, so a payments integration with its own key is sent its own links' changes only, across rotations; a link a member asked for matches no list. A key revoked or expired since stays on the list, and its links still change status. With Payment Link statuses or numbers chosen too, a change must pass them all. null receives every link's changes.`,
+);
+
+/** Keys are chosen for Payment Links only for an endpoint that receives their changes (ADR-324). */
+const invalidPaymentLinkApiKeys = () =>
+  new AppError('validation_failed', WEBHOOK_PAYMENT_LINK_API_KEYS_NEED_THE_EVENT, {
+    issues: [
+      { path: 'paymentLinkApiKeyIds', message: WEBHOOK_PAYMENT_LINK_API_KEYS_NEED_THE_EVENT },
     ],
   });
 
@@ -425,6 +494,16 @@ const runTriggersField = webhookRunTriggersSchema.describe(
 const invalidRunTriggers = () =>
   new AppError('validation_failed', WEBHOOK_RUN_TRIGGERS_NEED_THE_EVENTS, {
     issues: [{ path: 'runTriggers', message: WEBHOOK_RUN_TRIGGERS_NEED_THE_EVENTS }],
+  });
+
+const runApiKeyIdsField = webhookRunApiKeyIdsSchema.describe(
+  `The API keys whose runs the endpoint receives as automation.run_started and automation.run_ended: 1 to ${WEBHOOK_LIMITS.runApiKeys} ids of the company's keys that can start automations (automations.start), as run.apiKeyId names them (a key that adds an endpoint finds its own id in the endpoint's apiKeyId), only with one of those events. A run started through the API is received when the key that started it is listed, or a key it was rotated from or into, so a list keeps an integration's runs across rotations; a revoked or expired key stays allowed, as the runs it started still end. A run started otherwise belongs to no key and is not received. With the automations or what started the runs too, a run must pass them all. null receives every run.`,
+);
+
+/** API keys are chosen only for an endpoint that receives run events (ADR-319). */
+const invalidRunApiKeys = () =>
+  new AppError('validation_failed', WEBHOOK_RUN_API_KEYS_NEED_THE_EVENTS, {
+    issues: [{ path: 'runApiKeyIds', message: WEBHOOK_RUN_API_KEYS_NEED_THE_EVENTS }],
   });
 
 const consentChangesField = webhookConsentChangesSchema.describe(
@@ -617,6 +696,18 @@ const invalidCrmChangeMakers = () =>
     issues: [{ path: 'crmChangeMakers', message: WEBHOOK_CRM_CHANGE_MAKERS_NEED_THE_EVENTS }],
   });
 
+const crmExcludedApiKeyIdsField = webhookCrmExcludedApiKeyIdsSchema.describe(
+  `The API keys whose deal, task and note changes the endpoint does not receive: 1 to ${WEBHOOK_LIMITS.crmExcludedApiKeys} ids of the company's keys that can change them (deals.write, tasks.write or notes.write), as \`apiKeyId\` names the key that made a change in deal, task and note events (a key that adds an endpoint finds its own id in the endpoint's apiKeyId), only with a deal, task or note event. An event is left out when the key that made its change is listed, or a key it was rotated from or into, so an integration that writes through the API and takes the events is not sent back what it wrote, across rotations, while it is sent the changes of members, automations and other keys. A change HyFib did not record the maker of is never left out. With who made the changes or other lists too, an event must pass them all. Other events are not narrowed. null leaves nothing out.`,
+);
+
+/** Keys are left out only for an endpoint that receives CRM events (ADR-321). */
+const invalidCrmExcludedApiKeys = () =>
+  new AppError('validation_failed', WEBHOOK_CRM_EXCLUDED_API_KEYS_NEED_THE_EVENTS, {
+    issues: [
+      { path: 'crmExcludedApiKeyIds', message: WEBHOOK_CRM_EXCLUDED_API_KEYS_NEED_THE_EVENTS },
+    ],
+  });
+
 const surveyScoresField = webhookSurveyScoresSchema.describe(
   `The scores of the satisfaction survey answers the endpoint receives: one or more of ${WEBHOOK_SURVEY_SCORES.join(', ')}, as the survey's \`score\` gives them (3 for the first and best button, 2 for the second, 1 for the third, whatever the company's buttons say), only with satisfaction_survey.answered. Other events are not narrowed. null receives every answer.`,
 );
@@ -731,12 +822,16 @@ export const apiCreateWebhookEndpointSchema = z
     headers: headersField.optional(),
     messageStatuses: messageStatusesField.optional(),
     messageSenders: messageSendersField.optional(),
+    messageApiKeyIds: messageApiKeyIdsField.optional(),
     contactParts: contactPartsField.optional(),
     contactFieldKeys: contactFieldKeysField.optional(),
     automationIds: automationIdsField.optional(),
     campaignStatuses: campaignStatusesField.optional(),
     orderStatuses: orderStatusesField.optional(),
     paymentLinkStatuses: paymentLinkStatusesField.optional(),
+    orderChangeMakers: orderChangeMakersField.optional(),
+    orderExcludedApiKeyIds: orderExcludedApiKeyIdsField.optional(),
+    paymentLinkApiKeyIds: paymentLinkApiKeyIdsField.optional(),
     dealStatuses: dealStatusesField.optional(),
     taskStatuses: taskStatusesField.optional(),
     dealDetails: dealDetailsField.optional(),
@@ -745,6 +840,7 @@ export const apiCreateWebhookEndpointSchema = z
     conversationStatuses: conversationStatusesField.optional(),
     runEndStatuses: runEndStatusesField.optional(),
     runTriggers: runTriggersField.optional(),
+    runApiKeyIds: runApiKeyIdsField.optional(),
     consentChanges: consentChangesField.optional(),
     contactSources: contactSourcesField.optional(),
     messageTypes: messageTypesField.optional(),
@@ -764,6 +860,7 @@ export const apiCreateWebhookEndpointSchema = z
     noteStageIds: noteStageIdsField.optional(),
     noteDealOwnerIds: noteDealOwnerIdsField.optional(),
     crmChangeMakers: crmChangeMakersField.optional(),
+    crmExcludedApiKeyIds: crmExcludedApiKeyIdsField.optional(),
     surveyScores: surveyScoresField.optional(),
     surveyAssigneeIds: surveyAssigneeIdsField.optional(),
     surveyTeamIds: surveyTeamIdsField.optional(),
@@ -783,6 +880,10 @@ export const apiCreateWebhookEndpointSchema = z
   .refine((data) => !data.messageSenders || data.events.includes('message.status'), {
     path: ['messageSenders'],
     message: WEBHOOK_SENDERS_NEED_THE_EVENT,
+  })
+  .refine((data) => !data.messageApiKeyIds || data.events.includes('message.status'), {
+    path: ['messageApiKeyIds'],
+    message: WEBHOOK_MESSAGE_API_KEYS_NEED_THE_EVENT,
   })
   .refine((data) => !data.contactParts || data.events.includes('contact.updated'), {
     path: ['contactParts'],
@@ -808,6 +909,18 @@ export const apiCreateWebhookEndpointSchema = z
   .refine(
     (data) => !data.paymentLinkStatuses || data.events.includes('payment_link.status_changed'),
     { path: ['paymentLinkStatuses'], message: WEBHOOK_PAYMENT_LINK_STATUSES_NEED_THE_EVENT },
+  )
+  .refine((data) => !data.orderChangeMakers || data.events.includes('order.status_changed'), {
+    path: ['orderChangeMakers'],
+    message: WEBHOOK_ORDER_CHANGE_MAKERS_NEED_THE_EVENT,
+  })
+  .refine((data) => !data.orderExcludedApiKeyIds || data.events.includes('order.status_changed'), {
+    path: ['orderExcludedApiKeyIds'],
+    message: WEBHOOK_ORDER_EXCLUDED_API_KEYS_NEED_THE_EVENT,
+  })
+  .refine(
+    (data) => !data.paymentLinkApiKeyIds || data.events.includes('payment_link.status_changed'),
+    { path: ['paymentLinkApiKeyIds'], message: WEBHOOK_PAYMENT_LINK_API_KEYS_NEED_THE_EVENT },
   )
   .refine((data) => !data.dealStatuses || data.events.includes('deal.status_changed'), {
     path: ['dealStatuses'],
@@ -840,6 +953,10 @@ export const apiCreateWebhookEndpointSchema = z
   .refine((data) => !data.runTriggers || webhookTakesAutomationRuns(data.events), {
     path: ['runTriggers'],
     message: WEBHOOK_RUN_TRIGGERS_NEED_THE_EVENTS,
+  })
+  .refine((data) => !data.runApiKeyIds || webhookTakesAutomationRuns(data.events), {
+    path: ['runApiKeyIds'],
+    message: WEBHOOK_RUN_API_KEYS_NEED_THE_EVENTS,
   })
   .refine((data) => !data.consentChanges || data.events.includes('consent.changed'), {
     path: ['consentChanges'],
@@ -925,6 +1042,10 @@ export const apiCreateWebhookEndpointSchema = z
     path: ['crmChangeMakers'],
     message: WEBHOOK_CRM_CHANGE_MAKERS_NEED_THE_EVENTS,
   })
+  .refine((data) => !data.crmExcludedApiKeyIds || webhookTakesCrmChanges(data.events), {
+    path: ['crmExcludedApiKeyIds'],
+    message: WEBHOOK_CRM_EXCLUDED_API_KEYS_NEED_THE_EVENTS,
+  })
   .refine((data) => !data.surveyScores || data.events.includes('satisfaction_survey.answered'), {
     path: ['surveyScores'],
     message: WEBHOOK_SURVEY_SCORES_NEED_THE_EVENT,
@@ -992,6 +1113,11 @@ export const apiUpdateWebhookEndpointSchema = z
       .describe(
         'Who sent the messages whose message.status the endpoint receives; null receives the statuses of every message. Left out, they stay, unless the events no longer include message.status, which clears them.',
       ),
+    messageApiKeyIds: messageApiKeyIdsField
+      .optional()
+      .describe(
+        "The API keys whose sent messages' message.status the endpoint receives (the company's keys whose messages carry them, whatever their state); null receives the statuses of every message. Left out, they stay, unless the events no longer include message.status, which clears them.",
+      ),
     contactParts: contactPartsField
       .optional()
       .describe(
@@ -1021,6 +1147,21 @@ export const apiUpdateWebhookEndpointSchema = z
       .optional()
       .describe(
         'The statuses a Payment Link reaches that the endpoint receives as payment_link.status_changed; null receives every status. Left out, they stay, unless the events no longer include payment_link.status_changed, which clears them.',
+      ),
+    orderChangeMakers: orderChangeMakersField
+      .optional()
+      .describe(
+        'Who made the order status changes the endpoint receives as order.status_changed; null receives every change. Left out, they stay, unless the events no longer include order.status_changed, which clears them.',
+      ),
+    orderExcludedApiKeyIds: orderExcludedApiKeyIdsField
+      .optional()
+      .describe(
+        "The API keys whose order status changes the endpoint does not receive (the company's keys that can change orders, whatever their state); null leaves nothing out. Left out, they stay, unless the events no longer include order.status_changed, which clears them.",
+      ),
+    paymentLinkApiKeyIds: paymentLinkApiKeyIdsField
+      .optional()
+      .describe(
+        "The API keys whose Payment Links' changes the endpoint receives (the company's keys that ask customers to pay, whatever their state); null receives every link's. Left out, they stay, unless the events no longer include payment_link.status_changed, which clears them.",
       ),
     dealStatuses: dealStatusesField
       .optional()
@@ -1061,6 +1202,11 @@ export const apiUpdateWebhookEndpointSchema = z
       .optional()
       .describe(
         'What started the runs whose events the endpoint receives; null receives every run. Left out, they stay, unless the events no longer include automation.run_started or automation.run_ended, which clears them.',
+      ),
+    runApiKeyIds: runApiKeyIdsField
+      .optional()
+      .describe(
+        "The API keys whose runs the endpoint receives (the company's keys that can start automations, whatever their state); null receives every run. Left out, they stay, unless the events no longer include automation.run_started or automation.run_ended, which clears them.",
       ),
     consentChanges: consentChangesField
       .optional()
@@ -1157,6 +1303,11 @@ export const apiUpdateWebhookEndpointSchema = z
       .describe(
         'Who made the changes whose deal, task and note events the endpoint receives; null receives every change. Left out, they stay, unless the events no longer include a deal, task or note event, which clears them.',
       ),
+    crmExcludedApiKeyIds: crmExcludedApiKeyIdsField
+      .optional()
+      .describe(
+        "The API keys whose deal, task and note changes the endpoint does not receive (the company's keys that can change them, whatever their state); null leaves nothing out. Left out, they stay, unless the events no longer include a deal, task or note event, which clears them.",
+      ),
     surveyScores: surveyScoresField
       .optional()
       .describe(
@@ -1218,12 +1369,16 @@ export const apiUpdateWebhookEndpointSchema = z
       data.headers !== undefined ||
       data.messageStatuses !== undefined ||
       data.messageSenders !== undefined ||
+      data.messageApiKeyIds !== undefined ||
       data.contactParts !== undefined ||
       data.contactFieldKeys !== undefined ||
       data.automationIds !== undefined ||
       data.campaignStatuses !== undefined ||
       data.orderStatuses !== undefined ||
       data.paymentLinkStatuses !== undefined ||
+      data.orderChangeMakers !== undefined ||
+      data.orderExcludedApiKeyIds !== undefined ||
+      data.paymentLinkApiKeyIds !== undefined ||
       data.dealStatuses !== undefined ||
       data.taskStatuses !== undefined ||
       data.dealDetails !== undefined ||
@@ -1232,6 +1387,7 @@ export const apiUpdateWebhookEndpointSchema = z
       data.conversationStatuses !== undefined ||
       data.runEndStatuses !== undefined ||
       data.runTriggers !== undefined ||
+      data.runApiKeyIds !== undefined ||
       data.consentChanges !== undefined ||
       data.contactSources !== undefined ||
       data.messageTypes !== undefined ||
@@ -1251,6 +1407,7 @@ export const apiUpdateWebhookEndpointSchema = z
       data.noteStageIds !== undefined ||
       data.noteDealOwnerIds !== undefined ||
       data.crmChangeMakers !== undefined ||
+      data.crmExcludedApiKeyIds !== undefined ||
       data.surveyScores !== undefined ||
       data.surveyAssigneeIds !== undefined ||
       data.surveyTeamIds !== undefined ||
@@ -1261,7 +1418,7 @@ export const apiUpdateWebhookEndpointSchema = z
       data.contactTags !== undefined ||
       data.conversationTags !== undefined ||
       data.oauth !== undefined,
-    'Give the events, the description, the headers, the message statuses, who sent the messages, the contact parts, the deal and task details, the custom fields, the automations, the campaign statuses, the order statuses, the Payment Link statuses, the template statuses, the conversation statuses, the deal statuses, the task statuses, the run end statuses, what started the runs, the consent changes, where contacts came from, the received message types, the run end reasons, the numbers, the teams, the templates, the campaigns, the pipelines, the stages, the deal owners, the task assignees, the pipelines, stages and owners of tasks’ deals and of notes’ deals, who made the CRM changes, the survey scores, the members credited with survey answers and the teams of their conversations, the contact and conversation tags of survey answers, the tags of added and changed contacts, the members, the contact tags, the conversation tags, the OAuth client or whether the endpoint is enabled',
+    'Give the events, the description, the headers, the message statuses, who sent the messages, the API keys that sent them, the contact parts, the deal and task details, the custom fields, the automations, the campaign statuses, the order statuses, who made the order changes, the API keys whose order changes are left out, the Payment Link statuses, the API keys that asked for the Payment Links, the template statuses, the conversation statuses, the deal statuses, the task statuses, the run end statuses, what started the runs, the API keys that started them, the consent changes, where contacts came from, the received message types, the run end reasons, the numbers, the teams, the templates, the campaigns, the pipelines, the stages, the deal owners, the task assignees, the pipelines, stages and owners of tasks’ deals and of notes’ deals, who made the CRM changes, the API keys whose CRM changes are left out, the survey scores, the members credited with survey answers and the teams of their conversations, the contact and conversation tags of survey answers, the tags of added and changed contacts, the members, the contact tags, the conversation tags, the OAuth client or whether the endpoint is enabled',
   );
 
 export interface ApiWebhookEndpoint {
@@ -1284,6 +1441,8 @@ export interface ApiWebhookEndpoint {
   messageStatuses: WebhookMessageStatus[] | null;
   /** Who sent the messages whose statuses it receives (ADR-172); null receives every sender's. */
   messageSenders: WebhookMessageSender[] | null;
+  /** The API keys whose messages' statuses it receives (ADR-320); null receives every message's. */
+  messageApiKeyIds: string[] | null;
   /** The contact parts it receives as `contact.updated` (ADR-123); null receives every change. */
   contactParts: WebhookContactPart[] | null;
   /** The custom fields whose changes it receives (ADR-184); null receives every field's. */
@@ -1296,6 +1455,12 @@ export interface ApiWebhookEndpoint {
   orderStatuses: WebhookOrderStatus[] | null;
   /** The Payment Link statuses it receives (ADR-308); null receives every status. */
   paymentLinkStatuses: WebhookPaymentLinkStatus[] | null;
+  /** Who made the order status changes it receives (ADR-322); null receives every change. */
+  orderChangeMakers: WebhookOrderChangeMaker[] | null;
+  /** The API keys whose order status changes it leaves out (ADR-323); null: none. */
+  orderExcludedApiKeyIds: string[] | null;
+  /** The API keys whose Payment Links' changes it receives (ADR-324); null: every link's. */
+  paymentLinkApiKeyIds: string[] | null;
   /** The deal statuses it receives (ADR-309); null receives every status. */
   dealStatuses: WebhookDealStatus[] | null;
   /** The task statuses it receives (ADR-309); null receives every status. */
@@ -1312,6 +1477,8 @@ export interface ApiWebhookEndpoint {
   runEndStatuses: WebhookRunEndStatus[] | null;
   /** What started the runs whose events it receives (ADR-183); null receives every run. */
   runTriggers: WebhookRunTrigger[] | null;
+  /** The API keys whose runs it receives (ADR-319); null receives every run. */
+  runApiKeyIds: string[] | null;
   /** The consent changes it receives as `consent.changed` (ADR-189); null receives every change. */
   consentChanges: WebhookConsentChange[] | null;
   /** Where the contacts whose `contact.created` it receives came from (ADR-190); null: every one. */
@@ -1350,6 +1517,8 @@ export interface ApiWebhookEndpoint {
   noteDealOwnerIds: string[] | null;
   /** Who made the changes whose deal, task and note events it receives (ADR-306); null: all. */
   crmChangeMakers: WebhookCrmChangeMaker[] | null;
+  /** The API keys whose deal, task and note changes it leaves out (ADR-321); null: none. */
+  crmExcludedApiKeyIds: string[] | null;
   /** The scores of the satisfaction survey answers it receives (ADR-307); null: every answer. */
   surveyScores: WebhookSurveyScore[] | null;
   /** The members credited with the survey answers it receives (ADR-311); null: every answer. */
@@ -1463,12 +1632,16 @@ const columns = {
   headerNames: webhookEndpoints.headerNames,
   messageStatuses: webhookEndpoints.messageStatuses,
   messageSenders: webhookEndpoints.messageSenders,
+  messageApiKeyIds: webhookEndpoints.messageApiKeyIds,
   contactParts: webhookEndpoints.contactParts,
   contactFieldKeys: webhookEndpoints.contactFieldKeys,
   automationIds: webhookEndpoints.automationIds,
   campaignStatuses: webhookEndpoints.campaignStatuses,
   orderStatuses: webhookEndpoints.orderStatuses,
   paymentLinkStatuses: webhookEndpoints.paymentLinkStatuses,
+  orderChangeMakers: webhookEndpoints.orderChangeMakers,
+  orderExcludedApiKeyIds: webhookEndpoints.orderExcludedApiKeyIds,
+  paymentLinkApiKeyIds: webhookEndpoints.paymentLinkApiKeyIds,
   dealStatuses: webhookEndpoints.dealStatuses,
   taskStatuses: webhookEndpoints.taskStatuses,
   dealDetails: webhookEndpoints.dealDetails,
@@ -1477,6 +1650,7 @@ const columns = {
   conversationStatuses: webhookEndpoints.conversationStatuses,
   runEndStatuses: webhookEndpoints.runEndStatuses,
   runTriggers: webhookEndpoints.runTriggers,
+  runApiKeyIds: webhookEndpoints.runApiKeyIds,
   consentChanges: webhookEndpoints.consentChanges,
   contactSources: webhookEndpoints.contactSources,
   messageTypes: webhookEndpoints.messageTypes,
@@ -1496,6 +1670,7 @@ const columns = {
   noteStageIds: webhookEndpoints.noteStageIds,
   noteDealOwnerIds: webhookEndpoints.noteDealOwnerIds,
   crmChangeMakers: webhookEndpoints.crmChangeMakers,
+  crmExcludedApiKeyIds: webhookEndpoints.crmExcludedApiKeyIds,
   surveyScores: webhookEndpoints.surveyScores,
   surveyAssigneeIds: webhookEndpoints.surveyAssigneeIds,
   surveyTeamIds: webhookEndpoints.surveyTeamIds,
@@ -1529,12 +1704,16 @@ type EndpointRow = Pick<
   | 'headerNames'
   | 'messageStatuses'
   | 'messageSenders'
+  | 'messageApiKeyIds'
   | 'contactParts'
   | 'contactFieldKeys'
   | 'automationIds'
   | 'campaignStatuses'
   | 'orderStatuses'
   | 'paymentLinkStatuses'
+  | 'orderChangeMakers'
+  | 'orderExcludedApiKeyIds'
+  | 'paymentLinkApiKeyIds'
   | 'dealStatuses'
   | 'taskStatuses'
   | 'dealDetails'
@@ -1543,6 +1722,7 @@ type EndpointRow = Pick<
   | 'conversationStatuses'
   | 'runEndStatuses'
   | 'runTriggers'
+  | 'runApiKeyIds'
   | 'consentChanges'
   | 'contactSources'
   | 'messageTypes'
@@ -1562,6 +1742,7 @@ type EndpointRow = Pick<
   | 'noteStageIds'
   | 'noteDealOwnerIds'
   | 'crmChangeMakers'
+  | 'crmExcludedApiKeyIds'
   | 'surveyScores'
   | 'surveyAssigneeIds'
   | 'surveyTeamIds'
@@ -1600,12 +1781,16 @@ function toApiEndpoint(row: EndpointRow, now: Date): ApiWebhookEndpoint {
     headers: row.headerNames.map((name) => ({ name })),
     messageStatuses: row.messageStatuses,
     messageSenders: row.messageSenders,
+    messageApiKeyIds: row.messageApiKeyIds,
     contactParts: row.contactParts,
     contactFieldKeys: row.contactFieldKeys,
     automationIds: row.automationIds,
     campaignStatuses: row.campaignStatuses,
     orderStatuses: row.orderStatuses,
     paymentLinkStatuses: row.paymentLinkStatuses,
+    orderChangeMakers: row.orderChangeMakers,
+    orderExcludedApiKeyIds: row.orderExcludedApiKeyIds,
+    paymentLinkApiKeyIds: row.paymentLinkApiKeyIds,
     dealStatuses: row.dealStatuses,
     taskStatuses: row.taskStatuses,
     dealDetails: row.dealDetails,
@@ -1614,6 +1799,7 @@ function toApiEndpoint(row: EndpointRow, now: Date): ApiWebhookEndpoint {
     conversationStatuses: row.conversationStatuses,
     runEndStatuses: row.runEndStatuses,
     runTriggers: row.runTriggers,
+    runApiKeyIds: row.runApiKeyIds,
     consentChanges: row.consentChanges,
     contactSources: row.contactSources,
     messageTypes: row.messageTypes,
@@ -1633,6 +1819,7 @@ function toApiEndpoint(row: EndpointRow, now: Date): ApiWebhookEndpoint {
     noteStageIds: row.noteStageIds,
     noteDealOwnerIds: row.noteDealOwnerIds,
     crmChangeMakers: row.crmChangeMakers,
+    crmExcludedApiKeyIds: row.crmExcludedApiKeyIds,
     surveyScores: row.surveyScores,
     surveyAssigneeIds: row.surveyAssigneeIds,
     surveyTeamIds: row.surveyTeamIds,
@@ -1852,6 +2039,12 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               null,
             );
             const messageSenders = webhookMessageSendersFor(data.events, data.messageSenders, null);
+            const messageApiKeyIds = webhookMessageApiKeyIdsFor(
+              data.events,
+              data.messageApiKeyIds,
+              null,
+            );
+            await assertWebhookMessageApiKeys(tx, ctx.tenant.id, messageApiKeyIds);
             const contactParts = webhookContactPartsFor(data.events, data.contactParts, null);
             const contactFieldKeys = webhookContactFieldKeysFor(
               data.events,
@@ -1873,6 +2066,23 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               data.paymentLinkStatuses,
               null,
             );
+            const orderChangeMakers = webhookOrderChangeMakersFor(
+              data.events,
+              data.orderChangeMakers,
+              null,
+            );
+            const orderExcludedApiKeyIds = webhookOrderExcludedApiKeyIdsFor(
+              data.events,
+              data.orderExcludedApiKeyIds,
+              null,
+            );
+            await assertWebhookOrderExcludedApiKeys(tx, ctx.tenant.id, orderExcludedApiKeyIds);
+            const paymentLinkApiKeyIds = webhookPaymentLinkApiKeyIdsFor(
+              data.events,
+              data.paymentLinkApiKeyIds,
+              null,
+            );
+            await assertWebhookPaymentLinkApiKeys(tx, ctx.tenant.id, paymentLinkApiKeyIds);
             const dealStatuses = webhookDealStatusesFor(data.events, data.dealStatuses, null);
             const taskStatuses = webhookTaskStatusesFor(data.events, data.taskStatuses, null);
             const dealDetails = webhookDealDetailsFor(data.events, data.dealDetails, null);
@@ -1889,6 +2099,8 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
             );
             const runEndStatuses = webhookRunEndStatusesFor(data.events, data.runEndStatuses, null);
             const runTriggers = webhookRunTriggersFor(data.events, data.runTriggers, null);
+            const runApiKeyIds = webhookRunApiKeyIdsFor(data.events, data.runApiKeyIds, null);
+            await assertWebhookRunApiKeys(tx, ctx.tenant.id, runApiKeyIds);
             const consentChanges = webhookConsentChangesFor(data.events, data.consentChanges, null);
             const contactSources = webhookContactSourcesFor(data.events, data.contactSources, null);
             const messageTypes = webhookMessageTypesFor(data.events, data.messageTypes, null);
@@ -1951,6 +2163,12 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               data.crmChangeMakers,
               null,
             );
+            const crmExcludedApiKeyIds = webhookCrmExcludedApiKeyIdsFor(
+              data.events,
+              data.crmExcludedApiKeyIds,
+              null,
+            );
+            await assertWebhookCrmExcludedApiKeys(tx, ctx.tenant.id, crmExcludedApiKeyIds);
             const surveyScores = webhookSurveyScoresFor(data.events, data.surveyScores, null);
             const surveyAssigneeIds = webhookSurveyAssigneeIdsFor(
               data.events,
@@ -1990,12 +2208,16 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               headers,
               messageStatuses,
               messageSenders,
+              messageApiKeyIds,
               contactParts,
               contactFieldKeys,
               automationIds,
               campaignStatuses,
               orderStatuses,
               paymentLinkStatuses,
+              orderChangeMakers,
+              orderExcludedApiKeyIds,
+              paymentLinkApiKeyIds,
               dealStatuses,
               taskStatuses,
               dealDetails,
@@ -2004,6 +2226,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               conversationStatuses,
               runEndStatuses,
               runTriggers,
+              runApiKeyIds,
               consentChanges,
               contactSources,
               messageTypes,
@@ -2023,6 +2246,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               noteStageIds,
               noteDealOwnerIds,
               crmChangeMakers,
+              crmExcludedApiKeyIds,
               surveyScores,
               surveyAssigneeIds,
               surveyTeamIds,
@@ -2041,12 +2265,16 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               ...(headers.length > 0 ? { headers: headers.map((h) => h.name) } : {}),
               ...(messageStatuses ? { messageStatuses } : {}),
               ...(messageSenders ? { messageSenders } : {}),
+              ...(messageApiKeyIds ? { messageApiKeyIds } : {}),
               ...(contactParts ? { contactParts } : {}),
               ...(contactFieldKeys ? { contactFieldKeys } : {}),
               ...(automationIds ? { automationIds } : {}),
               ...(campaignStatuses ? { campaignStatuses } : {}),
               ...(orderStatuses ? { orderStatuses } : {}),
               ...(paymentLinkStatuses ? { paymentLinkStatuses } : {}),
+              ...(orderChangeMakers ? { orderChangeMakers } : {}),
+              ...(orderExcludedApiKeyIds ? { orderExcludedApiKeyIds } : {}),
+              ...(paymentLinkApiKeyIds ? { paymentLinkApiKeyIds } : {}),
               ...(dealStatuses ? { dealStatuses } : {}),
               ...(taskStatuses ? { taskStatuses } : {}),
               ...(dealDetails ? { dealDetails } : {}),
@@ -2055,6 +2283,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               ...(conversationStatuses ? { conversationStatuses } : {}),
               ...(runEndStatuses ? { runEndStatuses } : {}),
               ...(runTriggers ? { runTriggers } : {}),
+              ...(runApiKeyIds ? { runApiKeyIds } : {}),
               ...(consentChanges ? { consentChanges } : {}),
               ...(contactSources ? { contactSources } : {}),
               ...(messageTypes ? { messageTypes } : {}),
@@ -2074,6 +2303,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               ...(noteStageIds ? { noteStageIds } : {}),
               ...(noteDealOwnerIds ? { noteDealOwnerIds } : {}),
               ...(crmChangeMakers ? { crmChangeMakers } : {}),
+              ...(crmExcludedApiKeyIds ? { crmExcludedApiKeyIds } : {}),
               ...(surveyScores ? { surveyScores } : {}),
               ...(surveyAssigneeIds ? { surveyAssigneeIds } : {}),
               ...(surveyTeamIds ? { surveyTeamIds } : {}),
@@ -2111,6 +2341,9 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
         const events = data.events ?? endpoint.eventTypes;
         if (data.messageStatuses && !events.includes('message.status')) throw invalidStatuses();
         if (data.messageSenders && !events.includes('message.status')) throw invalidSenders();
+        if (data.messageApiKeyIds && !events.includes('message.status')) {
+          throw invalidMessageApiKeys();
+        }
         if (data.contactParts && !events.includes('contact.updated')) throw invalidParts();
         // Fields narrow field changes only, given the parts the endpoint keeps (ADR-184).
         const parts = webhookContactPartsFor(events, data.contactParts, endpoint.contactParts);
@@ -2126,6 +2359,15 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
         }
         if (data.paymentLinkStatuses && !events.includes('payment_link.status_changed')) {
           throw invalidPaymentLinkStatuses();
+        }
+        if (data.orderChangeMakers && !events.includes('order.status_changed')) {
+          throw invalidOrderChangeMakers();
+        }
+        if (data.orderExcludedApiKeyIds && !events.includes('order.status_changed')) {
+          throw invalidOrderExcludedApiKeys();
+        }
+        if (data.paymentLinkApiKeyIds && !events.includes('payment_link.status_changed')) {
+          throw invalidPaymentLinkApiKeys();
         }
         if (data.dealStatuses && !events.includes('deal.status_changed')) {
           throw invalidDealStatuses();
@@ -2145,6 +2387,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
           throw invalidRunEndStatuses();
         }
         if (data.runTriggers && !webhookTakesAutomationRuns(events)) throw invalidRunTriggers();
+        if (data.runApiKeyIds && !webhookTakesAutomationRuns(events)) throw invalidRunApiKeys();
         if (data.consentChanges && !events.includes('consent.changed')) {
           throw invalidConsentChanges();
         }
@@ -2177,6 +2420,9 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
         if (data.noteStageIds && !webhookTakesNoteEvents(events)) throw invalidNoteStages();
         if (data.noteDealOwnerIds && !webhookTakesNoteEvents(events)) throw invalidNoteDealOwners();
         if (data.crmChangeMakers && !webhookTakesCrmChanges(events)) throw invalidCrmChangeMakers();
+        if (data.crmExcludedApiKeyIds && !webhookTakesCrmChanges(events)) {
+          throw invalidCrmExcludedApiKeys();
+        }
         if (data.surveyScores && !events.includes('satisfaction_survey.answered')) {
           throw invalidSurveyScores();
         }
@@ -2207,6 +2453,26 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
         // Only a list given now is checked: the automations kept were checked when chosen.
         if (data.automationIds !== undefined) {
           await assertWebhookAutomations(tx, ctx.tenant.id, data.automationIds);
+        }
+        // And the API keys likewise (ADR-319).
+        if (data.runApiKeyIds !== undefined) {
+          await assertWebhookRunApiKeys(tx, ctx.tenant.id, data.runApiKeyIds);
+        }
+        // And those for messages (ADR-320).
+        if (data.messageApiKeyIds !== undefined) {
+          await assertWebhookMessageApiKeys(tx, ctx.tenant.id, data.messageApiKeyIds);
+        }
+        // And those left out of CRM changes (ADR-321).
+        if (data.crmExcludedApiKeyIds !== undefined) {
+          await assertWebhookCrmExcludedApiKeys(tx, ctx.tenant.id, data.crmExcludedApiKeyIds);
+        }
+        // And those left out of order changes (ADR-323).
+        if (data.orderExcludedApiKeyIds !== undefined) {
+          await assertWebhookOrderExcludedApiKeys(tx, ctx.tenant.id, data.orderExcludedApiKeyIds);
+        }
+        // And those for Payment Links (ADR-324).
+        if (data.paymentLinkApiKeyIds !== undefined) {
+          await assertWebhookPaymentLinkApiKeys(tx, ctx.tenant.id, data.paymentLinkApiKeyIds);
         }
         // And the numbers likewise (ADR-170).
         if (data.channelIds !== undefined) {
@@ -2323,12 +2589,16 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
           data.headers !== undefined ||
           data.messageStatuses !== undefined ||
           data.messageSenders !== undefined ||
+          data.messageApiKeyIds !== undefined ||
           data.contactParts !== undefined ||
           data.contactFieldKeys !== undefined ||
           data.automationIds !== undefined ||
           data.campaignStatuses !== undefined ||
           data.orderStatuses !== undefined ||
           data.paymentLinkStatuses !== undefined ||
+          data.orderChangeMakers !== undefined ||
+          data.orderExcludedApiKeyIds !== undefined ||
+          data.paymentLinkApiKeyIds !== undefined ||
           data.dealStatuses !== undefined ||
           data.taskStatuses !== undefined ||
           data.dealDetails !== undefined ||
@@ -2337,6 +2607,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
           data.conversationStatuses !== undefined ||
           data.runEndStatuses !== undefined ||
           data.runTriggers !== undefined ||
+          data.runApiKeyIds !== undefined ||
           data.consentChanges !== undefined ||
           data.contactSources !== undefined ||
           data.messageTypes !== undefined ||
@@ -2356,6 +2627,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
           data.noteStageIds !== undefined ||
           data.noteDealOwnerIds !== undefined ||
           data.crmChangeMakers !== undefined ||
+          data.crmExcludedApiKeyIds !== undefined ||
           data.surveyScores !== undefined ||
           data.surveyAssigneeIds !== undefined ||
           data.surveyTeamIds !== undefined ||
@@ -2388,6 +2660,11 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
                 data.messageSenders,
                 endpoint.messageSenders,
               ),
+              messageApiKeyIds: webhookMessageApiKeyIdsFor(
+                events,
+                data.messageApiKeyIds,
+                endpoint.messageApiKeyIds,
+              ),
               contactParts: parts,
               contactFieldKeys: webhookContactFieldKeysFor(
                 events,
@@ -2415,6 +2692,21 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
                 data.paymentLinkStatuses,
                 endpoint.paymentLinkStatuses,
               ),
+              orderChangeMakers: webhookOrderChangeMakersFor(
+                events,
+                data.orderChangeMakers,
+                endpoint.orderChangeMakers,
+              ),
+              orderExcludedApiKeyIds: webhookOrderExcludedApiKeyIdsFor(
+                events,
+                data.orderExcludedApiKeyIds,
+                endpoint.orderExcludedApiKeyIds,
+              ),
+              paymentLinkApiKeyIds: webhookPaymentLinkApiKeyIdsFor(
+                events,
+                data.paymentLinkApiKeyIds,
+                endpoint.paymentLinkApiKeyIds,
+              ),
               dealStatuses: webhookDealStatusesFor(
                 events,
                 data.dealStatuses,
@@ -2439,6 +2731,11 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               ),
               runEndStatuses: ends,
               runTriggers: webhookRunTriggersFor(events, data.runTriggers, endpoint.runTriggers),
+              runApiKeyIds: webhookRunApiKeyIdsFor(
+                events,
+                data.runApiKeyIds,
+                endpoint.runApiKeyIds,
+              ),
               consentChanges: webhookConsentChangesFor(
                 events,
                 data.consentChanges,
@@ -2511,6 +2808,11 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
                 data.crmChangeMakers,
                 endpoint.crmChangeMakers,
               ),
+              crmExcludedApiKeyIds: webhookCrmExcludedApiKeyIdsFor(
+                events,
+                data.crmExcludedApiKeyIds,
+                endpoint.crmExcludedApiKeyIds,
+              ),
               surveyScores: webhookSurveyScoresFor(
                 events,
                 data.surveyScores,
@@ -2555,12 +2857,16 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               eventTypes: webhookEndpoints.eventTypes,
               messageStatuses: webhookEndpoints.messageStatuses,
               messageSenders: webhookEndpoints.messageSenders,
+              messageApiKeyIds: webhookEndpoints.messageApiKeyIds,
               contactParts: webhookEndpoints.contactParts,
               contactFieldKeys: webhookEndpoints.contactFieldKeys,
               automationIds: webhookEndpoints.automationIds,
               campaignStatuses: webhookEndpoints.campaignStatuses,
               orderStatuses: webhookEndpoints.orderStatuses,
               paymentLinkStatuses: webhookEndpoints.paymentLinkStatuses,
+              orderChangeMakers: webhookEndpoints.orderChangeMakers,
+              orderExcludedApiKeyIds: webhookEndpoints.orderExcludedApiKeyIds,
+              paymentLinkApiKeyIds: webhookEndpoints.paymentLinkApiKeyIds,
               dealStatuses: webhookEndpoints.dealStatuses,
               taskStatuses: webhookEndpoints.taskStatuses,
               dealDetails: webhookEndpoints.dealDetails,
@@ -2569,6 +2875,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               conversationStatuses: webhookEndpoints.conversationStatuses,
               runEndStatuses: webhookEndpoints.runEndStatuses,
               runTriggers: webhookEndpoints.runTriggers,
+              runApiKeyIds: webhookEndpoints.runApiKeyIds,
               consentChanges: webhookEndpoints.consentChanges,
               contactSources: webhookEndpoints.contactSources,
               messageTypes: webhookEndpoints.messageTypes,
@@ -2588,6 +2895,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               noteStageIds: webhookEndpoints.noteStageIds,
               noteDealOwnerIds: webhookEndpoints.noteDealOwnerIds,
               crmChangeMakers: webhookEndpoints.crmChangeMakers,
+              crmExcludedApiKeyIds: webhookEndpoints.crmExcludedApiKeyIds,
               surveyScores: webhookEndpoints.surveyScores,
               surveyAssigneeIds: webhookEndpoints.surveyAssigneeIds,
               surveyTeamIds: webhookEndpoints.surveyTeamIds,
@@ -2605,6 +2913,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
             ...(data.headers !== undefined ? { headers: data.headers.map((h) => h.name) } : {}),
             ...(changed.messageStatuses ? { messageStatuses: changed.messageStatuses } : {}),
             ...(changed.messageSenders ? { messageSenders: changed.messageSenders } : {}),
+            ...(changed.messageApiKeyIds ? { messageApiKeyIds: changed.messageApiKeyIds } : {}),
             ...(changed.contactParts ? { contactParts: changed.contactParts } : {}),
             ...(changed.contactFieldKeys ? { contactFieldKeys: changed.contactFieldKeys } : {}),
             ...(changed.automationIds ? { automationIds: changed.automationIds } : {}),
@@ -2612,6 +2921,13 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
             ...(changed.orderStatuses ? { orderStatuses: changed.orderStatuses } : {}),
             ...(changed.paymentLinkStatuses
               ? { paymentLinkStatuses: changed.paymentLinkStatuses }
+              : {}),
+            ...(changed.orderChangeMakers ? { orderChangeMakers: changed.orderChangeMakers } : {}),
+            ...(changed.orderExcludedApiKeyIds
+              ? { orderExcludedApiKeyIds: changed.orderExcludedApiKeyIds }
+              : {}),
+            ...(changed.paymentLinkApiKeyIds
+              ? { paymentLinkApiKeyIds: changed.paymentLinkApiKeyIds }
               : {}),
             ...(changed.dealStatuses ? { dealStatuses: changed.dealStatuses } : {}),
             ...(changed.taskStatuses ? { taskStatuses: changed.taskStatuses } : {}),
@@ -2623,6 +2939,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               : {}),
             ...(changed.runEndStatuses ? { runEndStatuses: changed.runEndStatuses } : {}),
             ...(changed.runTriggers ? { runTriggers: changed.runTriggers } : {}),
+            ...(changed.runApiKeyIds ? { runApiKeyIds: changed.runApiKeyIds } : {}),
             ...(changed.consentChanges ? { consentChanges: changed.consentChanges } : {}),
             ...(changed.contactSources ? { contactSources: changed.contactSources } : {}),
             ...(changed.messageTypes ? { messageTypes: changed.messageTypes } : {}),
@@ -2642,6 +2959,9 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
             ...(changed.noteStageIds ? { noteStageIds: changed.noteStageIds } : {}),
             ...(changed.noteDealOwnerIds ? { noteDealOwnerIds: changed.noteDealOwnerIds } : {}),
             ...(changed.crmChangeMakers ? { crmChangeMakers: changed.crmChangeMakers } : {}),
+            ...(changed.crmExcludedApiKeyIds
+              ? { crmExcludedApiKeyIds: changed.crmExcludedApiKeyIds }
+              : {}),
             ...(changed.surveyScores ? { surveyScores: changed.surveyScores } : {}),
             ...(changed.surveyAssigneeIds ? { surveyAssigneeIds: changed.surveyAssigneeIds } : {}),
             ...(changed.surveyTeamIds ? { surveyTeamIds: changed.surveyTeamIds } : {}),

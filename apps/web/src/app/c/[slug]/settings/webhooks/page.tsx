@@ -10,6 +10,7 @@ import {
   WEBHOOK_EVENT_KEYS,
   WEBHOOK_LIMITS,
   WEBHOOK_ORDER_STATUS_LABELS,
+  WEBHOOK_ORDER_CHANGE_MAKER_LABELS,
   WEBHOOK_PAYMENT_LINK_STATUS_LABELS,
   WEBHOOK_DEAL_STATUS_LABELS,
   WEBHOOK_TASK_STATUS_LABELS,
@@ -34,6 +35,7 @@ import {
   webhookHost,
   webhookOwnerText,
   webhookPipelineText,
+  webhookApiKeyText,
   webhookStageText,
   webhookTeamText,
   webhookTemplateText,
@@ -69,6 +71,11 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
   const [
     endpoints,
     automationChoices,
+    runApiKeyChoices,
+    messageApiKeyChoices,
+    crmApiKeyChoices,
+    orderApiKeyChoices,
+    paymentLinkApiKeyChoices,
     channelChoices,
     teamChoices,
     templateChoices,
@@ -81,6 +88,11 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
   ] = await Promise.all([
     webhooks.list(ctx),
     webhooks.automationChoices(ctx),
+    webhooks.runApiKeyChoices(ctx),
+    webhooks.messageApiKeyChoices(ctx),
+    webhooks.crmApiKeyChoices(ctx),
+    webhooks.orderApiKeyChoices(ctx),
+    webhooks.paymentLinkApiKeyChoices(ctx),
     webhooks.channelChoices(ctx),
     webhooks.teamChoices(ctx),
     webhooks.templateChoices(ctx),
@@ -178,6 +190,12 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
                         {e.messageSenders.map((s) => WEBHOOK_MESSAGE_SENDER_LABELS[s]).join(', ')}
                       </p>
                     ) : null}
+                    {e.messageApiKeys ? (
+                      <p className="text-xs break-all text-muted-foreground">
+                        Statuses of messages sent through the API by:{' '}
+                        {e.messageApiKeys.map(webhookApiKeyText).join(', ')}
+                      </p>
+                    ) : null}
                     {e.templateStatuses ? (
                       <p className="text-xs text-muted-foreground">
                         Template statuses sent:{' '}
@@ -210,6 +228,26 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
                       <p className="text-xs text-muted-foreground">
                         Order statuses sent:{' '}
                         {e.orderStatuses.map((o) => WEBHOOK_ORDER_STATUS_LABELS[o]).join(', ')}
+                      </p>
+                    ) : null}
+                    {e.orderChangeMakers ? (
+                      <p className="text-xs text-muted-foreground">
+                        Order changes sent, made by:{' '}
+                        {e.orderChangeMakers
+                          .map((m) => WEBHOOK_ORDER_CHANGE_MAKER_LABELS[m])
+                          .join(', ')}
+                      </p>
+                    ) : null}
+                    {e.orderExcludedApiKeys ? (
+                      <p className="text-xs break-all text-muted-foreground">
+                        Order changes left out, made through the API by:{' '}
+                        {e.orderExcludedApiKeys.map(webhookApiKeyText).join(', ')}
+                      </p>
+                    ) : null}
+                    {e.paymentLinkApiKeys ? (
+                      <p className="text-xs break-all text-muted-foreground">
+                        Payment Links sent, asked for through the API by:{' '}
+                        {e.paymentLinkApiKeys.map(webhookApiKeyText).join(', ')}
                       </p>
                     ) : null}
                     {e.paymentLinkStatuses ? (
@@ -270,6 +308,12 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
                       <p className="text-xs text-muted-foreground">
                         Automation runs started by:{' '}
                         {e.runTriggers.map((t) => WEBHOOK_RUN_TRIGGER_LABELS[t]).join(', ')}
+                      </p>
+                    ) : null}
+                    {e.runApiKeys ? (
+                      <p className="text-xs break-all text-muted-foreground">
+                        Automation runs sent, started through the API by:{' '}
+                        {e.runApiKeys.map(webhookApiKeyText).join(', ')}
                       </p>
                     ) : null}
                     {e.consentChanges ? (
@@ -382,6 +426,12 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
                         {e.crmChangeMakers
                           .map((m) => WEBHOOK_CRM_CHANGE_MAKER_LABELS[m])
                           .join(', ')}
+                      </p>
+                    ) : null}
+                    {e.crmExcludedApiKeys ? (
+                      <p className="text-xs break-all text-muted-foreground">
+                        Deal, task and note changes left out, made through the API by:{' '}
+                        {e.crmExcludedApiKeys.map(webhookApiKeyText).join(', ')}
                       </p>
                     ) : null}
                     {e.surveyScores ? (
@@ -561,6 +611,11 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
           <WebhookEndpointForm
             slug={ctx.tenant.slug}
             automationChoices={automationChoices}
+            runApiKeyChoices={runApiKeyChoices}
+            messageApiKeyChoices={messageApiKeyChoices}
+            crmApiKeyChoices={crmApiKeyChoices}
+            orderApiKeyChoices={orderApiKeyChoices}
+            paymentLinkApiKeyChoices={paymentLinkApiKeyChoices}
             channelChoices={channelChoices}
             teamChoices={teamChoices}
             templateChoices={templateChoices}

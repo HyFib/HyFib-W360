@@ -1214,10 +1214,28 @@ verification, app review, Embedded Signup configuration).
   (ADR-316, migration 0239: an endpoint takes the `contact.created` and `contact.updated` of
   contacts with chosen tags, and the changes adding or removing one; erased and merged contacts are
   not narrowed).
+  **[API key filters for run events built; their database tests run only in CI]** (ADR-319,
+  migration 0241: an endpoint takes the run events of the runs chosen API keys started, the keys
+  they were rotated from or into included; runs started otherwise are not sent to a list).
+  **[API key filters for message statuses built; their database tests run only in CI]** (ADR-320,
+  migration 0242: an endpoint takes the statuses of the messages chosen API keys sent, the keys they
+  were rotated from or into included; messages sent otherwise are not sent to a list).
+  **[API key exclusions for deal, task and note events built; their database tests run only in CI]**
+  (ADR-321, migration 0243: an endpoint leaves out the changes chosen API keys made, the keys they
+  were rotated from or into included; changes made otherwise are never left out).
+  **[Order change maker filters built; their database tests run only in CI]** (ADR-322, migration
+  0244: an endpoint takes the order status changes of chosen makers, members, API keys or Payment
+  Links; changes without a recorded maker and new orders are not narrowed).
+  **[API key exclusions for order changes built; their database tests run only in CI]** (ADR-323,
+  migration 0245: an endpoint leaves out the order status changes chosen API keys made, the keys
+  they were rotated from or into included; changes made otherwise are never left out).
+  **[API key filters for Payment Link events built; their database tests run only in CI]** (ADR-324,
+  migration 0246: an endpoint takes the changes of the Payment Links chosen API keys asked for, the
+  keys they were rotated from or into included; links members asked for are not sent to a list).
   Remaining: filters for other event types and on a message's or contact's values (such as a field's
-  value, or the key that started a run or made a change), other authentication (headers computed per
-  delivery, other OAuth grants), mutual TLS, fixed egress addresses, events for store orders and
-  each step of a run, `createdAt` finer than the millisecond, load tests.
+  value), other authentication (headers computed per delivery, other OAuth grants), mutual TLS,
+  fixed egress addresses, events for store orders and each step of a run, `createdAt` finer than the
+  millisecond, load tests.
 - **P5-10 Platform ops screens** **[built, locally verified with test data only]** (ADR-054):
   `/platform/ops` with Overview, Onboarding (failed and abandoned signups, failed or stuck number
   setups, new companies without a number), Integrations (current failures with host-only labels,
@@ -1286,6 +1304,9 @@ verification, app review, Embedded Signup configuration).
   CSV leaves it out. ADR-314: an assignee is emailed once about each failure another administrator
   assigned them, with counts only. ADR-315: "Assigned to me" lists only the failures assigned to the
   administrator reading. ADR-318: "Unassigned" lists only the failures assigned to nobody).
+  **[Administrators told apart in the Assign list built; its database and browser tests run only in
+  CI]** (ADR-325: the reader marked "(you)", a shared name followed by when the account became an
+  administrator; no migration).
   Remaining:
   other alert channels, longer trends and charts, Meta's quality webhook (unconfirmed),
   paging and rollups for many companies.

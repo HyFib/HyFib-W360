@@ -149,6 +149,9 @@ import {
 import {
   WEBHOOK_FIELDS_NEED_THE_PART,
   WEBHOOK_RUN_TRIGGERS_NEED_THE_EVENTS,
+  WEBHOOK_RUN_API_KEYS_NEED_THE_EVENTS,
+  WEBHOOK_MESSAGE_API_KEYS_NEED_THE_EVENT,
+  WEBHOOK_CRM_EXCLUDED_API_KEYS_NEED_THE_EVENTS,
   WEBHOOK_CONSENT_CHANGES_NEED_THE_EVENT,
   WEBHOOK_CONTACT_SOURCES_NEED_THE_EVENT,
   WEBHOOK_MESSAGE_TYPES_NEED_THE_EVENT,
@@ -181,6 +184,9 @@ import {
   WEBHOOK_CONVERSATION_STATUSES_NEED_THE_EVENT,
   WEBHOOK_ORDER_STATUSES_NEED_THE_EVENT,
   WEBHOOK_PAYMENT_LINK_STATUSES_NEED_THE_EVENT,
+  WEBHOOK_ORDER_CHANGE_MAKERS_NEED_THE_EVENT,
+  WEBHOOK_ORDER_EXCLUDED_API_KEYS_NEED_THE_EVENT,
+  WEBHOOK_PAYMENT_LINK_API_KEYS_NEED_THE_EVENT,
   WEBHOOK_DEAL_STATUSES_NEED_THE_EVENT,
   WEBHOOK_TASK_STATUSES_NEED_THE_EVENT,
   WEBHOOK_DEAL_DETAILS_NEED_THE_EVENT,
@@ -202,6 +208,7 @@ import {
   WEBHOOK_FAILURE_KINDS,
   WEBHOOK_LIMITS,
   WEBHOOK_PAYMENT_LINK_STATUSES,
+  WEBHOOK_ORDER_CHANGE_MAKERS,
   WEBHOOK_DEAL_STATUSES,
   WEBHOOK_TASK_STATUSES,
   WEBHOOK_DEAL_DETAILS,
@@ -1480,12 +1487,14 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'conversationStatuses',
       'conversationTags',
       'crmChangeMakers',
+      'crmExcludedApiKeyIds',
       'dealDetails',
       'dealStatuses',
       'description',
       'enabled',
       'events',
       'headers',
+      'messageApiKeyIds',
       'messageSenders',
       'messageStatuses',
       'messageTypes',
@@ -1493,10 +1502,14 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'notePipelineIds',
       'noteStageIds',
       'oauth',
+      'orderChangeMakers',
+      'orderExcludedApiKeyIds',
       'orderStatuses',
       'ownerIds',
+      'paymentLinkApiKeyIds',
       'paymentLinkStatuses',
       'pipelineIds',
+      'runApiKeyIds',
       'runEndReasons',
       'runEndStatuses',
       'runTriggers',
@@ -1565,7 +1578,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       "An endpoint receives every automation's runs unless it names the automations it takes",
     );
     expect(webhooks['automation.run_ended']?.post?.description).toContain(
-      'An endpoint that names the automations it takes receives only their runs',
+      'An endpoint that names the automations or API keys it takes receives only their runs',
     );
     // The campaign statuses an endpoint receives (ADR-146): a list, or null.
     const campaignStatuses = (answered.properties as Record<string, { anyOf?: unknown[] }>)
@@ -2154,7 +2167,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       taskAssigneeIds: [dev],
     });
     expect(apiUpdateWebhookEndpointSchema.safeParse({}).error?.issues[0]?.message).toContain(
-      'the deal owners, the task assignees, the pipelines, stages and owners of tasks’ deals and of notes’ deals, who made the CRM changes, the survey scores, the members credited with survey answers and the teams of their conversations, the contact and conversation tags of survey answers, the tags of added and changed contacts, the members, the contact tags, the conversation tags, the OAuth client',
+      'the deal owners, the task assignees, the pipelines, stages and owners of tasks’ deals and of notes’ deals, who made the CRM changes, the API keys whose CRM changes are left out, the survey scores, the members credited with survey answers and the teams of their conversations, the contact and conversation tags of survey answers, the tags of added and changed contacts, the members, the contact tags, the conversation tags, the OAuth client',
     );
     const doc = buildOpenApiDocument('https://app.example.com/api/v1');
     const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
@@ -3416,7 +3429,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       paymentLinkStatuses: ['expired'],
     });
     expect(apiUpdateWebhookEndpointSchema.safeParse({}).error?.issues[0]?.message).toContain(
-      'the order statuses, the Payment Link statuses, the template statuses',
+      'the order statuses, who made the order changes, the API keys whose order changes are left out, the Payment Link statuses, the API keys that asked for the Payment Links, the template statuses',
     );
     const doc = buildOpenApiDocument('https://app.example.com/api/v1');
     const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
@@ -3431,6 +3444,173 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       .properties;
     expect(JSON.stringify(given.paymentLinkStatuses)).toContain(
       'as payment_link.status_changed (created, partially_paid, paid, expired, cancelled, failed), only with the payment_link.status_changed event',
+    );
+  });
+
+  it('take who made the order changes only with order.status_changed, and a list of them alone is a change (ADR-322)', () => {
+    const base = { url: 'https://hooks.example.com/w360', events: ['order.status_changed'] };
+    expect(
+      apiCreateWebhookEndpointSchema.parse({
+        ...base,
+        orderChangeMakers: ['payment_link', 'member', 'payment_link'],
+      }).orderChangeMakers,
+    ).toEqual(['member', 'payment_link']);
+    const refused = apiCreateWebhookEndpointSchema.safeParse({
+      ...base,
+      events: ['order.received', 'payment_link.status_changed'],
+      orderChangeMakers: ['member'],
+    });
+    expect(refused.error?.issues.map((i) => [i.path.join('.'), i.message])).toEqual([
+      ['orderChangeMakers', WEBHOOK_ORDER_CHANGE_MAKERS_NEED_THE_EVENT],
+    ]);
+    for (const body of [
+      { ...base, orderChangeMakers: [] },
+      { ...base, orderChangeMakers: ['automation'] },
+    ]) {
+      expect(apiCreateWebhookEndpointSchema.safeParse(body).success, JSON.stringify(body)).toBe(
+        false,
+      );
+    }
+    expect(apiUpdateWebhookEndpointSchema.parse({ orderChangeMakers: null })).toEqual({
+      orderChangeMakers: null,
+    });
+    expect(apiUpdateWebhookEndpointSchema.parse({ orderChangeMakers: ['api'] })).toEqual({
+      orderChangeMakers: ['api'],
+    });
+    expect(apiUpdateWebhookEndpointSchema.safeParse({}).error?.issues[0]?.message).toContain(
+      'the order statuses, who made the order changes, the API keys whose order changes are left out, the Payment Link statuses',
+    );
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas;
+    const answered = schemas.WebhookEndpoint as {
+      properties: Record<string, { anyOf?: { items?: { enum?: string[] } }[] }>;
+    };
+    expect(answered.properties.orderChangeMakers?.anyOf?.[0]?.items?.enum).toEqual([
+      ...WEBHOOK_ORDER_CHANGE_MAKERS,
+    ]);
+    const given = (schemas.CreateWebhookEndpoint as { properties: Record<string, unknown> })
+      .properties;
+    expect(JSON.stringify(given.orderChangeMakers)).toContain(
+      "as the event's changedBy names them (member, api, payment_link)",
+    );
+    expect(JSON.stringify(doc.webhooks)).toContain(
+      'every change unless it names who made the changes it takes (its `orderChangeMakers`',
+    );
+  });
+
+  it('leave out API keys only with order.status_changed, each once, and a list of them alone is a change (ADR-323)', () => {
+    const shop = '2A3B4C5D-6E7F-4A8B-9C0D-1E2F3A4B5C6D';
+    const erp = '3b4c5d6e-7f8a-4b9c-8d0e-2f3a4b5c6d7e';
+    const base = { url: 'https://hooks.example.com/w360', events: ['order.status_changed'] };
+    expect(
+      apiCreateWebhookEndpointSchema.parse({
+        ...base,
+        orderExcludedApiKeyIds: [shop, erp, shop.toLowerCase()],
+      }).orderExcludedApiKeyIds,
+    ).toEqual([shop.toLowerCase(), erp]);
+    expect(
+      apiCreateWebhookEndpointSchema.parse({ ...base, orderExcludedApiKeyIds: null })
+        .orderExcludedApiKeyIds,
+    ).toBeNull();
+    for (const body of [
+      { ...base, orderExcludedApiKeyIds: [] },
+      { ...base, orderExcludedApiKeyIds: ['w360_aaaaaaaaaaaa'] },
+      { ...base, orderExcludedApiKeyIds: erp },
+    ]) {
+      expect(apiCreateWebhookEndpointSchema.safeParse(body).success, JSON.stringify(body)).toBe(
+        false,
+      );
+    }
+    const refused = apiCreateWebhookEndpointSchema.safeParse({
+      ...base,
+      events: ['order.received', 'payment_link.status_changed'],
+      orderExcludedApiKeyIds: [erp],
+    });
+    expect(refused.error?.issues.map((i) => [i.path.join('.'), i.message])).toEqual([
+      ['orderExcludedApiKeyIds', WEBHOOK_ORDER_EXCLUDED_API_KEYS_NEED_THE_EVENT],
+    ]);
+    for (const change of [{ orderExcludedApiKeyIds: null }, { orderExcludedApiKeyIds: [erp] }]) {
+      expect(apiUpdateWebhookEndpointSchema.parse(change)).toEqual(change);
+    }
+    expect(apiUpdateWebhookEndpointSchema.safeParse({}).error?.issues[0]?.message).toContain(
+      'who made the order changes, the API keys whose order changes are left out, the Payment Link statuses',
+    );
+    // Answered as a list of key ids, or null, and set out with the order event.
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas;
+    const answered = schemas.WebhookEndpoint as {
+      properties: Record<string, { anyOf?: unknown[] }>;
+      required?: string[];
+    };
+    expect(answered.properties.orderExcludedApiKeyIds?.anyOf).toHaveLength(2);
+    expect(answered.required).toContain('orderExcludedApiKeyIds');
+    const given = (schemas.CreateWebhookEndpoint as { properties: Record<string, unknown> })
+      .properties;
+    expect(JSON.stringify(given.orderExcludedApiKeyIds)).toContain(
+      '(orders.write, or orders.request_payment, whose request leaves an order waiting for payment)',
+    );
+    expect(JSON.stringify(doc.webhooks)).toContain(
+      'or it can leave out only the changes chosen keys made (its `orderExcludedApiKeyIds`',
+    );
+  });
+
+  it('take API keys for Payment Links only with payment_link.status_changed, each once, and a list of them alone is a change (ADR-324)', () => {
+    const payments = '4C5D6E7F-8A9B-4C0D-9E1F-3A4B5C6D7E8F';
+    const shop = '5d6e7f8a-9b0c-4d1e-8f2a-4b5c6d7e8f9a';
+    const base = { url: 'https://hooks.example.com/w360', events: ['payment_link.status_changed'] };
+    expect(
+      apiCreateWebhookEndpointSchema.parse({
+        ...base,
+        paymentLinkApiKeyIds: [payments, shop, payments.toLowerCase()],
+      }).paymentLinkApiKeyIds,
+    ).toEqual([payments.toLowerCase(), shop]);
+    expect(
+      apiCreateWebhookEndpointSchema.parse({ ...base, paymentLinkApiKeyIds: null })
+        .paymentLinkApiKeyIds,
+    ).toBeNull();
+    for (const body of [
+      { ...base, paymentLinkApiKeyIds: [] },
+      { ...base, paymentLinkApiKeyIds: ['w360_aaaaaaaaaaaa'] },
+      { ...base, paymentLinkApiKeyIds: shop },
+    ]) {
+      expect(apiCreateWebhookEndpointSchema.safeParse(body).success, JSON.stringify(body)).toBe(
+        false,
+      );
+    }
+    const refused = apiCreateWebhookEndpointSchema.safeParse({
+      ...base,
+      events: ['order.status_changed', 'message.status'],
+      paymentLinkApiKeyIds: [shop],
+    });
+    expect(refused.error?.issues.map((i) => [i.path.join('.'), i.message])).toEqual([
+      ['paymentLinkApiKeyIds', WEBHOOK_PAYMENT_LINK_API_KEYS_NEED_THE_EVENT],
+    ]);
+    for (const change of [{ paymentLinkApiKeyIds: null }, { paymentLinkApiKeyIds: [shop] }]) {
+      expect(apiUpdateWebhookEndpointSchema.parse(change)).toEqual(change);
+    }
+    expect(apiUpdateWebhookEndpointSchema.safeParse({}).error?.issues[0]?.message).toContain(
+      'the Payment Link statuses, the API keys that asked for the Payment Links, the template statuses',
+    );
+    // Answered as a list of key ids, or null, and set out with the event.
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas;
+    const answered = schemas.WebhookEndpoint as {
+      properties: Record<string, { anyOf?: unknown[] }>;
+      required?: string[];
+    };
+    expect(answered.properties.paymentLinkApiKeyIds?.anyOf).toHaveLength(2);
+    expect(answered.required).toContain('paymentLinkApiKeyIds');
+    const given = (schemas.CreateWebhookEndpoint as { properties: Record<string, unknown> })
+      .properties;
+    expect(JSON.stringify(given.paymentLinkApiKeyIds)).toContain(
+      "the company's keys that ask customers to pay (orders.request_payment)",
+    );
+    const webhooks = doc.webhooks as Record<string, { post?: { description?: string } }>;
+    expect(webhooks['payment_link.status_changed']?.post?.description).toContain(
+      'unless it names the API keys whose links it takes (its `paymentLinkApiKeyIds`',
     );
   });
 
@@ -3863,6 +4043,199 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     expect(apiUpdateWebhookEndpointSchema.parse({ automationIds: [farewell] })).toEqual({
       automationIds: [farewell],
     });
+  });
+
+  it('take API keys only with an automation run event, each once, and a list of them alone is a change (ADR-319)', () => {
+    const store = '0E1A2B3C-4D5E-4F60-8172-8394A5B6C7D8';
+    const crm = '1f2e3d4c-5b6a-4978-8695-a4b3c2d1e0f9';
+    for (const events of [
+      ['automation.run_started'],
+      ['automation.run_ended', 'consent.changed'],
+    ]) {
+      expect(
+        apiCreateWebhookEndpointSchema.parse({
+          url: 'https://hooks.example.com/w360',
+          events,
+          runApiKeyIds: [store, crm, store.toLowerCase()],
+        }).runApiKeyIds,
+        JSON.stringify(events),
+      ).toEqual([store.toLowerCase(), crm]);
+    }
+    const base = { url: 'https://hooks.example.com/w360', events: ['automation.run_ended'] };
+    expect(apiCreateWebhookEndpointSchema.parse({ ...base, runApiKeyIds: null })).toEqual({
+      ...base,
+      runApiKeyIds: null,
+    });
+    const tooMany = Array.from(
+      { length: 21 },
+      (_, i) => `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`,
+    );
+    expect(
+      apiCreateWebhookEndpointSchema.safeParse({ ...base, runApiKeyIds: tooMany.slice(1) }).success,
+    ).toBe(true);
+    for (const body of [
+      { ...base, runApiKeyIds: [] },
+      { ...base, runApiKeyIds: ['w360_aaaaaaaaaaaa'] },
+      { ...base, runApiKeyIds: tooMany },
+      { ...base, runApiKeyIds: store },
+    ]) {
+      expect(apiCreateWebhookEndpointSchema.safeParse(body).success, JSON.stringify(body)).toBe(
+        false,
+      );
+    }
+    const refused = apiCreateWebhookEndpointSchema.safeParse({
+      ...base,
+      events: ['message.received', 'order.received'],
+      runApiKeyIds: [store],
+    });
+    expect(refused.error?.issues.map((i) => [i.path.join('.'), i.message])).toEqual([
+      ['runApiKeyIds', WEBHOOK_RUN_API_KEYS_NEED_THE_EVENTS],
+    ]);
+    expect(apiUpdateWebhookEndpointSchema.parse({ runApiKeyIds: null })).toEqual({
+      runApiKeyIds: null,
+    });
+    expect(apiUpdateWebhookEndpointSchema.parse({ runApiKeyIds: [crm] })).toEqual({
+      runApiKeyIds: [crm],
+    });
+    expect(apiUpdateWebhookEndpointSchema.safeParse({}).error?.issues[0]?.message).toContain(
+      'what started the runs, the API keys that started them, the consent changes,',
+    );
+    // Answered as a list of key ids, or null, and set out with the run events.
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas;
+    const answered = schemas.WebhookEndpoint as {
+      properties: Record<string, { anyOf?: unknown[] }>;
+      required?: string[];
+    };
+    expect(answered.properties.runApiKeyIds?.anyOf).toHaveLength(2);
+    expect(answered.required).toContain('runApiKeyIds');
+    expect(
+      Object.keys((schemas.CreateWebhookEndpoint as { properties: object }).properties),
+    ).toContain('runApiKeyIds');
+    const webhooks = doc.webhooks as Record<string, { post?: { description?: string } }>;
+    expect(webhooks['automation.run_started']?.post?.description).toContain(
+      'and every run unless it names the API keys whose runs it takes (its `runApiKeyIds`',
+    );
+  });
+
+  it('take API keys for messages only with message.status, each once, and a list of them alone is a change (ADR-320)', () => {
+    const store = '0E1A2B3C-4D5E-4F60-8172-8394A5B6C7D8';
+    const crm = '1f2e3d4c-5b6a-4978-8695-a4b3c2d1e0f9';
+    const base = { url: 'https://hooks.example.com/w360', events: ['message.status'] };
+    expect(
+      apiCreateWebhookEndpointSchema.parse({
+        ...base,
+        messageApiKeyIds: [store, crm, store.toLowerCase()],
+      }).messageApiKeyIds,
+    ).toEqual([store.toLowerCase(), crm]);
+    expect(
+      apiCreateWebhookEndpointSchema.parse({ ...base, messageApiKeyIds: null }).messageApiKeyIds,
+    ).toBeNull();
+    for (const body of [
+      { ...base, messageApiKeyIds: [] },
+      { ...base, messageApiKeyIds: ['w360_aaaaaaaaaaaa'] },
+      { ...base, messageApiKeyIds: store },
+    ]) {
+      expect(apiCreateWebhookEndpointSchema.safeParse(body).success, JSON.stringify(body)).toBe(
+        false,
+      );
+    }
+    // Received messages are not narrowed by key, so they cannot keep a list.
+    const refused = apiCreateWebhookEndpointSchema.safeParse({
+      ...base,
+      events: ['message.received'],
+      messageApiKeyIds: [store],
+    });
+    expect(refused.error?.issues.map((i) => [i.path.join('.'), i.message])).toEqual([
+      ['messageApiKeyIds', WEBHOOK_MESSAGE_API_KEYS_NEED_THE_EVENT],
+    ]);
+    for (const change of [{ messageApiKeyIds: null }, { messageApiKeyIds: [crm] }]) {
+      expect(apiUpdateWebhookEndpointSchema.parse(change)).toEqual(change);
+    }
+    expect(apiUpdateWebhookEndpointSchema.safeParse({}).error?.issues[0]?.message).toContain(
+      'who sent the messages, the API keys that sent them, the contact parts,',
+    );
+    // Answered as a list of key ids, or null, and set out with the event.
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas;
+    const answered = schemas.WebhookEndpoint as {
+      properties: Record<string, { anyOf?: unknown[] }>;
+      required?: string[];
+    };
+    expect(answered.properties.messageApiKeyIds?.anyOf).toHaveLength(2);
+    expect(answered.required).toContain('messageApiKeyIds');
+    expect(
+      Object.keys((schemas.CreateWebhookEndpoint as { properties: object }).properties),
+    ).toContain('messageApiKeyIds');
+    const webhooks = doc.webhooks as Record<string, { post?: { description?: string } }>;
+    expect(webhooks['message.status']?.post?.description).toContain(
+      'or the API keys that sent them (its `messageApiKeyIds`',
+    );
+  });
+
+  it('leave out API keys only with a deal, task or note event, each once, and a list of them alone is a change (ADR-321)', () => {
+    const store = '0E1A2B3C-4D5E-4F60-8172-8394A5B6C7D8';
+    const crm = '1f2e3d4c-5b6a-4978-8695-a4b3c2d1e0f9';
+    const base = { url: 'https://hooks.example.com/w360', events: ['deal.updated'] };
+    for (const events of [
+      ['deal.created'],
+      ['task.status_changed', 'consent.changed'],
+      ['note.created'],
+    ]) {
+      expect(
+        apiCreateWebhookEndpointSchema.parse({
+          ...base,
+          events,
+          crmExcludedApiKeyIds: [store, crm, store.toLowerCase()],
+        }).crmExcludedApiKeyIds,
+        JSON.stringify(events),
+      ).toEqual([store.toLowerCase(), crm]);
+    }
+    expect(
+      apiCreateWebhookEndpointSchema.parse({ ...base, crmExcludedApiKeyIds: null })
+        .crmExcludedApiKeyIds,
+    ).toBeNull();
+    for (const body of [
+      { ...base, crmExcludedApiKeyIds: [] },
+      { ...base, crmExcludedApiKeyIds: ['w360_aaaaaaaaaaaa'] },
+      { ...base, crmExcludedApiKeyIds: store },
+    ]) {
+      expect(apiCreateWebhookEndpointSchema.safeParse(body).success, JSON.stringify(body)).toBe(
+        false,
+      );
+    }
+    const refused = apiCreateWebhookEndpointSchema.safeParse({
+      ...base,
+      events: ['message.status', 'contact.updated'],
+      crmExcludedApiKeyIds: [store],
+    });
+    expect(refused.error?.issues.map((i) => [i.path.join('.'), i.message])).toEqual([
+      ['crmExcludedApiKeyIds', WEBHOOK_CRM_EXCLUDED_API_KEYS_NEED_THE_EVENTS],
+    ]);
+    for (const change of [{ crmExcludedApiKeyIds: null }, { crmExcludedApiKeyIds: [crm] }]) {
+      expect(apiUpdateWebhookEndpointSchema.parse(change)).toEqual(change);
+    }
+    expect(apiUpdateWebhookEndpointSchema.safeParse({}).error?.issues[0]?.message).toContain(
+      'who made the CRM changes, the API keys whose CRM changes are left out, the survey scores,',
+    );
+    // Answered as a list of key ids, or null, and set out with the webhooks.
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas;
+    const answered = schemas.WebhookEndpoint as {
+      properties: Record<string, { anyOf?: unknown[] }>;
+      required?: string[];
+    };
+    expect(answered.properties.crmExcludedApiKeyIds?.anyOf).toHaveLength(2);
+    expect(answered.required).toContain('crmExcludedApiKeyIds');
+    expect(
+      Object.keys((schemas.CreateWebhookEndpoint as { properties: object }).properties),
+    ).toContain('crmExcludedApiKeyIds');
+    expect(JSON.stringify(doc)).toContain(
+      'or it can leave out only the changes chosen keys made (its `crmExcludedApiKeyIds`',
+    );
   });
 });
 

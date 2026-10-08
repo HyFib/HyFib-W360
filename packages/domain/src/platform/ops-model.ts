@@ -692,6 +692,55 @@ export function integrationFailureView(value: unknown): IntegrationFailureView {
 export interface PlatformAdministrator {
   userId: string;
   name: string | null;
+  /** When the account became a platform administrator. */
+  since: Date;
+}
+
+/** An administrator as the Assign list offers them (ADR-325): the account and what it reads. */
+export interface PlatformAdministratorChoice {
+  userId: string;
+  label: string;
+}
+
+/**
+ * How the Assign list names each administrator (ADR-325): by name, the reader marked "(you)", and
+ * any other administrator whose name another one shares with when they became one, to the minute
+ * (UTC), and their place among those still alike, so no two choices read the same. Never an email
+ * address: the console shows none (ADR-054). In the order given.
+ */
+export function platformAdministratorChoices(
+  administrators: readonly PlatformAdministrator[],
+  readerUserId: string,
+): PlatformAdministratorChoice[] {
+  // A list option shows runs of spaces as one, so names are compared and shown that way.
+  const nameOf = (a: PlatformAdministrator) =>
+    a.name?.replace(/\s+/g, ' ').trim() || 'An administrator without a name';
+  const shared = (a: PlatformAdministrator) =>
+    administrators.some((b) => b.userId !== a.userId && nameOf(b) === nameOf(a));
+  const labelled = administrators.map((a) => ({
+    userId: a.userId,
+    label:
+      a.userId === readerUserId
+        ? `${nameOf(a)} (you)`
+        : shared(a)
+          ? `${nameOf(a)} (administrator since ${csvMinute(a.since)} UTC)`
+          : nameOf(a),
+  }));
+  // Names are the administrators' own, so a place is added until the label is one no other choice
+  // has or could have: never a label already given, nor one another choice reads before its place.
+  const plain = new Set(labelled.map((c) => c.label));
+  const given = new Set<string>();
+  return labelled.map((c) => {
+    const alike = labelled.filter((d) => d.label === c.label).length > 1;
+    let label = c.label;
+    let place = 0;
+    while ((alike && place === 0) || given.has(label) || (place > 0 && plain.has(label))) {
+      place += 1;
+      label = `${c.label} #${place}`;
+    }
+    given.add(label);
+    return { ...c, label };
+  });
 }
 
 export type ReceiptProblem = 'exhausted' | 'waiting';

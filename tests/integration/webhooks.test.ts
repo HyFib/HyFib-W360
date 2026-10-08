@@ -1445,6 +1445,377 @@ describe('Payment Link status filters (ADR-308)', () => {
   });
 });
 
+describe('who made the order changes (ADR-322)', () => {
+  it('are refused without order.status_changed, unknown or empty, kept by a change that leaves them out and cleared with the event; the database keeps them to that event', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const url = 'https://hooks.example.com/in';
+    const refused = (eventTypes: string[], orderChangeMakers: unknown, message: RegExp) =>
+      expectAppError(
+        webhooks().create(owner, { url, eventTypes, orderChangeMakers }),
+        'validation_failed',
+        message,
+      );
+    // A new order and a Payment Link's change have no maker to choose.
+    const needsTheEvent = /only for an endpoint that receives Order status/;
+    await refused(['order.received', 'payment_link.status_changed'], ['member'], needsTheEvent);
+    await refused(['order.status_changed'], [], /at least one maker/);
+    await refused(['order.status_changed'], ['automation'], /from the list/);
+    expect(await webhooks().list(owner)).toEqual([]);
+
+    const created = await webhooks().create(owner, {
+      url,
+      eventTypes: ['order.status_changed', 'order.received'],
+      orderChangeMakers: ['payment_link', 'member', 'payment_link'],
+    });
+    const [audit] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events WHERE tenant_id = $1 AND action = 'webhook.endpoint_created'`,
+      [c.tenant.id],
+    );
+    expect(audit?.metadata).toMatchObject({ orderChangeMakers: ['member', 'payment_link'] });
+    const change = (fields: Record<string, unknown>) =>
+      webhooks().update(owner, {
+        endpointId: created.id,
+        url,
+        description: '',
+        eventTypes: ['order.status_changed', 'order.received'],
+        ...fields,
+      });
+    const current = async () =>
+      (await webhooks().list(owner)).find((e) => e.id === created.id)?.orderChangeMakers;
+    expect(await current()).toEqual(['member', 'payment_link']);
+    await change({ description: 'kept' });
+    expect(await current()).toEqual(['member', 'payment_link']);
+    await change({ orderChangeMakers: ['api'] });
+    expect(await current()).toEqual(['api']);
+    const updates = await fx.query<{ metadata: { orderChangeMakers?: unknown } }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND action = 'webhook.endpoint_updated' ORDER BY occurred_at`,
+      [c.tenant.id],
+    );
+    expect(updates.map((u) => u.metadata.orderChangeMakers)).toEqual([
+      ['member', 'payment_link'],
+      ['api'],
+    ]);
+    await change({ orderChangeMakers: null });
+    expect(await current()).toBeNull();
+    await change({ orderChangeMakers: ['member'] });
+    // The database refuses an empty list, more than three entries, an unknown maker or a missing
+    // one from an endpoint taking the event…
+    const setInDatabase = (value: string) =>
+      fx.query(`UPDATE app.webhook_endpoints SET order_change_makers = ${value} WHERE id = $1`, [
+        created.id,
+      ]);
+    for (const bad of [
+      `'{}'`,
+      `'{member,api,payment_link,member}'`,
+      `'{member,automation}'`,
+      `ARRAY['member', NULL]::text[]`,
+      `ARRAY[ARRAY['member'], ARRAY['api']]::text[]`,
+    ]) {
+      await expect(setInDatabase(bad), bad).rejects.toThrow(
+        /webhook_endpoints_order_change_makers/,
+      );
+    }
+    await change({ eventTypes: ['order.received'] });
+    expect(await current()).toBeNull();
+    await expectAppError(
+      change({ eventTypes: ['order.received'], orderChangeMakers: ['member'] }),
+      'validation_failed',
+      needsTheEvent,
+    );
+    // …and any list for an endpoint that does not take it.
+    await expect(setInDatabase(`'{member}'`)).rejects.toThrow(
+      /webhook_endpoints_order_change_makers/,
+    );
+    // The company role changes the list only through its column grant.
+    const [grant] = await fx.query<{ can_update: boolean }>(
+      `SELECT has_column_privilege('w360_app', 'app.webhook_endpoints', 'order_change_makers',
+                'UPDATE') AS can_update`,
+    );
+    expect(grant?.can_update).toBe(true);
+  });
+});
+
+describe('API keys left out of order changes (ADR-323)', () => {
+  it('are refused without order.status_changed, or naming keys that are not the company’s or cannot change orders, kept by a change that leaves them out and cleared with the event; the database keeps them to that event', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const keys = createApiKeysService({ db: fx.dbs.app, clock: systemClock });
+    const fulfilment = await keys.create(owner, {
+      name: 'Fulfilment',
+      scopes: ['orders.write'],
+      expiresInDays: 0,
+    });
+    const payments = await keys.create(owner, {
+      name: 'Payments',
+      scopes: ['orders.read', 'orders.request_payment'],
+      expiresInDays: 30,
+    });
+    const reader = await keys.create(owner, {
+      name: 'Reader',
+      scopes: ['orders.read'],
+      expiresInDays: 0,
+    });
+    const other = await fx.company();
+    const theirs = await keys.create(await fx.ctx(other, other.owner), {
+      name: 'Theirs',
+      scopes: ['orders.write'],
+      expiresInDays: 0,
+    });
+    const url = 'https://hooks.example.com/in';
+    const refused = (eventTypes: string[], orderExcludedApiKeyIds: unknown, message: RegExp) =>
+      expectAppError(
+        webhooks().create(owner, { url, eventTypes, orderExcludedApiKeyIds }),
+        'validation_failed',
+        message,
+      );
+    const needsTheEvent = /only for an endpoint that receives Order status/;
+    const notTheirs = /API keys of this company that can change orders/;
+    await refused(
+      ['order.received', 'payment_link.status_changed'],
+      [fulfilment.id],
+      needsTheEvent,
+    );
+    await refused(['order.status_changed'], [], /at least one API key/);
+    await refused(['order.status_changed'], [fulfilment.keyPrefix], /from the list/);
+    await refused(['order.status_changed'], [fulfilment.id, reader.id], notTheirs);
+    await refused(['order.status_changed'], [theirs.id], notTheirs);
+    expect(await webhooks().list(owner)).toEqual([]);
+    // Settings offers the keys that can change orders and work, by name.
+    expect(await webhooks().orderApiKeyChoices(owner)).toEqual([
+      { id: fulfilment.id, name: 'Fulfilment', keyPrefix: fulfilment.keyPrefix },
+      { id: payments.id, name: 'Payments', keyPrefix: payments.keyPrefix },
+    ]);
+
+    const created = await webhooks().create(owner, {
+      url,
+      eventTypes: ['order.status_changed', 'consent.changed'],
+      orderExcludedApiKeyIds: [fulfilment.id, payments.id, fulfilment.id.toUpperCase()],
+    });
+    const [audit] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events WHERE tenant_id = $1 AND action = 'webhook.endpoint_created'`,
+      [c.tenant.id],
+    );
+    expect(audit?.metadata).toMatchObject({
+      orderExcludedApiKeyIds: [fulfilment.id, payments.id],
+    });
+    const change = (fields: Record<string, unknown>) =>
+      webhooks().update(owner, {
+        endpointId: created.id,
+        url,
+        description: '',
+        eventTypes: ['order.status_changed', 'consent.changed'],
+        ...fields,
+      });
+    const current = async () =>
+      (await webhooks().list(owner)).find((e) => e.id === created.id)?.orderExcludedApiKeys;
+    const named = (key: { id: string; keyPrefix: string }, name: string, state: string) => ({
+      id: key.id,
+      name,
+      keyPrefix: key.keyPrefix,
+      state,
+    });
+    expect(await current()).toEqual([
+      named(fulfilment, 'Fulfilment', 'active'),
+      named(payments, 'Payments', 'active'),
+    ]);
+    await change({ description: 'kept' });
+    expect((await current())?.map((k) => k.id)).toEqual([fulfilment.id, payments.id]);
+    // A key revoked since stays named, and allowed.
+    await keys.revoke(owner, { keyId: payments.id });
+    expect(await current()).toEqual([
+      named(fulfilment, 'Fulfilment', 'active'),
+      named(payments, 'Payments', 'revoked'),
+    ]);
+    await change({ orderExcludedApiKeyIds: [payments.id] });
+    const updates = await fx.query<{ metadata: { orderExcludedApiKeyIds?: unknown } }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND action = 'webhook.endpoint_updated' ORDER BY occurred_at`,
+      [c.tenant.id],
+    );
+    expect(updates.map((u) => u.metadata.orderExcludedApiKeyIds)).toEqual([
+      [fulfilment.id, payments.id],
+      [payments.id],
+    ]);
+    await change({ orderExcludedApiKeyIds: null });
+    expect(await current()).toBeNull();
+    await change({ orderExcludedApiKeyIds: [fulfilment.id] });
+    // The database refuses an empty list, more than 20 keys, a missing one or a list of lists from
+    // an endpoint taking the event…
+    const setInDatabase = (value: string) =>
+      fx.query(
+        `UPDATE app.webhook_endpoints SET order_excluded_api_key_ids = ${value} WHERE id = $1`,
+        [created.id],
+      );
+    const many = Array.from({ length: 21 }, () => `'${uuidv7()}'`).join(', ');
+    for (const bad of [
+      `'{}'`,
+      `ARRAY[${many}]::uuid[]`,
+      `ARRAY['${fulfilment.id}', NULL]::uuid[]`,
+      `ARRAY[ARRAY['${fulfilment.id}']]::uuid[]`,
+    ]) {
+      await expect(setInDatabase(bad), bad).rejects.toThrow(
+        /webhook_endpoints_order_excluded_api_key_ids/,
+      );
+    }
+    await change({ eventTypes: ['consent.changed'] });
+    expect(await current()).toBeNull();
+    await expectAppError(
+      change({ eventTypes: ['consent.changed'], orderExcludedApiKeyIds: [fulfilment.id] }),
+      'validation_failed',
+      needsTheEvent,
+    );
+    // …and any list from an endpoint not taking it.
+    await expect(setInDatabase(`ARRAY['${fulfilment.id}']::uuid[]`)).rejects.toThrow(
+      /webhook_endpoints_order_excluded_api_key_ids/,
+    );
+    // The company role changes the list only through its column grant.
+    const [grant] = await fx.query<{ can_update: boolean }>(
+      `SELECT has_column_privilege('w360_app', 'app.webhook_endpoints',
+                'order_excluded_api_key_ids', 'UPDATE') AS can_update`,
+    );
+    expect(grant?.can_update).toBe(true);
+  });
+});
+
+describe('API key filters of Payment Link events (ADR-324)', () => {
+  it('are refused without payment_link.status_changed, or naming keys that are not the company’s or cannot ask customers to pay, kept by a change that leaves them out and cleared with the event; the database keeps them to that event', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const keys = createApiKeysService({ db: fx.dbs.app, clock: systemClock });
+    const billing = await keys.create(owner, {
+      name: 'Billing',
+      scopes: ['orders.read', 'orders.request_payment'],
+      expiresInDays: 30,
+    });
+    const payer = await keys.create(owner, {
+      name: 'Payer',
+      scopes: ['orders.request_payment'],
+      expiresInDays: 0,
+    });
+    const mover = await keys.create(owner, {
+      name: 'Mover',
+      scopes: ['orders.write'],
+      expiresInDays: 0,
+    });
+    const other = await fx.company();
+    const theirs = await keys.create(await fx.ctx(other, other.owner), {
+      name: 'Theirs',
+      scopes: ['orders.request_payment'],
+      expiresInDays: 0,
+    });
+    const url = 'https://hooks.example.com/in';
+    const refused = (eventTypes: string[], paymentLinkApiKeyIds: unknown, message: RegExp) =>
+      expectAppError(
+        webhooks().create(owner, { url, eventTypes, paymentLinkApiKeyIds }),
+        'validation_failed',
+        message,
+      );
+    const needsTheEvent = /only for an endpoint that receives Payment Link status/;
+    const notTheirs = /API keys of this company that can ask customers to pay/;
+    await refused(['order.status_changed'], [payer.id], needsTheEvent);
+    await refused(['payment_link.status_changed'], [], /at least one API key/);
+    await refused(['payment_link.status_changed'], [payer.keyPrefix], /from the list/);
+    // A key that moves orders on asks for no link.
+    await refused(['payment_link.status_changed'], [payer.id, mover.id], notTheirs);
+    await refused(['payment_link.status_changed'], [theirs.id], notTheirs);
+    expect(await webhooks().list(owner)).toEqual([]);
+    // Settings offers the keys that ask customers to pay and work, by name.
+    expect(await webhooks().paymentLinkApiKeyChoices(owner)).toEqual([
+      { id: billing.id, name: 'Billing', keyPrefix: billing.keyPrefix },
+      { id: payer.id, name: 'Payer', keyPrefix: payer.keyPrefix },
+    ]);
+
+    const created = await webhooks().create(owner, {
+      url,
+      eventTypes: ['payment_link.status_changed', 'consent.changed'],
+      paymentLinkApiKeyIds: [payer.id, billing.id, payer.id.toUpperCase()],
+    });
+    const [audit] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events WHERE tenant_id = $1 AND action = 'webhook.endpoint_created'`,
+      [c.tenant.id],
+    );
+    expect(audit?.metadata).toMatchObject({ paymentLinkApiKeyIds: [payer.id, billing.id] });
+    const change = (fields: Record<string, unknown>) =>
+      webhooks().update(owner, {
+        endpointId: created.id,
+        url,
+        description: '',
+        eventTypes: ['payment_link.status_changed', 'consent.changed'],
+        ...fields,
+      });
+    const current = async () =>
+      (await webhooks().list(owner)).find((e) => e.id === created.id)?.paymentLinkApiKeys;
+    const named = (key: { id: string; keyPrefix: string }, name: string, state: string) => ({
+      id: key.id,
+      name,
+      keyPrefix: key.keyPrefix,
+      state,
+    });
+    expect(await current()).toEqual([
+      named(payer, 'Payer', 'active'),
+      named(billing, 'Billing', 'active'),
+    ]);
+    await change({ description: 'kept' });
+    expect((await current())?.map((k) => k.id)).toEqual([payer.id, billing.id]);
+    // A key revoked since stays named, and allowed: its links still change status.
+    await keys.revoke(owner, { keyId: billing.id });
+    expect(await current()).toEqual([
+      named(payer, 'Payer', 'active'),
+      named(billing, 'Billing', 'revoked'),
+    ]);
+    await change({ paymentLinkApiKeyIds: [billing.id] });
+    const updates = await fx.query<{ metadata: { paymentLinkApiKeyIds?: unknown } }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND action = 'webhook.endpoint_updated' ORDER BY occurred_at`,
+      [c.tenant.id],
+    );
+    expect(updates.map((u) => u.metadata.paymentLinkApiKeyIds)).toEqual([
+      [payer.id, billing.id],
+      [billing.id],
+    ]);
+    await change({ paymentLinkApiKeyIds: null });
+    expect(await current()).toBeNull();
+    await change({ paymentLinkApiKeyIds: [payer.id] });
+    // The database refuses an empty list, more than 20 keys, a missing one or a list of lists from
+    // an endpoint taking the event…
+    const setInDatabase = (value: string) =>
+      fx.query(
+        `UPDATE app.webhook_endpoints SET payment_link_api_key_ids = ${value} WHERE id = $1`,
+        [created.id],
+      );
+    const many = Array.from({ length: 21 }, () => `'${uuidv7()}'`).join(', ');
+    for (const bad of [
+      `'{}'`,
+      `ARRAY[${many}]::uuid[]`,
+      `ARRAY['${payer.id}', NULL]::uuid[]`,
+      `ARRAY[ARRAY['${payer.id}']]::uuid[]`,
+    ]) {
+      await expect(setInDatabase(bad), bad).rejects.toThrow(
+        /webhook_endpoints_payment_link_api_key_ids/,
+      );
+    }
+    await change({ eventTypes: ['consent.changed'] });
+    expect(await current()).toBeNull();
+    await expectAppError(
+      change({ eventTypes: ['consent.changed'], paymentLinkApiKeyIds: [payer.id] }),
+      'validation_failed',
+      needsTheEvent,
+    );
+    // …and any list from an endpoint not taking it.
+    await expect(setInDatabase(`ARRAY['${payer.id}']::uuid[]`)).rejects.toThrow(
+      /webhook_endpoints_payment_link_api_key_ids/,
+    );
+    // The company role changes the list only through its column grant.
+    const [grant] = await fx.query<{ can_update: boolean }>(
+      `SELECT has_column_privilege('w360_app', 'app.webhook_endpoints', 'payment_link_api_key_ids',
+                'UPDATE') AS can_update`,
+    );
+    expect(grant?.can_update).toBe(true);
+  });
+});
+
 describe('deal and task status filters (ADR-309)', () => {
   const kinds = [
     {
@@ -2191,6 +2562,409 @@ describe('message sender filters (ADR-172)', () => {
       ['agent', 'later'],
       ['api', 'later'],
     ]);
+  });
+});
+
+describe('API key filters of message statuses (ADR-320)', () => {
+  it('are refused without message.status, or naming keys that are not the company’s or cannot send messages, kept by a change that leaves them out and cleared with the event; the database keeps them to it', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const keys = createApiKeysService({ db: fx.dbs.app, clock: systemClock });
+    const shop = await keys.create(owner, {
+      name: 'Shop',
+      scopes: ['messages.send'],
+      expiresInDays: 0,
+    });
+    const desk = await keys.create(owner, {
+      name: 'Helpdesk',
+      scopes: ['contacts.read', 'messages.reply'],
+      expiresInDays: 30,
+    });
+    const runner = await keys.create(owner, {
+      name: 'Runner',
+      scopes: ['automations.start'],
+      expiresInDays: 0,
+    });
+    const other = await fx.company();
+    const theirs = await keys.create(await fx.ctx(other, other.owner), {
+      name: 'Theirs',
+      scopes: ['messages.send'],
+      expiresInDays: 0,
+    });
+    const url = 'https://hooks.example.com/in';
+    const refused = (eventTypes: string[], messageApiKeyIds: unknown, message: RegExp) =>
+      expectAppError(
+        webhooks().create(owner, { url, eventTypes, messageApiKeyIds }),
+        'validation_failed',
+        message,
+      );
+    const needsTheEvent = /only for an endpoint that receives Message status/;
+    const notTheirs = /API keys of this company that can send messages/;
+    await refused(['message.received'], [shop.id], needsTheEvent);
+    await refused(['message.status'], [], /at least one API key/);
+    await refused(['message.status'], [shop.keyPrefix], /from the list/);
+    await refused(['message.status'], [shop.id, runner.id], notTheirs);
+    await refused(['message.status'], [theirs.id], notTheirs);
+    expect(await webhooks().list(owner)).toEqual([]);
+    // Settings offers the keys that can send messages and work, by name, and for runs the key that
+    // can start them.
+    expect(await webhooks().messageApiKeyChoices(owner)).toEqual([
+      { id: desk.id, name: 'Helpdesk', keyPrefix: desk.keyPrefix },
+      { id: shop.id, name: 'Shop', keyPrefix: shop.keyPrefix },
+    ]);
+    expect((await webhooks().runApiKeyChoices(owner)).map((k) => k.id)).toEqual([runner.id]);
+
+    const created = await webhooks().create(owner, {
+      url,
+      eventTypes: ['message.status', 'message.received'],
+      messageApiKeyIds: [shop.id, desk.id, shop.id.toUpperCase()],
+    });
+    const [audit] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events WHERE tenant_id = $1 AND action = 'webhook.endpoint_created'`,
+      [c.tenant.id],
+    );
+    expect(audit?.metadata).toMatchObject({ messageApiKeyIds: [shop.id, desk.id] });
+    const change = (fields: Record<string, unknown>) =>
+      webhooks().update(owner, {
+        endpointId: created.id,
+        url,
+        description: '',
+        eventTypes: ['message.status', 'message.received'],
+        ...fields,
+      });
+    const current = async () =>
+      (await webhooks().list(owner)).find((e) => e.id === created.id)?.messageApiKeys;
+    const named = (key: { id: string; keyPrefix: string }, name: string, state: string) => ({
+      id: key.id,
+      name,
+      keyPrefix: key.keyPrefix,
+      state,
+    });
+    expect(await current()).toEqual([
+      named(shop, 'Shop', 'active'),
+      named(desk, 'Helpdesk', 'active'),
+    ]);
+    await change({ description: 'kept' });
+    expect((await current())?.map((k) => k.id)).toEqual([shop.id, desk.id]);
+    // A key revoked since stays named, and allowed: the messages it sent still change status.
+    await keys.revoke(owner, { keyId: desk.id });
+    expect(await current()).toEqual([
+      named(shop, 'Shop', 'active'),
+      named(desk, 'Helpdesk', 'revoked'),
+    ]);
+    await change({ messageApiKeyIds: [desk.id] });
+    expect((await current())?.map((k) => k.id)).toEqual([desk.id]);
+    const updates = await fx.query<{ metadata: { messageApiKeyIds?: unknown } }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND action = 'webhook.endpoint_updated' ORDER BY occurred_at`,
+      [c.tenant.id],
+    );
+    expect(updates.map((u) => u.metadata.messageApiKeyIds)).toEqual([
+      [shop.id, desk.id],
+      [desk.id],
+    ]);
+    await change({ messageApiKeyIds: null });
+    expect(await current()).toBeNull();
+    await change({ messageApiKeyIds: [shop.id] });
+    // Received messages alone do not keep the list.
+    await change({ eventTypes: ['message.received'] });
+    expect(await current()).toBeNull();
+    await expectAppError(
+      change({ eventTypes: ['message.received'], messageApiKeyIds: [shop.id] }),
+      'validation_failed',
+      needsTheEvent,
+    );
+    // The database refuses an empty list, more than 20 keys, a missing one or a list of lists from
+    // an endpoint taking message.status…
+    await change({ eventTypes: ['message.status'], messageApiKeyIds: [shop.id] });
+    const setInDatabase = (value: string) =>
+      fx.query(`UPDATE app.webhook_endpoints SET message_api_key_ids = ${value} WHERE id = $1`, [
+        created.id,
+      ]);
+    const many = Array.from({ length: 21 }, () => `'${uuidv7()}'`).join(', ');
+    for (const bad of [
+      `'{}'`,
+      `ARRAY[${many}]::uuid[]`,
+      `ARRAY['${shop.id}', NULL]::uuid[]`,
+      `ARRAY[ARRAY['${shop.id}']]::uuid[]`,
+    ]) {
+      await expect(setInDatabase(bad), bad).rejects.toThrow(
+        /webhook_endpoints_message_api_key_ids/,
+      );
+    }
+    // …and any list from an endpoint taking received messages only.
+    await change({ eventTypes: ['message.received'] });
+    await expect(setInDatabase(`ARRAY['${shop.id}']::uuid[]`)).rejects.toThrow(
+      /webhook_endpoints_message_api_key_ids/,
+    );
+    // The company role changes the list only through its column grant.
+    const [grant] = await fx.query<{ can_update: boolean }>(
+      `SELECT has_column_privilege('w360_app', 'app.webhook_endpoints', 'message_api_key_ids',
+                'UPDATE') AS can_update`,
+    );
+    expect(grant?.can_update).toBe(true);
+  });
+
+  it('sends an endpoint that names API keys the statuses of the messages they sent, across a rotation either way, and of no message sent otherwise', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const from = waId();
+    const msg = await inbound(c, from, 'Hi');
+    const keys = createApiKeysService({ db: fx.dbs.app, clock: systemClock });
+    const desk = await keys.create(owner, {
+      name: 'Helpdesk',
+      scopes: ['messages.reply'],
+      expiresInDays: 0,
+    });
+    const bot = await keys.create(owner, {
+      name: 'Bot',
+      scopes: ['messages.reply'],
+      expiresInDays: 0,
+    });
+    const add = async (messageApiKeyIds: string[] | null) =>
+      (
+        await webhooks().create(owner, {
+          url: `http://${HOST}:${port}/ok/${randomBytes(6).toString('hex')}`,
+          eventTypes: ['message.status'],
+          messageApiKeyIds,
+        })
+      ).id;
+    const every = await add(null);
+    const byDesk = await add([desk.id]);
+    const byBot = await add([bot.id]);
+    // The helpdesk's key is rotated: the old key works for a day more. An endpoint names the new
+    // one.
+    const rotated = await keys.rotate(owner, { keyId: desk.id, overlapHours: 24 });
+    const byRotated = await add([rotated.id]);
+    const deps = { db: fx.dbs.app, jobs: fx.jobs(), signer: fx.signer, clock: systemClock };
+    /** A text reply sent through the API with this token's key, accepted by the stand-in. */
+    const reply = async (token: string, text: string) => {
+      const key = await authenticateApiToken(fx.dbs.app, token, uuidv7());
+      if (!key) throw new Error('a key does not authenticate');
+      const sent = await apiSendMessage(
+        deps,
+        key,
+        { type: 'text', to: `+${from}`, text },
+        { key: `reply-${randomBytes(6).toString('hex')}`, requestHash: sha256Hex(text) },
+      );
+      expect(sent.status).toBe(201);
+      const messageId = (sent.body as { data: { id: string } }).data.id;
+      fx.standIn.state.sendQueue.push({
+        kind: 'accept',
+        wamid: `wamid.api.${randomBytes(8).toString('hex')}`,
+      });
+      const [intent] = await fx.query<{ id: string }>(
+        'SELECT id FROM app.send_intents WHERE message_id = $1',
+        [messageId],
+      );
+      if (!intent) throw new Error('no send intent');
+      const result = await processSendIntent(
+        {
+          ...deps,
+          keyring: fx.keyring,
+          graph: fx.graph,
+          rate: { capacity: 100, refillPerSecond: 100 },
+        },
+        authorizedTenantScope(c.tenant.id, null),
+        intent.id,
+      );
+      expect(result.outcome).toBe('accepted');
+      return messageId;
+    };
+    const byOldKey = await reply(desk.token, 'From the old key.');
+    const byNewKey = await reply(rotated.token, 'From the new key.');
+    const byOtherKey = await reply(bot.token, 'From the bot.');
+    // A member's reply belongs to no key.
+    await sendReply(c, msg.conversation_id, 'A member replies.');
+    const [memberReply] = await fx.query<{ id: string }>(
+      `SELECT id FROM app.messages WHERE conversation_id = $1 AND sender_type = 'agent'`,
+      [msg.conversation_id],
+    );
+    if (!memberReply) throw new Error('no member reply');
+
+    const sent = await fx.query<{
+      message: string;
+      endpoint: string;
+      detail: Record<string, unknown>;
+    }>(
+      `SELECT e.message_id AS message, d.endpoint_id AS endpoint, e.detail
+         FROM app.webhook_deliveries d
+         JOIN app.webhook_events e ON e.tenant_id = d.tenant_id AND e.id = d.event_id
+        WHERE d.tenant_id = $1 AND e.type = 'message.status'`,
+      [c.tenant.id],
+    );
+    const endpointName = new Map([
+      [every, 'every message'],
+      [byDesk, 'old key'],
+      [byBot, 'bot key'],
+      [byRotated, 'new key'],
+    ]);
+    const messageName = new Map([
+      [byOldKey, 'old key'],
+      [byNewKey, 'new key'],
+      [byOtherKey, 'bot'],
+      [memberReply.id, 'member'],
+    ]);
+    const sorted = (rows: unknown[][]) =>
+      [...rows].sort((x, y) => JSON.stringify(x).localeCompare(JSON.stringify(y)));
+    expect(
+      sorted(sent.map((s) => [messageName.get(s.message), endpointName.get(s.endpoint)])),
+    ).toEqual(
+      sorted([
+        // The old key's message reaches the list naming the key it was rotated into…
+        ['old key', 'every message'],
+        ['old key', 'old key'],
+        ['old key', 'new key'],
+        // …and the new key's the list naming the key it replaced.
+        ['new key', 'every message'],
+        ['new key', 'old key'],
+        ['new key', 'new key'],
+        ['bot', 'every message'],
+        ['bot', 'bot key'],
+        ['member', 'every message'],
+      ]),
+    );
+    // The key travels for the filter only: the payload reads it from the message.
+    expect(sent.filter((s) => 'apiKeyId' in s.detail)).toEqual([]);
+  });
+});
+
+describe('API keys left out of deal, task and note events (ADR-321)', () => {
+  it('are refused without a deal, task or note event, or naming keys that are not the company’s or cannot change them, kept by a change that leaves them out and cleared with the events; the database keeps them to those events', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const keys = createApiKeysService({ db: fx.dbs.app, clock: systemClock });
+    const deals = await keys.create(owner, {
+      name: 'Deals',
+      scopes: ['deals.write'],
+      expiresInDays: 0,
+    });
+    const notes = await keys.create(owner, {
+      name: 'Notes',
+      scopes: ['contacts.read', 'notes.write'],
+      expiresInDays: 30,
+    });
+    const sender = await keys.create(owner, {
+      name: 'Sender',
+      scopes: ['messages.send'],
+      expiresInDays: 0,
+    });
+    const other = await fx.company();
+    const theirs = await keys.create(await fx.ctx(other, other.owner), {
+      name: 'Theirs',
+      scopes: ['deals.write'],
+      expiresInDays: 0,
+    });
+    const url = 'https://hooks.example.com/in';
+    const refused = (eventTypes: string[], crmExcludedApiKeyIds: unknown, message: RegExp) =>
+      expectAppError(
+        webhooks().create(owner, { url, eventTypes, crmExcludedApiKeyIds }),
+        'validation_failed',
+        message,
+      );
+    const needsTheEvents = /only for an endpoint that receives deal, task or note events/;
+    const notTheirs = /API keys of this company that can change deals, tasks or notes/;
+    await refused(['contact.updated', 'message.status'], [deals.id], needsTheEvents);
+    await refused(['deal.updated'], [], /at least one API key/);
+    await refused(['deal.updated'], [deals.keyPrefix], /from the list/);
+    await refused(['task.created'], [deals.id, sender.id], notTheirs);
+    await refused(['note.created'], [theirs.id], notTheirs);
+    expect(await webhooks().list(owner)).toEqual([]);
+    // Settings offers the keys that can change deals, tasks or notes and work, by name.
+    expect(await webhooks().crmApiKeyChoices(owner)).toEqual([
+      { id: deals.id, name: 'Deals', keyPrefix: deals.keyPrefix },
+      { id: notes.id, name: 'Notes', keyPrefix: notes.keyPrefix },
+    ]);
+
+    const created = await webhooks().create(owner, {
+      url,
+      eventTypes: ['deal.updated', 'consent.changed'],
+      crmExcludedApiKeyIds: [deals.id, notes.id, deals.id.toUpperCase()],
+    });
+    const [audit] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events WHERE tenant_id = $1 AND action = 'webhook.endpoint_created'`,
+      [c.tenant.id],
+    );
+    expect(audit?.metadata).toMatchObject({ crmExcludedApiKeyIds: [deals.id, notes.id] });
+    const change = (fields: Record<string, unknown>) =>
+      webhooks().update(owner, {
+        endpointId: created.id,
+        url,
+        description: '',
+        eventTypes: ['deal.updated', 'consent.changed'],
+        ...fields,
+      });
+    const current = async () =>
+      (await webhooks().list(owner)).find((e) => e.id === created.id)?.crmExcludedApiKeys;
+    const named = (key: { id: string; keyPrefix: string }, name: string, state: string) => ({
+      id: key.id,
+      name,
+      keyPrefix: key.keyPrefix,
+      state,
+    });
+    expect(await current()).toEqual([
+      named(deals, 'Deals', 'active'),
+      named(notes, 'Notes', 'active'),
+    ]);
+    await change({ description: 'kept' });
+    expect((await current())?.map((k) => k.id)).toEqual([deals.id, notes.id]);
+    // A key revoked since stays named, and allowed.
+    await keys.revoke(owner, { keyId: notes.id });
+    expect(await current()).toEqual([
+      named(deals, 'Deals', 'active'),
+      named(notes, 'Notes', 'revoked'),
+    ]);
+    await change({ crmExcludedApiKeyIds: [notes.id] });
+    const updates = await fx.query<{ metadata: { crmExcludedApiKeyIds?: unknown } }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND action = 'webhook.endpoint_updated' ORDER BY occurred_at`,
+      [c.tenant.id],
+    );
+    expect(updates.map((u) => u.metadata.crmExcludedApiKeyIds)).toEqual([
+      [deals.id, notes.id],
+      [notes.id],
+    ]);
+    await change({ crmExcludedApiKeyIds: null });
+    expect(await current()).toBeNull();
+    await change({ crmExcludedApiKeyIds: [deals.id] });
+    // Any deal, task or note event keeps the list.
+    await change({ eventTypes: ['note.created'] });
+    expect((await current())?.map((k) => k.id)).toEqual([deals.id]);
+    // The database refuses an empty list, more than 20 keys, a missing one or a list of lists from
+    // an endpoint taking such an event…
+    const setInDatabase = (value: string) =>
+      fx.query(
+        `UPDATE app.webhook_endpoints SET crm_excluded_api_key_ids = ${value} WHERE id = $1`,
+        [created.id],
+      );
+    const many = Array.from({ length: 21 }, () => `'${uuidv7()}'`).join(', ');
+    for (const bad of [
+      `'{}'`,
+      `ARRAY[${many}]::uuid[]`,
+      `ARRAY['${deals.id}', NULL]::uuid[]`,
+      `ARRAY[ARRAY['${deals.id}']]::uuid[]`,
+    ]) {
+      await expect(setInDatabase(bad), bad).rejects.toThrow(
+        /webhook_endpoints_crm_excluded_api_key_ids/,
+      );
+    }
+    await change({ eventTypes: ['consent.changed'] });
+    expect(await current()).toBeNull();
+    await expectAppError(
+      change({ eventTypes: ['consent.changed'], crmExcludedApiKeyIds: [deals.id] }),
+      'validation_failed',
+      needsTheEvents,
+    );
+    // …and any list from an endpoint taking none.
+    await expect(setInDatabase(`ARRAY['${deals.id}']::uuid[]`)).rejects.toThrow(
+      /webhook_endpoints_crm_excluded_api_key_ids/,
+    );
+    // The company role changes the list only through its column grant.
+    const [grant] = await fx.query<{ can_update: boolean }>(
+      `SELECT has_column_privilege('w360_app', 'app.webhook_endpoints', 'crm_excluded_api_key_ids',
+                'UPDATE') AS can_update`,
+    );
+    expect(grant?.can_update).toBe(true);
   });
 });
 
@@ -3544,6 +4318,146 @@ describe('run trigger filters (ADR-183)', () => {
     // The company role changes the list only through its column grant.
     const [grant] = await fx.query<{ can_update: boolean }>(
       `SELECT has_column_privilege('w360_app', 'app.webhook_endpoints', 'run_triggers', 'UPDATE')
+                AS can_update`,
+    );
+    expect(grant?.can_update).toBe(true);
+  });
+});
+
+describe('API key filters of run events (ADR-319)', () => {
+  it('are refused without a run event, or naming keys that are not the company’s or cannot start automations, kept by a change that leaves them out and cleared with the events; the database keeps them to those events', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const keys = createApiKeysService({ db: fx.dbs.app, clock: systemClock });
+    const store = await keys.create(owner, {
+      name: 'Store',
+      scopes: ['automations.start'],
+      expiresInDays: 0,
+    });
+    const crm = await keys.create(owner, {
+      name: 'CRM',
+      scopes: ['contacts.read', 'automations.start'],
+      expiresInDays: 30,
+    });
+    const reader = await keys.create(owner, {
+      name: 'Reader',
+      scopes: ['contacts.read'],
+      expiresInDays: 0,
+    });
+    const other = await fx.company();
+    const theirs = await keys.create(await fx.ctx(other, other.owner), {
+      name: 'Theirs',
+      scopes: ['automations.start'],
+      expiresInDays: 0,
+    });
+    const url = 'https://hooks.example.com/in';
+    const refused = (eventTypes: string[], runApiKeyIds: unknown, message: RegExp) =>
+      expectAppError(
+        webhooks().create(owner, { url, eventTypes, runApiKeyIds }),
+        'validation_failed',
+        message,
+      );
+    const needsTheEvents =
+      /only for an endpoint that receives Automation started or Automation ended/;
+    const notTheirs = /API keys of this company that can start automations/;
+    await refused(['message.received', 'order.received'], [store.id], needsTheEvents);
+    await refused(['automation.run_started'], [], /at least one API key/);
+    await refused(['automation.run_started'], [store.keyPrefix], /from the list/);
+    await refused(['automation.run_started'], [store.id, reader.id], notTheirs);
+    await refused(['automation.run_ended'], [theirs.id], notTheirs);
+    expect(await webhooks().list(owner)).toEqual([]);
+    // Settings offers the keys that can start automations and work, by name.
+    expect(await webhooks().runApiKeyChoices(owner)).toEqual([
+      { id: crm.id, name: 'CRM', keyPrefix: crm.keyPrefix },
+      { id: store.id, name: 'Store', keyPrefix: store.keyPrefix },
+    ]);
+
+    const created = await webhooks().create(owner, {
+      url,
+      eventTypes: ['automation.run_started', 'consent.changed'],
+      runApiKeyIds: [store.id, crm.id, store.id.toUpperCase()],
+    });
+    const [audit] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events WHERE tenant_id = $1 AND action = 'webhook.endpoint_created'`,
+      [c.tenant.id],
+    );
+    expect(audit?.metadata).toMatchObject({ runApiKeyIds: [store.id, crm.id] });
+    const change = (fields: Record<string, unknown>) =>
+      webhooks().update(owner, {
+        endpointId: created.id,
+        url,
+        description: '',
+        eventTypes: ['automation.run_started', 'consent.changed'],
+        ...fields,
+      });
+    const current = async () =>
+      (await webhooks().list(owner)).find((e) => e.id === created.id)?.runApiKeys;
+    const named = (key: { id: string; keyPrefix: string }, name: string, state: string) => ({
+      id: key.id,
+      name,
+      keyPrefix: key.keyPrefix,
+      state,
+    });
+    expect(await current()).toEqual([named(store, 'Store', 'active'), named(crm, 'CRM', 'active')]);
+    await change({ description: 'kept' });
+    expect((await current())?.map((k) => k.id)).toEqual([store.id, crm.id]);
+    // A rotated key is offered no more: the key that replaced it is, under the same name. A key
+    // revoked since stays named, and allowed: the runs it started still end.
+    const rotated = await keys.rotate(owner, { keyId: store.id, overlapHours: 24 });
+    await keys.revoke(owner, { keyId: crm.id });
+    expect(await webhooks().runApiKeyChoices(owner)).toEqual([
+      { id: rotated.id, name: 'Store', keyPrefix: rotated.keyPrefix },
+    ]);
+    expect(await current()).toEqual([
+      named(store, 'Store', 'active'),
+      named(crm, 'CRM', 'revoked'),
+    ]);
+    await change({ runApiKeyIds: [crm.id, rotated.id] });
+    expect((await current())?.map((k) => k.id)).toEqual([crm.id, rotated.id]);
+    const updates = await fx.query<{ metadata: { runApiKeyIds?: unknown } }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND action = 'webhook.endpoint_updated' ORDER BY occurred_at`,
+      [c.tenant.id],
+    );
+    expect(updates.map((u) => u.metadata.runApiKeyIds)).toEqual([
+      [store.id, crm.id],
+      [crm.id, rotated.id],
+    ]);
+    await change({ runApiKeyIds: null });
+    expect(await current()).toBeNull();
+    await change({ runApiKeyIds: [store.id] });
+    // Either run event keeps the list.
+    await change({ eventTypes: ['automation.run_ended'] });
+    expect((await current())?.map((k) => k.id)).toEqual([store.id]);
+    // The database refuses an empty list, more than 20 keys, a missing one or a list of lists
+    // from an endpoint taking a run event…
+    const setInDatabase = (value: string) =>
+      fx.query(`UPDATE app.webhook_endpoints SET run_api_key_ids = ${value} WHERE id = $1`, [
+        created.id,
+      ]);
+    const many = Array.from({ length: 21 }, () => `'${uuidv7()}'`).join(', ');
+    for (const bad of [
+      `'{}'`,
+      `ARRAY[${many}]::uuid[]`,
+      `ARRAY['${store.id}', NULL]::uuid[]`,
+      `ARRAY[ARRAY['${store.id}']]::uuid[]`,
+    ]) {
+      await expect(setInDatabase(bad), bad).rejects.toThrow(/webhook_endpoints_run_api_key_ids/);
+    }
+    await change({ eventTypes: ['consent.changed'] });
+    expect(await current()).toBeNull();
+    await expectAppError(
+      change({ eventTypes: ['consent.changed'], runApiKeyIds: [store.id] }),
+      'validation_failed',
+      needsTheEvents,
+    );
+    // …and any list for an endpoint that takes neither.
+    await expect(setInDatabase(`ARRAY['${store.id}']::uuid[]`)).rejects.toThrow(
+      /webhook_endpoints_run_api_key_ids/,
+    );
+    // The company role changes the list only through its column grant.
+    const [grant] = await fx.query<{ can_update: boolean }>(
+      `SELECT has_column_privilege('w360_app', 'app.webhook_endpoints', 'run_api_key_ids', 'UPDATE')
                 AS can_update`,
     );
     expect(grant?.can_update).toBe(true);

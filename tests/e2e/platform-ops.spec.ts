@@ -337,8 +337,8 @@ test('staff acknowledge a company’s failing integration on the console, with a
   const suffix = `${Date.now().toString(36)}${Math.floor(Math.random() * 1e4)}`;
   const slug = `ack-${suffix}`;
   const companyName = `Ack Co ${suffix}`;
-  // Platform administrators are shared by every run, so this one's name is its own: the
-  // Administrator list is chosen by name.
+  // Platform administrators are shared by every run, so this one's name is its own; the
+  // Administrator list marks the reader (ADR-325).
   const staff = `Anil Staff ${suffix}`;
   await signUpAndVerify(page, { name: staff, email, password: PASSWORD });
   await page.getByLabel('Company name').fill(companyName);
@@ -380,7 +380,7 @@ test('staff acknowledge a company’s failing integration on the console, with a
   // Assigned to an administrator, here the one who took it (ADR-313).
   await expect(row).not.toContainText(`To ${staff}`);
   await row.getByText('Assign', { exact: true }).click();
-  await row.getByLabel('Administrator').selectOption({ label: staff });
+  await row.getByLabel('Administrator').selectOption({ label: `${staff} (you)` });
   await row.getByRole('button', { name: 'Assign failure' }).click();
   await expect(row).toContainText(`To ${staff}`);
   await expect(row.getByText('Reassign', { exact: true })).toBeVisible();

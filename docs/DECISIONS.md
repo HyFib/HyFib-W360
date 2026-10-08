@@ -12266,3 +12266,349 @@ Decision:
 
 Not built: counts of the unassigned failures on the tab, and an email about failures left unassigned
 for long.
+
+## ADR-319 Choosing the API keys whose runs a webhook endpoint receives (P5-09) (2026-10-08)
+
+Context: an endpoint taking `automation.run_started` or `automation.run_ended` can narrow them by
+automation (ADR-145), by how and why the runs ended (ADR-151, ADR-192) and by what started them
+(ADR-183), but not by the key that started them: every run started through the API has the trigger
+`api`. A company that gives each integration its own key (a store, a CRM) sent each integration's
+endpoint the runs the other keys started too, and each receiver read `run.apiKeyId` to drop them.
+
+Decision:
+
+- **One list per endpoint for both events,** `runApiKeyIds`: 1 to 20 ids of the company's API keys
+  (a company has at most 20 working keys), each once. A run started through the API is sent when the
+  key that started it is on the list, or a key it was rotated from or into, however many rotations
+  away: a key named before a rotation keeps the integration's runs, and a key named after one also
+  takes the runs the old key starts while it still works (up to 72 hours). A run started otherwise
+  (a keyword, a store event, a conversation) belongs to no key and is not sent to a list. Null
+  receives every run, as before. With automations, triggers, ends or reasons chosen too, a run must
+  pass them all. Chosen in Settings → Webhooks ("Runs started through the API": every run by
+  default, or only those the keys ticked started; shown while the endpoint takes either event),
+  shown on the endpoint as "Automation runs sent, started through the API by: …", and through the
+  API as `runApiKeyIds` on `POST /webhook-endpoints` and `PATCH /webhook-endpoints/{id}` and in
+  every endpoint the API answers; a key that adds an endpoint finds its own id in the endpoint's
+  `apiKeyId`.
+- **Which keys:** the services refuse an id that is not one of the company's keys holding
+  `automations.start` (named by place), whatever the key's state: a revoked or expired key's runs
+  still end, and a rotated key's runs match the key that replaced it. Settings offers the keys that
+  work and were not rotated, by name and prefix, and keeps naming a key an endpoint has, with
+  "revoked" or "expired" once it stops working. Keys are never deleted and keep their scopes, so a
+  list never names a key that is gone or cannot start runs.
+- **Only while a run event is taken:** a list given for an endpoint that takes neither event is
+  refused (422 through the API). A change that drops both events clears it, and a `PATCH` that
+  leaves it out keeps it; Settings always sends it (null while every run is taken). A check in the
+  database holds the same rule and the list's shape (null, or 1 to 20 ids in one dimension without a
+  null, with either event).
+- **Applied at capture:** the run trigger now passes the key that started the run (`apiKeyId`, null
+  for any other run) to `app.capture_webhook_event`, which reads the key's rotations from
+  `app.api_keys` (the keys it replaced and the keys that replaced it, along `replaced_by_key_id`
+  both ways, within the company) only when an active endpoint of the company that takes the event
+  names keys, and creates a delivery only for the endpoints whose list is null or shares one of
+  them. The key is taken out of the detail before the event is stored: the payload reads
+  `run.apiKeyId` from the run, as before. The capture runs as the role writing the run, the runtime
+  role or the definer role (an erasure stopping a run, say); both can read the keys' ids and
+  rotations (0024), and the capture reads nothing else of them.
+- **Audited and exported:** `webhook.endpoint_created` and `webhook.endpoint_updated` carry
+  `runApiKeyIds` when the endpoint has it, and the company data export carries the column.
+- **Permissions unchanged:** members with `developer.manage` in Settings, who see the same keys in
+  Settings → API keys, and keys with `webhooks.manage` through the API. A refusal tells a key only
+  whether an id names one of the company's keys that can start automations; keys already see the ids
+  of the keys that start runs, in the run events they receive.
+- **Migration 0241:** `run_api_key_ids uuid[]` on `app.webhook_endpoints` with its check, validated
+  at once (a company has at most 10 endpoints), the update grant on the column for the runtime role,
+  and the run trigger's `app.webhook_capture_automation_run` and `app.capture_webhook_event`
+  replaced with the same signatures (0131's and 0235's, with the key), so their owners and grants
+  stay. Existing endpoints keep null; nothing is backfilled.
+
+Not built: lists that leave chosen keys' runs out, filters by the key that sent a message or made a
+CRM change (their events name it), and the key's name in the payload.
+
+## ADR-320 Choosing the API keys whose sent messages' statuses a webhook endpoint receives (P5-09) (2026-10-08)
+
+Context: an endpoint taking `message.status` can narrow it by status (ADR-119) and by who sent the
+messages (ADR-172), but every message sent through the API has the sender `api`. A company that
+gives each integration its own key (a shop sending order updates, a helpdesk replying) sent each
+integration's endpoint the statuses of the messages the other keys sent too, and each receiver read
+`message.apiKeyId` to drop them. ADR-319 named keys for runs only.
+
+Decision:
+
+- **One list per endpoint,** `messageApiKeyIds`: 1 to 20 ids of the company's API keys, each once. A
+  status is sent when the key that sent its message through the API (`message.apiKeyId`) is on the
+  list, or a key it was rotated from or into, however many rotations away, as for runs (ADR-319). A
+  message a member, an automation, a campaign or HyFib sent belongs to no key, and neither does one
+  an automation sent for a run a key started: it is the automation's. Null receives every message's
+  statuses, as before. With statuses or senders chosen too, a status must pass them all; received
+  messages are not narrowed. Chosen in Settings → Webhooks ("Messages sent through the API": every
+  message's statuses by default, or only those of the messages the keys ticked sent; shown while the
+  endpoint takes Message status), shown on the endpoint as "Statuses of messages sent through the
+  API by: …", and through the API as `messageApiKeyIds` on `POST /webhook-endpoints` and
+  `PATCH /webhook-endpoints/{id}` and in every endpoint the API answers.
+- **Which keys:** the services refuse an id that is not one of the company's keys holding a scope
+  whose messages carry the key (`messages.send`, `messages.send_marketing` or `messages.reply`, or
+  `orders.request_payment`, whose Payment Link is sent in the chat as the key, ADR-283), named by
+  place, whatever the key's state: a revoked or expired key's messages still change status, and a
+  rotated key's messages match the key that replaced it. Settings offers the keys that work and were
+  not rotated, and keeps naming a key an endpoint has, with "revoked" or "expired" once it stops
+  working.
+- **Only while `message.status` is taken:** a list given for an endpoint that does not take it is
+  refused (422 through the API); a change that drops it clears the list, and a `PATCH` that leaves
+  the list out keeps it. A check in the database holds the same rule and the list's shape (null, or
+  1 to 20 ids in one dimension without a null, with `message.status`).
+- **Applied at capture:** the message trigger now passes the key that sent the message (`apiKeyId`,
+  null for any other message) with `message.status`, and `app.capture_webhook_event` reads the
+  key's rotations only when an active endpoint of the company taking the event names keys for
+  messages, then creates a delivery only for the endpoints whose list is null or shares one of them.
+  The rotations are read by `app.webhook_api_key_family`, which both key filters now share: a plain
+  SQL function, run as the capture's caller, following `replaced_by_key_id` both ways within the
+  company. The key is taken out of the stored detail: the payload reads `message.apiKeyId` from the
+  message, as before.
+- **Audited, exported, permissions unchanged,** as for runs: `webhook.endpoint_created` and
+  `webhook.endpoint_updated` carry `messageApiKeyIds` when the endpoint has it, and the company data
+  export carries the column.
+- **Migration 0242:** `message_api_key_ids uuid[]` on `app.webhook_endpoints` with its check,
+  validated at once (a company has at most 10 endpoints), the update grant on the column for the
+  runtime role, `app.webhook_api_key_family` for the runtime and definer roles, and the message
+  trigger's `app.webhook_capture_message` and `app.capture_webhook_event` replaced with the same
+  signatures (0133's and 0241's, with the key), so their owners and grants stay. Existing endpoints
+  keep null; nothing is backfilled.
+
+Not built: lists that leave chosen keys' messages out, the statuses of the messages an automation
+sent for a key's run, and filters by the key that made a CRM or order change.
+
+## ADR-321 Choosing the API keys whose deal, task and note changes a webhook endpoint leaves out (P5-09) (2026-10-08)
+
+Context: an endpoint taking deal, task or note events can choose who made the changes it receives
+(ADR-306): members, automations' runs, API keys. An integration that writes deals, tasks or notes
+through the API and takes their events (to keep its own copy in step) was sent back every change it
+wrote; leaving out the API's changes left out every other integration's too, and the receiver read
+`apiKeyId` to drop its own. ADR-320 left filters by the key that made a CRM change unbuilt.
+
+Decision:
+
+- **One list per endpoint,** `crmExcludedApiKeyIds`: 1 to 20 ids of the company's API keys, each
+  once, whose changes the endpoint does not receive. A deal, task or note event is left out when the
+  key that made its change, as the payload's `apiKeyId` names it (for `deal.created` and
+  `task.created` the key that added the deal or task, for `note.created` the key that wrote the
+  note), is on the list, or a key it was rotated from or into, however many rotations away, as for
+  runs and messages (ADR-319, ADR-320). A change a member or an automation's run made, or one HyFib
+  recorded no maker for (such as erasure retitling a deal), is left out by no list. A list of keys
+  to leave out rather than to take, because what an integration needs is every change but its own,
+  members' and other keys' included. Null leaves nothing out, as before. With who made the changes
+  or other lists chosen too, an event must pass them all; other events are not narrowed. Chosen in
+  Settings → Webhooks ("Deal, task and note changes made through the API": every change by default,
+  or all but those the keys ticked made; shown while the endpoint takes a deal, task or note event),
+  shown on the endpoint as "Deal, task and note changes left out, made through the API by: …", and
+  through the API as `crmExcludedApiKeyIds` on `POST /webhook-endpoints` and
+  `PATCH /webhook-endpoints/{id}` and in every endpoint the API answers.
+- **Which keys:** the services refuse an id that is not one of the company's keys holding a scope
+  that changes deals, tasks or notes (`deals.write`, `tasks.write` or `notes.write`), named by
+  place, whatever the key's state: a key revoked or expired since it was ticked makes no more
+  changes but does not stop the endpoint being saved, and a rotated key's changes match the key that
+  replaced it. Settings offers the keys that work and were not rotated, and keeps naming a key an
+  endpoint has, with "revoked" or "expired" once it stops working.
+- **Only while a deal, task or note event is taken:** a list given for an endpoint that takes none
+  is refused (422 through the API); a change that drops every such event clears the list, a `PATCH`
+  that leaves the list out keeps it, and one that gives only the list is a change. A check in the
+  database holds the same rule and the list's shape (null, or 1 to 20 ids in one dimension without a
+  null, with a deal, task or note event).
+- **Applied at capture:** `app.capture_webhook_event` already read who made a change when an active
+  endpoint taking the event names makers (0229); it now does so too when one leaves out keys, and
+  reads the key that made it: the deal's or task's `created_by_api_key_id` for its creation, the
+  note's `apiKeyId` when no member wrote it, and the `apiKeyId` the change triggers pass with the
+  maker `api` for the other events. It reads the key's rotations through
+  `app.webhook_api_key_family` (0242) only when an active endpoint taking the event leaves out keys,
+  and creates no delivery for an endpoint whose list shares one of them. Nothing new is stored: the
+  events' payloads already name the key.
+- **Audited, exported, permissions unchanged,** as for runs and messages: `webhook.endpoint_created`
+  and `webhook.endpoint_updated` carry `crmExcludedApiKeyIds` when the endpoint has it, and the
+  company data export carries the column.
+- **Migration 0243:** `crm_excluded_api_key_ids uuid[]` on `app.webhook_endpoints` with its check,
+  validated at once (a company has at most 10 endpoints), the update grant on the column for the
+  runtime role, and `app.capture_webhook_event` replaced with the same signature (0242's, with the
+  exclusion), so its owner and grants stay. Existing endpoints keep null; nothing is backfilled.
+
+Not built: lists that take only chosen keys' CRM changes, lists that leave chosen keys' runs or
+messages out, the statuses of the messages an automation sent for a key's run, and filters by the
+key that made an order change.
+
+## ADR-322 Choosing who made the order status changes a webhook endpoint receives (P5-09) (2026-10-08)
+
+Context: `order.status_changed` names who made each change (`changedBy`: a member on the order page,
+an API key, or HyFib applying what Razorpay reports for the order's Payment Link, ADR-270), so an
+integration could tell its own changes from others', but an endpoint received them all. An
+integration that moves orders through the API (an order system confirming and fulfilling them) was
+sent back every change it had just made and had to drop each one. ADR-306 left makers for order
+events unbuilt.
+
+Decision:
+
+- **One list per endpoint for its order status changes,** `orderChangeMakers`: 1 to 3 of `member`,
+  `api` and `payment_link`, in that order with repeats merged, as the event's `changedBy` names
+  them. Null receives every change, as before. A change that recorded no maker (`changedBy` null:
+  one written during ADR-270's rollout by code from before it) is sent whatever the list holds, so
+  no endpoint loses an event because HyFib cannot say who made it. `order.received` is not narrowed:
+  a new order is the customer's. With order statuses or numbers chosen too, an event must pass every
+  list. Chosen in Settings → Webhooks ("Order changes made by", every maker ticked by default;
+  untick API keys to leave out what integrations change through the API; shown while the endpoint
+  takes Order status), shown on the endpoint as "Order changes sent, made by: …", and through the
+  API as `orderChangeMakers` on `POST /webhook-endpoints` and `PATCH /webhook-endpoints/{id}` and in
+  every endpoint the API answers.
+- **Every key at once:** as for CRM changes (ADR-306), the list names kinds of maker, not keys: an
+  integration that unticks API keys leaves out every key's order changes, its own and other
+  integrations'. Leaving out chosen keys only, as ADR-321 does for CRM changes, is not built for
+  orders.
+- **Only while `order.status_changed` is taken:** a list given for an endpoint that does not take it
+  is refused (`orderChangeMakers`; 422 through the API). A change that drops the event clears the
+  list, a `PATCH` that leaves it out keeps it, and one that gives only the list is a change. A check
+  in the database holds the same rule (null, or 1 to 3 known makers in one dimension without a null,
+  with `order.status_changed`).
+- **Applied at capture:** `app.capture_webhook_event` matches the maker the order trigger puts in
+  the event's detail (0187: recorded with the status by the change's own transaction), with no
+  further read, and creates a delivery only for the endpoints whose list is null or holds it; a
+  change without a maker reaches every list. No event is written when no endpoint takes it, and
+  stored events are unchanged.
+- **Audited, exported, permissions unchanged:** `webhook.endpoint_created` and
+  `webhook.endpoint_updated` carry `orderChangeMakers` when the endpoint has the list, and the
+  company data export carries the column; members with `developer.manage` in Settings, keys with
+  `webhooks.manage` through the API.
+- **Migration 0244:** `order_change_makers text[]` on `app.webhook_endpoints` with its check,
+  validated at once (a company has at most 10 endpoints), the update grant on the column for the
+  runtime role, and `app.capture_webhook_event` replaced with the same signature (0243's, with the
+  maker), so its owner and grants stay. Existing endpoints keep null; nothing is backfilled.
+
+Not built: leaving out chosen keys' order changes, makers for Payment Link events
+(`payment_link.status_changed` names who asked for the link), and filters by the key that asked for
+an order's payment.
+
+## ADR-323 Choosing the API keys whose order status changes a webhook endpoint leaves out (P5-09) (2026-10-08)
+
+Context: an endpoint taking `order.status_changed` can choose who made the changes it receives
+(ADR-322): members, API keys, Payment Links. An order system that moves orders through the API and
+takes the event could leave out every key's changes, but then lost every other integration's too (a
+fulfilment service's and a payments service's, say), and the receiver read `apiKeyId` to drop its
+own. ADR-322 left leaving out chosen keys' order changes unbuilt.
+
+Decision:
+
+- **One list per endpoint,** `orderExcludedApiKeyIds`: 1 to 20 ids of the company's API keys, each
+  once, whose order status changes the endpoint does not receive. A change is left out when the key
+  that made it, as the event's `apiKeyId` names it, is on the list, or a key it was rotated from or
+  into, however many rotations away, as for runs, messages and CRM changes (ADR-319 to ADR-321). A
+  change a member or a Payment Link made, or one HyFib recorded no maker for, is left out by no
+  list, and `order.received` is not narrowed. Null leaves nothing out, as before. With order
+  statuses, who made the changes or numbers chosen too, an event must pass them all. Chosen in
+  Settings → Webhooks ("Order changes made through the API": every order change by default, or all
+  but those the keys ticked made; shown while the endpoint takes Order status), shown on the
+  endpoint as "Order changes left out, made through the API by: …", and through the API as
+  `orderExcludedApiKeyIds` on `POST /webhook-endpoints` and `PATCH /webhook-endpoints/{id}` and in
+  every endpoint the API answers.
+- **Which keys:** the services refuse an id that is not one of the company's keys holding a scope
+  that changes an order's status: `orders.write`, or `orders.request_payment`, whose request leaves
+  the order waiting for payment (ADR-270 records that change as the key's). Named by place, whatever
+  the key's state: a key revoked or expired since it was ticked makes no more changes but does not
+  stop the endpoint being saved, and a rotated key's changes match the key that replaced it.
+  Settings offers the keys that work and were not rotated, and keeps naming a key an endpoint has,
+  with "revoked" or "expired" once it stops working.
+- **Only while `order.status_changed` is taken:** a list given for an endpoint that does not take it
+  is refused (422 through the API); a change that drops the event clears the list, a `PATCH` that
+  leaves the list out keeps it, and one that gives only the list is a change. A check in the
+  database holds the same rule and the list's shape (null, or 1 to 20 ids in one dimension without a
+  null, with `order.status_changed`).
+- **Applied at capture:** the order trigger already passes the key that made a change in the detail
+  (0187), and the payload reads it there, so the key stays in the stored detail.
+  `app.capture_webhook_event` reads the key's rotations through `app.webhook_api_key_family` (0242),
+  as for runs and messages, only when an active endpoint of the company taking the event leaves out
+  keys, and creates no delivery for an endpoint whose list shares one of them.
+- **Audited, exported, permissions unchanged,** as for the other key lists:
+  `webhook.endpoint_created` and `webhook.endpoint_updated` carry `orderExcludedApiKeyIds` when the
+  endpoint has it, and the company data export carries the column.
+- **Migration 0245:** `order_excluded_api_key_ids uuid[]` on `app.webhook_endpoints` with its check,
+  validated at once (a company has at most 10 endpoints), the update grant on the column for the
+  runtime role, and `app.capture_webhook_event` replaced with the same signature (0244's, with the
+  exclusion), so its owner and grants stay. Existing endpoints keep null; nothing is backfilled.
+
+Not built: lists that take only chosen keys' order changes, lists that leave chosen keys' runs or
+messages out, makers and keys for Payment Link events (`payment_link.status_changed` names who asked
+for the link), and the statuses of the messages an automation sent for a key's run.
+
+## ADR-324 Choosing the API keys whose Payment Links' changes a webhook endpoint receives (P5-09) (2026-10-08)
+
+Context: `payment_link.status_changed` (ADR-285) names who asked for each link (`requestedBy`: a
+member, or an API key by `requestedByApiKeyId`, ADR-283), and an endpoint can narrow it by status
+(ADR-308), but it received every link's changes. A payments integration with its own key was sent
+the links members and other keys asked for too, and read `requestedByApiKeyId` to drop them. ADR-322
+and ADR-323 left keys for Payment Link events unbuilt.
+
+Decision:
+
+- **One list per endpoint,** `paymentLinkApiKeyIds`: 1 to 20 ids of the company's API keys, each
+  once. A link's change is sent when the key that asked for the link is on the list, or a key it was
+  rotated from or into, however many rotations away, as for runs and messages (ADR-319, ADR-320); a
+  link a member asked for matches no list. Null receives every link's changes, as before. With
+  statuses or numbers chosen too, a change must pass them all. Chosen in Settings → Webhooks
+  ("Payment Links asked for through the API": every link's changes by default, or only those of the
+  links the keys ticked asked for; shown while the endpoint takes Payment Link status), shown on the
+  endpoint as "Payment Links sent, asked for through the API by: …", and through the API as
+  `paymentLinkApiKeyIds` on `POST /webhook-endpoints` and `PATCH /webhook-endpoints/{id}` and in
+  every endpoint the API answers.
+- **Which keys:** the services refuse an id that is not one of the company's keys holding
+  `orders.request_payment`, the only scope that asks for links, named by place, whatever the key's
+  state: a revoked or expired key's links still change status, and a rotated key's links match the
+  key that replaced it. Settings offers the keys that work and were not rotated, and keeps naming a
+  key an endpoint has, with "revoked" or "expired" once it stops working.
+- **Only while `payment_link.status_changed` is taken:** a list given for an endpoint that does not
+  take it is refused (422 through the API); a change that drops the event clears the list, a `PATCH`
+  that leaves the list out keeps it, and one that gives only the list is a change. A check in the
+  database holds the same rule and the list's shape (null, or 1 to 20 ids in one dimension without a
+  null, with `payment_link.status_changed`).
+- **Applied at capture:** the link trigger now passes the key that asked for the link (`apiKeyId`,
+  null for a member's link) with `payment_link.status_changed`, and `app.capture_webhook_event`
+  reads the key's rotations through `app.webhook_api_key_family` only when an active endpoint of the
+  company taking the event names keys for links, then creates a delivery only for the endpoints
+  whose list is null or shares one of them. The key is taken out of the stored detail: the payload
+  reads who asked from the link, as before.
+- **Audited, exported, permissions unchanged,** as for the other key lists:
+  `webhook.endpoint_created` and `webhook.endpoint_updated` carry `paymentLinkApiKeyIds` when the
+  endpoint has it, and the company data export carries the column.
+- **Migration 0246:** `payment_link_api_key_ids uuid[]` on `app.webhook_endpoints` with its check,
+  validated at once (a company has at most 10 endpoints), the update grant on the column for the
+  runtime role, and the link trigger's `app.webhook_capture_payment_link` and
+  `app.capture_webhook_event` replaced with the same signatures (0204's and 0245's, with the key),
+  so their owners and grants stay. Existing endpoints keep null; nothing is backfilled.
+
+Not built: lists that leave chosen keys' links out, choosing links by who asked for them (a member
+or any key) without naming keys, and the statuses of the messages an automation sent for a key's
+run.
+
+## ADR-325 Telling platform administrators apart in the Assign list (P5-10) (2026-10-08)
+
+Context: the Administrator list a failure is assigned from (ADR-313) named each platform
+administrator by name only. Two administrators with the same name read the same, ordered by account
+id, so an administrator could assign a failure to someone other than the one they meant: CI's
+end-to-end run, which signs up several administrators of one name, did exactly that, and the failure
+went to an administrator who never saw it under "Assigned to me". The console shows no email
+addresses (ADR-054), so the name alone has to tell them apart.
+
+Decision:
+
+- **Names as a list shows them:** compared and shown trimmed, with runs of spaces as one, as a list
+  option displays them, so "Asha Ops" and "Asha Ops" count as one name.
+- **The reader is "(you)":** the administrator reading the console sees their own name followed by
+  "(you)", whoever shares it, since assigning oneself is the common case.
+- **A shared name gets when they became an administrator:** any other administrator whose name
+  another one has gets "(administrator since YYYY-MM-DD HH:MM UTC)", from
+  `ops.platform_admins.created_at`, which platform administrators can already read; administrators
+  still alike after that get "#1", "#2"… in the list's order (by name, then account), and so does a
+  label that would read like another one, since names are the administrators' own (one could be
+  named "Asha (you)"). An administrator without a name is "An administrator without a name", told
+  apart the same way. No two choices read the same.
+- **Names only where they were shown:** the rows still say "To …" and "By …" by name, the CSV still
+  leaves assignments out, and nothing new is read about an administrator but when they became one.
+  Built in `platformAdministratorChoices` (`platform/ops-model.ts`); the Integrations tab's
+  `administrators` now carry the label; no migration.
+
+Not built: the same marks on the rows' "To …" and "By …", and choosing administrators by anything
+but the list.
