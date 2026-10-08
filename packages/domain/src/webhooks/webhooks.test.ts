@@ -22,6 +22,7 @@ import {
   WEBHOOK_EVENT_TYPES,
 } from '@w360/db';
 import { apiCampaignResultsSchema } from '../api/campaigns';
+import { API_KEY_LIMITS } from '../api/model';
 import { apiContactSchema } from '../api/contact-view';
 import { apiSatisfactionSurveySchema } from '../api/satisfaction-survey-view';
 import { buildOpenApiDocument } from '../api/openapi';
@@ -95,6 +96,7 @@ import {
   webhookOwnerText,
   webhookPipelineText,
   webhookRetryDelaySeconds,
+  webhookRunApiKeyText,
   webhookTakesAutomationRuns,
   webhookTakesCampaignEvents,
   webhookTakesChannelEvents,
@@ -192,6 +194,8 @@ import {
   webhookRunEndStatusesSchema,
   webhookRunTriggersFor,
   webhookRunTriggersSchema,
+  webhookRunApiKeyIdsFor,
+  webhookRunApiKeyIdsSchema,
   webhookConsentChangesFor,
   webhookConsentChangesSchema,
   webhookContactSourcesFor,
@@ -2394,6 +2398,63 @@ describe('automation filters (ADR-145)', () => {
     ]);
     expect(webhookAutomationIdsFor(['consent.changed'], [greeter], [farewell])).toBeNull();
     expect(webhookAutomationIdsFor(['message.received'], undefined, [farewell])).toBeNull();
+  });
+});
+
+describe('API key filters of run events (ADR-319)', () => {
+  const store = '0e1a2b3c-4d5e-4f60-8172-8394a5b6c7d8';
+  const crm = '1f2e3d4c-5b6a-4978-8695-a4b3c2d1e0f9';
+
+  it('take 1 to 20 key ids, once each, in lower case; null takes every run', () => {
+    expect(webhookRunApiKeyIdsSchema.parse([store.toUpperCase(), crm, store])).toEqual([
+      store,
+      crm,
+    ]);
+    expect(webhookRunApiKeyIdsSchema.parse(null)).toBeNull();
+    // As many as a company can have working keys.
+    expect(WEBHOOK_LIMITS.runApiKeys).toBe(API_KEY_LIMITS.activeKeys);
+    const ids = Array.from(
+      { length: 21 },
+      (_, i) => `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`,
+    );
+    expect(webhookRunApiKeyIdsSchema.safeParse(ids.slice(1)).success).toBe(true);
+    expect(webhookRunApiKeyIdsSchema.safeParse(ids).error?.issues[0]?.message).toBe(
+      'Choose at most 20 API keys.',
+    );
+    expect(webhookRunApiKeyIdsSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one API key, or take every run.',
+    );
+    // A key's prefix is not its id.
+    expect(
+      webhookRunApiKeyIdsSchema.safeParse(['w360_aaaaaaaaaaaa']).error?.issues[0]?.message,
+    ).toBe('Choose API keys from the list.');
+  });
+
+  it('are kept only while the endpoint takes an automation run event: given, kept, or cleared', () => {
+    const both = ['automation.run_started', 'automation.run_ended'] as const;
+    expect(webhookRunApiKeyIdsFor([...both], [store], null)).toEqual([store]);
+    expect(webhookRunApiKeyIdsFor([...both], undefined, [crm])).toEqual([crm]);
+    expect(webhookRunApiKeyIdsFor([...both], null, [crm])).toBeNull();
+    expect(webhookRunApiKeyIdsFor([...both], undefined, null)).toBeNull();
+    // One of the two events is enough to keep the list.
+    expect(webhookRunApiKeyIdsFor(['automation.run_started'], undefined, [crm])).toEqual([crm]);
+    expect(webhookRunApiKeyIdsFor(['automation.run_ended'], undefined, [crm])).toEqual([crm]);
+    expect(webhookRunApiKeyIdsFor(['consent.changed'], [store], [crm])).toBeNull();
+    expect(webhookRunApiKeyIdsFor(['message.received'], undefined, [crm])).toBeNull();
+  });
+
+  it('name a key as the list of endpoints names the key that added one, and say why it stopped working', () => {
+    const key = { id: store, name: 'Store', keyPrefix: 'w360_aaaaaaaaaaaa' };
+    expect(webhookRunApiKeyText({ ...key, state: 'active' })).toBe('“Store” (w360_aaaaaaaaaaaa_…)');
+    expect(webhookRunApiKeyText({ ...key, state: 'revoked' })).toBe(
+      '“Store” (w360_aaaaaaaaaaaa_…), revoked',
+    );
+    expect(webhookRunApiKeyText({ ...key, state: 'expired' })).toBe(
+      '“Store” (w360_aaaaaaaaaaaa_…), expired',
+    );
+    expect(webhookRunApiKeyText({ id: store, name: null, keyPrefix: null, state: null })).toBe(
+      'Unknown API key',
+    );
   });
 });
 

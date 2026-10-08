@@ -1138,6 +1138,15 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    platform role and changes nothing else. Web servers of this release need it for "Unassigned"; web
    servers from before it do not call it, and workers are unaffected.
 
+   Migration 0241 (ADR-319) adds `run_api_key_ids` to `app.webhook_endpoints` with a check validated
+   by reading the table, and replaces the run trigger's `app.webhook_capture_automation_run` and
+   `app.capture_webhook_event` with the same signatures (keeping 0235's filters); every endpoint
+   starts without a list. Web servers of this release need it, as their reads of endpoints name the
+   column; workers do not read it. Web servers from before it neither show nor change the column:
+   until the web rollout ends, an old server's change that drops both run events from an endpoint
+   with a list fails on the check, its other changes keep the list, and its API refuses
+   `runApiKeyIds` (422) and leaves it out of the endpoints it answers.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

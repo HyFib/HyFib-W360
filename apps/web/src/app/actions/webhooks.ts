@@ -58,6 +58,8 @@ export async function createWebhookEndpointAction(
     runEndStatuses: string[] | null;
     /** What started the runs whose events it takes (ADR-183); null takes every run's. */
     runTriggers: string[] | null;
+    /** The API keys whose runs it takes (ADR-319); null takes every run. */
+    runApiKeyIds: string[] | null;
     /** The consent changes it takes as `consent.changed` (ADR-189); null takes every change. */
     consentChanges: string[] | null;
     /** Where the contacts whose `contact.created` it takes came from (ADR-190); null: every one. */
@@ -167,6 +169,8 @@ export async function updateWebhookEndpointAction(
     runEndStatuses: string[] | null;
     /** What started the runs whose events it takes (ADR-183); null takes every run's. */
     runTriggers: string[] | null;
+    /** The API keys whose runs it takes (ADR-319); null takes every run. */
+    runApiKeyIds: string[] | null;
     /** The consent changes it takes as `consent.changed` (ADR-189); null takes every change. */
     consentChanges: string[] | null;
     /** Where the contacts whose `contact.created` it takes came from (ADR-190); null: every one. */

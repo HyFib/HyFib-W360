@@ -1259,6 +1259,12 @@ export const apiWebhookEndpointSchema = z.object({
     .describe(
       'What started the runs whose events (automation.run_started and automation.run_ended) the endpoint receives, as run.trigger names it; null receives every run.',
     ),
+  runApiKeyIds: z
+    .array(z.uuid())
+    .nullable()
+    .describe(
+      'The API keys whose runs (automation.run_started and automation.run_ended) the endpoint receives, as run.apiKeyId names them: the runs one of them started through the API, or a key one of them was rotated from or into. A run started otherwise is not received. null receives every run.',
+    ),
   consentChanges: z
     .array(z.enum(WEBHOOK_CONSENT_CHANGES))
     .nullable()
@@ -4196,13 +4202,13 @@ export function buildOpenApiDocument(serverUrl: string) {
       'automation.run_started': webhook(
         'webhookAutomationRunStarted',
         WEBHOOK_EVENT_INFO['automation.run_started'].label,
-        `${WEBHOOK_EVENT_INFO['automation.run_started'].description} For a run started through the API, run.id is the id POST /automations/{id}/runs answered and run.apiKeyId names the key that called it. An endpoint receives every automation's runs unless it names the automations it takes (its \`automationIds\`, or the automations chosen in Settings → Webhooks).`,
+        `${WEBHOOK_EVENT_INFO['automation.run_started'].description} For a run started through the API, run.id is the id POST /automations/{id}/runs answered and run.apiKeyId names the key that called it. An endpoint receives every automation's runs unless it names the automations it takes (its \`automationIds\`, or the automations chosen in Settings → Webhooks), and every run unless it names the API keys whose runs it takes (its \`runApiKeyIds\`, or the keys ticked in Settings → Webhooks): then it receives the runs those keys started, or a key rotated from or into one of them.`,
         'WebhookAutomationRunStarted',
       ),
       'automation.run_ended': webhook(
         'webhookAutomationRunEnded',
         WEBHOOK_EVENT_INFO['automation.run_ended'].label,
-        `${WEBHOOK_EVENT_INFO['automation.run_ended'].description} Deliveries are not ordered: the end of a short run can arrive before its start, so compare run.startedAt and run.endedAt. An endpoint that names the automations it takes receives only their runs, as for automation.run_started, and an endpoint receives every end unless it names the statuses it takes (its \`runEndStatuses\`, or the endings ticked in Settings → Webhooks).`,
+        `${WEBHOOK_EVENT_INFO['automation.run_ended'].description} Deliveries are not ordered: the end of a short run can arrive before its start, so compare run.startedAt and run.endedAt. An endpoint that names the automations or API keys it takes receives only their runs, as for automation.run_started, and an endpoint receives every end unless it names the statuses it takes (its \`runEndStatuses\`, or the endings ticked in Settings → Webhooks).`,
         'WebhookAutomationRunEnded',
       ),
       'order.received': webhook(

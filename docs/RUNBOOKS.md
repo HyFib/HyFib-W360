@@ -3221,6 +3221,18 @@ To take more, tick the triggers under "Runs started by" on the endpoint's page, 
 `PATCH /webhook-endpoints/{id}` with `runTriggers` (null for every run). Removing both Automation
 started and Automation ended clears the list.
 
+**A receiver misses the runs of an API key (ADR-319).** An endpoint can take the run events of the
+runs chosen API keys started only. The endpoints list shows them ("Automation runs sent, started
+through the API by: …"), and the API answers `runApiKeyIds` (null takes every run). A run goes by
+the key that started it, as `run.apiKeyId` names it, and by the keys that key was rotated from or
+into; a run a keyword, a store event or a conversation started belongs to no key and is not sent to
+a list. A key revoked or expired since stays on the list, and Settings says so: the runs it started
+still end. Events no endpoint takes are not recorded, so there is nothing to replay;
+`GET /automation-runs/{id}` reads a run a key started. With automations, triggers, ends or reasons
+chosen too, a run must pass every list. To take more, tick the keys under "Runs started through the
+API" on the endpoint's page, or `PATCH /webhook-endpoints/{id}` with `runApiKeyIds` (null for every
+run). Removing both Automation started and Automation ended clears the list.
+
 **A receiver misses the events of a member's conversations (ADR-181).** An endpoint can take the
 message and conversation events of the conversations assigned to chosen members only. The endpoints
 list shows them ("Members whose conversations’ events are sent: …"), and the API answers

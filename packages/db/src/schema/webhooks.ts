@@ -269,6 +269,12 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
    */
   runTriggers: text('run_triggers').array().$type<WebhookRunTrigger[]>(),
   /**
+   * The API keys whose runs' events it takes (migration 0241, ADR-319): the runs one of them
+   * started through the API, or a key one of them was rotated from or into. null takes every run.
+   * Set only while `automation.run_started` or `automation.run_ended` is among its events.
+   */
+  runApiKeyIds: uuid('run_api_key_ids').array(),
+  /**
    * The WhatsApp numbers (channel accounts) whose events it takes (ADR-170): message,
    * conversation, automation run, order and campaign events; null takes every number. Set only
    * while one of those is among its events.

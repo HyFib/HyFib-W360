@@ -59,6 +59,7 @@ import {
   webhookPipelineText,
   webhookReplayAllSummary,
   webhookReplaySummary,
+  webhookRunApiKeyText,
   webhookRunEndReasonsChosen,
   webhookRunEndReasonsTicked,
   webhookStageText,
@@ -90,6 +91,7 @@ import {
   type WebhookEndpointOAuth,
   type WebhookEndpointOwner,
   type WebhookEndpointPipeline,
+  type WebhookEndpointRunApiKey,
   type WebhookEndpointStage,
   type WebhookEndpointTeam,
   type WebhookEventType,
@@ -106,6 +108,7 @@ import {
   type WebhookOwnerChoice,
   type WebhookPipelineChoice,
   type WebhookReplayPeriod,
+  type WebhookRunApiKeyChoice,
   type WebhookStageChoice,
   type WebhookRunEndStatus,
   type WebhookRunTrigger,
@@ -912,6 +915,106 @@ function AutomationChoices({
                     : a.status === 'paused'
                       ? ' (paused)'
                       : ''}
+                </Label>
+              </div>
+            );
+          })}
+        </div>
+      ) : null}
+    </fieldset>
+  );
+}
+
+/**
+ * The API keys whose runs an endpoint takes (ADR-319), shown while it takes an automation run
+ * event: every run, or only those the keys ticked started through the API. The keys that can start
+ * automations, work and were not rotated are offered; one the endpoint already names stays listed,
+ * ticked, until it is unticked.
+ */
+function RunApiKeyChoices({
+  prefix,
+  choices,
+  stored,
+  every,
+  onEveryChange,
+  chosen,
+  onChange,
+}: {
+  prefix: string;
+  choices: WebhookRunApiKeyChoice[];
+  /** The keys the endpoint names now, so one that stopped working stays listed until saved. */
+  stored: readonly WebhookEndpointRunApiKey[];
+  every: boolean;
+  onEveryChange: (next: boolean) => void;
+  chosen: string[];
+  onChange: (next: string[]) => void;
+}) {
+  const listed: WebhookEndpointRunApiKey[] = [
+    ...choices.map((c): WebhookEndpointRunApiKey => ({ ...c, state: 'active' })),
+    ...stored.filter((s) => !choices.some((c) => c.id === s.id)),
+  ];
+  return (
+    <fieldset className="grid gap-2">
+      <legend className="mb-1 text-sm font-medium">Runs started through the API</legend>
+      <p className="text-xs text-muted-foreground">
+        A run started through the API belongs to the key that started it, and to the keys that key
+        was rotated from or into; a run started otherwise belongs to none. With automations or what
+        started the runs chosen too, a run must pass them all.
+      </p>
+      <label className="flex items-start gap-2 text-sm">
+        <input
+          type="radio"
+          name={`${prefix}-run-api-keys`}
+          className="mt-1"
+          checked={every}
+          onChange={() => onEveryChange(true)}
+        />
+        <span>
+          Every run
+          <span className="block text-xs text-muted-foreground">
+            Including runs started otherwise, and by keys added later.
+          </span>
+        </span>
+      </label>
+      <label className="flex items-start gap-2 text-sm">
+        <input
+          type="radio"
+          name={`${prefix}-run-api-keys`}
+          className="mt-1"
+          checked={!every}
+          disabled={listed.length === 0}
+          onChange={() => onEveryChange(false)}
+        />
+        <span>
+          Only the runs the API keys ticked started
+          {listed.length === 0 ? (
+            <span className="block text-xs text-muted-foreground">
+              No API key can start automations yet.
+            </span>
+          ) : null}
+        </span>
+      </label>
+      {!every ? (
+        <div className="ml-6 grid max-h-64 gap-1 overflow-y-auto">
+          {listed.map((k) => {
+            const id = `${prefix}-run-api-key-${k.id}`;
+            return (
+              <div key={k.id} className="flex items-center gap-2">
+                <Checkbox
+                  id={id}
+                  checked={chosen.includes(k.id)}
+                  onChange={(e) =>
+                    onChange(
+                      e.target.checked
+                        ? listed
+                            .filter((l) => l.id === k.id || chosen.includes(l.id))
+                            .map((l) => l.id)
+                        : chosen.filter((x) => x !== k.id),
+                    )
+                  }
+                />
+                <Label htmlFor={id} className="font-normal break-all">
+                  {webhookRunApiKeyText(k)}
                 </Label>
               </div>
             );
@@ -2548,6 +2651,7 @@ export function WebhookEndpointForm({
   slug,
   endpoint,
   automationChoices,
+  runApiKeyChoices,
   channelChoices,
   teamChoices,
   templateChoices,
@@ -2589,6 +2693,8 @@ export function WebhookEndpointForm({
     runEndStatuses: WebhookRunEndStatus[] | null;
     /** What started the runs it takes (ADR-183); null for every run. */
     runTriggers: WebhookRunTrigger[] | null;
+    /** The API keys whose runs it takes (ADR-319), and whether they work; null: every run. */
+    runApiKeys: WebhookEndpointRunApiKey[] | null;
     /** The consent changes it takes (ADR-189); null for every change. */
     consentChanges: WebhookConsentChange[] | null;
     /** Where the contacts it takes as `contact.created` came from (ADR-190); null for every one. */
@@ -2648,6 +2754,8 @@ export function WebhookEndpointForm({
   };
   /** The company's published automations, which an endpoint can choose (ADR-145). */
   automationChoices: WebhookAutomationChoice[];
+  /** The company's API keys that can start runs, which an endpoint can choose (ADR-319). */
+  runApiKeyChoices: WebhookRunApiKeyChoice[];
   /** The company's WhatsApp numbers, which an endpoint can choose (ADR-170). */
   channelChoices: WebhookChannelChoice[];
   /** The company's teams, which an endpoint can choose (ADR-174). */
@@ -2731,6 +2839,10 @@ export function WebhookEndpointForm({
   );
   const [everyAutomation, setEveryAutomation] = useState(!endpoint?.automationIds);
   const [automationIds, setAutomationIds] = useState<string[]>(endpoint?.automationIds ?? []);
+  const [everyRunApiKey, setEveryRunApiKey] = useState(!endpoint?.runApiKeys);
+  const [runApiKeyIds, setRunApiKeyIds] = useState<string[]>(
+    endpoint?.runApiKeys?.map((k) => k.id) ?? [],
+  );
   const [everyChannel, setEveryChannel] = useState(!endpoint?.channelIds);
   const [channelIds, setChannelIds] = useState<string[]>(endpoint?.channelIds ?? []);
   const [everyTeam, setEveryTeam] = useState(!endpoint?.teams);
@@ -2931,6 +3043,9 @@ export function WebhookEndpointForm({
           webhookTakesAutomationRuns(eventTypes) && runTriggers.length < WEBHOOK_RUN_TRIGGERS.length
             ? runTriggers
             : null;
+        // Every run unless the API keys ticked are chosen (ADR-319).
+        const chosenRunApiKeys =
+          webhookTakesAutomationRuns(eventTypes) && !everyRunApiKey ? runApiKeyIds : null;
         // Every consent change ticked takes every change (null, ADR-189).
         const chosenConsentChanges =
           eventTypes.includes('consent.changed') &&
@@ -3076,6 +3191,7 @@ export function WebhookEndpointForm({
           conversationStatuses: chosenConversationStatuses,
           runEndStatuses: chosenRunEndStatuses,
           runTriggers: chosenRunTriggers,
+          runApiKeyIds: chosenRunApiKeys,
           consentChanges: chosenConsentChanges,
           contactSources: chosenContactSources,
           messageTypes: chosenMessageTypes,
@@ -3327,6 +3443,17 @@ export function WebhookEndpointForm({
       ) : null}
       {webhookTakesAutomationRuns(eventTypes) ? (
         <TriggerChoices prefix={prefix} chosen={runTriggers} onChange={setRunTriggers} />
+      ) : null}
+      {webhookTakesAutomationRuns(eventTypes) ? (
+        <RunApiKeyChoices
+          prefix={prefix}
+          choices={runApiKeyChoices}
+          stored={endpoint?.runApiKeys ?? []}
+          every={everyRunApiKey}
+          onEveryChange={setEveryRunApiKey}
+          chosen={runApiKeyIds}
+          onChange={setRunApiKeyIds}
+        />
       ) : null}
       {webhookTakesChannelEvents(eventTypes) ? (
         <ChannelChoices

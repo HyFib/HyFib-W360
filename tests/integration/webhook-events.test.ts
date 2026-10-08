@@ -23,6 +23,7 @@ import {
   apiGetDeal,
   apiGetTask,
   apiStartAutomationRun,
+  apiStopAutomationRun,
   apiUpdateConversation,
   apiUpdateDeal,
   apiUpdateTask,
@@ -2709,6 +2710,166 @@ describe('automation run events (ADR-078)', () => {
       expect(body.data.channel.id).toBe(c.channelAccountId);
     }
     expect(finished.data.run).toMatchObject({ status: 'completed', endReason: 'no_next' });
+  });
+
+  it('sends an endpoint that names API keys the runs they started, across rotations either way, and no run started otherwise (ADR-319)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const templateId = await approvedTemplate(c, {
+      category: 'UTILITY',
+      header: { type: 'none' },
+      body: { text: 'Hi {{1}}, your order {{2}} has shipped.', examples: ['Asha', 'A-1001'] },
+      footer: null,
+      buttons: [],
+    });
+    // The runs wait an hour before they send, so they can be stopped meanwhile.
+    const automationId = await publishAutomation(
+      owner,
+      'Shipping update',
+      { type: 'api', inputs: ['first_name', 'order'] },
+      {
+        version: 1,
+        start: 'pause',
+        nodes: [
+          { id: 'pause', type: 'wait', minutes: 60, next: 'shipped' },
+          {
+            id: 'shipped',
+            type: 'send_template',
+            templateId,
+            header: [],
+            body: ['{{input.first_name}}', '{{input.order}}'],
+            next: null,
+          },
+        ],
+      },
+      c.channelAccountId,
+    );
+    const keys = createApiKeysService({ db: fx.dbs.app, clock: systemClock });
+    const keyCtx = async (token: string) => {
+      const ctx = await authenticateApiToken(fx.dbs.app, token, uuidv7());
+      if (!ctx) throw new Error('a key does not authenticate');
+      return ctx;
+    };
+    const first = await keys.create(owner, {
+      name: 'Store',
+      scopes: ['automations.start'],
+      expiresInDays: 0,
+    });
+    const crm = await keys.create(owner, {
+      name: 'CRM',
+      scopes: ['automations.start'],
+      expiresInDays: 0,
+    });
+    const add = async (runApiKeyIds: string[] | null) =>
+      (
+        await webhooks().create(owner, {
+          url: `http://${HOST}:${port}/ok/${randomBytes(6).toString('hex')}`,
+          eventTypes: ['automation.run_started', 'automation.run_ended'],
+          runApiKeyIds,
+        })
+      ).id;
+    const every = await add(null);
+    const byFirst = await add([first.id]);
+    const byCrm = await add([crm.id]);
+    // The store's key is rotated twice; the older keys keep working for a day. An endpoint names
+    // the latest.
+    const second = await keys.rotate(owner, { keyId: first.id, overlapHours: 24 });
+    const latest = await keys.rotate(owner, { keyId: second.id, overlapHours: 24 });
+    const byLatest = await add([latest.id]);
+    const deps = { db: fx.dbs.app, clock: systemClock, jobs: fx.jobs(), signer: fx.signer };
+    let n = 0;
+    const start = async (token: string) => {
+      n += 1;
+      const answer = await apiStartAutomationRun(
+        deps,
+        await keyCtx(token),
+        automationId,
+        { to: `+91 98111 0${1200 + n}`, inputs: { first_name: 'Asha', order: `A-${n}` } },
+        { key: `run-keys-${n}`, requestHash: sha256Hex(`run-keys-${n}`) },
+      );
+      const runId = (answer.body.data as { id: string }).id;
+      expect(await driveRun(c, runId)).toBe('waiting');
+      return runId;
+    };
+    const byFirstKey = await start(first.token);
+    const byLatestKey = await start(latest.token);
+    const byCrmKey = await start(crm.token);
+    // A run a keyword started belongs to no key.
+    await publishAutomation(owner, 'Brochure', keyword('brochure'), sayGraph('Here it is.'));
+    const [byKeyword] = await runsIn((await inbound(c, waId(), 'brochure')).conversation_id);
+    if (!byKeyword) throw new Error('no run started');
+    // A key stops two runs as the runtime role; erasure stops the third inside its definer
+    // function, which reads the keys too.
+    await apiStopAutomationRun(deps, await keyCtx(crm.token), byCrmKey);
+    await apiStopAutomationRun(deps, await keyCtx(latest.token), byLatestKey);
+    const [run] = await fx.query<{ contact_id: string }>(
+      'SELECT contact_id FROM app.automation_runs WHERE id = $1',
+      [byFirstKey],
+    );
+    if (!run) throw new Error('no run');
+    await contactsService().eraseContact(owner, { contactId: run.contact_id, suppress: false });
+    expect(
+      (
+        await fx.query<{ status: string; end_reason: string }>(
+          'SELECT status, end_reason FROM app.automation_runs WHERE id = $1',
+          [byFirstKey],
+        )
+      )[0],
+    ).toEqual({ status: 'stopped', end_reason: 'contact_erased' });
+
+    const sent = await fx.query<{
+      type: string;
+      run: string;
+      endpoint: string;
+      detail: Record<string, unknown>;
+    }>(
+      `SELECT e.type, e.detail ->> 'runId' AS run, d.endpoint_id AS endpoint, e.detail
+         FROM app.webhook_deliveries d
+         JOIN app.webhook_events e ON e.tenant_id = d.tenant_id AND e.id = d.event_id
+        WHERE d.tenant_id = $1 AND e.type LIKE 'automation.%'`,
+      [c.tenant.id],
+    );
+    const endpointName = new Map([
+      [every, 'every run'],
+      [byFirst, 'first key'],
+      [byCrm, 'crm key'],
+      [byLatest, 'latest key'],
+    ]);
+    const runName = new Map([
+      [byFirstKey, 'first'],
+      [byLatestKey, 'latest'],
+      [byCrmKey, 'crm'],
+      [byKeyword.id, 'keyword'],
+    ]);
+    const sorted = (rows: unknown[][]) =>
+      [...rows].sort((x, y) => JSON.stringify(x).localeCompare(JSON.stringify(y)));
+    expect(
+      sorted(sent.map((s) => [s.type, runName.get(s.run), endpointName.get(s.endpoint)])),
+    ).toEqual(
+      sorted([
+        // The first key's run reaches the list naming the key it was rotated into, twice over…
+        ['automation.run_started', 'first', 'every run'],
+        ['automation.run_started', 'first', 'first key'],
+        ['automation.run_started', 'first', 'latest key'],
+        ['automation.run_ended', 'first', 'every run'],
+        ['automation.run_ended', 'first', 'first key'],
+        ['automation.run_ended', 'first', 'latest key'],
+        // …and the latest key's the list naming the key it replaced, twice over.
+        ['automation.run_started', 'latest', 'every run'],
+        ['automation.run_started', 'latest', 'first key'],
+        ['automation.run_started', 'latest', 'latest key'],
+        ['automation.run_ended', 'latest', 'every run'],
+        ['automation.run_ended', 'latest', 'first key'],
+        ['automation.run_ended', 'latest', 'latest key'],
+        ['automation.run_started', 'crm', 'every run'],
+        ['automation.run_started', 'crm', 'crm key'],
+        ['automation.run_ended', 'crm', 'every run'],
+        ['automation.run_ended', 'crm', 'crm key'],
+        ['automation.run_started', 'keyword', 'every run'],
+      ]),
+    );
+    // The key travels for the filter only: the payload reads it from the run.
+    expect(sent.filter((s) => 'apiKeyId' in s.detail)).toEqual([]);
   });
 
   it('reports a run that fails, with its reason', async () => {

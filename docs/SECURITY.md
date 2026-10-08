@@ -1583,6 +1583,19 @@ Phase 5 rules (outgoing webhooks, P5-09):
   which no role can change: it narrows what one endpoint receives and never adds an event or a
   delivery for another endpoint or company. The trigger passed is not stored with the event. Audited
   with the list (unit tests; integration and e2e tests, run in CI only).
+- An endpoint can take the run events of the runs chosen API keys started only (ADR-319), chosen
+  with `developer.manage` in Settings or `webhooks.manage` through the API. A list holds only the
+  company's keys that hold `automations.start` (checked by the services, whatever the key's state,
+  as its runs still end), is kept only while the endpoint takes a run event (a database check too),
+  and is applied in `app.capture_webhook_event` to the key the run's own row names, which no role
+  can change, and to that key's rotations, read from `app.api_keys` within the company. The capture
+  is not a definer function: it runs as the role writing the run, under the company's row-level
+  security, or as the definer role under the policy it already had on the keys (0024), and reads
+  their ids and rotations only, never their hashes. It narrows what one endpoint receives and never
+  adds an event or a delivery for another endpoint or company; the key is not stored with the event,
+  and the payload is unchanged. A refused id tells a key only whether it names one of the company's
+  keys that can start automations, whose ids keys already see in run events. Audited with the list
+  and in the company data export (unit tests; integration tests, run in CI only).
 - An endpoint can take the changes of chosen custom fields only (ADR-184), chosen the same way. A
   list may add only keys of the endpoint's company's fields (checked in its scope), is kept only
   while the endpoint takes field changes (a database check too, which also refuses a malformed key

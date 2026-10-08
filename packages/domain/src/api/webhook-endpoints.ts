@@ -72,6 +72,7 @@ import {
   assertWebhookAssignees,
   assertWebhookAuthorization,
   assertWebhookAutomations,
+  assertWebhookRunApiKeys,
   assertWebhookCampaigns,
   assertWebhookChannels,
   assertWebhookPipelines,
@@ -113,6 +114,7 @@ import {
   WEBHOOK_TASK_DETAILS_NEED_THE_EVENT,
   WEBHOOK_RUN_END_STATUSES_NEED_THE_EVENT,
   WEBHOOK_RUN_TRIGGERS_NEED_THE_EVENTS,
+  WEBHOOK_RUN_API_KEYS_NEED_THE_EVENTS,
   WEBHOOK_CONSENT_CHANGES_NEED_THE_EVENT,
   WEBHOOK_CONTACT_SOURCES_NEED_THE_EVENT,
   WEBHOOK_MESSAGE_TYPES_NEED_THE_EVENT,
@@ -161,6 +163,8 @@ import {
   webhookRunEndStatusesSchema,
   webhookRunTriggersFor,
   webhookRunTriggersSchema,
+  webhookRunApiKeyIdsFor,
+  webhookRunApiKeyIdsSchema,
   webhookConsentChangesFor,
   webhookConsentChangesSchema,
   webhookContactSourcesFor,
@@ -425,6 +429,16 @@ const runTriggersField = webhookRunTriggersSchema.describe(
 const invalidRunTriggers = () =>
   new AppError('validation_failed', WEBHOOK_RUN_TRIGGERS_NEED_THE_EVENTS, {
     issues: [{ path: 'runTriggers', message: WEBHOOK_RUN_TRIGGERS_NEED_THE_EVENTS }],
+  });
+
+const runApiKeyIdsField = webhookRunApiKeyIdsSchema.describe(
+  `The API keys whose runs the endpoint receives as automation.run_started and automation.run_ended: 1 to ${WEBHOOK_LIMITS.runApiKeys} ids of the company's keys that can start automations (automations.start), as run.apiKeyId names them (a key that adds an endpoint finds its own id in the endpoint's apiKeyId), only with one of those events. A run started through the API is received when the key that started it is listed, or a key it was rotated from or into, so a list keeps an integration's runs across rotations; a revoked or expired key stays allowed, as the runs it started still end. A run started otherwise belongs to no key and is not received. With the automations or what started the runs too, a run must pass them all. null receives every run.`,
+);
+
+/** API keys are chosen only for an endpoint that receives run events (ADR-319). */
+const invalidRunApiKeys = () =>
+  new AppError('validation_failed', WEBHOOK_RUN_API_KEYS_NEED_THE_EVENTS, {
+    issues: [{ path: 'runApiKeyIds', message: WEBHOOK_RUN_API_KEYS_NEED_THE_EVENTS }],
   });
 
 const consentChangesField = webhookConsentChangesSchema.describe(
@@ -745,6 +759,7 @@ export const apiCreateWebhookEndpointSchema = z
     conversationStatuses: conversationStatusesField.optional(),
     runEndStatuses: runEndStatusesField.optional(),
     runTriggers: runTriggersField.optional(),
+    runApiKeyIds: runApiKeyIdsField.optional(),
     consentChanges: consentChangesField.optional(),
     contactSources: contactSourcesField.optional(),
     messageTypes: messageTypesField.optional(),
@@ -840,6 +855,10 @@ export const apiCreateWebhookEndpointSchema = z
   .refine((data) => !data.runTriggers || webhookTakesAutomationRuns(data.events), {
     path: ['runTriggers'],
     message: WEBHOOK_RUN_TRIGGERS_NEED_THE_EVENTS,
+  })
+  .refine((data) => !data.runApiKeyIds || webhookTakesAutomationRuns(data.events), {
+    path: ['runApiKeyIds'],
+    message: WEBHOOK_RUN_API_KEYS_NEED_THE_EVENTS,
   })
   .refine((data) => !data.consentChanges || data.events.includes('consent.changed'), {
     path: ['consentChanges'],
@@ -1062,6 +1081,11 @@ export const apiUpdateWebhookEndpointSchema = z
       .describe(
         'What started the runs whose events the endpoint receives; null receives every run. Left out, they stay, unless the events no longer include automation.run_started or automation.run_ended, which clears them.',
       ),
+    runApiKeyIds: runApiKeyIdsField
+      .optional()
+      .describe(
+        "The API keys whose runs the endpoint receives (the company's keys that can start automations, whatever their state); null receives every run. Left out, they stay, unless the events no longer include automation.run_started or automation.run_ended, which clears them.",
+      ),
     consentChanges: consentChangesField
       .optional()
       .describe(
@@ -1232,6 +1256,7 @@ export const apiUpdateWebhookEndpointSchema = z
       data.conversationStatuses !== undefined ||
       data.runEndStatuses !== undefined ||
       data.runTriggers !== undefined ||
+      data.runApiKeyIds !== undefined ||
       data.consentChanges !== undefined ||
       data.contactSources !== undefined ||
       data.messageTypes !== undefined ||
@@ -1261,7 +1286,7 @@ export const apiUpdateWebhookEndpointSchema = z
       data.contactTags !== undefined ||
       data.conversationTags !== undefined ||
       data.oauth !== undefined,
-    'Give the events, the description, the headers, the message statuses, who sent the messages, the contact parts, the deal and task details, the custom fields, the automations, the campaign statuses, the order statuses, the Payment Link statuses, the template statuses, the conversation statuses, the deal statuses, the task statuses, the run end statuses, what started the runs, the consent changes, where contacts came from, the received message types, the run end reasons, the numbers, the teams, the templates, the campaigns, the pipelines, the stages, the deal owners, the task assignees, the pipelines, stages and owners of tasks’ deals and of notes’ deals, who made the CRM changes, the survey scores, the members credited with survey answers and the teams of their conversations, the contact and conversation tags of survey answers, the tags of added and changed contacts, the members, the contact tags, the conversation tags, the OAuth client or whether the endpoint is enabled',
+    'Give the events, the description, the headers, the message statuses, who sent the messages, the contact parts, the deal and task details, the custom fields, the automations, the campaign statuses, the order statuses, the Payment Link statuses, the template statuses, the conversation statuses, the deal statuses, the task statuses, the run end statuses, what started the runs, the API keys that started them, the consent changes, where contacts came from, the received message types, the run end reasons, the numbers, the teams, the templates, the campaigns, the pipelines, the stages, the deal owners, the task assignees, the pipelines, stages and owners of tasks’ deals and of notes’ deals, who made the CRM changes, the survey scores, the members credited with survey answers and the teams of their conversations, the contact and conversation tags of survey answers, the tags of added and changed contacts, the members, the contact tags, the conversation tags, the OAuth client or whether the endpoint is enabled',
   );
 
 export interface ApiWebhookEndpoint {
@@ -1312,6 +1337,8 @@ export interface ApiWebhookEndpoint {
   runEndStatuses: WebhookRunEndStatus[] | null;
   /** What started the runs whose events it receives (ADR-183); null receives every run. */
   runTriggers: WebhookRunTrigger[] | null;
+  /** The API keys whose runs it receives (ADR-319); null receives every run. */
+  runApiKeyIds: string[] | null;
   /** The consent changes it receives as `consent.changed` (ADR-189); null receives every change. */
   consentChanges: WebhookConsentChange[] | null;
   /** Where the contacts whose `contact.created` it receives came from (ADR-190); null: every one. */
@@ -1477,6 +1504,7 @@ const columns = {
   conversationStatuses: webhookEndpoints.conversationStatuses,
   runEndStatuses: webhookEndpoints.runEndStatuses,
   runTriggers: webhookEndpoints.runTriggers,
+  runApiKeyIds: webhookEndpoints.runApiKeyIds,
   consentChanges: webhookEndpoints.consentChanges,
   contactSources: webhookEndpoints.contactSources,
   messageTypes: webhookEndpoints.messageTypes,
@@ -1543,6 +1571,7 @@ type EndpointRow = Pick<
   | 'conversationStatuses'
   | 'runEndStatuses'
   | 'runTriggers'
+  | 'runApiKeyIds'
   | 'consentChanges'
   | 'contactSources'
   | 'messageTypes'
@@ -1614,6 +1643,7 @@ function toApiEndpoint(row: EndpointRow, now: Date): ApiWebhookEndpoint {
     conversationStatuses: row.conversationStatuses,
     runEndStatuses: row.runEndStatuses,
     runTriggers: row.runTriggers,
+    runApiKeyIds: row.runApiKeyIds,
     consentChanges: row.consentChanges,
     contactSources: row.contactSources,
     messageTypes: row.messageTypes,
@@ -1889,6 +1919,8 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
             );
             const runEndStatuses = webhookRunEndStatusesFor(data.events, data.runEndStatuses, null);
             const runTriggers = webhookRunTriggersFor(data.events, data.runTriggers, null);
+            const runApiKeyIds = webhookRunApiKeyIdsFor(data.events, data.runApiKeyIds, null);
+            await assertWebhookRunApiKeys(tx, ctx.tenant.id, runApiKeyIds);
             const consentChanges = webhookConsentChangesFor(data.events, data.consentChanges, null);
             const contactSources = webhookContactSourcesFor(data.events, data.contactSources, null);
             const messageTypes = webhookMessageTypesFor(data.events, data.messageTypes, null);
@@ -2004,6 +2036,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               conversationStatuses,
               runEndStatuses,
               runTriggers,
+              runApiKeyIds,
               consentChanges,
               contactSources,
               messageTypes,
@@ -2055,6 +2088,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               ...(conversationStatuses ? { conversationStatuses } : {}),
               ...(runEndStatuses ? { runEndStatuses } : {}),
               ...(runTriggers ? { runTriggers } : {}),
+              ...(runApiKeyIds ? { runApiKeyIds } : {}),
               ...(consentChanges ? { consentChanges } : {}),
               ...(contactSources ? { contactSources } : {}),
               ...(messageTypes ? { messageTypes } : {}),
@@ -2145,6 +2179,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
           throw invalidRunEndStatuses();
         }
         if (data.runTriggers && !webhookTakesAutomationRuns(events)) throw invalidRunTriggers();
+        if (data.runApiKeyIds && !webhookTakesAutomationRuns(events)) throw invalidRunApiKeys();
         if (data.consentChanges && !events.includes('consent.changed')) {
           throw invalidConsentChanges();
         }
@@ -2207,6 +2242,10 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
         // Only a list given now is checked: the automations kept were checked when chosen.
         if (data.automationIds !== undefined) {
           await assertWebhookAutomations(tx, ctx.tenant.id, data.automationIds);
+        }
+        // And the API keys likewise (ADR-319).
+        if (data.runApiKeyIds !== undefined) {
+          await assertWebhookRunApiKeys(tx, ctx.tenant.id, data.runApiKeyIds);
         }
         // And the numbers likewise (ADR-170).
         if (data.channelIds !== undefined) {
@@ -2337,6 +2376,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
           data.conversationStatuses !== undefined ||
           data.runEndStatuses !== undefined ||
           data.runTriggers !== undefined ||
+          data.runApiKeyIds !== undefined ||
           data.consentChanges !== undefined ||
           data.contactSources !== undefined ||
           data.messageTypes !== undefined ||
@@ -2439,6 +2479,11 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               ),
               runEndStatuses: ends,
               runTriggers: webhookRunTriggersFor(events, data.runTriggers, endpoint.runTriggers),
+              runApiKeyIds: webhookRunApiKeyIdsFor(
+                events,
+                data.runApiKeyIds,
+                endpoint.runApiKeyIds,
+              ),
               consentChanges: webhookConsentChangesFor(
                 events,
                 data.consentChanges,
@@ -2569,6 +2614,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               conversationStatuses: webhookEndpoints.conversationStatuses,
               runEndStatuses: webhookEndpoints.runEndStatuses,
               runTriggers: webhookEndpoints.runTriggers,
+              runApiKeyIds: webhookEndpoints.runApiKeyIds,
               consentChanges: webhookEndpoints.consentChanges,
               contactSources: webhookEndpoints.contactSources,
               messageTypes: webhookEndpoints.messageTypes,
@@ -2623,6 +2669,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               : {}),
             ...(changed.runEndStatuses ? { runEndStatuses: changed.runEndStatuses } : {}),
             ...(changed.runTriggers ? { runTriggers: changed.runTriggers } : {}),
+            ...(changed.runApiKeyIds ? { runApiKeyIds: changed.runApiKeyIds } : {}),
             ...(changed.consentChanges ? { consentChanges: changed.consentChanges } : {}),
             ...(changed.contactSources ? { contactSources: changed.contactSources } : {}),
             ...(changed.messageTypes ? { messageTypes: changed.messageTypes } : {}),

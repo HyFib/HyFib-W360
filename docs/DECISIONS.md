@@ -12266,3 +12266,61 @@ Decision:
 
 Not built: counts of the unassigned failures on the tab, and an email about failures left unassigned
 for long.
+
+## ADR-319 Choosing the API keys whose runs a webhook endpoint receives (P5-09) (2026-10-08)
+
+Context: an endpoint taking `automation.run_started` or `automation.run_ended` can narrow them by
+automation (ADR-145), by how and why the runs ended (ADR-151, ADR-192) and by what started them
+(ADR-183), but not by the key that started them: every run started through the API has the trigger
+`api`. A company that gives each integration its own key (a store, a CRM) sent each integration's
+endpoint the runs the other keys started too, and each receiver read `run.apiKeyId` to drop them.
+
+Decision:
+
+- **One list per endpoint for both events,** `runApiKeyIds`: 1 to 20 ids of the company's API keys
+  (a company has at most 20 working keys), each once. A run started through the API is sent when the
+  key that started it is on the list, or a key it was rotated from or into, however many rotations
+  away: a key named before a rotation keeps the integration's runs, and a key named after one also
+  takes the runs the old key starts while it still works (up to 72 hours). A run started otherwise
+  (a keyword, a store event, a conversation) belongs to no key and is not sent to a list. Null
+  receives every run, as before. With automations, triggers, ends or reasons chosen too, a run must
+  pass them all. Chosen in Settings → Webhooks ("Runs started through the API": every run by
+  default, or only those the keys ticked started; shown while the endpoint takes either event),
+  shown on the endpoint as "Automation runs sent, started through the API by: …", and through the
+  API as `runApiKeyIds` on `POST /webhook-endpoints` and `PATCH /webhook-endpoints/{id}` and in
+  every endpoint the API answers; a key that adds an endpoint finds its own id in the endpoint's
+  `apiKeyId`.
+- **Which keys:** the services refuse an id that is not one of the company's keys holding
+  `automations.start` (named by place), whatever the key's state: a revoked or expired key's runs
+  still end, and a rotated key's runs match the key that replaced it. Settings offers the keys that
+  work and were not rotated, by name and prefix, and keeps naming a key an endpoint has, with
+  "revoked" or "expired" once it stops working. Keys are never deleted and keep their scopes, so a
+  list never names a key that is gone or cannot start runs.
+- **Only while a run event is taken:** a list given for an endpoint that takes neither event is
+  refused (422 through the API). A change that drops both events clears it, and a `PATCH` that
+  leaves it out keeps it; Settings always sends it (null while every run is taken). A check in the
+  database holds the same rule and the list's shape (null, or 1 to 20 ids in one dimension without a
+  null, with either event).
+- **Applied at capture:** the run trigger now passes the key that started the run (`apiKeyId`, null
+  for any other run) to `app.capture_webhook_event`, which reads the key's rotations from
+  `app.api_keys` (the keys it replaced and the keys that replaced it, along `replaced_by_key_id`
+  both ways, within the company) only when an active endpoint of the company that takes the event
+  names keys, and creates a delivery only for the endpoints whose list is null or shares one of
+  them. The key is taken out of the detail before the event is stored: the payload reads
+  `run.apiKeyId` from the run, as before. The capture runs as the role writing the run, the runtime
+  role or the definer role (an erasure stopping a run, say); both can read the keys' ids and
+  rotations (0024), and the capture reads nothing else of them.
+- **Audited and exported:** `webhook.endpoint_created` and `webhook.endpoint_updated` carry
+  `runApiKeyIds` when the endpoint has it, and the company data export carries the column.
+- **Permissions unchanged:** members with `developer.manage` in Settings, who see the same keys in
+  Settings → API keys, and keys with `webhooks.manage` through the API. A refusal tells a key only
+  whether an id names one of the company's keys that can start automations; keys already see the ids
+  of the keys that start runs, in the run events they receive.
+- **Migration 0241:** `run_api_key_ids uuid[]` on `app.webhook_endpoints` with its check, validated
+  at once (a company has at most 10 endpoints), the update grant on the column for the runtime role,
+  and the run trigger's `app.webhook_capture_automation_run` and `app.capture_webhook_event`
+  replaced with the same signatures (0131's and 0235's, with the key), so their owners and grants
+  stay. Existing endpoints keep null; nothing is backfilled.
+
+Not built: lists that leave chosen keys' runs out, filters by the key that sent a message or made a
+CRM change (their events name it), and the key's name in the payload.

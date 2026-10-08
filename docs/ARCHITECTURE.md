@@ -2186,6 +2186,15 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   same signature) creates a delivery of a run event only for endpoints whose list is null or holds
   it, taking it out of the detail before the event is stored. Settings (checkboxes under "Runs
   started by") and the API (`runTriggers`) set it; a change that drops both events clears it.
+- **Run API key filters** (migration 0241, ADR-319): `run_api_key_ids` on an endpoint lists the API
+  keys whose runs' `automation.run_started` and `automation.run_ended` it takes, null for every run;
+  a check keeps it to 1 to 20 ids and to endpoints that take a run event. The run trigger passes the
+  run's `apiKeyId` in the detail, and `app.capture_webhook_event` (replaced with the same
+  signature), when an active endpoint names keys, reads the key's rotations both ways along
+  `replaced_by_key_id` and creates a delivery only for endpoints whose list is null or shares one of
+  them, taking the key out of the detail before the event is stored. Settings (checkboxes under
+  "Runs started through the API") and the API (`runApiKeyIds`) set it; a change that drops both
+  events clears it.
 - **Custom field filters** (migration 0132, ADR-184): `contact_field_keys` on an endpoint lists the
   custom fields whose changes it takes as `contact.updated`, null for every field's; a check keeps
   it to 1 to 50 well-formed keys and to endpoints taking `contact.updated` for every part or for

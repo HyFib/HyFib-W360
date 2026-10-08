@@ -1,5 +1,48 @@
 # Progress
 
+## 2026-10-08 — API key filters for run events (P5-09, H-014, ADR-319)
+
+Status: **Implemented; its database tests run in CI only.** Endpoints taking automation run events
+could name automations, triggers, ends and reasons, but not the key that started a run, so a
+receiver of one integration took the runs every other key started. The local PostgreSQL is
+unavailable, so the migration and the integration tests below were written but not run here;
+migration 0241 passed the pglast parse check (syntax only).
+
+### Completed
+
+- **Database:** migration 0241 (`run_api_key_ids` on `app.webhook_endpoints` with its check and
+  update grant; the run trigger passing the run's key; `app.capture_webhook_event` reading the key's
+  rotations both ways when an endpoint names keys, and leaving the key out of the stored detail).
+- **Domain:** `WEBHOOK_LIMITS.runApiKeys`, `webhookRunApiKeyIdsSchema`, `webhookRunApiKeyIdsFor` and
+  `assertWebhookRunApiKeys` in `webhooks/service.ts`, `runApiKeyChoices`, the endpoint view's
+  `runApiKeys` (named, with each key's state), creation, changes, audits and the export column;
+  `webhookRunApiKeyText` in `webhooks/model.ts`; the same in `api/webhook-endpoints.ts` and the
+  OpenAPI document (both run events' descriptions name it).
+- **Web:** Settings → Webhooks' "Runs started through the API" while the endpoint takes either run
+  event, and the endpoints list's line for it.
+- **Tests:** unit (4 new: the list's rules, keeping and clearing and the key as Settings names it in
+  `webhooks/webhooks.test.ts`; the API schemas and OpenAPI entries in `api/api.test.ts`; 2
+  assertions there updated for the new field and wording); integration (3 new: capture across
+  rotations in `webhook-events.test.ts`, the services in `webhooks.test.ts`, the API in
+  `api-webhook-endpoints.test.ts`). Written for CI; the integration tests were not run here. No e2e
+  test.
+- **Docs:** ADR-319; ARCHITECTURE; SECURITY; THREAT-MODEL T287; DEPLOYMENT; RUNBOOKS; BACKLOG P5-09;
+  feature matrix H-014.
+- **Mutation checks:** 23/23 deliberate regressions caught on the unit-tested parts. The capture,
+  the key checks against the database and the form need the database or a browser, so their
+  regressions are left to the integration tests, which run in CI.
+
+### Test commands and results (local, 2026-10-08)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 140 files, 1343 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| pglast 7 parse of migration 0241                   | passed (syntax only)                                          |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
 ## 2026-10-08 — The failing integrations assigned to nobody (P5-10, H-034, ADR-318)
 
 Status: **Implemented; its database and browser tests run in CI only.** Current failures could show

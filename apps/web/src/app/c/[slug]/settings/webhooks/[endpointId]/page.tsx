@@ -45,6 +45,7 @@ export default async function WebhookEndpointPage({
   const [
     deliveries,
     automationChoices,
+    runApiKeyChoices,
     channelChoices,
     teamChoices,
     templateChoices,
@@ -57,6 +58,7 @@ export default async function WebhookEndpointPage({
   ] = await Promise.all([
     webhooks.deliveries(ctx, { endpointId, failedOnly }),
     webhooks.automationChoices(ctx),
+    webhooks.runApiKeyChoices(ctx),
     webhooks.channelChoices(ctx),
     webhooks.teamChoices(ctx),
     webhooks.templateChoices(ctx),
@@ -218,6 +220,7 @@ export default async function WebhookEndpointPage({
               conversationStatuses: endpoint.conversationStatuses,
               runEndStatuses: endpoint.runEndStatuses,
               runTriggers: endpoint.runTriggers,
+              runApiKeys: endpoint.runApiKeys,
               consentChanges: endpoint.consentChanges,
               contactSources: endpoint.contactSources,
               messageTypes: endpoint.messageTypes,
@@ -249,6 +252,7 @@ export default async function WebhookEndpointPage({
               oauth: endpoint.oauth,
             }}
             automationChoices={automationChoices}
+            runApiKeyChoices={runApiKeyChoices}
             channelChoices={channelChoices}
             teamChoices={teamChoices}
             templateChoices={templateChoices}

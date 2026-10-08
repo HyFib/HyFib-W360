@@ -1214,10 +1214,13 @@ verification, app review, Embedded Signup configuration).
   (ADR-316, migration 0239: an endpoint takes the `contact.created` and `contact.updated` of
   contacts with chosen tags, and the changes adding or removing one; erased and merged contacts are
   not narrowed).
+  **[API key filters for run events built; their database tests run only in CI]** (ADR-319,
+  migration 0241: an endpoint takes the run events of the runs chosen API keys started, the keys
+  they were rotated from or into included; runs started otherwise are not sent to a list).
   Remaining: filters for other event types and on a message's or contact's values (such as a field's
-  value, or the key that started a run or made a change), other authentication (headers computed per
-  delivery, other OAuth grants), mutual TLS, fixed egress addresses, events for store orders and
-  each step of a run, `createdAt` finer than the millisecond, load tests.
+  value, or the key that made a change), other authentication (headers computed per delivery, other
+  OAuth grants), mutual TLS, fixed egress addresses, events for store orders and each step of a run,
+  `createdAt` finer than the millisecond, load tests.
 - **P5-10 Platform ops screens** **[built, locally verified with test data only]** (ADR-054):
   `/platform/ops` with Overview, Onboarding (failed and abandoned signups, failed or stuck number
   setups, new companies without a number), Integrations (current failures with host-only labels,

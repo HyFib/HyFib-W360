@@ -3550,6 +3550,146 @@ describe('run trigger filters (ADR-183)', () => {
   });
 });
 
+describe('API key filters of run events (ADR-319)', () => {
+  it('are refused without a run event, or naming keys that are not the company’s or cannot start automations, kept by a change that leaves them out and cleared with the events; the database keeps them to those events', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const keys = createApiKeysService({ db: fx.dbs.app, clock: systemClock });
+    const store = await keys.create(owner, {
+      name: 'Store',
+      scopes: ['automations.start'],
+      expiresInDays: 0,
+    });
+    const crm = await keys.create(owner, {
+      name: 'CRM',
+      scopes: ['contacts.read', 'automations.start'],
+      expiresInDays: 30,
+    });
+    const reader = await keys.create(owner, {
+      name: 'Reader',
+      scopes: ['contacts.read'],
+      expiresInDays: 0,
+    });
+    const other = await fx.company();
+    const theirs = await keys.create(await fx.ctx(other, other.owner), {
+      name: 'Theirs',
+      scopes: ['automations.start'],
+      expiresInDays: 0,
+    });
+    const url = 'https://hooks.example.com/in';
+    const refused = (eventTypes: string[], runApiKeyIds: unknown, message: RegExp) =>
+      expectAppError(
+        webhooks().create(owner, { url, eventTypes, runApiKeyIds }),
+        'validation_failed',
+        message,
+      );
+    const needsTheEvents =
+      /only for an endpoint that receives Automation started or Automation ended/;
+    const notTheirs = /API keys of this company that can start automations/;
+    await refused(['message.received', 'order.received'], [store.id], needsTheEvents);
+    await refused(['automation.run_started'], [], /at least one API key/);
+    await refused(['automation.run_started'], [store.keyPrefix], /from the list/);
+    await refused(['automation.run_started'], [store.id, reader.id], notTheirs);
+    await refused(['automation.run_ended'], [theirs.id], notTheirs);
+    expect(await webhooks().list(owner)).toEqual([]);
+    // Settings offers the keys that can start automations and work, by name.
+    expect(await webhooks().runApiKeyChoices(owner)).toEqual([
+      { id: crm.id, name: 'CRM', keyPrefix: crm.keyPrefix },
+      { id: store.id, name: 'Store', keyPrefix: store.keyPrefix },
+    ]);
+
+    const created = await webhooks().create(owner, {
+      url,
+      eventTypes: ['automation.run_started', 'consent.changed'],
+      runApiKeyIds: [store.id, crm.id, store.id.toUpperCase()],
+    });
+    const [audit] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events WHERE tenant_id = $1 AND action = 'webhook.endpoint_created'`,
+      [c.tenant.id],
+    );
+    expect(audit?.metadata).toMatchObject({ runApiKeyIds: [store.id, crm.id] });
+    const change = (fields: Record<string, unknown>) =>
+      webhooks().update(owner, {
+        endpointId: created.id,
+        url,
+        description: '',
+        eventTypes: ['automation.run_started', 'consent.changed'],
+        ...fields,
+      });
+    const current = async () =>
+      (await webhooks().list(owner)).find((e) => e.id === created.id)?.runApiKeys;
+    const named = (key: { id: string; keyPrefix: string }, name: string, state: string) => ({
+      id: key.id,
+      name,
+      keyPrefix: key.keyPrefix,
+      state,
+    });
+    expect(await current()).toEqual([named(store, 'Store', 'active'), named(crm, 'CRM', 'active')]);
+    await change({ description: 'kept' });
+    expect((await current())?.map((k) => k.id)).toEqual([store.id, crm.id]);
+    // A rotated key is offered no more: the key that replaced it is, under the same name. A key
+    // revoked since stays named, and allowed: the runs it started still end.
+    const rotated = await keys.rotate(owner, { keyId: store.id, overlapHours: 24 });
+    await keys.revoke(owner, { keyId: crm.id });
+    expect(await webhooks().runApiKeyChoices(owner)).toEqual([
+      { id: rotated.id, name: 'Store', keyPrefix: rotated.keyPrefix },
+    ]);
+    expect(await current()).toEqual([
+      named(store, 'Store', 'active'),
+      named(crm, 'CRM', 'revoked'),
+    ]);
+    await change({ runApiKeyIds: [crm.id, rotated.id] });
+    expect((await current())?.map((k) => k.id)).toEqual([crm.id, rotated.id]);
+    const updates = await fx.query<{ metadata: { runApiKeyIds?: unknown } }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND action = 'webhook.endpoint_updated' ORDER BY occurred_at`,
+      [c.tenant.id],
+    );
+    expect(updates.map((u) => u.metadata.runApiKeyIds)).toEqual([
+      [store.id, crm.id],
+      [crm.id, rotated.id],
+    ]);
+    await change({ runApiKeyIds: null });
+    expect(await current()).toBeNull();
+    await change({ runApiKeyIds: [store.id] });
+    // Either run event keeps the list.
+    await change({ eventTypes: ['automation.run_ended'] });
+    expect((await current())?.map((k) => k.id)).toEqual([store.id]);
+    // The database refuses an empty list, more than 20 keys, a missing one or a list of lists
+    // from an endpoint taking a run event…
+    const setInDatabase = (value: string) =>
+      fx.query(`UPDATE app.webhook_endpoints SET run_api_key_ids = ${value} WHERE id = $1`, [
+        created.id,
+      ]);
+    const many = Array.from({ length: 21 }, () => `'${uuidv7()}'`).join(', ');
+    for (const bad of [
+      `'{}'`,
+      `ARRAY[${many}]::uuid[]`,
+      `ARRAY['${store.id}', NULL]::uuid[]`,
+      `ARRAY[ARRAY['${store.id}']]::uuid[]`,
+    ]) {
+      await expect(setInDatabase(bad), bad).rejects.toThrow(/webhook_endpoints_run_api_key_ids/);
+    }
+    await change({ eventTypes: ['consent.changed'] });
+    expect(await current()).toBeNull();
+    await expectAppError(
+      change({ eventTypes: ['consent.changed'], runApiKeyIds: [store.id] }),
+      'validation_failed',
+      needsTheEvents,
+    );
+    // …and any list for an endpoint that takes neither.
+    await expect(setInDatabase(`ARRAY['${store.id}']::uuid[]`)).rejects.toThrow(
+      /webhook_endpoints_run_api_key_ids/,
+    );
+    // The company role changes the list only through its column grant.
+    const [grant] = await fx.query<{ can_update: boolean }>(
+      `SELECT has_column_privilege('w360_app', 'app.webhook_endpoints', 'run_api_key_ids', 'UPDATE')
+                AS can_update`,
+    );
+    expect(grant?.can_update).toBe(true);
+  });
+});
+
 describe('custom field filters (ADR-184)', () => {
   /** A custom field of the company, written as the contacts settings write one. */
   async function fieldOf(c: Company, key: string, label: string) {

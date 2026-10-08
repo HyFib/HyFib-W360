@@ -1661,6 +1661,105 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     });
   });
 
+  it('choose the API keys whose runs an endpoint receives, kept by changes that leave them out and cleared with the events (ADR-319)', async () => {
+    const c = await fx.company();
+    // The key adding the endpoint starts runs too; another key only starts them; one cannot.
+    const key = await apiKey(c, ['webhooks.manage', 'automations.start'], 'Store');
+    const crm = await apiKey(c, ['automations.start'], 'CRM');
+    const reader = await apiKey(c, ['contacts.read'], 'Reader');
+    const elsewhere = await apiKey(await fx.company(), ['automations.start'], 'Elsewhere');
+    const issueOf = async (promise: Promise<unknown>) => {
+      const error = await expectAppError(promise, 'validation_failed');
+      return isAppError(error) ? error.issues?.[0] : undefined;
+    };
+    const runs = ['automation.run_started', 'automation.run_ended'];
+    // Keys need a run event, at least one, each an id of the company's keys that can start
+    // automations (named by place).
+    const refusals = [
+      [['consent.changed'], [key.id], 'runApiKeyIds'],
+      [runs, [], 'runApiKeyIds'],
+      [runs, [key.id, key.keyPrefix], 'runApiKeyIds.1'],
+      [runs, [key.id, reader.id], 'runApiKeyIds.1'],
+      [['automation.run_ended'], [elsewhere.id], 'runApiKeyIds.0'],
+    ] as const;
+    for (const [index, [events, runApiKeyIds, path]] of refusals.entries()) {
+      expect(
+        await issueOf(
+          api().create(
+            key.ctx,
+            { url: receiverUrl(), events, runApiKeyIds },
+            idem(`run-keys-bad-${index}`, JSON.stringify(runApiKeyIds)),
+          ),
+        ),
+        JSON.stringify(runApiKeyIds),
+      ).toMatchObject({ path });
+    }
+    expect((await api().list(key.ctx)).data).toEqual([]);
+
+    const created = await addThroughApi(key.ctx, 'run-keys-1', {
+      url: receiverUrl(),
+      events: runs,
+      runApiKeyIds: [key.id, crm.id, key.id.toUpperCase()],
+    });
+    const id = created.body.data.id;
+    // The key finds its own id as the endpoint's.
+    expect(created.body.data.apiKeyId).toBe(key.id);
+    expect(created.body.data.runApiKeyIds).toEqual([key.id, crm.id]);
+    expect((await api().get(key.ctx, id)).runApiKeyIds).toEqual([key.id, crm.id]);
+    const [audit] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND subject_id = $2 AND action = 'webhook.endpoint_created'`,
+      [c.tenant.id, id],
+    );
+    expect(audit?.metadata).toMatchObject({ runApiKeyIds: [key.id, crm.id] });
+    // Settings names them, with whether they still work.
+    const owner = await fx.ctx(c, c.owner);
+    await keys.revoke(owner, { keyId: crm.id });
+    expect((await settings().list(owner)).find((e) => e.id === id)?.runApiKeys).toEqual([
+      { id: key.id, name: 'Store', keyPrefix: key.keyPrefix, state: 'active' },
+      { id: crm.id, name: 'CRM', keyPrefix: crm.keyPrefix, state: 'revoked' },
+    ]);
+
+    expect(await api().update(key.ctx, id, { description: 'Runs' })).toMatchObject({
+      runApiKeyIds: [key.id, crm.id],
+    });
+    // A revoked key stays allowed: the runs it started still end.
+    expect(await api().update(key.ctx, id, { runApiKeyIds: [crm.id] })).toMatchObject({
+      runApiKeyIds: [crm.id],
+    });
+    const updates = await fx.query<{ metadata: { runApiKeyIds?: unknown } }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND subject_id = $2 AND action = 'webhook.endpoint_updated'
+        ORDER BY occurred_at`,
+      [c.tenant.id, id],
+    );
+    expect(updates.map((u) => u.metadata.runApiKeyIds)).toEqual([[key.id, crm.id], [crm.id]]);
+    expect(await api().update(key.ctx, id, { events: ['automation.run_ended'] })).toMatchObject({
+      runApiKeyIds: [crm.id],
+    });
+    expect(await api().update(key.ctx, id, { events: ['consent.changed'] })).toMatchObject({
+      events: ['consent.changed'],
+      runApiKeyIds: null,
+    });
+    expect(await issueOf(api().update(key.ctx, id, { runApiKeyIds: [key.id] }))).toMatchObject({
+      path: 'runApiKeyIds',
+    });
+    expect(
+      await api().update(key.ctx, id, {
+        events: ['automation.run_started'],
+        runApiKeyIds: [key.id],
+      }),
+    ).toMatchObject({ runApiKeyIds: [key.id] });
+    // A list given again is checked again, changing nothing when it is refused.
+    expect(await issueOf(api().update(key.ctx, id, { runApiKeyIds: [reader.id] }))).toMatchObject({
+      path: 'runApiKeyIds.0',
+    });
+    expect((await api().get(key.ctx, id)).runApiKeyIds).toEqual([key.id]);
+    expect(await api().update(key.ctx, id, { runApiKeyIds: null })).toMatchObject({
+      runApiKeyIds: null,
+    });
+  });
+
   it('choose who sent the messages whose statuses an endpoint receives, kept by changes that leave them out and cleared with the event (ADR-172)', async () => {
     const c = await fx.company();
     const key = await apiKey(c, ['webhooks.manage']);

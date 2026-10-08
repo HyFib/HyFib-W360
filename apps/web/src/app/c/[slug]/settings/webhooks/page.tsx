@@ -34,6 +34,7 @@ import {
   webhookHost,
   webhookOwnerText,
   webhookPipelineText,
+  webhookRunApiKeyText,
   webhookStageText,
   webhookTeamText,
   webhookTemplateText,
@@ -69,6 +70,7 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
   const [
     endpoints,
     automationChoices,
+    runApiKeyChoices,
     channelChoices,
     teamChoices,
     templateChoices,
@@ -81,6 +83,7 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
   ] = await Promise.all([
     webhooks.list(ctx),
     webhooks.automationChoices(ctx),
+    webhooks.runApiKeyChoices(ctx),
     webhooks.channelChoices(ctx),
     webhooks.teamChoices(ctx),
     webhooks.templateChoices(ctx),
@@ -270,6 +273,12 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
                       <p className="text-xs text-muted-foreground">
                         Automation runs started by:{' '}
                         {e.runTriggers.map((t) => WEBHOOK_RUN_TRIGGER_LABELS[t]).join(', ')}
+                      </p>
+                    ) : null}
+                    {e.runApiKeys ? (
+                      <p className="text-xs break-all text-muted-foreground">
+                        Automation runs sent, started through the API by:{' '}
+                        {e.runApiKeys.map(webhookRunApiKeyText).join(', ')}
                       </p>
                     ) : null}
                     {e.consentChanges ? (
@@ -561,6 +570,7 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
           <WebhookEndpointForm
             slug={ctx.tenant.slug}
             automationChoices={automationChoices}
+            runApiKeyChoices={runApiKeyChoices}
             channelChoices={channelChoices}
             teamChoices={teamChoices}
             templateChoices={templateChoices}

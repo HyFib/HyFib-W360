@@ -21,18 +21,21 @@ import {
   isNull,
   memberships,
   messageTemplates,
+  or,
   sql,
   teams,
   users,
   webhookDeliveries,
   webhookEndpoints,
   webhookEvents,
+  type ApiScope,
   type ContactSource,
   type Database,
   type Tx,
   type WebhookDeliveryState,
   type WebhookEventType,
 } from '@w360/db';
+import { apiKeyState } from '../api/model';
 import { recordAudit, type RequestMeta } from '../audit';
 import { assertCan, type TenantContext } from '../authz/context';
 import { assertRecentSignIn } from '../authz/step-up';
@@ -81,6 +84,8 @@ import {
   webhookTakesTemplateEvents,
   type WebhookAssigneeChoice,
   type WebhookAutomationChoice,
+  type WebhookEndpointRunApiKey,
+  type WebhookRunApiKeyChoice,
   type WebhookCampaignChoice,
   type WebhookCampaignStatus,
   type WebhookChannelChoice,
@@ -676,6 +681,73 @@ export function webhookRunTriggersFor(
   if (!webhookTakesAutomationRuns(eventTypes)) return null;
   const kept = given === undefined ? current : given;
   return kept ? [...kept] : null;
+}
+
+/** The scope that starts automations through the API (ADR-319): only keys holding it start runs. */
+const RUN_STARTING_SCOPE: ApiScope = 'automations.start';
+
+/**
+ * The API keys whose runs an endpoint takes as `automation.run_started` and
+ * `automation.run_ended` (ADR-319), each once: the runs one of them started through the API, or a
+ * key one of them was rotated from or into. null takes every run, those started otherwise among
+ * them.
+ */
+export const webhookRunApiKeyIdsSchema = z
+  .array(z.uuid({ error: 'Choose API keys from the list.' }))
+  .min(1, 'Choose at least one API key, or take every run.')
+  .max(WEBHOOK_LIMITS.runApiKeys, `Choose at most ${WEBHOOK_LIMITS.runApiKeys} API keys.`)
+  .transform((ids) => [...new Set(ids.map((id) => id.toLowerCase()))])
+  .nullable();
+
+export const WEBHOOK_RUN_API_KEYS_NEED_THE_EVENTS =
+  'Choose API keys only for an endpoint that receives Automation started or Automation ended.';
+
+export const WEBHOOK_RUN_API_KEYS_NOT_FOUND =
+  'Choose API keys of this company that can start automations.';
+
+/**
+ * The API keys an endpoint keeps after it is added or changed: every run (null) unless it takes a
+ * run event; then those given, or else the ones it had.
+ */
+export function webhookRunApiKeyIdsFor(
+  eventTypes: readonly WebhookEventType[],
+  given: readonly string[] | null | undefined,
+  current: readonly string[] | null,
+): string[] | null {
+  if (!webhookTakesAutomationRuns(eventTypes)) return null;
+  const kept = given === undefined ? current : given;
+  return kept ? [...kept] : null;
+}
+
+/**
+ * Refuses API keys given for an endpoint unless each is the company's and holds
+ * `automations.start` (ADR-319), whatever its state: a revoked or expired key's runs still end, and
+ * a rotated key's runs match the key that replaced it. Keys are never deleted and keep their
+ * scopes, so a list never names a key that is gone or cannot start runs. `tx` is in the company's
+ * scope.
+ */
+export async function assertWebhookRunApiKeys(
+  tx: Tx,
+  tenantId: string,
+  ids: readonly string[] | null | undefined,
+): Promise<void> {
+  if (!ids || ids.length === 0) return;
+  const rows = await tx
+    .select({ id: apiKeys.id })
+    .from(apiKeys)
+    .where(
+      and(
+        eq(apiKeys.tenantId, tenantId),
+        inArray(apiKeys.id, [...ids]),
+        sql`${RUN_STARTING_SCOPE}::text = any(${apiKeys.scopes})`,
+      ),
+    );
+  const found = new Set(rows.map((r) => r.id));
+  const index = ids.findIndex((id) => !found.has(id));
+  if (index === -1) return;
+  throw new AppError('validation_failed', WEBHOOK_RUN_API_KEYS_NOT_FOUND, {
+    issues: [{ path: `runApiKeyIds.${index}`, message: WEBHOOK_RUN_API_KEYS_NOT_FOUND }],
+  });
 }
 
 /**
@@ -2161,6 +2233,8 @@ const endpointFields = z.object({
   runEndStatuses: webhookRunEndStatusesSchema.optional(),
   /** Given, what started the runs it takes (null: every run, ADR-183); left out, they stay. */
   runTriggers: webhookRunTriggersSchema.optional(),
+  /** Given, the API keys whose runs it takes (null: every run, ADR-319); left out, they stay. */
+  runApiKeyIds: webhookRunApiKeyIdsSchema.optional(),
   /** Given, the consent changes it takes (null: every change, ADR-189); left out, they stay. */
   consentChanges: webhookConsentChangesSchema.optional(),
   /** Given, where the contacts it takes came from (null: every one, ADR-190); left out, they stay. */
@@ -2387,6 +2461,12 @@ const runTriggersNeedTheEvents = {
     !data.runTriggers || webhookTakesAutomationRuns(data.eventTypes),
   options: { path: ['runTriggers'], message: WEBHOOK_RUN_TRIGGERS_NEED_THE_EVENTS },
 };
+/** API keys are chosen only for an endpoint that takes run events (ADR-319). */
+const runApiKeysNeedTheEvents = {
+  check: (data: { eventTypes: WebhookEventType[]; runApiKeyIds?: unknown }) =>
+    !data.runApiKeyIds || webhookTakesAutomationRuns(data.eventTypes),
+  options: { path: ['runApiKeyIds'], message: WEBHOOK_RUN_API_KEYS_NEED_THE_EVENTS },
+};
 /** Consent changes are chosen only for an endpoint that takes `consent.changed` (ADR-189). */
 const consentChangesNeedTheEvent = {
   check: (data: { eventTypes: WebhookEventType[]; consentChanges?: unknown }) =>
@@ -2576,6 +2656,7 @@ const endpointSchema = endpointFields
   .refine(conversationStatusesNeedTheEvent.check, conversationStatusesNeedTheEvent.options)
   .refine(runEndStatusesNeedTheEvent.check, runEndStatusesNeedTheEvent.options)
   .refine(runTriggersNeedTheEvents.check, runTriggersNeedTheEvents.options)
+  .refine(runApiKeysNeedTheEvents.check, runApiKeysNeedTheEvents.options)
   .refine(consentChangesNeedTheEvent.check, consentChangesNeedTheEvent.options)
   .refine(contactSourcesNeedTheEvent.check, contactSourcesNeedTheEvent.options)
   .refine(messageTypesNeedTheEvent.check, messageTypesNeedTheEvent.options)
@@ -2622,6 +2703,7 @@ const updateSchema = endpointFields
   .refine(conversationStatusesNeedTheEvent.check, conversationStatusesNeedTheEvent.options)
   .refine(runEndStatusesNeedTheEvent.check, runEndStatusesNeedTheEvent.options)
   .refine(runTriggersNeedTheEvents.check, runTriggersNeedTheEvents.options)
+  .refine(runApiKeysNeedTheEvents.check, runApiKeysNeedTheEvents.options)
   .refine(consentChangesNeedTheEvent.check, consentChangesNeedTheEvent.options)
   .refine(contactSourcesNeedTheEvent.check, contactSourcesNeedTheEvent.options)
   .refine(messageTypesNeedTheEvent.check, messageTypesNeedTheEvent.options)
@@ -2716,6 +2798,11 @@ export interface WebhookEndpointView {
   runEndStatuses: WebhookRunEndStatus[] | null;
   /** What started the runs whose events it takes (ADR-183); null takes every run's. */
   runTriggers: WebhookRunTrigger[] | null;
+  /**
+   * The API keys whose runs' events it takes (ADR-319), as stored, named, with whether they still
+   * work; null takes every run's.
+   */
+  runApiKeys: WebhookEndpointRunApiKey[] | null;
   /** The consent changes it takes as `consent.changed` (ADR-189); null takes every change. */
   consentChanges: WebhookConsentChange[] | null;
   /** Where the contacts whose `contact.created` it takes came from (ADR-190); null: every contact. */
@@ -3073,6 +3160,7 @@ export async function lockWebhookEndpoint(
       conversationStatuses: webhookEndpoints.conversationStatuses,
       runEndStatuses: webhookEndpoints.runEndStatuses,
       runTriggers: webhookEndpoints.runTriggers,
+      runApiKeyIds: webhookEndpoints.runApiKeyIds,
       consentChanges: webhookEndpoints.consentChanges,
       contactSources: webhookEndpoints.contactSources,
       messageTypes: webhookEndpoints.messageTypes,
@@ -3154,6 +3242,7 @@ export async function insertWebhookEndpoint(
     conversationStatuses: WebhookConversationStatus[] | null;
     runEndStatuses: WebhookRunEndStatus[] | null;
     runTriggers: WebhookRunTrigger[] | null;
+    runApiKeyIds: string[] | null;
     consentChanges: WebhookConsentChange[] | null;
     contactSources: ContactSource[] | null;
     messageTypes: WebhookReceivedMessageType[] | null;
@@ -3224,6 +3313,7 @@ export async function insertWebhookEndpoint(
     conversationStatuses: input.conversationStatuses,
     runEndStatuses: input.runEndStatuses,
     runTriggers: input.runTriggers,
+    runApiKeyIds: input.runApiKeyIds,
     consentChanges: input.consentChanges,
     contactSources: input.contactSources,
     messageTypes: input.messageTypes,
@@ -3643,6 +3733,7 @@ export function createWebhooksService(deps: {
               conversationStatuses: webhookEndpoints.conversationStatuses,
               runEndStatuses: webhookEndpoints.runEndStatuses,
               runTriggers: webhookEndpoints.runTriggers,
+              runApiKeyIds: webhookEndpoints.runApiKeyIds,
               consentChanges: webhookEndpoints.consentChanges,
               contactSources: webhookEndpoints.contactSources,
               messageTypes: webhookEndpoints.messageTypes,
@@ -3905,6 +3996,24 @@ export function createWebhooksService(deps: {
                     ),
                   );
           const assigneeById = new Map(namedAssignees.map((m) => [m.id, m]));
+          // The API keys endpoints chose for runs (ADR-319), and whether they still work.
+          const runApiKeyIds = [...new Set(rows.flatMap((r) => r.runApiKeyIds ?? []))];
+          const namedRunApiKeys =
+            runApiKeyIds.length === 0
+              ? []
+              : await tx
+                  .select({
+                    id: apiKeys.id,
+                    name: apiKeys.name,
+                    keyPrefix: apiKeys.keyPrefix,
+                    revokedAt: apiKeys.revokedAt,
+                    expiresAt: apiKeys.expiresAt,
+                  })
+                  .from(apiKeys)
+                  .where(
+                    and(eq(apiKeys.tenantId, ctx.tenant.id), inArray(apiKeys.id, runApiKeyIds)),
+                  );
+          const runApiKeyById = new Map(namedRunApiKeys.map((k) => [k.id, k]));
           // The custom fields endpoints chose (ADR-184); one deleted since is named by its absence.
           const fieldKeys = [...new Set(rows.flatMap((r) => r.contactFieldKeys ?? []))];
           const namedFields =
@@ -3933,6 +4042,7 @@ export function createWebhooksService(deps: {
               keyName,
               keyPrefix,
               automationIds,
+              runApiKeyIds: chosenRunApiKeys,
               channelAccountIds,
               teamIds: chosenTeams,
               templateIds: chosenTemplates,
@@ -4025,6 +4135,19 @@ export function createWebhooksService(deps: {
                     };
                   })
                 : null,
+              runApiKeys: chosenRunApiKeys
+                ? chosenRunApiKeys.map((id): WebhookEndpointRunApiKey => {
+                    const key = runApiKeyById.get(id);
+                    return key
+                      ? {
+                          id,
+                          name: key.name,
+                          keyPrefix: key.keyPrefix,
+                          state: apiKeyState(key, now),
+                        }
+                      : { id, name: null, keyPrefix: null, state: null };
+                  })
+                : null,
               createdByKey: keyName && keyPrefix ? { name: keyName, keyPrefix } : null,
               previousSecretExpiresAt: previousSigns ? r.previousSecretExpiresAt : null,
               recent,
@@ -4066,6 +4189,36 @@ export function createWebhooksService(deps: {
               ),
             )
             .orderBy(asc(automations.name), asc(automations.id)),
+        { accessMode: 'read only' },
+      );
+    },
+
+    /**
+     * The API keys an endpoint can choose to take the runs of (ADR-319): the company's keys that
+     * can start automations (`automations.start`), work now and were not rotated, by name. A
+     * rotated key's runs match the key that replaced it, which is offered instead; the API takes
+     * any of the company's keys that hold the scope, and Settings keeps showing one an endpoint
+     * names.
+     */
+    async runApiKeyChoices(ctx: TenantContext): Promise<WebhookRunApiKeyChoice[]> {
+      assertCan(ctx, 'developer.manage');
+      const now = clock.now();
+      return db.run(
+        ctx.scope,
+        (tx) =>
+          tx
+            .select({ id: apiKeys.id, name: apiKeys.name, keyPrefix: apiKeys.keyPrefix })
+            .from(apiKeys)
+            .where(
+              and(
+                eq(apiKeys.tenantId, ctx.tenant.id),
+                sql`${RUN_STARTING_SCOPE}::text = any(${apiKeys.scopes})`,
+                isNull(apiKeys.revokedAt),
+                isNull(apiKeys.replacedByKeyId),
+                or(isNull(apiKeys.expiresAt), gt(apiKeys.expiresAt, now)),
+              ),
+            )
+            .orderBy(asc(apiKeys.name), asc(apiKeys.createdAt), asc(apiKeys.id)),
         { accessMode: 'read only' },
       );
     },
@@ -4330,6 +4483,8 @@ export function createWebhooksService(deps: {
         );
         const runEndStatuses = webhookRunEndStatusesFor(data.eventTypes, data.runEndStatuses, null);
         const runTriggers = webhookRunTriggersFor(data.eventTypes, data.runTriggers, null);
+        const runApiKeyIds = webhookRunApiKeyIdsFor(data.eventTypes, data.runApiKeyIds, null);
+        await assertWebhookRunApiKeys(tx, ctx.tenant.id, runApiKeyIds);
         const consentChanges = webhookConsentChangesFor(data.eventTypes, data.consentChanges, null);
         const contactSources = webhookContactSourcesFor(data.eventTypes, data.contactSources, null);
         const messageTypes = webhookMessageTypesFor(data.eventTypes, data.messageTypes, null);
@@ -4460,6 +4615,7 @@ export function createWebhooksService(deps: {
           conversationStatuses,
           runEndStatuses,
           runTriggers,
+          runApiKeyIds,
           consentChanges,
           contactSources,
           messageTypes,
@@ -4518,6 +4674,7 @@ export function createWebhooksService(deps: {
               ...(conversationStatuses ? { conversationStatuses } : {}),
               ...(runEndStatuses ? { runEndStatuses } : {}),
               ...(runTriggers ? { runTriggers } : {}),
+              ...(runApiKeyIds ? { runApiKeyIds } : {}),
               ...(consentChanges ? { consentChanges } : {}),
               ...(contactSources ? { contactSources } : {}),
               ...(messageTypes ? { messageTypes } : {}),
@@ -4660,6 +4817,15 @@ export function createWebhooksService(deps: {
           data.runTriggers,
           endpoint.runTriggers,
         );
+        const runApiKeyIds = webhookRunApiKeyIdsFor(
+          data.eventTypes,
+          data.runApiKeyIds,
+          endpoint.runApiKeyIds,
+        );
+        // Only a list given now is checked: the keys kept were checked when chosen.
+        if (data.runApiKeyIds !== undefined) {
+          await assertWebhookRunApiKeys(tx, ctx.tenant.id, runApiKeyIds);
+        }
         const consentChanges = webhookConsentChangesFor(
           data.eventTypes,
           data.consentChanges,
@@ -4914,6 +5080,7 @@ export function createWebhooksService(deps: {
             conversationStatuses,
             runEndStatuses,
             runTriggers,
+            runApiKeyIds,
             consentChanges,
             contactSources,
             messageTypes,
@@ -4983,6 +5150,7 @@ export function createWebhooksService(deps: {
               ...(conversationStatuses ? { conversationStatuses } : {}),
               ...(runEndStatuses ? { runEndStatuses } : {}),
               ...(runTriggers ? { runTriggers } : {}),
+              ...(runApiKeyIds ? { runApiKeyIds } : {}),
               ...(consentChanges ? { consentChanges } : {}),
               ...(contactSources ? { contactSources } : {}),
               ...(messageTypes ? { messageTypes } : {}),

@@ -149,6 +149,7 @@ import {
 import {
   WEBHOOK_FIELDS_NEED_THE_PART,
   WEBHOOK_RUN_TRIGGERS_NEED_THE_EVENTS,
+  WEBHOOK_RUN_API_KEYS_NEED_THE_EVENTS,
   WEBHOOK_CONSENT_CHANGES_NEED_THE_EVENT,
   WEBHOOK_CONTACT_SOURCES_NEED_THE_EVENT,
   WEBHOOK_MESSAGE_TYPES_NEED_THE_EVENT,
@@ -1497,6 +1498,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'ownerIds',
       'paymentLinkStatuses',
       'pipelineIds',
+      'runApiKeyIds',
       'runEndReasons',
       'runEndStatuses',
       'runTriggers',
@@ -1565,7 +1567,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       "An endpoint receives every automation's runs unless it names the automations it takes",
     );
     expect(webhooks['automation.run_ended']?.post?.description).toContain(
-      'An endpoint that names the automations it takes receives only their runs',
+      'An endpoint that names the automations or API keys it takes receives only their runs',
     );
     // The campaign statuses an endpoint receives (ADR-146): a list, or null.
     const campaignStatuses = (answered.properties as Record<string, { anyOf?: unknown[] }>)
@@ -3863,6 +3865,80 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     expect(apiUpdateWebhookEndpointSchema.parse({ automationIds: [farewell] })).toEqual({
       automationIds: [farewell],
     });
+  });
+
+  it('take API keys only with an automation run event, each once, and a list of them alone is a change (ADR-319)', () => {
+    const store = '0E1A2B3C-4D5E-4F60-8172-8394A5B6C7D8';
+    const crm = '1f2e3d4c-5b6a-4978-8695-a4b3c2d1e0f9';
+    for (const events of [
+      ['automation.run_started'],
+      ['automation.run_ended', 'consent.changed'],
+    ]) {
+      expect(
+        apiCreateWebhookEndpointSchema.parse({
+          url: 'https://hooks.example.com/w360',
+          events,
+          runApiKeyIds: [store, crm, store.toLowerCase()],
+        }).runApiKeyIds,
+        JSON.stringify(events),
+      ).toEqual([store.toLowerCase(), crm]);
+    }
+    const base = { url: 'https://hooks.example.com/w360', events: ['automation.run_ended'] };
+    expect(apiCreateWebhookEndpointSchema.parse({ ...base, runApiKeyIds: null })).toEqual({
+      ...base,
+      runApiKeyIds: null,
+    });
+    const tooMany = Array.from(
+      { length: 21 },
+      (_, i) => `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`,
+    );
+    expect(
+      apiCreateWebhookEndpointSchema.safeParse({ ...base, runApiKeyIds: tooMany.slice(1) }).success,
+    ).toBe(true);
+    for (const body of [
+      { ...base, runApiKeyIds: [] },
+      { ...base, runApiKeyIds: ['w360_aaaaaaaaaaaa'] },
+      { ...base, runApiKeyIds: tooMany },
+      { ...base, runApiKeyIds: store },
+    ]) {
+      expect(apiCreateWebhookEndpointSchema.safeParse(body).success, JSON.stringify(body)).toBe(
+        false,
+      );
+    }
+    const refused = apiCreateWebhookEndpointSchema.safeParse({
+      ...base,
+      events: ['message.received', 'order.received'],
+      runApiKeyIds: [store],
+    });
+    expect(refused.error?.issues.map((i) => [i.path.join('.'), i.message])).toEqual([
+      ['runApiKeyIds', WEBHOOK_RUN_API_KEYS_NEED_THE_EVENTS],
+    ]);
+    expect(apiUpdateWebhookEndpointSchema.parse({ runApiKeyIds: null })).toEqual({
+      runApiKeyIds: null,
+    });
+    expect(apiUpdateWebhookEndpointSchema.parse({ runApiKeyIds: [crm] })).toEqual({
+      runApiKeyIds: [crm],
+    });
+    expect(apiUpdateWebhookEndpointSchema.safeParse({}).error?.issues[0]?.message).toContain(
+      'what started the runs, the API keys that started them, the consent changes,',
+    );
+    // Answered as a list of key ids, or null, and set out with the run events.
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas;
+    const answered = schemas.WebhookEndpoint as {
+      properties: Record<string, { anyOf?: unknown[] }>;
+      required?: string[];
+    };
+    expect(answered.properties.runApiKeyIds?.anyOf).toHaveLength(2);
+    expect(answered.required).toContain('runApiKeyIds');
+    expect(
+      Object.keys((schemas.CreateWebhookEndpoint as { properties: object }).properties),
+    ).toContain('runApiKeyIds');
+    const webhooks = doc.webhooks as Record<string, { post?: { description?: string } }>;
+    expect(webhooks['automation.run_started']?.post?.description).toContain(
+      'and every run unless it names the API keys whose runs it takes (its `runApiKeyIds`',
+    );
   });
 });
 

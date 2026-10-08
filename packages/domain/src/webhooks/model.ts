@@ -791,6 +791,8 @@ export const WEBHOOK_LIMITS = {
   surveyConversationTags: 50,
   /** The contact tags whose added and changed contacts an endpoint can choose (ADR-316). */
   contactEventTags: 50,
+  /** The API keys whose automation runs an endpoint can choose (ADR-319): a company's most keys. */
+  runApiKeys: 20,
   /** The contact tags an endpoint can choose to take the conversations' events of (ADR-267). */
   contactTags: 50,
   /** The conversation tags an endpoint can choose to take the conversations' events of (ADR-273). */
@@ -829,6 +831,38 @@ export interface WebhookAutomationChoice {
 export function webhookTakesAutomationRuns(eventTypes: readonly WebhookEventType[]): boolean {
   return WEBHOOK_AUTOMATION_EVENTS.some((type) => eventTypes.includes(type));
 }
+
+/**
+ * An API key of the company that can start automations (`automations.start`), works and was not
+ * rotated, which an endpoint can choose to take the runs it starts of (ADR-319). The API also takes
+ * a revoked, expired or rotated key that holds the scope; Settings lists one only while an endpoint
+ * names it.
+ */
+export interface WebhookRunApiKeyChoice {
+  id: string;
+  name: string;
+  keyPrefix: string;
+}
+
+/** An API key an endpoint takes the runs of (ADR-319), as stored. */
+export interface WebhookEndpointRunApiKey {
+  id: string;
+  /** Null only for a key the company no longer had, which cannot happen: keys are never deleted. */
+  name: string | null;
+  keyPrefix: string | null;
+  /**
+   * Whether the key works now. A revoked or expired key starts no more runs, though those it
+   * started still end, and a rotated key's runs match the key that replaced it: it stays chosen.
+   */
+  state: 'active' | 'revoked' | 'expired' | null;
+}
+
+/** An API key as Settings → Webhooks names it, as it names the key that added an endpoint. */
+export const webhookRunApiKeyText = (key: WebhookEndpointRunApiKey): string => {
+  if (!key.name || !key.keyPrefix) return 'Unknown API key';
+  const named = `“${key.name}” (${key.keyPrefix}_…)`;
+  return key.state === 'revoked' || key.state === 'expired' ? `${named}, ${key.state}` : named;
+};
 
 /**
  * The events that happen on a WhatsApp number, which an endpoint can take for chosen numbers
