@@ -204,6 +204,10 @@ import {
   webhookCrmExcludedApiKeyIdsFor,
   webhookCrmExcludedApiKeyIdsSchema,
   WEBHOOK_ORDER_KEY_SCOPES,
+  WEBHOOK_PAYMENT_LINK_KEY_SCOPES,
+  WEBHOOK_PAYMENT_LINK_API_KEYS_NEED_THE_EVENT,
+  webhookPaymentLinkApiKeyIdsFor,
+  webhookPaymentLinkApiKeyIdsSchema,
   WEBHOOK_ORDER_EXCLUDED_API_KEYS_NEED_THE_EVENT,
   webhookOrderExcludedApiKeyIdsFor,
   webhookOrderExcludedApiKeyIdsSchema,
@@ -2613,6 +2617,54 @@ describe('API keys left out of order changes (ADR-323)', () => {
     ).toBeNull();
     expect(WEBHOOK_ORDER_EXCLUDED_API_KEYS_NEED_THE_EVENT).toBe(
       `Leave out the order changes of API keys only for an endpoint that receives ${WEBHOOK_EVENT_INFO['order.status_changed'].label}.`,
+    );
+  });
+});
+
+describe('API key filters of Payment Link events (ADR-324)', () => {
+  const payments = '4c5d6e7f-8a9b-4c0d-9e1f-3a4b5c6d7e8f';
+  const shop = '5d6e7f8a-9b0c-4d1e-8f2a-4b5c6d7e8f9a';
+
+  it('take 1 to 20 key ids, once each, in lower case; null takes every link', () => {
+    expect(webhookPaymentLinkApiKeyIdsSchema.parse([shop.toUpperCase(), payments, shop])).toEqual([
+      shop,
+      payments,
+    ]);
+    expect(webhookPaymentLinkApiKeyIdsSchema.parse(null)).toBeNull();
+    expect(WEBHOOK_LIMITS.paymentLinkApiKeys).toBe(API_KEY_LIMITS.activeKeys);
+    const ids = Array.from(
+      { length: 21 },
+      (_, i) => `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`,
+    );
+    expect(webhookPaymentLinkApiKeyIdsSchema.safeParse(ids.slice(1)).success).toBe(true);
+    expect(webhookPaymentLinkApiKeyIdsSchema.safeParse(ids).error?.issues[0]?.message).toBe(
+      'Choose at most 20 API keys.',
+    );
+    expect(webhookPaymentLinkApiKeyIdsSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one API key, or take every Payment Link.',
+    );
+  });
+
+  it('name the keys that ask customers to pay', () => {
+    expect([...WEBHOOK_PAYMENT_LINK_KEY_SCOPES]).toEqual(['orders.request_payment']);
+  });
+
+  it('are kept only while the endpoint takes payment_link.status_changed: given, kept, or cleared', () => {
+    const both = ['payment_link.status_changed', 'order.status_changed'] as const;
+    expect(webhookPaymentLinkApiKeyIdsFor([...both], [shop], null)).toEqual([shop]);
+    expect(webhookPaymentLinkApiKeyIdsFor([...both], undefined, [payments])).toEqual([payments]);
+    expect(webhookPaymentLinkApiKeyIdsFor([...both], null, [payments])).toBeNull();
+    expect(webhookPaymentLinkApiKeyIdsFor([...both], undefined, null)).toBeNull();
+    // An order's own events have no link asked for.
+    expect(
+      webhookPaymentLinkApiKeyIdsFor(
+        ['order.status_changed', 'order.received'],
+        [shop],
+        [payments],
+      ),
+    ).toBeNull();
+    expect(WEBHOOK_PAYMENT_LINK_API_KEYS_NEED_THE_EVENT).toBe(
+      `Choose API keys only for an endpoint that receives ${WEBHOOK_EVENT_INFO['payment_link.status_changed'].label}.`,
     );
   });
 });

@@ -978,8 +978,8 @@ function AutomationChoices({
 }
 
 /**
- * What the API keys' fieldset says for runs (ADR-319), messages' statuses (ADR-320), and the CRM
- * (ADR-321) and order (ADR-323) changes left out.
+ * What the API keys' fieldset says for runs (ADR-319), messages' statuses (ADR-320) and Payment
+ * Links (ADR-324), and the CRM (ADR-321) and order (ADR-323) changes left out.
  */
 const API_KEY_WORDS = {
   runs: {
@@ -1018,11 +1018,21 @@ const API_KEY_WORDS = {
     none: 'No API key can change orders yet.',
     idPart: 'order-api-key',
   },
+  paymentLinks: {
+    legend: 'Payment Links asked for through the API',
+    help: 'A Payment Link asked for through the API belongs to the key that asked for it, and to the keys that key was rotated from or into; a link a member asked for belongs to none. With Payment Link statuses chosen too, a change must pass both.',
+    every: 'Every Payment Link’s changes',
+    everyHelp: 'Including links members asked for, and by keys added later.',
+    only: 'Only the changes of the links the API keys ticked asked for',
+    none: 'No API key can ask customers to pay yet.',
+    idPart: 'payment-link-api-key',
+  },
 } as const;
 
 /**
  * The API keys whose runs (ADR-319) or messages' statuses (ADR-320) an endpoint takes, or whose
- * deal, task and note changes (ADR-321) or order changes (ADR-323) it leaves out, as `kind` says,
+ * deal, task and note changes (ADR-321) or order changes (ADR-323) it leaves out, or whose Payment
+ * Links' changes it takes (ADR-324), as `kind` says,
  * shown while it takes their events: every run, message or change, or only those of the keys
  * ticked, or all but theirs. The keys that can start automations, send messages or change deals,
  * tasks, notes or orders, work and were not rotated are offered; one the endpoint already names
@@ -2747,6 +2757,7 @@ export function WebhookEndpointForm({
   messageApiKeyChoices,
   crmApiKeyChoices,
   orderApiKeyChoices,
+  paymentLinkApiKeyChoices,
   channelChoices,
   teamChoices,
   templateChoices,
@@ -2781,6 +2792,8 @@ export function WebhookEndpointForm({
     orderChangeMakers: WebhookOrderChangeMaker[] | null;
     /** The API keys whose order changes it leaves out (ADR-323), and if they work; null: none. */
     orderExcludedApiKeys: WebhookEndpointApiKey[] | null;
+    /** The keys whose Payment Links' changes it takes (ADR-324), and if they work; null: all. */
+    paymentLinkApiKeys: WebhookEndpointApiKey[] | null;
     /** The deal statuses it takes (ADR-309); null for every status. */
     dealStatuses: WebhookDealStatus[] | null;
     /** The task statuses it takes (ADR-309); null for every status. */
@@ -2865,6 +2878,8 @@ export function WebhookEndpointForm({
   crmApiKeyChoices: WebhookApiKeyChoice[];
   /** The company's API keys that change orders, which an endpoint can leave out (ADR-323). */
   orderApiKeyChoices: WebhookApiKeyChoice[];
+  /** The company's API keys that ask customers to pay, which an endpoint can choose (ADR-324). */
+  paymentLinkApiKeyChoices: WebhookApiKeyChoice[];
   /** The company's WhatsApp numbers, which an endpoint can choose (ADR-170). */
   channelChoices: WebhookChannelChoice[];
   /** The company's teams, which an endpoint can choose (ADR-174). */
@@ -2916,6 +2931,12 @@ export function WebhookEndpointForm({
   const [everyOrderChange, setEveryOrderChange] = useState(!endpoint?.orderExcludedApiKeys);
   const [orderExcludedApiKeyIds, setOrderExcludedApiKeyIds] = useState<string[]>(
     endpoint?.orderExcludedApiKeys?.map((k) => k.id) ?? [],
+  );
+  const [everyPaymentLinkApiKey, setEveryPaymentLinkApiKey] = useState(
+    !endpoint?.paymentLinkApiKeys,
+  );
+  const [paymentLinkApiKeyIds, setPaymentLinkApiKeyIds] = useState<string[]>(
+    endpoint?.paymentLinkApiKeys?.map((k) => k.id) ?? [],
   );
   const [dealStatuses, setDealStatuses] = useState<WebhookDealStatus[]>(
     endpoint?.dealStatuses ?? [...WEBHOOK_DEAL_STATUSES],
@@ -3138,6 +3159,11 @@ export function WebhookEndpointForm({
           eventTypes.includes('order.status_changed') && !everyOrderChange
             ? orderExcludedApiKeyIds
             : null;
+        // Every Payment Link's changes unless the API keys ticked are chosen (ADR-324).
+        const chosenPaymentLinkApiKeys =
+          eventTypes.includes('payment_link.status_changed') && !everyPaymentLinkApiKey
+            ? paymentLinkApiKeyIds
+            : null;
         // Every deal or task status ticked takes every status (null, ADR-309).
         const chosenDealStatuses =
           eventTypes.includes('deal.status_changed') &&
@@ -3327,6 +3353,7 @@ export function WebhookEndpointForm({
           paymentLinkStatuses: chosenPaymentLinkStatuses,
           orderChangeMakers: chosenOrderChangeMakers,
           orderExcludedApiKeyIds: chosenOrderExcludedApiKeys,
+          paymentLinkApiKeyIds: chosenPaymentLinkApiKeys,
           dealStatuses: chosenDealStatuses,
           taskStatuses: chosenTaskStatuses,
           dealDetails: chosenDealDetails,
@@ -3418,6 +3445,8 @@ export function WebhookEndpointForm({
               setOrderChangeMakers([...WEBHOOK_ORDER_CHANGE_MAKERS]);
               setEveryOrderChange(true);
               setOrderExcludedApiKeyIds([]);
+              setEveryPaymentLinkApiKey(true);
+              setPaymentLinkApiKeyIds([]);
               setDealStatuses([...WEBHOOK_DEAL_STATUSES]);
               setTaskStatuses([...WEBHOOK_TASK_STATUSES]);
               setDealDetails([...WEBHOOK_DEAL_DETAILS]);
@@ -3715,6 +3744,18 @@ export function WebhookEndpointForm({
           onEveryChange={setEveryOrderChange}
           chosen={orderExcludedApiKeyIds}
           onChange={setOrderExcludedApiKeyIds}
+        />
+      ) : null}
+      {eventTypes.includes('payment_link.status_changed') ? (
+        <ApiKeyChoices
+          kind="paymentLinks"
+          prefix={prefix}
+          choices={paymentLinkApiKeyChoices}
+          stored={endpoint?.paymentLinkApiKeys ?? []}
+          every={everyPaymentLinkApiKey}
+          onEveryChange={setEveryPaymentLinkApiKey}
+          chosen={paymentLinkApiKeyIds}
+          onChange={setPaymentLinkApiKeyIds}
         />
       ) : null}
       {eventTypes.includes('satisfaction_survey.answered') ? (

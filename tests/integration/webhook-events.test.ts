@@ -26,6 +26,7 @@ import {
   apiStopAutomationRun,
   apiUpdateConversation,
   apiUpdateDeal,
+  apiRequestOrderPayment,
   apiUpdateOrder,
   apiUpdateTask,
   authenticateApiToken,
@@ -3775,6 +3776,140 @@ describe('order events (ADR-085)', () => {
         ]),
         // A change that recorded no maker is left out by no list.
         ...to('order.status_changed', 'third', 'confirmed', all),
+      ]),
+    );
+  });
+
+  it('sends an endpoint that names API keys only the changes of the Payment Links they asked for, across a rotation either way (ADR-324)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const agent = await fx.ctx(c, c.agent);
+    await syncedCatalog(c, '5558593');
+    const keys = createApiKeysService({ db: fx.dbs.app, clock: systemClock });
+    const shop = await keys.create(owner, {
+      name: 'Shop',
+      scopes: ['orders.request_payment'],
+      expiresInDays: 0,
+    });
+    const billing = await keys.create(owner, {
+      name: 'Billing',
+      scopes: ['orders.request_payment'],
+      expiresInDays: 0,
+    });
+    const add = async (paymentLinkApiKeyIds: string[] | null) =>
+      (
+        await webhooks().create(owner, {
+          url: `http://${HOST}:${port}/ok/${randomBytes(6).toString('hex')}`,
+          eventTypes: ['payment_link.status_changed'],
+          paymentLinkApiKeyIds,
+        })
+      ).id;
+    const every = await add(null);
+    const byShop = await add([shop.id]);
+    const byBilling = await add([billing.id]);
+
+    // The company's Razorpay account, checked.
+    const keyId = `rzp_test_orderevents${String((merchants += 1)).padStart(2, '0')}`;
+    rzp.addMerchant(keyId, 'order-events-secret');
+    await commerce().savePaymentAccount(owner, {
+      keyId,
+      keySecret: 'order-events-secret',
+      webhookSecret: 'order-events-hook',
+    });
+    const [account] = await fx.query<{ id: string }>(
+      'SELECT id FROM app.commerce_payment_accounts WHERE tenant_id = $1',
+      [c.tenant.id],
+    );
+    expect(await processPaymentAccountCheck(commerceWorker(), scopeOf(c), account!.id)).toBe(
+      'done',
+    );
+    const keyCtx = async (token: string) => {
+      const ctx = await authenticateApiToken(fx.dbs.app, token, uuidv7());
+      if (!ctx) throw new Error('a key does not authenticate');
+      return ctx;
+    };
+    const apiDeps = { db: fx.dbs.app, clock: systemClock, jobs: fx.jobs(), signer: fx.signer };
+    const linkOf = async (orderId: string) =>
+      (
+        await fx.query<{ id: string }>(
+          'SELECT id FROM app.commerce_payment_links WHERE order_id = $1',
+          [orderId],
+        )
+      )[0]!.id;
+
+    // A member asks for the first order's payment and the shop's key for the second's. The shop's
+    // key is then rotated, an endpoint names the new one, the new key asks for the third's and the
+    // billing key for the fourth's.
+    const first = await sendCart(c, waId(), '5558593', [
+      { retailerId: 'sku-1', quantity: 1, price: 10 },
+    ]);
+    const { linkId: membersLink } = await commerce().requestPayment(agent, {
+      id: first.id,
+      expectedVersion: await orderVersion(first.id),
+    });
+    const second = await sendCart(c, waId(), '5558593', [
+      { retailerId: 'sku-2', quantity: 1, price: 20 },
+    ]);
+    await apiRequestOrderPayment(apiDeps, await keyCtx(shop.token), second.id, null);
+    const shopsLink = await linkOf(second.id);
+    const shop2 = await keys.rotate(owner, { keyId: shop.id, overlapHours: 24 });
+    const byShop2 = await add([shop2.id]);
+    const third = await sendCart(c, waId(), '5558593', [
+      { retailerId: 'sku-1', quantity: 2, price: 10 },
+    ]);
+    await apiRequestOrderPayment(apiDeps, await keyCtx(shop2.token), third.id, null);
+    const newKeysLink = await linkOf(third.id);
+    const fourth = await sendCart(c, waId(), '5558593', [
+      { retailerId: 'sku-2', quantity: 2, price: 20 },
+    ]);
+    await apiRequestOrderPayment(apiDeps, await keyCtx(billing.token), fourth.id, null);
+    const billingsLink = await linkOf(fourth.id);
+    for (const link of [membersLink, shopsLink, newKeysLink, billingsLink]) {
+      expect(await processPaymentLink(commerceWorker(), scopeOf(c), link)).toBe('done');
+    }
+
+    // Each link created once, delivered to the endpoints whose list holds the key that asked for
+    // it or a key it was rotated from or into; a member's link to every-link endpoints only. The
+    // key is not stored with the event.
+    const sent = await fx.query<{
+      link: string;
+      endpoint: string;
+      detail: Record<string, unknown>;
+    }>(
+      `SELECT e.detail ->> 'paymentLinkId' AS link, d.endpoint_id AS endpoint, e.detail
+         FROM app.webhook_deliveries d
+         JOIN app.webhook_events e ON e.tenant_id = d.tenant_id AND e.id = d.event_id
+        WHERE d.tenant_id = $1 AND e.type = 'payment_link.status_changed'`,
+      [c.tenant.id],
+    );
+    expect(sent.every((s) => !('apiKeyId' in s.detail))).toBe(true);
+    const endpointName = new Map([
+      [every, 'every link'],
+      [byShop, 'the old key'],
+      [byBilling, 'the billing key'],
+      [byShop2, 'the new key'],
+    ]);
+    const linkName = new Map([
+      [membersLink, "the member's link"],
+      [shopsLink, "the shop's link"],
+      [newKeysLink, "the new key's link"],
+      [billingsLink, "the billing key's link"],
+    ]);
+    const sorted = (rows: unknown[][]) =>
+      [...rows].sort((x, y) => JSON.stringify(x).localeCompare(JSON.stringify(y)));
+    expect(sorted(sent.map((s) => [linkName.get(s.link), endpointName.get(s.endpoint)]))).toEqual(
+      sorted([
+        ["the member's link", 'every link'],
+        // The old key's link reaches the list naming the key it was rotated into…
+        ["the shop's link", 'every link'],
+        ["the shop's link", 'the old key'],
+        ["the shop's link", 'the new key'],
+        // …and the new key's the list naming the key it replaced.
+        ["the new key's link", 'every link'],
+        ["the new key's link", 'the old key'],
+        ["the new key's link", 'the new key'],
+        ["the billing key's link", 'every link'],
+        ["the billing key's link", 'the billing key'],
       ]),
     );
   });

@@ -1679,6 +1679,143 @@ describe('API keys left out of order changes (ADR-323)', () => {
   });
 });
 
+describe('API key filters of Payment Link events (ADR-324)', () => {
+  it('are refused without payment_link.status_changed, or naming keys that are not the company’s or cannot ask customers to pay, kept by a change that leaves them out and cleared with the event; the database keeps them to that event', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const keys = createApiKeysService({ db: fx.dbs.app, clock: systemClock });
+    const billing = await keys.create(owner, {
+      name: 'Billing',
+      scopes: ['orders.read', 'orders.request_payment'],
+      expiresInDays: 30,
+    });
+    const payer = await keys.create(owner, {
+      name: 'Payer',
+      scopes: ['orders.request_payment'],
+      expiresInDays: 0,
+    });
+    const mover = await keys.create(owner, {
+      name: 'Mover',
+      scopes: ['orders.write'],
+      expiresInDays: 0,
+    });
+    const other = await fx.company();
+    const theirs = await keys.create(await fx.ctx(other, other.owner), {
+      name: 'Theirs',
+      scopes: ['orders.request_payment'],
+      expiresInDays: 0,
+    });
+    const url = 'https://hooks.example.com/in';
+    const refused = (eventTypes: string[], paymentLinkApiKeyIds: unknown, message: RegExp) =>
+      expectAppError(
+        webhooks().create(owner, { url, eventTypes, paymentLinkApiKeyIds }),
+        'validation_failed',
+        message,
+      );
+    const needsTheEvent = /only for an endpoint that receives Payment Link status/;
+    const notTheirs = /API keys of this company that can ask customers to pay/;
+    await refused(['order.status_changed'], [payer.id], needsTheEvent);
+    await refused(['payment_link.status_changed'], [], /at least one API key/);
+    await refused(['payment_link.status_changed'], [payer.keyPrefix], /from the list/);
+    // A key that moves orders on asks for no link.
+    await refused(['payment_link.status_changed'], [payer.id, mover.id], notTheirs);
+    await refused(['payment_link.status_changed'], [theirs.id], notTheirs);
+    expect(await webhooks().list(owner)).toEqual([]);
+    // Settings offers the keys that ask customers to pay and work, by name.
+    expect(await webhooks().paymentLinkApiKeyChoices(owner)).toEqual([
+      { id: billing.id, name: 'Billing', keyPrefix: billing.keyPrefix },
+      { id: payer.id, name: 'Payer', keyPrefix: payer.keyPrefix },
+    ]);
+
+    const created = await webhooks().create(owner, {
+      url,
+      eventTypes: ['payment_link.status_changed', 'consent.changed'],
+      paymentLinkApiKeyIds: [payer.id, billing.id, payer.id.toUpperCase()],
+    });
+    const [audit] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events WHERE tenant_id = $1 AND action = 'webhook.endpoint_created'`,
+      [c.tenant.id],
+    );
+    expect(audit?.metadata).toMatchObject({ paymentLinkApiKeyIds: [payer.id, billing.id] });
+    const change = (fields: Record<string, unknown>) =>
+      webhooks().update(owner, {
+        endpointId: created.id,
+        url,
+        description: '',
+        eventTypes: ['payment_link.status_changed', 'consent.changed'],
+        ...fields,
+      });
+    const current = async () =>
+      (await webhooks().list(owner)).find((e) => e.id === created.id)?.paymentLinkApiKeys;
+    const named = (key: { id: string; keyPrefix: string }, name: string, state: string) => ({
+      id: key.id,
+      name,
+      keyPrefix: key.keyPrefix,
+      state,
+    });
+    expect(await current()).toEqual([
+      named(payer, 'Payer', 'active'),
+      named(billing, 'Billing', 'active'),
+    ]);
+    await change({ description: 'kept' });
+    expect((await current())?.map((k) => k.id)).toEqual([payer.id, billing.id]);
+    // A key revoked since stays named, and allowed: its links still change status.
+    await keys.revoke(owner, { keyId: billing.id });
+    expect(await current()).toEqual([
+      named(payer, 'Payer', 'active'),
+      named(billing, 'Billing', 'revoked'),
+    ]);
+    await change({ paymentLinkApiKeyIds: [billing.id] });
+    const updates = await fx.query<{ metadata: { paymentLinkApiKeyIds?: unknown } }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND action = 'webhook.endpoint_updated' ORDER BY occurred_at`,
+      [c.tenant.id],
+    );
+    expect(updates.map((u) => u.metadata.paymentLinkApiKeyIds)).toEqual([
+      [payer.id, billing.id],
+      [billing.id],
+    ]);
+    await change({ paymentLinkApiKeyIds: null });
+    expect(await current()).toBeNull();
+    await change({ paymentLinkApiKeyIds: [payer.id] });
+    // The database refuses an empty list, more than 20 keys, a missing one or a list of lists from
+    // an endpoint taking the event…
+    const setInDatabase = (value: string) =>
+      fx.query(
+        `UPDATE app.webhook_endpoints SET payment_link_api_key_ids = ${value} WHERE id = $1`,
+        [created.id],
+      );
+    const many = Array.from({ length: 21 }, () => `'${uuidv7()}'`).join(', ');
+    for (const bad of [
+      `'{}'`,
+      `ARRAY[${many}]::uuid[]`,
+      `ARRAY['${payer.id}', NULL]::uuid[]`,
+      `ARRAY[ARRAY['${payer.id}']]::uuid[]`,
+    ]) {
+      await expect(setInDatabase(bad), bad).rejects.toThrow(
+        /webhook_endpoints_payment_link_api_key_ids/,
+      );
+    }
+    await change({ eventTypes: ['consent.changed'] });
+    expect(await current()).toBeNull();
+    await expectAppError(
+      change({ eventTypes: ['consent.changed'], paymentLinkApiKeyIds: [payer.id] }),
+      'validation_failed',
+      needsTheEvent,
+    );
+    // …and any list from an endpoint not taking it.
+    await expect(setInDatabase(`ARRAY['${payer.id}']::uuid[]`)).rejects.toThrow(
+      /webhook_endpoints_payment_link_api_key_ids/,
+    );
+    // The company role changes the list only through its column grant.
+    const [grant] = await fx.query<{ can_update: boolean }>(
+      `SELECT has_column_privilege('w360_app', 'app.webhook_endpoints', 'payment_link_api_key_ids',
+                'UPDATE') AS can_update`,
+    );
+    expect(grant?.can_update).toBe(true);
+  });
+});
+
 describe('deal and task status filters (ADR-309)', () => {
   const kinds = [
     {

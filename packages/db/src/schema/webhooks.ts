@@ -252,6 +252,12 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
    */
   orderExcludedApiKeyIds: uuid('order_excluded_api_key_ids').array(),
   /**
+   * The API keys whose Payment Links' changes it takes as `payment_link.status_changed` (migration
+   * 0246, ADR-324): the links one of them asked for, or a key one of them was rotated from or into.
+   * null takes every link's. Set only while `payment_link.status_changed` is among its events.
+   */
+  paymentLinkApiKeyIds: uuid('payment_link_api_key_ids').array(),
+  /**
    * The statuses a deal reaches that it takes as `deal.status_changed` (migration 0232, ADR-309);
    * null takes every status. Set only while `deal.status_changed` is among its events.
    */

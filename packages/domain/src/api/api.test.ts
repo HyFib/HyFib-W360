@@ -186,6 +186,7 @@ import {
   WEBHOOK_PAYMENT_LINK_STATUSES_NEED_THE_EVENT,
   WEBHOOK_ORDER_CHANGE_MAKERS_NEED_THE_EVENT,
   WEBHOOK_ORDER_EXCLUDED_API_KEYS_NEED_THE_EVENT,
+  WEBHOOK_PAYMENT_LINK_API_KEYS_NEED_THE_EVENT,
   WEBHOOK_DEAL_STATUSES_NEED_THE_EVENT,
   WEBHOOK_TASK_STATUSES_NEED_THE_EVENT,
   WEBHOOK_DEAL_DETAILS_NEED_THE_EVENT,
@@ -1505,6 +1506,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'orderExcludedApiKeyIds',
       'orderStatuses',
       'ownerIds',
+      'paymentLinkApiKeyIds',
       'paymentLinkStatuses',
       'pipelineIds',
       'runApiKeyIds',
@@ -3427,7 +3429,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       paymentLinkStatuses: ['expired'],
     });
     expect(apiUpdateWebhookEndpointSchema.safeParse({}).error?.issues[0]?.message).toContain(
-      'the order statuses, who made the order changes, the API keys whose order changes are left out, the Payment Link statuses, the template statuses',
+      'the order statuses, who made the order changes, the API keys whose order changes are left out, the Payment Link statuses, the API keys that asked for the Payment Links, the template statuses',
     );
     const doc = buildOpenApiDocument('https://app.example.com/api/v1');
     const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
@@ -3551,6 +3553,64 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     );
     expect(JSON.stringify(doc.webhooks)).toContain(
       'or it can leave out only the changes chosen keys made (its `orderExcludedApiKeyIds`',
+    );
+  });
+
+  it('take API keys for Payment Links only with payment_link.status_changed, each once, and a list of them alone is a change (ADR-324)', () => {
+    const payments = '4C5D6E7F-8A9B-4C0D-9E1F-3A4B5C6D7E8F';
+    const shop = '5d6e7f8a-9b0c-4d1e-8f2a-4b5c6d7e8f9a';
+    const base = { url: 'https://hooks.example.com/w360', events: ['payment_link.status_changed'] };
+    expect(
+      apiCreateWebhookEndpointSchema.parse({
+        ...base,
+        paymentLinkApiKeyIds: [payments, shop, payments.toLowerCase()],
+      }).paymentLinkApiKeyIds,
+    ).toEqual([payments.toLowerCase(), shop]);
+    expect(
+      apiCreateWebhookEndpointSchema.parse({ ...base, paymentLinkApiKeyIds: null })
+        .paymentLinkApiKeyIds,
+    ).toBeNull();
+    for (const body of [
+      { ...base, paymentLinkApiKeyIds: [] },
+      { ...base, paymentLinkApiKeyIds: ['w360_aaaaaaaaaaaa'] },
+      { ...base, paymentLinkApiKeyIds: shop },
+    ]) {
+      expect(apiCreateWebhookEndpointSchema.safeParse(body).success, JSON.stringify(body)).toBe(
+        false,
+      );
+    }
+    const refused = apiCreateWebhookEndpointSchema.safeParse({
+      ...base,
+      events: ['order.status_changed', 'message.status'],
+      paymentLinkApiKeyIds: [shop],
+    });
+    expect(refused.error?.issues.map((i) => [i.path.join('.'), i.message])).toEqual([
+      ['paymentLinkApiKeyIds', WEBHOOK_PAYMENT_LINK_API_KEYS_NEED_THE_EVENT],
+    ]);
+    for (const change of [{ paymentLinkApiKeyIds: null }, { paymentLinkApiKeyIds: [shop] }]) {
+      expect(apiUpdateWebhookEndpointSchema.parse(change)).toEqual(change);
+    }
+    expect(apiUpdateWebhookEndpointSchema.safeParse({}).error?.issues[0]?.message).toContain(
+      'the Payment Link statuses, the API keys that asked for the Payment Links, the template statuses',
+    );
+    // Answered as a list of key ids, or null, and set out with the event.
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas;
+    const answered = schemas.WebhookEndpoint as {
+      properties: Record<string, { anyOf?: unknown[] }>;
+      required?: string[];
+    };
+    expect(answered.properties.paymentLinkApiKeyIds?.anyOf).toHaveLength(2);
+    expect(answered.required).toContain('paymentLinkApiKeyIds');
+    const given = (schemas.CreateWebhookEndpoint as { properties: Record<string, unknown> })
+      .properties;
+    expect(JSON.stringify(given.paymentLinkApiKeyIds)).toContain(
+      "the company's keys that ask customers to pay (orders.request_payment)",
+    );
+    const webhooks = doc.webhooks as Record<string, { post?: { description?: string } }>;
+    expect(webhooks['payment_link.status_changed']?.post?.description).toContain(
+      'unless it names the API keys whose links it takes (its `paymentLinkApiKeyIds`',
     );
   });
 

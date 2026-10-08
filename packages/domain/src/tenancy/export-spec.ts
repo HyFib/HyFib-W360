@@ -1613,6 +1613,7 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
       'payment_link_statuses',
       'order_change_makers',
       'order_excluded_api_key_ids',
+      'payment_link_api_key_ids',
       'deal_statuses',
       'task_statuses',
       'deal_details',

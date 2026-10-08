@@ -1229,10 +1229,13 @@ verification, app review, Embedded Signup configuration).
   **[API key exclusions for order changes built; their database tests run only in CI]** (ADR-323,
   migration 0245: an endpoint leaves out the order status changes chosen API keys made, the keys
   they were rotated from or into included; changes made otherwise are never left out).
+  **[API key filters for Payment Link events built; their database tests run only in CI]** (ADR-324,
+  migration 0246: an endpoint takes the changes of the Payment Links chosen API keys asked for, the
+  keys they were rotated from or into included; links members asked for are not sent to a list).
   Remaining: filters for other event types and on a message's or contact's values (such as a field's
-  value, or who asked for a Payment Link), other authentication (headers computed per delivery,
-  other OAuth grants), mutual TLS, fixed egress addresses, events for store orders and each step of
-  a run, `createdAt` finer than the millisecond, load tests.
+  value), other authentication (headers computed per delivery, other OAuth grants), mutual TLS,
+  fixed egress addresses, events for store orders and each step of a run, `createdAt` finer than the
+  millisecond, load tests.
 - **P5-10 Platform ops screens** **[built, locally verified with test data only]** (ADR-054):
   `/platform/ops` with Overview, Onboarding (failed and abandoned signups, failed or stuck number
   setups, new companies without a number), Integrations (current failures with host-only labels,

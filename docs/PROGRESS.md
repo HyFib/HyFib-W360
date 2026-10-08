@@ -1,5 +1,49 @@
 # Progress
 
+## 2026-10-08 — API key filters for Payment Link events (P5-09, H-014, ADR-324)
+
+Status: **Implemented; its database tests run in CI only.** `payment_link.status_changed` names who
+asked for each link, but an endpoint received every link's changes, so a payments integration with
+its own key was sent the links others asked for. The local PostgreSQL is unavailable, so the
+migration and the integration tests below were written but not run here; migration 0246 passed the
+pglast parse check (syntax only).
+
+### Completed
+
+- **Database:** migration 0246 (`payment_link_api_key_ids` on `app.webhook_endpoints` with its check
+  and update grant; the link trigger passing the link's key; `app.capture_webhook_event` matching it
+  and its rotations and leaving it out of the stored detail).
+- **Domain:** `WEBHOOK_LIMITS.paymentLinkApiKeys`, `webhookPaymentLinkApiKeyIdsSchema`,
+  `WEBHOOK_PAYMENT_LINK_KEY_SCOPES`, `webhookPaymentLinkApiKeyIdsFor` and
+  `assertWebhookPaymentLinkApiKeys` in `webhooks/service.ts`, sharing the list's schema and the key
+  check with ADR-319's; `paymentLinkApiKeyChoices`; the endpoint view's `paymentLinkApiKeys`;
+  creation, changes, audits and the export column; the same in `api/webhook-endpoints.ts` and the
+  OpenAPI document (the endpoint's answer, and `payment_link.status_changed`'s description).
+- **Web:** Settings → Webhooks' "Payment Links asked for through the API" while the endpoint takes
+  Payment Link status (the fieldset the other key lists use), and the endpoints list's line for it.
+- **Tests:** unit (4 new: the list's rules, the scope, and keeping and clearing in
+  `webhooks/webhooks.test.ts`; the API schemas and OpenAPI entries in `api/api.test.ts`; 2
+  assertions there updated for the new field); integration (3 new: the services in
+  `webhooks.test.ts`, capture in `webhook-events.test.ts`, the API in
+  `api-webhook-endpoints.test.ts`; 1 changed: the full endpoint answer there). Written for CI; the
+  integration tests were not run here. No e2e test.
+- **Docs:** ADR-324; ARCHITECTURE; SECURITY; THREAT-MODEL T292; DEPLOYMENT; RUNBOOKS; BACKLOG P5-09;
+  feature matrix H-014.
+- **Mutation checks:** 16/16 deliberate regressions caught on the unit-tested parts. The capture,
+  the trigger, the key checks against the database and the form need the database or a browser, so
+  their regressions are left to the integration tests, which run in CI.
+
+### Test commands and results (local, 2026-10-08)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 140 files, 1362 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| pglast 7 parse of migration 0246                   | passed (syntax only)                                          |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
 ## 2026-10-08 — API key exclusions for order changes (P5-09, H-014, ADR-323)
 
 Status: **Implemented; its database tests run in CI only.** Endpoints taking `order.status_changed`

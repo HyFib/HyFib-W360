@@ -1230,6 +1230,12 @@ export const apiWebhookEndpointSchema = z.object({
     .describe(
       "The API keys whose order status changes the endpoint does not receive as order.status_changed, as the event's apiKeyId names the key that made a change: the changes one of them made through the API, or a key one of them was rotated from or into. Changes members and Payment Links made, and those HyFib did not record the maker of, are never left out. null leaves nothing out.",
     ),
+  paymentLinkApiKeyIds: z
+    .array(z.uuid())
+    .nullable()
+    .describe(
+      "The API keys whose Payment Links' payment_link.status_changed the endpoint receives, as the event's paymentLink.requestedByApiKeyId names the key that asked for a link: the links one of them asked for through the API, or a key one of them was rotated from or into. A link a member asked for matches no list. null receives every link's changes.",
+    ),
   dealStatuses: z
     .array(z.enum(WEBHOOK_DEAL_STATUSES))
     .nullable()
@@ -4251,7 +4257,7 @@ export function buildOpenApiDocument(serverUrl: string) {
       'payment_link.status_changed': webhook(
         'webhookPaymentLinkStatusChanged',
         WEBHOOK_EVENT_INFO['payment_link.status_changed'].label,
-        `${WEBHOOK_EVENT_INFO['payment_link.status_changed'].description} paymentLink.status and paymentLink.previousStatus are the change, as the worker wrote it from what it did at Razorpay or what Razorpay reported; the rest is the link as GET /orders/{id}/payment-links reads it when the event is delivered: its amounts, expiry, the message that sent it in the chat or why it was not sent (notSentReason), what went wrong at Razorpay, and who asked for it (a member, never which, or an API key by its id). Never the link’s address or Razorpay’s ids. Only a link Razorpay reports paid marks the order paid, which order.status_changed reports. Asking for payment and asking to cancel a link send no event of their own here: the link is \`creating\` until the worker creates it, and cancelled when Razorpay reports it. An endpoint receives every status unless it names the statuses it takes (its \`paymentLinkStatuses\`, or the statuses ticked in Settings → Webhooks). It happens on the order’s WhatsApp number, so an endpoint that names numbers receives it for those numbers only. Deliveries are not ordered: the latest change is the one with the latest createdAt.`,
+        `${WEBHOOK_EVENT_INFO['payment_link.status_changed'].description} paymentLink.status and paymentLink.previousStatus are the change, as the worker wrote it from what it did at Razorpay or what Razorpay reported; the rest is the link as GET /orders/{id}/payment-links reads it when the event is delivered: its amounts, expiry, the message that sent it in the chat or why it was not sent (notSentReason), what went wrong at Razorpay, and who asked for it (a member, never which, or an API key by its id). Never the link’s address or Razorpay’s ids. Only a link Razorpay reports paid marks the order paid, which order.status_changed reports. Asking for payment and asking to cancel a link send no event of their own here: the link is \`creating\` until the worker creates it, and cancelled when Razorpay reports it. An endpoint receives every status unless it names the statuses it takes (its \`paymentLinkStatuses\`, or the statuses ticked in Settings → Webhooks), and every link's changes unless it names the API keys whose links it takes (its \`paymentLinkApiKeyIds\`, a key rotated from or into one of them included): then those of the links they asked for only. It happens on the order’s WhatsApp number, so an endpoint that names numbers receives it for those numbers only. Deliveries are not ordered: the latest change is the one with the latest createdAt.`,
         'WebhookPaymentLinkStatusChanged',
       ),
       'campaign.status_changed': webhook(

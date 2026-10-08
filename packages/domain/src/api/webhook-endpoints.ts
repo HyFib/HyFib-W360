@@ -78,6 +78,7 @@ import {
   assertWebhookMessageApiKeys,
   assertWebhookCrmExcludedApiKeys,
   assertWebhookOrderExcludedApiKeys,
+  assertWebhookPaymentLinkApiKeys,
   assertWebhookCampaigns,
   assertWebhookChannels,
   assertWebhookPipelines,
@@ -115,6 +116,7 @@ import {
   WEBHOOK_PAYMENT_LINK_STATUSES_NEED_THE_EVENT,
   WEBHOOK_ORDER_CHANGE_MAKERS_NEED_THE_EVENT,
   WEBHOOK_ORDER_EXCLUDED_API_KEYS_NEED_THE_EVENT,
+  WEBHOOK_PAYMENT_LINK_API_KEYS_NEED_THE_EVENT,
   WEBHOOK_DEAL_STATUSES_NEED_THE_EVENT,
   WEBHOOK_TASK_STATUSES_NEED_THE_EVENT,
   WEBHOOK_DEAL_DETAILS_NEED_THE_EVENT,
@@ -255,6 +257,8 @@ import {
   webhookOrderChangeMakersSchema,
   webhookOrderExcludedApiKeyIdsFor,
   webhookOrderExcludedApiKeyIdsSchema,
+  webhookPaymentLinkApiKeyIdsFor,
+  webhookPaymentLinkApiKeyIdsSchema,
   webhookDealStatusesFor,
   webhookDealStatusesSchema,
   webhookTaskStatusesFor,
@@ -395,6 +399,18 @@ const invalidOrderExcludedApiKeys = () =>
   new AppError('validation_failed', WEBHOOK_ORDER_EXCLUDED_API_KEYS_NEED_THE_EVENT, {
     issues: [
       { path: 'orderExcludedApiKeyIds', message: WEBHOOK_ORDER_EXCLUDED_API_KEYS_NEED_THE_EVENT },
+    ],
+  });
+
+const paymentLinkApiKeyIdsField = webhookPaymentLinkApiKeyIdsSchema.describe(
+  `The API keys whose Payment Links' payment_link.status_changed the endpoint receives: 1 to ${WEBHOOK_LIMITS.paymentLinkApiKeys} ids of the company's keys that ask customers to pay (orders.request_payment), as the event's paymentLink.requestedByApiKeyId names the key that asked for a link (a key that adds an endpoint finds its own id in the endpoint's apiKeyId), only with the payment_link.status_changed event. A link matches when the key that asked for it is listed, or a key it was rotated from or into, so a payments integration with its own key is sent its own links' changes only, across rotations; a link a member asked for matches no list. A key revoked or expired since stays on the list, and its links still change status. With Payment Link statuses or numbers chosen too, a change must pass them all. null receives every link's changes.`,
+);
+
+/** Keys are chosen for Payment Links only for an endpoint that receives their changes (ADR-324). */
+const invalidPaymentLinkApiKeys = () =>
+  new AppError('validation_failed', WEBHOOK_PAYMENT_LINK_API_KEYS_NEED_THE_EVENT, {
+    issues: [
+      { path: 'paymentLinkApiKeyIds', message: WEBHOOK_PAYMENT_LINK_API_KEYS_NEED_THE_EVENT },
     ],
   });
 
@@ -815,6 +831,7 @@ export const apiCreateWebhookEndpointSchema = z
     paymentLinkStatuses: paymentLinkStatusesField.optional(),
     orderChangeMakers: orderChangeMakersField.optional(),
     orderExcludedApiKeyIds: orderExcludedApiKeyIdsField.optional(),
+    paymentLinkApiKeyIds: paymentLinkApiKeyIdsField.optional(),
     dealStatuses: dealStatusesField.optional(),
     taskStatuses: taskStatusesField.optional(),
     dealDetails: dealDetailsField.optional(),
@@ -901,6 +918,10 @@ export const apiCreateWebhookEndpointSchema = z
     path: ['orderExcludedApiKeyIds'],
     message: WEBHOOK_ORDER_EXCLUDED_API_KEYS_NEED_THE_EVENT,
   })
+  .refine(
+    (data) => !data.paymentLinkApiKeyIds || data.events.includes('payment_link.status_changed'),
+    { path: ['paymentLinkApiKeyIds'], message: WEBHOOK_PAYMENT_LINK_API_KEYS_NEED_THE_EVENT },
+  )
   .refine((data) => !data.dealStatuses || data.events.includes('deal.status_changed'), {
     path: ['dealStatuses'],
     message: WEBHOOK_DEAL_STATUSES_NEED_THE_EVENT,
@@ -1137,6 +1158,11 @@ export const apiUpdateWebhookEndpointSchema = z
       .describe(
         "The API keys whose order status changes the endpoint does not receive (the company's keys that can change orders, whatever their state); null leaves nothing out. Left out, they stay, unless the events no longer include order.status_changed, which clears them.",
       ),
+    paymentLinkApiKeyIds: paymentLinkApiKeyIdsField
+      .optional()
+      .describe(
+        "The API keys whose Payment Links' changes the endpoint receives (the company's keys that ask customers to pay, whatever their state); null receives every link's. Left out, they stay, unless the events no longer include payment_link.status_changed, which clears them.",
+      ),
     dealStatuses: dealStatusesField
       .optional()
       .describe(
@@ -1352,6 +1378,7 @@ export const apiUpdateWebhookEndpointSchema = z
       data.paymentLinkStatuses !== undefined ||
       data.orderChangeMakers !== undefined ||
       data.orderExcludedApiKeyIds !== undefined ||
+      data.paymentLinkApiKeyIds !== undefined ||
       data.dealStatuses !== undefined ||
       data.taskStatuses !== undefined ||
       data.dealDetails !== undefined ||
@@ -1391,7 +1418,7 @@ export const apiUpdateWebhookEndpointSchema = z
       data.contactTags !== undefined ||
       data.conversationTags !== undefined ||
       data.oauth !== undefined,
-    'Give the events, the description, the headers, the message statuses, who sent the messages, the API keys that sent them, the contact parts, the deal and task details, the custom fields, the automations, the campaign statuses, the order statuses, who made the order changes, the API keys whose order changes are left out, the Payment Link statuses, the template statuses, the conversation statuses, the deal statuses, the task statuses, the run end statuses, what started the runs, the API keys that started them, the consent changes, where contacts came from, the received message types, the run end reasons, the numbers, the teams, the templates, the campaigns, the pipelines, the stages, the deal owners, the task assignees, the pipelines, stages and owners of tasks’ deals and of notes’ deals, who made the CRM changes, the API keys whose CRM changes are left out, the survey scores, the members credited with survey answers and the teams of their conversations, the contact and conversation tags of survey answers, the tags of added and changed contacts, the members, the contact tags, the conversation tags, the OAuth client or whether the endpoint is enabled',
+    'Give the events, the description, the headers, the message statuses, who sent the messages, the API keys that sent them, the contact parts, the deal and task details, the custom fields, the automations, the campaign statuses, the order statuses, who made the order changes, the API keys whose order changes are left out, the Payment Link statuses, the API keys that asked for the Payment Links, the template statuses, the conversation statuses, the deal statuses, the task statuses, the run end statuses, what started the runs, the API keys that started them, the consent changes, where contacts came from, the received message types, the run end reasons, the numbers, the teams, the templates, the campaigns, the pipelines, the stages, the deal owners, the task assignees, the pipelines, stages and owners of tasks’ deals and of notes’ deals, who made the CRM changes, the API keys whose CRM changes are left out, the survey scores, the members credited with survey answers and the teams of their conversations, the contact and conversation tags of survey answers, the tags of added and changed contacts, the members, the contact tags, the conversation tags, the OAuth client or whether the endpoint is enabled',
   );
 
 export interface ApiWebhookEndpoint {
@@ -1432,6 +1459,8 @@ export interface ApiWebhookEndpoint {
   orderChangeMakers: WebhookOrderChangeMaker[] | null;
   /** The API keys whose order status changes it leaves out (ADR-323); null: none. */
   orderExcludedApiKeyIds: string[] | null;
+  /** The API keys whose Payment Links' changes it receives (ADR-324); null: every link's. */
+  paymentLinkApiKeyIds: string[] | null;
   /** The deal statuses it receives (ADR-309); null receives every status. */
   dealStatuses: WebhookDealStatus[] | null;
   /** The task statuses it receives (ADR-309); null receives every status. */
@@ -1612,6 +1641,7 @@ const columns = {
   paymentLinkStatuses: webhookEndpoints.paymentLinkStatuses,
   orderChangeMakers: webhookEndpoints.orderChangeMakers,
   orderExcludedApiKeyIds: webhookEndpoints.orderExcludedApiKeyIds,
+  paymentLinkApiKeyIds: webhookEndpoints.paymentLinkApiKeyIds,
   dealStatuses: webhookEndpoints.dealStatuses,
   taskStatuses: webhookEndpoints.taskStatuses,
   dealDetails: webhookEndpoints.dealDetails,
@@ -1683,6 +1713,7 @@ type EndpointRow = Pick<
   | 'paymentLinkStatuses'
   | 'orderChangeMakers'
   | 'orderExcludedApiKeyIds'
+  | 'paymentLinkApiKeyIds'
   | 'dealStatuses'
   | 'taskStatuses'
   | 'dealDetails'
@@ -1759,6 +1790,7 @@ function toApiEndpoint(row: EndpointRow, now: Date): ApiWebhookEndpoint {
     paymentLinkStatuses: row.paymentLinkStatuses,
     orderChangeMakers: row.orderChangeMakers,
     orderExcludedApiKeyIds: row.orderExcludedApiKeyIds,
+    paymentLinkApiKeyIds: row.paymentLinkApiKeyIds,
     dealStatuses: row.dealStatuses,
     taskStatuses: row.taskStatuses,
     dealDetails: row.dealDetails,
@@ -2045,6 +2077,12 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               null,
             );
             await assertWebhookOrderExcludedApiKeys(tx, ctx.tenant.id, orderExcludedApiKeyIds);
+            const paymentLinkApiKeyIds = webhookPaymentLinkApiKeyIdsFor(
+              data.events,
+              data.paymentLinkApiKeyIds,
+              null,
+            );
+            await assertWebhookPaymentLinkApiKeys(tx, ctx.tenant.id, paymentLinkApiKeyIds);
             const dealStatuses = webhookDealStatusesFor(data.events, data.dealStatuses, null);
             const taskStatuses = webhookTaskStatusesFor(data.events, data.taskStatuses, null);
             const dealDetails = webhookDealDetailsFor(data.events, data.dealDetails, null);
@@ -2179,6 +2217,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               paymentLinkStatuses,
               orderChangeMakers,
               orderExcludedApiKeyIds,
+              paymentLinkApiKeyIds,
               dealStatuses,
               taskStatuses,
               dealDetails,
@@ -2235,6 +2274,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               ...(paymentLinkStatuses ? { paymentLinkStatuses } : {}),
               ...(orderChangeMakers ? { orderChangeMakers } : {}),
               ...(orderExcludedApiKeyIds ? { orderExcludedApiKeyIds } : {}),
+              ...(paymentLinkApiKeyIds ? { paymentLinkApiKeyIds } : {}),
               ...(dealStatuses ? { dealStatuses } : {}),
               ...(taskStatuses ? { taskStatuses } : {}),
               ...(dealDetails ? { dealDetails } : {}),
@@ -2325,6 +2365,9 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
         }
         if (data.orderExcludedApiKeyIds && !events.includes('order.status_changed')) {
           throw invalidOrderExcludedApiKeys();
+        }
+        if (data.paymentLinkApiKeyIds && !events.includes('payment_link.status_changed')) {
+          throw invalidPaymentLinkApiKeys();
         }
         if (data.dealStatuses && !events.includes('deal.status_changed')) {
           throw invalidDealStatuses();
@@ -2426,6 +2469,10 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
         // And those left out of order changes (ADR-323).
         if (data.orderExcludedApiKeyIds !== undefined) {
           await assertWebhookOrderExcludedApiKeys(tx, ctx.tenant.id, data.orderExcludedApiKeyIds);
+        }
+        // And those for Payment Links (ADR-324).
+        if (data.paymentLinkApiKeyIds !== undefined) {
+          await assertWebhookPaymentLinkApiKeys(tx, ctx.tenant.id, data.paymentLinkApiKeyIds);
         }
         // And the numbers likewise (ADR-170).
         if (data.channelIds !== undefined) {
@@ -2551,6 +2598,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
           data.paymentLinkStatuses !== undefined ||
           data.orderChangeMakers !== undefined ||
           data.orderExcludedApiKeyIds !== undefined ||
+          data.paymentLinkApiKeyIds !== undefined ||
           data.dealStatuses !== undefined ||
           data.taskStatuses !== undefined ||
           data.dealDetails !== undefined ||
@@ -2653,6 +2701,11 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
                 events,
                 data.orderExcludedApiKeyIds,
                 endpoint.orderExcludedApiKeyIds,
+              ),
+              paymentLinkApiKeyIds: webhookPaymentLinkApiKeyIdsFor(
+                events,
+                data.paymentLinkApiKeyIds,
+                endpoint.paymentLinkApiKeyIds,
               ),
               dealStatuses: webhookDealStatusesFor(
                 events,
@@ -2813,6 +2866,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               paymentLinkStatuses: webhookEndpoints.paymentLinkStatuses,
               orderChangeMakers: webhookEndpoints.orderChangeMakers,
               orderExcludedApiKeyIds: webhookEndpoints.orderExcludedApiKeyIds,
+              paymentLinkApiKeyIds: webhookEndpoints.paymentLinkApiKeyIds,
               dealStatuses: webhookEndpoints.dealStatuses,
               taskStatuses: webhookEndpoints.taskStatuses,
               dealDetails: webhookEndpoints.dealDetails,
@@ -2871,6 +2925,9 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
             ...(changed.orderChangeMakers ? { orderChangeMakers: changed.orderChangeMakers } : {}),
             ...(changed.orderExcludedApiKeyIds
               ? { orderExcludedApiKeyIds: changed.orderExcludedApiKeyIds }
+              : {}),
+            ...(changed.paymentLinkApiKeyIds
+              ? { paymentLinkApiKeyIds: changed.paymentLinkApiKeyIds }
               : {}),
             ...(changed.dealStatuses ? { dealStatuses: changed.dealStatuses } : {}),
             ...(changed.taskStatuses ? { taskStatuses: changed.taskStatuses } : {}),

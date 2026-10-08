@@ -2231,6 +2231,15 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   them; a change without a key is left out by no list, and the key stays in the stored detail for
   the payload. Settings (checkboxes under "Order changes made through the API") and the API
   (`orderExcludedApiKeyIds`) set it; a change that drops `order.status_changed` clears it.
+- **Payment Link API key filters** (migration 0246, ADR-324): `payment_link_api_key_ids` on an
+  endpoint lists the API keys whose links' `payment_link.status_changed` it takes, null for every
+  link's; a check keeps it to 1 to 20 ids and to endpoints that take `payment_link.status_changed`.
+  The link trigger passes the link's `apiKeyId` in the detail, and `app.capture_webhook_event`
+  (replaced with the same signature), when an active endpoint names keys for links, reads the key's
+  rotations through `app.webhook_api_key_family` and creates a delivery only for endpoints whose
+  list is null or shares one of them, taking the key out of the detail before the event is stored.
+  Settings (checkboxes under "Payment Links asked for through the API") and the API
+  (`paymentLinkApiKeyIds`) set it; a change that drops `payment_link.status_changed` clears it.
 - **Custom field filters** (migration 0132, ADR-184): `contact_field_keys` on an endpoint lists the
   custom fields whose changes it takes as `contact.updated`, null for every field's; a check keeps
   it to 1 to 50 well-formed keys and to endpoints taking `contact.updated` for every part or for

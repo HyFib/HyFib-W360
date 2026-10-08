@@ -12533,3 +12533,52 @@ Decision:
 Not built: lists that take only chosen keys' order changes, lists that leave chosen keys' runs or
 messages out, makers and keys for Payment Link events (`payment_link.status_changed` names who asked
 for the link), and the statuses of the messages an automation sent for a key's run.
+
+## ADR-324 Choosing the API keys whose Payment Links' changes a webhook endpoint receives (P5-09) (2026-10-08)
+
+Context: `payment_link.status_changed` (ADR-285) names who asked for each link (`requestedBy`: a
+member, or an API key by `requestedByApiKeyId`, ADR-283), and an endpoint can narrow it by status
+(ADR-308), but it received every link's changes. A payments integration with its own key was sent
+the links members and other keys asked for too, and read `requestedByApiKeyId` to drop them. ADR-322
+and ADR-323 left keys for Payment Link events unbuilt.
+
+Decision:
+
+- **One list per endpoint,** `paymentLinkApiKeyIds`: 1 to 20 ids of the company's API keys, each
+  once. A link's change is sent when the key that asked for the link is on the list, or a key it was
+  rotated from or into, however many rotations away, as for runs and messages (ADR-319, ADR-320); a
+  link a member asked for matches no list. Null receives every link's changes, as before. With
+  statuses or numbers chosen too, a change must pass them all. Chosen in Settings → Webhooks
+  ("Payment Links asked for through the API": every link's changes by default, or only those of the
+  links the keys ticked asked for; shown while the endpoint takes Payment Link status), shown on the
+  endpoint as "Payment Links sent, asked for through the API by: …", and through the API as
+  `paymentLinkApiKeyIds` on `POST /webhook-endpoints` and `PATCH /webhook-endpoints/{id}` and in
+  every endpoint the API answers.
+- **Which keys:** the services refuse an id that is not one of the company's keys holding
+  `orders.request_payment`, the only scope that asks for links, named by place, whatever the key's
+  state: a revoked or expired key's links still change status, and a rotated key's links match the
+  key that replaced it. Settings offers the keys that work and were not rotated, and keeps naming a
+  key an endpoint has, with "revoked" or "expired" once it stops working.
+- **Only while `payment_link.status_changed` is taken:** a list given for an endpoint that does not
+  take it is refused (422 through the API); a change that drops the event clears the list, a `PATCH`
+  that leaves the list out keeps it, and one that gives only the list is a change. A check in the
+  database holds the same rule and the list's shape (null, or 1 to 20 ids in one dimension without a
+  null, with `payment_link.status_changed`).
+- **Applied at capture:** the link trigger now passes the key that asked for the link (`apiKeyId`,
+  absent for a member's link) with `payment_link.status_changed`, and `app.capture_webhook_event`
+  reads the key's rotations through `app.webhook_api_key_family` only when an active endpoint of the
+  company taking the event names keys for links, then creates a delivery only for the endpoints
+  whose list is null or shares one of them. The key is taken out of the stored detail: the payload
+  reads who asked from the link, as before.
+- **Audited, exported, permissions unchanged,** as for the other key lists:
+  `webhook.endpoint_created` and `webhook.endpoint_updated` carry `paymentLinkApiKeyIds` when the
+  endpoint has it, and the company data export carries the column.
+- **Migration 0246:** `payment_link_api_key_ids uuid[]` on `app.webhook_endpoints` with its check,
+  validated at once (a company has at most 10 endpoints), the update grant on the column for the
+  runtime role, and the link trigger's `app.webhook_capture_payment_link` and
+  `app.capture_webhook_event` replaced with the same signatures (0204's and 0245's, with the key),
+  so their owners and grants stay. Existing endpoints keep null; nothing is backfilled.
+
+Not built: lists that leave chosen keys' links out, choosing links by who asked for them (a member
+or any key) without naming keys, and the statuses of the messages an automation sent for a key's
+run.

@@ -3283,6 +3283,18 @@ untick it under "Order changes made through the API" on the endpoint's page, or
 `PATCH /webhook-endpoints/{id}` with `orderExcludedApiKeyIds` (null for every change). Removing
 Order status clears the list.
 
+**A receiver misses the Payment Links' changes of an API key (ADR-324).** An endpoint can take the
+changes of the links chosen API keys asked for only. The endpoints list shows them ("Payment Links
+sent, asked for through the API by: …"), and the API answers `paymentLinkApiKeyIds` (null takes
+every link's). A change goes by the key that asked for its link, as
+`paymentLink.requestedByApiKeyId` names it, and by the keys that key was rotated from or into; a
+link a member asked for is not sent to a list. A key revoked or expired since stays on the list, and
+Settings says so. Events no endpoint takes are not recorded, so there is nothing to replay;
+`GET /orders/{id}/payment-links` reads the links as they are now. With Payment Link statuses chosen
+too, a change must pass both. To take more, tick the keys under "Payment Links asked for through the
+API" on the endpoint's page, or `PATCH /webhook-endpoints/{id}` with `paymentLinkApiKeyIds` (null
+for every link). Removing Payment Link status clears the list.
+
 **A receiver misses the events of a member's conversations (ADR-181).** An endpoint can take the
 message and conversation events of the conversations assigned to chosen members only. The endpoints
 list shows them ("Members whose conversations’ events are sent: …"), and the API answers

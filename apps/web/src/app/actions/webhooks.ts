@@ -48,6 +48,8 @@ export async function createWebhookEndpointAction(
     orderChangeMakers: string[] | null;
     /** The API keys whose order status changes it leaves out (ADR-323); null: none. */
     orderExcludedApiKeyIds: string[] | null;
+    /** The API keys whose Payment Links' changes it takes (ADR-324); null: every link's. */
+    paymentLinkApiKeyIds: string[] | null;
     /** The deal statuses it takes (ADR-309); null takes every status. */
     dealStatuses: string[] | null;
     /** The task statuses it takes (ADR-309); null takes every status. */
@@ -167,6 +169,8 @@ export async function updateWebhookEndpointAction(
     orderChangeMakers: string[] | null;
     /** The API keys whose order status changes it leaves out (ADR-323); null: none. */
     orderExcludedApiKeyIds: string[] | null;
+    /** The API keys whose Payment Links' changes it takes (ADR-324); null: every link's. */
+    paymentLinkApiKeyIds: string[] | null;
     /** The deal statuses it takes (ADR-309); null takes every status. */
     dealStatuses: string[] | null;
     /** The task statuses it takes (ADR-309); null takes every status. */

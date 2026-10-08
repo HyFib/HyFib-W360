@@ -1976,6 +1976,62 @@ export async function assertWebhookOrderExcludedApiKeys(
 }
 
 /**
+ * The API keys whose Payment Links' changes an endpoint takes as `payment_link.status_changed`
+ * (ADR-324), each once: the links one of them asked for through the API, or a key one of them was
+ * rotated from or into. null takes every link's, those members asked for among them.
+ */
+export const webhookPaymentLinkApiKeyIdsSchema = webhookApiKeyIdsSchema(
+  WEBHOOK_LIMITS.paymentLinkApiKeys,
+  'every Payment Link',
+);
+
+export const WEBHOOK_PAYMENT_LINK_API_KEYS_NEED_THE_EVENT =
+  'Choose API keys only for an endpoint that receives Payment Link status.';
+
+export const WEBHOOK_PAYMENT_LINK_API_KEYS_NOT_FOUND =
+  'Choose API keys of this company that can ask customers to pay.';
+
+/** The scope whose keys ask for Payment Links through the API (ADR-324). */
+export const WEBHOOK_PAYMENT_LINK_KEY_SCOPES = [
+  'orders.request_payment',
+] as const satisfies readonly ApiScope[];
+
+/**
+ * The API keys an endpoint keeps for Payment Links after it is added or changed: every link (null)
+ * unless it takes `payment_link.status_changed`; then those given, or else the ones it had.
+ */
+export function webhookPaymentLinkApiKeyIdsFor(
+  eventTypes: readonly WebhookEventType[],
+  given: readonly string[] | null | undefined,
+  current: readonly string[] | null,
+): string[] | null {
+  if (!eventTypes.includes('payment_link.status_changed')) return null;
+  const kept = given === undefined ? current : given;
+  return kept ? [...kept] : null;
+}
+
+/**
+ * Refuses API keys given for an endpoint's Payment Links unless each is the company's and holds
+ * the scope that asks for them (ADR-324), whatever its state: a revoked or expired key's links
+ * still change status, and a rotated key's links match the key that replaced it. `tx` is in the
+ * company's scope.
+ */
+export async function assertWebhookPaymentLinkApiKeys(
+  tx: Tx,
+  tenantId: string,
+  ids: readonly string[] | null | undefined,
+): Promise<void> {
+  await assertCompanyApiKeys(
+    tx,
+    tenantId,
+    ids,
+    WEBHOOK_PAYMENT_LINK_KEY_SCOPES,
+    'paymentLinkApiKeyIds',
+    { notFound: WEBHOOK_PAYMENT_LINK_API_KEYS_NOT_FOUND },
+  );
+}
+
+/**
  * The scores of the satisfaction survey answers an endpoint takes (ADR-307), in the order Settings
  * lists them; null takes every answer.
  */
@@ -2478,6 +2534,11 @@ const endpointFields = z.object({
    * they stay.
    */
   orderExcludedApiKeyIds: webhookOrderExcludedApiKeyIdsSchema.optional(),
+  /**
+   * Given, the API keys whose Payment Links' changes it takes (null: every link's, ADR-324); left
+   * out, they stay.
+   */
+  paymentLinkApiKeyIds: webhookPaymentLinkApiKeyIdsSchema.optional(),
   /** Given, the deal statuses it takes (null: every status, ADR-309); left out, they stay. */
   dealStatuses: webhookDealStatusesSchema.optional(),
   /** Given, the task statuses it takes (null: every status, ADR-309); left out, they stay. */
@@ -2703,6 +2764,15 @@ const orderExcludedApiKeysNeedTheEvent = {
   options: {
     path: ['orderExcludedApiKeyIds'],
     message: WEBHOOK_ORDER_EXCLUDED_API_KEYS_NEED_THE_EVENT,
+  },
+};
+/** Keys are chosen for Payment Links only for an endpoint that takes their changes (ADR-324). */
+const paymentLinkApiKeysNeedTheEvent = {
+  check: (data: { eventTypes: WebhookEventType[]; paymentLinkApiKeyIds?: unknown }) =>
+    !data.paymentLinkApiKeyIds || data.eventTypes.includes('payment_link.status_changed'),
+  options: {
+    path: ['paymentLinkApiKeyIds'],
+    message: WEBHOOK_PAYMENT_LINK_API_KEYS_NEED_THE_EVENT,
   },
 };
 /** Deal statuses are chosen only for an endpoint that takes deal status changes (ADR-309). */
@@ -2955,6 +3025,7 @@ const endpointSchema = endpointFields
   .refine(paymentLinkStatusesNeedTheEvent.check, paymentLinkStatusesNeedTheEvent.options)
   .refine(orderChangeMakersNeedTheEvent.check, orderChangeMakersNeedTheEvent.options)
   .refine(orderExcludedApiKeysNeedTheEvent.check, orderExcludedApiKeysNeedTheEvent.options)
+  .refine(paymentLinkApiKeysNeedTheEvent.check, paymentLinkApiKeysNeedTheEvent.options)
   .refine(dealStatusesNeedTheEvent.check, dealStatusesNeedTheEvent.options)
   .refine(taskStatusesNeedTheEvent.check, taskStatusesNeedTheEvent.options)
   .refine(dealDetailsNeedTheEvent.check, dealDetailsNeedTheEvent.options)
@@ -3006,6 +3077,7 @@ const updateSchema = endpointFields
   .refine(paymentLinkStatusesNeedTheEvent.check, paymentLinkStatusesNeedTheEvent.options)
   .refine(orderChangeMakersNeedTheEvent.check, orderChangeMakersNeedTheEvent.options)
   .refine(orderExcludedApiKeysNeedTheEvent.check, orderExcludedApiKeysNeedTheEvent.options)
+  .refine(paymentLinkApiKeysNeedTheEvent.check, paymentLinkApiKeysNeedTheEvent.options)
   .refine(dealStatusesNeedTheEvent.check, dealStatusesNeedTheEvent.options)
   .refine(taskStatusesNeedTheEvent.check, taskStatusesNeedTheEvent.options)
   .refine(dealDetailsNeedTheEvent.check, dealDetailsNeedTheEvent.options)
@@ -3106,6 +3178,11 @@ export interface WebhookEndpointView {
    * they still work; null leaves nothing out.
    */
   orderExcludedApiKeys: WebhookEndpointApiKey[] | null;
+  /**
+   * The API keys whose Payment Links' changes it takes (ADR-324), as stored, named, with whether
+   * they still work; null takes every link's.
+   */
+  paymentLinkApiKeys: WebhookEndpointApiKey[] | null;
   /** The deal statuses it takes (ADR-309); null takes every status. */
   dealStatuses: WebhookDealStatus[] | null;
   /** The task statuses it takes (ADR-309); null takes every status. */
@@ -3484,6 +3561,7 @@ export async function lockWebhookEndpoint(
       paymentLinkStatuses: webhookEndpoints.paymentLinkStatuses,
       orderChangeMakers: webhookEndpoints.orderChangeMakers,
       orderExcludedApiKeyIds: webhookEndpoints.orderExcludedApiKeyIds,
+      paymentLinkApiKeyIds: webhookEndpoints.paymentLinkApiKeyIds,
       dealStatuses: webhookEndpoints.dealStatuses,
       taskStatuses: webhookEndpoints.taskStatuses,
       dealDetails: webhookEndpoints.dealDetails,
@@ -3570,6 +3648,7 @@ export async function insertWebhookEndpoint(
     paymentLinkStatuses: WebhookPaymentLinkStatus[] | null;
     orderChangeMakers: WebhookOrderChangeMaker[] | null;
     orderExcludedApiKeyIds: string[] | null;
+    paymentLinkApiKeyIds: string[] | null;
     dealStatuses: WebhookDealStatus[] | null;
     taskStatuses: WebhookTaskStatus[] | null;
     dealDetails: WebhookDealDetail[] | null;
@@ -3645,6 +3724,7 @@ export async function insertWebhookEndpoint(
     paymentLinkStatuses: input.paymentLinkStatuses,
     orderChangeMakers: input.orderChangeMakers,
     orderExcludedApiKeyIds: input.orderExcludedApiKeyIds,
+    paymentLinkApiKeyIds: input.paymentLinkApiKeyIds,
     dealStatuses: input.dealStatuses,
     taskStatuses: input.taskStatuses,
     dealDetails: input.dealDetails,
@@ -4069,6 +4149,7 @@ export function createWebhooksService(deps: {
               paymentLinkStatuses: webhookEndpoints.paymentLinkStatuses,
               orderChangeMakers: webhookEndpoints.orderChangeMakers,
               orderExcludedApiKeyIds: webhookEndpoints.orderExcludedApiKeyIds,
+              paymentLinkApiKeyIds: webhookEndpoints.paymentLinkApiKeyIds,
               dealStatuses: webhookEndpoints.dealStatuses,
               taskStatuses: webhookEndpoints.taskStatuses,
               dealDetails: webhookEndpoints.dealDetails,
@@ -4341,8 +4422,9 @@ export function createWebhooksService(deps: {
                     ),
                   );
           const assigneeById = new Map(namedAssignees.map((m) => [m.id, m]));
-          // The API keys endpoints chose for runs (ADR-319) and messages (ADR-320) and left out of
-          // CRM changes (ADR-321) and order changes (ADR-323), and whether they still work.
+          // The API keys endpoints chose for runs (ADR-319), messages (ADR-320) and Payment
+          // Links (ADR-324) and left out of CRM changes (ADR-321) and order changes (ADR-323), and
+          // whether they still work.
           const apiKeyIds = [
             ...new Set(
               rows.flatMap((r) => [
@@ -4350,6 +4432,7 @@ export function createWebhooksService(deps: {
                 ...(r.messageApiKeyIds ?? []),
                 ...(r.crmExcludedApiKeyIds ?? []),
                 ...(r.orderExcludedApiKeyIds ?? []),
+                ...(r.paymentLinkApiKeyIds ?? []),
               ]),
             ),
           ];
@@ -4405,6 +4488,7 @@ export function createWebhooksService(deps: {
               messageApiKeyIds: chosenMessageApiKeys,
               crmExcludedApiKeyIds: chosenCrmExcludedApiKeys,
               orderExcludedApiKeyIds: chosenOrderExcludedApiKeys,
+              paymentLinkApiKeyIds: chosenPaymentLinkApiKeys,
               channelAccountIds,
               teamIds: chosenTeams,
               templateIds: chosenTemplates,
@@ -4504,6 +4588,9 @@ export function createWebhooksService(deps: {
                 : null,
               orderExcludedApiKeys: chosenOrderExcludedApiKeys
                 ? chosenOrderExcludedApiKeys.map(namedApiKey)
+                : null,
+              paymentLinkApiKeys: chosenPaymentLinkApiKeys
+                ? chosenPaymentLinkApiKeys.map(namedApiKey)
                 : null,
               createdByKey: keyName && keyPrefix ? { name: keyName, keyPrefix } : null,
               previousSecretExpiresAt: previousSigns ? r.previousSecretExpiresAt : null,
@@ -4612,6 +4699,20 @@ export function createWebhooksService(deps: {
       return db.run(
         ctx.scope,
         (tx) => workingApiKeys(tx, ctx.tenant.id, WEBHOOK_ORDER_KEY_SCOPES, now),
+        { accessMode: 'read only' },
+      );
+    },
+
+    /**
+     * The API keys an endpoint can choose to take the Payment Links' changes of (ADR-324): the
+     * company's keys that ask for payments, working and not rotated, by name, as for runs.
+     */
+    async paymentLinkApiKeyChoices(ctx: TenantContext): Promise<WebhookApiKeyChoice[]> {
+      assertCan(ctx, 'developer.manage');
+      const now = clock.now();
+      return db.run(
+        ctx.scope,
+        (tx) => workingApiKeys(tx, ctx.tenant.id, WEBHOOK_PAYMENT_LINK_KEY_SCOPES, now),
         { accessMode: 'read only' },
       );
     },
@@ -4877,6 +4978,12 @@ export function createWebhooksService(deps: {
           null,
         );
         await assertWebhookOrderExcludedApiKeys(tx, ctx.tenant.id, orderExcludedApiKeyIds);
+        const paymentLinkApiKeyIds = webhookPaymentLinkApiKeyIdsFor(
+          data.eventTypes,
+          data.paymentLinkApiKeyIds,
+          null,
+        );
+        await assertWebhookPaymentLinkApiKeys(tx, ctx.tenant.id, paymentLinkApiKeyIds);
         const dealStatuses = webhookDealStatusesFor(data.eventTypes, data.dealStatuses, null);
         const taskStatuses = webhookTaskStatusesFor(data.eventTypes, data.taskStatuses, null);
         const dealDetails = webhookDealDetailsFor(data.eventTypes, data.dealDetails, null);
@@ -5026,6 +5133,7 @@ export function createWebhooksService(deps: {
           paymentLinkStatuses,
           orderChangeMakers,
           orderExcludedApiKeyIds,
+          paymentLinkApiKeyIds,
           dealStatuses,
           taskStatuses,
           dealDetails,
@@ -5089,6 +5197,7 @@ export function createWebhooksService(deps: {
               ...(paymentLinkStatuses ? { paymentLinkStatuses } : {}),
               ...(orderChangeMakers ? { orderChangeMakers } : {}),
               ...(orderExcludedApiKeyIds ? { orderExcludedApiKeyIds } : {}),
+              ...(paymentLinkApiKeyIds ? { paymentLinkApiKeyIds } : {}),
               ...(dealStatuses ? { dealStatuses } : {}),
               ...(taskStatuses ? { taskStatuses } : {}),
               ...(dealDetails ? { dealDetails } : {}),
@@ -5223,6 +5332,15 @@ export function createWebhooksService(deps: {
         // Only a list given now is checked: the keys kept were checked when chosen.
         if (data.orderExcludedApiKeyIds !== undefined) {
           await assertWebhookOrderExcludedApiKeys(tx, ctx.tenant.id, orderExcludedApiKeyIds);
+        }
+        const paymentLinkApiKeyIds = webhookPaymentLinkApiKeyIdsFor(
+          data.eventTypes,
+          data.paymentLinkApiKeyIds,
+          endpoint.paymentLinkApiKeyIds,
+        );
+        // Only a list given now is checked: the keys kept were checked when chosen.
+        if (data.paymentLinkApiKeyIds !== undefined) {
+          await assertWebhookPaymentLinkApiKeys(tx, ctx.tenant.id, paymentLinkApiKeyIds);
         }
         const dealStatuses = webhookDealStatusesFor(
           data.eventTypes,
@@ -5531,6 +5649,7 @@ export function createWebhooksService(deps: {
             paymentLinkStatuses,
             orderChangeMakers,
             orderExcludedApiKeyIds,
+            paymentLinkApiKeyIds,
             dealStatuses,
             taskStatuses,
             dealDetails,
@@ -5605,6 +5724,7 @@ export function createWebhooksService(deps: {
               ...(paymentLinkStatuses ? { paymentLinkStatuses } : {}),
               ...(orderChangeMakers ? { orderChangeMakers } : {}),
               ...(orderExcludedApiKeyIds ? { orderExcludedApiKeyIds } : {}),
+              ...(paymentLinkApiKeyIds ? { paymentLinkApiKeyIds } : {}),
               ...(dealStatuses ? { dealStatuses } : {}),
               ...(taskStatuses ? { taskStatuses } : {}),
               ...(dealDetails ? { dealDetails } : {}),
