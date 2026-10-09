@@ -44,6 +44,18 @@ platform's year of messages a day on the Usage tab and left a company's own year
   run here.
 - **Docs:** ADR-342; ARCHITECTURE; BACKLOG P5-10; feature matrix H-034.
 - **Mutation checks:** none new: no unit-tested logic changed.
+- **Review fixes:** an independent review of ADR-342 and of ADR-341's second fixes found four small
+  ones, fixed. While a company's deletion ran, its year showed counted days without messages: the
+  deletion deletes the counts first, so the page now says they went with the company, and the
+  worker no longer counts a company once its deletion has started, so its counts do not come back
+  between the deletion's batches. The purge ran in the count's transaction, so a day failing every
+  minute held it back: it is now `ops.purge_platform_message_days()` (0262), which the job calls
+  first in a transaction of its own, and the run logs what it deleted (`purged`). A comment still
+  said "deleted companies", and the runbook said every run logs, though one that counts and deletes
+  nothing logs nothing. 4/4 deliberate regressions of the purge's call caught; the count leaving out
+  a company being deleted, the purge and its grants are left to the integration tests (updated),
+  which run in CI. 0262 passed the pglast parse check again (syntax only), its three PL/pgSQL bodies
+  included.
 
 ### Test commands and results (local, 2026-10-09)
 

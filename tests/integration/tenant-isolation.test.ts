@@ -427,6 +427,9 @@ describe('database roles', () => {
     expect(await can('w360_app', 'ops.count_platform_message_days(integer)')).toBe(true);
     expect(await can('w360_platform', 'ops.count_platform_message_days(integer)')).toBe(false);
     expect(await can('w360_auth', 'ops.count_platform_message_days(integer)')).toBe(false);
+    expect(await can('w360_app', 'ops.purge_platform_message_days()')).toBe(true);
+    expect(await can('w360_platform', 'ops.purge_platform_message_days()')).toBe(false);
+    expect(await can('w360_auth', 'ops.purge_platform_message_days()')).toBe(false);
     // Settling work whose job ran out of retries (0089): the sweep's lookup and the mark for the
     // worker only; whether a job is waiting or running again for the definer functions only.
     for (const fn of [

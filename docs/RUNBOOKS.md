@@ -3811,17 +3811,20 @@ emailed` and `unsettled payments alert emailed`).
 day is counted once it has ended, for every company not deleted, and again once a day for a week
 while statuses arrive; after a deployment the 365 days before it are counted 3 a minute, newest
 first, so the card says how many days are not counted yet for about two hours. The worker logs
-`messages a day counted` with how many days a run counted when it ends without a failure; a run that
-fails logs the failure, and the days it counted before stay counted. Days staying uncounted, or "No
+`messages a day counted` with how many days a run counted and how many company days it deleted
+(`purged`), when it counted or deleted any; a run that fails logs the failure, and the days it
+counted before stay counted. Days staying uncounted, or "No
 day is counted yet" long after a deployment, mean the counting job does not run or fails: look for
 failures of `ops.message-days` in the worker's logs. Each day is counted in a transaction of its
 own, so a failed day is tried again the next minute and the days counted before it stay counted; a
 day whose count takes longer than the worker's statement timeout (`DATABASE_STATEMENT_TIMEOUT_MS`)
 fails every minute and holds back the older days, so the failure names the timeout: raise the
 timeout for the worker. A failure Meta reports more than 7 days after its message's day is not in
-the year; the window's chart above it counts live. A company's counts are deleted with the company
-(and by the next run, should a count race the deletion as it finishes), and every count after 400
-days.
+the year; the window's chart above it counts live. A company's counts are deleted when its deletion
+starts, and it is no longer counted: its platform page says so in place of its year. Each run
+first deletes, in a transaction of its own that a failing count never holds back, every count older
+than 400 days and those of companies deleted in the last 30 days, which a count racing a deletion
+as it finishes could leave.
 
 **Acknowledging failures (ADR-141).** On Current failures, the administrator who takes a failure
 opens Acknowledge on its row and writes a note of 10 to 500 characters: what was done or found

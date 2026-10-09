@@ -2239,9 +2239,10 @@ message text, contact details, payloads, email addresses, secrets or full URLs:
   `w360_platform`, raising `W3403` unless the session's user is in `ops.platform_admins`. The year's
   counts are kept per company and UTC day in `ops.platform_message_days`, a table with forced row
   level security that only the definer role reads and writes, counted by
-  `ops.count_platform_message_days`, executable by the worker's role only, and deleted with the
-  company. The definer role has column grants for the columns they read (no message text, contact,
-  token, secret or payload column) and a read policy on signup sessions.
+  `ops.count_platform_message_days` and deleted after 400 days by `ops.purge_platform_message_days`,
+  both executable by the worker's role only, and deleted with the company. The definer role has
+  column grants for the columns they read (no message text, contact, token, secret or payload
+  column) and a read policy on signup sessions.
 - Labels are a display number, an account name or a host (`ops.url_host`, executable only by the
   definer role): store and endpoint URLs can carry tokens in their paths or queries.
 - Errors are the provider's answer as HyFib already stored it for the company's own pages. Emails

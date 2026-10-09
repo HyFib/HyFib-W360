@@ -4,10 +4,10 @@ import type { OpsDailyActivity } from './ops';
 /**
  * Messages a day kept as days pass (P5-10, ADR-341). The Usage tab counts messages a day live, 93
  * days back at most (ADR-333); the worker now counts each UTC day once it has ended, for every
- * company not deleted, and keeps the counts, so the tab can draw a year. A few days a run, newest
- * first, back to 365 days before today; the 7 days before today are counted again once a day while
- * statuses Meta reports late arrive, and older days keep their counts. Counts only: never a contact,
- * a message or its text.
+ * company not deleted nor being deleted, and keeps the counts, so the tab can draw a year. A few
+ * days a run, newest first, back to 365 days before today; the 7 days before today are counted
+ * again once a day while statuses Meta reports late arrive, and older days keep their counts.
+ * Counts only: never a contact, a message or its text.
  */
 
 /** Days the year reads: the 365 before today. */
@@ -81,16 +81,21 @@ export async function keptMessageDays(
 }
 
 /**
- * The counting job (every minute): counts up to `limit` days due, newest first, each in a
- * transaction (and a statement) of its own, so a day's count has the whole statement timeout and
- * the days counted before it stay counted; stops at the first call that finds none due. Each call
- * also deletes the counts older than 400 days and those of deleted companies. How many days it
- * counted.
+ * The counting job (every minute): first deletes the counts older than 400 days and those of
+ * companies deleted in the last 30 days, in a transaction of its own, so a count that fails never
+ * holds that back; then counts up to `limit` days due, newest first, each in a transaction (and a
+ * statement) of its own, so a day's count has the whole statement timeout and the days counted
+ * before it stay counted, and stops at the first call that finds none due. How many company days
+ * it deleted and how many days it counted.
  */
 export async function countMessageDays(
   deps: { db: Database },
   limit: number = MESSAGE_DAYS_PER_RUN,
-): Promise<{ counted: number }> {
+): Promise<{ purged: number; counted: number }> {
+  const deleted = await deps.db.run(systemScope, (tx) =>
+    tx.execute<{ purged: number }>(sql`select ops.purge_platform_message_days() as purged`),
+  );
+  const purged = Number(deleted.rows[0]?.purged ?? 0);
   let counted = 0;
   for (let i = 0; i < limit; i += 1) {
     const result = await deps.db.run(systemScope, (tx) =>
@@ -99,5 +104,5 @@ export async function countMessageDays(
     if (Number(result.rows[0]?.counted ?? 0) === 0) break;
     counted += 1;
   }
-  return { counted };
+  return { purged, counted };
 }

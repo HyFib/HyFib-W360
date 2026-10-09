@@ -2716,16 +2716,18 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   one-argument function reads through the new one for any server of the release that added it.
 - **Messages a day kept as days pass (ADR-341, migration 0262):** the worker's `ops.message-days`
   job (every minute, one queued and one running) calls `countMessageDays`
-  (`platform/message-days.ts`), which calls `ops.count_platform_message_days(1)` up to 3 times, a
-  transaction each: each call counts the newest day due (one of the 365 before today never counted,
-  or of the 7 before today again once a day), whole for every company not deleted, into
+  (`platform/message-days.ts`), which first calls `ops.purge_platform_message_days()` in a
+  transaction of its own (counts older than 400 days and those of companies deleted in the last 30
+  days), then `ops.count_platform_message_days(1)` up to 3 times, a transaction each: each call
+  counts the newest day due (one of the 365 before today never counted, or of the 7 before today
+  again once a day), whole for every company not deleted nor being deleted, into
   `ops.platform_message_days` (a row per company and day with messages, forced row level security,
-  the definer role's alone), marks it in `ops.platform_message_days_counted` and deletes counts
-  older than 400 days and those of companies deleted in the last 30 days. `messageYear()` reads
-  `ops.platform_ops_message_days(365, null)` and keeps the run of counted days ending at the latest
-  one counted (`messageYear` in the same file), which the Usage tab draws under the window's chart
-  with `DailyMessages` under names of its own. `companyHealth()` reads a company's own year the
-  same way, with its health and 30 days, for its platform page (ADR-342).
+  the definer role's alone) and marks it in `ops.platform_message_days_counted`. `messageYear()`
+  reads `ops.platform_ops_message_days(365, null)` and keeps the run of counted days ending at the
+  latest one counted (`messageYear` in the same file), which the Usage tab draws under the window's
+  chart with `DailyMessages` under names of its own. `companyHealth()` reads a company's own year
+  the same way, with its health and 30 days, for its platform page (ADR-342), which says the counts
+  went with the company instead while its deletion runs.
 - **Exports (ADR-154, ADR-155, ADR-158):** `/platform/ops/export/[list]` (a route handler behind the
   pages' platform actor check; a name of `OPS_EXPORT_LISTS`, any other not found) calls
   `exportList`, which checks in its transaction that the actor is a platform administrator, reads

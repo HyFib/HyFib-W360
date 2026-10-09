@@ -3,10 +3,11 @@
 -- The Usage tab and a company's platform page count messages a day live from app.messages (0254,
 -- 0255), which is why they reach back 93 days at most: further back, each read would scan more of
 -- the platform's messages. The worker now counts each UTC day once it has ended, for every company
--- not deleted, and keeps the counts: a few days a minute, newest first, back to a year ago, so a
--- new deployment has its year within hours. A message's status can still change after its day (a
--- failure Meta reports later), so the 7 days before today are counted again once a day; older
--- days keep their counts. Nothing here holds a contact, a message or its text: counts a day only.
+-- not deleted nor being deleted, and keeps the counts: a few days a minute, newest first, back to a
+-- year ago, so a new deployment has its year within hours. A message's status can still change
+-- after its day (a failure Meta reports later), so the 7 days before today are counted again once
+-- a day; older days keep their counts. Nothing here holds a contact, a message or its text: counts
+-- a day only.
 
 -- Each company's messages on each UTC day it had any: sent, those of them failed, received. A
 -- company's rows are deleted with the company (step 35 below); none is kept past 400 days.
@@ -46,13 +47,42 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON ops.platform_message_days_counted TO w36
 INSERT INTO ops.tenant_deletion_steps (ordinal, tables, mode)
 VALUES (35, ARRAY['ops.platform_message_days']::regclass[], 'batch');
 
--- Counting (the worker, every minute, one day a call): deletes the counts older than 400 days and
--- those of companies deleted in the last 30 days (a count that raced a company's deletion, as it
--- finished, leaves them behind; the 400 days catch any older), then
--- counts up to p_limit days (at most 31) due, newest first: each of the 365 days before today never
--- counted, and each of the 7 before today counted more than a day ago. A day is counted whole,
--- replacing its rows, as 0255 counts the days it reads. One run at a time; how many days it
--- counted.
+-- Deleting the counts kept past their time (the worker, every minute, in a transaction of its own
+-- before it counts, so a count that fails never holds it back): those older than 400 days, and
+-- those of companies deleted in the last 30 days, which a count that raced a company's deletion as
+-- it finished can leave behind (the 400 days catch any older). How many company days it deleted.
+CREATE FUNCTION ops.purge_platform_message_days()
+  RETURNS integer
+  LANGUAGE plpgsql SECURITY DEFINER
+  SET search_path = pg_catalog, pg_temp
+  AS $$
+DECLARE
+  v_today date := (now() AT TIME ZONE 'UTC')::date;
+  v_old integer;
+  v_gone integer;
+BEGIN
+  PERFORM pg_advisory_xact_lock(hashtextextended('w360:platform-message-days', 0));
+  DELETE FROM ops.platform_message_days d WHERE d.utc_day < v_today - 400;
+  GET DIAGNOSTICS v_old = ROW_COUNT;
+  DELETE FROM ops.platform_message_days_counted c WHERE c.utc_day < v_today - 400;
+  DELETE FROM ops.platform_message_days d
+   USING app.tenants t
+   WHERE t.id = d.tenant_id AND t.status = 'deleted'
+     AND t.status_changed_at > now() - interval '30 days';
+  GET DIAGNOSTICS v_gone = ROW_COUNT;
+  RETURN v_old + v_gone;
+END
+$$;
+REVOKE EXECUTE ON FUNCTION ops.purge_platform_message_days() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION ops.purge_platform_message_days() TO w360_app;
+ALTER FUNCTION ops.purge_platform_message_days() OWNER TO w360_definer;
+
+-- Counting (the worker, every minute, one day a call): counts up to p_limit days (at most 31) due,
+-- newest first: each of the 365 days before today never counted, and each of the 7 before today
+-- counted more than a day ago. A day is counted whole, replacing its rows, as 0255 counts the days
+-- it reads, for every company not deleted whose deletion has not started: once it has, the
+-- deletion deletes the company's counts first (step 35) and they are not counted again. One run at
+-- a time; how many days it counted.
 CREATE FUNCTION ops.count_platform_message_days(p_limit integer)
   RETURNS integer
   LANGUAGE plpgsql SECURITY DEFINER
@@ -64,12 +94,6 @@ DECLARE
   v_counted integer := 0;
 BEGIN
   PERFORM pg_advisory_xact_lock(hashtextextended('w360:platform-message-days', 0));
-  DELETE FROM ops.platform_message_days d WHERE d.utc_day < v_today - 400;
-  DELETE FROM ops.platform_message_days_counted c WHERE c.utc_day < v_today - 400;
-  DELETE FROM ops.platform_message_days d
-   USING app.tenants t
-   WHERE t.id = d.tenant_id AND t.status = 'deleted'
-     AND t.status_changed_at > now() - interval '30 days';
   FOR v_day IN
     SELECT v_today - g.n
       FROM generate_series(1, 365) AS g(n)
@@ -91,7 +115,9 @@ BEGIN
          WHERE mm.tenant_id = t.id
            AND mm.created_at >= (v_day::timestamp AT TIME ZONE 'UTC')
            AND mm.created_at < ((v_day + 1)::timestamp AT TIME ZONE 'UTC')) m
-     WHERE t.status <> 'deleted' AND m.sent + m.received > 0;
+     WHERE t.status <> 'deleted' AND m.sent + m.received > 0
+       AND NOT EXISTS (SELECT 1 FROM ops.tenant_deletions dl
+                        WHERE dl.tenant_id = t.id AND dl.started_at IS NOT NULL);
     INSERT INTO ops.platform_message_days_counted (utc_day, counted_at) VALUES (v_day, now())
     ON CONFLICT (utc_day) DO UPDATE SET counted_at = excluded.counted_at;
     v_counted := v_counted + 1;

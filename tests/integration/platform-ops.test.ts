@@ -3885,14 +3885,38 @@ describe('messages a day kept as days pass (ADR-341)', () => {
       `UPDATE app.tenants SET status = 'deleted', status_changed_at = now() WHERE id = $1`,
       [gone.tenant.id],
     );
+    // A company whose deletion has started: the deletion deletes its counts first, and they are not
+    // counted again.
+    const leaving = await fx.company();
+    const leavingConversation = await conversationOf(leaving, '919876500043');
+    await messageAt(leaving, leavingConversation, 'outbound', 'delivered', noonDaysAgo(1));
+    await fx.query(
+      `UPDATE app.tenants SET status = 'pending_deletion', status_changed_at = now() WHERE id = $1`,
+      [leaving.tenant.id],
+    );
+    await fx.query(
+      `INSERT INTO ops.tenant_deletions
+         (id, tenant_id, requested_by_user_id, due_at, previous_status, company_name, started_at)
+       VALUES ($1, $2, $3, now(), 'active', 'Leaving company', now())`,
+      [uuidv7(), leaving.tenant.id, leaving.owner.id],
+    );
 
     // Newest first, as many as asked: yesterday and the day before.
-    expect(await count(2)).toEqual({ counted: 2 });
+    expect(await count(2)).toEqual({ purged: 0, counted: 2 });
     expect(await countedDays()).toEqual([utcDay(noonDaysAgo(2)), utcDay(noonDaysAgo(1))]);
     expect(await daysOf(kept)).toEqual([
       { day: utcDay(noonDaysAgo(1)), outbound: 2, failed: 1, inbound: 0 },
     ]);
     expect(await daysOf(gone)).toEqual([]);
+    expect(await daysOf(leaving)).toEqual([]);
+    // Ended as the deletion run ends it, so no other test finds a deletion open.
+    await fx.query(`UPDATE ops.tenant_deletions SET completed_at = now() WHERE tenant_id = $1`, [
+      leaving.tenant.id,
+    ]);
+    await fx.query(
+      `UPDATE app.tenants SET status = 'deleted', status_changed_at = now() WHERE id = $1`,
+      [leaving.tenant.id],
+    );
 
     // Then the rest of the year, a day a transaction, and nothing more until a day has passed.
     let runs = 0;
@@ -3915,18 +3939,18 @@ describe('messages a day kept as days pass (ADR-341)', () => {
           AND created_at > now() - interval '11 days'`,
       [kept.tenant.id],
     );
-    expect(await count(31)).toEqual({ counted: 0 });
+    expect(await count(31)).toEqual({ purged: 0, counted: 0 });
     await fx.query(
       `UPDATE ops.platform_message_days_counted SET counted_at = now() - interval '25 hours'`,
     );
-    expect(await count(31)).toEqual({ counted: 7 });
+    expect(await count(31)).toEqual({ purged: 0, counted: 7 });
     expect(await daysOf(kept)).toEqual([
       { day: utcDay(noonDaysAgo(10)), outbound: 1, failed: 0, inbound: 0 },
       { day: utcDay(noonDaysAgo(3)), outbound: 0, failed: 0, inbound: 1 },
       { day: utcDay(noonDaysAgo(1)), outbound: 2, failed: 2, inbound: 0 },
     ]);
 
-    // Counts older than 400 days are deleted.
+    // Counts older than 400 days are deleted, before any day is counted.
     await fx.query(
       `INSERT INTO ops.platform_message_days (tenant_id, utc_day, outbound, failed, inbound)
        VALUES ($1, (now() AT TIME ZONE 'UTC')::date - 401, 1, 0, 0)`,
@@ -3936,7 +3960,7 @@ describe('messages a day kept as days pass (ADR-341)', () => {
       `INSERT INTO ops.platform_message_days_counted (utc_day)
        VALUES ((now() AT TIME ZONE 'UTC')::date - 401)`,
     );
-    expect(await count(31)).toEqual({ counted: 0 });
+    expect(await count(31)).toEqual({ purged: 1, counted: 0 });
     expect(await daysOf(kept)).toHaveLength(3);
     expect(await countedDays()).toEqual(year);
 
@@ -3995,9 +4019,9 @@ describe('messages a day kept as days pass (ADR-341)', () => {
     const partial = await ops().messageYear(staff);
     expect(partial.uncounted).toBe(2);
     expect(partial.days.map((d) => d.day)).toEqual([4, 3, 2].map((n) => utcDay(noonDaysAgo(n))));
-    // The next run counts them, and deletes the counts a deleted company kept (as a count that
-    // raced its deletion would leave them).
-    expect(await count(31)).toEqual({ counted: 2 });
+    // The next run deletes the counts a deleted company kept (as a count that raced its deletion
+    // would leave them), then counts them.
+    expect(await count(31)).toEqual({ purged: 1, counted: 2 });
     expect(await daysOf(gone)).toEqual([]);
     expect((await ops().messageYear(staff)).uncounted).toBe(0);
   });
@@ -4023,9 +4047,12 @@ describe('messages a day kept as days pass (ADR-341)', () => {
     await expect(
       fx.dbs.appPool.query('SELECT * FROM ops.platform_ops_message_days(30, null)'),
     ).rejects.toThrow(/permission denied/);
-    await expect(
-      fx.dbs.platformPool.query('SELECT ops.count_platform_message_days(1)'),
-    ).rejects.toThrow(/permission denied/);
+    for (const call of [
+      'SELECT ops.count_platform_message_days(1)',
+      'SELECT ops.purge_platform_message_days()',
+    ]) {
+      await expect(fx.dbs.platformPool.query(call), call).rejects.toThrow(/permission denied/);
+    }
     for (const pool of [fx.dbs.appPool, fx.dbs.platformPool]) {
       for (const table of ['ops.platform_message_days', 'ops.platform_message_days_counted']) {
         await expect(pool.query(`SELECT count(*) FROM ${table}`), table).rejects.toThrow(

@@ -99,13 +99,15 @@ describe('the year of messages a day (ADR-341)', () => {
     ]);
   });
 
-  it('counts the days due one a transaction, a few a run unless told, until none is due', async () => {
+  it('deletes the counts kept past their time first, then counts the days due one a transaction, a few a run unless told, until none is due', async () => {
     const one = { rows: [{ counted: 1 }] };
     const { tx, statements } = answering([
+      { rows: [{ purged: 0 }] },
       one,
       one,
       one,
       // Asked for more, it counts more, and stops at the first call that finds no day due.
+      { rows: [{ purged: '2' }] },
       one,
       one,
       one,
@@ -119,14 +121,22 @@ describe('the year of messages a day (ADR-341)', () => {
         return fn(tx);
       },
     } as unknown as Database;
-    expect(await countMessageDays({ db })).toEqual({ counted: 3 });
-    expect(await countMessageDays({ db }, 31)).toEqual({ counted: 4 });
-    expect(transactions).toBe(8);
-    expect(statements).toEqual(
-      Array.from({ length: 8 }, () => ({
-        sql: 'select ops.count_platform_message_days(1) as counted',
-        params: [],
-      })),
-    );
+    expect(await countMessageDays({ db })).toEqual({ purged: 0, counted: 3 });
+    expect(await countMessageDays({ db }, 31)).toEqual({ purged: 2, counted: 4 });
+    expect(transactions).toBe(10);
+    const purge = { sql: 'select ops.purge_platform_message_days() as purged', params: [] };
+    const count = { sql: 'select ops.count_platform_message_days(1) as counted', params: [] };
+    expect(statements).toEqual([
+      purge,
+      count,
+      count,
+      count,
+      purge,
+      count,
+      count,
+      count,
+      count,
+      count,
+    ]);
   });
 });

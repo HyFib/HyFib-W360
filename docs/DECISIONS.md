@@ -13334,10 +13334,13 @@ Decision:
   definer role only); company deletion deletes a company's rows (step 35, with the deletion's two
   policies), and the export leaves them out, the messages themselves being exported. Counts older
   than 400 days are deleted, and so are those of a company deleted in the last 30 days, at every
-  run: a count that raced the company's deletion as it finished could leave some behind.
+  run, first and in a transaction of its own (`ops.purge_platform_message_days()`), so a count that
+  fails never holds it back: a count that raced the company's deletion as it finished could leave
+  some behind.
 - **Counting:** a worker job (queue `ops.message-days`, every minute, one queued and one running)
   counts up to 3 days due, newest first, each whole for every company not deleted under an advisory
-  lock and in a transaction of its own (`ops.count_platform_message_days(1)`), so a day's count has
+  lock and in a transaction of its own (`ops.count_platform_message_days(1)`), leaving out a company
+  whose deletion has started (the deletion deleted its counts first), so a day's count has
   the whole statement timeout and the days counted before it stay counted. A day is due when it is
   one of the 365 before today never counted, or one of the 7 before today last counted more than a
   day ago, so statuses Meta reports late reach the counts; older days keep theirs. A new deployment
@@ -13373,6 +13376,9 @@ Decision:
   counted days that ends at the latest one counted (`messageYear`), under the 30 days' chart, with
   the Usage tab year's names for its legend, table and summary, the days not counted yet and the
   empty state.
+- **While its deletion runs:** the deletion deletes the company's counts first and the worker no
+  longer counts it, so the page says the counts went with the company rather than draw a year of
+  days without messages.
 - **No migration:** the counts, their deletion with the company and the read's refusals are
   ADR-341's.
 
