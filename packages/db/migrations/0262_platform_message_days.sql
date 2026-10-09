@@ -81,7 +81,7 @@ ALTER FUNCTION ops.purge_platform_message_days() OWNER TO w360_definer;
 -- newest first: each of the 365 days before today never counted, and each of the 7 before today
 -- counted more than a day ago. A day is counted whole, replacing its rows, as 0255 counts the days
 -- it reads, for every company not deleted whose deletion has not started: once it has, the
--- deletion deletes the company's counts first (step 35) and they are not counted again. One run at
+-- deletion deletes the company's counts (step 35) and they are not counted again. One run at
 -- a time; how many days it counted.
 CREATE FUNCTION ops.count_platform_message_days(p_limit integer)
   RETURNS integer

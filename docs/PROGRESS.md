@@ -76,7 +76,10 @@ platform's year of messages a day on the Usage tab and left a company's own year
   health and gives no year, and the page says the counts "are deleted with it"; two comments said
   "being deleted", which here means a deletion that can still be cancelled; and the integration test
   had no company with a cancelled deletion, which is still counted (it has one now). 3/3 deliberate
-  regressions of the new read caught.
+  regressions of the new read caught. A review of these found the wording still saying the counts
+  go "first" and "being deleted" in a few places, now corrected. 0261 and 0262 were changed in place
+  while this pull request was open, before any database outside CI applied them: one that applied an
+  earlier draft would refuse them by checksum.
 
 ### Test commands and results (local, 2026-10-09)
 

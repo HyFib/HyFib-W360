@@ -13347,7 +13347,7 @@ Decision:
 - **Counting:** a worker job (queue `ops.message-days`, every minute, one queued and one running)
   counts up to 3 days due, newest first, each whole for every company not deleted under an advisory
   lock and in a transaction of its own (`ops.count_platform_message_days(1)`), leaving out a company
-  whose deletion has started (the deletion deleted its counts first), so a day's count has
+  whose deletion has started (the deletion deletes its counts), so a day's count has
   the whole statement timeout and the days counted before it stay counted. A day is due when it is
   one of the 365 before today never counted, or one of the 7 before today last counted more than a
   day ago, so statuses Meta reports late reach the counts; older days keep theirs. A new deployment

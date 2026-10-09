@@ -3885,7 +3885,7 @@ describe('messages a day kept as days pass (ADR-341)', () => {
       `UPDATE app.tenants SET status = 'deleted', status_changed_at = now() WHERE id = $1`,
       [gone.tenant.id],
     );
-    // A company whose deletion has started: the deletion deletes its counts first, and they are not
+    // A company whose deletion has started: the deletion deletes its counts, and they are not
     // counted again.
     const leaving = await fx.company();
     const leavingConversation = await conversationOf(leaving, '919876500043');

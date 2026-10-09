@@ -1022,8 +1022,8 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
     },
 
     /**
-     * One company's health, its activity over the last 30 days and its year of kept days (ADR-342;
-     * null when unknown).
+     * One company's health, its activity over the last 30 days and its year of kept days, none
+     * while its deletion runs (ADR-342); null when unknown.
      */
     async companyHealth(actor: PlatformActor, tenantId: string) {
       if (!z.uuid().safeParse(tenantId).success) return null;
