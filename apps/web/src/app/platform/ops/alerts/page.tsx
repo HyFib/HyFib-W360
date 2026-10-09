@@ -113,7 +113,12 @@ export default async function OpsAlertsPage() {
             <AlertChannelKindsForm options={KIND_OPTIONS} kinds={channel.kinds} />
           ) : null}
           {owner ? (
-            <AlertChannelForms host={channel?.host ?? null} />
+            <AlertChannelForms
+              host={channel?.host ?? null}
+              ownersAlerts={(channel?.kinds ?? [])
+                .filter((kind) => ALERT_CHANNEL_FINANCIAL_KINDS.includes(kind))
+                .map((kind) => ALERT_POST_KIND_LABELS[kind])}
+            />
           ) : (
             <p className="text-sm text-muted-foreground">
               Only platform owners can set, test or remove the chat channel and choose its alerts.

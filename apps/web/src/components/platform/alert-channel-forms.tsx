@@ -15,8 +15,17 @@ import { FormError, FormSuccess } from '@/components/form-status';
 /**
  * Setting, testing and removing the chat channel the operations alerts are posted to (platform
  * owners, ADR-338). The address is sent once and never shown back: the page names its host only.
+ * A new address keeps the alerts the channel gets (ADR-340), so the form names the platform owners'
+ * alerts among them, which would reach the new address's readers too.
  */
-export function AlertChannelForms({ host }: { host: string | null }) {
+export function AlertChannelForms({
+  host,
+  ownersAlerts,
+}: {
+  host: string | null;
+  /** The labels of the platform owners' alerts the channel gets. */
+  ownersAlerts: readonly string[];
+}) {
   const [url, setUrl] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -65,7 +74,11 @@ export function AlertChannelForms({ host }: { host: string | null }) {
         <Field
           id="alert-channel-url"
           label={host ? 'Replace the channel’s address' : 'The channel’s incoming webhook address'}
-          description="An https:// address that takes a JSON POST with a “text” member, such as a Slack incoming webhook (https://hooks.slack.com/services/…). It holds the channel’s secret: it is stored encrypted and never shown again."
+          description={`An https:// address that takes a JSON POST with a “text” member, such as a Slack incoming webhook (https://hooks.slack.com/services/…). It holds the channel’s secret: it is stored encrypted and never shown again.${
+            host && ownersAlerts.length > 0
+              ? ` A new address gets the alerts posted now, the platform owners’ ${ownersAlerts.join(' and ')} among them: untick those first if its readers should not see them.`
+              : ''
+          }`}
         >
           {(aria) => (
             <Input
@@ -94,7 +107,7 @@ export function AlertChannelForms({ host }: { host: string | null }) {
           </ClientButton>
           <ConfirmDialog
             title="Remove the chat channel?"
-            description={`Alerts are no longer posted to ${host}; they are still emailed to every platform administrator. Posts waiting fail as having no channel.`}
+            description={`Alerts are no longer posted to ${host}; they are still emailed as before, the operations alerts to every platform administrator and the platform owners’ alerts to platform owners. Posts waiting fail as having no channel.`}
             confirmLabel="Remove"
             destructive
             onConfirm={() => void remove()}

@@ -2189,17 +2189,19 @@ Phase 5 rules (daily settlement reconciliation, P5-05, ADR-059):
   and only platform owners run a day or resolve an item, audited with the reason or note.
 - Items keep transaction ids, amounts, fees, settlement ids and HyFib's match. Notes, descriptions,
   order receipts and card fields, which can carry another integration's customer data, are not read.
-- Alerts (ADR-066) go to platform owners only, through the encrypted outbox, not tied to a company.
-  They name days, counts by status and a failed run's last error (HyFib's own description of
-  Razorpay's answer), never a transaction id, amount or company; the details stay on the page, behind
-  platform sign-in and two-factor authentication. The worker reaches the runs and the owners'
-  addresses only through three SECURITY DEFINER functions executable by `w360_app` alone: the listing
-  returns ids, the mark writes only `alerted_attempt` and returns the email's content, and the
-  recipients function returns platform owners' ids and addresses.
-- Alerts about payments no settlement showed (ADR-071) follow the same rules: platform owners only,
-  counts and payment days only, never a company, amount or payment id. The worker reaches them only
-  through a listing (payment ids) and a mark (which checks each payment again and records it), both
-  SECURITY DEFINER and executable by `w360_app` alone; the runtime roles have no privileges on
+- Alerts (ADR-066) go to platform owners only, through the encrypted outbox, not tied to a company,
+  and, once a platform owner adds them, to the chat channel with days and counts only, never the
+  error (ADR-340). They name days, counts by status and a failed run's last error (HyFib's own
+  description of Razorpay's answer), never a transaction id, amount or company; the details stay on
+  the page, behind platform sign-in and two-factor authentication. The worker reaches the runs and
+  the owners' addresses only through three SECURITY DEFINER functions executable by `w360_app`
+  alone: the listing returns ids, the mark writes only `alerted_attempt` and returns the email's
+  content, and the recipients function returns platform owners' ids and addresses.
+- Alerts about payments no settlement showed (ADR-071) follow the same rules: platform owners only
+  (and the chat channel once a platform owner adds them, ADR-340), counts and payment days only,
+  never a company, amount or payment id. The worker reaches them only through a listing (payment
+  ids) and a mark (which checks each payment again and records it), both SECURITY DEFINER and
+  executable by `w360_app` alone; the runtime roles have no privileges on
   `ops.settlement_unsettled_alerts`, and the shared definition of an unsettled payment runs only
   inside definer functions.
 
@@ -2312,7 +2314,9 @@ message text, contact details, payloads, email addresses, secrets or full URLs:
   again, so the channel may show it twice.
 - The alerts a chat channel gets (ADR-340): only a platform owner chooses them (the service and
   `ops.platform_set_alert_channel_kinds` check the role; operators see them), audited as
-  `platform.alert_channel_kinds_set` with the host and the kinds before and after. The owners'
+  `platform.alert_channel_kinds_set` with the host and the kinds before and after. A new address
+  keeps them: the form names the platform owners' alerts it would take over, and
+  `platform.alert_channel_set` records the kinds the channel gets. The owners'
   financial alerts (reconciliation findings and payments not seen in a settlement), which platform
   owners alone are emailed, reach the channel only once an owner adds them, since whoever reads the
   channel reads them; their posts give days and counts only, never a company, an amount, a payment

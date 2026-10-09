@@ -2617,7 +2617,8 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   (ADR-071), once a platform owner adds them through `ops.platform_set_alert_channel_kinds`
   (definer, owners only, the kinds kept once each in the console's order; a change audited with the
   kinds before and after, the same kinds not audited). A new address keeps the kinds of the one it
-  replaces, and `ops.queue_platform_alert_post` queues a post only while the channel gets its kind.
+  replaces (its audit entry names them, and the replace field names the owners' alerts among them),
+  and `ops.queue_platform_alert_post` queues a post only while the channel gets its kind.
   The two financial sweeps (`alertSettlementReconFindings`, `alertUnsettledPayments`) queue their
   posts after their emails, in their transaction: the reconciliation's without a failed check's
   error (`settlementReconPost`), the unsettled payments' with the email's text.

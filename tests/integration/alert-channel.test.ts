@@ -39,6 +39,8 @@ const received: { method: string; path: string; headers: IncomingHttpHeaders; bo
 
 const BASE = 'https://app.w360.test';
 const LOOPBACK = { allowLoopbackForTests: true };
+/** The alerts a new channel gets (ADR-340). */
+const OPERATIONS = ['failures', 'queues', 'integrations'];
 
 const service = () =>
   createAlertChannelService({
@@ -188,8 +190,11 @@ describe('the chat channel (ADR-338)', () => {
 
     const audit = (await auditOf(owner)).slice(before);
     expect(audit.map((a) => [a.action, a.metadata])).toEqual([
-      ['platform.alert_channel_set', { host: '127.0.0.1' }],
-      ['platform.alert_channel_set', { host: '127.0.0.1', previousHost: '127.0.0.1' }],
+      ['platform.alert_channel_set', { host: '127.0.0.1', kinds: OPERATIONS }],
+      [
+        'platform.alert_channel_set',
+        { host: '127.0.0.1', previousHost: '127.0.0.1', kinds: OPERATIONS },
+      ],
     ]);
     expect(audit[0]!.correlation_id).toBe(owner.correlationId);
     expect(JSON.stringify(audit)).not.toContain('hook-secret');
@@ -295,7 +300,7 @@ describe('the chat channel (ADR-338)', () => {
     expect(state.channel?.lastSentAt).toBeInstanceOf(Date);
     expect(state.posts).toMatchObject([{ id: postId, kind: 'test', lastStatus: 200 }]);
     expect((await auditOf(owner)).slice(before).map((a) => [a.action, a.metadata])).toEqual([
-      ['platform.alert_channel_set', { host: '127.0.0.1' }],
+      ['platform.alert_channel_set', { host: '127.0.0.1', kinds: OPERATIONS }],
       ['platform.alert_channel_tested', { host: '127.0.0.1' }],
     ]);
     // Nothing more is due.
@@ -488,11 +493,7 @@ describe('the chat channel (ADR-338)', () => {
 
     // A new channel gets the operations alerts, not the owners' financial ones.
     await service().setChannel(owner, { url: hookUrl });
-    expect((await service().state(operator)).channel?.kinds).toEqual([
-      'failures',
-      'queues',
-      'integrations',
-    ]);
+    expect((await service().state(operator)).channel?.kinds).toEqual(OPERATIONS);
     expect(await queue('reconciliation')).toBe(false);
     expect(await queue('unsettled')).toBe(false);
     expect(await queue('test')).toBe(false);
@@ -529,16 +530,16 @@ describe('the chat channel (ADR-338)', () => {
 
     const audit = (await auditOf(owner)).slice(before);
     expect(audit.map((a) => [a.action, a.metadata])).toEqual([
-      ['platform.alert_channel_set', { host: '127.0.0.1' }],
+      ['platform.alert_channel_set', { host: '127.0.0.1', kinds: OPERATIONS }],
       [
         'platform.alert_channel_kinds_set',
-        {
-          host: '127.0.0.1',
-          kinds: financial,
-          previousKinds: ['failures', 'queues', 'integrations'],
-        },
+        { host: '127.0.0.1', kinds: financial, previousKinds: OPERATIONS },
       ],
-      ['platform.alert_channel_set', { host: '127.0.0.1', previousHost: '127.0.0.1' }],
+      // The new address's entry names the owners' alerts it took over.
+      [
+        'platform.alert_channel_set',
+        { host: '127.0.0.1', previousHost: '127.0.0.1', kinds: financial },
+      ],
     ]);
     expect(audit[1]!.correlation_id).toBe(owner.correlationId);
 

@@ -13288,9 +13288,10 @@ Decision:
 - **The channel names the alerts it gets:** `ops.platform_alert_channel.kinds` (migration 0261), in
   the console's order: Failures, Late queues, Failing integrations, Reconciliation findings and
   Payments not seen in a settlement. A new channel gets the three operations alerts, as before; a
-  new address keeps the kinds of the one it replaces. `ops.queue_platform_alert_post` queues a post
-  only while the channel gets the alert's kind. The column's check takes one to five known kinds,
-  and the posts' kind check takes the two new ones.
+  new address keeps the kinds of the one it replaces, which the replace field says when they include
+  the owners' alerts and the audit entry of the new address (`platform.alert_channel_set`) records.
+  `ops.queue_platform_alert_post` queues a post only while the channel gets the alert's kind. The
+  column's check takes one to five known kinds, and the posts' kind check takes the two new ones.
 - **Owners choose:** a platform owner ticks the alerts on Operations → Alerts and saves them
   together (at least one), through `ops.platform_set_alert_channel_kinds` (definer, owners only,
   the kinds given once each in any order and kept in the console's order). A change is audited

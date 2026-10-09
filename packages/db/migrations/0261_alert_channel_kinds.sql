@@ -52,7 +52,8 @@ ALTER FUNCTION ops.queue_platform_alert_post(text, text) OWNER TO w360_definer;
 
 -- Setting the channel (platform owners), as in 0258: the services seal the address with this row's
 -- id and give its host. A channel set before is replaced, and its kinds kept; posts waiting go to
--- the new one. Audited with the hosts only, never the address.
+-- the new one. Audited with the hosts, never the address, and the kinds the channel gets, so a
+-- replacement that carries the owners' alerts to another address shows.
 CREATE FUNCTION ops.platform_set_alert_channel(p_id uuid, p_url_ciphertext text, p_host text,
     p_correlation_id text)
   RETURNS void
@@ -63,6 +64,7 @@ DECLARE
   v_actor text := app.current_user_id();
   v_previous text;
   v_kinds text[];
+  v_now_kinds text[];
 BEGIN
   IF v_actor IS NULL OR NOT EXISTS (
       SELECT 1 FROM ops.platform_admins a WHERE a.user_id = v_actor AND a.role = 'platform_owner') THEN
@@ -77,9 +79,11 @@ BEGIN
   IF v_kinds IS NOT NULL THEN
     UPDATE ops.platform_alert_channel c SET kinds = v_kinds WHERE c.id = p_id;
   END IF;
+  SELECT c.kinds INTO v_now_kinds FROM ops.platform_alert_channel c WHERE c.id = p_id;
   INSERT INTO ops.platform_audit_events (actor_user_id, action, result, correlation_id, metadata)
   VALUES (v_actor, 'platform.alert_channel_set', 'success', p_correlation_id,
-          jsonb_strip_nulls(jsonb_build_object('host', p_host, 'previousHost', v_previous)));
+          jsonb_strip_nulls(jsonb_build_object('host', p_host, 'previousHost', v_previous,
+                                               'kinds', to_jsonb(v_now_kinds))));
 END
 $$;
 REVOKE EXECUTE ON FUNCTION ops.platform_set_alert_channel(uuid, text, text, text) FROM PUBLIC;

@@ -43,6 +43,14 @@ parse check (syntax only), its four PL/pgSQL bodies included.
   not saying it posted, or saying so without an owner; the unsettled post under another kind or not
   queued). The definer functions, the checks and the posting from real runs need the database, so
   their regressions are left to the integration tests, which run in CI.
+- **Review fixes:** an independent review found nothing that would fail CI and three small defects,
+  fixed: replacing the address carried the chosen alerts, the owners' among them, to the new
+  address without a word on the form or in the audit (the replace field now names the platform
+  owners' alerts it would take over, and `platform.alert_channel_set` records the kinds the channel
+  gets); the removal dialog said every alert stays emailed to every platform administrator (the
+  owners' alerts go to platform owners); and SECURITY still said the financial alerts reach platform
+  owners only. No unit-tested logic changed; the audit's kinds are checked by the integration tests,
+  which run in CI. The full check passed again (143 files, 1448 tests).
 
 ### Test commands and results (local, 2026-10-09)
 
