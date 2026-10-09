@@ -1250,6 +1250,12 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    servers of this release need it, as the Usage tab reads it; workers do not. Web servers from
    before it do not call it, so it can be applied before them.
 
+   Migration 0255 (ADR-334) adds `ops.platform_ops_daily_activity(timestamptz, uuid)` and recreates
+   0254's one-argument function to read through it, with the same signature, owner and grants, in
+   one transaction (a caller waits on the drop and finds the new function). Web servers of this
+   release call the two-argument function; those of the previous release call the one-argument
+   function, which stays, so it can be applied before the web rollout.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

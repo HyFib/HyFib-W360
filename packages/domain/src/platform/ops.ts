@@ -267,14 +267,18 @@ export interface OpsDailyActivity {
 }
 
 /**
- * The platform's messages each UTC day since a time (ADR-333), the first day from that time and
- * today up to now, as the activity function counts them, every day with a row: read in the same
- * snapshot as `usageRows`, they add up to its totals.
+ * The platform's messages each UTC day since a time (ADR-333), or one company's (ADR-334), the first
+ * day from that time and today up to now, as the activity function counts them, every day with a
+ * row: read in the same snapshot as the activity, they add up to its counts.
  */
-async function dailyActivity(tx: Tx, since: Date): Promise<OpsDailyActivity[]> {
+async function dailyActivity(
+  tx: Tx,
+  since: Date,
+  tenantId: string | null,
+): Promise<OpsDailyActivity[]> {
   const result = await tx.execute<Row>(sql`
     select to_char(utc_day, 'YYYY-MM-DD') as day, outbound, failed, inbound
-      from ops.platform_ops_daily_activity(${since.toISOString()}::timestamptz)
+      from ops.platform_ops_daily_activity(${since.toISOString()}::timestamptz, ${tenantId}::uuid)
      order by utc_day`);
   return result.rows.map((r) => ({
     day: String(r.day),
@@ -1000,12 +1004,19 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
     async companyHealth(actor: PlatformActor, tenantId: string) {
       if (!z.uuid().safeParse(tenantId).success) return null;
       const now = clock.now();
-      return platformDb.run(actor.userId, async (tx) => {
-        const [facts] = await healthFacts(tx, tenantId);
-        if (!facts) return null;
-        const [activity] = await activitySince(tx, new Date(now.getTime() - 30 * DAY_MS), tenantId);
-        return { health: assess(facts), activity: activity ?? null };
-      });
+      const since = new Date(now.getTime() - 30 * DAY_MS);
+      // One snapshot, so the company's days add up to its 30 days' counts (ADR-334).
+      return platformDb.run(
+        actor.userId,
+        async (tx) => {
+          const [facts] = await healthFacts(tx, tenantId);
+          if (!facts) return null;
+          const [activity] = await activitySince(tx, since, tenantId);
+          const daily = await dailyActivity(tx, since, tenantId);
+          return { health: assess(facts), activity: activity ?? null, daily };
+        },
+        { isolationLevel: 'repeatable read', accessMode: 'read only' },
+      );
     },
 
     /** Signup sessions that failed or were abandoned, stuck number setups and stalled companies. */
@@ -1137,7 +1148,7 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
         actor.userId,
         async (tx) => {
           const rows = await usageRows(tx, window, now);
-          const daily = await dailyActivity(tx, since);
+          const daily = await dailyActivity(tx, since, null);
           const sum = (pick: (a: CompanyUsage) => number) =>
             rows.reduce((total, a) => total + pick(a), 0);
           return {

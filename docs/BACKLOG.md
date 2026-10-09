@@ -1332,6 +1332,9 @@ verification, app review, Embedded Signup configuration).
   **[Messages a day built; its database and browser tests run only in CI]** (ADR-333, migration
   0254: the Usage tab draws the platform's messages sent and received each UTC day of its window,
   with each day's failures in a tooltip and a table of the days, read in the totals' snapshot).
+  **[A company's messages a day built; its database and browser tests run only in CI]** (ADR-334,
+  migration 0255: a company's platform page draws its days of the last 30 in the health card, read
+  with its 30 days' counts).
   Remaining:
   other alert channels, trends further back than 93 days and other charts, Meta's quality webhook
   (unconfirmed), rollups for many companies and pages read from the database.

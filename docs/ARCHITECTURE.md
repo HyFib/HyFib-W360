@@ -2656,6 +2656,12 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   (`components/platform/daily-chart.tsx`), a client component over the pure geometry of
   `platform/ops-chart.ts` (exported as `@w360/domain/ops-chart`), and folds the table of the days
   under it.
+- **A company's messages a day (ADR-334):** `companyHealth()` reads the company's facts, its 30
+  days' activity and its days from `ops.platform_ops_daily_activity(p_since, p_tenant_id)` (0255;
+  null for every company, which `usage()` passes) in one repeatable-read, read-only transaction;
+  its platform page draws them in the health card with the Usage tab's `DailyMessages` component
+  (`components/platform/daily-messages.tsx`: the chart, the folded table, the empty state). 0254's
+  one-argument function reads through the new one for the previous release's web servers.
 - **Exports (ADR-154, ADR-155, ADR-158):** `/platform/ops/export/[list]` (a route handler behind the
   pages' platform actor check; a name of `OPS_EXPORT_LISTS`, any other not found) calls
   `exportList`, which checks in its transaction that the actor is a platform administrator, reads

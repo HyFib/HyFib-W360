@@ -13007,3 +13007,33 @@ Not built: days further back than 93 (longer trends need daily rollups kept as d
 rollups for many companies the backlog lists), a chart for one company, the window before drawn
 beside the window, failures or other measures as charts of their own, the days in the CSV export
 (the table shows them), and days in a time zone other than UTC.
+
+## ADR-334 One company's messages a day on its platform page (P5-10) (2026-10-09)
+
+Context: the health card on a company's platform page gives its sending and receipts over 30 days
+as sums (ADR-054). The first question staff ask about a company whose numbers look wrong is when
+its sending stopped or its failures began, and the sums cannot say. ADR-333 drew the platform's
+days on the Usage tab and left a chart for one company unbuilt.
+
+Decision:
+
+- **The company's days on its page:** the health card draws the company's messages sent and
+  received each UTC day of the last 30 days, with the same chart, tooltip, slider and folded table
+  as the Usage tab (a shared `DailyMessages` component), under "Messages a day (30 days)". The
+  first day counts from 30 days ago at the time of reading and today up to now, so the days add up
+  to the card's "Sent in 30 days" and "Received in 30 days". A company with no message in them gets
+  an empty state saying so.
+- **One snapshot:** `companyHealth()` reads the company's facts, its 30 days' counts and its days in
+  one repeatable-read, read-only transaction, as `usage()` does since ADR-333.
+- **Migration 0255:** `ops.platform_ops_daily_activity(p_since, p_tenant_id)` takes the company,
+  or null for every company not deleted, as 0026's activity function does, with 0254's checks
+  (`W3403`, `W3412`), counting and grants (the platform role only, owned by the definer role). The
+  console calls it for both pages. 0254's one-argument function stays for the previous release's
+  web servers and now reads through the new one (dropped by its owner and created again, as
+  definer-owned functions are replaced), so the platform's days and a company's are counted by one
+  body; a later migration may drop it once no server calls it.
+- **No new permission:** the page re-checks the platform actor, and the function returns counts a
+  day, never a contact or a message.
+
+Not built: a company's days over another window than 30 days, the days of a company's numbers or
+campaigns, and the chart on the company's own Reports page (it lists messages per day as a table).

@@ -1,5 +1,47 @@
 # Progress
 
+## 2026-10-09 — One company's messages a day on its platform page (P5-10, H-034, ADR-334)
+
+Status: **Implemented; its database and browser tests run in CI only.** A company's platform page
+gave its sending and receipts over 30 days as sums. The local PostgreSQL is unavailable, so
+migration 0255 and the integration tests below were written but not run here; the migration passed
+the pglast parse check (syntax only), its PL/pgSQL and SQL bodies included.
+
+### Completed
+
+- **Database:** migration 0255 (`ops.platform_ops_daily_activity(p_since, p_tenant_id)`: 0254's
+  days for one company, or for every company with null, with 0254's checks, counting and grants;
+  0254's one-argument function dropped by its owner, the definer role, and created again to read
+  through the new one, so one body counts the platform's days and a company's).
+- **Domain:** `companyHealth()` reads the company's facts, its 30 days' activity and its days in one
+  repeatable-read, read-only transaction and returns `daily`; the days' read takes the company
+  (`usage()` passes null).
+- **Web:** `DailyMessages` (`components/platform/daily-messages.tsx`): the chart, the folded table
+  of the days and the empty state, shared by the Usage tab and the health card on a company's
+  platform page, which now shows "Messages a day (30 days)".
+- **Tests:** integration (1 new in `platform-ops.test.ts`: one company's exact days of its 30, none
+  of another company's on the same day, none from before the 30 days, adding up to its activity;
+  the two-argument function among the refusals for a non-administrator and the runtime role; the
+  message helpers shared with the ADR-333 test) and its grants in the isolation suite; e2e (the
+  ADR-333 test opens the company's page and finds its chart and one received message in the table;
+  the first console test finds the empty state for a company without messages). Written for CI;
+  the integration and e2e tests were not run here.
+- **Docs:** ADR-334; ARCHITECTURE; SECURITY; THREAT-MODEL T299; DEPLOYMENT; BACKLOG P5-10; feature
+  matrix H-034.
+- **Mutation checks:** none new: no unit-tested logic changed (the chart's geometry is ADR-333's);
+  the counting, the snapshot and the page are covered by the integration and e2e tests, in CI.
+
+### Test commands and results (local, 2026-10-09)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 141 files, 1400 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm test:e2e`                                    | not run here: it needs the database; CI runs it               |
+| `pnpm build`                                       | passed                                                        |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
 ## 2026-10-09 — Messages a day on the operations console (P5-10, H-034, ADR-333)
 
 Status: **Implemented; its database and browser tests run in CI only.** The Usage tab gave each
