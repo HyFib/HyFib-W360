@@ -72,6 +72,7 @@ import {
   processSendIntent,
   processTemplateSubmit,
   processWebhookDeliveries,
+  WEBHOOK_EXACT_TIME_RE,
   WebhookOAuthTokenCache,
   runCampaignTick,
   syncTemplates,
@@ -641,6 +642,27 @@ describe('conversation events', () => {
     expect(createdAt.size).toBe(3);
     const inOrder = rows.map((r) => createdAt.get(r.id) ?? '');
     expect([...inOrder].sort()).toEqual(inOrder);
+    // To the microsecond (ADR-330): each change's own time as stored, so the three differ and sort
+    // as text in the order they were captured; createdAt is the same moment cut to the millisecond.
+    const exact = new Map(
+      assignments.map((b) => [b.id, (b as { createdAtExact?: string }).createdAtExact ?? '']),
+    );
+    const stored = await fx.query<{ id: string; at: string }>(
+      `SELECT id, to_char(occurred_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS at
+         FROM app.webhook_events
+        WHERE tenant_id = $1 AND conversation_id = $2 AND type = 'conversation.assignment_changed'
+        ORDER BY occurred_at`,
+      [c.tenant.id, conversationId],
+    );
+    expect(stored.map((r) => r.id)).toEqual(rows.map((r) => r.id));
+    expect(stored.map((r) => exact.get(r.id))).toEqual(stored.map((r) => r.at));
+    expect(new Set(exact.values()).size).toBe(3);
+    const exactInOrder = rows.map((r) => exact.get(r.id) ?? '');
+    expect([...exactInOrder].sort()).toEqual(exactInOrder);
+    for (const [id, at] of exact) {
+      expect(at).toMatch(WEBHOOK_EXACT_TIME_RE);
+      expect(createdAt.get(id)).toBe(`${at.slice(0, 23)}Z`);
+    }
     // The member changes are as captured; the team is the conversation's now.
     expect(
       assignments.map((b) => (b.data.conversation as { teamId: string | null }).teamId),

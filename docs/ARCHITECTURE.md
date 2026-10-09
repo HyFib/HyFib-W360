@@ -2015,8 +2015,9 @@ true`); the same key with another request (method, path and body hashed) answers
 - **Delivery** (`webhooks/delivery.ts`): the job claims up to 10 due deliveries (`FOR UPDATE SKIP
 LOCKED`; pending ones due now, then `delivering` ones whose lease expired), builds each payload
   from the company's current data (`webhooks/payloads.ts`; an erased contact has no number or name,
-  a message, conversation, contact, run or order that is gone ends the delivery as `event_gone`),
-  signs it, sets the lease (the 10 s egress deadline plus 35 s) and commits. A delivery whose payload
+  a message, conversation, contact, run or order that is gone ends the delivery as `event_gone`;
+  since ADR-330 every body gives `createdAtExact`, the event's `occurred_at` read with
+  `exactTimestamp`, and `createdAt` as its millisecond cut, `toWebhookMillisecond`), signs it, sets the lease (the 10 s egress deadline plus 35 s) and commits. A delivery whose payload
   or signature cannot be built (a bug, data the builder cannot describe, a secret or the endpoint's
   own headers the keyring cannot open, or a database error while building, each build running in a
   savepoint) ends at once as

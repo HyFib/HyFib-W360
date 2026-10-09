@@ -1,5 +1,37 @@
 # Progress
 
+## 2026-10-09 — Webhook times to the microsecond (P5-09, H-014, ADR-330)
+
+Status: **Implemented; its database tests run in CI only.** Webhook bodies gave their time to the
+millisecond, so two changes one request made within a millisecond could share it. The local
+PostgreSQL is unavailable, so the integration test below was written but not run here. No
+migration.
+
+### Completed
+
+- **Domain:** `WEBHOOK_EXACT_TIME_RE`, `toWebhookMillisecond` and `createdAtExact` in every body's
+  envelope (`webhooks/payloads.ts`), from the event's time read with `exactTimestamp` in
+  `webhooks/delivery.ts`; the member assignment event's description in the OpenAPI document.
+- **Tests:** unit (2 new in `webhooks/webhooks.test.ts`: every body's schema and the two times'
+  rules, and the builder stamping both from the exact time; the fixtures of 18 tests there carry
+  the exact time); integration (1 changed: the three member changes of one request in
+  `webhook-events.test.ts` now differ in `createdAtExact`, as stored, in order). Written for CI; the
+  integration test was not run here. No e2e test.
+- **Docs:** ADR-330; ARCHITECTURE; BACKLOG P5-09; feature matrix H-014.
+- **Mutation checks:** 12/12 deliberate regressions caught on the unit-tested parts. The
+  delivery's read of the stored time needs the database, so its regressions are left to the
+  integration test, which runs in CI.
+
+### Test commands and results (local, 2026-10-09)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 140 files, 1380 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
 ## 2026-10-09 — What changed of each contact in the contact feed (P5-08, H-033, ADR-329)
 
 Status: **Implemented; its database and browser tests run in CI only.** `GET /contact-changes` read

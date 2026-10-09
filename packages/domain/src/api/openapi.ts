@@ -4207,7 +4207,7 @@ export function buildOpenApiDocument(serverUrl: string) {
       'conversation.assignment_changed': webhook(
         'webhookConversationAssignmentChanged',
         WEBHOOK_EVENT_INFO['conversation.assignment_changed'].label,
-        `${WEBHOOK_EVENT_INFO['conversation.assignment_changed'].description} conversation.assigneeId and conversation.previousAssigneeId are the change (members as GET /members lists them); the rest is the conversation when the event is delivered. Deliveries are not ordered: the latest change is the one with the latest createdAt. createdAt is given to the millisecond, and one request can change the member twice (taking it off and moving the conversation to a team whose routing gives it out again): when two events of a conversation share a createdAt, GET /conversations/{id} gives the member it has.`,
+        `${WEBHOOK_EVENT_INFO['conversation.assignment_changed'].description} conversation.assigneeId and conversation.previousAssigneeId are the change (members as GET /members lists them); the rest is the conversation when the event is delivered. Deliveries are not ordered: the latest change is the one with the latest createdAt. createdAt is given to the millisecond, and one request can change the member twice (taking it off and moving the conversation to a team whose routing gives it out again): createdAtExact gives each change's own time to the microsecond, as it was captured, which tells the two apart.`,
         'WebhookConversationAssignmentChanged',
       ),
       'conversation.team_changed': webhook(

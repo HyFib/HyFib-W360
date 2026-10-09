@@ -2349,8 +2349,9 @@ send `deal.updated` to the endpoints that take it (ADR-275), as does erasure's r
 send nothing; a change of its owner sends `deal.owner_changed` to the endpoints that take it
 (ADR-269). Changes made while no endpoint took the type were not recorded and are not sent later. A
 deal reopened in another stage (its own was removed), or moved and closed by one API request, sends
-two events, in the order the steps happened and possibly with the same `createdAt`; each gives the
-stage and status its step left. An erased contact's deal is sent titled "Deal (contact erased)",
+two events, in the order the steps happened and possibly with the same `createdAt`, which their
+`createdAtExact`, to the microsecond, tells apart (ADR-330); each gives the stage and status its
+step left. An erased contact's deal is sent titled "Deal (contact erased)",
 without its contact's number or name or a lost reason.
 
 **An integration misses a task change, or a task event fails as gone (ADR-261).** Endpoints that

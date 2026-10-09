@@ -12819,3 +12819,30 @@ Decision:
 Not built: the values before a change (the feed reads the contact as it is now), which tags were
 added or removed (the `contact.updated` webhook names them since ADR-182), and filtering the feed by
 part.
+
+## ADR-330 Webhook bodies give their time to the microsecond (P5-09) (2026-10-09)
+
+Context: every webhook body gives `createdAt`, the time its event was captured, to the millisecond.
+One request can change the same thing twice within a millisecond (ADR-094: taking a conversation off
+its member and moving it to a team whose routing gives it out again), so the two events could share
+a `createdAt`, and a receiver ordering events by it could not tell which came last: the OpenAPI
+document told it to read the conversation again. The events are stored to the microsecond. ADR-094
+listed `createdAt` finer than the millisecond as not built.
+
+Decision:
+
+- **`createdAtExact` in every body:** the event's time to the microsecond, in UTC with six fractional
+  digits (`2026-10-09T08:15:30.123456Z`), so such times sort as text in time order. `createdAt`
+  stays, now cut from the same time to the millisecond (never rounded), so the two always agree;
+  receivers that read only `createdAt` see no change. Fields are only added.
+- **It orders what `createdAt` orders, more finely:** events stamped as each change is captured,
+  conversation and campaign events among them (ADR-087, ADR-094), differ in it even when one request
+  makes two changes within a millisecond; events stamped with their transaction's or their record's
+  own time share it with the changes saved with them, as before. The member assignment event's
+  description now points to it instead of to reading the conversation again.
+- **How:** the delivery reads the stored time with `exactTimestamp`, as the API's cursors do, and the
+  body builder writes both fields from it, for replays and test events too. No migration:
+  `occurred_at` has always kept microseconds.
+
+Not built: a sequence number across events, and an order among the events stamped with one
+transaction's time.
