@@ -318,6 +318,10 @@ test('staff read the operations console and repair a quarantined webhook event',
   await page.getByRole('link', { name: companyName }).click();
   await expect(page.getByRole('heading', { name: 'Health' })).toBeVisible();
   await expect(page.getByText('0 active of 0')).toBeVisible();
+  // A company without messages says so where its days would be drawn (ADR-334).
+  await expect(
+    page.getByText('The company sent and received no message in these 30 days.'),
+  ).toBeVisible();
   await expectNoHorizontalOverflow(page);
 });
 
@@ -566,4 +570,33 @@ test('staff read the platform’s messages a day on the Usage tab (ADR-333)', as
     page.getByRole('slider', { name: 'Messages sent and received each UTC day, 30 days' }),
   ).toBeVisible();
   await expectNoHorizontalOverflow(page);
+
+  // The company's own days on its platform page (ADR-334): the customer's one message, and none of
+  // the other companies'.
+  await page.goto(`/platform?q=${slug}`);
+  await page.getByRole('link', { name: companyName }).click();
+  await expect(page.getByRole('heading', { name: 'Health' })).toBeVisible();
+  const companyChart = page.getByRole('slider', {
+    name: "This company's messages sent and received each UTC day, 30 days",
+  });
+  await expect(async () => {
+    await page.reload();
+    await expect(companyChart).toBeVisible({ timeout: 1_000 });
+  }).toPass({ timeout: 30_000 });
+  await page.getByText('Table of the days', { exact: true }).click();
+  const companyDays = page.getByRole('table', { name: 'Messages a day' });
+  await expect(companyDays).toBeVisible();
+  const received = await companyDays.locator('tbody td:nth-child(4)').allTextContents();
+  expect(received.length).toBeGreaterThanOrEqual(31);
+  expect(received.reduce((total, n) => total + Number(n), 0)).toBe(1);
+  await expectNoHorizontalOverflow(page);
+  // As on the Usage tab, the chart and the open table stay inside a page 360 pixels wide.
+  const shown = page.viewportSize();
+  await page.setViewportSize({ width: 360, height: shown?.height ?? 800 });
+  for (const part of [companyChart, page.locator('details').filter({ has: companyDays })]) {
+    const box = await part.boundingBox();
+    expect(box, 'shown').not.toBeNull();
+    expect(box!.x + box!.width, 'inside the page').toBeLessThanOrEqual(360);
+  }
+  if (shown) await page.setViewportSize(shown);
 });

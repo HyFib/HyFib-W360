@@ -1464,18 +1464,39 @@ export const apiWebhookEndpointSchema = z.object({
     ),
   contactEventFieldValues: z
     .array(
-      z.object({
-        key: z.string().describe("The custom field's key (GET /contact-fields)."),
-        value: z
-          .union([z.string(), z.number(), z.boolean()])
-          .describe(
-            'A value of the field’s type: text, a number, a date as YYYY-MM-DD, or true or false for yes/no.',
-          ),
-      }),
+      z.union([
+        z.object({
+          key: z.string().describe("The custom field's key (GET /contact-fields)."),
+          value: z
+            .union([z.string(), z.number(), z.boolean()])
+            .describe(
+              'A value of the field’s type: text, a number, a date as YYYY-MM-DD, or true or false for yes/no.',
+            ),
+        }),
+        z.object({
+          key: z.string().describe("The text field's key (GET /contact-fields)."),
+          contains: z
+            .string()
+            .describe('A word or phrase the field’s text contains, whatever its case.'),
+        }),
+        z.object({
+          key: z.string().describe("The number or date field's key (GET /contact-fields)."),
+          atLeast: z
+            .union([z.number(), z.string()])
+            .optional()
+            .describe(
+              'The range’s start, included: a number for a number field, a date as YYYY-MM-DD for a date field.',
+            ),
+          atMost: z
+            .union([z.number(), z.string()])
+            .optional()
+            .describe('The range’s end, included, of the same kind as its start.'),
+        }),
+      ]),
     )
     .nullable()
     .describe(
-      'The custom field values whose contact.created and contact.updated the endpoint receives: the changes of a contact that has one of the values once they are saved (text compared whatever its case, numbers as numbers), and those changing one of the fields, so the change that takes a contact out of the values is received too; a contact.created is received when the change that adds the contact gives it one of them. A pair stays after its field is deleted, matching nothing until a field with its key is added again. null receives every contact. Other events are not narrowed.',
+      'The custom field conditions whose contact.created and contact.updated the endpoint receives: the changes of a contact that passes one of them once they are saved (a value it has, text compared whatever its case and numbers as numbers; a word its text contains; or a range its number or date is in, the ends included), and those changing one of the fields, so the change that takes a contact out of the conditions is received too; a contact.created is received when the change that adds the contact makes it pass one of them. A condition stays after its field is deleted, matching nothing until a field with its key is added again. null receives every contact. Other events are not narrowed.',
     ),
   assigneeIds: z
     .array(z.uuid())
@@ -4240,13 +4261,13 @@ export function buildOpenApiDocument(serverUrl: string) {
       'contact.created': webhook(
         'webhookContactCreated',
         WEBHOOK_EVENT_INFO['contact.created'].label,
-        `${WEBHOOK_EVENT_INFO['contact.created'].description} An import sends one per contact added. An endpoint that names tags (its \`contactEventTags\`, or the tags given in Settings → Webhooks) receives it for a contact the change that adds it tags with one of them, and one that names custom field values (its \`contactEventFieldValues\`) for a contact the change that adds it gives one of them.`,
+        `${WEBHOOK_EVENT_INFO['contact.created'].description} An import sends one per contact added. An endpoint that names tags (its \`contactEventTags\`, or the tags given in Settings → Webhooks) receives it for a contact the change that adds it tags with one of them, and one that names custom field values, words or ranges (its \`contactEventFieldValues\`) for a contact the change that adds it makes pass one of them.`,
         'WebhookContactCreated',
       ),
       'contact.updated': webhook(
         'webhookContactUpdated',
         WEBHOOK_EVENT_INFO['contact.updated'].label,
-        `${WEBHOOK_EVENT_INFO['contact.updated'].description} One event per contact for each change saved; a contact added in the same change is sent as contact.created only. An endpoint receives every change unless it names the parts it takes (its \`contactParts\`, or the parts ticked in Settings → Webhooks): then it receives the events whose changes name one of them, each naming every part that changed. An endpoint that names tags (its \`contactEventTags\`) receives the changes of contacts that have one of them when they are saved, and the changes that add or remove one; one that names custom field values (its \`contactEventFieldValues\`) receives the changes of contacts that have one of the values when they are saved, and the changes of those fields.`,
+        `${WEBHOOK_EVENT_INFO['contact.updated'].description} One event per contact for each change saved; a contact added in the same change is sent as contact.created only. An endpoint receives every change unless it names the parts it takes (its \`contactParts\`, or the parts ticked in Settings → Webhooks): then it receives the events whose changes name one of them, each naming every part that changed. An endpoint that names tags (its \`contactEventTags\`) receives the changes of contacts that have one of them when they are saved, and the changes that add or remove one; one that names custom field values, words or ranges (its \`contactEventFieldValues\`) receives the changes of contacts that pass one of them when they are saved, and the changes of those fields.`,
         'WebhookContactUpdated',
       ),
       'contact.erased': webhook(

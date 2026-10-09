@@ -1,5 +1,174 @@
 # Progress
 
+## 2026-10-09 — Endpoint audit entries that fit, however long the lists (P5-09, H-014, ADR-336)
+
+Status: **Fixed; its database tests run in CI only.** Adding or changing a webhook endpoint
+records an audit entry naming every list the endpoint has, and the lists were bounded each on its
+own: lists within their limits but past the 8 KiB of metadata an audit entry holds together (two
+lists of 50 tags written in Tamil or Hindi were enough) made the audit's check roll the change back
+with an internal error, in Settings and through the API. Found in passing while building ADR-335.
+The local PostgreSQL is unavailable, so the integration tests below were written but not run here.
+
+### Completed
+
+- **Domain:** `webhookEndpointAuditMetadata` (in the webhooks service) counts an entry with
+  `jsonbSize` (ADR-131's upper bound, checked against PostgreSQL in CI), keeps one within 7,000
+  bytes as it is and otherwise names its largest lists by count under `listCounts` and by the first
+  16 hex digits of their SHA-256 under `listDigests`, largest first and by name when as large, until
+  it fits, always naming the host and the events (a change's `eventTypes`, a replay's `events`).
+  Settings' added and changed endpoints and every entry of the API's endpoints pass through it; the
+  endpoint keeps every list.
+- **Tests:** unit (3 new in `webhooks/webhooks.test.ts`: an entry that fits unchanged with room for
+  the API's source; the largest lists in bytes counted first and by name, with their digests and a
+  changed list's other digest; the events of a change or a replay kept, and every list counted
+  within 6,000 bytes); integration (1 new each in `webhooks.test.ts` and
+  `api-webhook-endpoints.test.ts`: an endpoint with five lists of 50 Tamil tags, about 29,000
+  bytes, added and changed, every list kept, its entries fitting, PostgreSQL's uncompressed size of
+  each within the count, and in Settings a changed list's digest alone changing). Written for CI;
+  the integration tests were not run here. No migration.
+- **Docs:** ADR-336; ARCHITECTURE; SECURITY; THREAT-MODEL T301; BACKLOG P5-09.
+- **Mutation checks:** 14/14 deliberate regressions caught on the unit-tested parts (an entry that
+  fits, the events of a change and of a replay, the order of the lists named by count, in bytes and
+  by name, their end, the counts, the digests, the count in bytes, and the budget with room for the
+  API's source), one after a test was added (lists ordered by their items). The call sites need the
+  database, so their regressions are left to the integration tests, which run in CI.
+- **Review fixes:** an independent review before the push found no defect that would fail the fix
+  or its tests. It found that the slice counted bytes with a counter of its own, untested against
+  PostgreSQL and weaker at its edges, where `jsonbSize` (ADR-131) already did so and is checked
+  against `pg_column_size` in CI; the slice now uses it. It found that an entry naming a list by
+  count could hide that the change replaced it, so each list named by count now carries a digest;
+  that a replay's `events` were not kept as a change's `eventTypes` were; the reason given for the
+  4,000 bytes of field values (the audit entry, now bounded as a whole) still stated as before in a
+  comment and a test; "40 letters" where the limit is 40 characters; and, beside the slice, that an
+  API answer kept with its `Idempotency-Key` holds 64 KiB, which every list of an endpoint at its
+  limit at once could pass. Each is corrected; the last is in BACKLOG P5-09, not built.
+- **Codex review fix:** Codex's review of the pull request found that a list's digest hashed its
+  JSON in the order its objects' keys came: a field value range built as `key, atLeast, atMost` and
+  read back from jsonb as `key, atMost, atLeast` hashed otherwise, so a change that left the list
+  out reported it changed. Digests now hash each object's keys in order (a unit test: the same
+  ranges in jsonb's order have the same digest; it fails without the fix).
+
+### Test commands and results (local, 2026-10-09)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 141 files, 1410 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
+## 2026-10-09 — Words and ranges in field value filters (P5-09, H-014, ADR-335)
+
+Status: **Implemented; its database tests run in CI only.** An endpoint taking added and changed
+contacts could name exact custom field values only. The local PostgreSQL is unavailable, so
+migration 0256 and the integration tests below were written but not run here; the migration passed
+the pglast parse check (syntax only), the body of its SQL function included. The jsonpath
+expressions in its check are checked by PostgreSQL alone, in CI.
+
+### Completed
+
+- **Database:** migration 0256 (the check on `contact_event_field_values` replaced: each pair a
+  field's key with a value, a word (`contains`, text of 1 to 500 characters without spaces around
+  it) or a range (`atLeast`, `atMost`: numbers or YYYY-MM-DD dates, of one kind and in order), one
+  shape a pair; `app.webhook_contact_values_match` replaced in place: words by `strpos` on lowered
+  text, number ranges by jsonb's order, date ranges as YYYY-MM-DD text in the "C" collation).
+- **Domain:** `WebhookContactFieldValue` is a value, a word or a range (`webhookContactFieldKind`);
+  the schema takes one kind a pair (`superRefine`) and keeps the value pairs' messages and paths;
+  `webhookContactEventFieldValuesChecked` reads a word only for a text field and a range's ends only
+  for a number or date field, by its type, refusing a start after its end; ids, the text Settings
+  shows (`webhookContactFieldConditionText`), which conditions its inputs show
+  (`webhookFieldConditionEditable`) and its readers (`webhookFieldWordsFromLines`,
+  `webhookFieldRangeFromInputs`); the API's description and the OpenAPI entries of the three kinds.
+- **Web:** Settings → Webhooks shows under each text field the words it contains, one a line, and
+  under each number or date field one range ("at least" and "at most", or "from" and "until"); a
+  condition its inputs cannot show is kept and listed as it is.
+- **Tests:** unit (6 new in `webhooks/webhooks.test.ts`, 1 new and 1 changed in `api/api.test.ts`);
+  integration (1 new each in `webhooks.test.ts`: the service's refusals and keeping, a deleted
+  field's conditions, the audit, each new clause of the database check; `webhook-events.test.ts`:
+  capture by a word, number and date ranges with either end, the changes of listed fields and
+  contact.created; `api-webhook-endpoints.test.ts`: the API's round trip and refusals). Written for
+  CI; the integration tests were not run here. No e2e test.
+- **Docs:** ADR-335; ARCHITECTURE; SECURITY; THREAT-MODEL T300; DEPLOYMENT; RUNBOOKS; BACKLOG
+  P5-09; feature matrix W-138, W-139 and H-014.
+- **Mutation checks:** 42/42 deliberate regressions caught on the unit-tested parts (the schema's
+  shapes, the reading of words and ranges by type, ids and their ends' kinds, the text Settings
+  shows, which conditions its inputs show and its readers, the API's description of a change). The
+  check and the match need the database, so their regressions are left to the integration tests,
+  which run in CI.
+- **Review fixes:** an independent review before the push found that a range's id did not tell a
+  number end from text of the same digits, so a range given through the API with `"10000"` for a
+  number field was taken for the endpoint's held `10000` and kept unread, and the database check
+  then refused it with a 500 instead of a 422; ids now carry each end's kind, and the range is read
+  and refused ("Score takes a number."). It found that Settings decided again at each render which
+  conditions its inputs show, while a save refreshes the endpoint without remounting the form, so
+  a field's second range could leave the kept list unseen; that is now decided once, as the form
+  opens. It found the API's description of a change still naming values alone, the range inputs
+  of number fields opening a keypad without a minus on iPhones (they now open the usual keyboard),
+  and the rollout note silent on old web servers, which keep a held word or range as a pair
+  without a value and so fail (500) on any change of such an endpoint until the rollout ends;
+  DEPLOYMENT now says so. Each is corrected and the first and third are tested.
+
+### Test commands and results (local, 2026-10-09)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 141 files, 1407 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
+## 2026-10-09 — One company's messages a day on its platform page (P5-10, H-034, ADR-334)
+
+Status: **Implemented; its database and browser tests run in CI only.** A company's platform page
+gave its sending and receipts over 30 days as sums. The local PostgreSQL is unavailable, so
+migration 0255 and the integration tests below were written but not run here; the migration passed
+the pglast parse check (syntax only), its PL/pgSQL and SQL bodies included.
+
+### Completed
+
+- **Database:** migration 0255 (`ops.platform_ops_daily_activity(p_since, p_tenant_id)`: 0254's
+  days for one company, or for every company with null, with 0254's checks, counting and grants;
+  0254's one-argument function dropped by its owner, the definer role, and created again to read
+  through the new one, so one body counts the platform's days and a company's).
+- **Domain:** `companyHealth()` reads the company's facts, its 30 days' activity and its days in one
+  repeatable-read, read-only transaction and returns `daily`; the days' read takes the company
+  (`usage()` passes null).
+- **Web:** `DailyMessages` (`components/platform/daily-messages.tsx`): the chart, the folded table
+  of the days and the empty state, shared by the Usage tab and the health card on a company's
+  platform page, which now shows "Messages a day (30 days)".
+- **Tests:** integration (1 new in `platform-ops.test.ts`: one company's exact days of its 30, none
+  of another company's on the same day, none from before the 30 days, adding up to its activity;
+  the two-argument function among the refusals for a non-administrator and the runtime role; the
+  message helpers shared with the ADR-333 test) and its grants in the isolation suite; e2e (the
+  ADR-333 test opens the company's page and finds its chart and one received message in the table;
+  the first console test finds the empty state for a company without messages). Written for CI;
+  the integration and e2e tests were not run here.
+- **Docs:** ADR-334; ARCHITECTURE; SECURITY; THREAT-MODEL T299; DEPLOYMENT; BACKLOG P5-10; feature
+  matrix H-034.
+- **Mutation checks:** none new: no unit-tested logic changed (the chart's geometry is ADR-333's);
+  the counting, the snapshot and the page are covered by the integration and e2e tests, in CI.
+- **Review fixes:** an independent review found no functional defect. It corrected the
+  migration's and the docs' account of the rollout (this release calls only the new function; the
+  one-argument function serves a server of the release that added it, if one still runs), of why
+  definer-owned functions are dropped and created again (the migration role lacks the owner's
+  privileges; the definer role does hold CREATE on the schema), and of what a call during the
+  migration finds (no lock: the old function before the commit, the new one after); the console's
+  read functions counted again in SECURITY and T75 (eight); and the e2e test now checks the
+  company's chart and open table at 360 pixels too, as the Usage tab's.
+
+### Test commands and results (local, 2026-10-09)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 141 files, 1400 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm test:e2e`                                    | not run here: it needs the database; CI runs it               |
+| `pnpm build`                                       | passed                                                        |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
 ## 2026-10-09 — Messages a day on the operations console (P5-10, H-034, ADR-333)
 
 Status: **Implemented; its database and browser tests run in CI only.** The Usage tab gave each

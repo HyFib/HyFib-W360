@@ -257,6 +257,7 @@ import {
   webhookMessageApiKeyIdsSchema,
   webhookMessageStatusesFor,
   webhookMessageStatusesSchema,
+  webhookEndpointAuditMetadata,
   webhookOAuthAudit,
   webhookOAuthColumns,
   webhookOAuthSchema,
@@ -809,7 +810,7 @@ const invalidContactEventTags = () =>
   });
 
 const contactEventFieldValuesField = webhookContactEventFieldValuesSchema.describe(
-  `The custom field values whose contact.created and contact.updated the endpoint receives: 1 to ${WEBHOOK_LIMITS.contactEventFieldValues} pairs of a field's key (GET /contact-fields) and a value of the field's type, as contacts take them (text of up to 500 characters, a number, a date as YYYY-MM-DD, or true or false for yes/no), each once, up to ${WEBHOOK_LIMITS.contactEventFieldValuesBytes.toLocaleString('en')} bytes as JSON in all, only with contact.created or contact.updated. A change is sent when the contact has one of the values (text compared whatever its case, numbers as numbers) once the change is saved, or when it changes one of the fields, so the change that takes a contact out of the values is sent too; a change between two values not named is sent as well, as the event does not say what a field was before. A contact added and given one of the values in the same change is sent as contact.created. A value given now must be of one of the company's fields; one the endpoint holds stays when its field is deleted, matching nothing until a field with its key is added again (keys never change), whose changes are then sent and whose values are matched as they are kept. With where contacts came from, the contact parts, the custom fields or the tags too, an event must pass them all. Other events, contact.erased and contact.merged among them, are not narrowed. null receives every contact.`,
+  `The custom field conditions whose contact.created and contact.updated the endpoint receives: 1 to ${WEBHOOK_LIMITS.contactEventFieldValues} of a field's key (GET /contact-fields) with one of: \`value\`, a value of the field's type, as contacts take them (text of up to 500 characters, a number, a date as YYYY-MM-DD, or true or false for yes/no); \`contains\`, for a text field, a word or phrase of up to 500 characters its value contains, whatever its case; or \`atLeast\`, \`atMost\` or both, for a number or date field, the ends of a range of its numbers or dates, each included, the start not after the end. Each condition once, up to ${WEBHOOK_LIMITS.contactEventFieldValuesBytes.toLocaleString('en')} bytes as JSON in all, only with contact.created or contact.updated. A change is sent when the contact passes one of them (equal text compared whatever its case, numbers as numbers) once the change is saved, or when it changes one of the fields, so the change that takes a contact out of the values is sent too; a change between two values not named is sent as well, as the event does not say what a field was before. A contact added and given one of the values in the same change is sent as contact.created. A condition given now must be of one of the company's fields; one the endpoint holds stays when its field is deleted, matching nothing until a field with its key is added again (keys never change), whose changes are then sent and whose values are matched as they are kept. With where contacts came from, the contact parts, the custom fields or the tags too, an event must pass them all. Other events, contact.erased and contact.merged among them, are not narrowed. null receives every contact.`,
 );
 
 /** Field values of added and changed contacts are chosen only for an endpoint receiving them (ADR-332). */
@@ -1422,7 +1423,7 @@ export const apiUpdateWebhookEndpointSchema = z
     contactEventFieldValues: contactEventFieldValuesField
       .optional()
       .describe(
-        "The custom field values whose contact.created and contact.updated the endpoint receives (pairs of a field's key and a value of its type; a pair the endpoint holds may stay as it is after its field is deleted); null receives every contact. Left out, they stay, unless the events include neither contact.created nor contact.updated any more, which clears them.",
+        "The custom field conditions whose contact.created and contact.updated the endpoint receives (each a field's key with a value of its type, a word its text contains or a range of its numbers or dates; a condition the endpoint holds may stay as it is after its field is deleted); null receives every contact. Left out, they stay, unless the events include neither contact.created nor contact.updated any more, which clears them.",
       ),
     assigneeIds: assigneeIdsField
       .optional()
@@ -2060,6 +2061,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
     }
   }
 
+  // An endpoint's entry names its largest lists by count when they would not fit (ADR-336).
   const audit = (
     tx: Tx,
     ctx: ApiContext,
@@ -2074,7 +2076,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
         action,
         subjectType: 'webhook_endpoint',
         subjectId: id,
-        metadata: { ...metadata, source: 'api' },
+        metadata: { ...webhookEndpointAuditMetadata(metadata), source: 'api' },
         correlationId: ctx.requestId,
       },
       apiActor(ctx),

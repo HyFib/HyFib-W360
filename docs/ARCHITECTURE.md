@@ -2323,7 +2323,10 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   type whose contacts' `contact.created` and `contact.updated` it takes, null for every contact; a
   check keeps it to 1 to 50 such pairs and to endpoints taking either event, the services read
   each value a list adds by its field's type (`webhookContactEventFieldValuesChecked`) and keep a
-  list to 4,000 bytes as JSON, so the audit entries carrying it fit their 8 KiB of metadata.
+  list to 4,000 bytes as JSON. The audit entries of added and changed endpoints name every list,
+  and one whose lists together would pass 7,000 bytes as jsonb (`jsonbSize`, an upper bound) names
+  the largest by count under `listCounts` and by a digest under `listDigests` until it fits within
+  its 8 KiB of metadata (`webhookEndpointAuditMetadata`, ADR-336).
   `app.webhook_contact_values_match` passes a change when the contact has one of the values (text
   whatever its case, numbers as numbers) or, for a `contact.updated`, when its transaction changed
   one of the fields. `app.capture_contact_webhook_event` and `app.deliver_contact_webhook_tag`
@@ -2331,7 +2334,12 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   values and apply it at each write, so a contact given a value by a later write of the
   transaction that added it is sent as `contact.created`. Settings (a field's values one a line,
   yes/no ticked) and the API (`contactEventFieldValues`) set it; a change that drops both events
-  clears it.
+  clears it. Since 0256 (ADR-335) a pair holds, besides a value, a word a text field's value
+  contains (`contains`) or a range of a number or date field (`atLeast`, `atMost`); the check keeps
+  each pair to one shape, `webhookContactEventFieldValuesChecked` reads words and range ends by the
+  field's type, and the match function compares words with `strpos` on lowered text and ranges by
+  jsonb's order for numbers and the "C" collation for dates. Settings shows a text field's words one
+  a line and one range a number or date field.
 - **Message type filters** (migration 0137, ADR-191): `message_types` on an endpoint lists the types
   of the received messages it takes as `message.received`, null for every type; a check keeps it to
   1 to 14 known types (never `template`) and to endpoints taking the event.
@@ -2656,6 +2664,12 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   (`components/platform/daily-chart.tsx`), a client component over the pure geometry of
   `platform/ops-chart.ts` (exported as `@w360/domain/ops-chart`), and folds the table of the days
   under it.
+- **A company's messages a day (ADR-334):** `companyHealth()` reads the company's facts, its 30
+  days' activity and its days from `ops.platform_ops_daily_activity(p_since, p_tenant_id)` (0255;
+  null for every company, which `usage()` passes) in one repeatable-read, read-only transaction;
+  its platform page draws them in the health card with the Usage tab's `DailyMessages` component
+  (`components/platform/daily-messages.tsx`: the chart, the folded table, the empty state). 0254's
+  one-argument function reads through the new one for any server of the release that added it.
 - **Exports (ADR-154, ADR-155, ADR-158):** `/platform/ops/export/[list]` (a route handler behind the
   pages' platform actor check; a name of `OPS_EXPORT_LISTS`, any other not found) calls
   `exportList`, which checks in its transaction that the actor is a platform administrator, reads

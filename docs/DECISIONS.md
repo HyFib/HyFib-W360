@@ -13007,3 +13007,117 @@ Not built: days further back than 93 (longer trends need daily rollups kept as d
 rollups for many companies the backlog lists), a chart for one company, the window before drawn
 beside the window, failures or other measures as charts of their own, the days in the CSV export
 (the table shows them), and days in a time zone other than UTC.
+
+## ADR-334 One company's messages a day on its platform page (P5-10) (2026-10-09)
+
+Context: the health card on a company's platform page gives its sending and receipts over 30 days
+as sums (ADR-054). The first question staff ask about a company whose numbers look wrong is when
+its sending stopped or its failures began, and the sums cannot say. ADR-333 drew the platform's
+days on the Usage tab and left a chart for one company unbuilt.
+
+Decision:
+
+- **The company's days on its page:** the health card draws the company's messages sent and
+  received each UTC day of the last 30 days, with the same chart, tooltip, slider and folded table
+  as the Usage tab (a shared `DailyMessages` component), under "Messages a day (30 days)". The
+  first day counts from 30 days ago at the time of reading and today up to now, so the days add up
+  to the card's "Sent in 30 days" and "Received in 30 days". A company with no message in them gets
+  an empty state saying so.
+- **One snapshot:** `companyHealth()` reads the company's facts, its 30 days' counts and its days in
+  one repeatable-read, read-only transaction, as `usage()` does since ADR-333.
+- **Migration 0255:** `ops.platform_ops_daily_activity(p_since, p_tenant_id)` takes the company,
+  or null for every company not deleted, as 0026's activity function does, with 0254's checks
+  (`W3403`, `W3412`), counting and grants (the platform role only, owned by the definer role). The
+  console calls it for both pages. 0254's one-argument function stays for any web server of the
+  release that added it (ADR-333) still running during the rollout, and now reads through the new
+  one (dropped by its owner and created again, as definer-owned functions are replaced), so the
+  platform's days and a company's are counted by one body; a later migration may drop it once no
+  server calls it.
+- **No new permission:** the page re-checks the platform actor, and the function returns counts a
+  day, never a contact or a message.
+
+Not built: a company's days over another window than 30 days, the days of a company's numbers or
+campaigns, and the chart on the company's own Reports page (it lists messages per day as a table).
+
+## ADR-335 Words and ranges in the field value filter of added and changed contacts (P5-09) (2026-10-09)
+
+Context: since ADR-332 an endpoint taking `contact.created` or `contact.updated` can name exact
+custom field values of the contacts whose changes it takes. A receiver keeping a segment by a
+number or a date (the contacts whose lifetime value is at least 10,000, whose renewal falls in
+October) or by a word of a text field (a city containing "Chennai") could not say so, and ADR-332
+left comparisons other than equality unbuilt.
+
+Decision:
+
+- **Three kinds of condition in one list,** `contactEventFieldValues` (still 1 to 50, each once,
+  up to 4,000 bytes as JSON, any of them passing): a field's key with `value`, an exact value as
+  before; with `contains`, for a text field, a word or phrase of up to 500 characters, trimmed, that
+  the contact's text contains, whatever its case; or with `atLeast`, `atMost` or both, for a number
+  or date field, the ends of a range, each included: numbers for a number field and real dates as
+  YYYY-MM-DD for a date field, read as the field's values are, the start not after the end. A pair
+  of more than one kind, or of none, is refused (422 through the API), as is a word for a field
+  that is not text and a range for one that is neither a number nor a date. Two ranges of one field
+  are both kept and either passes; ranges are not merged.
+- **What is sent is unchanged in kind:** a change is sent when the contact passes one of the
+  conditions once its transaction's write is saved, or when the transaction changes one of the
+  listed fields, so the change that takes a contact out of a range is sent too; a contact added
+  passing one is sent as `contact.created`. A date range compares the contact's value as
+  YYYY-MM-DD text, so a text value written as a date, of a field deleted and added again as text,
+  would be compared too; the services never add a range to a text field.
+- **Settings → Webhooks:** under each text field, besides its values one a line, the words it
+  contains one a line ("City: containing"); under each number or date field, one range ("Score: at
+  least" and "at most", or a date field's "from" and "until"), either end left blank. A condition
+  its field's inputs cannot show as it is (a field's second range given through the API, a word on
+  several lines, or of a field deleted or added again with another type) is listed ticked and kept
+  as it is, as ADR-332 keeps values. The endpoint shows them as "City: Chennai, containing "chen";
+  Score: at least 10; Renewal: 2026-10-01 to 2026-10-31".
+- **Migration 0256:** the column's check replaced: each pair an object of a field's key and the
+  members of one shape (`value`; `contains`, text of 1 to 500 characters without spaces around it;
+  `atLeast` and `atMost`, numbers or YYYY-MM-DD dates, both of one kind and in order), validated at
+  once, as before. `app.webhook_contact_values_match` replaced with the same signature (owned by the
+  migration role, so in place; its grants stay): a word by `strpos` on both sides lowered, so no
+  character of it is a pattern; a range by jsonb's order for numbers and the "C" collation for
+  dates. The capture and tag functions call it unchanged.
+- **Unchanged:** permissions (`developer.manage`, keys with `webhooks.manage`), the audit entries
+  and the company data export carrying the list as it is stored, and the payloads.
+
+Not built: lists that leave contacts out, a range of text, words of number or date fields,
+comparisons other than these (a field without a value, before or after today), several ranges of
+one field in Settings, and sending only the changes that leave a condition.
+
+## ADR-336 Endpoint audit entries that fit, however long the lists (P5-09) (2026-10-09)
+
+Context: adding or changing a webhook endpoint, in Settings or through the API, records an audit
+entry (`webhook.endpoint_created`, `webhook.endpoint_updated`) naming the endpoint's host, its
+events and every list it has: numbers, teams, members, templates, tags, field values and the rest.
+An audit entry holds 8 KiB of metadata (0001's check), but the lists were bounded each on its own,
+never together: two lists of 50 tags written in Tamil or Hindi (up to 40 characters of 3 bytes each)
+passed every other rule and took about 12 KB, so the audit's check refused the entry and rolled the
+change back with an internal error. ADR-332 kept field values to 4,000 bytes for this reason, but
+alone. Found in passing while building ADR-335.
+
+Decision:
+
+- **An entry kept within 7,000 bytes as jsonb,** counted by `jsonbSize` (ADR-131: an upper bound of
+  what PostgreSQL stores before compressing a value, checked against `pg_column_size` in CI). The
+  room above 7,000 bytes covers the `source` the API adds.
+- **Its largest lists named by count:** an entry that would pass it names its lists one after
+  another, the largest first (by name when two are as large), by their lengths under `listCounts`
+  (`{"contactTags": 50}`) and by the first 16 hex digits of the SHA-256 of their JSON under
+  `listDigests`, instead of item by item, until it fits (`webhookEndpointAuditMetadata`). The digest
+  shows whether a list named by count in two entries changed between them; its items are not in the
+  entry. It hashes each object's keys in order, so a list read back from the database (jsonb keeps
+  an object's keys by length) hashes as the services wrote it. The host, the events (`eventTypes`, or a replay's `events`) and the other facts are always
+  named, and an entry that fits is unchanged. With every list named by count, an entry with every
+  event and the longest hosts takes under 6,000 bytes. The endpoint keeps every list whole, as
+  Settings, the API and the company data export show it.
+- **Both paths:** Settings and the API name lists by count the same way when an endpoint is added
+  or changed; the API's other endpoint entries (turned off or on, deleted, a secret rotated,
+  deliveries replayed) pass through the same function and name no list long enough to change.
+- **Unchanged:** every list's own limit, ADR-332's 4,000 bytes of field values, the audit table
+  and its check, and the other actions' entries; no migration.
+
+Not built: naming a long list's items over several entries, a bound on the entries of other audited
+actions, and a bound on an endpoint's whole configuration for the API's answers (an endpoint's
+answer to a `POST`, kept with its `Idempotency-Key`, holds 64 KiB, which every list at its limit at
+once could pass; estimated, not reproduced).

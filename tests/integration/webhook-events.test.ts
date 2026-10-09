@@ -2291,6 +2291,131 @@ describe('contact event field value filters (ADR-332)', () => {
     ).toEqual([['contact.erased', kept]]);
   });
 });
+describe('contact event field words and ranges (ADR-335)', () => {
+  const add = async (
+    c: Company,
+    eventTypes: WebhookEventType[],
+    lists: Record<string, unknown>,
+  ) => {
+    const path = `/ok/${randomBytes(6).toString('hex')}`;
+    const owner = await fx.ctx(c, c.owner);
+    const created = await webhooks().create(owner, {
+      url: `http://${HOST}:${port}${path}`,
+      eventTypes,
+      ...lists,
+    });
+    return { ...created, path };
+  };
+  const sentTo = (path: string) =>
+    bodiesAt(path)
+      .map((b) => [
+        b.type,
+        (b.data.contact as { id: string }).id,
+        (b.data.changes as string[] | undefined) ?? null,
+      ])
+      .sort((x, y) => JSON.stringify(x).localeCompare(JSON.stringify(y)));
+  const sorted = (rows: unknown[][]) =>
+    [...rows].sort((x, y) => JSON.stringify(x).localeCompare(JSON.stringify(y)));
+
+  it('sends an endpoint the changes of contacts whose text contains its word or whose number or date is in its range, and every change of those fields', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const service = contactsService();
+    await service.createField(owner, { label: 'City', key: 'city', type: 'text' });
+    await service.createField(owner, { label: 'Score', key: 'score', type: 'number' });
+    await service.createField(owner, { label: 'Renewal', key: 'renewal', type: 'date' });
+    // A word compared whatever its case: "CHEN" is in the contact's "Chennai".
+    const word = await add(c, ['contact.updated'], {
+      contactEventFieldValues: [{ key: 'city', contains: 'CHEN' }],
+    });
+    const high = await add(c, ['contact.updated'], {
+      contactEventFieldValues: [{ key: 'score', atLeast: 10 }],
+    });
+    const band = await add(c, ['contact.updated'], {
+      contactEventFieldValues: [{ key: 'score', atLeast: 1, atMost: 5 }],
+    });
+    const october = await add(c, ['contact.updated'], {
+      contactEventFieldValues: [{ key: 'renewal', atLeast: '2026-10-01', atMost: '2026-10-31' }],
+    });
+    const untilMidNovember = await add(c, ['contact.updated'], {
+      contactEventFieldValues: [{ key: 'renewal', atMost: '2026-11-15' }],
+    });
+    const mixed = await add(c, ['contact.updated'], {
+      contactEventFieldValues: [
+        { key: 'city', value: 'Madurai' },
+        { key: 'score', atMost: 0 },
+      ],
+    });
+    const addedHigh = await add(c, ['contact.created'], {
+      contactEventFieldValues: [{ key: 'score', atLeast: 10 }],
+    });
+    const { id: asha } = await service.createContact(owner, {
+      displayName: 'Asha',
+      phone: '+919811100271',
+      attributes: { city: 'Chennai', score: '12', renewal: '2026-10-15' },
+    });
+    const { id: bala } = await service.createContact(owner, {
+      displayName: 'Bala',
+      phone: '+919811100272',
+      attributes: { city: 'Coimbatore', score: '3', renewal: '2026-12-01' },
+    });
+    // Asha: Chennai, 12, renewing on 15 October.
+    await service.updateContact(owner, asha, { displayName: 'Asha K' });
+    // Bala: Coimbatore, 3, renewing on 1 December.
+    await service.updateContact(owner, bala, { displayName: 'Bala S' });
+    // Bala's score changes to 10: the range's start is in it, and the field is listed.
+    await service.updateContact(owner, bala, {
+      displayName: 'Bala S',
+      attributes: { score: '10' },
+    });
+    // Asha moves to Madurai: out of the word, into the mixed list's value.
+    await service.updateContact(owner, asha, {
+      displayName: 'Asha K',
+      attributes: { city: 'Madurai' },
+    });
+
+    await deliverDue(c);
+    expect(sentTo(word.path)).toEqual(
+      sorted([
+        ['contact.updated', asha, ['name']],
+        ['contact.updated', asha, ['fields.city']],
+      ]),
+    );
+    expect(sentTo(high.path)).toEqual(
+      sorted([
+        ['contact.updated', asha, ['name']],
+        ['contact.updated', bala, ['fields.score']],
+        ['contact.updated', asha, ['fields.city']],
+      ]),
+    );
+    expect(sentTo(band.path)).toEqual(
+      sorted([
+        ['contact.updated', bala, ['name']],
+        ['contact.updated', bala, ['fields.score']],
+      ]),
+    );
+    expect(sentTo(october.path)).toEqual(
+      sorted([
+        ['contact.updated', asha, ['name']],
+        ['contact.updated', asha, ['fields.city']],
+      ]),
+    );
+    expect(sentTo(untilMidNovember.path)).toEqual(
+      sorted([
+        ['contact.updated', asha, ['name']],
+        ['contact.updated', asha, ['fields.city']],
+      ]),
+    );
+    expect(sentTo(mixed.path)).toEqual(
+      sorted([
+        ['contact.updated', bala, ['fields.score']],
+        ['contact.updated', asha, ['fields.city']],
+      ]),
+    );
+    // Added with a score of 12, Asha is sent as added; Bala, at 3, is not.
+    expect(sentTo(addedHigh.path)).toEqual([['contact.created', asha, null]]);
+  });
+});
 
 describe('message events (ADR-082)', () => {
   it('name the message a customer quotes or reacts to, when it is in the conversation', async () => {

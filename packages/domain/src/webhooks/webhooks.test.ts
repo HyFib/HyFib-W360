@@ -1,7 +1,7 @@
 import { createHmac, randomBytes } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
-import { isAppError, Keyring } from '@w360/core';
+import { isAppError, jsonbSize, Keyring, sha256Hex } from '@w360/core';
 import {
   ACTIVE_RUN_STATUSES,
   AUTOMATION_END_REASONS,
@@ -127,9 +127,14 @@ import {
   webhookRunEndTakesReason,
   webhookStageText,
   webhookContactEventFieldValuesText,
+  webhookContactFieldConditionText,
+  webhookContactFieldKind,
   webhookContactFieldValueId,
+  webhookFieldConditionEditable,
+  webhookFieldRangeFromInputs,
   webhookFieldValueEditable,
   webhookFieldValuesFromLines,
+  webhookFieldWordsFromLines,
   webhookFieldValueText,
 } from './model';
 import {
@@ -343,6 +348,7 @@ import {
   WEBHOOK_CONVERSATION_TAGS_NEED_THE_EVENTS,
   webhookTemplateStatusesFor,
   webhookTemplateStatusesSchema,
+  webhookEndpointAuditMetadata,
 } from './service';
 
 const SECRET = 'whsec_test-secret-one';
@@ -3816,6 +3822,496 @@ describe('contact event field value filters (ADR-332)', () => {
       message: 'Joined must be a date written as YYYY-MM-DD.',
     });
     expect(webhookFieldValuesFromLines(tier, '')).toEqual({ ok: true, values: [] });
+  });
+});
+
+describe('contact event field words and ranges (ADR-335)', () => {
+  const schema = webhookContactEventFieldValuesSchema;
+  const refusal = (given: unknown) => {
+    const issue = schema.safeParse(given).error?.issues[0];
+    return issue && [issue.path.join('.'), issue.message];
+  };
+  function fieldsTx(fields: { key: string; label: string; type: string }[]) {
+    let reads = 0;
+    const tx = {
+      select: () => ({
+        from: () => ({
+          where: () => {
+            reads += 1;
+            return Promise.resolve(fields);
+          },
+        }),
+      }),
+    } as unknown as Tx;
+    return { tx, reads: () => reads };
+  }
+  const fields = [
+    { key: 'city', label: 'City', type: 'text' },
+    { key: 'score', label: 'Score', type: 'number' },
+    { key: 'renewal', label: 'Renewal', type: 'date' },
+    { key: 'vip', label: 'VIP', type: 'boolean' },
+  ];
+  async function issues(run: Promise<unknown>) {
+    try {
+      await run;
+    } catch (error) {
+      if (isAppError(error) && error.code === 'validation_failed') return error.issues;
+      throw error;
+    }
+    throw new Error('expected a validation error');
+  }
+
+  it('take a word, or a range with either end or both, beside the values, one kind a condition', () => {
+    const conditions = [
+      { key: 'city', value: 'Chennai' },
+      { key: 'city', contains: 'chen' },
+      { key: 'score', atLeast: 10 },
+      { key: 'score', atMost: 2.5 },
+      { key: 'renewal', atLeast: '2026-10-01', atMost: '2026-10-31' },
+    ];
+    expect(schema.parse(conditions)).toEqual(conditions);
+    expect(conditions.map((c) => webhookContactFieldKind(c))).toEqual([
+      'value',
+      'contains',
+      'range',
+      'range',
+      'range',
+    ]);
+    expect(refusal([{ key: 'city', value: 'Chennai', contains: 'chen' }])).toEqual([
+      '0',
+      'Give a value, a word or a range with a field’s key, not more than one.',
+    ]);
+    expect(refusal([{ key: 'score', contains: '5', atMost: 5 }])?.[0]).toBe('0');
+    expect(refusal([{ key: 'score', value: 5, atLeast: 1 }])?.[0]).toBe('0');
+    expect(refusal([{ key: 'score' }])).toEqual([
+      '0',
+      'Give a value, a word to look for or a range with each field’s key.',
+    ]);
+    expect(refusal([{ key: 'city', contains: ['chen'] }])).toEqual([
+      '0.contains',
+      'Give the word to look for as text.',
+    ]);
+    for (const end of [null, true, { from: 1 }, Number.NaN]) {
+      expect(refusal([{ key: 'score', atLeast: end }])?.[0], String(end)).toBe('0.atLeast');
+      expect(refusal([{ key: 'score', atMost: end }])?.[0], String(end)).toBe('0.atMost');
+    }
+    expect(refusal([{ key: 'score', atLeast: 1, op: 'gte' }])?.[0]).toBe('0');
+  });
+
+  it('read a word only for a text field and a range only for a number or date field, by its type', async () => {
+    const { tx, reads } = fieldsTx(fields);
+    expect(
+      await webhookContactEventFieldValuesChecked(tx, 'tenant', [
+        { key: 'city', contains: '  Chen  ' },
+        { key: 'city', contains: 'CHEN' },
+        { key: 'score', atLeast: 10 },
+        { key: 'score', atLeast: 10.0 },
+        { key: 'score', atLeast: 1, atMost: 1 },
+        { key: 'renewal', atMost: '2026-12-31' },
+        { key: 'renewal', atLeast: '2026-10-01', atMost: '2026-10-31' },
+      ]),
+    ).toEqual([
+      { key: 'city', contains: 'Chen' },
+      { key: 'score', atLeast: 10 },
+      { key: 'score', atLeast: 1, atMost: 1 },
+      { key: 'renewal', atMost: '2026-12-31' },
+      { key: 'renewal', atLeast: '2026-10-01', atMost: '2026-10-31' },
+    ]);
+    expect(reads()).toBe(1);
+    const check = (pairs: Parameters<typeof webhookContactEventFieldValuesChecked>[2]) =>
+      issues(webhookContactEventFieldValuesChecked(tx, 'tenant', pairs));
+    expect(await check([{ key: 'score', contains: '5' }])).toEqual([
+      {
+        path: 'contactEventFieldValues.0.contains',
+        message: 'Score is not a text field: give a value or a range of it instead.',
+      },
+    ]);
+    expect(await check([{ key: 'vip', contains: 'yes' }])).toEqual([
+      {
+        path: 'contactEventFieldValues.0.contains',
+        message: 'VIP is not a text field: give a value of it instead.',
+      },
+    ]);
+    expect(await check([{ key: 'city', contains: '   ' }])).toEqual([
+      { path: 'contactEventFieldValues.0.contains', message: 'Give a word to look for in City.' },
+    ]);
+    expect(await check([{ key: 'city', contains: 'x'.repeat(501) }])).toEqual([
+      {
+        path: 'contactEventFieldValues.0.contains',
+        message: 'City is longer than 500 characters.',
+      },
+    ]);
+    expect(await check([{ key: 'city', atLeast: 'a' }])).toEqual([
+      {
+        path: 'contactEventFieldValues.0',
+        message: 'City takes no range: give a value or a word to look for of it instead.',
+      },
+    ]);
+    expect(await check([{ key: 'vip', atMost: 1 }])).toEqual([
+      {
+        path: 'contactEventFieldValues.0',
+        message: 'VIP takes no range: give a value of it instead.',
+      },
+    ]);
+    expect(await check([{ key: 'score', atLeast: '5' }])).toEqual([
+      { path: 'contactEventFieldValues.0.atLeast', message: 'Score takes a number.' },
+    ]);
+    expect(await check([{ key: 'score', atMost: 1e21 }])).toEqual([
+      {
+        path: 'contactEventFieldValues.0.atMost',
+        message: 'Score takes a number with at most 15 digits before the point and 6 after.',
+      },
+    ]);
+    expect(await check([{ key: 'renewal', atMost: '2026-02-30' }])).toEqual([
+      {
+        path: 'contactEventFieldValues.0.atMost',
+        message: 'Renewal must be a date written as YYYY-MM-DD.',
+      },
+    ]);
+    expect(await check([{ key: 'renewal', atLeast: 20261001 }])).toEqual([
+      {
+        path: 'contactEventFieldValues.0.atLeast',
+        message: 'Renewal takes a date written as YYYY-MM-DD.',
+      },
+    ]);
+    expect(await check([{ key: 'score', atLeast: 10, atMost: 9.5 }])).toEqual([
+      {
+        path: 'contactEventFieldValues.0',
+        message: 'The range of Score must start at or before its end.',
+      },
+    ]);
+    expect(await check([{ key: 'renewal', atLeast: '2026-11-01', atMost: '2026-10-31' }])).toEqual([
+      {
+        path: 'contactEventFieldValues.0',
+        message: 'The range of Renewal must start at or before its end.',
+      },
+    ]);
+    expect(await check([{ key: 'town', contains: 'x' }])).toEqual([
+      { path: 'contactEventFieldValues.0.key', message: WEBHOOK_FIELDS_NOT_FOUND },
+    ]);
+  });
+
+  it('keep the words and ranges the endpoint held as they were, without reading them', async () => {
+    const { tx, reads } = fieldsTx(fields);
+    const held = [
+      { key: 'gone', contains: 'Old' },
+      { key: 'gone', atLeast: 5, atMost: 1 },
+    ];
+    expect(
+      await webhookContactEventFieldValuesChecked(
+        tx,
+        'tenant',
+        [
+          { key: 'gone', contains: 'old' },
+          { key: 'gone', atLeast: 5, atMost: 1 },
+        ],
+        held,
+      ),
+    ).toEqual([
+      { key: 'gone', contains: 'old' },
+      { key: 'gone', atLeast: 5, atMost: 1 },
+    ]);
+    expect(reads()).toBe(0);
+    // A range whose ends are of another kind than a held one's is not that range: it is read.
+    expect(
+      await issues(
+        webhookContactEventFieldValuesChecked(
+          tx,
+          'tenant',
+          [{ key: 'score', atLeast: '10000' }],
+          [{ key: 'score', atLeast: 10000 }],
+        ),
+      ),
+    ).toEqual([{ path: 'contactEventFieldValues.0.atLeast', message: 'Score takes a number.' }]);
+  });
+
+  it('tell conditions apart as the database compares them, and name them as Settings shows them', () => {
+    const id = webhookContactFieldValueId;
+    expect(id({ key: 'city', contains: 'Chen' })).toBe(id({ key: 'city', contains: 'chen' }));
+    expect(id({ key: 'city', contains: 'chen' })).not.toBe(id({ key: 'city', value: 'chen' }));
+    expect(id({ key: 'score', atLeast: 1 })).not.toBe(id({ key: 'score', atMost: 1 }));
+    expect(id({ key: 'score', atLeast: 1, atMost: 2 })).not.toBe(
+      id({ key: 'score', atLeast: 1, atMost: 3 }),
+    );
+    expect(id({ key: 'score', atLeast: 1 })).not.toBe(id({ key: 'rank', atLeast: 1 }));
+    expect(id({ key: 'score', atLeast: 10000 })).not.toBe(id({ key: 'score', atLeast: '10000' }));
+    expect(id({ key: 'score', atMost: 1 })).not.toBe(id({ key: 'score', atMost: '1' }));
+    expect(id({ key: 'score', atLeast: 1, atMost: 2 })).toBe(
+      id({ key: 'score', atLeast: 1.0, atMost: 2 }),
+    );
+    expect(webhookContactFieldConditionText({ key: 'city', contains: 'chen' })).toBe(
+      'containing "chen"',
+    );
+    expect(webhookContactFieldConditionText({ key: 'score', atLeast: 1, atMost: 9 })).toBe(
+      '1 to 9',
+    );
+    expect(webhookContactFieldConditionText({ key: 'score', atLeast: 10 })).toBe('at least 10');
+    expect(webhookContactFieldConditionText({ key: 'score', atMost: 2.5 })).toBe('at most 2.5');
+    expect(webhookContactFieldConditionText({ key: 'renewal', atLeast: '2026-10-01' })).toBe(
+      'from 2026-10-01',
+    );
+    expect(webhookContactFieldConditionText({ key: 'renewal', atMost: '2026-10-31' })).toBe(
+      'until 2026-10-31',
+    );
+    expect(webhookContactFieldConditionText({ key: 'vip', value: true })).toBe('yes');
+    expect(
+      webhookContactEventFieldValuesText(
+        [
+          { key: 'city', value: 'Chennai' },
+          { key: 'score', atLeast: 10 },
+          { key: 'city', contains: 'chen' },
+          { key: 'gone', atLeast: '2026-01-01', atMost: '2026-12-31' },
+        ],
+        new Map([
+          ['city', 'City'],
+          ['score', 'Score'],
+        ]),
+      ),
+    ).toBe(
+      'City: Chennai, containing "chen"; Score: at least 10; gone (deleted): 2026-01-01 to 2026-12-31',
+    );
+  });
+
+  it('show a word or a range in a field’s inputs only when they read it back as it is', () => {
+    expect(webhookFieldConditionEditable('text', { key: 'f', contains: 'chen' })).toBe(true);
+    expect(webhookFieldConditionEditable('text', { key: 'f', contains: 'a\nb' })).toBe(false);
+    expect(webhookFieldConditionEditable('number', { key: 'f', contains: 'chen' })).toBe(false);
+    expect(webhookFieldConditionEditable('number', { key: 'f', atLeast: 1, atMost: 2 })).toBe(true);
+    expect(webhookFieldConditionEditable('number', { key: 'f', atMost: 2 })).toBe(true);
+    expect(webhookFieldConditionEditable('number', { key: 'f', atLeast: '2026-01-01' })).toBe(
+      false,
+    );
+    expect(webhookFieldConditionEditable('date', { key: 'f', atLeast: '2026-01-01' })).toBe(true);
+    expect(webhookFieldConditionEditable('date', { key: 'f', atMost: '2026-02-30' })).toBe(false);
+    expect(webhookFieldConditionEditable('date', { key: 'f', atMost: 5 })).toBe(false);
+    expect(webhookFieldConditionEditable('text', { key: 'f', atLeast: 1 })).toBe(false);
+    expect(webhookFieldConditionEditable('boolean', { key: 'f', atLeast: 1 })).toBe(false);
+    expect(webhookFieldConditionEditable('number', { key: 'f', value: 2 })).toBe(true);
+    expect(webhookFieldConditionEditable('number', { key: 'f', value: '2' })).toBe(false);
+  });
+
+  it('read the words and the range Settings gives for a field as its entries are read', () => {
+    expect(webhookFieldWordsFromLines({ label: 'City' }, ' chen \n\n  Madurai')).toEqual({
+      ok: true,
+      words: ['chen', 'Madurai'],
+    });
+    expect(webhookFieldWordsFromLines({ label: 'City' }, 'x'.repeat(501))).toEqual({
+      ok: false,
+      message: 'City is longer than 500 characters.',
+    });
+    const score = { key: 'score', label: 'Score', type: 'number' } as const;
+    const renewal = { key: 'renewal', label: 'Renewal', type: 'date' } as const;
+    expect(webhookFieldRangeFromInputs(score, '', ' ')).toEqual({ ok: true, range: null });
+    expect(webhookFieldRangeFromInputs(score, '10', '')).toEqual({
+      ok: true,
+      range: { key: 'score', atLeast: 10 },
+    });
+    expect(webhookFieldRangeFromInputs(score, '', '2.5')).toEqual({
+      ok: true,
+      range: { key: 'score', atMost: 2.5 },
+    });
+    expect(webhookFieldRangeFromInputs(renewal, '2026-10-01', '2026-10-31')).toEqual({
+      ok: true,
+      range: { key: 'renewal', atLeast: '2026-10-01', atMost: '2026-10-31' },
+    });
+    expect(webhookFieldRangeFromInputs(score, 'ten', '')).toMatchObject({ ok: false });
+    expect(webhookFieldRangeFromInputs(renewal, '', '2026-02-30')).toMatchObject({ ok: false });
+    expect(
+      webhookFieldRangeFromInputs({ key: 'city', label: 'City', type: 'text' }, 'a', ''),
+    ).toEqual({ ok: false, message: 'City takes no range.' });
+    expect(
+      webhookFieldRangeFromInputs({ key: 'vip', label: 'VIP', type: 'boolean' }, '', ''),
+    ).toEqual({ ok: false, message: 'VIP takes no range.' });
+  });
+});
+
+describe('endpoint audit entries within an audit entry’s 8 KiB (ADR-336)', () => {
+  // A tag of 40 Tamil letters and digits: 114 bytes of UTF-8, as a company's tags may be.
+  const tamil = (i: number) => `${'க'.repeat(37)}${String(i).padStart(3, '0')}`;
+  const tags = (count: number) => Array.from({ length: count }, (_, i) => tamil(i));
+  const digest = (list: unknown[]) => sha256Hex(JSON.stringify(list)).slice(0, 16);
+
+  it('keep an entry that fits as it is, with room for the source the API adds', () => {
+    const metadata = {
+      host: 'hooks.example.com',
+      eventTypes: ['message.received'],
+      contactTags: tags(50),
+      teamIds: ['019245c1-5a4c-7b1e-9a1e-1f2d3c4b5a69'],
+    };
+    expect(jsonbSize(metadata)).toBeLessThanOrEqual(WEBHOOK_LIMITS.auditMetadataBytes);
+    expect(webhookEndpointAuditMetadata(metadata)).toBe(metadata);
+    expect(WEBHOOK_LIMITS.auditMetadataBytes + jsonbSize({ source: 'api' })).toBeLessThanOrEqual(
+      8192,
+    );
+  });
+
+  it('name the largest lists by count and digest, one after another and by name when as large, until the entry fits', () => {
+    const teamIds = ['019245c1-5a4c-7b1e-9a1e-1f2d3c4b5a69'];
+    const eventTypes = ['message.received', 'contact.updated', 'satisfaction_survey.answered'];
+    // The largest list alone.
+    const one = webhookEndpointAuditMetadata({
+      host: 'hooks.example.com',
+      eventTypes,
+      conversationTags: tags(40),
+      contactTags: tags(50),
+      teamIds,
+    });
+    expect(one).toEqual({
+      host: 'hooks.example.com',
+      eventTypes,
+      conversationTags: tags(40),
+      teamIds,
+      listCounts: { contactTags: 50 },
+      listDigests: { contactTags: digest(tags(50)) },
+    });
+    expect(jsonbSize(one)).toBeLessThanOrEqual(WEBHOOK_LIMITS.auditMetadataBytes);
+    // Two lists as large: by name, and only as many as it takes.
+    const two = webhookEndpointAuditMetadata({
+      host: 'hooks.example.com',
+      eventTypes,
+      surveyContactTags: tags(50),
+      contactTags: tags(50),
+      contactEventTags: tags(50),
+    });
+    expect(two).toEqual({
+      host: 'hooks.example.com',
+      eventTypes,
+      surveyContactTags: tags(50),
+      listCounts: { contactEventTags: 50, contactTags: 50 },
+      listDigests: { contactEventTags: digest(tags(50)), contactTags: digest(tags(50)) },
+    });
+    // The largest in bytes, not in items: 45 tags take more than 60 ids.
+    const ids = Array.from(
+      { length: 60 },
+      (_, i) => `019245c1-5a4c-7b1e-9a1e-${String(i).padStart(12, '0')}`,
+    );
+    expect(
+      webhookEndpointAuditMetadata({ host: 'h', eventTypes, teamIds: ids, contactTags: tags(45) }),
+    ).toEqual({
+      host: 'h',
+      eventTypes,
+      teamIds: ids,
+      listCounts: { contactTags: 45 },
+      listDigests: { contactTags: digest(tags(45)) },
+    });
+    // A list read back from the database, each object's keys in jsonb's order (by length: key,
+    // atMost, atLeast), has the digest of the list as the services built it.
+    const ranges = Array.from({ length: 50 }, (_, i) => ({
+      key: 'score',
+      atLeast: i,
+      atMost: i + 1,
+    }));
+    const written = webhookEndpointAuditMetadata({
+      host: 'h',
+      eventTypes,
+      conversationTags: tags(20),
+      contactEventFieldValues: ranges,
+    });
+    expect(written.listCounts).toEqual({ contactEventFieldValues: 50 });
+    expect(
+      webhookEndpointAuditMetadata({
+        host: 'h',
+        eventTypes,
+        conversationTags: tags(20),
+        contactEventFieldValues: ranges.map(({ key, atLeast, atMost }) => ({
+          key,
+          atMost,
+          atLeast,
+        })),
+      }).listDigests,
+    ).toEqual(written.listDigests);
+    // A list changed to as many tags has another digest.
+    const changed = webhookEndpointAuditMetadata({
+      host: 'hooks.example.com',
+      eventTypes,
+      conversationTags: tags(40),
+      contactTags: tags(51).slice(1),
+      teamIds,
+    });
+    expect(changed).toMatchObject({ listCounts: { contactTags: 50 } });
+    expect(changed.listDigests).not.toEqual(one.listDigests);
+  });
+
+  it('always name the events, of a change or of a replay, and fit with every list named by count', () => {
+    const events = Array.from({ length: 60 }, (_, i) => `event.${i}`.padEnd(100, 'x'));
+    for (const key of ['eventTypes', 'events']) {
+      expect(
+        webhookEndpointAuditMetadata({ host: 'h', [key]: events, contactTags: tags(10) }),
+      ).toEqual({
+        host: 'h',
+        [key]: events,
+        listCounts: { contactTags: 10 },
+        listDigests: { contactTags: digest(tags(10)) },
+      });
+    }
+    // Every event type, hosts of 253 characters and the 54 lists an entry can name, each too
+    // long to name item by item beside the others: named by count, the entry takes under 6,000.
+    const keys = [
+      'assigneeIds',
+      'automationIds',
+      'campaignIds',
+      'campaignStatuses',
+      'channelIds',
+      'consentChanges',
+      'contactEventFieldValues',
+      'contactEventTags',
+      'contactFieldKeys',
+      'contactParts',
+      'contactSources',
+      'contactTags',
+      'conversationStatuses',
+      'conversationTags',
+      'crmChangeMakers',
+      'crmExcludedApiKeyIds',
+      'dealDetails',
+      'dealStatuses',
+      'headers',
+      'messageApiKeyIds',
+      'messageSenders',
+      'messageStatuses',
+      'messageTypes',
+      'noteDealOwnerIds',
+      'notePipelineIds',
+      'noteStageIds',
+      'orderChangeMakers',
+      'orderExcludedApiKeyIds',
+      'orderStatuses',
+      'ownerIds',
+      'paymentLinkApiKeyIds',
+      'paymentLinkStatuses',
+      'pipelineIds',
+      'runApiKeyIds',
+      'runEndReasons',
+      'runEndStatuses',
+      'runStepNodeTypes',
+      'runStepOutcomes',
+      'runTriggers',
+      'stageIds',
+      'surveyAssigneeIds',
+      'surveyContactTags',
+      'surveyConversationTags',
+      'surveyScores',
+      'surveyTeamIds',
+      'taskAssigneeIds',
+      'taskDealOwnerIds',
+      'taskDetails',
+      'taskPipelineIds',
+      'taskStageIds',
+      'taskStatuses',
+      'teamIds',
+      'templateIds',
+      'templateStatuses',
+    ];
+    expect(keys).toHaveLength(54);
+    const whole = webhookEndpointAuditMetadata({
+      host: 'h'.repeat(253),
+      eventTypes: [...WEBHOOK_EVENT_TYPES],
+      ...Object.fromEntries(keys.map((key) => [key, tags(20)])),
+      oauthTokenHost: 'o'.repeat(253),
+      oauthSecretReplaced: true,
+    });
+    expect(Object.keys(whole.listCounts as object)).toHaveLength(54);
+    expect(jsonbSize(whole)).toBeLessThan(6000);
   });
 });
 

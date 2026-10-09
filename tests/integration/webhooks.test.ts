@@ -3,7 +3,7 @@ import { once } from 'node:events';
 import { createServer, type IncomingHttpHeaders, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import { isAppError, sha256Hex, systemClock, uuidv7, type Clock } from '@w360/core';
+import { isAppError, jsonbSize, sha256Hex, systemClock, uuidv7, type Clock } from '@w360/core';
 import {
   DEFAULT_EGRESS_POLICY,
   createEgressClient,
@@ -7129,7 +7129,7 @@ describe('contact event field value filters (ADR-332)', () => {
       /Choose fields of this company/,
       'contactEventFieldValues.1.key',
     );
-    // Values too long together for the audit entry carrying them are refused before any write.
+    // Values past the list's 4,000 bytes (ADR-332) are refused before any write.
     await refused(
       {
         contactEventFieldValues: Array.from({ length: 50 }, (_, i) => ({
@@ -7318,7 +7318,7 @@ describe('contact event field value filters (ADR-332)', () => {
     expect(grants).toEqual({ app_updates: true, definer_reads_source: true });
   });
 
-  it('save and audit a list of values up to the 4,000 bytes an audit entry carries', async () => {
+  it('save and audit a list of values up to the 4,000 bytes the list takes', async () => {
     const c = await fx.company();
     const owner = await fx.ctx(c, c.owner);
     await fx.query(
@@ -7357,6 +7357,237 @@ describe('contact event field value filters (ADR-332)', () => {
     expect(
       (await webhooks().list(owner)).find((e) => e.id === created.id)?.contactEventFieldValues,
     ).toEqual(long);
+  });
+});
+describe('endpoint audit entries within an audit entry’s 8 KiB (ADR-336)', () => {
+  it('save an endpoint whose lists would not fit its audit entry, the entry naming the largest by count and keeping the others', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    // Tags of 36 Tamil letters and four digits, 112 bytes each: five lists of 50 take about
+    // 29,000 bytes, which an audit entry's 8 KiB refused, rolling the change back, before ADR-336.
+    const tags = (list: number) =>
+      Array.from({ length: 50 }, (_, i) => `${'க'.repeat(36)}${list}${String(i).padStart(3, '0')}`);
+    const lists = {
+      contactTags: tags(1),
+      conversationTags: tags(2),
+      contactEventTags: tags(3),
+      surveyContactTags: tags(4),
+      surveyConversationTags: tags(5),
+    };
+    const url = 'https://hooks.example.com/in';
+    const eventTypes = ['message.received', 'contact.updated', 'satisfaction_survey.answered'];
+    const created = await webhooks().create(owner, { url, eventTypes, ...lists });
+    await webhooks().update(owner, {
+      endpointId: created.id,
+      url,
+      description: 'Tamil tags',
+      eventTypes,
+    });
+    // The endpoint keeps every list whole.
+    expect((await webhooks().list(owner)).find((e) => e.id === created.id)).toMatchObject(lists);
+    // A change of a list named by count changes its digest alone.
+    const otherTags = tags(6);
+    await webhooks().update(owner, {
+      endpointId: created.id,
+      url,
+      eventTypes,
+      contactTags: otherTags,
+    });
+    const audits = await fx.query<{
+      action: string;
+      metadata: Record<string, unknown>;
+      bytes: number;
+    }>(
+      `SELECT action, metadata, pg_column_size(metadata::text::jsonb) AS bytes FROM app.audit_events
+        WHERE tenant_id = $1 AND action LIKE 'webhook.endpoint_%' ORDER BY occurred_at, id`,
+      [c.tenant.id],
+    );
+    expect(audits.map((a) => a.action)).toEqual([
+      'webhook.endpoint_created',
+      'webhook.endpoint_updated',
+      'webhook.endpoint_updated',
+    ]);
+    const digest = (list: string[]) => sha256Hex(JSON.stringify(list)).slice(0, 16);
+    const digests = {
+      contactEventTags: digest(lists.contactEventTags),
+      contactTags: digest(lists.contactTags),
+      conversationTags: digest(lists.conversationTags),
+      surveyContactTags: digest(lists.surveyContactTags),
+    };
+    for (const [index, audit] of audits.entries()) {
+      // The count takes no fewer bytes than PostgreSQL does, uncompressed, and the entry fits.
+      expect(audit.bytes).toBeLessThanOrEqual(jsonbSize(audit.metadata));
+      expect(jsonbSize(audit.metadata)).toBeLessThanOrEqual(WEBHOOK_LIMITS.auditMetadataBytes);
+      // Four lists as large named by count and digest, by name; the fifth whole, with the events
+      // and the host.
+      expect(audit.metadata).toMatchObject({
+        host: 'hooks.example.com',
+        listCounts: {
+          contactEventTags: 50,
+          contactTags: 50,
+          conversationTags: 50,
+          surveyContactTags: 50,
+        },
+        listDigests: index < 2 ? digests : { ...digests, contactTags: digest(otherTags) },
+        surveyConversationTags: lists.surveyConversationTags,
+      });
+      expect(audit.metadata.eventTypes).toHaveLength(3);
+      for (const counted of ['contactEventTags', 'contactTags', 'conversationTags']) {
+        expect(audit.metadata).not.toHaveProperty(counted);
+      }
+    }
+    expect(digest(otherTags)).not.toBe(digests.contactTags);
+  });
+});
+describe('contact event field words and ranges (ADR-335)', () => {
+  it('keep words of text fields and ranges of number and date fields as the fields read them, refuse them for other fields or out of order; the database keeps them to one shape a condition', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const fieldOf = (key: string, label: string, type: string) =>
+      fx.query(
+        `INSERT INTO app.contact_fields (id, tenant_id, key, label, type) VALUES ($1, $2, $3, $4, $5)`,
+        [uuidv7(), c.tenant.id, key, label, type],
+      );
+    await fieldOf('city', 'City', 'text');
+    await fieldOf('score', 'Score', 'number');
+    await fieldOf('renewal', 'Renewal', 'date');
+    await fieldOf('vip', 'VIP', 'boolean');
+    const url = 'https://hooks.example.com/in';
+    const refused = async (contactEventFieldValues: unknown[], message: RegExp, path: string) => {
+      const error = await expectAppError(
+        webhooks().create(owner, { url, eventTypes: ['contact.updated'], contactEventFieldValues }),
+        'validation_failed',
+        message,
+      );
+      expect(
+        isAppError(error) && error.issues?.[0]?.path,
+        JSON.stringify(contactEventFieldValues),
+      ).toBe(path);
+    };
+    await refused(
+      [{ key: 'score', contains: '5' }],
+      /Score is not a text field/,
+      'contactEventFieldValues.0.contains',
+    );
+    await refused(
+      [{ key: 'city', atLeast: 'a' }],
+      /City takes no range/,
+      'contactEventFieldValues.0',
+    );
+    await refused(
+      [{ key: 'score', atLeast: 10, atMost: 9 }],
+      /must start at or before its end/,
+      'contactEventFieldValues.0',
+    );
+    await refused(
+      [{ key: 'renewal', atLeast: '2026-02-30' }],
+      /Renewal must be a date/,
+      'contactEventFieldValues.0.atLeast',
+    );
+    await refused(
+      [{ key: 'city', value: 'Chennai', contains: 'chen' }],
+      /not more than one/,
+      'contactEventFieldValues.0',
+    );
+    expect(await webhooks().list(owner)).toEqual([]);
+
+    const created = await webhooks().create(owner, {
+      url,
+      eventTypes: ['contact.created', 'contact.updated'],
+      contactEventFieldValues: [
+        { key: 'city', value: 'Chennai' },
+        { key: 'city', contains: ' Chen ' },
+        { key: 'city', contains: 'CHEN' },
+        { key: 'score', atLeast: 10 },
+        { key: 'score', atLeast: 1, atMost: 5 },
+        { key: 'renewal', atLeast: '2026-10-01', atMost: '2026-10-31' },
+        { key: 'vip', value: true },
+      ],
+    });
+    const stored = [
+      { key: 'city', value: 'Chennai' },
+      { key: 'city', contains: 'Chen' },
+      { key: 'score', atLeast: 10 },
+      { key: 'score', atLeast: 1, atMost: 5 },
+      { key: 'renewal', atLeast: '2026-10-01', atMost: '2026-10-31' },
+      { key: 'vip', value: true },
+    ];
+    const current = async () =>
+      (await webhooks().list(owner)).find((e) => e.id === created.id)?.contactEventFieldValues;
+    expect(await current()).toEqual(stored);
+    const [audit] = await fx.query<{ metadata: { contactEventFieldValues?: unknown } }>(
+      `SELECT metadata FROM app.audit_events WHERE tenant_id = $1 AND action = 'webhook.endpoint_created'`,
+      [c.tenant.id],
+    );
+    expect(audit?.metadata.contactEventFieldValues).toEqual(stored);
+    // A word or range the endpoint holds stays as it was after its field is deleted.
+    await fx.query(`DELETE FROM app.contact_fields WHERE tenant_id = $1 AND key = 'score'`, [
+      c.tenant.id,
+    ]);
+    await webhooks().update(owner, {
+      endpointId: created.id,
+      url,
+      description: 'kept',
+      eventTypes: ['contact.updated'],
+      contactEventFieldValues: [
+        { key: 'score', atLeast: 1, atMost: 5 },
+        { key: 'city', contains: 'chen' },
+      ],
+    });
+    expect(await current()).toEqual([
+      { key: 'score', atLeast: 1, atMost: 5 },
+      { key: 'city', contains: 'chen' },
+    ]);
+
+    // The database refuses a condition that is not of one shape, or whose members are not of it…
+    const setInDatabase = (value: string) =>
+      fx.query(
+        `UPDATE app.webhook_endpoints SET contact_event_field_values = $2::jsonb WHERE id = $1`,
+        [created.id, value],
+      );
+    const one = (condition: Record<string, unknown>) =>
+      JSON.stringify([{ key: 'score', ...condition }]);
+    for (const bad of [
+      one({}),
+      one({ value: 5, atLeast: 1 }),
+      one({ value: 'chen', contains: 'chen' }),
+      one({ contains: 'chen', atMost: 5 }),
+      one({ min: 5 }),
+      one({ atLeast: 1, op: 'gte' }),
+      one({ contains: 5 }),
+      one({ contains: '' }),
+      one({ contains: ' chen' }),
+      one({ contains: ['chen'] }),
+      one({ contains: 'x'.repeat(501) }),
+      one({ atLeast: null }),
+      one({ atLeast: true }),
+      one({ atLeast: [1] }),
+      one({ atMost: { at: 1 } }),
+      one({ atLeast: '2026/10/01' }),
+      one({ atMost: '1 October' }),
+      one({ atLeast: 1, atMost: '2026-10-31' }),
+      one({ atLeast: 5, atMost: 1 }),
+      one({ atLeast: '2026-11-01', atMost: '2026-10-31' }),
+      JSON.stringify([{ key: 'Score', atLeast: 1 }]),
+      JSON.stringify([{ contains: 'chen' }]),
+    ]) {
+      await expect(setInDatabase(bad), bad).rejects.toThrow(
+        /webhook_endpoints_contact_event_field_values/,
+      );
+    }
+    // …and keeps words, ranges with either end or both, equal ends, beside values.
+    const kept = [
+      { key: 'city', contains: 'x'.repeat(500) },
+      { key: 'city', contains: 'São' },
+      { key: 'score', atLeast: -2.5 },
+      { key: 'score', atMost: 0 },
+      { key: 'score', atLeast: 3, atMost: 3 },
+      { key: 'renewal', atLeast: '2026-10-01' },
+      { key: 'renewal', atLeast: '2026-10-01', atMost: '2026-10-01' },
+      { key: 'vip', value: false },
+    ];
+    await setInDatabase(JSON.stringify(kept));
+    expect(await current()).toEqual(kept);
   });
 });
 

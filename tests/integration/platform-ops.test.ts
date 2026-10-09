@@ -93,6 +93,41 @@ async function platformStaff(): Promise<PlatformActor> {
   return { userId: user.id, role: 'platform_operator', correlationId: uuidv7() };
 }
 
+/** A customer's first message to a company: the conversation further messages are written on. */
+async function conversationOf(c: Company, waId: string): Promise<string> {
+  await fx.deliver(fx.messagesBody(c, { messages: [{ waId, text: 'Counting the days' }] }));
+  const [row] = await fx.query<{ id: string }>(
+    `SELECT id FROM app.conversations WHERE tenant_id = $1`,
+    [c.tenant.id],
+  );
+  return row!.id;
+}
+
+/** A message written at a given time, as the sending and receiving code would leave it. */
+function messageAt(
+  c: Company,
+  conversationId: string,
+  direction: 'outbound' | 'inbound',
+  status: string,
+  at: Date,
+) {
+  return fx.query(
+    `INSERT INTO app.messages (id, tenant_id, conversation_id, channel_account_id, direction,
+       type, status, sender_type, created_at)
+     VALUES ($1, $2, $3, $4, $5, 'text', $6, $7, $8)`,
+    [
+      uuidv7(),
+      c.tenant.id,
+      conversationId,
+      c.channelAccountId,
+      direction,
+      status,
+      direction === 'outbound' ? 'agent' : 'contact',
+      at,
+    ],
+  );
+}
+
 beforeAll(async () => {
   fx = await startWhatsAppFixture();
   staff = await platformStaff();
@@ -200,6 +235,7 @@ describe('who can read the operations facts', () => {
       sql`select * from ops.platform_ops_health(null)`,
       sql`select * from ops.platform_ops_activity(now() - interval '1 day', null)`,
       sql`select * from ops.platform_ops_daily_activity(now() - interval '1 day')`,
+      sql`select * from ops.platform_ops_daily_activity(now() - interval '1 day', ${company.tenant.id}::uuid)`,
       sql`select * from ops.platform_ops_signup_sessions(now() - interval '1 day', 10)`,
       sql`select * from ops.platform_ops_integration_failures(10)`,
       sql`select ops.platform_retry_webhook_receipt(${uuidv7()}::uuid, 'Retrying after the outage', 'c')`,
@@ -213,6 +249,7 @@ describe('who can read the operations facts', () => {
       `ops.platform_ops_health(null)`,
       `ops.platform_ops_activity(now() - interval '1 day', null)`,
       `ops.platform_ops_daily_activity(now() - interval '1 day')`,
+      `ops.platform_ops_daily_activity(now() - interval '1 day', null)`,
       `ops.platform_ops_integration_failures(10)`,
     ]) {
       await expect(fx.dbs.appPool.query(`SELECT * FROM ${fn}`)).rejects.toThrow(
@@ -393,42 +430,12 @@ describe('company health and signals', () => {
   it("counts every company's messages each UTC day, adding up to the Usage tab's totals (ADR-333)", async () => {
     const counted = await fx.company();
     const gone = await fx.company();
-    const conversationOf = async (c: Company, waId: string) => {
-      await fx.deliver(fx.messagesBody(c, { messages: [{ waId, text: 'Counting the days' }] }));
-      const [row] = await fx.query<{ id: string }>(
-        `SELECT id FROM app.conversations WHERE tenant_id = $1`,
-        [c.tenant.id],
-      );
-      return row!.id;
-    };
     const countedConversation = await conversationOf(counted, '919876500021');
     const goneConversation = await conversationOf(gone, '919876500022');
-    const message = (
-      c: Company,
-      conversationId: string,
-      direction: 'outbound' | 'inbound',
-      status: string,
-      at: Date,
-    ) =>
-      fx.query(
-        `INSERT INTO app.messages (id, tenant_id, conversation_id, channel_account_id, direction,
-           type, status, sender_type, created_at)
-         VALUES ($1, $2, $3, $4, $5, 'text', $6, $7, $8)`,
-        [
-          uuidv7(),
-          c.tenant.id,
-          conversationId,
-          c.channelAccountId,
-          direction,
-          status,
-          direction === 'outbound' ? 'agent' : 'contact',
-          at,
-        ],
-      );
     const hour = 60 * 60 * 1000;
     const ago = (ms: number) => new Date(Date.now() - ms);
     const yesterday = ago(24 * hour);
-    await message(gone, goneConversation, 'outbound', 'delivered', yesterday);
+    await messageAt(gone, goneConversation, 'outbound', 'delivered', yesterday);
     const [goneInbound] = await fx.query<{ created_at: Date }>(
       `SELECT created_at FROM app.messages WHERE tenant_id = $1 AND direction = 'inbound'`,
       [gone.tenant.id],
@@ -438,11 +445,11 @@ describe('company health and signals', () => {
     const threeDaysAgo = ago(72 * hour);
     const justNow = ago(60 * 1000);
     const nineDaysAgo = ago(9 * 24 * hour);
-    await message(counted, countedConversation, 'outbound', 'delivered', threeDaysAgo);
-    await message(counted, countedConversation, 'outbound', 'failed', threeDaysAgo);
-    await message(counted, countedConversation, 'inbound', 'received', yesterday);
-    await message(counted, countedConversation, 'outbound', 'read', justNow);
-    await message(counted, countedConversation, 'outbound', 'delivered', nineDaysAgo);
+    await messageAt(counted, countedConversation, 'outbound', 'delivered', threeDaysAgo);
+    await messageAt(counted, countedConversation, 'outbound', 'failed', threeDaysAgo);
+    await messageAt(counted, countedConversation, 'inbound', 'received', yesterday);
+    await messageAt(counted, countedConversation, 'outbound', 'read', justNow);
+    await messageAt(counted, countedConversation, 'outbound', 'delivered', nineDaysAgo);
     // A deleted company's messages are no longer counted, whenever they were written.
     await fx.query(`UPDATE app.tenants SET status = 'deleted' WHERE id = $1`, [gone.tenant.id]);
     const changes = [
@@ -495,6 +502,70 @@ describe('company health and signals', () => {
       }
     }
     expect(JSON.stringify(before)).not.toContain('Counting the days');
+  });
+
+  it("counts one company's messages each UTC day on its platform page, and no other's (ADR-334)", async () => {
+    const one = await fx.company();
+    const other = await fx.company();
+    const oneConversation = await conversationOf(one, '919876500031');
+    const otherConversation = await conversationOf(other, '919876500032');
+    const hour = 60 * 60 * 1000;
+    const ago = (ms: number) => new Date(Date.now() - ms);
+    const fourDaysAgo = ago(96 * hour);
+    const yesterday = ago(24 * hour);
+    await messageAt(one, oneConversation, 'outbound', 'delivered', fourDaysAgo);
+    await messageAt(one, oneConversation, 'outbound', 'failed', fourDaysAgo);
+    await messageAt(one, oneConversation, 'inbound', 'received', yesterday);
+    // Before the 30 days, and another company's on a day counted.
+    await messageAt(one, oneConversation, 'outbound', 'delivered', ago(31 * 24 * hour));
+    await messageAt(other, otherConversation, 'outbound', 'delivered', yesterday);
+    const [first] = await fx.query<{ created_at: Date }>(
+      `SELECT min(created_at) AS created_at FROM app.messages
+        WHERE tenant_id = $1 AND direction = 'inbound' AND created_at > now() - interval '1 hour'`,
+      [one.tenant.id],
+    );
+    const call = new Date();
+    const health = await ops().companyHealth(staff, one.tenant.id);
+    const returned = new Date();
+    expect(health).not.toBeNull();
+    const { daily, activity } = health!;
+    // A row for each UTC day from 30 days ago to today.
+    const days = daily.map((d) => d.day);
+    const utcDay = (d: Date) => d.toISOString().slice(0, 10);
+    expect([call, returned].map((d) => utcDay(new Date(d.getTime() - 30 * 24 * hour)))).toContain(
+      days[0],
+    );
+    expectConsecutiveDays(days);
+    expect([call, returned].map(utcDay)).toContain(days.at(-1));
+    // Exactly the company's own messages of the 30 days, each on its day.
+    const expected = new Map<string, { outbound: number; failed: number; inbound: number }>();
+    for (const [at, change] of [
+      [fourDaysAgo, { outbound: 2, failed: 1, inbound: 0 }],
+      [yesterday, { outbound: 0, failed: 0, inbound: 1 }],
+      [first!.created_at, { outbound: 0, failed: 0, inbound: 1 }],
+    ] as const) {
+      const e = expected.get(utcDay(at)) ?? { outbound: 0, failed: 0, inbound: 0 };
+      expected.set(utcDay(at), {
+        outbound: e.outbound + change.outbound,
+        failed: e.failed + change.failed,
+        inbound: e.inbound + change.inbound,
+      });
+    }
+    for (const d of daily) {
+      expect({ outbound: d.outbound, failed: d.failed, inbound: d.inbound }, d.day).toEqual(
+        expected.get(d.day) ?? { outbound: 0, failed: 0, inbound: 0 },
+      );
+    }
+    // Read with the company's 30 days' counts, the days add up to them.
+    const sum = (pick: (d: OpsDailyActivity) => number) =>
+      daily.reduce((total, d) => total + pick(d), 0);
+    expect([sum((d) => d.outbound), sum((d) => d.failed), sum((d) => d.inbound)]).toEqual([
+      activity!.outbound,
+      activity!.failed,
+      activity!.inbound,
+    ]);
+    expect(activity).toMatchObject({ outbound: 2, failed: 1, inbound: 2 });
+    expect(JSON.stringify(health)).not.toContain('Counting the days');
   });
 
   it('exports the Usage tab as CSV only after writing the export to the platform audit log (ADR-154)', async () => {

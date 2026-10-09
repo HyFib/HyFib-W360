@@ -3,7 +3,7 @@ import { once } from 'node:events';
 import { createServer, type IncomingHttpHeaders, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { isAppError, sha256Hex, systemClock, uuidv7, type Clock } from '@w360/core';
+import { isAppError, jsonbSize, sha256Hex, systemClock, uuidv7, type Clock } from '@w360/core';
 import { DEFAULT_EGRESS_POLICY, createEgressClient } from '@w360/core/egress';
 import { authorizedTenantScope, sql } from '@w360/db';
 import {
@@ -15,6 +15,7 @@ import {
   createWebhooksService,
   outboxAad,
   processWebhookDeliveries,
+  WEBHOOK_LIMITS,
   WebhookOAuthTokenCache,
   verifyWebhookSignature,
   webhookOAuthSecretAad,
@@ -2965,6 +2966,136 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     expect(await api().update(key.ctx, id, { contactEventTags: null })).toMatchObject({
       contactEventTags: null,
     });
+  });
+
+  it('choose words of text fields and ranges of number and date fields, read by the fields’ types, through the API (ADR-335)', async () => {
+    const c = await fx.company();
+    const key = await apiKey(c, ['webhooks.manage']);
+    const fieldOf = (fieldKey: string, label: string, type: string) =>
+      fx.query(
+        `INSERT INTO app.contact_fields (id, tenant_id, key, label, type) VALUES ($1, $2, $3, $4, $5)`,
+        [uuidv7(), c.tenant.id, fieldKey, label, type],
+      );
+    await fieldOf('city', 'City', 'text');
+    await fieldOf('score', 'Score', 'number');
+    await fieldOf('renewal', 'Renewal', 'date');
+    const issueOf = async (promise: Promise<unknown>) => {
+      const error = await expectAppError(promise, 'validation_failed');
+      return isAppError(error) ? error.issues?.[0] : undefined;
+    };
+    const refusals = [
+      [[{ key: 'score', contains: '5' }], 'contactEventFieldValues.0.contains'],
+      [[{ key: 'city', atMost: 'z' }], 'contactEventFieldValues.0'],
+      [[{ key: 'score', atLeast: 2, atMost: 1 }], 'contactEventFieldValues.0'],
+      [[{ key: 'renewal', atLeast: 20261001 }], 'contactEventFieldValues.0.atLeast'],
+      [[{ key: 'score', value: 1, atMost: 2 }], 'contactEventFieldValues.0'],
+      [[{ key: 'score' }], 'contactEventFieldValues.0'],
+    ] as const;
+    for (const [index, [conditions, path]] of refusals.entries()) {
+      expect(
+        await issueOf(
+          api().create(
+            key.ctx,
+            {
+              url: receiverUrl(),
+              events: ['contact.updated'],
+              contactEventFieldValues: conditions,
+            },
+            idem(`contact-event-field-ranges-bad-${index}`, JSON.stringify(conditions)),
+          ),
+        ),
+        JSON.stringify(conditions),
+      ).toMatchObject({ path });
+    }
+    expect((await api().list(key.ctx)).data).toEqual([]);
+
+    const created = await addThroughApi(key.ctx, 'contact-event-field-ranges-1', {
+      url: receiverUrl(),
+      events: ['contact.updated'],
+      contactEventFieldValues: [
+        { key: 'city', contains: ' Chen ' },
+        { key: 'score', atLeast: 10 },
+        { key: 'renewal', atLeast: '2026-10-01', atMost: '2026-10-31' },
+      ],
+    });
+    const stored = [
+      { key: 'city', contains: 'Chen' },
+      { key: 'score', atLeast: 10 },
+      { key: 'renewal', atLeast: '2026-10-01', atMost: '2026-10-31' },
+    ];
+    expect(created.body.data).toMatchObject({ contactEventFieldValues: stored });
+    expect(await api().get(key.ctx, created.body.data.id)).toMatchObject({
+      contactEventFieldValues: stored,
+    });
+    expect(
+      await api().update(key.ctx, created.body.data.id, {
+        contactEventFieldValues: [{ key: 'score', atMost: 0 }],
+      }),
+    ).toMatchObject({ contactEventFieldValues: [{ key: 'score', atMost: 0 }] });
+  });
+
+  it('add and change an endpoint whose lists would not fit its audit entry, the entry naming the largest by count (ADR-336)', async () => {
+    const c = await fx.company();
+    const key = await apiKey(c, ['webhooks.manage']);
+    // Five lists of 50 tags of 112 bytes each, as in the Settings test: about 29,000 bytes.
+    const tags = (list: number) =>
+      Array.from({ length: 50 }, (_, i) => `${'க'.repeat(36)}${list}${String(i).padStart(3, '0')}`);
+    const lists = {
+      contactTags: tags(1),
+      conversationTags: tags(2),
+      contactEventTags: tags(3),
+      surveyContactTags: tags(4),
+      surveyConversationTags: tags(5),
+    };
+    const created = await addThroughApi(key.ctx, 'audit-lists-1', {
+      url: receiverUrl(),
+      events: ['message.received', 'contact.updated', 'satisfaction_survey.answered'],
+      ...lists,
+    });
+    expect(created.status).toBe(201);
+    expect(created.body.data).toMatchObject(lists);
+    expect(
+      await api().update(key.ctx, created.body.data.id, { description: 'Tamil tags' }),
+    ).toMatchObject({ description: 'Tamil tags', ...lists });
+    const audits = await fx.query<{
+      action: string;
+      metadata: Record<string, unknown>;
+      bytes: number;
+    }>(
+      `SELECT action, metadata, pg_column_size(metadata::text::jsonb) AS bytes FROM app.audit_events
+        WHERE tenant_id = $1 AND action LIKE 'webhook.endpoint_%' ORDER BY occurred_at, id`,
+      [c.tenant.id],
+    );
+    expect(audits.map((a) => a.action)).toEqual([
+      'webhook.endpoint_created',
+      'webhook.endpoint_updated',
+    ]);
+    const digest = (list: string[]) => sha256Hex(JSON.stringify(list)).slice(0, 16);
+    for (const audit of audits) {
+      expect(audit.bytes).toBeLessThanOrEqual(jsonbSize(audit.metadata));
+      expect(audit.bytes).toBeLessThanOrEqual(8192);
+      expect(audit.metadata).toMatchObject({
+        source: 'api',
+        listCounts: {
+          contactEventTags: 50,
+          contactTags: 50,
+          conversationTags: 50,
+          surveyContactTags: 50,
+        },
+        listDigests: {
+          contactEventTags: digest(lists.contactEventTags),
+          contactTags: digest(lists.contactTags),
+          conversationTags: digest(lists.conversationTags),
+          surveyContactTags: digest(lists.surveyContactTags),
+        },
+        surveyConversationTags: lists.surveyConversationTags,
+      });
+      expect(audit.metadata).not.toHaveProperty('contactTags');
+    }
+    // Without its source the entry is within the count the services keep it to.
+    const [first] = audits;
+    const { source: _source, ...withoutSource } = first?.metadata ?? {};
+    expect(jsonbSize(withoutSource)).toBeLessThanOrEqual(WEBHOOK_LIMITS.auditMetadataBytes);
   });
 
   it('choose the field values of the added and changed contacts an endpoint receives, read by the fields’ types, kept by changes that leave them out and cleared with both events (ADR-332)', async () => {

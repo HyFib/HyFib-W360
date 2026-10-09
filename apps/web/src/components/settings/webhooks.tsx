@@ -59,11 +59,15 @@ import {
   webhookAssigneeText,
   webhookCampaignText,
   webhookChannelText,
+  webhookContactFieldConditionText,
+  webhookContactFieldKind,
   webhookContactFieldValueId,
+  webhookFieldConditionEditable,
+  webhookFieldRangeFromInputs,
   webhookFieldText,
-  webhookFieldValueEditable,
   webhookFieldValuesFromLines,
   webhookFieldValueText,
+  webhookFieldWordsFromLines,
   webhookOAuthText,
   webhookOwnerText,
   webhookPipelineText,
@@ -2271,11 +2275,13 @@ function ContactTagChoices({
 
 /**
  * The custom field values whose added and changed contacts an endpoint takes (ADR-332), shown while
- * it takes either event: every contact, or only those that have one of the values given. Values are
- * typed one a line for text, number and date fields, read as a member's entry of the field is, and
- * ticked for yes/no fields. A value the endpoint holds that its field's input cannot show as it is
- * (its field deleted since, or added again with another type) stays listed, ticked and kept as it
- * is, until it is unticked.
+ * it takes either event: every contact, or only those that pass one of the conditions given. Values
+ * are typed one a line for text, number and date fields, read as a member's entry of the field is,
+ * and ticked for yes/no fields; words a text field's value contains are typed one a line, and a
+ * number or date field takes one range, either end or both (ADR-335). A condition the endpoint
+ * holds that its field's inputs cannot show as it is (its field deleted since, added again with
+ * another type, or a second range given through the API) stays listed, ticked and kept as it is,
+ * until it is unticked.
  */
 function FieldValueChoices({
   prefix,
@@ -2285,6 +2291,10 @@ function FieldValueChoices({
   onEveryChange,
   lines,
   onLinesChange,
+  words,
+  onWordsChange,
+  ranges,
+  onRangesChange,
   ticked,
   onTickedChange,
 }: {
@@ -2297,6 +2307,12 @@ function FieldValueChoices({
   /** The lines typed for each text, number and date field, by key. */
   lines: Record<string, string>;
   onLinesChange: (next: Record<string, string>) => void;
+  /** The words typed for each text field, one a line, by key (ADR-335). */
+  words: Record<string, string>;
+  onWordsChange: (next: Record<string, string>) => void;
+  /** The range typed for each number and date field, by key (ADR-335). */
+  ranges: Record<string, { from: string; to: string }>;
+  onRangesChange: (next: Record<string, { from: string; to: string }>) => void;
   /** The yes/no values and the values kept as they are ticked (`webhookContactFieldValueId`). */
   ticked: string[];
   onTickedChange: (next: string[]) => void;
@@ -2310,11 +2326,12 @@ function FieldValueChoices({
         Field values of added and changed contacts
       </legend>
       <p className="text-xs text-muted-foreground">
-        A change of a contact is sent when the contact has any of the values once it is saved, or
-        when the change changes one of these fields, so the change that takes a contact out of the
-        values is sent too; text is compared whatever its case. A contact added with one of the
-        values is sent as added. With where contacts came from, the parts, the fields or the tags
-        chosen too, an event must pass them all. Other events are sent whichever values are given.
+        A change of a contact is sent when the contact has any of the values, a word given or a
+        number or date in a range once it is saved, or when the change changes one of these fields,
+        so the change that takes a contact out of them is sent too; text is compared whatever its
+        case, and a range includes its ends. A contact added passing one of them is sent as added.
+        With where contacts came from, the parts, the fields or the tags chosen too, an event must
+        pass them all. Other events are sent whichever values are given.
       </p>
       <label className="flex items-start gap-2 text-sm">
         <input
@@ -2341,7 +2358,7 @@ function FieldValueChoices({
           onChange={() => onEveryChange(false)}
         />
         <span>
-          Only the contacts who have any of these values
+          Only the contacts who have any of these values, words or ranges
           {choices.length === 0 && kept.length === 0 ? (
             <span className="block text-xs text-muted-foreground">
               The company has no custom field yet.
@@ -2380,29 +2397,83 @@ function FieldValueChoices({
                 </div>
               );
             }
+            const range = ranges[field.key] ?? { from: '', to: '' };
+            const setRange = (next: { from: string; to: string }) =>
+              onRangesChange({ ...ranges, [field.key]: next });
             return (
-              <Field
-                key={field.key}
-                id={id}
-                label={webhookFieldText(field)}
-                description={
-                  field.type === 'number'
-                    ? 'Numbers, one a line.'
-                    : field.type === 'date'
-                      ? 'Dates written as YYYY-MM-DD, one a line.'
-                      : 'Values, one a line.'
-                }
-              >
-                {(aria) => (
-                  <Textarea
-                    {...aria}
-                    rows={2}
-                    autoComplete="off"
-                    value={lines[field.key] ?? ''}
-                    onChange={(e) => onLinesChange({ ...lines, [field.key]: e.target.value })}
-                  />
+              <div key={field.key} className="grid gap-2">
+                <Field
+                  id={id}
+                  label={webhookFieldText(field)}
+                  description={
+                    field.type === 'number'
+                      ? 'Numbers, one a line.'
+                      : field.type === 'date'
+                        ? 'Dates written as YYYY-MM-DD, one a line.'
+                        : 'Values, one a line.'
+                  }
+                >
+                  {(aria) => (
+                    <Textarea
+                      {...aria}
+                      rows={2}
+                      autoComplete="off"
+                      value={lines[field.key] ?? ''}
+                      onChange={(e) => onLinesChange({ ...lines, [field.key]: e.target.value })}
+                    />
+                  )}
+                </Field>
+                {field.type === 'text' ? (
+                  <Field
+                    id={`${id}-words`}
+                    label={`${webhookFieldText(field)}: containing`}
+                    description="Words or phrases the text contains, whatever its case, one a line."
+                  >
+                    {(aria) => (
+                      <Textarea
+                        {...aria}
+                        rows={2}
+                        autoComplete="off"
+                        value={words[field.key] ?? ''}
+                        onChange={(e) => onWordsChange({ ...words, [field.key]: e.target.value })}
+                      />
+                    )}
+                  </Field>
+                ) : (
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    <Field
+                      id={`${id}-from`}
+                      label={`${webhookFieldText(field)}: ${field.type === 'date' ? 'from' : 'at least'}`}
+                      description="The range's start, included; blank for none."
+                    >
+                      {(aria) => (
+                        <Input
+                          {...aria}
+                          type={field.type === 'date' ? 'date' : 'text'}
+                          autoComplete="off"
+                          value={range.from}
+                          onChange={(e) => setRange({ ...range, from: e.target.value })}
+                        />
+                      )}
+                    </Field>
+                    <Field
+                      id={`${id}-to`}
+                      label={`${webhookFieldText(field)}: ${field.type === 'date' ? 'until' : 'at most'}`}
+                      description="The range's end, included; blank for none."
+                    >
+                      {(aria) => (
+                        <Input
+                          {...aria}
+                          type={field.type === 'date' ? 'date' : 'text'}
+                          autoComplete="off"
+                          value={range.to}
+                          onChange={(e) => setRange({ ...range, to: e.target.value })}
+                        />
+                      )}
+                    </Field>
+                  </div>
                 )}
-              </Field>
+              </div>
             );
           })}
           {kept.map((pair, index) => {
@@ -2418,8 +2489,8 @@ function FieldValueChoices({
                 />
                 <Label htmlFor={boxId} className="font-normal break-all">
                   {webhookFieldText(field ?? { key: pair.key, label: null })}:{' '}
-                  {webhookFieldValueText(pair.value)}
-                  {field ? ' (kept as it is: its field’s input cannot show it)' : ''}
+                  {webhookContactFieldConditionText(pair)}
+                  {field ? ' (kept as it is: its field’s inputs cannot show it)' : ''}
                 </Label>
               </div>
             );
@@ -3361,31 +3432,71 @@ export function WebhookEndpointForm({
     endpoint?.contactEventTags?.join(', ') ?? '',
   );
   // The field values of added and changed contacts (ADR-332): lines for text, number and date
-  // fields and ticks for yes/no fields; a value the endpoint holds that its field's input cannot
-  // show as it is (its field deleted, or added again with another type) is ticked and kept as it is.
-  const fieldTypeByKey = new Map(contactFieldChoices.map((f) => [f.key, f.type]));
-  const editableFieldValue = (pair: WebhookContactFieldValue) => {
-    const type = fieldTypeByKey.get(pair.key);
-    return type !== undefined && webhookFieldValueEditable(type, pair.value);
-  };
-  const keptFieldValues = (endpoint?.contactEventFieldValues ?? []).filter(
-    (pair) => !editableFieldValue(pair),
-  );
+  // fields and ticks for yes/no fields, words for text fields and one range a number or date field
+  // (ADR-335); a condition the endpoint holds that its field's inputs cannot show as it is (its
+  // field deleted, added again with another type, or a field's second range) is ticked and kept as
+  // it is.
+  // Which conditions the inputs show and which are kept apart is decided once, as the form opens:
+  // a save refreshes the endpoint without remounting the form, and deciding again from it (which
+  // range comes first) would move a range the inputs do not hold out of the kept list unseen.
+  const [fieldConditionLayout] = useState(() => {
+    const fieldTypeByKey = new Map(contactFieldChoices.map((f) => [f.key, f.type]));
+    const editable = (pair: WebhookContactFieldValue) => {
+      const type = fieldTypeByKey.get(pair.key);
+      return type !== undefined && webhookFieldConditionEditable(type, pair);
+    };
+    const stored = endpoint?.contactEventFieldValues ?? [];
+    const rangeShown = new Set<string>();
+    const shown = stored.filter((pair) => {
+      if (!editable(pair)) return false;
+      if (webhookContactFieldKind(pair) !== 'range') return true;
+      if (rangeShown.has(pair.key)) return false;
+      rangeShown.add(pair.key);
+      return true;
+    });
+    return { shown, kept: stored.filter((pair) => !shown.includes(pair)) };
+  });
+  const shownInInputs = (pair: WebhookContactFieldValue) =>
+    fieldConditionLayout.shown.includes(pair);
+  const keptFieldValues = fieldConditionLayout.kept;
   const [everyContactEventFieldValue, setEveryContactEventFieldValue] = useState(
     !endpoint?.contactEventFieldValues,
   );
   const [fieldValueLines, setFieldValueLines] = useState<Record<string, string>>(() => {
     const lines: Record<string, string> = {};
     for (const pair of endpoint?.contactEventFieldValues ?? []) {
-      if (!editableFieldValue(pair) || typeof pair.value === 'boolean') continue;
+      if (!shownInInputs(pair) || !('value' in pair) || typeof pair.value === 'boolean') continue;
       const text = webhookFieldValueText(pair.value);
       lines[pair.key] = lines[pair.key] ? `${lines[pair.key]}\n${text}` : text;
     }
     return lines;
   });
+  const [fieldWordLines, setFieldWordLines] = useState<Record<string, string>>(() => {
+    const lines: Record<string, string> = {};
+    for (const pair of endpoint?.contactEventFieldValues ?? []) {
+      if (!shownInInputs(pair) || !('contains' in pair)) continue;
+      lines[pair.key] = lines[pair.key] ? `${lines[pair.key]}\n${pair.contains}` : pair.contains;
+    }
+    return lines;
+  });
+  const [fieldRanges, setFieldRanges] = useState<Record<string, { from: string; to: string }>>(
+    () => {
+      const ranges: Record<string, { from: string; to: string }> = {};
+      for (const pair of fieldConditionLayout.shown) {
+        if ('value' in pair || 'contains' in pair) continue;
+        ranges[pair.key] = {
+          from: pair.atLeast === undefined ? '' : String(pair.atLeast),
+          to: pair.atMost === undefined ? '' : String(pair.atMost),
+        };
+      }
+      return ranges;
+    },
+  );
   const [fieldValuesTicked, setFieldValuesTicked] = useState<string[]>(() =>
     (endpoint?.contactEventFieldValues ?? [])
-      .filter((pair) => !editableFieldValue(pair) || typeof pair.value === 'boolean')
+      .filter(
+        (pair) => !shownInInputs(pair) || ('value' in pair && typeof pair.value === 'boolean'),
+      )
       .map(webhookContactFieldValueId),
   );
   const [everyAssignee, setEveryAssignee] = useState(!endpoint?.assignees);
@@ -3685,6 +3796,30 @@ export function WebhookEndpointForm({
             }
             for (const value of read.values) {
               chosenContactEventFieldValues.push({ key: field.key, value });
+            }
+            // Words of a text field, the range of a number or date field (ADR-335).
+            if (field.type === 'text') {
+              const typed = webhookFieldWordsFromLines(field, fieldWordLines[field.key] ?? '');
+              if (!typed.ok) {
+                setBusy(false);
+                setError({ code: 'validation_failed', message: typed.message });
+                return;
+              }
+              for (const contains of typed.words) {
+                chosenContactEventFieldValues.push({ key: field.key, contains });
+              }
+            } else {
+              const range = webhookFieldRangeFromInputs(
+                field,
+                fieldRanges[field.key]?.from ?? '',
+                fieldRanges[field.key]?.to ?? '',
+              );
+              if (!range.ok) {
+                setBusy(false);
+                setError({ code: 'validation_failed', message: range.message });
+                return;
+              }
+              if (range.range) chosenContactEventFieldValues.push(range.range);
             }
           }
           for (const pair of keptFieldValues) {
@@ -4207,6 +4342,10 @@ export function WebhookEndpointForm({
           onEveryChange={setEveryContactEventFieldValue}
           lines={fieldValueLines}
           onLinesChange={setFieldValueLines}
+          words={fieldWordLines}
+          onWordsChange={setFieldWordLines}
+          ranges={fieldRanges}
+          onRangesChange={setFieldRanges}
           ticked={fieldValuesTicked}
           onTickedChange={setFieldValuesTicked}
         />

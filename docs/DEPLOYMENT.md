@@ -1250,6 +1250,27 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    servers of this release need it, as the Usage tab reads it; workers do not. Web servers from
    before it do not call it, so it can be applied before them.
 
+   Migration 0255 (ADR-334) adds `ops.platform_ops_daily_activity(timestamptz, uuid)` and recreates
+   0254's one-argument function to read through it, with the same signature, owner and grants, in
+   one transaction: a call made before it commits runs 0254's body and a later one the new function
+   (a statement planned just before the commit and run just after can fail once, as with any
+   function the migrations recreate). Web servers of this release call the two-argument function;
+   a server of the release that added 0254, if one still runs, calls the one-argument function,
+   which stays, so 0255 can be applied before the web rollout.
+
+   Migration 0256 (ADR-335) replaces the check on `app.webhook_endpoints.contact_event_field_values`
+   (validated by reading the table, which holds at most 10 endpoints a company) and
+   `app.webhook_contact_values_match` with the same signature, so the capture keeps calling it.
+   Every list stored before it passes the new check. Web servers of this release need it, as they
+   store words and ranges; workers do not read the list. Web servers from before it neither show
+   nor take words and ranges: until the web rollout ends, an old server shows such a condition as
+   "undefined", refuses a change in Settings that keeps it, and its API refuses words and ranges
+   (422) while answering them as stored. An old server also keeps a word or range the endpoint holds
+   as a pair without a value, which the new check refuses: any change it makes to an endpoint
+   holding one (in Settings or through the API, even a change that leaves the list out) fails with
+   a 500 and leaves the endpoint as it was. Finish the web rollout before companies add words and
+   ranges, or expect such failures until it ends.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

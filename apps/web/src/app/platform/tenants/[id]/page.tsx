@@ -44,6 +44,7 @@ import {
   CancelStaffDeletionForm,
   ScheduleDeletionForm,
 } from '@/components/platform/deletion-forms';
+import { DailyMessages } from '@/components/platform/daily-messages';
 import { IssueList, LevelBadge, Utc } from '@/components/platform/ops';
 import {
   PlanPaymentRefundForm,
@@ -723,6 +724,21 @@ export default async function PlatformTenantPage({ params }: { params: Promise<{
                   </div>
                 </dl>
               ) : null}
+              {/* The company's own days, read with its 30 days' counts (ADR-334). */}
+              <section aria-labelledby="company-daily" className="grid min-w-0 gap-3 lg:col-span-2">
+                <h3 id="company-daily" className="font-medium">
+                  Messages a day (30 days)
+                </h3>
+                <p className="text-muted-foreground">
+                  Each UTC day, the first from 30 days ago at this time and today so far, as the
+                  counts above.
+                </p>
+                <DailyMessages
+                  days={ops.daily}
+                  label="This company's messages sent and received each UTC day, 30 days"
+                  empty="The company sent and received no message in these 30 days."
+                />
+              </section>
             </CardContent>
           </Card>
         ) : null}

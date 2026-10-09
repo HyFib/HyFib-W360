@@ -1,6 +1,14 @@
 import { randomBytes } from 'node:crypto';
 import { z } from 'zod';
-import { AppError, notFound, uuidv7, type Clock, type Keyring } from '@w360/core';
+import {
+  AppError,
+  jsonbSize,
+  notFound,
+  sha256Hex,
+  uuidv7,
+  type Clock,
+  type Keyring,
+} from '@w360/core';
 import { EgressError, parseEgressUrl, type EgressPolicy } from '@w360/core/egress';
 import {
   and,
@@ -29,6 +37,7 @@ import {
   webhookEndpoints,
   webhookEvents,
   type ApiScope,
+  type ContactFieldType,
   type ContactSource,
   type Database,
   type Tx,
@@ -40,7 +49,7 @@ import { recordAudit, type RequestMeta } from '../audit';
 import { assertCan, type TenantContext } from '../authz/context';
 import { assertRecentSignIn } from '../authz/step-up';
 import { CONTACT_FIELD_KEY_RE } from '../contacts/field-definitions';
-import { apiFieldValue, normalizeTag } from '../contacts/fields';
+import { apiFieldValue, coerceFieldValue, normalizeTag } from '../contacts/fields';
 import { crmMembers, memberRefs } from '../crm/common';
 import { INBOX_WORKER_ROLES } from '../inbox/routing';
 import { parseInput } from '../validation';
@@ -2466,12 +2475,18 @@ export function webhookContactEventTagsFor(
   return kept ? [...kept] : null;
 }
 
+/** A range's end as the API takes it (ADR-335): a number, or a date written as YYYY-MM-DD. */
+const webhookRangeEndSchema = z.union([z.number(), z.string()], {
+  error: 'Give a range’s ends as numbers or as dates written as YYYY-MM-DD.',
+});
+
 /**
- * The custom field values whose `contact.created` and `contact.updated` an endpoint takes
- * (ADR-332): 1 to 50 pairs of a field's key (as GET /contact-fields lists them) and a value, text, a
- * number or true or false, read by the field's type when the list adds them
- * (`webhookContactEventFieldValuesChecked`). A change is taken when the contact has one of the
- * values, or when it changes one of the fields; null takes every contact.
+ * The custom field conditions whose `contact.created` and `contact.updated` an endpoint takes: 1 to
+ * 50 of a field's key (as GET /contact-fields lists them) with a value, text, a number or true or
+ * false (ADR-332), with a word or phrase its text contains, or with a range of its numbers or dates,
+ * either end or both (`atLeast`, `atMost`; ADR-335), read by the field's type when the list adds
+ * them (`webhookContactEventFieldValuesChecked`). A change is taken when the contact passes one of
+ * them, or when it changes one of the fields; null takes every contact.
  */
 export const webhookContactEventFieldValuesSchema = z
   .array(
@@ -2481,13 +2496,47 @@ export const webhookContactEventFieldValuesSchema = z
           key: z
             .string({ error: 'Choose fields from the list.' })
             .regex(CONTACT_FIELD_KEY_RE, 'Choose fields from the list.'),
-          value: z.union([z.string(), z.number(), z.boolean()], {
-            error: 'Give text, a number, or true or false.',
-          }),
+          value: z
+            .union([z.string(), z.number(), z.boolean()], {
+              error: 'Give text, a number, or true or false.',
+            })
+            .optional(),
+          contains: z.string({ error: 'Give the word to look for as text.' }).optional(),
+          atLeast: webhookRangeEndSchema.optional(),
+          atMost: webhookRangeEndSchema.optional(),
         },
         { error: 'Give each value with its field’s key.' },
       )
-      .strict(),
+      .strict()
+      .superRefine((pair, ctx) => {
+        const shapes = [
+          pair.value !== undefined,
+          pair.contains !== undefined,
+          pair.atLeast !== undefined || pair.atMost !== undefined,
+        ].filter(Boolean).length;
+        if (shapes === 0) {
+          ctx.addIssue({
+            code: 'custom',
+            message: 'Give a value, a word to look for or a range with each field’s key.',
+          });
+        } else if (shapes > 1) {
+          ctx.addIssue({
+            code: 'custom',
+            message: 'Give a value, a word or a range with a field’s key, not more than one.',
+          });
+        }
+      })
+      .transform((pair): WebhookContactFieldValue =>
+        pair.value !== undefined
+          ? { key: pair.key, value: pair.value }
+          : pair.contains !== undefined
+            ? { key: pair.key, contains: pair.contains }
+            : {
+                key: pair.key,
+                ...(pair.atLeast !== undefined ? { atLeast: pair.atLeast } : {}),
+                ...(pair.atMost !== undefined ? { atMost: pair.atMost } : {}),
+              },
+      ),
   )
   .min(1, 'Give at least one value, or take every contact.')
   .max(
@@ -2523,12 +2572,72 @@ export function webhookContactEventFieldValuesFor(
 }
 
 /**
- * The field values an endpoint keeps, read as the API reads a contact's values (ADR-332,
- * `apiFieldValue`): each pair the list adds names one of the company's fields and a value of its
- * type (text trimmed, up to 500 characters; a number as members type them; a real date as
- * YYYY-MM-DD; true or false), and an empty one is refused. A pair the endpoint held stays as it
- * was, its field deleted since or not. Each pair once, text compared whatever its case, in the order
- * given. `tx` is in the company's scope.
+ * A condition the list adds, read by its field's type (ADR-332, ADR-335): a value as the API reads
+ * a contact's values (`apiFieldValue`: text trimmed, up to 500 characters; a number as members type
+ * them; a real date as YYYY-MM-DD; true or false), an empty one refused; a word only for a text
+ * field, trimmed as its text is; a range only for a number or date field, each end read as a value
+ * of it and the start not after the end.
+ */
+function webhookContactFieldConditionRead(
+  field: { label: string; type: ContactFieldType },
+  pair: WebhookContactFieldValue,
+  refused: (path: string, message: string) => AppError,
+  path: string,
+): WebhookContactFieldValue {
+  if ('value' in pair) {
+    const read = apiFieldValue(field, pair.value);
+    if (!read.ok) throw refused(`${path}.value`, read.message);
+    if (read.value === null)
+      throw refused(`${path}.value`, `Give a value of ${field.label} to match.`);
+    return { key: pair.key, value: read.value };
+  }
+  if ('contains' in pair) {
+    if (field.type !== 'text') {
+      throw refused(
+        `${path}.contains`,
+        `${field.label} is not a text field: give a value${field.type === 'boolean' ? '' : ' or a range'} of it instead.`,
+      );
+    }
+    const read = coerceFieldValue(field, pair.contains);
+    if (!read.ok) throw refused(`${path}.contains`, read.message);
+    if (typeof read.value !== 'string') {
+      throw refused(`${path}.contains`, `Give a word to look for in ${field.label}.`);
+    }
+    return { key: pair.key, contains: read.value };
+  }
+  if (field.type !== 'number' && field.type !== 'date') {
+    throw refused(
+      path,
+      `${field.label} takes no range: give a value${field.type === 'text' ? ' or a word to look for' : ''} of it instead.`,
+    );
+  }
+  const end = (side: 'atLeast' | 'atMost'): number | string | undefined => {
+    const given = pair[side];
+    if (given === undefined) return undefined;
+    const read = apiFieldValue(field, given);
+    if (!read.ok) throw refused(`${path}.${side}`, read.message);
+    if (read.value === null || typeof read.value === 'boolean') {
+      throw refused(`${path}.${side}`, `Give the range of ${field.label} as values of it.`);
+    }
+    return read.value;
+  };
+  const atLeast = end('atLeast');
+  const atMost = end('atMost');
+  if (atLeast !== undefined && atMost !== undefined && atLeast > atMost) {
+    throw refused(path, `The range of ${field.label} must start at or before its end.`);
+  }
+  return {
+    key: pair.key,
+    ...(atLeast !== undefined ? { atLeast } : {}),
+    ...(atMost !== undefined ? { atMost } : {}),
+  };
+}
+
+/**
+ * The field conditions an endpoint keeps (ADR-332, ADR-335): each one the list adds names one of
+ * the company's fields and is read by its type (`webhookContactFieldConditionRead`). A condition
+ * the endpoint held stays as it was, its field deleted since or not. Each condition once, text
+ * compared whatever its case, in the order given. `tx` is in the company's scope.
  */
 export async function webhookContactEventFieldValuesChecked(
   tx: Tx,
@@ -2554,28 +2663,78 @@ export async function webhookContactEventFieldValuesChecked(
   const kept: WebhookContactFieldValue[] = [];
   const seen = new Set<string>();
   pairs.forEach((pair, index) => {
-    let value = pair.value;
+    let checked = pair;
     if (!heldIds.has(webhookContactFieldValueId(pair))) {
       const field = fieldByKey.get(pair.key);
       if (!field) {
         throw refused(`contactEventFieldValues.${index}.key`, WEBHOOK_FIELDS_NOT_FOUND);
       }
-      const read = apiFieldValue(field, pair.value);
-      if (!read.ok) throw refused(`contactEventFieldValues.${index}.value`, read.message);
-      if (read.value === null) {
-        throw refused(
-          `contactEventFieldValues.${index}.value`,
-          `Give a value of ${field.label} to match.`,
-        );
-      }
-      value = read.value;
+      checked = webhookContactFieldConditionRead(
+        field,
+        pair,
+        refused,
+        `contactEventFieldValues.${index}`,
+      );
     }
-    const id = webhookContactFieldValueId({ key: pair.key, value });
+    const id = webhookContactFieldValueId(checked);
     if (seen.has(id)) return;
     seen.add(id);
-    kept.push({ key: pair.key, value });
+    kept.push({ ...checked });
   });
   return kept;
+}
+
+/**
+ * An endpoint's audit entry within the 8 KiB of metadata an audit entry holds (ADR-336): as given
+ * while `jsonbSize` counts at most `WEBHOOK_LIMITS.auditMetadataBytes` for it; otherwise its largest
+ * lists, one after another (by name when two are as large), are named by their lengths under
+ * `listCounts` and by the first 16 hex digits of the SHA-256 of their JSON, each object's keys in
+ * order (`canonicalJson`), under `listDigests`, so that two entries still show whether a list named
+ * by count in both changed, until it fits. Its
+ * events (`eventTypes`, or a replay's `events`) are always named, and the endpoint keeps every list
+ * whole. With every list named by count an entry takes under 6,000 bytes, so it then fits.
+ */
+/**
+ * A value's JSON with each object's keys in order, so that a list read back from jsonb (which keeps
+ * an object's keys by length) is written as the services built it, and hashes the same.
+ */
+function canonicalJson(value: unknown): string {
+  return JSON.stringify(value, (_key, item: unknown) =>
+    typeof item === 'object' && item !== null && !Array.isArray(item)
+      ? Object.fromEntries(Object.entries(item).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))
+      : item,
+  );
+}
+
+export function webhookEndpointAuditMetadata(
+  metadata: Record<string, unknown>,
+): Record<string, unknown> {
+  const fits = (entry: Record<string, unknown>) =>
+    jsonbSize(entry) <= WEBHOOK_LIMITS.auditMetadataBytes;
+  if (fits(metadata)) return metadata;
+  const largestFirst = Object.entries(metadata)
+    .filter(
+      (entry): entry is [string, unknown[]] =>
+        entry[0] !== 'eventTypes' && entry[0] !== 'events' && Array.isArray(entry[1]),
+    )
+    .map(([key, list]) => ({ key, list, bytes: jsonbSize(list) }))
+    .sort((a, b) => b.bytes - a.bytes || (a.key < b.key ? -1 : 1));
+  const counted: typeof largestFirst = [];
+  const entry = () => {
+    const keys = new Set(counted.map((list) => list.key));
+    return {
+      ...Object.fromEntries(Object.entries(metadata).filter(([key]) => !keys.has(key))),
+      listCounts: Object.fromEntries(counted.map((list) => [list.key, list.list.length])),
+      listDigests: Object.fromEntries(
+        counted.map((list) => [list.key, sha256Hex(canonicalJson(list.list)).slice(0, 16)]),
+      ),
+    };
+  };
+  for (const list of largestFirst) {
+    counted.push(list);
+    if (fits(entry())) break;
+  }
+  return entry();
 }
 
 /**
@@ -5439,7 +5598,8 @@ export function createWebhooksService(deps: {
             action: 'webhook.endpoint_created',
             subjectType: 'webhook_endpoint',
             subjectId: id,
-            metadata: {
+            // Its largest lists named by count when they would not fit (ADR-336).
+            metadata: webhookEndpointAuditMetadata({
               host,
               eventTypes: data.eventTypes,
               ...(headers.length > 0 ? { headers: headers.map((h) => h.name) } : {}),
@@ -5497,7 +5657,7 @@ export function createWebhooksService(deps: {
               ...(contactTags ? { contactTags } : {}),
               ...(conversationTags ? { conversationTags } : {}),
               ...(oauth ? { oauthTokenHost: oauth.host } : {}),
-            },
+            }),
           },
           meta,
         );
@@ -5993,7 +6153,8 @@ export function createWebhooksService(deps: {
             action: 'webhook.endpoint_updated',
             subjectType: 'webhook_endpoint',
             subjectId: data.endpointId,
-            metadata: {
+            // Its largest lists named by count when they would not fit (ADR-336).
+            metadata: webhookEndpointAuditMetadata({
               host,
               eventTypes: data.eventTypes,
               ...(data.headers ? { headers: data.headers.map((h) => h.name) } : {}),
@@ -6051,7 +6212,7 @@ export function createWebhooksService(deps: {
               ...(contactTags ? { contactTags } : {}),
               ...(conversationTags ? { conversationTags } : {}),
               ...webhookOAuthAudit(oauth, endpoint),
-            },
+            }),
           },
           meta,
         );

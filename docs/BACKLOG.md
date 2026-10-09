@@ -1251,10 +1251,19 @@ verification, app review, Embedded Signup configuration).
   CI]** (ADR-332, migration 0253: an endpoint takes the `contact.created` and `contact.updated` of
   contacts with chosen custom field values, read by each field's type, and every change of those
   fields).
-  Remaining: filters for other event types and on a message's values, comparisons of field values
-  other than equality, other authentication (headers computed per delivery, other OAuth grants),
-  mutual TLS, fixed egress addresses, events for store orders, a sequence number across events, load
-  tests.
+  **[Words and ranges in field value filters built; their database tests run only in CI]**
+  (ADR-335, migration 0256: a condition can be a word a text field's value contains or a range of a
+  number or date field's values, either end or both).
+  **[Audit entries of endpoints with long lists fixed; their database tests run only in CI]**
+  (ADR-336, no migration: an added or changed endpoint's entry whose lists together would pass
+  7,000 bytes as jsonb names the largest by count and digest, so no change is refused for its audit
+  entry).
+  Remaining: filters for other event types and on a message's values, field value comparisons beyond
+  values, words and ranges, other authentication (headers computed per delivery, other OAuth
+  grants), mutual TLS, fixed egress addresses, events for store orders, a sequence number across
+  events, load tests, a bound on an endpoint's whole configuration (an API answer kept with its
+  `Idempotency-Key` holds 64 KiB, which every list at its limit at once could pass; estimated in
+  ADR-336's review, not reproduced).
 - **P5-10 Platform ops screens** **[built, locally verified with test data only]** (ADR-054):
   `/platform/ops` with Overview, Onboarding (failed and abandoned signups, failed or stuck number
   setups, new companies without a number), Integrations (current failures with host-only labels,
@@ -1332,6 +1341,9 @@ verification, app review, Embedded Signup configuration).
   **[Messages a day built; its database and browser tests run only in CI]** (ADR-333, migration
   0254: the Usage tab draws the platform's messages sent and received each UTC day of its window,
   with each day's failures in a tooltip and a table of the days, read in the totals' snapshot).
+  **[A company's messages a day built; its database and browser tests run only in CI]** (ADR-334,
+  migration 0255: a company's platform page draws its days of the last 30 in the health card, read
+  with its 30 days' counts).
   Remaining:
   other alert channels, trends further back than 93 days and other charts, Meta's quality webhook
   (unconfirmed), rollups for many companies and pages read from the database.
