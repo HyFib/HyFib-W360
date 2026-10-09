@@ -1699,7 +1699,8 @@ Phase 5 rules (outgoing webhooks, P5-09):
   (ADR-332), chosen the same way. A value a list adds must be of one of the company's fields and of
   its type, read as the API reads a contact's value; the list is kept only while the endpoint takes
   `contact.created` or `contact.updated`, and a database check keeps it to 1 to 50 pairs of a
-  field's key and text, a number or a boolean. It is applied in `app.capture_contact_webhook_event`
+  field's key and text, a number or a boolean; the services keep it to 4,000 bytes as JSON, so the
+  audit entries carrying it always fit. It is applied in `app.capture_contact_webhook_event`
   and `app.deliver_contact_webhook_tag` through `app.webhook_contact_values_match`; none is a
   definer function: they run as the role making the change, under the company's row-level
   security, or as the definer role merging and erasing contacts, which reads the contact's values

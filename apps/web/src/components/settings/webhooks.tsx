@@ -61,6 +61,7 @@ import {
   webhookChannelText,
   webhookContactFieldValueId,
   webhookFieldText,
+  webhookFieldValueEditable,
   webhookFieldValuesFromLines,
   webhookFieldValueText,
   webhookOAuthText,
@@ -2272,13 +2273,14 @@ function ContactTagChoices({
  * The custom field values whose added and changed contacts an endpoint takes (ADR-332), shown while
  * it takes either event: every contact, or only those that have one of the values given. Values are
  * typed one a line for text, number and date fields, read as a member's entry of the field is, and
- * ticked for yes/no fields. The values of a field deleted since they were chosen stay listed,
- * ticked, until they are unticked.
+ * ticked for yes/no fields. A value the endpoint holds that its field's input cannot show as it is
+ * (its field deleted since, or added again with another type) stays listed, ticked and kept as it
+ * is, until it is unticked.
  */
 function FieldValueChoices({
   prefix,
   choices,
-  deleted,
+  kept,
   every,
   onEveryChange,
   lines,
@@ -2288,19 +2290,20 @@ function FieldValueChoices({
 }: {
   prefix: string;
   choices: WebhookFieldChoice[];
-  /** The values the endpoint holds of fields deleted since. */
-  deleted: readonly WebhookContactFieldValue[];
+  /** The values the endpoint holds that the fields' inputs cannot show as they are. */
+  kept: readonly WebhookContactFieldValue[];
   every: boolean;
   onEveryChange: (next: boolean) => void;
   /** The lines typed for each text, number and date field, by key. */
   lines: Record<string, string>;
   onLinesChange: (next: Record<string, string>) => void;
-  /** The yes/no values and deleted fields' values ticked (`webhookContactFieldValueId`). */
+  /** The yes/no values and the values kept as they are ticked (`webhookContactFieldValueId`). */
   ticked: string[];
   onTickedChange: (next: string[]) => void;
 }) {
   const tick = (id: string, on: boolean) =>
     onTickedChange(on ? [...ticked.filter((t) => t !== id), id] : ticked.filter((t) => t !== id));
+  const fieldByKey = new Map(choices.map((f) => [f.key, f]));
   return (
     <fieldset className="grid gap-2">
       <legend className="mb-1 text-sm font-medium">
@@ -2334,12 +2337,12 @@ function FieldValueChoices({
           name={`${prefix}-contact-event-field-values-every`}
           className="mt-1"
           checked={!every}
-          disabled={choices.length === 0 && deleted.length === 0}
+          disabled={choices.length === 0 && kept.length === 0}
           onChange={() => onEveryChange(false)}
         />
         <span>
           Only the contacts who have any of these values
-          {choices.length === 0 && deleted.length === 0 ? (
+          {choices.length === 0 && kept.length === 0 ? (
             <span className="block text-xs text-muted-foreground">
               The company has no custom field yet.
             </span>
@@ -2402,9 +2405,10 @@ function FieldValueChoices({
               </Field>
             );
           })}
-          {deleted.map((pair, index) => {
+          {kept.map((pair, index) => {
             const pairId = webhookContactFieldValueId(pair);
-            const boxId = `${prefix}-field-value-deleted-${index}`;
+            const boxId = `${prefix}-field-value-kept-${index}`;
+            const field = fieldByKey.get(pair.key);
             return (
               <div key={pairId} className="flex items-center gap-2">
                 <Checkbox
@@ -2413,8 +2417,9 @@ function FieldValueChoices({
                   onChange={(e) => tick(pairId, e.target.checked)}
                 />
                 <Label htmlFor={boxId} className="font-normal break-all">
-                  {webhookFieldText({ key: pair.key, label: null })}:{' '}
+                  {webhookFieldText(field ?? { key: pair.key, label: null })}:{' '}
                   {webhookFieldValueText(pair.value)}
+                  {field ? ' (kept as it is: its field’s input cannot show it)' : ''}
                 </Label>
               </div>
             );
@@ -3356,10 +3361,15 @@ export function WebhookEndpointForm({
     endpoint?.contactEventTags?.join(', ') ?? '',
   );
   // The field values of added and changed contacts (ADR-332): lines for text, number and date
-  // fields, ticks for yes/no fields and for the values of fields deleted since.
+  // fields and ticks for yes/no fields; a value the endpoint holds that its field's input cannot
+  // show as it is (its field deleted, or added again with another type) is ticked and kept as it is.
   const fieldTypeByKey = new Map(contactFieldChoices.map((f) => [f.key, f.type]));
-  const deletedFieldValues = (endpoint?.contactEventFieldValues ?? []).filter(
-    (pair) => !fieldTypeByKey.has(pair.key),
+  const editableFieldValue = (pair: WebhookContactFieldValue) => {
+    const type = fieldTypeByKey.get(pair.key);
+    return type !== undefined && webhookFieldValueEditable(type, pair.value);
+  };
+  const keptFieldValues = (endpoint?.contactEventFieldValues ?? []).filter(
+    (pair) => !editableFieldValue(pair),
   );
   const [everyContactEventFieldValue, setEveryContactEventFieldValue] = useState(
     !endpoint?.contactEventFieldValues,
@@ -3367,8 +3377,7 @@ export function WebhookEndpointForm({
   const [fieldValueLines, setFieldValueLines] = useState<Record<string, string>>(() => {
     const lines: Record<string, string> = {};
     for (const pair of endpoint?.contactEventFieldValues ?? []) {
-      const type = fieldTypeByKey.get(pair.key);
-      if (type === undefined || type === 'boolean') continue;
+      if (!editableFieldValue(pair) || typeof pair.value === 'boolean') continue;
       const text = webhookFieldValueText(pair.value);
       lines[pair.key] = lines[pair.key] ? `${lines[pair.key]}\n${text}` : text;
     }
@@ -3376,7 +3385,7 @@ export function WebhookEndpointForm({
   });
   const [fieldValuesTicked, setFieldValuesTicked] = useState<string[]>(() =>
     (endpoint?.contactEventFieldValues ?? [])
-      .filter((pair) => fieldTypeByKey.get(pair.key) === 'boolean' || !fieldTypeByKey.has(pair.key))
+      .filter((pair) => !editableFieldValue(pair) || typeof pair.value === 'boolean')
       .map(webhookContactFieldValueId),
   );
   const [everyAssignee, setEveryAssignee] = useState(!endpoint?.assignees);
@@ -3678,7 +3687,7 @@ export function WebhookEndpointForm({
               chosenContactEventFieldValues.push({ key: field.key, value });
             }
           }
-          for (const pair of deletedFieldValues) {
+          for (const pair of keptFieldValues) {
             if (fieldValuesTicked.includes(webhookContactFieldValueId(pair))) {
               chosenContactEventFieldValues.push(pair);
             }
@@ -4193,7 +4202,7 @@ export function WebhookEndpointForm({
         <FieldValueChoices
           prefix={prefix}
           choices={contactFieldChoices}
-          deleted={deletedFieldValues}
+          kept={keptFieldValues}
           every={everyContactEventFieldValue}
           onEveryChange={setEveryContactEventFieldValue}
           lines={fieldValueLines}

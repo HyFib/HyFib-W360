@@ -2935,7 +2935,9 @@ field is sent too, so a receiver also gets the changes between two values it did
 contact added without the value and given it later is sent as `contact.updated`. Values are
 compared by the field's type: text whatever its case, numbers as numbers, dates as YYYY-MM-DD, yes/no
 as true or false, so a number given as text matches nothing (the services refuse it). A pair whose
-field was deleted matches nothing. Events no endpoint takes are not recorded, so there is nothing to
+field was deleted matches nothing until a field with its key is added again; then that field's
+changes are sent. A list holds at most 4,000 bytes as JSON: shorten or drop values to add more.
+Events no endpoint takes are not recorded, so there is nothing to
 replay; `GET /contacts/{id}` gives a contact's values as they are now. With sources, parts, fields
 or tags chosen too, an event must pass every list. To take more, change the values on the endpoint's
 page, or `PATCH /webhook-endpoints/{id}` with `contactEventFieldValues` (null for every contact).

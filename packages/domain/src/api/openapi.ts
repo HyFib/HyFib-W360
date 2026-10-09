@@ -1475,7 +1475,7 @@ export const apiWebhookEndpointSchema = z.object({
     )
     .nullable()
     .describe(
-      'The custom field values whose contact.created and contact.updated the endpoint receives: the changes of a contact that has one of the values once they are saved (text compared whatever its case, numbers as numbers), and those changing one of the fields, so the change that takes a contact out of the values is received too; a contact.created is received when the change that adds the contact gives it one of them. A pair stays after its field is deleted, and matches nothing then. null receives every contact. Other events are not narrowed.',
+      'The custom field values whose contact.created and contact.updated the endpoint receives: the changes of a contact that has one of the values once they are saved (text compared whatever its case, numbers as numbers), and those changing one of the fields, so the change that takes a contact out of the values is received too; a contact.created is received when the change that adds the contact gives it one of them. A pair stays after its field is deleted, matching nothing until a field with its key is added again. null receives every contact. Other events are not narrowed.',
     ),
   assigneeIds: z
     .array(z.uuid())

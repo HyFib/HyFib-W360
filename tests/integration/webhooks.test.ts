@@ -7129,6 +7129,17 @@ describe('contact event field value filters (ADR-332)', () => {
       /Choose fields of this company/,
       'contactEventFieldValues.1.key',
     );
+    // Values too long together for the audit entry carrying them are refused before any write.
+    await refused(
+      {
+        contactEventFieldValues: Array.from({ length: 50 }, (_, i) => ({
+          key: 'tier',
+          value: `${i}`.padEnd(500, 'x'),
+        })),
+      },
+      /at most 4,000 bytes in all/,
+      'contactEventFieldValues',
+    );
     // Another company's field is not this company's.
     await fieldOf(await fx.company(), 'zone', 'Zone', 'text');
     await refused(
@@ -7268,6 +7279,10 @@ describe('contact event field value filters (ADR-332)', () => {
       pair(' gold'),
       pair('gold\n'),
       pair('x'.repeat(501)),
+      // More than 4,500 bytes as PostgreSQL writes the list out.
+      JSON.stringify(
+        Array.from({ length: 10 }, (_, i) => ({ key: 'tier', value: `${i}`.padEnd(450, 'x') })),
+      ),
     ]) {
       await expect(setInDatabase(bad), bad).rejects.toThrow(
         /webhook_endpoints_contact_event_field_values/,
@@ -7301,6 +7316,47 @@ describe('contact event field value filters (ADR-332)', () => {
                 AS definer_reads_source`,
     );
     expect(grants).toEqual({ app_updates: true, definer_reads_source: true });
+  });
+
+  it('save and audit a list of values up to the 4,000 bytes an audit entry carries', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    await fx.query(
+      `INSERT INTO app.contact_fields (id, tenant_id, key, label, type) VALUES ($1, $2, 'tier', 'Tier', 'text')`,
+      [uuidv7(), c.tenant.id],
+    );
+    // Eight values of 473 characters: 3,993 bytes as JSON, the most of its kind the list takes.
+    const long = Array.from({ length: 8 }, (_, i) => ({
+      key: 'tier',
+      value: `${i}`.padEnd(473, 'x'),
+    }));
+    expect(new TextEncoder().encode(JSON.stringify(long)).length).toBe(3993);
+    const url = 'https://hooks.example.com/in';
+    const eventTypes = ['contact.created', 'contact.updated'];
+    const created = await webhooks().create(owner, {
+      url,
+      eventTypes,
+      contactEventFieldValues: long,
+      contactEventTags: Array.from({ length: 50 }, (_, i) => `tag ${i}`.padEnd(40, 'x')),
+    });
+    await webhooks().update(owner, {
+      endpointId: created.id,
+      url,
+      description: 'Long values',
+      eventTypes,
+    });
+    const audits = await fx.query<{ action: string; values: unknown }>(
+      `SELECT action, metadata -> 'contactEventFieldValues' AS values FROM app.audit_events
+        WHERE tenant_id = $1 AND action LIKE 'webhook.endpoint_%' ORDER BY occurred_at, id`,
+      [c.tenant.id],
+    );
+    expect(audits).toEqual([
+      { action: 'webhook.endpoint_created', values: long },
+      { action: 'webhook.endpoint_updated', values: long },
+    ]);
+    expect(
+      (await webhooks().list(owner)).find((e) => e.id === created.id)?.contactEventFieldValues,
+    ).toEqual(long);
   });
 });
 

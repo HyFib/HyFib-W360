@@ -25,22 +25,40 @@ function. The jsonpath expressions in its check are checked by PostgreSQL alone,
   `contactEventFieldValues` on create, change and every endpoint it answers; the OpenAPI entries;
   the export spec's column.
 - **Web:** Settings → Webhooks "Field values of added and changed contacts" (values one a line for
-  text, number and date fields, yes/no ticked, a deleted field's values listed until unticked) and
-  the endpoint's line in the list.
-- **Tests:** unit (7 new in `webhooks/webhooks.test.ts`: the list's rules, keeping and clearing,
-  reading by type, refusals, held pairs, telling pairs apart and naming them, Settings' lines; 1 new
+  text, number and date fields, yes/no ticked, a value its field's input cannot show as it is
+  listed apart and kept until unticked) and the endpoint's line in the list.
+- **Review fixes:** an independent review of the slice found that a list the services took (50
+  values of 500 characters, or fewer in a script of several bytes a letter) could not be saved:
+  the audit entries carrying it outgrew the 8 KiB an audit entry's metadata holds, so the change
+  failed with an internal error. A list now holds at most 4,000 bytes as JSON (refused with a
+  message before any write), and the database check at most 4,500 bytes of its text. The same
+  review found the docs saying a deleted field's pair matches nothing, which is true only until a
+  field with its key is added again, and the check relying on the order the database evaluates
+  its conditions in; the docs now say so, and the check reads the list's shape in a `CASE` before
+  its keys and values.
+- **Review fix:** Codex's review of PR #52 found that Settings read an endpoint's value through its
+  field's current type: after a field was deleted and added again with another type, a stored
+  `true` became the text "yes" on the next save, and a number or date field refused every save. A
+  value the input cannot show as it is (`webhookFieldValueEditable`: of another type, a date that
+  is not one, or text on several lines given through the API) is now listed apart, ticked and kept
+  as it is.
+- **Tests:** unit (8 new in `webhooks/webhooks.test.ts`: the list's rules, keeping and clearing,
+  reading by type, refusals, held pairs, telling pairs apart and naming them, which values Settings
+  shows as they are, Settings' lines; 1 new
   in `api/api.test.ts`: the API schemas and OpenAPI entries; 3 changed for the wider PATCH message,
   the endpoint's properties and the contact event descriptions); integration (4 new in
   `webhook-events.test.ts`: capture by values and by changes of listed fields, either order of a
   transaction's writes, contact.created with values given in its transaction by its source and
-  tags, a merge and an erasure as the definer role; 1 new in `webhooks.test.ts`: refusals, keeping,
-  replacing and clearing, a deleted field's pair, the audits, each clause of the database check and
-  the grants; 1 new in `api-webhook-endpoints.test.ts`; 2 changed: the field choices' types and the
+  tags, a merge and an erasure as the definer role; 2 new in `webhooks.test.ts`: refusals (a list
+  over 4,000 bytes among them), keeping, replacing and clearing, a deleted field's pair, the
+  audits, each clause of the database check and the grants, and a list of 3,993 bytes saved and
+  audited with 50 tags beside it; 1 new in `api-webhook-endpoints.test.ts`; 2 changed: the field choices' types and the
   API's endpoint with the new property) and the function's grants in the isolation suite. Written
   for CI; the integration tests were not run here. No e2e test.
 - **Docs:** ADR-332; ARCHITECTURE; SECURITY; THREAT-MODEL T298; DEPLOYMENT; RUNBOOKS; BACKLOG
   P5-09; feature matrix W-138, W-139 and H-014.
-- **Mutation checks:** 30/32 deliberate regressions caught on the unit-tested parts. Of the two
+- **Mutation checks:** 39/41 deliberate regressions caught on the unit-tested parts (9 of them on
+  the review fixes, one after a test of a list of exactly 4,000 bytes was added). Of the two
   left, the Settings form's rule refusing values for an endpoint without either event is covered by
   the integration test of the refusals (CI only), and splitting Settings' lines on carriage returns
   too was equivalent, as each line is trimmed, so the code now splits on newlines alone. The
@@ -52,7 +70,7 @@ function. The jsonpath expressions in its check are checked by PostgreSQL alone,
 | Command                                            | Result                                                        |
 | -------------------------------------------------- | ------------------------------------------------------------- |
 | `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
-| `pnpm test` (unit)                                 | 140 files, 1391 tests passed                                  |
+| `pnpm test` (unit)                                 | 140 files, 1392 tests passed                                  |
 | `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
 | `pnpm build`                                       | passed                                                        |
 | gitleaks 8.30.1 on the staged changes              | no leaks found                                                |

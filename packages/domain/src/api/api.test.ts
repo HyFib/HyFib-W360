@@ -4136,6 +4136,14 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       { ...contacts, contactEventFieldValues: [{ key: 'tier' }] },
       { ...contacts, contactEventFieldValues: [{ key: 'tier', value: 'gold', op: 'eq' }] },
       { ...contacts, contactEventFieldValues: { tier: 'gold' } },
+      // Fifty values of 500 characters would not fit the audit entry carrying them.
+      {
+        ...contacts,
+        contactEventFieldValues: Array.from({ length: 50 }, (_, i) => ({
+          key: 'tier',
+          value: `${i}`.padEnd(500, 'x'),
+        })),
+      },
     ]) {
       expect(apiCreateWebhookEndpointSchema.safeParse(body).success, JSON.stringify(body)).toBe(
         false,

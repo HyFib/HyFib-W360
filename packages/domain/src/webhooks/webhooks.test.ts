@@ -128,6 +128,7 @@ import {
   webhookStageText,
   webhookContactEventFieldValuesText,
   webhookContactFieldValueId,
+  webhookFieldValueEditable,
   webhookFieldValuesFromLines,
   webhookFieldValueText,
 } from './model';
@@ -3569,6 +3570,25 @@ describe('contact event field value filters (ADR-332)', () => {
     expect(refusal(['tier'])).toEqual(['0', 'Give each value with its field’s key.']);
     expect(schema.safeParse({ tier: 'gold' }).success).toBe(false);
     expect(WEBHOOK_LIMITS.contactEventFieldValues).toBe(50);
+    // At most 4,000 bytes as JSON in all, so that the audit entries carrying the list fit.
+    expect(WEBHOOK_LIMITS.contactEventFieldValuesBytes).toBe(4000);
+    const long = (count: number, length: number) =>
+      Array.from({ length: count }, (_, i) => ({ key: 'tier', value: `${i}`.padEnd(length, 'x') }));
+    const bytes = (pairs: unknown) => new TextEncoder().encode(JSON.stringify(pairs)).length;
+    expect(bytes(long(8, 473))).toBe(3993);
+    expect(schema.parse(long(8, 473))).toHaveLength(8);
+    const exact = long(8, 474).map((p, i) =>
+      i === 7 ? { ...p, value: p.value.slice(0, 473) } : p,
+    );
+    expect(bytes(exact)).toBe(4000);
+    expect(schema.parse(exact)).toHaveLength(8);
+    expect(bytes(long(8, 475))).toBe(4009);
+    expect(refusal(long(8, 475))).toEqual([
+      '',
+      'Give shorter or fewer values: at most 4,000 bytes in all, as JSON.',
+    ]);
+    // Bytes, not characters: 500 Tamil letters are 1,500 bytes.
+    expect(refusal(long(3, 500).map((p) => ({ ...p, value: 'த'.repeat(500) })))?.[0]).toBe('');
   });
 
   it('are kept only while the endpoint takes added or changed contacts: given, kept, or cleared', () => {
@@ -3744,6 +3764,37 @@ describe('contact event field value filters (ADR-332)', () => {
         ]),
       ),
     ).toBe('Tier: gold, platinum; VIP: yes; gone (deleted): 3');
+  });
+
+  it('show in a field’s input only the values it reads back as they are, keeping the others apart', () => {
+    expect(webhookFieldValueEditable('boolean', true)).toBe(true);
+    expect(webhookFieldValueEditable('number', 2.5)).toBe(true);
+    expect(webhookFieldValueEditable('date', '2026-01-31')).toBe(true);
+    expect(webhookFieldValueEditable('text', 'gold')).toBe(true);
+    expect(webhookFieldValueEditable('text', '2026-01-31')).toBe(true);
+    // A field deleted and added again with another type: the value it held is kept apart.
+    expect(webhookFieldValueEditable('text', true)).toBe(false);
+    expect(webhookFieldValueEditable('boolean', 'yes')).toBe(false);
+    expect(webhookFieldValueEditable('number', '5')).toBe(false);
+    expect(webhookFieldValueEditable('date', 'gold')).toBe(false);
+    expect(webhookFieldValueEditable('date', 5)).toBe(false);
+    // Text on several lines, given through the API, would come back as several values.
+    expect(webhookFieldValueEditable('text', 'line one\nline two')).toBe(false);
+    expect(webhookFieldValueEditable('text', 'line one\rline two')).toBe(false);
+    // Every value Settings reads from a line is one it shows again as it is.
+    for (const [type, line] of [
+      ['text', 'Gold Member'],
+      ['number', '5.10'],
+      ['number', '-12'],
+      ['date', '2026-02-28'],
+    ] as const) {
+      const read = webhookFieldValuesFromLines({ label: 'F', type }, line);
+      if (!read.ok) throw new Error(read.message);
+      expect(webhookFieldValueEditable(type, read.values[0]!), line).toBe(true);
+      expect(
+        webhookFieldValuesFromLines({ label: 'F', type }, webhookFieldValueText(read.values[0]!)),
+      ).toEqual(read);
+    }
   });
 
   it('read the lines Settings gives for a field as a member’s entries of it, skipping blank lines', () => {

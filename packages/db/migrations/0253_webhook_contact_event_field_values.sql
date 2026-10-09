@@ -9,34 +9,40 @@
 -- value as the contact's field values are kept in app.contacts.attributes (0005): text of 1 to 500
 -- characters without spaces around it (dates as YYYY-MM-DD), a number, or true or false. The
 -- services check each key against the company's fields and each value against its field's type when
--- a list adds them. A list is kept only while the endpoint takes contact.created or
--- contact.updated, so it never outlives them. A company has at most 10 endpoints, so the table is
--- small and the check is validated here. The checks run in order: a list that is not an array of
--- such pairs fails before the paths below read their keys and values.
+-- a list adds them, and keep a list to 4,000 bytes as JSON so that the audit entries carrying it
+-- stay within app.audit_events' 8 KiB of metadata (0001); the check below allows 4,500 bytes of its
+-- text here, which spaces out what JSON does not. A list is kept only while the endpoint takes
+-- contact.created or contact.updated, so it never outlives them. A company has at most 10
+-- endpoints, so the table is small and the check is validated here. The CASE reads the list's shape
+-- before its keys and values, so a list that is not an array of such pairs fails the check before
+-- the paths below read them.
 ALTER TABLE app.webhook_endpoints
   ADD COLUMN contact_event_field_values jsonb,
   ADD CONSTRAINT webhook_endpoints_contact_event_field_values CHECK (
     contact_event_field_values IS NULL
-    OR (jsonb_typeof(contact_event_field_values) = 'array'
-        AND jsonb_array_length(contact_event_field_values) BETWEEN 1 AND 50
-        -- Each pair an object of a key and a value and nothing else, …
-        AND NOT jsonb_path_exists(contact_event_field_values,
-                                  'strict $[*] ? (@.type() != "object")')
-        AND NOT jsonb_path_exists(contact_event_field_values,
-                                  'strict $[*].keyvalue() ? (@.key != "key" && @.key != "value")')
-        AND jsonb_array_length(jsonb_path_query_array(contact_event_field_values,
-                                                      'strict $[*].keyvalue()'))
-          = 2 * jsonb_array_length(contact_event_field_values)
-        -- … the key a field's key (0005's rule) …
-        AND NOT jsonb_path_exists(contact_event_field_values,
-              'strict $[*].key ? (@.type() != "string" || !(@ like_regex "^[a-z][a-z0-9_]{0,39}$"))')
-        -- … and the value text of 1 to 500 characters without spaces around it, a number or a
-        -- boolean.
-        AND NOT jsonb_path_exists(contact_event_field_values,
-              'strict $[*].value ? (@.type() != "string" && @.type() != "number" && @.type() != "boolean")')
-        AND NOT jsonb_path_exists(contact_event_field_values,
-              'strict $[*].value ? (@.type() == "string" && (@ == "" || @ like_regex "^\\s|\\s$" || @ like_regex "^.{250}.{251}" flag "s"))')
-        AND ('contact.created' = ANY (event_types) OR 'contact.updated' = ANY (event_types))));
+    OR CASE
+         WHEN jsonb_typeof(contact_event_field_values) <> 'array' THEN false
+         WHEN jsonb_array_length(contact_event_field_values) NOT BETWEEN 1 AND 50 THEN false
+         WHEN octet_length(contact_event_field_values::text) > 4500 THEN false
+         -- Each pair an object of a key and a value and nothing else, …
+         WHEN jsonb_path_exists(contact_event_field_values,
+                                'strict $[*] ? (@.type() != "object")') THEN false
+         WHEN jsonb_path_exists(contact_event_field_values,
+                                'strict $[*].keyvalue() ? (@.key != "key" && @.key != "value")')
+           THEN false
+         WHEN jsonb_array_length(jsonb_path_query_array(contact_event_field_values,
+                                                        'strict $[*].keyvalue()'))
+              <> 2 * jsonb_array_length(contact_event_field_values) THEN false
+         -- … the key a field's key (0005's rule), and the value text of 1 to 500 characters
+         -- without spaces around it, a number or a boolean.
+         ELSE NOT jsonb_path_exists(contact_event_field_values,
+                'strict $[*].key ? (@.type() != "string" || !(@ like_regex "^[a-z][a-z0-9_]{0,39}$"))')
+              AND NOT jsonb_path_exists(contact_event_field_values,
+                'strict $[*].value ? (@.type() != "string" && @.type() != "number" && @.type() != "boolean")')
+              AND NOT jsonb_path_exists(contact_event_field_values,
+                'strict $[*].value ? (@.type() == "string" && (@ == "" || @ like_regex "^\\s|\\s$" || @ like_regex "^.{250}.{251}" flag "s"))')
+              AND ('contact.created' = ANY (event_types) OR 'contact.updated' = ANY (event_types))
+       END);
 
 -- The runtime role sets it when it adds an endpoint (its table grant) and changes it with the
 -- events (0025 grants updates column by column). Both roles read it through their table grants.

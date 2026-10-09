@@ -2494,6 +2494,12 @@ export const webhookContactEventFieldValuesSchema = z
     WEBHOOK_LIMITS.contactEventFieldValues,
     `Give at most ${WEBHOOK_LIMITS.contactEventFieldValues} values.`,
   )
+  .refine(
+    (pairs) =>
+      new TextEncoder().encode(JSON.stringify(pairs)).length <=
+      WEBHOOK_LIMITS.contactEventFieldValuesBytes,
+    `Give shorter or fewer values: at most ${WEBHOOK_LIMITS.contactEventFieldValuesBytes.toLocaleString('en')} bytes in all, as JSON.`,
+  )
   .nullable();
 
 export const WEBHOOK_CONTACT_EVENT_FIELD_VALUES_NEED_THE_EVENTS =

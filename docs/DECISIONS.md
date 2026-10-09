@@ -12888,12 +12888,19 @@ Decision:
 - **One list per endpoint for both events,** `contactEventFieldValues`: 1 to 50 pairs of a field's
   key (as `GET /contact-fields` lists them) and a value of the field's type, as contacts take them
   (`apiFieldValue`): text of up to 500 characters, trimmed; a number as members type it; a date as
-  YYYY-MM-DD; true or false for yes/no. Each pair once, in the order given; text is compared
+  YYYY-MM-DD; true or false for yes/no; up to 4,000 bytes as JSON in all, so that the audit entries
+  carrying the list stay within an audit entry's 8 KiB of metadata (found by a review of this slice
+  before it was pushed: 50 values of 500 characters passed every other rule and then failed the
+  audit's own check, rolling the change back with an internal error). Each pair once, in the order
+  given; text is compared
   whatever its case, as the API's contact search compares it (ADR-113), and numbers as numbers, so
   "Gold" and "gold", or 5 and 5.0, are one pair. A pair given now must name one of the company's
   fields and a value of its type; a pair the endpoint holds stays as it was when its field is
   deleted (deleting a field deletes its values, so the pair matches nothing then), and may be kept
-  but not added again, as ADR-184 keeps deleted fields. Null receives every contact, as before.
+  but not added again, as ADR-184 keeps deleted fields; a field added later with the same key (keys
+  never change) brings the pair back: that field's changes are sent and its values matched as they
+  are kept, so a pair of another type than the new field's matches none of its values. Null
+  receives every contact, as before.
 - **What is sent:** a change of a contact is sent when the contact has one of the values once one of
   its transaction's writes is saved, or when its transaction changes one of the listed fields, so
   the change that takes a contact out of the receiver's segment is sent too. An event does not say
@@ -12906,8 +12913,10 @@ Decision:
   value later is sent as `contact.updated`. With sources, parts, fields or tags chosen too, an event
   must pass them all. `contact.erased` and `contact.merged` are not narrowed. Chosen in Settings →
   Webhooks ("Field values of added and changed contacts": every contact, or the values typed one a
-  line for text, number and date fields and ticked for yes/no fields, a deleted field's values
-  listed ticked until unticked), shown on the endpoint as "Added and changed contacts sent, of
+  line for text, number and date fields and ticked for yes/no fields; a value the endpoint holds
+  that its field's input cannot show as it is, of a field deleted since, of one added again with
+  another type or text on several lines given through the API, listed ticked and kept as it is
+  until unticked, so saving the form never turns it into another value), shown on the endpoint as "Added and changed contacts sent, of
   contacts with these values or changing these fields: Tier: gold, platinum; VIP: yes", and through
   the API as `contactEventFieldValues` on `POST /webhook-endpoints` and
   `PATCH /webhook-endpoints/{id}` and in every endpoint the API answers.
@@ -12916,7 +12925,9 @@ Decision:
   keeps it; Settings always sends it (null while every contact is taken). A check in the database
   holds the same rule and the list's shape: null, or an array of 1 to 50 objects of a `key` that is
   a field's key and a `value` that is text of 1 to 500 characters without spaces around it, a number
-  or a boolean, with either event.
+  or a boolean, of at most 4,500 bytes as PostgreSQL writes it out (the spaces it puts between
+  JSON's items included), with either event; it reads the shape before the keys and values in a
+  `CASE`, so it never depends on the order the database evaluates its conditions in.
 - **Applied at capture:** `app.capture_contact_webhook_event` reads the contact's values only when an
   active endpoint of the company that takes either event names values, and creates a delivery only
   for the endpoints whose list passes `app.webhook_contact_values_match`: the contact as the write

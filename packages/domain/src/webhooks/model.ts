@@ -26,7 +26,7 @@ import type {
   WebhookSurveyScore,
   WebhookTemplateStatus,
 } from '@w360/db';
-import { coerceFieldValue, type AttributeValue } from '../contacts/fields';
+import { coerceFieldValue, validDate, type AttributeValue } from '../contacts/fields';
 
 export type {
   AutomationEndReason,
@@ -363,6 +363,26 @@ export function webhookContactEventFieldValuesText(
   return [...byKey]
     .map(([key, texts]) => `${labels.get(key) ?? `${key} (deleted)`}: ${texts.join(', ')}`)
     .join('; ');
+}
+
+/**
+ * Whether Settings → Webhooks can show a stored value in its field's input and read it back as it
+ * is (ADR-332): a boolean for a yes/no field, a number for a number field, a real date for a date
+ * field and text on one line for a text field. Any other value the endpoint holds (of a field
+ * deleted and added again with another type, or text on several lines given through the API) is
+ * listed apart and kept as it is, so saving the form never turns it into another value.
+ */
+export function webhookFieldValueEditable(type: ContactFieldType, value: AttributeValue): boolean {
+  switch (type) {
+    case 'boolean':
+      return typeof value === 'boolean';
+    case 'number':
+      return typeof value === 'number';
+    case 'date':
+      return typeof value === 'string' && validDate(value);
+    case 'text':
+      return typeof value === 'string' && !/[\r\n]/.test(value);
+  }
 }
 
 /**
@@ -994,6 +1014,11 @@ export const WEBHOOK_LIMITS = {
   contactEventTags: 50,
   /** The custom field values whose added and changed contacts an endpoint can choose (ADR-332). */
   contactEventFieldValues: 50,
+  /**
+   * And their bytes as JSON in all (ADR-332), so that the audit entries carrying the list stay
+   * within the 8 KiB of metadata an audit entry holds.
+   */
+  contactEventFieldValuesBytes: 4000,
   /** The API keys whose automation runs an endpoint can choose (ADR-319): a company's most keys. */
   runApiKeys: 20,
   /** The API keys whose sent messages' statuses an endpoint can choose (ADR-320), as for runs. */
