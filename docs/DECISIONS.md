@@ -13392,7 +13392,7 @@ after another in one job, one test at a time, against one database, Mailpit, web
 Each slice adds about 4 tests, one a project, and the job's limit was raised again and again (from
 30 minutes to 240, PROGRESS). On a248d4d its 464 tests took 168.3 of the suite step's 230 minutes:
 every pull request waited almost three hours for its last check, and a slow runner with a few
-retries came close to the limit.
+retries could come close to the limit.
 
 Decision:
 
@@ -13413,6 +13413,13 @@ Decision:
 Consequences: four runners work at once instead of one, each building the app (about 1.5 minutes)
 and installing a browser, so the end-to-end checks should end in about an hour instead of three; the
 first runs of this change measure it. Re-running a failed project's job re-runs that project only,
-then the check of the four.
+then the check of the four. The setup runs four times, so a run takes more runner minutes and meets
+a failing package mirror or image pull four times as often, and a run now takes ten jobs of this
+workflow (two more in the containers workflow), which can wait for runners if the plan's limit on
+jobs at once is reached. CI no longer runs the four projects' data in one database (several
+currencies' rate cards side by side, the settlement runs of four days, a platform owner per
+project); running the suite locally still does. A run cancelled by a newer push to the same branch,
+or by hand, now shows the check of the four as failed rather than cancelled: expected, since a
+skipped required check would pass.
 
 Not built: splitting a project's tests across jobs, and tests run in parallel within a job.

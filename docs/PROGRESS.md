@@ -17,6 +17,12 @@ on a248d4d (PR #55), almost three hours before a pull request's last check ended
 - **Tests:** the usage and settlement specs' comments say the projects share one database when they
   run together, as locally, and that CI gives each its own. No test changed.
 - **Docs:** ADR-343.
+- **Review fixes:** an independent review found nothing that would fail CI and four small things,
+  fixed: ADR-343 now says a run cancelled by a newer push shows the check of the four as failed
+  (expected: a skipped required check would pass), that the setup runs four times and a run takes
+  ten jobs, and that CI no longer runs the four projects' data in one database; "came close to the
+  limit" became "could come close", since no recorded run did; and the operations console test's
+  comment on earlier projects' posts says they share a database only when run together.
 
 ### Test commands and results (local, 2026-10-09)
 

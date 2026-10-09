@@ -240,8 +240,8 @@ jobs:
 
   e2e:
     # The check main's branch protection requires, by this name: it passes only when every browser
-    # project's job passed. It runs whatever they did, so a project failed or cancelled fails it; a
-    # skipped job would count as passed.
+    # project's job passed. It runs whatever they did, so a project failed or cancelled fails it,
+    # and so does a run cancelled by a newer push: a skipped job would count as passed.
     name: End-to-end (Chromium, Firefox, WebKit, mobile)
     needs: e2e-project
     if: always()

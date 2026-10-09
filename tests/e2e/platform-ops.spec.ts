@@ -746,8 +746,9 @@ test('an owner posts the operations alerts to a chat channel and sends it a test
       );
     await expect.poll(() => tests().length, { timeout: 30_000 }).toBe(1);
     expect(tests()[0]!.type).toBe('application/json');
-    // Posts are kept 7 days and listed newest first: earlier projects' test posts are below this
-    // one.
+    // Posts are kept 7 days and listed newest first: run together, as locally, the projects share
+    // one database, and earlier projects' test posts are below this one (CI gives each project its
+    // own, ADR-343).
     const testRow = page
       .getByRole('table', { name: 'Latest posts' })
       .getByRole('row')
