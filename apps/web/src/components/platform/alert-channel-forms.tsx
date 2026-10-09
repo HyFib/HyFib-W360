@@ -76,7 +76,7 @@ export function AlertChannelForms({
           label={host ? 'Replace the channel’s address' : 'The channel’s incoming webhook address'}
           description={`An https:// address that takes a JSON POST with a “text” member, such as a Slack incoming webhook (https://hooks.slack.com/services/…). It holds the channel’s secret: it is stored encrypted and never shown again.${
             host && ownersAlerts.length > 0
-              ? ` A new address gets the alerts posted now, the platform owners’ ${ownersAlerts.join(' and ')} among them: untick those first if its readers should not see them.`
+              ? ` A new address gets the alerts posted now, among them the platform owners’ ${ownersAlerts.map((label) => `“${label}”`).join(' and ')}: untick those first if its readers should not see them.`
               : ''
           }`}
         >

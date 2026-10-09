@@ -13327,19 +13327,21 @@ unbuilt.
 Decision:
 
 - **Kept counts:** `ops.platform_message_days` (migration 0262) holds each company's messages on
-  each UTC day it had any (sent, those of them that failed, received), counted as the live
-  function counts them; `ops.platform_message_days_counted` records which days were counted and
-  when, since a day without messages has no row. The counts table follows the tenant-table rules
-  (`tenant_id` not null, unique with `id`, forced row level security with the definer role's
-  policy, grants to the definer role only); company deletion deletes a company's rows (step 35),
-  and the export leaves them out, the messages themselves being exported. Counts older than 400
-  days are deleted.
+  each UTC day it had any (sent, those of them that failed, received), counted as the live function
+  counts them; `ops.platform_message_days_counted` records which days were counted and when, since a
+  day without messages has no row. The counts table follows the tenant-table rules (`tenant_id` not
+  null, unique with `id`, forced row level security with the definer role's policy, grants to the
+  definer role only); company deletion deletes a company's rows (step 35, with the deletion's two
+  policies), and the export leaves them out, the messages themselves being exported. Counts older
+  than 400 days are deleted, and so are a deleted company's, at every run: a count that raced the
+  company's deletion could leave some behind.
 - **Counting:** a worker job (queue `ops.message-days`, every minute, one queued and one running)
-  calls `ops.count_platform_message_days(3)`: up to 3 days due, newest first, each counted whole
-  for every company not deleted under an advisory lock. A day is due when it is one of the 365
-  before today never counted, or one of the 7 before today last counted more than a day ago, so
-  statuses Meta reports late reach the counts; older days keep theirs. A new deployment counts its
-  year in about two hours.
+  counts up to 3 days due, newest first, each whole for every company not deleted under an advisory
+  lock and in a transaction of its own (`ops.count_platform_message_days(1)`), so a day's count has
+  the whole statement timeout and the days counted before it stay counted. A day is due when it is
+  one of the 365 before today never counted, or one of the 7 before today last counted more than a
+  day ago, so statuses Meta reports late reach the counts; older days keep theirs. A new deployment
+  counts its year in about two hours.
 - **Reading:** `ops.platform_ops_message_days(p_days, p_tenant_id)`, for platform administrators
   only (`W3403`) and 1 to 365 days (`W3412`), returns each day before today with every company's
   counts not deleted (or one company's) and whether the day was counted.

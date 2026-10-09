@@ -119,7 +119,7 @@ export default async function OpsUsagePage({
             them once each day has ended and again each day for a week while statuses arrive: a
             failure reported later than that is not among them. Today&apos;s are in the chart above.
             {year.uncounted > 0
-              ? ` ${year.uncounted} of the 365 days are not counted yet, a few more each minute.`
+              ? ` ${year.uncounted} of the 365 days ${year.uncounted === 1 ? 'is' : 'are'} not counted yet, a few more each minute.`
               : null}
           </CardDescription>
         </CardHeader>

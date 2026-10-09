@@ -81,17 +81,23 @@ export async function keptMessageDays(
 }
 
 /**
- * The counting job (every minute): deletes the counts older than 400 days and counts up to `limit`
- * days due, newest first; how many it counted.
+ * The counting job (every minute): counts up to `limit` days due, newest first, each in a
+ * transaction (and a statement) of its own, so a day's count has the whole statement timeout and
+ * the days counted before it stay counted; stops at the first call that finds none due. Each call
+ * also deletes the counts older than 400 days and those of deleted companies. How many days it
+ * counted.
  */
 export async function countMessageDays(
   deps: { db: Database },
   limit: number = MESSAGE_DAYS_PER_RUN,
 ): Promise<{ counted: number }> {
-  const result = await deps.db.run(systemScope, (tx) =>
-    tx.execute<{ counted: number }>(
-      sql`select ops.count_platform_message_days(${limit}::int) as counted`,
-    ),
-  );
-  return { counted: Number(result.rows[0]?.counted ?? 0) };
+  let counted = 0;
+  for (let i = 0; i < limit; i += 1) {
+    const result = await deps.db.run(systemScope, (tx) =>
+      tx.execute<{ counted: number }>(sql`select ops.count_platform_message_days(1) as counted`),
+    );
+    if (Number(result.rows[0]?.counted ?? 0) === 0) break;
+    counted += 1;
+  }
+  return { counted };
 }

@@ -3812,11 +3812,14 @@ day is counted once it has ended, for every company not deleted, and again once 
 while statuses arrive; after a deployment the 365 days before it are counted 3 a minute, newest
 first, so the card says how many days are not counted yet for about two hours. The worker logs
 `messages a day counted` with how many days each run counted. Days staying uncounted, or "No day is
-counted yet" long after a deployment, mean the counting job does not run: look for failures of
-`ops.message-days` in the worker's logs (a run that fails counts nothing and the next minute's tries
-again). A failure Meta reports more than 7 days after its message's day is not in the year; the
-window's chart above it counts live. A company's counts are deleted with the company, and every
-count after 400 days.
+counted yet" long after a deployment, mean the counting job does not run or fails: look for failures
+of `ops.message-days` in the worker's logs. Each day is counted in a transaction of its own, so a
+failed day is tried again the next minute and the days counted before it stay counted; a day whose
+count takes longer than the worker's statement timeout (`DATABASE_STATEMENT_TIMEOUT_MS`) fails every
+minute and holds back the older days, so the failure names the timeout: raise the timeout for the
+worker. A failure Meta reports more than 7 days after its message's day is not in the year; the
+window's chart above it counts live. A company's counts are deleted with the company (and by the
+next run, should a count race the deletion), and every count after 400 days.
 
 **Acknowledging failures (ADR-141).** On Current failures, the administrator who takes a failure
 opens Acknowledge on its row and writes a note of 10 to 500 characters: what was done or found

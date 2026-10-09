@@ -99,19 +99,34 @@ describe('the year of messages a day (ADR-341)', () => {
     ]);
   });
 
-  it('counts the days due through the definer function, a few a run unless told', async () => {
+  it('counts the days due one a transaction, a few a run unless told, until none is due', async () => {
+    const one = { rows: [{ counted: 1 }] };
     const { tx, statements } = answering([
-      { rows: [{ counted: 3 }] },
+      one,
+      one,
+      one,
+      // Asked for more, it counts more, and stops at the first call that finds no day due.
+      one,
+      one,
+      one,
+      one,
       { rows: [{ counted: '0' }] },
     ]);
+    let transactions = 0;
     const db = {
-      run: async (_scope: unknown, fn: (t: typeof tx) => Promise<unknown>) => fn(tx),
+      run: async (_scope: unknown, fn: (t: typeof tx) => Promise<unknown>) => {
+        transactions += 1;
+        return fn(tx);
+      },
     } as unknown as Database;
     expect(await countMessageDays({ db })).toEqual({ counted: 3 });
-    expect(await countMessageDays({ db }, 31)).toEqual({ counted: 0 });
-    expect(statements).toEqual([
-      { sql: 'select ops.count_platform_message_days($1::int) as counted', params: [3] },
-      { sql: 'select ops.count_platform_message_days($1::int) as counted', params: [31] },
-    ]);
+    expect(await countMessageDays({ db }, 31)).toEqual({ counted: 4 });
+    expect(transactions).toBe(8);
+    expect(statements).toEqual(
+      Array.from({ length: 8 }, () => ({
+        sql: 'select ops.count_platform_message_days(1) as counted',
+        params: [],
+      })),
+    );
   });
 });

@@ -3835,11 +3835,15 @@ describe('exports of the onboarding, integrations and queues lists (ADR-158)', (
 });
 
 describe('messages a day kept as days pass (ADR-341)', () => {
-  /** Noon UTC `n` days before today: well inside that UTC day. */
-  const noonDaysAgo = (n: number) => {
-    const now = new Date();
-    return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - n, 12));
-  };
+  /** Today's UTC day by the database's clock, which the counting reads (YYYY-MM-DD). */
+  let today = '';
+  /**
+   * Noon UTC `n` days before the database's today: well inside that UTC day. (A run crossing
+   * midnight UTC between the inserts and the counts would see the days move: the few seconds the
+   * test takes.)
+   */
+  const noonDaysAgo = (n: number) =>
+    new Date(Date.parse(`${today}T12:00:00Z`) - n * 24 * 60 * 60 * 1000);
   const utcDay = (d: Date) => d.toISOString().slice(0, 10);
   const count = (limit: number) => countMessageDays({ db: fx.dbs.app }, limit);
   const countedDays = async () =>
@@ -3860,6 +3864,10 @@ describe('messages a day kept as days pass (ADR-341)', () => {
     // The counts are the platform's: this test starts them afresh.
     await fx.query('DELETE FROM ops.platform_message_days');
     await fx.query('DELETE FROM ops.platform_message_days_counted');
+    const [clock] = await fx.query<{ day: string }>(
+      `SELECT to_char((now() AT TIME ZONE 'UTC')::date, 'YYYY-MM-DD') AS day`,
+    );
+    today = clock!.day;
     const kept = await fx.company();
     const gone = await fx.company();
     // Each conversation starts with a customer's message today, which no count holds yet.
@@ -3882,10 +3890,10 @@ describe('messages a day kept as days pass (ADR-341)', () => {
     ]);
     expect(await daysOf(gone)).toEqual([]);
 
-    // Then the rest of the year, at most 31 days a run, and nothing more until a day has passed.
+    // Then the rest of the year, a day a transaction, and nothing more until a day has passed.
     let runs = 0;
     while ((await count(100)).counted > 0) runs += 1;
-    expect(runs).toBe(12);
+    expect(runs).toBe(4);
     const year = await countedDays();
     expect(year).toHaveLength(365);
     expect([year[0], year.at(-1)]).toEqual([utcDay(noonDaysAgo(365)), utcDay(noonDaysAgo(1))]);
@@ -3978,6 +3986,11 @@ describe('messages a day kept as days pass (ADR-341)', () => {
     const partial = await ops().messageYear(staff);
     expect(partial.uncounted).toBe(2);
     expect(partial.days.map((d) => d.day)).toEqual([4, 3, 2].map((n) => utcDay(noonDaysAgo(n))));
+    // The next run counts them, and deletes the counts a deleted company kept (as a count that
+    // raced its deletion would leave them).
+    expect(await count(31)).toEqual({ counted: 2 });
+    expect(await daysOf(gone)).toEqual([]);
+    expect((await ops().messageYear(staff)).uncounted).toBe(0);
   });
 
   it('lets only platform administrators read the days, 1 to 365 of them, and the worker count them', async () => {

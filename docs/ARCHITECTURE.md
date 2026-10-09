@@ -2716,11 +2716,12 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   one-argument function reads through the new one for any server of the release that added it.
 - **Messages a day kept as days pass (ADR-341, migration 0262):** the worker's `ops.message-days`
   job (every minute, one queued and one running) calls `countMessageDays`
-  (`platform/message-days.ts`), whose `ops.count_platform_message_days(3)` counts up to 3 days due,
-  newest first (each of the 365 before today never counted, and each of the 7 before today again
-  once a day), each whole for every company not deleted, into `ops.platform_message_days` (a row per
-  company and day with messages, forced row level security, the definer role's alone), marks it in
-  `ops.platform_message_days_counted` and deletes counts older than 400 days. `messageYear()` reads
+  (`platform/message-days.ts`), which calls `ops.count_platform_message_days(1)` up to 3 times, a
+  transaction each: each call counts the newest day due (one of the 365 before today never counted,
+  or of the 7 before today again once a day), whole for every company not deleted, into
+  `ops.platform_message_days` (a row per company and day with messages, forced row level security,
+  the definer role's alone), marks it in `ops.platform_message_days_counted` and deletes counts
+  older than 400 days and those of deleted companies. `messageYear()` reads
   `ops.platform_ops_message_days(365, null)` and keeps the run of counted days ending at the latest
   one counted (`messageYear` in the same file), which the Usage tab draws under the window's chart
   with `DailyMessages` under names of its own.

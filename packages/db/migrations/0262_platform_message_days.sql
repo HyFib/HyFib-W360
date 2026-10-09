@@ -23,9 +23,14 @@ CREATE TABLE ops.platform_message_days (
 );
 CREATE INDEX platform_message_days_day_idx ON ops.platform_message_days (utc_day);
 SELECT ops.apply_tenant_rls('ops.platform_message_days');
--- Only the definer role's functions below, and the company deletion's, read and write the counts.
+-- Only the definer role's functions below, and the company deletion's, read and write the counts;
+-- the deletion's policies are those of every table it deletes (0028).
 CREATE POLICY definer_all ON ops.platform_message_days TO w360_definer
   USING (true) WITH CHECK (true);
+CREATE POLICY tenant_deletion_read ON ops.platform_message_days FOR SELECT TO w360_definer
+  USING (tenant_id = (SELECT ops.deleting_tenant_id()));
+CREATE POLICY tenant_deletion_delete ON ops.platform_message_days FOR DELETE TO w360_definer
+  USING (tenant_id = (SELECT ops.deleting_tenant_id()));
 GRANT SELECT, INSERT, DELETE ON ops.platform_message_days TO w360_definer;
 
 -- The days counted, and when each was last: a day without a row here is not counted yet, which a
@@ -41,10 +46,12 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON ops.platform_message_days_counted TO w36
 INSERT INTO ops.tenant_deletion_steps (ordinal, tables, mode)
 VALUES (35, ARRAY['ops.platform_message_days']::regclass[], 'batch');
 
--- Counting (the worker, every minute): deletes the counts older than 400 days, then counts up to
--- p_limit days (at most 31) due, newest first: each of the 365 days before today never counted,
--- and each of the 7 before today counted more than a day ago. A day is counted whole, replacing its
--- rows, as 0255 counts the days it reads. One run at a time; how many days it counted.
+-- Counting (the worker, every minute, one day a call): deletes the counts older than 400 days and
+-- those of companies deleted (a count that raced a company's deletion leaves them behind), then
+-- counts up to p_limit days (at most 31) due, newest first: each of the 365 days before today never
+-- counted, and each of the 7 before today counted more than a day ago. A day is counted whole,
+-- replacing its rows, as 0255 counts the days it reads. One run at a time; how many days it
+-- counted.
 CREATE FUNCTION ops.count_platform_message_days(p_limit integer)
   RETURNS integer
   LANGUAGE plpgsql SECURITY DEFINER
@@ -58,6 +65,9 @@ BEGIN
   PERFORM pg_advisory_xact_lock(hashtextextended('w360:platform-message-days', 0));
   DELETE FROM ops.platform_message_days d WHERE d.utc_day < v_today - 400;
   DELETE FROM ops.platform_message_days_counted c WHERE c.utc_day < v_today - 400;
+  DELETE FROM ops.platform_message_days d
+   USING app.tenants t
+   WHERE t.id = d.tenant_id AND t.status = 'deleted';
   FOR v_day IN
     SELECT v_today - g.n
       FROM generate_series(1, 365) AS g(n)

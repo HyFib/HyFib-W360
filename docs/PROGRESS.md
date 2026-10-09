@@ -37,6 +37,17 @@ the pglast parse check (syntax only), its two PL/pgSQL bodies included.
   day read as counted, the counts read as given; 31 days a run, 366 days, the count's result as
   given). The definer functions need the database, so their regressions are left to the integration
   tests, which run in CI.
+- **Review fixes:** an independent review found one test that would have failed in CI: the company
+  deletion's policies test requires every table the deletion deletes to have its two deletion
+  policies, which the counts' table lacked (it now has them). Also fixed: a count that raced a
+  company's deletion could leave its counts behind (each run now deletes the counts of deleted
+  companies, without locking the companies' rows, which plan changes lock); one slow day held three
+  days in one statement under the worker's statement timeout (a run now counts a day a transaction,
+  and the runbook says what a day longer than the timeout means); the integration test read today
+  from the test's clock rather than the database's; "1 of the 365 days are" and the alert names
+  mid-sentence in ADR-340's warning. 4/4 deliberate regressions of the counting loop caught; the
+  policies and the purge are left to the integration tests, which run in CI. The full check passed
+  again (144 files, 1454 tests).
 
 ### Test commands and results (local, 2026-10-09)
 
