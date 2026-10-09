@@ -177,6 +177,7 @@ import {
   WEBHOOK_SURVEY_CONTACT_TAGS_NEED_THE_EVENT,
   WEBHOOK_SURVEY_CONVERSATION_TAGS_NEED_THE_EVENT,
   WEBHOOK_CONTACT_EVENT_TAGS_NEED_THE_EVENTS,
+  WEBHOOK_CONTACT_EVENT_FIELD_VALUES_NEED_THE_EVENTS,
   WEBHOOK_CONTACT_TAGS_NEED_THE_EVENTS,
   WEBHOOK_CONVERSATION_TAGS_NEED_THE_EVENTS,
   WEBHOOK_CAMPAIGN_STATUSES_NEED_THE_EVENT,
@@ -1483,6 +1484,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'campaignStatuses',
       'channelIds',
       'consentChanges',
+      'contactEventFieldValues',
       'contactEventTags',
       'contactFieldKeys',
       'contactParts',
@@ -2191,7 +2193,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       taskAssigneeIds: [dev],
     });
     expect(apiUpdateWebhookEndpointSchema.safeParse({}).error?.issues[0]?.message).toContain(
-      'the deal owners, the task assignees, the pipelines, stages and owners of tasks’ deals and of notes’ deals, who made the CRM changes, the API keys whose CRM changes are left out, the survey scores, the members credited with survey answers and the teams of their conversations, the contact and conversation tags of survey answers, the tags of added and changed contacts, the members, the contact tags, the conversation tags, the OAuth client',
+      'the deal owners, the task assignees, the pipelines, stages and owners of tasks’ deals and of notes’ deals, who made the CRM changes, the API keys whose CRM changes are left out, the survey scores, the members credited with survey answers and the teams of their conversations, the contact and conversation tags of survey answers, the tags and field values of added and changed contacts, the members, the contact tags, the conversation tags, the OAuth client',
     );
     const doc = buildOpenApiDocument('https://app.example.com/api/v1');
     const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
@@ -4076,7 +4078,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       expect(apiUpdateWebhookEndpointSchema.parse(change)).toEqual(change);
     }
     expect(apiUpdateWebhookEndpointSchema.safeParse({}).error?.issues[0]?.message).toContain(
-      'the contact and conversation tags of survey answers, the tags of added and changed contacts, the members,',
+      'the contact and conversation tags of survey answers, the tags and field values of added and changed contacts, the members,',
     );
     const doc = buildOpenApiDocument('https://app.example.com/api/v1');
     const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
@@ -4090,7 +4092,84 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'contact.updated'
     ]?.post?.description;
     expect(updated).toContain(
-      'receives the changes of contacts that have one of them when they are saved, and the changes that add or remove one.',
+      'receives the changes of contacts that have one of them when they are saved, and the changes that add or remove one;',
+    );
+  });
+
+  it('take the field values of added and changed contacts only with contact.created or contact.updated, as pairs of a key and a value, and a list of them alone is a change (ADR-332)', () => {
+    const url = 'https://hooks.example.com/w360';
+    const pairs = [
+      { key: 'tier', value: 'gold' },
+      { key: 'score', value: 5 },
+      { key: 'vip', value: true },
+    ];
+    for (const events of [
+      ['contact.created'],
+      ['contact.updated'],
+      ['contact.created', 'contact.updated'],
+    ]) {
+      expect(
+        apiCreateWebhookEndpointSchema.parse({ url, events, contactEventFieldValues: pairs }),
+        events.join(),
+      ).toMatchObject({ contactEventFieldValues: pairs });
+    }
+    // Erased and merged contacts, and conversations' events, take no such list.
+    const refused = apiCreateWebhookEndpointSchema.safeParse({
+      url,
+      events: ['contact.erased', 'contact.merged', 'message.received'],
+      contactEventFieldValues: pairs,
+    });
+    expect(refused.error?.issues.map((i) => [i.path.join('.'), i.message])).toEqual([
+      ['contactEventFieldValues', WEBHOOK_CONTACT_EVENT_FIELD_VALUES_NEED_THE_EVENTS],
+    ]);
+    const contacts = { url, events: ['contact.updated'] };
+    const many = Array.from({ length: WEBHOOK_LIMITS.contactEventFieldValues + 1 }, (_, i) => ({
+      key: 'tier',
+      value: `tier ${i}`,
+    }));
+    for (const body of [
+      { ...contacts, contactEventFieldValues: [] },
+      { ...contacts, contactEventFieldValues: many },
+      { ...contacts, contactEventFieldValues: [{ key: 'Tier', value: 'gold' }] },
+      { ...contacts, contactEventFieldValues: [{ key: 'tier', value: null }] },
+      { ...contacts, contactEventFieldValues: [{ key: 'tier', value: ['gold'] }] },
+      { ...contacts, contactEventFieldValues: [{ key: 'tier' }] },
+      { ...contacts, contactEventFieldValues: [{ key: 'tier', value: 'gold', op: 'eq' }] },
+      { ...contacts, contactEventFieldValues: { tier: 'gold' } },
+    ]) {
+      expect(apiCreateWebhookEndpointSchema.safeParse(body).success, JSON.stringify(body)).toBe(
+        false,
+      );
+    }
+    for (const change of [
+      { contactEventFieldValues: null },
+      { contactEventFieldValues: [{ key: 'tier', value: 'gold' }] },
+    ]) {
+      expect(apiUpdateWebhookEndpointSchema.parse(change)).toEqual(change);
+    }
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas;
+    const given = (schemas.CreateWebhookEndpoint as { properties: Record<string, unknown> })
+      .properties;
+    expect(JSON.stringify(given.contactEventFieldValues)).toContain(
+      "1 to 50 pairs of a field's key (GET /contact-fields) and a value of the field's type",
+    );
+    expect(JSON.stringify(given.contactEventFieldValues)).toContain(
+      'or when it changes one of the fields, so the change that takes a contact out of the values is sent too',
+    );
+    const endpoint = schemas.WebhookEndpoint as {
+      properties: Record<string, { anyOf?: unknown[] }>;
+      required: string[];
+    };
+    expect(endpoint.properties.contactEventFieldValues?.anyOf).toHaveLength(2);
+    expect(endpoint.required).toContain('contactEventFieldValues');
+    const hooks = doc.webhooks as Record<string, { post?: { description?: string } }>;
+    expect(hooks['contact.created']?.post?.description).toContain(
+      'one that names custom field values (its `contactEventFieldValues`) for a contact the change that adds it gives one of them.',
+    );
+    expect(hooks['contact.updated']?.post?.description).toContain(
+      'receives the changes of contacts that have one of the values when they are saved, and the changes of those fields.',
     );
   });
 

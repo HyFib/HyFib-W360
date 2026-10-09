@@ -1,6 +1,6 @@
 'use client';
 import { useId, useState } from 'react';
-import { Alert, Button, Checkbox, Field, Input, Label, Select } from '@w360/ui';
+import { Alert, Button, Checkbox, Field, Input, Label, Select, Textarea } from '@w360/ui';
 import { ConfirmDialog } from '@w360/ui/client';
 import {
   WEBHOOK_CAMPAIGN_STATUS_LABELS,
@@ -59,7 +59,10 @@ import {
   webhookAssigneeText,
   webhookCampaignText,
   webhookChannelText,
+  webhookContactFieldValueId,
   webhookFieldText,
+  webhookFieldValuesFromLines,
+  webhookFieldValueText,
   webhookOAuthText,
   webhookOwnerText,
   webhookPipelineText,
@@ -87,6 +90,7 @@ import {
   type WebhookCampaignStatus,
   type WebhookChannelChoice,
   type WebhookCampaignChoice,
+  type WebhookContactFieldValue,
   type WebhookContactPart,
   type WebhookCrmChangeMaker,
   type WebhookSurveyScore,
@@ -2265,6 +2269,163 @@ function ContactTagChoices({
 }
 
 /**
+ * The custom field values whose added and changed contacts an endpoint takes (ADR-332), shown while
+ * it takes either event: every contact, or only those that have one of the values given. Values are
+ * typed one a line for text, number and date fields, read as a member's entry of the field is, and
+ * ticked for yes/no fields. The values of a field deleted since they were chosen stay listed,
+ * ticked, until they are unticked.
+ */
+function FieldValueChoices({
+  prefix,
+  choices,
+  deleted,
+  every,
+  onEveryChange,
+  lines,
+  onLinesChange,
+  ticked,
+  onTickedChange,
+}: {
+  prefix: string;
+  choices: WebhookFieldChoice[];
+  /** The values the endpoint holds of fields deleted since. */
+  deleted: readonly WebhookContactFieldValue[];
+  every: boolean;
+  onEveryChange: (next: boolean) => void;
+  /** The lines typed for each text, number and date field, by key. */
+  lines: Record<string, string>;
+  onLinesChange: (next: Record<string, string>) => void;
+  /** The yes/no values and deleted fields' values ticked (`webhookContactFieldValueId`). */
+  ticked: string[];
+  onTickedChange: (next: string[]) => void;
+}) {
+  const tick = (id: string, on: boolean) =>
+    onTickedChange(on ? [...ticked.filter((t) => t !== id), id] : ticked.filter((t) => t !== id));
+  return (
+    <fieldset className="grid gap-2">
+      <legend className="mb-1 text-sm font-medium">
+        Field values of added and changed contacts
+      </legend>
+      <p className="text-xs text-muted-foreground">
+        A change of a contact is sent when the contact has any of the values once it is saved, or
+        when the change changes one of these fields, so the change that takes a contact out of the
+        values is sent too; text is compared whatever its case. A contact added with one of the
+        values is sent as added. With where contacts came from, the parts, the fields or the tags
+        chosen too, an event must pass them all. Other events are sent whichever values are given.
+      </p>
+      <label className="flex items-start gap-2 text-sm">
+        <input
+          type="radio"
+          name={`${prefix}-contact-event-field-values-every`}
+          className="mt-1"
+          checked={every}
+          onChange={() => onEveryChange(true)}
+        />
+        <span>
+          Every contact
+          <span className="block text-xs text-muted-foreground">
+            Including contacts without values.
+          </span>
+        </span>
+      </label>
+      <label className="flex items-start gap-2 text-sm">
+        <input
+          type="radio"
+          name={`${prefix}-contact-event-field-values-every`}
+          className="mt-1"
+          checked={!every}
+          disabled={choices.length === 0 && deleted.length === 0}
+          onChange={() => onEveryChange(false)}
+        />
+        <span>
+          Only the contacts who have any of these values
+          {choices.length === 0 && deleted.length === 0 ? (
+            <span className="block text-xs text-muted-foreground">
+              The company has no custom field yet.
+            </span>
+          ) : null}
+        </span>
+      </label>
+      {!every ? (
+        <div className="ml-6 grid max-h-96 gap-3 overflow-y-auto">
+          {choices.map((field) => {
+            const id = `${prefix}-field-value-${field.key}`;
+            if (field.type === 'boolean') {
+              return (
+                <div key={field.key} role="group" aria-labelledby={id} className="grid gap-1">
+                  <span id={id} className="text-sm font-medium break-all">
+                    {webhookFieldText(field)}
+                  </span>
+                  <div className="flex flex-wrap gap-4">
+                    {[true, false].map((value) => {
+                      const pairId = webhookContactFieldValueId({ key: field.key, value });
+                      const boxId = `${id}-${value ? 'yes' : 'no'}`;
+                      return (
+                        <div key={pairId} className="flex items-center gap-2">
+                          <Checkbox
+                            id={boxId}
+                            checked={ticked.includes(pairId)}
+                            onChange={(e) => tick(pairId, e.target.checked)}
+                          />
+                          <Label htmlFor={boxId} className="font-normal">
+                            {webhookFieldValueText(value)}
+                          </Label>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            }
+            return (
+              <Field
+                key={field.key}
+                id={id}
+                label={webhookFieldText(field)}
+                description={
+                  field.type === 'number'
+                    ? 'Numbers, one a line.'
+                    : field.type === 'date'
+                      ? 'Dates written as YYYY-MM-DD, one a line.'
+                      : 'Values, one a line.'
+                }
+              >
+                {(aria) => (
+                  <Textarea
+                    {...aria}
+                    rows={2}
+                    autoComplete="off"
+                    value={lines[field.key] ?? ''}
+                    onChange={(e) => onLinesChange({ ...lines, [field.key]: e.target.value })}
+                  />
+                )}
+              </Field>
+            );
+          })}
+          {deleted.map((pair, index) => {
+            const pairId = webhookContactFieldValueId(pair);
+            const boxId = `${prefix}-field-value-deleted-${index}`;
+            return (
+              <div key={pairId} className="flex items-center gap-2">
+                <Checkbox
+                  id={boxId}
+                  checked={ticked.includes(pairId)}
+                  onChange={(e) => tick(pairId, e.target.checked)}
+                />
+                <Label htmlFor={boxId} className="font-normal break-all">
+                  {webhookFieldText({ key: pair.key, label: null })}:{' '}
+                  {webhookFieldValueText(pair.value)}
+                </Label>
+              </div>
+            );
+          })}
+        </div>
+      ) : null}
+    </fieldset>
+  );
+}
+
+/**
  * What the conversation tags' fieldset says for conversations' events (ADR-273) and satisfaction
  * survey answers (ADR-312).
  */
@@ -2984,6 +3145,8 @@ export function WebhookEndpointForm({
     surveyConversationTags: string[] | null;
     /** The contact tags of the added and changed contacts it takes (ADR-316); null: every one. */
     contactEventTags: string[] | null;
+    /** The field values of the added and changed contacts it takes (ADR-332); null: every one. */
+    contactEventFieldValues: WebhookContactFieldValue[] | null;
     /** The members it names (ADR-181), with whether they still take conversations; null: all. */
     assignees: WebhookEndpointAssignee[] | null;
     /** The contact tags it names (ADR-267); null for every conversation. */
@@ -3191,6 +3354,30 @@ export function WebhookEndpointForm({
   const [everyContactEventTag, setEveryContactEventTag] = useState(!endpoint?.contactEventTags);
   const [contactEventTagsText, setContactEventTagsText] = useState(
     endpoint?.contactEventTags?.join(', ') ?? '',
+  );
+  // The field values of added and changed contacts (ADR-332): lines for text, number and date
+  // fields, ticks for yes/no fields and for the values of fields deleted since.
+  const fieldTypeByKey = new Map(contactFieldChoices.map((f) => [f.key, f.type]));
+  const deletedFieldValues = (endpoint?.contactEventFieldValues ?? []).filter(
+    (pair) => !fieldTypeByKey.has(pair.key),
+  );
+  const [everyContactEventFieldValue, setEveryContactEventFieldValue] = useState(
+    !endpoint?.contactEventFieldValues,
+  );
+  const [fieldValueLines, setFieldValueLines] = useState<Record<string, string>>(() => {
+    const lines: Record<string, string> = {};
+    for (const pair of endpoint?.contactEventFieldValues ?? []) {
+      const type = fieldTypeByKey.get(pair.key);
+      if (type === undefined || type === 'boolean') continue;
+      const text = webhookFieldValueText(pair.value);
+      lines[pair.key] = lines[pair.key] ? `${lines[pair.key]}\n${text}` : text;
+    }
+    return lines;
+  });
+  const [fieldValuesTicked, setFieldValuesTicked] = useState<string[]>(() =>
+    (endpoint?.contactEventFieldValues ?? [])
+      .filter((pair) => fieldTypeByKey.get(pair.key) === 'boolean' || !fieldTypeByKey.has(pair.key))
+      .map(webhookContactFieldValueId),
   );
   const [everyAssignee, setEveryAssignee] = useState(!endpoint?.assignees);
   const [everyField, setEveryField] = useState(!endpoint?.contactFields);
@@ -3462,6 +3649,41 @@ export function WebhookEndpointForm({
                 .map((tag) => tag.trim())
                 .filter((tag) => tag !== '')
             : null;
+        // Every contact unless field values are given for added and changed contacts (ADR-332):
+        // the lines read by each field's type, the yes/no values ticked and the deleted fields'
+        // values kept.
+        let chosenContactEventFieldValues: WebhookContactFieldValue[] | null = null;
+        if (
+          (eventTypes.includes('contact.created') || eventTypes.includes('contact.updated')) &&
+          !everyContactEventFieldValue
+        ) {
+          chosenContactEventFieldValues = [];
+          for (const field of contactFieldChoices) {
+            if (field.type === 'boolean') {
+              for (const value of [true, false]) {
+                if (
+                  fieldValuesTicked.includes(webhookContactFieldValueId({ key: field.key, value }))
+                )
+                  chosenContactEventFieldValues.push({ key: field.key, value });
+              }
+              continue;
+            }
+            const read = webhookFieldValuesFromLines(field, fieldValueLines[field.key] ?? '');
+            if (!read.ok) {
+              setBusy(false);
+              setError({ code: 'validation_failed', message: read.message });
+              return;
+            }
+            for (const value of read.values) {
+              chosenContactEventFieldValues.push({ key: field.key, value });
+            }
+          }
+          for (const pair of deletedFieldValues) {
+            if (fieldValuesTicked.includes(webhookContactFieldValueId(pair))) {
+              chosenContactEventFieldValues.push(pair);
+            }
+          }
+        }
         // Every conversation's events unless the members ticked are chosen (ADR-181).
         const chosenAssignees =
           webhookTakesTeamEvents(eventTypes) && !everyAssignee ? assigneeIds : null;
@@ -3534,6 +3756,7 @@ export function WebhookEndpointForm({
           surveyContactTags: chosenSurveyContactTags,
           surveyConversationTags: chosenSurveyConversationTags,
           contactEventTags: chosenContactEventTags,
+          contactEventFieldValues: chosenContactEventFieldValues,
           assigneeIds: chosenAssignees,
           contactTags: chosenContactTags,
           conversationTags: chosenConversationTags,
@@ -3654,6 +3877,9 @@ export function WebhookEndpointForm({
               setSurveyConversationTagsText('');
               setEveryContactEventTag(true);
               setContactEventTagsText('');
+              setEveryContactEventFieldValue(true);
+              setFieldValueLines({});
+              setFieldValuesTicked([]);
               setEveryAssignee(true);
               setAssigneeIds([]);
               setEveryContactTag(true);
@@ -3961,6 +4187,19 @@ export function WebhookEndpointForm({
           onEveryChange={setEveryContactEventTag}
           text={contactEventTagsText}
           onTextChange={setContactEventTagsText}
+        />
+      ) : null}
+      {eventTypes.includes('contact.created') || eventTypes.includes('contact.updated') ? (
+        <FieldValueChoices
+          prefix={prefix}
+          choices={contactFieldChoices}
+          deleted={deletedFieldValues}
+          every={everyContactEventFieldValue}
+          onEveryChange={setEveryContactEventFieldValue}
+          lines={fieldValueLines}
+          onLinesChange={setFieldValueLines}
+          ticked={fieldValuesTicked}
+          onTickedChange={setFieldValuesTicked}
         />
       ) : null}
       {webhookTakesPipelineEvents(eventTypes) ? (

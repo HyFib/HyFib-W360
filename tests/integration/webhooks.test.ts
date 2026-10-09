@@ -4810,15 +4810,15 @@ describe('custom field filters (ADR-184)', () => {
     expect(grant?.can_update).toBe(true);
   });
 
-  it("offer the company's custom fields by label, to developers only", async () => {
+  it("offer the company's custom fields by label with their types, to developers only", async () => {
     const c = await fx.company();
     const owner = await fx.ctx(c, c.owner);
     await fieldOf(c, 'tier', 'Tier');
     await fieldOf(c, 'city', 'City');
     await fieldOf(await fx.company(), 'zone', 'Zone');
     expect(await webhooks().contactFieldChoices(owner)).toEqual([
-      { key: 'city', label: 'City' },
-      { key: 'tier', label: 'Tier' },
+      { key: 'city', label: 'City', type: 'text' },
+      { key: 'tier', label: 'Tier', type: 'text' },
     ]);
     for (const user of [c.agent, c.marketer]) {
       await expectAppError(webhooks().contactFieldChoices(await fx.ctx(c, user)), 'forbidden');
@@ -7071,6 +7071,236 @@ describe('contact event tag filters (ADR-316)', () => {
                 'UPDATE') AS can_update`,
     );
     expect(grant?.can_update).toBe(true);
+  });
+});
+
+describe('contact event field value filters (ADR-332)', () => {
+  it('are refused without contact.created or contact.updated, empty, over 50, of a field the company does not have or of another type; kept as the field reads them, kept by a change that leaves them out, a deleted field’s included, and cleared with both events; the database keeps them to the events and to pairs of a key and a value', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const fieldOf = (company: Company, key: string, label: string, type: string) =>
+      fx.query(
+        `INSERT INTO app.contact_fields (id, tenant_id, key, label, type) VALUES ($1, $2, $3, $4, $5)`,
+        [uuidv7(), company.tenant.id, key, label, type],
+      );
+    await fieldOf(c, 'tier', 'Tier', 'text');
+    await fieldOf(c, 'score', 'Score', 'number');
+    await fieldOf(c, 'vip', 'VIP', 'boolean');
+    await fieldOf(c, 'joined', 'Joined', 'date');
+    const url = 'https://hooks.example.com/in';
+    const refused = async (
+      fields: Record<string, unknown>,
+      message: RegExp,
+      path: string,
+      eventTypes = ['contact.updated'],
+    ) => {
+      const error = await expectAppError(
+        webhooks().create(owner, { url, eventTypes, ...fields }),
+        'validation_failed',
+        message,
+      );
+      expect(isAppError(error) && error.issues?.[0]?.path, JSON.stringify(fields)).toBe(path);
+    };
+    const gold = [{ key: 'tier', value: 'gold' }];
+    // Erased and merged contacts, and conversations' events, take no such list.
+    await refused(
+      { contactEventFieldValues: gold },
+      /field values of added and changed contacts only for an endpoint that receives Contact added or Contact changed/,
+      'contactEventFieldValues',
+      ['contact.erased', 'contact.merged', 'message.received'],
+    );
+    await refused(
+      { contactEventFieldValues: [] },
+      /at least one value, or take every contact/,
+      'contactEventFieldValues',
+    );
+    await refused(
+      {
+        contactEventFieldValues: Array.from({ length: 51 }, (_, i) => ({
+          key: 'tier',
+          value: `t${i}`,
+        })),
+      },
+      /at most 50/,
+      'contactEventFieldValues',
+    );
+    await refused(
+      { contactEventFieldValues: [...gold, { key: 'city', value: 'Chennai' }] },
+      /Choose fields of this company/,
+      'contactEventFieldValues.1.key',
+    );
+    // Another company's field is not this company's.
+    await fieldOf(await fx.company(), 'zone', 'Zone', 'text');
+    await refused(
+      { contactEventFieldValues: [{ key: 'zone', value: 'north' }] },
+      /Choose fields of this company/,
+      'contactEventFieldValues.0.key',
+    );
+    await refused(
+      { contactEventFieldValues: [{ key: 'score', value: '5' }] },
+      /Score takes a number/,
+      'contactEventFieldValues.0.value',
+    );
+    await refused(
+      { contactEventFieldValues: [{ key: 'tier', value: '  ' }] },
+      /Give a value of Tier to match/,
+      'contactEventFieldValues.0.value',
+    );
+    expect(await webhooks().list(owner)).toEqual([]);
+
+    const created = await webhooks().create(owner, {
+      url,
+      eventTypes: ['contact.created', 'contact.updated', 'contact.erased'],
+      contactEventFieldValues: [
+        { key: 'tier', value: ' Gold ' },
+        { key: 'tier', value: 'gold' },
+        { key: 'score', value: 5 },
+        { key: 'vip', value: true },
+        { key: 'joined', value: '2026-01-31' },
+      ],
+    });
+    const stored = [
+      { key: 'tier', value: 'Gold' },
+      { key: 'score', value: 5 },
+      { key: 'vip', value: true },
+      { key: 'joined', value: '2026-01-31' },
+    ];
+    const audits = async (action: string) =>
+      (
+        await fx.query<{ metadata: { contactEventFieldValues?: unknown } }>(
+          `SELECT metadata FROM app.audit_events
+            WHERE tenant_id = $1 AND action = $2 ORDER BY occurred_at, id`,
+          [c.tenant.id, action],
+        )
+      ).map((a) => a.metadata.contactEventFieldValues);
+    expect(await audits('webhook.endpoint_created')).toEqual([stored]);
+    const current = async () =>
+      (await webhooks().list(owner)).find((e) => e.id === created.id)?.contactEventFieldValues;
+    expect(await current()).toEqual(stored);
+    const change = (fields: Record<string, unknown>) =>
+      webhooks().update(owner, {
+        endpointId: created.id,
+        url,
+        description: '',
+        eventTypes: ['contact.created', 'contact.updated', 'contact.erased'],
+        ...fields,
+      });
+    await change({ description: 'kept' });
+    expect(await current()).toEqual(stored);
+    await change({ contactEventFieldValues: [{ key: 'tier', value: 'Silver' }] });
+    expect(await current()).toEqual([{ key: 'tier', value: 'Silver' }]);
+    // Either event keeps the list.
+    await change({ eventTypes: ['contact.created'] });
+    expect(await current()).toEqual([{ key: 'tier', value: 'Silver' }]);
+    await change({ eventTypes: ['contact.updated'], contactEventFieldValues: null });
+    expect(await current()).toBeNull();
+    await change({
+      eventTypes: ['contact.updated'],
+      contactEventFieldValues: [
+        { key: 'joined', value: '2026-01-31' },
+        { key: 'vip', value: false },
+      ],
+    });
+    // A deleted field's pair stays, and may be kept as it was, but not added again.
+    await fx.query(`DELETE FROM app.contact_fields WHERE tenant_id = $1 AND key = 'joined'`, [
+      c.tenant.id,
+    ]);
+    expect(await current()).toEqual([
+      { key: 'joined', value: '2026-01-31' },
+      { key: 'vip', value: false },
+    ]);
+    await change({
+      eventTypes: ['contact.updated'],
+      contactEventFieldValues: [
+        { key: 'vip', value: false },
+        { key: 'joined', value: '2026-01-31' },
+      ],
+    });
+    expect(await current()).toEqual([
+      { key: 'vip', value: false },
+      { key: 'joined', value: '2026-01-31' },
+    ]);
+    await expectAppError(
+      change({
+        eventTypes: ['contact.updated'],
+        contactEventFieldValues: [{ key: 'joined', value: '2026-02-01' }],
+      }),
+      'validation_failed',
+      /Choose fields of this company/,
+    );
+    expect(await audits('webhook.endpoint_updated')).toEqual([
+      stored,
+      [{ key: 'tier', value: 'Silver' }],
+      [{ key: 'tier', value: 'Silver' }],
+      undefined,
+      [
+        { key: 'joined', value: '2026-01-31' },
+        { key: 'vip', value: false },
+      ],
+      [
+        { key: 'vip', value: false },
+        { key: 'joined', value: '2026-01-31' },
+      ],
+    ]);
+    // The database refuses a list that is not an array of 1 to 50 pairs of a field's key and
+    // text of 1 to 500 characters without spaces around it, a number or a boolean…
+    const setInDatabase = (value: string) =>
+      fx.query(
+        `UPDATE app.webhook_endpoints SET contact_event_field_values = $2::jsonb WHERE id = $1`,
+        [created.id, value],
+      );
+    const pair = (value: unknown, key = 'tier') => JSON.stringify([{ key, value }]);
+    for (const bad of [
+      '{"tier": "gold"}',
+      '"gold"',
+      '[]',
+      JSON.stringify(Array.from({ length: 51 }, (_, i) => ({ key: 'tier', value: `t${i}` }))),
+      '["tier"]',
+      '[{"key": "tier"}]',
+      '[{"key": "tier", "value": "gold", "op": "eq"}]',
+      pair('gold', 'Tier'),
+      pair('gold', '1tier'),
+      '[{"key": 5, "value": "gold"}]',
+      pair(null),
+      pair(['gold']),
+      pair({ is: 'gold' }),
+      pair(''),
+      pair(' gold'),
+      pair('gold\n'),
+      pair('x'.repeat(501)),
+    ]) {
+      await expect(setInDatabase(bad), bad).rejects.toThrow(
+        /webhook_endpoints_contact_event_field_values/,
+      );
+    }
+    // Pairs of any field, text of 500 characters, numbers and booleans are kept.
+    const kept = [
+      { key: 'tier', value: 'x'.repeat(500) },
+      { key: 'score', value: 2.5 },
+      { key: 'vip', value: true },
+      { key: 'city', value: 'São Paulo' },
+    ];
+    await setInDatabase(JSON.stringify(kept));
+    expect(await current()).toEqual(kept);
+    // …leaving both events clears the list…
+    await change({ eventTypes: ['contact.erased'] });
+    expect(await current()).toBeNull();
+    await expectAppError(
+      change({ eventTypes: ['contact.erased'], contactEventFieldValues: gold }),
+      'validation_failed',
+      /field values of added and changed contacts only/,
+    );
+    // …and the database refuses it for an endpoint that takes neither.
+    await expect(setInDatabase(JSON.stringify(gold))).rejects.toThrow(
+      /webhook_endpoints_contact_event_field_values/,
+    );
+    const [grants] = await fx.query<{ app_updates: boolean; definer_reads_source: boolean }>(
+      `SELECT has_column_privilege('w360_app', 'app.webhook_endpoints',
+                'contact_event_field_values', 'UPDATE') AS app_updates,
+              has_column_privilege('w360_definer', 'app.contacts', 'source', 'SELECT')
+                AS definer_reads_source`,
+    );
+    expect(grants).toEqual({ app_updates: true, definer_reads_source: true });
   });
 });
 

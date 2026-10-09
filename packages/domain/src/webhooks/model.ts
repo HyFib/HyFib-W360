@@ -1,6 +1,7 @@
 import type {
   AutomationEndReason,
   ChannelStatus,
+  ContactFieldType,
   ContactSource,
   WebhookCampaignStatus,
   WebhookConsentChange,
@@ -25,6 +26,7 @@ import type {
   WebhookSurveyScore,
   WebhookTemplateStatus,
 } from '@w360/db';
+import { coerceFieldValue, type AttributeValue } from '../contacts/fields';
 
 export type {
   AutomationEndReason,
@@ -301,10 +303,14 @@ export function webhookTakesFieldChanges(
   return eventTypes.includes('contact.updated') && (parts === null || parts.includes('fields'));
 }
 
-/** A custom field of the company, which an endpoint can choose to take the changes of (ADR-184). */
+/**
+ * A custom field of the company, which an endpoint can choose to take the changes of (ADR-184) or
+ * name values of (ADR-332, read by its type).
+ */
 export interface WebhookFieldChoice {
   key: string;
   label: string;
+  type: ContactFieldType;
 }
 
 /** A custom field an endpoint takes the changes of (ADR-184), as stored. */
@@ -317,6 +323,65 @@ export interface WebhookEndpointField {
 /** A field as Settings → Webhooks lists it: its label and key. */
 export const webhookFieldText = (field: WebhookEndpointField): string =>
   field.label === null ? `${field.key} (deleted)` : `${field.label} (${field.key})`;
+
+/**
+ * A custom field value whose added and changed contacts an endpoint takes (ADR-332): a field's key
+ * and a value of its type, as contacts keep them (text, a number, a date as YYYY-MM-DD, or true or
+ * false for yes/no).
+ */
+export interface WebhookContactFieldValue {
+  key: string;
+  value: AttributeValue;
+}
+
+/**
+ * What tells a pair of a field and a value apart from the others (ADR-332): text compared whatever
+ * its case, as the database compares it with the contacts' values, and numbers as numbers.
+ */
+export const webhookContactFieldValueId = (pair: WebhookContactFieldValue): string =>
+  `${pair.key}:${typeof pair.value}:${
+    typeof pair.value === 'string' ? pair.value.toLowerCase() : String(pair.value)
+  }`;
+
+/** A value as Settings → Webhooks shows it: yes or no for true and false, else as kept. */
+export const webhookFieldValueText = (value: AttributeValue): string =>
+  typeof value === 'boolean' ? (value ? 'yes' : 'no') : String(value);
+
+/**
+ * The field values an endpoint takes the added and changed contacts of, as Settings → Webhooks
+ * names them (ADR-332): each field by its label, or by its key and "(deleted)" for one deleted
+ * since, with its values in the order given.
+ */
+export function webhookContactEventFieldValuesText(
+  pairs: readonly WebhookContactFieldValue[],
+  labels: ReadonlyMap<string, string>,
+): string {
+  const byKey = new Map<string, string[]>();
+  for (const { key, value } of pairs) {
+    byKey.set(key, [...(byKey.get(key) ?? []), webhookFieldValueText(value)]);
+  }
+  return [...byKey]
+    .map(([key, texts]) => `${labels.get(key) ?? `${key} (deleted)`}: ${texts.join(', ')}`)
+    .join('; ');
+}
+
+/**
+ * The values Settings → Webhooks reads for a text, number or date field (ADR-332): one a line,
+ * each read as a member's entry of the field is (`coerceFieldValue`, which trims it, a carriage
+ * return included), blank lines skipped. Yes/no fields are ticked instead.
+ */
+export function webhookFieldValuesFromLines(
+  field: { label: string; type: ContactFieldType },
+  text: string,
+): { ok: true; values: AttributeValue[] } | { ok: false; message: string } {
+  const values: AttributeValue[] = [];
+  for (const line of text.split('\n')) {
+    const read = coerceFieldValue(field, line);
+    if (!read.ok) return read;
+    if (read.value !== null) values.push(read.value);
+  }
+  return { ok: true, values };
+}
 
 /** How Settings names each part an endpoint can choose (ADR-123). */
 export const WEBHOOK_CONTACT_PART_LABELS: Record<WebhookContactPart, string> = {
@@ -927,6 +992,8 @@ export const WEBHOOK_LIMITS = {
   surveyConversationTags: 50,
   /** The contact tags whose added and changed contacts an endpoint can choose (ADR-316). */
   contactEventTags: 50,
+  /** The custom field values whose added and changed contacts an endpoint can choose (ADR-332). */
+  contactEventFieldValues: 50,
   /** The API keys whose automation runs an endpoint can choose (ADR-319): a company's most keys. */
   runApiKeys: 20,
   /** The API keys whose sent messages' statuses an endpoint can choose (ADR-320), as for runs. */

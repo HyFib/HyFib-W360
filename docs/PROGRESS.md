@@ -1,5 +1,62 @@
 # Progress
 
+## 2026-10-09 — Field value filters for added and changed contacts (P5-09, H-014, ADR-332)
+
+Status: **Implemented; its database tests run in CI only.** An endpoint taking `contact.created` or
+`contact.updated` could not narrow them by a custom field's value. The local PostgreSQL is
+unavailable, so the migration and the integration tests below were written but not run here;
+migration 0253 passed the pglast parse check (syntax only), and so did the body of its SQL
+function. The jsonpath expressions in its check are checked by PostgreSQL alone, in CI.
+
+### Completed
+
+- **Database:** migration 0253 (`contact_event_field_values` on `app.webhook_endpoints` with its
+  check and update grant; `app.webhook_contact_values_match` for the runtime and definer roles; the
+  definer role's read of a contact's source; `app.capture_contact_webhook_event` and
+  `app.deliver_contact_webhook_tag` replaced with the same signatures, matching the contact's values
+  at each write and, for a change, the listed fields its transaction changed; a later write of the
+  transaction that added a contact giving its `contact.created` to the endpoints naming values it
+  has then).
+- **Domain:** `webhookContactEventFieldValuesSchema`, `webhookContactEventFieldValuesFor` and
+  `webhookContactEventFieldValuesChecked` (each value a list adds read by its field's type, a held
+  pair kept as it was) in `webhooks/service.ts`; `WebhookContactFieldValue`,
+  `webhookContactFieldValueId`, `webhookFieldValueText`, `webhookContactEventFieldValuesText` and
+  `webhookFieldValuesFromLines` in `webhooks/model.ts`, and the field choices' types; the API's
+  `contactEventFieldValues` on create, change and every endpoint it answers; the OpenAPI entries;
+  the export spec's column.
+- **Web:** Settings → Webhooks "Field values of added and changed contacts" (values one a line for
+  text, number and date fields, yes/no ticked, a deleted field's values listed until unticked) and
+  the endpoint's line in the list.
+- **Tests:** unit (7 new in `webhooks/webhooks.test.ts`: the list's rules, keeping and clearing,
+  reading by type, refusals, held pairs, telling pairs apart and naming them, Settings' lines; 1 new
+  in `api/api.test.ts`: the API schemas and OpenAPI entries; 3 changed for the wider PATCH message,
+  the endpoint's properties and the contact event descriptions); integration (4 new in
+  `webhook-events.test.ts`: capture by values and by changes of listed fields, either order of a
+  transaction's writes, contact.created with values given in its transaction by its source and
+  tags, a merge and an erasure as the definer role; 1 new in `webhooks.test.ts`: refusals, keeping,
+  replacing and clearing, a deleted field's pair, the audits, each clause of the database check and
+  the grants; 1 new in `api-webhook-endpoints.test.ts`; 2 changed: the field choices' types and the
+  API's endpoint with the new property) and the function's grants in the isolation suite. Written
+  for CI; the integration tests were not run here. No e2e test.
+- **Docs:** ADR-332; ARCHITECTURE; SECURITY; THREAT-MODEL T298; DEPLOYMENT; RUNBOOKS; BACKLOG
+  P5-09; feature matrix W-138, W-139 and H-014.
+- **Mutation checks:** 30/32 deliberate regressions caught on the unit-tested parts. Of the two
+  left, the Settings form's rule refusing values for an endpoint without either event is covered by
+  the integration test of the refusals (CI only), and splitting Settings' lines on carriage returns
+  too was equivalent, as each line is trimmed, so the code now splits on newlines alone. The
+  capture's matching needs the database, so its regressions are left to the integration tests,
+  which run in CI.
+
+### Test commands and results (local, 2026-10-09)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 140 files, 1391 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
 ## 2026-10-09 — Pages of companies on the operations console (P5-10, H-034, ADR-331)
 
 Status: **Implemented; its browser test runs in CI only.** The console's Overview listed every

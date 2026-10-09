@@ -1247,9 +1247,14 @@ verification, app review, Embedded Signup configuration).
   **[Times to the microsecond in every body built; its database tests run only in CI]** (ADR-330, no
   migration: `createdAtExact` gives the event's time in UTC with six fractional digits, and
   `createdAt` is its millisecond cut).
-  Remaining: filters for other event types and on a message's or contact's values (such as a field's
-  value), other authentication (headers computed per delivery, other OAuth grants), mutual TLS,
-  fixed egress addresses, events for store orders, a sequence number across events, load tests.
+  **[Field value filters for added and changed contacts built; their database tests run only in
+  CI]** (ADR-332, migration 0253: an endpoint takes the `contact.created` and `contact.updated` of
+  contacts with chosen custom field values, read by each field's type, and every change of those
+  fields).
+  Remaining: filters for other event types and on a message's values, comparisons of field values
+  other than equality, other authentication (headers computed per delivery, other OAuth grants),
+  mutual TLS, fixed egress addresses, events for store orders, a sequence number across events, load
+  tests.
 - **P5-10 Platform ops screens** **[built, locally verified with test data only]** (ADR-054):
   `/platform/ops` with Overview, Onboarding (failed and abandoned signups, failed or stuck number
   setups, new companies without a number), Integrations (current failures with host-only labels,

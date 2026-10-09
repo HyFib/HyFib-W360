@@ -303,6 +303,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       surveyContactTags: null,
       surveyConversationTags: null,
       contactEventTags: null,
+      contactEventFieldValues: null,
       assigneeIds: null,
       contactTags: null,
       conversationTags: null,
@@ -2963,6 +2964,124 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     ).toMatchObject({ contactEventTags: ['vip'] });
     expect(await api().update(key.ctx, id, { contactEventTags: null })).toMatchObject({
       contactEventTags: null,
+    });
+  });
+
+  it('choose the field values of the added and changed contacts an endpoint receives, read by the fields’ types, kept by changes that leave them out and cleared with both events (ADR-332)', async () => {
+    const c = await fx.company();
+    const key = await apiKey(c, ['webhooks.manage']);
+    const fieldOf = (company: Company, fieldKey: string, label: string, type: string) =>
+      fx.query(
+        `INSERT INTO app.contact_fields (id, tenant_id, key, label, type) VALUES ($1, $2, $3, $4, $5)`,
+        [uuidv7(), company.tenant.id, fieldKey, label, type],
+      );
+    await fieldOf(c, 'tier', 'Tier', 'text');
+    await fieldOf(c, 'score', 'Score', 'number');
+    await fieldOf(await fx.company(), 'zone', 'Zone', 'text');
+    const issueOf = async (promise: Promise<unknown>) => {
+      const error = await expectAppError(promise, 'validation_failed');
+      return isAppError(error) ? error.issues?.[0] : undefined;
+    };
+    // The list needs one of the events, at least one value, the company's fields and their types.
+    const gold = [{ key: 'tier', value: 'gold' }];
+    const refusals = [
+      [
+        ['contact.erased', 'contact.merged'],
+        { contactEventFieldValues: gold },
+        'contactEventFieldValues',
+      ],
+      [['contact.updated'], { contactEventFieldValues: [] }, 'contactEventFieldValues'],
+      [
+        ['contact.updated'],
+        { contactEventFieldValues: [...gold, { key: 'zone', value: 'north' }] },
+        'contactEventFieldValues.1.key',
+      ],
+      [
+        ['contact.created'],
+        { contactEventFieldValues: [{ key: 'score', value: 'five' }] },
+        'contactEventFieldValues.0.value',
+      ],
+      [
+        ['contact.created'],
+        { contactEventFieldValues: [{ key: 'tier', value: null }] },
+        'contactEventFieldValues.0.value',
+      ],
+    ] as const;
+    for (const [index, [events, lists, path]] of refusals.entries()) {
+      expect(
+        await issueOf(
+          api().create(
+            key.ctx,
+            { url: receiverUrl(), events, ...lists },
+            idem(`contact-event-field-values-bad-${index}`, JSON.stringify(lists)),
+          ),
+        ),
+        JSON.stringify(lists),
+      ).toMatchObject({ path });
+    }
+    expect((await api().list(key.ctx)).data).toEqual([]);
+
+    const created = await addThroughApi(key.ctx, 'contact-event-field-values-1', {
+      url: receiverUrl(),
+      events: ['contact.created', 'contact.updated'],
+      contactEventFieldValues: [
+        { key: 'tier', value: 'Gold ' },
+        { key: 'tier', value: 'GOLD' },
+        { key: 'score', value: 5 },
+      ],
+    });
+    const id = created.body.data.id;
+    const stored = [
+      { key: 'tier', value: 'Gold' },
+      { key: 'score', value: 5 },
+    ];
+    expect(created.body.data).toMatchObject({
+      contactEventFieldValues: stored,
+      contactEventTags: null,
+    });
+    expect(await api().get(key.ctx, id)).toMatchObject({ contactEventFieldValues: stored });
+    const audits = async (action: string) =>
+      (
+        await fx.query<{ metadata: { contactEventFieldValues?: unknown } }>(
+          `SELECT metadata FROM app.audit_events
+            WHERE tenant_id = $1 AND subject_id = $2 AND action = $3 ORDER BY occurred_at, id`,
+          [c.tenant.id, id, action],
+        )
+      ).map((a) => a.metadata.contactEventFieldValues);
+    expect(await audits('webhook.endpoint_created')).toEqual([stored]);
+    expect(await api().update(key.ctx, id, { description: 'Gold sync' })).toMatchObject({
+      contactEventFieldValues: stored,
+    });
+    // A list alone is a change.
+    expect(
+      await api().update(key.ctx, id, { contactEventFieldValues: [{ key: 'score', value: 7 }] }),
+    ).toMatchObject({ contactEventFieldValues: [{ key: 'score', value: 7 }] });
+    // Either event keeps it.
+    expect(await api().update(key.ctx, id, { events: ['contact.updated'] })).toMatchObject({
+      events: ['contact.updated'],
+      contactEventFieldValues: [{ key: 'score', value: 7 }],
+    });
+    expect(await audits('webhook.endpoint_updated')).toEqual([
+      stored,
+      [{ key: 'score', value: 7 }],
+      [{ key: 'score', value: 7 }],
+    ]);
+    // Neither event clears it, and then refuses it.
+    expect(await api().update(key.ctx, id, { events: ['contact.erased'] })).toMatchObject({
+      events: ['contact.erased'],
+      contactEventFieldValues: null,
+    });
+    expect(
+      await issueOf(api().update(key.ctx, id, { contactEventFieldValues: gold })),
+    ).toMatchObject({ path: 'contactEventFieldValues' });
+    expect(
+      await api().update(key.ctx, id, {
+        events: ['contact.created'],
+        contactEventFieldValues: gold,
+      }),
+    ).toMatchObject({ contactEventFieldValues: gold });
+    expect(await api().update(key.ctx, id, { contactEventFieldValues: null })).toMatchObject({
+      contactEventFieldValues: null,
     });
   });
 

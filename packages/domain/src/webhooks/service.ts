@@ -40,7 +40,7 @@ import { recordAudit, type RequestMeta } from '../audit';
 import { assertCan, type TenantContext } from '../authz/context';
 import { assertRecentSignIn } from '../authz/step-up';
 import { CONTACT_FIELD_KEY_RE } from '../contacts/field-definitions';
-import { normalizeTag } from '../contacts/fields';
+import { apiFieldValue, normalizeTag } from '../contacts/fields';
 import { crmMembers, memberRefs } from '../crm/common';
 import { INBOX_WORKER_ROLES } from '../inbox/routing';
 import { parseInput } from '../validation';
@@ -71,6 +71,7 @@ import {
   WEBHOOK_REPLAY_PERIODS,
   WEBHOOK_TEMPLATE_STATUSES,
   WEBHOOK_UNATTEMPTED_ERRORS,
+  webhookContactFieldValueId,
   webhookHost,
   webhookTakesAutomationRuns,
   webhookTakesCampaignEvents,
@@ -99,6 +100,7 @@ import {
   type WebhookEndpointCampaign,
   type WebhookEndpointChannel,
   type WebhookEndpointField,
+  type WebhookContactFieldValue,
   type WebhookFieldChoice,
   type WebhookEndpointOAuth,
   type WebhookEndpointOwner,
@@ -2465,6 +2467,112 @@ export function webhookContactEventTagsFor(
 }
 
 /**
+ * The custom field values whose `contact.created` and `contact.updated` an endpoint takes
+ * (ADR-332): 1 to 50 pairs of a field's key (as GET /contact-fields lists them) and a value, text, a
+ * number or true or false, read by the field's type when the list adds them
+ * (`webhookContactEventFieldValuesChecked`). A change is taken when the contact has one of the
+ * values, or when it changes one of the fields; null takes every contact.
+ */
+export const webhookContactEventFieldValuesSchema = z
+  .array(
+    z
+      .object(
+        {
+          key: z
+            .string({ error: 'Choose fields from the list.' })
+            .regex(CONTACT_FIELD_KEY_RE, 'Choose fields from the list.'),
+          value: z.union([z.string(), z.number(), z.boolean()], {
+            error: 'Give text, a number, or true or false.',
+          }),
+        },
+        { error: 'Give each value with its field’s key.' },
+      )
+      .strict(),
+  )
+  .min(1, 'Give at least one value, or take every contact.')
+  .max(
+    WEBHOOK_LIMITS.contactEventFieldValues,
+    `Give at most ${WEBHOOK_LIMITS.contactEventFieldValues} values.`,
+  )
+  .nullable();
+
+export const WEBHOOK_CONTACT_EVENT_FIELD_VALUES_NEED_THE_EVENTS =
+  'Choose the field values of added and changed contacts only for an endpoint that receives Contact added or Contact changed.';
+
+/**
+ * The field values of added and changed contacts an endpoint keeps after it is added or changed:
+ * every contact (null) unless it takes `contact.created` or `contact.updated`; then those given, or
+ * else the ones it had.
+ */
+export function webhookContactEventFieldValuesFor(
+  eventTypes: readonly WebhookEventType[],
+  given: readonly WebhookContactFieldValue[] | null | undefined,
+  current: readonly WebhookContactFieldValue[] | null,
+): WebhookContactFieldValue[] | null {
+  if (!eventTypes.includes('contact.created') && !eventTypes.includes('contact.updated')) {
+    return null;
+  }
+  const kept = given === undefined ? current : given;
+  return kept ? kept.map((pair) => ({ ...pair })) : null;
+}
+
+/**
+ * The field values an endpoint keeps, read as the API reads a contact's values (ADR-332,
+ * `apiFieldValue`): each pair the list adds names one of the company's fields and a value of its
+ * type (text trimmed, up to 500 characters; a number as members type them; a real date as
+ * YYYY-MM-DD; true or false), and an empty one is refused. A pair the endpoint held stays as it
+ * was, its field deleted since or not. Each pair once, text compared whatever its case, in the order
+ * given. `tx` is in the company's scope.
+ */
+export async function webhookContactEventFieldValuesChecked(
+  tx: Tx,
+  tenantId: string,
+  pairs: readonly WebhookContactFieldValue[] | null,
+  held: readonly WebhookContactFieldValue[] | null = null,
+): Promise<WebhookContactFieldValue[] | null> {
+  if (pairs === null) return null;
+  const heldIds = new Set((held ?? []).map(webhookContactFieldValueId));
+  const added = [
+    ...new Set(pairs.filter((p) => !heldIds.has(webhookContactFieldValueId(p))).map((p) => p.key)),
+  ];
+  const fields =
+    added.length === 0
+      ? []
+      : await tx
+          .select({ key: contactFields.key, label: contactFields.label, type: contactFields.type })
+          .from(contactFields)
+          .where(and(eq(contactFields.tenantId, tenantId), inArray(contactFields.key, added)));
+  const fieldByKey = new Map(fields.map((f) => [f.key, f]));
+  const refused = (path: string, message: string) =>
+    new AppError('validation_failed', message, { issues: [{ path, message }] });
+  const kept: WebhookContactFieldValue[] = [];
+  const seen = new Set<string>();
+  pairs.forEach((pair, index) => {
+    let value = pair.value;
+    if (!heldIds.has(webhookContactFieldValueId(pair))) {
+      const field = fieldByKey.get(pair.key);
+      if (!field) {
+        throw refused(`contactEventFieldValues.${index}.key`, WEBHOOK_FIELDS_NOT_FOUND);
+      }
+      const read = apiFieldValue(field, pair.value);
+      if (!read.ok) throw refused(`contactEventFieldValues.${index}.value`, read.message);
+      if (read.value === null) {
+        throw refused(
+          `contactEventFieldValues.${index}.value`,
+          `Give a value of ${field.label} to match.`,
+        );
+      }
+      value = read.value;
+    }
+    const id = webhookContactFieldValueId({ key: pair.key, value });
+    if (seen.has(id)) return;
+    seen.add(id);
+    kept.push({ key: pair.key, value });
+  });
+  return kept;
+}
+
+/**
  * The contact tags whose conversations' message and conversation events an endpoint takes
  * (ADR-267), as contacts carry them (`normalizeTag`), each once; null takes every conversation's.
  */
@@ -2747,6 +2855,11 @@ const endpointFields = z.object({
    * contact, ADR-316); left out, they stay.
    */
   contactEventTags: webhookContactEventTagsSchema.optional(),
+  /**
+   * Given, the custom field values whose `contact.created` and `contact.updated` it takes (null:
+   * every contact, ADR-332); left out, they stay.
+   */
+  contactEventFieldValues: webhookContactEventFieldValuesSchema.optional(),
   /**
    * Given, the members whose assigned conversations' events it takes (null: every conversation's,
    * ADR-181); left out, they stay.
@@ -3065,6 +3178,17 @@ const surveyConversationTagsNeedTheEvent = {
     message: WEBHOOK_SURVEY_CONVERSATION_TAGS_NEED_THE_EVENT,
   },
 };
+/** Field values of added and changed contacts are chosen only for an endpoint taking them (ADR-332). */
+const contactEventFieldValuesNeedTheEvents = {
+  check: (data: { eventTypes: WebhookEventType[]; contactEventFieldValues?: unknown }) =>
+    !data.contactEventFieldValues ||
+    data.eventTypes.includes('contact.created') ||
+    data.eventTypes.includes('contact.updated'),
+  options: {
+    path: ['contactEventFieldValues'],
+    message: WEBHOOK_CONTACT_EVENT_FIELD_VALUES_NEED_THE_EVENTS,
+  },
+};
 /** Tags of added and changed contacts are chosen only for an endpoint that takes them (ADR-316). */
 const contactEventTagsNeedTheEvents = {
   check: (data: { eventTypes: WebhookEventType[]; contactEventTags?: unknown }) =>
@@ -3140,6 +3264,7 @@ const endpointSchema = endpointFields
   .refine(surveyContactTagsNeedTheEvent.check, surveyContactTagsNeedTheEvent.options)
   .refine(surveyConversationTagsNeedTheEvent.check, surveyConversationTagsNeedTheEvent.options)
   .refine(contactEventTagsNeedTheEvents.check, contactEventTagsNeedTheEvents.options)
+  .refine(contactEventFieldValuesNeedTheEvents.check, contactEventFieldValuesNeedTheEvents.options)
   .refine(assigneesNeedTheEvents.check, assigneesNeedTheEvents.options)
   .refine(contactTagsNeedTheEvents.check, contactTagsNeedTheEvents.options)
   .refine(conversationTagsNeedTheEvents.check, conversationTagsNeedTheEvents.options);
@@ -3194,6 +3319,7 @@ const updateSchema = endpointFields
   .refine(surveyContactTagsNeedTheEvent.check, surveyContactTagsNeedTheEvent.options)
   .refine(surveyConversationTagsNeedTheEvent.check, surveyConversationTagsNeedTheEvent.options)
   .refine(contactEventTagsNeedTheEvents.check, contactEventTagsNeedTheEvents.options)
+  .refine(contactEventFieldValuesNeedTheEvents.check, contactEventFieldValuesNeedTheEvents.options)
   .refine(assigneesNeedTheEvents.check, assigneesNeedTheEvents.options)
   .refine(contactTagsNeedTheEvents.check, contactTagsNeedTheEvents.options)
   .refine(conversationTagsNeedTheEvents.check, conversationTagsNeedTheEvents.options);
@@ -3404,6 +3530,11 @@ export interface WebhookEndpointView {
    * null takes every contact.
    */
   contactEventTags: string[] | null;
+  /**
+   * The custom field values whose `contact.created` and `contact.updated` it takes (ADR-332), as
+   * stored; null takes every contact.
+   */
+  contactEventFieldValues: WebhookContactFieldValue[] | null;
   /**
    * The members whose assigned conversations' events it takes (ADR-181), as stored, named, with
    * whether conversations can still be assigned to them; null takes every conversation's.
@@ -3684,6 +3815,7 @@ export async function lockWebhookEndpoint(
       surveyContactTags: webhookEndpoints.surveyContactTags,
       surveyConversationTags: webhookEndpoints.surveyConversationTags,
       contactEventTags: webhookEndpoints.contactEventTags,
+      contactEventFieldValues: webhookEndpoints.contactEventFieldValues,
       assigneeIds: webhookEndpoints.assigneeIds,
       contactTags: webhookEndpoints.contactTags,
       conversationTags: webhookEndpoints.conversationTags,
@@ -3773,6 +3905,7 @@ export async function insertWebhookEndpoint(
     surveyContactTags: string[] | null;
     surveyConversationTags: string[] | null;
     contactEventTags: string[] | null;
+    contactEventFieldValues: WebhookContactFieldValue[] | null;
     assigneeIds: string[] | null;
     contactTags: string[] | null;
     conversationTags: string[] | null;
@@ -3851,6 +3984,7 @@ export async function insertWebhookEndpoint(
     surveyContactTags: input.surveyContactTags,
     surveyConversationTags: input.surveyConversationTags,
     contactEventTags: input.contactEventTags,
+    contactEventFieldValues: input.contactEventFieldValues,
     assigneeIds: input.assigneeIds,
     contactTags: input.contactTags,
     conversationTags: input.conversationTags,
@@ -4278,6 +4412,7 @@ export function createWebhooksService(deps: {
               surveyContactTags: webhookEndpoints.surveyContactTags,
               surveyConversationTags: webhookEndpoints.surveyConversationTags,
               contactEventTags: webhookEndpoints.contactEventTags,
+              contactEventFieldValues: webhookEndpoints.contactEventFieldValues,
               assigneeIds: webhookEndpoints.assigneeIds,
               contactTags: webhookEndpoints.contactTags,
               conversationTags: webhookEndpoints.conversationTags,
@@ -4998,8 +5133,8 @@ export function createWebhooksService(deps: {
     },
 
     /**
-     * The custom fields an endpoint can choose to take the changes of (ADR-184): every field of the
-     * company, by label.
+     * The custom fields an endpoint can choose to take the changes of (ADR-184) or name values of
+     * (ADR-332): every field of the company, by label, with its type.
      */
     async contactFieldChoices(ctx: TenantContext): Promise<WebhookFieldChoice[]> {
       assertCan(ctx, 'developer.manage');
@@ -5007,7 +5142,11 @@ export function createWebhooksService(deps: {
         ctx.scope,
         (tx) =>
           tx
-            .select({ key: contactFields.key, label: contactFields.label })
+            .select({
+              key: contactFields.key,
+              label: contactFields.label,
+              type: contactFields.type,
+            })
             .from(contactFields)
             .where(eq(contactFields.tenantId, ctx.tenant.id))
             .orderBy(asc(contactFields.label), asc(contactFields.key)),
@@ -5204,6 +5343,12 @@ export function createWebhooksService(deps: {
           data.contactEventTags,
           null,
         );
+        // Each value read by its field's type, so the database compares like with like (ADR-332).
+        const contactEventFieldValues = await webhookContactEventFieldValuesChecked(
+          tx,
+          ctx.tenant.id,
+          webhookContactEventFieldValuesFor(data.eventTypes, data.contactEventFieldValues, null),
+        );
         const assigneeIds = webhookAssigneeIdsFor(data.eventTypes, data.assigneeIds, null);
         await assertWebhookAssignees(tx, ctx.tenant.id, assigneeIds);
         const contactTags = webhookContactTagsFor(data.eventTypes, data.contactTags, null);
@@ -5274,6 +5419,7 @@ export function createWebhooksService(deps: {
           surveyContactTags,
           surveyConversationTags,
           contactEventTags,
+          contactEventFieldValues,
           assigneeIds,
           contactTags,
           conversationTags,
@@ -5340,6 +5486,7 @@ export function createWebhooksService(deps: {
               ...(surveyContactTags ? { surveyContactTags } : {}),
               ...(surveyConversationTags ? { surveyConversationTags } : {}),
               ...(contactEventTags ? { contactEventTags } : {}),
+              ...(contactEventFieldValues ? { contactEventFieldValues } : {}),
               ...(assigneeIds ? { assigneeIds } : {}),
               ...(contactTags ? { contactTags } : {}),
               ...(conversationTags ? { conversationTags } : {}),
@@ -5720,6 +5867,17 @@ export function createWebhooksService(deps: {
           data.contactEventTags,
           endpoint.contactEventTags,
         );
+        // Each value the list adds read by its field's type; those it held stay (ADR-332).
+        const contactEventFieldValues = await webhookContactEventFieldValuesChecked(
+          tx,
+          ctx.tenant.id,
+          webhookContactEventFieldValuesFor(
+            data.eventTypes,
+            data.contactEventFieldValues,
+            endpoint.contactEventFieldValues,
+          ),
+          endpoint.contactEventFieldValues,
+        );
         const assigneeIds = webhookAssigneeIdsFor(
           data.eventTypes,
           data.assigneeIds,
@@ -5804,6 +5962,7 @@ export function createWebhooksService(deps: {
             surveyContactTags,
             surveyConversationTags,
             contactEventTags,
+            contactEventFieldValues,
             assigneeIds,
             contactTags,
             conversationTags,
@@ -5881,6 +6040,7 @@ export function createWebhooksService(deps: {
               ...(surveyContactTags ? { surveyContactTags } : {}),
               ...(surveyConversationTags ? { surveyConversationTags } : {}),
               ...(contactEventTags ? { contactEventTags } : {}),
+              ...(contactEventFieldValues ? { contactEventFieldValues } : {}),
               ...(assigneeIds ? { assigneeIds } : {}),
               ...(contactTags ? { contactTags } : {}),
               ...(conversationTags ? { conversationTags } : {}),

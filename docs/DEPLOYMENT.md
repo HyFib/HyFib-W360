@@ -1235,6 +1235,17 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    keep the list, and its API refuses `runStepNodeTypes` (422) and leaves it out of the endpoints it
    answers.
 
+   Migration 0253 (ADR-332) adds `contact_event_field_values` to `app.webhook_endpoints` with a
+   check validated by reading the table, creates `app.webhook_contact_values_match` for the runtime
+   and definer roles, grants the definer role the read of a contact's source, and replaces
+   `app.capture_contact_webhook_event` and `app.deliver_contact_webhook_tag` with the same
+   signatures (keeping 0239's filters); every endpoint starts without a list. Web servers of this
+   release need it, as their reads of endpoints name the column; workers do not read it. Web
+   servers from before it neither show nor change the column: until the web rollout ends, an old
+   server's change that drops both contact events from an endpoint with a list fails on the check,
+   its other changes keep the list, and its API refuses `contactEventFieldValues` (422) and leaves
+   it out of the endpoints it answers.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back
