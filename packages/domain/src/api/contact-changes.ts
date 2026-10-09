@@ -14,7 +14,12 @@ import {
   type Database,
 } from '@w360/db';
 import { parseInput } from '../validation';
-import { openChangeCursor, sealChangeCursor, type ChangePosition } from './change-cursors';
+import {
+  openChangePass,
+  sealChangeCursor,
+  type ChangePass,
+  type ChangePosition,
+} from './change-cursors';
 import { apiContactColumns, toApiContact, type ApiContact } from './contact-view';
 import { assertScope, type ApiContext } from './context';
 import { API_LIMITS } from './model';
@@ -33,8 +38,11 @@ import { API_LIMITS } from './model';
  *
  * Each change keeps the parts of the contact its transaction changed, and the compaction keeps on
  * the change that replaced others where each of their parts last changed (migration 0251,
- * ADR-329), so each contact read names exactly the parts changed after the reader's cursor
- * (`changes`), whatever was compacted since.
+ * ADR-329). A page passes changes of contacts it does not read, those changed again later, so what
+ * changed is counted from where the reader's pass through the feed began, not from the page's
+ * place: the cursor seals both, and a pass ends, and the next begins, where a page reads all there
+ * is (`hasMore` false). Every contact a pass reads is then named with every part changed since the
+ * pass began, whatever was compacted since; a part can be named again, never missed.
  */
 
 export const apiContactChangesQuerySchema = z
@@ -63,9 +71,10 @@ export interface ApiContactChange {
   /** The contact as it is now; null once erased. */
   contact: ApiContact | null;
   /**
-   * What changed since the reader's cursor (ADR-329), sorted, once each: `erased` alone once the
-   * contact is erased, `added` alone when it was added since, else the parts that changed; null
-   * when some of those changes were recorded before HyFib recorded what changed.
+   * What changed since the reader's pass through the feed began (ADR-329), sorted, once each:
+   * `erased` alone once the contact is erased, `added` alone when it was added since, else the
+   * parts that changed; null when some of those changes were recorded before HyFib recorded what
+   * changed, or the pass began before HyFib counted from it.
    */
   changes: string[] | null;
   /**
@@ -82,13 +91,17 @@ export interface ApiContactChangePage {
 }
 
 /**
- * What the feed tells a reader changed of a contact since its cursor (ADR-329), from the parts of
- * the contact's changes after the cursor (`*` for one recorded before the parts were): `erased`
- * alone once the contact is erased, `added` alone when it was added since, null when what changed
- * is not all known, else the parts in byte order.
+ * What the feed tells a reader changed of a contact since its pass began (ADR-329), from the parts
+ * of the contact's changes since then (`*` for one recorded before the parts were; null when the
+ * pass began nobody knows where): `erased` alone once the contact is erased, `added` alone when it
+ * was added since, null when what changed is not all known, else the parts in byte order.
  */
-export function contactChangesSince(erased: boolean, parts: readonly string[]): string[] | null {
+export function contactChangesSince(
+  erased: boolean,
+  parts: readonly string[] | null,
+): string[] | null {
   if (erased) return ['erased'];
+  if (parts === null) return null;
   if (parts.includes('added')) return ['added'];
   if (parts.includes('*')) return null;
   return [...new Set(parts)].sort();
@@ -97,18 +110,36 @@ export function contactChangesSince(erased: boolean, parts: readonly string[]): 
 /** A place in the company's feed: after the change with this transaction and id. */
 export type ContactChangePosition = ChangePosition;
 
-/** A cursor sealed to the company and to this feed (ADR-114). */
+/**
+ * Where the pass of the next page began (ADR-329): the same pass while more can be read now; a new
+ * one from the page's place once the page read all there was, since every contact changed before
+ * that place has then been read at its latest change.
+ */
+export function nextPassSince(
+  at: ContactChangePosition,
+  since: ContactChangePosition | null,
+  hasMore: boolean,
+): ContactChangePosition | null {
+  return hasMore ? since : at;
+}
+
+/**
+ * A cursor sealed to the company and to this feed (ADR-114), with where the reader's pass began
+ * (ADR-329; none for a pass that began nobody knows where).
+ */
 export const sealContactChangeCursor = (
   keyring: Keyring,
   tenantId: string,
   at: ContactChangePosition,
-): string => sealChangeCursor(keyring, 'contact-changes', tenantId, at);
+  since: ContactChangePosition | null = null,
+): string => sealChangeCursor(keyring, 'contact-changes', tenantId, at, since);
 
+/** A cursor's place and where its pass began; a new pass from the start without a cursor. */
 export const openContactChangeCursor = (
   keyring: Keyring,
   tenantId: string,
   cursor: string | undefined,
-): ContactChangePosition => openChangeCursor(keyring, 'contact-changes', tenantId, cursor);
+): ChangePass => openChangePass(keyring, 'contact-changes', tenantId, cursor);
 
 export async function apiContactChanges(
   deps: { db: Database; keyring: Keyring },
@@ -117,7 +148,7 @@ export async function apiContactChanges(
 ): Promise<ApiContactChangePage> {
   assertScope(ctx, 'contacts.read');
   const q = parseInput(apiContactChangesQuerySchema, query);
-  const from = openContactChangeCursor(deps.keyring, ctx.tenant.id, q.cursor);
+  const { at: from, since } = openContactChangeCursor(deps.keyring, ctx.tenant.id, q.cursor);
   const finished = sql`pg_snapshot_xmin(pg_current_snapshot())`;
   const { rows, merges } = await deps.db.run(
     ctx.scope,
@@ -127,10 +158,14 @@ export async function apiContactChanges(
           ...apiContactColumns,
           changeId: sql<string>`${contactChanges.id}::text`,
           changeXact: sql<string>`${contactChanges.xact}::text`,
-          // The parts changed after the cursor, up to this change (migration 0251).
-          parts: sql<string[]>`app.contact_changed_parts(${contactChanges.tenantId},
-            ${contactChanges.contactId}, ${from.xact}::xid8, ${from.id}::bigint,
-            ${contactChanges.xact}, ${contactChanges.id})`,
+          // The parts changed since the pass began, up to this change (migration 0251); none
+          // known for a pass that began before passes were sealed.
+          parts:
+            since === null
+              ? sql<string[] | null>`null::text[]`
+              : sql<string[] | null>`app.contact_changed_parts(${contactChanges.tenantId},
+                  ${contactChanges.contactId}, ${since.xact}::xid8, ${since.id}::bigint,
+                  ${contactChanges.xact}, ${contactChanges.id})`,
         })
         .from(contactChanges)
         .innerJoin(
@@ -179,6 +214,8 @@ export async function apiContactChanges(
   );
   const page = rows.slice(0, q.limit);
   const last = page.at(-1);
+  const at = last ? { xact: last.changeXact, id: last.changeId } : from;
+  const hasMore = rows.length > q.limit;
   const mergedInto = new Map<string, string[]>();
   for (const m of merges) {
     mergedInto.set(m.keptContactId, [
@@ -197,9 +234,10 @@ export async function apiContactChanges(
     nextCursor: sealContactChangeCursor(
       deps.keyring,
       ctx.tenant.id,
-      last ? { xact: last.changeXact, id: last.changeId } : from,
+      at,
+      nextPassSince(at, since, hasMore),
     ),
-    hasMore: rows.length > q.limit,
+    hasMore,
   };
 }
 

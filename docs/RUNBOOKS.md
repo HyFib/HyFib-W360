@@ -2480,12 +2480,15 @@ deleted` in its log); `ops.contact_change_compaction.compacted_at` shows when it
 stops, the feed still answers correctly, with more rows to pass.
 
 **The contact change feed names the wrong parts, or `changes` is null (ADR-329).** `changes` lists
-what changed after the cursor the integration sent. Null means a change recorded before migration
-0251 lies after that cursor: nobody knows what it changed, so the integration takes the whole
-contact, and the next reads name parts again once its cursor is past that change. `added` or
-`erased` alone are expected for a contact added or erased since. A part named
-again whose value the integration already had is expected too: a change saved while the previous
-page was read is named on the next read. To see what is recorded for a contact, as the owner role:
+what changed since the integration's pass through the feed began: without a cursor, or with the
+`nextCursor` of a page whose `hasMore` was false, until the next such page. Null means a change
+recorded before migration 0251 lies after that beginning, or the pass began with a cursor given
+before 0251's release: the integration takes the whole contact, and a later pass names parts again.
+`added` or `erased` alone are expected for a contact added or erased since. A part named again whose
+value the integration already had is expected too: a contact read twice in one pass is named with
+everything since the pass began, and a change saved while the previous page was read is named on
+the next read. To see what is recorded for a contact, as the migration role with
+`SET ROLE w360_definer` (the owner role reads no rows of this table):
 `SELECT xact, id, parts, replaced FROM app.contact_changes WHERE tenant_id = $1 AND contact_id = $2 ORDER BY xact, id`;
 `parts` is what each change named, `replaced` where each part of the changes the compaction deleted
 last changed (`[transaction, change id]`). A part you know changed (from the audit log, say) that

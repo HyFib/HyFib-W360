@@ -435,6 +435,60 @@ describe('following contact changes through the public API (ADR-114)', () => {
     expect(await changesSince(ctx, afterEmail.cursor)).toEqual([[kiran, ['name']]]);
   });
 
+  it('counts what changed from where the pass began, so a contact a later page reads misses none of the changes earlier pages passed over (ADR-329)', async () => {
+    const c = await fx.company();
+    const ctx = await apiKey(c, ['contacts.read', 'contacts.write']);
+    /** Every page of one pass from `cursor`, one contact a page. */
+    const onePerPage = async (cursor?: string) => {
+      const read: [string, string[] | null][] = [];
+      let next = cursor;
+      for (let pages = 0; pages < 100; pages += 1) {
+        const page = await apiContactChanges(feedDeps(), ctx, {
+          limit: '1',
+          ...(next === undefined ? {} : { cursor: next }),
+        });
+        read.push(...page.data.map((ch): [string, string[] | null] => [ch.id, ch.changes]));
+        next = page.nextCursor;
+        if (!page.hasMore) return { read, cursor: next };
+      }
+      throw new Error('the pass did not end');
+    };
+    // A contact added, another added, then the first changed: the first page passes the first
+    // contact's addition, and the page that reads it still names it added.
+    const kala = await createContact(ctx, 'Kala');
+    const arun = await createContact(ctx, 'Arun');
+    await apiUpdateContact(deps(), ctx, kala, { email: 'kala@example.com' });
+    const first = await onePerPage();
+    expect(first.read).toEqual([
+      [arun, ['added']],
+      [kala, ['added']],
+    ]);
+    // The same in a later pass: the name a page passed over is named with the email.
+    await apiUpdateContact(deps(), ctx, kala, { name: 'Kala R' });
+    await apiUpdateContact(deps(), ctx, arun, { addTags: ['vip'] });
+    await apiUpdateContact(deps(), ctx, kala, { email: 'kala.r@example.com' });
+    const second = await onePerPage(first.cursor);
+    expect(second.read).toEqual([
+      [arun, ['tags']],
+      [kala, ['email', 'name']],
+    ]);
+    // The next pass begins where this one ended.
+    expect((await onePerPage(second.cursor)).read).toEqual([]);
+    await apiUpdateContact(deps(), ctx, arun, { name: 'Arun S' });
+    expect((await onePerPage(second.cursor)).read).toEqual([[arun, ['name']]]);
+
+    // A cursor sealed before passes were: what changed since its pass began is not known, until a
+    // page reads all there is and the next pass begins there.
+    const legacy = sealContactChangeCursor(fx.keyring, c.tenant.id, { xact: '0', id: '0' });
+    const unknown = await onePerPage(legacy);
+    expect(unknown.read).toEqual([
+      [kala, null],
+      [arun, null],
+    ]);
+    await apiUpdateContact(deps(), ctx, kala, { name: 'Kala S' });
+    expect((await onePerPage(unknown.cursor)).read).toEqual([[kala, ['name']]]);
+  });
+
   it('does not name what changed when a change was recorded before HyFib recorded the parts, unless the contact is new (ADR-329)', async () => {
     const c = await fx.company();
     const ctx = await apiKey(c, ['contacts.read', 'contacts.write']);

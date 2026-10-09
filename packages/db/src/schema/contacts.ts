@@ -52,7 +52,9 @@ export const contactChanges = appSchema.table('contact_changes', {
    * Where each part last changed among the changes the compaction deleted in this one's favour:
    * part → [transaction, change id], `*` for those recorded before 0251 (ADR-329).
    */
-  replaced: jsonb('replaced').notNull(),
+  replaced: jsonb('replaced')
+    .notNull()
+    .default(sql`'{}'::jsonb`),
 });
 
 export const CONTACT_FIELD_TYPES = ['text', 'number', 'date', 'boolean'] as const;

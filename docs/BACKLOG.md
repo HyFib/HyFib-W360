@@ -958,8 +958,8 @@ verification, app review, Embedded Signup configuration).
   through the API; notes are not read through the API).
   **[What changed of each contact in the contact feed built; its database tests run only in CI]**
   (ADR-329, migrations 0251 and 0252: `GET /contact-changes` names for each contact the parts that
-  changed since the cursor, exactly whatever the compaction deleted, `added` or `erased` alone, and
-  null while a change recorded before the parts lies after the cursor).
+  changed since the reader's pass through the feed began, whatever the compaction deleted, `added`
+  or `erased` alone, and null while a change recorded before the parts lies after that beginning).
   Remaining: call-to-action messages through the API, taking
   reactions back,
   changing a field's type,

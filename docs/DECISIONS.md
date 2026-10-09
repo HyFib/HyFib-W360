@@ -12765,12 +12765,23 @@ The backlog listed which fields of a contact changed in the contact feed as rema
 
 Decision:
 
-- **Each contact read names what changed since the reader's cursor** (`changes`): the parts,
-  sorted, once each, in the API contact's names as `contact.updated` gives them (`name`, `phone`,
-  `email`, `tags`, `fields.<key>`), with `consent.marketing`, `consent.utility`, `source`, and
-  `merged` when another contact was merged into it; `added` alone when it was added since the
-  cursor (from the start, every contact), and `erased` alone once it is erased. Names only: the
-  contact carries the values as they are now.
+- **Each contact read names what changed since the reader's pass through the feed began**
+  (`changes`): the parts, sorted, once each, in the API contact's names as `contact.updated` gives
+  them (`name`, `phone`, `email`, `tags`, `fields.<key>`), with `consent.marketing`,
+  `consent.utility`, `source`, and `merged` when another contact was merged into it; `added` alone
+  when it was added since (from the start, every contact), and `erased` alone once it is erased.
+  Names only: the contact carries the values as they are now. `fields.<key>` is named for any key a
+  field can have, so a value left under a deleted field's key that changes (a merge copying it) is
+  named though the API shows it nowhere.
+- **Counted from where the pass began, not from the page.** The feed reads a contact only at its
+  latest change, so a page passes the earlier changes of contacts changed again later without
+  reading them, and the page that reads such a contact lies beyond them: counted from that page's
+  place, they would be missed (`added` on the second page of a first read, say). The cursor seals
+  the page's place and where the reader's pass began; a pass begins without a cursor or with the
+  `nextCursor` of a page that read all there was (`hasMore` false), and ends at the next such page,
+  since by then every contact changed before that page's place has been read at its latest change.
+  The review before this was pushed found the first version, which counted from each page's place,
+  missing parts across pages.
 - **Exact from any cursor, compacted or not.** Each change records the parts its transaction
   changed (`app.contact_changes.parts`), named by the triggers that record the change (0091, 0150);
   a later change of the same contact in the same transaction adds its parts to the change the
@@ -12781,12 +12792,14 @@ Decision:
   feed names the parts of the contact's changes after the cursor, up to the change it reads, and
   the kept entries that lie after the cursor: never a part changed only before the cursor, never
   missing one changed after it.
-- **At least once, like the feed itself:** a change saved while the reader read the page before can
-  be named again, its value already in the contact read then, as a contact changed again appears
-  again.
+- **At least once, like the feed itself:** a contact read twice in one pass is named with everything
+  since the pass began, and a change saved while the reader read the page before can be named
+  again, its value already in the contact read then, as a contact changed again appears again.
 - **Unknown is said, not guessed.** The changes recorded before migration 0251 have no parts, and
-  nothing is backfilled (nobody knows what they changed): while one lies after the cursor, `changes`
-  is null (take the whole contact), unless the contact was added or erased since.
+  nothing is backfilled (nobody knows what they changed): while one lies after the pass's beginning,
+  `changes` is null (take the whole contact), unless the contact was added or erased since. A
+  cursor given before this release seals no pass beginning, so its pass reads null too, until a page
+  reads all there is.
 - **What the API never reads is no change:** a value under a key no custom field can have changes
   nothing the API describes and is no longer recorded; a deleted field's values are, as
   `fields.<key>`. A change that changes no part is not recorded.

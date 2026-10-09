@@ -1245,9 +1245,12 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   keeps on the row that survives where each part of the rows it deletes last changed (`replaced`,
   part → `[xact, id]`, `*` for rows from before 0251; none on an erasing row), and the feed calls
   `app.contact_changed_parts` as the reader for each contact it reads (the parts of the contact's
-  rows after the cursor up to the row read, and the kept entries after the cursor), which
+  rows after the pass's beginning up to the row read, and the kept entries after it), which
   `contactChangesSince` turns into `changes`: `erased` or `added` alone, null with `*`, else the
-  parts in byte order. Since 0150 (ADR-225) the trigger on `app.contact_merges` also records a
+  parts in byte order. The cursor seals the pass's beginning with the place (`a.b~c.d`,
+  `openChangePass` in `api/change-cursors.ts`): none starts a pass at the first change, and
+  `nextPassSince` begins the next pass at a page that read all there was (`hasMore` false); a
+  cursor without one (sealed before 0251's release) reads `changes` null until then. Since 0150 (ADR-225) the trigger on `app.contact_merges` also records a
   change of the kept contact (named `merged` since 0251), and the feed lists for each contact it
   reads the contacts merged into it (`mergedContactIds`, from `app.contact_merges` in the page's
   snapshot); the contact endpoints
