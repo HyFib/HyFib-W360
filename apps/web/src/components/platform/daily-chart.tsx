@@ -1,5 +1,12 @@
 'use client';
-import { useEffect, useRef, useState, type KeyboardEvent, type PointerEvent } from 'react';
+import {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type KeyboardEvent,
+  type PointerEvent,
+} from 'react';
 import {
   DAILY_CHART_SERIES,
   chartCount,
@@ -11,7 +18,7 @@ import {
 } from '@w360/domain/ops-chart';
 
 const HEIGHT = 240;
-/** About the tooltip's width: it moves no closer than this to the chart's far edge. */
+/** The tooltip's width until the browser measures it. */
 const TIP = 168;
 /** The series' colours (globals.css): they follow the series, never their order in the data. */
 const COLOR: Record<DailyChartSeriesKey, string> = {
@@ -41,26 +48,43 @@ const describe = (d: DailyChartDay) =>
  */
 export function DailyMessagesChart({ days, label }: { days: DailyChartDay[]; label: string }) {
   const box = useRef<HTMLDivElement>(null);
-  // Drawn at 720 pixels on the server and until the browser measures the room it has (scaled to
-  // fit until then).
-  const [width, setWidth] = useState(720);
+  const tip = useRef<HTMLDivElement>(null);
+  // Drawn at 720 pixels on the server and until the browser measures the room it has, and never
+  // narrower than 280: a narrower box shows the drawing scaled to fit.
+  const [size, setSize] = useState({ box: 720, drawn: 720 });
+  const [tipWidth, setTipWidth] = useState(TIP);
   const [active, setActive] = useState<number | null>(null);
   useEffect(() => {
     const element = box.current;
     if (!element) return;
     const observer = new ResizeObserver(([entry]) => {
-      if (entry) setWidth(Math.max(280, Math.floor(entry.contentRect.width)));
+      if (!entry) return;
+      const measured = Math.floor(entry.contentRect.width);
+      setSize({ box: measured, drawn: Math.max(280, measured) });
     });
     observer.observe(element);
     return () => observer.disconnect();
   }, []);
-  const layout = dailyChartLayout(days, width, HEIGHT);
+  const layout = dailyChartLayout(days, size.drawn, HEIGHT);
   const last = days.length - 1;
   const shownIndex = active !== null && active <= last ? active : null;
   const shown = shownIndex === null ? undefined : days[shownIndex];
   const shownX = shownIndex === null ? 0 : (layout.xs[shownIndex] ?? 0);
   const current = shownIndex ?? last;
   const currentDay = days[current];
+  // The tooltip's own width keeps it inside the box, however long its numbers: measured again for
+  // each day it shows and each width of the box.
+  useLayoutEffect(() => {
+    const measured = tip.current?.offsetWidth;
+    if (measured !== undefined) setTipWidth(measured);
+  }, [shownIndex, size.box]);
+  // Beside the crosshair, in the box's pixels, as near as the box's edges allow.
+  const tipX = (shownX * size.box) / layout.width;
+  const tipRoom = Math.max(0, size.box - tipWidth);
+  const tipPlace =
+    tipX > size.box / 2
+      ? { right: Math.min(Math.max(0, size.box - tipX + 12), tipRoom) }
+      : { left: Math.min(tipX + 12, tipRoom) };
 
   const onPointerMove = (event: PointerEvent<SVGSVGElement>) => {
     const rect = event.currentTarget.getBoundingClientRect();
@@ -89,7 +113,7 @@ export function DailyMessagesChart({ days, label }: { days: DailyChartDay[]; lab
   };
 
   return (
-    <div className="flex flex-col gap-3">
+    <div className="flex min-w-0 flex-col gap-3">
       <ul aria-label="Lines" className="flex flex-wrap items-center gap-4 text-sm">
         {DAILY_CHART_SERIES.map((s) => (
           <li key={s.key} className="flex items-center gap-2">
@@ -213,13 +237,10 @@ export function DailyMessagesChart({ days, label }: { days: DailyChartDay[]; lab
         </svg>
         {shown ? (
           <div
+            ref={tip}
             aria-hidden="true"
-            className="pointer-events-none absolute top-2 z-10 grid min-w-36 max-w-full gap-1 rounded-md border border-border bg-popover px-3 py-2 text-sm text-popover-foreground shadow-sm"
-            style={
-              shownX > layout.width / 2
-                ? { right: Math.max(0, Math.min(layout.width - shownX + 12, layout.width - TIP)) }
-                : { left: Math.max(0, Math.min(shownX + 12, layout.width - TIP)) }
-            }
+            className="pointer-events-none absolute top-2 z-10 grid w-max min-w-36 max-w-full gap-1 rounded-md border border-border bg-popover px-3 py-2 text-sm text-popover-foreground shadow-sm"
+            style={tipPlace}
           >
             <span className="text-xs text-muted-foreground">{chartDayLabel(shown.day)} (UTC)</span>
             {DAILY_CHART_SERIES.map((s) => (

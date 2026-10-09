@@ -113,7 +113,8 @@ export default async function OpsUsagePage({
                 days={o.daily}
                 label={`Messages sent and received each UTC day, ${o.days} days`}
               />
-              <details className="rounded-md border border-border p-3">
+              {/* min-w-0: the table scrolls in its box rather than widening the card on a phone. */}
+              <details className="min-w-0 rounded-md border border-border p-3">
                 <summary className="cursor-pointer text-sm font-medium">Table of the days</summary>
                 <Table aria-label="Messages a day" className="mt-3">
                   <THead>

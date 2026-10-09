@@ -12991,7 +12991,10 @@ Decision:
   days are written by hand rather than by the locale, so the server and the browser render the same
   text. The two lines' colours are new tokens (`--chart-1`, `--chart-2`, for light and dark),
   categorical colours checked for colour-vision separation and contrast against the card in both
-  modes; the legend and the end labels name the lines, so colour never stands alone.
+  modes. The legend names the lines, and the end labels name them too where they fit (not on a
+  phone, nor where the ends come within 16 pixels); where they do not, the colours alone tell the
+  lines apart, which is why they were chosen to stay apart for colour-blind readers, and the
+  tooltip and the table name every number.
 - **Migration 0254:** `ops.platform_ops_daily_activity(p_since)`, a SECURITY DEFINER function for
   the platform role only that, like 0026's activity function, refuses anyone but a platform
   administrator (`W3403`) and a start outside the last 93 days (`W3412`), and reads the same columns

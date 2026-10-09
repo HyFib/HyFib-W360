@@ -549,6 +549,17 @@ test('staff read the platform’s messages a day on the Usage tab (ADR-333)', as
   await page.keyboard.press('Escape');
   await expect(tooltip(days.at(-1)!)).toHaveCount(0);
 
+  // On a phone narrower than this project's, the chart and the open table stay inside the page:
+  // the table scrolls in its own box rather than widening the card.
+  const viewport = page.viewportSize();
+  await page.setViewportSize({ width: 360, height: viewport?.height ?? 800 });
+  for (const part of [chart, page.locator('details').filter({ has: table })]) {
+    const box = await part.boundingBox();
+    expect(box, 'shown').not.toBeNull();
+    expect(box!.x + box!.width, 'inside the page').toBeLessThanOrEqual(360);
+  }
+  if (viewport) await page.setViewportSize(viewport);
+
   // The other windows draw their own days.
   await page.getByRole('link', { name: '30 days' }).click();
   await expect(

@@ -51,6 +51,17 @@ body included.
 - **Lint fix:** the first full check failed on the non-null assertions and on a focusable group
   with key handlers; the chart is now a slider, the role whose keys (the arrows, Home and End) it
   already used.
+- **Review fixes:** an independent review before the push found that opening the table of the days
+  on a phone up to 375 pixels wide made the page scroll sideways (the folded table, a grid item,
+  kept the table's width as its least), and that the tooltip was placed in the drawing's pixels
+  against a fixed width, so on a chart narrower than 280 pixels, or with six-figure counts, it could
+  be cut off at the chart's edge. The table's box now shrinks with the card and its table scrolls
+  inside it, the e2e test checks the chart and the open table at 360 pixels, and the tooltip is
+  placed in the box's pixels by its measured width (checked by rendering at 320 pixels with
+  six-figure counts). The same review found the console's read functions miscounted in SECURITY
+  and T75 (seven, not five), a claim that colour never stands alone (on a phone the colours alone
+  tell the lines apart, so the ADR now says so), the days read without an order, and a comment
+  promising at most five gridlines above 0 where there are at most four; each is corrected.
 
 ### Test commands and results (local, 2026-10-09)
 

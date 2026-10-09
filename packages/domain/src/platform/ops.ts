@@ -274,7 +274,8 @@ export interface OpsDailyActivity {
 async function dailyActivity(tx: Tx, since: Date): Promise<OpsDailyActivity[]> {
   const result = await tx.execute<Row>(sql`
     select to_char(utc_day, 'YYYY-MM-DD') as day, outbound, failed, inbound
-      from ops.platform_ops_daily_activity(${since.toISOString()}::timestamptz)`);
+      from ops.platform_ops_daily_activity(${since.toISOString()}::timestamptz)
+     order by utc_day`);
   return result.rows.map((r) => ({
     day: String(r.day),
     outbound: num(r.outbound),

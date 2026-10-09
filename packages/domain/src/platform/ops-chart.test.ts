@@ -27,7 +27,7 @@ describe('the messages a day chart (ADR-333)', () => {
     expect(chartDayLabel('2026-12-01')).toBe('1 Dec');
   });
 
-  it('steps gridlines by 1, 2 or 5 times a power of ten, at most five above 0', () => {
+  it('steps gridlines by 1, 2 or 5 times a power of ten, at most four above 0', () => {
     for (const [max, step] of [
       [0, 1],
       [1, 1],
@@ -47,8 +47,8 @@ describe('the messages a day chart (ADR-333)', () => {
       [2001, 1000],
     ] as const) {
       expect(chartStep(max), String(max)).toBe(step);
-      // The busiest day sits under the top gridline, at most five steps above 0.
-      expect(Math.ceil(max / step), String(max)).toBeLessThanOrEqual(5);
+      // The busiest day sits under the top gridline, at most four steps above 0.
+      expect(Math.ceil(max / step), String(max)).toBeLessThanOrEqual(4);
       const top = dailyChartLayout([day('2026-10-09', max, 0)], 720, 240).yTicks.at(-1)!.value;
       expect(top, String(max)).toBeGreaterThanOrEqual(max);
       expect(top, String(max)).toBeLessThan(Math.max(max, 1) + step);

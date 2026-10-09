@@ -76,7 +76,7 @@ export function chartDayLabel(day: string): string {
 
 /**
  * The step between gridlines for counts up to `max`: 1, 2 or 5 times a power of ten, at least 1
- * (counts are whole), so there are at most five gridlines above 0.
+ * (counts are whole) and at least a quarter of `max`, so there are at most four gridlines above 0.
  */
 export function chartStep(max: number): number {
   if (max <= 4) return 1;
