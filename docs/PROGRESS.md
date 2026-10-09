@@ -12,13 +12,19 @@ migration.
 - **Domain:** `WEBHOOK_EXACT_TIME_RE`, `toWebhookMillisecond` and `createdAtExact` in every body's
   envelope (`webhooks/payloads.ts`), from the event's time read with `exactTimestamp` in
   `webhooks/delivery.ts`; the member assignment event's description in the OpenAPI document.
-- **Tests:** unit (2 new in `webhooks/webhooks.test.ts`: every body's schema and the two times'
-  rules, and the builder stamping both from the exact time; the fixtures of 18 tests there carry
-  the exact time); integration (1 changed: the three member changes of one request in
+- **Tests:** unit (3 new in `webhooks/webhooks.test.ts`: every body's schema and the two times'
+  rules, the builder stamping both from the exact time, and refusing a time with no such form; the
+  fixtures of 18 tests there carry the exact time); integration (1 changed: the three member changes of one request in
   `webhook-events.test.ts` now differ in `createdAtExact`, as stored, in order). Written for CI; the
   integration test was not run here. No e2e test.
-- **Docs:** ADR-330; ARCHITECTURE; BACKLOG P5-09; feature matrix H-014.
-- **Mutation checks:** 12/12 deliberate regressions caught on the unit-tested parts. The
+- **Review fix:** an independent review before the push found that an event whose stored time has
+  no form to the microsecond (an infinite one, which an integration test sets to stand for any row
+  the builder cannot describe) would fail with a `TypeError` where the delivery test expects the
+  `RangeError` such an event raised before; the builder now refuses such a time with a `RangeError`
+  before reading anything.
+- **Docs:** ADR-330; ARCHITECTURE; RUNBOOKS; BACKLOG P5-09; feature matrix H-014.
+- **Mutation checks:** 15/15 deliberate regressions caught on the unit-tested parts (3 of them on
+  the review fix). The
   delivery's read of the stored time needs the database, so its regressions are left to the
   integration test, which runs in CI.
 
@@ -27,7 +33,7 @@ migration.
 | Command                                            | Result                                                        |
 | -------------------------------------------------- | ------------------------------------------------------------- |
 | `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
-| `pnpm test` (unit)                                 | 140 files, 1380 tests passed                                  |
+| `pnpm test` (unit)                                 | 140 files, 1381 tests passed                                  |
 | `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
 | `pnpm build`                                       | passed                                                        |
 | gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
@@ -68,7 +74,9 @@ the bodies of 0251's three SQL functions.
   there, and a pass ends at a page that read all there was; a cursor given before carries no
   beginning and reads null until then. The same review found the runbook's query run as the owner
   role, which reads no rows of the table under forced row-level security; it now runs as the
-  definer role.
+  definer role. A second review found that web instances of the previous release refuse the new
+  cursors, so an integration reaching one during the rollout or after a rollback starts the feed
+  again (now in DEPLOYMENT), and wording still counting from the cursor.
 - **Docs:** ADR-329; ARCHITECTURE; SECURITY; THREAT-MODEL T297 (and T296's mutation count after
   ADR-328's review fix); DEPLOYMENT; RUNBOOKS; DATA-RETENTION; BACKLOG P5-08; feature matrix W-134
   and H-033 (and H-014's mutation count).

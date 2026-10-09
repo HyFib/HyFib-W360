@@ -102,7 +102,11 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    validates them while contacts keep changing. From 0251 on, every change records its parts; until
    the new web version runs, the feed answers without `changes`. Once it does, the changes recorded
    before 0251, and passes begun with cursors the old version gave, read as unknown (`changes` null)
-   until a page reads all there is. Until the new workers run, an automation and a member removing the same
+   until a page reads all there is. The new contact feed cursors also seal where the reader's pass
+   began, a form web instances of the previous release refuse: an integration whose request reaches
+   one during the rollout, or any after a rollback of the web app, gets 422 naming `cursor` and
+   starts the feed again from the start, reading every contact once more. Switch the web instances
+   over at once to avoid it. Until the new workers run, an automation and a member removing the same
    tag at the same moment can deadlock, as adding one already could; PostgreSQL ends one of the two
    with an error.
    Migration 0092 (ADR-115) only widens the scope checks of `app.api_keys` and `ops.plans`; it holds

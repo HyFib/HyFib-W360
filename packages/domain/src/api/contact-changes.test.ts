@@ -150,7 +150,7 @@ describe('the contact change feed (ADR-114)', () => {
     ]);
     // A merged contact is read through the contact it was merged into (ADR-225).
     expect(op?.description).toContain('naming it in `mergedContactIds`');
-    // What changed since the cursor (ADR-329): the parts' names and what null means.
+    // What changed since the pass began (ADR-329): the parts' names and what null means.
     expect(op?.description).toContain(
       'with what changed since your pass through the feed began (`changes`)',
     );

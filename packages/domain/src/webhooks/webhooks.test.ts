@@ -2159,6 +2159,40 @@ describe('the OpenAPI document', () => {
     expect(pingPayloadSchema.safeParse(built).success).toBe(true);
   });
 
+  it('describes no event whose time has no form to the microsecond, before reading anything (ADR-330)', async () => {
+    const unreadable = new Proxy(
+      {},
+      {
+        get: () => {
+          throw new Error('the database was read');
+        },
+      },
+    ) as unknown as Parameters<typeof buildWebhookPayload>[0];
+    // An infinite time has none (to_char gives null); a time cut short is not one either.
+    for (const occurredAtExact of [null, '2026-10-09T08:15:30.123Z', 'infinity']) {
+      const event = {
+        id: '0192f3a4-5b6c-7d8e-9f00-112233445566',
+        tenantId: '0192f3a4-5b6c-7d8e-9f00-112233445577',
+        type: 'ping',
+        messageId: null,
+        conversationId: null,
+        contactId: null,
+        templateId: null,
+        status: null,
+        detail: {},
+        contactChanges: null,
+        tagsAdded: null,
+        tagsRemoved: null,
+        occurredAt: new Date(Number.NaN),
+        occurredAtExact,
+      } as unknown as Parameters<typeof buildWebhookPayload>[1];
+      await expect(
+        buildWebhookPayload(unreadable, event, '0192f3a4-5b6c-7d8e-9f00-112233445588'),
+        String(occurredAtExact),
+      ).rejects.toBeInstanceOf(RangeError);
+    }
+  });
+
   it('says what a contact.updated changed: always given, a list of parts or null (ADR-121)', () => {
     const doc = buildOpenApiDocument('https://app.example.com/api/v1');
     const schemas = doc.components.schemas as Record<string, unknown>;

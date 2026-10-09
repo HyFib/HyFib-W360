@@ -13,7 +13,8 @@
 -- The compaction deletes the changes a later change of the same contact replaced (0091); it now
 -- keeps, on the change that replaced them, where each part last changed among them (`replaced`:
 -- part -> [transaction, change id], `*` for the changes recorded before this migration). The feed
--- then tells a reader exactly the parts changed after its cursor, whatever was compacted since.
+-- then tells a reader exactly the parts changed since its pass through the feed began (the cursor
+-- seals where), whatever was compacted since.
 -- The map holds one entry per part, so it stays small; an erasing change keeps none, since an
 -- erased contact is read as erased alone.
 --
@@ -247,9 +248,9 @@ REVOKE EXECUTE ON FUNCTION ops.compact_contact_changes(integer) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION ops.compact_contact_changes(integer) TO w360_app;
 ALTER FUNCTION ops.compact_contact_changes(integer) OWNER TO w360_definer;
 
--- What changed of a contact after a reader's cursor, up to the change the feed reads it at: the
--- parts of its changes in between, and the entries they kept of the changes they replaced that lie
--- after the cursor; sorted in byte order, once each, with `*` when one of them was recorded before
+-- What changed of a contact after the place given (where the reader's pass began), up to the change
+-- the feed reads it at: the parts of its changes in between, and the entries they kept of the
+-- changes they replaced that lie after that place; sorted in byte order, once each, with `*` when one of them was recorded before
 -- this migration (the feed answers `added` or `erased` alone whatever else changed, else nothing
 -- named when `*` is there). Every change up to the one read is finished, as the feed reads only
 -- finished changes. Runs as the reader, so it reads the company's changes only.

@@ -961,8 +961,11 @@ export interface StoredWebhookEvent {
   tagsAdded: string[] | null;
   tagsRemoved: string[] | null;
   occurredAt: Date;
-  /** `occurredAt` to the microsecond, as `exactTimestamp` writes it (ADR-330). */
-  occurredAtExact: string;
+  /**
+   * `occurredAt` to the microsecond, as `exactTimestamp` writes it (ADR-330); null for a time with
+   * no such form (an infinite one).
+   */
+  occurredAtExact: string | null;
 }
 
 const str = (value: unknown): string | null => (typeof value === 'string' ? value : null);
@@ -1562,11 +1565,16 @@ export async function buildWebhookPayload(
   endpointId: string,
 ): Promise<WebhookPayload> {
   // The time to the microsecond, and createdAt as the same moment cut to the millisecond (ADR-330).
+  // A time with no such form cannot be described, as a date with no ISO form could not before.
+  const exact = event.occurredAtExact;
+  if (exact === null || !WEBHOOK_EXACT_TIME_RE.test(exact)) {
+    throw new RangeError('The event has no time to the microsecond.');
+  }
   const base = {
     id: event.id,
     type: event.type,
-    createdAt: toWebhookMillisecond(event.occurredAtExact),
-    createdAtExact: event.occurredAtExact,
+    createdAt: toWebhookMillisecond(exact),
+    createdAtExact: exact,
   };
   const tenantId = event.tenantId;
   switch (event.type) {

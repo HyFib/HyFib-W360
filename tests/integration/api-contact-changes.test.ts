@@ -26,7 +26,8 @@ import { startWhatsAppFixture, type Company, type WhatsAppFixture } from './what
  * does not; a cursor that never passes a change still being saved; the compaction, which deletes
  * the changes later ones replaced without changing what the feed reads and never passes a change
  * still being saved either; and cursors sealed to their company. Each contact read names the parts
- * changed since the cursor (ADR-329), exactly, whatever the compaction deleted meanwhile.
+ * changed since the reader's pass through the feed began (ADR-329), whatever the compaction deleted
+ * meanwhile.
  */
 let fx: WhatsAppFixture;
 

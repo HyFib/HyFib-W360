@@ -12789,9 +12789,9 @@ Decision:
   transaction's own change. The compaction, which deletes the changes a later one replaced, keeps
   on that later change where each part last changed among them (`replaced`: part → transaction and
   change id), one entry per part, so the map stays small however often the contact changes. The
-  feed names the parts of the contact's changes after the cursor, up to the change it reads, and
-  the kept entries that lie after the cursor: never a part changed only before the cursor, never
-  missing one changed after it.
+  feed names the parts of the contact's changes after its reader's pass began, up to the change it
+  reads, and the kept entries that lie after that beginning: never a part changed only before it,
+  never missing one changed after it.
 - **At least once, like the feed itself:** a contact read twice in one pass is named with everything
   since the pass began, and a change saved while the reader read the page before can be named
   again, its value already in the contact read then, as a contact changed again appears again.
