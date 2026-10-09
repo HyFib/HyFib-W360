@@ -614,6 +614,58 @@ describe('the chat channel (ADR-338)', () => {
     ]);
   });
 
+  it('fails a post queued while its alert was being unticked, before any address gets it (ADR-340)', async () => {
+    await service().setChannel(owner, { url: hookUrl });
+    await service().setKinds(owner, { kinds: ['failures', 'reconciliation'] });
+    // An alert sweep queues its post while an owner's unticking of its alert has not committed: the
+    // queueing still sees the alert ticked, and the unticking cannot see the post to fail it.
+    await fx.dbs.platform.run(owner.userId, async (tx) => {
+      await tx.execute(
+        sql`select ops.platform_set_alert_channel_kinds(${sql.param(['failures'])}::text[], null)`,
+      );
+      const queued = await fx.dbs.app.run(systemScope, (app) =>
+        app.execute<{ queued: boolean }>(
+          sql`select ops.queue_platform_alert_post('reconciliation', 'Reconciliation late') as queued`,
+        ),
+      );
+      expect(queued.rows[0]?.queued).toBe(true);
+    });
+    expect(await posts()).toMatchObject([
+      { body: 'Reconciliation late', sent: false, failed: false },
+    ]);
+    // The posting job fails it as unticked rather than claiming it: the address never gets it.
+    expect(await send()).toMatchObject({ claimed: 0, sent: 0 });
+    expect(received).toEqual([]);
+    expect(await posts()).toMatchObject([
+      { body: 'Reconciliation late', sent: false, failed: true, last_error: 'unticked' },
+    ]);
+  });
+
+  it('holds the channel while posts are claimed, so they go to the address they were claimed for', async () => {
+    await service().setChannel(owner, { url: hookUrl });
+    await service().sendTest(owner);
+    const free = (strength: 'UPDATE' | 'NO KEY UPDATE') =>
+      fx.query(`SELECT 1 FROM ops.platform_alert_channel FOR ${strength} NOWAIT`).then(
+        () => true,
+        (error: unknown) => {
+          expect(String(error)).toMatch(/could not obtain lock/);
+          return false;
+        },
+      );
+    // Until the claim's transaction, in which the worker reads the address, ends: replacing the
+    // address, removing the channel and choosing its alerts, which lock its row for update, wait
+    // for it; an attempt's outcome, which locks it for no key update, does not.
+    const held = await fx.dbs.app.run(systemScope, async (tx) => {
+      const claimed = await tx.execute<{ id: string }>(
+        sql`select id from ops.claim_platform_alert_posts(5)`,
+      );
+      expect(claimed.rows).toHaveLength(1);
+      return { forUpdate: await free('UPDATE'), forNoKeyUpdate: await free('NO KEY UPDATE') };
+    });
+    expect(held).toEqual({ forUpdate: false, forNoKeyUpdate: true });
+    expect(await free('UPDATE')).toBe(true);
+  });
+
   it('deletes posts 7 days after they were sent or failed, and only those', async () => {
     const ids = [uuidv7(), uuidv7(), uuidv7(), uuidv7()];
     await fx.query(

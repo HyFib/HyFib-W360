@@ -86,7 +86,7 @@ platform's year of messages a day on the Usage tab and left a company's own year
 | Command                                            | Result                                                        |
 | -------------------------------------------------- | ------------------------------------------------------------- |
 | `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
-| `pnpm test` (unit)                                 | 144 files, 1454 tests passed                                  |
+| `pnpm test` (unit)                                 | 144 files, 1455 tests passed                                  |
 | `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
 | `pnpm build`                                       | passed                                                        |
 | gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
@@ -215,6 +215,22 @@ parse check (syntax only), its four PL/pgSQL bodies included.
   never retried, the ticked alert's post the only one the new address gets, and none sent when the
   alert is ticked again); the e2e test's confirmation. 1/1 deliberate regression of the label
   caught; the definer functions are left to the integration test, which runs in CI.
+- **The fix's review:** an independent review of the fix found two gaps, fixed in 0261 (still not
+  applied anywhere). A post queued while its alert was being unticked, which the unticking could not
+  see yet, stayed claimable: `ops.claim_platform_alert_posts`, now replaced, fails the posts waiting
+  of an alert the channel no longer gets before it claims. And an attempt's outcome locked the post
+  before the channel's row, which choosing the alerts and removing the channel lock first, so the
+  two could deadlock: `ops.finish_platform_alert_post` now locks the channel's row first. The claim
+  now locks it too, and the worker reads the address in the claim's transaction, which holds the row
+  until it ends, so the posts claimed go to the address they were claimed for, never to one that
+  replaced it since (before, a replacement between the claim and the reading of the address could
+  take them). Tests: the posting job's unit test checks that the address is read in the claim's
+  transaction; two integration tests (a post queued while an owner's unticking had not committed,
+  failed as unticked rather than sent; the channel's row held against an update but not against an
+  attempt's outcome while posts are claimed). 2/2 deliberate regressions of the worker caught (the
+  address read in a transaction of its own, or read when nothing was claimed); the functions are
+  left to the integration tests, which run in CI. The full check passed again (144 files, 1455
+  tests).
 
 ### Test commands and results (local, 2026-10-09)
 

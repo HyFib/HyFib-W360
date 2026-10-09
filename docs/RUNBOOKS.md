@@ -3796,18 +3796,19 @@ run: look for failures of `ops.alert-posts` in the worker's logs.
 
 **The alerts a chat channel gets (ADR-340).** A new channel gets the three operations alerts. Under
 "Alerts posted" a platform owner ticks the alerts the channel gets and presses "Save the alerts
-posted" (at least one); the change is audited, and a replaced address keeps the alerts chosen:
-the replace field names the platform owners' alerts among them, to untick first if the new channel's
+posted" (at least one); the change is audited, and a replaced address keeps the alerts chosen: the
+replace field names the platform owners' alerts among them, to untick first if the new channel's
 readers should not see them, and the audit entry of the new address names its alerts. Unticking an
 alert fails its posts still waiting or retrying ("Its alert was unticked before it was sent" under
-the latest posts), so the new address never gets them; ticking it again sends none of them.
-"Reconciliation findings" and "Payments not seen in a settlement" are the platform owners' alerts
-(ADR-066, ADR-071), emailed to platform owners only: add them only when whoever reads the channel
-may know that a day's reconciliation needs a person or failed, and how many top-ups were not
-settled, by day. Their posts give days and counts, never a company, an amount, a payment id or a
-failed check's error: the email to owners has the error, and Platform → Reconciliation the rest. The
-worker logs whether each financial alert was posted (`posted` on `settlement reconciliation alert
-emailed` and `unsettled payments alert emailed`).
+the latest posts), and the posting job fails any queued as it was unticked, so the new address never
+gets them; ticking it again sends none of them. A post already on its way finishes its attempt, to
+the address it was claimed for. "Reconciliation findings" and "Payments not seen in a settlement"
+are the platform owners' alerts (ADR-066, ADR-071), emailed to platform owners only: add them only
+when whoever reads the channel may know that a day's reconciliation needs a person or failed, and
+how many top-ups were not settled, by day. Their posts give days and counts, never a company, an
+amount, a payment id or a failed check's error: the email to owners has the error, and Platform →
+Reconciliation the rest. The worker logs whether each financial alert was posted (`posted` on
+`settlement reconciliation alert emailed` and `unsettled payments alert emailed`).
 
 **The last 12 months (ADR-341).** The Usage tab's year comes from counts the worker keeps: each UTC
 day is counted once it has ended, for every company not deleted, and again once a day for a week

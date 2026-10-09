@@ -30,6 +30,7 @@ DROP FUNCTION ops.queue_platform_alert_post(text, text);
 DROP FUNCTION ops.platform_set_alert_channel(uuid, text, text, text);
 DROP FUNCTION ops.platform_alert_channel_state();
 DROP FUNCTION ops.finish_platform_alert_post(uuid, integer, uuid, integer, text, boolean);
+DROP FUNCTION ops.claim_platform_alert_posts(integer);
 RESET ROLE;
 
 -- An alert's post (the worker's alert sweeps, in the transaction that queues its emails): queued
@@ -175,9 +176,11 @@ REVOKE EXECUTE ON FUNCTION ops.platform_alert_channel_state() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION ops.platform_alert_channel_state() TO w360_platform;
 ALTER FUNCTION ops.platform_alert_channel_state() OWNER TO w360_definer;
 
--- An attempt's outcome (the worker), as 0258 records it, but for one more case: a 2xx status is
--- sent also when the post failed while it was on its way because its kind was unticked, as when
--- the channel was removed; any other answer leaves such a post failed.
+-- An attempt's outcome (the worker), as 0258 records it, but for two things: a 2xx status is sent
+-- also when the post failed while it was on its way because its kind was unticked, as when the
+-- channel was removed, and any other answer leaves such a post failed; and the channel's row is
+-- locked before the post's, as choosing the alerts and removing the channel lock it before the
+-- posts, so neither waits on the other in a deadlock.
 CREATE FUNCTION ops.finish_platform_alert_post(p_id uuid, p_attempt integer, p_channel_id uuid,
     p_status integer, p_error text, p_retry boolean)
   RETURNS text
@@ -191,6 +194,7 @@ BEGIN
   IF (p_status IS NULL) = (p_error IS NULL) THEN
     RAISE EXCEPTION 'give an attempt''s HTTP status or its error code' USING ERRCODE = 'W3412';
   END IF;
+  PERFORM 1 FROM ops.platform_alert_channel c WHERE c.id = p_channel_id FOR NO KEY UPDATE;
   SELECT p.attempts INTO v_attempts FROM ops.platform_alert_posts p
    WHERE p.id = p_id AND p.attempts = p_attempt AND p.sent_at IS NULL
      AND (p.failed_at IS NULL
@@ -228,3 +232,52 @@ GRANT EXECUTE ON FUNCTION ops.finish_platform_alert_post(uuid, integer, uuid, in
   TO w360_app;
 ALTER FUNCTION ops.finish_platform_alert_post(uuid, integer, uuid, integer, text, boolean)
   OWNER TO w360_definer;
+
+-- The posts due (the worker, every minute and when a post is queued), as 0258 claims them, but for
+-- two things. The channel's row is locked first, as choosing the alerts, replacing the address and
+-- removing the channel lock it before the posts, and held until the worker has read the address in
+-- this transaction: the posts claimed go to the address of this moment, never to one that replaced
+-- it since (a finish's lock does not wait for it). And a post waiting of an alert the channel no
+-- longer gets fails as unticked: one queued while its alert was being unticked, which choosing the
+-- alerts could not see yet, is never sent.
+CREATE FUNCTION ops.claim_platform_alert_posts(p_limit integer)
+  RETURNS TABLE (id uuid, kind text, body text, attempts smallint, created_at timestamptz)
+  LANGUAGE plpgsql SECURITY DEFINER
+  SET search_path = pg_catalog, pg_temp
+  AS $$
+DECLARE
+  v_kinds text[];
+BEGIN
+  SELECT c.kinds INTO v_kinds FROM ops.platform_alert_channel c FOR KEY SHARE;
+  UPDATE ops.platform_alert_posts p
+     SET failed_at = now(), last_status = NULL, last_error = 'interrupted', lease_until = NULL
+   WHERE p.sent_at IS NULL AND p.failed_at IS NULL AND p.attempts >= 5 AND p.lease_until < now();
+  IF v_kinds IS NULL THEN
+    -- No channel, or one replaced or removed while this waited for its row: the posts waiting fail
+    -- only when none is set, and the next run claims those of a new address.
+    IF NOT EXISTS (SELECT 1 FROM ops.platform_alert_channel) THEN
+      UPDATE ops.platform_alert_posts p
+         SET failed_at = now(), last_status = NULL, last_error = 'no_channel', lease_until = NULL
+       WHERE p.sent_at IS NULL AND p.failed_at IS NULL;
+    END IF;
+    RETURN;
+  END IF;
+  UPDATE ops.platform_alert_posts p
+     SET failed_at = now(), last_status = NULL, last_error = 'unticked', lease_until = NULL
+   WHERE p.sent_at IS NULL AND p.failed_at IS NULL AND p.kind <> 'test'
+     AND NOT (p.kind = ANY (v_kinds));
+  RETURN QUERY
+  UPDATE ops.platform_alert_posts p
+     SET attempts = p.attempts + 1, lease_until = now() + interval '3 minutes'
+   WHERE p.id IN (SELECT d.id FROM ops.platform_alert_posts d
+                   WHERE d.sent_at IS NULL AND d.failed_at IS NULL AND d.next_attempt_at <= now()
+                     AND (d.lease_until IS NULL OR d.lease_until < now()) AND d.attempts < 5
+                   ORDER BY d.next_attempt_at, d.id
+                   LIMIT least(greatest(coalesce(p_limit, 0), 0), 10)
+                   FOR UPDATE SKIP LOCKED)
+  RETURNING p.id, p.kind, p.body, p.attempts, p.created_at;
+END
+$$;
+REVOKE EXECUTE ON FUNCTION ops.claim_platform_alert_posts(integer) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION ops.claim_platform_alert_posts(integer) TO w360_app;
+ALTER FUNCTION ops.claim_platform_alert_posts(integer) OWNER TO w360_definer;

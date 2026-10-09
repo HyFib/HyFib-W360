@@ -551,19 +551,24 @@ describe('the posting job (ADR-338)', () => {
     created_at: `2026-10-09T10:0${minute}:00Z`,
   });
 
-  /** A database answering the job's statements: the purge, the claim, the channel, each finish. */
+  /**
+   * A database answering the job's statements: the purge, the claim, the channel, each finish. Each
+   * statement records its transaction, numbered from 1.
+   */
   function jobDb(opts: {
     posts: Post[];
     channel: { id: string; url_ciphertext: string } | null;
     finish?: (params: unknown[]) => string;
   }) {
-    const statements: { scope: unknown; sql: string; params: unknown[] }[] = [];
+    const statements: { scope: unknown; tx: number; sql: string; params: unknown[] }[] = [];
+    let transactions = 0;
     const db = {
-      run: async (scope: unknown, fn: (tx: unknown) => Promise<unknown>) =>
-        fn({
+      run: async (scope: unknown, fn: (tx: unknown) => Promise<unknown>) => {
+        const tx = ++transactions;
+        return fn({
           execute: async (q: SQL) => {
             const built = query(q);
-            statements.push({ scope, ...built });
+            statements.push({ scope, tx, ...built });
             if (built.sql.includes('purge_platform_alert_posts')) return { rows: [{ purged: 2 }] };
             if (built.sql.includes('claim_platform_alert_posts')) return { rows: opts.posts };
             if (built.sql.includes('from ops.platform_alert_channel'))
@@ -572,7 +577,8 @@ describe('the posting job (ADR-338)', () => {
               return { rows: [{ state: opts.finish?.(built.params) ?? 'sent' }] };
             throw new Error(`unexpected statement: ${built.sql}`);
           },
-        }),
+        });
+      },
     } as unknown as Database;
     return { db, statements };
   }
@@ -620,15 +626,19 @@ describe('the posting job (ADR-338)', () => {
         body: JSON.stringify({ text }),
       })),
     );
-    expect(statements.map((s) => [s.scope, s.sql])).toEqual([
-      [{ kind: 'system' }, 'select ops.purge_platform_alert_posts() as purged'],
+    // The address is read in the claim's transaction, which holds the channel's row; the purge and
+    // each finish have a transaction of their own.
+    expect(statements.map((s) => [s.scope, s.tx, s.sql])).toEqual([
+      [{ kind: 'system' }, 1, 'select ops.purge_platform_alert_posts() as purged'],
       [
         { kind: 'system' },
+        2,
         'select id, kind, body, attempts, created_at from ops.claim_platform_alert_posts($1)',
       ],
-      [{ kind: 'system' }, 'select id, url_ciphertext from ops.platform_alert_channel'],
-      ...['a', 'b', 'c'].map((): [unknown, string] => [
+      [{ kind: 'system' }, 2, 'select id, url_ciphertext from ops.platform_alert_channel'],
+      ...[3, 4, 5].map((tx): [unknown, number, string] => [
         { kind: 'system' },
+        tx,
         'select ops.finish_platform_alert_post($1::uuid, $2::integer, $3::uuid, $4::integer, $5::text, $6::boolean) as state',
       ]),
     ]);
@@ -687,7 +697,7 @@ describe('the posting job (ADR-338)', () => {
     expect(statements.at(-1)?.params).toEqual(['a', 1, 'chan-1', null, 'unopenable', true]);
   });
 
-  it('fails a post claimed as the channel was removed, and claims nothing more when none is due', async () => {
+  it('fails a post claimed when no channel is read, and claims nothing more when none is due', async () => {
     const { db, statements } = jobDb({
       posts: [post('a', 1)],
       channel: null,

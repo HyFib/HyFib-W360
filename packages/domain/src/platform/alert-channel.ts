@@ -300,9 +300,9 @@ export interface AlertPostsResult {
 /**
  * The posting job (every minute, and when an alert or a test post is queued): deletes the posts
  * kept 7 days, claims up to `limit` posts due and sends them one after another, oldest first, to
- * the channel's address, recording each attempt's answer. Never logs nor returns the address or a
- * post's body. Posting is at least once: a post whose answer did not come is tried again, so the
- * channel may show it twice.
+ * the channel's address when they were claimed, recording each attempt's answer. Never logs nor
+ * returns the address or a post's body. Posting is at least once: a post whose answer did not come
+ * is tried again, so the channel may show it twice.
  */
 export async function sendAlertPosts(
   deps: AlertPostsDeps,
@@ -311,8 +311,10 @@ export async function sendAlertPosts(
   const purge = await deps.db.run(systemScope, (tx) =>
     tx.execute<{ purged: number }>(sql`select ops.purge_platform_alert_posts() as purged`),
   );
-  const claimed = await deps.db.run(systemScope, (tx) =>
-    tx.execute<{
+  // The address is read in the claim's transaction, which holds the channel's row (0261): the posts
+  // claimed go to the address they were claimed for, never to one that replaced it since.
+  const { claimed, channel } = await deps.db.run(systemScope, async (tx) => {
+    const due = await tx.execute<{
       id: string;
       kind: string;
       body: string;
@@ -320,26 +322,22 @@ export async function sendAlertPosts(
       created_at: Date | string;
     }>(
       sql`select id, kind, body, attempts, created_at from ops.claim_platform_alert_posts(${limit})`,
-    ),
-  );
+    );
+    if (due.rows.length === 0) return { claimed: due.rows, channel: null };
+    const channels = await tx.execute<{ id: string; url_ciphertext: string }>(
+      sql`select id, url_ciphertext from ops.platform_alert_channel`,
+    );
+    return { claimed: due.rows, channel: channels.rows[0] ?? null };
+  });
   const result: AlertPostsResult = {
-    claimed: claimed.rows.length,
+    claimed: claimed.length,
     sent: 0,
     retrying: 0,
     failed: [],
     unopenable: null,
     purged: Number(purge.rows[0]?.purged ?? 0),
   };
-  if (claimed.rows.length === 0) return result;
-  const channels = await deps.db.run(
-    systemScope,
-    (tx) =>
-      tx.execute<{ id: string; url_ciphertext: string }>(
-        sql`select id, url_ciphertext from ops.platform_alert_channel`,
-      ),
-    { accessMode: 'read only' },
-  );
-  const channel = channels.rows[0] ?? null;
+  if (claimed.length === 0) return result;
   let url: string | null = null;
   if (channel) {
     try {
@@ -349,12 +347,13 @@ export async function sendAlertPosts(
       result.unopenable = toError(error).message;
     }
   }
-  const posts = [...claimed.rows].sort(
+  const posts = [...claimed].sort(
     (a, b) =>
       new Date(a.created_at).getTime() - new Date(b.created_at).getTime() || (a.id < b.id ? -1 : 1),
   );
   for (const post of posts) {
-    // Removed after the claim: its removal failed the post already, and this changes nothing.
+    // No channel cannot follow a claim that returned posts, which holds the channel's row until the
+    // address is read; should it, the posts fail rather than go anywhere.
     const outcome: AlertPostOutcome = !channel
       ? { status: null, error: 'no_channel', retry: false }
       : url === null
@@ -378,7 +377,8 @@ export async function sendAlertPosts(
         error: outcome.error,
       });
     }
-    // 'stale': another attempt claimed the post after this one's lease ran out.
+    // 'stale': another attempt claimed the post after this one's lease ran out, or the channel's
+    // removal or its alert's unticking failed it on its way and the answer was no 2xx.
   }
   return result;
 }

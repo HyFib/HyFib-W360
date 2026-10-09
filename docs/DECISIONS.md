@@ -13300,10 +13300,15 @@ Decision:
 - **Unticking stops the posts waiting:** the posts of an alert no longer ticked that wait, or are
   retrying, fail as unticked ("Its alert was unticked before it was sent"), as removing the channel
   fails them, so neither this address nor a replacement gets them: the replace field advises
-  unticking an alert before replacing the address, and a new address takes the posts waiting
-  (found by Codex's review). A post on its way when its alert is unticked is never tried again; if
-  the address accepted it, it is recorded as sent (`ops.finish_platform_alert_post`, replaced in
-  0261), as when the channel is removed.
+  unticking an alert before replacing the address, and a new address takes the posts waiting (found
+  by Codex's review). The claim (`ops.claim_platform_alert_posts`, replaced in 0261) fails them too,
+  so a post queued while its alert was being unticked, which the unticking could not see, is never
+  sent. A post on its way when its alert is unticked is never tried again; if the address accepted
+  it, it is recorded as sent (`ops.finish_platform_alert_post`, replaced in 0261), as when the
+  channel is removed. The claim holds the channel's row until the worker has read the address in its
+  transaction, so the posts claimed go to the address they were claimed for, never to one that
+  replaced it since; the claim, an attempt's outcome and the functions that change the channel lock
+  its row before the posts', so none waits on another in a deadlock.
 - **The financial alerts are posted only once an owner adds them:** their posts reach whoever reads
   the channel, not only platform owners. The form marks them "platform owners' alert" and says so.
   Each is posted in the transaction that queues its emails, as the operations alerts are: the
