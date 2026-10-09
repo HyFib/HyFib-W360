@@ -3770,8 +3770,8 @@ for HyFib-side kinds (accounts not checked for 26 hours, webhooks not subscribed
 failures are the company's to fix, and the company is told of them; HyFib staff contact it when it
 does not act.
 
-**The alerts' chat channel (ADR-338).** The three alerts above are emailed whatever happens; a
-platform owner can also have them posted to a chat channel. Create an incoming webhook for the
+**The alerts' chat channel (ADR-338).** The three alerts above are emailed to every platform
+administrator; a platform owner can also have them posted to a chat channel. Create an incoming webhook for the
 channel (in Slack: an app with Incoming Webhooks turned on, added to the channel, which gives an
 address `https://hooks.slack.com/services/…`; any service that takes a JSON `POST` with a `text`
 member works the same way), then on Operations → Alerts paste the address and press "Set the

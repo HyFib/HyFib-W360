@@ -1285,7 +1285,7 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
 
    Migration 0258 (ADR-338) adds `ops.platform_alert_channel` and `ops.platform_alert_posts` with
    their grants, the channel's definer functions (set, remove, test and read for platform staff;
-   queue, claim, finish and purge for the worker) and replaces `ops.sealed_value_keys` with the
+   queue, claim, finish and purge the posts and re-encrypt the address for the worker) and replaces `ops.sealed_value_keys` with the
    channel's address as one more sealed kind. `pnpm db:migrate` also creates the queue
    `ops.alert-posts`. No channel is set until a platform owner sets one, so nothing is posted.
    Workers of this release need the migration (their alert sweeps queue posts in the transaction of

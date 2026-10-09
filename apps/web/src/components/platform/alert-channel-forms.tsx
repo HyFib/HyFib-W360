@@ -42,7 +42,11 @@ export function AlertChannelForms({ host }: { host: string | null }) {
     setBusy(false);
     if (!result.ok) setError(result.message);
     else
-      setDone('Test post queued: the worker sends it within seconds. Reload to see its outcome.');
+      setDone(
+        result.data.woken
+          ? 'Test post queued: the worker sends it within seconds. Reload to see its outcome.'
+          : 'Test post queued: the worker sends it within a minute. Reload to see its outcome.',
+      );
   }
   async function remove() {
     begin();
@@ -88,7 +92,7 @@ export function AlertChannelForms({ host }: { host: string | null }) {
           </ClientButton>
           <ConfirmDialog
             title="Remove the chat channel?"
-            description={`Alerts are no longer posted to ${host}; they are still emailed to every platform administrator. Posts waiting are dropped.`}
+            description={`Alerts are no longer posted to ${host}; they are still emailed to every platform administrator. Posts waiting fail as having no channel.`}
             confirmLabel="Remove"
             destructive
             onConfirm={() => void remove()}

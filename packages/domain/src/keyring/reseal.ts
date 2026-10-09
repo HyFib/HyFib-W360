@@ -271,13 +271,22 @@ const SEALED_VALUES: Record<SealedValueKind, SealedValueSpec> = {
     sealed: emailOutbox.payloadCiphertext,
     aad: (r) => outboxAad(r.id),
   }),
-  alert_channel: sealedColumn({
-    table: platformAlertChannel,
-    id: platformAlertChannel.id,
-    tenantId: null,
-    sealed: platformAlertChannel.urlCiphertext,
-    aad: (r) => alertChannelAad(r.id),
-  }),
+  alert_channel: {
+    ...sealedColumn({
+      table: platformAlertChannel,
+      id: platformAlertChannel.id,
+      tenantId: null,
+      sealed: platformAlertChannel.urlCiphertext,
+      aad: (r) => alertChannelAad(r.id),
+    }),
+    // The runtime role cannot write the chat channel's address; its re-encryption is the one change.
+    async write(tx, ref, stored, next) {
+      const res = await tx.execute<{ swapped: boolean }>(
+        sql`select ops.reseal_platform_alert_channel(${ref.id}::uuid, ${stored.sealed}, ${next}) as swapped`,
+      );
+      return res.rows[0]?.swapped === true;
+    },
+  },
 };
 
 const KIND_SET: ReadonlySet<string> = new Set(SEALED_VALUE_KINDS);

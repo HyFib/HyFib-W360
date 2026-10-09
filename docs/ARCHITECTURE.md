@@ -2599,12 +2599,14 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   and one running) deletes posts kept 7 days, claims up to 5 posts due (`ops.claim_platform_alert_posts`:
   leased 3 minutes, the attempt counted at the claim), reads and opens the address as the runtime
   role and `POST`s `{"text": …}` to it one post after another through its own egress client, and
-  records each answer (`ops.finish_platform_alert_post`: a 2xx is sent; a 429, a 5xx or no answer is
-  tried again 1, 2, 4 and 8 minutes later; anything else, or a fifth attempt, fails). The channel
+  records each answer (`ops.finish_platform_alert_post`: a 2xx is sent, even after the channel's
+  removal failed the post on its way; a 429, a 5xx or no answer is tried again 1, 2, 4 and 8
+  minutes later; anything else, or a fifth attempt, fails). The channel
   keeps its last post sent and failed with the status or error code; the console reads them and the
   10 latest posts (never their text) through definer functions for platform administrators. Test
   posts are queued by owners and signalled at once. The keyring sweep re-encrypts the address as
-  the `alert_channel` kind.
+  the `alert_channel` kind, through `ops.reseal_platform_alert_channel` (compare and set): the
+  runtime role has no write grant on it.
 - **Acknowledging failures** (ADR-141, migration 0107): a platform administrator acknowledges a
   failure on Current failures with a note, through `ops.platform_acknowledge_integration_failure`
   (definer, platform role only), which checks the administrator and that `ops.integration_failures`

@@ -2301,8 +2301,9 @@ message text, contact details, payloads, email addresses, secrets or full URLs:
   and each SECURITY DEFINER function check the role; operators read its state). Its incoming
   webhook address holds the channel's secret: the web tier holds it to the egress guard's rules
   (https, no credentials, port 443 or from 1024) and seals it with the keyring under the row's id;
-  only the runtime role reads the sealed column (and may only re-encrypt it), the platform role has
-  no grant on the table, and the console, the audit entries (`platform.alert_channel_set`,
+  only the runtime role reads the sealed column, and it may only re-encrypt it, compare and set,
+  through `ops.reseal_platform_alert_channel` (it has no write grant); the platform role has no
+  grant on the table, and the console, the audit entries (`platform.alert_channel_set`,
   `_removed`, `_tested`) and the logs name its host only, never the address or a post's text. A
   post carries its alert's counts-only text, as the email does, to an address HyFib's staff chose,
   through the egress guard (public addresses only, the name resolved once and pinned, no redirects,

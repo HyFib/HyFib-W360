@@ -429,12 +429,23 @@ export async function removeAlertChannelAction(): Promise<ActionResult<{ removed
   });
 }
 
-/** Queues a test post to the chat channel (platform owners, audited, ADR-338). */
-export async function sendAlertChannelTestAction(): Promise<ActionResult<{ postId: string }>> {
+/**
+ * Queues a test post to the chat channel (platform owners, audited, ADR-338); whether the posting
+ * job was woken for it (else the minute run sends it, and the error is logged).
+ */
+export async function sendAlertChannelTestAction(): Promise<
+  ActionResult<{ postId: string; woken: boolean }>
+> {
   return runAction(async () => {
     const { actor, runtime } = await actorForAction();
-    const result = await runtime.alertChannel.sendTest(actor);
+    const { postId, wakeError } = await runtime.alertChannel.sendTest(actor);
+    if (wakeError) {
+      runtime.logger.warn(
+        { err: wakeError, postId },
+        'waking the alert posting job failed; its minute run sends the test post',
+      );
+    }
     refresh();
-    return result;
+    return { postId, woken: wakeError === null };
   });
 }

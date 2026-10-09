@@ -498,8 +498,13 @@ export function createAlertChannelService(deps: AlertChannelDeps) {
       return { removed: res.rows[0]?.removed === true };
     },
 
-    /** Queues a test post (platform owners) and signals the posting job, which sends it at once. */
-    async sendTest(actor: PlatformActor): Promise<{ postId: string }> {
+    /**
+     * Queues a test post (platform owners) and signals the posting job, which sends it at once. The
+     * signal goes after the post's transaction committed, so the job finds it; should it fail, the
+     * post is queued and audited all the same and the minute run sends it, so the error is given
+     * back for the caller to log and say so.
+     */
+    async sendTest(actor: PlatformActor): Promise<{ postId: string; wakeError: Error | null }> {
       ownersOnly(actor, 'test');
       const res = await deps.platformDb.run(actor.userId, (tx) =>
         tx.execute<{ id: string }>(
@@ -508,10 +513,12 @@ export function createAlertChannelService(deps: AlertChannelDeps) {
       );
       const postId = res.rows[0]?.id;
       if (!postId) throw new Error('ops.platform_test_alert_channel returned no post');
-      // After the post's transaction committed: the job finds it. Without the signal the minute
-      // run sends it.
-      await signalAlertPosts(deps, null, actor.userId, postId);
-      return { postId };
+      try {
+        await signalAlertPosts(deps, null, actor.userId, postId);
+        return { postId, wakeError: null };
+      } catch (error) {
+        return { postId, wakeError: toError(error) };
+      }
     },
   };
 }

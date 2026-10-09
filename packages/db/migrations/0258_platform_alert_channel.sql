@@ -8,7 +8,7 @@
 -- which the worker sends through the egress guard (queue `ops.alert-posts`), up to 5 attempts. The
 -- address holds the channel's secret, so the services seal it with the keyring (the keyring sweep
 -- re-encrypts it, 0101) and the console shows its host only: no role reads it but the runtime
--- role, which sends the posts.
+-- role, which sends the posts and may only re-encrypt it.
 
 -- The channel: one row at most (its unique index on a constant). Its id is part of the associated
 -- data the address is sealed with, so a new address is a new row. It keeps when a post was last
@@ -27,12 +27,12 @@ CREATE TABLE ops.platform_alert_channel (
   CHECK (last_status IS NULL OR last_error IS NULL)
 );
 CREATE UNIQUE INDEX platform_alert_channel_one ON ops.platform_alert_channel ((true));
--- The runtime role reads the sealed address to send, and re-encrypts it under the primary key (the
--- keyring sweep compares and sets it); the definer role's functions below do the rest.
+-- The runtime role reads the sealed address to send, and re-encrypts it under the primary key only
+-- through ops.reseal_platform_alert_channel (the keyring sweep); the definer role's functions below
+-- do the rest.
 GRANT SELECT (id, url_ciphertext) ON ops.platform_alert_channel TO w360_app;
-GRANT UPDATE (url_ciphertext) ON ops.platform_alert_channel TO w360_app;
 GRANT SELECT, INSERT, DELETE ON ops.platform_alert_channel TO w360_definer;
-GRANT UPDATE (last_sent_at, last_failed_at, last_status, last_error)
+GRANT UPDATE (url_ciphertext, last_sent_at, last_failed_at, last_status, last_error)
   ON ops.platform_alert_channel TO w360_definer;
 
 -- The posts waiting, sent or failed. A post's body is its alert's text, counts only, as its email.
@@ -228,8 +228,8 @@ REVOKE EXECUTE ON FUNCTION ops.queue_platform_alert_post(text, text) FROM PUBLIC
 GRANT EXECUTE ON FUNCTION ops.queue_platform_alert_post(text, text) TO w360_app;
 ALTER FUNCTION ops.queue_platform_alert_post(text, text) OWNER TO w360_definer;
 
--- The posts due (the worker, every minute and when a test post is queued), oldest first, at most
--- 10, each leased for 3 minutes and its attempt counted as it is claimed. A post whose last attempt
+-- The posts due (the worker, every minute and when a post is queued), oldest first, at most 10,
+-- each leased for 3 minutes and its attempt counted as it is claimed. A post whose last attempt
 -- was interrupted (its lease ran out with no attempt left) fails; without a channel, every post
 -- waiting fails and none is returned.
 CREATE FUNCTION ops.claim_platform_alert_posts(p_limit integer)
@@ -264,11 +264,11 @@ GRANT EXECUTE ON FUNCTION ops.claim_platform_alert_posts(integer) TO w360_app;
 ALTER FUNCTION ops.claim_platform_alert_posts(integer) OWNER TO w360_definer;
 
 -- An attempt's outcome (the worker): its post and attempt as claimed, the channel it was sent to,
--- and the answer, an HTTP status or an error code. A 2xx status is sent. Otherwise the post is
--- tried again after a wait while attempts remain and the failure may pass (p_retry), else it fails
--- for good. The channel keeps its last of each. 'stale' when the attempt no longer holds the post
--- (another claimed it after its lease ran out, or it was failed meanwhile); else 'sent',
--- 'retrying' or 'failed'.
+-- and the answer, an HTTP status or an error code. A 2xx status is sent, even when the channel's
+-- removal failed the post while it was being sent. Otherwise the post is tried again after a wait
+-- while attempts remain and the failure may pass (p_retry), else it fails for good. The channel
+-- keeps its last of each. 'stale' when the attempt is no longer the post's latest claim, or the
+-- post was sent or failed meanwhile (but for that removal); else 'sent', 'retrying' or 'failed'.
 CREATE FUNCTION ops.finish_platform_alert_post(p_id uuid, p_attempt integer, p_channel_id uuid,
     p_status integer, p_error text, p_retry boolean)
   RETURNS text
@@ -283,14 +283,16 @@ BEGIN
     RAISE EXCEPTION 'give an attempt''s HTTP status or its error code' USING ERRCODE = 'W3412';
   END IF;
   SELECT p.attempts INTO v_attempts FROM ops.platform_alert_posts p
-   WHERE p.id = p_id AND p.attempts = p_attempt AND p.sent_at IS NULL AND p.failed_at IS NULL
+   WHERE p.id = p_id AND p.attempts = p_attempt AND p.sent_at IS NULL
+     AND (p.failed_at IS NULL OR (p_status BETWEEN 200 AND 299 AND p.last_error = 'no_channel'))
    FOR UPDATE;
   IF v_attempts IS NULL THEN
     RETURN 'stale';
   END IF;
   IF p_status BETWEEN 200 AND 299 THEN
     UPDATE ops.platform_alert_posts p
-       SET sent_at = now(), lease_until = NULL, last_status = p_status, last_error = NULL
+       SET sent_at = now(), failed_at = NULL, lease_until = NULL, last_status = p_status,
+           last_error = NULL
      WHERE p.id = p_id;
     UPDATE ops.platform_alert_channel c SET last_sent_at = now() WHERE c.id = p_channel_id;
     RETURN 'sent';
@@ -316,6 +318,28 @@ GRANT EXECUTE ON FUNCTION ops.finish_platform_alert_post(uuid, integer, uuid, in
   TO w360_app;
 ALTER FUNCTION ops.finish_platform_alert_post(uuid, integer, uuid, integer, text, boolean)
   OWNER TO w360_definer;
+
+-- The channel's address re-encrypted under the primary key (the keyring sweep, as the runtime
+-- role): written only while it is still the value the sweep opened (compare and set), and only as
+-- another sealed value; false when it changed or the channel is gone. As 0101 re-encrypts a store's
+-- webhook secret, which the runtime role cannot write either.
+CREATE FUNCTION ops.reseal_platform_alert_channel(p_id uuid, p_old text, p_new text)
+  RETURNS boolean
+  LANGUAGE plpgsql SECURITY DEFINER
+  SET search_path = pg_catalog, pg_temp
+  AS $$
+BEGIN
+  IF p_old IS NULL OR p_new IS NULL OR NOT starts_with(p_new, 'v1:') OR p_new = p_old THEN
+    RAISE EXCEPTION 'the chat channel''s address is only re-encrypted' USING ERRCODE = 'W3412';
+  END IF;
+  UPDATE ops.platform_alert_channel c SET url_ciphertext = p_new
+   WHERE c.id = p_id AND c.url_ciphertext = p_old;
+  RETURN FOUND;
+END
+$$;
+REVOKE EXECUTE ON FUNCTION ops.reseal_platform_alert_channel(uuid, text, text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION ops.reseal_platform_alert_channel(uuid, text, text) TO w360_app;
+ALTER FUNCTION ops.reseal_platform_alert_channel(uuid, text, text) OWNER TO w360_definer;
 
 -- Posts sent or failed more than 7 days ago (the worker, every minute); how many went.
 CREATE FUNCTION ops.purge_platform_alert_posts()

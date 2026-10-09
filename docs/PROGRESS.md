@@ -29,9 +29,9 @@ from search excerpts of its pages (ADR-338 lists them), and no post was made to 
 - **Web:** Operations → Alerts (the channel's host, who set it and when, its last post sent and
   failed with the answer, the posts waiting and failed, and the 10 latest posts; owners set, replace,
   test and remove it); the Keys tab names the channel's address among the sealed values.
-- **Tests:** unit (22 new in `platform/alert-channel.test.ts`; the alerts' wording and results in
+- **Tests:** unit (23 new in `platform/alert-channel.test.ts`; the alerts' wording and results in
   `failure-alerts.test.ts`, `queue-waits.test.ts` and `integration-alerts.test.ts`; the reseal kinds
-  in `keyring/reseal.test.ts`); integration (8 new in `alert-channel.test.ts`; the keyring sweep
+  in `keyring/reseal.test.ts`); integration (9 new in `alert-channel.test.ts`; the keyring sweep
   re-encrypting the channel's address in `keyring-reseal.test.ts`; the functions' grants in
   `tenant-isolation.test.ts`); e2e (1 new in `platform-ops.spec.ts`: an owner sets the channel to a
   local receiver, sends a test post it receives as JSON, and removes it). Written for CI; the
@@ -46,6 +46,19 @@ from search excerpts of its pages (ADR-338 lists them), and no post was made to 
   post's signal and the state's snapshot; the reseal kind; the alerts' wording and results). The
   definer functions, the grants and the posting against a receiver need the database, so their
   regressions are left to the integration tests, which run in CI.
+
+- **Review fixes:** an independent review found two tests that would have failed in CI: the
+  integration test of the test post counted the audit entries an earlier test of the file wrote (it
+  now counts its own), and the browser test matched the test posts of the projects that ran before
+  it (it now takes the newest, and removes the channel even when it fails). Also fixed: the runtime
+  role could write the channel's address, not only re-encrypt it (it now re-encrypts it, compare and
+  set, through `ops.reseal_platform_alert_channel`, with no write grant); a post the channel's
+  removal failed while it was on its way was shown failed though delivered (a 2xx now makes it
+  sent); a test post whose job could not be woken was reported as an error though queued (the error
+  is logged and the page says it goes out within a minute); and wording (the runbook, the removal's
+  dialog, the decision's queue and outcome rules). 3/3 deliberate regressions of the unit-tested
+  fixes caught; the re-encryption and the race are left to the integration tests, which run in CI.
+  The full check passed again (142 files, 1438 tests).
 
 ### Test commands and results (local, 2026-10-09)
 

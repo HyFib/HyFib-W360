@@ -142,6 +142,8 @@ afterAll(async () => {
 
 describe('the chat channel (ADR-338)', () => {
   it('lets platform owners set it, sealed under its row and audited by its host only', async () => {
+    // The audit is append-only and the owner is the file's: this test's entries are those after.
+    const before = (await auditOf(owner)).length;
     await expectCode(service().setChannel(operator, { url: hookUrl }), 'forbidden');
     // The definer function holds the same rule for a caller that skips the service.
     await expectCode(
@@ -184,7 +186,7 @@ describe('the chat channel (ADR-338)', () => {
       ),
     ).rejects.toThrow(/platform_alert_channel_one/);
 
-    const audit = await auditOf(owner);
+    const audit = (await auditOf(owner)).slice(before);
     expect(audit.map((a) => [a.action, a.metadata])).toEqual([
       ['platform.alert_channel_set', { host: '127.0.0.1' }],
       ['platform.alert_channel_set', { host: '127.0.0.1', previousHost: '127.0.0.1' }],
@@ -205,7 +207,7 @@ describe('the chat channel (ADR-338)', () => {
     expect(JSON.stringify(state)).not.toContain('hook-secret');
   });
 
-  it('gives the address to the runtime role alone, which may only read and re-encrypt it', async () => {
+  it('gives the address to the runtime role alone, which may only read it and re-encrypt it', async () => {
     const can = async (role: string, column: string, privilege: string) =>
       (
         await fx.query<{ ok: boolean }>(
@@ -219,7 +221,7 @@ describe('the chat channel (ADR-338)', () => {
       }
     }
     expect(await can('w360_app', 'url_ciphertext', 'SELECT')).toBe(true);
-    expect(await can('w360_app', 'url_ciphertext', 'UPDATE')).toBe(true);
+    expect(await can('w360_app', 'url_ciphertext', 'UPDATE')).toBe(false);
     expect(await can('w360_app', 'host', 'SELECT')).toBe(false);
     expect(await can('w360_app', 'host', 'UPDATE')).toBe(false);
     const [table] = await fx.query<{ insert: boolean; delete: boolean; posts: boolean }>(
@@ -230,14 +232,37 @@ describe('the chat channel (ADR-338)', () => {
                 AS posts`,
     );
     expect(table).toEqual({ insert: false, delete: false, posts: false });
+
+    // Its re-encryption (the keyring sweep) replaces the value it opened, and only with another
+    // sealed value.
+    await service().setChannel(owner, { url: hookUrl });
+    const [row] = await fx.query<{ id: string; url_ciphertext: string }>(
+      `SELECT id, url_ciphertext FROM ops.platform_alert_channel`,
+    );
+    const resealed = fx.keyring.encrypt(hookUrl, alertChannelAad(row!.id));
+    const reseal = (old: string, next: string) =>
+      fx.dbs.app.run(systemScope, (tx) =>
+        tx.execute<{ swapped: boolean }>(
+          sql`select ops.reseal_platform_alert_channel(${row!.id}::uuid, ${old}, ${next}) as swapped`,
+        ),
+      );
+    expect((await reseal('v1:another', resealed)).rows[0]?.swapped).toBe(false);
+    await expectCode(reseal(row!.url_ciphertext, 'in clear'), 'precondition_failed');
+    expect((await reseal(row!.url_ciphertext, resealed)).rows[0]?.swapped).toBe(true);
+    const [after] = await fx.query<{ url_ciphertext: string }>(
+      `SELECT url_ciphertext FROM ops.platform_alert_channel`,
+    );
+    expect(after?.url_ciphertext).toBe(resealed);
   });
 
   it('sends a test post to the channel as JSON text, and keeps its answer', async () => {
+    const before = (await auditOf(owner)).length;
     await expectCode(service().sendTest(owner), 'not_found', /No chat channel is set/);
     await service().setChannel(owner, { url: hookUrl });
     await expectCode(service().sendTest(operator), 'forbidden');
 
-    const { postId } = await service().sendTest(owner);
+    const { postId, wakeError } = await service().sendTest(owner);
+    expect(wakeError).toBeNull();
     // The posting job is woken at once.
     const [signal] = await fx.query<{ n: number }>(
       `SELECT count(*)::int AS n FROM pgboss.job
@@ -267,7 +292,7 @@ describe('the chat channel (ADR-338)', () => {
     const state = await service().state(owner);
     expect(state.channel?.lastSentAt).toBeInstanceOf(Date);
     expect(state.posts).toMatchObject([{ id: postId, kind: 'test', lastStatus: 200 }]);
-    expect((await auditOf(owner)).map((a) => [a.action, a.metadata])).toEqual([
+    expect((await auditOf(owner)).slice(before).map((a) => [a.action, a.metadata])).toEqual([
       ['platform.alert_channel_set', { host: '127.0.0.1' }],
       ['platform.alert_channel_tested', { host: '127.0.0.1' }],
     ]);
@@ -378,6 +403,33 @@ describe('the chat channel (ADR-338)', () => {
     );
     expect(queued.rows[0]?.queued).toBe(false);
     expect(await posts()).toHaveLength(3);
+  });
+
+  it('records as sent a post the channel’s removal failed while it was being sent', async () => {
+    await service().setChannel(owner, { url: hookUrl });
+    const [channel] = await fx.query<{ id: string }>(`SELECT id FROM ops.platform_alert_channel`);
+    const { postId } = await service().sendTest(owner);
+    const worker = <T extends Record<string, unknown>>(statement: ReturnType<typeof sql>) =>
+      fx.dbs.app.run(systemScope, (tx) => tx.execute<T>(statement)).then((r) => r.rows);
+    const claimed = await worker<{ id: string; attempts: number }>(
+      sql`select id, attempts from ops.claim_platform_alert_posts(5)`,
+    );
+    expect(claimed).toEqual([{ id: postId, attempts: 1 }]);
+    // Removed while the post is on its way: it fails as having no channel…
+    await service().removeChannel(owner);
+    expect(await posts()).toMatchObject([{ id: postId, failed: true, last_error: 'no_channel' }]);
+    // …and the channel's 2xx makes it sent, while a failure no longer changes it.
+    const finish = (status: number) =>
+      worker<{ state: string }>(
+        sql`select ops.finish_platform_alert_post(${postId}::uuid, 1, ${channel!.id}::uuid,
+              ${status}::integer, null::text, true) as state`,
+      );
+    expect(await finish(503)).toEqual([{ state: 'stale' }]);
+    expect(await finish(200)).toEqual([{ state: 'sent' }]);
+    expect(await posts()).toMatchObject([
+      { id: postId, sent: true, failed: false, last_status: 200, last_error: null },
+    ]);
+    expect(await finish(200)).toEqual([{ state: 'stale' }]);
   });
 
   it('posts an alert with its emails, in their transaction, with the email’s text', async () => {

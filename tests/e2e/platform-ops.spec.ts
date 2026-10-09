@@ -682,10 +682,13 @@ test('an owner posts the operations alerts to a chat channel and sends it a test
       );
     await expect.poll(() => tests().length, { timeout: 30_000 }).toBe(1);
     expect(tests()[0]!.type).toBe('application/json');
+    // Posts are kept 7 days and listed newest first: earlier projects' test posts are below this
+    // one.
     const testRow = page
       .getByRole('table', { name: 'Latest posts' })
       .getByRole('row')
-      .filter({ hasText: 'Test post' });
+      .filter({ hasText: 'Test post' })
+      .first();
     await expect(async () => {
       await page.reload();
       await expect(testRow).toContainText('Sent', { timeout: 1_000 });
@@ -700,5 +703,13 @@ test('an owner posts the operations alerts to a chat channel and sends it a test
   } finally {
     receiver.closeAllConnections();
     receiver.close();
+    // A failed run leaves no channel behind for the specs after it (a fixture step).
+    const owner = new pg.Client({ connectionString: process.env.DATABASE_URL_MIGRATE });
+    await owner.connect();
+    try {
+      await owner.query('DELETE FROM ops.platform_alert_channel WHERE host = $1', [host]);
+    } finally {
+      await owner.end();
+    }
   }
 });

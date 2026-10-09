@@ -228,7 +228,7 @@ function platformDbAnswering(answers: { rows: unknown[] }[]) {
 }
 
 describe('Operations → Alerts’ service (ADR-338)', () => {
-  const service = (answers: { rows: unknown[] }[], ring = keyring()) => {
+  const service = (answers: { rows: unknown[] }[], ring = keyring(), wake = true) => {
     const { platformDb, statements, options } = platformDbAnswering(answers);
     const enqueued: unknown[][] = [];
     const svc = createAlertChannelService({
@@ -237,6 +237,7 @@ describe('Operations → Alerts’ service (ADR-338)', () => {
       jobs: {
         enqueue: async (...args: unknown[]) => {
           enqueued.push(args);
+          if (!wake) throw new Error('pg-boss is down');
           return 'job-1';
         },
       } as never,
@@ -304,7 +305,7 @@ describe('Operations → Alerts’ service (ADR-338)', () => {
 
   it('queues a test post and then wakes the posting job outside the post’s transaction', async () => {
     const { svc, statements, enqueued } = service([{ rows: [{ id: 'post-1' }] }]);
-    expect(await svc.sendTest(OWNER)).toEqual({ postId: 'post-1' });
+    expect(await svc.sendTest(OWNER)).toEqual({ postId: 'post-1', wakeError: null });
     expect(statements.map((s) => [s.sql, s.params])).toEqual([
       ['select ops.platform_test_alert_channel($1, $2) as id', [alertChannelTestBody(BASE), 'c-1']],
     ]);
@@ -323,6 +324,15 @@ describe('Operations → Alerts’ service (ADR-338)', () => {
         { singletonKey: 'alert-posts' },
       ],
     ]);
+  });
+
+  it('gives back an error waking the job, the test post queued all the same', async () => {
+    const { svc, statements, enqueued } = service([{ rows: [{ id: 'post-1' }] }], keyring(), false);
+    const sent = await svc.sendTest(OWNER);
+    expect(sent.postId).toBe('post-1');
+    expect(sent.wakeError?.message).toBe('pg-boss is down');
+    expect(statements).toHaveLength(1);
+    expect(enqueued).toHaveLength(1);
   });
 
   it('reads the channel and the latest posts in one snapshot, as dates and numbers', async () => {
