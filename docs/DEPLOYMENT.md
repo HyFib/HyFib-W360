@@ -1279,7 +1279,9 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    runs in the database. Web servers from before it neither show nor change the column: until the
    web rollout ends, an old server's change that drops Message received from an endpoint with words
    fails on the check (a 500, leaving the endpoint as it was), its other changes keep the words, and
-   its API refuses `messageWords` (422) and leaves it out of the endpoints it answers.
+   its API refuses `messageWords` (422) and leaves it out of the endpoints it answers. A web rollback
+   after the migration brings the same back until this release is rolled out again: old servers can
+   neither show nor clear words, so an endpoint with words cannot drop Message received there.
 
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.

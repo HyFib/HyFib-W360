@@ -8569,9 +8569,10 @@ describe('words in received messages (ADR-337)', () => {
     ]) {
       await expect(setInDatabase(bad), bad).rejects.toThrow(/webhook_endpoints_message_words/);
     }
-    // …and takes 100 characters, commas and other scripts.
-    await setInDatabase(`ARRAY[repeat('x', 100), 'a, b', 'பணம்']`);
-    expect(await current()).toEqual(['x'.repeat(100), 'a, b', 'பணம்']);
+    // …and takes 100 characters, commas and other scripts, and the line separator, which only the
+    // services refuse: PostgreSQL's patterns read only C0 and C1 controls as control characters.
+    await setInDatabase(`ARRAY[repeat('x', 100), 'a, b', 'பணம்', 'para' || chr(8232) || 'graph']`);
+    expect(await current()).toEqual(['x'.repeat(100), 'a, b', 'பணம்', 'para\u2028graph']);
     await change({ eventTypes: ['message.status'] });
     expect(await current()).toBeNull();
     await expectAppError(

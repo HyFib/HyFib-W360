@@ -576,7 +576,7 @@ const invalidMessageTypes = () =>
   });
 
 const messageWordsField = webhookMessageWordsSchema.describe(
-  "1 to 50 words or phrases, each up to 100 characters, trimmed and without control characters, kept once whatever their case; the endpoint receives a received message as message.received when its text, as `message.text` gives it (the text, a caption, a tapped reply's title, a reaction or a location's name or address), contains one of them, whatever its case, and a message without text when the list is null. Only with message.received; applied with the endpoint's types, numbers, teams, members and tags. null receives every message.",
+  "1 to 50 words or phrases, each up to 100 characters, trimmed and without control characters, kept once whatever their case; the endpoint receives a received message as message.received when its text, as `message.text` gives it (the text, a caption, a tapped reply's title, a reaction, or a location's name, else its address), contains one of them, whatever its case, and a message without text when the list is null. Only with message.received; applied with the endpoint's types, numbers, teams, members and tags. null receives every message.",
 );
 
 /** Words are chosen only for an endpoint that receives `message.received` (ADR-337). */

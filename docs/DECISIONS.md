@@ -13132,10 +13132,10 @@ rest. ADR-191 left filters on a received message's words unbuilt.
 
 Decision:
 
-- **A list of words or phrases per endpoint,** for `message.received` only: 1 to 50, each 1 to 100
-  characters, trimmed, without control characters (a line break among them, and the line and
-  paragraph separators the database counts as such), kept once whatever their case and in the order
-  given. Null receives every message, as before. A message is sent when its text, as the payload's
+- **A list of words or phrases per endpoint,** for `message.received` only: 1 to 50 given (counted
+  before a word given twice is dropped, in Settings as through the API), each 1 to 100 characters,
+  trimmed, without control characters (a line break among them) or the line and paragraph
+  separators, kept once whatever their case and in the order given. Null receives every message, as before. A message is sent when its text, as the payload's
   `message.text` gives it (the text, a caption, the title of a tapped reply, a reaction, or a
   location's name, else its address), contains one of them, whatever its case; a message without
   text passes no list. With the endpoint's types, numbers, teams, members and tags chosen too, a
@@ -13150,17 +13150,20 @@ Decision:
 - **Matched as captured:** `app.capture_webhook_event` reads the message's text only when an active
   endpoint of the company that takes the event names words, through `app.webhook_message_text`,
   which derives it as the payload does (`inboundSummary`; an integration test holds the two to the
-  same text over every kind of content), and creates a delivery only for the endpoints whose list is
-  null or names a word the text contains, with `strpos` on lowered text, so no character of a word
-  (such as `%` or `_`) acts as a pattern. The text is never stored with the event: the event keeps
+  same text over samples of every message type), lowers it once, and creates a delivery only for the
+  endpoints whose list is null or names a word the text contains, with `strpos` on lowered text, so
+  no character of a word (such as `%` or `_`) acts as a pattern. The text is never stored with the event: the event keeps
   only the message's type, as before, and the payload is built when delivered. Replays and test
   events are unchanged.
 - **Migration 0257:** `message_words text[]` on `app.webhook_endpoints` with a check validated at
   once (1 to 50 words, one dimension, no null, each 1 to 100 characters without spaces around it or
   control characters, only while `message.received` is among the events; the words are joined on a
-  control character for the pattern, and no word may hold it, so one word cannot pass for two), an
-  update grant on the column for the runtime role, `app.webhook_message_text(text, jsonb)` for the
-  runtime and definer roles (nobody else), and the capture replaced with the same signature.
+  control character for the pattern, and no word may hold it, so one word cannot pass for two). It
+  is a backstop looser than the services: PostgreSQL's patterns read only the C0 and C1 controls as
+  control characters, so it lets the line and paragraph separators through, and of the spaces at a
+  word's ends it refuses only the ASCII one. Also: an update grant on the column for the runtime
+  role, `app.webhook_message_text(text, jsonb)` for the runtime and definer roles (nobody else), and
+  the capture replaced with the same signature.
 - **Audited and exported** as the other lists: the endpoint's audit entries name the words (by count
   and digest once the entry would not fit, ADR-336), and the company data export carries the
   column. Words can say what customers write about, so they are treated as the tag lists are.

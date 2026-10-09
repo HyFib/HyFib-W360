@@ -960,7 +960,8 @@ export const WEBHOOK_RECEIVED_MESSAGE_TYPE_LABELS: Record<WebhookReceivedMessage
 /**
  * A word or phrase an endpoint looks for in the received messages it takes (ADR-337), as Settings
  * and the API read it: trimmed, 1 to 100 characters, and without control characters, a line break
- * among them (nor the line and paragraph separators, which the database counts as such).
+ * among them, nor the line and paragraph separators. The database's check is looser (only C0 and
+ * C1 control characters, and a space at either end), so this is the rule.
  */
 export function webhookMessageWord(
   raw: string,
@@ -985,25 +986,27 @@ export function webhookMessageWord(
 
 /**
  * The words and phrases Settings → Webhooks takes for received messages (ADR-337), one a line,
- * each read by `webhookMessageWord`, blank lines skipped and each kept once whatever its case.
+ * each read by `webhookMessageWord`, blank lines skipped, at most 50 given and each kept once
+ * whatever its case.
  */
 export function webhookMessageWordsFromLines(
   text: string,
 ): { ok: true; words: string[] } | { ok: false; message: string } {
+  const lines = text.split(/\r?\n/).filter((line) => line.trim());
+  // Counted as given, before a word given twice is dropped, as the services count a list.
+  if (lines.length > WEBHOOK_LIMITS.messageWords) {
+    return {
+      ok: false,
+      message: `Give at most ${WEBHOOK_LIMITS.messageWords} words and phrases.`,
+    };
+  }
   const words: string[] = [];
-  for (const line of text.split(/\r?\n/)) {
-    if (!line.trim()) continue;
+  for (const line of lines) {
     const read = webhookMessageWord(line);
     if (!read.ok) return read;
     if (!words.some((word) => word.toLowerCase() === read.word.toLowerCase())) {
       words.push(read.word);
     }
-  }
-  if (words.length > WEBHOOK_LIMITS.messageWords) {
-    return {
-      ok: false,
-      message: `Give at most ${WEBHOOK_LIMITS.messageWords} words and phrases.`,
-    };
   }
   return { ok: true, words };
 }

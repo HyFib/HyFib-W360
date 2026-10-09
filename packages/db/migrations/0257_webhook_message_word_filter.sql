@@ -11,8 +11,10 @@
 -- them, whatever its case; a message without text passes no list. With the endpoint's other
 -- filters chosen too, a message must pass them all. The services trim the words and keep each once,
 -- whatever its case; the database checks their shape, joining them on a control character, which
--- no word may hold (checked first, so that one word holding it cannot pass for two). A company has
--- at most 10 endpoints, so the table is small and the check is validated here.
+-- no word may hold (a clause of its own, so that one word holding it cannot pass for two). The
+-- check is a backstop looser than the services: PostgreSQL's patterns read only the C0 and C1
+-- controls as control characters (the services also refuse the line and paragraph separators). A
+-- company has at most 10 endpoints, so the table is small and the check is validated here.
 ALTER TABLE app.webhook_endpoints
   ADD COLUMN message_words text[],
   ADD CONSTRAINT webhook_endpoints_message_words CHECK (
@@ -366,15 +368,15 @@ BEGIN
                              AND p_type = ANY (e.event_types)))) THEN
     v_keys := app.webhook_api_key_family(p_tenant, (p_detail ->> 'apiKeyId')::uuid);
   END IF;
-  -- The text of a received message (0257), as the payload's message.text gives it, read only when
-  -- an active endpoint of the company that takes the event names words. The message trigger runs
-  -- after the insert, as the role adding the message (the runtime role: no definer function adds a
-  -- received message), which reads the message's row.
+  -- The text of a received message (0257), as the payload's message.text gives it, lowered once
+  -- for the words' matches, read only when an active endpoint of the company that takes the event
+  -- names words. The message trigger runs after the insert, as the role adding the message (the
+  -- runtime role: no definer function adds a received message), which reads the message's row.
   IF p_type = 'message.received'
      AND EXISTS (SELECT 1 FROM app.webhook_endpoints e
                   WHERE e.tenant_id = p_tenant AND e.state = 'active'
                     AND e.message_words IS NOT NULL AND p_type = ANY (e.event_types)) THEN
-    SELECT app.webhook_message_text(m.type, m.content) INTO v_message_text
+    SELECT lower(app.webhook_message_text(m.type, m.content)) INTO v_message_text
       FROM app.messages m
      WHERE m.tenant_id = p_tenant AND m.id = p_message;
   END IF;
@@ -467,7 +469,7 @@ BEGIN
                          OR (p_detail ->> 'messageType') = ANY (e.message_types))
                     AND (p_type <> 'message.received' OR e.message_words IS NULL
                          OR EXISTS (SELECT 1 FROM unnest(e.message_words) AS w(word)
-                                     WHERE strpos(lower(v_message_text), lower(w.word)) > 0))
+                                     WHERE strpos(v_message_text, lower(w.word)) > 0))
                     AND (p_type <> 'automation.run_ended' OR e.run_end_reasons IS NULL
                          OR (p_detail ->> 'endReason') = ANY (e.run_end_reasons)
                          OR NOT (e.run_end_reasons && v_end_reasons))
@@ -620,7 +622,7 @@ BEGIN
           OR (p_detail ->> 'messageType') = ANY (e.message_types))
      AND (p_type <> 'message.received' OR e.message_words IS NULL
           OR EXISTS (SELECT 1 FROM unnest(e.message_words) AS w(word)
-                      WHERE strpos(lower(v_message_text), lower(w.word)) > 0))
+                      WHERE strpos(v_message_text, lower(w.word)) > 0))
      AND (p_type <> 'automation.run_ended' OR e.run_end_reasons IS NULL
           OR (p_detail ->> 'endReason') = ANY (e.run_end_reasons)
           OR NOT (e.run_end_reasons && v_end_reasons))

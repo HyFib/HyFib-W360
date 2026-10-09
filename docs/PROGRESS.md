@@ -26,7 +26,7 @@ the pglast parse check (syntax only), its SQL function's body included.
   list names them.
 - **Tests:** unit (4 new in `webhooks/webhooks.test.ts`, 1 new and 1 changed in `api/api.test.ts`);
   integration (3 new in `webhooks.test.ts`: the service's refusals and keeping, the audit and each
-  clause of the database check; the text read as the payload gives it over every kind of content;
+  clause of the database check; the text read as the payload gives it over samples of every type;
   capture by words in a text, a caption and a tapped reply, `%` found as written, a message without
   text, the event without text, and the payloads; 1 new in `api-webhook-endpoints.test.ts`: the
   API's round trip and refusals; the function's grants in `tenant-isolation.test.ts`). Written for
@@ -39,6 +39,19 @@ the pglast parse check (syntax only), its SQL function's body included.
   kept only with the event; the API's rule, its change and description; the OpenAPI entries). The
   services' rule, the check and the capture need the database, so their regressions are left to the
   integration tests, which run in CI.
+
+- **Review fixes:** an independent review found the API's integration test that compares a new
+  endpoint field by field without `messageWords` (it would have failed in CI), the ADR-336 test of
+  every list without it (55 lists now, still under 6,000 bytes), Settings counting the words after
+  dropping those given twice where the API counts them as given (both count them as given now), the
+  database check described as refusing the line and paragraph separators (PostgreSQL's patterns read
+  only C0 and C1 controls as control characters: the docs now call the check a looser backstop, and
+  an integration test pins it), the capture lowering a message's text for each word (now once a
+  message), a doc comment `canonicalJson` (ADR-336) had parted from its function, and wording (the
+  OpenAPI event description, a location's name else its address, the parity test's samples, a
+  rollback note in DEPLOYMENT). 5/5 deliberate regressions of the fixed parts caught (Settings
+  counting after dropping, 50 refused, blank lines counted, 100 given taken, the event's
+  description); the full check passed again (141 files, 1415 tests).
 
 ### Test commands and results (local, 2026-10-09)
 

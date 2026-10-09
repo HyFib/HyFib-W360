@@ -4292,7 +4292,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     expect(endpoint.required).toContain('messageWords');
     const hooks = doc.webhooks as Record<string, { post?: { description?: string } }>;
     expect(hooks['message.received']?.post?.description).toContain(
-      'or words and phrases (its `messageWords`): then it receives the messages whose text, as `message.text` gives it, contains one of them, whatever its case, and no message without text.',
+      'An endpoint that names words and phrases (its `messageWords`) receives only the messages whose text, as `message.text` gives it, contains one of them, whatever its case, and no message without text.',
     );
   });
 

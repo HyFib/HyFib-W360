@@ -4141,7 +4141,6 @@ describe('words in received messages (ADR-337)', () => {
     ).toEqual(['Refund', 'cancel order', 'a, b', 'பணம்']);
     expect(webhookMessageWordsSchema.parse(null)).toBeNull();
     expect(webhookMessageWordsSchema.parse(['x'.repeat(100)])).toEqual(['x'.repeat(100)]);
-    // Fifty words given twice each are fifty.
     expect(
       webhookMessageWordsSchema.parse(Array.from({ length: 50 }, (_, i) => `w${i}`)),
     ).toHaveLength(50);
@@ -4150,6 +4149,11 @@ describe('words in received messages (ADR-337)', () => {
   it('refuse an empty list, more than 50, a blank word, a long one or one with control characters, by place', () => {
     expect(refusal([])).toEqual(['', 'Give at least one word or phrase, or take every message.']);
     expect(refusal(Array.from({ length: 51 }, (_, i) => `w${i}`))).toEqual([
+      '',
+      'Give at most 50 words and phrases.',
+    ]);
+    // Counted as given, before a word given twice is dropped (as Settings counts its lines).
+    expect(refusal(Array.from({ length: 100 }, (_, i) => `W${i % 50}`))).toEqual([
       '',
       'Give at most 50 words and phrases.',
     ]);
@@ -4204,7 +4208,10 @@ describe('words in received messages (ADR-337)', () => {
     ).toEqual({ ok: false, message: 'Give at most 50 words and phrases.' });
     expect(
       webhookMessageWordsFromLines(Array.from({ length: 100 }, (_, i) => `W${i % 50}`).join('\n')),
-    ).toMatchObject({ ok: true, words: Array.from({ length: 50 }, (_, i) => `W${i}`) });
+    ).toEqual({ ok: false, message: 'Give at most 50 words and phrases.' });
+    expect(
+      webhookMessageWordsFromLines(Array.from({ length: 50 }, (_, i) => `W${i % 25}`).join('\n\n')),
+    ).toEqual({ ok: true, words: Array.from({ length: 25 }, (_, i) => `W${i}`) });
     expect(webhookMessageWordsText(['refund', 'a, b'])).toBe('"refund", "a, b"');
   });
 });
@@ -4328,7 +4335,7 @@ describe('endpoint audit entries within an audit entry’s 8 KiB (ADR-336)', () 
         listDigests: { contactTags: digest(tags(10)) },
       });
     }
-    // Every event type, hosts of 253 characters and the 54 lists an entry can name, each too
+    // Every event type, hosts of 253 characters and the 55 lists an entry can name, each too
     // long to name item by item beside the others: named by count, the entry takes under 6,000.
     const keys = [
       'assigneeIds',
@@ -4354,6 +4361,7 @@ describe('endpoint audit entries within an audit entry’s 8 KiB (ADR-336)', () 
       'messageSenders',
       'messageStatuses',
       'messageTypes',
+      'messageWords',
       'noteDealOwnerIds',
       'notePipelineIds',
       'noteStageIds',
@@ -4386,7 +4394,7 @@ describe('endpoint audit entries within an audit entry’s 8 KiB (ADR-336)', () 
       'templateIds',
       'templateStatuses',
     ];
-    expect(keys).toHaveLength(54);
+    expect(keys).toHaveLength(55);
     const whole = webhookEndpointAuditMetadata({
       host: 'h'.repeat(253),
       eventTypes: [...WEBHOOK_EVENT_TYPES],
@@ -4394,7 +4402,7 @@ describe('endpoint audit entries within an audit entry’s 8 KiB (ADR-336)', () 
       oauthTokenHost: 'o'.repeat(253),
       oauthSecretReplaced: true,
     });
-    expect(Object.keys(whole.listCounts as object)).toHaveLength(54);
+    expect(Object.keys(whole.listCounts as object)).toHaveLength(55);
     expect(jsonbSize(whole)).toBeLessThan(6000);
   });
 });

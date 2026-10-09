@@ -281,6 +281,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       consentChanges: null,
       contactSources: null,
       messageTypes: null,
+      messageWords: null,
       runEndReasons: null,
       channelIds: null,
       teamIds: null,
