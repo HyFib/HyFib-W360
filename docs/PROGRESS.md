@@ -1,5 +1,59 @@
 # Progress
 
+## 2026-10-09 — The alerts a chat channel gets, the owners' financial alerts among them (P5-10, H-034, ADR-340)
+
+Status: **Implemented; its database and browser tests run in CI only.** Since ADR-338 the chat
+channel got every operations alert and nothing else: owners could not keep an alert out of it, and
+the owners' financial alerts (the reconciliation's findings, ADR-066, and the payments no settlement
+showed, ADR-071) reached the mailbox alone. The local PostgreSQL is unavailable, so migration 0261
+and the integration tests below were written but not run here; the migration passed the pglast
+parse check (syntax only), its four PL/pgSQL bodies included.
+
+### Completed
+
+- **Database:** migration 0261 (`ops.platform_alert_channel.kinds`, one to five known kinds in the
+  console's order, the three operations alerts by default, with its update grant to the definer;
+  the posts' kind check with the two new kinds; `ops.queue_platform_alert_post` queueing only the
+  kinds the channel gets; `ops.platform_set_alert_channel` keeping the kinds of the channel it
+  replaces; `ops.platform_set_alert_channel_kinds` for owners, audited with the kinds before and
+  after; `ops.platform_alert_channel_state` with the kinds).
+- **Domain:** `ALERT_CHANNEL_KINDS`, the defaults, the financial kinds and their labels; the
+  service's `setKinds` (owners only, at least one, kept once each in order) and the state's kinds;
+  `settlementReconPost` (the reconciliation email's text without a failed check's error); both
+  financial sweeps queue their posts after their emails, in their transaction, and say whether they
+  posted; the test post no longer names the alerts.
+- **Worker:** the financial alerts' logs say whether they were posted.
+- **Web:** Operations → Alerts lists the alerts posted, and owners tick them ("Save the alerts
+  posted"), the financial ones marked as platform owners' alerts with a note on who reads them.
+- **Tests:** unit (3 new in `platform/alert-channel.test.ts`, 3 changed; 4 new in
+  `billing/settlement-alerts.test.ts`); integration (1 new in `alert-channel.test.ts`: the default
+  kinds, owners only and the definer function's refusals, queueing by kind, the kinds kept on a new
+  address, the audit, the checks, and the grants in the file's privileges test; 1 new in
+  `settlement-recon.test.ts`: both financial alerts posted from real reconciliation runs, the
+  reconciliation's error left out, and not posted when the channel does not get them, with the
+  strict results of the file's other alert tests gaining `posted`; the function's grants in
+  `tenant-isolation.test.ts`); e2e (the alerts test checks the default kinds and adds a financial
+  one). Written for CI; the integration and e2e tests were not run here.
+- **Docs:** ADR-340; ARCHITECTURE; SECURITY; THREAT-MODEL T304; DEPLOYMENT; RUNBOOKS;
+  DATA-RETENTION; BACKLOG P5-10; feature matrix H-034.
+- **Mutation checks:** 16/16 deliberate regressions caught on the unit-tested parts (a financial
+  kind by default, a financial kind left out, a label; the kinds chosen by an operator, sent as
+  given, given back unknown or empty; the state's kinds in the database's order or not read; the
+  reconciliation post keeping the error, posting the email's text or under another kind, its result
+  not saying it posted, or saying so without an owner; the unsettled post under another kind or not
+  queued). The definer functions, the checks and the posting from real runs need the database, so
+  their regressions are left to the integration tests, which run in CI.
+
+### Test commands and results (local, 2026-10-09)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 143 files, 1448 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
 ## 2026-10-09 — Answers kept with an Idempotency-Key up to 256 KiB (P5-08, P5-09, H-033, ADR-339)
 
 Status: **Fixed; its database test runs in CI only.** A successful answer to a request sent with an

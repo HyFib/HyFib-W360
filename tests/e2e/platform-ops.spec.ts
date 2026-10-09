@@ -690,6 +690,19 @@ test('an owner posts the operations alerts to a chat channel and sends it a test
     await expect(page.getByText(token)).toHaveCount(0);
     await expect(page.getByLabel('Replace the channel’s address')).toHaveValue('');
 
+    // A new channel gets the operations alerts; an owner adds a financial one (ADR-340).
+    const kinds = page.getByRole('group', { name: 'Alerts posted' });
+    await expect(kinds.getByLabel('Failures')).toBeChecked();
+    await expect(kinds.getByLabel('Reconciliation findings')).not.toBeChecked();
+    await kinds.getByLabel('Reconciliation findings').check();
+    await page.getByRole('button', { name: 'Save the alerts posted' }).click();
+    await expect(page.getByText('Saved: the alerts ticked are posted from now on.')).toBeVisible();
+    await expect(
+      page.getByText('Failures, Late queues, Failing integrations, Reconciliation findings', {
+        exact: true,
+      }),
+    ).toBeVisible();
+
     await page.getByRole('button', { name: 'Send a test post' }).click();
     await expect(page.getByText(/^Test post queued/)).toBeVisible();
     // The alerts other tests cause while the channel is set are posted too: only the test post is

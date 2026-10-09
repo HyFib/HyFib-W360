@@ -2611,6 +2611,16 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   posts are queued by owners and signalled at once. The keyring sweep re-encrypts the address as
   the `alert_channel` kind, through `ops.reseal_platform_alert_channel` (compare and set): the
   runtime role has no write grant on it.
+- **The alerts a chat channel gets** (ADR-340, migration 0261): `ops.platform_alert_channel.kinds`
+  names them in the console's order, the three operations alerts by default and the owners'
+  financial alerts, the reconciliation findings (ADR-066) and the payments no settlement showed
+  (ADR-071), once a platform owner adds them through `ops.platform_set_alert_channel_kinds`
+  (definer, owners only, the kinds kept once each in the console's order; a change audited with the
+  kinds before and after, the same kinds not audited). A new address keeps the kinds of the one it
+  replaces, and `ops.queue_platform_alert_post` queues a post only while the channel gets its kind.
+  The two financial sweeps (`alertSettlementReconFindings`, `alertUnsettledPayments`) queue their
+  posts after their emails, in their transaction: the reconciliation's without a failed check's
+  error (`settlementReconPost`), the unsettled payments' with the email's text.
 - **Acknowledging failures** (ADR-141, migration 0107): a platform administrator acknowledges a
   failure on Current failures with a note, through `ops.platform_acknowledge_integration_failure`
   (definer, platform role only), which checks the administrator and that `ops.integration_failures`

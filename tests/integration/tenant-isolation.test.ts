@@ -256,11 +256,13 @@ describe('database roles', () => {
       expect(await can('w360_auth', fn), fn).toBe(false);
       expect(await can('w360_platform', fn), fn).toBe(false);
     }
-    // The alerts' chat channel (0258): setting, removing, testing and reading it for platform staff
-    // (owners only for the changes, which the functions check); queueing, claiming, finishing and
-    // purging its posts, and re-encrypting its address, for the worker.
+    // The alerts' chat channel (0258, 0261): setting, removing, testing and reading it and choosing
+    // its alerts for platform staff (owners only for the changes, which the functions check);
+    // queueing, claiming, finishing and purging its posts, and re-encrypting its address, for the
+    // worker.
     for (const fn of [
       'ops.platform_set_alert_channel(uuid,text,text,text)',
+      'ops.platform_set_alert_channel_kinds(text[],text)',
       'ops.platform_remove_alert_channel(text)',
       'ops.platform_test_alert_channel(text,text)',
       'ops.platform_alert_channel_state()',

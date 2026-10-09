@@ -7,6 +7,11 @@ import { QUEUES } from '@w360/contracts';
 import type { Database, SQL } from '@w360/db';
 import type { PlatformDatabase } from '@w360/db/platform';
 import {
+  ALERT_CHANNEL_DEFAULT_KINDS,
+  ALERT_CHANNEL_FINANCIAL_KINDS,
+  ALERT_CHANNEL_KINDS,
+  ALERT_POST_KIND_LABELS,
+  ALERT_POST_KINDS,
   ALERT_POST_MAX_CHARS,
   alertChannelAad,
   alertChannelTestBody,
@@ -94,9 +99,32 @@ describe('a chat channel post’s text (ADR-338)', () => {
     const body = alertChannelTestBody(BASE);
     expect(body.split('\n')).toEqual([
       'HyFib W360: a test post from the operations console',
-      'The operations alerts (failures, late queues and failing integrations) are posted here when they are emailed to platform administrators, with counts only.',
+      'The alerts chosen under Operations → Alerts are posted here when they are emailed, with counts only.',
       `Open the alerts: ${BASE}/platform/ops/alerts`,
     ]);
+  });
+});
+
+describe('the alerts a channel gets (ADR-340)', () => {
+  it('lists the operations alerts and then the owners’ financial ones, the operations ones by default', () => {
+    expect(ALERT_CHANNEL_KINDS).toEqual([
+      'failures',
+      'queues',
+      'integrations',
+      'reconciliation',
+      'unsettled',
+    ]);
+    expect(ALERT_CHANNEL_DEFAULT_KINDS).toEqual(['failures', 'queues', 'integrations']);
+    expect(ALERT_CHANNEL_FINANCIAL_KINDS).toEqual(['reconciliation', 'unsettled']);
+    expect(ALERT_POST_KINDS).toEqual([...ALERT_CHANNEL_KINDS, 'test']);
+    expect(ALERT_POST_KIND_LABELS).toEqual({
+      failures: 'Failures',
+      queues: 'Late queues',
+      integrations: 'Failing integrations',
+      reconciliation: 'Reconciliation findings',
+      unsettled: 'Payments not seen in a settlement',
+      test: 'Test post',
+    });
   });
 });
 
@@ -267,13 +295,14 @@ describe('Operations → Alerts’ service (ADR-338)', () => {
   it('lets only platform owners set, remove or test the channel, before reaching the database', async () => {
     const { svc, statements, enqueued } = service([]);
     for (const [call, what] of [
-      [() => svc.setChannel(OPERATOR, { url: HOOK }), 'set'],
-      [() => svc.removeChannel(OPERATOR), 'remove'],
-      [() => svc.sendTest(OPERATOR), 'test'],
+      [() => svc.setChannel(OPERATOR, { url: HOOK }), 'set the chat channel'],
+      [() => svc.removeChannel(OPERATOR), 'remove the chat channel'],
+      [() => svc.sendTest(OPERATOR), 'test the chat channel'],
+      [() => svc.setKinds(OPERATOR, { kinds: ['failures'] }), 'choose the chat channel’s alerts'],
     ] as const) {
       await expect(call()).rejects.toMatchObject({
         code: 'forbidden',
-        message: `Only platform owners can ${what} the chat channel.`,
+        message: `Only platform owners can ${what}.`,
       });
     }
     expect(statements).toEqual([]);
@@ -287,6 +316,46 @@ describe('Operations → Alerts’ service (ADR-338)', () => {
       issues: [{ path: 'url' }],
     });
     await expect(svc.setChannel(OWNER, {})).rejects.toMatchObject({ code: 'validation_failed' });
+    expect(statements).toEqual([]);
+  });
+
+  it('chooses the alerts the channel gets, once each in the console’s order, and gives back what it now gets', async () => {
+    const { svc, statements } = service([
+      { rows: [{ kinds: ['queues', 'reconciliation'] }] },
+      { rows: [{ kinds: ['failures', 'gone'] }] },
+    ]);
+    expect(
+      await svc.setKinds(OWNER, { kinds: ['reconciliation', 'queues', 'reconciliation'] }),
+    ).toEqual({ kinds: ['queues', 'reconciliation'] });
+    // A kind the database gave that the services do not know is left out.
+    expect(await svc.setKinds(OWNER, { kinds: ['failures'] })).toEqual({ kinds: ['failures'] });
+    expect(statements.map((s) => [s.actor, s.sql, s.params])).toEqual([
+      [
+        'user-owner',
+        'select ops.platform_set_alert_channel_kinds($1::text[], $2) as kinds',
+        [['queues', 'reconciliation'], 'c-1'],
+      ],
+      [
+        'user-owner',
+        'select ops.platform_set_alert_channel_kinds($1::text[], $2) as kinds',
+        [['failures'], 'c-1'],
+      ],
+    ]);
+  });
+
+  it('refuses no alert, an alert it does not know and anything but a list, before reaching the database', async () => {
+    const { svc, statements } = service([]);
+    for (const input of [
+      { kinds: [] },
+      { kinds: ['failures', 'payments'] },
+      { kinds: 'failures' },
+      {},
+    ]) {
+      await expect(svc.setKinds(OWNER, input)).rejects.toMatchObject({
+        code: 'validation_failed',
+        issues: [expect.objectContaining({ message: 'Choose at least one of the alerts listed.' })],
+      });
+    }
     expect(statements).toEqual([]);
   });
 
@@ -349,6 +418,7 @@ describe('Operations → Alerts’ service (ADR-338)', () => {
             last_error: null,
             posts_waiting: 1,
             posts_failed: '2',
+            kinds: ['unsettled', 'failures', 'gone'],
           },
         ],
       },
@@ -372,6 +442,8 @@ describe('Operations → Alerts’ service (ADR-338)', () => {
     expect(await svc.state(OPERATOR)).toEqual({
       channel: {
         host: 'hooks.slack.com',
+        // In the console's order, without a kind the services do not know.
+        kinds: ['failures', 'unsettled'],
         setByName: 'Asha Rao',
         setAt: new Date('2026-10-09T10:00:00Z'),
         lastSentAt: null,
@@ -396,7 +468,7 @@ describe('Operations → Alerts’ service (ADR-338)', () => {
       ],
     });
     expect(statements.map((s) => s.sql)).toEqual([
-      'select host, set_by_name, set_at, last_sent_at, last_failed_at, last_status, last_error, posts_waiting, posts_failed from ops.platform_alert_channel_state()',
+      'select host, set_by_name, set_at, last_sent_at, last_failed_at, last_status, last_error, posts_waiting, posts_failed, kinds from ops.platform_alert_channel_state()',
       'select id, kind, created_at, attempts, next_attempt_at, sent_at, failed_at, last_status, last_error from ops.platform_alert_posts_recent()',
     ]);
     expect(options).toEqual([{ accessMode: 'read only', isolationLevel: 'repeatable read' }]);

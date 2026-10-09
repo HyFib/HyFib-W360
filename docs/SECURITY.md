@@ -2310,6 +2310,13 @@ message text, contact details, payloads, email addresses, secrets or full URLs:
   10 seconds); posts are kept 7 days, readable only by the definer, and the console lists their
   kind, times and answers only. Posting is at least once: a post whose answer did not come is tried
   again, so the channel may show it twice.
+- The alerts a chat channel gets (ADR-340): only a platform owner chooses them (the service and
+  `ops.platform_set_alert_channel_kinds` check the role; operators see them), audited as
+  `platform.alert_channel_kinds_set` with the host and the kinds before and after. The owners'
+  financial alerts (reconciliation findings and payments not seen in a settlement), which platform
+  owners alone are emailed, reach the channel only once an owner adds them, since whoever reads the
+  channel reads them; their posts give days and counts only, never a company, an amount, a payment
+  id, a transaction or a failed check's error, which can quote Razorpay's answer.
 - Acknowledging integration failures (ADR-141): a platform administrator notes on the console that a
   listed failure is being handled, through `ops.platform_acknowledge_integration_failure` (SECURITY
   DEFINER, executable only by the platform role), which checks the administrator, the note (10 to

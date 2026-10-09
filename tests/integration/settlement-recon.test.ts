@@ -8,6 +8,7 @@ import {
   PgBossJobQueue,
   RazorpayClient,
   addDays,
+  alertPostBody,
   alertSettlementReconFindings,
   alertUnsettledPayments,
   applyRefundById,
@@ -1388,7 +1389,12 @@ describe('alerts for platform owners (ADR-066, ADR-071)', () => {
     const refusal = await runDay(refused);
     expect(refusal.result.outcome).toBe('failed');
 
-    expect(await alertSweep()).toEqual({ alerted: 2, unsent: 0, recipients: owners.length });
+    expect(await alertSweep()).toEqual({
+      alerted: 2,
+      unsent: 0,
+      recipients: owners.length,
+      posted: false,
+    });
     const sent = await platformNotices(since);
     expect(sent.map((n) => n.to).sort()).toEqual(owners);
     for (const notice of sent) {
@@ -1410,7 +1416,7 @@ describe('alerts for platform owners (ADR-066, ADR-071)', () => {
     }
 
     // Once: nothing more for the same attempts, however often the sweep runs.
-    expect(await alertSweep()).toEqual({ alerted: 0, unsent: 0, recipients: 0 });
+    expect(await alertSweep()).toEqual({ alerted: 0, unsent: 0, recipients: 0, posted: false });
     expect(await platformNotices(since)).toHaveLength(owners.length);
 
     // The retrying day fails for good on its sixth attempt, and that is emailed.
@@ -1500,7 +1506,7 @@ describe('alerts for platform owners (ADR-066, ADR-071)', () => {
        RETURNING user_id`,
     );
     try {
-      expect(await alertSweep()).toEqual({ alerted: 0, unsent: 1, recipients: 0 });
+      expect(await alertSweep()).toEqual({ alerted: 0, unsent: 1, recipients: 0, posted: false });
     } finally {
       await adminQuery(
         `UPDATE ops.platform_admins SET role = 'platform_owner' WHERE user_id = ANY($1::text[])`,
@@ -1508,7 +1514,12 @@ describe('alerts for platform owners (ADR-066, ADR-071)', () => {
       );
     }
     const since2 = await dbNow();
-    expect(await alertSweep()).toEqual({ alerted: 1, unsent: 0, recipients: owners.length });
+    expect(await alertSweep()).toEqual({
+      alerted: 1,
+      unsent: 0,
+      recipients: owners.length,
+      posted: false,
+    });
     expect((await platformNotices(since2)).map((n) => n.payload.subject)).toEqual(
       owners.map(() => `Settlement reconciliation for ${label(nobody)} needs a person`),
     );
@@ -1564,11 +1575,16 @@ describe('alerts for platform owners (ADR-066, ADR-071)', () => {
     standIn.settle(addDays(D0, 2), { paymentIds: [settled.payment.id], refundIds: [] });
     await reconcile(D0, 7);
     // Until the day 7 days after the payments is reconciled, nothing is due.
-    expect(await unsettledSweep()).toEqual({ alerted: 0, unsent: 0, recipients: 0 });
+    expect(await unsettledSweep()).toEqual({ alerted: 0, unsent: 0, recipients: 0, posted: false });
     await reconcile(addDays(D0, 7), 1);
 
     const since = await dbNow();
-    expect(await unsettledSweep()).toEqual({ alerted: 4, unsent: 0, recipients: owners.length });
+    expect(await unsettledSweep()).toEqual({
+      alerted: 4,
+      unsent: 0,
+      recipients: owners.length,
+      posted: false,
+    });
     const sent = await platformNotices(since);
     expect(sent.map((n) => n.to).sort()).toEqual(owners);
     for (const n of sent) {
@@ -1597,7 +1613,7 @@ describe('alerts for platform owners (ADR-066, ADR-071)', () => {
     for (const t of report.topups) expect(alerted.has(t.paymentId), t.paymentId).toBe(true);
     // Nothing more however often the sweep runs.
     const since2 = await dbNow();
-    expect(await unsettledSweep()).toEqual({ alerted: 0, unsent: 0, recipients: 0 });
+    expect(await unsettledSweep()).toEqual({ alerted: 0, unsent: 0, recipients: 0, posted: false });
     expect(await platformNotices(since2)).toEqual([]);
 
     // The later payment is due once the 7 days after it are reconciled: emailed on its own.
@@ -1663,7 +1679,12 @@ describe('alerts for platform owners (ADR-066, ADR-071)', () => {
        RETURNING user_id`,
     );
     try {
-      expect(await unsettledSweep()).toEqual({ alerted: 0, unsent: 1, recipients: 0 });
+      expect(await unsettledSweep()).toEqual({
+        alerted: 0,
+        unsent: 1,
+        recipients: 0,
+        posted: false,
+      });
     } finally {
       await adminQuery(
         `UPDATE ops.platform_admins SET role = 'platform_owner' WHERE user_id = ANY($1::text[])`,
@@ -1671,7 +1692,12 @@ describe('alerts for platform owners (ADR-066, ADR-071)', () => {
       );
     }
     expect((await alertedPayments()).has(waiting.payment.id)).toBe(false);
-    expect(await unsettledSweep()).toEqual({ alerted: 1, unsent: 0, recipients: owners.length });
+    expect(await unsettledSweep()).toEqual({
+      alerted: 1,
+      unsent: 0,
+      recipients: owners.length,
+      posted: false,
+    });
     expect((await alertedPayments()).has(waiting.payment.id)).toBe(true);
 
     // Neither runtime role reads or writes the alerts, or runs the shared definition itself.
@@ -1691,5 +1717,71 @@ describe('alerts for platform owners (ADR-066, ADR-071)', () => {
     await expect(
       dbs.platformPool.query('SELECT * FROM ops.settlement_unsettled_alerts_due(1)'),
     ).rejects.toThrow(/permission denied for function/);
+  });
+
+  it('posts these alerts to a chat channel that gets them, the reconciliation’s without its error (ADR-340)', async () => {
+    // Whatever earlier tests left due goes out first, so this test sees only its own alerts.
+    await alertSweep();
+    await unsettledSweep();
+    // A channel getting the owners' alerts (its address is never opened here: nothing is sent).
+    const channelId = uuidv7();
+    await adminQuery(
+      `INSERT INTO ops.platform_alert_channel (id, url_ciphertext, host, kinds)
+       VALUES ($1, 'v1:unused', 'chat.example.test',
+               ARRAY['failures', 'reconciliation', 'unsettled'])`,
+      [channelId],
+    );
+    const postsOf = (kind: string) =>
+      adminQuery<{ body: string }>(
+        'SELECT body FROM ops.platform_alert_posts WHERE kind = $1 ORDER BY created_at, id',
+        [kind],
+      );
+    try {
+      const refused = day(-80);
+      standIn.settle(refused, { paymentIds: [], refundIds: [], extra: [raw({})] });
+      standIn.state.queues.recon.push({
+        kind: 'error',
+        status: 401,
+        description: 'The api key provided is invalid',
+      });
+      expect((await runDay(refused)).result.outcome).toBe('failed');
+      const since = await dbNow();
+      expect(await alertSweep()).toMatchObject({ alerted: 1, posted: true });
+      // The email names the error; the post leaves it out.
+      const [notice] = await platformNotices(since);
+      expect(notice?.payload.lines[0]).toContain('The last error: Razorpay refused');
+      expect((await postsOf('reconciliation')).map((p) => p.body.split('\n'))).toEqual([
+        [
+          `Settlement reconciliation for ${label(refused)} failed`,
+          `${label(refused)}: the check failed and waits for a platform owner to run the day again.`,
+          CLOSING,
+          `Open reconciliation: http://localhost:3000/platform/reconciliation/${refused}`,
+        ],
+      ]);
+
+      // Not among the alerts the channel gets, an alert is emailed only.
+      await adminQuery(`UPDATE ops.platform_alert_channel SET kinds = ARRAY['unsettled']`);
+      expect((await runDay(refused)).result.outcome).toBe('completed');
+      expect(await alertSweep()).toMatchObject({ alerted: 1, posted: false });
+      expect(await postsOf('reconciliation')).toHaveLength(1);
+
+      const c = await company('Recon Channel Posts');
+      const D0 = day(-185);
+      const unsettled = await paidTopup(c, 17_000);
+      await setPaidAt([unsettled.topupId], D0);
+      await reconcile(D0, 8);
+      const since2 = await dbNow();
+      expect(await unsettledSweep()).toMatchObject({ alerted: 1, posted: true });
+      const [email] = await platformNotices(since2);
+      expect(await postsOf('unsettled')).toEqual([
+        { body: alertPostBody(email!.payload as Parameters<typeof alertPostBody>[0]) },
+      ]);
+      expect((await postsOf('unsettled'))[0]?.body).not.toContain(unsettled.payment.id);
+    } finally {
+      await adminQuery(
+        `DELETE FROM ops.platform_alert_posts WHERE kind IN ('reconciliation', 'unsettled')`,
+      );
+      await adminQuery('DELETE FROM ops.platform_alert_channel WHERE id = $1', [channelId]);
+    }
   });
 });

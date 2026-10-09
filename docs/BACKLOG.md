@@ -1363,11 +1363,17 @@ verification, app review, Embedded Signup configuration).
   and named by its host only, and the failure, late-queue and integration alerts are also posted
   to it as JSON text with their emails' counts, tried up to 5 times; owners send a test post and
   remove it, and administrators see the last answers and the latest posts).
+  **[The alerts a chat channel gets built; their database and browser tests run only in CI]**
+  (ADR-340, migration 0261: owners choose the alerts the channel gets, the operations alerts by
+  default, and add the owners' financial alerts, the reconciliation findings and the payments not
+  seen in a settlement, posted with their emails' days and counts and never a failed check's error;
+  each change audited).
   Remaining:
   other alert channels (several channels, a channel per alert, formats other than a JSON `text`
-  member, such as Microsoft Teams' or PagerDuty's, and the owners' financial alerts and personal
-  notices in a channel), trends further back than 93 days and other charts, Meta's quality webhook
-  (unconfirmed), rollups for many companies and pages read from the database.
+  member, such as Microsoft Teams' or PagerDuty's, and the owners' other notices, such as refund
+  requests and personal notices, in a channel), trends further back than 93 days and other charts,
+  Meta's quality webhook (unconfirmed), rollups for many companies and pages read from the
+  database.
 - **P5-11 Account export/deletion workflow** **[built, locally verified with test data only]**
   (ADR-055): Settings → Company data for owners. A streamed, gzip-compressed JSON Lines export of
   every company table from one read-only transaction (each table and column exported or excluded

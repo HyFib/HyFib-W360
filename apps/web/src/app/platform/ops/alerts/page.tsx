@@ -1,5 +1,7 @@
 import type { Metadata } from 'next';
 import {
+  ALERT_CHANNEL_FINANCIAL_KINDS,
+  ALERT_CHANNEL_KINDS,
   ALERT_POST_ATTEMPTS,
   ALERT_POST_KIND_LABELS,
   alertPostFailureLabel,
@@ -21,13 +23,23 @@ import {
   TR,
   Table,
 } from '@w360/ui';
-import { AlertChannelForms } from '@/components/platform/alert-channel-forms';
+import {
+  AlertChannelForms,
+  AlertChannelKindsForm,
+  type AlertKindOption,
+} from '@/components/platform/alert-channel-forms';
 import { Utc } from '@/components/platform/ops';
 import { getRuntime } from '@/server/runtime';
 import { requirePlatformActor } from '@/server/session';
 
 export const metadata: Metadata = { title: 'Alerts · Operations' };
 export const dynamic = 'force-dynamic';
+
+const KIND_OPTIONS: AlertKindOption[] = ALERT_CHANNEL_KINDS.map((kind) => ({
+  kind,
+  label: ALERT_POST_KIND_LABELS[kind],
+  financial: ALERT_CHANNEL_FINANCIAL_KINDS.includes(kind),
+}));
 
 function PostState({ post }: { post: AlertPostView }) {
   if (post.sentAt) return <Badge tone="success">Sent</Badge>;
@@ -52,10 +64,13 @@ export default async function OpsAlertsPage() {
           <CardTitle>Chat channel</CardTitle>
           <CardDescription>
             The operations alerts (failures, late queues and failing integrations) are emailed to
-            every platform administrator, at most every 15 minutes each. With a chat channel set,
-            each is also posted to it with the same counts-only text: an incoming webhook address
-            that takes a JSON POST with a “text” member, as Slack’s incoming webhooks do. A post is
-            tried up to {ALERT_POST_ATTEMPTS} times, so the channel may show one twice.
+            every platform administrator, at most every 15 minutes each; the reconciliation findings
+            and payments not seen in a settlement are emailed to platform owners. A chat channel, an
+            incoming webhook address that takes a JSON POST with a “text” member as Slack’s incoming
+            webhooks do, also gets the alerts chosen for it, with their emails’ counts-only text and
+            never a failed reconciliation’s error. A new channel gets the operations alerts; owners
+            choose the rest. A post is tried up to {ALERT_POST_ATTEMPTS} times, so the channel may
+            show one twice.
           </CardDescription>
         </CardHeader>
         <CardContent className="grid gap-4">
@@ -69,6 +84,8 @@ export default async function OpsAlertsPage() {
               <dl className="grid gap-x-6 gap-y-2 text-sm sm:grid-cols-[max-content_1fr]">
                 <dt className="text-muted-foreground">Posts to</dt>
                 <dd className="break-all font-mono">{channel.host}</dd>
+                <dt className="text-muted-foreground">Alerts posted</dt>
+                <dd>{channel.kinds.map((kind) => ALERT_POST_KIND_LABELS[kind]).join(', ')}</dd>
                 <dt className="text-muted-foreground">Set</dt>
                 <dd>
                   <Utc at={channel.setAt} />
@@ -92,11 +109,14 @@ export default async function OpsAlertsPage() {
           ) : (
             <EmptyState title="No chat channel is set" description="The alerts are emailed only." />
           )}
+          {owner && channel ? (
+            <AlertChannelKindsForm options={KIND_OPTIONS} kinds={channel.kinds} />
+          ) : null}
           {owner ? (
             <AlertChannelForms host={channel?.host ?? null} />
           ) : (
             <p className="text-sm text-muted-foreground">
-              Only platform owners can set, test or remove the chat channel.
+              Only platform owners can set, test or remove the chat channel and choose its alerts.
             </p>
           )}
         </CardContent>

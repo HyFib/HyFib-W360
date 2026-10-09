@@ -13273,3 +13273,45 @@ Decision:
 Not built: a bound on a pipeline's archived stages (kept since ADR-240 so closed deals keep their
 stage; the answer gives each), and a bound on answers that are not kept (they are not limited by
 this check).
+
+## ADR-340 The alerts a chat channel gets, the owners' financial alerts among them (P5-10) (2026-10-09)
+
+Context: since ADR-338 the chat channel got every operations alert (failures, late queues and
+failing integrations), emailed to every platform administrator, and nothing else. The owners'
+financial alerts, the settlement reconciliation's findings (ADR-066) and the payments no settlement
+showed (ADR-071), are emailed to platform owners only, so an owner on call heard of a failed
+reconciliation in the mailbox alone; and owners could not keep an alert out of the channel. ADR-338
+left both, with several channels, unbuilt.
+
+Decision:
+
+- **The channel names the alerts it gets:** `ops.platform_alert_channel.kinds` (migration 0261), in
+  the console's order: Failures, Late queues, Failing integrations, Reconciliation findings and
+  Payments not seen in a settlement. A new channel gets the three operations alerts, as before; a
+  new address keeps the kinds of the one it replaces. `ops.queue_platform_alert_post` queues a post
+  only while the channel gets the alert's kind. The column's check takes one to five known kinds,
+  and the posts' kind check takes the two new ones.
+- **Owners choose:** a platform owner ticks the alerts on Operations → Alerts and saves them
+  together (at least one), through `ops.platform_set_alert_channel_kinds` (definer, owners only,
+  the kinds given once each in any order and kept in the console's order). A change is audited
+  (`platform.alert_channel_kinds_set`, with the host and the kinds before and after); the same kinds
+  change nothing and are not audited. Operators see the alerts posted.
+- **The financial alerts are posted only once an owner adds them:** their posts reach whoever reads
+  the channel, not only platform owners. The form marks them "platform owners' alert" and says so.
+  Each is posted in the transaction that queues its emails, as the operations alerts are: the
+  unsettled payments' with the email's text (how many, the days they were paid, what to check and
+  where the list is); the reconciliation's without a failed check's error (`settlementReconPost`),
+  which can quote Razorpay's answer, such as a refusal of HyFib's keys. Neither names a company, an
+  amount, a payment id or a transaction, as the emails do not.
+- **The test post** says the alerts chosen under Operations → Alerts are posted there, not which.
+
+Consequences: an owner who adds the financial alerts tells whoever reads the channel that a day's
+reconciliation needs a person or failed, and how many top-ups were not settled, by day; amounts and
+companies stay on Platform → Reconciliation. Old web servers keep working during the rollout: the
+console's state function returns the kinds as one more column, which they do not read. Workers of
+this release need the migration: while a channel is set, their financial alerts queue posts of the
+new kinds, which the posts' old check refuses, failing the minute billing sweep at that alert, its
+emails rolled back, until it is applied (migrations run before workers roll out).
+
+Not built: several channels, a channel per alert, formats other than a JSON `text` member, and the
+owners' other notices (refund requests, ADR-073; personal notices, ADR-314) in the channel.

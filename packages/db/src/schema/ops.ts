@@ -215,13 +215,19 @@ export const tenantDeletions = opsSchema.table('tenant_deletions', {
 /**
  * The chat channel the operations alerts are posted to (ADR-338): one row at most, its address
  * sealed with the keyring under its id. Set, removed and read for the console only through the
- * definer functions of migration 0258; the runtime role reads the sealed address, to send the
- * posts, and re-encrypts it (the keyring sweep).
+ * definer functions of migrations 0258 and 0261; the runtime role reads the sealed address, to send
+ * the posts, and re-encrypts it (the keyring sweep).
  */
 export const platformAlertChannel = opsSchema.table('platform_alert_channel', {
   id: uuid('id').primaryKey(),
   urlCiphertext: text('url_ciphertext').notNull(),
   host: text('host').notNull(),
+  /** The alerts it gets, in the console's order (ADR-340). */
+  kinds: text('kinds')
+    .array()
+    .notNull()
+    .default(sql`ARRAY['failures', 'queues', 'integrations']::text[]`)
+    .$type<('failures' | 'queues' | 'integrations' | 'reconciliation' | 'unsettled')[]>(),
   setBy: text('set_by'),
   setAt: tz('set_at').notNull().defaultNow(),
   lastSentAt: tz('last_sent_at'),
@@ -237,7 +243,9 @@ export const platformAlertChannel = opsSchema.table('platform_alert_channel', {
  */
 export const platformAlertPosts = opsSchema.table('platform_alert_posts', {
   id: uuid('id').primaryKey(),
-  kind: text('kind', { enum: ['failures', 'queues', 'integrations', 'test'] }).notNull(),
+  kind: text('kind', {
+    enum: ['failures', 'queues', 'integrations', 'reconciliation', 'unsettled', 'test'],
+  }).notNull(),
   body: text('body').notNull(),
   createdAt: tz('created_at').notNull().defaultNow(),
   attempts: smallint('attempts').notNull().default(0),

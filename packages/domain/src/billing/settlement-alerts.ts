@@ -1,5 +1,6 @@
 import { sql, systemScope, type Database } from '@w360/db';
 import { enqueueEmail, type OutboxDeps } from '../email/outbox';
+import { queueAlertPost } from '../platform/alert-channel';
 
 /**
  * Alerts for the daily settlement reconciliation (ADR-066). When a day's run finishes with
@@ -7,7 +8,8 @@ import { enqueueEmail, type OutboxDeps } from '../email/outbox';
  * The minute billing sweep lists the attempts not emailed yet (run ids and attempt numbers only) and
  * marks each in the transaction that queues the emails; the mark returns what the email says. The
  * email names days, counts and errors, never a transaction or a company: those stay on Platform →
- * Reconciliation.
+ * Reconciliation. When the chat channel gets these alerts (ADR-340), each email is also posted
+ * there, without the errors.
  */
 
 /** Days in one email at most; the rest wait for the next sweep. */
@@ -37,6 +39,8 @@ export interface SettlementReconAlertResult {
   /** Days due but not emailed because there is no platform owner to tell. */
   unsent: number;
   recipients: number;
+  /** Whether the alert was also queued for the chat channel (ADR-340). */
+  posted: boolean;
 }
 
 function dayLabel(date: string): string {
@@ -94,9 +98,23 @@ export function settlementReconAlert(
 }
 
 /**
+ * The chat channel's post about finished attempts (ADR-340): the email's text without a failed
+ * check's error, which can quote what Razorpay answered and is for platform owners only.
+ */
+export function settlementReconPost(
+  days: readonly SettlementReconAlertDay[],
+  appBaseUrl: string,
+): { subject: string; lines: string[]; url: string; actionLabel: string } {
+  return settlementReconAlert(
+    days.map((day) => ({ ...day, lastError: null })),
+    appBaseUrl,
+  );
+}
+
+/**
  * The minute sweep's alerts: emails every platform owner once about the finished attempts not
- * emailed yet. Nothing is marked while there is no platform owner, so the alert goes out once there
- * is one.
+ * emailed yet, and posts them to the chat channel when it gets them. Nothing is marked while there
+ * is no platform owner, so the alert goes out once there is one.
  */
 export async function alertSettlementReconFindings(
   deps: SettlementReconAlertDeps,
@@ -110,7 +128,7 @@ export async function alertSettlementReconFindings(
       ),
     { accessMode: 'read only' },
   );
-  if (due.rows.length === 0) return { alerted: 0, unsent: 0, recipients: 0 };
+  if (due.rows.length === 0) return { alerted: 0, unsent: 0, recipients: 0, posted: false };
   const recipients = await deps.db.run(
     systemScope,
     (tx) =>
@@ -120,7 +138,7 @@ export async function alertSettlementReconFindings(
     { accessMode: 'read only' },
   );
   if (recipients.rows.length === 0) {
-    return { alerted: 0, unsent: due.rows.length, recipients: 0 };
+    return { alerted: 0, unsent: due.rows.length, recipients: 0, posted: false };
   }
   return deps.db.run(systemScope, async (tx) => {
     const days: SettlementReconAlertDay[] = [];
@@ -148,7 +166,9 @@ export async function alertSettlementReconFindings(
         openNotHyfib: Number(row.open_not_hyfib),
       });
     }
-    if (days.length === 0) return { alerted: 0, unsent: 0, recipients: recipients.rows.length };
+    if (days.length === 0) {
+      return { alerted: 0, unsent: 0, recipients: recipients.rows.length, posted: false };
+    }
     const alert = settlementReconAlert(days, deps.appBaseUrl);
     for (const recipient of recipients.rows) {
       await enqueueEmail(deps.outbox, tx, {
@@ -158,7 +178,13 @@ export async function alertSettlementReconFindings(
         payload: { kind: 'platform.notice', ...alert },
       });
     }
-    return { alerted: days.length, unsent: 0, recipients: recipients.rows.length };
+    const posted = await queueAlertPost(
+      deps.outbox,
+      tx,
+      'reconciliation',
+      settlementReconPost(days, deps.appBaseUrl),
+    );
+    return { alerted: days.length, unsent: 0, recipients: recipients.rows.length, posted };
   });
 }
 
@@ -166,7 +192,8 @@ export async function alertSettlementReconFindings(
  * Alerts for payments no settlement showed (ADR-071): platform owners are emailed once about each
  * paid top-up on the unsettled list of Platform → Reconciliation (7 days after its payment, with
  * every day since reconciled). The email gives how many and on which days they were paid, never a
- * company, an amount or a payment id: those stay on the page.
+ * company, an amount or a payment id: those stay on the page. When the chat channel gets these
+ * alerts (ADR-340), each email is also posted there with the same text.
  */
 
 /** Payments recorded per sweep at most; the rest wait for the next sweep. */
@@ -178,6 +205,8 @@ export interface UnsettledAlertResult {
   /** Payments due but not emailed because there is no platform owner to tell. */
   unsent: number;
   recipients: number;
+  /** Whether the alert was also queued for the chat channel (ADR-340). */
+  posted: boolean;
 }
 
 /** A calendar day in India time, where Razorpay's settlement days are counted. */
@@ -214,8 +243,8 @@ export function unsettledPaymentsAlert(
 
 /**
  * The minute sweep's alert about unsettled payments: emails every platform owner once about the
- * payments on the list not emailed yet. Nothing is recorded while there is no platform owner, so the
- * alert goes out once there is one.
+ * payments on the list not emailed yet, and posts it to the chat channel when it gets them. Nothing
+ * is recorded while there is no platform owner, so the alert goes out once there is one.
  */
 export async function alertUnsettledPayments(
   deps: SettlementReconAlertDeps,
@@ -229,7 +258,7 @@ export async function alertUnsettledPayments(
       ),
     { accessMode: 'read only' },
   );
-  if (due.rows.length === 0) return { alerted: 0, unsent: 0, recipients: 0 };
+  if (due.rows.length === 0) return { alerted: 0, unsent: 0, recipients: 0, posted: false };
   const recipients = await deps.db.run(
     systemScope,
     (tx) =>
@@ -239,7 +268,7 @@ export async function alertUnsettledPayments(
     { accessMode: 'read only' },
   );
   if (recipients.rows.length === 0) {
-    return { alerted: 0, unsent: due.rows.length, recipients: 0 };
+    return { alerted: 0, unsent: due.rows.length, recipients: 0, posted: false };
   }
   const ids = due.rows.map((r) => r.payment_id);
   return deps.db.run(systemScope, async (tx) => {
@@ -247,7 +276,7 @@ export async function alertUnsettledPayments(
       sql`select payment_id, paid_at from ops.settlement_mark_unsettled_alerted(${sql.param(ids)}::text[])`,
     );
     if (marked.rows.length === 0) {
-      return { alerted: 0, unsent: 0, recipients: recipients.rows.length };
+      return { alerted: 0, unsent: 0, recipients: recipients.rows.length, posted: false };
     }
     const alert = unsettledPaymentsAlert(
       marked.rows.map((r) => new Date(r.paid_at)),
@@ -261,6 +290,7 @@ export async function alertUnsettledPayments(
         payload: { kind: 'platform.notice', ...alert },
       });
     }
-    return { alerted: marked.rows.length, unsent: 0, recipients: recipients.rows.length };
+    const posted = await queueAlertPost(deps.outbox, tx, 'unsettled', alert);
+    return { alerted: marked.rows.length, unsent: 0, recipients: recipients.rows.length, posted };
   });
 }

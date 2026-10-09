@@ -1,6 +1,7 @@
 'use server';
 import { refresh } from 'next/cache';
 import { AppError } from '@w360/core';
+import type { AlertChannelKind } from '@w360/domain';
 import { getRuntime } from '@/server/runtime';
 import { runAction, type ActionResult } from '@/server/action';
 import { correlationId } from '@/server/session';
@@ -414,6 +415,18 @@ export async function setAlertChannelAction(
   return runAction(async () => {
     const { actor, runtime } = await actorForAction();
     const result = await runtime.alertChannel.setChannel(actor, input);
+    refresh();
+    return result;
+  });
+}
+
+/** Chooses the alerts the chat channel gets (platform owners, audited, ADR-340). */
+export async function setAlertChannelKindsAction(
+  input: unknown,
+): Promise<ActionResult<{ kinds: AlertChannelKind[] }>> {
+  return runAction(async () => {
+    const { actor, runtime } = await actorForAction();
+    const result = await runtime.alertChannel.setKinds(actor, input);
     refresh();
     return result;
   });
