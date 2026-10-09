@@ -1,5 +1,32 @@
 # Progress
 
+## 2026-10-09 — Each browser project's end-to-end tests in a CI job of its own (ADR-343)
+
+Status: **Implemented; it first runs in CI with this pull request.** The four browser projects' 464
+end-to-end tests ran one after another in one CI job and took 168.3 of its suite step's 230 minutes
+on a248d4d (PR #55), almost three hours before a pull request's last check ended.
+
+### Completed
+
+- **CI:** `e2e-project`, a job per Playwright project (Chromium, Firefox, WebKit and mobile
+  Chromium), each with its own PostgreSQL, Mailpit, build, web server and worker, its browser only
+  and `--project`; 110 minutes for a project's suite and 120 for its job; reports, traces and server
+  logs uploaded per project and attempt. "End-to-end (Chromium, Firefox, WebKit, mobile)", the check
+  main requires, is now a job that needs the four, runs whatever they did and passes only when they
+  all passed.
+- **Tests:** the usage and settlement specs' comments say the projects share one database when they
+  run together, as locally, and that CI gives each its own. No test changed.
+- **Docs:** ADR-343.
+
+### Test commands and results (local, 2026-10-09)
+
+| Command                                | Result                                                            |
+| -------------------------------------- | ----------------------------------------------------------------- |
+| `pnpm format:check`                    | clean, the workflow file included                                 |
+| The workflow parsed as YAML            | jobs `e2e-project` (the four projects) and `e2e` (`if: always()`) |
+| `playwright test --list`, each project | 116 tests each, 464 in all                                        |
+| The new jobs on GitHub Actions         | not run here: they first run with this pull request               |
+
 ## 2026-10-09 — A company's year on its platform page (P5-10, H-034, ADR-342)
 
 Status: **Implemented; its database and browser tests run in CI only.** ADR-341 drew the

@@ -13378,3 +13378,35 @@ Decision:
 
 Not built: failures or other measures as charts of their own, the year in a CSV, and days in a time
 zone other than UTC.
+
+## ADR-343 Each browser project's end-to-end tests in a CI job of its own (2026-10-09)
+
+Context: CI ran the four Playwright projects (Chromium, Firefox, WebKit and mobile Chromium) one
+after another in one job, one test at a time, against one database, Mailpit, web server and worker.
+Each slice adds about 4 tests, one a project, and the job's limit was raised again and again (from
+30 minutes to 240, PROGRESS). On a248d4d its 464 tests took 168.3 of the suite step's 230 minutes:
+every pull request waited almost three hours for its last check, and a slow runner with a few
+retries came close to the limit.
+
+Decision:
+
+- **A job per project:** `e2e-project` is a matrix of the four projects. Each job has its own
+  PostgreSQL, Mailpit, build, web server and worker, installs its browser only and runs
+  `pnpm test:e2e --project=<project>`, one test at a time as before. `fail-fast` is off, so one
+  project failing still leaves the others' evidence. A project's suite stops at 110 minutes and its
+  job at 120: its 116 tests are a quarter of the 464.
+- **The required check keeps its name:** main's branch protection requires "End-to-end (Chromium,
+  Firefox, WebKit, mobile)". A job of that name needs the four and passes only when their result is
+  `success`. It runs whatever they did (`if: always()`): a skipped job would count as passed.
+- **Evidence:** each project's report, traces and server logs are uploaded under names with the
+  project and the attempt.
+- **Tests unchanged:** run together, as `pnpm test:e2e` runs them locally, the projects still share
+  one database, which the settlement and usage tests' days and currencies a project allow for; their
+  comments now say CI gives each project its own.
+
+Consequences: four runners work at once instead of one, each building the app (about 1.5 minutes)
+and installing a browser, so the end-to-end checks should end in about an hour instead of three; the
+first runs of this change measure it. Re-running a failed project's job re-runs that project only,
+then the check of the four.
+
+Not built: splitting a project's tests across jobs, and tests run in parallel within a job.

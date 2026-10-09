@@ -28,7 +28,8 @@ test.skip(
 
 /**
  * Rate cards are shared by every company in the database, and the browser projects share one
- * database: each project uses its own currency, which no other spec uses.
+ * database when they run together, as `pnpm test:e2e` runs them locally (CI gives each its own,
+ * ADR-343): each project uses its own currency, which no other spec uses.
  */
 const CURRENCIES: Record<string, string> = {
   chromium: 'AUD',

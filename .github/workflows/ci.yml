@@ -74,26 +74,31 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
 
-  e2e:
-    name: End-to-end (Chromium, Firefox, WebKit, mobile)
+  e2e-project:
+    name: End-to-end on ${{ matrix.label }}
     runs-on: ubuntu-24.04
-    # Tests run one at a time across four browser projects: the whole job took 139 minutes on d50ff85
-    # (October 2026), 344 tests took 127.3 minutes on 3695c23, 340
-    # took 120.3 to 127.6 on cecf550, 2e74750 and a2df990, 260 took 91.1 on 57bc896, 224 took 71.1
-    # on aceb7a0, 220 took 65.3 on c1b45aa, 216 took 61.2 on 76b0eff, 212 took 64.0 on afcb21d and
-    # 61.0 on b453b6c, 208 took 66.5 on da91fc3 (one flaky test passed on its retry on b453b6c and
-    # da91fc3), 200 took 64.3 on 28a774c and 180 took 54.0 on 736acb4. The usage, settlement, API
-    # key and refund request specs each wait per project for a worker's minute sweep to send an
-    # email: the rate change notice (since 3978329) and the key expiry reminder up to 90 seconds,
-    # the reconciliation and unsettled payment alerts, which go to every platform owner, up to 150;
-    # the refund request test waits for three sweeps (about 2 minutes), the plans test for two staff
-    # plan changes' emails and the plan subscription test for a staff cancellation's (ADR-100,
-    # ADR-101), and the two WhatsApp access tests for the sweep to check an account never checked
-    # (about a minute each, ADR-137). Runners vary (148 tests took 33.5 minutes on b2b7614; 160 took
-    # 45.9 on fb8efa6, including a 4-minute timeout and its retry), each slice adds about 4 tests,
-    # and one retry of a long test (the cart reminder test allows 5 minutes) must still fit on a
-    # slow runner: the suite step stops at 230 minutes, the job at 240.
-    timeout-minutes: 240
+    # Each browser project runs in a job of its own (ADR-343), one test at a time, against its own
+    # database, Mailpit, web server and worker. The four projects ran one after another in one job
+    # until their 464 tests took 168.3 of its 230 minutes on a248d4d (October 2026); each slice adds
+    # about 4 tests, one a project. The usage, settlement, API key and refund request specs each
+    # wait for a worker's minute sweep to send an email: the rate change notice and the key expiry
+    # reminder up to 90 seconds, the reconciliation and unsettled payment alerts, which go to every
+    # platform owner, up to 150; the refund request test waits for three sweeps (about 2 minutes),
+    # the plans test for two staff plan changes' emails and the plan subscription test for a staff
+    # cancellation's (ADR-100, ADR-101), and the two WhatsApp access tests for the sweep to check an
+    # account never checked (about a minute each, ADR-137). Runners vary, and one retry of a long
+    # test (the cart reminder test allows 5 minutes) must still fit on a slow runner: a project's
+    # suite stops at 110 minutes, its job at 120.
+    timeout-minutes: 120
+    strategy:
+      # Every project runs to its end, so one failing still leaves the others' evidence.
+      fail-fast: false
+      matrix:
+        include:
+          - { project: chromium, label: Chromium, browser: chromium }
+          - { project: firefox, label: Firefox, browser: firefox }
+          - { project: webkit, label: WebKit, browser: webkit }
+          - { project: mobile-chromium, label: mobile Chromium, browser: chromium }
     services:
       postgres:
         image: postgres:18-alpine
@@ -184,10 +189,10 @@ jobs:
           (cd apps/worker && NODE_ENV=production nohup node dist/main.js > "$RUNNER_TEMP/worker.log" 2>&1 &)
           for i in $(seq 1 60); do curl -sf http://localhost:3000/api/health/ready && curl -sf http://localhost:9464/ready && exit 0; sleep 1; done
           cat "$RUNNER_TEMP/web.log" "$RUNNER_TEMP/worker.log"; exit 1
-      - run: pnpm exec playwright install --with-deps chromium firefox webkit
+      - run: pnpm exec playwright install --with-deps ${{ matrix.browser }}
       # Stops before the job's limit, so a run that overruns still gets the steps below.
-      - run: pnpm test:e2e
-        timeout-minutes: 230
+      - run: pnpm test:e2e --project=${{ matrix.project }}
+        timeout-minutes: 110
       - if: failure() || cancelled()
         run: cat "$RUNNER_TEMP/web.log" "$RUNNER_TEMP/worker.log"
       # Test data only: what the job queues and the stores held when the suite failed.
@@ -217,7 +222,7 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           # A re-run is the same workflow run: one name per attempt keeps both attempts' evidence.
-          name: playwright-report-${{ github.run_attempt }}
+          name: playwright-report-${{ matrix.project }}-${{ github.run_attempt }}
           path: |
             tests/e2e/playwright-report
             tests/e2e/test-results
@@ -226,12 +231,29 @@ jobs:
       - if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: e2e-server-logs-${{ github.run_attempt }}
+          name: e2e-server-logs-${{ matrix.project }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/web.log
             ${{ runner.temp }}/worker.log
           if-no-files-found: ignore
           retention-days: 7
+
+  e2e:
+    # The check main's branch protection requires, by this name: it passes only when every browser
+    # project's job passed. It runs whatever they did, so a project failed or cancelled fails it; a
+    # skipped job would count as passed.
+    name: End-to-end (Chromium, Firefox, WebKit, mobile)
+    needs: e2e-project
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Every browser project passed
+        env:
+          RESULT: ${{ needs.e2e-project.result }}
+        run: |
+          echo "The browser projects' jobs: $RESULT"
+          test "$RESULT" = success
 
   security:
     name: Dependency audit and secret scan
