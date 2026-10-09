@@ -73,6 +73,7 @@ import {
   WEBHOOK_TEMPLATE_STATUSES,
   WEBHOOK_UNATTEMPTED_ERRORS,
   webhookContactFieldValueId,
+  webhookEndpointAuditMetadata,
   webhookHost,
   webhookTakesAutomationRuns,
   webhookTakesCampaignEvents,
@@ -5537,7 +5538,8 @@ export function createWebhooksService(deps: {
             action: 'webhook.endpoint_created',
             subjectType: 'webhook_endpoint',
             subjectId: id,
-            metadata: {
+            // Its largest lists named by count when they would not fit (ADR-336).
+            metadata: webhookEndpointAuditMetadata({
               host,
               eventTypes: data.eventTypes,
               ...(headers.length > 0 ? { headers: headers.map((h) => h.name) } : {}),
@@ -5595,7 +5597,7 @@ export function createWebhooksService(deps: {
               ...(contactTags ? { contactTags } : {}),
               ...(conversationTags ? { conversationTags } : {}),
               ...(oauth ? { oauthTokenHost: oauth.host } : {}),
-            },
+            }),
           },
           meta,
         );
@@ -6091,7 +6093,8 @@ export function createWebhooksService(deps: {
             action: 'webhook.endpoint_updated',
             subjectType: 'webhook_endpoint',
             subjectId: data.endpointId,
-            metadata: {
+            // Its largest lists named by count when they would not fit (ADR-336).
+            metadata: webhookEndpointAuditMetadata({
               host,
               eventTypes: data.eventTypes,
               ...(data.headers ? { headers: data.headers.map((h) => h.name) } : {}),
@@ -6149,7 +6152,7 @@ export function createWebhooksService(deps: {
               ...(contactTags ? { contactTags } : {}),
               ...(conversationTags ? { conversationTags } : {}),
               ...webhookOAuthAudit(oauth, endpoint),
-            },
+            }),
           },
           meta,
         );

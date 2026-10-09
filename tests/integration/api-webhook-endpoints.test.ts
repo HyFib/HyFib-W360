@@ -15,8 +15,10 @@ import {
   createWebhooksService,
   outboxAad,
   processWebhookDeliveries,
+  WEBHOOK_LIMITS,
   WebhookOAuthTokenCache,
   verifyWebhookSignature,
+  webhookAuditMetadataBytes,
   webhookOAuthSecretAad,
   type ApiContext,
   type ApiKeysService,
@@ -3031,6 +3033,65 @@ describe('webhook endpoints through the API (ADR-081)', () => {
         contactEventFieldValues: [{ key: 'score', atMost: 0 }],
       }),
     ).toMatchObject({ contactEventFieldValues: [{ key: 'score', atMost: 0 }] });
+  });
+
+  it('add and change an endpoint whose lists would not fit its audit entry, the entry naming the largest by count (ADR-336)', async () => {
+    const c = await fx.company();
+    const key = await apiKey(c, ['webhooks.manage']);
+    // Five lists of 50 tags of 112 bytes each, as in the Settings test: about 29,000 bytes.
+    const tags = (list: number) =>
+      Array.from({ length: 50 }, (_, i) => `${'க'.repeat(36)}${list}${String(i).padStart(3, '0')}`);
+    const lists = {
+      contactTags: tags(1),
+      conversationTags: tags(2),
+      contactEventTags: tags(3),
+      surveyContactTags: tags(4),
+      surveyConversationTags: tags(5),
+    };
+    const created = await addThroughApi(key.ctx, 'audit-lists-1', {
+      url: receiverUrl(),
+      events: ['message.received', 'contact.updated', 'satisfaction_survey.answered'],
+      ...lists,
+    });
+    expect(created.status).toBe(201);
+    expect(created.body.data).toMatchObject(lists);
+    expect(
+      await api().update(key.ctx, created.body.data.id, { description: 'Tamil tags' }),
+    ).toMatchObject({ description: 'Tamil tags', ...lists });
+    const audits = await fx.query<{
+      action: string;
+      metadata: Record<string, unknown>;
+      bytes: number;
+    }>(
+      `SELECT action, metadata, pg_column_size(metadata::text::jsonb) AS bytes FROM app.audit_events
+        WHERE tenant_id = $1 AND action LIKE 'webhook.endpoint_%' ORDER BY occurred_at, id`,
+      [c.tenant.id],
+    );
+    expect(audits.map((a) => a.action)).toEqual([
+      'webhook.endpoint_created',
+      'webhook.endpoint_updated',
+    ]);
+    for (const audit of audits) {
+      expect(audit.bytes).toBeLessThanOrEqual(webhookAuditMetadataBytes(audit.metadata));
+      expect(audit.bytes).toBeLessThanOrEqual(8192);
+      expect(audit.metadata).toMatchObject({
+        source: 'api',
+        listCounts: {
+          contactEventTags: 50,
+          contactTags: 50,
+          conversationTags: 50,
+          surveyContactTags: 50,
+        },
+        surveyConversationTags: lists.surveyConversationTags,
+      });
+      expect(audit.metadata).not.toHaveProperty('contactTags');
+    }
+    // Without its source the entry is within the count the services keep it to.
+    const [first] = audits;
+    const { source: _source, ...withoutSource } = first?.metadata ?? {};
+    expect(webhookAuditMetadataBytes(withoutSource)).toBeLessThanOrEqual(
+      WEBHOOK_LIMITS.auditMetadataBytes,
+    );
   });
 
   it('choose the field values of the added and changed contacts an endpoint receives, read by the fields’ types, kept by changes that leave them out and cleared with both events (ADR-332)', async () => {

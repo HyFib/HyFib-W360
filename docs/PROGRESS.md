@@ -1,5 +1,43 @@
 # Progress
 
+## 2026-10-09 — Endpoint audit entries that fit, however long the lists (P5-09, H-014, ADR-336)
+
+Status: **Fixed; its database tests run in CI only.** Adding or changing a webhook endpoint
+records an audit entry naming every list the endpoint has, and the lists were bounded each on its
+own: lists within their limits but past the 8 KiB of metadata an audit entry holds together (two
+lists of 50 tags written in Tamil or Hindi were enough) made the audit's check roll the change back
+with an internal error, in Settings and through the API. Found in passing while building ADR-335.
+The local PostgreSQL is unavailable, so the integration tests below were written but not run here.
+
+### Completed
+
+- **Domain:** `webhookAuditMetadataBytes` counts a value as jsonb takes it, generously (the header,
+  each value's entry, the containers' headers, UTF-8 bytes, numbers' numeric form and alignment, in
+  full); `webhookEndpointAuditMetadata` keeps an entry that fits within 7,000 bytes as it is and
+  otherwise names its largest lists by count under `listCounts`, largest first and by name when as
+  large, until it fits, always naming the host and the events. Settings' added and changed
+  endpoints and every entry of the API's endpoints pass through it; the endpoint keeps every list.
+- **Tests:** unit (3 new in `webhooks/webhooks.test.ts`: the count of each kind of value, an entry
+  that fits unchanged, the largest lists counted first and by name with the events kept);
+  integration (1 new each in `webhooks.test.ts` and `api-webhook-endpoints.test.ts`: an endpoint
+  with five lists of 50 Tamil tags, about 29,000 bytes, added and changed, every list kept, its
+  entries fitting and PostgreSQL's uncompressed size of each within the count). Written for CI; the
+  integration tests were not run here. No migration.
+- **Docs:** ADR-336; ARCHITECTURE; SECURITY; THREAT-MODEL T301; BACKLOG P5-09.
+- **Mutation checks:** 14/14 deliberate regressions caught on the unit-tested parts (each kind of
+  value the count takes, an entry that fits, the events, the order and the end of the lists named by
+  count, the counts, and the budget with room for the API's source). The call sites need the
+  database, so their regressions are left to the integration tests, which run in CI.
+
+### Test commands and results (local, 2026-10-09)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 141 files, 1410 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+
 ## 2026-10-09 — Words and ranges in field value filters (P5-09, H-014, ADR-335)
 
 Status: **Implemented; its database tests run in CI only.** An endpoint taking added and changed

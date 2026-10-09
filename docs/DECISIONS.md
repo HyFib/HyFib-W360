@@ -13084,3 +13084,35 @@ Decision:
 Not built: lists that leave contacts out, a range of text, words of number or date fields,
 comparisons other than these (a field without a value, before or after today), several ranges of
 one field in Settings, and sending only the changes that leave a condition.
+
+## ADR-336 Endpoint audit entries that fit, however long the lists (P5-09) (2026-10-09)
+
+Context: adding or changing a webhook endpoint, in Settings or through the API, records an audit
+entry (`webhook.endpoint_created`, `webhook.endpoint_updated`) naming the endpoint's host, its
+events and every list it has: numbers, teams, members, templates, tags, field values and the rest.
+An audit entry holds 8 KiB of metadata (0001's check), but the lists were bounded each on its own,
+never together: two lists of 50 tags written in Tamil or Hindi (up to 40 letters of 3 bytes each)
+passed every other rule and took about 12 KB, so the audit's check refused the entry and rolled the
+change back with an internal error. ADR-332 kept field values to 4,000 bytes for this reason, but
+alone. Found in passing while building ADR-335.
+
+Decision:
+
+- **An entry kept within 7,000 bytes as jsonb, counted generously** (`webhookAuditMetadataBytes`:
+  the value's header, each value's 4-byte entry, the containers' headers, UTF-8 bytes, a number's
+  numeric form and alignment, each counted in full, so the count is never below what PostgreSQL
+  stores before compressing it). The room above 7,000 bytes covers the `source` the API adds.
+- **Its largest lists named by count:** an entry that would pass it names its lists one after
+  another, the largest first (by name when two are as large), by their lengths under `listCounts`
+  (`{"contactTags": 50}`) instead of item by item, until it fits
+  (`webhookEndpointAuditMetadata`). The host, the events and the other facts are always named, and
+  an entry that fits is unchanged. The endpoint keeps every list whole, as Settings, the API and the
+  company data export show it.
+- **Both paths:** Settings and the API name lists by count the same way when an endpoint is added
+  or changed; the API's other endpoint entries (turned off or on, deleted, a secret rotated,
+  deliveries replayed) pass through the same function and name no list long enough to change.
+- **Unchanged:** every list's own limit, ADR-332's 4,000 bytes of field values, the audit table
+  and its check, and the other actions' entries; no migration.
+
+Not built: naming a long list's items over several entries, and a bound on the entries of other
+audited actions.

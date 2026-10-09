@@ -136,6 +136,8 @@ import {
   webhookFieldValuesFromLines,
   webhookFieldWordsFromLines,
   webhookFieldValueText,
+  webhookAuditMetadataBytes,
+  webhookEndpointAuditMetadata,
 } from './model';
 import {
   noteCreatedPayloadSchema,
@@ -4121,6 +4123,84 @@ describe('contact event field words and ranges (ADR-335)', () => {
     expect(
       webhookFieldRangeFromInputs({ key: 'vip', label: 'VIP', type: 'boolean' }, '', ''),
     ).toEqual({ ok: false, message: 'VIP takes no range.' });
+  });
+});
+
+describe('endpoint audit entries within an audit entry’s 8 KiB (ADR-336)', () => {
+  // A tag of 40 Tamil letters and digits: 114 bytes of UTF-8, as a company's tags may be.
+  const tamil = (i: number) => `${'க'.repeat(37)}${String(i).padStart(3, '0')}`;
+  const tags = (count: number) => Array.from({ length: count }, (_, i) => tamil(i));
+
+  it('count no fewer bytes than jsonb takes: headers, entries, UTF-8, numbers and alignment', () => {
+    const bytes = webhookAuditMetadataBytes;
+    expect(bytes('ab')).toBe(14);
+    expect(bytes(true)).toBe(12);
+    expect(bytes([])).toBe(11);
+    expect(bytes(['ab', 'c'])).toBe(22);
+    expect(bytes(['க'])).toBe(18);
+    expect(bytes({ a: 'b' })).toBe(21);
+    expect(bytes({ a: [true] })).toBe(31);
+    expect(bytes([5])).toBe(30);
+    expect(bytes([123456.789012])).toBe(36);
+    expect(bytes([1e21])).toBe(48);
+    expect(bytes(tags(50))).toBe(11 + 50 * (4 + 114));
+  });
+
+  it('keep an entry that fits as it is', () => {
+    const metadata = {
+      host: 'hooks.example.com',
+      eventTypes: ['message.received'],
+      contactTags: tags(50),
+      teamIds: ['019245c1-5a4c-7b1e-9a1e-1f2d3c4b5a69'],
+    };
+    expect(webhookAuditMetadataBytes(metadata)).toBeLessThanOrEqual(
+      WEBHOOK_LIMITS.auditMetadataBytes,
+    );
+    expect(webhookEndpointAuditMetadata(metadata)).toBe(metadata);
+    // With the source the API adds, an entry within the count fits the audit's 8 KiB.
+    expect(
+      WEBHOOK_LIMITS.auditMetadataBytes + webhookAuditMetadataBytes({ source: 'api' }),
+    ).toBeLessThanOrEqual(8192);
+  });
+
+  it('name the largest lists by count, one after another and by name when as large, until the entry fits', () => {
+    const teamIds = ['019245c1-5a4c-7b1e-9a1e-1f2d3c4b5a69'];
+    const eventTypes = ['message.received', 'contact.updated', 'satisfaction_survey.answered'];
+    // The largest list alone.
+    const one = webhookEndpointAuditMetadata({
+      host: 'hooks.example.com',
+      eventTypes,
+      conversationTags: tags(40),
+      contactTags: tags(50),
+      teamIds,
+    });
+    expect(one).toEqual({
+      host: 'hooks.example.com',
+      eventTypes,
+      conversationTags: tags(40),
+      teamIds,
+      listCounts: { contactTags: 50 },
+    });
+    expect(webhookAuditMetadataBytes(one)).toBeLessThanOrEqual(WEBHOOK_LIMITS.auditMetadataBytes);
+    // Two lists as large: by name, and only as many as it takes.
+    const two = webhookEndpointAuditMetadata({
+      host: 'hooks.example.com',
+      eventTypes,
+      surveyContactTags: tags(50),
+      contactTags: tags(50),
+      contactEventTags: tags(50),
+    });
+    expect(two).toEqual({
+      host: 'hooks.example.com',
+      eventTypes,
+      surveyContactTags: tags(50),
+      listCounts: { contactEventTags: 50, contactTags: 50 },
+    });
+    // The events are always named, however many.
+    const events = Array.from({ length: 60 }, (_, i) => `event.${i}`.padEnd(100, 'x'));
+    expect(
+      webhookEndpointAuditMetadata({ host: 'h', eventTypes: events, contactTags: tags(10) }),
+    ).toEqual({ host: 'h', eventTypes: events, listCounts: { contactTags: 10 } });
   });
 });
 

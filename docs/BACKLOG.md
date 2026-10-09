@@ -1254,6 +1254,9 @@ verification, app review, Embedded Signup configuration).
   **[Words and ranges in field value filters built; their database tests run only in CI]**
   (ADR-335, migration 0256: a condition can be a word a text field's value contains or a range of a
   number or date field's values, either end or both).
+  **[Audit entries of endpoints with long lists fixed; their database tests run only in CI]**
+  (ADR-336, no migration: an added or changed endpoint's entry whose lists together would pass
+  7,000 bytes as jsonb names the largest by count, so no change is refused for its audit entry).
   Remaining: filters for other event types and on a message's values, field value comparisons beyond
   values, words and ranges, other authentication (headers computed per delivery, other OAuth
   grants), mutual TLS, fixed egress addresses, events for store orders, a sequence number across

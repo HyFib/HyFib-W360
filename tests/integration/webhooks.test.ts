@@ -44,6 +44,7 @@ import {
   WEBHOOK_LIMITS,
   WEBHOOK_TEMPLATE_STATUSES,
   WEBHOOK_USER_AGENT,
+  webhookAuditMetadataBytes,
   webhookHeadersAad,
   WebhookOAuthTokenCache,
   webhookOAuthSecretAad,
@@ -7357,6 +7358,69 @@ describe('contact event field value filters (ADR-332)', () => {
     expect(
       (await webhooks().list(owner)).find((e) => e.id === created.id)?.contactEventFieldValues,
     ).toEqual(long);
+  });
+});
+describe('endpoint audit entries within an audit entry’s 8 KiB (ADR-336)', () => {
+  it('save an endpoint whose lists would not fit its audit entry, the entry naming the largest by count and keeping the others', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    // Tags of 36 Tamil letters and four digits, 112 bytes each: five lists of 50 take about
+    // 29,000 bytes, which an audit entry's 8 KiB refused, rolling the change back, before ADR-336.
+    const tags = (list: number) =>
+      Array.from({ length: 50 }, (_, i) => `${'க'.repeat(36)}${list}${String(i).padStart(3, '0')}`);
+    const lists = {
+      contactTags: tags(1),
+      conversationTags: tags(2),
+      contactEventTags: tags(3),
+      surveyContactTags: tags(4),
+      surveyConversationTags: tags(5),
+    };
+    const url = 'https://hooks.example.com/in';
+    const eventTypes = ['message.received', 'contact.updated', 'satisfaction_survey.answered'];
+    const created = await webhooks().create(owner, { url, eventTypes, ...lists });
+    await webhooks().update(owner, {
+      endpointId: created.id,
+      url,
+      description: 'Tamil tags',
+      eventTypes,
+    });
+    // The endpoint keeps every list whole.
+    expect((await webhooks().list(owner)).find((e) => e.id === created.id)).toMatchObject(lists);
+    const audits = await fx.query<{
+      action: string;
+      metadata: Record<string, unknown>;
+      bytes: number;
+    }>(
+      `SELECT action, metadata, pg_column_size(metadata::text::jsonb) AS bytes FROM app.audit_events
+        WHERE tenant_id = $1 AND action LIKE 'webhook.endpoint_%' ORDER BY occurred_at, id`,
+      [c.tenant.id],
+    );
+    expect(audits.map((a) => a.action)).toEqual([
+      'webhook.endpoint_created',
+      'webhook.endpoint_updated',
+    ]);
+    for (const audit of audits) {
+      // The count takes no fewer bytes than PostgreSQL does, uncompressed, and the entry fits.
+      expect(audit.bytes).toBeLessThanOrEqual(webhookAuditMetadataBytes(audit.metadata));
+      expect(webhookAuditMetadataBytes(audit.metadata)).toBeLessThanOrEqual(
+        WEBHOOK_LIMITS.auditMetadataBytes,
+      );
+      // Four lists as large named by count, by name; the fifth whole, with the events and host.
+      expect(audit.metadata).toMatchObject({
+        host: 'hooks.example.com',
+        listCounts: {
+          contactEventTags: 50,
+          contactTags: 50,
+          conversationTags: 50,
+          surveyContactTags: 50,
+        },
+        surveyConversationTags: lists.surveyConversationTags,
+      });
+      expect(audit.metadata.eventTypes).toHaveLength(3);
+      for (const counted of ['contactEventTags', 'contactTags', 'conversationTags']) {
+        expect(audit.metadata).not.toHaveProperty(counted);
+      }
+    }
   });
 });
 describe('contact event field words and ranges (ADR-335)', () => {

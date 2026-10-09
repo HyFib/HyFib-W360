@@ -72,6 +72,7 @@ import {
   WEBHOOK_TASK_DETAILS,
   webhookTakesTeamEvents,
   webhookTakesTemplateEvents,
+  webhookEndpointAuditMetadata,
   type WebhookContactFieldValue,
   type WebhookEndpointOAuth,
 } from '../webhooks/model';
@@ -2060,6 +2061,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
     }
   }
 
+  // An endpoint's entry names its largest lists by count when they would not fit (ADR-336).
   const audit = (
     tx: Tx,
     ctx: ApiContext,
@@ -2074,7 +2076,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
         action,
         subjectType: 'webhook_endpoint',
         subjectId: id,
-        metadata: { ...metadata, source: 'api' },
+        metadata: { ...webhookEndpointAuditMetadata(metadata), source: 'api' },
         correlationId: ctx.requestId,
       },
       apiActor(ctx),
