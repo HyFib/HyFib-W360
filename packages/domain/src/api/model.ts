@@ -376,6 +376,12 @@ export const API_LIMITS = {
   contactCardTextLength: 256,
   idempotencyKeyLength: 255,
   idempotencyHours: 24,
+  /**
+   * The most an answer kept with an Idempotency-Key may take as jsonb, counted by `jsonbSize`
+   * (ADR-339): the check of `app.api_idempotency_keys.response` (0259). An answer can give more
+   * than its request carried (a webhook endpoint's whole configuration, an order with its items).
+   */
+  idempotentResponseBytes: 262_144,
   /** Conversations one call to POST /conversations/update-many changes (ADR-120). */
   conversationsPerChange: 100,
   /** Contacts one call to POST /contacts/update-many changes (ADR-122). */

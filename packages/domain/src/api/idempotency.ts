@@ -1,4 +1,4 @@
-import { AppError, uuidv7 } from '@w360/core';
+import { AppError, jsonbSize, uuidv7 } from '@w360/core';
 import { and, apiIdempotencyKeys, eq, lte, type Tx } from '@w360/db';
 import type { ApiContext } from './context';
 import { API_LIMITS } from './model';
@@ -77,12 +77,25 @@ export async function claimIdempotencyKey(
   return { replay: { status: existing.statusCode, body: existing.response, replayed: true } };
 }
 
+/**
+ * Keeps a request's answer with its claimed key, for a retry to get it again. An answer the
+ * column's check would refuse (counted at most as `pg_column_size` counts it, `jsonbSize`) is
+ * refused with a reason instead (ADR-339): the request's transaction rolls back with the claim, and
+ * the request can be sent again without a key.
+ */
 export async function storeIdempotentResponse(
   tx: Tx,
   ctx: ApiContext,
   id: string,
   response: { status: number; body: Record<string, unknown> },
 ): Promise<void> {
+  if (jsonbSize(response.body) > API_LIMITS.idempotentResponseBytes) {
+    throw new AppError(
+      'validation_failed',
+      `The answer to this request takes more than ${API_LIMITS.idempotentResponseBytes / 1024} KiB, too much to keep with an Idempotency-Key. Send it without one.`,
+      { details: { apiReason: 'idempotency_response_too_large' } },
+    );
+  }
   await tx
     .update(apiIdempotencyKeys)
     .set({ statusCode: response.status, response: response.body })

@@ -1295,6 +1295,13 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    before setting a channel, as the deploy order below does. After a rollback the channel and its
    posts stay in the database unused: alerts are emailed only, as before.
 
+   Migration 0259 (ADR-339) replaces the check on `app.api_idempotency_keys.response` with one of
+   256 KiB (64 KiB before), validated by reading the table, which holds a day's keys. Web servers
+   of either release work with it: those of this release refuse an answer larger than 256 KiB with
+   422 `idempotency_response_too_large`, and those from before it now keep answers between 64 and
+   256 KiB that their requests failed on (an internal error). A rollback of the web keeps the new
+   check, which old servers satisfy.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

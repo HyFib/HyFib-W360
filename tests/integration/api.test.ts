@@ -6617,6 +6617,85 @@ describe('CRM pipelines and deals (ADR-253)', () => {
     await onPlan(c, ['crm']);
     expect((await apiGetPipelineForecast(deps(), reader.ctx, sales.id)).pipelineId).toBe(sales.id);
   });
+
+  it('keep an answer of up to 256 KiB with its Idempotency-Key, and refuse a larger one with its reason, changing nothing (ADR-339)', async () => {
+    const c = await fx.company();
+    const manager = await apiKey(c, ['pipelines.manage']);
+    const dataOf = (response: { body: unknown }) => (response.body as { data: ApiPipeline }).data;
+    const pipeline = dataOf(
+      await apiCreatePipeline(
+        deps(),
+        manager.ctx,
+        { name: 'Long history', currency: 'INR', stages: [{ name: 'Open' }] },
+        null,
+      ),
+    );
+    // Stages members removed over the years stay archived, and the pipeline's answer gives each:
+    // 40 Tamil letters and digits are 112 bytes of UTF-8 a name.
+    const archive = (from: number, count: number) =>
+      fx.query(
+        `INSERT INTO app.crm_stages (id, tenant_id, pipeline_id, name, position, archived_at)
+         SELECT gen_random_uuid(), $1, $2, repeat('க', 36) || lpad(g::text, 4, '0'), g, now()
+           FROM generate_series($3::int, $3::int + $4::int - 1) AS g`,
+        [c.tenant.id, pipeline.id, from, count],
+      );
+    await archive(1, 400);
+    const change = (name: string, version: number, key: string | null) => {
+      const input = { name, expectedVersion: version };
+      return apiUpdatePipeline(
+        deps(),
+        manager.ctx,
+        pipeline.id,
+        input,
+        key ? idem(key, JSON.stringify(input)) : null,
+      );
+    };
+    // Past the 64 KiB an answer was kept within before: kept, and a retry gets it again.
+    const kept = await change('Long history 2', 1, 'history-1');
+    expect([kept.status, kept.replayed]).toEqual([200, false]);
+    expect(dataOf(kept).stages).toHaveLength(401);
+    expect(Buffer.byteLength(JSON.stringify(kept.body))).toBeGreaterThan(65_536);
+    const again = await change('Long history 2', 1, 'history-1');
+    expect(again.replayed).toBe(true);
+    expect(again.body).toEqual(kept.body);
+
+    // Past 256 KiB: refused with its reason, before anything is kept, and nothing changes.
+    await archive(401, 800);
+    const refused = await change('Long history 3', 2, 'history-2').catch((error: unknown) => error);
+    expect(isAppError(refused) && [refused.code, refused.details]).toEqual([
+      'validation_failed',
+      { apiReason: 'idempotency_response_too_large' },
+    ]);
+    expect(isAppError(refused) && refused.message).toBe(
+      'The answer to this request takes more than 256 KiB, too much to keep with an Idempotency-Key. Send it without one.',
+    );
+    expect(apiErrorResponse(refused, 'r').status).toBe(422);
+    const [after] = await fx.query<{ name: string; version: number }>(
+      'SELECT name, version FROM app.crm_pipelines WHERE id = $1',
+      [pipeline.id],
+    );
+    expect(after).toEqual({ name: 'Long history 2', version: 2 });
+    expect(
+      await fx.query(
+        `SELECT 1 FROM app.api_idempotency_keys WHERE api_key_id = $1 AND idempotency_key = 'history-2'`,
+        [manager.id],
+      ),
+    ).toEqual([]);
+    // Without a key the change goes through.
+    const plain = await change('Long history 3', 2, null);
+    expect([plain.status, dataOf(plain).name, dataOf(plain).stages.length]).toEqual([
+      200,
+      'Long history 3',
+      1201,
+    ]);
+
+    // The check takes 256 KiB of jsonb, and no more.
+    const [check] = await fx.query<{ definition: string }>(
+      `SELECT pg_get_constraintdef(oid) AS definition FROM pg_constraint
+        WHERE conname = 'api_idempotency_keys_response_check'`,
+    );
+    expect(check?.definition).toBe('CHECK ((pg_column_size(response) <= 262144))');
+  });
 });
 
 describe('conversation reads (ADR-072)', () => {

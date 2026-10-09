@@ -1,5 +1,50 @@
 # Progress
 
+## 2026-10-09 — Answers kept with an Idempotency-Key up to 256 KiB (P5-08, P5-09, H-033, ADR-339)
+
+Status: **Fixed; its database test runs in CI only.** A successful answer to a request sent with an
+`Idempotency-Key` is kept so a retry gets it again, and its check held it to 64 KiB as jsonb.
+ADR-336's review estimated that an answer giving more than its request carried could pass that; a
+survey of the 29 places that keep an answer found five that can within their limits, among them a
+webhook endpoint's whole configuration (`POST /webhook-endpoints` and its secret rotation, whose
+key is required: about 103 KB, measured by `jsonbSize` in a unit test), and each such request
+failed with an internal error every time. The survey's other figures (an order with its items, a
+template with its history, a pipeline with its archived stages) came from a script reproducing
+jsonb's layout, not from PostgreSQL. The local PostgreSQL is unavailable, so migration 0259 and the
+integration test below were written but not run here; the migration passed the pglast parse check
+(syntax only).
+
+### Completed
+
+- **Database:** migration 0259 (the check on `app.api_idempotency_keys.response` replaced with one
+  of 256 KiB, validated at once).
+- **Domain:** `API_LIMITS.idempotentResponseBytes`; `storeIdempotentResponse` refuses an answer
+  larger than that, counted by `jsonbSize`, with 422 and reason `idempotency_response_too_large`
+  before writing it, which rolls the request back with its claim; the OpenAPI document names the
+  reason and the limit.
+- **Tests:** unit (2 new in `api/idempotency.test.ts`: an answer at the limit kept and one byte
+  more refused with nothing written; the largest answer a webhook endpoint can give, every list
+  full of three-byte text, over 64 KiB and within half of 256 KiB); integration (1 new in
+  `api.test.ts`: a pipeline's answer past 64 KiB kept and replayed, one past 256 KiB refused with
+  its reason, nothing changed or kept, and taken without a key; the check's definition). Written
+  for CI; the integration test was not run here. No e2e test.
+- **Docs:** ADR-339; ARCHITECTURE; DEPLOYMENT; DATA-RETENTION; BACKLOG P5-08 and P5-09; feature
+  matrix H-033.
+- **Mutation checks:** 6/6 deliberate regressions caught on the unit-tested parts (the limit itself
+  refused, the answer counted as JSON characters, nothing refused, no reason given, the limit at 64
+  KiB and at 1 MiB). The check itself and the refusal through a real request need the database, so
+  they are left to the integration test, which runs in CI.
+
+### Test commands and results (local, 2026-10-09)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 143 files, 1440 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
 ## 2026-10-09 — A chat channel for the operations alerts (P5-10, H-034, ADR-338)
 
 Status: **Implemented; its database and browser tests run in CI only.** The operations alerts

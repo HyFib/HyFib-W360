@@ -13235,3 +13235,35 @@ Not built: several channels or one per alert, formats other than a JSON `text` m
 Microsoft Teams' or PagerDuty's), the owners' financial alerts (ADR-066, ADR-071) and personal
 notices (ADR-314) in the channel, mentions and formatting beyond plain text, and a `Retry-After`
 answer's wait (a 429 waits as a 5xx does).
+
+## ADR-339 Answers kept with an Idempotency-Key up to 256 KiB (P5-08, P5-09) (2026-10-09)
+
+Context: a successful answer to a request sent with an `Idempotency-Key` is kept for 24 hours so a
+retry gets it again (ADR-052), and the column's check held it to 64 KiB as jsonb (0024), the size
+of a request body. ADR-336's review estimated that an answer giving more than its request carried
+could pass it. A survey of the 29 places that keep an answer found five that can, within their
+limits: a webhook endpoint's whole configuration, filled by separate changes and answered by
+`POST /webhook-endpoints/{id}/rotate-secret` (its key required) and by `POST /webhook-endpoints`
+(about 103 KB as jsonb at most, every list full of text of three-byte letters, measured by
+`jsonbSize` in a unit test); `POST /orders/{id}/request-payment` with 100 items (about 105 KB);
+`POST /message-templates/{id}/submit` with 50 history entries and 100 numbers (about 68 KB, 113 KB
+if Meta's reasons were in such letters); and `PATCH /pipelines/{id}`, whose answer gives every
+archived stage, which are kept without bound. The survey's figures for the last four came from a
+script reproducing jsonb's layout, not from PostgreSQL. Each such request failed with an internal
+error, every time it was retried, and its work was rolled back.
+
+Decision:
+
+- **256 KiB:** migration 0259 replaces the check with one of 262,144 bytes, more than twice the
+  largest bounded answer, so every answer the routes can give within their limits is kept.
+- **A larger answer is refused with its reason:** `storeIdempotentResponse` counts the answer with
+  `jsonbSize` (an upper bound of what the check counts) and, past 256 KiB, refuses it with 422 and
+  reason `idempotency_response_too_large`, "send it without one", before writing it; the request's
+  transaction rolls back with its claim, so nothing is done and the key stays free. Only a pipeline
+  with more than about 1,000 archived stages of long names reaches it; such a `PATCH` goes through
+  without a key. The OpenAPI document's reasons and its note on keys name it.
+- **Kept as before:** keys, their 24 hours, the replay and the refusal of a reused key.
+
+Not built: a bound on a pipeline's archived stages (kept since ADR-240 so closed deals keep their
+stage; the answer gives each), and a bound on answers that are not kept (they are not limited by
+this check).
