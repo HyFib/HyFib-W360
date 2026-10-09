@@ -20,8 +20,11 @@ export function DailyMessages({
   label: string;
   /** What the empty state says when nothing was sent or received. */
   empty: string;
-  /** The failed share's chart: its accessible name, and what it says when nothing was sent. */
-  failed: { label: string; noneSent: string };
+  /**
+   * The failed share's chart: its accessible name, what it says when nothing was sent, and the
+   * period its caption ends with, so the two captions of a page with two charts differ.
+   */
+  failed: { label: string; noneSent: string; period: string };
   /** The legend's, the folded table's and its summary's names, told apart on a page with two. */
   names?: { legend: string; summary: string; table: string };
 }) {
@@ -34,7 +37,7 @@ export function DailyMessages({
       <DailyMessagesChart days={days} label={label} legendLabel={names.legend} aligned={sent} />
       <figure className="grid min-w-0 gap-2">
         <figcaption className="text-sm font-medium">
-          Sends that failed, as a share of those sent
+          Sends that failed, as a share of those sent, {failed.period}
         </figcaption>
         {sent ? (
           <DailyFailedShareChart days={days} label={failed.label} />

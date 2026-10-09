@@ -13458,14 +13458,15 @@ others, they would lie flat on the axis, so a day when many sends failed looked 
 
 Decision:
 
-- **A chart of their own:** under each messages chart (the Usage tab's window and year, a
-  company's 30 days and year), "Sends that failed, as a share of those sent" draws each UTC day's
+- **A chart of their own:** under each messages chart (the Usage tab's window and year, a company's
+  30 days and year), "Sends that failed, as a share of those sent", its caption ending with the days
+  drawn ("30 days", "the last 12 months") so a page's two captions differ, draws each UTC day's
   failed sends divided by its sends, one line on an axis of percentages from 0% to the first
-  gridline at or above the largest share, in steps of a tenth of a percent at least. A day that
-  sent nothing has no share, so the line breaks there rather than draw 0%, and a day alone between
-  such days is drawn as a dot. Shares are written to a tenth of a percent, a share above 0 too small
-  for one as "<0.1%" and one below all as ">99.9%". When nothing was sent in the days drawn, a note
-  says so in place of the chart.
+  gridline at or above the largest share, in steps of a tenth of a percent at least. A day that sent
+  nothing has no share, so the line breaks there rather than draw 0%, and a day alone between such
+  days is drawn as a dot. Shares are written to a tenth of a percent, a share above 0 too small for
+  one as "<0.1%" and one below all as ">99.9%". When nothing was sent in the days drawn, a note says
+  so in place of the chart.
 - **The same days, a measure of its own:** both charts share the plot's edges (room for either
   chart's gridline labels on the left and end labels on the right, `sharedPlotEdges`), so each day
   sits at the same x in both and a peak lines up with the day above it, and the days are named

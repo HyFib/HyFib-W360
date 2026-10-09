@@ -742,6 +742,7 @@ export default async function PlatformTenantPage({ params }: { params: Promise<{
                     label:
                       "Share of this company's messages sent that failed each UTC day, 30 days",
                     noneSent: 'The company sent no message in these 30 days, so none failed.',
+                    period: '30 days',
                   }}
                 />
               </section>
@@ -779,6 +780,7 @@ export default async function PlatformTenantPage({ params }: { params: Promise<{
                       label:
                         "Share of this company's messages sent that failed each UTC day, the last 12 months",
                       noneSent: 'The company sent no message in the days counted, so none failed.',
+                      period: 'the last 12 months',
                     }}
                     // Unlike the 30 days' chart above: names matched in part never find both.
                     names={{

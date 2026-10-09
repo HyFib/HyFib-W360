@@ -558,23 +558,28 @@ test('staff read the platform’s messages a day on the Usage tab (ADR-333)', as
   await expect(tooltip(days.at(-1)!)).toHaveCount(0);
 
   // Under it, the share of each day's sends that failed (ADR-344): drawn when a company sent a
-  // message in the window, which earlier tests may or may not have done; its value names the day's
-  // share of those sent, or none sent.
+  // message in the window, as the table's Sent column says (earlier tests may or may not have),
+  // else a note; its value names the last day's share of those sent, or none sent.
+  const sent = (await rows.locator('td:nth-child(2)').allTextContents()).map((n) => Number(n));
   const failedChart = page.getByRole('slider', {
     name: 'Share of the messages sent that failed each UTC day, 7 days',
   });
-  await expect(
-    failedChart.or(
-      page.getByText('No company sent a message in these days, so none failed.', { exact: true }),
-    ),
-  ).toBeVisible();
-  if ((await failedChart.count()) > 0) {
+  const noneSent = page.getByText('No company sent a message in these days, so none failed.', {
+    exact: true,
+  });
+  if (sent.some((n) => n > 0)) {
+    await expect(noneSent).toHaveCount(0);
     await expect(failedChart).toHaveAttribute(
       'aria-valuetext',
-      new RegExp(
-        `^${chartDay(days.at(-1)!)}: (none sent|[<>]?[\\d.]+% of [\\d,]+ sent failed \\([\\d,]+\\))$`,
-      ),
+      sent.at(-1) === 0
+        ? `${chartDay(days.at(-1)!)}: none sent`
+        : new RegExp(
+            `^${chartDay(days.at(-1)!)}: [<>]?[\\d.]+% of [\\d,]+ sent failed \\([\\d,]+\\)$`,
+          ),
     );
+  } else {
+    await expect(noneSent).toBeVisible();
+    await expect(failedChart).toHaveCount(0);
   }
 
   // On a phone narrower than this project's, the chart and the open table stay inside the page:
