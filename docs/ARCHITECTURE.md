@@ -1752,7 +1752,11 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   `POST /contacts`). The key's row is inserted in the request's own transaction, so a concurrent
   retry waits on the unique index and then replays the stored response (`Idempotent-Replayed:
 true`); the same key with another request (method, path and body hashed) answers 422
-  `idempotency_key_reused`; a failed request stores nothing; an expired key is reused.
+  `idempotency_key_reused`; a failed request stores nothing; an expired key is reused. An answer
+  is kept up to 256 KiB as jsonb (0259, validated by 0260; 64 KiB before):
+  `storeIdempotentResponse` refuses a larger one, counted by `jsonbSize`, with 422
+  `idempotency_response_too_large`, which rolls the request back with its claim; only answers to
+  requests whose key is optional get that large (ADR-339).
 - **Monthly API requests by plan (0035, ADR-061):** `ops.plans.api_requests_monthly` is empty for no
   limit, 0 when the plan leaves the API out, or the requests a company may make per monthly usage
   period (§7). `admitApiRequest` (`api/quota.ts`) counts every request that passed authentication
@@ -2347,6 +2351,15 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   message trigger stores in the detail against the list, with the endpoint's other filters. Settings
   (checkboxes under "Message received") and the API (`messageTypes`) set it; a change that drops the
   event clears it.
+- **Word filters for received messages** (migration 0257, ADR-337): `message_words` on an endpoint
+  lists 1 to 50 words or phrases whose received messages it takes as `message.received`, null for
+  every message; a check keeps their shape (1 to 100 characters, no control character or spaces
+  around them) and the list to endpoints taking the event. `app.capture_webhook_event` (replaced
+  with the same signature) reads the message's text through `app.webhook_message_text`, which
+  derives it as the payload's `message.text` (`inboundSummary`) does, only when an active endpoint
+  names words, and matches it with `strpos` on lowered text, with the endpoint's other filters; the
+  event keeps the type only. Settings (one a line under "Message received") and the API
+  (`messageWords`) set it; a change that drops the event clears it.
 - **Run end reason filters** (migration 0138, ADR-192): `run_end_reasons` on an endpoint lists the
   reasons a run ended for that it takes as `automation.run_ended`, null for every reason; a check
   keeps it to 1 to 21 known reasons, to endpoints taking the event and to reasons of the ends they
@@ -2578,6 +2591,26 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   for an hour and counts the failures not yet told; `ops.mark_integration_alert` marks them (at most
   every 15 minutes, `ops.platform_alerts` kind `integrations`, 1,000 at a time) in the transaction
   that queues one `platform.notice` email to every platform administrator, with counts by kind only.
+- **The alerts' chat channel** (ADR-338, migration 0258, `platform/alert-channel.ts`): a platform
+  owner sets one incoming webhook address for the platform on Operations → Alerts; the web tier
+  checks it with the egress guard's rules, seals it with the keyring under the new row's id
+  (`alertChannelAad`) and stores it with its host through `ops.platform_set_alert_channel` (definer,
+  owners only, audited with the host). Each of the three alerts above, in the transaction that
+  queues its emails, also queues a post with the email's text (`alertPostBody`: the subject, lines
+  and link, Slack's three control characters escaped, at most 4,000 characters) through
+  `ops.queue_platform_alert_post`, which queues nothing without a channel, and signals the
+  `ops.alert-posts` queue in the same transaction. That job (scheduled every minute too, one queued
+  and one running) deletes posts kept 7 days, claims up to 5 posts due (`ops.claim_platform_alert_posts`:
+  leased 3 minutes, the attempt counted at the claim), reads and opens the address as the runtime
+  role and `POST`s `{"text": …}` to it one post after another through its own egress client, and
+  records each answer (`ops.finish_platform_alert_post`: a 2xx is sent, even after the channel's
+  removal failed the post on its way; a 429, a 5xx or no answer is tried again 1, 2, 4 and 8
+  minutes later; anything else, or a fifth attempt, fails). The channel
+  keeps its last post sent and failed with the status or error code; the console reads them and the
+  10 latest posts (never their text) through definer functions for platform administrators. Test
+  posts are queued by owners and signalled at once. The keyring sweep re-encrypts the address as
+  the `alert_channel` kind, through `ops.reseal_platform_alert_channel` (compare and set): the
+  runtime role has no write grant on it.
 - **Acknowledging failures** (ADR-141, migration 0107): a platform administrator acknowledges a
   failure on Current failures with a note, through `ops.platform_acknowledge_integration_failure`
   (definer, platform role only), which checks the administrator and that `ops.integration_failures`

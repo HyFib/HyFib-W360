@@ -178,6 +178,7 @@ import {
   WEBHOOK_SURVEY_CONVERSATION_TAGS_NEED_THE_EVENT,
   WEBHOOK_CONTACT_EVENT_TAGS_NEED_THE_EVENTS,
   WEBHOOK_CONTACT_EVENT_FIELD_VALUES_NEED_THE_EVENTS,
+  WEBHOOK_MESSAGE_WORDS_NEED_THE_EVENT,
   WEBHOOK_CONTACT_TAGS_NEED_THE_EVENTS,
   WEBHOOK_CONVERSATION_TAGS_NEED_THE_EVENTS,
   WEBHOOK_CAMPAIGN_STATUSES_NEED_THE_EVENT,
@@ -1504,6 +1505,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'messageSenders',
       'messageStatuses',
       'messageTypes',
+      'messageWords',
       'noteDealOwnerIds',
       'notePipelineIds',
       'noteStageIds',
@@ -4248,6 +4250,50 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       properties: Record<string, { anyOf?: { items?: { anyOf?: unknown[] } }[] }>;
     };
     expect(endpoint.properties.contactEventFieldValues?.anyOf?.[0]?.items?.anyOf).toHaveLength(3);
+  });
+
+  it('take the words of received messages only with message.received, kept once whatever their case, and a list of them alone is a change (ADR-337)', () => {
+    const url = 'https://hooks.example.com/w360';
+    expect(
+      apiCreateWebhookEndpointSchema.parse({
+        url,
+        events: ['message.received'],
+        messageWords: [' Refund ', 'refund', 'cancel order'],
+      }).messageWords,
+    ).toEqual(['Refund', 'cancel order']);
+    const refused = apiCreateWebhookEndpointSchema.safeParse({
+      url,
+      events: ['message.status'],
+      messageWords: ['refund'],
+    });
+    expect(refused.error?.issues.map((i) => [i.path.join('.'), i.message])).toEqual([
+      ['messageWords', WEBHOOK_MESSAGE_WORDS_NEED_THE_EVENT],
+    ]);
+    for (const change of [{ messageWords: null }, { messageWords: ['price'] }]) {
+      expect(apiUpdateWebhookEndpointSchema.parse(change)).toEqual(change);
+    }
+    expect(
+      apiUpdateWebhookEndpointSchema.safeParse({ messageWords: ['ok', 'two\nlines'] }).error
+        ?.issues[0]?.path,
+    ).toEqual(['messageWords', 1]);
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas;
+    const given = (schemas.CreateWebhookEndpoint as { properties: Record<string, unknown> })
+      .properties;
+    expect(JSON.stringify(given.messageWords)).toContain(
+      'contains one of them, whatever its case, and a message without text when the list is null',
+    );
+    const endpoint = schemas.WebhookEndpoint as {
+      properties: Record<string, unknown>;
+      required: string[];
+    };
+    expect(endpoint.properties.messageWords).toBeDefined();
+    expect(endpoint.required).toContain('messageWords');
+    const hooks = doc.webhooks as Record<string, { post?: { description?: string } }>;
+    expect(hooks['message.received']?.post?.description).toContain(
+      'An endpoint that names words and phrases (its `messageWords`) receives only the messages whose text, as `message.text` gives it, contains one of them, whatever its case, and no message without text.',
+    );
   });
 
   it('take campaign statuses only with campaign.status_changed, and a list of them alone is a change (ADR-146)', () => {

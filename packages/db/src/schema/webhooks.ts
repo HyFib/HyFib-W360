@@ -531,6 +531,13 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
    */
   messageTypes: text('message_types').array().$type<WebhookReceivedMessageType[]>(),
   /**
+   * The words or phrases whose received messages it takes as `message.received` (migration 0257,
+   * ADR-337): a message whose text, as the payload's `message.text` gives it, contains one of them,
+   * whatever its case; null takes every message. Set only while `message.received` is among its
+   * events.
+   */
+  messageWords: text('message_words').array(),
+  /**
    * The reasons the runs it takes as `automation.run_ended` ended for (ADR-192), applied with the
    * ends it chose; null takes every reason. Set only while `automation.run_ended` is among its events.
    */

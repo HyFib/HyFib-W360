@@ -1723,6 +1723,18 @@ Phase 5 rules (outgoing webhooks, P5-09):
   `app.capture_webhook_event` to the type the message trigger stores: it narrows what one endpoint
   receives and never adds an event or a delivery for another endpoint or company. Audited with the
   list (unit tests; integration and e2e tests, run in CI only).
+- An endpoint can take the received messages whose text contains chosen words or phrases only
+  (ADR-337), chosen the same way. A list holds 1 to 50 words of 1 to 100 characters without control
+  characters and is kept only while the endpoint takes `message.received` (a database check too,
+  which also refuses the control character it joins the words on inside a word). It is applied in
+  `app.capture_webhook_event`, which reads the message's text, as the payload derives it
+  (`app.webhook_message_text`), only when an active endpoint names words, from the message row by
+  the company and its id, as the role adding the message under the company's row-level security,
+  and compares it with `strpos` on lowered text, so no character of a word acts as a pattern. The
+  text is never stored with the event, which keeps the message's type only; the filter narrows what
+  one endpoint receives and never adds an event or a delivery for another endpoint or company.
+  Words can say what customers write about, so the list is in the company data export and the
+  audits as the tag lists are (unit tests; integration tests, run in CI only).
 - An endpoint can take the runs of an end that ended for chosen reasons only (ADR-192), chosen the
   same way. A list holds only the 21 reasons a run ends for, is kept only while the endpoint takes
   `automation.run_ended` and only with reasons of the ends it takes (a database check too, which
@@ -2285,6 +2297,19 @@ message text, contact details, payloads, email addresses, secrets or full URLs:
   (`ops.integration_alerts_due`, `ops.mark_integration_alert`), which are SECURITY DEFINER and
   executable only by the worker's role; only the definer role reads and writes
   `ops.integration_alerts`. Each failure is emailed once, at most one alert every 15 minutes.
+- The alerts' chat channel (ADR-338): only a platform owner sets, tests or removes it (the service
+  and each SECURITY DEFINER function check the role; operators read its state). Its incoming
+  webhook address holds the channel's secret: the web tier holds it to the egress guard's rules
+  (https, no credentials, port 443 or from 1024) and seals it with the keyring under the row's id;
+  only the runtime role reads the sealed column, and it may only re-encrypt it, compare and set,
+  through `ops.reseal_platform_alert_channel` (it has no write grant); the platform role has no
+  grant on the table, and the console, the audit entries (`platform.alert_channel_set`,
+  `_removed`, `_tested`) and the logs name its host only, never the address or a post's text. A
+  post carries its alert's counts-only text, as the email does, to an address HyFib's staff chose,
+  through the egress guard (public addresses only, the name resolved once and pinned, no redirects,
+  10 seconds); posts are kept 7 days, readable only by the definer, and the console lists their
+  kind, times and answers only. Posting is at least once: a post whose answer did not come is tried
+  again, so the channel may show it twice.
 - Acknowledging integration failures (ADR-141): a platform administrator notes on the console that a
   listed failure is being handled, through `ops.platform_acknowledge_integration_failure` (SECURITY
   DEFINER, executable only by the platform role), which checks the administrator, the note (10 to

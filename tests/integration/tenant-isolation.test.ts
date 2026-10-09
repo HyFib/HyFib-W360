@@ -256,6 +256,31 @@ describe('database roles', () => {
       expect(await can('w360_auth', fn), fn).toBe(false);
       expect(await can('w360_platform', fn), fn).toBe(false);
     }
+    // The alerts' chat channel (0258): setting, removing, testing and reading it for platform staff
+    // (owners only for the changes, which the functions check); queueing, claiming, finishing and
+    // purging its posts, and re-encrypting its address, for the worker.
+    for (const fn of [
+      'ops.platform_set_alert_channel(uuid,text,text,text)',
+      'ops.platform_remove_alert_channel(text)',
+      'ops.platform_test_alert_channel(text,text)',
+      'ops.platform_alert_channel_state()',
+      'ops.platform_alert_posts_recent()',
+    ]) {
+      expect(await can('w360_platform', fn), fn).toBe(true);
+      expect(await can('w360_app', fn), fn).toBe(false);
+      expect(await can('w360_auth', fn), fn).toBe(false);
+    }
+    for (const fn of [
+      'ops.queue_platform_alert_post(text,text)',
+      'ops.claim_platform_alert_posts(integer)',
+      'ops.finish_platform_alert_post(uuid,integer,uuid,integer,text,boolean)',
+      'ops.reseal_platform_alert_channel(uuid,text,text)',
+      'ops.purge_platform_alert_posts()',
+    ]) {
+      expect(await can('w360_app', fn), fn).toBe(true);
+      expect(await can('w360_auth', fn), fn).toBe(false);
+      expect(await can('w360_platform', fn), fn).toBe(false);
+    }
     for (const role of ['w360_app', 'w360_auth', 'w360_platform']) {
       expect(await can(role, 'ops.tenant_status_after_deletion(uuid,text,text)'), role).toBe(false);
     }
@@ -336,6 +361,8 @@ describe('database roles', () => {
       'app.webhook_contact_values_match(jsonb,jsonb,text[])',
       // A key's rotations, which the capture reads for the API key filters (0242).
       'app.webhook_api_key_family(uuid,uuid)',
+      // A received message's text, which the capture matches with an endpoint's words (0257).
+      'app.webhook_message_text(text,jsonb)',
     ]) {
       expect(await can('w360_app', fn), fn).toBe(true);
       expect(await can('w360_definer', fn), fn).toBe(true);

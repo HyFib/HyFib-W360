@@ -65,6 +65,7 @@ import {
   createPlatformReconciliationService,
   createBillingUsageService,
   createPlatformOpsService,
+  createAlertChannelService,
   pgBossQueueInspector,
   createRateCardsService,
   createSavedRepliesService,
@@ -121,6 +122,7 @@ import {
   type PlatformReconciliationService,
   type BillingUsageService,
   type PlatformOpsService,
+  type AlertChannelService,
   type RateCardsService,
   type SavedRepliesService,
   type ConversationTagsService,
@@ -171,6 +173,8 @@ export interface Runtime {
   platform: PlatformService;
   /** The platform operations console (/platform/ops): content-free facts and two audited repairs. */
   platformOps: PlatformOpsService;
+  /** Operations → Alerts: the chat channel the operations alerts are posted to (ADR-338). */
+  alertChannel: AlertChannelService;
   /** Companies' service credit for platform staff, and refunds of unused credit (ADR-058). */
   platformBilling: PlatformBillingService;
   /** Daily settlement reconciliation with Razorpay, for platform staff (ADR-059). */
@@ -352,6 +356,15 @@ async function init(): Promise<Runtime> {
     clock: systemClock,
     keyring,
     jobSigning: signer,
+  });
+  const alertChannel = createAlertChannelService({
+    platformDb,
+    keyring,
+    jobs,
+    signer,
+    // http:// and loopback channels only where configuration allows them (local and test).
+    egressPolicy: { allowLoopbackForTests: config.W360_EGRESS_ALLOW_LOOPBACK ?? false },
+    appBaseUrl: config.APP_BASE_URL,
   });
   const platformBilling = createPlatformBillingService({ platformDb });
   const platformReconciliation = createPlatformReconciliationService({ platformDb });
@@ -567,6 +580,7 @@ async function init(): Promise<Runtime> {
     companyExport,
     platform,
     platformOps,
+    alertChannel,
     platformBilling,
     platformReconciliation,
     billingUsage,

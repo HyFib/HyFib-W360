@@ -406,3 +406,46 @@ export async function resolveQuarantineAction(input: unknown): Promise<ActionRes
     return null;
   });
 }
+
+/** Sets the chat channel the operations alerts are posted to (platform owners, audited, ADR-338). */
+export async function setAlertChannelAction(
+  input: unknown,
+): Promise<ActionResult<{ host: string }>> {
+  return runAction(async () => {
+    const { actor, runtime } = await actorForAction();
+    const result = await runtime.alertChannel.setChannel(actor, input);
+    refresh();
+    return result;
+  });
+}
+
+/** Removes the chat channel (platform owners, audited, ADR-338). */
+export async function removeAlertChannelAction(): Promise<ActionResult<{ removed: boolean }>> {
+  return runAction(async () => {
+    const { actor, runtime } = await actorForAction();
+    const result = await runtime.alertChannel.removeChannel(actor);
+    refresh();
+    return result;
+  });
+}
+
+/**
+ * Queues a test post to the chat channel (platform owners, audited, ADR-338); whether the posting
+ * job was woken for it (else the minute run sends it, and the error is logged).
+ */
+export async function sendAlertChannelTestAction(): Promise<
+  ActionResult<{ postId: string; woken: boolean }>
+> {
+  return runAction(async () => {
+    const { actor, runtime } = await actorForAction();
+    const { postId, wakeError } = await runtime.alertChannel.sendTest(actor);
+    if (wakeError) {
+      runtime.logger.warn(
+        { err: wakeError, postId },
+        'waking the alert posting job failed; its minute run sends the test post',
+      );
+    }
+    refresh();
+    return { postId, woken: wakeError === null };
+  });
+}

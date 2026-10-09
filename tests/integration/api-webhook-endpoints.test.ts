@@ -281,6 +281,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       consentChanges: null,
       contactSources: null,
       messageTypes: null,
+      messageWords: null,
       runEndReasons: null,
       channelIds: null,
       teamIds: null,
@@ -3645,6 +3646,77 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     });
     expect(await issueOf(api().update(key.ctx, id, { messageTypes: [] }))).toMatchObject({
       path: 'messageTypes',
+    });
+  });
+
+  it('choose the words of the received messages an endpoint receives, kept once whatever their case, kept by changes that leave them out and cleared with the event (ADR-337)', async () => {
+    const c = await fx.company();
+    const key = await apiKey(c, ['webhooks.manage']);
+    const issueOf = async (promise: Promise<unknown>) => {
+      const error = await expectAppError(promise, 'validation_failed');
+      return isAppError(error) ? error.issues?.[0] : undefined;
+    };
+    // The words need message.received, at least one, and each as text of 1 to 100 characters
+    // without control characters, by place.
+    const refusals = [
+      [['message.status'], ['refund'], 'messageWords'],
+      [['message.received'], [], 'messageWords'],
+      [['message.received'], ['refund', '  '], 'messageWords.1'],
+      [['message.received'], ['x'.repeat(101)], 'messageWords.0'],
+      [['message.received'], ['a', 'b\tc'], 'messageWords.1'],
+      [['message.received'], [7], 'messageWords.0'],
+    ] as const;
+    for (const [index, [events, messageWords, path]] of refusals.entries()) {
+      expect(
+        await issueOf(
+          api().create(
+            key.ctx,
+            { url: receiverUrl(), events, messageWords },
+            idem(`message-words-bad-${index}`, JSON.stringify(messageWords)),
+          ),
+        ),
+        JSON.stringify(messageWords),
+      ).toMatchObject({ path });
+    }
+    expect((await api().list(key.ctx)).data).toEqual([]);
+
+    const created = await addThroughApi(key.ctx, 'message-words-1', {
+      url: receiverUrl(),
+      events: ['message.received', 'message.status'],
+      messageWords: [' Refund', 'cancel order', 'refund'],
+    });
+    const id = created.body.data.id;
+    expect(created.body.data.messageWords).toEqual(['Refund', 'cancel order']);
+    expect((await api().get(key.ctx, id)).messageWords).toEqual(['Refund', 'cancel order']);
+    const [audit] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND subject_id = $2 AND action = 'webhook.endpoint_created'`,
+      [c.tenant.id, id],
+    );
+    expect(audit?.metadata).toMatchObject({ messageWords: ['Refund', 'cancel order'] });
+
+    expect(await api().update(key.ctx, id, { description: 'Helpdesk' })).toMatchObject({
+      messageWords: ['Refund', 'cancel order'],
+    });
+    expect(await api().update(key.ctx, id, { messageWords: ['price'] })).toMatchObject({
+      messageWords: ['price'],
+    });
+    // Dropping the event clears the list.
+    expect(await api().update(key.ctx, id, { events: ['message.status'] })).toMatchObject({
+      events: ['message.status'],
+      messageWords: null,
+    });
+    expect(await issueOf(api().update(key.ctx, id, { messageWords: ['price'] }))).toMatchObject({
+      path: 'messageWords',
+    });
+    expect(
+      await api().update(key.ctx, id, { events: ['message.received'], messageWords: ['price'] }),
+    ).toMatchObject({ messageWords: ['price'] });
+    expect(await api().update(key.ctx, id, { messageWords: null })).toMatchObject({
+      messageWords: null,
+    });
+    expect(await issueOf(api().update(key.ctx, id, { messageWords: [] }))).toMatchObject({
+      path: 'messageWords',
     });
   });
 

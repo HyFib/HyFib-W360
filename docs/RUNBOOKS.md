@@ -2904,6 +2904,17 @@ not recorded at all, so there is nothing to replay. A tap on reply buttons or a 
 under "Message received" on the endpoint's page, or `PATCH /webhook-endpoints/{id}` with
 `messageTypes` (null for every type). Removing Message received clears the list.
 
+**A receiver misses received messages it named words for (ADR-337).** An endpoint can take only the
+received messages whose text contains one of its words or phrases. The endpoints list shows them
+("Received messages sent, containing: …"), and the API answers `messageWords` (null takes every
+message). A message goes by its text as `message.text` gives it (the text, a caption, the title of
+a tapped reply, a reaction, or a location's name, else its address), whatever its case; a word is
+found as written, spaces and punctuation included, so "cancel order" does not find "cancel my
+order", and "refund" finds "refunded" too. A message without text (a photo without a caption, a
+sticker, a contact card) passes no list. A message no endpoint takes is not recorded, so there is
+nothing to replay. To take more, add words on the endpoint's page, or `PATCH /webhook-endpoints/{id}`
+with `messageWords` (null for every message). Removing Message received clears the list.
+
 **A receiver misses added contacts (ADR-190).** An endpoint can take the `contact.created` of the
 contacts from chosen sources only. The endpoints list shows them ("New contacts sent: …"), and the
 API answers `contactSources` (null takes every contact). An added contact goes by its source
@@ -3758,6 +3769,30 @@ many companies points to HyFib or the provider: the worker's logs, the provider'
 for HyFib-side kinds (accounts not checked for 26 hours, webhooks not subscribed: section 6). Most
 failures are the company's to fix, and the company is told of them; HyFib staff contact it when it
 does not act.
+
+**The alerts' chat channel (ADR-338).** The three alerts above are emailed to every platform
+administrator; a platform owner can also have them posted to a chat channel. Create an incoming webhook for the
+channel (in Slack: an app with Incoming Webhooks turned on, added to the channel, which gives an
+address `https://hooks.slack.com/services/…`; any service that takes a JSON `POST` with a `text`
+member works the same way), then on Operations → Alerts paste the address and press "Set the
+channel", and "Send a test post": it reaches the channel within seconds, and Latest posts shows it
+Sent with the channel's answer. The address is a secret: the console never shows it again and names
+its host only; whoever has it can post to the channel, so after it leaks, remove the webhook in the
+chat service, create another and "Replace the channel" with it (the old one is deleted). Each alert
+is posted with its email's text (counts only), at most every 15 minutes each. A post that gets a
+429, a 5xx or no answer is tried again 1, 2, 4 and 8 minutes later, so a post whose answer was lost
+can appear twice; any other answer, or a fifth failure, fails it for good. "The last post failed"
+names the answer: HTTP 404 or 410 usually mean the webhook was removed or its channel archived
+(create a new one and replace the address), HTTP 403 a restriction of the chat workspace, "The
+address is private or reserved" a host name that resolves inside the network (refused by the egress
+guard), and "The address does not open with the configured keys" a keyring configuration without
+the key that sealed it (the worker logs `the chat channel’s address does not open with the
+configured keys`; check `W360_ENCRYPTION_KEYS` against the key rotation steps of section 13, then
+send a test post). The worker logs `alert posts` with counts and `an alert post to the chat channel failed for
+good` with the post's id and answer, never the address or the text. "Remove the channel" stops the
+posts; those waiting fail as "No chat channel was set". Posts are kept 7 days after they are sent or
+fail. A post waiting for more than a few minutes without an attempt means the posting job does not
+run: look for failures of `ops.alert-posts` in the worker's logs.
 
 **Acknowledging failures (ADR-141).** On Current failures, the administrator who takes a failure
 opens Acknowledge on its row and writes a note of 10 to 500 characters: what was done or found

@@ -960,13 +960,21 @@ verification, app review, Embedded Signup configuration).
   (ADR-329, migrations 0251 and 0252: `GET /contact-changes` names for each contact the parts that
   changed since the reader's pass through the feed began, whatever the compaction deleted, `added`
   or `erased` alone, and null while a change recorded before the parts lies after that beginning).
+  **[Answers kept with an Idempotency-Key up to 256 KiB built; its database test runs only in
+  CI]** (ADR-339, migrations 0259 and 0260: answers that give more than their request carried,
+  such as a webhook endpoint's whole configuration, an order with its items or a template with its
+  history, are kept past the 64 KiB that failed them with an internal error; a larger answer is
+  refused with 422 `idempotency_response_too_large` and the request rolled back).
   Remaining: call-to-action messages through the API, taking
   reactions back,
   changing a field's type,
   resuming what members or HyFib paused, campaign
   recipients through webhooks, limits per endpoint, availability per single endpoint (plans choose
-  per scope since ADR-092). The one-argument key lookup kept for rolling deploys (0051) is dropped
-  (0074). Replaying many deliveries in one call is built with P5-09 (ADR-095).
+  per scope since ADR-092), a bound on a pipeline's archived stages (kept without one and each in
+  the pipeline's answer: past about 1,000 with long names in a script of three-byte letters, a
+  `PATCH /pipelines/{id}` with a key is refused, ADR-339). The one-argument key lookup kept for
+  rolling deploys (0051) is dropped (0074). Replaying many deliveries in one call is built with
+  P5-09 (ADR-095).
 - **P5-09 Outgoing webhooks** **[built, locally verified; delivered to local test receivers only]**
   (ADR-053): up to 10 endpoints per company (`developer.manage`) for `message.received`,
   `message.status`, `consent.changed` and `template.status_changed`, captured by database triggers
@@ -1254,16 +1262,22 @@ verification, app review, Embedded Signup configuration).
   **[Words and ranges in field value filters built; their database tests run only in CI]**
   (ADR-335, migration 0256: a condition can be a word a text field's value contains or a range of a
   number or date field's values, either end or both).
+  **[Words in received messages built; their database tests run only in CI]** (ADR-337, migration
+  0257: an endpoint takes `message.received` only for the messages whose text, as `message.text`
+  gives it, contains one of 1 to 50 chosen words or phrases, whatever their case).
   **[Audit entries of endpoints with long lists fixed; their database tests run only in CI]**
   (ADR-336, no migration: an added or changed endpoint's entry whose lists together would pass
   7,000 bytes as jsonb names the largest by count and digest, so no change is refused for its audit
   entry).
-  Remaining: filters for other event types and on a message's values, field value comparisons beyond
+  **[Answers kept with an Idempotency-Key up to 256 KiB built; their database test runs only in
+  CI]** (ADR-339, migrations 0259 and 0260: an endpoint's whole configuration, about 103 KB at
+  most, is kept with the key of `POST /webhook-endpoints` and its secret rotation, which failed past
+  64 KiB).
+  Remaining: filters for other event types and on a message's values other than its type and words,
+  field value comparisons beyond
   values, words and ranges, other authentication (headers computed per delivery, other OAuth
   grants), mutual TLS, fixed egress addresses, events for store orders, a sequence number across
-  events, load tests, a bound on an endpoint's whole configuration (an API answer kept with its
-  `Idempotency-Key` holds 64 KiB, which every list at its limit at once could pass; estimated in
-  ADR-336's review, not reproduced).
+  events, load tests.
 - **P5-10 Platform ops screens** **[built, locally verified with test data only]** (ADR-054):
   `/platform/ops` with Overview, Onboarding (failed and abandoned signups, failed or stuck number
   setups, new companies without a number), Integrations (current failures with host-only labels,
@@ -1344,8 +1358,15 @@ verification, app review, Embedded Signup configuration).
   **[A company's messages a day built; its database and browser tests run only in CI]** (ADR-334,
   migration 0255: a company's platform page draws its days of the last 30 in the health card, read
   with its 30 days' counts).
+  **[The alerts' chat channel built; its database and browser tests run only in CI]** (ADR-338,
+  migration 0258: a platform owner sets one incoming webhook address on Operations → Alerts, sealed
+  and named by its host only, and the failure, late-queue and integration alerts are also posted
+  to it as JSON text with their emails' counts, tried up to 5 times; owners send a test post and
+  remove it, and administrators see the last answers and the latest posts).
   Remaining:
-  other alert channels, trends further back than 93 days and other charts, Meta's quality webhook
+  other alert channels (several channels, a channel per alert, formats other than a JSON `text`
+  member, such as Microsoft Teams' or PagerDuty's, and the owners' financial alerts and personal
+  notices in a channel), trends further back than 93 days and other charts, Meta's quality webhook
   (unconfirmed), rollups for many companies and pages read from the database.
 - **P5-11 Account export/deletion workflow** **[built, locally verified with test data only]**
   (ADR-055): Settings → Company data for owners. A streamed, gzip-compressed JSON Lines export of

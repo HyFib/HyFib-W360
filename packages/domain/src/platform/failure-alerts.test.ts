@@ -22,7 +22,7 @@ describe('the alert about work that failed for good (ADR-091)', () => {
       '4 jobs used all their retries and went to the dead-letter queue: whatsapp.send 3, commerce.store 1. The minute sweeps signal most work again, so look for the cause in the worker’s logs. Operations → Queues lists them.',
       '1 provider webhook receipt used all 12 processing attempts: Razorpay 1. Once the cause is fixed, retry it on Operations → Integrations within 7 days of receipt, while its body is kept.',
       '2 provider events could not be matched to a company: Meta (WhatsApp), unknown account or number 2. Review them on Operations → Integrations.',
-      'This email gives counts only: the companies, receipts and errors are on the operations console. Further alerts come at most every 15 minutes.',
+      'This alert gives counts only: the companies, receipts and errors are on the operations console. Further alerts come at most every 15 minutes.',
     ]);
     expect(() => emailPayloadSchema.parse({ kind: 'platform.notice', ...alert })).not.toThrow();
   });
@@ -104,7 +104,7 @@ describe('the alert about work that failed for good (ADR-091)', () => {
       outbox: {} as never,
       appBaseUrl: BASE,
     });
-    expect(result).toEqual({ alerted: 0, unsent: 3, recipients: 0 });
+    expect(result).toEqual({ alerted: 0, unsent: 3, recipients: 0, posted: false });
     expect(calls).toHaveLength(2);
   });
 });

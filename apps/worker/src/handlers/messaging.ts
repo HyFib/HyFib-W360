@@ -390,7 +390,7 @@ export function messagingSweepHandler(rt: WorkerRuntime) {
     });
     if (failures.alerted > 0) {
       rt.logger.info(
-        { items: failures.alerted, recipients: failures.recipients },
+        { items: failures.alerted, recipients: failures.recipients, posted: failures.posted },
         'failure alert emailed to platform staff',
       );
     }
@@ -411,7 +411,11 @@ export function messagingSweepHandler(rt: WorkerRuntime) {
     });
     if (lateQueues.alerted > 0) {
       rt.logger.info(
-        { queues: lateQueues.alerted, recipients: lateQueues.recipients },
+        {
+          queues: lateQueues.alerted,
+          recipients: lateQueues.recipients,
+          posted: lateQueues.posted,
+        },
         'late queue alert emailed to platform staff',
       );
     }
@@ -430,7 +434,11 @@ export function messagingSweepHandler(rt: WorkerRuntime) {
     });
     if (integrations.alerted > 0) {
       rt.logger.info(
-        { failures: integrations.alerted, recipients: integrations.recipients },
+        {
+          failures: integrations.alerted,
+          recipients: integrations.recipients,
+          posted: integrations.posted,
+        },
         'integration failure alert emailed to platform staff',
       );
     }

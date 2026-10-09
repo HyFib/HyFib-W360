@@ -81,6 +81,7 @@ import {
   WEBHOOK_TEMPLATE_STATUSES,
   WEBHOOK_UNATTEMPTED_ERRORS,
   webhookContactFieldValueId,
+  webhookMessageWord,
   webhookHost,
   webhookTakesAutomationRuns,
   webhookTakesCampaignEvents,
@@ -1044,6 +1045,52 @@ export function webhookMessageTypesFor(
   given: readonly WebhookReceivedMessageType[] | null | undefined,
   current: readonly WebhookReceivedMessageType[] | null,
 ): WebhookReceivedMessageType[] | null {
+  if (!eventTypes.includes('message.received')) return null;
+  const kept = given === undefined ? current : given;
+  return kept ? [...kept] : null;
+}
+
+/**
+ * The words and phrases whose received messages an endpoint takes as `message.received` (ADR-337):
+ * 1 to 50, each read by `webhookMessageWord` and kept once whatever its case, in the order given. A
+ * message is taken when its text, as the payload's `message.text` gives it, contains one of them,
+ * whatever its case; null takes every message.
+ */
+export const webhookMessageWordsSchema = z
+  .array(z.string({ error: 'Give the words and phrases as text.' }))
+  .min(1, 'Give at least one word or phrase, or take every message.')
+  .max(
+    WEBHOOK_LIMITS.messageWords,
+    `Give at most ${WEBHOOK_LIMITS.messageWords} words and phrases.`,
+  )
+  .transform((given, ctx) => {
+    const words: string[] = [];
+    for (const [index, raw] of given.entries()) {
+      const read = webhookMessageWord(raw);
+      if (!read.ok) {
+        ctx.addIssue({ code: 'custom', message: read.message, path: [index] });
+        return z.NEVER;
+      }
+      if (!words.some((word) => word.toLowerCase() === read.word.toLowerCase())) {
+        words.push(read.word);
+      }
+    }
+    return words;
+  })
+  .nullable();
+
+export const WEBHOOK_MESSAGE_WORDS_NEED_THE_EVENT =
+  'Choose words in received messages only for an endpoint that receives Message received.';
+
+/**
+ * The words in received messages an endpoint keeps after it is added or changed: every message
+ * (null) unless it takes `message.received`; then those given, or else the ones it had.
+ */
+export function webhookMessageWordsFor(
+  eventTypes: readonly WebhookEventType[],
+  given: readonly string[] | null | undefined,
+  current: readonly string[] | null,
+): string[] | null {
   if (!eventTypes.includes('message.received')) return null;
   const kept = given === undefined ? current : given;
   return kept ? [...kept] : null;
@@ -2685,16 +2732,6 @@ export async function webhookContactEventFieldValuesChecked(
 }
 
 /**
- * An endpoint's audit entry within the 8 KiB of metadata an audit entry holds (ADR-336): as given
- * while `jsonbSize` counts at most `WEBHOOK_LIMITS.auditMetadataBytes` for it; otherwise its largest
- * lists, one after another (by name when two are as large), are named by their lengths under
- * `listCounts` and by the first 16 hex digits of the SHA-256 of their JSON, each object's keys in
- * order (`canonicalJson`), under `listDigests`, so that two entries still show whether a list named
- * by count in both changed, until it fits. Its
- * events (`eventTypes`, or a replay's `events`) are always named, and the endpoint keeps every list
- * whole. With every list named by count an entry takes under 6,000 bytes, so it then fits.
- */
-/**
  * A value's JSON with each object's keys in order, so that a list read back from jsonb (which keeps
  * an object's keys by length) is written as the services built it, and hashes the same.
  */
@@ -2706,6 +2743,16 @@ function canonicalJson(value: unknown): string {
   );
 }
 
+/**
+ * An endpoint's audit entry within the 8 KiB of metadata an audit entry holds (ADR-336): as given
+ * while `jsonbSize` counts at most `WEBHOOK_LIMITS.auditMetadataBytes` for it; otherwise its largest
+ * lists, one after another (by name when two are as large), are named by their lengths under
+ * `listCounts` and by the first 16 hex digits of the SHA-256 of their JSON, each object's keys in
+ * order (`canonicalJson`), under `listDigests`, so that two entries still show whether a list named
+ * by count in both changed, until it fits. Its events (`eventTypes`, or a replay's `events`) are
+ * always named, and the endpoint keeps every list whole. With every list named by count an entry
+ * takes under 6,000 bytes, so it then fits.
+ */
 export function webhookEndpointAuditMetadata(
   metadata: Record<string, unknown>,
 ): Record<string, unknown> {
@@ -2909,6 +2956,11 @@ const endpointFields = z.object({
   contactSources: webhookContactSourcesSchema.optional(),
   /** Given, the types of the received messages it takes (null: every type, ADR-191); left out, they stay. */
   messageTypes: webhookMessageTypesSchema.optional(),
+  /**
+   * Given, the words of the received messages it takes (null: every message, ADR-337); left out,
+   * they stay.
+   */
+  messageWords: webhookMessageWordsSchema.optional(),
   /** Given, why the runs it takes ended (null: every reason, ADR-192); left out, they stay. */
   runEndReasons: webhookRunEndReasonsSchema.optional(),
   /**
@@ -3205,6 +3257,12 @@ const messageTypesNeedTheEvent = {
     !data.messageTypes || data.eventTypes.includes('message.received'),
   options: { path: ['messageTypes'], message: WEBHOOK_MESSAGE_TYPES_NEED_THE_EVENT },
 };
+/** Words are chosen only for an endpoint that takes `message.received` (ADR-337). */
+const messageWordsNeedTheEvent = {
+  check: (data: { eventTypes: WebhookEventType[]; messageWords?: unknown }) =>
+    !data.messageWords || data.eventTypes.includes('message.received'),
+  options: { path: ['messageWords'], message: WEBHOOK_MESSAGE_WORDS_NEED_THE_EVENT },
+};
 /** End reasons are chosen only for an endpoint that takes `automation.run_ended` (ADR-192). */
 const runEndReasonsNeedTheEvent = {
   check: (data: { eventTypes: WebhookEventType[]; runEndReasons?: unknown }) =>
@@ -3406,6 +3464,7 @@ const endpointSchema = endpointFields
   .refine(consentChangesNeedTheEvent.check, consentChangesNeedTheEvent.options)
   .refine(contactSourcesNeedTheEvent.check, contactSourcesNeedTheEvent.options)
   .refine(messageTypesNeedTheEvent.check, messageTypesNeedTheEvent.options)
+  .refine(messageWordsNeedTheEvent.check, messageWordsNeedTheEvent.options)
   .refine(runEndReasonsNeedTheEvent.check, runEndReasonsNeedTheEvent.options)
   .refine(channelsNeedTheEvents.check, channelsNeedTheEvents.options)
   .refine(teamsNeedTheEvents.check, teamsNeedTheEvents.options)
@@ -3461,6 +3520,7 @@ const updateSchema = endpointFields
   .refine(consentChangesNeedTheEvent.check, consentChangesNeedTheEvent.options)
   .refine(contactSourcesNeedTheEvent.check, contactSourcesNeedTheEvent.options)
   .refine(messageTypesNeedTheEvent.check, messageTypesNeedTheEvent.options)
+  .refine(messageWordsNeedTheEvent.check, messageWordsNeedTheEvent.options)
   .refine(runEndReasonsNeedTheEvent.check, runEndReasonsNeedTheEvent.options)
   .refine(channelsNeedTheEvents.check, channelsNeedTheEvents.options)
   .refine(teamsNeedTheEvents.check, teamsNeedTheEvents.options)
@@ -3586,6 +3646,11 @@ export interface WebhookEndpointView {
   contactSources: ContactSource[] | null;
   /** The types of the received messages it takes as `message.received` (ADR-191); null: every type. */
   messageTypes: WebhookReceivedMessageType[] | null;
+  /**
+   * The words and phrases whose received messages it takes as `message.received` (ADR-337), as
+   * stored; null takes every message.
+   */
+  messageWords: string[] | null;
   /** Why the runs it takes as `automation.run_ended` ended (ADR-192); null takes every reason. */
   runEndReasons: AutomationEndReason[] | null;
   /** The numbers whose events it takes (ADR-170), as stored, named; null takes every number. */
@@ -3957,6 +4022,7 @@ export async function lockWebhookEndpoint(
       consentChanges: webhookEndpoints.consentChanges,
       contactSources: webhookEndpoints.contactSources,
       messageTypes: webhookEndpoints.messageTypes,
+      messageWords: webhookEndpoints.messageWords,
       runEndReasons: webhookEndpoints.runEndReasons,
       channelAccountIds: webhookEndpoints.channelAccountIds,
       teamIds: webhookEndpoints.teamIds,
@@ -4047,6 +4113,7 @@ export async function insertWebhookEndpoint(
     consentChanges: WebhookConsentChange[] | null;
     contactSources: ContactSource[] | null;
     messageTypes: WebhookReceivedMessageType[] | null;
+    messageWords: string[] | null;
     runEndReasons: AutomationEndReason[] | null;
     channelAccountIds: string[] | null;
     teamIds: string[] | null;
@@ -4126,6 +4193,7 @@ export async function insertWebhookEndpoint(
     consentChanges: input.consentChanges,
     contactSources: input.contactSources,
     messageTypes: input.messageTypes,
+    messageWords: input.messageWords,
     runEndReasons: input.runEndReasons,
     channelAccountIds: input.channelAccountIds,
     teamIds: input.teamIds,
@@ -4554,6 +4622,7 @@ export function createWebhooksService(deps: {
               consentChanges: webhookEndpoints.consentChanges,
               contactSources: webhookEndpoints.contactSources,
               messageTypes: webhookEndpoints.messageTypes,
+              messageWords: webhookEndpoints.messageWords,
               runEndReasons: webhookEndpoints.runEndReasons,
               channelAccountIds: webhookEndpoints.channelAccountIds,
               teamIds: webhookEndpoints.teamIds,
@@ -5412,6 +5481,7 @@ export function createWebhooksService(deps: {
         const consentChanges = webhookConsentChangesFor(data.eventTypes, data.consentChanges, null);
         const contactSources = webhookContactSourcesFor(data.eventTypes, data.contactSources, null);
         const messageTypes = webhookMessageTypesFor(data.eventTypes, data.messageTypes, null);
+        const messageWords = webhookMessageWordsFor(data.eventTypes, data.messageWords, null);
         // Reasons narrow the ends taken: refused for an end it does not take (ADR-192).
         if (
           data.runEndReasons?.some((reason) => !webhookRunEndTakesReason(runEndStatuses, reason))
@@ -5561,6 +5631,7 @@ export function createWebhooksService(deps: {
           consentChanges,
           contactSources,
           messageTypes,
+          messageWords,
           runEndReasons,
           channelAccountIds: channelIds,
           teamIds,
@@ -5629,6 +5700,7 @@ export function createWebhooksService(deps: {
               ...(consentChanges ? { consentChanges } : {}),
               ...(contactSources ? { contactSources } : {}),
               ...(messageTypes ? { messageTypes } : {}),
+              ...(messageWords ? { messageWords } : {}),
               ...(runEndReasons ? { runEndReasons } : {}),
               ...(channelIds ? { channelIds } : {}),
               ...(teamIds ? { teamIds } : {}),
@@ -5835,6 +5907,11 @@ export function createWebhooksService(deps: {
           data.eventTypes,
           data.messageTypes,
           endpoint.messageTypes,
+        );
+        const messageWords = webhookMessageWordsFor(
+          data.eventTypes,
+          data.messageWords,
+          endpoint.messageWords,
         );
         // Reasons narrow the ends it keeps: refused for an end it does not take (ADR-192).
         if (
@@ -6105,6 +6182,7 @@ export function createWebhooksService(deps: {
             consentChanges,
             contactSources,
             messageTypes,
+            messageWords,
             runEndReasons,
             channelAccountIds: channelIds,
             teamIds,
@@ -6184,6 +6262,7 @@ export function createWebhooksService(deps: {
               ...(consentChanges ? { consentChanges } : {}),
               ...(contactSources ? { contactSources } : {}),
               ...(messageTypes ? { messageTypes } : {}),
+              ...(messageWords ? { messageWords } : {}),
               ...(runEndReasons ? { runEndReasons } : {}),
               ...(channelIds ? { channelIds } : {}),
               ...(teamIds ? { teamIds } : {}),

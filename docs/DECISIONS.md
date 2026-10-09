@@ -13121,3 +13121,155 @@ Not built: naming a long list's items over several entries, a bound on the entri
 actions, and a bound on an endpoint's whole configuration for the API's answers (an endpoint's
 answer to a `POST`, kept with its `Idempotency-Key`, holds 64 KiB, which every list at its limit at
 once could pass; estimated, not reproduced).
+
+## ADR-337 Words in the received messages a webhook endpoint takes (P5-09) (2026-10-09)
+
+Context: an endpoint that takes `message.received` receives every message customers send, or those
+of the numbers, teams, members, tags and types it chose (ADR-170 to ADR-191, ADR-267, ADR-273). A
+receiver that acts on some messages only (a helpdesk taking the messages that ask for a refund, a
+bot that answers "price") was sent every other one and had to read `message.text` and drop the
+rest. ADR-191 left filters on a received message's words unbuilt.
+
+Decision:
+
+- **A list of words or phrases per endpoint,** for `message.received` only: 1 to 50 given (counted
+  before a word given twice is dropped, in Settings as through the API), each 1 to 100 characters,
+  trimmed, without control characters (a line break among them) or the line and paragraph
+  separators, kept once whatever their case and in the order given. Null receives every message, as before. A message is sent when its text, as the payload's
+  `message.text` gives it (the text, a caption, the title of a tapped reply, a reaction, or a
+  location's name, else its address), contains one of them, whatever its case; a message without
+  text passes no list. With the endpoint's types, numbers, teams, members and tags chosen too, a
+  message must pass them all. It is set in Settings → Webhooks under "Message received" ("Received
+  messages sent, by words": every message, or only those containing any of the words typed one a
+  line), shown on the endpoint as `Received messages sent, containing: "refund", "cancel order"`,
+  and through the API as `messageWords` on `POST /webhook-endpoints` and
+  `PATCH /webhook-endpoints/{id}` and in every endpoint the API answers.
+- **Only with the event:** a list given for an endpoint that does not take `message.received` is
+  refused (`messageWords`; 422 through the API); a change that removes the event clears it, and a
+  `PATCH` that leaves it out keeps it.
+- **Matched as captured:** `app.capture_webhook_event` reads the message's text only when an active
+  endpoint of the company that takes the event names words, through `app.webhook_message_text`,
+  which derives it as the payload does (`inboundSummary`; an integration test holds the two to the
+  same text over samples of every message type), lowers it once, and creates a delivery only for the
+  endpoints whose list is null or names a word the text contains, with `strpos` on lowered text, so
+  no character of a word (such as `%` or `_`) acts as a pattern. The text is never stored with the event: the event keeps
+  only the message's type, as before, and the payload is built when delivered. Replays and test
+  events are unchanged.
+- **Migration 0257:** `message_words text[]` on `app.webhook_endpoints` with a check validated at
+  once (1 to 50 words, one dimension, no null, each 1 to 100 characters without spaces around it or
+  control characters, only while `message.received` is among the events; the words are joined on a
+  control character for the pattern, and no word may hold it, so one word cannot pass for two). It
+  is a backstop looser than the services: PostgreSQL's patterns read only the C0 and C1 controls as
+  control characters, so it lets the line and paragraph separators through, and of the spaces at a
+  word's ends it refuses only the ASCII one. Also: an update grant on the column for the runtime
+  role, `app.webhook_message_text(text, jsonb)` for the runtime and definer roles (nobody else), and
+  the capture replaced with the same signature.
+- **Audited and exported** as the other lists: the endpoint's audit entries name the words (by count
+  and digest once the entry would not fit, ADR-336), and the company data export carries the
+  column. Words can say what customers write about, so they are treated as the tag lists are.
+- **Permissions unchanged:** members with `developer.manage` in Settings, keys with
+  `webhooks.manage` through the API.
+
+Not built: words that leave messages out, whole-word or pattern matches, words in the messages
+HyFib sends (`message.status`), words in a contact card's or an order's content (they have no
+`message.text`), and the case folding of a language whose lower case PostgreSQL's locale does not
+know.
+
+## ADR-338 A chat channel for the operations alerts (P5-10) (2026-10-09)
+
+Context: the operations alerts (failures, ADR-091; late queues, ADR-096; failing integrations,
+ADR-139) are emailed to every platform administrator. Staff on call often watch a chat room rather
+than a mailbox, and P5-10 left other alert channels unbuilt.
+
+Decision:
+
+- **One chat channel for the platform:** an incoming webhook address that takes a JSON `POST` with
+  a `text` member, as Slack's incoming webhooks do (`Content-Type: application/json`, body
+  `{"text": "…"}`). Platform owners set, replace and remove it on a new Operations → Alerts tab;
+  platform operators see its state. Any service that takes that body works; HyFib names no service.
+- **The address is a secret:** it is held to the egress guard's rules (https, no credentials, port
+  443 or from 1024, at most 2,048 characters, its fragment dropped), sealed with the keyring under
+  a new row's id, and readable only by the runtime role, which sends the posts and may only
+  re-encrypt it, compare and set through `ops.reseal_platform_alert_channel` (the keyring sweep's
+  `alert_channel` kind). The console, the platform audit entries
+  (`platform.alert_channel_set` with the host and the host it replaced, `platform.alert_channel_removed`,
+  `platform.alert_channel_tested`) and the logs name its host only.
+- **The alerts' own text:** each of the three alerts queues one post, in the transaction that queues
+  its emails, with the email's subject, lines and link one a line, `&`, `<` and `>` written as
+  Slack's formatting requires, at most 4,000 characters; without a channel nothing is queued. The
+  alerts' notes now say "This alert gives counts only" (and the integration alert "not alerted
+  about yet" and "told once"), so the same text reads right in an email and in a chat.
+- **Posting (queue `ops.alert-posts`):** a job scheduled every minute and signalled when a post is
+  queued (one queued and one running at a time) claims up to 5 posts due, oldest first, each leased
+  3 minutes with its attempt counted at the claim, and posts them one after another through its own
+  egress client (public addresses only, the name resolved once and pinned, no redirects, 10
+  seconds). A 2xx is sent. A 429, a 5xx or no answer (the name, the connection, the time limit, the
+  network) is tried again 1, 2, 4 and 8 minutes later; any other answer, an address the guard
+  refuses, or a fifth failure fails the post. An outcome is recorded only for the post's latest
+  claim, and a 2xx answer makes the post sent even when the channel's removal failed it while it
+  was on its way. A post whose answer was lost is tried again: posting is at least once, so the
+  channel may show a post twice. A post whose last attempt's worker was lost fails as
+  `interrupted`, removing the channel fails the posts waiting as `no_channel`, and an address that
+  does not open with the configured keys is recorded as `unopenable` and tried again.
+- **On the console:** the channel's host, who set it and when, its last post sent and failed with
+  the answer (labelled as webhook deliveries label theirs), the posts waiting and failed, and the
+  10 latest posts with their kind, times, attempts and last answer, never their text. Owners send a
+  test post, which the worker sends within seconds (within a minute should waking the job fail,
+  which is logged and said).
+- **Migration 0258:** the channel (one row, by a unique index on a constant) and the posts, their
+  grants, ten definer functions (five for platform staff, the three changes for owners only; five
+  for the worker: queue, claim, finish, purge and re-encrypt the address), and
+  `ops.sealed_value_keys` replaced with the channel's address. Posts are deleted 7 days after they are sent or fail.
+
+Sources: Slack's incoming webhooks
+(https://docs.slack.dev/messaging/sending-messages-using-incoming-webhooks/,
+https://api.slack.com/incoming-webhooks), message formatting
+(https://docs.slack.dev/messaging/formatting-message-text), rate limits
+(https://docs.slack.dev/apis/web-api/rate-limits) and webhook errors
+(https://docs.slack.dev/changelog/2016-05-17-changes-to-errors-for-incoming-webhooks). These pages
+could not be opened from the build environment: the body, the three escaped characters, the limit of
+about one post a second answered with 429, and the error statuses were taken from search excerpts
+of them, so they are unverified against the pages themselves, and no post was made to Slack.
+
+Not built: several channels or one per alert, formats other than a JSON `text` member (such as
+Microsoft Teams' or PagerDuty's), the owners' financial alerts (ADR-066, ADR-071) and personal
+notices (ADR-314) in the channel, mentions and formatting beyond plain text, and a `Retry-After`
+answer's wait (a 429 waits as a 5xx does).
+
+## ADR-339 Answers kept with an Idempotency-Key up to 256 KiB (P5-08, P5-09) (2026-10-09)
+
+Context: a successful answer to a request sent with an `Idempotency-Key` is kept for 24 hours so a
+retry gets it again (ADR-052), and the column's check held it to 64 KiB as jsonb (0024), the size
+of a request body. ADR-336's review estimated that an answer giving more than its request carried
+could pass it. A survey of the 29 places that keep an answer found five that can, within their
+limits: a webhook endpoint's whole configuration, filled by separate changes and answered by
+`POST /webhook-endpoints/{id}/rotate-secret` (its key required) and by `POST /webhook-endpoints`
+(about 103 KB as jsonb at most, every list full of text of three-byte letters, measured by
+`jsonbSize` in a unit test); `POST /orders/{id}/request-payment` with 100 items (about 105 KB);
+`POST /message-templates/{id}/submit` with 50 history entries and 100 numbers (about 68 KB, 113 KB
+if Meta's reasons were in such letters); and `PATCH /pipelines/{id}`, whose answer gives every
+archived stage, which are kept without bound. The survey's figures for the last four came from a
+script reproducing jsonb's layout, not from PostgreSQL. Each such request failed with an internal
+error, every time it was retried, and its work was rolled back.
+
+Decision:
+
+- **256 KiB:** migration 0259 replaces the check with one of 262,144 bytes, more than twice the
+  largest bounded answer, so every answer the routes can give within their limits is kept. It is
+  added `NOT VALID`, so new rows are checked at once without reading the table under the lock the
+  change takes (every request sent with a key writes to it), and 0260 validates it for the rows
+  already there, which met the stricter check, without blocking the table's writes.
+- **A larger answer is refused with its reason:** `storeIdempotentResponse` counts the answer with
+  `jsonbSize` (an upper bound of what the check counts) and, past 256 KiB, refuses it with 422 and
+  reason `idempotency_response_too_large` before writing it; the request's transaction rolls back
+  with its claim, so nothing is done and the key stays free. Only a pipeline with more than about
+  1,000 archived stages of long names reaches it; such a `PATCH` goes through without a key. Every
+  route whose key is required answers well within the limit, so the refusal says to send the
+  request again without a key only where the key is optional, and the OpenAPI document gives the
+  limit in a sentence on keys of its own, not in the one on `POST /messages`, whose key is
+  required. Its reasons name it too.
+- **Kept as before:** keys, their 24 hours, the replay and the refusal of a reused key.
+
+Not built: a bound on a pipeline's archived stages (kept since ADR-240 so closed deals keep their
+stage; the answer gives each), and a bound on answers that are not kept (they are not limited by
+this check).

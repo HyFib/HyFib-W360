@@ -25,8 +25,8 @@ describe('the alert about companies’ failing integrations (ADR-139)', () => {
     expect(alert.url).toBe(`${BASE}/platform/ops/integrations`);
     expect(alert.actionLabel).toBe('Open integrations');
     expect(alert.lines).toEqual([
-      'Operations → Integrations lists 5 failing integrations of companies that platform staff were not emailed about yet: Webhook endpoint, failing 3; WhatsApp number, needs reconnecting 1; WhatsApp webhooks, not subscribed 1.',
-      'This email gives counts only: the companies and errors are on the operations console. Each failure is emailed once while it lasts, and further alerts come at most every 15 minutes.',
+      'Operations → Integrations lists 5 failing integrations of companies that platform staff were not alerted about yet: Webhook endpoint, failing 3; WhatsApp number, needs reconnecting 1; WhatsApp webhooks, not subscribed 1.',
+      'This alert gives counts only: the companies and errors are on the operations console. Each failure is told once while it lasts, and further alerts come at most every 15 minutes.',
     ]);
     expect(() => emailPayloadSchema.parse({ kind: 'platform.notice', ...alert })).not.toThrow();
   });
@@ -35,7 +35,7 @@ describe('the alert about companies’ failing integrations (ADR-139)', () => {
     const alert = integrationAlert([{ source: 'store', state: 'failed', items: 1 }], BASE);
     expect(alert.subject).toBe('1 company integration is failing');
     expect(alert.lines[0]).toBe(
-      'Operations → Integrations lists 1 failing integration of companies that platform staff were not emailed about yet: Store, failed 1.',
+      'Operations → Integrations lists 1 failing integration of companies that platform staff were not alerted about yet: Store, failed 1.',
     );
   });
 
@@ -91,7 +91,7 @@ describe('the alert about companies’ failing integrations (ADR-139)', () => {
         }),
     } as unknown as Database;
     const result = await alertIntegrationFailures({ db, outbox: {} as never, appBaseUrl: BASE });
-    expect(result).toEqual({ alerted: 0, unsent: 4, recipients: 0 });
+    expect(result).toEqual({ alerted: 0, unsent: 4, recipients: 0, posted: false });
     expect(calls).toHaveLength(2);
   });
 
@@ -111,6 +111,7 @@ describe('the alert about companies’ failing integrations (ADR-139)', () => {
       alerted: 0,
       unsent: 0,
       recipients: 0,
+      posted: false,
     });
   });
 });

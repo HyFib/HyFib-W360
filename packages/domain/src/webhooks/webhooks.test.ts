@@ -136,6 +136,8 @@ import {
   webhookFieldValuesFromLines,
   webhookFieldWordsFromLines,
   webhookFieldValueText,
+  webhookMessageWordsFromLines,
+  webhookMessageWordsText,
 } from './model';
 import {
   noteCreatedPayloadSchema,
@@ -239,6 +241,8 @@ import {
   webhookContactSourcesSchema,
   webhookMessageTypesFor,
   webhookMessageTypesSchema,
+  webhookMessageWordsFor,
+  webhookMessageWordsSchema,
   webhookRunEndReasonsFor,
   webhookRunEndReasonsNeedTheEnds,
   webhookRunEndReasonsSchema,
@@ -4125,6 +4129,93 @@ describe('contact event field words and ranges (ADR-335)', () => {
   });
 });
 
+describe('words in received messages (ADR-337)', () => {
+  const refusal = (given: unknown) => {
+    const issue = webhookMessageWordsSchema.safeParse(given).error?.issues[0];
+    return issue && [issue.path.join('.'), issue.message];
+  };
+
+  it('take 1 to 50 words or phrases, trimmed and kept once whatever their case, in the order given', () => {
+    expect(
+      webhookMessageWordsSchema.parse(['  Refund ', 'cancel order', 'REFUND', 'a, b', 'பணம்']),
+    ).toEqual(['Refund', 'cancel order', 'a, b', 'பணம்']);
+    expect(webhookMessageWordsSchema.parse(null)).toBeNull();
+    expect(webhookMessageWordsSchema.parse(['x'.repeat(100)])).toEqual(['x'.repeat(100)]);
+    expect(
+      webhookMessageWordsSchema.parse(Array.from({ length: 50 }, (_, i) => `w${i}`)),
+    ).toHaveLength(50);
+  });
+
+  it('refuse an empty list, more than 50, a blank word, a long one or one with control characters, by place', () => {
+    expect(refusal([])).toEqual(['', 'Give at least one word or phrase, or take every message.']);
+    expect(refusal(Array.from({ length: 51 }, (_, i) => `w${i}`))).toEqual([
+      '',
+      'Give at most 50 words and phrases.',
+    ]);
+    // Counted as given, before a word given twice is dropped (as Settings counts its lines).
+    expect(refusal(Array.from({ length: 100 }, (_, i) => `W${i % 50}`))).toEqual([
+      '',
+      'Give at most 50 words and phrases.',
+    ]);
+    expect(refusal(['ok', '  '])).toEqual(['1', 'Give each word or phrase as text, not blank.']);
+    expect(refusal(['x'.repeat(101)])).toEqual([
+      '0',
+      'Give words and phrases of at most 100 characters.',
+    ]);
+    for (const bad of [
+      'a\nb',
+      'a\tb',
+      'a\u0000b',
+      'a\u001fb',
+      'a\u007fb',
+      'a\u0085b',
+      'a\u2028b',
+      'a\u2029b',
+    ]) {
+      expect(refusal(['ok', bad]), JSON.stringify(bad)).toEqual([
+        '1',
+        'Give words and phrases without line breaks or control characters.',
+      ]);
+    }
+    expect(refusal([5])).toEqual(['0', 'Give the words and phrases as text.']);
+    expect(refusal('refund')?.[0]).toBe('');
+  });
+
+  it('are kept only while the endpoint takes message.received: given, kept, or cleared', () => {
+    expect(webhookMessageWordsFor(['message.received'], ['a'], null)).toEqual(['a']);
+    expect(webhookMessageWordsFor(['message.received'], undefined, ['b'])).toEqual(['b']);
+    expect(webhookMessageWordsFor(['message.received'], null, ['b'])).toBeNull();
+    expect(webhookMessageWordsFor(['message.received'], undefined, null)).toBeNull();
+    expect(webhookMessageWordsFor(['message.status'], ['a'], ['b'])).toBeNull();
+  });
+
+  it('read the words Settings gives, one a line, and name them as Settings shows them', () => {
+    expect(webhookMessageWordsFromLines(' Refund \n\n  cancel order\r\nrefund\n')).toEqual({
+      ok: true,
+      words: ['Refund', 'cancel order'],
+    });
+    expect(webhookMessageWordsFromLines('  \n')).toEqual({ ok: true, words: [] });
+    expect(webhookMessageWordsFromLines(`ok\n${'x'.repeat(101)}`)).toEqual({
+      ok: false,
+      message: 'Give words and phrases of at most 100 characters.',
+    });
+    expect(webhookMessageWordsFromLines('a\u0007b')).toEqual({
+      ok: false,
+      message: 'Give words and phrases without line breaks or control characters.',
+    });
+    expect(
+      webhookMessageWordsFromLines(Array.from({ length: 51 }, (_, i) => `w${i}`).join('\n')),
+    ).toEqual({ ok: false, message: 'Give at most 50 words and phrases.' });
+    expect(
+      webhookMessageWordsFromLines(Array.from({ length: 100 }, (_, i) => `W${i % 50}`).join('\n')),
+    ).toEqual({ ok: false, message: 'Give at most 50 words and phrases.' });
+    expect(
+      webhookMessageWordsFromLines(Array.from({ length: 50 }, (_, i) => `W${i % 25}`).join('\n\n')),
+    ).toEqual({ ok: true, words: Array.from({ length: 25 }, (_, i) => `W${i}`) });
+    expect(webhookMessageWordsText(['refund', 'a, b'])).toBe('"refund", "a, b"');
+  });
+});
+
 describe('endpoint audit entries within an audit entry’s 8 KiB (ADR-336)', () => {
   // A tag of 40 Tamil letters and digits: 114 bytes of UTF-8, as a company's tags may be.
   const tamil = (i: number) => `${'க'.repeat(37)}${String(i).padStart(3, '0')}`;
@@ -4244,7 +4335,7 @@ describe('endpoint audit entries within an audit entry’s 8 KiB (ADR-336)', () 
         listDigests: { contactTags: digest(tags(10)) },
       });
     }
-    // Every event type, hosts of 253 characters and the 54 lists an entry can name, each too
+    // Every event type, hosts of 253 characters and the 55 lists an entry can name, each too
     // long to name item by item beside the others: named by count, the entry takes under 6,000.
     const keys = [
       'assigneeIds',
@@ -4270,6 +4361,7 @@ describe('endpoint audit entries within an audit entry’s 8 KiB (ADR-336)', () 
       'messageSenders',
       'messageStatuses',
       'messageTypes',
+      'messageWords',
       'noteDealOwnerIds',
       'notePipelineIds',
       'noteStageIds',
@@ -4302,7 +4394,7 @@ describe('endpoint audit entries within an audit entry’s 8 KiB (ADR-336)', () 
       'templateIds',
       'templateStatuses',
     ];
-    expect(keys).toHaveLength(54);
+    expect(keys).toHaveLength(55);
     const whole = webhookEndpointAuditMetadata({
       host: 'h'.repeat(253),
       eventTypes: [...WEBHOOK_EVENT_TYPES],
@@ -4310,7 +4402,7 @@ describe('endpoint audit entries within an audit entry’s 8 KiB (ADR-336)', () 
       oauthTokenHost: 'o'.repeat(253),
       oauthSecretReplaced: true,
     });
-    expect(Object.keys(whole.listCounts as object)).toHaveLength(54);
+    expect(Object.keys(whole.listCounts as object)).toHaveLength(55);
     expect(jsonbSize(whole)).toBeLessThan(6000);
   });
 });

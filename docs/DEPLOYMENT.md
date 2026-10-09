@@ -1271,6 +1271,39 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    a 500 and leaves the endpoint as it was. Finish the web rollout before companies add words and
    ranges, or expect such failures until it ends.
 
+   Migration 0257 (ADR-337) adds `app.webhook_endpoints.message_words` with its check (validated by
+   reading the table, which holds at most 10 endpoints a company) and update grant, adds
+   `app.webhook_message_text`, and replaces `app.capture_webhook_event` with the same signature,
+   keeping every filter before it; every endpoint starts without a list. Web servers of this release
+   need it, as their reads of endpoints name the column; workers do not read it, and the capture
+   runs in the database. Web servers from before it neither show nor change the column: until the
+   web rollout ends, an old server's change that drops Message received from an endpoint with words
+   fails on the check (a 500, leaving the endpoint as it was), its other changes keep the words, and
+   its API refuses `messageWords` (422) and leaves it out of the endpoints it answers. A web
+   rollback after the migration brings the same back until this release is rolled out again: old
+   servers can neither show nor clear words, so an endpoint with words cannot drop Message received
+   there.
+
+   Migration 0258 (ADR-338) adds `ops.platform_alert_channel` and `ops.platform_alert_posts` with
+   their grants, the channel's definer functions (set, remove, test and read for platform staff;
+   queue, claim, finish and purge the posts and re-encrypt the address for the worker) and replaces
+   `ops.sealed_value_keys` with the channel's address as one more sealed kind. `pnpm db:migrate`
+   also creates the queue `ops.alert-posts`. No channel is set until a platform owner sets one, so
+   nothing is posted. Workers of this release need the migration (their alert sweeps queue posts in
+   the transaction of their emails, and they schedule and run the posting job); workers from before
+   it keep emailing only, and a post queued while an old worker runs is sent by a new one. Web
+   servers of this release need it for Operations → Alerts and Keys; old web servers know neither.
+   Roll out workers before setting a channel, as the deploy order below does. After a rollback the
+   channel and its posts stay in the database unused: alerts are emailed only, as before.
+
+   Migration 0259 (ADR-339) replaces the check on `app.api_idempotency_keys.response` with one of
+   256 KiB (64 KiB before), added `NOT VALID` so that it takes its lock only briefly (every request
+   sent with a key writes to the table), and 0260 validates it for the rows already there without
+   blocking the table's writes. Web servers of either release work with it: those of this release
+   refuse an answer larger than 256 KiB with 422 `idempotency_response_too_large`, and those from
+   before it now keep answers between 64 and 256 KiB that their requests failed on (an internal
+   error). A rollback of the web keeps the new check, which old servers satisfy.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

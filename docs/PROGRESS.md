@@ -1,5 +1,198 @@
 # Progress
 
+## 2026-10-09 — Answers kept with an Idempotency-Key up to 256 KiB (P5-08, P5-09, H-033, ADR-339)
+
+Status: **Fixed; its database test runs in CI only.** A successful answer to a request sent with an
+`Idempotency-Key` is kept so a retry gets it again, and its check held it to 64 KiB as jsonb.
+ADR-336's review estimated that an answer giving more than its request carried could pass that; a
+survey of the 29 places that keep an answer found five that can within their limits, among them a
+webhook endpoint's whole configuration (`POST /webhook-endpoints` and its secret rotation, whose
+key is required: about 103 KB, measured by `jsonbSize` in a unit test), and each such request
+failed with an internal error every time. The survey's other figures (an order with its items, a
+template with its history, a pipeline with its archived stages) came from a script reproducing
+jsonb's layout, not from PostgreSQL. The local PostgreSQL is unavailable, so migrations 0259 and
+0260 and the integration test below were written but not run here; the migrations passed the pglast
+parse check (syntax only).
+
+### Completed
+
+- **Database:** migrations 0259 (the check on `app.api_idempotency_keys.response` replaced with one
+  of 256 KiB, `NOT VALID`) and 0260 (the check validated without blocking the table's writes).
+- **Domain:** `API_LIMITS.idempotentResponseBytes`; `storeIdempotentResponse` refuses an answer
+  larger than that, counted by `jsonbSize`, with 422 and reason `idempotency_response_too_large`
+  before writing it, which rolls the request back with its claim; the OpenAPI document names the
+  reason and the limit, in a sentence on keys apart from `POST /messages`.
+- **Tests:** unit (3 new in `api/idempotency.test.ts`: an answer at the limit kept and one byte
+  more refused with nothing written; the largest answer a webhook endpoint can give, every list
+  full of three-byte text, over 64 KiB and within half of 256 KiB; the OpenAPI document's sentence
+  on the limit); integration (1 new in `api.test.ts`: a pipeline's answer past 64 KiB kept and
+  replayed, one past 256 KiB refused with its reason, nothing changed or kept, and taken without a
+  key; the check's definition, validated). Written for CI; the integration test was not run here.
+  No e2e test.
+- **Docs:** ADR-339; ARCHITECTURE; DEPLOYMENT; DATA-RETENTION; BACKLOG P5-08 and P5-09; feature
+  matrix H-033.
+- **Mutation checks:** 6/6 deliberate regressions caught on the unit-tested parts (the limit itself
+  refused, the answer counted as JSON characters, nothing refused, no reason given, the limit at 64
+  KiB and at 1 MiB). The check itself and the refusal through a real request need the database, so
+  they are left to the integration test, which runs in CI.
+- **Review fixes:** an independent review of this slice and of ADR-338's fixes found nothing that
+  would fail CI and four small defects, fixed: 0259 read the whole table under the lock its change
+  takes, which every request sent with a key waits on (the check is now added `NOT VALID` and 0260
+  validates it without blocking the table's writes, as 0200 and 0201 did); ADR-338's browser test
+  deleted its channel after a failure without failing the posts still waiting, which the next
+  channel set would have received, and an error there would have hidden the test's own (the posts
+  now fail as removing the channel does, and an error there after a failure is logged with it); the
+  refusal and the OpenAPI document said to send the request again without a key, which routes
+  whose key is required refuse (the document gives the limit in a sentence of its own on keys,
+  saying only requests whose key is optional get answers that large, and the refusal says to go
+  without one where the key is optional); and 0259's comment gave the endpoint's answer as 105 KB,
+  not 103 KB. 3/3 deliberate regressions of the unit-tested fixes caught; the migrations and the
+  browser test's cleanup are left to the integration and e2e tests, which run in CI. The full check
+  passed again (143 files, 1441 tests).
+
+### Test commands and results (local, 2026-10-09)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 143 files, 1440 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
+## 2026-10-09 — A chat channel for the operations alerts (P5-10, H-034, ADR-338)
+
+Status: **Implemented; its database and browser tests run in CI only.** The operations alerts
+(failures, late queues and failing integrations) were emailed only, and P5-10 left other alert
+channels unbuilt. The local PostgreSQL is unavailable, so migration 0258 and the integration tests
+below were written but not run here; the migration passed the pglast parse check (syntax only), its
+SQL function bodies included. Slack's documentation could not be opened here: the request's body,
+the three characters escaped, the limit of about one post a second and the error answers were taken
+from search excerpts of its pages (ADR-338 lists them), and no post was made to Slack.
+
+### Completed
+
+- **Database:** migration 0258 (`ops.platform_alert_channel`, one row at most, its address sealed;
+  `ops.platform_alert_posts`, kept 7 days; their grants; definer functions to set, remove, test and
+  read the channel and list its latest posts, for platform staff, the changes for owners only and
+  audited by host; to queue, claim, finish and purge the posts, for the worker;
+  `ops.sealed_value_keys` replaced with the channel's address).
+- **Domain:** `platform/alert-channel.ts`: a post's text (`alertPostBody`: the alert's subject,
+  lines and link, Slack's three control characters escaped, cut at 4,000 characters), the test
+  post, the address's rules (`checkedAlertChannelUrl`), each answer's outcome and label,
+  `queueAlertPost` (in the alerts' transactions, with the posting job's signal), the posting job
+  (`sendAlertPosts`) and the console's service (`createAlertChannelService`); the three alerts queue
+  their posts and now say "This alert gives counts only"; the keyring sweep's `alert_channel` kind;
+  the queue `ops.alert-posts`.
+- **Worker:** the posting job, scheduled every minute, with its own egress client; the alerts' logs
+  say whether they were posted.
+- **Web:** Operations → Alerts (the channel's host, who set it and when, its last post sent and
+  failed with the answer, the posts waiting and failed, and the 10 latest posts; owners set, replace,
+  test and remove it); the Keys tab names the channel's address among the sealed values.
+- **Tests:** unit (23 new in `platform/alert-channel.test.ts`; the alerts' wording and results in
+  `failure-alerts.test.ts`, `queue-waits.test.ts` and `integration-alerts.test.ts`; the reseal kinds
+  in `keyring/reseal.test.ts`); integration (9 new in `alert-channel.test.ts`; the keyring sweep
+  re-encrypting the channel's address in `keyring-reseal.test.ts`; the functions' grants in
+  `tenant-isolation.test.ts`); e2e (1 new in `platform-ops.spec.ts`: an owner sets the channel to a
+  local receiver, sends a test post it receives as JSON, and removes it). Written for CI; the
+  integration and e2e tests were not run here.
+- **Docs:** ADR-338; ARCHITECTURE; SECURITY; THREAT-MODEL T303; DEPLOYMENT; RUNBOOKS;
+  DATA-RETENTION; BACKLOG P5-10; feature matrix H-034.
+- **Mutation checks:** 34/34 deliberate regressions caught on the unit-tested parts (the escapes
+  and their order, the link, the 4,000-character cut and what it leaves out; the address's blank,
+  fragment, 2,048-character limit and credentials; the labels; each answer's outcome; the post's
+  headers and body; queueing and waking the job only with a post and in its transaction; the job's
+  unopenable address, removed channel, order and counts; owners only, the sealed value, the test
+  post's signal and the state's snapshot; the reseal kind; the alerts' wording and results). The
+  definer functions, the grants and the posting against a receiver need the database, so their
+  regressions are left to the integration tests, which run in CI.
+
+- **Review fixes:** an independent review found two tests that would have failed in CI: the
+  integration test of the test post counted the audit entries an earlier test of the file wrote (it
+  now counts its own), and the browser test matched the test posts of the projects that ran before
+  it (it now takes the newest, and removes the channel even when it fails). Also fixed: the runtime
+  role could write the channel's address, not only re-encrypt it (it now re-encrypts it, compare and
+  set, through `ops.reseal_platform_alert_channel`, with no write grant); a post the channel's
+  removal failed while it was on its way was shown failed though delivered (a 2xx now makes it
+  sent); a test post whose job could not be woken was reported as an error though queued (the error
+  is logged and the page says it goes out within a minute); and wording (the runbook, the removal's
+  dialog, the decision's queue and outcome rules). 3/3 deliberate regressions of the unit-tested
+  fixes caught; the re-encryption and the race are left to the integration tests, which run in CI.
+  The full check passed again (142 files, 1438 tests).
+
+### Test commands and results (local, 2026-10-09)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 142 files, 1437 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
+## 2026-10-09 — Words in received messages (P5-09, H-014, ADR-337)
+
+Status: **Implemented; its database tests run in CI only.** An endpoint taking `message.received`
+received every message customers send, or those of its numbers, teams, members, tags and types, and
+ADR-191 left filters on a message's words unbuilt. The local PostgreSQL is unavailable, so
+migration 0257 and the integration tests below were written but not run here; the migration passed
+the pglast parse check (syntax only), its SQL function's body included.
+
+### Completed
+
+- **Database:** migration 0257 (`message_words text[]` on endpoints with its check: 1 to 50 words,
+  one dimension, no null, each 1 to 100 characters without control characters or spaces around it,
+  joined on a control character no word may hold, only with `message.received`; the column's update
+  grant; `app.webhook_message_text(text, jsonb)`, a message's text as the payload's `message.text`
+  gives it, for the runtime and definer roles; `app.capture_webhook_event` replaced in place: the
+  text read only when an active endpoint names words and matched with `strpos` on lowered text).
+- **Domain:** `webhookMessageWord`, `webhookMessageWordsFromLines` and `webhookMessageWordsText`;
+  `webhookMessageWordsSchema` (trimmed, kept once whatever their case, refusals by place),
+  `webhookMessageWordsFor` and the rule that words need the event; the endpoint's view, insert,
+  change, audit and export; the API's `messageWords` on create, change and every endpoint, and the
+  OpenAPI entries, the message.received event's description among them.
+- **Web:** Settings → Webhooks shows "Received messages sent, by words" under "Message received"
+  (every message, or only those containing any of the words, typed one a line), and the endpoints
+  list names them.
+- **Tests:** unit (4 new in `webhooks/webhooks.test.ts`, 1 new and 1 changed in `api/api.test.ts`);
+  integration (3 new in `webhooks.test.ts`: the service's refusals and keeping, the audit and each
+  clause of the database check; the text read as the payload gives it over samples of every type;
+  capture by words in a text, a caption and a tapped reply, `%` found as written, a message without
+  text, the event without text, and the payloads; 1 new in `api-webhook-endpoints.test.ts`: the
+  API's round trip and refusals; the function's grants in `tenant-isolation.test.ts`). Written for
+  CI; the integration tests were not run here. No e2e test.
+- **Docs:** ADR-337; ARCHITECTURE; SECURITY; THREAT-MODEL T302; DEPLOYMENT; RUNBOOKS; BACKLOG
+  P5-09; feature matrix W-138, W-139 and H-014.
+- **Mutation checks:** 21/21 deliberate regressions caught on the unit-tested parts (reading a
+  word: trimming, blanks, its length either side and control characters, the separators and C1
+  controls among them; Settings' reader and text; the schema's bounds, keeping and places; the list
+  kept only with the event; the API's rule, its change and description; the OpenAPI entries). The
+  services' rule, the check and the capture need the database, so their regressions are left to the
+  integration tests, which run in CI.
+
+- **Review fixes:** an independent review found the API's integration test that compares a new
+  endpoint field by field without `messageWords` (it would have failed in CI), the ADR-336 test of
+  every list without it (55 lists now, still under 6,000 bytes), Settings counting the words after
+  dropping those given twice where the API counts them as given (both count them as given now), the
+  database check described as refusing the line and paragraph separators (PostgreSQL's patterns read
+  only C0 and C1 controls as control characters: the docs now call the check a looser backstop, and
+  an integration test pins it), the capture lowering a message's text for each word (now once a
+  message), a doc comment `canonicalJson` (ADR-336) had parted from its function, and wording (the
+  OpenAPI event description, a location's name else its address, the parity test's samples, a
+  rollback note in DEPLOYMENT). 5/5 deliberate regressions of the fixed parts caught (Settings
+  counting after dropping, 50 refused, blank lines counted, 100 given taken, the event's
+  description); the full check passed again (141 files, 1415 tests).
+
+### Test commands and results (local, 2026-10-09)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 141 files, 1415 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
 ## 2026-10-09 — Endpoint audit entries that fit, however long the lists (P5-09, H-014, ADR-336)
 
 Status: **Fixed; its database tests run in CI only.** Adding or changing a webhook endpoint

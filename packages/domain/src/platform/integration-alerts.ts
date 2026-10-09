@@ -1,14 +1,16 @@
 import { sql, systemScope, type Database } from '@w360/db';
 import { enqueueEmail, type OutboxDeps } from '../email/outbox';
+import { queueAlertPost } from './alert-channel';
 import { INTEGRATION_SOURCE_LABELS, INTEGRATION_STATE_LABELS } from './ops-model';
 
 /**
  * Alerts for companies' failing integrations (ADR-139): what the operations console's Integrations
  * page lists (ADR-054, ADR-137, ADR-138), read from the same rule (`ops.integration_failures`).
  * Every platform administrator hears of each failure once, by its integration and state, in one
- * email at most every 15 minutes, with counts by kind only: the companies, labels and errors stay
- * on the console behind platform sign-in. A failure the console has not listed for an hour is
- * forgotten, so the integration is told again if it fails later.
+ * email at most every 15 minutes (posted to the chat channel too when one is set, ADR-338), with
+ * counts by kind only: the companies, labels and errors stay on the console behind platform
+ * sign-in. A failure the console has not listed for an hour is forgotten, so the integration is
+ * told again if it fails later.
  */
 
 /** Minutes between two alerts at least; enforced by `ops.mark_integration_alert`. */
@@ -39,6 +41,8 @@ export interface IntegrationAlertResult {
   /** Failures due but not emailed because there is no platform administrator to tell. */
   unsent: number;
   recipients: number;
+  /** Whether the alert was also queued for the chat channel (ADR-338). */
+  posted: boolean;
 }
 
 const plural = (n: number, one: string, many: string) => (n === 1 ? one : many);
@@ -68,8 +72,8 @@ export function integrationAlert(
   return {
     subject: `${total} company ${plural(total, 'integration is', 'integrations are')} failing`,
     lines: [
-      `Operations → Integrations lists ${total} failing ${plural(total, 'integration', 'integrations')} of companies that platform staff were not emailed about yet: ${list}.`,
-      `This email gives counts only: the companies and errors are on the operations console. Each failure is emailed once while it lasts, and further alerts come at most every ${INTEGRATION_ALERT_INTERVAL_MINUTES} minutes.`,
+      `Operations → Integrations lists ${total} failing ${plural(total, 'integration', 'integrations')} of companies that platform staff were not alerted about yet: ${list}.`,
+      `This alert gives counts only: the companies and errors are on the operations console. Each failure is told once while it lasts, and further alerts come at most every ${INTEGRATION_ALERT_INTERVAL_MINUTES} minutes.`,
     ],
     url: new URL('/platform/ops/integrations', appBaseUrl).toString(),
     actionLabel: 'Open integrations',
@@ -80,8 +84,8 @@ export function integrationAlert(
  * The minute sweep's alert: refreshes the marks of failures still listed and forgets those not
  * listed for an hour; when a listed failure was not told yet and the last integration alert went
  * out at least 15 minutes ago, marks the failures in the transaction that queues one email to every
- * platform administrator. Nothing is marked while there is no platform administrator, so the alert
- * goes out once there is one.
+ * platform administrator, and its post to the chat channel when one is set. Nothing is marked while
+ * there is no platform administrator, so the alert goes out once there is one.
  */
 export async function alertIntegrationFailures(
   deps: IntegrationAlertDeps,
@@ -91,7 +95,7 @@ export async function alertIntegrationFailures(
     tx.execute<{ due: number }>(sql`select ops.integration_alerts_due() as due`),
   );
   const waiting = Number(due.rows[0]?.due ?? 0);
-  if (waiting === 0) return { alerted: 0, unsent: 0, recipients: 0 };
+  if (waiting === 0) return { alerted: 0, unsent: 0, recipients: 0, posted: false };
   const recipients = await deps.db.run(
     systemScope,
     (tx) =>
@@ -100,7 +104,9 @@ export async function alertIntegrationFailures(
       ),
     { accessMode: 'read only' },
   );
-  if (recipients.rows.length === 0) return { alerted: 0, unsent: waiting, recipients: 0 };
+  if (recipients.rows.length === 0) {
+    return { alerted: 0, unsent: waiting, recipients: 0, posted: false };
+  }
   return deps.db.run(systemScope, async (tx) => {
     const marked = await tx.execute<{ source: string; state: string; items: number }>(
       sql`select source, state, items from ops.mark_integration_alert()`,
@@ -111,7 +117,9 @@ export async function alertIntegrationFailures(
       items: Number(r.items),
     }));
     const alerted = counts.reduce((sum, c) => sum + c.items, 0);
-    if (alerted === 0) return { alerted: 0, unsent: 0, recipients: recipients.rows.length };
+    if (alerted === 0) {
+      return { alerted: 0, unsent: 0, recipients: recipients.rows.length, posted: false };
+    }
     const alert = integrationAlert(counts, deps.appBaseUrl);
     for (const recipient of recipients.rows) {
       await enqueueEmail(deps.outbox, tx, {
@@ -121,6 +129,7 @@ export async function alertIntegrationFailures(
         payload: { kind: 'platform.notice', ...alert },
       });
     }
-    return { alerted, unsent: 0, recipients: recipients.rows.length };
+    const posted = await queueAlertPost(deps.outbox, tx, 'integrations', alert);
+    return { alerted, unsent: 0, recipients: recipients.rows.length, posted };
   });
 }
