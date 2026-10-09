@@ -13436,15 +13436,15 @@ Decision:
 
 Consequences: four runners work at once instead of one, each building the app (about 1.5 minutes)
 and installing a browser, and the end-to-end checks end in under an hour instead of three: on the
-first run, on b1a8b3e, the check of the four ended 52 minutes after the run started, each job
-spending about 3 minutes on its setup and its suite 36.8 minutes (mobile Chromium), 38.2 (Chromium),
-40.8 (Firefox) and 48.5 (WebKit, one failing test tried twice). Re-running a failed project's job
-re-runs that project only, then the check of the four. The setup runs four times, so a run takes
-more runner minutes and meets a failing package mirror or image pull four times as often, and a run
-now takes ten jobs of this workflow (two more in the containers workflow), which can wait for
-runners if the plan's limit on jobs at once is reached. CI no longer runs the four projects' data in
-one database (several currencies' rate cards side by side, the settlement runs of four days, a
-platform owner per project); running the suite locally still does. A run cancelled by a newer push
+first complete run, on b1a8b3e, the check of the four ended 52 minutes after the run started, each
+job spending about 3 minutes on its setup and its suite 36.8 minutes (mobile Chromium), 38.2
+(Chromium), 40.8 (Firefox) and 48.5 (WebKit, one failing test tried twice). Re-running a failed
+project's job re-runs that project only, then the check of the four. The setup runs four times, so a
+run takes more runner minutes and meets a failing package mirror or image pull four times as often,
+and a run now takes ten jobs of this workflow (two more in the containers workflow), which can wait
+for runners if the plan's limit on jobs at once is reached. CI no longer runs the four projects'
+data in one database (several currencies' rate cards side by side, the settlement runs of four days,
+a platform owner per project); running the suite locally still does. A run cancelled by a newer push
 to the same branch, or by hand, now shows the check of the four as failed rather than cancelled:
 expected, since a skipped required check would pass.
 

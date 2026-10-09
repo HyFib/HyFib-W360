@@ -1837,7 +1837,13 @@ test('an endpoint can take the events of chosen WhatsApp numbers only, and chang
     await expect(page.getByText('Hello main shop')).toBeVisible({ timeout: 1_000 });
     await expect(page.getByText('Hello outlet')).toBeVisible({ timeout: 1_000 });
   }).toPass({ timeout: 30_000 });
-  await page.goto(`/c/${slug}/settings/webhooks`);
+  // The live inbox is left through the navigation, not a page load (see openFromNav).
+  await openFromNav(page, 'Settings');
+  await page
+    .getByRole('navigation', { name: 'Settings sections' })
+    .getByRole('link', { name: 'Webhooks' })
+    .click();
+  await expect(page).toHaveURL(new RegExp(`/c/${slug}/settings/webhooks$`));
   await page.getByRole('link', { name: /Deliveries and settings/ }).click();
   await expect(page.getByRole('heading', { name: /^Deliveries to/ })).toBeVisible();
   const deliveries = page.getByRole('list', { name: 'Deliveries' }).getByRole('listitem');

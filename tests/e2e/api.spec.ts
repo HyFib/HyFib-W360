@@ -934,9 +934,12 @@ test('a key tags conversations and lists them by tag, and the inbox shows the ta
     ['refund', 'vip'],
   ]);
 
-  // The inbox shows the tags the key put on, and filters by them.
-  await page.goto(`/c/${slug}/inbox?view=all&status=open&tag=vip`);
-  await expect(items).toHaveCount(1);
+  // The inbox shows the tags the key put on, and filters by them. The key's changes refresh the
+  // live inbox, so the list is loaded again if a refresh interrupts the load (see openFromNav).
+  await expect(async () => {
+    await page.goto(`/c/${slug}/inbox?view=all&status=open&tag=vip`);
+    await expect(items).toHaveCount(1, { timeout: 5_000 });
+  }).toPass({ timeout: 30_000 });
   await expect(items.first()).toContainText('refund');
   await expect(items.first()).toContainText('vip');
 

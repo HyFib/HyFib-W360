@@ -2,10 +2,10 @@
 
 ## 2026-10-09 — Each browser project's end-to-end tests in a CI job of its own (ADR-343)
 
-Status: **Implemented and measured in CI: its first run ended the check of the four in 52 minutes.**
-The four browser projects' 464 end-to-end tests ran one after another in one CI job and took 168.3
-of its suite step's 230 minutes on a248d4d (PR #55), almost three hours before a pull request's last
-check ended.
+Status: **Implemented and measured in CI: its first complete run ended the check of the four in 52
+minutes, failing one WebKit test, which this pull request fixes.** The four browser projects' 464
+end-to-end tests ran one after another in one CI job and took 168.3 of its suite step's 230 minutes
+on a248d4d (PR #55), almost three hours before a pull request's last check ended.
 
 ### Completed
 
@@ -24,13 +24,19 @@ check ended.
   registries, each with the same digest as on Docker Hub. A review found the image scans still
   pulling from Docker Hub and the Mailpit digest comparable through Docker Hub's tag API; both are
   done.
-- **First run (b1a8b3e, PR #56):** the check of the four ended 52 minutes after the run started.
-  Each job spent about 3 minutes on its setup (the build about 1.5, its browser under a minute) and
-  its suite 36.8 minutes on mobile Chromium, 38.2 on Chromium, 40.8 on Firefox and 48.5 on WebKit.
-  WebKit failed one test twice: the team endpoint test in `webhook-events.spec.ts` loaded the
-  webhooks page with `page.goto` from the live inbox, and a refresh in flight interrupted the load
-  ("interrupted by another navigation"), as `openFromNav` describes; it passed in the combined job
-  on a248d4d. The test now leaves the inbox through the navigation, as the file's other tests do.
+- **First complete run (b1a8b3e, PR #56; bb80f93's stopped at the image pulls):** the check of the
+  four ended 52 minutes after the run started. Each job spent about 3 minutes on its setup (the
+  build about 1.5, its browser under a minute) and its suite 36.8 minutes on mobile Chromium, 38.2
+  on Chromium, 40.8 on Firefox and 48.5 on WebKit. WebKit failed one test twice: the team endpoint
+  test in `webhook-events.spec.ts` loaded the webhooks page with `page.goto` from the live inbox,
+  and a refresh in flight interrupted the load ("interrupted by another navigation"), as
+  `openFromNav` describes; it passed in the combined job on a248d4d. The test now leaves the inbox
+  through the navigation. A review found four other tests loading a page from the live inbox while
+  its events could still refresh it (`automations.spec.ts`, `api.spec.ts` and `webhooks.spec.ts`,
+  which load a filtered list or an endpoint's page, and another in `webhook-events.spec.ts`): the
+  first three now load the page again when a refresh interrupts the load, as `inbox.spec.ts` does,
+  and the last leaves through the navigation. The api spec's reloads of a live page just after a
+  key's change are unchanged: they have passed in every browser so far.
 - **Docs:** ADR-343.
 - **Review fixes:** an independent review found nothing that would fail CI and four small things,
   fixed: ADR-343 now says a run cancelled by a newer push shows the check of the four as failed
@@ -46,9 +52,9 @@ check ended.
 | `pnpm format:check`                    | clean, the workflow file included                                 |
 | The workflow parsed as YAML            | jobs `e2e-project` (the four projects) and `e2e` (`if: always()`) |
 | `playwright test --list`, each project | 116 tests each, 464 in all                                        |
-| The new jobs on GitHub Actions         | not run here: they first run with this pull request               |
+| The new jobs on GitHub Actions         | ran on b1a8b3e (run 37995636791): one WebKit test failed, fixed   |
 | Image digests, 2026-10-09              | the mirrors' equal Docker Hub's for the five images CI pulls      |
-| The mirrored images on GitHub Actions  | not run yet: they first run with this pull request                |
+| The mirrored images on GitHub Actions  | pulled on b1a8b3e (run 37995636791)                               |
 
 ## 2026-10-09 — A company's year on its platform page (P5-10, H-034, ADR-342)
 
