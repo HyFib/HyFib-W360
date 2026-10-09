@@ -42,8 +42,10 @@ jobs:
       matrix:
         postgres: ['17', '18']
     services:
+      # Docker's official image through the Amazon ECR Public mirror (the same digests as Docker
+      # Hub's): Docker Hub's anonymous pull limit failed every job that pulls on bb80f93 (ADR-343).
       postgres:
-        image: postgres:${{ matrix.postgres }}-alpine
+        image: public.ecr.aws/docker/library/postgres:${{ matrix.postgres }}-alpine
         env:
           POSTGRES_PASSWORD: postgres
         ports: ['5432:5432']
@@ -99,9 +101,11 @@ jobs:
           - { project: firefox, label: Firefox, browser: firefox }
           - { project: webkit, label: WebKit, browser: webkit }
           - { project: mobile-chromium, label: mobile Chromium, browser: chromium }
+    # Images from registries without Docker Hub's anonymous pull limit (see the integration job):
+    # PostgreSQL through the Amazon ECR Public mirror, Mailpit from its publisher's GitHub registry.
     services:
       postgres:
-        image: postgres:18-alpine
+        image: public.ecr.aws/docker/library/postgres:18-alpine
         env:
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: w360
@@ -109,7 +113,7 @@ jobs:
         options: >-
           --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 3s --health-retries 20
       mailpit:
-        image: axllent/mailpit:latest
+        image: ghcr.io/axllent/mailpit:latest
         ports: ['1025:1025', '8025:8025']
     env:
       APP_ENV: test

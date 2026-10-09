@@ -16,6 +16,10 @@ on a248d4d (PR #55), almost three hours before a pull request's last check ended
   all passed.
 - **Tests:** the usage and settlement specs' comments say the projects share one database when they
   run together, as locally, and that CI gives each its own. No test changed.
+- **CI images:** the first run on bb80f93 failed every job that pulls an image with Docker Hub's
+  `429 Too Many Requests`, and so did its one re-run; the CI jobs now pull PostgreSQL from the
+  Amazon ECR Public mirror of Docker's official images (the same 17-alpine and 18-alpine digests as
+  Docker Hub's) and Mailpit from `ghcr.io/axllent/mailpit`.
 - **Docs:** ADR-343.
 - **Review fixes:** an independent review found nothing that would fail CI and four small things,
   fixed: ADR-343 now says a run cancelled by a newer push shows the check of the four as failed

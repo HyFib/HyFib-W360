@@ -13409,6 +13409,16 @@ Decision:
 - **Tests unchanged:** run together, as `pnpm test:e2e` runs them locally, the projects still share
   one database, which the settlement and usage tests' days and currencies a project allow for; their
   comments now say CI gives each project its own.
+- **Service images without Docker Hub's anonymous limit:** the first run of the split, on bb80f93,
+  failed every job that pulls an image, the integration jobs too, with Docker Hub's
+  `429 Too Many Requests`; the re-run failed the same way. The CI jobs now pull PostgreSQL through
+  the Amazon ECR Public mirror of Docker's official images
+  (`public.ecr.aws/docker/library/postgres`, whose 17-alpine and 18-alpine manifests have the same
+  digests as Docker Hub's, checked on 2026-10-09) and Mailpit from its publisher's GitHub Container
+  Registry (`ghcr.io/axllent/mailpit`, which exists with a `latest` tag; its digest could not be
+  compared, Docker Hub answering 429 there too). The containers workflow's base images still come
+  from Docker Hub: its scans are not required checks, and the production images' registry is a
+  separate decision.
 
 Consequences: four runners work at once instead of one, each building the app (about 1.5 minutes)
 and installing a browser, so the end-to-end checks should end in about an hour instead of three; the
