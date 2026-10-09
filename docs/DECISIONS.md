@@ -13121,3 +13121,53 @@ Not built: naming a long list's items over several entries, a bound on the entri
 actions, and a bound on an endpoint's whole configuration for the API's answers (an endpoint's
 answer to a `POST`, kept with its `Idempotency-Key`, holds 64 KiB, which every list at its limit at
 once could pass; estimated, not reproduced).
+
+## ADR-337 Words in the received messages a webhook endpoint takes (P5-09) (2026-10-09)
+
+Context: an endpoint that takes `message.received` receives every message customers send, or those
+of the numbers, teams, members, tags and types it chose (ADR-170 to ADR-191, ADR-267, ADR-273). A
+receiver that acts on some messages only (a helpdesk taking the messages that ask for a refund, a
+bot that answers "price") was sent every other one and had to read `message.text` and drop the
+rest. ADR-191 left filters on a received message's words unbuilt.
+
+Decision:
+
+- **A list of words or phrases per endpoint,** for `message.received` only: 1 to 50, each 1 to 100
+  characters, trimmed, without control characters (a line break among them, and the line and
+  paragraph separators the database counts as such), kept once whatever their case and in the order
+  given. Null receives every message, as before. A message is sent when its text, as the payload's
+  `message.text` gives it (the text, a caption, the title of a tapped reply, a reaction, or a
+  location's name, else its address), contains one of them, whatever its case; a message without
+  text passes no list. With the endpoint's types, numbers, teams, members and tags chosen too, a
+  message must pass them all. It is set in Settings → Webhooks under "Message received" ("Received
+  messages sent, by words": every message, or only those containing any of the words typed one a
+  line), shown on the endpoint as `Received messages sent, containing: "refund", "cancel order"`,
+  and through the API as `messageWords` on `POST /webhook-endpoints` and
+  `PATCH /webhook-endpoints/{id}` and in every endpoint the API answers.
+- **Only with the event:** a list given for an endpoint that does not take `message.received` is
+  refused (`messageWords`; 422 through the API); a change that removes the event clears it, and a
+  `PATCH` that leaves it out keeps it.
+- **Matched as captured:** `app.capture_webhook_event` reads the message's text only when an active
+  endpoint of the company that takes the event names words, through `app.webhook_message_text`,
+  which derives it as the payload does (`inboundSummary`; an integration test holds the two to the
+  same text over every kind of content), and creates a delivery only for the endpoints whose list is
+  null or names a word the text contains, with `strpos` on lowered text, so no character of a word
+  (such as `%` or `_`) acts as a pattern. The text is never stored with the event: the event keeps
+  only the message's type, as before, and the payload is built when delivered. Replays and test
+  events are unchanged.
+- **Migration 0257:** `message_words text[]` on `app.webhook_endpoints` with a check validated at
+  once (1 to 50 words, one dimension, no null, each 1 to 100 characters without spaces around it or
+  control characters, only while `message.received` is among the events; the words are joined on a
+  control character for the pattern, and no word may hold it, so one word cannot pass for two), an
+  update grant on the column for the runtime role, `app.webhook_message_text(text, jsonb)` for the
+  runtime and definer roles (nobody else), and the capture replaced with the same signature.
+- **Audited and exported** as the other lists: the endpoint's audit entries name the words (by count
+  and digest once the entry would not fit, ADR-336), and the company data export carries the
+  column. Words can say what customers write about, so they are treated as the tag lists are.
+- **Permissions unchanged:** members with `developer.manage` in Settings, keys with
+  `webhooks.manage` through the API.
+
+Not built: words that leave messages out, whole-word or pattern matches, words in the messages
+HyFib sends (`message.status`), words in a contact card's or an order's content (they have no
+`message.text`), and the case folding of a language whose lower case PostgreSQL's locale does not
+know.

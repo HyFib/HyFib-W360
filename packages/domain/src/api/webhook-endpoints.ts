@@ -134,6 +134,7 @@ import {
   WEBHOOK_CONSENT_CHANGES_NEED_THE_EVENT,
   WEBHOOK_CONTACT_SOURCES_NEED_THE_EVENT,
   WEBHOOK_MESSAGE_TYPES_NEED_THE_EVENT,
+  WEBHOOK_MESSAGE_WORDS_NEED_THE_EVENT,
   WEBHOOK_RUN_END_REASONS_NEED_THE_EVENT,
   WEBHOOK_RUN_END_REASONS_NEED_THE_ENDS,
   WEBHOOK_SENDERS_NEED_THE_EVENT,
@@ -190,6 +191,8 @@ import {
   webhookContactSourcesSchema,
   webhookMessageTypesFor,
   webhookMessageTypesSchema,
+  webhookMessageWordsFor,
+  webhookMessageWordsSchema,
   webhookRunEndReasonsFor,
   webhookRunEndReasonsNeedTheEnds,
   webhookRunEndReasonsSchema,
@@ -572,6 +575,16 @@ const invalidMessageTypes = () =>
     issues: [{ path: 'messageTypes', message: WEBHOOK_MESSAGE_TYPES_NEED_THE_EVENT }],
   });
 
+const messageWordsField = webhookMessageWordsSchema.describe(
+  "1 to 50 words or phrases, each up to 100 characters, trimmed and without control characters, kept once whatever their case; the endpoint receives a received message as message.received when its text, as `message.text` gives it (the text, a caption, a tapped reply's title, a reaction or a location's name or address), contains one of them, whatever its case, and a message without text when the list is null. Only with message.received; applied with the endpoint's types, numbers, teams, members and tags. null receives every message.",
+);
+
+/** Words are chosen only for an endpoint that receives `message.received` (ADR-337). */
+const invalidMessageWords = () =>
+  new AppError('validation_failed', WEBHOOK_MESSAGE_WORDS_NEED_THE_EVENT, {
+    issues: [{ path: 'messageWords', message: WEBHOOK_MESSAGE_WORDS_NEED_THE_EVENT }],
+  });
+
 const runEndReasonsField = webhookRunEndReasonsSchema.describe(
   'The reasons the runs the endpoint receives as automation.run_ended ended for, as `run.endReason` names them (completed: end_node, no_next; handed_off: handoff_node; taken_over: agent_replied, assigned, take_over, api_replied; stopped: stopped_by_member, conversation_resolved, opted_out, contact_erased, automation_archived, stopped_by_api; failed: budget_steps, budget_loop, budget_messages, budget_http, expired, send_blocked, send_failed, error), only with automation.run_ended and only reasons of the ends it receives. A run then counts only when its reason is listed, for an end the list names reasons of; the runs of its other ends are narrowed by the ends alone. null receives every reason.',
 );
@@ -897,6 +910,7 @@ export const apiCreateWebhookEndpointSchema = z
     consentChanges: consentChangesField.optional(),
     contactSources: contactSourcesField.optional(),
     messageTypes: messageTypesField.optional(),
+    messageWords: messageWordsField.optional(),
     runEndReasons: runEndReasonsField.optional(),
     channelIds: channelIdsField.optional(),
     teamIds: teamIdsField.optional(),
@@ -1031,6 +1045,10 @@ export const apiCreateWebhookEndpointSchema = z
   .refine((data) => !data.messageTypes || data.events.includes('message.received'), {
     path: ['messageTypes'],
     message: WEBHOOK_MESSAGE_TYPES_NEED_THE_EVENT,
+  })
+  .refine((data) => !data.messageWords || data.events.includes('message.received'), {
+    path: ['messageWords'],
+    message: WEBHOOK_MESSAGE_WORDS_NEED_THE_EVENT,
   })
   .refine((data) => !data.runEndReasons || data.events.includes('automation.run_ended'), {
     path: ['runEndReasons'],
@@ -1305,6 +1323,11 @@ export const apiUpdateWebhookEndpointSchema = z
       .describe(
         'The types of the received messages the endpoint receives as message.received; null receives every type. Left out, they stay, unless the events no longer include message.received, which clears them.',
       ),
+    messageWords: messageWordsField
+      .optional()
+      .describe(
+        'The words or phrases whose received messages the endpoint receives as message.received (a message whose text contains one of them, whatever its case); null receives every message. Left out, they stay, unless the events no longer include message.received, which clears them.',
+      ),
     runEndReasons: runEndReasonsField
       .optional()
       .describe(
@@ -1480,6 +1503,7 @@ export const apiUpdateWebhookEndpointSchema = z
       data.consentChanges !== undefined ||
       data.contactSources !== undefined ||
       data.messageTypes !== undefined ||
+      data.messageWords !== undefined ||
       data.runEndReasons !== undefined ||
       data.channelIds !== undefined ||
       data.teamIds !== undefined ||
@@ -1579,6 +1603,8 @@ export interface ApiWebhookEndpoint {
   contactSources: ContactSource[] | null;
   /** The types of the received messages it receives (ADR-191); null receives every type. */
   messageTypes: WebhookReceivedMessageType[] | null;
+  /** The words of the received messages it receives (ADR-337); null receives every message. */
+  messageWords: string[] | null;
   /** Why the runs it receives as `automation.run_ended` ended (ADR-192); null: every reason. */
   runEndReasons: AutomationEndReason[] | null;
   /** The numbers whose events it receives (ADR-170); null receives every number's. */
@@ -1752,6 +1778,7 @@ const columns = {
   consentChanges: webhookEndpoints.consentChanges,
   contactSources: webhookEndpoints.contactSources,
   messageTypes: webhookEndpoints.messageTypes,
+  messageWords: webhookEndpoints.messageWords,
   runEndReasons: webhookEndpoints.runEndReasons,
   channelAccountIds: webhookEndpoints.channelAccountIds,
   teamIds: webhookEndpoints.teamIds,
@@ -1827,6 +1854,7 @@ type EndpointRow = Pick<
   | 'consentChanges'
   | 'contactSources'
   | 'messageTypes'
+  | 'messageWords'
   | 'runEndReasons'
   | 'channelAccountIds'
   | 'teamIds'
@@ -1907,6 +1935,7 @@ function toApiEndpoint(row: EndpointRow, now: Date): ApiWebhookEndpoint {
     consentChanges: row.consentChanges,
     contactSources: row.contactSources,
     messageTypes: row.messageTypes,
+    messageWords: row.messageWords,
     runEndReasons: row.runEndReasons,
     channelIds: row.channelAccountIds,
     teamIds: row.teamIds,
@@ -2220,6 +2249,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
             const consentChanges = webhookConsentChangesFor(data.events, data.consentChanges, null);
             const contactSources = webhookContactSourcesFor(data.events, data.contactSources, null);
             const messageTypes = webhookMessageTypesFor(data.events, data.messageTypes, null);
+            const messageWords = webhookMessageWordsFor(data.events, data.messageWords, null);
             const runEndReasons = webhookRunEndReasonsFor(
               data.events,
               runEndStatuses,
@@ -2355,6 +2385,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               consentChanges,
               contactSources,
               messageTypes,
+              messageWords,
               runEndReasons,
               channelAccountIds: channelIds,
               teamIds,
@@ -2415,6 +2446,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               ...(consentChanges ? { consentChanges } : {}),
               ...(contactSources ? { contactSources } : {}),
               ...(messageTypes ? { messageTypes } : {}),
+              ...(messageWords ? { messageWords } : {}),
               ...(runEndReasons ? { runEndReasons } : {}),
               ...(channelIds ? { channelIds } : {}),
               ...(teamIds ? { teamIds } : {}),
@@ -2531,6 +2563,9 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
         }
         if (data.messageTypes && !events.includes('message.received')) {
           throw invalidMessageTypes();
+        }
+        if (data.messageWords && !events.includes('message.received')) {
+          throw invalidMessageWords();
         }
         if (data.runEndReasons && !events.includes('automation.run_ended')) {
           throw invalidRunEndReasons();
@@ -2766,6 +2801,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
           data.consentChanges !== undefined ||
           data.contactSources !== undefined ||
           data.messageTypes !== undefined ||
+          data.messageWords !== undefined ||
           data.runEndReasons !== undefined ||
           data.channelIds !== undefined ||
           data.teamIds !== undefined ||
@@ -2917,6 +2953,11 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
                 data.messageTypes,
                 endpoint.messageTypes,
               ),
+              messageWords: webhookMessageWordsFor(
+                events,
+                data.messageWords,
+                endpoint.messageWords,
+              ),
               runEndReasons: webhookRunEndReasonsFor(
                 events,
                 ends,
@@ -3048,6 +3089,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               consentChanges: webhookEndpoints.consentChanges,
               contactSources: webhookEndpoints.contactSources,
               messageTypes: webhookEndpoints.messageTypes,
+              messageWords: webhookEndpoints.messageWords,
               runEndReasons: webhookEndpoints.runEndReasons,
               channelAccountIds: webhookEndpoints.channelAccountIds,
               teamIds: webhookEndpoints.teamIds,
@@ -3115,6 +3157,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
             ...(changed.consentChanges ? { consentChanges: changed.consentChanges } : {}),
             ...(changed.contactSources ? { contactSources: changed.contactSources } : {}),
             ...(changed.messageTypes ? { messageTypes: changed.messageTypes } : {}),
+            ...(changed.messageWords ? { messageWords: changed.messageWords } : {}),
             ...(changed.runEndReasons ? { runEndReasons: changed.runEndReasons } : {}),
             ...(changed.channelAccountIds ? { channelIds: changed.channelAccountIds } : {}),
             ...(changed.teamIds ? { teamIds: changed.teamIds } : {}),

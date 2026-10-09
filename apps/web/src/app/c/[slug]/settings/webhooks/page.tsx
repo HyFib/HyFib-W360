@@ -36,6 +36,7 @@ import {
   webhookFieldText,
   webhookOAuthText,
   webhookHost,
+  webhookMessageWordsText,
   webhookOwnerText,
   webhookPipelineText,
   webhookApiKeyText,
@@ -355,6 +356,12 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
                         {e.messageTypes
                           .map((t) => WEBHOOK_RECEIVED_MESSAGE_TYPE_LABELS[t])
                           .join(', ')}
+                      </p>
+                    ) : null}
+                    {e.messageWords ? (
+                      <p className="text-xs break-all text-muted-foreground">
+                        Received messages sent, containing:{' '}
+                        {webhookMessageWordsText(e.messageWords)}
                       </p>
                     ) : null}
                     {e.runEndReasons ? (

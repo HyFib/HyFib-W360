@@ -136,6 +136,8 @@ import {
   webhookFieldValuesFromLines,
   webhookFieldWordsFromLines,
   webhookFieldValueText,
+  webhookMessageWordsFromLines,
+  webhookMessageWordsText,
 } from './model';
 import {
   noteCreatedPayloadSchema,
@@ -239,6 +241,8 @@ import {
   webhookContactSourcesSchema,
   webhookMessageTypesFor,
   webhookMessageTypesSchema,
+  webhookMessageWordsFor,
+  webhookMessageWordsSchema,
   webhookRunEndReasonsFor,
   webhookRunEndReasonsNeedTheEnds,
   webhookRunEndReasonsSchema,
@@ -4122,6 +4126,86 @@ describe('contact event field words and ranges (ADR-335)', () => {
     expect(
       webhookFieldRangeFromInputs({ key: 'vip', label: 'VIP', type: 'boolean' }, '', ''),
     ).toEqual({ ok: false, message: 'VIP takes no range.' });
+  });
+});
+
+describe('words in received messages (ADR-337)', () => {
+  const refusal = (given: unknown) => {
+    const issue = webhookMessageWordsSchema.safeParse(given).error?.issues[0];
+    return issue && [issue.path.join('.'), issue.message];
+  };
+
+  it('take 1 to 50 words or phrases, trimmed and kept once whatever their case, in the order given', () => {
+    expect(
+      webhookMessageWordsSchema.parse(['  Refund ', 'cancel order', 'REFUND', 'a, b', 'பணம்']),
+    ).toEqual(['Refund', 'cancel order', 'a, b', 'பணம்']);
+    expect(webhookMessageWordsSchema.parse(null)).toBeNull();
+    expect(webhookMessageWordsSchema.parse(['x'.repeat(100)])).toEqual(['x'.repeat(100)]);
+    // Fifty words given twice each are fifty.
+    expect(
+      webhookMessageWordsSchema.parse(Array.from({ length: 50 }, (_, i) => `w${i}`)),
+    ).toHaveLength(50);
+  });
+
+  it('refuse an empty list, more than 50, a blank word, a long one or one with control characters, by place', () => {
+    expect(refusal([])).toEqual(['', 'Give at least one word or phrase, or take every message.']);
+    expect(refusal(Array.from({ length: 51 }, (_, i) => `w${i}`))).toEqual([
+      '',
+      'Give at most 50 words and phrases.',
+    ]);
+    expect(refusal(['ok', '  '])).toEqual(['1', 'Give each word or phrase as text, not blank.']);
+    expect(refusal(['x'.repeat(101)])).toEqual([
+      '0',
+      'Give words and phrases of at most 100 characters.',
+    ]);
+    for (const bad of [
+      'a\nb',
+      'a\tb',
+      'a\u0000b',
+      'a\u001fb',
+      'a\u007fb',
+      'a\u0085b',
+      'a\u2028b',
+      'a\u2029b',
+    ]) {
+      expect(refusal(['ok', bad]), JSON.stringify(bad)).toEqual([
+        '1',
+        'Give words and phrases without line breaks or control characters.',
+      ]);
+    }
+    expect(refusal([5])).toEqual(['0', 'Give the words and phrases as text.']);
+    expect(refusal('refund')?.[0]).toBe('');
+  });
+
+  it('are kept only while the endpoint takes message.received: given, kept, or cleared', () => {
+    expect(webhookMessageWordsFor(['message.received'], ['a'], null)).toEqual(['a']);
+    expect(webhookMessageWordsFor(['message.received'], undefined, ['b'])).toEqual(['b']);
+    expect(webhookMessageWordsFor(['message.received'], null, ['b'])).toBeNull();
+    expect(webhookMessageWordsFor(['message.received'], undefined, null)).toBeNull();
+    expect(webhookMessageWordsFor(['message.status'], ['a'], ['b'])).toBeNull();
+  });
+
+  it('read the words Settings gives, one a line, and name them as Settings shows them', () => {
+    expect(webhookMessageWordsFromLines(' Refund \n\n  cancel order\r\nrefund\n')).toEqual({
+      ok: true,
+      words: ['Refund', 'cancel order'],
+    });
+    expect(webhookMessageWordsFromLines('  \n')).toEqual({ ok: true, words: [] });
+    expect(webhookMessageWordsFromLines(`ok\n${'x'.repeat(101)}`)).toEqual({
+      ok: false,
+      message: 'Give words and phrases of at most 100 characters.',
+    });
+    expect(webhookMessageWordsFromLines('a\u0007b')).toEqual({
+      ok: false,
+      message: 'Give words and phrases without line breaks or control characters.',
+    });
+    expect(
+      webhookMessageWordsFromLines(Array.from({ length: 51 }, (_, i) => `w${i}`).join('\n')),
+    ).toEqual({ ok: false, message: 'Give at most 50 words and phrases.' });
+    expect(
+      webhookMessageWordsFromLines(Array.from({ length: 100 }, (_, i) => `W${i % 50}`).join('\n')),
+    ).toMatchObject({ ok: true, words: Array.from({ length: 50 }, (_, i) => `W${i}`) });
+    expect(webhookMessageWordsText(['refund', 'a, b'])).toBe('"refund", "a, b"');
   });
 });
 

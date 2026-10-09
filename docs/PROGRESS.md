@@ -1,5 +1,55 @@
 # Progress
 
+## 2026-10-09 — Words in received messages (P5-09, H-014, ADR-337)
+
+Status: **Implemented; its database tests run in CI only.** An endpoint taking `message.received`
+received every message customers send, or those of its numbers, teams, members, tags and types, and
+ADR-191 left filters on a message's words unbuilt. The local PostgreSQL is unavailable, so
+migration 0257 and the integration tests below were written but not run here; the migration passed
+the pglast parse check (syntax only), its SQL function's body included.
+
+### Completed
+
+- **Database:** migration 0257 (`message_words text[]` on endpoints with its check: 1 to 50 words,
+  one dimension, no null, each 1 to 100 characters without control characters or spaces around it,
+  joined on a control character no word may hold, only with `message.received`; the column's update
+  grant; `app.webhook_message_text(text, jsonb)`, a message's text as the payload's `message.text`
+  gives it, for the runtime and definer roles; `app.capture_webhook_event` replaced in place: the
+  text read only when an active endpoint names words and matched with `strpos` on lowered text).
+- **Domain:** `webhookMessageWord`, `webhookMessageWordsFromLines` and `webhookMessageWordsText`;
+  `webhookMessageWordsSchema` (trimmed, kept once whatever their case, refusals by place),
+  `webhookMessageWordsFor` and the rule that words need the event; the endpoint's view, insert,
+  change, audit and export; the API's `messageWords` on create, change and every endpoint, and the
+  OpenAPI entries, the message.received event's description among them.
+- **Web:** Settings → Webhooks shows "Received messages sent, by words" under "Message received"
+  (every message, or only those containing any of the words, typed one a line), and the endpoints
+  list names them.
+- **Tests:** unit (4 new in `webhooks/webhooks.test.ts`, 1 new and 1 changed in `api/api.test.ts`);
+  integration (3 new in `webhooks.test.ts`: the service's refusals and keeping, the audit and each
+  clause of the database check; the text read as the payload gives it over every kind of content;
+  capture by words in a text, a caption and a tapped reply, `%` found as written, a message without
+  text, the event without text, and the payloads; 1 new in `api-webhook-endpoints.test.ts`: the
+  API's round trip and refusals; the function's grants in `tenant-isolation.test.ts`). Written for
+  CI; the integration tests were not run here. No e2e test.
+- **Docs:** ADR-337; ARCHITECTURE; SECURITY; THREAT-MODEL T302; DEPLOYMENT; RUNBOOKS; BACKLOG
+  P5-09; feature matrix W-138, W-139 and H-014.
+- **Mutation checks:** 21/21 deliberate regressions caught on the unit-tested parts (reading a
+  word: trimming, blanks, its length either side and control characters, the separators and C1
+  controls among them; Settings' reader and text; the schema's bounds, keeping and places; the list
+  kept only with the event; the API's rule, its change and description; the OpenAPI entries). The
+  services' rule, the check and the capture need the database, so their regressions are left to the
+  integration tests, which run in CI.
+
+### Test commands and results (local, 2026-10-09)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 141 files, 1415 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
 ## 2026-10-09 — Endpoint audit entries that fit, however long the lists (P5-09, H-014, ADR-336)
 
 Status: **Fixed; its database tests run in CI only.** Adding or changing a webhook endpoint

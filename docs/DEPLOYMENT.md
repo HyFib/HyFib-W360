@@ -1271,6 +1271,16 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    a 500 and leaves the endpoint as it was. Finish the web rollout before companies add words and
    ranges, or expect such failures until it ends.
 
+   Migration 0257 (ADR-337) adds `app.webhook_endpoints.message_words` with its check (validated by
+   reading the table, which holds at most 10 endpoints a company) and update grant, adds
+   `app.webhook_message_text`, and replaces `app.capture_webhook_event` with the same signature,
+   keeping every filter before it; every endpoint starts without a list. Web servers of this release
+   need it, as their reads of endpoints name the column; workers do not read it, and the capture
+   runs in the database. Web servers from before it neither show nor change the column: until the
+   web rollout ends, an old server's change that drops Message received from an endpoint with words
+   fails on the check (a 500, leaving the endpoint as it was), its other changes keep the words, and
+   its API refuses `messageWords` (422) and leaves it out of the endpoints it answers.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

@@ -68,6 +68,7 @@ import {
   webhookFieldValuesFromLines,
   webhookFieldValueText,
   webhookFieldWordsFromLines,
+  webhookMessageWordsFromLines,
   webhookOAuthText,
   webhookOwnerText,
   webhookPipelineText,
@@ -825,6 +826,78 @@ function MessageTypeChoices({
           </div>
         );
       })}
+    </fieldset>
+  );
+}
+
+/**
+ * The words and phrases whose received messages an endpoint takes as `message.received` (ADR-337),
+ * shown while it takes the event: every message, or only those whose text contains one of them,
+ * whatever its case, typed one a line and read as the service reads them.
+ */
+function MessageWordChoices({
+  prefix,
+  every,
+  onEveryChange,
+  text,
+  onTextChange,
+}: {
+  prefix: string;
+  every: boolean;
+  onEveryChange: (next: boolean) => void;
+  text: string;
+  onTextChange: (next: string) => void;
+}) {
+  return (
+    <fieldset className="ml-6 grid gap-2">
+      <legend className="mb-1 text-xs text-muted-foreground">
+        Received messages sent, by words
+      </legend>
+      <label className="flex items-start gap-2 text-sm">
+        <input
+          type="radio"
+          name={`${prefix}-message-words-every`}
+          className="mt-1"
+          checked={every}
+          onChange={() => onEveryChange(true)}
+        />
+        <span>Every message, whatever its text</span>
+      </label>
+      <label className="flex items-start gap-2 text-sm">
+        <input
+          type="radio"
+          name={`${prefix}-message-words-every`}
+          className="mt-1"
+          checked={!every}
+          onChange={() => onEveryChange(false)}
+        />
+        <span>
+          Only the messages whose text contains any of these words or phrases
+          <span className="block text-xs text-muted-foreground">
+            The text, a caption, the title of a tapped reply, a reaction or a location’s name,
+            whatever its case. A message without text is not sent.
+          </span>
+        </span>
+      </label>
+      {!every ? (
+        <div className="ml-6">
+          <Field
+            id={`${prefix}-message-words`}
+            label="Words and phrases"
+            description={`One a line, up to ${WEBHOOK_LIMITS.messageWords}, each up to ${WEBHOOK_LIMITS.messageWordLength} characters.`}
+          >
+            {(aria) => (
+              <Textarea
+                {...aria}
+                rows={3}
+                autoComplete="off"
+                value={text}
+                onChange={(e) => onTextChange(e.target.value)}
+              />
+            )}
+          </Field>
+        </div>
+      ) : null}
     </fieldset>
   );
 }
@@ -2637,6 +2710,10 @@ function EventChoices({
   onContactSourcesChange,
   messageTypes,
   onMessageTypesChange,
+  everyMessageWord,
+  onEveryMessageWordChange,
+  messageWordsText,
+  onMessageWordsTextChange,
   runEndReasons,
   onRunEndReasonsChange,
   scores,
@@ -2681,6 +2758,10 @@ function EventChoices({
   onContactSourcesChange: (next: ContactSource[]) => void;
   messageTypes: WebhookReceivedMessageType[];
   onMessageTypesChange: (next: WebhookReceivedMessageType[]) => void;
+  everyMessageWord: boolean;
+  onEveryMessageWordChange: (next: boolean) => void;
+  messageWordsText: string;
+  onMessageWordsTextChange: (next: string) => void;
   runEndReasons: AutomationEndReason[];
   onRunEndReasonsChange: (next: AutomationEndReason[]) => void;
   scores: WebhookSurveyScore[];
@@ -2711,11 +2792,20 @@ function EventChoices({
               </Label>
             </div>
             {type === 'message.received' && chosen.includes(type) ? (
-              <MessageTypeChoices
-                prefix={prefix}
-                chosen={messageTypes}
-                onChange={onMessageTypesChange}
-              />
+              <>
+                <MessageTypeChoices
+                  prefix={prefix}
+                  chosen={messageTypes}
+                  onChange={onMessageTypesChange}
+                />
+                <MessageWordChoices
+                  prefix={prefix}
+                  every={everyMessageWord}
+                  onEveryChange={onEveryMessageWordChange}
+                  text={messageWordsText}
+                  onTextChange={onMessageWordsTextChange}
+                />
+              </>
             ) : null}
             {type === 'satisfaction_survey.answered' && chosen.includes(type) ? (
               <ScoreChoices prefix={prefix} chosen={scores} onChange={onScoresChange} />
@@ -3176,6 +3266,7 @@ export function WebhookEndpointForm({
     contactSources: ContactSource[] | null;
     /** The types of the received messages it takes (ADR-191); null for every type. */
     messageTypes: WebhookReceivedMessageType[] | null;
+    messageWords: string[] | null;
     /** Why the runs it takes ended (ADR-192), narrowing the ends they belong to; null: every one. */
     runEndReasons: AutomationEndReason[] | null;
     channelIds: string[] | null;
@@ -3339,6 +3430,10 @@ export function WebhookEndpointForm({
   );
   const [messageTypes, setMessageTypes] = useState<WebhookReceivedMessageType[]>(
     endpoint?.messageTypes ?? [...WEBHOOK_RECEIVED_MESSAGE_TYPES],
+  );
+  const [everyMessageWord, setEveryMessageWord] = useState(!endpoint?.messageWords);
+  const [messageWordsText, setMessageWordsText] = useState(
+    endpoint?.messageWords?.join('\n') ?? '',
   );
   const [runEndReasons, setRunEndReasons] = useState<AutomationEndReason[]>(
     webhookRunEndReasonsTicked(endpoint?.runEndReasons ?? null),
@@ -3678,6 +3773,17 @@ export function WebhookEndpointForm({
           messageTypes.length < WEBHOOK_RECEIVED_MESSAGE_TYPES.length
             ? messageTypes
             : null;
+        // Every received message unless words are given, one a line (ADR-337).
+        let chosenMessageWords: string[] | null = null;
+        if (eventTypes.includes('message.received') && !everyMessageWord) {
+          const read = webhookMessageWordsFromLines(messageWordsText);
+          if (!read.ok) {
+            setBusy(false);
+            setError({ code: 'validation_failed', message: read.message });
+            return;
+          }
+          chosenMessageWords = read.words;
+        }
         // Every reason ticked of an end takes its every run; those ticked narrow the others (ADR-192).
         const chosenRunEndReasons = eventTypes.includes('automation.run_ended')
           ? webhookRunEndReasonsChosen(chosenRunEndStatuses, runEndReasons)
@@ -3877,6 +3983,7 @@ export function WebhookEndpointForm({
           consentChanges: chosenConsentChanges,
           contactSources: chosenContactSources,
           messageTypes: chosenMessageTypes,
+          messageWords: chosenMessageWords,
           runEndReasons: chosenRunEndReasons,
           channelIds: chosenChannels,
           teamIds: chosenTeams,
@@ -3972,6 +4079,8 @@ export function WebhookEndpointForm({
               setConsentChanges([...WEBHOOK_CONSENT_CHANGES]);
               setContactSources([...WEBHOOK_CONTACT_SOURCES]);
               setMessageTypes([...WEBHOOK_RECEIVED_MESSAGE_TYPES]);
+              setEveryMessageWord(true);
+              setMessageWordsText('');
               setRunEndReasons([...WEBHOOK_RUN_END_REASONS]);
               setEveryAutomation(true);
               setAutomationIds([]);
@@ -4118,6 +4227,10 @@ export function WebhookEndpointForm({
         onContactSourcesChange={setContactSources}
         messageTypes={messageTypes}
         onMessageTypesChange={setMessageTypes}
+        everyMessageWord={everyMessageWord}
+        onEveryMessageWordChange={setEveryMessageWord}
+        messageWordsText={messageWordsText}
+        onMessageWordsTextChange={setMessageWordsText}
         runEndReasons={runEndReasons}
         onRunEndReasonsChange={setRunEndReasons}
         scores={scores}

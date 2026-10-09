@@ -958,6 +958,61 @@ export const WEBHOOK_RECEIVED_MESSAGE_TYPE_LABELS: Record<WebhookReceivedMessage
 };
 
 /**
+ * A word or phrase an endpoint looks for in the received messages it takes (ADR-337), as Settings
+ * and the API read it: trimmed, 1 to 100 characters, and without control characters, a line break
+ * among them (nor the line and paragraph separators, which the database counts as such).
+ */
+export function webhookMessageWord(
+  raw: string,
+): { ok: true; word: string } | { ok: false; message: string } {
+  const word = raw.trim();
+  if (!word) return { ok: false, message: 'Give each word or phrase as text, not blank.' };
+  if (word.length > WEBHOOK_LIMITS.messageWordLength) {
+    return {
+      ok: false,
+      message: `Give words and phrases of at most ${WEBHOOK_LIMITS.messageWordLength} characters.`,
+    };
+  }
+  // eslint-disable-next-line no-control-regex
+  if (/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(word)) {
+    return {
+      ok: false,
+      message: 'Give words and phrases without line breaks or control characters.',
+    };
+  }
+  return { ok: true, word };
+}
+
+/**
+ * The words and phrases Settings → Webhooks takes for received messages (ADR-337), one a line,
+ * each read by `webhookMessageWord`, blank lines skipped and each kept once whatever its case.
+ */
+export function webhookMessageWordsFromLines(
+  text: string,
+): { ok: true; words: string[] } | { ok: false; message: string } {
+  const words: string[] = [];
+  for (const line of text.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    const read = webhookMessageWord(line);
+    if (!read.ok) return read;
+    if (!words.some((word) => word.toLowerCase() === read.word.toLowerCase())) {
+      words.push(read.word);
+    }
+  }
+  if (words.length > WEBHOOK_LIMITS.messageWords) {
+    return {
+      ok: false,
+      message: `Give at most ${WEBHOOK_LIMITS.messageWords} words and phrases.`,
+    };
+  }
+  return { ok: true, words };
+}
+
+/** Words and phrases as Settings → Webhooks names them (ADR-337): each in quotes. */
+export const webhookMessageWordsText = (words: readonly string[]): string =>
+  words.map((word) => `"${word}"`).join(', ');
+
+/**
  * The reasons a run ends for (`run.endReason`) by the end they belong to (ADR-192), as automations
  * define them, in the order of `WEBHOOK_RUN_END_STATUSES`.
  */
@@ -1146,6 +1201,9 @@ export const WEBHOOK_LIMITS = {
   contactTags: 50,
   /** The conversation tags an endpoint can choose to take the conversations' events of (ADR-273). */
   conversationTags: 50,
+  /** The words and phrases an endpoint can look for in received messages (ADR-337). */
+  messageWords: 50,
+  messageWordLength: 100,
   /**
    * An endpoint's OAuth client (ADR-173): its identifier, secret and scope, short enough that the
    * Basic header stays within what the egress client sends, and the longest token kept.

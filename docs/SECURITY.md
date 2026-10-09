@@ -1723,6 +1723,18 @@ Phase 5 rules (outgoing webhooks, P5-09):
   `app.capture_webhook_event` to the type the message trigger stores: it narrows what one endpoint
   receives and never adds an event or a delivery for another endpoint or company. Audited with the
   list (unit tests; integration and e2e tests, run in CI only).
+- An endpoint can take the received messages whose text contains chosen words or phrases only
+  (ADR-337), chosen the same way. A list holds 1 to 50 words of 1 to 100 characters without control
+  characters and is kept only while the endpoint takes `message.received` (a database check too,
+  which also refuses the control character it joins the words on inside a word). It is applied in
+  `app.capture_webhook_event`, which reads the message's text, as the payload derives it
+  (`app.webhook_message_text`), only when an active endpoint names words, from the message row by
+  the company and its id, as the role adding the message under the company's row-level security,
+  and compares it with `strpos` on lowered text, so no character of a word acts as a pattern. The
+  text is never stored with the event, which keeps the message's type only; the filter narrows what
+  one endpoint receives and never adds an event or a delivery for another endpoint or company.
+  Words can say what customers write about, so the list is in the company data export and the
+  audits as the tag lists are (unit tests; integration tests, run in CI only).
 - An endpoint can take the runs of an end that ended for chosen reasons only (ADR-192), chosen the
   same way. A list holds only the 21 reasons a run ends for, is kept only while the endpoint takes
   `automation.run_ended` and only with reasons of the ends it takes (a database check too, which

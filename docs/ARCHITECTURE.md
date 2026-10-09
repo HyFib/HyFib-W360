@@ -2347,6 +2347,15 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   message trigger stores in the detail against the list, with the endpoint's other filters. Settings
   (checkboxes under "Message received") and the API (`messageTypes`) set it; a change that drops the
   event clears it.
+- **Word filters for received messages** (migration 0257, ADR-337): `message_words` on an endpoint
+  lists 1 to 50 words or phrases whose received messages it takes as `message.received`, null for
+  every message; a check keeps their shape (1 to 100 characters, no control character or spaces
+  around them) and the list to endpoints taking the event. `app.capture_webhook_event` (replaced
+  with the same signature) reads the message's text through `app.webhook_message_text`, which
+  derives it as the payload's `message.text` (`inboundSummary`) does, only when an active endpoint
+  names words, and matches it with `strpos` on lowered text, with the endpoint's other filters; the
+  event keeps the type only. Settings (one a line under "Message received") and the API
+  (`messageWords`) set it; a change that drops the event clears it.
 - **Run end reason filters** (migration 0138, ADR-192): `run_end_reasons` on an endpoint lists the
   reasons a run ended for that it takes as `automation.run_ended`, null for every reason; a check
   keeps it to 1 to 21 known reasons, to endpoints taking the event and to reasons of the ends they

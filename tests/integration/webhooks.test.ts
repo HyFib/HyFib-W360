@@ -30,6 +30,7 @@ import {
   createWebhooksService,
   dispatchDueWebhooks,
   findWebhookDispatchDue,
+  inboundSummary,
   messageReceivedPayloadSchema,
   messageStatusPayloadSchema,
   pingPayloadSchema,
@@ -8482,6 +8483,216 @@ describe('message type filters (ADR-191)', () => {
         .sort();
     expect(typesAt(path)).toEqual(['interactive', 'text']);
     expect(typesAt(every.path)).toEqual(['interactive', 'location', 'text']);
+  });
+});
+
+describe('words in received messages (ADR-337)', () => {
+  it('are refused without message.received, empty, blank, too long or with control characters, kept once whatever their case, by a change that leaves them out and cleared with the event; the database keeps their shape and the event', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const url = 'https://hooks.example.com/in';
+    const refused = (eventTypes: string[], messageWords: unknown, message: RegExp) =>
+      expectAppError(
+        webhooks().create(owner, { url, eventTypes, messageWords }),
+        'validation_failed',
+        message,
+      );
+    const needsTheEvent = /only for an endpoint that receives Message received/;
+    await refused(['message.status'], ['refund'], needsTheEvent);
+    await refused(['message.received'], [], /at least one word or phrase/);
+    await refused(['message.received'], ['   '], /not blank/);
+    await refused(['message.received'], ['x'.repeat(101)], /at most 100 characters/);
+    await refused(['message.received'], ['two\nlines'], /control characters/);
+    await refused(['message.received'], ['para\u2028graph'], /control characters/);
+    await refused(
+      ['message.received'],
+      Array.from({ length: 51 }, (_, i) => `word ${i}`),
+      /at most 50 words and phrases/,
+    );
+    await refused(['message.received'], [5], /as text/);
+    expect(await webhooks().list(owner)).toEqual([]);
+
+    const created = await webhooks().create(owner, {
+      url,
+      eventTypes: ['message.received', 'message.status'],
+      messageWords: ['  Refund ', 'cancel order', 'REFUND', 'பணம் திரும்ப'],
+    });
+    const words = ['Refund', 'cancel order', 'பணம் திரும்ப'];
+    const [audit] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events WHERE tenant_id = $1 AND action = 'webhook.endpoint_created'`,
+      [c.tenant.id],
+    );
+    expect(audit?.metadata).toMatchObject({ messageWords: words });
+    const change = (fields: Record<string, unknown>) =>
+      webhooks().update(owner, {
+        endpointId: created.id,
+        url,
+        description: '',
+        eventTypes: ['message.received', 'message.status'],
+        ...fields,
+      });
+    const current = async () =>
+      (await webhooks().list(owner)).find((e) => e.id === created.id)?.messageWords;
+    expect(await current()).toEqual(words);
+    await change({ description: 'kept' });
+    expect(await current()).toEqual(words);
+    await change({ messageWords: ['price', 'a, b'] });
+    expect(await current()).toEqual(['price', 'a, b']);
+    const updates = await fx.query<{ metadata: { messageWords?: unknown } }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND action = 'webhook.endpoint_updated' ORDER BY occurred_at`,
+      [c.tenant.id],
+    );
+    expect(updates.map((u) => u.metadata.messageWords)).toEqual([words, ['price', 'a, b']]);
+    await change({ messageWords: null });
+    expect(await current()).toBeNull();
+    await change({ messageWords: ['price'] });
+    // The database refuses an empty list, more than fifty words, a missing word, a nested list, a
+    // word with spaces around it, an empty word, one with a control character (the one the check
+    // joins the words on among them, so one word cannot pass for two) or of more than 100
+    // characters…
+    const setInDatabase = (value: string) =>
+      fx.query(`UPDATE app.webhook_endpoints SET message_words = ${value} WHERE id = $1`, [
+        created.id,
+      ]);
+    for (const bad of [
+      `'{}'`,
+      `array_fill('word'::text, ARRAY[51])`,
+      `ARRAY['price', NULL]::text[]`,
+      `ARRAY[['price']]::text[]`,
+      `ARRAY[' price']`,
+      `ARRAY['price ']`,
+      `ARRAY['']`,
+      `ARRAY['two' || chr(10) || 'lines']`,
+      `ARRAY['one' || chr(31) || 'two']`,
+      `ARRAY[repeat('x', 101)]`,
+    ]) {
+      await expect(setInDatabase(bad), bad).rejects.toThrow(/webhook_endpoints_message_words/);
+    }
+    // …and takes 100 characters, commas and other scripts.
+    await setInDatabase(`ARRAY[repeat('x', 100), 'a, b', 'பணம்']`);
+    expect(await current()).toEqual(['x'.repeat(100), 'a, b', 'பணம்']);
+    await change({ eventTypes: ['message.status'] });
+    expect(await current()).toBeNull();
+    await expectAppError(
+      change({ eventTypes: ['message.status'], messageWords: ['price'] }),
+      'validation_failed',
+      needsTheEvent,
+    );
+    // …and any list for an endpoint that does not take the event.
+    await expect(setInDatabase(`ARRAY['price']`)).rejects.toThrow(
+      /webhook_endpoints_message_words/,
+    );
+    // The company role changes the list only through its column grant.
+    const [grant] = await fx.query<{ can_update: boolean }>(
+      `SELECT has_column_privilege('w360_app', 'app.webhook_endpoints', 'message_words', 'UPDATE')
+                AS can_update`,
+    );
+    expect(grant?.can_update).toBe(true);
+  });
+
+  it('read a received message’s text as the payload gives it', async () => {
+    const cases: [string, Record<string, unknown>][] = [
+      ['text', { text: 'Hello' }],
+      ['text', { text: 5 }],
+      ['text', {}],
+      ['text', { text: 'Hi', tooLarge: true }],
+      ['text', { text: 'Hi', tooLarge: 'true' }],
+      ['image', { caption: 'A photo', mime_type: 'image/jpeg' }],
+      ['video', { caption: 'A clip' }],
+      ['audio', { mime_type: 'audio/ogg' }],
+      ['document', { caption: ['not text'] }],
+      ['sticker', { caption: 'A sticker' }],
+      ['button', { text: 'Yes', payload: 'yes' }],
+      ['interactive', { interactiveType: 'button_reply', reply: { id: 'a', title: 'Refund' } }],
+      ['interactive', { reply: 'Refund' }],
+      ['interactive', { reply: { title: 7 } }],
+      ['interactive', {}],
+      ['reaction', { emoji: '👍', messageId: 'wamid.x' }],
+      ['location', { name: 'Home', address: 'MG Road' }],
+      ['location', { address: 'MG Road' }],
+      ['location', { name: '', address: 'MG Road' }],
+      ['location', { name: 5, address: 'MG Road' }],
+      ['contacts', { contacts: [] }],
+      ['order', { text: 'An order' }],
+      ['system', { text: 'A change' }],
+      ['unsupported', { text: 'Unknown' }],
+    ];
+    for (const [type, content] of cases) {
+      const [row] = await fx.query<{ text: string | null }>(
+        `SELECT app.webhook_message_text($1, $2::jsonb) AS text`,
+        [type, JSON.stringify(content)],
+      );
+      expect(row?.text, `${type} ${JSON.stringify(content)}`).toBe(
+        inboundSummary(type, content).text,
+      );
+    }
+  });
+
+  it('sends an endpoint that names words only the messages whose text contains one, whatever its case, others every message, and captures none nobody takes', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const path = `/ok/${randomBytes(6).toString('hex')}`;
+    const desk = await webhooks().create(owner, {
+      url: `http://${HOST}:${port}${path}`,
+      eventTypes: ['message.received'],
+      messageWords: ['refund', 'Cancel order', '100%'],
+    });
+    const from = waId();
+    const send = (message: Record<string, unknown>) =>
+      fx.deliver(fx.messagesBody(c, { messages: [{ waId: from, ...message }] }));
+    // A message no word matches, which only an endpoint taking every message would take: none does
+    // yet, so it is not captured at all.
+    await send({ text: 'Which size fits me?' });
+    expect((await eventsOf(c)).filter((e) => e.type === 'message.received')).toEqual([]);
+    const every = await addEndpoint(c, 'ok', ['message.received']);
+    await send({ text: 'I want a REFUND please' });
+    await send({ text: 'Which size fits me?' });
+    await send({
+      type: 'image',
+      extra: {
+        image: { id: 'media-1', mime_type: 'image/jpeg', caption: 'Please cancel ORDER 42' },
+      },
+    });
+    await send({
+      type: 'interactive',
+      extra: {
+        interactive: { type: 'button_reply', button_reply: { id: 'refund', title: 'Refund' } },
+      },
+    });
+    await send({ type: 'sticker', extra: { sticker: { id: 'media-2', mime_type: 'image/webp' } } });
+    // A word is no pattern: "100%" is found as written, and "100 percent" does not pass for it.
+    await send({ text: 'Is it 100% cotton?' });
+    await send({ text: 'Is it 100 percent cotton?' });
+    const received = (await eventsOf(c)).filter((e) => e.type === 'message.received');
+    expect(received.map((e) => e.detail.messageType)).toEqual([
+      'text',
+      'text',
+      'image',
+      'interactive',
+      'sticker',
+      'text',
+      'text',
+    ]);
+    const takenBy = async (endpointId: string) =>
+      (await deliveriesOf(endpointId)).map((d) => d.event_id);
+    const [refund, size, caption, tap, sticker, percent, words] = received.map((e) => e.id);
+    expect(await takenBy(desk.id)).toEqual([refund, caption, tap, percent]);
+    expect(await takenBy(every.id)).toEqual([refund, size, caption, tap, sticker, percent, words]);
+    // The event keeps no text.
+    expect(received.map((e) => Object.keys(e.detail).sort())).toEqual(
+      received.map(() => ['messageType']),
+    );
+
+    await deliverDue(c);
+    const textsAt = (to: string) =>
+      requestsTo(to)
+        .map((r) => messageReceivedPayloadSchema.parse(JSON.parse(r.body)).data.message.text)
+        .sort();
+    expect(textsAt(path)).toEqual(
+      ['I want a REFUND please', 'Please cancel ORDER 42', 'Refund', 'Is it 100% cotton?'].sort(),
+    );
+    expect(textsAt(every.path)).toHaveLength(7);
   });
 });
 

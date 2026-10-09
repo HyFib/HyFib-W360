@@ -1324,6 +1324,12 @@ export const apiWebhookEndpointSchema = z.object({
     .describe(
       'The types of the received messages the endpoint receives as message.received, as message.type names them; null receives every type.',
     ),
+  messageWords: z
+    .array(z.string())
+    .nullable()
+    .describe(
+      'The words or phrases whose received messages the endpoint receives as message.received: a message whose text, as message.text gives it, contains one of them, whatever its case. null receives every message.',
+    ),
   runEndReasons: z
     .array(z.enum(WEBHOOK_RUN_END_REASONS))
     .nullable()
@@ -4213,7 +4219,7 @@ export function buildOpenApiDocument(serverUrl: string) {
       'message.received': webhook(
         'webhookMessageReceived',
         WEBHOOK_EVENT_INFO['message.received'].label,
-        WEBHOOK_EVENT_INFO['message.received'].description,
+        `${WEBHOOK_EVENT_INFO['message.received'].description} An endpoint receives every received message unless it names the types it takes (its \`messageTypes\`) or words and phrases (its \`messageWords\`): then it receives the messages whose text, as \`message.text\` gives it, contains one of them, whatever its case, and no message without text.`,
         'WebhookMessageReceived',
       ),
       'message.status': webhook(

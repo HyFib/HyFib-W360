@@ -2904,6 +2904,17 @@ not recorded at all, so there is nothing to replay. A tap on reply buttons or a 
 under "Message received" on the endpoint's page, or `PATCH /webhook-endpoints/{id}` with
 `messageTypes` (null for every type). Removing Message received clears the list.
 
+**A receiver misses received messages it named words for (ADR-337).** An endpoint can take only the
+received messages whose text contains one of its words or phrases. The endpoints list shows them
+("Received messages sent, containing: …"), and the API answers `messageWords` (null takes every
+message). A message goes by its text as `message.text` gives it (the text, a caption, the title of
+a tapped reply, a reaction, or a location's name, else its address), whatever its case; a word is
+found as written, spaces and punctuation included, so "cancel order" does not find "cancel my
+order", and "refund" finds "refunded" too. A message without text (a photo without a caption, a
+sticker, a contact card) passes no list. A message no endpoint takes is not recorded, so there is
+nothing to replay. To take more, add words on the endpoint's page, or `PATCH /webhook-endpoints/{id}`
+with `messageWords` (null for every message). Removing Message received clears the list.
+
 **A receiver misses added contacts (ADR-190).** An endpoint can take the `contact.created` of the
 contacts from chosen sources only. The endpoints list shows them ("New contacts sent: …"), and the
 API answers `contactSources` (null takes every contact). An added contact goes by its source

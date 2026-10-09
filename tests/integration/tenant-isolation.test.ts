@@ -336,6 +336,8 @@ describe('database roles', () => {
       'app.webhook_contact_values_match(jsonb,jsonb,text[])',
       // A key's rotations, which the capture reads for the API key filters (0242).
       'app.webhook_api_key_family(uuid,uuid)',
+      // A received message's text, which the capture matches with an endpoint's words (0257).
+      'app.webhook_message_text(text,jsonb)',
     ]) {
       expect(await can('w360_app', fn), fn).toBe(true);
       expect(await can('w360_definer', fn), fn).toBe(true);
