@@ -2318,6 +2318,20 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   `app.deliver_contact_webhook_tag`, which adds the delivery of its transaction's event for the
   endpoints naming the tag added or removed. Settings and the API (`contactEventTags`) set it; a
   change that drops both events clears it.
+- **Field value filters for added and changed contacts** (migration 0253, ADR-332):
+  `contact_event_field_values` on an endpoint lists pairs of a custom field's key and a value of its
+  type whose contacts' `contact.created` and `contact.updated` it takes, null for every contact; a
+  check keeps it to 1 to 50 such pairs and to endpoints taking either event, the services read
+  each value a list adds by its field's type (`webhookContactEventFieldValuesChecked`) and keep a
+  list to 4,000 bytes as JSON, so the audit entries carrying it fit their 8 KiB of metadata.
+  `app.webhook_contact_values_match` passes a change when the contact has one of the values (text
+  whatever its case, numbers as numbers) or, for a `contact.updated`, when its transaction changed
+  one of the fields. `app.capture_contact_webhook_event` and `app.deliver_contact_webhook_tag`
+  (replaced with the same signatures) read the contact's values when an active endpoint names
+  values and apply it at each write, so a contact given a value by a later write of the
+  transaction that added it is sent as `contact.created`. Settings (a field's values one a line,
+  yes/no ticked) and the API (`contactEventFieldValues`) set it; a change that drops both events
+  clears it.
 - **Message type filters** (migration 0137, ADR-191): `message_types` on an endpoint lists the types
   of the received messages it takes as `message.received`, null for every type; a check keeps it to
   1 to 14 known types (never `template`) and to endpoints taking the event.
@@ -2622,8 +2636,10 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   ties by id so the file starts with the tab's rows.
 - **Web:** `/platform/ops` (Overview, Onboarding, Integrations, Queues, Signals, Usage over 7, 30 or
   90 days) and a health card on each company's platform page. Every page re-checks the platform
-  actor. The functions read every company on each view, which suits the test envelope; paging and
-  precomputed rollups come with growth.
+  actor. The functions read every company on each view, which suits the test envelope; since
+  ADR-331 the Overview, Signals and Usage lists show 100 companies a page (`opsCompanyPage`,
+  `CompanyPager`), cut from the whole list so the totals and CSVs still cover every company; pages
+  read from the database and precomputed rollups come with growth.
 - **API requests on the Usage tab (ADR-153):** `usage()` also reads each company's latest
   `api_requests` row of `app.usage_counters` through the platform role (0023's policy), in the same
   transaction, and joins it to the companies the activity function returns; the tab shows it, with

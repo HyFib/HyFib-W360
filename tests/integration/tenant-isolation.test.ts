@@ -332,6 +332,8 @@ describe('database roles', () => {
       'app.add_contact_webhook_changes(uuid,uuid,text[])',
       // Matching the tags a change adds and removes (0239), as the capture does.
       'app.deliver_contact_webhook_tag(uuid,uuid,text)',
+      // Matching a contact's field values with an endpoint's (0253), as the capture does.
+      'app.webhook_contact_values_match(jsonb,jsonb,text[])',
       // A key's rotations, which the capture reads for the API key filters (0242).
       'app.webhook_api_key_family(uuid,uuid)',
     ]) {

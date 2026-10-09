@@ -1,5 +1,121 @@
 # Progress
 
+## 2026-10-09 — Field value filters for added and changed contacts (P5-09, H-014, ADR-332)
+
+Status: **Implemented; its database tests run in CI only.** An endpoint taking `contact.created` or
+`contact.updated` could not narrow them by a custom field's value. The local PostgreSQL is
+unavailable, so the migration and the integration tests below were written but not run here;
+migration 0253 passed the pglast parse check (syntax only), and so did the body of its SQL
+function. The jsonpath expressions in its check are checked by PostgreSQL alone, in CI.
+
+### Completed
+
+- **Database:** migration 0253 (`contact_event_field_values` on `app.webhook_endpoints` with its
+  check and update grant; `app.webhook_contact_values_match` for the runtime and definer roles; the
+  definer role's read of a contact's source; `app.capture_contact_webhook_event` and
+  `app.deliver_contact_webhook_tag` replaced with the same signatures, matching the contact's values
+  at each write and, for a change, the listed fields its transaction changed; a later write of the
+  transaction that added a contact giving its `contact.created` to the endpoints naming values it
+  has then).
+- **Domain:** `webhookContactEventFieldValuesSchema`, `webhookContactEventFieldValuesFor` and
+  `webhookContactEventFieldValuesChecked` (each value a list adds read by its field's type, a held
+  pair kept as it was) in `webhooks/service.ts`; `WebhookContactFieldValue`,
+  `webhookContactFieldValueId`, `webhookFieldValueText`, `webhookContactEventFieldValuesText` and
+  `webhookFieldValuesFromLines` in `webhooks/model.ts`, and the field choices' types; the API's
+  `contactEventFieldValues` on create, change and every endpoint it answers; the OpenAPI entries;
+  the export spec's column.
+- **Web:** Settings → Webhooks "Field values of added and changed contacts" (values one a line for
+  text, number and date fields, yes/no ticked, a value its field's input cannot show as it is
+  listed apart and kept until unticked) and the endpoint's line in the list.
+- **Review fixes:** an independent review of the slice found that a list the services took (50
+  values of 500 characters, or fewer in a script of several bytes a letter) could not be saved:
+  the audit entries carrying it outgrew the 8 KiB an audit entry's metadata holds, so the change
+  failed with an internal error. A list now holds at most 4,000 bytes as JSON (refused with a
+  message before any write), and the database check at most 4,500 bytes of its text. The same
+  review found the docs saying a deleted field's pair matches nothing, which is true only until a
+  field with its key is added again, and the check relying on the order the database evaluates
+  its conditions in; the docs now say so, and the check reads the list's shape in a `CASE` before
+  its keys and values.
+- **Review fix:** Codex's review of PR #52 found that Settings read an endpoint's value through its
+  field's current type: after a field was deleted and added again with another type, a stored
+  `true` became the text "yes" on the next save, and a number or date field refused every save. A
+  value the input cannot show as it is (`webhookFieldValueEditable`: of another type, a date that
+  is not one, or text on several lines given through the API) is now listed apart, ticked and kept
+  as it is.
+- **Tests:** unit (8 new in `webhooks/webhooks.test.ts`: the list's rules, keeping and clearing,
+  reading by type, refusals, held pairs, telling pairs apart and naming them, which values Settings
+  shows as they are, Settings' lines; 1 new
+  in `api/api.test.ts`: the API schemas and OpenAPI entries; 3 changed for the wider PATCH message,
+  the endpoint's properties and the contact event descriptions); integration (4 new in
+  `webhook-events.test.ts`: capture by values and by changes of listed fields, either order of a
+  transaction's writes, contact.created with values given in its transaction by its source and
+  tags, a merge and an erasure as the definer role; 2 new in `webhooks.test.ts`: refusals (a list
+  over 4,000 bytes among them), keeping, replacing and clearing, a deleted field's pair, the
+  audits, each clause of the database check and the grants, and a list of 3,993 bytes saved and
+  audited with 50 tags beside it; 1 new in `api-webhook-endpoints.test.ts`; 2 changed: the field choices' types and the
+  API's endpoint with the new property) and the function's grants in the isolation suite. Written
+  for CI; the integration tests were not run here. No e2e test.
+- **Docs:** ADR-332; ARCHITECTURE; SECURITY; THREAT-MODEL T298; DEPLOYMENT; RUNBOOKS; BACKLOG
+  P5-09; feature matrix W-138, W-139 and H-014.
+- **Mutation checks:** 39/41 deliberate regressions caught on the unit-tested parts (9 of them on
+  the review fixes, one after a test of a list of exactly 4,000 bytes was added). Of the two
+  left, the Settings form's rule refusing values for an endpoint without either event is covered by
+  the integration test of the refusals (CI only), and splitting Settings' lines on carriage returns
+  too was equivalent, as each line is trimmed, so the code now splits on newlines alone. The
+  capture's matching needs the database, so its regressions are left to the integration tests,
+  which run in CI.
+
+### Test commands and results (local, 2026-10-09)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 140 files, 1392 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
+## 2026-10-09 — Pages of companies on the operations console (P5-10, H-034, ADR-331)
+
+Status: **Implemented; its browser test runs in CI only.** The console's Overview listed every
+company needing attention, and its Signals and Usage tabs every company they cover, each on one
+page. No migration and no new permission.
+
+### Completed
+
+- **Domain:** `OPS_COMPANY_PAGE_ROWS` and `opsCompanyPage` in `platform/ops-model.ts`: the page
+  asked for of a list in its order, the nearest for one out of range and the first for anything but
+  a whole number, with which companies it shows and of how many.
+- **Web:** `CompanyPager` in `components/platform/ops.tsx` ("Companies 101–200 of 250" and, with
+  more than one page, the previous and next pages and "Page 2 of 3"); the Overview, Signals and
+  Usage pages show 100 companies a page from the whole list they read, the totals and counts above
+  them and the CSVs covering every company; the Usage tab's links keep its window.
+- **Tests:** unit (2 new in `platform/ops-model.test.ts`: 100 a page in the list's order with the
+  places shown, a page out of range, odd requests and no companies); e2e (`platform-ops.spec.ts`
+  follows the Usage tab's pages until the new company shows, checking the address and the page
+  shown). The e2e test was not run here.
+- **Review fix:** an independent review before the push found that the e2e test could read the
+  Signals tab's pager before the Usage tab arrived (the tabs change on the client, and Signals
+  shows companies a page too), then wait on a next page that was not there until the test timed
+  out; it now waits for the Usage table and fails at once when no next page is left. The same review
+  found whole numbers too large to count exactly showing the first page rather than the last, and
+  a navigation landmark without links on a list of one page: the count now stands alone, the links
+  are a landmark only when there is more than one page, and their arrows are hidden from screen
+  readers.
+- **Docs:** ADR-331; ARCHITECTURE; BACKLOG P5-10; feature matrix H-034.
+- **Mutation checks:** 14/14 deliberate regressions caught on the unit-tested parts. The pager and
+  the pages' wiring are covered by the e2e test, which runs in CI.
+
+### Test commands and results (local, 2026-10-09)
+
+| Command                                            | Result                                          |
+| -------------------------------------------------- | ----------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                           |
+| `pnpm test` (unit)                                 | 140 files, 1383 tests passed                    |
+| `pnpm test:e2e`                                    | not run here: it needs the database; CI runs it |
+| `pnpm build`                                       | passed                                          |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                  |
+
 ## 2026-10-09 — Webhook times to the microsecond (P5-09, H-014, ADR-330)
 
 Status: **Implemented; its database tests run in CI only.** Webhook bodies gave their time to the

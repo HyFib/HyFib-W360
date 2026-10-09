@@ -2926,6 +2926,23 @@ an event must pass every list, and parts that leave out tags mean a change of ta
 sent. To take more, change the tags on the endpoint's page, or `PATCH /webhook-endpoints/{id}` with
 `contactEventTags` (null for every contact). Removing both contact events clears the list.
 
+**A receiver misses changes of contacts with some field values (ADR-332).** An endpoint can take
+the `contact.created` and `contact.updated` of contacts with chosen custom field values only. The
+endpoints list shows them ("Added and changed contacts sent, of contacts with these values or
+changing these fields: …"), and the API answers `contactEventFieldValues` (null takes every
+contact). A change goes by the values the contact has once it is saved, and every change of a listed
+field is sent too, so a receiver also gets the changes between two values it did not list; a
+contact added without the value and given it later is sent as `contact.updated`. Values are
+compared by the field's type: text whatever its case, numbers as numbers, dates as YYYY-MM-DD, yes/no
+as true or false, so a number given as text matches nothing (the services refuse it). A pair whose
+field was deleted matches nothing until a field with its key is added again; then that field's
+changes are sent. A list holds at most 4,000 bytes as JSON: shorten or drop values to add more.
+Events no endpoint takes are not recorded, so there is nothing to
+replay; `GET /contacts/{id}` gives a contact's values as they are now. With sources, parts, fields
+or tags chosen too, an event must pass every list. To take more, change the values on the endpoint's
+page, or `PATCH /webhook-endpoints/{id}` with `contactEventFieldValues` (null for every contact).
+Removing both contact events clears the list.
+
 **A receiver misses consent changes (ADR-189).** An endpoint can take chosen consent changes only.
 The endpoints list shows them ("Consent changes sent: …"), and the API answers `consentChanges`
 (null takes every change). A change goes by its purpose and action (`marketing_opt_out`): the others

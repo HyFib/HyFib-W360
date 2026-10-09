@@ -502,6 +502,15 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
    */
   contactEventTags: text('contact_event_tags').array(),
   /**
+   * The custom field values whose `contact.created` and `contact.updated` it takes (migration
+   * 0253, ADR-332): pairs of a field's key and a value of its type, as contacts keep them. A change
+   * is taken when the contact has one of the values, or when it changes one of the fields. null
+   * takes every contact. Set only while one of the two is among its events.
+   */
+  contactEventFieldValues: jsonb('contact_event_field_values').$type<
+    { key: string; value: string | number | boolean }[]
+  >(),
+  /**
    * The consent changes it takes as `consent.changed` (ADR-189), by purpose and action; null takes
    * every change. Set only while `consent.changed` is among its events.
    */

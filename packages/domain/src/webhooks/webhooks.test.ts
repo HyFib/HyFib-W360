@@ -22,6 +22,7 @@ import {
   TASK_STATUSES,
   TEMPLATE_STATUSES,
   WEBHOOK_EVENT_TYPES,
+  type Tx,
 } from '@w360/db';
 import { apiCampaignResultsSchema } from '../api/campaigns';
 import { API_KEY_LIMITS } from '../api/model';
@@ -125,6 +126,11 @@ import {
   webhookRunEndReasonsTicked,
   webhookRunEndTakesReason,
   webhookStageText,
+  webhookContactEventFieldValuesText,
+  webhookContactFieldValueId,
+  webhookFieldValueEditable,
+  webhookFieldValuesFromLines,
+  webhookFieldValueText,
 } from './model';
 import {
   noteCreatedPayloadSchema,
@@ -279,6 +285,11 @@ import {
   webhookContactEventTagsFor,
   webhookContactEventTagsSchema,
   WEBHOOK_CONTACT_EVENT_TAGS_NEED_THE_EVENTS,
+  webhookContactEventFieldValuesChecked,
+  webhookContactEventFieldValuesFor,
+  webhookContactEventFieldValuesSchema,
+  WEBHOOK_CONTACT_EVENT_FIELD_VALUES_NEED_THE_EVENTS,
+  WEBHOOK_FIELDS_NOT_FOUND,
   WEBHOOK_AUTOMATIONS_NEED_THE_EVENTS,
   WEBHOOK_RUN_TRIGGERS_NEED_THE_EVENTS,
   WEBHOOK_RUN_API_KEYS_NEED_THE_EVENTS,
@@ -3523,6 +3534,288 @@ describe('contact event tag filters (ADR-316)', () => {
     expect(WEBHOOK_CONTACT_EVENT_TAGS_NEED_THE_EVENTS).toBe(
       `Choose the tags of added and changed contacts only for an endpoint that receives ${added} or ${changed}.`,
     );
+  });
+});
+
+describe('contact event field value filters (ADR-332)', () => {
+  const schema = webhookContactEventFieldValuesSchema;
+  const refusal = (given: unknown) => {
+    const issue = schema.safeParse(given).error?.issues[0];
+    return issue && [issue.path.join('.'), issue.message];
+  };
+
+  it('take 1 to 50 pairs of a field key and text, a number or true or false; null takes every contact', () => {
+    const pairs = [
+      { key: 'tier', value: 'gold' },
+      { key: 'score', value: 5 },
+      { key: 'vip', value: false },
+    ];
+    expect(schema.parse(pairs)).toEqual(pairs);
+    expect(schema.parse(null)).toBeNull();
+    const many = Array.from({ length: 51 }, (_, i) => ({ key: 'tier', value: `t${i}` }));
+    expect(schema.parse(many.slice(1))).toHaveLength(50);
+    expect(refusal([])).toEqual(['', 'Give at least one value, or take every contact.']);
+    expect(refusal(many)).toEqual(['', 'Give at most 50 values.']);
+    expect(refusal([{ key: 'Tier', value: 'gold' }])).toEqual([
+      '0.key',
+      'Choose fields from the list.',
+    ]);
+    expect(refusal([pairs[0], { key: 'tier', value: null }])).toEqual([
+      '1.value',
+      'Give text, a number, or true or false.',
+    ]);
+    expect(refusal([{ key: 'tier', value: { is: 'gold' } }])?.[0]).toBe('0.value');
+    expect(refusal([{ key: 'tier', value: Number.POSITIVE_INFINITY }])?.[0]).toBe('0.value');
+    expect(refusal([{ key: 'tier', value: 'gold', op: 'eq' }])?.[0]).toBe('0');
+    expect(refusal(['tier'])).toEqual(['0', 'Give each value with its field’s key.']);
+    expect(schema.safeParse({ tier: 'gold' }).success).toBe(false);
+    expect(WEBHOOK_LIMITS.contactEventFieldValues).toBe(50);
+    // At most 4,000 bytes as JSON in all, so that the audit entries carrying the list fit.
+    expect(WEBHOOK_LIMITS.contactEventFieldValuesBytes).toBe(4000);
+    const long = (count: number, length: number) =>
+      Array.from({ length: count }, (_, i) => ({ key: 'tier', value: `${i}`.padEnd(length, 'x') }));
+    const bytes = (pairs: unknown) => new TextEncoder().encode(JSON.stringify(pairs)).length;
+    expect(bytes(long(8, 473))).toBe(3993);
+    expect(schema.parse(long(8, 473))).toHaveLength(8);
+    const exact = long(8, 474).map((p, i) =>
+      i === 7 ? { ...p, value: p.value.slice(0, 473) } : p,
+    );
+    expect(bytes(exact)).toBe(4000);
+    expect(schema.parse(exact)).toHaveLength(8);
+    expect(bytes(long(8, 475))).toBe(4009);
+    expect(refusal(long(8, 475))).toEqual([
+      '',
+      'Give shorter or fewer values: at most 4,000 bytes in all, as JSON.',
+    ]);
+    // Bytes, not characters: 500 Tamil letters are 1,500 bytes.
+    expect(refusal(long(3, 500).map((p) => ({ ...p, value: 'த'.repeat(500) })))?.[0]).toBe('');
+  });
+
+  it('are kept only while the endpoint takes added or changed contacts: given, kept, or cleared', () => {
+    const gold = [{ key: 'tier', value: 'gold' }];
+    const silver = [{ key: 'tier', value: 'silver' }];
+    for (const events of [
+      ['contact.created'],
+      ['contact.updated'],
+      ['contact.created', 'contact.updated', 'message.received'],
+    ] as const) {
+      expect(webhookContactEventFieldValuesFor([...events], gold, null), events.join()).toEqual(
+        gold,
+      );
+      expect(webhookContactEventFieldValuesFor([...events], undefined, silver)).toEqual(silver);
+      expect(webhookContactEventFieldValuesFor([...events], null, silver)).toBeNull();
+      expect(webhookContactEventFieldValuesFor([...events], undefined, null)).toBeNull();
+    }
+    expect(
+      webhookContactEventFieldValuesFor(
+        ['contact.erased', 'contact.merged', 'message.received'],
+        gold,
+        gold,
+      ),
+    ).toBeNull();
+    const added = WEBHOOK_EVENT_INFO['contact.created'].label;
+    const changed = WEBHOOK_EVENT_INFO['contact.updated'].label;
+    expect(WEBHOOK_CONTACT_EVENT_FIELD_VALUES_NEED_THE_EVENTS).toBe(
+      `Choose the field values of added and changed contacts only for an endpoint that receives ${added} or ${changed}.`,
+    );
+  });
+
+  /** A transaction that answers each read of the company's fields with these, counting reads. */
+  function fieldsTx(fields: { key: string; label: string; type: string }[]) {
+    let reads = 0;
+    const tx = {
+      select: () => ({
+        from: () => ({
+          where: () => {
+            reads += 1;
+            return Promise.resolve(fields);
+          },
+        }),
+      }),
+    } as unknown as Tx;
+    return { tx, reads: () => reads };
+  }
+  const fields = [
+    { key: 'tier', label: 'Tier', type: 'text' },
+    { key: 'score', label: 'Score', type: 'number' },
+    { key: 'joined', label: 'Joined', type: 'date' },
+    { key: 'vip', label: 'VIP', type: 'boolean' },
+  ];
+  async function issues(run: Promise<unknown>) {
+    try {
+      await run;
+    } catch (error) {
+      if (isAppError(error) && error.code === 'validation_failed') return error.issues;
+      throw error;
+    }
+    throw new Error('expected a validation error');
+  }
+
+  it('read each value a list adds by its field’s type, once each, text whatever its case', async () => {
+    const { tx, reads } = fieldsTx(fields);
+    expect(
+      await webhookContactEventFieldValuesChecked(tx, 'tenant', [
+        { key: 'tier', value: ' Gold ' },
+        { key: 'tier', value: 'gold' },
+        { key: 'score', value: 5 },
+        { key: 'score', value: 5.0 },
+        { key: 'joined', value: '2026-01-31' },
+        { key: 'vip', value: true },
+        { key: 'vip', value: false },
+      ]),
+    ).toEqual([
+      { key: 'tier', value: 'Gold' },
+      { key: 'score', value: 5 },
+      { key: 'joined', value: '2026-01-31' },
+      { key: 'vip', value: true },
+      { key: 'vip', value: false },
+    ]);
+    expect(reads()).toBe(1);
+    expect(await webhookContactEventFieldValuesChecked(tx, 'tenant', null)).toBeNull();
+    expect(reads()).toBe(1);
+  });
+
+  it('refuse a value of a field the company does not have, of another type, or empty', async () => {
+    const { tx } = fieldsTx(fields);
+    const check = (pairs: { key: string; value: string | number | boolean }[]) =>
+      issues(webhookContactEventFieldValuesChecked(tx, 'tenant', pairs));
+    expect(
+      await check([
+        { key: 'tier', value: 'gold' },
+        { key: 'city', value: 'Chennai' },
+      ]),
+    ).toEqual([{ path: 'contactEventFieldValues.1.key', message: WEBHOOK_FIELDS_NOT_FOUND }]);
+    expect(await check([{ key: 'score', value: '5' }])).toEqual([
+      { path: 'contactEventFieldValues.0.value', message: 'Score takes a number.' },
+    ]);
+    expect(await check([{ key: 'score', value: 1e21 }])).toEqual([
+      {
+        path: 'contactEventFieldValues.0.value',
+        message: 'Score takes a number with at most 15 digits before the point and 6 after.',
+      },
+    ]);
+    expect(await check([{ key: 'joined', value: '2026-02-30' }])).toEqual([
+      {
+        path: 'contactEventFieldValues.0.value',
+        message: 'Joined must be a date written as YYYY-MM-DD.',
+      },
+    ]);
+    expect(await check([{ key: 'vip', value: 'yes' }])).toEqual([
+      { path: 'contactEventFieldValues.0.value', message: 'VIP takes true or false.' },
+    ]);
+    expect(await check([{ key: 'tier', value: '   ' }])).toEqual([
+      { path: 'contactEventFieldValues.0.value', message: 'Give a value of Tier to match.' },
+    ]);
+    expect(await check([{ key: 'tier', value: 'x'.repeat(501) }])).toEqual([
+      { path: 'contactEventFieldValues.0.value', message: 'Tier is longer than 500 characters.' },
+    ]);
+  });
+
+  it('keep the pairs the endpoint held as they were, a deleted field’s among them, without reading them', async () => {
+    const { tx, reads } = fieldsTx(fields);
+    const held = [
+      { key: 'gone', value: 'Old' },
+      { key: 'score', value: 7 },
+    ];
+    expect(
+      await webhookContactEventFieldValuesChecked(
+        tx,
+        'tenant',
+        [
+          { key: 'gone', value: 'old' },
+          { key: 'score', value: 7 },
+        ],
+        held,
+      ),
+    ).toEqual([
+      { key: 'gone', value: 'old' },
+      { key: 'score', value: 7 },
+    ]);
+    expect(reads()).toBe(0);
+    // A value the endpoint did not hold is read, a deleted field's refused.
+    expect(
+      await issues(
+        webhookContactEventFieldValuesChecked(tx, 'tenant', [{ key: 'gone', value: 'new' }], held),
+      ),
+    ).toEqual([{ path: 'contactEventFieldValues.0.key', message: WEBHOOK_FIELDS_NOT_FOUND }]);
+  });
+
+  it('tell pairs apart as the database compares them, and name them as Settings shows them', () => {
+    const id = webhookContactFieldValueId;
+    expect(id({ key: 'tier', value: 'Gold' })).toBe(id({ key: 'tier', value: 'gold' }));
+    expect(id({ key: 'tier', value: 'gold' })).not.toBe(id({ key: 'rank', value: 'gold' }));
+    expect(id({ key: 'score', value: 5 })).not.toBe(id({ key: 'score', value: '5' }));
+    expect(id({ key: 'vip', value: true })).not.toBe(id({ key: 'vip', value: 'true' }));
+    expect(webhookFieldValueText(true)).toBe('yes');
+    expect(webhookFieldValueText(false)).toBe('no');
+    expect(webhookFieldValueText(2.5)).toBe('2.5');
+    expect(webhookFieldValueText('gold')).toBe('gold');
+    expect(
+      webhookContactEventFieldValuesText(
+        [
+          { key: 'tier', value: 'gold' },
+          { key: 'vip', value: true },
+          { key: 'tier', value: 'platinum' },
+          { key: 'gone', value: 3 },
+        ],
+        new Map([
+          ['tier', 'Tier'],
+          ['vip', 'VIP'],
+        ]),
+      ),
+    ).toBe('Tier: gold, platinum; VIP: yes; gone (deleted): 3');
+  });
+
+  it('show in a field’s input only the values it reads back as they are, keeping the others apart', () => {
+    expect(webhookFieldValueEditable('boolean', true)).toBe(true);
+    expect(webhookFieldValueEditable('number', 2.5)).toBe(true);
+    expect(webhookFieldValueEditable('date', '2026-01-31')).toBe(true);
+    expect(webhookFieldValueEditable('text', 'gold')).toBe(true);
+    expect(webhookFieldValueEditable('text', '2026-01-31')).toBe(true);
+    // A field deleted and added again with another type: the value it held is kept apart.
+    expect(webhookFieldValueEditable('text', true)).toBe(false);
+    expect(webhookFieldValueEditable('boolean', 'yes')).toBe(false);
+    expect(webhookFieldValueEditable('number', '5')).toBe(false);
+    expect(webhookFieldValueEditable('date', 'gold')).toBe(false);
+    expect(webhookFieldValueEditable('date', 5)).toBe(false);
+    // Text on several lines, given through the API, would come back as several values.
+    expect(webhookFieldValueEditable('text', 'line one\nline two')).toBe(false);
+    expect(webhookFieldValueEditable('text', 'line one\rline two')).toBe(false);
+    // Every value Settings reads from a line is one it shows again as it is.
+    for (const [type, line] of [
+      ['text', 'Gold Member'],
+      ['number', '5.10'],
+      ['number', '-12'],
+      ['date', '2026-02-28'],
+    ] as const) {
+      const read = webhookFieldValuesFromLines({ label: 'F', type }, line);
+      if (!read.ok) throw new Error(read.message);
+      expect(webhookFieldValueEditable(type, read.values[0]!), line).toBe(true);
+      expect(
+        webhookFieldValuesFromLines({ label: 'F', type }, webhookFieldValueText(read.values[0]!)),
+      ).toEqual(read);
+    }
+  });
+
+  it('read the lines Settings gives for a field as a member’s entries of it, skipping blank lines', () => {
+    const tier = { label: 'Tier', type: 'text' } as const;
+    expect(webhookFieldValuesFromLines(tier, ' gold \n\nplatinum\r\n')).toEqual({
+      ok: true,
+      values: ['gold', 'platinum'],
+    });
+    expect(webhookFieldValuesFromLines({ label: 'Score', type: 'number' }, '5\n2.50')).toEqual({
+      ok: true,
+      values: [5, 2.5],
+    });
+    expect(webhookFieldValuesFromLines({ label: 'Score', type: 'number' }, '5\nfive')).toEqual({
+      ok: false,
+      message: 'Score must be a number.',
+    });
+    expect(webhookFieldValuesFromLines({ label: 'Joined', type: 'date' }, '2026-13-01')).toEqual({
+      ok: false,
+      message: 'Joined must be a date written as YYYY-MM-DD.',
+    });
+    expect(webhookFieldValuesFromLines(tier, '')).toEqual({ ok: true, values: [] });
   });
 });
 

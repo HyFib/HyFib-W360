@@ -1995,6 +1995,303 @@ describe('contact event tag filters (ADR-316)', () => {
   });
 });
 
+describe('contact event field value filters (ADR-332)', () => {
+  /** An endpoint of the company taking these contact events, narrowed by these lists. */
+  const add = async (
+    c: Company,
+    eventTypes: WebhookEventType[],
+    lists: Record<string, unknown>,
+  ) => {
+    const path = `/ok/${randomBytes(6).toString('hex')}`;
+    const owner = await fx.ctx(c, c.owner);
+    const created = await webhooks().create(owner, {
+      url: `http://${HOST}:${port}${path}`,
+      eventTypes,
+      ...lists,
+    });
+    return { ...created, path };
+  };
+  /** What an endpoint was sent, sorted: each event's type and contact, and an update's changes. */
+  const sentTo = (path: string) =>
+    bodiesAt(path)
+      .map((b) => [
+        b.type,
+        (b.data.contact as { id: string }).id,
+        (b.data.changes as string[] | undefined) ?? null,
+      ])
+      .sort((x, y) => JSON.stringify(x).localeCompare(JSON.stringify(y)));
+  const sorted = (rows: unknown[][]) =>
+    [...rows].sort((x, y) => JSON.stringify(x).localeCompare(JSON.stringify(y)));
+  /** The company's fields this describe block names. */
+  const addFields = async (c: Company) => {
+    const owner = await fx.ctx(c, c.owner);
+    const service = contactsService();
+    await service.createField(owner, { label: 'Tier', key: 'tier', type: 'text' });
+    await service.createField(owner, { label: 'Score', key: 'score', type: 'number' });
+    await service.createField(owner, { label: 'VIP', key: 'vip', type: 'boolean' });
+  };
+
+  it('sends an endpoint that names values the changes of contacts that have one of them, and every change of those fields', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const service = contactsService();
+    await addFields(c);
+    // Text is compared whatever its case: "gold" is the contact's "Gold".
+    const gold = await add(c, ['contact.updated'], {
+      contactEventFieldValues: [{ key: 'tier', value: 'gold' }],
+    });
+    const goldNames = await add(c, ['contact.updated'], {
+      contactEventFieldValues: [{ key: 'tier', value: 'GOLD' }],
+      contactParts: ['name'],
+    });
+    const scored = await add(c, ['contact.updated'], {
+      contactEventFieldValues: [
+        { key: 'score', value: 5 },
+        { key: 'vip', value: true },
+      ],
+    });
+    const every = await add(c, ['contact.updated'], {});
+    const { id: hema } = await service.createContact(owner, {
+      displayName: 'Hema',
+      phone: '+919811100261',
+      attributes: { tier: 'Gold' },
+    });
+    const { id: ravi } = await service.createContact(owner, {
+      displayName: 'Ravi',
+      phone: '+919811100262',
+    });
+    // A change of a contact with a listed value: sent, by its part too.
+    await service.updateContact(owner, hema, { displayName: 'Hema K' });
+    // A change of a contact without one.
+    await service.updateContact(owner, ravi, { displayName: 'Ravi S' });
+    // A number given as members type it: 5 is the endpoint's 5.
+    await service.updateContact(owner, ravi, {
+      displayName: 'Ravi S',
+      attributes: { score: '5.0' },
+    });
+    // Out of gold: a change of the listed field, sent to the endpoint taking every part.
+    await service.updateContact(owner, hema, {
+      displayName: 'Hema K',
+      attributes: { tier: 'silver' },
+    });
+    // The next change of a contact no longer gold is not.
+    await service.updateContact(owner, hema, { displayName: 'Hema R' });
+    // A change of a listed field between two values not listed is sent too.
+    await service.updateContact(owner, ravi, {
+      displayName: 'Ravi S',
+      attributes: { tier: 'bronze' },
+    });
+    // Yes/no as true and false.
+    await service.updateContact(owner, ravi, { displayName: 'Ravi S', attributes: { vip: 'yes' } });
+
+    expect(
+      (await eventsOf(c, 'contact.')).map((e) => [
+        e.type,
+        e.contact_id,
+        e.contact_changes,
+        e.deliveries,
+      ]),
+    ).toEqual([
+      ['contact.created', hema, null, 0],
+      ['contact.created', ravi, null, 0],
+      ['contact.updated', hema, ['name'], 3],
+      ['contact.updated', ravi, ['name'], 1],
+      ['contact.updated', ravi, ['fields.score'], 2],
+      ['contact.updated', hema, ['fields.tier'], 2],
+      ['contact.updated', hema, ['name'], 1],
+      ['contact.updated', ravi, ['fields.tier'], 3],
+      ['contact.updated', ravi, ['fields.vip'], 2],
+    ]);
+    await deliverDue(c);
+    expect(sentTo(gold.path)).toEqual(
+      sorted([
+        ['contact.updated', hema, ['name']],
+        ['contact.updated', hema, ['fields.tier']],
+        ['contact.updated', ravi, ['fields.tier']],
+      ]),
+    );
+    expect(sentTo(goldNames.path)).toEqual([['contact.updated', hema, ['name']]]);
+    expect(sentTo(scored.path)).toEqual(
+      sorted([
+        ['contact.updated', ravi, ['fields.score']],
+        ['contact.updated', ravi, ['fields.tier']],
+        ['contact.updated', ravi, ['fields.vip']],
+      ]),
+    );
+    expect(sentTo(every.path)).toHaveLength(7);
+  });
+
+  it('matches the values whatever the order of a transaction’s writes, into the values and out of them', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const service = contactsService();
+    await addFields(c);
+    const goldNames = await add(c, ['contact.updated'], {
+      contactEventFieldValues: [{ key: 'tier', value: 'gold' }],
+      contactParts: ['name'],
+    });
+    const { id: hema } = await service.createContact(owner, {
+      displayName: 'Hema',
+      phone: '+919811100263',
+      attributes: { tier: 'silver' },
+    });
+    const scope = authorizedTenantScope(c.tenant.id, c.owner.id);
+    const rename = (name: string) =>
+      sql`update app.contacts set display_name = ${name}
+           where tenant_id = ${c.tenant.id}::uuid and id = ${hema}::uuid`;
+    const setTier = (tier: string) =>
+      sql`update app.contacts set attributes = attributes || jsonb_build_object('tier', ${tier}::text)
+           where tenant_id = ${c.tenant.id}::uuid and id = ${hema}::uuid`;
+    // Renamed, then gold: the name passes the parts once the contact is gold.
+    await fx.dbs.app.run(scope, async (tx) => {
+      await tx.execute(rename('Hema K'));
+      await tx.execute(setTier('gold'));
+    });
+    // Out of gold, then renamed: the name passes the parts, the tier the values.
+    await fx.dbs.app.run(scope, async (tx) => {
+      await tx.execute(setTier('silver'));
+      await tx.execute(rename('Hema R'));
+    });
+    // Out of gold without a change of a part the endpoint takes: not sent.
+    await fx.dbs.app.run(scope, async (tx) => {
+      await tx.execute(setTier('gold'));
+    });
+    await fx.dbs.app.run(scope, async (tx) => {
+      await tx.execute(setTier('bronze'));
+    });
+    // Both writes in one statement.
+    await fx.dbs.app.run(scope, async (tx) => {
+      await tx.execute(sql`update app.contacts
+          set display_name = 'Hema S', attributes = attributes || '{"tier": "Gold"}'::jsonb
+        where tenant_id = ${c.tenant.id}::uuid and id = ${hema}::uuid`);
+    });
+    expect(
+      (await eventsOf(c, 'contact.')).map((e) => [e.type, e.contact_changes, e.deliveries]),
+    ).toEqual([
+      ['contact.created', null, 0],
+      ['contact.updated', ['fields.tier', 'name'], 1],
+      ['contact.updated', ['fields.tier', 'name'], 1],
+      ['contact.updated', ['fields.tier'], 0],
+      ['contact.updated', ['fields.tier'], 0],
+      ['contact.updated', ['fields.tier', 'name'], 1],
+    ]);
+    await deliverDue(c);
+    expect(sentTo(goldNames.path)).toHaveLength(3);
+  });
+
+  it('sends a contact added with a listed value as contact.created, by its source and tags too, and one given it later as contact.updated', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const service = contactsService();
+    await addFields(c);
+    const goldAdded = await add(c, ['contact.created'], {
+      contactEventFieldValues: [{ key: 'tier', value: 'gold' }],
+    });
+    const apiGoldAdded = await add(c, ['contact.created'], {
+      contactEventFieldValues: [{ key: 'tier', value: 'gold' }],
+      contactSources: ['api'],
+    });
+    const vipGoldAdded = await add(c, ['contact.created'], {
+      contactEventFieldValues: [{ key: 'tier', value: 'gold' }],
+      contactEventTags: ['vip'],
+    });
+    const goldBoth = await add(c, ['contact.created', 'contact.updated'], {
+      contactEventFieldValues: [{ key: 'tier', value: 'gold' }],
+    });
+    const everyAdded = await add(c, ['contact.created'], {});
+    // Added gold by a member, in one statement.
+    const { id: hema } = await service.createContact(owner, {
+      displayName: 'Hema',
+      phone: '+919811100264',
+      attributes: { tier: 'gold' },
+    });
+    // Added from the API, then given gold and tagged vip in the same transaction.
+    const api = uuidv7();
+    await fx.dbs.app.run(authorizedTenantScope(c.tenant.id, c.owner.id), async (tx) => {
+      await tx.execute(sql`insert into app.contacts (id, tenant_id, phone_e164, source)
+        values (${api}::uuid, ${c.tenant.id}::uuid, '+919811100265', 'api')`);
+      await tx.execute(sql`update app.contacts set attributes = '{"tier": "gold"}'::jsonb
+        where tenant_id = ${c.tenant.id}::uuid and id = ${api}::uuid`);
+      await tx.execute(sql`insert into app.contact_tags (id, tenant_id, contact_id, tag)
+        values (gen_random_uuid(), ${c.tenant.id}::uuid, ${api}::uuid, 'vip')`);
+    });
+    // Added without values and given gold later: the change is a contact.updated.
+    const { id: ravi } = await service.createContact(owner, {
+      displayName: 'Ravi',
+      phone: '+919811100266',
+    });
+    await service.updateContact(owner, ravi, { displayName: 'Ravi', attributes: { tier: 'gold' } });
+
+    expect(
+      (await eventsOf(c, 'contact.')).map((e) => [e.type, e.contact_id, e.deliveries]),
+    ).toEqual([
+      ['contact.created', hema, 3],
+      ['contact.created', api, 5],
+      ['contact.created', ravi, 1],
+      ['contact.updated', ravi, 1],
+    ]);
+    await deliverDue(c);
+    expect(sentTo(goldAdded.path)).toEqual(
+      sorted([
+        ['contact.created', hema, null],
+        ['contact.created', api, null],
+      ]),
+    );
+    expect(sentTo(apiGoldAdded.path)).toEqual([['contact.created', api, null]]);
+    expect(sentTo(vipGoldAdded.path)).toEqual([['contact.created', api, null]]);
+    expect(sentTo(goldBoth.path)).toEqual(
+      sorted([
+        ['contact.created', hema, null],
+        ['contact.created', api, null],
+        ['contact.updated', ravi, ['fields.tier']],
+      ]),
+    );
+    expect(sentTo(everyAdded.path)).toHaveLength(3);
+  });
+
+  it('matches values as the definer role merging contacts, and an erasure is sent as itself', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const service = contactsService();
+    await addFields(c);
+    const gold = await add(c, ['contact.updated', 'contact.erased'], {
+      contactEventFieldValues: [{ key: 'tier', value: 'gold' }],
+    });
+    const { id: kept } = await service.createContact(owner, {
+      displayName: 'Gita',
+      phone: '+919811100267',
+    });
+    const merged = await writesByUserId(c);
+    await fx.dbs.app.run(authorizedTenantScope(c.tenant.id, c.owner.id), async (tx) => {
+      await tx.execute(sql`update app.contacts set attributes = '{"tier": "gold"}'::jsonb
+        where tenant_id = ${c.tenant.id}::uuid and id = ${merged}::uuid`);
+    });
+    await deliverDue(c);
+    expect(sentTo(gold.path)).toEqual([['contact.updated', merged, ['fields.tier']]]);
+
+    // The merge gives the kept contact the merged one's tier as the definer role.
+    await createContactMergeService({ db: fx.dbs.app, clock: systemClock }).mergeContacts(owner, {
+      keepContactId: kept,
+      mergeContactId: merged,
+    });
+    await deliverDue(c);
+    const afterMerge = bodiesAt(gold.path).slice(1);
+    expect(afterMerge.map((b) => [b.type, (b.data.contact as { id: string }).id])).toEqual([
+      ['contact.updated', kept],
+    ]);
+    expect(afterMerge[0]!.data.changes).toContain('fields.tier');
+
+    // Erasing it is sent, contact.erased being narrowed by no value.
+    await service.eraseContact(owner, { contactId: kept, suppress: false });
+    await deliverDue(c);
+    expect(
+      bodiesAt(gold.path)
+        .slice(2)
+        .map((b) => [b.type, (b.data.contact as { id: string }).id]),
+    ).toEqual([['contact.erased', kept]]);
+  });
+});
+
 describe('message events (ADR-082)', () => {
   it('name the message a customer quotes or reacts to, when it is in the conversation', async () => {
     const c = await fx.company();

@@ -1695,6 +1695,19 @@ Phase 5 rules (outgoing webhooks, P5-09):
   receives and never add an event or a delivery for another endpoint or company, and the payload is
   unchanged. Tag names can say something about a person, so the list is in the company data export
   and the audits as the other tag lists are (unit tests; integration tests, run in CI only).
+- An endpoint can take the added and changed contacts with chosen custom field values only
+  (ADR-332), chosen the same way. A value a list adds must be of one of the company's fields and of
+  its type, read as the API reads a contact's value; the list is kept only while the endpoint takes
+  `contact.created` or `contact.updated`, and a database check keeps it to 1 to 50 pairs of a
+  field's key and text, a number or a boolean; the services keep it to 4,000 bytes as JSON, so the
+  audit entries carrying it always fit. It is applied in `app.capture_contact_webhook_event`
+  and `app.deliver_contact_webhook_tag` through `app.webhook_contact_values_match`; none is a
+  definer function: they run as the role making the change, under the company's row-level
+  security, or as the definer role merging and erasing contacts, which reads the contact's values
+  (since 0147) and now its source, granted for this capture only. They narrow what one endpoint
+  receives and never add an event or a delivery for another endpoint or company, and the payload is
+  unchanged. Field values can say something about a person, so the list is in the company data
+  export and the audits as the tag lists are (unit tests; integration tests, run in CI only).
 - An endpoint can take the received messages of chosen types only (ADR-191), chosen the same way. A
   list holds only the fourteen types a received message has, is kept only while the endpoint takes
   `message.received` (a database check too, which also refuses a null entry), and is applied in

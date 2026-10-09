@@ -244,8 +244,22 @@ test('staff read the operations console and repair a quarantined webhook event',
   expect(signals.text).toContain('Company,Address,Status,Sent,Failed,Marketing delivered,');
   expect(signals.text).not.toContain(companyName);
   await sections.getByRole('link', { name: 'Usage' }).click();
+  // The tabs change on the client: wait for the Usage tab itself before reading its pages, since
+  // the Signals tab shows companies a page too.
+  await expect(page).toHaveURL(/\/platform\/ops\/usage$/);
   const usage = page.getByRole('table', { name: 'Usage by company' });
+  await expect(usage).toBeVisible();
   const usageRow = usage.getByRole('row').filter({ hasText: companyName });
+  // 100 companies a page, busiest first (ADR-331): follow the pages until the new company shows.
+  await expect(page.getByText(/^Companies 1–[\d,]+ of [\d,]+$/)).toBeVisible();
+  const pager = page.getByRole('navigation', { name: 'Pages of companies' });
+  for (let next = 2; (await usageRow.count()) === 0; next += 1) {
+    const nextPage = pager.getByRole('link', { name: 'Next page' });
+    await expect(nextPage, 'the new company is on one of the pages').toBeVisible();
+    await nextPage.click();
+    await expect(page).toHaveURL(new RegExp(`[?&]page=${next}(&|$)`));
+    await expect(pager).toContainText(`Page ${next} of`);
+  }
   await expect(usageRow).toBeVisible();
   const usageColumns = await usage.getByRole('columnheader').allTextContents();
   const apiColumn = usageColumns.indexOf('API requests');

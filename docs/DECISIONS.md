@@ -12846,3 +12846,115 @@ Decision:
 
 Not built: a sequence number across events, and an order among the events stamped with one
 transaction's time.
+
+## ADR-331 Pages of companies on the operations console (P5-10) (2026-10-09)
+
+Context: the operations console lists every company needing attention on its Overview, every
+company with a signal or sending in the window on its Signals tab, and every company on its Usage
+tab, each on one page. With many companies those pages would grow without end; the test envelope
+has few. The backlog listed paging and rollups for many companies as remaining.
+
+Decision:
+
+- **100 companies a page** on the three company lists, in the order they had: the companies
+  needing attention (worst first), the sending signals (the most signals first) and the usage by
+  company (busiest first). Each says which companies it shows ("Companies 101–200 of 2,345") and,
+  when there is more than one page, links to the pages before and after it ("Page 2 of 24"); the
+  Usage tab's links keep its window, and choosing another window starts again at the first page. A
+  page before the first or past the last shows the nearest, and anything but a whole number shows
+  the first.
+- **What stays whole:** the totals and counts above the lists (the companies needing attention by
+  level, the flagged companies, the messages sent and received and the rest) and the CSV exports
+  cover every company, as before.
+- **How:** the page is cut from the list the console reads (`opsCompanyPage` in
+  `platform/ops-model.ts`), so each view still reads every company once, as the totals need; reading
+  only a page from the database, and rollups precomputed for many companies, come with growth. No
+  migration and no new permission: each page re-checks the platform actor, as before.
+
+Not built: rollups beyond the totals, sorting or searching the lists, and reading only a page from
+the database.
+
+## ADR-332 Choosing the custom field values of the added and changed contacts a webhook endpoint receives (P5-09) (2026-10-09)
+
+Context: an endpoint taking `contact.created` or `contact.updated` can narrow them by where contacts
+came from (ADR-190), the parts that changed (ADR-123), the custom fields whose changes it takes
+(ADR-184) and the contact's tags (ADR-316), but not by a custom field's value. A receiver that keeps
+a segment of customers in step by a field, the contacts whose loyalty tier is gold or whose city is
+Chennai say, was sent every other contact's changes too and had to read each one to drop it. The
+backlog listed filters on a contact's values, such as a field's value, as remaining.
+
+Decision:
+
+- **One list per endpoint for both events,** `contactEventFieldValues`: 1 to 50 pairs of a field's
+  key (as `GET /contact-fields` lists them) and a value of the field's type, as contacts take them
+  (`apiFieldValue`): text of up to 500 characters, trimmed; a number as members type it; a date as
+  YYYY-MM-DD; true or false for yes/no; up to 4,000 bytes as JSON in all, so that the audit entries
+  carrying the list stay within an audit entry's 8 KiB of metadata (found by a review of this slice
+  before it was pushed: 50 values of 500 characters passed every other rule and then failed the
+  audit's own check, rolling the change back with an internal error). Each pair once, in the order
+  given; text is compared
+  whatever its case, as the API's contact search compares it (ADR-113), and numbers as numbers, so
+  "Gold" and "gold", or 5 and 5.0, are one pair. A pair given now must name one of the company's
+  fields and a value of its type; a pair the endpoint holds stays as it was when its field is
+  deleted (deleting a field deletes its values, so the pair matches nothing then), and may be kept
+  but not added again, as ADR-184 keeps deleted fields; a field added later with the same key (keys
+  never change) brings the pair back: that field's changes are sent and its values matched as they
+  are kept, so a pair of another type than the new field's matches none of its values. Null
+  receives every contact, as before.
+- **What is sent:** a change of a contact is sent when the contact has one of the values once one of
+  its transaction's writes is saved, or when its transaction changes one of the listed fields, so
+  the change that takes a contact out of the receiver's segment is sent too. An event does not say
+  what a field was before, so a change of a listed field between two values not listed is sent as
+  well, and the receiver reads the value the contact has now; keeping the values each change
+  replaced, to send only the changes leaving a value, would keep field values on every event and
+  is not built. A contact added with one of the values is sent as `contact.created`, also when a
+  later write of the transaction that adds it gives it the value (a member adding a contact and
+  then its fields, an import or an API request writing the values after the contact); one given a
+  value later is sent as `contact.updated`. With sources, parts, fields or tags chosen too, an event
+  must pass them all. `contact.erased` and `contact.merged` are not narrowed. Chosen in Settings →
+  Webhooks ("Field values of added and changed contacts": every contact, or the values typed one a
+  line for text, number and date fields and ticked for yes/no fields; a value the endpoint holds
+  that its field's input cannot show as it is, of a field deleted since, of one added again with
+  another type or text on several lines given through the API, listed ticked and kept as it is
+  until unticked, so saving the form never turns it into another value), shown on the endpoint as "Added and changed contacts sent, of
+  contacts with these values or changing these fields: Tier: gold, platinum; VIP: yes", and through
+  the API as `contactEventFieldValues` on `POST /webhook-endpoints` and
+  `PATCH /webhook-endpoints/{id}` and in every endpoint the API answers.
+- **Only while an event is taken:** a list given for an endpoint that takes neither event is refused
+  (422 through the API). A change that drops both events clears it, and a `PATCH` that leaves it out
+  keeps it; Settings always sends it (null while every contact is taken). A check in the database
+  holds the same rule and the list's shape: null, or an array of 1 to 50 objects of a `key` that is
+  a field's key and a `value` that is text of 1 to 500 characters without spaces around it, a number
+  or a boolean, of at most 4,500 bytes as PostgreSQL writes it out (the spaces it puts between
+  JSON's items included), with either event; it reads the shape before the keys and values in a
+  `CASE`, so it never depends on the order the database evaluates its conditions in.
+- **Applied at capture:** `app.capture_contact_webhook_event` reads the contact's values only when an
+  active endpoint of the company that takes either event names values, and creates a delivery only
+  for the endpoints whose list passes `app.webhook_contact_values_match`: the contact as the write
+  left it, and for a `contact.updated` everything its transaction changed so far, so the change is
+  sent whatever the order of its writes (a name changed before a tier, or a tier left before a
+  rename, as the integration tests write them). A later write of a transaction that added the
+  contact gives its `contact.created` to the endpoints naming values it has then, by their sources
+  and its tags; `app.deliver_contact_webhook_tag` applies the values to the endpoints naming the tag
+  a change adds or removes. Each endpoint gets each event once. All of them run as the role making
+  the change, the runtime role or the definer role merging and erasing contacts, and read nothing
+  more while no active endpoint of the company names values. Stored events and payloads are
+  unchanged.
+- **Audited and exported:** `webhook.endpoint_created` and `webhook.endpoint_updated` carry
+  `contactEventFieldValues` when the endpoint has it, and the company data export carries the
+  column.
+- **Permissions unchanged:** members with `developer.manage` in Settings, keys with
+  `webhooks.manage` through the API. Settings lists the company's fields with their types, as it
+  did their labels (ADR-184).
+- **Migration 0253:** `contact_event_field_values jsonb` on `app.webhook_endpoints` with its check,
+  validated at once (a company has at most 10 endpoints), the update grant on the column for the
+  runtime role; `app.webhook_contact_values_match` for the runtime and definer roles; and
+  `app.capture_contact_webhook_event` and `app.deliver_contact_webhook_tag` replaced with the same
+  signatures (0239's, with the values), so their owners and grants stay. The definer role may now
+  read a contact's source, which the capture reads when a definer function gives values to a
+  contact added in the same transaction. Existing endpoints keep null; nothing is backfilled.
+
+Not built: lists that leave contacts with chosen values out, comparisons other than equality (ranges
+of numbers or dates, text containing a word), sending only the changes that leave a value (it needs
+the replaced values kept on each event), the contact's values at capture in the payload (it gives
+the contact as it is when delivered), and value filters for erased and merged contacts.

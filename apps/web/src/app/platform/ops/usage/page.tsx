@@ -15,8 +15,8 @@ import {
   TR,
   Table,
 } from '@w360/ui';
-import { USAGE_WINDOWS, usageChange } from '@w360/domain';
-import { CompanyLink, StatTile } from '@/components/platform/ops';
+import { USAGE_WINDOWS, opsCompanyPage, usageChange } from '@w360/domain';
+import { CompanyLink, CompanyPager, StatTile } from '@/components/platform/ops';
 import { getRuntime } from '@/server/runtime';
 import { requirePlatformActor } from '@/server/session';
 
@@ -40,13 +40,15 @@ function Before({ current, previous }: { current: number; previous: number | und
 export default async function OpsUsagePage({
   searchParams,
 }: {
-  searchParams: Promise<{ days?: string }>;
+  searchParams: Promise<{ days?: string; page?: string }>;
 }) {
   const actor = await requirePlatformActor();
-  const { days } = await searchParams;
+  const { days, page } = await searchParams;
   const { platformOps } = await getRuntime();
   const o = await platformOps.usage(actor, Number(days ?? 30));
   const t = o.totals;
+  // A page of the companies (ADR-331); the totals and the CSV cover them all.
+  const shown = opsCompanyPage(o.rows, Number(page ?? 1));
   return (
     <div className="grid grid-cols-1 gap-6">
       <nav aria-label="Period" className="flex flex-wrap gap-2 text-sm">
@@ -107,75 +109,81 @@ export default async function OpsUsagePage({
               : 'The 90 days before are not compared: the console reads at most 93 days back.'}
           </CardDescription>
         </CardHeader>
-        <CardContent>
+        <CardContent className="grid gap-4">
           {o.rows.length === 0 ? (
             <EmptyState title="No companies yet" />
           ) : (
-            <Table aria-label="Usage by company">
-              <THead>
-                <TR>
-                  <TH>Company</TH>
-                  <TH>Sent</TH>
-                  <TH>By</TH>
-                  <TH>Received</TH>
-                  <TH>Webhook deliveries</TH>
-                  <TH>Automation runs</TH>
-                  <TH>API requests</TH>
-                  <TH>Members</TH>
-                  <TH>Numbers</TH>
-                </TR>
-              </THead>
-              <TBody>
-                {o.rows.map((a) => (
-                  <TR key={a.tenantId}>
-                    <TD>
-                      <CompanyLink id={a.tenantId} name={a.name} slug={a.slug} />
-                    </TD>
-                    <TD className="tabular-nums">
-                      {a.outbound}
-                      <Before current={a.outbound} previous={a.previous?.outbound} />
-                    </TD>
-                    <TD className="whitespace-nowrap text-xs text-muted-foreground">
-                      {a.outbound === 0
-                        ? '—'
-                        : [
-                            ['agents', a.outboundBySender.agent],
-                            ['automations', a.outboundBySender.bot],
-                            ['campaigns', a.outboundBySender.campaign],
-                            ['API', a.outboundBySender.api],
-                            ['system', a.outboundBySender.system],
-                          ]
-                            .filter(([, n]) => Number(n) > 0)
-                            .map(([label, n]) => `${n} ${label}`)
-                            .join(' · ')}
-                    </TD>
-                    <TD className="tabular-nums">
-                      {a.inbound}
-                      <Before current={a.inbound} previous={a.previous?.inbound} />
-                    </TD>
-                    <TD className="tabular-nums">{a.webhookDeliveries}</TD>
-                    <TD className="tabular-nums">
-                      {a.automationRuns}
-                      {a.runsPeriodStart ? (
-                        <div className="text-xs text-muted-foreground">
-                          from {a.runsPeriodStart.toISOString().slice(0, 10)}
-                        </div>
-                      ) : null}
-                    </TD>
-                    <TD className="tabular-nums">
-                      {a.apiRequests}
-                      {a.apiPeriodStart ? (
-                        <div className="text-xs text-muted-foreground">
-                          from {a.apiPeriodStart.toISOString().slice(0, 10)}
-                        </div>
-                      ) : null}
-                    </TD>
-                    <TD className="tabular-nums">{a.members}</TD>
-                    <TD className="tabular-nums">{a.numbers}</TD>
+            <>
+              <CompanyPager
+                page={shown}
+                href={(n) => `/platform/ops/usage?days=${o.days}&page=${n}`}
+              />
+              <Table aria-label="Usage by company">
+                <THead>
+                  <TR>
+                    <TH>Company</TH>
+                    <TH>Sent</TH>
+                    <TH>By</TH>
+                    <TH>Received</TH>
+                    <TH>Webhook deliveries</TH>
+                    <TH>Automation runs</TH>
+                    <TH>API requests</TH>
+                    <TH>Members</TH>
+                    <TH>Numbers</TH>
                   </TR>
-                ))}
-              </TBody>
-            </Table>
+                </THead>
+                <TBody>
+                  {shown.rows.map((a) => (
+                    <TR key={a.tenantId}>
+                      <TD>
+                        <CompanyLink id={a.tenantId} name={a.name} slug={a.slug} />
+                      </TD>
+                      <TD className="tabular-nums">
+                        {a.outbound}
+                        <Before current={a.outbound} previous={a.previous?.outbound} />
+                      </TD>
+                      <TD className="whitespace-nowrap text-xs text-muted-foreground">
+                        {a.outbound === 0
+                          ? '—'
+                          : [
+                              ['agents', a.outboundBySender.agent],
+                              ['automations', a.outboundBySender.bot],
+                              ['campaigns', a.outboundBySender.campaign],
+                              ['API', a.outboundBySender.api],
+                              ['system', a.outboundBySender.system],
+                            ]
+                              .filter(([, n]) => Number(n) > 0)
+                              .map(([label, n]) => `${n} ${label}`)
+                              .join(' · ')}
+                      </TD>
+                      <TD className="tabular-nums">
+                        {a.inbound}
+                        <Before current={a.inbound} previous={a.previous?.inbound} />
+                      </TD>
+                      <TD className="tabular-nums">{a.webhookDeliveries}</TD>
+                      <TD className="tabular-nums">
+                        {a.automationRuns}
+                        {a.runsPeriodStart ? (
+                          <div className="text-xs text-muted-foreground">
+                            from {a.runsPeriodStart.toISOString().slice(0, 10)}
+                          </div>
+                        ) : null}
+                      </TD>
+                      <TD className="tabular-nums">
+                        {a.apiRequests}
+                        {a.apiPeriodStart ? (
+                          <div className="text-xs text-muted-foreground">
+                            from {a.apiPeriodStart.toISOString().slice(0, 10)}
+                          </div>
+                        ) : null}
+                      </TD>
+                      <TD className="tabular-nums">{a.members}</TD>
+                      <TD className="tabular-nums">{a.numbers}</TD>
+                    </TR>
+                  ))}
+                </TBody>
+              </Table>
+            </>
           )}
         </CardContent>
       </Card>

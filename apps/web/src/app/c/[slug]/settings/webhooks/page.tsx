@@ -32,6 +32,7 @@ import {
   webhookAssigneeText,
   webhookCampaignText,
   webhookChannelText,
+  webhookContactEventFieldValuesText,
   webhookFieldText,
   webhookOAuthText,
   webhookHost,
@@ -107,6 +108,8 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
   ]);
   const tz = ctx.tenant.timezone;
   const base = `/c/${ctx.tenant.slug}/settings/webhooks`;
+  // The fields' labels, for the field values endpoints name (ADR-332).
+  const fieldLabels = new Map(contactFieldChoices.map((f) => [f.key, f.label]));
   // A replay of every endpoint (ADR-160) offers the events the endpoints that are on receive.
   const on = endpoints.filter((e) => e.state === 'active');
   const onEvents = WEBHOOK_EVENT_KEYS.filter((t) => on.some((e) => e.eventTypes.includes(t)));
@@ -485,6 +488,13 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
                       <p className="text-xs break-all text-muted-foreground">
                         Added and changed contacts sent, of contacts tagged:{' '}
                         {e.contactEventTags.join(', ')}
+                      </p>
+                    ) : null}
+                    {e.contactEventFieldValues ? (
+                      <p className="text-xs break-all text-muted-foreground">
+                        Added and changed contacts sent, of contacts with these values or changing
+                        these fields:{' '}
+                        {webhookContactEventFieldValuesText(e.contactEventFieldValues, fieldLabels)}
                       </p>
                     ) : null}
                     {e.teams ? (

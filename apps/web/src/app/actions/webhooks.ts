@@ -1,6 +1,10 @@
 'use server';
 import { refresh } from 'next/cache';
-import { webhookHost, type WebhookReplayPeriod } from '@w360/domain/webhook-model';
+import {
+  webhookHost,
+  type WebhookContactFieldValue,
+  type WebhookReplayPeriod,
+} from '@w360/domain/webhook-model';
 import { getRuntime } from '@/server/runtime';
 import { runAction, type ActionResult } from '@/server/action';
 import { requestMeta } from '@/server/session';
@@ -123,6 +127,8 @@ export async function createWebhookEndpointAction(
     /** The conversation tags of the survey answers it takes (ADR-312); null: every answer. */
     surveyConversationTags: string[] | null;
     contactEventTags: string[] | null;
+    /** The field values of the added and changed contacts it takes (ADR-332); null: every one. */
+    contactEventFieldValues: WebhookContactFieldValue[] | null;
     /** The members whose assigned conversations' events it takes (ADR-181); null: every one's. */
     assigneeIds: string[] | null;
     /** The contact tags whose conversations' events it takes (ADR-267); null: every one's. */
@@ -248,6 +254,8 @@ export async function updateWebhookEndpointAction(
     /** The conversation tags of the survey answers it takes (ADR-312); null: every answer. */
     surveyConversationTags: string[] | null;
     contactEventTags: string[] | null;
+    /** The field values of the added and changed contacts it takes (ADR-332); null: every one. */
+    contactEventFieldValues: WebhookContactFieldValue[] | null;
     /** The members whose assigned conversations' events it takes (ADR-181); null: every one's. */
     assigneeIds: string[] | null;
     /** The contact tags whose conversations' events it takes (ADR-267); null: every one's. */

@@ -1462,6 +1462,21 @@ export const apiWebhookEndpointSchema = z.object({
     .describe(
       'The contact tags whose contact.created and contact.updated the endpoint receives, as contacts carry them: the changes of a contact that has one of them when they are saved, and those adding or removing one; a contact.created is received when the change that adds the contact tags it with one. null receives every contact. Other events are not narrowed.',
     ),
+  contactEventFieldValues: z
+    .array(
+      z.object({
+        key: z.string().describe("The custom field's key (GET /contact-fields)."),
+        value: z
+          .union([z.string(), z.number(), z.boolean()])
+          .describe(
+            'A value of the field’s type: text, a number, a date as YYYY-MM-DD, or true or false for yes/no.',
+          ),
+      }),
+    )
+    .nullable()
+    .describe(
+      'The custom field values whose contact.created and contact.updated the endpoint receives: the changes of a contact that has one of the values once they are saved (text compared whatever its case, numbers as numbers), and those changing one of the fields, so the change that takes a contact out of the values is received too; a contact.created is received when the change that adds the contact gives it one of them. A pair stays after its field is deleted, matching nothing until a field with its key is added again. null receives every contact. Other events are not narrowed.',
+    ),
   assigneeIds: z
     .array(z.uuid())
     .nullable()
@@ -4225,13 +4240,13 @@ export function buildOpenApiDocument(serverUrl: string) {
       'contact.created': webhook(
         'webhookContactCreated',
         WEBHOOK_EVENT_INFO['contact.created'].label,
-        `${WEBHOOK_EVENT_INFO['contact.created'].description} An import sends one per contact added. An endpoint that names tags (its \`contactEventTags\`, or the tags given in Settings → Webhooks) receives it for a contact the change that adds it tags with one of them.`,
+        `${WEBHOOK_EVENT_INFO['contact.created'].description} An import sends one per contact added. An endpoint that names tags (its \`contactEventTags\`, or the tags given in Settings → Webhooks) receives it for a contact the change that adds it tags with one of them, and one that names custom field values (its \`contactEventFieldValues\`) for a contact the change that adds it gives one of them.`,
         'WebhookContactCreated',
       ),
       'contact.updated': webhook(
         'webhookContactUpdated',
         WEBHOOK_EVENT_INFO['contact.updated'].label,
-        `${WEBHOOK_EVENT_INFO['contact.updated'].description} One event per contact for each change saved; a contact added in the same change is sent as contact.created only. An endpoint receives every change unless it names the parts it takes (its \`contactParts\`, or the parts ticked in Settings → Webhooks): then it receives the events whose changes name one of them, each naming every part that changed. An endpoint that names tags (its \`contactEventTags\`) receives the changes of contacts that have one of them when they are saved, and the changes that add or remove one.`,
+        `${WEBHOOK_EVENT_INFO['contact.updated'].description} One event per contact for each change saved; a contact added in the same change is sent as contact.created only. An endpoint receives every change unless it names the parts it takes (its \`contactParts\`, or the parts ticked in Settings → Webhooks): then it receives the events whose changes name one of them, each naming every part that changed. An endpoint that names tags (its \`contactEventTags\`) receives the changes of contacts that have one of them when they are saved, and the changes that add or remove one; one that names custom field values (its \`contactEventFieldValues\`) receives the changes of contacts that have one of the values when they are saved, and the changes of those fields.`,
         'WebhookContactUpdated',
       ),
       'contact.erased': webhook(

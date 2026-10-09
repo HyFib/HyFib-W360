@@ -261,6 +261,7 @@ export default async function WebhookEndpointPage({
               surveyContactTags: endpoint.surveyContactTags,
               surveyConversationTags: endpoint.surveyConversationTags,
               contactEventTags: endpoint.contactEventTags,
+              contactEventFieldValues: endpoint.contactEventFieldValues,
               assignees: endpoint.assignees,
               contactTags: endpoint.contactTags,
               conversationTags: endpoint.conversationTags,
