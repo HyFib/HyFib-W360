@@ -13270,7 +13270,7 @@ Decision:
   required. Its reasons name it too.
 - **Kept as before:** keys, their 24 hours, the replay and the refusal of a reused key.
 
-Not built: a bound on a pipeline's archived stages (kept since ADR-240 so closed deals keep their
+Not built: a bound on a pipeline's archived stages (kept since ADR-040 so closed deals keep their
 stage; the answer gives each), and a bound on answers that are not kept (they are not limited by
 this check).
 
