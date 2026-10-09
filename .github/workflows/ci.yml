@@ -43,7 +43,8 @@ jobs:
         postgres: ['17', '18']
     services:
       # Docker's official image through the Amazon ECR Public mirror (the same digests as Docker
-      # Hub's): Docker Hub's anonymous pull limit failed every job that pulls on bb80f93 (ADR-343).
+      # Hub's, checked 2026-10-09): Docker Hub's anonymous pull limit failed every job that pulled
+      # from it on bb80f93 (ADR-343).
       postgres:
         image: public.ecr.aws/docker/library/postgres:${{ matrix.postgres }}-alpine
         env:

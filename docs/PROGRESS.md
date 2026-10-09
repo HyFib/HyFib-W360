@@ -16,10 +16,13 @@ on a248d4d (PR #55), almost three hours before a pull request's last check ended
   all passed.
 - **Tests:** the usage and settlement specs' comments say the projects share one database when they
   run together, as locally, and that CI gives each its own. No test changed.
-- **CI images:** the first run on bb80f93 failed every job that pulls an image with Docker Hub's
-  `429 Too Many Requests`, and so did its one re-run; the CI jobs now pull PostgreSQL from the
-  Amazon ECR Public mirror of Docker's official images (the same 17-alpine and 18-alpine digests as
-  Docker Hub's) and Mailpit from `ghcr.io/axllent/mailpit`.
+- **CI images:** the first run on bb80f93 failed every job that pulled from Docker Hub with its
+  `429 Too Many Requests`, and so did its one re-run (the secret scan, pulling from GitHub's
+  registry, passed). CI now pulls PostgreSQL and the image scans' Node base through the Amazon ECR
+  Public mirror of Docker's official images, and Mailpit and Trivy from their publishers' GitHub
+  registries, each with the same digest as on Docker Hub. A review found the image scans still
+  pulling from Docker Hub and the Mailpit digest comparable through Docker Hub's tag API; both are
+  done.
 - **Docs:** ADR-343.
 - **Review fixes:** an independent review found nothing that would fail CI and four small things,
   fixed: ADR-343 now says a run cancelled by a newer push shows the check of the four as failed
@@ -36,6 +39,8 @@ on a248d4d (PR #55), almost three hours before a pull request's last check ended
 | The workflow parsed as YAML            | jobs `e2e-project` (the four projects) and `e2e` (`if: always()`) |
 | `playwright test --list`, each project | 116 tests each, 464 in all                                        |
 | The new jobs on GitHub Actions         | not run here: they first run with this pull request               |
+| Image digests, 2026-10-09              | the mirrors' equal Docker Hub's for the five images CI pulls      |
+| The mirrored images on GitHub Actions  | not run yet: they first run with this pull request                |
 
 ## 2026-10-09 — A company's year on its platform page (P5-10, H-034, ADR-342)
 
