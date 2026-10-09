@@ -2648,6 +2648,14 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   since the window's start and since twice as far back in one statement (two calls of the STABLE
   definer function, so one snapshot) and gives each company the difference, the window before's
   sending and receipts; 90 days has none (the function reads at most 93 days back).
+- **Messages a day (ADR-333):** `usage()` reads the companies and
+  `ops.platform_ops_daily_activity` (0254) in one repeatable-read, read-only transaction
+  (`PlatformDatabase.run`'s options), so the days add up to the totals. The function returns a row
+  for each UTC day from the window's start to today (and a later day the snapshot holds messages
+  of), counting as the activity function does. The tab draws them with `DailyMessagesChart`
+  (`components/platform/daily-chart.tsx`), a client component over the pure geometry of
+  `platform/ops-chart.ts` (exported as `@w360/domain/ops-chart`), and folds the table of the days
+  under it.
 - **Exports (ADR-154, ADR-155, ADR-158):** `/platform/ops/export/[list]` (a route handler behind the
   pages' platform actor check; a name of `OPS_EXPORT_LISTS`, any other not found) calls
   `exportList`, which checks in its transaction that the actor is a platform administrator, reads

@@ -1329,9 +1329,12 @@ verification, app review, Embedded Signup configuration).
   **[Pages of companies built; its browser test runs only in CI]** (ADR-331: the Overview's
   companies needing attention and the Signals and Usage tabs show 100 companies a page, the totals
   and CSVs still covering them all; no migration).
+  **[Messages a day built; its database and browser tests run only in CI]** (ADR-333, migration
+  0254: the Usage tab draws the platform's messages sent and received each UTC day of its window,
+  with each day's failures in a tooltip and a table of the days, read in the totals' snapshot).
   Remaining:
-  other alert channels, longer trends and charts, Meta's quality webhook (unconfirmed),
-  rollups for many companies and pages read from the database.
+  other alert channels, trends further back than 93 days and other charts, Meta's quality webhook
+  (unconfirmed), rollups for many companies and pages read from the database.
 - **P5-11 Account export/deletion workflow** **[built, locally verified with test data only]**
   (ADR-055): Settings → Company data for owners. A streamed, gzip-compressed JSON Lines export of
   every company table from one read-only transaction (each table and column exported or excluded

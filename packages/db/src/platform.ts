@@ -2,7 +2,7 @@ import { drizzle } from 'drizzle-orm/node-postgres';
 import { sql } from 'drizzle-orm';
 import type pg from 'pg';
 import * as schema from './schema/index';
-import type { Tx } from './client';
+import type { TransactionOptions, Tx } from './client';
 import { mapDatabaseError } from './errors';
 
 /**
@@ -13,22 +13,36 @@ import { mapDatabaseError } from './errors';
  * app.user_id so SECURITY DEFINER helpers and audit rows can attribute the action.
  */
 export interface PlatformDatabase {
-  run<T>(actorUserId: string, fn: (tx: Tx) => Promise<T>): Promise<T>;
+  /**
+   * Runs `fn` in a transaction as the acting administrator: read committed and read write unless
+   * `options` asks otherwise (a read of several statements that must agree, one snapshot).
+   */
+  run<T>(actorUserId: string, fn: (tx: Tx) => Promise<T>, options?: TransactionOptions): Promise<T>;
   close(): Promise<void>;
 }
 
 export function createPlatformDatabase(pool: pg.Pool): PlatformDatabase {
   const db = drizzle({ client: pool, schema });
   return {
-    async run<T>(actorUserId: string, fn: (tx: Tx) => Promise<T>): Promise<T> {
+    async run<T>(
+      actorUserId: string,
+      fn: (tx: Tx) => Promise<T>,
+      options: TransactionOptions = {},
+    ): Promise<T> {
       if (!actorUserId) throw new Error('Platform actor required');
       try {
-        return await db.transaction(async (tx) => {
-          await tx.execute(
-            sql`select set_config('app.tenant_id', '', true), set_config('app.user_id', ${actorUserId}, true)`,
-          );
-          return fn(tx as unknown as Tx);
-        });
+        return await db.transaction(
+          async (tx) => {
+            await tx.execute(
+              sql`select set_config('app.tenant_id', '', true), set_config('app.user_id', ${actorUserId}, true)`,
+            );
+            return fn(tx as unknown as Tx);
+          },
+          {
+            isolationLevel: options.isolationLevel ?? 'read committed',
+            accessMode: options.accessMode ?? 'read write',
+          },
+        );
       } catch (error) {
         throw mapDatabaseError(error);
       }

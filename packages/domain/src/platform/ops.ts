@@ -257,6 +257,33 @@ async function usageRows(tx: Tx, window: UsageWindow, now: Date): Promise<Compan
   });
 }
 
+/** The platform's messages on one UTC day (ADR-333): sent, those of them that failed, received. */
+export interface OpsDailyActivity {
+  /** The UTC day, as YYYY-MM-DD. */
+  day: string;
+  outbound: number;
+  failed: number;
+  inbound: number;
+}
+
+/**
+ * The platform's messages each UTC day since a time (ADR-333), the first day from that time and
+ * today up to now, as the activity function counts them, every day with a row: read in the same
+ * snapshot as `usageRows`, they add up to its totals.
+ */
+async function dailyActivity(tx: Tx, since: Date): Promise<OpsDailyActivity[]> {
+  const result = await tx.execute<Row>(sql`
+    select to_char(utc_day, 'YYYY-MM-DD') as day, outbound, failed, inbound
+      from ops.platform_ops_daily_activity(${since.toISOString()}::timestamptz)
+     order by utc_day`);
+  return result.rows.map((r) => ({
+    day: String(r.day),
+    outbound: num(r.outbound),
+    failed: num(r.failed),
+    inbound: num(r.inbound),
+  }));
+}
+
 const usageWindow = (days: number): UsageWindow =>
   (USAGE_WINDOWS as readonly number[]).includes(days) ? (days as UsageWindow) : 30;
 
@@ -1105,34 +1132,42 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
       const window = usageWindow(days);
       const now = clock.now();
       const since = new Date(now.getTime() - window * DAY_MS);
-      return platformDb.run(actor.userId, async (tx) => {
-        const rows = await usageRows(tx, window, now);
-        const sum = (pick: (a: CompanyUsage) => number) =>
-          rows.reduce((total, a) => total + pick(a), 0);
-        return {
-          days: window,
-          since,
-          rows,
-          /** The window before's sending and receipts (ADR-157), null for 90 days. */
-          previous: USAGE_COMPARED_WINDOWS.includes(window)
-            ? {
-                outbound: sum((a) => a.previous?.outbound ?? 0),
-                inbound: sum((a) => a.previous?.inbound ?? 0),
-              }
-            : null,
-          totals: {
-            outbound: sum((a) => a.outbound),
-            inbound: sum((a) => a.inbound),
-            campaign: sum((a) => a.outboundBySender.campaign),
-            api: sum((a) => a.outboundBySender.api),
-            bot: sum((a) => a.outboundBySender.bot),
-            webhookDeliveries: sum((a) => a.webhookDeliveries),
-            automationRuns: sum((a) => a.automationRuns),
-            members: sum((a) => a.members),
-            numbers: sum((a) => a.numbers),
-          },
-        };
-      });
+      // One snapshot for the companies and the days, so the chart adds up to the totals (ADR-333).
+      return platformDb.run(
+        actor.userId,
+        async (tx) => {
+          const rows = await usageRows(tx, window, now);
+          const daily = await dailyActivity(tx, since);
+          const sum = (pick: (a: CompanyUsage) => number) =>
+            rows.reduce((total, a) => total + pick(a), 0);
+          return {
+            days: window,
+            since,
+            rows,
+            /** The platform's messages each UTC day of the window (ADR-333). */
+            daily,
+            /** The window before's sending and receipts (ADR-157), null for 90 days. */
+            previous: USAGE_COMPARED_WINDOWS.includes(window)
+              ? {
+                  outbound: sum((a) => a.previous?.outbound ?? 0),
+                  inbound: sum((a) => a.previous?.inbound ?? 0),
+                }
+              : null,
+            totals: {
+              outbound: sum((a) => a.outbound),
+              inbound: sum((a) => a.inbound),
+              campaign: sum((a) => a.outboundBySender.campaign),
+              api: sum((a) => a.outboundBySender.api),
+              bot: sum((a) => a.outboundBySender.bot),
+              webhookDeliveries: sum((a) => a.webhookDeliveries),
+              automationRuns: sum((a) => a.automationRuns),
+              members: sum((a) => a.members),
+              numbers: sum((a) => a.numbers),
+            },
+          };
+        },
+        { isolationLevel: 'repeatable read', accessMode: 'read only' },
+      );
     },
 
     /**

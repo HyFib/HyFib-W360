@@ -441,3 +441,129 @@ test('staff acknowledge a company’s failing integration on the console, with a
   await expect(page.getByText('platform.integration_failure_acknowledged').first()).toBeVisible();
   await expect(page.getByText('platform.integration_failure_assigned').first()).toBeVisible();
 });
+
+/** A UTC day, YYYY-MM-DD, as the chart names it: 9 Oct. */
+function chartDay(day: string): string {
+  const months = [
+    'Jan',
+    'Feb',
+    'Mar',
+    'Apr',
+    'May',
+    'Jun',
+    'Jul',
+    'Aug',
+    'Sep',
+    'Oct',
+    'Nov',
+    'Dec',
+  ];
+  const [, month, date] = day.split('-').map(Number);
+  return `${date} ${months[month! - 1]}`;
+}
+
+test('staff read the platform’s messages a day on the Usage tab (ADR-333)', async ({
+  page,
+  request,
+}) => {
+  test.skip(!platformConfigured, 'needs DATABASE_URL_MIGRATE and E2E_DATABASE_URL_AUTH');
+  test.skip(!messagingConfigured, 'Meta test configuration (stand-in, app secret) not provided');
+  test.setTimeout(150_000);
+  const email = uniqueEmail('daily');
+  const suffix = `${Date.now().toString(36)}${Math.floor(Math.random() * 1e4)}`;
+  const slug = `daily-${suffix}`;
+  const companyName = `Daily Co ${suffix}`;
+  await signUpAndVerify(page, { name: 'Dana Staff', email, password: PASSWORD });
+  await page.getByLabel('Company name').fill(companyName);
+  await page.getByLabel('Company address').fill(slug);
+  await page.getByRole('button', { name: 'Create company' }).click();
+  await expect(page.getByRole('heading', { name: companyName })).toBeVisible();
+  await turnOnTwoFactor(page, PASSWORD);
+  await makePlatformOwner(email);
+  // A customer writes to the company's number, so the platform has a message today whatever ran
+  // before this test.
+  const { wabaId, phoneNumberId } = await connectTestChannel({ ownerEmail: email, slug });
+  await sendSignedWebhook(
+    request,
+    inboundMessage(wabaId, phoneNumberId, randomWaId(), 'Is the shop open today?'),
+  );
+
+  const chart = page.getByRole('slider', {
+    name: 'Messages sent and received each UTC day, 7 days',
+  });
+  const before = new Date();
+  await page.goto('/platform/ops/usage?days=7');
+  await expect(page.getByText('Messages a day', { exact: true })).toBeVisible();
+  // The worker stores the message after the webhook is answered; the page shows what was there
+  // when it rendered.
+  await expect(async () => {
+    await page.reload();
+    await expect(chart).toBeVisible({ timeout: 1_000 });
+  }).toPass({ timeout: 30_000 });
+  await expect(page.getByRole('list', { name: 'Lines' }).getByRole('listitem')).toHaveText([
+    'Sent',
+    'Received',
+  ]);
+
+  // The table gives every day: each UTC day from the window's start to today (the server's, read
+  // between the two times).
+  await page.getByText('Table of the days', { exact: true }).click();
+  const table = page.getByRole('table', { name: 'Messages a day' });
+  await expect(table.getByRole('columnheader')).toHaveText([
+    'Day (UTC)',
+    'Sent',
+    'Failed',
+    'Received',
+  ]);
+  const rows = table.getByRole('row').filter({ has: page.getByRole('cell') });
+  const days = (await rows.locator('td:first-child').allTextContents()).map((d) => d.trim());
+  const after = new Date();
+  expect(days.length).toBeGreaterThanOrEqual(8);
+  for (let i = 1; i < days.length; i += 1) {
+    const next = new Date(Date.parse(`${days[i - 1]}T00:00:00Z`) + 24 * 60 * 60 * 1000);
+    expect(days[i], `after ${days[i - 1]}`).toBe(next.toISOString().slice(0, 10));
+  }
+  expect([before, after].map((d) => d.toISOString().slice(0, 10))).toContain(days.at(-1));
+
+  // The chart is a slider over the days, its value the last day's numbers until another is chosen;
+  // focused, it shows that day's tooltip, and the arrow keys, Home and End move along the days.
+  const describes = (day: string) =>
+    new RegExp(`^${chartDay(day)}: [\\d,]+ sent, [\\d,]+ received, [\\d,]+ failed$`);
+  const tooltip = (day: string) => chart.getByText(`${chartDay(day)} (UTC)`, { exact: true });
+  await expect(chart).toHaveAttribute('aria-valuetext', describes(days.at(-1)!));
+  await expect(tooltip(days.at(-1)!)).toHaveCount(0);
+  await chart.focus();
+  await expect(tooltip(days.at(-1)!)).toBeVisible();
+  await page.keyboard.press('Home');
+  await expect(chart).toHaveAttribute('aria-valuenow', '0');
+  await expect(chart).toHaveAttribute('aria-valuetext', describes(days[0]!));
+  await expect(tooltip(days[0]!)).toBeVisible();
+  await page.keyboard.press('ArrowRight');
+  await expect(chart).toHaveAttribute('aria-valuetext', describes(days[1]!));
+  await page.keyboard.press('End');
+  await expect(chart).toHaveAttribute('aria-valuenow', String(days.length - 1));
+  await expect(chart).toHaveAttribute('aria-valuetext', describes(days.at(-1)!));
+  // The tooltip stays inside the page, on a phone as on a desktop; Escape puts it away.
+  await expect(tooltip(days.at(-1)!)).toBeVisible();
+  await expectNoHorizontalOverflow(page);
+  await page.keyboard.press('Escape');
+  await expect(tooltip(days.at(-1)!)).toHaveCount(0);
+
+  // On a phone narrower than this project's, the chart and the open table stay inside the page:
+  // the table scrolls in its own box rather than widening the card.
+  const viewport = page.viewportSize();
+  await page.setViewportSize({ width: 360, height: viewport?.height ?? 800 });
+  for (const part of [chart, page.locator('details').filter({ has: table })]) {
+    const box = await part.boundingBox();
+    expect(box, 'shown').not.toBeNull();
+    expect(box!.x + box!.width, 'inside the page').toBeLessThanOrEqual(360);
+  }
+  if (viewport) await page.setViewportSize(viewport);
+
+  // The other windows draw their own days.
+  await page.getByRole('link', { name: '30 days' }).click();
+  await expect(
+    page.getByRole('slider', { name: 'Messages sent and received each UTC day, 30 days' }),
+  ).toBeVisible();
+  await expectNoHorizontalOverflow(page);
+});

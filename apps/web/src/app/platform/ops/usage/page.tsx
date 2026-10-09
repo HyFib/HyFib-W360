@@ -17,6 +17,7 @@ import {
 } from '@w360/ui';
 import { USAGE_WINDOWS, opsCompanyPage, usageChange } from '@w360/domain';
 import { CompanyLink, CompanyPager, StatTile } from '@/components/platform/ops';
+import { DailyMessagesChart } from '@/components/platform/daily-chart';
 import { getRuntime } from '@/server/runtime';
 import { requirePlatformActor } from '@/server/session';
 
@@ -90,6 +91,56 @@ export default async function OpsUsagePage({
           detail="Active members · WhatsApp numbers"
         />
       </section>
+      <Card>
+        <CardHeader>
+          <CardTitle>Messages a day</CardTitle>
+          <CardDescription>
+            Every company&apos;s messages each UTC day of the {o.days} days: the first day from the
+            period&apos;s start at {o.since.toISOString().slice(11, 16)} UTC, today so far. Point at
+            a day, or focus the chart and use the arrow keys, for its numbers with the sends that
+            failed; the table gives every day.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="grid gap-4">
+          {o.daily.every((d) => d.outbound === 0 && d.inbound === 0) ? (
+            <EmptyState
+              title="No messages in these days"
+              description="No company sent or received a message since the period started."
+            />
+          ) : (
+            <>
+              <DailyMessagesChart
+                days={o.daily}
+                label={`Messages sent and received each UTC day, ${o.days} days`}
+              />
+              {/* min-w-0: the table scrolls in its box rather than widening the card on a phone. */}
+              <details className="min-w-0 rounded-md border border-border p-3">
+                <summary className="cursor-pointer text-sm font-medium">Table of the days</summary>
+                <Table aria-label="Messages a day" className="mt-3">
+                  <THead>
+                    <TR>
+                      <TH>Day (UTC)</TH>
+                      <TH>Sent</TH>
+                      <TH>Failed</TH>
+                      <TH>Received</TH>
+                    </TR>
+                  </THead>
+                  <TBody>
+                    {o.daily.map((d) => (
+                      <TR key={d.day}>
+                        <TD className="whitespace-nowrap">{d.day}</TD>
+                        <TD className="tabular-nums">{d.outbound}</TD>
+                        <TD className="tabular-nums">{d.failed}</TD>
+                        <TD className="tabular-nums">{d.inbound}</TD>
+                      </TR>
+                    ))}
+                  </TBody>
+                </Table>
+              </details>
+            </>
+          )}
+        </CardContent>
+      </Card>
       <Card>
         <CardHeader>
           <div className="flex flex-wrap items-center justify-between gap-2">
