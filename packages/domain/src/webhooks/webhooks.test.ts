@@ -4194,6 +4194,32 @@ describe('endpoint audit entries within an audit entry’s 8 KiB (ADR-336)', () 
       listCounts: { contactTags: 45 },
       listDigests: { contactTags: digest(tags(45)) },
     });
+    // A list read back from the database, each object's keys in jsonb's order (by length: key,
+    // atMost, atLeast), has the digest of the list as the services built it.
+    const ranges = Array.from({ length: 50 }, (_, i) => ({
+      key: 'score',
+      atLeast: i,
+      atMost: i + 1,
+    }));
+    const written = webhookEndpointAuditMetadata({
+      host: 'h',
+      eventTypes,
+      conversationTags: tags(20),
+      contactEventFieldValues: ranges,
+    });
+    expect(written.listCounts).toEqual({ contactEventFieldValues: 50 });
+    expect(
+      webhookEndpointAuditMetadata({
+        host: 'h',
+        eventTypes,
+        conversationTags: tags(20),
+        contactEventFieldValues: ranges.map(({ key, atLeast, atMost }) => ({
+          key,
+          atMost,
+          atLeast,
+        })),
+      }).listDigests,
+    ).toEqual(written.listDigests);
     // A list changed to as many tags has another digest.
     const changed = webhookEndpointAuditMetadata({
       host: 'hooks.example.com',

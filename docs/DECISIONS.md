@@ -13106,7 +13106,8 @@ Decision:
   (`{"contactTags": 50}`) and by the first 16 hex digits of the SHA-256 of their JSON under
   `listDigests`, instead of item by item, until it fits (`webhookEndpointAuditMetadata`). The digest
   shows whether a list named by count in two entries changed between them; its items are not in the
-  entry. The host, the events (`eventTypes`, or a replay's `events`) and the other facts are always
+  entry. It hashes each object's keys in order, so a list read back from the database (jsonb keeps
+  an object's keys by length) hashes as the services wrote it. The host, the events (`eventTypes`, or a replay's `events`) and the other facts are always
   named, and an entry that fits is unchanged. With every list named by count, an entry with every
   event and the longest hosts takes under 6,000 bytes. The endpoint keeps every list whole, as
   Settings, the API and the company data export show it.

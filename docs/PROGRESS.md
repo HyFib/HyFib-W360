@@ -42,6 +42,11 @@ The local PostgreSQL is unavailable, so the integration tests below were written
   comment and a test; "40 letters" where the limit is 40 characters; and, beside the slice, that an
   API answer kept with its `Idempotency-Key` holds 64 KiB, which every list of an endpoint at its
   limit at once could pass. Each is corrected; the last is in BACKLOG P5-09, not built.
+- **Codex review fix:** Codex's review of the pull request found that a list's digest hashed its
+  JSON in the order its objects' keys came: a field value range built as `key, atLeast, atMost` and
+  read back from jsonb as `key, atMost, atLeast` hashed otherwise, so a change that left the list
+  out reported it changed. Digests now hash each object's keys in order (a unit test: the same
+  ranges in jsonb's order have the same digest; it fails without the fix).
 
 ### Test commands and results (local, 2026-10-09)
 

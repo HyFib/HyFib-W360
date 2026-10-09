@@ -2688,11 +2688,24 @@ export async function webhookContactEventFieldValuesChecked(
  * An endpoint's audit entry within the 8 KiB of metadata an audit entry holds (ADR-336): as given
  * while `jsonbSize` counts at most `WEBHOOK_LIMITS.auditMetadataBytes` for it; otherwise its largest
  * lists, one after another (by name when two are as large), are named by their lengths under
- * `listCounts` and by the first 16 hex digits of the SHA-256 of their JSON under `listDigests`, so
- * that two entries still show whether a list named by count in both changed, until it fits. Its
+ * `listCounts` and by the first 16 hex digits of the SHA-256 of their JSON, each object's keys in
+ * order (`canonicalJson`), under `listDigests`, so that two entries still show whether a list named
+ * by count in both changed, until it fits. Its
  * events (`eventTypes`, or a replay's `events`) are always named, and the endpoint keeps every list
  * whole. With every list named by count an entry takes under 6,000 bytes, so it then fits.
  */
+/**
+ * A value's JSON with each object's keys in order, so that a list read back from jsonb (which keeps
+ * an object's keys by length) is written as the services built it, and hashes the same.
+ */
+function canonicalJson(value: unknown): string {
+  return JSON.stringify(value, (_key, item: unknown) =>
+    typeof item === 'object' && item !== null && !Array.isArray(item)
+      ? Object.fromEntries(Object.entries(item).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))
+      : item,
+  );
+}
+
 export function webhookEndpointAuditMetadata(
   metadata: Record<string, unknown>,
 ): Record<string, unknown> {
@@ -2713,7 +2726,7 @@ export function webhookEndpointAuditMetadata(
       ...Object.fromEntries(Object.entries(metadata).filter(([key]) => !keys.has(key))),
       listCounts: Object.fromEntries(counted.map((list) => [list.key, list.list.length])),
       listDigests: Object.fromEntries(
-        counted.map((list) => [list.key, sha256Hex(JSON.stringify(list.list)).slice(0, 16)]),
+        counted.map((list) => [list.key, sha256Hex(canonicalJson(list.list)).slice(0, 16)]),
       ),
     };
   };
