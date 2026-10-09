@@ -43,6 +43,47 @@ export const OPS_LIST_ROWS = {
   deadLetters: { shown: 100, exported: 5000 },
 } as const;
 
+/** How many companies a page of the console's company lists shows (ADR-331). */
+export const OPS_COMPANY_PAGE_ROWS = 100;
+
+/** A page of one of the console's company lists: Overview, Signals and Usage (ADR-331). */
+export interface OpsCompanyPage<T> {
+  rows: T[];
+  /** The page shown, from 1; a page before the first or past the last shows the nearest. */
+  page: number;
+  pages: number;
+  /** The companies in the whole list, and the places of the first and last shown (0 for none). */
+  total: number;
+  first: number;
+  last: number;
+}
+
+/**
+ * The page asked for of a list already in its order (ADR-331): a whole number, the nearest page for
+ * one before the first or past the last, and the first page for any other request; the totals and
+ * the CSV still cover the whole list.
+ */
+export function opsCompanyPage<T>(
+  list: readonly T[],
+  requested: number,
+  size: number = OPS_COMPANY_PAGE_ROWS,
+): OpsCompanyPage<T> {
+  const total = list.length;
+  const pages = Math.max(1, Math.ceil(total / size));
+  const asked = Number.isInteger(requested) ? requested : 1;
+  const page = Math.min(Math.max(asked, 1), pages);
+  const start = (page - 1) * size;
+  const rows = list.slice(start, start + size);
+  return {
+    rows,
+    page,
+    pages,
+    total,
+    first: rows.length === 0 ? 0 : start + 1,
+    last: start + rows.length,
+  };
+}
+
 export const OPS_WINDOWS = {
   /** Embedded Signup sessions and new companies shown on the onboarding page. */
   onboardingDays: 30,

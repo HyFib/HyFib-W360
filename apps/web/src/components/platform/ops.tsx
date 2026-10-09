@@ -5,6 +5,7 @@ import {
   OPS_LIST_ROWS,
   type HealthIssue,
   type HealthLevel,
+  type OpsCompanyPage,
   type OpsExportList,
 } from '@w360/domain';
 
@@ -124,6 +125,47 @@ export function CompanyLink({ id, name, slug }: { id: string; name: string; slug
       </Link>
       <div className="text-xs text-muted-foreground">/{slug}</div>
     </>
+  );
+}
+
+/**
+ * Which companies a page of a company list shows and, when there is more than one page, the links
+ * to the pages beside it (ADR-331); nothing for an empty list. `href` gives a page's address,
+ * keeping the list's other choices (its window).
+ */
+export function CompanyPager({
+  page,
+  href,
+}: {
+  page: Omit<OpsCompanyPage<unknown>, 'rows'>;
+  href: (page: number) => string;
+}) {
+  if (page.total === 0) return null;
+  const link = 'text-primary underline-offset-4 hover:underline';
+  const n = (value: number) => value.toLocaleString('en');
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
+      <p>
+        Companies {n(page.first)}–{n(page.last)} of {n(page.total)}
+      </p>
+      {page.pages > 1 ? (
+        <nav aria-label="Pages of companies" className="flex flex-wrap items-center gap-3">
+          {page.page > 1 ? (
+            <Link href={href(page.page - 1)} className={link}>
+              <span aria-hidden="true">← </span>Previous page
+            </Link>
+          ) : null}
+          <span className="text-muted-foreground">
+            Page {n(page.page)} of {n(page.pages)}
+          </span>
+          {page.page < page.pages ? (
+            <Link href={href(page.page + 1)} className={link}>
+              Next page<span aria-hidden="true"> →</span>
+            </Link>
+          ) : null}
+        </nav>
+      ) : null}
+    </div>
   );
 }
 

@@ -15,20 +15,27 @@ import {
   TR,
   Table,
 } from '@w360/ui';
-import { OPS_SIGNAL_RULES, qualityRank } from '@w360/domain';
-import { CompanyLink, percent } from '@/components/platform/ops';
+import { OPS_SIGNAL_RULES, opsCompanyPage, qualityRank } from '@w360/domain';
+import { CompanyLink, CompanyPager, percent } from '@/components/platform/ops';
 import { getRuntime } from '@/server/runtime';
 import { requirePlatformActor } from '@/server/session';
 
 export const metadata: Metadata = { title: 'Signals · Operations' };
 export const dynamic = 'force-dynamic';
 
-export default async function OpsSignalsPage() {
+export default async function OpsSignalsPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ page?: string }>;
+}) {
   const actor = await requirePlatformActor();
+  const { page } = await searchParams;
   const { platformOps } = await getRuntime();
   const o = await platformOps.signals(actor);
   const r = OPS_SIGNAL_RULES;
   const flagged = o.rows.filter((row) => row.flags.length > 0).length;
+  // A page of the companies (ADR-331); the count of flagged ones covers them all.
+  const shown = opsCompanyPage(o.rows, Number(page ?? 1));
   return (
     <div className="grid grid-cols-1 gap-6">
       <Card>
@@ -61,75 +68,82 @@ export default async function OpsSignalsPage() {
           {o.rows.length === 0 ? (
             <EmptyState title={`No sending in the last ${r.windowDays} days`} />
           ) : (
-            <Table aria-label="Sending signals">
-              <THead>
-                <TR>
-                  <TH>Company</TH>
-                  <TH>Sent</TH>
-                  <TH>Failed</TH>
-                  <TH>Marketing delivered</TH>
-                  <TH>Marketing opt-outs</TH>
-                  <TH>131050 / 131049</TH>
-                  <TH>Complaints</TH>
-                  <TH>Quality</TH>
-                  <TH>Signals</TH>
-                </TR>
-              </THead>
-              <TBody>
-                {o.rows.map(({ activity: a, quality, flags }) => {
-                  const rank = qualityRank(quality);
-                  return (
-                    <TR key={a.tenantId}>
-                      <TD>
-                        <CompanyLink id={a.tenantId} name={a.name} slug={a.slug} />
-                      </TD>
-                      <TD className="tabular-nums">{a.outbound}</TD>
-                      <TD className="tabular-nums">
-                        {a.failed}
-                        <div className="text-xs text-muted-foreground">
-                          {percent(a.failed, a.outbound)}
-                        </div>
-                      </TD>
-                      <TD className="tabular-nums">{a.marketingDelivered}</TD>
-                      <TD className="tabular-nums">
-                        {a.marketingOptOuts}
-                        <div className="text-xs text-muted-foreground">
-                          {percent(a.marketingOptOuts, a.marketingDelivered)}
-                        </div>
-                      </TD>
-                      <TD className="tabular-nums">
-                        {a.error131050} / {a.error131049}
-                      </TD>
-                      <TD className="tabular-nums">{a.complaints}</TD>
-                      <TD>
-                        {rank ? (
-                          <Badge
-                            tone={
-                              rank === 'RED' ? 'danger' : rank === 'YELLOW' ? 'warning' : 'success'
-                            }
-                          >
-                            {rank}
-                          </Badge>
-                        ) : (
-                          <span className="text-muted-foreground">Not rated</span>
-                        )}
-                      </TD>
-                      <TD className="min-w-48">
-                        {flags.length === 0 ? (
-                          <span className="text-muted-foreground">None</span>
-                        ) : (
-                          <ul className="grid gap-1 text-sm">
-                            {flags.map((f) => (
-                              <li key={f.key}>{f.detail}</li>
-                            ))}
-                          </ul>
-                        )}
-                      </TD>
-                    </TR>
-                  );
-                })}
-              </TBody>
-            </Table>
+            <>
+              <CompanyPager page={shown} href={(n) => `/platform/ops/signals?page=${n}`} />
+              <Table aria-label="Sending signals">
+                <THead>
+                  <TR>
+                    <TH>Company</TH>
+                    <TH>Sent</TH>
+                    <TH>Failed</TH>
+                    <TH>Marketing delivered</TH>
+                    <TH>Marketing opt-outs</TH>
+                    <TH>131050 / 131049</TH>
+                    <TH>Complaints</TH>
+                    <TH>Quality</TH>
+                    <TH>Signals</TH>
+                  </TR>
+                </THead>
+                <TBody>
+                  {shown.rows.map(({ activity: a, quality, flags }) => {
+                    const rank = qualityRank(quality);
+                    return (
+                      <TR key={a.tenantId}>
+                        <TD>
+                          <CompanyLink id={a.tenantId} name={a.name} slug={a.slug} />
+                        </TD>
+                        <TD className="tabular-nums">{a.outbound}</TD>
+                        <TD className="tabular-nums">
+                          {a.failed}
+                          <div className="text-xs text-muted-foreground">
+                            {percent(a.failed, a.outbound)}
+                          </div>
+                        </TD>
+                        <TD className="tabular-nums">{a.marketingDelivered}</TD>
+                        <TD className="tabular-nums">
+                          {a.marketingOptOuts}
+                          <div className="text-xs text-muted-foreground">
+                            {percent(a.marketingOptOuts, a.marketingDelivered)}
+                          </div>
+                        </TD>
+                        <TD className="tabular-nums">
+                          {a.error131050} / {a.error131049}
+                        </TD>
+                        <TD className="tabular-nums">{a.complaints}</TD>
+                        <TD>
+                          {rank ? (
+                            <Badge
+                              tone={
+                                rank === 'RED'
+                                  ? 'danger'
+                                  : rank === 'YELLOW'
+                                    ? 'warning'
+                                    : 'success'
+                              }
+                            >
+                              {rank}
+                            </Badge>
+                          ) : (
+                            <span className="text-muted-foreground">Not rated</span>
+                          )}
+                        </TD>
+                        <TD className="min-w-48">
+                          {flags.length === 0 ? (
+                            <span className="text-muted-foreground">None</span>
+                          ) : (
+                            <ul className="grid gap-1 text-sm">
+                              {flags.map((f) => (
+                                <li key={f.key}>{f.detail}</li>
+                              ))}
+                            </ul>
+                          )}
+                        </TD>
+                      </TR>
+                    );
+                  })}
+                </TBody>
+              </Table>
+            </>
           )}
         </CardContent>
       </Card>

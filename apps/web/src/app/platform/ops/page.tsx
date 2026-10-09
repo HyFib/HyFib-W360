@@ -9,17 +9,32 @@ import {
   CardTitle,
   EmptyState,
 } from '@w360/ui';
-import { CompanyLink, IssueList, LevelBadge, StatTile, Utc } from '@/components/platform/ops';
+import { opsCompanyPage } from '@w360/domain';
+import {
+  CompanyLink,
+  CompanyPager,
+  IssueList,
+  LevelBadge,
+  StatTile,
+  Utc,
+} from '@/components/platform/ops';
 import { getRuntime } from '@/server/runtime';
 import { requirePlatformActor } from '@/server/session';
 
 export const metadata: Metadata = { title: 'Operations · Platform' };
 export const dynamic = 'force-dynamic';
 
-export default async function OpsOverviewPage() {
+export default async function OpsOverviewPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ page?: string }>;
+}) {
   const actor = await requirePlatformActor();
+  const { page } = await searchParams;
   const { platformOps } = await getRuntime();
   const o = await platformOps.overview(actor);
+  // A page of the companies needing attention (ADR-331); the counts above cover them all.
+  const shown = opsCompanyPage(o.attention, Number(page ?? 1));
   return (
     <div className="grid grid-cols-1 gap-6">
       <section aria-label="Totals" className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
@@ -101,27 +116,34 @@ export default async function OpsOverviewPage() {
           {o.attention.length === 0 ? (
             <EmptyState title="Every company looks healthy" />
           ) : (
-            <ul aria-label="Companies needing attention" className="grid gap-4">
-              {o.attention.map((c) => (
-                <li
-                  key={c.facts.tenantId}
-                  className="grid gap-2 border-b border-border pb-4 last:border-0 sm:grid-cols-[minmax(0,14rem)_minmax(0,1fr)]"
-                >
-                  <div className="grid content-start gap-1">
-                    <div>
-                      <CompanyLink id={c.facts.tenantId} name={c.facts.name} slug={c.facts.slug} />
+            <div className="grid gap-4">
+              <CompanyPager page={shown} href={(n) => `/platform/ops?page=${n}`} />
+              <ul aria-label="Companies needing attention" className="grid gap-4">
+                {shown.rows.map((c) => (
+                  <li
+                    key={c.facts.tenantId}
+                    className="grid gap-2 border-b border-border pb-4 last:border-0 sm:grid-cols-[minmax(0,14rem)_minmax(0,1fr)]"
+                  >
+                    <div className="grid content-start gap-1">
+                      <div>
+                        <CompanyLink
+                          id={c.facts.tenantId}
+                          name={c.facts.name}
+                          slug={c.facts.slug}
+                        />
+                      </div>
+                      <div className="flex flex-wrap gap-1">
+                        <LevelBadge level={c.level} />
+                        {c.facts.status !== 'active' ? (
+                          <Badge tone="neutral">{c.facts.status}</Badge>
+                        ) : null}
+                      </div>
                     </div>
-                    <div className="flex flex-wrap gap-1">
-                      <LevelBadge level={c.level} />
-                      {c.facts.status !== 'active' ? (
-                        <Badge tone="neutral">{c.facts.status}</Badge>
-                      ) : null}
-                    </div>
-                  </div>
-                  <IssueList issues={c.issues} />
-                </li>
-              ))}
-            </ul>
+                    <IssueList issues={c.issues} />
+                  </li>
+                ))}
+              </ul>
+            </div>
           )}
         </CardContent>
       </Card>

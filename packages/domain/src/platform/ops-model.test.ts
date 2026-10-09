@@ -9,6 +9,8 @@ import {
   OPS_EXPORT_LISTS,
   OPS_SIGNAL_RULES,
   OPS_LIST_ROWS,
+  OPS_COMPANY_PAGE_ROWS,
+  opsCompanyPage,
   QUARANTINE_CSV_COLUMNS,
   QUEUES_CSV_COLUMNS,
   RECEIPTS_CSV_COLUMNS,
@@ -986,5 +988,52 @@ describe('the administrators the Assign list offers (ADR-325)', () => {
       'Ravi (administrator since 2026-10-01 09:30 UTC) #2',
     ]);
     expect(new Set(choices.map((c) => c.label)).size).toBe(choices.length);
+  });
+});
+
+describe('pages of the console’s company lists (ADR-331)', () => {
+  const companies = (n: number) => Array.from({ length: n }, (_, i) => `company ${i + 1}`);
+
+  it('shows 100 companies a page, in the list’s order, saying which and of how many', () => {
+    expect(OPS_COMPANY_PAGE_ROWS).toBe(100);
+    const list = companies(250);
+    expect(opsCompanyPage(list, 1)).toMatchObject({
+      page: 1,
+      pages: 3,
+      total: 250,
+      first: 1,
+      last: 100,
+    });
+    expect(opsCompanyPage(list, 1).rows).toEqual(list.slice(0, 100));
+    const second = opsCompanyPage(list, 2);
+    expect(second).toMatchObject({ page: 2, pages: 3, first: 101, last: 200 });
+    expect(second.rows[0]).toBe('company 101');
+    const third = opsCompanyPage(list, 3);
+    expect(third).toMatchObject({ page: 3, pages: 3, first: 201, last: 250 });
+    expect(third.rows).toHaveLength(50);
+    // Exactly a page's worth is one page.
+    expect(opsCompanyPage(companies(100), 1)).toMatchObject({ pages: 1, first: 1, last: 100 });
+    expect(opsCompanyPage(companies(101), 2)).toMatchObject({ pages: 2, first: 101, last: 101 });
+  });
+
+  it('shows the nearest page for one out of range, and the first for anything but a whole number', () => {
+    const list = companies(250);
+    expect(opsCompanyPage(list, 9).page).toBe(3);
+    // Whole numbers too large to count exactly are still past the last page.
+    expect(opsCompanyPage(list, 2 ** 60)).toMatchObject({ page: 3, first: 201, last: 250 });
+    expect(opsCompanyPage(list, 0).page).toBe(1);
+    expect(opsCompanyPage(list, -2).page).toBe(1);
+    for (const odd of [Number.NaN, 1.5, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+      expect(opsCompanyPage(list, odd).page, String(odd)).toBe(1);
+    }
+    // No companies: one empty page.
+    expect(opsCompanyPage([], 4)).toEqual({
+      rows: [],
+      page: 1,
+      pages: 1,
+      total: 0,
+      first: 0,
+      last: 0,
+    });
   });
 });

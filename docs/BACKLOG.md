@@ -1321,9 +1321,12 @@ verification, app review, Embedded Signup configuration).
   **[Administrators told apart in the Assign list built; its database and browser tests run only in
   CI]** (ADR-325: the reader marked "(you)", a shared name followed by when the account became an
   administrator; no migration).
+  **[Pages of companies built; its browser test runs only in CI]** (ADR-331: the Overview's
+  companies needing attention and the Signals and Usage tabs show 100 companies a page, the totals
+  and CSVs still covering them all; no migration).
   Remaining:
   other alert channels, longer trends and charts, Meta's quality webhook (unconfirmed),
-  paging and rollups for many companies.
+  rollups for many companies and pages read from the database.
 - **P5-11 Account export/deletion workflow** **[built, locally verified with test data only]**
   (ADR-055): Settings → Company data for owners. A streamed, gzip-compressed JSON Lines export of
   every company table from one read-only transaction (each table and column exported or excluded

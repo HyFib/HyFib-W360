@@ -12846,3 +12846,30 @@ Decision:
 
 Not built: a sequence number across events, and an order among the events stamped with one
 transaction's time.
+
+## ADR-331 Pages of companies on the operations console (P5-10) (2026-10-09)
+
+Context: the operations console lists every company needing attention on its Overview, every
+company with a signal or sending in the window on its Signals tab, and every company on its Usage
+tab, each on one page. With many companies those pages would grow without end; the test envelope
+has few. The backlog listed paging and rollups for many companies as remaining.
+
+Decision:
+
+- **100 companies a page** on the three company lists, in the order they had: the companies
+  needing attention (worst first), the sending signals (the most signals first) and the usage by
+  company (busiest first). Each says which companies it shows ("Companies 101–200 of 2,345") and,
+  when there is more than one page, links to the pages before and after it ("Page 2 of 24"); the
+  Usage tab's links keep its window, and choosing another window starts again at the first page. A
+  page before the first or past the last shows the nearest, and anything but a whole number shows
+  the first.
+- **What stays whole:** the totals and counts above the lists (the companies needing attention by
+  level, the flagged companies, the messages sent and received and the rest) and the CSV exports
+  cover every company, as before.
+- **How:** the page is cut from the list the console reads (`opsCompanyPage` in
+  `platform/ops-model.ts`), so each view still reads every company once, as the totals need; reading
+  only a page from the database, and rollups precomputed for many companies, come with growth. No
+  migration and no new permission: each page re-checks the platform actor, as before.
+
+Not built: rollups beyond the totals, sorting or searching the lists, and reading only a page from
+the database.

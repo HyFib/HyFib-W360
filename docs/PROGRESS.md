@@ -1,5 +1,46 @@
 # Progress
 
+## 2026-10-09 — Pages of companies on the operations console (P5-10, H-034, ADR-331)
+
+Status: **Implemented; its browser test runs in CI only.** The console's Overview listed every
+company needing attention, and its Signals and Usage tabs every company they cover, each on one
+page. No migration and no new permission.
+
+### Completed
+
+- **Domain:** `OPS_COMPANY_PAGE_ROWS` and `opsCompanyPage` in `platform/ops-model.ts`: the page
+  asked for of a list in its order, the nearest for one out of range and the first for anything but
+  a whole number, with which companies it shows and of how many.
+- **Web:** `CompanyPager` in `components/platform/ops.tsx` ("Companies 101–200 of 250" and, with
+  more than one page, the previous and next pages and "Page 2 of 3"); the Overview, Signals and
+  Usage pages show 100 companies a page from the whole list they read, the totals and counts above
+  them and the CSVs covering every company; the Usage tab's links keep its window.
+- **Tests:** unit (2 new in `platform/ops-model.test.ts`: 100 a page in the list's order with the
+  places shown, a page out of range, odd requests and no companies); e2e (`platform-ops.spec.ts`
+  follows the Usage tab's pages until the new company shows, checking the address and the page
+  shown). The e2e test was not run here.
+- **Review fix:** an independent review before the push found that the e2e test could read the
+  Signals tab's pager before the Usage tab arrived (the tabs change on the client, and Signals
+  shows companies a page too), then wait on a next page that was not there until the test timed
+  out; it now waits for the Usage table and fails at once when no next page is left. The same review
+  found whole numbers too large to count exactly showing the first page rather than the last, and
+  a navigation landmark without links on a list of one page: the count now stands alone, the links
+  are a landmark only when there is more than one page, and their arrows are hidden from screen
+  readers.
+- **Docs:** ADR-331; ARCHITECTURE; BACKLOG P5-10; feature matrix H-034.
+- **Mutation checks:** 14/14 deliberate regressions caught on the unit-tested parts. The pager and
+  the pages' wiring are covered by the e2e test, which runs in CI.
+
+### Test commands and results (local, 2026-10-09)
+
+| Command                                            | Result                                          |
+| -------------------------------------------------- | ----------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                           |
+| `pnpm test` (unit)                                 | 140 files, 1383 tests passed                    |
+| `pnpm test:e2e`                                    | not run here: it needs the database; CI runs it |
+| `pnpm build`                                       | passed                                          |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                  |
+
 ## 2026-10-09 — Webhook times to the microsecond (P5-09, H-014, ADR-330)
 
 Status: **Implemented; its database tests run in CI only.** Webhook bodies gave their time to the

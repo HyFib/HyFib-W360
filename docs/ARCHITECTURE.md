@@ -2622,8 +2622,10 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   ties by id so the file starts with the tab's rows.
 - **Web:** `/platform/ops` (Overview, Onboarding, Integrations, Queues, Signals, Usage over 7, 30 or
   90 days) and a health card on each company's platform page. Every page re-checks the platform
-  actor. The functions read every company on each view, which suits the test envelope; paging and
-  precomputed rollups come with growth.
+  actor. The functions read every company on each view, which suits the test envelope; since
+  ADR-331 the Overview, Signals and Usage lists show 100 companies a page (`opsCompanyPage`,
+  `CompanyPager`), cut from the whole list so the totals and CSVs still cover every company; pages
+  read from the database and precomputed rollups come with growth.
 - **API requests on the Usage tab (ADR-153):** `usage()` also reads each company's latest
   `api_requests` row of `app.usage_counters` through the platform role (0023's policy), in the same
   transaction, and joins it to the companies the activity function returns; the tab shows it, with
