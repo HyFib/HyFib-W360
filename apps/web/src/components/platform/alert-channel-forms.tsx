@@ -160,7 +160,9 @@ export function AlertChannelKindsForm({
       setError(result.message);
       return;
     }
-    setDone('Saved: the alerts ticked are posted from now on.');
+    setDone(
+      'Saved: the alerts ticked are posted from now on, and posts waiting of the others are not sent.',
+    );
   }
   return (
     <ClientForm onSubmit={submit} className="grid max-w-xl gap-3">

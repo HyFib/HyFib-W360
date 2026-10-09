@@ -563,6 +563,57 @@ describe('the chat channel (ADR-338)', () => {
     ).rejects.toThrow(/platform_alert_posts_kind_check/);
   });
 
+  it('fails the posts waiting of an alert no longer ticked, so no address gets them (ADR-340)', async () => {
+    await service().setChannel(owner, { url: hookUrl });
+    const [channel] = await fx.query<{ id: string }>(`SELECT id FROM ops.platform_alert_channel`);
+    await service().setKinds(owner, { kinds: ['failures', 'reconciliation'] });
+    const worker = <T extends Record<string, unknown>>(statement: ReturnType<typeof sql>) =>
+      fx.dbs.app.run(systemScope, (tx) => tx.execute<T>(statement)).then((r) => r.rows);
+    const queue = (kind: string, body: string) =>
+      worker(sql`select ops.queue_platform_alert_post(${kind}, ${body})`);
+    await queue('reconciliation', 'Reconciliation on its way');
+    await queue('reconciliation', 'Reconciliation waiting');
+    await queue('failures', 'Failures waiting');
+    // The oldest is on its way when an owner unticks its alert, before replacing the address as
+    // the console advises.
+    const [onItsWay] = await worker<{ id: string; attempts: number }>(
+      sql`select id, attempts from ops.claim_platform_alert_posts(1)`,
+    );
+    expect(onItsWay).toMatchObject({ attempts: 1 });
+    expect(await service().setKinds(owner, { kinds: ['failures'] })).toEqual({
+      kinds: ['failures'],
+    });
+    expect((await posts()).map((p) => [p.body, p.failed, p.last_error])).toEqual([
+      ['Reconciliation on its way', true, 'unticked'],
+      ['Reconciliation waiting', true, 'unticked'],
+      ['Failures waiting', false, null],
+    ]);
+    // The attempt on its way: a failure leaves it failed, never tried again; a 2xx records it sent,
+    // as it reached the address it was claimed for.
+    const finish = (status: number) =>
+      worker<{ state: string }>(
+        sql`select ops.finish_platform_alert_post(${onItsWay!.id}::uuid, 1, ${channel!.id}::uuid,
+              ${status}::integer, null::text, true) as state`,
+      );
+    expect(await finish(503)).toEqual([{ state: 'stale' }]);
+    expect(await finish(200)).toEqual([{ state: 'sent' }]);
+
+    // The new address gets the ticked alert's post only, and ticking the alert again sends none of
+    // the posts that failed.
+    await service().setChannel(owner, { url: `${hookUrl}-2` });
+    await service().setKinds(owner, { kinds: ['failures', 'reconciliation'] });
+    const before = received.length;
+    expect(await send()).toMatchObject({ claimed: 1, sent: 1 });
+    expect(received.slice(before).map((r) => JSON.parse(r.body))).toEqual([
+      { text: 'Failures waiting' },
+    ]);
+    expect((await posts()).map((p) => [p.body, p.sent, p.failed])).toEqual([
+      ['Reconciliation on its way', true, false],
+      ['Reconciliation waiting', false, true],
+      ['Failures waiting', true, false],
+    ]);
+  });
+
   it('deletes posts 7 days after they were sent or failed, and only those', async () => {
     const ids = [uuidv7(), uuidv7(), uuidv7(), uuidv7()];
     await fx.query(

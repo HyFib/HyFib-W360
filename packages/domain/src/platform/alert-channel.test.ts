@@ -228,6 +228,9 @@ describe('a post’s attempt and its failure (ADR-338)', () => {
     );
     expect(alertPostFailureLabel('interrupted', null)).toBe('The attempt was interrupted');
     expect(alertPostFailureLabel('no_channel', null)).toBe('No chat channel was set');
+    expect(alertPostFailureLabel('unticked', null)).toBe(
+      'Its alert was unticked before it was sent',
+    );
     expect(alertPostFailureLabel('unopenable', null)).toBe(
       'The address does not open with the configured keys',
     );

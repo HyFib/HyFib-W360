@@ -169,12 +169,14 @@ export function checkedAlertChannelUrl(
 
 /**
  * What a post's or the channel's last failure says: an HTTP status, an egress error code, or one
- * the database or the worker writes (`no_channel`, `interrupted`, `unopenable`).
+ * the database or the worker writes (`no_channel`, `unticked`, `interrupted`, `unopenable`).
  */
 export function alertPostFailureLabel(error: string | null, status: number | null): string | null {
   switch (error) {
     case 'no_channel':
       return 'No chat channel was set';
+    case 'unticked':
+      return 'Its alert was unticked before it was sent';
     case 'unopenable':
       return 'The address does not open with the configured keys';
     default:

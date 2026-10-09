@@ -190,6 +190,17 @@ parse check (syntax only), its four PL/pgSQL bodies included.
   owners' alerts go to platform owners); and SECURITY still said the financial alerts reach platform
   owners only. No unit-tested logic changed; the audit's kinds are checked by the integration tests,
   which run in CI. The full check passed again (143 files, 1448 tests).
+- **Codex's review (PR #56):** unticking an alert left its posts waiting or retrying claimable, and
+  a replaced address takes the posts waiting, so an owners' alert unticked, as the replace field
+  advises, could still reach the new channel. 0261 (not yet applied anywhere) now fails those posts
+  as unticked when the kinds are saved, and its replaced `ops.finish_platform_alert_post` records
+  as sent a post on its way that the address accepted, as when the channel is removed; the console
+  labels them "Its alert was unticked before it was sent", and the form's confirmation says posts
+  waiting of the others are not sent. Tests: a unit test of the label; an integration test (two
+  posts of the unticked alert failed, one of them on its way and recorded as sent on a 2xx but
+  never retried, the ticked alert's post the only one the new address gets, and none sent when the
+  alert is ticked again); the e2e test's confirmation. 1/1 deliberate regression of the label
+  caught; the definer functions are left to the integration test, which runs in CI.
 
 ### Test commands and results (local, 2026-10-09)
 

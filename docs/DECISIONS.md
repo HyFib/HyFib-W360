@@ -13297,6 +13297,13 @@ Decision:
   the kinds given once each in any order and kept in the console's order). A change is audited
   (`platform.alert_channel_kinds_set`, with the host and the kinds before and after); the same kinds
   change nothing and are not audited. Operators see the alerts posted.
+- **Unticking stops the posts waiting:** the posts of an alert no longer ticked that wait, or are
+  retrying, fail as unticked ("Its alert was unticked before it was sent"), as removing the channel
+  fails them, so neither this address nor a replacement gets them: the replace field advises
+  unticking an alert before replacing the address, and a new address takes the posts waiting
+  (found by Codex's review). A post on its way when its alert is unticked is never tried again; if
+  the address accepted it, it is recorded as sent (`ops.finish_platform_alert_post`, replaced in
+  0261), as when the channel is removed.
 - **The financial alerts are posted only once an owner adds them:** their posts reach whoever reads
   the channel, not only platform owners. The form marks them "platform owners' alert" and says so.
   Each is posted in the transaction that queues its emails, as the operations alerts are: the

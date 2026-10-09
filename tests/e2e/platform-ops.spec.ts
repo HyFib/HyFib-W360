@@ -725,7 +725,11 @@ test('an owner posts the operations alerts to a chat channel and sends it a test
     await expect(kinds.getByLabel('Reconciliation findings')).not.toBeChecked();
     await kinds.getByLabel('Reconciliation findings').check();
     await page.getByRole('button', { name: 'Save the alerts posted' }).click();
-    await expect(page.getByText('Saved: the alerts ticked are posted from now on.')).toBeVisible();
+    await expect(
+      page.getByText(
+        'Saved: the alerts ticked are posted from now on, and posts waiting of the others are not sent.',
+      ),
+    ).toBeVisible();
     await expect(
       page.getByText('Failures, Late queues, Failing integrations, Reconciliation findings', {
         exact: true,

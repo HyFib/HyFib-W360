@@ -29,6 +29,7 @@ SET ROLE w360_definer;
 DROP FUNCTION ops.queue_platform_alert_post(text, text);
 DROP FUNCTION ops.platform_set_alert_channel(uuid, text, text, text);
 DROP FUNCTION ops.platform_alert_channel_state();
+DROP FUNCTION ops.finish_platform_alert_post(uuid, integer, uuid, integer, text, boolean);
 RESET ROLE;
 
 -- An alert's post (the worker's alert sweeps, in the transaction that queues its emails): queued
@@ -92,7 +93,10 @@ ALTER FUNCTION ops.platform_set_alert_channel(uuid, text, text, text) OWNER TO w
 
 -- The kinds the channel gets (platform owners): given once each, in any order, and kept in the
 -- console's order. The same kinds change nothing and are not audited; a change is audited with the
--- kinds before and after. The kinds the channel now gets.
+-- kinds before and after. The posts waiting of a kind no longer ticked, a post on its way among
+-- them, fail as unticked, as removing the channel fails them: the console advises unticking an
+-- alert before replacing the address, and a new address takes the posts waiting. The kinds the
+-- channel now gets.
 CREATE FUNCTION ops.platform_set_alert_channel_kinds(p_kinds text[], p_correlation_id text)
   RETURNS text[]
   LANGUAGE plpgsql SECURITY DEFINER
@@ -127,6 +131,10 @@ BEGIN
     RETURN v_kinds;
   END IF;
   UPDATE ops.platform_alert_channel c SET kinds = v_kinds WHERE c.id = v_id;
+  UPDATE ops.platform_alert_posts p
+     SET failed_at = now(), last_status = NULL, last_error = 'unticked', lease_until = NULL
+   WHERE p.sent_at IS NULL AND p.failed_at IS NULL AND p.kind <> 'test'
+     AND NOT (p.kind = ANY (v_kinds));
   INSERT INTO ops.platform_audit_events (actor_user_id, action, result, correlation_id, metadata)
   VALUES (v_actor, 'platform.alert_channel_kinds_set', 'success', p_correlation_id,
           jsonb_build_object('host', v_host, 'kinds', to_jsonb(v_kinds),
@@ -166,3 +174,57 @@ $$;
 REVOKE EXECUTE ON FUNCTION ops.platform_alert_channel_state() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION ops.platform_alert_channel_state() TO w360_platform;
 ALTER FUNCTION ops.platform_alert_channel_state() OWNER TO w360_definer;
+
+-- An attempt's outcome (the worker), as 0258 records it, but for one more case: a 2xx status is
+-- sent also when the post failed while it was on its way because its kind was unticked, as when
+-- the channel was removed; any other answer leaves such a post failed.
+CREATE FUNCTION ops.finish_platform_alert_post(p_id uuid, p_attempt integer, p_channel_id uuid,
+    p_status integer, p_error text, p_retry boolean)
+  RETURNS text
+  LANGUAGE plpgsql SECURITY DEFINER
+  SET search_path = pg_catalog, pg_temp
+  AS $$
+DECLARE
+  v_attempts smallint;
+  v_retry boolean;
+BEGIN
+  IF (p_status IS NULL) = (p_error IS NULL) THEN
+    RAISE EXCEPTION 'give an attempt''s HTTP status or its error code' USING ERRCODE = 'W3412';
+  END IF;
+  SELECT p.attempts INTO v_attempts FROM ops.platform_alert_posts p
+   WHERE p.id = p_id AND p.attempts = p_attempt AND p.sent_at IS NULL
+     AND (p.failed_at IS NULL
+          OR (p_status BETWEEN 200 AND 299 AND p.last_error IN ('no_channel', 'unticked')))
+   FOR UPDATE;
+  IF v_attempts IS NULL THEN
+    RETURN 'stale';
+  END IF;
+  IF p_status BETWEEN 200 AND 299 THEN
+    UPDATE ops.platform_alert_posts p
+       SET sent_at = now(), failed_at = NULL, lease_until = NULL, last_status = p_status,
+           last_error = NULL
+     WHERE p.id = p_id;
+    UPDATE ops.platform_alert_channel c SET last_sent_at = now() WHERE c.id = p_channel_id;
+    RETURN 'sent';
+  END IF;
+  v_retry := coalesce(p_retry, false) AND v_attempts < 5;
+  -- After the first four attempts, 1, 2, 4 and 8 minutes.
+  UPDATE ops.platform_alert_posts p
+     SET last_status = p_status, last_error = p_error, lease_until = NULL,
+         next_attempt_at = CASE WHEN v_retry
+           THEN now() + make_interval(mins => 1 << (greatest(v_attempts, 1) - 1))
+           ELSE p.next_attempt_at END,
+         failed_at = CASE WHEN v_retry THEN NULL ELSE now() END
+   WHERE p.id = p_id;
+  UPDATE ops.platform_alert_channel c
+     SET last_failed_at = now(), last_status = p_status, last_error = p_error
+   WHERE c.id = p_channel_id;
+  RETURN CASE WHEN v_retry THEN 'retrying' ELSE 'failed' END;
+END
+$$;
+REVOKE EXECUTE ON FUNCTION ops.finish_platform_alert_post(uuid, integer, uuid, integer, text, boolean)
+  FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION ops.finish_platform_alert_post(uuid, integer, uuid, integer, text, boolean)
+  TO w360_app;
+ALTER FUNCTION ops.finish_platform_alert_post(uuid, integer, uuid, integer, text, boolean)
+  OWNER TO w360_definer;

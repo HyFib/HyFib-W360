@@ -1306,15 +1306,16 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
 
    Migration 0261 (ADR-340) adds `ops.platform_alert_channel.kinds` (the three operations alerts for
    a channel already set), replaces the posts' kind check, `ops.queue_platform_alert_post`,
-   `ops.platform_set_alert_channel` and `ops.platform_alert_channel_state` (one more column) and
-   adds `ops.platform_set_alert_channel_kinds`. Apply it before workers of this release roll out:
-   while a channel is set, their financial alerts queue posts of the new kinds, which the posts' old
-   check refuses, so the minute billing sweep fails at that alert, its emails rolled back, every
-   minute until it is applied. Workers from before it keep posting the operations alerts, now only
-   those the channel gets. Web servers of this release need it for the Alerts tab, whose state reads
-   the kinds; those from before it show and change the channel without them, and a channel they
-   replace keeps its kinds. After a rollback the kinds stay in the database: old workers post the
-   operations alerts the channel gets and no financial one.
+   `ops.platform_set_alert_channel`, `ops.platform_alert_channel_state` (one more column) and
+   `ops.finish_platform_alert_post` (a post failed as unticked while on its way is recorded as sent
+   when the address accepted it) and adds `ops.platform_set_alert_channel_kinds`. Apply it before
+   workers of this release roll out: while a channel is set, their financial alerts queue posts of
+   the new kinds, which the posts' old check refuses, so the minute billing sweep fails at that
+   alert, its emails rolled back, every minute until it is applied. Workers from before it keep
+   posting the operations alerts, now only those the channel gets. Web servers of this release need
+   it for the Alerts tab, whose state reads the kinds; those from before it show and change the
+   channel without them, and a channel they replace keeps its kinds. After a rollback the kinds stay
+   in the database: old workers post the operations alerts the channel gets and no financial one.
 
    Migration 0262 (ADR-341) adds `ops.platform_message_days` (each company's messages a UTC day,
    with forced row level security and the definer role's grants only),
