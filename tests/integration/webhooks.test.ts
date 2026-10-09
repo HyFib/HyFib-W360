@@ -2062,6 +2062,112 @@ describe('deal and task detail filters (ADR-310)', () => {
   }
 });
 
+describe('run step kind of node filters (ADR-328)', () => {
+  it('are refused without automation.run_step, unknown or empty, kept by a change that leaves them out and cleared with the event; the database keeps them to that event', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const url = 'https://hooks.example.com/in';
+    const refused = (eventTypes: string[], runStepNodeTypes: unknown, message: RegExp) =>
+      expectAppError(
+        webhooks().create(owner, { url, eventTypes, runStepNodeTypes }),
+        'validation_failed',
+        message,
+      );
+    // A run's start and end have no kind of step to choose.
+    const needsTheEvent = /only for an endpoint that receives Automation step/;
+    await refused(['automation.run_started', 'automation.run_ended'], ['wait'], needsTheEvent);
+    await refused(['automation.run_step'], [], /at least one kind of step/);
+    await refused(['automation.run_step'], ['keyword'], /from the list/);
+    await refused(['automation.run_step'], ['Wait'], /from the list/);
+    expect(await webhooks().list(owner)).toEqual([]);
+
+    const created = await webhooks().create(owner, {
+      url,
+      eventTypes: ['automation.run_step', 'consent.changed'],
+      runStepNodeTypes: ['wait', 'send_text', 'wait'],
+    });
+    const [audit] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events WHERE tenant_id = $1 AND action = 'webhook.endpoint_created'`,
+      [c.tenant.id],
+    );
+    expect(audit?.metadata).toMatchObject({ runStepNodeTypes: ['send_text', 'wait'] });
+    const change = (fields: Record<string, unknown>) =>
+      webhooks().update(owner, {
+        endpointId: created.id,
+        url,
+        description: '',
+        eventTypes: ['automation.run_step', 'consent.changed'],
+        ...fields,
+      });
+    const current = async () =>
+      (await webhooks().list(owner)).find((e) => e.id === created.id)?.runStepNodeTypes;
+    expect(await current()).toEqual(['send_text', 'wait']);
+    await change({ description: 'kept' });
+    expect(await current()).toEqual(['send_text', 'wait']);
+    await change({ runStepNodeTypes: ['http_request'] });
+    expect(await current()).toEqual(['http_request']);
+    const updates = await fx.query<{ metadata: { runStepNodeTypes?: unknown } }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND action = 'webhook.endpoint_updated' ORDER BY occurred_at`,
+      [c.tenant.id],
+    );
+    expect(updates.map((u) => u.metadata.runStepNodeTypes)).toEqual([
+      ['send_text', 'wait'],
+      ['http_request'],
+    ]);
+    await change({ runStepNodeTypes: null });
+    expect(await current()).toBeNull();
+    await change({ runStepNodeTypes: ['end'] });
+    // The database refuses an empty list, more than 18 entries, an unknown kind (a trigger
+    // included), a missing one or a nested list from an endpoint taking the event…
+    const setInDatabase = (value: string) =>
+      fx.query(`UPDATE app.webhook_endpoints SET run_step_node_types = ${value} WHERE id = $1`, [
+        created.id,
+      ]);
+    for (const bad of [
+      `'{}'`,
+      `'{${Array(19).fill('wait').join(',')}}'`,
+      `'{wait,keyword}'`,
+      `'{wait,none}'`,
+      `'{wait,Wait}'`,
+      `ARRAY['wait', NULL]::text[]`,
+      `ARRAY[ARRAY['wait'], ARRAY['end']]::text[]`,
+    ]) {
+      await expect(setInDatabase(bad), bad).rejects.toThrow(
+        /webhook_endpoints_run_step_node_types/,
+      );
+    }
+    // Every kind at once, the steps outside a node among them, is a list the database takes.
+    await setInDatabase(
+      `ARRAY['send_text', 'ask_buttons', 'ask_text', 'send_template', 'ask_template', 'send_flow',
+             'condition', 'update_contact', 'update_conversation', 'http_request', 'create_task',
+             'create_deal', 'move_deal', 'close_deal', 'wait', 'handoff', 'end',
+             'outside_node']::text[]`,
+    );
+    await change({ eventTypes: ['consent.changed'] });
+    expect(await current()).toBeNull();
+    await expectAppError(
+      change({ eventTypes: ['consent.changed'], runStepNodeTypes: ['wait'] }),
+      'validation_failed',
+      needsTheEvent,
+    );
+    // …and any list for an endpoint that does not take it, a run's other events included.
+    await expect(setInDatabase(`'{wait}'`)).rejects.toThrow(
+      /webhook_endpoints_run_step_node_types/,
+    );
+    await change({ eventTypes: ['automation.run_started'] });
+    await expect(setInDatabase(`'{wait}'`)).rejects.toThrow(
+      /webhook_endpoints_run_step_node_types/,
+    );
+    // The company role changes the list only through its column grant.
+    const [grant] = await fx.query<{ can_update: boolean }>(
+      `SELECT has_column_privilege('w360_app', 'app.webhook_endpoints', 'run_step_node_types',
+                'UPDATE') AS can_update`,
+    );
+    expect(grant?.can_update).toBe(true);
+  });
+});
+
 describe('run step outcome filters (ADR-327)', () => {
   it('are refused without automation.run_step, unknown or empty, kept by a change that leaves them out and cleared with the event; the database keeps them to that event', async () => {
     const c = await fx.company();

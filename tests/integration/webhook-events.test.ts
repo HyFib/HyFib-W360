@@ -3235,6 +3235,146 @@ describe('automation run events (ADR-078)', () => {
     expect(recorded.map((r) => r.status)).toEqual(['sent']);
   });
 
+  it('sends an endpoint that names kinds of step only the steps of those nodes, the steps outside a node only to a list naming them, and with outcomes chosen too only the steps passing both (ADR-328)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    await publishAutomation(owner, 'Brochure', keyword('brochure'), sayGraph('Here it is.'));
+    const add = async (filters: {
+      runStepNodeTypes: string[] | null;
+      runStepOutcomes?: string[];
+    }) =>
+      (
+        await webhooks().create(owner, {
+          url: `http://${HOST}:${port}/ok/${randomBytes(6).toString('hex')}`,
+          eventTypes: ['automation.run_step'],
+          ...filters,
+        })
+      ).id;
+    // Every kind of node but the steps outside one: what null takes, less the runs' starts.
+    const everyNode = [
+      'send_text',
+      'ask_buttons',
+      'ask_text',
+      'send_template',
+      'ask_template',
+      'send_flow',
+      'condition',
+      'update_contact',
+      'update_conversation',
+      'http_request',
+      'create_task',
+      'create_deal',
+      'move_deal',
+      'close_deal',
+      'wait',
+      'handoff',
+      'end',
+    ];
+    const lists = new Map<string, { nodes: string[] | null; outcomes: string[] | null }>([
+      ['every step', { nodes: null, outcomes: null }],
+      ['messages', { nodes: ['send_text'], outcomes: null }],
+      ['conditions', { nodes: ['condition'], outcomes: null }],
+      ['failed messages', { nodes: ['send_text'], outcomes: ['failed'] }],
+      ['outside a node', { nodes: ['outside_node'], outcomes: null }],
+      ['every node', { nodes: everyNode, outcomes: null }],
+    ]);
+    const endpoints = new Map<string, string>();
+    for (const [name, list] of lists) {
+      endpoints.set(
+        await add({
+          runStepNodeTypes: list.nodes,
+          ...(list.outcomes ? { runStepOutcomes: list.outcomes } : {}),
+        }),
+        name,
+      );
+    }
+    const run = async (clock: Clock = systemClock) => {
+      const [started] = await runsIn((await inbound(c, waId(), 'brochure')).conversation_id);
+      if (!started) throw new Error('no run started');
+      expect(await driveRun(c, started.id, clock)).toBe('ended');
+      return started.id;
+    };
+    const sent = await run();
+    // A day later the customer's window has closed: the text cannot be sent and the run fails.
+    const failed = await run({ now: () => new Date(Date.now() + 25 * 3600_000) });
+    const runs = new Map([
+      [sent, 'sent'],
+      [failed, 'failed'],
+    ]);
+    const logged = new Map<string, { node: string | null; outcome: string }[]>();
+    for (const [runId, name] of runs) {
+      logged.set(
+        name,
+        (await stepsOf(runId)).map((step) => ({ node: step.node_type, outcome: step.outcome })),
+      );
+    }
+    // Each run starts outside a node, then runs its message node: sent, or failed.
+    expect(logged.get('sent')).toEqual(
+      expect.arrayContaining([
+        { node: null, outcome: 'started' },
+        { node: 'send_text', outcome: 'sent' },
+      ]),
+    );
+    expect(logged.get('failed')).toEqual(
+      expect.arrayContaining([
+        { node: null, outcome: 'started' },
+        { node: 'send_text', outcome: 'failed' },
+      ]),
+    );
+
+    const delivered = await fx.query<{ run: string; endpoint: string; outcome: string }>(
+      `SELECT e.detail ->> 'runId' AS run, d.endpoint_id AS endpoint, e.status AS outcome
+         FROM app.webhook_deliveries d
+         JOIN app.webhook_events e ON e.tenant_id = d.tenant_id AND e.id = d.event_id
+        WHERE d.tenant_id = $1 AND e.type = 'automation.run_step'`,
+      [c.tenant.id],
+    );
+    const sorted = (rows: unknown[][]) =>
+      [...rows].sort((x, y) => JSON.stringify(x).localeCompare(JSON.stringify(y)));
+    // A step reaches the endpoints whose kinds are null or hold its node (outside_node for a step
+    // outside a node) and whose outcomes are null or hold its outcome.
+    const expected: unknown[][] = [];
+    for (const [runName, steps] of logged) {
+      for (const step of steps) {
+        for (const [endpoint, list] of lists) {
+          const node = !list.nodes || list.nodes.includes(step.node ?? 'outside_node');
+          const outcome = !list.outcomes || list.outcomes.includes(step.outcome);
+          if (node && outcome) expected.push([runName, endpoint, step.outcome]);
+        }
+      }
+    }
+    expect(
+      sorted(delivered.map((d) => [runs.get(d.run), endpoints.get(d.endpoint), d.outcome])),
+    ).toEqual(sorted(expected));
+    // The kind travels for the filter only: the payload reads it from the step.
+    const stored = await fx.query<{ detail: Record<string, unknown> }>(
+      `SELECT detail FROM app.webhook_events WHERE tenant_id = $1 AND type = 'automation.run_step'`,
+      [c.tenant.id],
+    );
+    for (const { detail } of stored) {
+      expect(Object.keys(detail).sort()).toEqual(['automationId', 'runId', 'stepId']);
+    }
+    // Delivered, a step gives its kind of node, null for the run's start.
+    await deliverDue(c);
+    const bodies = received
+      .map((r) => JSON.parse(r.body) as { type: string; data: { run?: { id?: string } } })
+      .filter((b) => b.type === 'automation.run_step' && runs.has(b.data.run?.id ?? ''))
+      .map((b) => automationRunStepPayloadSchema.parse(b));
+    expect(bodies).toHaveLength(expected.length);
+    expect(
+      sorted(
+        bodies.map((b) => [runs.get(b.data.run.id), b.data.step.nodeType, b.data.step.outcome]),
+      ),
+    ).toEqual(
+      sorted(
+        delivered.map((d) => {
+          const step = logged.get(runs.get(d.run) ?? '')?.find((s) => s.outcome === d.outcome);
+          return [runs.get(d.run), step?.node ?? null, d.outcome];
+        }),
+      ),
+    );
+  });
+
   it('reports a run that fails, with its reason', async () => {
     const c = await fx.company();
     const owner = await fx.ctx(c, c.owner);

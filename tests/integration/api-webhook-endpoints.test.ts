@@ -264,6 +264,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       orderStatuses: null,
       paymentLinkStatuses: null,
       runStepOutcomes: null,
+      runStepNodeTypes: null,
       orderChangeMakers: null,
       orderExcludedApiKeyIds: null,
       paymentLinkApiKeyIds: null,
@@ -1065,6 +1066,87 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     });
     expect(await issueOf(api().update(key.ctx, id, { orderStatuses: [] }))).toMatchObject({
       path: 'orderStatuses',
+    });
+  });
+
+  it('choose the kinds of node whose run steps an endpoint receives, kept by changes that leave them out and cleared with the event (ADR-328)', async () => {
+    const c = await fx.company();
+    const key = await apiKey(c, ['webhooks.manage']);
+    const issueOf = async (promise: Promise<unknown>) => {
+      const error = await expectAppError(promise, 'validation_failed');
+      return isAppError(error) ? error.issues?.[0] : undefined;
+    };
+    // Kinds need the step event, at least one, and each from the list (a trigger by place).
+    const refusals = [
+      [['automation.run_started'], ['wait'], 'runStepNodeTypes'],
+      [['automation.run_step'], [], 'runStepNodeTypes'],
+      [['automation.run_step'], ['wait', 'keyword'], 'runStepNodeTypes.1'],
+      [['automation.run_step'], ['Wait'], 'runStepNodeTypes.0'],
+    ] as const;
+    for (const [index, [events, runStepNodeTypes, path]] of refusals.entries()) {
+      expect(
+        await issueOf(
+          api().create(
+            key.ctx,
+            { url: receiverUrl(), events, runStepNodeTypes },
+            idem(`step-kinds-bad-${index}`, JSON.stringify(runStepNodeTypes)),
+          ),
+        ),
+        JSON.stringify(runStepNodeTypes),
+      ).toMatchObject({ path });
+    }
+    expect((await api().list(key.ctx)).data).toEqual([]);
+
+    const created = await addThroughApi(key.ctx, 'step-kinds-1', {
+      url: receiverUrl(),
+      events: ['automation.run_step', 'automation.run_started'],
+      runStepNodeTypes: ['wait', 'http_request', 'wait'],
+    });
+    const id = created.body.data.id;
+    expect(created.body.data.runStepNodeTypes).toEqual(['http_request', 'wait']);
+    expect((await api().get(key.ctx, id)).runStepNodeTypes).toEqual(['http_request', 'wait']);
+    const [audit] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND subject_id = $2 AND action = 'webhook.endpoint_created'`,
+      [c.tenant.id, id],
+    );
+    expect(audit?.metadata).toMatchObject({ runStepNodeTypes: ['http_request', 'wait'] });
+
+    expect(await api().update(key.ctx, id, { description: 'Web requests' })).toMatchObject({
+      runStepNodeTypes: ['http_request', 'wait'],
+    });
+    // A list alone is a change; outside_node, the steps outside a node, comes last.
+    expect(
+      await api().update(key.ctx, id, { runStepNodeTypes: ['outside_node', 'end'] }),
+    ).toMatchObject({ runStepNodeTypes: ['end', 'outside_node'] });
+    const updates = await fx.query<{ metadata: { runStepNodeTypes?: unknown } }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND subject_id = $2 AND action = 'webhook.endpoint_updated'
+        ORDER BY occurred_at`,
+      [c.tenant.id, id],
+    );
+    expect(updates.map((u) => u.metadata.runStepNodeTypes)).toEqual([
+      ['http_request', 'wait'],
+      ['end', 'outside_node'],
+    ]);
+    expect(await api().update(key.ctx, id, { events: ['automation.run_started'] })).toMatchObject({
+      events: ['automation.run_started'],
+      runStepNodeTypes: null,
+    });
+    expect(await issueOf(api().update(key.ctx, id, { runStepNodeTypes: ['end'] }))).toMatchObject({
+      path: 'runStepNodeTypes',
+    });
+    expect(
+      await api().update(key.ctx, id, {
+        events: ['automation.run_step'],
+        runStepNodeTypes: ['create_deal'],
+      }),
+    ).toMatchObject({ runStepNodeTypes: ['create_deal'] });
+    expect(await api().update(key.ctx, id, { runStepNodeTypes: null })).toMatchObject({
+      runStepNodeTypes: null,
+    });
+    expect(await issueOf(api().update(key.ctx, id, { runStepNodeTypes: [] }))).toMatchObject({
+      path: 'runStepNodeTypes',
     });
   });
 

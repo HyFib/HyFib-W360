@@ -28,6 +28,8 @@ import {
   WEBHOOK_PAYMENT_LINK_STATUSES,
   WEBHOOK_RUN_STEP_OUTCOME_LABELS,
   WEBHOOK_RUN_STEP_OUTCOMES,
+  WEBHOOK_RUN_STEP_NODE_TYPE_LABELS,
+  WEBHOOK_RUN_STEP_NODE_TYPES,
   WEBHOOK_ORDER_CHANGE_MAKER_LABELS,
   WEBHOOK_ORDER_CHANGE_MAKERS,
   WEBHOOK_DEAL_STATUS_LABELS,
@@ -106,6 +108,7 @@ import {
   type WebhookOrderStatus,
   type WebhookPaymentLinkStatus,
   type WebhookRunStepOutcome,
+  type WebhookRunStepNodeType,
   type WebhookOrderChangeMaker,
   type WebhookDealStatus,
   type WebhookTaskStatus,
@@ -482,6 +485,52 @@ function StepOutcomeChoices({
             <Label htmlFor={id} className="font-normal">
               {WEBHOOK_RUN_STEP_OUTCOME_LABELS[outcome]}{' '}
               <span className="font-mono text-xs">({outcome})</span>
+            </Label>
+          </div>
+        );
+      })}
+    </fieldset>
+  );
+}
+
+/**
+ * The kinds of node whose run steps an endpoint takes as `automation.run_step` (ADR-328), shown
+ * while it takes the event: every step unless some kinds are unticked, in the order the automation
+ * builder lists them, then the steps outside a node.
+ */
+function StepNodeTypeChoices({
+  prefix,
+  chosen,
+  onChange,
+}: {
+  prefix: string;
+  chosen: WebhookRunStepNodeType[];
+  onChange: (next: WebhookRunStepNodeType[]) => void;
+}) {
+  return (
+    <fieldset className="ml-6 grid gap-1">
+      <legend className="mb-1 text-xs text-muted-foreground">
+        Kinds of step sent (all of them unless you untick some; a step is sent when the kind of step
+        it ran is ticked)
+      </legend>
+      {WEBHOOK_RUN_STEP_NODE_TYPES.map((type) => {
+        const id = `${prefix}-step-node-${type}`;
+        return (
+          <div key={type} className="flex items-center gap-2">
+            <Checkbox
+              id={id}
+              checked={chosen.includes(type)}
+              onChange={(e) =>
+                onChange(
+                  e.target.checked
+                    ? WEBHOOK_RUN_STEP_NODE_TYPES.filter((t) => t === type || chosen.includes(t))
+                    : chosen.filter((t) => t !== type),
+                )
+              }
+            />
+            <Label htmlFor={id} className="font-normal">
+              {WEBHOOK_RUN_STEP_NODE_TYPE_LABELS[type]}{' '}
+              <span className="font-mono text-xs">({type})</span>
             </Label>
           </div>
         );
@@ -2329,6 +2378,8 @@ function EventChoices({
   onPaymentLinkStatusesChange,
   runStepOutcomes,
   onRunStepOutcomesChange,
+  runStepNodeTypes,
+  onRunStepNodeTypesChange,
   dealStatuses,
   onDealStatusesChange,
   taskStatuses,
@@ -2371,6 +2422,8 @@ function EventChoices({
   onPaymentLinkStatusesChange: (next: WebhookPaymentLinkStatus[]) => void;
   runStepOutcomes: WebhookRunStepOutcome[];
   onRunStepOutcomesChange: (next: WebhookRunStepOutcome[]) => void;
+  runStepNodeTypes: WebhookRunStepNodeType[];
+  onRunStepNodeTypesChange: (next: WebhookRunStepNodeType[]) => void;
   dealStatuses: WebhookDealStatus[];
   onDealStatusesChange: (next: WebhookDealStatus[]) => void;
   taskStatuses: WebhookTaskStatus[];
@@ -2516,6 +2569,13 @@ function EventChoices({
                 prefix={prefix}
                 chosen={runStepOutcomes}
                 onChange={onRunStepOutcomesChange}
+              />
+            ) : null}
+            {type === 'automation.run_step' && chosen.includes(type) ? (
+              <StepNodeTypeChoices
+                prefix={prefix}
+                chosen={runStepNodeTypes}
+                onChange={onRunStepNodeTypesChange}
               />
             ) : null}
             {type === 'deal.status_changed' && chosen.includes(type) ? (
@@ -2850,6 +2910,8 @@ export function WebhookEndpointForm({
     paymentLinkStatuses: WebhookPaymentLinkStatus[] | null;
     /** The outcomes of the run steps it takes (ADR-327); null for every step. */
     runStepOutcomes: WebhookRunStepOutcome[] | null;
+    /** The kinds of node whose run steps it takes (ADR-328); null for every step. */
+    runStepNodeTypes: WebhookRunStepNodeType[] | null;
     /** Who made the order status changes it takes (ADR-322); null for every change. */
     orderChangeMakers: WebhookOrderChangeMaker[] | null;
     /** The API keys whose order changes it leaves out (ADR-323), and if they work; null: none. */
@@ -2989,6 +3051,9 @@ export function WebhookEndpointForm({
   );
   const [runStepOutcomes, setRunStepOutcomes] = useState<WebhookRunStepOutcome[]>(
     endpoint?.runStepOutcomes ?? [...WEBHOOK_RUN_STEP_OUTCOMES],
+  );
+  const [runStepNodeTypes, setRunStepNodeTypes] = useState<WebhookRunStepNodeType[]>(
+    endpoint?.runStepNodeTypes ?? [...WEBHOOK_RUN_STEP_NODE_TYPES],
   );
   const [orderChangeMakers, setOrderChangeMakers] = useState<WebhookOrderChangeMaker[]>(
     endpoint?.orderChangeMakers ?? [...WEBHOOK_ORDER_CHANGE_MAKERS],
@@ -3219,6 +3284,13 @@ export function WebhookEndpointForm({
           runStepOutcomes.length < WEBHOOK_RUN_STEP_OUTCOMES.length
             ? runStepOutcomes
             : null;
+        // Every kind of step ticked, the steps outside a node among them, takes every step (null,
+        // ADR-328); a list of every kind but those keeps them out.
+        const chosenRunStepNodeTypes =
+          eventTypes.includes('automation.run_step') &&
+          runStepNodeTypes.length < WEBHOOK_RUN_STEP_NODE_TYPES.length
+            ? runStepNodeTypes
+            : null;
         // Every maker ticked takes every order change (null, ADR-322).
         const chosenOrderChangeMakers =
           eventTypes.includes('order.status_changed') &&
@@ -3423,6 +3495,7 @@ export function WebhookEndpointForm({
           orderStatuses: chosenOrderStatuses,
           paymentLinkStatuses: chosenPaymentLinkStatuses,
           runStepOutcomes: chosenRunStepOutcomes,
+          runStepNodeTypes: chosenRunStepNodeTypes,
           orderChangeMakers: chosenOrderChangeMakers,
           orderExcludedApiKeyIds: chosenOrderExcludedApiKeys,
           paymentLinkApiKeyIds: chosenPaymentLinkApiKeys,
@@ -3515,6 +3588,7 @@ export function WebhookEndpointForm({
               setOrderStatuses([...WEBHOOK_ORDER_STATUSES]);
               setPaymentLinkStatuses([...WEBHOOK_PAYMENT_LINK_STATUSES]);
               setRunStepOutcomes([...WEBHOOK_RUN_STEP_OUTCOMES]);
+              setRunStepNodeTypes([...WEBHOOK_RUN_STEP_NODE_TYPES]);
               setOrderChangeMakers([...WEBHOOK_ORDER_CHANGE_MAKERS]);
               setEveryOrderChange(true);
               setOrderExcludedApiKeyIds([]);
@@ -3652,6 +3726,8 @@ export function WebhookEndpointForm({
         onPaymentLinkStatusesChange={setPaymentLinkStatuses}
         runStepOutcomes={runStepOutcomes}
         onRunStepOutcomesChange={setRunStepOutcomes}
+        runStepNodeTypes={runStepNodeTypes}
+        onRunStepNodeTypesChange={setRunStepNodeTypes}
         dealStatuses={dealStatuses}
         onDealStatusesChange={setDealStatuses}
         taskStatuses={taskStatuses}

@@ -1885,6 +1885,15 @@ true`); the same key with another request (method, path and body hashed) answers
   endpoints whose list is null or holds the step's outcome, the event's status. Settings ("Steps
   sent" under Automation step) and the API (`runStepOutcomes`) set it; a change that drops
   `automation.run_step` clears it.
+- **Step kind filters** (migration 0250, ADR-328): `run_step_node_types` on an endpoint lists the
+  kinds of node whose run steps it takes as `automation.run_step`, null for every step; a check
+  keeps it to 1 to 18 known kinds (`outside_node` naming the steps outside a node) and to endpoints
+  that take `automation.run_step`. The step trigger passes the step's `nodeType` in the detail, and
+  `app.capture_webhook_event` (replaced with the same signature) creates a step's delivery only for
+  endpoints whose list is null or holds it (`outside_node` for a step outside a node), taking the
+  kind out of the detail before the event is stored. Settings ("Kinds of step sent" under Automation
+  step) and the API (`runStepNodeTypes`) set it; a change that drops `automation.run_step` clears
+  it.
 - **Order events** (migrations 0063–0064, ADR-085): triggers on `app.commerce_orders` capture
   `order.received` when a WhatsApp order is recorded and `order.status_changed` when an update
   changes its status (a member, or the payment worker applying a Payment Link's outcome), through
