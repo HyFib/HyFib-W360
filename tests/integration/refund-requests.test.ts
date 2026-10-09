@@ -15,6 +15,7 @@ import {
   createPlatformBillingService,
   createRefundRequestsService,
   notifyRefundRequestDeclines,
+  alertPostBody,
   outboxAad,
   refundRequestsAnnouncement,
   resolveTenantContext,
@@ -1045,7 +1046,12 @@ describe('emails', () => {
     const r1 = await ask(c, first.topupId, '50');
     const r2 = await ask(c, second.topupId, '60');
 
-    expect(await announce()).toEqual({ announced: 2, unsent: 0, recipients: owners.length });
+    expect(await announce()).toEqual({
+      announced: 2,
+      unsent: 0,
+      recipients: owners.length,
+      posted: false,
+    });
     const sent = await platformNotices(since);
     expect(sent.map((n) => n.to).sort()).toEqual(owners);
     for (const notice of sent) {
@@ -1064,7 +1070,7 @@ describe('emails', () => {
     expect((await requestRow(r2.requestId)).announced_at).toBeInstanceOf(Date);
 
     // Once, however often the sweep runs.
-    expect(await announce()).toEqual({ announced: 0, unsent: 0, recipients: 0 });
+    expect(await announce()).toEqual({ announced: 0, unsent: 0, recipients: 0, posted: false });
     expect(await platformNotices(since)).toHaveLength(owners.length);
 
     // A request withdrawn before the sweep is not announced.
@@ -1072,7 +1078,7 @@ describe('emails', () => {
     const third = await paidTopup(c, 20_000);
     const r3 = await ask(c, third.topupId, '70');
     await requests().withdraw(c.ctx, r3.requestId);
-    expect(await announce()).toEqual({ announced: 0, unsent: 0, recipients: 0 });
+    expect(await announce()).toEqual({ announced: 0, unsent: 0, recipients: 0, posted: false });
     expect((await requestRow(r3.requestId)).announced_at).toBeNull();
 
     // Two sweeps at once announce a request once.
@@ -1090,7 +1096,7 @@ describe('emails', () => {
        RETURNING user_id`,
     );
     try {
-      expect(await announce()).toEqual({ announced: 0, unsent: 1, recipients: 0 });
+      expect(await announce()).toEqual({ announced: 0, unsent: 1, recipients: 0, posted: false });
     } finally {
       await adminQuery(
         `UPDATE ops.platform_admins SET role = 'platform_owner' WHERE user_id = ANY($1::text[])`,
@@ -1099,10 +1105,67 @@ describe('emails', () => {
     }
     expect((await requestRow(r5.requestId)).announced_at).toBeNull();
     const since3 = await dbNow();
-    expect(await announce()).toEqual({ announced: 1, unsent: 0, recipients: owners.length });
+    expect(await announce()).toEqual({
+      announced: 1,
+      unsent: 0,
+      recipients: owners.length,
+      posted: false,
+    });
     expect((await platformNotices(since3)).map((n) => n.payload)).toEqual(
       owners.map(() => ({ kind: 'platform.notice', ...refundRequestsAnnouncement(1, APP_BASE) })),
     );
+  });
+
+  it('posts the notice to a chat channel that gets refund requests, a count only (ADR-345)', async () => {
+    // Whatever earlier tests left unannounced is announced first.
+    await announce();
+    const owners = await ownerEmails();
+    // A channel getting refund requests (its address is never opened here: nothing is sent).
+    const channelId = uuidv7();
+    await adminQuery(
+      `INSERT INTO ops.platform_alert_channel (id, url_ciphertext, host, kinds)
+       VALUES ($1, 'v1:unused', 'chat.example.test', ARRAY['failures', 'refund_requests'])`,
+      [channelId],
+    );
+    const posts = () =>
+      adminQuery<{ body: string }>(
+        `SELECT body FROM ops.platform_alert_posts WHERE kind = 'refund_requests'
+          ORDER BY created_at, id`,
+      );
+    try {
+      const c = await company();
+      const first = await paidTopup(c, 20_000);
+      await ask(c, first.topupId, '50');
+      expect(await announce()).toEqual({
+        announced: 1,
+        unsent: 0,
+        recipients: owners.length,
+        posted: true,
+      });
+      // The email's text: no company, amount or reason.
+      expect(await posts()).toEqual([
+        { body: alertPostBody(refundRequestsAnnouncement(1, APP_BASE)) },
+      ]);
+      const [post] = await posts();
+      expect(post!.body).not.toContain(c.tenant.slug);
+      expect(post!.body).not.toContain(REASON);
+      expect(post!.body).not.toContain('₹');
+
+      // Not among the alerts the channel gets, the notice is emailed only.
+      await adminQuery(`UPDATE ops.platform_alert_channel SET kinds = ARRAY['failures']`);
+      const second = await paidTopup(c, 20_000);
+      await ask(c, second.topupId, '60');
+      expect(await announce()).toEqual({
+        announced: 1,
+        unsent: 0,
+        recipients: owners.length,
+        posted: false,
+      });
+      expect(await posts()).toHaveLength(1);
+    } finally {
+      await adminQuery(`DELETE FROM ops.platform_alert_posts WHERE kind = 'refund_requests'`);
+      await adminQuery('DELETE FROM ops.platform_alert_channel WHERE id = $1', [channelId]);
+    }
   });
 
   it('tells the billing managers once when a request is declined, with the note', async () => {

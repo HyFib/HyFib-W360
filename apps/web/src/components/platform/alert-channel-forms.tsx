@@ -12,6 +12,12 @@ import {
 import { ClientButton, ClientForm } from '@/components/client-form';
 import { FormError, FormSuccess } from '@/components/form-status';
 
+/** Labels in quotes, as a sentence lists them: “A”, “B” and “C”. */
+const quotedList = (labels: readonly string[]) => {
+  const quoted = labels.map((label) => `“${label}”`);
+  return quoted.length > 1 ? `${quoted.slice(0, -1).join(', ')} and ${quoted.at(-1)}` : quoted[0];
+};
+
 /**
  * Setting, testing and removing the chat channel the operations alerts are posted to (platform
  * owners, ADR-338). The address is sent once and never shown back: the page names its host only.
@@ -76,7 +82,7 @@ export function AlertChannelForms({
           label={host ? 'Replace the channel’s address' : 'The channel’s incoming webhook address'}
           description={`An https:// address that takes a JSON POST with a “text” member, such as a Slack incoming webhook (https://hooks.slack.com/services/…). It holds the channel’s secret: it is stored encrypted and never shown again.${
             host && ownersAlerts.length > 0
-              ? ` A new address gets the alerts posted now, among them the platform owners’ ${ownersAlerts.map((label) => `“${label}”`).join(' and ')}: untick ${ownersAlerts.length === 1 ? 'it first if its readers should not see it' : 'them first if its readers should not see them'}.`
+              ? ` A new address gets the alerts posted now, among them the platform owners’ ${quotedList(ownersAlerts)}: untick ${ownersAlerts.length === 1 ? 'it first if its readers should not see it' : 'them first if its readers should not see them'}.`
               : ''
           }`}
         >
@@ -186,8 +192,8 @@ export function AlertChannelKindsForm({
       </fieldset>
       <p className="text-sm text-muted-foreground">
         Platform owners’ alerts are emailed to platform owners only. Posted, they reach whoever
-        reads the channel, with days and counts only: never a company, an amount, a payment id or a
-        failed check’s error.
+        reads the channel, with days and counts only: never a company, an amount, a payment id, a
+        refund’s reason or a failed check’s error.
       </p>
       <div>
         <Button type="submit" disabled={busy || chosen.length === 0 || unchanged}>

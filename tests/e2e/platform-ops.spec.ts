@@ -754,9 +754,11 @@ test('an owner posts the operations alerts to a chat channel and sends it a test
     await expect(page.getByText(token)).toHaveCount(0);
     await expect(page.getByLabel('Replace the channel’s address')).toHaveValue('');
 
-    // A new channel gets the operations alerts; an owner adds a financial one (ADR-340).
+    // A new channel gets the operations alerts, not the owners' (refund requests among them,
+    // ADR-345); an owner adds a financial one (ADR-340).
     const kinds = page.getByRole('group', { name: 'Alerts posted' });
     await expect(kinds.getByLabel('Failures')).toBeChecked();
+    await expect(kinds.getByLabel('Refund requests (platform owners’ alert)')).not.toBeChecked();
     await expect(kinds.getByLabel('Reconciliation findings')).not.toBeChecked();
     await kinds.getByLabel('Reconciliation findings').check();
     await page.getByRole('button', { name: 'Save the alerts posted' }).click();

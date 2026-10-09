@@ -3802,13 +3802,16 @@ readers should not see them, and the audit entry of the new address names its al
 alert fails its posts still waiting or retrying ("Its alert was unticked before it was sent" under
 the latest posts), and the posting job fails any queued as it was unticked, so the new address never
 gets them; ticking it again sends none of them. A post already on its way finishes its attempt, to
-the address it was claimed for. "Reconciliation findings" and "Payments not seen in a settlement"
-are the platform owners' alerts (ADR-066, ADR-071), emailed to platform owners only: add them only
-when whoever reads the channel may know that a day's reconciliation needs a person or failed, and
-how many top-ups were not settled, by day. Their posts give days and counts, never a company, an
-amount, a payment id or a failed check's error: the email to owners has the error, and Platform →
-Reconciliation the rest. The worker logs whether each financial alert was posted (`posted` on
-`settlement reconciliation alert emailed` and `unsettled payments alert emailed`).
+the address it was claimed for. "Reconciliation findings", "Payments not seen in a settlement" and
+"Refund requests" are the platform owners' alerts (ADR-066, ADR-071, ADR-345), emailed to platform
+owners only: add them only when whoever reads the channel may know that a day's reconciliation needs
+a person or failed, how many top-ups were not settled, by day, and how many refund requests wait, of
+which kind. Their posts give days and counts, never a company, an amount, a payment id, a refund's
+reason or a failed check's error: the email to owners has the error, and Platform → Reconciliation
+and Platform → Refunds the rest. The worker logs whether each was posted (`posted` on `settlement
+reconciliation alert emailed`, `unsettled payments alert emailed` and `refund requests announced to
+platform owners`). Saving the alerts from a web server older than 0263's release unticks "Refund
+requests", which it does not list.
 
 **The last 12 months (ADR-341).** The Usage tab's year comes from counts the worker keeps: each UTC
 day is counted once it has ended, for every company not deleted, and again once a day for a week

@@ -13487,3 +13487,34 @@ counted (ADR-341).
 
 Not built: other measures (delivered or read shares, failures by reason or by company), and the
 share in a CSV.
+
+## ADR-345 Refund requests in the chat channel, an owners' alert (P5-10) (2026-10-09)
+
+Context: the minute billing sweep emails platform owners once about refund requests waiting for a
+decision, of service credit (ADR-073) and of plan payments (ADR-104), with counts only. ADR-340 let
+owners add their financial alerts to the chat channel, but the refund requests' notice reached the
+mailbox alone, so an owner watching the channel learned of a request from the email only; BACKLOG
+listed it as remaining.
+
+Decision:
+
+- **An owners' alert of its own:** the kind `refund_requests` (migration 0263), "Refund requests" in
+  the console, after the financial alerts and marked, as they are, a platform owners' alert: a
+  channel gets it only once an owner ticks it, since its posts reach whoever reads the channel. A
+  new channel gets the operations alerts only, as before, and a channel set before keeps its kinds.
+- **The email's text:** `announceRefundRequests` queues the post in the transaction that queues the
+  emails and marks the requests announced, as the other alerts are posted: the same counts-only
+  text, how many requests of which kind and where they are listed, never a company, an amount or a
+  reason. Nothing is posted while there is no platform owner, as nothing is emailed or marked then.
+- **Migration 0263:** the channel's kinds check (one to six known kinds), the posts' kind check, and
+  `ops.platform_set_alert_channel_kinds` with the new kind in its order; the claim, the outcome and
+  the rest are 0261's, which already treat any kind the channel stops getting as unticked.
+
+Consequences: an owner who adds refund requests tells whoever reads the channel how many requests
+wait and of which kind; the companies, amounts and reasons stay on Platform → Refunds. The worker
+logs whether the notice was posted (`posted` on `refund requests announced to platform owners`). Web
+servers from before 0263's release do not list the kind, and saving the alerts from one unticks it,
+since they send the kinds they know.
+
+Not built: the owners' other notices in a channel, several channels, a channel per alert, and
+formats other than a JSON `text` member.

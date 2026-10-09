@@ -49,6 +49,7 @@ export const ALERT_CHANNEL_KINDS = [
   'integrations',
   'reconciliation',
   'unsettled',
+  'refund_requests',
 ] as const;
 export type AlertChannelKind = (typeof ALERT_CHANNEL_KINDS)[number];
 
@@ -60,12 +61,14 @@ export const ALERT_CHANNEL_DEFAULT_KINDS: readonly AlertChannelKind[] = [
 ];
 
 /**
- * The owners' financial alerts (ADR-066, ADR-071), which platform owners alone are emailed: a
- * channel gets them only once an owner adds them, since their posts reach whoever reads it.
+ * The owners' financial alerts (ADR-066, ADR-071) and refund requests (ADR-073, ADR-104, ADR-345),
+ * which platform owners alone are emailed: a channel gets them only once an owner adds them, since
+ * their posts reach whoever reads it.
  */
 export const ALERT_CHANNEL_FINANCIAL_KINDS: readonly AlertChannelKind[] = [
   'reconciliation',
   'unsettled',
+  'refund_requests',
 ];
 
 export const ALERT_POST_KINDS = [...ALERT_CHANNEL_KINDS, 'test'] as const;
@@ -77,6 +80,7 @@ export const ALERT_POST_KIND_LABELS: Record<AlertPostKind, string> = {
   integrations: 'Failing integrations',
   reconciliation: 'Reconciliation findings',
   unsettled: 'Payments not seen in a settlement',
+  refund_requests: 'Refund requests',
   test: 'Test post',
 };
 

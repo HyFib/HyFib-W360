@@ -1,5 +1,49 @@
 # Progress
 
+## 2026-10-09 — Refund requests in the chat channel, an owners' alert (P5-10, H-034, ADR-345)
+
+Status: **Implemented; its database and browser tests run in CI only.** The refund requests' notice
+(ADR-073, ADR-104) reached platform owners' mailboxes alone: ADR-340's chat channel could get the
+owners' financial alerts but not it. The local PostgreSQL is unavailable, so migration 0263 and the
+integration tests below were written but not run here; the migration passed the pglast parse check
+(syntax only), its PL/pgSQL body included.
+
+### Completed
+
+- **Database:** migration 0263 (the channel's kinds check with `refund_requests`, one to six known
+  kinds; the posts' kind check; `ops.platform_set_alert_channel_kinds` replaced with the kind in its
+  order, the rest as 0261 left it).
+- **Domain:** `refund_requests` among `ALERT_CHANNEL_KINDS` and the owners' alerts
+  (`ALERT_CHANNEL_FINANCIAL_KINDS`), labelled "Refund requests"; `announceRefundRequests` queues the
+  email's text as the channel's post in the transaction of the emails and says whether it posted.
+- **Worker:** the sweep's log of announced requests says whether the notice was posted (`posted`).
+- **Web:** Operations → Alerts lists "Refund requests (platform owners’ alert)"; the page names
+  refund requests among the alerts emailed to platform owners, the form a refund's reason among what
+  posts never give, and the replace field lists three owners' alerts as a sentence does.
+- **Tests:** unit (the kinds, the owners' alerts and the labels, and the state's kinds in the
+  console's order with the new kind; 2 changed in `platform/alert-channel.test.ts`); integration (1
+  new in `refund-requests.test.ts`: the notice posted to a channel that gets refund requests, the
+  email's text without a company, an amount or a reason, and not posted once the kind is unticked;
+  the strict results of the announcement tests in both refund requests files gain `posted`); e2e (a
+  new channel leaves refund requests unticked). Written for CI; the integration and e2e tests were
+  not run here.
+- **Docs:** ADR-345; ARCHITECTURE; SECURITY; THREAT-MODEL T304; DEPLOYMENT (0263); RUNBOOKS; BACKLOG
+  P5-10; feature matrix H-034.
+- **Mutation checks:** 4/4 deliberate regressions caught on the unit-tested parts (the kind left out
+  of the list, placed before the financial alerts, not marked an owners' alert, or labelled
+  otherwise). The announcement's post needs the database, so its regressions are left to the
+  integration test, which runs in CI.
+
+### Test commands and results (local, 2026-10-09)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 144 files, 1462 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
 ## 2026-10-09 — Failed sends a day as a share of those sent (P5-10, H-034, ADR-344)
 
 Status: **Implemented; its browser test runs in CI only.** The messages a day charts left failed

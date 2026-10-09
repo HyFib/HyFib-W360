@@ -543,7 +543,8 @@ describe('the chat channel (ADR-338)', () => {
     ]);
     expect(audit[1]!.correlation_id).toBe(owner.correlationId);
 
-    // The column holds one to five known kinds, and the posts a known kind, whoever writes them.
+    // The column holds one to six known kinds (0263), and the posts a known kind, whoever writes
+    // them.
     for (const kinds of [
       `'{}'`,
       `ARRAY['payments']`,

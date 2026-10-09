@@ -64,13 +64,13 @@ export default async function OpsAlertsPage() {
           <CardTitle>Chat channel</CardTitle>
           <CardDescription>
             The operations alerts (failures, late queues and failing integrations) are emailed to
-            every platform administrator, at most every 15 minutes each; the reconciliation findings
-            and payments not seen in a settlement are emailed to platform owners. A chat channel, an
-            incoming webhook address that takes a JSON POST with a “text” member as Slack’s incoming
-            webhooks do, also gets the alerts chosen for it, with their emails’ counts-only text and
-            never a failed reconciliation’s error. A new channel gets the operations alerts; owners
-            choose the rest. A post is tried up to {ALERT_POST_ATTEMPTS} times, so the channel may
-            show one twice.
+            every platform administrator, at most every 15 minutes each; the reconciliation
+            findings, payments not seen in a settlement and refund requests are emailed to platform
+            owners. A chat channel, an incoming webhook address that takes a JSON POST with a “text”
+            member as Slack’s incoming webhooks do, also gets the alerts chosen for it, with their
+            emails’ counts-only text and never a failed reconciliation’s error. A new channel gets
+            the operations alerts; owners choose the rest. A post is tried up to{' '}
+            {ALERT_POST_ATTEMPTS} times, so the channel may show one twice.
           </CardDescription>
         </CardHeader>
         <CardContent className="grid gap-4">
