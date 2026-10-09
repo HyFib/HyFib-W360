@@ -3305,6 +3305,14 @@ tapped, their answer; members read both on the run's page in Automations. Events
 are not recorded, so there is nothing to replay for steps recorded before the endpoint took the
 event; the run's page lists them.
 
+**A receiver misses some of a run's steps (ADR-327).** An endpoint can take the steps of chosen
+outcomes only. The endpoints list shows them ("Automation steps sent: …"), and the API answers
+`runStepOutcomes` (null takes every step). A step goes by its outcome as `step.outcome` names it;
+the run filters apply too. Events no endpoint takes are not recorded, so there is nothing to replay;
+a run's page in Automations lists every step. To take more, tick the outcomes under "Steps sent" on
+the endpoint's page, or `PATCH /webhook-endpoints/{id}` with `runStepOutcomes` (null for every
+step). Removing Automation step clears the list.
+
 **A receiver misses the events of a member's conversations (ADR-181).** An endpoint can take the
 message and conversation events of the conversations assigned to chosen members only. The endpoints
 list shows them ("Members whose conversations’ events are sent: …"), and the API answers

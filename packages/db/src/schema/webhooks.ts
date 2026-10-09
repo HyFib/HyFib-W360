@@ -1,6 +1,6 @@
 import { integer, smallint, text, timestamp, uuid } from 'drizzle-orm/pg-core';
 import { jsonb } from './columns';
-import type { AutomationEndReason } from './automations';
+import type { AutomationEndReason, AutomationStepOutcome } from './automations';
 import type { OrderStatusChanger, PaymentLinkStatus } from './commerce';
 import type { CrmChanger, DealStatus, TaskStatus } from './crm';
 import type { ContactSource, MessageType } from './messaging';
@@ -153,6 +153,12 @@ export type WebhookConversationStatus = 'open' | 'resolved';
 export type WebhookRunEndStatus = 'completed' | 'handed_off' | 'taken_over' | 'stopped' | 'failed';
 
 /**
+ * The outcomes an `automation.run_step` event reports, each step's as the run's log recorded it,
+ * which an endpoint can choose (ADR-327).
+ */
+export type WebhookRunStepOutcome = AutomationStepOutcome;
+
+/**
  * What started a live automation run (ADR-078), which an endpoint taking run events can choose
  * (ADR-183), as the event's `run.trigger` says; members' test runs send no events.
  */
@@ -296,6 +302,11 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
    * every end. Set only while `automation.run_ended` is among its events.
    */
   runEndStatuses: text('run_end_statuses').array().$type<WebhookRunEndStatus[]>(),
+  /**
+   * The outcomes of the run steps it takes as `automation.run_step` (migration 0249, ADR-327); null
+   * takes every step. Set only while `automation.run_step` is among its events.
+   */
+  runStepOutcomes: text('run_step_outcomes').array().$type<WebhookRunStepOutcome[]>(),
   /**
    * What started the runs whose events it takes (ADR-183); null takes every run's. Set only while
    * `automation.run_started`, `automation.run_ended` or `automation.run_step` is among its events.

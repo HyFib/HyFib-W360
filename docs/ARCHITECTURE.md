@@ -1878,6 +1878,13 @@ true`); the same key with another request (method, path and body hashed) answers
   takes any of the three. The payload is built when delivered from the step and the run: the step's
   number, node type, outcome and message id, never its branch or detail; the run's id, automation,
   trigger, key and start; the conversation, contact and number.
+- **Step outcome filters** (migration 0249, ADR-327): `run_step_outcomes` on an endpoint lists the
+  outcomes of the run steps it takes as `automation.run_step`, null for every step; a check keeps it
+  to 1 to 21 known outcomes and to endpoints that take `automation.run_step`.
+  `app.capture_webhook_event` (replaced with the same signature) creates a step's delivery only for
+  endpoints whose list is null or holds the step's outcome, the event's status. Settings ("Steps
+  sent" under Automation step) and the API (`runStepOutcomes`) set it; a change that drops
+  `automation.run_step` clears it.
 - **Order events** (migrations 0063–0064, ADR-085): triggers on `app.commerce_orders` capture
   `order.received` when a WhatsApp order is recorded and `order.status_changed` when an update
   changes its status (a member, or the payment worker applying a Payment Link's outcome), through

@@ -12,6 +12,7 @@ import {
   WEBHOOK_ORDER_STATUS_LABELS,
   WEBHOOK_ORDER_CHANGE_MAKER_LABELS,
   WEBHOOK_PAYMENT_LINK_STATUS_LABELS,
+  WEBHOOK_RUN_STEP_OUTCOME_LABELS,
   WEBHOOK_DEAL_STATUS_LABELS,
   WEBHOOK_TASK_STATUS_LABELS,
   WEBHOOK_DEAL_DETAIL_LABELS,
@@ -255,6 +256,14 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
                         Payment Link statuses sent:{' '}
                         {e.paymentLinkStatuses
                           .map((s) => WEBHOOK_PAYMENT_LINK_STATUS_LABELS[s])
+                          .join(', ')}
+                      </p>
+                    ) : null}
+                    {e.runStepOutcomes ? (
+                      <p className="text-xs text-muted-foreground">
+                        Automation steps sent:{' '}
+                        {e.runStepOutcomes
+                          .map((o) => WEBHOOK_RUN_STEP_OUTCOME_LABELS[o])
                           .join(', ')}
                       </p>
                     ) : null}

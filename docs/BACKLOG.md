@@ -1236,10 +1236,12 @@ verification, app review, Embedded Signup configuration).
   0247–0248: `automation.run_step` for each step a live run records, with its number, node type,
   outcome and message, never its branch or detail, narrowed by the run events' automation, trigger,
   API key and number filters).
+  **[Step outcome filters built; their database tests run only in CI]** (ADR-327, migration 0249: an
+  endpoint takes the run steps of chosen outcomes only).
   Remaining: filters for other event types and on a message's or contact's values (such as a field's
   value), other authentication (headers computed per delivery, other OAuth grants), mutual TLS,
-  fixed egress addresses, events for store orders, filters of a run's steps by outcome or node,
-  `createdAt` finer than the millisecond, load tests.
+  fixed egress addresses, events for store orders, filters of a run's steps by node, `createdAt`
+  finer than the millisecond, load tests.
 - **P5-10 Platform ops screens** **[built, locally verified with test data only]** (ADR-054):
   `/platform/ops` with Overview, Onboarding (failed and abandoned signups, failed or stuck number
   setups, new companies without a number), Integrations (current failures with host-only labels,

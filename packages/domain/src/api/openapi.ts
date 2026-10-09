@@ -32,6 +32,7 @@ import {
   WEBHOOK_MESSAGE_STATUSES,
   WEBHOOK_ORDER_STATUSES,
   WEBHOOK_PAYMENT_LINK_STATUSES,
+  WEBHOOK_RUN_STEP_OUTCOMES,
   WEBHOOK_ORDER_CHANGE_MAKERS,
   WEBHOOK_DEAL_STATUSES,
   WEBHOOK_TASK_STATUSES,
@@ -1218,6 +1219,12 @@ export const apiWebhookEndpointSchema = z.object({
     .nullable()
     .describe(
       'The statuses a Payment Link reaches that the endpoint receives as payment_link.status_changed; null receives every status.',
+    ),
+  runStepOutcomes: z
+    .array(z.enum(WEBHOOK_RUN_STEP_OUTCOMES))
+    .nullable()
+    .describe(
+      'The outcomes of the run steps the endpoint receives as automation.run_step, as step.outcome names them; null receives every step.',
     ),
   orderChangeMakers: z
     .array(z.enum(WEBHOOK_ORDER_CHANGE_MAKERS))
@@ -4246,7 +4253,7 @@ export function buildOpenApiDocument(serverUrl: string) {
       'automation.run_step': webhook(
         'webhookAutomationRunStep',
         WEBHOOK_EVENT_INFO['automation.run_step'].label,
-        `${WEBHOOK_EVENT_INFO['automation.run_step'].description} One event for each step a live run records in its log, its start included (step 0), alongside the run's automation.run_started and automation.run_ended. The step gives its number in the run, the kind of node it ran, its outcome and the message it sent; never the branch it took (for an answered question, the title of the button the customer tapped, which is their answer: run events never send a run's answers) or the step's detail (a note for the run's page in Automations, such as what started the run, a web request's status or why a send was refused). Deliveries are not ordered: order a run's steps by step.number. An endpoint that names the automations, what started the runs, the API keys or the numbers it takes receives only those runs' steps, as for automation.run_started; a run's end statuses and end reasons do not narrow its steps.`,
+        `${WEBHOOK_EVENT_INFO['automation.run_step'].description} One event for each step a live run records in its log, its start included (step 0), alongside the run's automation.run_started and automation.run_ended. The step gives its number in the run, the kind of node it ran, its outcome and the message it sent; never the branch it took (for an answered question, the title of the button the customer tapped, which is their answer: run events never send a run's answers) or the step's detail (a note for the run's page in Automations, such as what started the run, a web request's status or why a send was refused). Deliveries are not ordered: order a run's steps by step.number. An endpoint that names the automations, what started the runs, the API keys or the numbers it takes receives only those runs' steps, as for automation.run_started; a run's end statuses and end reasons do not narrow its steps. An endpoint receives every step unless it names the outcomes it takes (its \`runStepOutcomes\`, or the outcomes ticked in Settings → Webhooks).`,
         'WebhookAutomationRunStep',
       ),
       'order.received': webhook(
