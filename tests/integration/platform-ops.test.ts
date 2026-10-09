@@ -3976,6 +3976,11 @@ describe('messages a day kept as days pass (ADR-341)', () => {
       ),
     );
     expect(one.rows).toEqual(await daysOf(kept));
+    // A company's platform page reads its own year with its health (ADR-342).
+    const health = await ops().companyHealth(staff, kept.tenant.id);
+    expect(health?.year.uncounted).toBe(0);
+    expect(health?.year.days.map((d) => d.day)).toEqual(year);
+    expect(health?.year.days.filter((d) => d.outbound + d.inbound > 0)).toEqual(await daysOf(kept));
     expect(JSON.stringify(read)).not.toContain('Counting the days');
 
     // Days not counted yet are left out of the year, from the latest uncounted day back.

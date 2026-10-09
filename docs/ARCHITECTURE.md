@@ -2724,7 +2724,8 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   older than 400 days and those of deleted companies. `messageYear()` reads
   `ops.platform_ops_message_days(365, null)` and keeps the run of counted days ending at the latest
   one counted (`messageYear` in the same file), which the Usage tab draws under the window's chart
-  with `DailyMessages` under names of its own.
+  with `DailyMessages` under names of its own. `companyHealth()` reads a company's own year the
+  same way, with its health and 30 days, for its platform page (ADR-342).
 - **Exports (ADR-154, ADR-155, ADR-158):** `/platform/ops/export/[list]` (a route handler behind the
   pages' platform actor check; a name of `OPS_EXPORT_LISTS`, any other not found) calls
   `exportList`, which checks in its transaction that the actor is a platform administrator, reads

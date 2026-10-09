@@ -607,6 +607,21 @@ test('staff read the platform’s messages a day on the Usage tab (ADR-333)', as
   expect(received.length).toBeGreaterThanOrEqual(31);
   expect(received.reduce((total, n) => total + Number(n), 0)).toBe(1);
   await expectNoHorizontalOverflow(page);
+  // Its last 12 months (ADR-342), from the days the worker counts once they end: drawn, or none
+  // counted yet, or none of those counted with a message.
+  await expect(page.getByRole('heading', { name: 'The last 12 months' })).toBeVisible();
+  await expect(
+    page
+      .getByRole('slider', {
+        name: "This company's messages sent and received each UTC day, the last 12 months",
+      })
+      .or(page.getByText('No day is counted yet', { exact: true }))
+      .or(
+        page.getByText('The company sent and received no message in the days counted.', {
+          exact: true,
+        }),
+      ),
+  ).toBeVisible();
   // As on the Usage tab, the chart and the open table stay inside a page 360 pixels wide.
   const shown = page.viewportSize();
   await page.setViewportSize({ width: 360, height: shown?.height ?? 800 });

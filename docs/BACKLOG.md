@@ -1372,10 +1372,12 @@ verification, app review, Embedded Signup configuration).
   migration 0262: the worker counts each UTC day once it ends, for every company, and again once a
   day for a week, back to a year ago, a few days a minute; the Usage tab draws the year's counted
   days and says how many are not counted yet).
+  **[A company's year built; its database and browser tests run only in CI]** (ADR-342, no
+  migration: a company's platform page draws its own year under its 30 days).
   Remaining:
   other alert channels (several channels, a channel per alert, formats other than a JSON `text`
   member, such as Microsoft Teams' or PagerDuty's, and the owners' other notices, such as refund
-  requests and personal notices, in a channel), the year on a company's page and other charts,
+  requests and personal notices, in a channel), other charts (failures, a measure of their own),
   Meta's quality webhook (unconfirmed), rollups for many companies and pages read from the
   database.
 - **P5-11 Account export/deletion workflow** **[built, locally verified with test data only]**

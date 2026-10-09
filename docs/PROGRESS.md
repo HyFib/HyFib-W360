@@ -1,5 +1,33 @@
 # Progress
 
+## 2026-10-09 — A company's year on its platform page (P5-10, H-034, ADR-342)
+
+Status: **Implemented; its database and browser tests run in CI only.** ADR-341 drew the
+platform's year of messages a day on the Usage tab and left a company's own year unbuilt.
+
+### Completed
+
+- **Domain:** `companyHealth()` reads the company's kept days for the 365 days before today with
+  its health and 30 days, as `year` (`messageYear` of ADR-341). No migration.
+- **Web:** the company's platform page draws "The last 12 months" under its 30 days, with the days
+  not counted yet and the empty state, under names of its own.
+- **Tests:** integration (`platform-ops.test.ts`: the company's year read with its health, every day
+  counted and its days with messages those of the counts table); e2e (the company page test checks
+  the year). No unit-tested logic changed. Written for CI; the integration and e2e tests were not
+  run here.
+- **Docs:** ADR-342; ARCHITECTURE; BACKLOG P5-10; feature matrix H-034.
+- **Mutation checks:** none new: no unit-tested logic changed.
+
+### Test commands and results (local, 2026-10-09)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 144 files, 1454 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
 ## 2026-10-09 — A year of messages a day on the Usage tab (P5-10, H-034, ADR-341)
 
 Status: **Implemented; its database and browser tests run in CI only.** The Usage tab and a

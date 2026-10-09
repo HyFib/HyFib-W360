@@ -13358,3 +13358,23 @@ read once when it is first counted and once a day for a week after, through the
 
 Not built: the year on a company's page, failures or other measures as charts of their own, the
 year in a CSV, and days in a time zone other than UTC.
+
+## ADR-342 A company's year on its platform page (P5-10) (2026-10-09)
+
+Context: ADR-341 drew the platform's year of messages a day on the Usage tab from the counts the
+worker keeps per company and UTC day, and left a company's own year unbuilt. Staff opening a
+company's platform page saw its 30 days only (ADR-334).
+
+Decision:
+
+- **The health card's "The last 12 months":** `companyHealth()` reads the company's kept days for
+  the 365 days before today through `ops.platform_ops_message_days(365, tenant)` (0262, unchanged)
+  in the snapshot it reads the company's health and 30 days in, and the page draws the run of
+  counted days that ends at the latest one counted (`messageYear`), under the 30 days' chart, with
+  the Usage tab year's names for its legend, table and summary, the days not counted yet and the
+  empty state.
+- **No migration:** the counts, their deletion with the company and the read's refusals are
+  ADR-341's.
+
+Not built: failures or other measures as charts of their own, the year in a CSV, and days in a time
+zone other than UTC.

@@ -23,6 +23,7 @@ import {
   CardDescription,
   CardHeader,
   CardTitle,
+  EmptyState,
   TBody,
   TD,
   TH,
@@ -738,6 +739,38 @@ export default async function PlatformTenantPage({ params }: { params: Promise<{
                   label="This company's messages sent and received each UTC day, 30 days"
                   empty="The company sent and received no message in these 30 days."
                 />
+              </section>
+              {/* Its year, from the counts the worker keeps as days pass (ADR-342). */}
+              <section aria-labelledby="company-year" className="grid min-w-0 gap-3 lg:col-span-2">
+                <h3 id="company-year" className="font-medium">
+                  The last 12 months
+                </h3>
+                <p className="text-muted-foreground">
+                  Each UTC day of the 365 before today, as the worker counts them once each day has
+                  ended and again each day for a week: a failure reported later than that is not
+                  among them.
+                  {ops.year.uncounted > 0
+                    ? ` ${ops.year.uncounted} of the 365 days ${ops.year.uncounted === 1 ? 'is' : 'are'} not counted yet.`
+                    : null}
+                </p>
+                {ops.year.days.length === 0 ? (
+                  <EmptyState
+                    title="No day is counted yet"
+                    description="The worker counts each day after it ends, and the days before it back to a year ago, a few a minute."
+                  />
+                ) : (
+                  <DailyMessages
+                    days={ops.year.days}
+                    label="This company's messages sent and received each UTC day, the last 12 months"
+                    empty="The company sent and received no message in the days counted."
+                    // Unlike the 30 days' chart above: names matched in part never find both.
+                    names={{
+                      legend: 'Legend of the 12 months',
+                      summary: 'Table of the 12 months',
+                      table: 'The 12 months, day by day',
+                    }}
+                  />
+                )}
               </section>
             </CardContent>
           </Card>

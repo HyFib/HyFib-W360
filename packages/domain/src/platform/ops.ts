@@ -1015,7 +1015,10 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
       return messageYear(days);
     },
 
-    /** One company's health and its activity over the last 30 days (null when unknown). */
+    /**
+     * One company's health, its activity over the last 30 days and its year of kept days (ADR-342;
+     * null when unknown).
+     */
     async companyHealth(actor: PlatformActor, tenantId: string) {
       if (!z.uuid().safeParse(tenantId).success) return null;
       const now = clock.now();
@@ -1028,7 +1031,8 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
           if (!facts) return null;
           const [activity] = await activitySince(tx, since, tenantId);
           const daily = await dailyActivity(tx, since, tenantId);
-          return { health: assess(facts), activity: activity ?? null, daily };
+          const year = messageYear(await keptMessageDays(tx, MESSAGE_DAYS_KEPT, tenantId));
+          return { health: assess(facts), activity: activity ?? null, daily, year };
         },
         { isolationLevel: 'repeatable read', accessMode: 'read only' },
       );
