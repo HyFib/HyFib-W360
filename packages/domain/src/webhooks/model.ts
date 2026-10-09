@@ -325,40 +325,77 @@ export const webhookFieldText = (field: WebhookEndpointField): string =>
   field.label === null ? `${field.key} (deleted)` : `${field.label} (${field.key})`;
 
 /**
- * A custom field value whose added and changed contacts an endpoint takes (ADR-332): a field's key
- * and a value of its type, as contacts keep them (text, a number, a date as YYYY-MM-DD, or true or
- * false for yes/no).
+ * A condition on a custom field whose added and changed contacts an endpoint takes, one of three
+ * kinds: an exact value of the field's type, as contacts keep them (text, a number, a date as
+ * YYYY-MM-DD, or true or false for yes/no; ADR-332); a word or phrase a text field's value contains,
+ * whatever its case; or a range of a number or date field's values, either end or both, the ends
+ * included (ADR-335).
  */
-export interface WebhookContactFieldValue {
+export type WebhookContactFieldValue =
+  | { key: string; value: AttributeValue }
+  | { key: string; contains: string }
+  | { key: string; atLeast?: number | string; atMost?: number | string };
+
+/** A condition's range, when it is one (ADR-335). */
+export type WebhookContactFieldRange = {
   key: string;
-  value: AttributeValue;
-}
+  atLeast?: number | string;
+  atMost?: number | string;
+};
+
+/** Whether a condition is an exact value, a word or a range. */
+export const webhookContactFieldKind = (
+  pair: WebhookContactFieldValue,
+): 'value' | 'contains' | 'range' =>
+  'value' in pair ? 'value' : 'contains' in pair ? 'contains' : 'range';
 
 /**
- * What tells a pair of a field and a value apart from the others (ADR-332): text compared whatever
- * its case, as the database compares it with the contacts' values, and numbers as numbers.
+ * What tells a condition apart from the others (ADR-332, ADR-335): text compared whatever its case,
+ * as the database compares it with the contacts' values, numbers as numbers, and a range by its
+ * ends.
  */
-export const webhookContactFieldValueId = (pair: WebhookContactFieldValue): string =>
-  `${pair.key}:${typeof pair.value}:${
-    typeof pair.value === 'string' ? pair.value.toLowerCase() : String(pair.value)
-  }`;
+export function webhookContactFieldValueId(pair: WebhookContactFieldValue): string {
+  if ('value' in pair) {
+    return `${pair.key}:${typeof pair.value}:${
+      typeof pair.value === 'string' ? pair.value.toLowerCase() : String(pair.value)
+    }`;
+  }
+  if ('contains' in pair) return `${pair.key}:contains:${pair.contains.toLowerCase()}`;
+  return `${pair.key}:range:${pair.atLeast ?? ''}:${pair.atMost ?? ''}`;
+}
 
 /** A value as Settings → Webhooks shows it: yes or no for true and false, else as kept. */
 export const webhookFieldValueText = (value: AttributeValue): string =>
   typeof value === 'boolean' ? (value ? 'yes' : 'no') : String(value);
 
 /**
- * The field values an endpoint takes the added and changed contacts of, as Settings → Webhooks
- * names them (ADR-332): each field by its label, or by its key and "(deleted)" for one deleted
- * since, with its values in the order given.
+ * A condition as Settings → Webhooks shows it (ADR-335): a value as kept, a word in quotes after
+ * "containing", and a range from its start to its end, "at least" or "from" its start alone and
+ * "at most" or "until" its end alone, as numbers and dates read.
+ */
+export function webhookContactFieldConditionText(pair: WebhookContactFieldValue): string {
+  if ('value' in pair) return webhookFieldValueText(pair.value);
+  if ('contains' in pair) return `containing "${pair.contains}"`;
+  const date = typeof (pair.atLeast ?? pair.atMost) === 'string';
+  if (pair.atLeast !== undefined && pair.atMost !== undefined) {
+    return `${pair.atLeast} to ${pair.atMost}`;
+  }
+  if (pair.atLeast !== undefined) return `${date ? 'from' : 'at least'} ${pair.atLeast}`;
+  return `${date ? 'until' : 'at most'} ${pair.atMost ?? ''}`;
+}
+
+/**
+ * The conditions an endpoint takes the added and changed contacts of, as Settings → Webhooks names
+ * them (ADR-332, ADR-335): each field by its label, or by its key and "(deleted)" for one deleted
+ * since, with its values, words and ranges in the order given.
  */
 export function webhookContactEventFieldValuesText(
   pairs: readonly WebhookContactFieldValue[],
   labels: ReadonlyMap<string, string>,
 ): string {
   const byKey = new Map<string, string[]>();
-  for (const { key, value } of pairs) {
-    byKey.set(key, [...(byKey.get(key) ?? []), webhookFieldValueText(value)]);
+  for (const pair of pairs) {
+    byKey.set(pair.key, [...(byKey.get(pair.key) ?? []), webhookContactFieldConditionText(pair)]);
   }
   return [...byKey]
     .map(([key, texts]) => `${labels.get(key) ?? `${key} (deleted)`}: ${texts.join(', ')}`)
@@ -386,6 +423,24 @@ export function webhookFieldValueEditable(type: ContactFieldType, value: Attribu
 }
 
 /**
+ * Whether Settings → Webhooks can show a stored condition in its field's inputs as it is (ADR-335):
+ * a value as `webhookFieldValueEditable` says; a word on one line for a text field; a range of
+ * numbers for a number field or of real dates for a date field. Settings shows one range a field,
+ * so a field's other ranges are listed apart and kept as they are (decided by the form).
+ */
+export function webhookFieldConditionEditable(
+  type: ContactFieldType,
+  pair: WebhookContactFieldValue,
+): boolean {
+  if ('value' in pair) return webhookFieldValueEditable(type, pair.value);
+  if ('contains' in pair) return type === 'text' && !/[\r\n]/.test(pair.contains);
+  const ends = [pair.atLeast, pair.atMost].filter((end) => end !== undefined);
+  if (type === 'number') return ends.every((end) => typeof end === 'number');
+  if (type === 'date') return ends.every((end) => typeof end === 'string' && validDate(end));
+  return false;
+}
+
+/**
  * The values Settings → Webhooks reads for a text, number or date field (ADR-332): one a line,
  * each read as a member's entry of the field is (`coerceFieldValue`, which trims it, a carriage
  * return included), blank lines skipped. Yes/no fields are ticked instead.
@@ -401,6 +456,61 @@ export function webhookFieldValuesFromLines(
     if (read.value !== null) values.push(read.value);
   }
   return { ok: true, values };
+}
+
+/**
+ * The words Settings → Webhooks reads for a text field (ADR-335): one a line, trimmed as a text
+ * value is, blank lines skipped.
+ */
+export function webhookFieldWordsFromLines(
+  field: { label: string },
+  text: string,
+): { ok: true; words: string[] } | { ok: false; message: string } {
+  const words: string[] = [];
+  for (const line of text.split('\n')) {
+    const read = coerceFieldValue({ label: field.label, type: 'text' }, line);
+    if (!read.ok) return read;
+    if (typeof read.value === 'string') words.push(read.value);
+  }
+  return { ok: true, words };
+}
+
+/**
+ * The range Settings → Webhooks reads for a number or date field (ADR-335): its start and its end
+ * read as a member's entry of the field is, either left blank; null when both are. The service
+ * checks that the start is not after the end.
+ */
+export function webhookFieldRangeFromInputs(
+  field: { key: string; label: string; type: ContactFieldType },
+  start: string,
+  end: string,
+): { ok: true; range: WebhookContactFieldRange | null } | { ok: false; message: string } {
+  const read = (
+    raw: string,
+  ): { ok: true; end: number | string | undefined } | { ok: false; message: string } => {
+    if (field.type !== 'number' && field.type !== 'date') {
+      return { ok: false, message: `${field.label} takes no range.` };
+    }
+    const value = coerceFieldValue(field, raw);
+    if (!value.ok) return value;
+    if (typeof value.value === 'boolean') {
+      return { ok: false, message: `${field.label} takes no range.` };
+    }
+    return { ok: true, end: value.value ?? undefined };
+  };
+  const from = read(start);
+  if (!from.ok) return from;
+  const to = read(end);
+  if (!to.ok) return to;
+  if (from.end === undefined && to.end === undefined) return { ok: true, range: null };
+  return {
+    ok: true,
+    range: {
+      key: field.key,
+      ...(from.end !== undefined ? { atLeast: from.end } : {}),
+      ...(to.end !== undefined ? { atMost: to.end } : {}),
+    },
+  };
 }
 
 /** How Settings names each part an endpoint can choose (ADR-123). */

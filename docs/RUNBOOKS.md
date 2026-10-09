@@ -2937,6 +2937,11 @@ compared by the field's type: text whatever its case, numbers as numbers, dates 
 as true or false, so a number given as text matches nothing (the services refuse it). A pair whose
 field was deleted matches nothing until a field with its key is added again; then that field's
 changes are sent. A list holds at most 4,000 bytes as JSON: shorten or drop values to add more.
+Since ADR-335 a list can also hold words of text fields (`contains`, whatever their case) and ranges
+of number or date fields (`atLeast`, `atMost`, the ends included): a receiver missing a contact at
+the edge of a range should check the end it gave (a date range compares YYYY-MM-DD, so 31 October is
+in a range ending `2026-10-31`), and one missing a city should check the word is in the text as the
+contact has it.
 Events no endpoint takes are not recorded, so there is nothing to
 replay; `GET /contacts/{id}` gives a contact's values as they are now. With sources, parts, fields
 or tags chosen too, an event must pass every list. To take more, change the values on the endpoint's

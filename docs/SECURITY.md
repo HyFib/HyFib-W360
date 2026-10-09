@@ -1708,6 +1708,11 @@ Phase 5 rules (outgoing webhooks, P5-09):
   receives and never add an event or a delivery for another endpoint or company, and the payload is
   unchanged. Field values can say something about a person, so the list is in the company data
   export and the audits as the tag lists are (unit tests; integration tests, run in CI only).
+  Since ADR-335 a condition can also be a word a text field's value contains or a range of a number
+  or date field: the services read each by its field's type, the check keeps each pair to one
+  shape, and the match compares a word with `strpos` on lowered text, so no character of it acts
+  as a pattern, and a range by jsonb's order or the "C" collation, never by evaluating anything
+  the list holds.
 - An endpoint can take the received messages of chosen types only (ADR-191), chosen the same way. A
   list holds only the fourteen types a received message has, is kept only while the endpoint takes
   `message.received` (a database check too, which also refuses a null entry), and is applied in

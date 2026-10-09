@@ -1251,10 +1251,13 @@ verification, app review, Embedded Signup configuration).
   CI]** (ADR-332, migration 0253: an endpoint takes the `contact.created` and `contact.updated` of
   contacts with chosen custom field values, read by each field's type, and every change of those
   fields).
-  Remaining: filters for other event types and on a message's values, comparisons of field values
-  other than equality, other authentication (headers computed per delivery, other OAuth grants),
-  mutual TLS, fixed egress addresses, events for store orders, a sequence number across events, load
-  tests.
+  **[Words and ranges in field value filters built; their database tests run only in CI]**
+  (ADR-335, migration 0256: a condition can be a word a text field's value contains or a range of a
+  number or date field's values, either end or both).
+  Remaining: filters for other event types and on a message's values, field value comparisons beyond
+  values, words and ranges, other authentication (headers computed per delivery, other OAuth
+  grants), mutual TLS, fixed egress addresses, events for store orders, a sequence number across
+  events, load tests.
 - **P5-10 Platform ops screens** **[built, locally verified with test data only]** (ADR-054):
   `/platform/ops` with Overview, Onboarding (failed and abandoned signups, failed or stuck number
   setups, new companies without a number), Integrations (current failures with host-only labels,

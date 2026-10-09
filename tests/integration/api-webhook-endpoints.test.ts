@@ -2967,6 +2967,72 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     });
   });
 
+  it('choose words of text fields and ranges of number and date fields, read by the fields’ types, through the API (ADR-335)', async () => {
+    const c = await fx.company();
+    const key = await apiKey(c, ['webhooks.manage']);
+    const fieldOf = (fieldKey: string, label: string, type: string) =>
+      fx.query(
+        `INSERT INTO app.contact_fields (id, tenant_id, key, label, type) VALUES ($1, $2, $3, $4, $5)`,
+        [uuidv7(), c.tenant.id, fieldKey, label, type],
+      );
+    await fieldOf('city', 'City', 'text');
+    await fieldOf('score', 'Score', 'number');
+    await fieldOf('renewal', 'Renewal', 'date');
+    const issueOf = async (promise: Promise<unknown>) => {
+      const error = await expectAppError(promise, 'validation_failed');
+      return isAppError(error) ? error.issues?.[0] : undefined;
+    };
+    const refusals = [
+      [[{ key: 'score', contains: '5' }], 'contactEventFieldValues.0.contains'],
+      [[{ key: 'city', atMost: 'z' }], 'contactEventFieldValues.0'],
+      [[{ key: 'score', atLeast: 2, atMost: 1 }], 'contactEventFieldValues.0'],
+      [[{ key: 'renewal', atLeast: 20261001 }], 'contactEventFieldValues.0.atLeast'],
+      [[{ key: 'score', value: 1, atMost: 2 }], 'contactEventFieldValues.0'],
+      [[{ key: 'score' }], 'contactEventFieldValues.0'],
+    ] as const;
+    for (const [index, [conditions, path]] of refusals.entries()) {
+      expect(
+        await issueOf(
+          api().create(
+            key.ctx,
+            {
+              url: receiverUrl(),
+              events: ['contact.updated'],
+              contactEventFieldValues: conditions,
+            },
+            idem(`contact-event-field-ranges-bad-${index}`, JSON.stringify(conditions)),
+          ),
+        ),
+        JSON.stringify(conditions),
+      ).toMatchObject({ path });
+    }
+    expect((await api().list(key.ctx)).data).toEqual([]);
+
+    const created = await addThroughApi(key.ctx, 'contact-event-field-ranges-1', {
+      url: receiverUrl(),
+      events: ['contact.updated'],
+      contactEventFieldValues: [
+        { key: 'city', contains: ' Chen ' },
+        { key: 'score', atLeast: 10 },
+        { key: 'renewal', atLeast: '2026-10-01', atMost: '2026-10-31' },
+      ],
+    });
+    const stored = [
+      { key: 'city', contains: 'Chen' },
+      { key: 'score', atLeast: 10 },
+      { key: 'renewal', atLeast: '2026-10-01', atMost: '2026-10-31' },
+    ];
+    expect(created.body.data).toMatchObject({ contactEventFieldValues: stored });
+    expect(await api().get(key.ctx, created.body.data.id)).toMatchObject({
+      contactEventFieldValues: stored,
+    });
+    expect(
+      await api().update(key.ctx, created.body.data.id, {
+        contactEventFieldValues: [{ key: 'score', atMost: 0 }],
+      }),
+    ).toMatchObject({ contactEventFieldValues: [{ key: 'score', atMost: 0 }] });
+  });
+
   it('choose the field values of the added and changed contacts an endpoint receives, read by the fields’ types, kept by changes that leave them out and cleared with both events (ADR-332)', async () => {
     const c = await fx.company();
     const key = await apiKey(c, ['webhooks.manage']);

@@ -2331,7 +2331,12 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   values and apply it at each write, so a contact given a value by a later write of the
   transaction that added it is sent as `contact.created`. Settings (a field's values one a line,
   yes/no ticked) and the API (`contactEventFieldValues`) set it; a change that drops both events
-  clears it.
+  clears it. Since 0256 (ADR-335) a pair holds, besides a value, a word a text field's value
+  contains (`contains`) or a range of a number or date field (`atLeast`, `atMost`); the check keeps
+  each pair to one shape, `webhookContactEventFieldValuesChecked` reads words and range ends by the
+  field's type, and the match function compares words with `strpos` on lowered text and ranges by
+  jsonb's order for numbers and the "C" collation for dates. Settings shows a text field's words one
+  a line and one range a number or date field.
 - **Message type filters** (migration 0137, ADR-191): `message_types` on an endpoint lists the types
   of the received messages it takes as `message.received`, null for every type; a check keeps it to
   1 to 14 known types (never `template`) and to endpoints taking the event.

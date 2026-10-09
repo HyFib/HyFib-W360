@@ -13038,3 +13038,49 @@ Decision:
 
 Not built: a company's days over another window than 30 days, the days of a company's numbers or
 campaigns, and the chart on the company's own Reports page (it lists messages per day as a table).
+
+## ADR-335 Words and ranges in the field value filter of added and changed contacts (P5-09) (2026-10-09)
+
+Context: since ADR-332 an endpoint taking `contact.created` or `contact.updated` can name exact
+custom field values of the contacts whose changes it takes. A receiver keeping a segment by a
+number or a date (the contacts whose lifetime value is at least 10,000, whose renewal falls in
+October) or by a word of a text field (a city containing "Chennai") could not say so, and ADR-332
+left comparisons other than equality unbuilt.
+
+Decision:
+
+- **Three kinds of condition in one list,** `contactEventFieldValues` (still 1 to 50, each once,
+  up to 4,000 bytes as JSON, any of them passing): a field's key with `value`, an exact value as
+  before; with `contains`, for a text field, a word or phrase of up to 500 characters, trimmed, that
+  the contact's text contains, whatever its case; or with `atLeast`, `atMost` or both, for a number
+  or date field, the ends of a range, each included: numbers for a number field and real dates as
+  YYYY-MM-DD for a date field, read as the field's values are, the start not after the end. A pair
+  of more than one kind, or of none, is refused (422 through the API), as is a word for a field
+  that is not text and a range for one that is neither a number nor a date. Two ranges of one field
+  are both kept and either passes; ranges are not merged.
+- **What is sent is unchanged in kind:** a change is sent when the contact passes one of the
+  conditions once its transaction's write is saved, or when the transaction changes one of the
+  listed fields, so the change that takes a contact out of a range is sent too; a contact added
+  passing one is sent as `contact.created`. A date range compares the contact's value as
+  YYYY-MM-DD text, so a text value written as a date, of a field deleted and added again as text,
+  would be compared too; the services never add a range to a text field.
+- **Settings → Webhooks:** under each text field, besides its values one a line, the words it
+  contains one a line ("City: containing"); under each number or date field, one range ("Score: at
+  least" and "at most", or a date field's "from" and "until"), either end left blank. A condition
+  its field's inputs cannot show as it is (a field's second range given through the API, a word on
+  several lines, or of a field deleted or added again with another type) is listed ticked and kept
+  as it is, as ADR-332 keeps values. The endpoint shows them as "City: Chennai, containing "chen";
+  Score: at least 10; Renewal: 2026-10-01 to 2026-10-31".
+- **Migration 0256:** the column's check replaced: each pair an object of a field's key and the
+  members of one shape (`value`; `contains`, text of 1 to 500 characters without spaces around it;
+  `atLeast` and `atMost`, numbers or YYYY-MM-DD dates, both of one kind and in order), validated at
+  once, as before. `app.webhook_contact_values_match` replaced with the same signature (owned by the
+  migration role, so in place; its grants stay): a word by `strpos` on both sides lowered, so no
+  character of it is a pattern; a range by jsonb's order for numbers and the "C" collation for
+  dates. The capture and tag functions call it unchanged.
+- **Unchanged:** permissions (`developer.manage`, keys with `webhooks.manage`), the audit entries
+  and the company data export carrying the list as it is stored, and the payloads.
+
+Not built: lists that leave contacts out, a range of text, words of number or date fields,
+comparisons other than these (a field without a value, before or after today), several ranges of
+one field in Settings, and sending only the changes that leave a condition.

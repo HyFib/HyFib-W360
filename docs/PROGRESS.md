@@ -1,5 +1,53 @@
 # Progress
 
+## 2026-10-09 — Words and ranges in field value filters (P5-09, H-014, ADR-335)
+
+Status: **Implemented; its database tests run in CI only.** An endpoint taking added and changed
+contacts could name exact custom field values only. The local PostgreSQL is unavailable, so
+migration 0256 and the integration tests below were written but not run here; the migration passed
+the pglast parse check (syntax only), the body of its SQL function included. The jsonpath
+expressions in its check are checked by PostgreSQL alone, in CI.
+
+### Completed
+
+- **Database:** migration 0256 (the check on `contact_event_field_values` replaced: each pair a
+  field's key with a value, a word (`contains`, text of 1 to 500 characters without spaces around
+  it) or a range (`atLeast`, `atMost`: numbers or YYYY-MM-DD dates, of one kind and in order), one
+  shape a pair; `app.webhook_contact_values_match` replaced in place: words by `strpos` on lowered
+  text, number ranges by jsonb's order, date ranges as YYYY-MM-DD text in the "C" collation).
+- **Domain:** `WebhookContactFieldValue` is a value, a word or a range (`webhookContactFieldKind`);
+  the schema takes one kind a pair (`superRefine`) and keeps the value pairs' messages and paths;
+  `webhookContactEventFieldValuesChecked` reads a word only for a text field and a range's ends only
+  for a number or date field, by its type, refusing a start after its end; ids, the text Settings
+  shows (`webhookContactFieldConditionText`), which conditions its inputs show
+  (`webhookFieldConditionEditable`) and its readers (`webhookFieldWordsFromLines`,
+  `webhookFieldRangeFromInputs`); the API's description and the OpenAPI entries of the three kinds.
+- **Web:** Settings → Webhooks shows under each text field the words it contains, one a line, and
+  under each number or date field one range ("at least" and "at most", or "from" and "until"); a
+  condition its inputs cannot show is kept and listed as it is.
+- **Tests:** unit (6 new in `webhooks/webhooks.test.ts`, 1 new and 1 changed in `api/api.test.ts`);
+  integration (1 new each in `webhooks.test.ts`: the service's refusals and keeping, a deleted
+  field's conditions, the audit, each new clause of the database check; `webhook-events.test.ts`:
+  capture by a word, number and date ranges with either end, the changes of listed fields and
+  contact.created; `api-webhook-endpoints.test.ts`: the API's round trip and refusals). Written for
+  CI; the integration tests were not run here. No e2e test.
+- **Docs:** ADR-335; ARCHITECTURE; SECURITY; THREAT-MODEL T300; DEPLOYMENT; RUNBOOKS; BACKLOG
+  P5-09; feature matrix W-138, W-139 and H-014.
+- **Mutation checks:** 37/37 deliberate regressions caught on the unit-tested parts (the schema's
+  shapes, the reading of words and ranges by type, ids, the text Settings shows, which conditions
+  its inputs show and its readers). The check and the match need the database, so their
+  regressions are left to the integration tests, which run in CI.
+
+### Test commands and results (local, 2026-10-09)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 141 files, 1407 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
 ## 2026-10-09 — One company's messages a day on its platform page (P5-10, H-034, ADR-334)
 
 Status: **Implemented; its database and browser tests run in CI only.** A company's platform page

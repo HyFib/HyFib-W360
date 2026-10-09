@@ -4161,7 +4161,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     const given = (schemas.CreateWebhookEndpoint as { properties: Record<string, unknown> })
       .properties;
     expect(JSON.stringify(given.contactEventFieldValues)).toContain(
-      "1 to 50 pairs of a field's key (GET /contact-fields) and a value of the field's type",
+      "1 to 50 of a field's key (GET /contact-fields) with one of: `value`, a value of the field's type",
     );
     expect(JSON.stringify(given.contactEventFieldValues)).toContain(
       'or when it changes one of the fields, so the change that takes a contact out of the values is sent too',
@@ -4174,11 +4174,71 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     expect(endpoint.required).toContain('contactEventFieldValues');
     const hooks = doc.webhooks as Record<string, { post?: { description?: string } }>;
     expect(hooks['contact.created']?.post?.description).toContain(
-      'one that names custom field values (its `contactEventFieldValues`) for a contact the change that adds it gives one of them.',
+      'one that names custom field values, words or ranges (its `contactEventFieldValues`) for a contact the change that adds it makes pass one of them.',
     );
     expect(hooks['contact.updated']?.post?.description).toContain(
-      'receives the changes of contacts that have one of the values when they are saved, and the changes of those fields.',
+      'receives the changes of contacts that pass one of them when they are saved, and the changes of those fields.',
     );
+  });
+
+  it('take words of text fields and ranges of number and date fields too, one kind a condition (ADR-335)', () => {
+    const url = 'https://hooks.example.com/w360';
+    const conditions = [
+      { key: 'tier', value: 'gold' },
+      { key: 'city', contains: 'Chennai' },
+      { key: 'ltv', atLeast: 10000 },
+      { key: 'score', atLeast: 1, atMost: 9.5 },
+      { key: 'renewal', atMost: '2026-12-31' },
+    ];
+    expect(
+      apiCreateWebhookEndpointSchema.parse({
+        url,
+        events: ['contact.updated'],
+        contactEventFieldValues: conditions,
+      }).contactEventFieldValues,
+    ).toEqual(conditions);
+    expect(
+      apiUpdateWebhookEndpointSchema.parse({ contactEventFieldValues: conditions })
+        .contactEventFieldValues,
+    ).toEqual(conditions);
+    const contacts = { url, events: ['contact.updated'] };
+    for (const [condition, path, message] of [
+      [{ key: 'city', value: 'Chennai', contains: 'chen' }, '0', 'not more than one'],
+      [{ key: 'score', contains: 'x', atLeast: 1 }, '0', 'not more than one'],
+      [{ key: 'score', value: 1, atMost: 2 }, '0', 'not more than one'],
+      [{ key: 'score' }, '0', 'Give a value, a word to look for or a range'],
+      [{ key: 'city', contains: 5 }, '0.contains', 'Give the word to look for as text.'],
+      [{ key: 'score', atLeast: null }, '0.atLeast', 'numbers or as dates'],
+      [{ key: 'score', atMost: true }, '0.atMost', 'numbers or as dates'],
+      [{ key: 'score', atLeast: 1, op: 'gte' }, '0', ''],
+    ] as const) {
+      const refused = apiCreateWebhookEndpointSchema.safeParse({
+        ...contacts,
+        contactEventFieldValues: [condition],
+      });
+      expect(refused.success, JSON.stringify(condition)).toBe(false);
+      const issue = refused.error?.issues.find((i) =>
+        i.path.join('.').startsWith('contactEventFieldValues'),
+      );
+      expect(issue?.path.join('.'), JSON.stringify(condition)).toBe(
+        `contactEventFieldValues.${path}`,
+      );
+      expect(issue?.message, JSON.stringify(condition)).toContain(message);
+    }
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas;
+    const given = JSON.stringify(
+      (schemas.CreateWebhookEndpoint as { properties: Record<string, unknown> }).properties
+        .contactEventFieldValues,
+    );
+    for (const member of ['"contains"', '"atLeast"', '"atMost"']) {
+      expect(given).toContain(member);
+    }
+    const endpoint = schemas.WebhookEndpoint as {
+      properties: Record<string, { anyOf?: { items?: { anyOf?: unknown[] } }[] }>;
+    };
+    expect(endpoint.properties.contactEventFieldValues?.anyOf?.[0]?.items?.anyOf).toHaveLength(3);
   });
 
   it('take campaign statuses only with campaign.status_changed, and a list of them alone is a change (ADR-146)', () => {
