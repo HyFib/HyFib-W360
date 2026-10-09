@@ -1,5 +1,46 @@
 # Progress
 
+## 2026-10-09 — Step kind filters for webhook endpoints (P5-09, H-014, ADR-328)
+
+Status: **Implemented; its database tests run in CI only.** An endpoint could choose the outcomes of
+the run steps it takes, not the kinds of node they ran. The local PostgreSQL is unavailable, so the
+migration and the integration tests below were written but not run here; migration 0250 passed the
+pglast parse check (syntax only).
+
+### Completed
+
+- **Database:** migration 0250 (`run_step_node_types` on `app.webhook_endpoints` with its check and
+  update grant; the step trigger passing the step's kind; `app.capture_webhook_event` matching it
+  and leaving it out of the stored detail).
+- **Domain:** `WEBHOOK_RUN_STEP_NODE_TYPES` and `WEBHOOK_RUN_STEP_NODE_TYPE_LABELS` in
+  `webhooks/model.ts`; `webhookRunStepNodeTypesSchema`, `webhookRunStepNodeTypesFor` and the refusal
+  in `webhooks/service.ts`; the endpoint view, creation, changes, audits and the export column; the
+  same in `api/webhook-endpoints.ts` and the OpenAPI document (the endpoint's answer, and
+  `automation.run_step`'s description).
+- **Web:** Settings → Webhooks' "Kinds of step sent" under Automation step, and the endpoints list's
+  line for it.
+- **Tests:** unit (3 new: the list's rules and keeping and clearing in `webhooks/webhooks.test.ts`;
+  the API schemas and OpenAPI entries in `api/api.test.ts`; 3 tests there changed for the new field
+  and the empty change's wording); integration (3 new: the services in `webhooks.test.ts`, capture
+  in `webhook-events.test.ts`, the API in `api-webhook-endpoints.test.ts`; 1 changed: the full
+  endpoint answer there). Written for CI; the integration tests were not run here. No e2e test.
+- **Docs:** ADR-328; ARCHITECTURE; SECURITY; THREAT-MODEL T296; DEPLOYMENT; RUNBOOKS;
+  DATA-RETENTION; BACKLOG P5-09; feature matrix H-014.
+- **Mutation checks:** 20/20 deliberate regressions caught on the unit-tested parts. The trigger,
+  the capture, the check and the form need the database or a browser, so their regressions are left
+  to the integration tests, which run in CI.
+
+### Test commands and results (local, 2026-10-09)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 140 files, 1375 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| pglast 7 parse of migration 0250                   | passed (syntax only)                                          |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
 ## 2026-10-08 — Step outcome filters for webhook endpoints (P5-09, H-014, ADR-327)
 
 Status: **Implemented; its database tests run in CI only.** `automation.run_step` sent every step of

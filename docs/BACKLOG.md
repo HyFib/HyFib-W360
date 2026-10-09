@@ -1238,10 +1238,13 @@ verification, app review, Embedded Signup configuration).
   API key and number filters).
   **[Step outcome filters built; their database tests run only in CI]** (ADR-327, migration 0249: an
   endpoint takes the run steps of chosen outcomes only).
+  **[Step kind filters built; their database tests run only in CI]** (ADR-328, migration 0250: an
+  endpoint takes the run steps of chosen kinds of node only; steps outside a node are not sent to a
+  list).
   Remaining: filters for other event types and on a message's or contact's values (such as a field's
   value), other authentication (headers computed per delivery, other OAuth grants), mutual TLS,
-  fixed egress addresses, events for store orders, filters of a run's steps by node, `createdAt`
-  finer than the millisecond, load tests.
+  fixed egress addresses, events for store orders, `createdAt` finer than the millisecond, load
+  tests.
 - **P5-10 Platform ops screens** **[built, locally verified with test data only]** (ADR-054):
   `/platform/ops` with Overview, Onboarding (failed and abandoned signups, failed or stuck number
   setups, new companies without a number), Integrations (current failures with host-only labels,

@@ -54,6 +54,7 @@ import {
   WEBHOOK_ORDER_STATUSES,
   WEBHOOK_PAYMENT_LINK_STATUSES,
   WEBHOOK_RUN_STEP_OUTCOMES,
+  WEBHOOK_RUN_STEP_NODE_TYPES,
   WEBHOOK_ORDER_CHANGE_MAKERS,
   WEBHOOK_DEAL_STATUSES,
   WEBHOOK_TASK_STATUSES,
@@ -112,6 +113,7 @@ import {
   type WebhookOrderStatus,
   type WebhookPaymentLinkStatus,
   type WebhookRunStepOutcome,
+  type WebhookRunStepNodeType,
   type WebhookOrderChangeMaker,
   type WebhookDealStatus,
   type WebhookTaskStatus,
@@ -585,6 +587,34 @@ export function webhookRunStepOutcomesFor(
   given: readonly WebhookRunStepOutcome[] | null | undefined,
   current: readonly WebhookRunStepOutcome[] | null,
 ): WebhookRunStepOutcome[] | null {
+  if (!eventTypes.includes('automation.run_step')) return null;
+  const kept = given === undefined ? current : given;
+  return kept ? [...kept] : null;
+}
+
+/**
+ * The kinds of node whose run steps an endpoint takes as `automation.run_step` (ADR-328), in the
+ * order the automation builder lists them; null takes every step, those outside a node among them.
+ */
+export const webhookRunStepNodeTypesSchema = z
+  .array(z.enum(WEBHOOK_RUN_STEP_NODE_TYPES, { error: 'Choose kinds of step from the list.' }))
+  .min(1, 'Choose at least one kind of step, or take every step.')
+  .max(WEBHOOK_RUN_STEP_NODE_TYPES.length, 'Give each kind of step once.')
+  .transform((chosen) => WEBHOOK_RUN_STEP_NODE_TYPES.filter((type) => chosen.includes(type)))
+  .nullable();
+
+export const WEBHOOK_RUN_STEP_NODE_TYPES_NEED_THE_EVENT =
+  'Choose kinds of step only for an endpoint that receives Automation step.';
+
+/**
+ * The kinds of step an endpoint keeps after it is added or changed: every step (null) unless it
+ * takes `automation.run_step`; then those given, or else the ones it had.
+ */
+export function webhookRunStepNodeTypesFor(
+  eventTypes: readonly WebhookEventType[],
+  given: readonly WebhookRunStepNodeType[] | null | undefined,
+  current: readonly WebhookRunStepNodeType[] | null,
+): WebhookRunStepNodeType[] | null {
   if (!eventTypes.includes('automation.run_step')) return null;
   const kept = given === undefined ? current : given;
   return kept ? [...kept] : null;
@@ -2556,6 +2586,8 @@ const endpointFields = z.object({
   paymentLinkStatuses: webhookPaymentLinkStatusesSchema.optional(),
   /** Given, the outcomes of the steps it takes (null: every step, ADR-327); left out, they stay. */
   runStepOutcomes: webhookRunStepOutcomesSchema.optional(),
+  /** Given, the kinds of node whose steps it takes (null: every step, ADR-328); left out, kept. */
+  runStepNodeTypes: webhookRunStepNodeTypesSchema.optional(),
   /**
    * Given, who made the order status changes it takes (null: every change, ADR-322); left out, they
    * stay.
@@ -2788,6 +2820,12 @@ const runStepOutcomesNeedTheEvent = {
   check: (data: { eventTypes: WebhookEventType[]; runStepOutcomes?: unknown }) =>
     !data.runStepOutcomes || data.eventTypes.includes('automation.run_step'),
   options: { path: ['runStepOutcomes'], message: WEBHOOK_RUN_STEP_OUTCOMES_NEED_THE_EVENT },
+};
+/** Kinds of step are chosen only for an endpoint that takes run steps (ADR-328). */
+const runStepNodeTypesNeedTheEvent = {
+  check: (data: { eventTypes: WebhookEventType[]; runStepNodeTypes?: unknown }) =>
+    !data.runStepNodeTypes || data.eventTypes.includes('automation.run_step'),
+  options: { path: ['runStepNodeTypes'], message: WEBHOOK_RUN_STEP_NODE_TYPES_NEED_THE_EVENT },
 };
 /** Who made the order changes is chosen only for an endpoint that takes them (ADR-322). */
 const orderChangeMakersNeedTheEvent = {
@@ -3062,6 +3100,7 @@ const endpointSchema = endpointFields
   .refine(orderStatusesNeedTheEvent.check, orderStatusesNeedTheEvent.options)
   .refine(paymentLinkStatusesNeedTheEvent.check, paymentLinkStatusesNeedTheEvent.options)
   .refine(runStepOutcomesNeedTheEvent.check, runStepOutcomesNeedTheEvent.options)
+  .refine(runStepNodeTypesNeedTheEvent.check, runStepNodeTypesNeedTheEvent.options)
   .refine(orderChangeMakersNeedTheEvent.check, orderChangeMakersNeedTheEvent.options)
   .refine(orderExcludedApiKeysNeedTheEvent.check, orderExcludedApiKeysNeedTheEvent.options)
   .refine(paymentLinkApiKeysNeedTheEvent.check, paymentLinkApiKeysNeedTheEvent.options)
@@ -3115,6 +3154,7 @@ const updateSchema = endpointFields
   .refine(orderStatusesNeedTheEvent.check, orderStatusesNeedTheEvent.options)
   .refine(paymentLinkStatusesNeedTheEvent.check, paymentLinkStatusesNeedTheEvent.options)
   .refine(runStepOutcomesNeedTheEvent.check, runStepOutcomesNeedTheEvent.options)
+  .refine(runStepNodeTypesNeedTheEvent.check, runStepNodeTypesNeedTheEvent.options)
   .refine(orderChangeMakersNeedTheEvent.check, orderChangeMakersNeedTheEvent.options)
   .refine(orderExcludedApiKeysNeedTheEvent.check, orderExcludedApiKeysNeedTheEvent.options)
   .refine(paymentLinkApiKeysNeedTheEvent.check, paymentLinkApiKeysNeedTheEvent.options)
@@ -3213,6 +3253,8 @@ export interface WebhookEndpointView {
   paymentLinkStatuses: WebhookPaymentLinkStatus[] | null;
   /** The outcomes of the run steps it takes (ADR-327); null takes every step. */
   runStepOutcomes: WebhookRunStepOutcome[] | null;
+  /** The kinds of node whose run steps it takes (ADR-328); null takes every step. */
+  runStepNodeTypes: WebhookRunStepNodeType[] | null;
   /** Who made the order status changes it takes (ADR-322), in Settings' order; null: all. */
   orderChangeMakers: WebhookOrderChangeMaker[] | null;
   /**
@@ -3602,6 +3644,7 @@ export async function lockWebhookEndpoint(
       orderStatuses: webhookEndpoints.orderStatuses,
       paymentLinkStatuses: webhookEndpoints.paymentLinkStatuses,
       runStepOutcomes: webhookEndpoints.runStepOutcomes,
+      runStepNodeTypes: webhookEndpoints.runStepNodeTypes,
       orderChangeMakers: webhookEndpoints.orderChangeMakers,
       orderExcludedApiKeyIds: webhookEndpoints.orderExcludedApiKeyIds,
       paymentLinkApiKeyIds: webhookEndpoints.paymentLinkApiKeyIds,
@@ -3691,6 +3734,7 @@ export async function insertWebhookEndpoint(
     paymentLinkStatuses: WebhookPaymentLinkStatus[] | null;
     orderChangeMakers: WebhookOrderChangeMaker[] | null;
     runStepOutcomes: WebhookRunStepOutcome[] | null;
+    runStepNodeTypes: WebhookRunStepNodeType[] | null;
     orderExcludedApiKeyIds: string[] | null;
     paymentLinkApiKeyIds: string[] | null;
     dealStatuses: WebhookDealStatus[] | null;
@@ -3767,6 +3811,7 @@ export async function insertWebhookEndpoint(
     orderStatuses: input.orderStatuses,
     paymentLinkStatuses: input.paymentLinkStatuses,
     runStepOutcomes: input.runStepOutcomes,
+    runStepNodeTypes: input.runStepNodeTypes,
     orderChangeMakers: input.orderChangeMakers,
     orderExcludedApiKeyIds: input.orderExcludedApiKeyIds,
     paymentLinkApiKeyIds: input.paymentLinkApiKeyIds,
@@ -4193,6 +4238,7 @@ export function createWebhooksService(deps: {
               orderStatuses: webhookEndpoints.orderStatuses,
               paymentLinkStatuses: webhookEndpoints.paymentLinkStatuses,
               runStepOutcomes: webhookEndpoints.runStepOutcomes,
+              runStepNodeTypes: webhookEndpoints.runStepNodeTypes,
               orderChangeMakers: webhookEndpoints.orderChangeMakers,
               orderExcludedApiKeyIds: webhookEndpoints.orderExcludedApiKeyIds,
               paymentLinkApiKeyIds: webhookEndpoints.paymentLinkApiKeyIds,
@@ -5018,6 +5064,11 @@ export function createWebhooksService(deps: {
           data.runStepOutcomes,
           null,
         );
+        const runStepNodeTypes = webhookRunStepNodeTypesFor(
+          data.eventTypes,
+          data.runStepNodeTypes,
+          null,
+        );
         const orderChangeMakers = webhookOrderChangeMakersFor(
           data.eventTypes,
           data.orderChangeMakers,
@@ -5184,6 +5235,7 @@ export function createWebhooksService(deps: {
           paymentLinkStatuses,
           orderChangeMakers,
           runStepOutcomes,
+          runStepNodeTypes,
           orderExcludedApiKeyIds,
           paymentLinkApiKeyIds,
           dealStatuses,
@@ -5248,6 +5300,7 @@ export function createWebhooksService(deps: {
               ...(orderStatuses ? { orderStatuses } : {}),
               ...(paymentLinkStatuses ? { paymentLinkStatuses } : {}),
               ...(runStepOutcomes ? { runStepOutcomes } : {}),
+              ...(runStepNodeTypes ? { runStepNodeTypes } : {}),
               ...(orderChangeMakers ? { orderChangeMakers } : {}),
               ...(orderExcludedApiKeyIds ? { orderExcludedApiKeyIds } : {}),
               ...(paymentLinkApiKeyIds ? { paymentLinkApiKeyIds } : {}),
@@ -5376,6 +5429,11 @@ export function createWebhooksService(deps: {
           data.eventTypes,
           data.runStepOutcomes,
           endpoint.runStepOutcomes,
+        );
+        const runStepNodeTypes = webhookRunStepNodeTypesFor(
+          data.eventTypes,
+          data.runStepNodeTypes,
+          endpoint.runStepNodeTypes,
         );
         const orderChangeMakers = webhookOrderChangeMakersFor(
           data.eventTypes,
@@ -5707,6 +5765,7 @@ export function createWebhooksService(deps: {
             paymentLinkStatuses,
             orderChangeMakers,
             runStepOutcomes,
+            runStepNodeTypes,
             orderExcludedApiKeyIds,
             paymentLinkApiKeyIds,
             dealStatuses,
@@ -5782,6 +5841,7 @@ export function createWebhooksService(deps: {
               ...(orderStatuses ? { orderStatuses } : {}),
               ...(paymentLinkStatuses ? { paymentLinkStatuses } : {}),
               ...(runStepOutcomes ? { runStepOutcomes } : {}),
+              ...(runStepNodeTypes ? { runStepNodeTypes } : {}),
               ...(orderChangeMakers ? { orderChangeMakers } : {}),
               ...(orderExcludedApiKeyIds ? { orderExcludedApiKeyIds } : {}),
               ...(paymentLinkApiKeyIds ? { paymentLinkApiKeyIds } : {}),

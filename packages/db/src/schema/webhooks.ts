@@ -159,6 +159,29 @@ export type WebhookRunEndStatus = 'completed' | 'handed_off' | 'taken_over' | 's
 export type WebhookRunStepOutcome = AutomationStepOutcome;
 
 /**
+ * The kinds of automation node whose steps an endpoint can choose to take as `automation.run_step`
+ * (ADR-328), as the event's `step.nodeType` names them and the automation builder defines them.
+ */
+export type WebhookRunStepNodeType =
+  | 'send_text'
+  | 'ask_buttons'
+  | 'ask_text'
+  | 'send_template'
+  | 'ask_template'
+  | 'send_flow'
+  | 'condition'
+  | 'update_contact'
+  | 'update_conversation'
+  | 'http_request'
+  | 'create_task'
+  | 'create_deal'
+  | 'move_deal'
+  | 'close_deal'
+  | 'wait'
+  | 'handoff'
+  | 'end';
+
+/**
  * What started a live automation run (ADR-078), which an endpoint taking run events can choose
  * (ADR-183), as the event's `run.trigger` says; members' test runs send no events.
  */
@@ -307,6 +330,12 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
    * takes every step. Set only while `automation.run_step` is among its events.
    */
   runStepOutcomes: text('run_step_outcomes').array().$type<WebhookRunStepOutcome[]>(),
+  /**
+   * The kinds of node whose run steps it takes as `automation.run_step` (migration 0250, ADR-328);
+   * null takes every step, those outside a node among them. Set only while `automation.run_step` is
+   * among its events.
+   */
+  runStepNodeTypes: text('run_step_node_types').array().$type<WebhookRunStepNodeType[]>(),
   /**
    * What started the runs whose events it takes (ADR-183); null takes every run's. Set only while
    * `automation.run_started`, `automation.run_ended` or `automation.run_step` is among its events.

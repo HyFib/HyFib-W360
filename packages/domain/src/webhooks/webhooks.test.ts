@@ -28,7 +28,7 @@ import { API_KEY_LIMITS } from '../api/model';
 import { apiContactSchema } from '../api/contact-view';
 import { apiSatisfactionSurveySchema } from '../api/satisfaction-survey-view';
 import { buildOpenApiDocument } from '../api/openapi';
-import { NODE_TYPES } from '../automations/graph';
+import { NODE_TYPE_LABELS, NODE_TYPES } from '../automations/graph';
 import {
   campaignResultsSchema,
   toCampaignResults,
@@ -76,6 +76,8 @@ import {
   WEBHOOK_PAYMENT_LINK_STATUSES,
   WEBHOOK_RUN_STEP_OUTCOME_LABELS,
   WEBHOOK_RUN_STEP_OUTCOMES,
+  WEBHOOK_RUN_STEP_NODE_TYPE_LABELS,
+  WEBHOOK_RUN_STEP_NODE_TYPES,
   WEBHOOK_ORDER_CHANGE_MAKER_LABELS,
   WEBHOOK_ORDER_CHANGE_MAKERS,
   WEBHOOK_DEAL_STATUS_LABELS,
@@ -242,6 +244,9 @@ import {
   webhookRunStepOutcomesFor,
   webhookRunStepOutcomesSchema,
   WEBHOOK_RUN_STEP_OUTCOMES_NEED_THE_EVENT,
+  webhookRunStepNodeTypesFor,
+  webhookRunStepNodeTypesSchema,
+  WEBHOOK_RUN_STEP_NODE_TYPES_NEED_THE_EVENT,
   webhookOrderChangeMakersFor,
   webhookOrderChangeMakersSchema,
   WEBHOOK_ORDER_CHANGE_MAKERS_NEED_THE_EVENT,
@@ -2904,6 +2909,70 @@ describe('run step outcome filters (ADR-327)', () => {
     ).toBeNull();
     expect(WEBHOOK_RUN_STEP_OUTCOMES_NEED_THE_EVENT).toBe(
       `Choose step outcomes only for an endpoint that receives ${WEBHOOK_EVENT_INFO['automation.run_step'].label}.`,
+    );
+  });
+});
+
+describe('run step kind of node filters (ADR-328)', () => {
+  it('take 1 to 17 of the automation builder’s kinds of node, once each, in its order; null takes every step', () => {
+    expect(webhookRunStepNodeTypesSchema.parse(['wait', 'send_text', 'wait'])).toEqual([
+      'send_text',
+      'wait',
+    ]);
+    expect(webhookRunStepNodeTypesSchema.parse(null)).toBeNull();
+    expect(webhookRunStepNodeTypesSchema.parse([...WEBHOOK_RUN_STEP_NODE_TYPES].reverse())).toEqual(
+      [...WEBHOOK_RUN_STEP_NODE_TYPES],
+    );
+    // Every kind of node a step can run, as automation.run_step's step.nodeType names them.
+    expect(WEBHOOK_RUN_STEP_NODE_TYPES).toEqual([...NODE_TYPES]);
+    expect(WEBHOOK_RUN_STEP_NODE_TYPES).toHaveLength(17);
+    // A trigger is not a node: no step runs one.
+    for (const refused of [
+      [],
+      ['keyword'],
+      ['api'],
+      ['Send_text'],
+      'wait',
+      [null],
+      Array(18).fill('wait'),
+    ]) {
+      expect(
+        webhookRunStepNodeTypesSchema.safeParse(refused).success,
+        JSON.stringify(refused),
+      ).toBe(false);
+    }
+    expect(webhookRunStepNodeTypesSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one kind of step, or take every step.',
+    );
+    expect(webhookRunStepNodeTypesSchema.safeParse(['keyword']).error?.issues[0]?.message).toBe(
+      'Choose kinds of step from the list.',
+    );
+    expect(
+      webhookRunStepNodeTypesSchema.safeParse(Array(18).fill('wait')).error?.issues[0]?.message,
+    ).toBe('Give each kind of step once.');
+    // Named as the automation builder names them, in the list's order.
+    expect(WEBHOOK_RUN_STEP_NODE_TYPE_LABELS).toEqual(NODE_TYPE_LABELS);
+    expect(Object.keys(WEBHOOK_RUN_STEP_NODE_TYPE_LABELS)).toEqual([
+      ...WEBHOOK_RUN_STEP_NODE_TYPES,
+    ]);
+  });
+
+  it('are kept only while the endpoint takes automation.run_step: given, kept, or cleared', () => {
+    const both = ['automation.run_step', 'automation.run_started'] as const;
+    expect(webhookRunStepNodeTypesFor([...both], ['http_request'], null)).toEqual(['http_request']);
+    expect(webhookRunStepNodeTypesFor([...both], undefined, ['wait'])).toEqual(['wait']);
+    expect(webhookRunStepNodeTypesFor([...both], null, ['wait'])).toBeNull();
+    expect(webhookRunStepNodeTypesFor([...both], undefined, null)).toBeNull();
+    // The run's own events have no kind of step to choose.
+    expect(
+      webhookRunStepNodeTypesFor(
+        ['automation.run_started', 'automation.run_ended'],
+        ['wait'],
+        ['end'],
+      ),
+    ).toBeNull();
+    expect(WEBHOOK_RUN_STEP_NODE_TYPES_NEED_THE_EVENT).toBe(
+      `Choose kinds of step only for an endpoint that receives ${WEBHOOK_EVENT_INFO['automation.run_step'].label}.`,
     );
   });
 });

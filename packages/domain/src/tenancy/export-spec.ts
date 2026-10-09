@@ -1622,6 +1622,7 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
       'conversation_statuses',
       'run_end_statuses',
       'run_step_outcomes',
+      'run_step_node_types',
       'run_triggers',
       'run_api_key_ids',
       'consent_changes',

@@ -19,6 +19,7 @@ import type {
   WebhookTaskDetail,
   WebhookRunEndStatus,
   WebhookRunStepOutcome,
+  WebhookRunStepNodeType,
   WebhookReceivedMessageType,
   WebhookRunTrigger,
   WebhookSurveyScore,
@@ -45,6 +46,7 @@ export type {
   WebhookTaskDetail,
   WebhookRunEndStatus,
   WebhookRunStepOutcome,
+  WebhookRunStepNodeType,
   WebhookReceivedMessageType,
   WebhookRunTrigger,
   WebhookSurveyScore,
@@ -601,6 +603,53 @@ export const WEBHOOK_RUN_STEP_OUTCOME_LABELS: Record<WebhookRunStepOutcome, stri
   skipped: 'Skipped the step',
   moved: 'Moved the deal',
   closed: 'Closed the deal',
+};
+
+/**
+ * The kinds of automation node whose steps an endpoint taking `automation.run_step` can choose
+ * (ADR-328), in the order the automation builder lists them (as the event's `step.nodeType` names
+ * them). A step outside a node (the run starting, being stopped or taken over) has no kind and is
+ * taken only by an endpoint that takes every kind.
+ */
+export const WEBHOOK_RUN_STEP_NODE_TYPES = [
+  'send_text',
+  'ask_buttons',
+  'ask_text',
+  'send_template',
+  'ask_template',
+  'send_flow',
+  'condition',
+  'update_contact',
+  'update_conversation',
+  'http_request',
+  'create_task',
+  'create_deal',
+  'move_deal',
+  'close_deal',
+  'wait',
+  'handoff',
+  'end',
+] as const satisfies readonly WebhookRunStepNodeType[];
+
+/** How Settings names each kind of step an endpoint can choose (ADR-328), as the builder does. */
+export const WEBHOOK_RUN_STEP_NODE_TYPE_LABELS: Record<WebhookRunStepNodeType, string> = {
+  send_text: 'Send a message',
+  ask_buttons: 'Ask with buttons',
+  ask_text: 'Ask a question',
+  send_template: 'Send a template',
+  ask_template: 'Ask with a template',
+  send_flow: 'Send a form',
+  condition: 'Condition',
+  update_contact: 'Update contact',
+  update_conversation: 'Tag the conversation',
+  http_request: 'Call a web address',
+  create_task: 'Create a CRM task',
+  create_deal: 'Create a CRM deal',
+  move_deal: 'Move the CRM deal',
+  close_deal: 'Close the CRM deal',
+  wait: 'Wait',
+  handoff: 'Hand off to people',
+  end: 'End',
 };
 
 /**

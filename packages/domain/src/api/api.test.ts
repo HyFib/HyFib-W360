@@ -185,6 +185,7 @@ import {
   WEBHOOK_ORDER_STATUSES_NEED_THE_EVENT,
   WEBHOOK_PAYMENT_LINK_STATUSES_NEED_THE_EVENT,
   WEBHOOK_RUN_STEP_OUTCOMES_NEED_THE_EVENT,
+  WEBHOOK_RUN_STEP_NODE_TYPES_NEED_THE_EVENT,
   WEBHOOK_ORDER_CHANGE_MAKERS_NEED_THE_EVENT,
   WEBHOOK_ORDER_EXCLUDED_API_KEYS_NEED_THE_EVENT,
   WEBHOOK_PAYMENT_LINK_API_KEYS_NEED_THE_EVENT,
@@ -210,6 +211,7 @@ import {
   WEBHOOK_LIMITS,
   WEBHOOK_PAYMENT_LINK_STATUSES,
   WEBHOOK_RUN_STEP_OUTCOMES,
+  WEBHOOK_RUN_STEP_NODE_TYPES,
   WEBHOOK_ORDER_CHANGE_MAKERS,
   WEBHOOK_DEAL_STATUSES,
   WEBHOOK_TASK_STATUSES,
@@ -1514,6 +1516,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'runApiKeyIds',
       'runEndReasons',
       'runEndStatuses',
+      'runStepNodeTypes',
       'runStepOutcomes',
       'runTriggers',
       'stageIds',
@@ -1618,6 +1621,15 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     expect(Object.keys(createBody.properties)).toContain('runStepOutcomes');
     expect(webhooks['automation.run_step']?.post?.description).toContain(
       'An endpoint receives every step unless it names the outcomes it takes (its `runStepOutcomes`',
+    );
+    // The kinds of node whose steps an endpoint receives (ADR-328): a list, or null.
+    const runStepNodeTypes = (answered.properties as Record<string, { anyOf?: unknown[] }>)
+      .runStepNodeTypes;
+    expect(runStepNodeTypes?.anyOf).toHaveLength(2);
+    expect(answered.required).toContain('runStepNodeTypes');
+    expect(Object.keys(createBody.properties)).toContain('runStepNodeTypes');
+    expect(webhooks['automation.run_step']?.post?.description).toContain(
+      'or the kinds of node it takes (its `runStepNodeTypes`, or the kinds ticked there), which leaves out the steps outside a node.',
     );
     // The deal and task statuses an endpoint receives (ADR-309): lists, or null.
     for (const [field, event] of [
@@ -3407,6 +3419,60 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     });
   });
 
+  it('take kinds of step only with automation.run_step, and a list of them alone is a change (ADR-328)', () => {
+    const base = { url: 'https://hooks.example.com/w360', events: ['automation.run_step'] };
+    expect(
+      apiCreateWebhookEndpointSchema.parse({
+        ...base,
+        runStepNodeTypes: ['wait', 'http_request', 'wait'],
+      }).runStepNodeTypes,
+    ).toEqual(['http_request', 'wait']);
+    const refused = apiCreateWebhookEndpointSchema.safeParse({
+      ...base,
+      events: ['automation.run_started'],
+      runStepNodeTypes: ['wait'],
+    });
+    expect(refused.error?.issues.map((i) => [i.path.join('.'), i.message])).toEqual([
+      ['runStepNodeTypes', WEBHOOK_RUN_STEP_NODE_TYPES_NEED_THE_EVENT],
+    ]);
+    for (const body of [
+      { ...base, runStepNodeTypes: [] },
+      { ...base, runStepNodeTypes: ['keyword'] },
+    ]) {
+      expect(apiCreateWebhookEndpointSchema.safeParse(body).success, JSON.stringify(body)).toBe(
+        false,
+      );
+    }
+    expect(apiUpdateWebhookEndpointSchema.parse({ runStepNodeTypes: null })).toEqual({
+      runStepNodeTypes: null,
+    });
+    expect(apiUpdateWebhookEndpointSchema.parse({ runStepNodeTypes: ['end'] })).toEqual({
+      runStepNodeTypes: ['end'],
+    });
+    expect(apiUpdateWebhookEndpointSchema.safeParse({}).error?.issues[0]?.message).toContain(
+      'the step outcomes, the kinds of step, what started the runs',
+    );
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas;
+    const answered = schemas.WebhookEndpoint as {
+      properties: Record<string, { anyOf?: { items?: { enum?: string[] } }[] }>;
+    };
+    expect(answered.properties.runStepNodeTypes?.anyOf?.[0]?.items?.enum).toEqual([
+      ...WEBHOOK_RUN_STEP_NODE_TYPES,
+    ]);
+    const given = (schemas.CreateWebhookEndpoint as { properties: Record<string, unknown> })
+      .properties;
+    expect(JSON.stringify(given.runStepNodeTypes)).toContain(
+      `as automation.run_step (${WEBHOOK_RUN_STEP_NODE_TYPES.join(', ')}), as step.nodeType names them, only with the automation.run_step event. A step outside a node (step.nodeType null`,
+    );
+    const changed = (schemas.UpdateWebhookEndpoint as { properties: Record<string, unknown> })
+      .properties;
+    expect(JSON.stringify(changed.runStepNodeTypes)).toContain(
+      'The kinds of node whose run steps the endpoint receives as automation.run_step; null receives every step. Left out, they stay, unless the events no longer include automation.run_step, which clears them',
+    );
+  });
+
   it('take step outcomes only with automation.run_step, and a list of them alone is a change (ADR-327)', () => {
     const base = { url: 'https://hooks.example.com/w360', events: ['automation.run_step'] };
     expect(
@@ -3438,7 +3504,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       runStepOutcomes: ['timed_out'],
     });
     expect(apiUpdateWebhookEndpointSchema.safeParse({}).error?.issues[0]?.message).toContain(
-      'the run end statuses, the step outcomes, what started the runs',
+      'the run end statuses, the step outcomes, the kinds of step, what started the runs',
     );
     const doc = buildOpenApiDocument('https://app.example.com/api/v1');
     const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })

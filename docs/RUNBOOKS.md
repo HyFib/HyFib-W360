@@ -3313,6 +3313,16 @@ a run's page in Automations lists every step. To take more, tick the outcomes un
 the endpoint's page, or `PATCH /webhook-endpoints/{id}` with `runStepOutcomes` (null for every
 step). Removing Automation step clears the list.
 
+**A receiver misses the steps of some nodes, or a run's start (ADR-328).** An endpoint can take the
+steps of chosen kinds of node only. The endpoints list shows them ("Kinds of automation step sent:
+…"), and the API answers `runStepNodeTypes` (null takes every step). A step goes by the kind of node
+it ran, as `step.nodeType` names it; a step outside a node (the run starting, being stopped or taken
+over, or failing between steps) is not sent to a list. Events no endpoint takes are not recorded, so
+there is nothing to replay; a run's page in Automations lists every step. To take more, tick the
+kinds under "Kinds of step sent" on the endpoint's page (all of them to take the steps outside a
+node too), or `PATCH /webhook-endpoints/{id}` with `runStepNodeTypes` (null for every step).
+Removing Automation step clears the list.
+
 **A receiver misses the events of a member's conversations (ADR-181).** An endpoint can take the
 message and conversation events of the conversations assigned to chosen members only. The endpoints
 list shows them ("Members whose conversations’ events are sent: …"), and the API answers
