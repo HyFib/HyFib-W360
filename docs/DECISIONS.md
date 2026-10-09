@@ -13028,10 +13028,11 @@ Decision:
 - **Migration 0255:** `ops.platform_ops_daily_activity(p_since, p_tenant_id)` takes the company,
   or null for every company not deleted, as 0026's activity function does, with 0254's checks
   (`W3403`, `W3412`), counting and grants (the platform role only, owned by the definer role). The
-  console calls it for both pages. 0254's one-argument function stays for the previous release's
-  web servers and now reads through the new one (dropped by its owner and created again, as
-  definer-owned functions are replaced), so the platform's days and a company's are counted by one
-  body; a later migration may drop it once no server calls it.
+  console calls it for both pages. 0254's one-argument function stays for any web server of the
+  release that added it (ADR-333) still running during the rollout, and now reads through the new
+  one (dropped by its owner and created again, as definer-owned functions are replaced), so the
+  platform's days and a company's are counted by one body; a later migration may drop it once no
+  server calls it.
 - **No new permission:** the page re-checks the platform actor, and the function returns counts a
   day, never a contact or a message.
 

@@ -590,4 +590,13 @@ test('staff read the platform’s messages a day on the Usage tab (ADR-333)', as
   expect(received.length).toBeGreaterThanOrEqual(31);
   expect(received.reduce((total, n) => total + Number(n), 0)).toBe(1);
   await expectNoHorizontalOverflow(page);
+  // As on the Usage tab, the chart and the open table stay inside a page 360 pixels wide.
+  const shown = page.viewportSize();
+  await page.setViewportSize({ width: 360, height: shown?.height ?? 800 });
+  for (const part of [companyChart, page.locator('details').filter({ has: companyDays })]) {
+    const box = await part.boundingBox();
+    expect(box, 'shown').not.toBeNull();
+    expect(box!.x + box!.width, 'inside the page').toBeLessThanOrEqual(360);
+  }
+  if (shown) await page.setViewportSize(shown);
 });

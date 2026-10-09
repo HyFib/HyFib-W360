@@ -1252,9 +1252,11 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
 
    Migration 0255 (ADR-334) adds `ops.platform_ops_daily_activity(timestamptz, uuid)` and recreates
    0254's one-argument function to read through it, with the same signature, owner and grants, in
-   one transaction (a caller waits on the drop and finds the new function). Web servers of this
-   release call the two-argument function; those of the previous release call the one-argument
-   function, which stays, so it can be applied before the web rollout.
+   one transaction: a call made before it commits runs 0254's body and a later one the new function
+   (a statement planned just before the commit and run just after can fail once, as with any
+   function the migrations recreate). Web servers of this release call the two-argument function;
+   a server of the release that added 0254, if one still runs, calls the one-argument function,
+   which stays, so 0255 can be applied before the web rollout.
 
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.

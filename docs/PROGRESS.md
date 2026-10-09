@@ -30,6 +30,14 @@ the pglast parse check (syntax only), its PL/pgSQL and SQL bodies included.
   matrix H-034.
 - **Mutation checks:** none new: no unit-tested logic changed (the chart's geometry is ADR-333's);
   the counting, the snapshot and the page are covered by the integration and e2e tests, in CI.
+- **Review fixes:** an independent review found no functional defect. It corrected the
+  migration's and the docs' account of the rollout (this release calls only the new function; the
+  one-argument function serves a server of the release that added it, if one still runs), of why
+  definer-owned functions are dropped and created again (the migration role lacks the owner's
+  privileges; the definer role does hold CREATE on the schema), and of what a call during the
+  migration finds (no lock: the old function before the commit, the new one after); the console's
+  read functions counted again in SECURITY and T75 (eight); and the e2e test now checks the
+  company's chart and open table at 360 pixels too, as the Usage tab's.
 
 ### Test commands and results (local, 2026-10-09)
 

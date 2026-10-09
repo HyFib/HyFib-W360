@@ -2661,7 +2661,7 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   null for every company, which `usage()` passes) in one repeatable-read, read-only transaction;
   its platform page draws them in the health card with the Usage tab's `DailyMessages` component
   (`components/platform/daily-messages.tsx`: the chart, the folded table, the empty state). 0254's
-  one-argument function reads through the new one for the previous release's web servers.
+  one-argument function reads through the new one for any server of the release that added it.
 - **Exports (ADR-154, ADR-155, ADR-158):** `/platform/ops/export/[list]` (a route handler behind the
   pages' platform actor check; a name of `OPS_EXPORT_LISTS`, any other not found) calls
   `exportList`, which checks in its transaction that the actor is a platform administrator, reads

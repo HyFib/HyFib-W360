@@ -6,9 +6,10 @@
 -- question staff ask first about it: when did its sending stop, or its failures start? This
 -- migration adds the company to the days' function, as 0026's activity function takes it: a second
 -- argument, the company's id, or null for every company not deleted. A company's days count only
--- while it is not deleted, as its other facts. 0254's function keeps its signature (this release's
--- web servers and the previous ones call it) and now reads every company's days through the new
--- one, so the platform's days and a company's are counted by one body.
+-- while it is not deleted, as its other facts. This release's web servers call the new function
+-- for both. 0254's keeps its signature for any web server of the release that added it still
+-- running during the rollout, and now reads every company's days through the new one, so the
+-- platform's days and a company's are counted by one body.
 --
 -- Like 0254 it refuses anyone but a platform administrator and a start outside the last 93 days,
 -- is owned by the definer role and returns counts a day only, never a contact or a message.
@@ -54,9 +55,9 @@ GRANT EXECUTE ON FUNCTION ops.platform_ops_daily_activity(timestamptz, uuid) TO 
 ALTER FUNCTION ops.platform_ops_daily_activity(timestamptz, uuid) OWNER TO w360_definer;
 
 -- Every company's days, through the function above. 0254's function is owned by the definer role,
--- which the migration role cannot replace in place (it may SET ROLE to it but lacks CREATE on the
--- schema as that role): the owner drops it and the migration role creates it again, granting before
--- handing it back. The drop and the creation commit together.
+-- whose privileges the migration role does not hold (it may only SET ROLE to it): as 0011 and 0236
+-- replace definer-owned functions, the owner drops it and the migration role creates it again,
+-- granting before handing it back. The drop and the creation commit together.
 SET ROLE w360_definer;
 DROP FUNCTION ops.platform_ops_daily_activity(timestamptz);
 RESET ROLE;
