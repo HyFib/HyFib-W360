@@ -3770,6 +3770,30 @@ for HyFib-side kinds (accounts not checked for 26 hours, webhooks not subscribed
 failures are the company's to fix, and the company is told of them; HyFib staff contact it when it
 does not act.
 
+**The alerts' chat channel (ADR-338).** The three alerts above are emailed whatever happens; a
+platform owner can also have them posted to a chat channel. Create an incoming webhook for the
+channel (in Slack: an app with Incoming Webhooks turned on, added to the channel, which gives an
+address `https://hooks.slack.com/services/…`; any service that takes a JSON `POST` with a `text`
+member works the same way), then on Operations → Alerts paste the address and press "Set the
+channel", and "Send a test post": it reaches the channel within seconds, and Latest posts shows it
+Sent with the channel's answer. The address is a secret: the console never shows it again and names
+its host only; whoever has it can post to the channel, so after it leaks, remove the webhook in the
+chat service, create another and "Replace the channel" with it (the old one is deleted). Each alert
+is posted with its email's text (counts only), at most every 15 minutes each. A post that gets a
+429, a 5xx or no answer is tried again 1, 2, 4 and 8 minutes later, so a post whose answer was lost
+can appear twice; any other answer, or a fifth failure, fails it for good. "The last post failed"
+names the answer: HTTP 404 or 410 usually mean the webhook was removed or its channel archived
+(create a new one and replace the address), HTTP 403 a restriction of the chat workspace, "The
+address is private or reserved" a host name that resolves inside the network (refused by the egress
+guard), and "The address does not open with the configured keys" a keyring configuration without
+the key that sealed it (the worker logs `the chat channel’s address does not open with the
+configured keys`; check `W360_ENCRYPTION_KEYS` against the key rotation steps of section 13, then
+send a test post). The worker logs `alert posts` with counts and `an alert post to the chat channel failed for
+good` with the post's id and answer, never the address or the text. "Remove the channel" stops the
+posts; those waiting fail as "No chat channel was set". Posts are kept 7 days after they are sent or
+fail. A post waiting for more than a few minutes without an attempt means the posting job does not
+run: look for failures of `ops.alert-posts` in the worker's logs.
+
 **Acknowledging failures (ADR-141).** On Current failures, the administrator who takes a failure
 opens Acknowledge on its row and writes a note of 10 to 500 characters: what was done or found
 ("Called the owner: they will reconnect the number today", "Meta's status page reports an outage").

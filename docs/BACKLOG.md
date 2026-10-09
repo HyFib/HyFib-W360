@@ -1348,8 +1348,15 @@ verification, app review, Embedded Signup configuration).
   **[A company's messages a day built; its database and browser tests run only in CI]** (ADR-334,
   migration 0255: a company's platform page draws its days of the last 30 in the health card, read
   with its 30 days' counts).
+  **[The alerts' chat channel built; its database and browser tests run only in CI]** (ADR-338,
+  migration 0258: a platform owner sets one incoming webhook address on Operations → Alerts, sealed
+  and named by its host only, and the failure, late-queue and integration alerts are also posted
+  to it as JSON text with their emails' counts, tried up to 5 times; owners send a test post and
+  remove it, and administrators see the last answers and the latest posts).
   Remaining:
-  other alert channels, trends further back than 93 days and other charts, Meta's quality webhook
+  other alert channels (several channels, a channel per alert, formats other than a JSON `text`
+  member, such as Microsoft Teams' or PagerDuty's, and the owners' financial alerts and personal
+  notices in a channel), trends further back than 93 days and other charts, Meta's quality webhook
   (unconfirmed), rollups for many companies and pages read from the database.
 - **P5-11 Account export/deletion workflow** **[built, locally verified with test data only]**
   (ADR-055): Settings → Company data for owners. A streamed, gzip-compressed JSON Lines export of

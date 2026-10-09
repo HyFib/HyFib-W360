@@ -13174,3 +13174,61 @@ Not built: words that leave messages out, whole-word or pattern matches, words i
 HyFib sends (`message.status`), words in a contact card's or an order's content (they have no
 `message.text`), and the case folding of a language whose lower case PostgreSQL's locale does not
 know.
+
+## ADR-338 A chat channel for the operations alerts (P5-10) (2026-10-09)
+
+Context: the operations alerts (failures, ADR-091; late queues, ADR-096; failing integrations,
+ADR-139) are emailed to every platform administrator. Staff on call often watch a chat room rather
+than a mailbox, and P5-10 left other alert channels unbuilt.
+
+Decision:
+
+- **One chat channel for the platform:** an incoming webhook address that takes a JSON `POST` with
+  a `text` member, as Slack's incoming webhooks do (`Content-Type: application/json`, body
+  `{"text": "…"}`). Platform owners set, replace and remove it on a new Operations → Alerts tab;
+  platform operators see its state. Any service that takes that body works; HyFib names no service.
+- **The address is a secret:** it is held to the egress guard's rules (https, no credentials, port
+  443 or from 1024, at most 2,048 characters, its fragment dropped), sealed with the keyring under
+  a new row's id, and readable only by the runtime role, which sends the posts and re-encrypts it
+  (the keyring sweep's `alert_channel` kind). The console, the platform audit entries
+  (`platform.alert_channel_set` with the host and the host it replaced, `platform.alert_channel_removed`,
+  `platform.alert_channel_tested`) and the logs name its host only.
+- **The alerts' own text:** each of the three alerts queues one post, in the transaction that queues
+  its emails, with the email's subject, lines and link one a line, `&`, `<` and `>` written as
+  Slack's formatting requires, at most 4,000 characters; without a channel nothing is queued. The
+  alerts' notes now say "This alert gives counts only" (and the integration alert "not alerted
+  about yet" and "told once"), so the same text reads right in an email and in a chat.
+- **Posting (queue `ops.alert-posts`):** a job scheduled every minute and signalled when a post is
+  queued (one queued and one running at most) claims up to 5 posts due, oldest first, each leased
+  3 minutes with its attempt counted at the claim, and posts them one after another through its own
+  egress client (public addresses only, the name resolved once and pinned, no redirects, 10
+  seconds). A 2xx is sent. A 429, a 5xx or no answer (the name, the connection, the time limit, the
+  network) is tried again 1, 2, 4 and 8 minutes later; any other answer, an address the guard
+  refuses, or a fifth failure fails the post. An outcome is recorded only while its attempt still
+  holds the post. A post whose answer was lost is tried again: posting is at least once, so the
+  channel may show a post twice. A post whose last attempt's worker was lost fails as
+  `interrupted`, removing the channel fails the posts waiting as `no_channel`, and an address that
+  does not open with the configured keys is recorded as `unopenable` and tried again.
+- **On the console:** the channel's host, who set it and when, its last post sent and failed with
+  the answer (labelled as webhook deliveries label theirs), the posts waiting and failed, and the
+  10 latest posts with their kind, times, attempts and last answer, never their text. Owners send a
+  test post, which the worker sends within seconds.
+- **Migration 0258:** the channel (one row, by a unique index on a constant) and the posts, their
+  grants, nine definer functions (five for platform staff, the three changes for owners only; four
+  for the worker: queue, claim, finish and purge), and `ops.sealed_value_keys` replaced with the
+  channel's address. Posts are deleted 7 days after they are sent or fail.
+
+Sources: Slack's incoming webhooks
+(https://docs.slack.dev/messaging/sending-messages-using-incoming-webhooks/,
+https://api.slack.com/incoming-webhooks), message formatting
+(https://docs.slack.dev/messaging/formatting-message-text), rate limits
+(https://docs.slack.dev/apis/web-api/rate-limits) and webhook errors
+(https://docs.slack.dev/changelog/2016-05-17-changes-to-errors-for-incoming-webhooks). These pages
+could not be opened from the build environment: the body, the three escaped characters, the limit of
+about one post a second answered with 429, and the error statuses were taken from search excerpts
+of them, so they are unverified against the pages themselves, and no post was made to Slack.
+
+Not built: several channels or one per alert, formats other than a JSON `text` member (such as
+Microsoft Teams' or PagerDuty's), the owners' financial alerts (ADR-066, ADR-071) and personal
+notices (ADR-314) in the channel, mentions and formatting beyond plain text, and a `Retry-After`
+answer's wait (a 429 waits as a 5xx does).

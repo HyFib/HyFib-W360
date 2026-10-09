@@ -1,5 +1,62 @@
 # Progress
 
+## 2026-10-09 — A chat channel for the operations alerts (P5-10, H-034, ADR-338)
+
+Status: **Implemented; its database and browser tests run in CI only.** The operations alerts
+(failures, late queues and failing integrations) were emailed only, and P5-10 left other alert
+channels unbuilt. The local PostgreSQL is unavailable, so migration 0258 and the integration tests
+below were written but not run here; the migration passed the pglast parse check (syntax only), its
+SQL function bodies included. Slack's documentation could not be opened here: the request's body,
+the three characters escaped, the limit of about one post a second and the error answers were taken
+from search excerpts of its pages (ADR-338 lists them), and no post was made to Slack.
+
+### Completed
+
+- **Database:** migration 0258 (`ops.platform_alert_channel`, one row at most, its address sealed;
+  `ops.platform_alert_posts`, kept 7 days; their grants; definer functions to set, remove, test and
+  read the channel and list its latest posts, for platform staff, the changes for owners only and
+  audited by host; to queue, claim, finish and purge the posts, for the worker;
+  `ops.sealed_value_keys` replaced with the channel's address).
+- **Domain:** `platform/alert-channel.ts`: a post's text (`alertPostBody`: the alert's subject,
+  lines and link, Slack's three control characters escaped, cut at 4,000 characters), the test
+  post, the address's rules (`checkedAlertChannelUrl`), each answer's outcome and label,
+  `queueAlertPost` (in the alerts' transactions, with the posting job's signal), the posting job
+  (`sendAlertPosts`) and the console's service (`createAlertChannelService`); the three alerts queue
+  their posts and now say "This alert gives counts only"; the keyring sweep's `alert_channel` kind;
+  the queue `ops.alert-posts`.
+- **Worker:** the posting job, scheduled every minute, with its own egress client; the alerts' logs
+  say whether they were posted.
+- **Web:** Operations → Alerts (the channel's host, who set it and when, its last post sent and
+  failed with the answer, the posts waiting and failed, and the 10 latest posts; owners set, replace,
+  test and remove it); the Keys tab names the channel's address among the sealed values.
+- **Tests:** unit (22 new in `platform/alert-channel.test.ts`; the alerts' wording and results in
+  `failure-alerts.test.ts`, `queue-waits.test.ts` and `integration-alerts.test.ts`; the reseal kinds
+  in `keyring/reseal.test.ts`); integration (8 new in `alert-channel.test.ts`; the keyring sweep
+  re-encrypting the channel's address in `keyring-reseal.test.ts`; the functions' grants in
+  `tenant-isolation.test.ts`); e2e (1 new in `platform-ops.spec.ts`: an owner sets the channel to a
+  local receiver, sends a test post it receives as JSON, and removes it). Written for CI; the
+  integration and e2e tests were not run here.
+- **Docs:** ADR-338; ARCHITECTURE; SECURITY; THREAT-MODEL T303; DEPLOYMENT; RUNBOOKS;
+  DATA-RETENTION; BACKLOG P5-10; feature matrix H-034.
+- **Mutation checks:** 34/34 deliberate regressions caught on the unit-tested parts (the escapes
+  and their order, the link, the 4,000-character cut and what it leaves out; the address's blank,
+  fragment, 2,048-character limit and credentials; the labels; each answer's outcome; the post's
+  headers and body; queueing and waking the job only with a post and in its transaction; the job's
+  unopenable address, removed channel, order and counts; owners only, the sealed value, the test
+  post's signal and the state's snapshot; the reseal kind; the alerts' wording and results). The
+  definer functions, the grants and the posting against a receiver need the database, so their
+  regressions are left to the integration tests, which run in CI.
+
+### Test commands and results (local, 2026-10-09)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 142 files, 1437 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
 ## 2026-10-09 — Words in received messages (P5-09, H-014, ADR-337)
 
 Status: **Implemented; its database tests run in CI only.** An endpoint taking `message.received`

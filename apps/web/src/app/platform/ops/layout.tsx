@@ -31,6 +31,7 @@ export default async function OpsLayout({ children }: { children: ReactNode }) {
           { href: `${BASE}/signals`, label: 'Signals' },
           { href: `${BASE}/usage`, label: 'Usage' },
           { href: `${BASE}/keys`, label: 'Keys' },
+          { href: `${BASE}/alerts`, label: 'Alerts' },
         ]}
       />
       {children}

@@ -1,4 +1,7 @@
+import { once } from 'node:events';
 import { readFile } from 'node:fs/promises';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import type { Page } from '@playwright/test';
 import pg from 'pg';
 import { expect, test } from './fixtures';
@@ -599,4 +602,103 @@ test('staff read the platform’s messages a day on the Usage tab (ADR-333)', as
     expect(box!.x + box!.width, 'inside the page').toBeLessThanOrEqual(360);
   }
   if (shown) await page.setViewportSize(shown);
+});
+
+test('an owner posts the operations alerts to a chat channel and sends it a test post (ADR-338)', async ({
+  page,
+}) => {
+  // A host name that resolves to 127.0.0.1 on the test machine (CI adds it to /etc/hosts); the web
+  // and worker must allow loopback egress, which only APP_ENV=local|test permits.
+  const host = (process.env.E2E_HTTP_HOST ?? '').toLowerCase();
+  test.skip(!platformConfigured, 'needs DATABASE_URL_MIGRATE and E2E_DATABASE_URL_AUTH');
+  test.skip(
+    !host || process.env.W360_EGRESS_ALLOW_LOOPBACK !== 'true',
+    'Chat receiver not provided (E2E_HTTP_HOST resolving to 127.0.0.1, W360_EGRESS_ALLOW_LOOPBACK)',
+  );
+  test.setTimeout(120_000);
+  const received: { path: string; type: string; body: string }[] = [];
+  const receiver = createServer((req, res) => {
+    let body = '';
+    req.setEncoding('utf8');
+    req.on('data', (chunk: string) => (body += chunk));
+    req.on('end', () => {
+      received.push({ path: req.url ?? '', type: req.headers['content-type'] ?? '', body });
+      res.writeHead(200, { 'content-type': 'text/plain' });
+      res.end('ok');
+    });
+  });
+  receiver.listen(0, '127.0.0.1');
+  await once(receiver, 'listening');
+  try {
+    const suffix = `${Date.now().toString(36)}${Math.floor(Math.random() * 1e4)}`;
+    // The address's secret part, which no page may show.
+    const token = `hook${Math.random().toString(36).slice(2, 12)}`;
+    const path = `/services/e2e/${token}`;
+    const email = uniqueEmail('alerts');
+    const companyName = `Alerts Co ${suffix}`;
+    await signUpAndVerify(page, { name: 'Alma Staff', email, password: PASSWORD });
+    await page.getByLabel('Company name').fill(companyName);
+    await page.getByLabel('Company address').fill(`alerts-${suffix}`);
+    await page.getByRole('button', { name: 'Create company' }).click();
+    await expect(page.getByRole('heading', { name: companyName })).toBeVisible();
+    await turnOnTwoFactor(page, PASSWORD);
+    await makePlatformOwner(email);
+
+    await page.goto('/platform/ops/alerts');
+    await expect(page.getByRole('link', { name: 'Alerts', exact: true })).toHaveAttribute(
+      'aria-current',
+      'page',
+    );
+    // Another test's channel may be left behind if it failed: start from none.
+    const remove = page.getByRole('button', { name: 'Remove the channel' });
+    if (await remove.isVisible()) {
+      await remove.click();
+      await page.getByRole('alertdialog').getByRole('button', { name: 'Remove' }).click();
+    }
+    await expect(page.getByText('No chat channel is set', { exact: true })).toBeVisible();
+
+    const port = (receiver.address() as AddressInfo).port;
+    await page
+      .getByLabel('The channel’s incoming webhook address')
+      .fill(`http://${host}:${port}${path}`);
+    await page.getByRole('button', { name: 'Set the channel' }).click();
+    await expect(page.getByText(`Alerts are posted to ${host} from now on.`)).toBeVisible();
+    // The page names the host, never the address, which holds the channel's secret.
+    await expect(page.getByText(host, { exact: true })).toBeVisible();
+    await expect(page.getByText(token)).toHaveCount(0);
+    await expect(page.getByLabel('Replace the channel’s address')).toHaveValue('');
+
+    await page.getByRole('button', { name: 'Send a test post' }).click();
+    await expect(page.getByText(/^Test post queued/)).toBeVisible();
+    // The alerts other tests cause while the channel is set are posted too: only the test post is
+    // counted.
+    const tests = () =>
+      received.filter(
+        (r) =>
+          r.path === path &&
+          (JSON.parse(r.body) as { text: string }).text.startsWith(
+            'HyFib W360: a test post from the operations console\n',
+          ),
+      );
+    await expect.poll(() => tests().length, { timeout: 30_000 }).toBe(1);
+    expect(tests()[0]!.type).toBe('application/json');
+    const testRow = page
+      .getByRole('table', { name: 'Latest posts' })
+      .getByRole('row')
+      .filter({ hasText: 'Test post' });
+    await expect(async () => {
+      await page.reload();
+      await expect(testRow).toContainText('Sent', { timeout: 1_000 });
+    }).toPass({ timeout: 30_000 });
+    await expect(testRow).toContainText('HTTP 200');
+    await expectNoHorizontalOverflow(page);
+
+    await page.getByRole('button', { name: 'Remove the channel' }).click();
+    await page.getByRole('alertdialog').getByRole('button', { name: 'Remove' }).click();
+    await expect(page.getByText('Chat channel removed: alerts are emailed only.')).toBeVisible();
+    await expect(page.getByText('No chat channel is set', { exact: true })).toBeVisible();
+  } finally {
+    receiver.closeAllConnections();
+    receiver.close();
+  }
 });

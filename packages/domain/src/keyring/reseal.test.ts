@@ -36,8 +36,8 @@ describe('the sealed values the sweep re-encrypts (ADR-134)', () => {
       .sort()
       .map((name) => readFileSync(new URL(name, migrations), 'utf8'))
       .filter((sql) => sql.includes('CREATE FUNCTION ops.sealed_value_keys()'));
-    // 0101 and 0121 (the OAuth client secrets) so far.
-    expect(defining.length).toBeGreaterThanOrEqual(2);
+    // 0101, 0121 (the OAuth client secrets) and 0258 (the alerts' chat channel) so far.
+    expect(defining.length).toBeGreaterThanOrEqual(3);
     const migration = defining.at(-1)!;
     const body = migration.slice(migration.indexOf('CREATE FUNCTION ops.sealed_value_keys()'));
     const kinds = [...body.matchAll(/^\s+SELECT '([a-z_]+)'(?:::text)?,/gm)].map((m) => m[1]);

@@ -62,10 +62,10 @@ export default async function OpsKeysPage() {
           <CardTitle>Encryption keys</CardTitle>
           <CardDescription>
             Stored secrets (WhatsApp tokens, HTTP and webhook secrets, store and Razorpay
-            credentials, Flow keys, queued emails and provider webhook bodies) are sealed with the
-            encryption keyring. New values use the primary key. While another key is configured, the
-            worker seals the values that key sealed again with the primary key, up to 500 a minute.
-            Key ids and counts only: no key or value is shown.
+            credentials, Flow keys, queued emails, provider webhook bodies and the alerts&apos; chat
+            channel address) are sealed with the encryption keyring. New values use the primary key.
+            While another key is configured, the worker seals the values that key sealed again with
+            the primary key, up to 500 a minute. Key ids and counts only: no key or value is shown.
           </CardDescription>
         </CardHeader>
         <CardContent className="grid gap-4">

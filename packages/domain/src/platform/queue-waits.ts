@@ -2,6 +2,7 @@ import { queueMaxWaitMinutes, type QueueDefinition } from '@w360/contracts';
 import { jsonbText } from '@w360/core';
 import { sql, systemScope, type Database } from '@w360/db';
 import { enqueueEmail, type OutboxDeps } from '../email/outbox';
+import { queueAlertPost } from './alert-channel';
 
 /**
  * How long jobs wait in each queue, and alerts for queues that fall behind (ADR-096). pg-boss's
@@ -9,8 +10,9 @@ import { enqueueEmail, type OutboxDeps } from '../email/outbox';
  * the jobs pg-boss would hand to a worker now and when the oldest of them became due, and records
  * them in `ops.queue_waits`. A queue is late once that wait reaches the queue's limit
  * (`maxWaitMinutes` in the catalog) and until it is back under half of it; every platform
- * administrator is emailed once each time a queue becomes late, at most every 15 minutes. Queue
- * names, counts and times only: nothing of a job's payload leaves pg-boss.
+ * administrator is emailed once each time a queue becomes late, at most every 15 minutes, and the
+ * same text is posted to the chat channel when one is set (ADR-338). Queue names, counts and times
+ * only: nothing of a job's payload leaves pg-boss.
  */
 
 /** Minutes between two late-queue alerts at least; enforced by `ops.mark_queue_alert`. */
@@ -138,7 +140,7 @@ export function lateQueueAlert(
   }
   lines.push(
     'Jobs wait when the worker is stopped, busy with other work, or cannot reach the database. Look at the worker’s health and logs; Operations → Queues shows every queue’s counts and waits.',
-    `This email gives queue names and counts only. A queue is told again only after it has caught up and falls behind again; further alerts come at most every ${QUEUE_ALERT_INTERVAL_MINUTES} minutes.`,
+    `This alert gives queue names and counts only. A queue is told again only after it has caught up and falls behind again; further alerts come at most every ${QUEUE_ALERT_INTERVAL_MINUTES} minutes.`,
   );
   const [first] = sorted;
   return {
@@ -164,13 +166,16 @@ export interface LateQueueAlertResult {
   /** Late queues not emailed because there is no platform administrator to tell. */
   unsent: number;
   recipients: number;
+  /** Whether the alert was also queued for the chat channel (ADR-338). */
+  posted: boolean;
 }
 
 /**
  * The minute sweep's alert, after the check: when a queue became late and the last queue alert
  * went out at least 15 minutes ago, marks every late queue not yet told in the transaction that
- * queues one email to every platform administrator. Nothing is marked while there is no platform
- * administrator, so the alert goes out once there is one, while the queue is still late.
+ * queues one email to every platform administrator, and its post to the chat channel when one is
+ * set. Nothing is marked while there is no platform administrator, so the alert goes out once
+ * there is one, while the queue is still late.
  */
 export async function alertLateQueues(deps: LateQueueAlertDeps): Promise<LateQueueAlertResult> {
   const due = await deps.db.run(
@@ -183,7 +188,7 @@ export async function alertLateQueues(deps: LateQueueAlertDeps): Promise<LateQue
     { accessMode: 'read only' },
   );
   const waiting = Number(due.rows[0]?.due ?? 0);
-  if (waiting === 0) return { alerted: 0, unsent: 0, recipients: 0 };
+  if (waiting === 0) return { alerted: 0, unsent: 0, recipients: 0, posted: false };
   const recipients = await deps.db.run(
     systemScope,
     (tx) =>
@@ -192,7 +197,9 @@ export async function alertLateQueues(deps: LateQueueAlertDeps): Promise<LateQue
       ),
     { accessMode: 'read only' },
   );
-  if (recipients.rows.length === 0) return { alerted: 0, unsent: waiting, recipients: 0 };
+  if (recipients.rows.length === 0) {
+    return { alerted: 0, unsent: waiting, recipients: 0, posted: false };
+  }
   return deps.db.run(systemScope, async (tx) => {
     const marked = await tx.execute<{
       queue: string;
@@ -211,7 +218,9 @@ export async function alertLateQueues(deps: LateQueueAlertDeps): Promise<LateQue
       limitMinutes: Number(r.limit_minutes),
       checkedAt: new Date(r.checked_at),
     }));
-    if (late.length === 0) return { alerted: 0, unsent: 0, recipients: recipients.rows.length };
+    if (late.length === 0) {
+      return { alerted: 0, unsent: 0, recipients: recipients.rows.length, posted: false };
+    }
     const alert = lateQueueAlert(late, deps.appBaseUrl);
     for (const recipient of recipients.rows) {
       await enqueueEmail(deps.outbox, tx, {
@@ -221,6 +230,7 @@ export async function alertLateQueues(deps: LateQueueAlertDeps): Promise<LateQue
         payload: { kind: 'platform.notice', ...alert },
       });
     }
-    return { alerted: late.length, unsent: 0, recipients: recipients.rows.length };
+    const posted = await queueAlertPost(deps.outbox, tx, 'queues', alert);
+    return { alerted: late.length, unsent: 0, recipients: recipients.rows.length, posted };
   });
 }

@@ -406,3 +406,35 @@ export async function resolveQuarantineAction(input: unknown): Promise<ActionRes
     return null;
   });
 }
+
+/** Sets the chat channel the operations alerts are posted to (platform owners, audited, ADR-338). */
+export async function setAlertChannelAction(
+  input: unknown,
+): Promise<ActionResult<{ host: string }>> {
+  return runAction(async () => {
+    const { actor, runtime } = await actorForAction();
+    const result = await runtime.alertChannel.setChannel(actor, input);
+    refresh();
+    return result;
+  });
+}
+
+/** Removes the chat channel (platform owners, audited, ADR-338). */
+export async function removeAlertChannelAction(): Promise<ActionResult<{ removed: boolean }>> {
+  return runAction(async () => {
+    const { actor, runtime } = await actorForAction();
+    const result = await runtime.alertChannel.removeChannel(actor);
+    refresh();
+    return result;
+  });
+}
+
+/** Queues a test post to the chat channel (platform owners, audited, ADR-338). */
+export async function sendAlertChannelTestAction(): Promise<ActionResult<{ postId: string }>> {
+  return runAction(async () => {
+    const { actor, runtime } = await actorForAction();
+    const result = await runtime.alertChannel.sendTest(actor);
+    refresh();
+    return result;
+  });
+}

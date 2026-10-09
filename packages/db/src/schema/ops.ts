@@ -5,6 +5,7 @@ import {
   inet,
   integer,
   pgSchema,
+  smallint,
   text,
   timestamp,
   uuid,
@@ -209,4 +210,41 @@ export const tenantDeletions = opsSchema.table('tenant_deletions', {
   cancelReason: text('cancel_reason'),
   scheduledNotifiedAt: tz('scheduled_notified_at'),
   cancelledNotifiedAt: tz('cancelled_notified_at'),
+});
+
+/**
+ * The chat channel the operations alerts are posted to (ADR-338): one row at most, its address
+ * sealed with the keyring under its id. Set, removed and read for the console only through the
+ * definer functions of migration 0258; the runtime role reads the sealed address, to send the
+ * posts, and re-encrypts it (the keyring sweep).
+ */
+export const platformAlertChannel = opsSchema.table('platform_alert_channel', {
+  id: uuid('id').primaryKey(),
+  urlCiphertext: text('url_ciphertext').notNull(),
+  host: text('host').notNull(),
+  setBy: text('set_by'),
+  setAt: tz('set_at').notNull().defaultNow(),
+  lastSentAt: tz('last_sent_at'),
+  lastFailedAt: tz('last_failed_at'),
+  /** The last failure: an HTTP status or an error code, never both. */
+  lastStatus: integer('last_status'),
+  lastError: text('last_error'),
+});
+
+/**
+ * The alerts' posts to the chat channel (ADR-338), each with its alert's counts-only text, kept 7
+ * days after it is sent or fails. Written only through the definer functions of migration 0258.
+ */
+export const platformAlertPosts = opsSchema.table('platform_alert_posts', {
+  id: uuid('id').primaryKey(),
+  kind: text('kind', { enum: ['failures', 'queues', 'integrations', 'test'] }).notNull(),
+  body: text('body').notNull(),
+  createdAt: tz('created_at').notNull().defaultNow(),
+  attempts: smallint('attempts').notNull().default(0),
+  nextAttemptAt: tz('next_attempt_at').notNull().defaultNow(),
+  leaseUntil: tz('lease_until'),
+  sentAt: tz('sent_at'),
+  failedAt: tz('failed_at'),
+  lastStatus: integer('last_status'),
+  lastError: text('last_error'),
 });

@@ -10,6 +10,7 @@ import {
   RESEAL_IDLE_MS,
   RESEAL_SKIP_LIMIT,
   advanceAutomationRun,
+  alertChannelAad,
   createAutomationService,
   createPlatformOpsService,
   createWebRequestService,
@@ -568,8 +569,25 @@ describe('re-encrypting under the primary key', () => {
       plain: rawBody.toString('utf8'),
       aad: receiptAad(receiptId),
     });
+    // The operations alerts' chat channel (ADR-338), one for the platform, as its service seals it.
+    const channelId = uuidv7();
+    const hook = `https://hooks.reseal.test/services/${randomBytes(6).toString('hex')}`;
+    await fx.query(`DELETE FROM ops.platform_alert_channel`);
+    await fx.query(
+      `INSERT INTO ops.platform_alert_channel (id, url_ciphertext, host)
+       VALUES ($1, $2, 'hooks.reseal.test')`,
+      [channelId, r.before.encrypt(hook, alertChannelAad(channelId))],
+    );
+    seeded.push({
+      kind: 'alert_channel',
+      table: 'ops.platform_alert_channel',
+      column: 'url_ciphertext',
+      id: channelId,
+      plain: hook,
+      aad: alertChannelAad(channelId),
+    });
     const kinds = new Set(seeded.map((s) => s.kind));
-    expect(kinds.size).toBe(16);
+    expect(kinds.size).toBe(17);
     for (const s of seeded) expect(keyOf(await storedValue(s)), s.kind).toBe(r.ids.old);
 
     const console = await ops(r.during).keyring(staff);
@@ -637,6 +655,8 @@ describe('re-encrypting under the primary key', () => {
       [c.tenant.id],
     );
     expect(message!.n).toBe(1);
+    // No channel outlives the test: later files' alerts are emailed only.
+    await fx.query(`DELETE FROM ops.platform_alert_channel`);
   });
 
   it('leaves a value a member replaced meanwhile as it is (compare and set)', async () => {

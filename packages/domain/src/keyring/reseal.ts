@@ -7,6 +7,7 @@ import {
   commerceStores,
   emailOutbox,
   flowKeys,
+  platformAlertChannel,
   httpSecrets,
   sql,
   systemScope,
@@ -20,6 +21,7 @@ import {
 import type { AnyPgColumn, PgTable } from 'drizzle-orm/pg-core';
 import { httpRequestAad, httpSecretAad } from '../automations/http';
 import { paymentAccountAad } from '../commerce/model';
+import { alertChannelAad } from '../platform/alert-channel';
 import { outboxAad } from '../email/outbox';
 import { flowKeyAad } from '../flows/model';
 import { credentialAad } from '../messaging/credentials';
@@ -35,7 +37,7 @@ import { webhookHeadersAad, webhookSecretAad } from '../webhooks/service';
  * with (the same functions, so the two cannot drift). While more than one key is configured, the
  * minute sweep re-encrypts the values sealed with a configured key other than the primary, so that
  * key can be removed once nothing is sealed with it. The latest migration that defines
- * `ops.sealed_value_keys` (0101, then 0121) lists the same columns, in the same order.
+ * `ops.sealed_value_keys` (0101, then 0121, then 0258) lists the same columns, in the same order.
  */
 export const SEALED_VALUE_KINDS = [
   'whatsapp_token',
@@ -54,6 +56,7 @@ export const SEALED_VALUE_KINDS = [
   'webhook_oauth_secret',
   'provider_receipt',
   'queued_email',
+  'alert_channel',
 ] as const;
 export type SealedValueKind = (typeof SEALED_VALUE_KINDS)[number];
 
@@ -74,6 +77,7 @@ export const SEALED_VALUE_LABELS: Record<SealedValueKind, string> = {
   webhook_oauth_secret: 'Webhook endpoint OAuth client secrets',
   provider_receipt: 'Provider webhook bodies (kept 7 days)',
   queued_email: 'Emails waiting to be sent',
+  alert_channel: 'The operations alerts’ chat channel address',
 };
 
 /** A sealed value the sweep found: its kind, its row and its company (null for operations rows). */
@@ -266,6 +270,13 @@ const SEALED_VALUES: Record<SealedValueKind, SealedValueSpec> = {
     tenantId: null,
     sealed: emailOutbox.payloadCiphertext,
     aad: (r) => outboxAad(r.id),
+  }),
+  alert_channel: sealedColumn({
+    table: platformAlertChannel,
+    id: platformAlertChannel.id,
+    tenantId: null,
+    sealed: platformAlertChannel.urlCiphertext,
+    aad: (r) => alertChannelAad(r.id),
   }),
 };
 

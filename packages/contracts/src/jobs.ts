@@ -103,6 +103,20 @@ export const QUEUES = {
     expireInSeconds: 120,
     deleteAfterHours: 24,
   },
+  /**
+   * Sends the operations alerts' posts to the platform's chat channel (ADR-338): every minute, and
+   * when an alert or a test post is queued; one queued and one active run. It claims the posts due
+   * from the database, so its payload carries nothing it trusts; each post records its attempts.
+   */
+  alertPosts: {
+    name: 'ops.alert-posts',
+    policy: 'stately',
+    retryLimit: 1,
+    retryDelaySeconds: 30,
+    retryBackoff: false,
+    expireInSeconds: 300,
+    deleteAfterHours: 24,
+  },
   billingEventProcess: {
     name: 'billing.event-process',
     policy: 'exclusive',

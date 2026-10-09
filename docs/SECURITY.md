@@ -2297,6 +2297,18 @@ message text, contact details, payloads, email addresses, secrets or full URLs:
   (`ops.integration_alerts_due`, `ops.mark_integration_alert`), which are SECURITY DEFINER and
   executable only by the worker's role; only the definer role reads and writes
   `ops.integration_alerts`. Each failure is emailed once, at most one alert every 15 minutes.
+- The alerts' chat channel (ADR-338): only a platform owner sets, tests or removes it (the service
+  and each SECURITY DEFINER function check the role; operators read its state). Its incoming
+  webhook address holds the channel's secret: the web tier holds it to the egress guard's rules
+  (https, no credentials, port 443 or from 1024) and seals it with the keyring under the row's id;
+  only the runtime role reads the sealed column (and may only re-encrypt it), the platform role has
+  no grant on the table, and the console, the audit entries (`platform.alert_channel_set`,
+  `_removed`, `_tested`) and the logs name its host only, never the address or a post's text. A
+  post carries its alert's counts-only text, as the email does, to an address HyFib's staff chose,
+  through the egress guard (public addresses only, the name resolved once and pinned, no redirects,
+  10 seconds); posts are kept 7 days, readable only by the definer, and the console lists their
+  kind, times and answers only. Posting is at least once: a post whose answer did not come is tried
+  again, so the channel may show it twice.
 - Acknowledging integration failures (ADR-141): a platform administrator notes on the console that a
   listed failure is being handled, through `ops.platform_acknowledge_integration_failure` (SECURITY
   DEFINER, executable only by the platform role), which checks the administrator, the note (10 to

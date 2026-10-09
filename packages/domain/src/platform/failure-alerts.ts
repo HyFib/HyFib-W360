@@ -1,5 +1,6 @@
 import { sql, systemScope, type Database } from '@w360/db';
 import { enqueueEmail, type OutboxDeps } from '../email/outbox';
+import { queueAlertPost } from './alert-channel';
 import { QUARANTINE_REASON_LABELS, WEBHOOK_PROVIDER_LABELS } from './ops-model';
 
 /**
@@ -7,8 +8,9 @@ import { QUARANTINE_REASON_LABELS, WEBHOOK_PROVIDER_LABELS } from './ops-model';
  * Razorpay webhook receipts that used all their processing attempts (the sweeper stops at
  * `MAX_RECEIPT_ATTEMPTS`) and provider events that could not be matched to a company. The
  * operations console lists them (ADR-054); this tells every platform administrator, once per item,
- * in one email at most every 15 minutes. The email gives counts by queue, provider and reason,
- * never a company, a receipt or an error: those stay on the console behind platform sign-in.
+ * in one email at most every 15 minutes, and posts the same text to the chat channel when one is
+ * set (ADR-338). The alert gives counts by queue, provider and reason, never a company, a receipt
+ * or an error: those stay on the console behind platform sign-in.
  */
 
 /** Minutes between two alerts at least; enforced by `ops.mark_failure_alert`. */
@@ -48,6 +50,8 @@ export interface FailureAlertResult {
   /** Items due but not emailed because there is no platform administrator to tell. */
   unsent: number;
   recipients: number;
+  /** Whether the alert was also queued for the chat channel (ADR-338). */
+  posted: boolean;
 }
 
 const plural = (n: number, one: string, many: string) => (n === 1 ? one : many);
@@ -100,7 +104,7 @@ export function failureAlert(
     );
   }
   lines.push(
-    `This email gives counts only: the companies, receipts and errors are on the operations console. Further alerts come at most every ${FAILURE_ALERT_INTERVAL_MINUTES} minutes.`,
+    `This alert gives counts only: the companies, receipts and errors are on the operations console. Further alerts come at most every ${FAILURE_ALERT_INTERVAL_MINUTES} minutes.`,
   );
   const path =
     receipts.length === 0 && quarantine.length === 0
@@ -118,9 +122,9 @@ export function failureAlert(
 
 /**
  * The minute sweep's alert: when anything waits and the last alert went out at least 15 minutes
- * ago, marks it all in the transaction that queues one email to every platform administrator.
- * Nothing is marked while there is no platform administrator, so the alert goes out once there is
- * one.
+ * ago, marks it all in the transaction that queues one email to every platform administrator, and
+ * its post to the chat channel when one is set. Nothing is marked while there is no platform
+ * administrator, so the alert goes out once there is one.
  */
 export async function alertFailures(deps: FailureAlertDeps): Promise<FailureAlertResult> {
   const due = await deps.db.run(
@@ -129,7 +133,7 @@ export async function alertFailures(deps: FailureAlertDeps): Promise<FailureAler
     { accessMode: 'read only' },
   );
   const waiting = Number(due.rows[0]?.due ?? 0);
-  if (waiting === 0) return { alerted: 0, unsent: 0, recipients: 0 };
+  if (waiting === 0) return { alerted: 0, unsent: 0, recipients: 0, posted: false };
   const recipients = await deps.db.run(
     systemScope,
     (tx) =>
@@ -138,7 +142,9 @@ export async function alertFailures(deps: FailureAlertDeps): Promise<FailureAler
       ),
     { accessMode: 'read only' },
   );
-  if (recipients.rows.length === 0) return { alerted: 0, unsent: waiting, recipients: 0 };
+  if (recipients.rows.length === 0) {
+    return { alerted: 0, unsent: waiting, recipients: 0, posted: false };
+  }
   return deps.db.run(systemScope, async (tx) => {
     const marked = await tx.execute<{ source: string; label: string; items: number }>(
       sql`select source, label, items from ops.mark_failure_alert()`,
@@ -149,7 +155,9 @@ export async function alertFailures(deps: FailureAlertDeps): Promise<FailureAler
       items: Number(r.items),
     }));
     const alerted = counts.reduce((sum, c) => sum + c.items, 0);
-    if (alerted === 0) return { alerted: 0, unsent: 0, recipients: recipients.rows.length };
+    if (alerted === 0) {
+      return { alerted: 0, unsent: 0, recipients: recipients.rows.length, posted: false };
+    }
     const alert = failureAlert(counts, deps.appBaseUrl);
     for (const recipient of recipients.rows) {
       await enqueueEmail(deps.outbox, tx, {
@@ -159,6 +167,7 @@ export async function alertFailures(deps: FailureAlertDeps): Promise<FailureAler
         payload: { kind: 'platform.notice', ...alert },
       });
     }
-    return { alerted, unsent: 0, recipients: recipients.rows.length };
+    const posted = await queueAlertPost(deps.outbox, tx, 'failures', alert);
+    return { alerted, unsent: 0, recipients: recipients.rows.length, posted };
   });
 }

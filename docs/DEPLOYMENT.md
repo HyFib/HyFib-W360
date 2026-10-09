@@ -1283,6 +1283,18 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    after the migration brings the same back until this release is rolled out again: old servers can
    neither show nor clear words, so an endpoint with words cannot drop Message received there.
 
+   Migration 0258 (ADR-338) adds `ops.platform_alert_channel` and `ops.platform_alert_posts` with
+   their grants, the channel's definer functions (set, remove, test and read for platform staff;
+   queue, claim, finish and purge for the worker) and replaces `ops.sealed_value_keys` with the
+   channel's address as one more sealed kind. `pnpm db:migrate` also creates the queue
+   `ops.alert-posts`. No channel is set until a platform owner sets one, so nothing is posted.
+   Workers of this release need the migration (their alert sweeps queue posts in the transaction of
+   their emails, and they schedule and run the posting job); workers from before it keep emailing
+   only, and a post queued while an old worker runs is sent by a new one. Web servers of this
+   release need it for Operations → Alerts and Keys; old web servers know neither. Roll out workers
+   before setting a channel, as the deploy order below does. After a rollback the channel and its
+   posts stay in the database unused: alerts are emailed only, as before.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

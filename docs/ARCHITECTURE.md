@@ -2587,6 +2587,24 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   for an hour and counts the failures not yet told; `ops.mark_integration_alert` marks them (at most
   every 15 minutes, `ops.platform_alerts` kind `integrations`, 1,000 at a time) in the transaction
   that queues one `platform.notice` email to every platform administrator, with counts by kind only.
+- **The alerts' chat channel** (ADR-338, migration 0258, `platform/alert-channel.ts`): a platform
+  owner sets one incoming webhook address for the platform on Operations → Alerts; the web tier
+  checks it with the egress guard's rules, seals it with the keyring under the new row's id
+  (`alertChannelAad`) and stores it with its host through `ops.platform_set_alert_channel` (definer,
+  owners only, audited with the host). Each of the three alerts above, in the transaction that
+  queues its emails, also queues a post with the email's text (`alertPostBody`: the subject, lines
+  and link, Slack's three control characters escaped, at most 4,000 characters) through
+  `ops.queue_platform_alert_post`, which queues nothing without a channel, and signals the
+  `ops.alert-posts` queue in the same transaction. That job (scheduled every minute too, one queued
+  and one running) deletes posts kept 7 days, claims up to 5 posts due (`ops.claim_platform_alert_posts`:
+  leased 3 minutes, the attempt counted at the claim), reads and opens the address as the runtime
+  role and `POST`s `{"text": …}` to it one post after another through its own egress client, and
+  records each answer (`ops.finish_platform_alert_post`: a 2xx is sent; a 429, a 5xx or no answer is
+  tried again 1, 2, 4 and 8 minutes later; anything else, or a fifth attempt, fails). The channel
+  keeps its last post sent and failed with the status or error code; the console reads them and the
+  10 latest posts (never their text) through definer functions for platform administrators. Test
+  posts are queued by owners and signalled at once. The keyring sweep re-encrypts the address as
+  the `alert_channel` kind.
 - **Acknowledging failures** (ADR-141, migration 0107): a platform administrator acknowledges a
   failure on Current failures with a note, through `ops.platform_acknowledge_integration_failure`
   (definer, platform role only), which checks the administrator and that `ops.integration_failures`

@@ -64,6 +64,11 @@ export interface WorkerRuntime {
    * larger responses (order pages) and a longer deadline.
    */
   storeEgress: EgressClient;
+  /**
+   * Egress for the operations alerts' chat channel (ADR-338): the same address checks, its own
+   * client, so the posts never wait for name lookups of companies' traffic.
+   */
+  alertEgress: EgressClient;
   /** HyFib's Shopify app; null until configured (Shopify stores then cannot connect or sync). */
   shopify: ShopifyConfig | null;
   /**
@@ -171,6 +176,7 @@ export async function createWorkerRuntime(): Promise<WorkerRuntime> {
       timeoutMs: 30_000,
       maxResponseBytes: 4 * 1024 * 1024,
     }),
+    alertEgress: createEgressClient(egressPolicy),
     shopify,
     webhookOAuthTokens: new WebhookOAuthTokenCache(),
     async close() {

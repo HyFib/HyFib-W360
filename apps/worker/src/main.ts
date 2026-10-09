@@ -1,6 +1,8 @@
 import { QUEUES } from '@w360/contracts';
 import { toError } from '@w360/core';
+import { ALERT_POSTS_JOB_KEY } from '@w360/domain';
 import { startHealthServer } from './health';
+import { alertPostsHandler } from './handlers/alert-posts';
 import {
   autoRechargeHandler,
   billingEventProcessHandler,
@@ -97,6 +99,16 @@ async function main(): Promise<void> {
   );
   await rt.boss.schedule(QUEUES.messagingSweep.name, '* * * * *', null, {
     singletonKey: 'messaging-sweep',
+  });
+  // The operations alerts' posts to the chat channel (ADR-338): every minute, and woken when an
+  // alert or a test post is queued.
+  await rt.boss.work(
+    QUEUES.alertPosts.name,
+    { localConcurrency: 1, batchSize: 1 },
+    logFailures(rt, QUEUES.alertPosts.name, alertPostsHandler(rt)),
+  );
+  await rt.boss.schedule(QUEUES.alertPosts.name, '* * * * *', null, {
+    singletonKey: ALERT_POSTS_JOB_KEY,
   });
   await rt.boss.work(
     QUEUES.templateSubmit.name,

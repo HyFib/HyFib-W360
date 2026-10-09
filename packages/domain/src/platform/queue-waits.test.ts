@@ -77,7 +77,7 @@ describe('the alert about late queues (ADR-096)', () => {
       'tenant.delete: 2 jobs waiting, the oldest for 1 hour 1 minute (its limit is 60 minutes).',
       'email.send: 1 job waiting, the oldest for 16 minutes (its limit is 15 minutes).',
       'Jobs wait when the worker is stopped, busy with other work, or cannot reach the database. Look at the worker’s health and logs; Operations → Queues shows every queue’s counts and waits.',
-      `This email gives queue names and counts only. A queue is told again only after it has caught up and falls behind again; further alerts come at most every ${QUEUE_ALERT_INTERVAL_MINUTES} minutes.`,
+      `This alert gives queue names and counts only. A queue is told again only after it has caught up and falls behind again; further alerts come at most every ${QUEUE_ALERT_INTERVAL_MINUTES} minutes.`,
     ]);
     expect(emailPayloadSchema.safeParse({ kind: 'platform.notice', ...alert }).success).toBe(true);
     const one = lateQueueAlert([late('webhook.deliver', 7, 20)], BASE);
@@ -119,7 +119,7 @@ describe('the alert about late queues (ADR-096)', () => {
         }),
     } as unknown as Database;
     const result = await alertLateQueues({ db, outbox: {} as never, appBaseUrl: BASE });
-    expect(result).toEqual({ alerted: 0, unsent: 2, recipients: 0 });
+    expect(result).toEqual({ alerted: 0, unsent: 2, recipients: 0, posted: false });
     expect(calls).toHaveLength(2);
   });
 });
