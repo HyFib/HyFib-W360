@@ -33,10 +33,23 @@ expressions in its check are checked by PostgreSQL alone, in CI.
   CI; the integration tests were not run here. No e2e test.
 - **Docs:** ADR-335; ARCHITECTURE; SECURITY; THREAT-MODEL T300; DEPLOYMENT; RUNBOOKS; BACKLOG
   P5-09; feature matrix W-138, W-139 and H-014.
-- **Mutation checks:** 37/37 deliberate regressions caught on the unit-tested parts (the schema's
-  shapes, the reading of words and ranges by type, ids, the text Settings shows, which conditions
-  its inputs show and its readers). The check and the match need the database, so their
-  regressions are left to the integration tests, which run in CI.
+- **Mutation checks:** 42/42 deliberate regressions caught on the unit-tested parts (the schema's
+  shapes, the reading of words and ranges by type, ids and their ends' kinds, the text Settings
+  shows, which conditions its inputs show and its readers, the API's description of a change). The
+  check and the match need the database, so their regressions are left to the integration tests,
+  which run in CI.
+- **Review fixes:** an independent review before the push found that a range's id did not tell a
+  number end from text of the same digits, so a range given through the API with `"10000"` for a
+  number field was taken for the endpoint's held `10000` and kept unread, and the database check
+  then refused it with a 500 instead of a 422; ids now carry each end's kind, and the range is read
+  and refused ("Score takes a number."). It found that Settings decided again at each render which
+  conditions its inputs show, while a save refreshes the endpoint without remounting the form, so
+  a field's second range could leave the kept list unseen; that is now decided once, as the form
+  opens. It found the API's description of a change still naming values alone, the range inputs
+  of number fields opening a keypad without a minus on iPhones (they now open the usual keyboard),
+  and the rollout note silent on old web servers, which keep a held word or range as a pair
+  without a value and so fail (500) on any change of such an endpoint until the rollout ends;
+  DEPLOYMENT now says so. Each is corrected and the first and third are tested.
 
 ### Test commands and results (local, 2026-10-09)
 

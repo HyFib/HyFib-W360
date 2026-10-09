@@ -1265,7 +1265,11 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    store words and ranges; workers do not read the list. Web servers from before it neither show
    nor take words and ranges: until the web rollout ends, an old server shows such a condition as
    "undefined", refuses a change in Settings that keeps it, and its API refuses words and ranges
-   (422) while answering them as stored.
+   (422) while answering them as stored. An old server also keeps a word or range the endpoint holds
+   as a pair without a value, which the new check refuses: any change it makes to an endpoint
+   holding one (in Settings or through the API, even a change that leaves the list out) fails with
+   a 500 and leaves the endpoint as it was. Finish the web rollout before companies add words and
+   ranges, or expect such failures until it ends.
 
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.

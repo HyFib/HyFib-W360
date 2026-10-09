@@ -352,7 +352,7 @@ export const webhookContactFieldKind = (
 /**
  * What tells a condition apart from the others (ADR-332, ADR-335): text compared whatever its case,
  * as the database compares it with the contacts' values, numbers as numbers, and a range by its
- * ends.
+ * ends and their kinds.
  */
 export function webhookContactFieldValueId(pair: WebhookContactFieldValue): string {
   if ('value' in pair) {
@@ -361,7 +361,10 @@ export function webhookContactFieldValueId(pair: WebhookContactFieldValue): stri
     }`;
   }
   if ('contains' in pair) return `${pair.key}:contains:${pair.contains.toLowerCase()}`;
-  return `${pair.key}:range:${pair.atLeast ?? ''}:${pair.atMost ?? ''}`;
+  // The ends' kinds too, so that 10000 and "10000" are not one end.
+  const end = (value: number | string | undefined) =>
+    value === undefined ? '' : `${typeof value}:${value}`;
+  return `${pair.key}:range:${end(pair.atLeast)}:${end(pair.atMost)}`;
 }
 
 /** A value as Settings → Webhooks shows it: yes or no for true and false, else as kept. */

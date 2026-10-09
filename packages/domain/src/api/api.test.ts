@@ -4235,6 +4235,15 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     for (const member of ['"contains"', '"atLeast"', '"atMost"']) {
       expect(given).toContain(member);
     }
+    // A change says what a condition may be too.
+    expect(
+      JSON.stringify(
+        (schemas.UpdateWebhookEndpoint as { properties: Record<string, unknown> }).properties
+          .contactEventFieldValues,
+      ),
+    ).toContain(
+      "each a field's key with a value of its type, a word its text contains or a range of its numbers or dates",
+    );
     const endpoint = schemas.WebhookEndpoint as {
       properties: Record<string, { anyOf?: { items?: { anyOf?: unknown[] } }[] }>;
     };

@@ -1422,7 +1422,7 @@ export const apiUpdateWebhookEndpointSchema = z
     contactEventFieldValues: contactEventFieldValuesField
       .optional()
       .describe(
-        "The custom field values whose contact.created and contact.updated the endpoint receives (pairs of a field's key and a value of its type; a pair the endpoint holds may stay as it is after its field is deleted); null receives every contact. Left out, they stay, unless the events include neither contact.created nor contact.updated any more, which clears them.",
+        "The custom field conditions whose contact.created and contact.updated the endpoint receives (each a field's key with a value of its type, a word its text contains or a range of its numbers or dates; a condition the endpoint holds may stay as it is after its field is deleted); null receives every contact. Left out, they stay, unless the events include neither contact.created nor contact.updated any more, which clears them.",
       ),
     assigneeIds: assigneeIdsField
       .optional()

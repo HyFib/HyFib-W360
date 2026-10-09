@@ -2450,7 +2450,6 @@ function FieldValueChoices({
                         <Input
                           {...aria}
                           type={field.type === 'date' ? 'date' : 'text'}
-                          inputMode={field.type === 'number' ? 'decimal' : undefined}
                           autoComplete="off"
                           value={range.from}
                           onChange={(e) => setRange({ ...range, from: e.target.value })}
@@ -2466,7 +2465,6 @@ function FieldValueChoices({
                         <Input
                           {...aria}
                           type={field.type === 'date' ? 'date' : 'text'}
-                          inputMode={field.type === 'number' ? 'decimal' : undefined}
                           autoComplete="off"
                           value={range.to}
                           onChange={(e) => setRange({ ...range, to: e.target.value })}
@@ -3438,27 +3436,29 @@ export function WebhookEndpointForm({
   // (ADR-335); a condition the endpoint holds that its field's inputs cannot show as it is (its
   // field deleted, added again with another type, or a field's second range) is ticked and kept as
   // it is.
-  const fieldTypeByKey = new Map(contactFieldChoices.map((f) => [f.key, f.type]));
-  const editableFieldValue = (pair: WebhookContactFieldValue) => {
-    const type = fieldTypeByKey.get(pair.key);
-    return type !== undefined && webhookFieldConditionEditable(type, pair);
-  };
-  const shownRanges = new Map<string, WebhookContactFieldValue>();
-  for (const pair of endpoint?.contactEventFieldValues ?? []) {
-    if (
-      webhookContactFieldKind(pair) === 'range' &&
-      editableFieldValue(pair) &&
-      !shownRanges.has(pair.key)
-    ) {
-      shownRanges.set(pair.key, pair);
-    }
-  }
+  // Which conditions the inputs show and which are kept apart is decided once, as the form opens:
+  // a save refreshes the endpoint without remounting the form, and deciding again from it (which
+  // range comes first) would move a range the inputs do not hold out of the kept list unseen.
+  const [fieldConditionLayout] = useState(() => {
+    const fieldTypeByKey = new Map(contactFieldChoices.map((f) => [f.key, f.type]));
+    const editable = (pair: WebhookContactFieldValue) => {
+      const type = fieldTypeByKey.get(pair.key);
+      return type !== undefined && webhookFieldConditionEditable(type, pair);
+    };
+    const stored = endpoint?.contactEventFieldValues ?? [];
+    const rangeShown = new Set<string>();
+    const shown = stored.filter((pair) => {
+      if (!editable(pair)) return false;
+      if (webhookContactFieldKind(pair) !== 'range') return true;
+      if (rangeShown.has(pair.key)) return false;
+      rangeShown.add(pair.key);
+      return true;
+    });
+    return { shown, kept: stored.filter((pair) => !shown.includes(pair)) };
+  });
   const shownInInputs = (pair: WebhookContactFieldValue) =>
-    editableFieldValue(pair) &&
-    (webhookContactFieldKind(pair) !== 'range' || shownRanges.get(pair.key) === pair);
-  const keptFieldValues = (endpoint?.contactEventFieldValues ?? []).filter(
-    (pair) => !shownInInputs(pair),
-  );
+    fieldConditionLayout.shown.includes(pair);
+  const keptFieldValues = fieldConditionLayout.kept;
   const [everyContactEventFieldValue, setEveryContactEventFieldValue] = useState(
     !endpoint?.contactEventFieldValues,
   );
@@ -3482,9 +3482,9 @@ export function WebhookEndpointForm({
   const [fieldRanges, setFieldRanges] = useState<Record<string, { from: string; to: string }>>(
     () => {
       const ranges: Record<string, { from: string; to: string }> = {};
-      for (const [key, pair] of shownRanges) {
+      for (const pair of fieldConditionLayout.shown) {
         if ('value' in pair || 'contains' in pair) continue;
-        ranges[key] = {
+        ranges[pair.key] = {
           from: pair.atLeast === undefined ? '' : String(pair.atLeast),
           to: pair.atMost === undefined ? '' : String(pair.atMost),
         };

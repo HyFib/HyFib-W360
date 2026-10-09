@@ -4011,6 +4011,17 @@ describe('contact event field words and ranges (ADR-335)', () => {
       { key: 'gone', atLeast: 5, atMost: 1 },
     ]);
     expect(reads()).toBe(0);
+    // A range whose ends are of another kind than a held one's is not that range: it is read.
+    expect(
+      await issues(
+        webhookContactEventFieldValuesChecked(
+          tx,
+          'tenant',
+          [{ key: 'score', atLeast: '10000' }],
+          [{ key: 'score', atLeast: 10000 }],
+        ),
+      ),
+    ).toEqual([{ path: 'contactEventFieldValues.0.atLeast', message: 'Score takes a number.' }]);
   });
 
   it('tell conditions apart as the database compares them, and name them as Settings shows them', () => {
@@ -4022,6 +4033,11 @@ describe('contact event field words and ranges (ADR-335)', () => {
       id({ key: 'score', atLeast: 1, atMost: 3 }),
     );
     expect(id({ key: 'score', atLeast: 1 })).not.toBe(id({ key: 'rank', atLeast: 1 }));
+    expect(id({ key: 'score', atLeast: 10000 })).not.toBe(id({ key: 'score', atLeast: '10000' }));
+    expect(id({ key: 'score', atMost: 1 })).not.toBe(id({ key: 'score', atMost: '1' }));
+    expect(id({ key: 'score', atLeast: 1, atMost: 2 })).toBe(
+      id({ key: 'score', atLeast: 1.0, atMost: 2 }),
+    );
     expect(webhookContactFieldConditionText({ key: 'city', contains: 'chen' })).toBe(
       'containing "chen"',
     );
