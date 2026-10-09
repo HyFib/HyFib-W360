@@ -2914,18 +2914,23 @@ describe('run step outcome filters (ADR-327)', () => {
 });
 
 describe('run step kind of node filters (ADR-328)', () => {
-  it('take 1 to 17 of the automation builder’s kinds of node, once each, in its order; null takes every step', () => {
+  it('take 1 to 18 of the automation builder’s kinds of node and the steps outside one, once each, in its order; null takes every step', () => {
     expect(webhookRunStepNodeTypesSchema.parse(['wait', 'send_text', 'wait'])).toEqual([
       'send_text',
       'wait',
+    ]);
+    expect(webhookRunStepNodeTypesSchema.parse(['outside_node', 'end'])).toEqual([
+      'end',
+      'outside_node',
     ]);
     expect(webhookRunStepNodeTypesSchema.parse(null)).toBeNull();
     expect(webhookRunStepNodeTypesSchema.parse([...WEBHOOK_RUN_STEP_NODE_TYPES].reverse())).toEqual(
       [...WEBHOOK_RUN_STEP_NODE_TYPES],
     );
-    // Every kind of node a step can run, as automation.run_step's step.nodeType names them.
-    expect(WEBHOOK_RUN_STEP_NODE_TYPES).toEqual([...NODE_TYPES]);
-    expect(WEBHOOK_RUN_STEP_NODE_TYPES).toHaveLength(17);
+    // Every kind of node a step can run, as automation.run_step's step.nodeType names them, then
+    // the steps outside a node (step.nodeType null), so every subset of steps can be named.
+    expect(WEBHOOK_RUN_STEP_NODE_TYPES).toEqual([...NODE_TYPES, 'outside_node']);
+    expect(WEBHOOK_RUN_STEP_NODE_TYPES).toHaveLength(18);
     // A trigger is not a node: no step runs one.
     for (const refused of [
       [],
@@ -2934,7 +2939,8 @@ describe('run step kind of node filters (ADR-328)', () => {
       ['Send_text'],
       'wait',
       [null],
-      Array(18).fill('wait'),
+      ['none'],
+      Array(19).fill('wait'),
     ]) {
       expect(
         webhookRunStepNodeTypesSchema.safeParse(refused).success,
@@ -2948,10 +2954,14 @@ describe('run step kind of node filters (ADR-328)', () => {
       'Choose kinds of step from the list.',
     );
     expect(
-      webhookRunStepNodeTypesSchema.safeParse(Array(18).fill('wait')).error?.issues[0]?.message,
+      webhookRunStepNodeTypesSchema.safeParse(Array(19).fill('wait')).error?.issues[0]?.message,
     ).toBe('Give each kind of step once.');
     // Named as the automation builder names them, in the list's order.
-    expect(WEBHOOK_RUN_STEP_NODE_TYPE_LABELS).toEqual(NODE_TYPE_LABELS);
+    expect(WEBHOOK_RUN_STEP_NODE_TYPE_LABELS).toEqual({
+      ...NODE_TYPE_LABELS,
+      outside_node:
+        'Outside a step (the run starting, being stopped or taken over, or failing between steps)',
+    });
     expect(Object.keys(WEBHOOK_RUN_STEP_NODE_TYPE_LABELS)).toEqual([
       ...WEBHOOK_RUN_STEP_NODE_TYPES,
     ]);

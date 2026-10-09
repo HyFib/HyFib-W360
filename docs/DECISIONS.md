@@ -12713,30 +12713,35 @@ and wait too. The backlog listed filters of a run's steps by node as remaining.
 
 Decision:
 
-- **One list per endpoint,** `runStepNodeTypes`: 1 to 17 of the automation builder's kinds of node
-  (send_text, ask_buttons, ask_text, send_template, ask_template, send_flow, condition,
+- **One list per endpoint,** `runStepNodeTypes`: 1 to 18 of the automation builder's 17 kinds of
+  node (send_text, ask_buttons, ask_text, send_template, ask_template, send_flow, condition,
   update_contact, update_conversation, http_request, create_task, create_deal, move_deal,
-  close_deal, wait, handoff, end), each once, kept in the builder's order. A step is sent when the
-  kind of node it ran is on the list; null receives every step, as before. With the step outcomes
-  (ADR-327), the automations, what started the runs, their API keys or the numbers chosen too, a
-  step must pass them all.
-- **Steps outside a node match no list.** The run starting, being stopped or taken over, and a
-  failure between steps run no node (`step.nodeType` null), so an endpoint naming kinds does not
-  receive them; one that wants them takes every kind (null). Settings says so beside the choices.
+  close_deal, wait, handoff, end) and `outside_node`, each once, kept in the builder's order with
+  `outside_node` last. A step is sent when the kind of node it ran is on the list; null receives
+  every step, as before. With the step outcomes (ADR-327), the automations, what started the runs,
+  their API keys or the numbers chosen too, a step must pass them all.
+- **The steps outside a node are named too, as `outside_node`.** The run starting, being stopped or
+  taken over, and a failure between steps run no node (`step.nodeType` null): a list takes them when
+  it names `outside_node`, so every subset of steps can be named and a list of all 18 takes what
+  null takes. Codex's review of PR #50 found the first version, where such steps matched no list,
+  unsafe: a list of the 17 kinds set through the API (every node step, no starts or stops) read in
+  Settings as "every kind ticked", and any save there turned it into null, sending the starts and
+  stops it left out.
 - **Chosen** in Settings → Webhooks ("Kinds of step sent" under Automation step, every kind ticked
-  by default, each named as the automation builder names it), shown on the endpoint as "Kinds of
-  automation step sent: …", and through the API as `runStepNodeTypes` on `POST /webhook-endpoints`
-  and `PATCH /webhook-endpoints/{id}` and in every endpoint the API answers.
+  by default, each named as the automation builder names it, "Outside a step" last), shown on the
+  endpoint as "Kinds of automation step sent: …", and through the API as `runStepNodeTypes` on
+  `POST /webhook-endpoints` and `PATCH /webhook-endpoints/{id}` and in every endpoint the API
+  answers.
 - **Only while `automation.run_step` is taken:** a list given for an endpoint that does not take it
   is refused (422 through the API); a change that drops the event clears the list, a `PATCH` that
   leaves the list out keeps it, and one that gives only the list is a change. A check in the
-  database holds the same rule and the list's shape (null, or 1 to 17 known kinds in one dimension
+  database holds the same rule and the list's shape (null, or 1 to 18 known kinds in one dimension
   without a null, with `automation.run_step`).
 - **Applied at capture:** the step trigger now passes the step's kind of node (`nodeType`) with
   `automation.run_step`, for the filter only, and `app.capture_webhook_event` creates a step's
-  delivery only for the endpoints whose list is null or holds it, writing no event when no active
-  endpoint takes it. The kind is taken out of the stored detail: the payload reads it from the step,
-  as before.
+  delivery only for the endpoints whose list is null or holds it (`outside_node` for a step outside
+  a node), writing no event when no active endpoint takes it. The kind is taken out of the stored
+  detail: the payload reads it from the step, as before.
 - **Audited, exported, permissions unchanged,** as for the other lists: `webhook.endpoint_created`
   and `webhook.endpoint_updated` carry `runStepNodeTypes` when the endpoint has it, and the company
   data export carries the column.
@@ -12746,5 +12751,5 @@ Decision:
   `app.capture_webhook_event` replaced with the same signatures (0247's and 0249's, with the kind),
   so their owners and grants stay. Existing endpoints keep null; nothing is backfilled.
 
-Not built: choosing particular nodes of an automation (by node id), taking the steps outside a node
-alongside chosen kinds, and lists that leave chosen kinds out.
+Not built: choosing particular nodes of an automation (by node id), and lists that leave chosen
+kinds out.

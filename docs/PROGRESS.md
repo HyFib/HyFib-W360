@@ -24,11 +24,17 @@ pglast parse check (syntax only).
   and the empty change's wording); integration (3 new: the services in `webhooks.test.ts`, capture
   in `webhook-events.test.ts`, the API in `api-webhook-endpoints.test.ts`; 1 changed: the full
   endpoint answer there). Written for CI; the integration tests were not run here. No e2e test.
+- **Review fix:** Codex's review of PR #50 found that a list of the 17 kinds of node set through the
+  API (every node step, none of the runs' starts or stops) read in Settings as every kind ticked, and
+  a save there turned it into null, sending the steps it left out. The steps outside a node are now
+  named too, as `outside_node` ("Outside a step", last in Settings), so every subset of steps can be
+  named and a list of all 18 takes what null takes: the check, the capture, the schemas, the OpenAPI
+  texts, the tests and the docs changed with it.
 - **Docs:** ADR-328; ARCHITECTURE; SECURITY; THREAT-MODEL T296; DEPLOYMENT; RUNBOOKS;
   DATA-RETENTION; BACKLOG P5-09; feature matrix H-014.
-- **Mutation checks:** 20/20 deliberate regressions caught on the unit-tested parts. The trigger,
-  the capture, the check and the form need the database or a browser, so their regressions are left
-  to the integration tests, which run in CI.
+- **Mutation checks:** 23/23 deliberate regressions caught on the unit-tested parts after the review
+  fix (20/20 before it). The trigger, the capture, the check and the form need the database or a
+  browser, so their regressions are left to the integration tests, which run in CI.
 
 ### Test commands and results (local, 2026-10-09)
 

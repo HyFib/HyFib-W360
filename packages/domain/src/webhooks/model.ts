@@ -608,8 +608,9 @@ export const WEBHOOK_RUN_STEP_OUTCOME_LABELS: Record<WebhookRunStepOutcome, stri
 /**
  * The kinds of automation node whose steps an endpoint taking `automation.run_step` can choose
  * (ADR-328), in the order the automation builder lists them (as the event's `step.nodeType` names
- * them). A step outside a node (the run starting, being stopped or taken over) has no kind and is
- * taken only by an endpoint that takes every kind.
+ * them), then `outside_node` for the steps outside a node (the run starting, being stopped or taken
+ * over, or failing between steps), whose `step.nodeType` is null. Every one of them takes every
+ * step, as null does.
  */
 export const WEBHOOK_RUN_STEP_NODE_TYPES = [
   'send_text',
@@ -629,9 +630,13 @@ export const WEBHOOK_RUN_STEP_NODE_TYPES = [
   'wait',
   'handoff',
   'end',
+  'outside_node',
 ] as const satisfies readonly WebhookRunStepNodeType[];
 
-/** How Settings names each kind of step an endpoint can choose (ADR-328), as the builder does. */
+/**
+ * How Settings names each kind of step an endpoint can choose (ADR-328), as the automation builder
+ * names its nodes.
+ */
 export const WEBHOOK_RUN_STEP_NODE_TYPE_LABELS: Record<WebhookRunStepNodeType, string> = {
   send_text: 'Send a message',
   ask_buttons: 'Ask with buttons',
@@ -650,6 +655,8 @@ export const WEBHOOK_RUN_STEP_NODE_TYPE_LABELS: Record<WebhookRunStepNodeType, s
   wait: 'Wait',
   handoff: 'Hand off to people',
   end: 'End',
+  outside_node:
+    'Outside a step (the run starting, being stopped or taken over, or failing between steps)',
 };
 
 /**

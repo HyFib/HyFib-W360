@@ -3235,7 +3235,7 @@ describe('automation run events (ADR-078)', () => {
     expect(recorded.map((r) => r.status)).toEqual(['sent']);
   });
 
-  it('sends an endpoint that names kinds of step only the steps of those nodes, none outside a node, and with outcomes chosen too only the steps passing both (ADR-328)', async () => {
+  it('sends an endpoint that names kinds of step only the steps of those nodes, the steps outside a node only to a list naming them, and with outcomes chosen too only the steps passing both (ADR-328)', async () => {
     const c = await fx.company();
     const owner = await fx.ctx(c, c.owner);
     await publishAutomation(owner, 'Brochure', keyword('brochure'), sayGraph('Here it is.'));
@@ -3250,11 +3250,33 @@ describe('automation run events (ADR-078)', () => {
           ...filters,
         })
       ).id;
+    // Every kind of node but the steps outside one: what null takes, less the runs' starts.
+    const everyNode = [
+      'send_text',
+      'ask_buttons',
+      'ask_text',
+      'send_template',
+      'ask_template',
+      'send_flow',
+      'condition',
+      'update_contact',
+      'update_conversation',
+      'http_request',
+      'create_task',
+      'create_deal',
+      'move_deal',
+      'close_deal',
+      'wait',
+      'handoff',
+      'end',
+    ];
     const lists = new Map<string, { nodes: string[] | null; outcomes: string[] | null }>([
       ['every step', { nodes: null, outcomes: null }],
       ['messages', { nodes: ['send_text'], outcomes: null }],
       ['conditions', { nodes: ['condition'], outcomes: null }],
       ['failed messages', { nodes: ['send_text'], outcomes: ['failed'] }],
+      ['outside a node', { nodes: ['outside_node'], outcomes: null }],
+      ['every node', { nodes: everyNode, outcomes: null }],
     ]);
     const endpoints = new Map<string, string>();
     for (const [name, list] of lists) {
@@ -3309,13 +3331,13 @@ describe('automation run events (ADR-078)', () => {
     );
     const sorted = (rows: unknown[][]) =>
       [...rows].sort((x, y) => JSON.stringify(x).localeCompare(JSON.stringify(y)));
-    // A step reaches the endpoints whose kinds are null or hold its node (a step outside a node
-    // matches no list) and whose outcomes are null or hold its outcome.
+    // A step reaches the endpoints whose kinds are null or hold its node (outside_node for a step
+    // outside a node) and whose outcomes are null or hold its outcome.
     const expected: unknown[][] = [];
     for (const [runName, steps] of logged) {
       for (const step of steps) {
         for (const [endpoint, list] of lists) {
-          const node = !list.nodes || (step.node !== null && list.nodes.includes(step.node));
+          const node = !list.nodes || list.nodes.includes(step.node ?? 'outside_node');
           const outcome = !list.outcomes || list.outcomes.includes(step.outcome);
           if (node && outcome) expected.push([runName, endpoint, step.outcome]);
         }

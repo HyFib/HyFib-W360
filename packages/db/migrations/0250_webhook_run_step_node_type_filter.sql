@@ -3,18 +3,20 @@
 -- automation.run_step (0247) names the kind of node each step ran, and an endpoint can choose the
 -- steps' outcomes (0249), but not their kinds: an integration that follows only the web requests
 -- runs make, or only their CRM changes, was sent every other step too. An endpoint can now name the
--- kinds it takes (run_step_node_types): 1 to 17 of the automation builder's kinds of node, each
--- once, only while it takes automation.run_step, so a list never outlives the event. A step is
--- delivered when the kind of node it ran is on the list; a step outside a node (the run starting,
--- being stopped or taken over, or failing between steps) has no kind and matches no list. With the
--- outcomes and the run filters chosen too, a step must pass them all. The services keep the list
--- in the builder's order; the database checks its shape. A company has at most 10 endpoints, so
--- the table is small and the check is validated here.
+-- kinds it takes (run_step_node_types): 1 to 18 of the automation builder's 17 kinds of node and
+-- outside_node, which stands for the steps outside a node (the run starting, being stopped or taken
+-- over, or failing between steps, whose kind is null), each once, only while it takes
+-- automation.run_step, so a list never outlives the event. A step is delivered when its kind, or
+-- outside_node for a step outside a node, is on the list, so every subset of steps can be named and
+-- a list of all 18 takes what null takes. With the outcomes and the run filters chosen too, a step
+-- must pass them all. The services keep the list in the builder's order, outside_node last; the
+-- database checks its shape. A company has at most 10 endpoints, so the table is small and the
+-- check is validated here.
 ALTER TABLE app.webhook_endpoints
   ADD COLUMN run_step_node_types text[],
   ADD CONSTRAINT webhook_endpoints_run_step_node_types CHECK (
     run_step_node_types IS NULL
-    OR (cardinality(run_step_node_types) BETWEEN 1 AND 17
+    OR (cardinality(run_step_node_types) BETWEEN 1 AND 18
         AND array_ndims(run_step_node_types) = 1
         AND array_position(run_step_node_types, NULL) IS NULL
         AND run_step_node_types <@ ARRAY['send_text', 'ask_buttons', 'ask_text', 'send_template',
@@ -22,7 +24,7 @@ ALTER TABLE app.webhook_endpoints
                                          'update_contact', 'update_conversation',
                                          'http_request', 'create_task', 'create_deal',
                                          'move_deal', 'close_deal', 'wait', 'handoff',
-                                         'end']::text[]
+                                         'end', 'outside_node']::text[]
         AND 'automation.run_step' = ANY (event_types)));
 
 -- The runtime role sets it when it adds an endpoint (its table grant) and changes it with the
@@ -61,10 +63,11 @@ END
 $$;
 
 -- 0249's capture with the kind of node filter: an automation.run_step event is delivered only to
--- the active endpoints whose list is null or holds the kind of node the step ran, and no event is
--- written when none takes it. The kind is taken out of the stored detail: the payload reads it
--- from the step. Other types are captured as before. Same signature, so its owner and grants stay
--- (0025); replays and test events do not pass through here.
+-- the active endpoints whose list is null or holds the kind of node the step ran (outside_node for
+-- a step outside a node), and no event is written when none takes it. The kind is taken out of the
+-- stored detail: the payload reads it from the step. Other types are captured as before. Same
+-- signature, so its owner and grants stay (0025); replays and test events do not pass through
+-- here.
 CREATE OR REPLACE FUNCTION app.capture_webhook_event(p_tenant uuid, p_type text, p_message uuid,
   p_conversation uuid, p_contact uuid, p_template uuid, p_status text, p_detail jsonb,
   p_occurred_at timestamptz) RETURNS void
@@ -377,7 +380,8 @@ BEGIN
                     AND (p_type <> 'automation.run_step' OR e.run_step_outcomes IS NULL
                          OR p_status = ANY (e.run_step_outcomes))
                     AND (p_type <> 'automation.run_step' OR e.run_step_node_types IS NULL
-                         OR p_detail ->> 'nodeType' = ANY (e.run_step_node_types))
+                         OR coalesce(p_detail ->> 'nodeType', 'outside_node')
+                            = ANY (e.run_step_node_types))
                     AND (p_type NOT IN ('automation.run_started', 'automation.run_ended',
                                         'automation.run_step')
                          OR e.run_triggers IS NULL OR v_run_trigger = ANY (e.run_triggers))
@@ -540,7 +544,7 @@ BEGIN
      AND (p_type <> 'automation.run_step' OR e.run_step_outcomes IS NULL
           OR p_status = ANY (e.run_step_outcomes))
      AND (p_type <> 'automation.run_step' OR e.run_step_node_types IS NULL
-          OR p_detail ->> 'nodeType' = ANY (e.run_step_node_types))
+          OR coalesce(p_detail ->> 'nodeType', 'outside_node') = ANY (e.run_step_node_types))
      AND (p_type NOT IN ('automation.run_started', 'automation.run_ended', 'automation.run_step')
           OR e.run_triggers IS NULL OR v_run_trigger = ANY (e.run_triggers))
      AND (p_type NOT IN ('automation.run_started', 'automation.run_ended', 'automation.run_step')

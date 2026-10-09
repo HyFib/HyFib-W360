@@ -594,7 +594,8 @@ export function webhookRunStepOutcomesFor(
 
 /**
  * The kinds of node whose run steps an endpoint takes as `automation.run_step` (ADR-328), in the
- * order the automation builder lists them; null takes every step, those outside a node among them.
+ * order the automation builder lists them, `outside_node` last for the steps outside a node; null
+ * takes every step.
  */
 export const webhookRunStepNodeTypesSchema = z
   .array(z.enum(WEBHOOK_RUN_STEP_NODE_TYPES, { error: 'Choose kinds of step from the list.' }))

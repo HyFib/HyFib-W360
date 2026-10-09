@@ -401,7 +401,7 @@ const invalidRunStepOutcomes = () =>
   });
 
 const runStepNodeTypesField = webhookRunStepNodeTypesSchema.describe(
-  `The kinds of node whose run steps the endpoint receives as automation.run_step (${WEBHOOK_RUN_STEP_NODE_TYPES.join(', ')}), as step.nodeType names them, only with the automation.run_step event. A step outside a node (step.nodeType null: the run starting, being stopped or taken over, or failing between steps) is not received. null receives every step. With the step outcomes, the automations, what started the runs, their API keys or the numbers chosen too, a step must pass them all.`,
+  `The kinds of node whose run steps the endpoint receives as automation.run_step (${WEBHOOK_RUN_STEP_NODE_TYPES.join(', ')}), as step.nodeType names them, and outside_node for the steps outside a node (step.nodeType null: the run starting, being stopped or taken over, or failing between steps), only with the automation.run_step event. null receives every step, as a list of all of them does. With the step outcomes, the automations, what started the runs, their API keys or the numbers chosen too, a step must pass them all.`,
 );
 
 /** Kinds of step are chosen only for an endpoint that receives run steps (ADR-328). */

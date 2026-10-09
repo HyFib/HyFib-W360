@@ -496,7 +496,7 @@ function StepOutcomeChoices({
 /**
  * The kinds of node whose run steps an endpoint takes as `automation.run_step` (ADR-328), shown
  * while it takes the event: every step unless some kinds are unticked, in the order the automation
- * builder lists them. Unticking any leaves out the steps outside a node too.
+ * builder lists them, then the steps outside a node.
  */
 function StepNodeTypeChoices({
   prefix,
@@ -510,8 +510,8 @@ function StepNodeTypeChoices({
   return (
     <fieldset className="ml-6 grid gap-1">
       <legend className="mb-1 text-xs text-muted-foreground">
-        Kinds of step sent (all of them unless you untick some; with any unticked, the steps outside
-        a step of the automation, such as the run starting or being stopped, are not sent)
+        Kinds of step sent (all of them unless you untick some; a step is sent when the kind of step
+        it ran is ticked)
       </legend>
       {WEBHOOK_RUN_STEP_NODE_TYPES.map((type) => {
         const id = `${prefix}-step-node-${type}`;
@@ -3284,7 +3284,8 @@ export function WebhookEndpointForm({
           runStepOutcomes.length < WEBHOOK_RUN_STEP_OUTCOMES.length
             ? runStepOutcomes
             : null;
-        // Every kind of step ticked takes every step, those outside a node too (null, ADR-328).
+        // Every kind of step ticked, the steps outside a node among them, takes every step (null,
+        // ADR-328); a list of every kind but those keeps them out.
         const chosenRunStepNodeTypes =
           eventTypes.includes('automation.run_step') &&
           runStepNodeTypes.length < WEBHOOK_RUN_STEP_NODE_TYPES.length

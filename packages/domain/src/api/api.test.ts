@@ -1629,7 +1629,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     expect(answered.required).toContain('runStepNodeTypes');
     expect(Object.keys(createBody.properties)).toContain('runStepNodeTypes');
     expect(webhooks['automation.run_step']?.post?.description).toContain(
-      'or the kinds of node it takes (its `runStepNodeTypes`, or the kinds ticked there), which leaves out the steps outside a node.',
+      'or the kinds of node it takes (its `runStepNodeTypes`, outside_node standing for the steps outside a node, or the kinds ticked there).',
     );
     // The deal and task statuses an endpoint receives (ADR-309): lists, or null.
     for (const [field, event] of [
@@ -3449,6 +3449,10 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     expect(apiUpdateWebhookEndpointSchema.parse({ runStepNodeTypes: ['end'] })).toEqual({
       runStepNodeTypes: ['end'],
     });
+    // The steps outside a node are named like a kind, so every subset of steps can be named.
+    expect(
+      apiUpdateWebhookEndpointSchema.parse({ runStepNodeTypes: ['outside_node', 'end'] }),
+    ).toEqual({ runStepNodeTypes: ['end', 'outside_node'] });
     expect(apiUpdateWebhookEndpointSchema.safeParse({}).error?.issues[0]?.message).toContain(
       'the step outcomes, the kinds of step, what started the runs',
     );
@@ -3464,7 +3468,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     const given = (schemas.CreateWebhookEndpoint as { properties: Record<string, unknown> })
       .properties;
     expect(JSON.stringify(given.runStepNodeTypes)).toContain(
-      `as automation.run_step (${WEBHOOK_RUN_STEP_NODE_TYPES.join(', ')}), as step.nodeType names them, only with the automation.run_step event. A step outside a node (step.nodeType null`,
+      `as automation.run_step (${WEBHOOK_RUN_STEP_NODE_TYPES.join(', ')}), as step.nodeType names them, and outside_node for the steps outside a node (step.nodeType null`,
     );
     const changed = (schemas.UpdateWebhookEndpoint as { properties: Record<string, unknown> })
       .properties;

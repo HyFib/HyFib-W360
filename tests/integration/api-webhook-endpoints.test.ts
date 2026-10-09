@@ -1115,10 +1115,10 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     expect(await api().update(key.ctx, id, { description: 'Web requests' })).toMatchObject({
       runStepNodeTypes: ['http_request', 'wait'],
     });
-    // A list alone is a change.
-    expect(await api().update(key.ctx, id, { runStepNodeTypes: ['end'] })).toMatchObject({
-      runStepNodeTypes: ['end'],
-    });
+    // A list alone is a change; outside_node, the steps outside a node, comes last.
+    expect(
+      await api().update(key.ctx, id, { runStepNodeTypes: ['outside_node', 'end'] }),
+    ).toMatchObject({ runStepNodeTypes: ['end', 'outside_node'] });
     const updates = await fx.query<{ metadata: { runStepNodeTypes?: unknown } }>(
       `SELECT metadata FROM app.audit_events
         WHERE tenant_id = $1 AND subject_id = $2 AND action = 'webhook.endpoint_updated'
@@ -1127,7 +1127,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     );
     expect(updates.map((u) => u.metadata.runStepNodeTypes)).toEqual([
       ['http_request', 'wait'],
-      ['end'],
+      ['end', 'outside_node'],
     ]);
     expect(await api().update(key.ctx, id, { events: ['automation.run_started'] })).toMatchObject({
       events: ['automation.run_started'],
