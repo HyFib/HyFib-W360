@@ -6,6 +6,7 @@ import {
   MESSAGE_DAYS_KEPT,
   MESSAGE_DAYS_PER_RUN,
   countMessageDays,
+  deletionStarted,
   keptMessageDays,
   messageYear,
   type KeptMessageDay,
@@ -97,6 +98,21 @@ describe('the year of messages a day (ADR-341)', () => {
         params: [365, 'tenant-1'],
       },
     ]);
+  });
+
+  it('reads whether a company’s deletion has started, which no cancellation undoes', async () => {
+    const { tx, statements } = answering([
+      { rows: [{ started: true }] },
+      { rows: [{ started: false }] },
+      { rows: [] },
+    ]);
+    expect(await deletionStarted(tx as unknown as Tx, 'tenant-1')).toBe(true);
+    expect(await deletionStarted(tx as unknown as Tx, 'tenant-2')).toBe(false);
+    expect(await deletionStarted(tx as unknown as Tx, 'tenant-3')).toBe(false);
+    expect(statements[0]).toEqual({
+      sql: 'select exists ( select 1 from ops.tenant_deletions d where d.tenant_id = $1::uuid and d.started_at is not null ) as started',
+      params: ['tenant-1'],
+    });
   });
 
   it('deletes the counts kept past their time first, then counts the days due one a transaction, a few a run unless told, until none is due', async () => {

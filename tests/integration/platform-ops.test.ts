@@ -3900,6 +3900,18 @@ describe('messages a day kept as days pass (ADR-341)', () => {
        VALUES ($1, $2, $3, now(), 'active', 'Leaving company', now())`,
       [uuidv7(), leaving.tenant.id, leaving.owner.id],
     );
+    // A company whose deletion was cancelled before it started is counted as before.
+    const staying = await fx.company();
+    const stayingConversation = await conversationOf(staying, '919876500044');
+    await messageAt(staying, stayingConversation, 'inbound', 'received', noonDaysAgo(1));
+    await fx.query(
+      `INSERT INTO ops.tenant_deletions
+         (id, tenant_id, requested_by_user_id, due_at, previous_status, company_name, cancelled_at,
+          cancelled_by_user_id, cancelled_by)
+       VALUES ($1, $2, $3, now() + interval '14 days', 'active', 'Staying company', now(), $3,
+               'owner')`,
+      [uuidv7(), staying.tenant.id, staying.owner.id],
+    );
 
     // Newest first, as many as asked: yesterday and the day before.
     expect(await count(2)).toEqual({ purged: 0, counted: 2 });
@@ -3909,6 +3921,14 @@ describe('messages a day kept as days pass (ADR-341)', () => {
     ]);
     expect(await daysOf(gone)).toEqual([]);
     expect(await daysOf(leaving)).toEqual([]);
+    expect(await daysOf(staying)).toEqual([
+      { day: utcDay(noonDaysAgo(1)), outbound: 0, failed: 0, inbound: 1 },
+    ]);
+    // Its platform page draws no year while its deletion runs, from the same snapshot as its
+    // health (ADR-342).
+    const leavingHealth = await ops().companyHealth(staff, leaving.tenant.id);
+    expect(leavingHealth?.health).toBeDefined();
+    expect(leavingHealth?.year).toBeNull();
     // Ended as the deletion run ends it, so no other test finds a deletion open.
     await fx.query(`UPDATE ops.tenant_deletions SET completed_at = now() WHERE tenant_id = $1`, [
       leaving.tenant.id,
@@ -4006,9 +4026,11 @@ describe('messages a day kept as days pass (ADR-341)', () => {
     expect(one.rows).toEqual(await daysOf(kept));
     // A company's platform page reads its own year with its health (ADR-342).
     const health = await ops().companyHealth(staff, kept.tenant.id);
-    expect(health?.year.uncounted).toBe(0);
-    expect(health?.year.days.map((d) => d.day)).toEqual(year);
-    expect(health?.year.days.filter((d) => d.outbound + d.inbound > 0)).toEqual(await daysOf(kept));
+    expect(health?.year?.uncounted).toBe(0);
+    expect(health?.year?.days.map((d) => d.day)).toEqual(year);
+    expect(health?.year?.days.filter((d) => d.outbound + d.inbound > 0)).toEqual(
+      await daysOf(kept),
+    );
     expect(JSON.stringify(read)).not.toContain('Counting the days');
 
     // Days not counted yet are left out of the year, from the latest uncounted day back.

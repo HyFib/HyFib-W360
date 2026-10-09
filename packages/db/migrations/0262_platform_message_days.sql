@@ -3,11 +3,11 @@
 -- The Usage tab and a company's platform page count messages a day live from app.messages (0254,
 -- 0255), which is why they reach back 93 days at most: further back, each read would scan more of
 -- the platform's messages. The worker now counts each UTC day once it has ended, for every company
--- not deleted nor being deleted, and keeps the counts: a few days a minute, newest first, back to a
--- year ago, so a new deployment has its year within hours. A message's status can still change
--- after its day (a failure Meta reports later), so the 7 days before today are counted again once
--- a day; older days keep their counts. Nothing here holds a contact, a message or its text: counts
--- a day only.
+-- not deleted and whose deletion has not started, and keeps the counts: a few days a minute, newest
+-- first, back to a year ago, so a new deployment has its year within hours. A message's status can
+-- still change after its day (a failure Meta reports later), so the 7 days before today are counted
+-- again once a day; older days keep their counts. Nothing here holds a contact, a message or its
+-- text: counts a day only.
 
 -- Each company's messages on each UTC day it had any: sent, those of them failed, received. A
 -- company's rows are deleted with the company (step 35 below); none is kept past 400 days.

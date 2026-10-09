@@ -4,10 +4,10 @@ import type { OpsDailyActivity } from './ops';
 /**
  * Messages a day kept as days pass (P5-10, ADR-341). The Usage tab counts messages a day live, 93
  * days back at most (ADR-333); the worker now counts each UTC day once it has ended, for every
- * company not deleted nor being deleted, and keeps the counts, so the tab can draw a year. A few
- * days a run, newest first, back to 365 days before today; the 7 days before today are counted
- * again once a day while statuses Meta reports late arrive, and older days keep their counts.
- * Counts only: never a contact, a message or its text.
+ * company not deleted and whose deletion has not started, and keeps the counts, so the tab can draw
+ * a year. A few days a run, newest first, back to 365 days before today; the 7 days before today
+ * are counted again once a day while statuses Meta reports late arrive, and older days keep their
+ * counts. Counts only: never a contact, a message or its text.
  */
 
 /** Days the year reads: the 365 before today. */
@@ -78,6 +78,20 @@ export async function keptMessageDays(
     inbound: Number(r.inbound),
     counted: r.counted === true,
   }));
+}
+
+/**
+ * Whether the company's deletion has started (platform administrators): from then on the deletion
+ * deletes its kept counts and the worker no longer counts it, so its year is not drawn (ADR-342).
+ * A started deletion cannot be cancelled (0028).
+ */
+export async function deletionStarted(tx: Tx, tenantId: string): Promise<boolean> {
+  const result = await tx.execute<{ started: boolean }>(sql`
+    select exists (
+      select 1 from ops.tenant_deletions d
+       where d.tenant_id = ${tenantId}::uuid and d.started_at is not null
+    ) as started`);
+  return result.rows[0]?.started === true;
 }
 
 /**

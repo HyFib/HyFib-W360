@@ -41,7 +41,13 @@ import { MAX_RECEIPT_ATTEMPTS } from '../messaging/receipts';
 import type { QueueInspector, QueueSnapshot } from '../jobs/queue';
 import { QUEUE_CHECK_FRESH_MINUTES } from './queue-waits';
 import { deadLetterRetryBlock, deadLetterRetryableUntil } from './dead-letter-retries';
-import { MESSAGE_DAYS_KEPT, keptMessageDays, messageYear, type MessageYear } from './message-days';
+import {
+  MESSAGE_DAYS_KEPT,
+  deletionStarted,
+  keptMessageDays,
+  messageYear,
+  type MessageYear,
+} from './message-days';
 import { parseInput } from '../validation';
 import {
   OPS_SIGNAL_RULES,
@@ -1031,7 +1037,11 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
           if (!facts) return null;
           const [activity] = await activitySince(tx, since, tenantId);
           const daily = await dailyActivity(tx, since, tenantId);
-          const year = messageYear(await keptMessageDays(tx, MESSAGE_DAYS_KEPT, tenantId));
+          // None while its deletion runs: the deletion deletes its kept counts, and the worker no
+          // longer counts it (ADR-342).
+          const year = (await deletionStarted(tx, tenantId))
+            ? null
+            : messageYear(await keptMessageDays(tx, MESSAGE_DAYS_KEPT, tenantId));
           return { health: assess(facts), activity: activity ?? null, daily, year };
         },
         { isolationLevel: 'repeatable read', accessMode: 'read only' },

@@ -102,8 +102,6 @@ export default async function PlatformTenantPage({ params }: { params: Promise<{
     credit.refunds.some((r) => r.status === 'requested' || r.status === 'submitted'),
   );
   const openDeletion = Boolean(deletion && !deletion.cancelledAt && !deletion.completedAt);
-  // A deletion once started cannot be cancelled (0028).
-  const deleting = Boolean(deletion?.startedAt && !deletion.completedAt);
   const reasonLimits = { min: STAFF_DELETION_REASON.min, max: STAFF_DELETION_REASON.max };
   const tz = planView.timezone;
   const option = (p: (typeof published)[number] | NonNullable<typeof planView.plan>) => ({
@@ -751,16 +749,16 @@ export default async function PlatformTenantPage({ params }: { params: Promise<{
                   Each UTC day of the 365 before today, as the worker counts them once each day has
                   ended and again each day for a week: a failure reported later than that is not
                   among them.
-                  {!deleting && ops.year.uncounted > 0
+                  {ops.year && ops.year.uncounted > 0
                     ? ` ${ops.year.uncounted} of the 365 days ${ops.year.uncounted === 1 ? 'is' : 'are'} not counted yet.`
                     : null}
                 </p>
-                {deleting ? (
-                  // Its deletion deleted the kept counts first and they are not counted again: a
-                  // year of zeros would read as a year without messages.
+                {ops.year === null ? (
+                  // None while its deletion runs (ADR-342): a year of zeros would read as a year
+                  // without messages.
                   <EmptyState
                     title="Deleted with the company"
-                    description="Its deletion has started: the counts kept for its days were deleted first, and its days are no longer counted."
+                    description="Its deletion has started: the counts kept for its days are deleted with it, and its days are no longer counted."
                   />
                 ) : ops.year.days.length === 0 ? (
                   <EmptyState

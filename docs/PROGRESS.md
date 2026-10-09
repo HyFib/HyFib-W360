@@ -70,7 +70,13 @@ platform's year of messages a day on the Usage tab and left a company's own year
   nothing logs nothing. 4/4 deliberate regressions of the purge's call caught; the count leaving out
   a company being deleted, the purge and its grants are left to the integration tests (updated),
   which run in CI. 0262 passed the pglast parse check again (syntax only), its three PL/pgSQL bodies
-  included.
+  included. A review of these fixes found three more small ones, fixed: the page decided from a
+  separate read that the counts "were deleted first", which the deletion does only at its fourth
+  step, so `companyHealth()` now reads whether the deletion has started in the snapshot of its
+  health and gives no year, and the page says the counts "are deleted with it"; two comments said
+  "being deleted", which here means a deletion that can still be cancelled; and the integration test
+  had no company with a cancelled deletion, which is still counted (it has one now). 3/3 deliberate
+  regressions of the new read caught.
 
 ### Test commands and results (local, 2026-10-09)
 

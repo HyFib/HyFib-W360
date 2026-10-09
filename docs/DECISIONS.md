@@ -13383,9 +13383,9 @@ Decision:
   counted days that ends at the latest one counted (`messageYear`), under the 30 days' chart, with
   the Usage tab year's names for its legend, table and summary, the days not counted yet and the
   empty state.
-- **While its deletion runs:** the deletion deletes the company's counts first and the worker no
-  longer counts it, so the page says the counts went with the company rather than draw a year of
-  days without messages.
+- **While its deletion runs:** the deletion deletes the company's counts (step 35) and the worker no
+  longer counts it, so `companyHealth()` reads no year for it, in the snapshot of its health, and
+  the page says its counts are deleted with it rather than draw a year of days without messages.
 - **No migration:** the counts, their deletion with the company and the read's refusals are
   ADR-341's.
 
