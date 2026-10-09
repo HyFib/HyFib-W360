@@ -12958,3 +12958,49 @@ Not built: lists that leave contacts with chosen values out, comparisons other t
 of numbers or dates, text containing a word), sending only the changes that leave a value (it needs
 the replaced values kept on each event), the contact's values at capture in the payload (it gives
 the contact as it is when delivered), and value filters for erased and merged contacts.
+
+## ADR-333 Messages a day on the operations console's Usage tab (P5-10) (2026-10-09)
+
+Context: the Usage tab gives each company's messages sent and received over 7, 30 or 90 days and,
+for 7 and 30, the window before (ADR-157): sums only. A day the platform stopped sending, a burst
+of failures or a slow climb was hidden in them. The backlog listed trends and charts as remaining.
+
+Decision:
+
+- **A chart of the platform's messages each UTC day of the window**, above the companies: sent and
+  received as two lines on one axis from 0, with a legend, the last day's values written at the
+  lines' ends when there is room and they do not nearly meet, and gridlines 1, 2 or 5 times a power
+  of ten apart. Pointing at a day, or focusing the chart and pressing the arrow keys, Home or End,
+  draws a crosshair and a tooltip with the day's sent, received and failed messages, and Escape
+  puts it away. To assistive technology the chart is a slider over the days, its value the chosen
+  day's numbers (the last day's until another is chosen). Failed sends are not a line:
+  far fewer than the others, they would lie flat on the axis, so the tooltip and the table give
+  them. A table of the days (day, sent, failed, received) is folded under the chart. A day with no
+  message shows 0; a window without any says so instead of drawing.
+- **What a day is:** a UTC day, as the console's dates are. The first day counts from the window's
+  start (the time shown) and today up to now, so the days add up to the totals above them; they
+  count as the totals do, the outbound messages, those of them that failed and the inbound
+  messages of every company not deleted.
+- **One snapshot:** `usage()` reads the companies and the days in one repeatable-read, read-only
+  transaction (`PlatformDatabase.run` takes the isolation level and access mode, read committed and
+  read write unless asked), so the days add up to the totals exactly while messages are written.
+- **How it is drawn:** the geometry is pure and unit-tested (`platform/ops-chart.ts`: the step, the
+  scale, the paths, the days named under the axis, whether the end labels fit, the day nearest a
+  pointer), and a client component (`components/platform/daily-chart.tsx`) draws it as SVG at the
+  width the browser measures (720 pixels on the server and until then, scaled to fit). Counts and
+  days are written by hand rather than by the locale, so the server and the browser render the same
+  text. The two lines' colours are new tokens (`--chart-1`, `--chart-2`, for light and dark),
+  categorical colours checked for colour-vision separation and contrast against the card in both
+  modes; the legend and the end labels name the lines, so colour never stands alone.
+- **Migration 0254:** `ops.platform_ops_daily_activity(p_since)`, a SECURITY DEFINER function for
+  the platform role only that, like 0026's activity function, refuses anyone but a platform
+  administrator (`W3403`) and a start outside the last 93 days (`W3412`), and reads the same columns
+  through the same grants and index. It returns counts a day, never a company, a contact or a
+  message. A day after today has a row when the snapshot holds messages written on it (by a
+  transaction begun after this one's start, just past midnight), so no counted message is left out
+  of the days.
+
+Not built: days further back than 93 (longer trends need daily rollups kept as days pass, with the
+rollups for many companies the backlog lists), a chart for one company, the window before drawn
+beside the window, failures or other measures as charts of their own, the days in the CSV export
+(the table shows them), and days in a time zone other than UTC.

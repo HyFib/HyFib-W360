@@ -1,5 +1,68 @@
 # Progress
 
+## 2026-10-09 — Messages a day on the operations console (P5-10, H-034, ADR-333)
+
+Status: **Implemented; its database and browser tests run in CI only.** The Usage tab gave each
+company's sending and receipts over its window as sums, with nothing to show how they moved within
+it. The local PostgreSQL is unavailable, so migration 0254 and the integration tests below were
+written but not run here; the migration passed the pglast parse check (syntax only), its PL/pgSQL
+body included.
+
+### Completed
+
+- **Database:** migration 0254 (`ops.platform_ops_daily_activity(p_since)`: the platform's
+  outbound, failed and inbound messages for each UTC day from a start within the last 93 days to
+  today, of the companies not deleted, counted as the activity function counts them; a row for
+  every day, and for a later day the snapshot holds messages of; refusing anyone but a platform
+  administrator; the platform role only, owned by the definer role).
+- **Domain:** `usage()` reads the companies and the days in one repeatable-read, read-only
+  transaction (`PlatformDatabase.run` takes the isolation level and access mode) and returns
+  `daily`; `platform/ops-chart.ts` (exported as `@w360/domain/ops-chart`): the chart's pure
+  geometry, counts and days written by hand, gridline steps, the scale, the paths, the days named
+  under the axis with 64 pixels each, the end labels when they fit, the day nearest a pointer.
+- **Web:** `DailyMessagesChart` (`components/platform/daily-chart.tsx`, a client component): two
+  lines with a legend and end labels, a crosshair and tooltip on hover and on the arrow keys, Home
+  and End once focused (Escape puts it away), a slider over the days to assistive technology with
+  the chosen day's numbers as its value, drawn at the measured width; the Usage tab's "Messages a
+  day" card with the chart, the folded table of the days and an empty state; `--chart-1` and
+  `--chart-2` colour tokens for light and dark, checked for colour-vision separation and contrast
+  against the card.
+- **Tests:** unit (8 in the new `platform/ops-chart.test.ts`); integration (2 new in
+  `platform-ops.test.ts`: each day moved by the messages written on it and by those of a company
+  deleted between two reads, over 7 and 30 days, the days adding up to the totals and the failures,
+  consecutive UTC days from the window's start to today; the window's bounds and a missing start
+  refused; and the new function in the refusals for a non-administrator and the runtime role) and
+  its grants in the isolation suite; e2e (1 new in `platform-ops.spec.ts`: the chart after a
+  customer's message, its legend, the slider's value and the tooltip for the days the keys choose,
+  the table of consecutive days to today, no horizontal overflow, the 30-day chart). Written for CI;
+  the integration and e2e tests were not run here. The chart was rendered in Chromium from a scratch
+  page (light, dark, a phone's width, hover and keyboard) and looked at.
+- **Docs:** ADR-333; ARCHITECTURE; SECURITY; THREAT-MODEL T299; DEPLOYMENT; BACKLOG P5-10; feature
+  matrix H-034.
+- **Mutation checks:** 44/45 deliberate regressions caught on the unit-tested parts. A first run
+  left 4 of 41: the top gridline rounded rather than raised, the end labels' gap at 15 pixels, the
+  lines' names, and day names given 48 pixels. Tests were added for the first three; the last
+  showed that the last day's name could come within about 40 pixels of the one before it, so a
+  name now gives way to the last by pixels (64) rather than by days, and the tests measure every
+  gap. The final run, after the geometry was written without non-null assertions (the lint forbids
+  them), left one of 45: a tiny chart planning one day name rather than two, which names the same
+  days (the first and the last), so it is equivalent. The component and the page are covered by
+  the e2e test, which runs in CI.
+- **Lint fix:** the first full check failed on the non-null assertions and on a focusable group
+  with key handlers; the chart is now a slider, the role whose keys (the arrows, Home and End) it
+  already used.
+
+### Test commands and results (local, 2026-10-09)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 141 files, 1400 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm test:e2e`                                    | not run here: it needs the database; CI runs it               |
+| `pnpm build`                                       | passed                                                        |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
 ## 2026-10-09 — Field value filters for added and changed contacts (P5-09, H-014, ADR-332)
 
 Status: **Implemented; its database tests run in CI only.** An endpoint taking `contact.created` or

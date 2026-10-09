@@ -15,7 +15,8 @@
     "./api-model": "./src/api/model.ts",
     "./webhook-model": "./src/webhooks/model.ts",
     "./overdue-notice": "./src/inbox/overdue-notice.ts",
-    "./presence": "./src/inbox/presence.ts"
+    "./presence": "./src/inbox/presence.ts",
+    "./ops-chart": "./src/platform/ops-chart.ts"
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json"

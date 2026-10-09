@@ -1246,6 +1246,10 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    its other changes keep the list, and its API refuses `contactEventFieldValues` (422) and leaves
    it out of the endpoints it answers.
 
+   Migration 0254 (ADR-333) creates `ops.platform_ops_daily_activity` for the platform role. Web
+   servers of this release need it, as the Usage tab reads it; workers do not. Web servers from
+   before it do not call it, so it can be applied before them.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back
