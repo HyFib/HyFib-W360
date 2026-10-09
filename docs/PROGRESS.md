@@ -2,9 +2,10 @@
 
 ## 2026-10-09 — Each browser project's end-to-end tests in a CI job of its own (ADR-343)
 
-Status: **Implemented; it first runs in CI with this pull request.** The four browser projects' 464
-end-to-end tests ran one after another in one CI job and took 168.3 of its suite step's 230 minutes
-on a248d4d (PR #55), almost three hours before a pull request's last check ended.
+Status: **Implemented and measured in CI: its first run ended the check of the four in 52 minutes.**
+The four browser projects' 464 end-to-end tests ran one after another in one CI job and took 168.3
+of its suite step's 230 minutes on a248d4d (PR #55), almost three hours before a pull request's last
+check ended.
 
 ### Completed
 
@@ -23,6 +24,13 @@ on a248d4d (PR #55), almost three hours before a pull request's last check ended
   registries, each with the same digest as on Docker Hub. A review found the image scans still
   pulling from Docker Hub and the Mailpit digest comparable through Docker Hub's tag API; both are
   done.
+- **First run (b1a8b3e, PR #56):** the check of the four ended 52 minutes after the run started.
+  Each job spent about 3 minutes on its setup (the build about 1.5, its browser under a minute) and
+  its suite 36.8 minutes on mobile Chromium, 38.2 on Chromium, 40.8 on Firefox and 48.5 on WebKit.
+  WebKit failed one test twice: the team endpoint test in `webhook-events.spec.ts` loaded the
+  webhooks page with `page.goto` from the live inbox, and a refresh in flight interrupted the load
+  ("interrupted by another navigation"), as `openFromNav` describes; it passed in the combined job
+  on a248d4d. The test now leaves the inbox through the navigation, as the file's other tests do.
 - **Docs:** ADR-343.
 - **Review fixes:** an independent review found nothing that would fail CI and four small things,
   fixed: ADR-343 now says a run cancelled by a newer push shows the check of the four as failed

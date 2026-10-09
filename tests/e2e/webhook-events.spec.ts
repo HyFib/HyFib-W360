@@ -512,7 +512,14 @@ test("an endpoint for one team receives only its conversations' events: messages
   const locations = () =>
     received.filter((r) => r.path === locationPath).map((r) => JSON.parse(r.body) as EventBody);
   const typeBox = (name: string) => page.getByRole('checkbox', { name, exact: true });
-  await page.goto(`/c/${slug}/settings/webhooks`);
+  // The live inbox is left through the navigation, not a page load (see openFromNav; `page.goto`
+  // was interrupted here in WebKit on b1a8b3e).
+  await openFromNav(page, 'Settings');
+  await page
+    .getByRole('navigation', { name: 'Settings sections' })
+    .getByRole('link', { name: 'Webhooks' })
+    .click();
+  await expect(page).toHaveURL(new RegExp(`/c/${slug}/settings/webhooks$`));
   await page.getByLabel('Endpoint URL').fill(`http://${HOST}:${port}${locationPath}`);
   await page.getByRole('checkbox', { name: /Message received/ }).check();
   for (const name of [
