@@ -238,8 +238,9 @@ ALTER FUNCTION ops.finish_platform_alert_post(uuid, integer, uuid, integer, text
 -- removing the channel lock it before the posts, and held until the worker has read the address in
 -- this transaction: the posts claimed go to the address of this moment, never to one that replaced
 -- it since (a finish's lock does not wait for it). And a post waiting of an alert the channel no
--- longer gets fails as unticked: one queued while its alert was being unticked, which choosing the
--- alerts could not see yet, is never sent.
+-- longer gets fails as unticked, and only the posts of the alerts it gets are claimed: one queued
+-- while its alert was being unticked, which choosing the alerts could not see yet, is never sent,
+-- even when it commits between this function's statements (the next run fails it).
 CREATE FUNCTION ops.claim_platform_alert_posts(p_limit integer)
   RETURNS TABLE (id uuid, kind text, body text, attempts smallint, created_at timestamptz)
   LANGUAGE plpgsql SECURITY DEFINER
@@ -272,6 +273,7 @@ BEGIN
    WHERE p.id IN (SELECT d.id FROM ops.platform_alert_posts d
                    WHERE d.sent_at IS NULL AND d.failed_at IS NULL AND d.next_attempt_at <= now()
                      AND (d.lease_until IS NULL OR d.lease_until < now()) AND d.attempts < 5
+                     AND (d.kind = 'test' OR d.kind = ANY (v_kinds))
                    ORDER BY d.next_attempt_at, d.id
                    LIMIT least(greatest(coalesce(p_limit, 0), 0), 10)
                    FOR UPDATE SKIP LOCKED)

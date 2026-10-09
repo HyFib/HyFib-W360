@@ -2620,11 +2620,12 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   replaces (its audit entry names them, and the replace field names the owners' alerts among them),
   and `ops.queue_platform_alert_post` queues a post only while the channel gets its kind. Unticking
   an alert fails its posts waiting, and `ops.claim_platform_alert_posts` fails any queued as it was
-  unticked; the claim holds the channel's row until the worker has read the address in its
-  transaction, so the posts claimed go to the address they were claimed for. The two financial
-  sweeps (`alertSettlementReconFindings`, `alertUnsettledPayments`) queue their posts after their
-  emails, in their transaction: the reconciliation's without a failed check's error
-  (`settlementReconPost`), the unsettled payments' with the email's text.
+  unticked and claims only the posts of the alerts the channel gets; the claim holds the channel's
+  row until the worker has read the address in its transaction, so the posts claimed go to the
+  address they were claimed for. The two financial sweeps (`alertSettlementReconFindings`,
+  `alertUnsettledPayments`) queue their posts after their emails, in their transaction: the
+  reconciliation's without a failed check's error (`settlementReconPost`), the unsettled payments'
+  with the email's text.
 - **Acknowledging failures** (ADR-141, migration 0107): a platform administrator acknowledges a
   failure on Current failures with a note, through `ops.platform_acknowledge_integration_failure`
   (definer, platform role only), which checks the administrator and that `ops.integration_failures`

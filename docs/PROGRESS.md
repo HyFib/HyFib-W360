@@ -229,8 +229,11 @@ parse check (syntax only), its four PL/pgSQL bodies included.
   failed as unticked rather than sent; the channel's row held against an update but not against an
   attempt's outcome while posts are claimed). 2/2 deliberate regressions of the worker caught (the
   address read in a transaction of its own, or read when nothing was claimed); the functions are
-  left to the integration tests, which run in CI. The full check passed again (144 files, 1455
-  tests).
+  left to the integration tests, which run in CI. A review of these fixes found the claiming
+  statement did not filter by the kinds read under the lock, so a post committed between the claim's
+  statements could still be claimed: the claim now takes only the posts of the alerts the channel
+  gets, and the next run fails such a post as unticked. That window lies between two statements of
+  one function, so no test reproduces it. The full check passed again (144 files, 1455 tests).
 
 ### Test commands and results (local, 2026-10-09)
 

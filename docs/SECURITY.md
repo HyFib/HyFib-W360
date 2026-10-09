@@ -2326,10 +2326,10 @@ message text, contact details, payloads, email addresses, secrets or full URLs:
   emailed, reach the channel only once an owner adds them, since whoever reads the channel reads
   them; their posts give days and counts only, never a company, an amount, a payment id, a
   transaction or a failed check's error, which can quote Razorpay's answer. Unticking an alert fails
-  its posts waiting, and the claim fails any queued as it was unticked, so no address gets them; a
-  post already on its way finishes its attempt. The claim holds the channel's row until the worker
-  has read the address, so the posts claimed go to the address they were claimed for, never to one
-  that replaced it since.
+  its posts waiting, and the claim fails any queued as it was unticked and claims only the posts of
+  the alerts ticked, so no address gets them; a post already on its way finishes its attempt. The
+  claim holds the channel's row until the worker has read the address, so the posts claimed go to
+  the address they were claimed for, never to one that replaced it since.
 - Acknowledging integration failures (ADR-141): a platform administrator notes on the console that a
   listed failure is being handled, through `ops.platform_acknowledge_integration_failure` (SECURITY
   DEFINER, executable only by the platform role), which checks the administrator, the note (10 to
