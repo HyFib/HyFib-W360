@@ -47,7 +47,8 @@ INSERT INTO ops.tenant_deletion_steps (ordinal, tables, mode)
 VALUES (35, ARRAY['ops.platform_message_days']::regclass[], 'batch');
 
 -- Counting (the worker, every minute, one day a call): deletes the counts older than 400 days and
--- those of companies deleted (a count that raced a company's deletion leaves them behind), then
+-- those of companies deleted in the last 30 days (a count that raced a company's deletion, as it
+-- finished, leaves them behind; the 400 days catch any older), then
 -- counts up to p_limit days (at most 31) due, newest first: each of the 365 days before today never
 -- counted, and each of the 7 before today counted more than a day ago. A day is counted whole,
 -- replacing its rows, as 0255 counts the days it reads. One run at a time; how many days it
@@ -67,7 +68,8 @@ BEGIN
   DELETE FROM ops.platform_message_days_counted c WHERE c.utc_day < v_today - 400;
   DELETE FROM ops.platform_message_days d
    USING app.tenants t
-   WHERE t.id = d.tenant_id AND t.status = 'deleted';
+   WHERE t.id = d.tenant_id AND t.status = 'deleted'
+     AND t.status_changed_at > now() - interval '30 days';
   FOR v_day IN
     SELECT v_today - g.n
       FROM generate_series(1, 365) AS g(n)

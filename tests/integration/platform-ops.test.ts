@@ -3880,7 +3880,11 @@ describe('messages a day kept as days pass (ADR-341)', () => {
     // More than a year ago: never counted.
     await messageAt(kept, keptConversation, 'outbound', 'delivered', noonDaysAgo(366));
     await messageAt(gone, goneConversation, 'outbound', 'delivered', noonDaysAgo(1));
-    await fx.query(`UPDATE app.tenants SET status = 'deleted' WHERE id = $1`, [gone.tenant.id]);
+    // Deleted as the deletion run leaves a company (0028).
+    await fx.query(
+      `UPDATE app.tenants SET status = 'deleted', status_changed_at = now() WHERE id = $1`,
+      [gone.tenant.id],
+    );
 
     // Newest first, as many as asked: yesterday and the day before.
     expect(await count(2)).toEqual({ counted: 2 });

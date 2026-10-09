@@ -2721,7 +2721,7 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   or of the 7 before today again once a day), whole for every company not deleted, into
   `ops.platform_message_days` (a row per company and day with messages, forced row level security,
   the definer role's alone), marks it in `ops.platform_message_days_counted` and deletes counts
-  older than 400 days and those of deleted companies. `messageYear()` reads
+  older than 400 days and those of companies deleted in the last 30 days. `messageYear()` reads
   `ops.platform_ops_message_days(365, null)` and keeps the run of counted days ending at the latest
   one counted (`messageYear` in the same file), which the Usage tab draws under the window's chart
   with `DailyMessages` under names of its own. `companyHealth()` reads a company's own year the

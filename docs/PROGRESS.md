@@ -75,7 +75,10 @@ the pglast parse check (syntax only), its two PL/pgSQL bodies included.
   from the test's clock rather than the database's; "1 of the 365 days are" and the alert names
   mid-sentence in ADR-340's warning. 4/4 deliberate regressions of the counting loop caught; the
   policies and the purge are left to the integration tests, which run in CI. The full check passed
-  again (144 files, 1454 tests).
+  again (144 files, 1454 tests). A second review of these fixes found three small ones, fixed: the
+  purge read every company ever deleted at every call (it now reads those deleted in the last 30
+  days, the 400 days catching any older), "untick those" for one alert, and the runbook's account
+  of what a run that fails logs.
 
 ### Test commands and results (local, 2026-10-09)
 

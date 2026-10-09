@@ -13333,8 +13333,8 @@ Decision:
   null, unique with `id`, forced row level security with the definer role's policy, grants to the
   definer role only); company deletion deletes a company's rows (step 35, with the deletion's two
   policies), and the export leaves them out, the messages themselves being exported. Counts older
-  than 400 days are deleted, and so are a deleted company's, at every run: a count that raced the
-  company's deletion could leave some behind.
+  than 400 days are deleted, and so are those of a company deleted in the last 30 days, at every
+  run: a count that raced the company's deletion as it finished could leave some behind.
 - **Counting:** a worker job (queue `ops.message-days`, every minute, one queued and one running)
   counts up to 3 days due, newest first, each whole for every company not deleted under an advisory
   lock and in a transaction of its own (`ops.count_platform_message_days(1)`), so a day's count has
