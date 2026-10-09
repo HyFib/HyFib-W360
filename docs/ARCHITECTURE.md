@@ -1753,9 +1753,10 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   retry waits on the unique index and then replays the stored response (`Idempotent-Replayed:
 true`); the same key with another request (method, path and body hashed) answers 422
   `idempotency_key_reused`; a failed request stores nothing; an expired key is reused. An answer
-  is kept up to 256 KiB as jsonb (0259; 64 KiB before): `storeIdempotentResponse` refuses a larger
-  one, counted by `jsonbSize`, with 422 `idempotency_response_too_large`, which rolls the request
-  back with its claim (ADR-339).
+  is kept up to 256 KiB as jsonb (0259, validated by 0260; 64 KiB before):
+  `storeIdempotentResponse` refuses a larger one, counted by `jsonbSize`, with 422
+  `idempotency_response_too_large`, which rolls the request back with its claim; only answers to
+  requests whose key is optional get that large (ADR-339).
 - **Monthly API requests by plan (0035, ADR-061):** `ops.plans.api_requests_monthly` is empty for no
   limit, 0 when the plan leaves the API out, or the requests a company may make per monthly usage
   period (§7). `admitApiRequest` (`api/quota.ts`) counts every request that passed authentication

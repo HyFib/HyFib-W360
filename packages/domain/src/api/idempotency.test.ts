@@ -28,6 +28,7 @@ import {
 } from '../webhooks/model';
 import { storeIdempotentResponse } from './idempotency';
 import { API_LIMITS } from './model';
+import { buildOpenApiDocument } from './openapi';
 import type { ApiWebhookEndpoint } from './webhook-endpoints';
 
 /** A transaction that records what `storeIdempotentResponse` writes. */
@@ -66,10 +67,20 @@ describe('answers kept with an Idempotency-Key (ADR-339)', () => {
     expect(refused).toMatchObject({
       code: 'validation_failed',
       message:
-        'The answer to this request takes more than 256 KiB, too much to keep with an Idempotency-Key. Send it without one.',
+        'The answer to this request takes more than 256 KiB, too much to keep with its Idempotency-Key, so nothing was done. Where the key is optional, send it again without one.',
       details: { apiReason: 'idempotency_response_too_large' },
     });
     expect(writes).toHaveLength(1);
+  });
+
+  it('is described with the keys, as happening only where the key is optional', () => {
+    const { description } = buildOpenApiDocument('https://app.example.com/api/v1').info;
+    expect(description).toContain(
+      'holds up to 256 KiB: a request whose response would be larger is refused with 422 and reason `idempotency_response_too_large`, and nothing is done. Only requests whose key is optional can give a response that large, so send such a request again without a key.',
+    );
+    // POST /messages, whose key is required, is not told to go without one.
+    expect(description).toMatch(/^POST \/messages needs [^\n]* responses are kept 24 hours\. /m);
+    expect(description).not.toMatch(/^POST \/messages needs [^\n]*without/m);
   });
 
   it('fits the largest answer a webhook endpoint can give, every list full of three-byte text, in half of it', () => {

@@ -961,10 +961,10 @@ verification, app review, Embedded Signup configuration).
   changed since the reader's pass through the feed began, whatever the compaction deleted, `added`
   or `erased` alone, and null while a change recorded before the parts lies after that beginning).
   **[Answers kept with an Idempotency-Key up to 256 KiB built; its database test runs only in
-  CI]** (ADR-339, migration 0259: answers that give more than their request carried, such as a
-  webhook endpoint's whole configuration, an order with its items or a template with its history,
-  are kept past the 64 KiB that failed them with an internal error; a larger answer is refused with
-  422 `idempotency_response_too_large` and the request rolled back).
+  CI]** (ADR-339, migrations 0259 and 0260: answers that give more than their request carried,
+  such as a webhook endpoint's whole configuration, an order with its items or a template with its
+  history, are kept past the 64 KiB that failed them with an internal error; a larger answer is
+  refused with 422 `idempotency_response_too_large` and the request rolled back).
   Remaining: call-to-action messages through the API, taking
   reactions back,
   changing a field's type,
@@ -972,8 +972,9 @@ verification, app review, Embedded Signup configuration).
   recipients through webhooks, limits per endpoint, availability per single endpoint (plans choose
   per scope since ADR-092), a bound on a pipeline's archived stages (kept without one and each in
   the pipeline's answer: past about 1,000 with long names in a script of three-byte letters, a
-  `PATCH /pipelines/{id}` with a key is refused, ADR-339). The one-argument key lookup kept for rolling deploys (0051) is dropped
-  (0074). Replaying many deliveries in one call is built with P5-09 (ADR-095).
+  `PATCH /pipelines/{id}` with a key is refused, ADR-339). The one-argument key lookup kept for
+  rolling deploys (0051) is dropped (0074). Replaying many deliveries in one call is built with
+  P5-09 (ADR-095).
 - **P5-09 Outgoing webhooks** **[built, locally verified; delivered to local test receivers only]**
   (ADR-053): up to 10 endpoints per company (`developer.manage`) for `message.received`,
   `message.status`, `consent.changed` and `template.status_changed`, captured by database triggers
@@ -1269,8 +1270,9 @@ verification, app review, Embedded Signup configuration).
   7,000 bytes as jsonb names the largest by count and digest, so no change is refused for its audit
   entry).
   **[Answers kept with an Idempotency-Key up to 256 KiB built; their database test runs only in
-  CI]** (ADR-339, migration 0259: an endpoint's whole configuration, about 103 KB at most, is kept
-  with the key of `POST /webhook-endpoints` and its secret rotation, which failed past 64 KiB).
+  CI]** (ADR-339, migrations 0259 and 0260: an endpoint's whole configuration, about 103 KB at
+  most, is kept with the key of `POST /webhook-endpoints` and its secret rotation, which failed past
+  64 KiB).
   Remaining: filters for other event types and on a message's values other than its type and words,
   field value comparisons beyond
   values, words and ranges, other authentication (headers computed per delivery, other OAuth

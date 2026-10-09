@@ -80,8 +80,9 @@ export async function claimIdempotencyKey(
 /**
  * Keeps a request's answer with its claimed key, for a retry to get it again. An answer the
  * column's check would refuse (counted at most as `pg_column_size` counts it, `jsonbSize`) is
- * refused with a reason instead (ADR-339): the request's transaction rolls back with the claim, and
- * the request can be sent again without a key.
+ * refused with a reason instead (ADR-339): the request's transaction rolls back with the claim.
+ * Only answers to requests whose key is optional get that large, so the request can be sent again
+ * without one.
  */
 export async function storeIdempotentResponse(
   tx: Tx,
@@ -92,7 +93,7 @@ export async function storeIdempotentResponse(
   if (jsonbSize(response.body) > API_LIMITS.idempotentResponseBytes) {
     throw new AppError(
       'validation_failed',
-      `The answer to this request takes more than ${API_LIMITS.idempotentResponseBytes / 1024} KiB, too much to keep with an Idempotency-Key. Send it without one.`,
+      `The answer to this request takes more than ${API_LIMITS.idempotentResponseBytes / 1024} KiB, too much to keep with its Idempotency-Key, so nothing was done. Where the key is optional, send it again without one.`,
       { details: { apiReason: 'idempotency_response_too_large' } },
     );
   }

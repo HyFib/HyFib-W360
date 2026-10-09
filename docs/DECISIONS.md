@@ -13255,13 +13255,19 @@ error, every time it was retried, and its work was rolled back.
 Decision:
 
 - **256 KiB:** migration 0259 replaces the check with one of 262,144 bytes, more than twice the
-  largest bounded answer, so every answer the routes can give within their limits is kept.
+  largest bounded answer, so every answer the routes can give within their limits is kept. It is
+  added `NOT VALID`, so new rows are checked at once without reading the table under the lock the
+  change takes (every request sent with a key writes to it), and 0260 validates it for the rows
+  already there, which met the stricter check, without blocking the table's writes.
 - **A larger answer is refused with its reason:** `storeIdempotentResponse` counts the answer with
   `jsonbSize` (an upper bound of what the check counts) and, past 256 KiB, refuses it with 422 and
-  reason `idempotency_response_too_large`, "send it without one", before writing it; the request's
-  transaction rolls back with its claim, so nothing is done and the key stays free. Only a pipeline
-  with more than about 1,000 archived stages of long names reaches it; such a `PATCH` goes through
-  without a key. The OpenAPI document's reasons and its note on keys name it.
+  reason `idempotency_response_too_large` before writing it; the request's transaction rolls back
+  with its claim, so nothing is done and the key stays free. Only a pipeline with more than about
+  1,000 archived stages of long names reaches it; such a `PATCH` goes through without a key. Every
+  route whose key is required answers well within the limit, so the refusal says to send the
+  request again without a key only where the key is optional, and the OpenAPI document gives the
+  limit in a sentence on keys of its own, not in the one on `POST /messages`, whose key is
+  required. Its reasons name it too.
 - **Kept as before:** keys, their 24 hours, the replay and the refusal of a reused key.
 
 Not built: a bound on a pipeline's archived stages (kept since ADR-240 so closed deals keep their

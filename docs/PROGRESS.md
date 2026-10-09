@@ -10,30 +10,45 @@ webhook endpoint's whole configuration (`POST /webhook-endpoints` and its secret
 key is required: about 103 KB, measured by `jsonbSize` in a unit test), and each such request
 failed with an internal error every time. The survey's other figures (an order with its items, a
 template with its history, a pipeline with its archived stages) came from a script reproducing
-jsonb's layout, not from PostgreSQL. The local PostgreSQL is unavailable, so migration 0259 and the
-integration test below were written but not run here; the migration passed the pglast parse check
-(syntax only).
+jsonb's layout, not from PostgreSQL. The local PostgreSQL is unavailable, so migrations 0259 and
+0260 and the integration test below were written but not run here; the migrations passed the pglast
+parse check (syntax only).
 
 ### Completed
 
-- **Database:** migration 0259 (the check on `app.api_idempotency_keys.response` replaced with one
-  of 256 KiB, validated at once).
+- **Database:** migrations 0259 (the check on `app.api_idempotency_keys.response` replaced with one
+  of 256 KiB, `NOT VALID`) and 0260 (the check validated without blocking the table's writes).
 - **Domain:** `API_LIMITS.idempotentResponseBytes`; `storeIdempotentResponse` refuses an answer
   larger than that, counted by `jsonbSize`, with 422 and reason `idempotency_response_too_large`
   before writing it, which rolls the request back with its claim; the OpenAPI document names the
-  reason and the limit.
-- **Tests:** unit (2 new in `api/idempotency.test.ts`: an answer at the limit kept and one byte
+  reason and the limit, in a sentence on keys apart from `POST /messages`.
+- **Tests:** unit (3 new in `api/idempotency.test.ts`: an answer at the limit kept and one byte
   more refused with nothing written; the largest answer a webhook endpoint can give, every list
-  full of three-byte text, over 64 KiB and within half of 256 KiB); integration (1 new in
-  `api.test.ts`: a pipeline's answer past 64 KiB kept and replayed, one past 256 KiB refused with
-  its reason, nothing changed or kept, and taken without a key; the check's definition). Written
-  for CI; the integration test was not run here. No e2e test.
+  full of three-byte text, over 64 KiB and within half of 256 KiB; the OpenAPI document's sentence
+  on the limit); integration (1 new in `api.test.ts`: a pipeline's answer past 64 KiB kept and
+  replayed, one past 256 KiB refused with its reason, nothing changed or kept, and taken without a
+  key; the check's definition, validated). Written for CI; the integration test was not run here.
+  No e2e test.
 - **Docs:** ADR-339; ARCHITECTURE; DEPLOYMENT; DATA-RETENTION; BACKLOG P5-08 and P5-09; feature
   matrix H-033.
 - **Mutation checks:** 6/6 deliberate regressions caught on the unit-tested parts (the limit itself
   refused, the answer counted as JSON characters, nothing refused, no reason given, the limit at 64
   KiB and at 1 MiB). The check itself and the refusal through a real request need the database, so
   they are left to the integration test, which runs in CI.
+- **Review fixes:** an independent review of this slice and of ADR-338's fixes found nothing that
+  would fail CI and four small defects, fixed: 0259 read the whole table under the lock its change
+  takes, which every request sent with a key waits on (the check is now added `NOT VALID` and 0260
+  validates it without blocking the table's writes, as 0200 and 0201 did); ADR-338's browser test
+  deleted its channel after a failure without failing the posts still waiting, which the next
+  channel set would have received, and an error there would have hidden the test's own (the posts
+  now fail as removing the channel does, and an error there after a failure is logged with it); the
+  refusal and the OpenAPI document said to send the request again without a key, which routes
+  whose key is required refuse (the document gives the limit in a sentence of its own on keys,
+  saying only requests whose key is optional get answers that large, and the refusal says to go
+  without one where the key is optional); and 0259's comment gave the endpoint's answer as 105 KB,
+  not 103 KB. 3/3 deliberate regressions of the unit-tested fixes caught; the migrations and the
+  browser test's cleanup are left to the integration and e2e tests, which run in CI. The full check
+  passed again (143 files, 1441 tests).
 
 ### Test commands and results (local, 2026-10-09)
 

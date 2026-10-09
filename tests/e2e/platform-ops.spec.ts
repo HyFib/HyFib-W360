@@ -604,6 +604,27 @@ test('staff read the platform’s messages a day on the Usage tab (ADR-333)', as
   if (shown) await page.setViewportSize(shown);
 });
 
+/**
+ * Removes the chat channel a failed run of the test below left, failing the posts still waiting as
+ * removing it on the page does, so that none goes to the next channel set (owner role: a fixture
+ * step).
+ */
+async function removeChatChannel(host: string) {
+  const owner = new pg.Client({ connectionString: process.env.DATABASE_URL_MIGRATE });
+  await owner.connect();
+  try {
+    await owner.query(
+      `WITH gone AS (DELETE FROM ops.platform_alert_channel WHERE host = $1 RETURNING 1)
+       UPDATE ops.platform_alert_posts
+          SET failed_at = now(), last_status = NULL, last_error = 'no_channel', lease_until = NULL
+        WHERE sent_at IS NULL AND failed_at IS NULL AND EXISTS (SELECT 1 FROM gone)`,
+      [host],
+    );
+  } finally {
+    await owner.end();
+  }
+}
+
 test('an owner posts the operations alerts to a chat channel and sends it a test post (ADR-338)', async ({
   page,
 }) => {
@@ -629,6 +650,7 @@ test('an owner posts the operations alerts to a chat channel and sends it a test
   });
   receiver.listen(0, '127.0.0.1');
   await once(receiver, 'listening');
+  let passed = false;
   try {
     const suffix = `${Date.now().toString(36)}${Math.floor(Math.random() * 1e4)}`;
     // The address's secret part, which no page may show.
@@ -700,16 +722,15 @@ test('an owner posts the operations alerts to a chat channel and sends it a test
     await page.getByRole('alertdialog').getByRole('button', { name: 'Remove' }).click();
     await expect(page.getByText('Chat channel removed: alerts are emailed only.')).toBeVisible();
     await expect(page.getByText('No chat channel is set', { exact: true })).toBeVisible();
+    passed = true;
   } finally {
     receiver.closeAllConnections();
     receiver.close();
-    // A failed run leaves no channel behind for the specs after it (a fixture step).
-    const owner = new pg.Client({ connectionString: process.env.DATABASE_URL_MIGRATE });
-    await owner.connect();
-    try {
-      await owner.query('DELETE FROM ops.platform_alert_channel WHERE host = $1', [host]);
-    } finally {
-      await owner.end();
-    }
+    // A failed run leaves no channel behind for the specs after it. Its own failure is the one
+    // reported: a failure here is then logged with it.
+    await removeChatChannel(host).catch((error: unknown) => {
+      if (passed) throw error;
+      console.error('The chat channel could not be removed after the failure:', error);
+    });
   }
 });

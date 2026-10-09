@@ -6667,7 +6667,7 @@ describe('CRM pipelines and deals (ADR-253)', () => {
       { apiReason: 'idempotency_response_too_large' },
     ]);
     expect(isAppError(refused) && refused.message).toBe(
-      'The answer to this request takes more than 256 KiB, too much to keep with an Idempotency-Key. Send it without one.',
+      'The answer to this request takes more than 256 KiB, too much to keep with its Idempotency-Key, so nothing was done. Where the key is optional, send it again without one.',
     );
     expect(apiErrorResponse(refused, 'r').status).toBe(422);
     const [after] = await fx.query<{ name: string; version: number }>(
@@ -6689,12 +6689,16 @@ describe('CRM pipelines and deals (ADR-253)', () => {
       1201,
     ]);
 
-    // The check takes 256 KiB of jsonb, and no more.
-    const [check] = await fx.query<{ definition: string }>(
-      `SELECT pg_get_constraintdef(oid) AS definition FROM pg_constraint
-        WHERE conname = 'api_idempotency_keys_response_check'`,
+    // The check takes 256 KiB of jsonb, and no more, and holds for the rows kept before it (0260).
+    const [check] = await fx.query<{ definition: string; validated: boolean }>(
+      `SELECT pg_get_constraintdef(oid) AS definition, convalidated AS validated FROM pg_constraint
+        WHERE conrelid = 'app.api_idempotency_keys'::regclass
+          AND conname = 'api_idempotency_keys_response_check'`,
     );
-    expect(check?.definition).toBe('CHECK ((pg_column_size(response) <= 262144))');
+    expect(check).toEqual({
+      definition: 'CHECK ((pg_column_size(response) <= 262144))',
+      validated: true,
+    });
   });
 });
 
