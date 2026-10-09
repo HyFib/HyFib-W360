@@ -2479,6 +2479,19 @@ every contact. The worker's minute sweep compacts the change rows (`replaced con
 deleted` in its log); `ops.contact_change_compaction.compacted_at` shows when it last ran. If it
 stops, the feed still answers correctly, with more rows to pass.
 
+**The contact change feed names the wrong parts, or `changes` is null (ADR-329).** `changes` lists
+what changed after the cursor the integration sent. Null means a change recorded before migration
+0251 lies after that cursor: nobody knows what it changed, so the integration takes the whole
+contact, and the next reads name parts again once its cursor is past that change. `added` or
+`erased` alone are expected for a contact added or erased since. A part named
+again whose value the integration already had is expected too: a change saved while the previous
+page was read is named on the next read. To see what is recorded for a contact, as the owner role:
+`SELECT xact, id, parts, replaced FROM app.contact_changes WHERE tenant_id = $1 AND contact_id = $2 ORDER BY xact, id`;
+`parts` is what each change named, `replaced` where each part of the changes the compaction deleted
+last changed (`[transaction, change id]`). A part you know changed (from the audit log, say) that
+is missing there points to a trigger: report it with the rows; meanwhile the integration can take
+the whole contact. A value under a key no custom field can have is not a change, by design.
+
 **A key cannot add, rename or delete a custom field (ADR-115).** The key needs the "Define contact
 fields" scope (`contact_fields.manage`), which only owners and administrators can grant, and a plan
 version that chose its scopes may leave it out (403 `not_in_plan`). A 409 naming `key` means the

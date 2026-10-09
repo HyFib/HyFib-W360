@@ -956,10 +956,13 @@ verification, app review, Embedded Signup configuration).
   **[Adding CRM notes built; its database tests run only in CI]** (ADR-268, migration 0184:
   `notes.write` adds a note to a contact's or a deal's timeline as members do, recorded as written
   through the API; notes are not read through the API).
+  **[What changed of each contact in the contact feed built; its database tests run only in CI]**
+  (ADR-329, migrations 0251 and 0252: `GET /contact-changes` names for each contact the parts that
+  changed since the cursor, exactly whatever the compaction deleted, `added` or `erased` alone, and
+  null while a change recorded before the parts lies after the cursor).
   Remaining: call-to-action messages through the API, taking
   reactions back,
   changing a field's type,
-  which fields of a contact changed in the contact feed (webhooks name them since ADR-121),
   resuming what members or HyFib paused, campaign
   recipients through webhooks, limits per endpoint, availability per single endpoint (plans choose
   per scope since ADR-092). The one-argument key lookup kept for rolling deploys (0051) is dropped

@@ -30,6 +30,11 @@ import { API_LIMITS } from './model';
  * A merged contact is deleted with its changes, and the merge records a change of the contact kept
  * (migration 0150, ADR-225): each contact read names the contacts merged into it, so a reader
  * learns of a merge when it reads the kept contact at that change or a later one.
+ *
+ * Each change keeps the parts of the contact its transaction changed, and the compaction keeps on
+ * the change that replaced others where each of their parts last changed (migration 0251,
+ * ADR-329), so each contact read names exactly the parts changed after the reader's cursor
+ * (`changes`), whatever was compacted since.
  */
 
 export const apiContactChangesQuerySchema = z
@@ -43,12 +48,26 @@ export const apiContactChangesQuerySchema = z
   })
   .strict();
 
+/**
+ * A part of a contact the feed names as changed (ADR-329): the API contact's names as the
+ * contact.updated webhook gives them (name, phone, email, tags, `fields.<key>`), its consent states
+ * and source, a contact merged into it, and `added` or `erased` alone.
+ */
+export const CONTACT_FEED_PART_RE =
+  /^(added|name|phone|email|tags|source|erased|merged|consent\.(marketing|utility)|fields\.[a-z][a-z0-9_]{0,39})$/;
+
 export interface ApiContactChange {
   /** The contact's id. */
   id: string;
   erased: boolean;
   /** The contact as it is now; null once erased. */
   contact: ApiContact | null;
+  /**
+   * What changed since the reader's cursor (ADR-329), sorted, once each: `erased` alone once the
+   * contact is erased, `added` alone when it was added since, else the parts that changed; null
+   * when some of those changes were recorded before HyFib recorded what changed.
+   */
+  changes: string[] | null;
   /**
    * The contacts merged into this one, oldest merge first, those merged into a contact merged into
    * it later included (ADR-225): they no longer exist.
@@ -60,6 +79,19 @@ export interface ApiContactChangePage {
   data: ApiContactChange[];
   nextCursor: string;
   hasMore: boolean;
+}
+
+/**
+ * What the feed tells a reader changed of a contact since its cursor (ADR-329), from the parts of
+ * the contact's changes after the cursor (`*` for one recorded before the parts were): `erased`
+ * alone once the contact is erased, `added` alone when it was added since, null when what changed
+ * is not all known, else the parts in byte order.
+ */
+export function contactChangesSince(erased: boolean, parts: readonly string[]): string[] | null {
+  if (erased) return ['erased'];
+  if (parts.includes('added')) return ['added'];
+  if (parts.includes('*')) return null;
+  return [...new Set(parts)].sort();
 }
 
 /** A place in the company's feed: after the change with this transaction and id. */
@@ -95,6 +127,10 @@ export async function apiContactChanges(
           ...apiContactColumns,
           changeId: sql<string>`${contactChanges.id}::text`,
           changeXact: sql<string>`${contactChanges.xact}::text`,
+          // The parts changed after the cursor, up to this change (migration 0251).
+          parts: sql<string[]>`app.contact_changed_parts(${contactChanges.tenantId},
+            ${contactChanges.contactId}, ${from.xact}::xid8, ${from.id}::bigint,
+            ${contactChanges.xact}, ${contactChanges.id})`,
         })
         .from(contactChanges)
         .innerJoin(
@@ -155,6 +191,7 @@ export async function apiContactChanges(
       id: r.id,
       erased: r.erasedAt !== null,
       contact: r.erasedAt === null ? toApiContact(r) : null,
+      changes: contactChangesSince(r.erasedAt !== null, r.parts),
       mergedContactIds: mergedInto.get(r.id) ?? [],
     })),
     nextCursor: sealContactChangeCursor(

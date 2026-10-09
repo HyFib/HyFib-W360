@@ -5,6 +5,8 @@ import type { Database } from '@w360/db';
 import {
   apiContactChanges,
   apiContactChangesQuerySchema,
+  CONTACT_FEED_PART_RE,
+  contactChangesSince,
   openContactChangeCursor,
   sealContactChangeCursor,
 } from './contact-changes';
@@ -123,9 +125,88 @@ describe('the contact change feed (ADR-114)', () => {
       'id',
       'erased',
       'contact',
+      'changes',
       'mergedContactIds',
     ]);
     // A merged contact is read through the contact it was merged into (ADR-225).
     expect(op?.description).toContain('naming it in `mergedContactIds`');
+    // What changed since the cursor (ADR-329): the parts' names and what null means.
+    expect(op?.description).toContain('with what changed since your cursor (`changes`)');
+    const changes = schemas.ContactChange?.properties?.changes as {
+      oneOf: { items?: { pattern: string } }[];
+      description: string;
+    };
+    expect(changes.oneOf[0]?.items?.pattern).toBe(CONTACT_FEED_PART_RE.source);
+    expect(changes.description).toContain(
+      '`added` alone when the contact was added since your cursor, and `erased` alone once it is erased.',
+    );
+    expect(changes.description).toContain(
+      'Null when some of those changes were saved before HyFib recorded what changed: take the whole contact.',
+    );
+  });
+});
+
+describe('what changed of each contact the feed reads (ADR-329)', () => {
+  it('names erased alone once the contact is erased, added alone when it was added since, else the parts in byte order; null when not all known', () => {
+    expect(contactChangesSince(false, ['name', 'email', 'fields.city'])).toEqual([
+      'email',
+      'fields.city',
+      'name',
+    ]);
+    // Byte order, as the database sorts them: a digit before an underscore, which a locale's
+    // order puts first.
+    expect(contactChangesSince(false, ['fields.a_b', 'fields.a1', 'consent.utility'])).toEqual([
+      'consent.utility',
+      'fields.a1',
+      'fields.a_b',
+    ]);
+    expect(contactChangesSince(false, ['tags', 'tags'])).toEqual(['tags']);
+    expect(contactChangesSince(false, ['name', 'added', 'tags'])).toEqual(['added']);
+    // Added and erased since: the contact is gone.
+    expect(contactChangesSince(true, ['added', 'erased'])).toEqual(['erased']);
+    // Erased, even when what changed before is unknown or names other parts.
+    expect(contactChangesSince(true, ['*'])).toEqual(['erased']);
+    expect(contactChangesSince(true, ['name'])).toEqual(['erased']);
+    // A change recorded before the parts were (`*`): not all known, unless the contact is new.
+    expect(contactChangesSince(false, ['*', 'name'])).toBeNull();
+    expect(contactChangesSince(false, ['*'])).toBeNull();
+    expect(contactChangesSince(false, ['*', 'added'])).toEqual(['added']);
+    // Erased once, no longer erased since: read whole again.
+    expect(contactChangesSince(false, ['added', 'erased'])).toEqual(['added']);
+  });
+
+  it('names the parts as the API contact does', () => {
+    for (const part of [
+      'added',
+      'name',
+      'phone',
+      'email',
+      'tags',
+      'source',
+      'erased',
+      'merged',
+      'consent.marketing',
+      'consent.utility',
+      'fields.city',
+      'fields.a',
+      `fields.a${'b'.repeat(39)}`,
+    ]) {
+      expect(CONTACT_FEED_PART_RE.test(part), part).toBe(true);
+    }
+    for (const part of [
+      '',
+      'Name',
+      'consent',
+      'consent.service',
+      'fields',
+      'fields.',
+      'fields.City',
+      'fields.1st',
+      `fields.a${'b'.repeat(40)}`,
+      'name,email',
+      ' name',
+    ]) {
+      expect(CONTACT_FEED_PART_RE.test(part), part).toBe(false);
+    }
   });
 });

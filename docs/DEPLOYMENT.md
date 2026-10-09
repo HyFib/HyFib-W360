@@ -97,7 +97,11 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
 
    Migration 0091 (ADR-114) records every existing contact once while its triggers hold write locks
    on contacts, tags and consent states, so writes to them wait for it; on a large contacts table
-   run it at a quiet time. Until the new workers run, an automation and a member removing the same
+   run it at a quiet time. Migration 0251 (ADR-329) adds two columns to `app.contact_changes`
+   without rewriting it and its checks `NOT VALID`, so it holds the table's lock only briefly; 0252
+   validates them while contacts keep changing. From 0251 on, every change records its parts; until
+   the new web version runs, the feed answers without `changes`, and the changes recorded before
+   0251 read as unknown (`changes` null) once it does. Until the new workers run, an automation and a member removing the same
    tag at the same moment can deadlock, as adding one already could; PostgreSQL ends one of the two
    with an error.
    Migration 0092 (ADR-115) only widens the scope checks of `app.api_keys` and `ops.plans`; it holds

@@ -12753,3 +12753,56 @@ Decision:
 
 Not built: choosing particular nodes of an automation (by node id), and lists that leave chosen
 kinds out.
+
+## ADR-329 Saying what changed of each contact in the contact change feed (P5-08) (2026-10-09)
+
+Context: `GET /contact-changes` (ADR-114) reads each contact once, at its latest change, as it is
+now. An integration keeping a copy had to compare the two field by field to learn what changed, and
+could not tell a field deleted from one never set. The webhooks have named what a `contact.updated`
+event changed since ADR-121, but the feed could not: the compaction folds a contact's changes into
+its latest, and a reader may have passed some of the changes the latest replaced and not others.
+The backlog listed which fields of a contact changed in the contact feed as remaining.
+
+Decision:
+
+- **Each contact read names what changed since the reader's cursor** (`changes`): the parts,
+  sorted, once each, in the API contact's names as `contact.updated` gives them (`name`, `phone`,
+  `email`, `tags`, `fields.<key>`), with `consent.marketing`, `consent.utility`, `source`, and
+  `merged` when another contact was merged into it; `added` alone when it was added since the
+  cursor (from the start, every contact), and `erased` alone once it is erased. Names only: the
+  contact carries the values as they are now.
+- **Exact from any cursor, compacted or not.** Each change records the parts its transaction
+  changed (`app.contact_changes.parts`), named by the triggers that record the change (0091, 0150);
+  a later change of the same contact in the same transaction adds its parts to the change the
+  transaction recorded first, through a definer function that reaches only the calling
+  transaction's own change. The compaction, which deletes the changes a later one replaced, keeps
+  on that later change where each part last changed among them (`replaced`: part → transaction and
+  change id), one entry per part, so the map stays small however often the contact changes. The
+  feed names the parts of the contact's changes after the cursor, up to the change it reads, and
+  the kept entries that lie after the cursor: never a part changed only before the cursor, never
+  missing one changed after it.
+- **At least once, like the feed itself:** a change saved while the reader read the page before can
+  be named again, its value already in the contact read then, as a contact changed again appears
+  again.
+- **Unknown is said, not guessed.** The changes recorded before migration 0251 have no parts, and
+  nothing is backfilled (nobody knows what they changed): while one lies after the cursor, `changes`
+  is null (take the whole contact), unless the contact was added or erased since.
+- **What the API never reads is no change:** a value under a key no custom field can have changes
+  nothing the API describes and is no longer recorded; a deleted field's values are, as
+  `fields.<key>`. A change that changes no part is not recorded.
+- **Erasure keeps no names:** an erasing change names `erased` alone, and the compaction keeps no
+  entries on it, so once compacted nothing says which parts an erased contact had. A contact no
+  longer erased (nothing does this) is read as added.
+- **Permissions unchanged:** `contacts.read`. The runtime role records the parts with the changes it
+  makes and updates no change; the definer role adds parts to its own transaction's change and keeps
+  the entries in the compaction. Not exported, as before.
+- **Migrations:** 0251 adds `parts` (part names, at least one, in one dimension without a null) and
+  `replaced` (an object), both checks `NOT VALID`, with their grants and the definer role's update
+  policy; the capture with parts, `app.contact_change_parts_union` and the definer
+  `app.add_contact_change_parts`; the triggers' functions of 0091 and 0150 replaced with the same
+  signatures; the compaction replaced; and `app.contact_changed_parts`, which the feed calls as the
+  reader. The two-argument capture is dropped. 0252 validates both checks without blocking writes.
+
+Not built: the values before a change (the feed reads the contact as it is now), which tags were
+added or removed (the `contact.updated` webhook names them since ADR-182), and filtering the feed by
+part.

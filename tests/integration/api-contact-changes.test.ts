@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { isAppError, Keyring, systemClock, uuidv7 } from '@w360/core';
+import { authorizedTenantScope, sql } from '@w360/db';
 import {
   apiContactChanges,
   apiCreateContact,
@@ -24,7 +25,8 @@ import { startWhatsAppFixture, type Company, type WhatsAppFixture } from './what
  * (name, email, custom field values and a field's deletion, tags, consent states, erasure) and what
  * does not; a cursor that never passes a change still being saved; the compaction, which deletes
  * the changes later ones replaced without changing what the feed reads and never passes a change
- * still being saved either; and cursors sealed to their company.
+ * still being saved either; and cursors sealed to their company. Each contact read names the parts
+ * changed since the cursor (ADR-329), exactly, whatever the compaction deleted meanwhile.
  */
 let fx: WhatsAppFixture;
 
@@ -98,6 +100,35 @@ async function refusal(promise: Promise<unknown>) {
   throw new Error('expected a refusal');
 }
 
+/** Each contact the feed reads from `cursor`, with what it names as changed. */
+const changesSince = async (ctx: ApiContext, cursor?: string) =>
+  (await readFeed(ctx, cursor)).changes.map((ch) => [ch.id, ch.changes]);
+
+/** Compacts until the contact has `rows` change rows left. */
+async function compactTo(contactId: string, rows: number) {
+  for (let i = 0; i < 100 && (await rowsOf(contactId)) > rows; i += 1) {
+    await compactContactChanges(fx.dbs.app, 10_000);
+  }
+  expect(await rowsOf(contactId)).toBe(rows);
+}
+
+/** The messages of a refused statement and its causes. */
+async function refusedWith(promise: Promise<unknown>, pattern: RegExp) {
+  try {
+    await promise;
+  } catch (error) {
+    const messages: string[] = [];
+    let current: unknown = error;
+    for (let depth = 0; depth < 5 && current instanceof Error; depth += 1) {
+      messages.push(isAppError(current) ? current.publicMessage : current.message);
+      current = current.cause;
+    }
+    expect(messages.join(' | ')).toMatch(pattern);
+    return;
+  }
+  throw new Error('expected the statement to be refused');
+}
+
 describe('following contact changes through the public API (ADR-114)', () => {
   it('reads every contact once, at its latest change, in the order the changes were saved, and a cursor reads what changed since', async () => {
     const c = await fx.company();
@@ -112,6 +143,7 @@ describe('following contact changes through the public API (ADR-114)', () => {
       id: asha,
       erased: false,
       contact: await apiGetContact(deps(), ctx, asha),
+      changes: ['added'],
       mergedContactIds: [],
     });
 
@@ -121,24 +153,29 @@ describe('following contact changes through the public API (ADR-114)', () => {
     expect(all.changes[2]!.contact?.name).toBe('Asha K');
     const since = await readFeed(ctx, first.cursor);
     expect(ids(since.changes)).toEqual([asha]);
+    // What changed since the cursor; from the start, each contact is new (ADR-329).
+    expect(since.changes.map((ch) => ch.changes)).toEqual([['name']]);
+    expect(all.changes.map((ch) => ch.changes)).toEqual([['added'], ['added'], ['added']]);
 
     // A tag, then a consent state set and changed; the same opt-in again leaves it as it is.
     await apiUpdateContact(deps(), ctx, bala, { addTags: ['vip'] });
     const tagged = await readFeed(ctx, since.cursor);
-    expect(tagged.changes.map((ch) => [ch.id, ch.contact?.tags])).toEqual([[bala, ['vip']]]);
+    expect(tagged.changes.map((ch) => [ch.id, ch.contact?.tags, ch.changes])).toEqual([
+      [bala, ['vip'], ['tags']],
+    ]);
     const consent = { purpose: 'marketing', action: 'opt_in', evidence: 'Checkout form' };
     await apiRecordConsent(deps(), ctx, chitra, consent);
     const consented = await readFeed(ctx, tagged.cursor);
-    expect(consented.changes.map((ch) => [ch.id, ch.contact?.consent.marketing])).toEqual([
-      [chitra, 'opted_in'],
-    ]);
+    expect(
+      consented.changes.map((ch) => [ch.id, ch.contact?.consent.marketing, ch.changes]),
+    ).toEqual([[chitra, 'opted_in', ['consent.marketing']]]);
     await apiRecordConsent(deps(), ctx, chitra, consent);
     expect((await readFeed(ctx, consented.cursor)).changes).toEqual([]);
     await apiRecordConsent(deps(), ctx, chitra, { ...consent, action: 'opt_out' });
     const withdrawn = await readFeed(ctx, consented.cursor);
-    expect(withdrawn.changes.map((ch) => [ch.id, ch.contact?.consent.marketing])).toEqual([
-      [chitra, 'opted_out'],
-    ]);
+    expect(
+      withdrawn.changes.map((ch) => [ch.id, ch.contact?.consent.marketing, ch.changes]),
+    ).toEqual([[chitra, 'opted_out', ['consent.marketing']]]);
     // Nor do a name the contact already has, a column written with its own value, or a write
     // of the row's times alone.
     await apiUpdateContact(deps(), ctx, asha, { name: 'Asha K' });
@@ -154,7 +191,7 @@ describe('following contact changes through the public API (ADR-114)', () => {
     const rows = await rowsOf(bala);
     await apiUpdateContact(deps(), ctx, bala, { name: 'Bala R', addTags: ['new'] });
     expect(await rowsOf(bala)).toBe(rows + 1);
-    expect(ids((await readFeed(ctx, unchanged.cursor)).changes)).toEqual([bala]);
+    expect(await changesSince(ctx, unchanged.cursor)).toEqual([[bala, ['name', 'tags']]]);
 
     // One contact a page: the same contacts in the same order, never one twice.
     const paged: string[] = [];
@@ -188,33 +225,58 @@ describe('following contact changes through the public API (ADR-114)', () => {
     };
 
     await service.addTags(owner, withCity, ['gold']);
-    expect(ids(await next())).toEqual([withCity]);
+    expect((await next()).map((ch) => [ch.id, ch.changes])).toEqual([[withCity, ['tags']]]);
     await service.removeTag(owner, withCity, 'gold');
-    expect((await next()).map((ch) => [ch.id, ch.contact?.tags])).toEqual([[withCity, []]]);
+    expect((await next()).map((ch) => [ch.id, ch.contact?.tags, ch.changes])).toEqual([
+      [withCity, [], ['tags']],
+    ]);
     await apiUpdateContact(deps(), ctx, withCity, { fields: { city: 'Delhi' } });
-    expect((await next()).map((ch) => ch.contact?.fields)).toEqual([{ city: 'Delhi' }]);
+    expect((await next()).map((ch) => [ch.contact?.fields, ch.changes])).toEqual([
+      [{ city: 'Delhi' }, ['fields.city']],
+    ]);
     await apiUpdateContact(deps(), ctx, withCity, { email: 'devi@example.com' });
-    expect((await next()).map((ch) => ch.contact?.email)).toEqual(['devi@example.com']);
+    expect((await next()).map((ch) => [ch.contact?.email, ch.changes])).toEqual([
+      ['devi@example.com', ['email']],
+    ]);
     const newPhone = nextPhone();
     await service.updateContact(owner, withCity, { displayName: 'Devi', phone: newPhone });
-    expect((await next()).map((ch) => ch.contact?.phone)).toEqual([newPhone]);
+    expect((await next()).map((ch) => [ch.contact?.phone, ch.changes])).toEqual([
+      [newPhone, ['phone']],
+    ]);
 
     // A field's deletion removes its values: each contact that had one changed.
     await service.deleteField(owner, city.id);
-    expect((await next()).map((ch) => [ch.id, ch.contact?.fields])).toEqual([[withCity, {}]]);
+    expect((await next()).map((ch) => [ch.id, ch.contact?.fields, ch.changes])).toEqual([
+      [withCity, {}, ['fields.city']],
+    ]);
 
     const phone = (await apiGetContact(deps(), ctx, withCity)).phone!;
     await service.eraseContact(owner, { contactId: withCity, suppress: false });
     const erased = await next();
-    expect(erased).toEqual([{ id: withCity, erased: true, contact: null, mergedContactIds: [] }]);
+    expect(erased).toEqual([
+      { id: withCity, erased: true, contact: null, changes: ['erased'], mergedContactIds: [] },
+    ]);
     expect(JSON.stringify(erased)).not.toContain(phone.slice(1));
     // From the start: each contact once, the erased one as erased.
     expect(
-      (await readFeed(ctx)).changes.map((ch) => [ch.id, ch.erased, ch.contact?.name ?? null]),
+      (await readFeed(ctx)).changes.map((ch) => [
+        ch.id,
+        ch.erased,
+        ch.contact?.name ?? null,
+        ch.changes,
+      ]),
     ).toEqual([
-      [without, false, 'Elan'],
-      [withCity, true, null],
+      [without, false, 'Elan', ['added']],
+      [withCity, true, null, ['erased']],
     ]);
+    // The erasure's change names erased alone, and once compacted keeps no names of what the
+    // contact had.
+    await compactTo(withCity, 1);
+    expect(
+      await fx.query('SELECT parts, replaced FROM app.contact_changes WHERE contact_id = $1', [
+        withCity,
+      ]),
+    ).toEqual([{ parts: ['erased'], replaced: {} }]);
   });
 
   it('never reads past a change still being saved, so following the cursor misses nothing', async () => {
@@ -245,17 +307,17 @@ describe('following contact changes through the public API (ADR-114)', () => {
     // The committed change lies beyond the ones still being saved, so none is read yet.
     expect(during.changes).toEqual([]);
     // Each contact is still read once from the start, as it is now.
-    expect(fromStart.changes.map((ch) => [ch.id, ch.contact?.name])).toEqual([
-      [held, 'Farah'],
-      [later, 'Gopal N'],
-      [last, 'Hema'],
+    expect(fromStart.changes.map((ch) => [ch.id, ch.contact?.name, ch.changes])).toEqual([
+      [held, 'Farah', ['added']],
+      [later, 'Gopal N', ['added']],
+      [last, 'Hema', ['added']],
     ]);
     // In the order of the transactions: both changes of the one that began first, then the other.
     const after = await readFeed(ctx, during.cursor);
-    expect(after.changes.map((ch) => [ch.id, ch.contact?.name])).toEqual([
-      [held, 'Farah S'],
-      [last, 'Hema T'],
-      [later, 'Gopal N'],
+    expect(after.changes.map((ch) => [ch.id, ch.contact?.name, ch.changes])).toEqual([
+      [held, 'Farah S', ['name']],
+      [last, 'Hema T', ['name']],
+      [later, 'Gopal N', ['name']],
     ]);
     expect((await readFeed(ctx, after.cursor)).changes).toEqual([]);
   });
@@ -308,8 +370,186 @@ describe('following contact changes through the public API (ADR-114)', () => {
       [once, 'Indu M'],
       [often, 'Hari 5'],
     ]);
-    // Following the earlier cursor reads both changes, once each.
-    expect(ids((await readFeed(ctx, before.cursor)).changes)).toEqual([once, often]);
+    // Following the earlier cursor reads both changes, once each, naming only what changed after
+    // it: the changes the compaction deleted lay before it.
+    expect(await changesSince(ctx, before.cursor)).toEqual([
+      [once, ['name']],
+      [often, ['name']],
+    ]);
+  });
+
+  it('names exactly what changed since a cursor, whatever the compaction deleted since, keeping one place per part (ADR-329)', async () => {
+    const c = await fx.company();
+    const ctx = await apiKey(c, ['contacts.read', 'contacts.write']);
+    const owner = await fx.ctx(c, c.owner);
+    await contactsService().createField(owner, { label: 'City', key: 'city', type: 'text' });
+    const kiran = await createContact(ctx, 'Kiran');
+    const start = await readFeed(ctx);
+    expect(start.changes.map((ch) => ch.changes)).toEqual([['added']]);
+
+    // Three changes; a reader read between the first two.
+    await apiUpdateContact(deps(), ctx, kiran, { name: 'Kiran B' });
+    const afterName = await readFeed(ctx, start.cursor);
+    expect(afterName.changes.map((ch) => ch.changes)).toEqual([['name']]);
+    await apiUpdateContact(deps(), ctx, kiran, { addTags: ['vip'], fields: { city: 'Pune' } });
+    await apiUpdateContact(deps(), ctx, kiran, { email: 'kiran@example.com' });
+    const sinceStart = [[kiran, ['email', 'fields.city', 'name', 'tags']]];
+    const sinceName = [[kiran, ['email', 'fields.city', 'tags']]];
+    expect(await changesSince(ctx, start.cursor)).toEqual(sinceStart);
+    expect(await changesSince(ctx, afterName.cursor)).toEqual(sinceName);
+    // The compaction leaves the latest change alone, and every reader the same answer.
+    await compactTo(kiran, 1);
+    expect(await changesSince(ctx, start.cursor)).toEqual(sinceStart);
+    expect(await changesSince(ctx, afterName.cursor)).toEqual(sinceName);
+    expect(await changesSince(ctx)).toEqual([[kiran, ['added']]]);
+    const afterEmail = await readFeed(ctx, afterName.cursor);
+
+    // A later change replacing the one that kept the others keeps their places too.
+    await apiUpdateContact(deps(), ctx, kiran, { name: 'Kiran C' });
+    await compactTo(kiran, 1);
+    expect(await changesSince(ctx, afterEmail.cursor)).toEqual([[kiran, ['name']]]);
+    expect(await changesSince(ctx, afterName.cursor)).toEqual([
+      [kiran, ['email', 'fields.city', 'name', 'tags']],
+    ]);
+    expect(await changesSince(ctx, start.cursor)).toEqual([
+      [kiran, ['email', 'fields.city', 'name', 'tags']],
+    ]);
+
+    // However often the contact changes, the kept places stay one per part.
+    for (const name of ['Kiran D', 'Kiran E', 'Kiran F']) {
+      await apiUpdateContact(deps(), ctx, kiran, { name });
+      await compactTo(kiran, 1);
+    }
+    const [kept] = await fx.query<{ parts: string[]; replaced: Record<string, unknown> }>(
+      'SELECT parts, replaced FROM app.contact_changes WHERE contact_id = $1',
+      [kiran],
+    );
+    expect(kept?.parts).toEqual(['name']);
+    expect(Object.keys(kept?.replaced ?? {}).sort()).toEqual([
+      'added',
+      'email',
+      'fields.city',
+      'name',
+      'tags',
+    ]);
+    expect(await changesSince(ctx, afterEmail.cursor)).toEqual([[kiran, ['name']]]);
+  });
+
+  it('does not name what changed when a change was recorded before HyFib recorded the parts, unless the contact is new (ADR-329)', async () => {
+    const c = await fx.company();
+    const ctx = await apiKey(c, ['contacts.read', 'contacts.write']);
+    const lata = await createContact(ctx, 'Lata');
+    const start = await readFeed(ctx);
+    // A change as migration 0251 found them: no parts.
+    await fx.query('INSERT INTO app.contact_changes (tenant_id, contact_id) VALUES ($1, $2)', [
+      c.tenant.id,
+      lata,
+    ]);
+    const unknown = await readFeed(ctx, start.cursor);
+    expect(unknown.changes.map((ch) => [ch.id, ch.changes])).toEqual([[lata, null]]);
+    await apiUpdateContact(deps(), ctx, lata, { name: 'Lata P' });
+    expect(await changesSince(ctx, start.cursor)).toEqual([[lata, null]]);
+    expect(await changesSince(ctx, unknown.cursor)).toEqual([[lata, ['name']]]);
+    // The compaction keeps where the unknown change was, so the answers stay.
+    await compactTo(lata, 1);
+    expect(await changesSince(ctx, start.cursor)).toEqual([[lata, null]]);
+    expect(await changesSince(ctx, unknown.cursor)).toEqual([[lata, ['name']]]);
+    // A contact added since the cursor is new whatever else is unknown.
+    expect(await changesSince(ctx)).toEqual([[lata, ['added']]]);
+  });
+
+  it('records the parts in the database: checked, kept by the triggers for what only the database changes, and added only to the transaction’s own change (ADR-329)', async () => {
+    const c = await fx.company();
+    const ctx = await apiKey(c, ['contacts.read', 'contacts.write']);
+    const mira = await createContact(ctx, 'Mira');
+    let at = (await readFeed(ctx)).cursor;
+    const next = async () => {
+      const read = await readFeed(ctx, at);
+      at = read.cursor;
+      return read.changes.map((ch) => [ch.id, ch.changes]);
+    };
+
+    // The source, which the API never changes, and a value under a key no field can have, which
+    // the API never reads: the first is a change, the second is not recorded.
+    await fx.query(`UPDATE app.contacts SET source = 'import' WHERE id = $1`, [mira]);
+    expect(await next()).toEqual([[mira, ['source']]]);
+    const rows = await rowsOf(mira);
+    await fx.query(
+      `UPDATE app.contacts SET attributes = attributes || '{"Not a key": 1}'::jsonb WHERE id = $1`,
+      [mira],
+    );
+    expect(await rowsOf(mira)).toBe(rows);
+    expect(await next()).toEqual([]);
+    // A contact no longer erased (nothing does this) is read whole again.
+    await contactsService().eraseContact(await fx.ctx(c, c.owner), {
+      contactId: mira,
+      suppress: false,
+    });
+    expect(await next()).toEqual([[mira, ['erased']]]);
+    await fx.query('UPDATE app.contacts SET erased_at = NULL WHERE id = $1', [mira]);
+    expect(await next()).toEqual([[mira, ['added']]]);
+
+    // The check: parts in the API contact's names, at least one, once dimensional, no nulls.
+    const store = (parts: string) =>
+      fx.query(
+        `INSERT INTO app.contact_changes (tenant_id, contact_id, parts) VALUES ($1, $2, ${parts})`,
+        [c.tenant.id, mira],
+      );
+    for (const bad of [
+      `'{}'`,
+      `'{Name}'`,
+      `'{fields.City}'`,
+      `'{fields.}'`,
+      `'{consent.service}'`,
+      `'{name,nickname}'`,
+      `ARRAY['tags', NULL]::text[]`,
+      `ARRAY[ARRAY['name'], ARRAY['tags']]::text[]`,
+    ]) {
+      await refusedWith(store(bad), /contact_changes_parts_check/);
+    }
+    await refusedWith(
+      fx.query(
+        `INSERT INTO app.contact_changes (tenant_id, contact_id, parts, replaced)
+         VALUES ($1, $2, '{name}', '[]')`,
+        [c.tenant.id, mira],
+      ),
+      /contact_changes_replaced_check/,
+    );
+
+    // The company role records changes and reads them, and changes none.
+    const scope = authorizedTenantScope(c.tenant.id, c.owner.id);
+    await refusedWith(
+      fx.dbs.app.run(scope, (tx) =>
+        tx.execute(sql`update app.contact_changes set parts = array['email']
+          where contact_id = ${mira}::uuid`),
+      ),
+      /permission denied for table contact_changes/,
+    );
+    // Adding parts reaches only the change the calling transaction recorded.
+    const partsOf = async () =>
+      (
+        await fx.query<{ parts: string[] | null }>(
+          'SELECT parts FROM app.contact_changes WHERE contact_id = $1 ORDER BY xact, id',
+          [mira],
+        )
+      ).map((r) => r.parts);
+    const before = await partsOf();
+    await fx.dbs.app.run(scope, (tx) =>
+      tx.execute(sql`select app.add_contact_change_parts(${c.tenant.id}::uuid, ${mira}::uuid,
+        array['email'])`),
+    );
+    expect(await partsOf()).toEqual(before);
+    const own = await fx.dbs.app.run(scope, async (tx) => {
+      await tx.execute(sql`update app.contacts set display_name = 'Mira S'
+        where id = ${mira}::uuid`);
+      await tx.execute(sql`select app.add_contact_change_parts(${c.tenant.id}::uuid, ${mira}::uuid,
+        array['tags', 'email'])`);
+      const stored = await tx.execute<{ parts: string[] }>(sql`select parts
+        from app.contact_changes
+        where contact_id = ${mira}::uuid and xact = pg_current_xact_id()`);
+      return stored.rows.map((r) => r.parts);
+    });
+    expect(own).toEqual([['email', 'name', 'tags']]);
   });
 
   it('opens a cursor only for the company that read it and refuses forged ones; a key needs contacts.read', async () => {

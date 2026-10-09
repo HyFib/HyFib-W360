@@ -1239,9 +1239,18 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   at its latest such row, joined to the contact for its current state; the cursor is sealed with the
   keyring and the company as associated data. `ops.compact_contact_changes` (minute sweep) walks the
   rows in the same order from `ops.contact_change_compaction` and deletes the rows each change
-  replaced. Since 0150 (ADR-225) the trigger on `app.contact_merges` also records a change of the
-  kept contact, and the feed lists for each contact it reads the contacts merged into it
-  (`mergedContactIds`, from `app.contact_merges` in the page's snapshot); the contact endpoints
+  replaced. Since 0251 (ADR-329) each row keeps the parts its transaction changed (`parts`, named by
+  the triggers; a later change of the transaction adds its own through the definer
+  `app.add_contact_change_parts`, which reaches only rows with the caller's `xact`), the compaction
+  keeps on the row that survives where each part of the rows it deletes last changed (`replaced`,
+  part → `[xact, id]`, `*` for rows from before 0251; none on an erasing row), and the feed calls
+  `app.contact_changed_parts` as the reader for each contact it reads (the parts of the contact's
+  rows after the cursor up to the row read, and the kept entries after the cursor), which
+  `contactChangesSince` turns into `changes`: `erased` or `added` alone, null with `*`, else the
+  parts in byte order. Since 0150 (ADR-225) the trigger on `app.contact_merges` also records a
+  change of the kept contact (named `merged` since 0251), and the feed lists for each contact it
+  reads the contacts merged into it (`mergedContactIds`, from `app.contact_merges` in the page's
+  snapshot); the contact endpoints
   answer a merged contact's id with 404, reason `contact_merged` and `mergedInto`
   (`apiContactNotFound`, `api/contact-view.ts`). Since ADR-227 `POST /contacts/{id}/merge`
   (`apiMergeContacts`, scope `contacts.merge`) checks that both contacts exist in the key's company,

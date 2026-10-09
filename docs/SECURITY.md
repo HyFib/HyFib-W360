@@ -1070,9 +1070,18 @@ Phase 5 rules (Public API, P5-08):
   it shows nothing of other companies' activity and opens for no other company; a changed or foreign
   cursor is refused with 422. Change rows hold no personal data; an erased contact is read as
   `erased` with no contact. The triggers that record changes run as whoever changes the contact
-  (column grants: the runtime and definer roles insert only `tenant_id` and `contact_id`); only the
-  compaction function, owned by the definer role and run by the worker, deletes rows across
-  companies, and only rows a later change of the same contact replaced.
+  (column grants: the runtime and definer roles insert only `tenant_id`, `contact_id` and, since
+  ADR-329, `parts`); only the compaction function, owned by the definer role and run by the worker,
+  deletes rows across companies, and only rows a later change of the same contact replaced.
+- What changed of each contact (ADR-329): change rows name the parts a change changed (`name`,
+  `tags`, `fields.<key>` and the like), never values. The runtime role cannot update a change row;
+  a later change of the same transaction adds its parts through the definer
+  `app.add_contact_change_parts`, which updates only rows whose `xact` is the calling transaction's
+  (rows it inserted under its own row-level security, which no reader or compaction has read), and
+  the compaction keeps the parts of the rows it deletes on the row that replaced them. The feed reads
+  them through `app.contact_changed_parts`, run as the reader, so it reads the key's company's rows
+  only. An erasing change names `erased` alone and the compaction keeps nothing on it, so no part
+  names of an erased contact remain once compacted.
 - Merging contacts through the API (ADR-227): `contacts.merge` is granted only by members holding
   `contacts.delete` (owners and administrators, who merge in the app), is a writing scope (refused
   while the company is suspended or restricted) and can be left out by the plan. The merge runs

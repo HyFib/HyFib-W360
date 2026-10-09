@@ -119,6 +119,7 @@ import {
 } from './segments';
 import { apiContactFieldCreateSchema, apiContactFieldUpdateSchema } from './contact-fields';
 import { apiContactSearchSchema, apiUpdateMatchingContactsSchema } from './contact-search';
+import { CONTACT_FEED_PART_RE } from './contact-changes';
 import { apiContactSchema } from './contact-view';
 import {
   API_CONTACT_SEARCH_WINDOW,
@@ -2126,7 +2127,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         get: {
           operationId: 'listContactChanges',
           summary: 'Contacts in the order they changed',
-          description: `${scopeNote('contacts.read')} Every contact whose name, number, email, custom field values, tags or consent changed, that was added or erased, or that another contact was merged into, once, as it is now, in the order the changes were saved. A merged contact is not read again: the contact it was merged into is, naming it in \`mergedContactIds\`. Start without a cursor to read every contact the company has; keep \`nextCursor\` and ask again with it to read what changed since. No change is skipped: a change appears once every change saved before it has finished, and a contact changed again appears again. Read pages until \`hasMore\` is false, then ask again later with the last \`nextCursor\`. A cursor works only for the company that read it.`,
+          description: `${scopeNote('contacts.read')} Every contact whose name, number, email, custom field values, tags or consent changed, that was added or erased, or that another contact was merged into, once, as it is now, in the order the changes were saved, with what changed since your cursor (\`changes\`). A merged contact is not read again: the contact it was merged into is, naming it in \`mergedContactIds\`. Start without a cursor to read every contact the company has; keep \`nextCursor\` and ask again with it to read what changed since. No change is skipped: a change appears once every change saved before it has finished, and a contact changed again appears again. Read pages until \`hasMore\` is false, then ask again later with the last \`nextCursor\`. A cursor works only for the company that read it.`,
           parameters: [
             {
               name: 'limit',
@@ -4476,6 +4477,17 @@ export function buildOpenApiDocument(serverUrl: string) {
               oneOf: [ref('Contact'), { type: 'null' }],
               description: 'The contact as it is now; null once it was erased.',
             },
+            changes: {
+              oneOf: [
+                {
+                  type: 'array',
+                  items: { type: 'string', pattern: CONTACT_FEED_PART_RE.source },
+                },
+                { type: 'null' },
+              ],
+              description:
+                'What changed since your cursor (since the first change without one), sorted, once each: `name`, `phone`, `email`, `tags` (a tag added or removed), `fields.<key>` for each custom field whose value changed or was deleted (GET /contact-fields), `consent.marketing`, `consent.utility`, `source`, and `merged` when another contact was merged into this one (`mergedContactIds`). `added` alone when the contact was added since your cursor, and `erased` alone once it is erased. Names only: `contact` carries the values as they are now. A change saved while you read the page before can be named again, its value already in the contact you read then. Null when some of those changes were saved before HyFib recorded what changed: take the whole contact.',
+            },
             mergedContactIds: {
               type: 'array',
               items: { type: 'string', format: 'uuid' },
@@ -4483,7 +4495,7 @@ export function buildOpenApiDocument(serverUrl: string) {
                 'The contacts merged into this one, oldest merge first, including those merged into a contact that was merged into this one later: they no longer exist, and their records are this contact’s. Delete your copies.',
             },
           },
-          required: ['id', 'erased', 'contact', 'mergedContactIds'],
+          required: ['id', 'erased', 'contact', 'changes', 'mergedContactIds'],
         },
         Consent: jsonSchema(apiConsentSchema, 'input'),
         ContactMerge: jsonSchema(apiMergeContactsSchema, 'input'),
