@@ -521,6 +521,7 @@ test('staff read the platform’s messages a day on the Usage tab (ADR-333)', as
     'Sent',
     'Failed',
     'Received',
+    'Share failed',
   ]);
   const rows = table.getByRole('row').filter({ has: page.getByRole('cell') });
   const days = (await rows.locator('td:first-child').allTextContents()).map((d) => d.trim());
@@ -555,6 +556,26 @@ test('staff read the platform’s messages a day on the Usage tab (ADR-333)', as
   await expectNoHorizontalOverflow(page);
   await page.keyboard.press('Escape');
   await expect(tooltip(days.at(-1)!)).toHaveCount(0);
+
+  // Under it, the share of each day's sends that failed (ADR-344): drawn when a company sent a
+  // message in the window, which earlier tests may or may not have done; its value names the day's
+  // share of those sent, or none sent.
+  const failedChart = page.getByRole('slider', {
+    name: 'Share of the messages sent that failed each UTC day, 7 days',
+  });
+  await expect(
+    failedChart.or(
+      page.getByText('No company sent a message in these days, so none failed.', { exact: true }),
+    ),
+  ).toBeVisible();
+  if ((await failedChart.count()) > 0) {
+    await expect(failedChart).toHaveAttribute(
+      'aria-valuetext',
+      new RegExp(
+        `^${chartDay(days.at(-1)!)}: (none sent|[<>]?[\\d.]+% of [\\d,]+ sent failed \\([\\d,]+\\))$`,
+      ),
+    );
+  }
 
   // On a phone narrower than this project's, the chart and the open table stay inside the page:
   // the table scrolls in its own box rather than widening the card.
@@ -606,6 +627,15 @@ test('staff read the platform’s messages a day on the Usage tab (ADR-333)', as
   const received = await companyDays.locator('tbody td:nth-child(4)').allTextContents();
   expect(received.length).toBeGreaterThanOrEqual(31);
   expect(received.reduce((total, n) => total + Number(n), 0)).toBe(1);
+  // It sent nothing, so no share failed (ADR-344): the note in place of the chart, and the table's
+  // last column says so for every day.
+  await expect(
+    page.getByText('The company sent no message in these 30 days, so none failed.', {
+      exact: true,
+    }),
+  ).toBeVisible();
+  const shares = await companyDays.locator('tbody td:nth-child(5)').allTextContents();
+  expect(new Set(shares.map((share) => share.trim()))).toEqual(new Set(['None sent']));
   await expectNoHorizontalOverflow(page);
   // Its last 12 months (ADR-342), from the days the worker counts once they end: drawn, or none
   // counted yet, or none of those counted with a message.

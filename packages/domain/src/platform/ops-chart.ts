@@ -2,8 +2,9 @@
  * The geometry of the operations console's "Messages a day" chart (P5-10, ADR-333): the platform's
  * messages sent and received each UTC day of the Usage tab's window, as lines on one axis. Pure,
  * so the browser draws it at the width it has and the unit tests read every number. Failed sends
- * are not drawn: far fewer than the others, they would lie flat on the axis; the tooltip and the
- * table give them.
+ * are not drawn on it: far fewer than the others, they would lie flat on the axis. They have a
+ * chart of their own under it (ADR-344), as a share of the messages sent each day, on an axis of
+ * percentages.
  */
 
 /** One UTC day of the platform's messages, as the service reads them. */
@@ -54,6 +55,8 @@ const TOP_ROOM = 12;
 const END_LABEL_GAP = 16;
 /** Narrower than this, the plot keeps the room the end labels would take. */
 const END_LABEL_MIN_WIDTH = 480;
+/** Room for the failed sends' end label (">99.9%", ADR-344). */
+const SHARE_LABEL_ROOM = 60;
 /**
  * The room a day's name ("30 Sep", about 40 pixels) takes under the axis. The first name starts at
  * its day and the last ends at its day, so a name beside either needs one and a half names' width.
@@ -86,14 +89,50 @@ export function chartStep(max: number): number {
   return (residual <= 1 ? 1 : residual <= 2 ? 2 : residual <= 5 ? 5 : 10) * magnitude;
 }
 
+const round = (value: number) => Math.round(value * 100) / 100;
+
+/**
+ * The days along an x axis from `left` to `right`: each day's x, and the days named under it, as
+ * many as fit, at most six: the first, the last, and evenly between; a name too close to the last
+ * gives way to it.
+ */
+function dayAxis(days: readonly DailyChartDay[], left: number, right: number) {
+  const last = days.length - 1;
+  const x = (index: number) =>
+    last <= 0 ? (left + right) / 2 : left + (index / last) * (right - left);
+  const fit = Math.min(6, Math.max(2, Math.floor((right - left) / DAY_LABEL_ROOM)));
+  const every = Math.ceil(last / (fit - 1));
+  const named: number[] = [];
+  for (let index = 0; index < last; index += every) named.push(index);
+  const beforeLast = named.at(-1);
+  if (beforeLast !== undefined && x(last) - x(beforeLast) < DAY_LABEL_ROOM) named.pop();
+  if (last >= 0) named.push(last);
+  const shownNames = new Set(named);
+  return {
+    x,
+    xs: days.map((_, index) => round(x(index))),
+    xTicks: days.flatMap((d, index) =>
+      shownNames.has(index) ? [{ index, x: round(x(index)), label: chartDayLabel(d.day) }] : [],
+    ),
+  };
+}
+
+/** A plot's left and right edges, which two charts of the same days can share (ADR-344). */
+export interface PlotEdges {
+  left: number;
+  right: number;
+}
+
 /**
  * Where each day and gridline goes on a chart `width` by `height` pixels: the x axis spans the
- * days, the y axis from 0 to the first gridline at or above the busiest day's count.
+ * days, the y axis from 0 to the first gridline at or above the busiest day's count. With `edges`,
+ * the plot spans those instead of its own (`sharedPlotEdges`).
  */
 export function dailyChartLayout(
   days: readonly DailyChartDay[],
   width: number,
   height: number,
+  edges?: PlotEdges,
 ): DailyChartLayout {
   const max = Math.max(0, ...days.map((d) => Math.max(d.outbound, d.inbound)));
   const step = chartStep(max);
@@ -101,7 +140,7 @@ export function dailyChartLayout(
   const ticks: number[] = [];
   for (let value = 0; value <= top; value += step) ticks.push(value);
   // The y labels' width decides the left edge: about 7 pixels a character, and a gap.
-  const left = Math.max(...ticks.map((value) => chartCount(value).length)) * 7 + 12;
+  const left = edges?.left ?? Math.max(...ticks.map((value) => chartCount(value).length)) * 7 + 12;
   const plotTop = TOP_ROOM;
   const bottom = height - X_AXIS_ROOM;
   const y = (value: number) => bottom - (value / top) * (bottom - plotTop);
@@ -112,30 +151,15 @@ export function dailyChartLayout(
     width >= END_LABEL_MIN_WIDTH &&
     lastDay !== undefined &&
     Math.abs(y(lastDay.outbound) - y(lastDay.inbound)) >= END_LABEL_GAP;
-  const right = width - (endLabels ? END_LABEL_ROOM : 16);
-  const x = (index: number) =>
-    last <= 0 ? (left + right) / 2 : left + (index / last) * (right - left);
-  const xs = days.map((_, index) => x(index));
-  // As many days named as fit, at most six: the first, the last, and evenly between; a name too
-  // close to the last gives way to it.
-  const fit = Math.min(6, Math.max(2, Math.floor((right - left) / DAY_LABEL_ROOM)));
-  const every = Math.ceil(last / (fit - 1));
-  const named: number[] = [];
-  for (let index = 0; index < last; index += every) named.push(index);
-  const beforeLast = named.at(-1);
-  if (beforeLast !== undefined && x(last) - x(beforeLast) < DAY_LABEL_ROOM) named.pop();
-  if (last >= 0) named.push(last);
-  const shownNames = new Set(named);
-  const round = (value: number) => Math.round(value * 100) / 100;
+  const right = edges?.right ?? width - (endLabels ? END_LABEL_ROOM : 16);
+  const { x, xs, xTicks } = dayAxis(days, left, right);
   return {
     width,
     height,
     plot: { left, right, top: plotTop, bottom },
     yTicks: ticks.map((value) => ({ value, y: round(y(value)), label: chartCount(value) })),
-    xTicks: days.flatMap((d, index) =>
-      shownNames.has(index) ? [{ index, x: round(x(index)), label: chartDayLabel(d.day) }] : [],
-    ),
-    xs: xs.map(round),
+    xTicks,
+    xs,
     series: DAILY_CHART_SERIES.map((s) => ({
       key: s.key,
       label: s.label,
@@ -148,6 +172,131 @@ export function dailyChartLayout(
         : { x: round(x(0)), y: round(bottom), value: 0 },
     })),
     endLabels,
+  };
+}
+
+/**
+ * The share of a day's sent messages that failed (ADR-344), from 0 to 1, or null on a day that
+ * sent none: it has no share, and the chart leaves a gap there rather than draw it as 0%.
+ */
+export function failedShare(day: DailyChartDay): number | null {
+  return day.outbound > 0 ? day.failed / day.outbound : null;
+}
+
+/**
+ * A share as the chart writes it, by the same hand as the counts: 3%, 2.5%, to a tenth of a
+ * percent; a share above 0 too small for a tenth is "<0.1%", and one below 1 that would round to
+ * 100% is ">99.9%", so neither reads as none or as all of them.
+ */
+export function chartShare(share: number): string {
+  const tenths = Math.round(share * 1000);
+  if (share > 0 && tenths === 0) return '<0.1%';
+  if (share < 1 && tenths === 1000) return '>99.9%';
+  return `${tenths % 10 === 0 ? tenths / 10 : (tenths / 10).toFixed(1)}%`;
+}
+
+export interface FailedShareLayout {
+  width: number;
+  height: number;
+  /** The plot's edges, inside the axis labels. */
+  plot: { left: number; right: number; top: number; bottom: number };
+  /** Gridlines and their labels, from 0% up, valued in tenths of a percent: at most five. */
+  yTicks: { value: number; y: number; label: string }[];
+  /** The days named under the axis, as the messages chart names them. */
+  xTicks: { index: number; x: number; label: string }[];
+  /** Each day's x, for the crosshair. */
+  xs: number[];
+  /** The line, broken at each day that sent nothing. */
+  path: string;
+  /** Each day's y, or null on a day that sent nothing. */
+  ys: (number | null)[];
+  /** The days with a share between days without one: a line of one point draws nothing. */
+  lone: number[];
+  /** Where the line ends and the last day's share, or null when the last day sent nothing. */
+  end: { x: number; y: number; share: number } | null;
+  /** Whether the last day's share is written at the line's end. */
+  endLabel: boolean;
+}
+
+/**
+ * Where each day and gridline goes on the failed sends' chart (ADR-344), `width` by `height`
+ * pixels: the days along the x axis as on the messages chart, the y axis from 0% to the first
+ * gridline at or above the day with the largest share, in tenths of a percent so the steps are
+ * whole like the counts' (0.1% at least). Days that sent nothing have no point. With `edges`, the
+ * plot spans those instead of its own (`sharedPlotEdges`).
+ */
+export function failedShareLayout(
+  days: readonly DailyChartDay[],
+  width: number,
+  height: number,
+  edges?: PlotEdges,
+): FailedShareLayout {
+  const shares = days.map(failedShare);
+  // Each day's share rounded up to a tenth of a percent, in whole numbers, so the scale's top is at
+  // or above every day's.
+  const tenthsUp = (d: DailyChartDay) =>
+    d.outbound > 0 ? Math.floor((d.failed * 1000 + d.outbound - 1) / d.outbound) : 0;
+  const max = Math.max(0, ...days.map(tenthsUp));
+  const step = chartStep(max);
+  const top = Math.max(step, Math.ceil(max / step) * step);
+  const ticks: number[] = [];
+  for (let value = 0; value <= top; value += step) ticks.push(value);
+  const left =
+    edges?.left ?? Math.max(...ticks.map((value) => chartShare(value / 1000).length)) * 7 + 12;
+  const plotTop = TOP_ROOM;
+  const bottom = height - X_AXIS_ROOM;
+  const y = (tenths: number) => bottom - (tenths / top) * (bottom - plotTop);
+  const lastShare = shares.at(-1) ?? null;
+  const endLabel = width >= END_LABEL_MIN_WIDTH && lastShare !== null;
+  const right = edges?.right ?? width - (endLabel ? SHARE_LABEL_ROOM : 16);
+  const { xs, xTicks } = dayAxis(days, left, right);
+  const ys = shares.map((share) => (share === null ? null : round(y(share * 1000))));
+  const drawn = (index: number) => ys[index] !== undefined && ys[index] !== null;
+  const endX = xs.at(-1);
+  const endY = ys.at(-1);
+  return {
+    width,
+    height,
+    plot: { left, right, top: plotTop, bottom },
+    yTicks: ticks.map((value) => ({
+      value,
+      y: round(y(value)),
+      label: chartShare(value / 1000),
+    })),
+    xTicks,
+    xs,
+    path: ys
+      .flatMap((value, index) =>
+        value === null ? [] : [`${drawn(index - 1) ? 'L' : 'M'}${xs[index]} ${value}`],
+      )
+      .join(' '),
+    ys,
+    lone: ys.flatMap((_, index) =>
+      drawn(index) && !drawn(index - 1) && !drawn(index + 1) ? [index] : [],
+    ),
+    end:
+      lastShare !== null && endX !== undefined && endY !== undefined && endY !== null
+        ? { x: endX, y: endY, share: lastShare }
+        : null,
+    endLabel,
+  };
+}
+
+/**
+ * The edges the messages chart and the failed sends' chart drawn under it share (ADR-344), so each
+ * day sits at the same x in both: room on the left for either chart's gridline labels, and on the
+ * right for either's end labels.
+ */
+export function sharedPlotEdges(
+  days: readonly DailyChartDay[],
+  width: number,
+  height: number,
+): PlotEdges {
+  const messages = dailyChartLayout(days, width, height).plot;
+  const failed = failedShareLayout(days, width, height).plot;
+  return {
+    left: Math.max(messages.left, failed.left),
+    right: Math.min(messages.right, failed.right),
   };
 }
 

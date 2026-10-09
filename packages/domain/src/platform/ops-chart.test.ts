@@ -3,9 +3,13 @@ import {
   DAILY_CHART_SERIES,
   chartCount,
   chartDayLabel,
+  chartShare,
   chartStep,
   dailyChartLayout,
+  failedShare,
+  failedShareLayout,
   nearestDayIndex,
+  sharedPlotEdges,
   type DailyChartDay,
 } from './ops-chart';
 
@@ -180,5 +184,162 @@ describe('the messages a day chart (ADR-333)', () => {
     expect(nearestDayIndex(xs, 457)).toBe(2);
     expect(nearestDayIndex(xs, 9999)).toBe(2);
     expect(nearestDayIndex([], 10)).toBeNull();
+  });
+});
+
+describe('the failed sends a day chart (ADR-344)', () => {
+  it('takes each day’s share of its sends that failed, and none on a day that sent nothing', () => {
+    expect(failedShare(day('2026-10-09', 40, 3, 1))).toBe(0.025);
+    expect(failedShare(day('2026-10-09', 40, 3, 0))).toBe(0);
+    expect(failedShare(day('2026-10-09', 2, 0, 2))).toBe(1);
+    // Received messages have no share: only sends fail.
+    expect(failedShare(day('2026-10-09', 0, 12, 0))).toBeNull();
+  });
+
+  it('writes shares to a tenth of a percent, never as none or all when they are not', () => {
+    expect(chartShare(0)).toBe('0%');
+    expect(chartShare(0.025)).toBe('2.5%');
+    expect(chartShare(0.03)).toBe('3%');
+    expect(chartShare(1 / 3)).toBe('33.3%');
+    expect(chartShare(0.0005)).toBe('0.1%');
+    expect(chartShare(0.00049)).toBe('<0.1%');
+    expect(chartShare(0.9994)).toBe('99.9%');
+    expect(chartShare(0.9995)).toBe('>99.9%');
+    expect(chartShare(1)).toBe('100%');
+  });
+
+  it('scales from 0% to the gridline at or above the largest share, broken where none was sent', () => {
+    const layout = failedShareLayout(
+      [
+        day('2026-10-06', 40, 0, 1),
+        day('2026-10-07', 10, 5, 0),
+        day('2026-10-08', 0, 7),
+        day('2026-10-09', 50, 2, 3),
+      ],
+      720,
+      240,
+    );
+    // 6% at most: steps of 2%, valued in tenths of a percent.
+    expect(layout.yTicks.map((t) => [t.value, t.label])).toEqual([
+      [0, '0%'],
+      [20, '2%'],
+      [40, '4%'],
+      [60, '6%'],
+    ]);
+    // Right of the y labels (2 characters), under 12 pixels of air, left of the end label.
+    expect(layout.plot).toEqual({ left: 26, right: 660, top: 12, bottom: 212 });
+    expect(layout.yTicks.map((t) => t.y)).toEqual([212, 145.33, 78.67, 12]);
+    expect(layout.xs).toEqual([26, 237.33, 448.67, 660]);
+    expect(layout.ys).toEqual([128.67, 212, null, 12]);
+    // The line stops at the day that sent nothing and starts again after it, where one day alone
+    // is drawn as a dot.
+    expect(layout.path).toBe('M26 128.67 L237.33 212 M660 12');
+    expect(layout.lone).toEqual([3]);
+    expect(layout.end).toEqual({ x: 660, y: 12, share: 0.06 });
+    expect(layout.endLabel).toBe(true);
+    expect(layout.xTicks.map((t) => [t.index, t.label])).toEqual([
+      [0, '6 Oct'],
+      [1, '7 Oct'],
+      [2, '8 Oct'],
+      [3, '9 Oct'],
+    ]);
+  });
+
+  it('keeps every share under the top gridline, whole steps of a tenth of a percent at least', () => {
+    for (const [sent, failed, top, step] of [
+      [3000, 1, 1, 1],
+      [1000, 3, 3, 1],
+      // Just past 0.2%: rounded up to 0.3%, so the day stays under the top.
+      [1_000_000, 2001, 3, 1],
+      [1000, 7, 8, 2],
+      [3, 1, 400, 100],
+      [1000, 45, 60, 20],
+      [10, 9, 1000, 500],
+      [1, 1, 1000, 500],
+    ] as const) {
+      const layout = failedShareLayout([day('2026-10-09', sent, 0, failed)], 720, 240);
+      const values = layout.yTicks.map((t) => t.value);
+      expect(values.at(-1), `${failed} of ${sent}`).toBe(top);
+      expect(values[1], `${failed} of ${sent}`).toBe(step);
+      expect(values.length, `${failed} of ${sent}`).toBeLessThanOrEqual(5);
+      expect(layout.ys[0], `${failed} of ${sent}`).toBeGreaterThanOrEqual(layout.plot.top);
+    }
+    const tiny = failedShareLayout([day('2026-10-09', 3000, 0, 1)], 720, 240);
+    expect(tiny.yTicks.map((t) => t.label)).toEqual(['0%', '0.1%']);
+    // The labels' width decides the left edge: "0.1%" is 4 characters.
+    expect(tiny.plot.left).toBe(40);
+    expect(
+      failedShareLayout([day('2026-10-09', 1, 0, 1)], 720, 240).yTicks.map((t) => t.label),
+    ).toEqual(['0%', '50%', '100%']);
+  });
+
+  it('leaves the last share unwritten when the last day sent nothing, or the chart is narrow', () => {
+    const none = failedShareLayout(
+      [day('2026-10-08', 10, 0, 1), day('2026-10-09', 0, 4)],
+      720,
+      240,
+    );
+    expect(none.end).toBeNull();
+    expect(none.endLabel).toBe(false);
+    expect(none.plot.right).toBe(704);
+    // The first day alone, between the chart's start and a day without sends.
+    expect(none.lone).toEqual([0]);
+    const narrow = failedShareLayout([day('2026-10-09', 10, 0, 1)], 479, 240);
+    expect(narrow.endLabel).toBe(false);
+    expect(narrow.plot.right).toBe(463);
+    expect(failedShareLayout([day('2026-10-09', 10, 0, 1)], 480, 240).endLabel).toBe(true);
+  });
+
+  it('names the same days as the messages chart, and draws no line without sends or days', () => {
+    const month = Array.from({ length: 31 }, (_, i) =>
+      day(`2026-10-${String(i + 1).padStart(2, '0')}`, i, 2 * i, i % 3 === 0 ? 0 : 1),
+    );
+    expect(failedShareLayout(month, 720, 240).xTicks.map((t) => t.index)).toEqual([
+      0, 6, 12, 18, 24, 30,
+    ]);
+    // The first day sent nothing: the line starts at the second.
+    expect(failedShareLayout(month, 720, 240).path).toMatch(/^M\S+ \S+ L/);
+    const quiet = failedShareLayout([day('2026-10-08', 0, 3), day('2026-10-09', 0, 1)], 720, 240);
+    expect(quiet.path).toBe('');
+    expect(quiet.ys).toEqual([null, null]);
+    expect(quiet.lone).toEqual([]);
+    expect(quiet.end).toBeNull();
+    expect(quiet.yTicks.map((t) => t.label)).toEqual(['0%', '0.1%']);
+    const empty = failedShareLayout([], 720, 240);
+    expect(empty.xs).toEqual([]);
+    expect(empty.path).toBe('');
+    expect(empty.end).toBeNull();
+    expect(empty.endLabel).toBe(false);
+  });
+
+  it('shares the plot’s edges with the messages chart above it, so each day sits under its own', () => {
+    const days = [
+      day('2026-10-07', 10, 4, 1),
+      day('2026-10-08', 30, 12),
+      day('2026-10-09', 25, 8, 2),
+    ];
+    // Alone, the messages chart's labels take 26 pixels and its end labels 120; the shares' labels
+    // ("10%") take 33 and their end label 60.
+    expect(dailyChartLayout(days, 720, 240).plot).toMatchObject({ left: 26, right: 600 });
+    expect(failedShareLayout(days, 720, 240).plot).toMatchObject({ left: 33, right: 660 });
+    const edges = sharedPlotEdges(days, 720, 240);
+    expect(edges).toEqual({ left: 33, right: 600 });
+    const messages = dailyChartLayout(days, 720, 240, edges);
+    const shares = failedShareLayout(days, 720, 240, edges);
+    expect(messages.plot).toMatchObject(edges);
+    expect(shares.plot).toMatchObject(edges);
+    expect(shares.xs).toEqual(messages.xs);
+    expect(shares.xTicks).toEqual(messages.xTicks);
+    expect(messages.xs).toEqual([33, 316.5, 600]);
+    // The scales stay each chart's own.
+    expect(messages.yTicks.map((t) => t.label)).toEqual(['0', '10', '20', '30']);
+    expect(shares.yTicks.map((t) => t.label)).toEqual(['0%', '5%', '10%']);
+    // Where the messages' ends nearly meet, they write no end labels, but the share still does:
+    // the messages chart keeps the share's room on the right.
+    const close = [day('2026-10-08', 10, 2, 1), day('2026-10-09', 20, 19, 1)];
+    expect(dailyChartLayout(close, 720, 240).plot.right).toBe(704);
+    const closeEdges = sharedPlotEdges(close, 720, 240);
+    expect(closeEdges.right).toBe(660);
+    expect(dailyChartLayout(close, 720, 240, closeEdges).plot.right).toBe(660);
   });
 });

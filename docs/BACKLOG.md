@@ -1374,10 +1374,14 @@ verification, app review, Embedded Signup configuration).
   days and says how many are not counted yet).
   **[A company's year built; its database and browser tests run only in CI]** (ADR-342, no
   migration: a company's platform page draws its own year under its 30 days).
+  **[Failed sends as a share of those sent built; its browser test runs only in CI]** (ADR-344, no
+  migration: under each messages chart, a chart of each day's failed sends divided by its sends, on
+  an axis of percentages, with a "Share failed" column in the table of the days).
   Remaining:
   other alert channels (several channels, a channel per alert, formats other than a JSON `text`
   member, such as Microsoft Teams' or PagerDuty's, and the owners' other notices, such as refund
-  requests and personal notices, in a channel), other charts (failures, a measure of their own),
+  requests and personal notices, in a channel; Microsoft's documentation of Teams' webhooks could
+  not be opened from here), other charts (other measures, such as delivered or read shares),
   Meta's quality webhook (unconfirmed), rollups for many companies and pages read from the
   database.
 - **P5-11 Account export/deletion workflow** **[built, locally verified with test data only]**

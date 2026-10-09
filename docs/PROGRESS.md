@@ -1,5 +1,49 @@
 # Progress
 
+## 2026-10-09 — Failed sends a day as a share of those sent (P5-10, H-034, ADR-344)
+
+Status: **Implemented; its browser test runs in CI only.** The messages a day charts left failed
+sends to the tooltip and the table: beside the messages sent they would lie flat on the axis.
+
+### Completed
+
+- **Domain:** `platform/ops-chart.ts`: `failedShare` (a day's failed sends divided by its sends,
+  none on a day that sent nothing), `chartShare` (to a tenth of a percent, "<0.1%" and ">99.9%"
+  where rounding would read as none or all) and `failedShareLayout` (a scale in tenths of a percent,
+  the line broken at days without sends, lone days as dots, the end label's room); the days along
+  the x axis now come from one `dayAxis` for both charts, which share the plot's edges
+  (`sharedPlotEdges`), so each day sits at the same x in both. No migration, no query changed.
+- **Web:** `DailyFailedShareChart` under each messages chart (the Usage tab's window and year, a
+  company's 30 days and year), captioned "Sends that failed, as a share of those sent", or a note
+  when nothing was sent; both charts drawn in the shared `DayChartFrame` (the slider, the
+  gridlines, the days' names, the crosshair and the tooltip); a "Share failed" column in the table
+  of the days; the colour token `--chart-3` (aqua), light and dark.
+- **Colour:** the palette validator passed the three slots against the card, light (`#ffffff`) and
+  dark (`#1b1815`), for colour-vision separation (worst all-pairs ΔE 9.2 light, 9.4 dark) and
+  normal vision; aqua is under 3:1 on the light card (2.82), so the line's last share is written at
+  its end where it fits and the table gives every share.
+- **Tests:** unit (7 new in `platform/ops-chart.test.ts`: the share and its gap, the shares written,
+  the scale and the line broken with a lone day, the top above every share including one just past a
+  step, the end label's room, the days named as on the messages chart, the edges both charts share;
+  the 8 earlier tests unchanged and passing over the shared axis); e2e (the Usage tab's chart or its
+  note and the slider's value; a company that only received a message shows the note and "None sent"
+  every day). Written for CI; the e2e test was not run here.
+- **Docs:** ADR-344; ARCHITECTURE; BACKLOG P5-10 (with the Teams format noted as blocked on
+  Microsoft's documentation); feature matrix H-034.
+- **Mutation checks:** 21/21 deliberate regressions caught on the unit-tested parts (2 after
+  assertions were added: the left edge sized by counts rather than percentages, and the messages
+  chart ignoring the shared right edge where only the share writes an end label).
+
+### Test commands and results (local, 2026-10-09)
+
+| Command                                            | Result                                                         |
+| -------------------------------------------------- | -------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                          |
+| `pnpm test` (unit)                                 | 144 files, 1461 tests passed                                   |
+| `pnpm test:e2e`                                    | not run here: it needs the web, worker and Mailpit; CI runs it |
+| `pnpm build`                                       | passed                                                         |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                 |
+
 ## 2026-10-09 — Each browser project's end-to-end tests in a CI job of its own (ADR-343)
 
 Status: **Implemented and measured in CI: its first complete run ended the check of the four in 52

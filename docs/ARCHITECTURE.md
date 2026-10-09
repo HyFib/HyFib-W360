@@ -2733,6 +2733,15 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   the same way, with its health and 30 days, for its platform page (ADR-342), which says the counts
   are deleted with the company instead while its deletion runs (`deletionStarted`, read in the same
   snapshot).
+- **Failed sends as a share (ADR-344):** `DailyMessages` draws, under each messages chart,
+  `DailyFailedShareChart`: each day's failed sends divided by its sends (`failedShare`, null on a
+  day that sent nothing), laid out by `failedShareLayout` in `platform/ops-chart.ts` (a scale in
+  tenths of a percent, the line broken at days without sends, lone days as dots, the days named as
+  on the messages chart by the same `dayAxis`, on the plot edges both charts share,
+  `sharedPlotEdges`) and written by `chartShare`. Both charts are drawn in `DayChartFrame`
+  (`components/platform/daily-chart.tsx`), which measures the room, holds the chosen day, and draws
+  the slider, the gridlines, the days' names, the crosshair and the tooltip; each chart gives it a
+  `draw` callback for its layout, marks and tooltip at the measured width. No query changed.
 - **Exports (ADR-154, ADR-155, ADR-158):** `/platform/ops/export/[list]` (a route handler behind the
   pages' platform actor check; a name of `OPS_EXPORT_LISTS`, any other not found) calls
   `exportList`, which checks in its transaction that the actor is a platform administrator, reads

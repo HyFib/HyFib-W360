@@ -13449,3 +13449,40 @@ to the same branch, or by hand, now shows the check of the four as failed rather
 expected, since a skipped required check would pass.
 
 Not built: splitting a project's tests across jobs, and tests run in parallel within a job.
+
+## ADR-344 Failed sends a day as a share of those sent, a chart of their own (P5-10) (2026-10-09)
+
+Context: the messages a day charts (ADR-333, ADR-334, ADR-341, ADR-342) draw sent and received
+messages on one axis and leave failed sends to the tooltip and the table: far fewer than the
+others, they would lie flat on the axis, so a day when many sends failed looked like any other.
+
+Decision:
+
+- **A chart of their own:** under each messages chart (the Usage tab's window and year, a
+  company's 30 days and year), "Sends that failed, as a share of those sent" draws each UTC day's
+  failed sends divided by its sends, one line on an axis of percentages from 0% to the first
+  gridline at or above the largest share, in steps of a tenth of a percent at least. A day that
+  sent nothing has no share, so the line breaks there rather than draw 0%, and a day alone between
+  such days is drawn as a dot. Shares are written to a tenth of a percent, a share above 0 too small
+  for one as "<0.1%" and one below all as ">99.9%". When nothing was sent in the days drawn, a note
+  says so in place of the chart.
+- **The same days, a measure of its own:** both charts share the plot's edges (room for either
+  chart's gridline labels on the left and end labels on the right, `sharedPlotEdges`), so each day
+  sits at the same x in both and a peak lines up with the day above it, and the days are named
+  alike. The crosshair, the slider over the days, the keys and the tooltip are the messages chart's
+  frame, now shared (`DayChartFrame`); the tooltip gives the day's share, failed and sent, and the
+  slider's value the same in words. Each chart keeps its own scale. One measure needs no legend:
+  the caption names it.
+- **Colour:** the third categorical slot (`--chart-3`, aqua), so the share never takes Sent's or
+  Received's colour; checked with the palette validator against the card for colour-vision
+  separation from the other two, light and dark. On the light card it is under 3:1, so the line's
+  last share is written at its end where it fits and the table gives every share: the folded table
+  of the days has a "Share failed" column, "None sent" on a day without sends.
+- **No migration:** the counts are those the charts already read.
+
+Consequences: a day whose sends failed in numbers small beside those sent shows as a peak. A share
+counts the failures known when the day was read: the live days' as they are, the year's as last
+counted (ADR-341).
+
+Not built: other measures (delivered or read shares, failures by reason or by company), and the
+share in a CSV.
