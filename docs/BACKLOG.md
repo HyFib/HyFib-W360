@@ -1256,11 +1256,14 @@ verification, app review, Embedded Signup configuration).
   number or date field's values, either end or both).
   **[Audit entries of endpoints with long lists fixed; their database tests run only in CI]**
   (ADR-336, no migration: an added or changed endpoint's entry whose lists together would pass
-  7,000 bytes as jsonb names the largest by count, so no change is refused for its audit entry).
+  7,000 bytes as jsonb names the largest by count and digest, so no change is refused for its audit
+  entry).
   Remaining: filters for other event types and on a message's values, field value comparisons beyond
   values, words and ranges, other authentication (headers computed per delivery, other OAuth
   grants), mutual TLS, fixed egress addresses, events for store orders, a sequence number across
-  events, load tests.
+  events, load tests, a bound on an endpoint's whole configuration (an API answer kept with its
+  `Idempotency-Key` holds 64 KiB, which every list at its limit at once could pass; estimated in
+  ADR-336's review, not reproduced).
 - **P5-10 Platform ops screens** **[built, locally verified with test data only]** (ADR-054):
   `/platform/ops` with Overview, Onboarding (failed and abandoned signups, failed or stuck number
   setups, new companies without a number), Integrations (current failures with host-only labels,

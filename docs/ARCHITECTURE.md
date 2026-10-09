@@ -2324,9 +2324,9 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   check keeps it to 1 to 50 such pairs and to endpoints taking either event, the services read
   each value a list adds by its field's type (`webhookContactEventFieldValuesChecked`) and keep a
   list to 4,000 bytes as JSON. The audit entries of added and changed endpoints name every list,
-  and one whose lists together would pass 7,000 bytes as jsonb (`webhookAuditMetadataBytes`, a
-  generous count) names the largest by count under `listCounts` until it fits within its 8 KiB of
-  metadata (`webhookEndpointAuditMetadata`, ADR-336).
+  and one whose lists together would pass 7,000 bytes as jsonb (`jsonbSize`, an upper bound) names
+  the largest by count under `listCounts` and by a digest under `listDigests` until it fits within
+  its 8 KiB of metadata (`webhookEndpointAuditMetadata`, ADR-336).
   `app.webhook_contact_values_match` passes a change when the contact has one of the values (text
   whatever its case, numbers as numbers) or, for a `contact.updated`, when its transaction changed
   one of the fields. `app.capture_contact_webhook_event` and `app.deliver_contact_webhook_tag`

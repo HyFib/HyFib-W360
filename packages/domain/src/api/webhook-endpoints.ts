@@ -72,7 +72,6 @@ import {
   WEBHOOK_TASK_DETAILS,
   webhookTakesTeamEvents,
   webhookTakesTemplateEvents,
-  webhookEndpointAuditMetadata,
   type WebhookContactFieldValue,
   type WebhookEndpointOAuth,
 } from '../webhooks/model';
@@ -258,6 +257,7 @@ import {
   webhookMessageApiKeyIdsSchema,
   webhookMessageStatusesFor,
   webhookMessageStatusesSchema,
+  webhookEndpointAuditMetadata,
   webhookOAuthAudit,
   webhookOAuthColumns,
   webhookOAuthSchema,

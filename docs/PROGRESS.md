@@ -11,23 +11,37 @@ The local PostgreSQL is unavailable, so the integration tests below were written
 
 ### Completed
 
-- **Domain:** `webhookAuditMetadataBytes` counts a value as jsonb takes it, generously (the header,
-  each value's entry, the containers' headers, UTF-8 bytes, numbers' numeric form and alignment, in
-  full); `webhookEndpointAuditMetadata` keeps an entry that fits within 7,000 bytes as it is and
-  otherwise names its largest lists by count under `listCounts`, largest first and by name when as
-  large, until it fits, always naming the host and the events. Settings' added and changed
-  endpoints and every entry of the API's endpoints pass through it; the endpoint keeps every list.
-- **Tests:** unit (3 new in `webhooks/webhooks.test.ts`: the count of each kind of value, an entry
-  that fits unchanged, the largest lists counted first and by name with the events kept);
-  integration (1 new each in `webhooks.test.ts` and `api-webhook-endpoints.test.ts`: an endpoint
-  with five lists of 50 Tamil tags, about 29,000 bytes, added and changed, every list kept, its
-  entries fitting and PostgreSQL's uncompressed size of each within the count). Written for CI; the
-  integration tests were not run here. No migration.
+- **Domain:** `webhookEndpointAuditMetadata` (in the webhooks service) counts an entry with
+  `jsonbSize` (ADR-131's upper bound, checked against PostgreSQL in CI), keeps one within 7,000
+  bytes as it is and otherwise names its largest lists by count under `listCounts` and by the first
+  16 hex digits of their SHA-256 under `listDigests`, largest first and by name when as large, until
+  it fits, always naming the host and the events (a change's `eventTypes`, a replay's `events`).
+  Settings' added and changed endpoints and every entry of the API's endpoints pass through it; the
+  endpoint keeps every list.
+- **Tests:** unit (3 new in `webhooks/webhooks.test.ts`: an entry that fits unchanged with room for
+  the API's source; the largest lists in bytes counted first and by name, with their digests and a
+  changed list's other digest; the events of a change or a replay kept, and every list counted
+  within 6,000 bytes); integration (1 new each in `webhooks.test.ts` and
+  `api-webhook-endpoints.test.ts`: an endpoint with five lists of 50 Tamil tags, about 29,000
+  bytes, added and changed, every list kept, its entries fitting, PostgreSQL's uncompressed size of
+  each within the count, and in Settings a changed list's digest alone changing). Written for CI;
+  the integration tests were not run here. No migration.
 - **Docs:** ADR-336; ARCHITECTURE; SECURITY; THREAT-MODEL T301; BACKLOG P5-09.
-- **Mutation checks:** 14/14 deliberate regressions caught on the unit-tested parts (each kind of
-  value the count takes, an entry that fits, the events, the order and the end of the lists named by
-  count, the counts, and the budget with room for the API's source). The call sites need the
+- **Mutation checks:** 14/14 deliberate regressions caught on the unit-tested parts (an entry that
+  fits, the events of a change and of a replay, the order of the lists named by count, in bytes and
+  by name, their end, the counts, the digests, the count in bytes, and the budget with room for the
+  API's source), one after a test was added (lists ordered by their items). The call sites need the
   database, so their regressions are left to the integration tests, which run in CI.
+- **Review fixes:** an independent review before the push found no defect that would fail the fix
+  or its tests. It found that the slice counted bytes with a counter of its own, untested against
+  PostgreSQL and weaker at its edges, where `jsonbSize` (ADR-131) already did so and is checked
+  against `pg_column_size` in CI; the slice now uses it. It found that an entry naming a list by
+  count could hide that the change replaced it, so each list named by count now carries a digest;
+  that a replay's `events` were not kept as a change's `eventTypes` were; the reason given for the
+  4,000 bytes of field values (the audit entry, now bounded as a whole) still stated as before in a
+  comment and a test; "40 letters" where the limit is 40 characters; and, beside the slice, that an
+  API answer kept with its `Idempotency-Key` holds 64 KiB, which every list of an endpoint at its
+  limit at once could pass. Each is corrected; the last is in BACKLOG P5-09, not built.
 
 ### Test commands and results (local, 2026-10-09)
 
@@ -37,6 +51,7 @@ The local PostgreSQL is unavailable, so the integration tests below were written
 | `pnpm test` (unit)                                 | 141 files, 1410 tests passed                                  |
 | `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
 | `pnpm build`                                       | passed                                                        |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
 
 ## 2026-10-09 — Words and ranges in field value filters (P5-09, H-014, ADR-335)
 

@@ -1128,8 +1128,8 @@ export const WEBHOOK_LIMITS = {
   /** The custom field values whose added and changed contacts an endpoint can choose (ADR-332). */
   contactEventFieldValues: 50,
   /**
-   * And their bytes as JSON in all (ADR-332), so that the audit entries carrying the list stay
-   * within the 8 KiB of metadata an audit entry holds.
+   * And their bytes as JSON in all (ADR-332), set for the 8 KiB of metadata an audit entry holds;
+   * since ADR-336 the entry as a whole is kept within it (`webhookEndpointAuditMetadata`).
    */
   contactEventFieldValuesBytes: 4000,
   /** The API keys whose automation runs an endpoint can choose (ADR-319): a company's most keys. */
@@ -1155,72 +1155,11 @@ export const WEBHOOK_LIMITS = {
   oauthScopeLength: 500,
   oauthTokenLength: 4000,
   /**
-   * The most an endpoint's audit entry may take as jsonb, counted by `webhookAuditMetadataBytes`
-   * (ADR-336): below the 8 KiB of metadata an audit entry holds (0001), with room for the source
-   * the API adds.
+   * The most an endpoint's audit entry may take as jsonb, counted by `jsonbSize` (ADR-336): below
+   * the 8 KiB of metadata an audit entry holds (0001), with room for the source the API adds.
    */
   auditMetadataBytes: 7000,
 } as const;
-
-/**
- * At most the bytes PostgreSQL's jsonb takes for a JSON value (ADR-336), as `pg_column_size` counts
- * a value not yet compressed: the 4-byte header, each value's 4-byte entry, a container's header,
- * a string's or key's UTF-8 bytes, a number's numeric form (its headers and two bytes for each four
- * digits, counted generously) and the alignment of containers and numbers, counted in full. A value
- * that is neither an array nor an object is kept as an array of one.
- */
-export function webhookAuditMetadataBytes(value: unknown): number {
-  const utf8 = (text: string) => new TextEncoder().encode(text).length;
-  const data = (v: unknown): number => {
-    if (typeof v === 'string') return utf8(v);
-    if (typeof v === 'number') {
-      const text = String(v);
-      const digits = /e/i.test(text) ? 40 : text.length;
-      return 3 + 6 + 2 * (Math.ceil(digits / 4) + 2);
-    }
-    if (Array.isArray(v)) return 3 + 4 + v.reduce<number>((sum, item) => sum + 4 + data(item), 0);
-    if (typeof v === 'object' && v !== null) {
-      return (
-        3 +
-        4 +
-        Object.entries(v).reduce((sum, [key, item]) => sum + 4 + utf8(key) + 4 + data(item), 0)
-      );
-    }
-    return 0;
-  };
-  return 4 + (typeof value === 'object' && value !== null ? data(value) : 8 + data(value));
-}
-
-/**
- * An endpoint's audit entry within the 8 KiB of metadata an audit entry holds (ADR-336): as given
- * while `webhookAuditMetadataBytes` counts at most `WEBHOOK_LIMITS.auditMetadataBytes`; otherwise
- * its largest lists, one after another (by name when two are as large), are named by their lengths
- * under `listCounts` instead of item by item, until it fits. Its events are always named, and the
- * endpoint keeps every list whole: only the entry names some by count.
- */
-export function webhookEndpointAuditMetadata(
-  metadata: Record<string, unknown>,
-): Record<string, unknown> {
-  const fits = (entry: Record<string, unknown>) =>
-    webhookAuditMetadataBytes(entry) <= WEBHOOK_LIMITS.auditMetadataBytes;
-  if (fits(metadata)) return metadata;
-  const largestFirst = Object.entries(metadata)
-    .filter(
-      (entry): entry is [string, unknown[]] => entry[0] !== 'eventTypes' && Array.isArray(entry[1]),
-    )
-    .map(([key, list]) => ({ key, length: list.length, bytes: webhookAuditMetadataBytes(list) }))
-    .sort((a, b) => b.bytes - a.bytes || (a.key < b.key ? -1 : 1));
-  const counted = new Map<string, number>();
-  const entry = () => ({
-    ...Object.fromEntries(Object.entries(metadata).filter(([key]) => !counted.has(key))),
-    listCounts: Object.fromEntries(counted),
-  });
-  for (const list of largestFirst) {
-    counted.set(list.key, list.length);
-    if (fits(entry())) break;
-  }
-  return entry();
-}
 
 /**
  * The events of automation runs, which an endpoint can take for chosen automations (ADR-145): a

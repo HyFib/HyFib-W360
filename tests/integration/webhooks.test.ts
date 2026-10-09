@@ -3,7 +3,7 @@ import { once } from 'node:events';
 import { createServer, type IncomingHttpHeaders, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import { isAppError, sha256Hex, systemClock, uuidv7, type Clock } from '@w360/core';
+import { isAppError, jsonbSize, sha256Hex, systemClock, uuidv7, type Clock } from '@w360/core';
 import {
   DEFAULT_EGRESS_POLICY,
   createEgressClient,
@@ -44,7 +44,6 @@ import {
   WEBHOOK_LIMITS,
   WEBHOOK_TEMPLATE_STATUSES,
   WEBHOOK_USER_AGENT,
-  webhookAuditMetadataBytes,
   webhookHeadersAad,
   WebhookOAuthTokenCache,
   webhookOAuthSecretAad,
@@ -7130,7 +7129,7 @@ describe('contact event field value filters (ADR-332)', () => {
       /Choose fields of this company/,
       'contactEventFieldValues.1.key',
     );
-    // Values too long together for the audit entry carrying them are refused before any write.
+    // Values past the list's 4,000 bytes (ADR-332) are refused before any write.
     await refused(
       {
         contactEventFieldValues: Array.from({ length: 50 }, (_, i) => ({
@@ -7319,7 +7318,7 @@ describe('contact event field value filters (ADR-332)', () => {
     expect(grants).toEqual({ app_updates: true, definer_reads_source: true });
   });
 
-  it('save and audit a list of values up to the 4,000 bytes an audit entry carries', async () => {
+  it('save and audit a list of values up to the 4,000 bytes the list takes', async () => {
     const c = await fx.company();
     const owner = await fx.ctx(c, c.owner);
     await fx.query(
@@ -7386,6 +7385,14 @@ describe('endpoint audit entries within an audit entry’s 8 KiB (ADR-336)', () 
     });
     // The endpoint keeps every list whole.
     expect((await webhooks().list(owner)).find((e) => e.id === created.id)).toMatchObject(lists);
+    // A change of a list named by count changes its digest alone.
+    const otherTags = tags(6);
+    await webhooks().update(owner, {
+      endpointId: created.id,
+      url,
+      eventTypes,
+      contactTags: otherTags,
+    });
     const audits = await fx.query<{
       action: string;
       metadata: Record<string, unknown>;
@@ -7398,14 +7405,21 @@ describe('endpoint audit entries within an audit entry’s 8 KiB (ADR-336)', () 
     expect(audits.map((a) => a.action)).toEqual([
       'webhook.endpoint_created',
       'webhook.endpoint_updated',
+      'webhook.endpoint_updated',
     ]);
-    for (const audit of audits) {
+    const digest = (list: string[]) => sha256Hex(JSON.stringify(list)).slice(0, 16);
+    const digests = {
+      contactEventTags: digest(lists.contactEventTags),
+      contactTags: digest(lists.contactTags),
+      conversationTags: digest(lists.conversationTags),
+      surveyContactTags: digest(lists.surveyContactTags),
+    };
+    for (const [index, audit] of audits.entries()) {
       // The count takes no fewer bytes than PostgreSQL does, uncompressed, and the entry fits.
-      expect(audit.bytes).toBeLessThanOrEqual(webhookAuditMetadataBytes(audit.metadata));
-      expect(webhookAuditMetadataBytes(audit.metadata)).toBeLessThanOrEqual(
-        WEBHOOK_LIMITS.auditMetadataBytes,
-      );
-      // Four lists as large named by count, by name; the fifth whole, with the events and host.
+      expect(audit.bytes).toBeLessThanOrEqual(jsonbSize(audit.metadata));
+      expect(jsonbSize(audit.metadata)).toBeLessThanOrEqual(WEBHOOK_LIMITS.auditMetadataBytes);
+      // Four lists as large named by count and digest, by name; the fifth whole, with the events
+      // and the host.
       expect(audit.metadata).toMatchObject({
         host: 'hooks.example.com',
         listCounts: {
@@ -7414,6 +7428,7 @@ describe('endpoint audit entries within an audit entry’s 8 KiB (ADR-336)', () 
           conversationTags: 50,
           surveyContactTags: 50,
         },
+        listDigests: index < 2 ? digests : { ...digests, contactTags: digest(otherTags) },
         surveyConversationTags: lists.surveyConversationTags,
       });
       expect(audit.metadata.eventTypes).toHaveLength(3);
@@ -7421,6 +7436,7 @@ describe('endpoint audit entries within an audit entry’s 8 KiB (ADR-336)', () 
         expect(audit.metadata).not.toHaveProperty(counted);
       }
     }
+    expect(digest(otherTags)).not.toBe(digests.contactTags);
   });
 });
 describe('contact event field words and ranges (ADR-335)', () => {

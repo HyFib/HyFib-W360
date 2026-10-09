@@ -3,7 +3,7 @@ import { once } from 'node:events';
 import { createServer, type IncomingHttpHeaders, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { isAppError, sha256Hex, systemClock, uuidv7, type Clock } from '@w360/core';
+import { isAppError, jsonbSize, sha256Hex, systemClock, uuidv7, type Clock } from '@w360/core';
 import { DEFAULT_EGRESS_POLICY, createEgressClient } from '@w360/core/egress';
 import { authorizedTenantScope, sql } from '@w360/db';
 import {
@@ -18,7 +18,6 @@ import {
   WEBHOOK_LIMITS,
   WebhookOAuthTokenCache,
   verifyWebhookSignature,
-  webhookAuditMetadataBytes,
   webhookOAuthSecretAad,
   type ApiContext,
   type ApiKeysService,
@@ -3071,8 +3070,9 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'webhook.endpoint_created',
       'webhook.endpoint_updated',
     ]);
+    const digest = (list: string[]) => sha256Hex(JSON.stringify(list)).slice(0, 16);
     for (const audit of audits) {
-      expect(audit.bytes).toBeLessThanOrEqual(webhookAuditMetadataBytes(audit.metadata));
+      expect(audit.bytes).toBeLessThanOrEqual(jsonbSize(audit.metadata));
       expect(audit.bytes).toBeLessThanOrEqual(8192);
       expect(audit.metadata).toMatchObject({
         source: 'api',
@@ -3082,6 +3082,12 @@ describe('webhook endpoints through the API (ADR-081)', () => {
           conversationTags: 50,
           surveyContactTags: 50,
         },
+        listDigests: {
+          contactEventTags: digest(lists.contactEventTags),
+          contactTags: digest(lists.contactTags),
+          conversationTags: digest(lists.conversationTags),
+          surveyContactTags: digest(lists.surveyContactTags),
+        },
         surveyConversationTags: lists.surveyConversationTags,
       });
       expect(audit.metadata).not.toHaveProperty('contactTags');
@@ -3089,9 +3095,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     // Without its source the entry is within the count the services keep it to.
     const [first] = audits;
     const { source: _source, ...withoutSource } = first?.metadata ?? {};
-    expect(webhookAuditMetadataBytes(withoutSource)).toBeLessThanOrEqual(
-      WEBHOOK_LIMITS.auditMetadataBytes,
-    );
+    expect(jsonbSize(withoutSource)).toBeLessThanOrEqual(WEBHOOK_LIMITS.auditMetadataBytes);
   });
 
   it('choose the field values of the added and changed contacts an endpoint receives, read by the fields’ types, kept by changes that leave them out and cleared with both events (ADR-332)', async () => {

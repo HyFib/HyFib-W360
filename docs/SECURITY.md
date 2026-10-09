@@ -1389,8 +1389,9 @@ Phase 5 rules (outgoing webhooks, P5-09):
   with `webhooks.manage` do the same for the endpoints keys added (ADR-081, ADR-083). Every change
   is audited with the endpoint's host only; the full URL (which may carry a receiver's token) and
   the secret are never logged. An entry whose lists together would pass 7,000 bytes, counted as
-  jsonb generously, names the largest by count instead of item by item (ADR-336), so no change is
-  refused for its audit entry; the endpoint keeps every list whole.
+  jsonb by `jsonbSize` (an upper bound), names the largest by count and by a digest of their items
+  instead of item by item (ADR-336), so no change is refused for its audit entry and two entries
+  still show whether such a list changed; the endpoint keeps every list whole.
 - An endpoint's URL must pass the egress guard's rules when saved (https, no credentials, port 443
   or from 1024) and every request goes through the egress guard: private, loopback, link-local,
   metadata and reserved addresses are refused after DNS resolution, the connection is pinned to the

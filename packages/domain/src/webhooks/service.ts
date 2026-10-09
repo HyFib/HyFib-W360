@@ -1,6 +1,14 @@
 import { randomBytes } from 'node:crypto';
 import { z } from 'zod';
-import { AppError, notFound, uuidv7, type Clock, type Keyring } from '@w360/core';
+import {
+  AppError,
+  jsonbSize,
+  notFound,
+  sha256Hex,
+  uuidv7,
+  type Clock,
+  type Keyring,
+} from '@w360/core';
 import { EgressError, parseEgressUrl, type EgressPolicy } from '@w360/core/egress';
 import {
   and,
@@ -73,7 +81,6 @@ import {
   WEBHOOK_TEMPLATE_STATUSES,
   WEBHOOK_UNATTEMPTED_ERRORS,
   webhookContactFieldValueId,
-  webhookEndpointAuditMetadata,
   webhookHost,
   webhookTakesAutomationRuns,
   webhookTakesCampaignEvents,
@@ -2675,6 +2682,46 @@ export async function webhookContactEventFieldValuesChecked(
     kept.push({ ...checked });
   });
   return kept;
+}
+
+/**
+ * An endpoint's audit entry within the 8 KiB of metadata an audit entry holds (ADR-336): as given
+ * while `jsonbSize` counts at most `WEBHOOK_LIMITS.auditMetadataBytes` for it; otherwise its largest
+ * lists, one after another (by name when two are as large), are named by their lengths under
+ * `listCounts` and by the first 16 hex digits of the SHA-256 of their JSON under `listDigests`, so
+ * that two entries still show whether a list named by count in both changed, until it fits. Its
+ * events (`eventTypes`, or a replay's `events`) are always named, and the endpoint keeps every list
+ * whole. With every list named by count an entry takes under 6,000 bytes, so it then fits.
+ */
+export function webhookEndpointAuditMetadata(
+  metadata: Record<string, unknown>,
+): Record<string, unknown> {
+  const fits = (entry: Record<string, unknown>) =>
+    jsonbSize(entry) <= WEBHOOK_LIMITS.auditMetadataBytes;
+  if (fits(metadata)) return metadata;
+  const largestFirst = Object.entries(metadata)
+    .filter(
+      (entry): entry is [string, unknown[]] =>
+        entry[0] !== 'eventTypes' && entry[0] !== 'events' && Array.isArray(entry[1]),
+    )
+    .map(([key, list]) => ({ key, list, bytes: jsonbSize(list) }))
+    .sort((a, b) => b.bytes - a.bytes || (a.key < b.key ? -1 : 1));
+  const counted: typeof largestFirst = [];
+  const entry = () => {
+    const keys = new Set(counted.map((list) => list.key));
+    return {
+      ...Object.fromEntries(Object.entries(metadata).filter(([key]) => !keys.has(key))),
+      listCounts: Object.fromEntries(counted.map((list) => [list.key, list.list.length])),
+      listDigests: Object.fromEntries(
+        counted.map((list) => [list.key, sha256Hex(JSON.stringify(list.list)).slice(0, 16)]),
+      ),
+    };
+  };
+  for (const list of largestFirst) {
+    counted.push(list);
+    if (fits(entry())) break;
+  }
+  return entry();
 }
 
 /**
