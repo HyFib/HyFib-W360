@@ -2,6 +2,7 @@ import { sql } from 'drizzle-orm';
 import {
   bigint,
   boolean,
+  date,
   inet,
   integer,
   pgSchema,
@@ -255,4 +256,24 @@ export const platformAlertPosts = opsSchema.table('platform_alert_posts', {
   failedAt: tz('failed_at'),
   lastStatus: integer('last_status'),
   lastError: text('last_error'),
+});
+
+/**
+ * Each company's messages on each UTC day it had any (ADR-341): sent, those of them failed and
+ * received, counted by the worker once the day ended. Written and read only through the definer
+ * functions of migration 0262; a company's rows are deleted with the company.
+ */
+export const platformMessageDays = opsSchema.table('platform_message_days', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  tenantId: uuid('tenant_id').notNull(),
+  utcDay: date('utc_day', { mode: 'string' }).notNull(),
+  outbound: integer('outbound').notNull(),
+  failed: integer('failed').notNull(),
+  inbound: integer('inbound').notNull(),
+});
+
+/** The days `platformMessageDays` holds counts of, and when each was last counted (ADR-341). */
+export const platformMessageDaysCounted = opsSchema.table('platform_message_days_counted', {
+  utcDay: date('utc_day', { mode: 'string' }).primaryKey(),
+  countedAt: tz('counted_at').notNull().defaultNow(),
 });

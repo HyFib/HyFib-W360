@@ -1,5 +1,53 @@
 # Progress
 
+## 2026-10-09 — A year of messages a day on the Usage tab (P5-10, H-034, ADR-341)
+
+Status: **Implemented; its database and browser tests run in CI only.** The Usage tab and a
+company's platform page counted messages a day live, 93 days back at most (ADR-333, ADR-334), and
+trends further back needed counts kept as days pass. The local PostgreSQL is unavailable, so
+migration 0262 and the integration tests below were written but not run here; the migration passed
+the pglast parse check (syntax only), its two PL/pgSQL bodies included.
+
+### Completed
+
+- **Database:** migration 0262 (`ops.platform_message_days`, each company's messages on each UTC
+  day it had any, with the tenant-table rules, forced row level security and the definer role's
+  grants only; `ops.platform_message_days_counted`, the days counted; the counts' step 35 in
+  company deletion; `ops.count_platform_message_days` for the worker, which counts up to 31 days due
+  a run, newest first, under an advisory lock, and deletes counts older than 400 days;
+  `ops.platform_ops_message_days` for platform administrators, 1 to 365 days, with each day's
+  counted flag).
+- **Domain:** `platform/message-days.ts` (`countMessageDays`, `keptMessageDays` and `messageYear`,
+  the run of counted days ending at the latest one); the operations service's `messageYear`; the
+  queue `ops.message-days`; the export leaves the counts out, the messages themselves exported.
+- **Worker:** the counting job, every minute, 3 days a run; it logs how many days it counted.
+- **Web:** the Usage tab's "The last 12 months" under the window's chart, with the same component
+  under names of its own, how many days are not counted yet and the empty states.
+- **Tests:** unit (6 new in `platform/message-days.test.ts`); integration (2 new in
+  `platform-ops.test.ts`: each day counted once for every company not deleted, newest first and a
+  few a run, the 7 days counted again once a day and older days kept, the purge, the year's sums
+  against the table, one company's days and the days not counted left out; the refusals, grants and
+  row level security; the functions' grants in `tenant-isolation.test.ts`; the company deletion and
+  export tests now cover the table); e2e (the Usage tab test checks the year card). Written for CI;
+  the integration and e2e tests were not run here.
+- **Docs:** ADR-341; ARCHITECTURE; SECURITY (the console's nine read functions); THREAT-MODEL T75
+  and T305; DEPLOYMENT; RUNBOOKS; DATA-RETENTION; BACKLOG P5-10; feature matrix H-034.
+- **Mutation checks:** 9/9 deliberate regressions caught on the unit-tested parts (the latest days
+  not counted drawn, days before a gap drawn, the days not counted miscounted, the flag drawn; every
+  day read as counted, the counts read as given; 31 days a run, 366 days, the count's result as
+  given). The definer functions need the database, so their regressions are left to the integration
+  tests, which run in CI.
+
+### Test commands and results (local, 2026-10-09)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 144 files, 1454 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
 ## 2026-10-09 — The alerts a chat channel gets, the owners' financial alerts among them (P5-10, H-034, ADR-340)
 
 Status: **Implemented; its database and browser tests run in CI only.** Since ADR-338 the chat

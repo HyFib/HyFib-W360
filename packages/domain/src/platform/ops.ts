@@ -41,6 +41,7 @@ import { MAX_RECEIPT_ATTEMPTS } from '../messaging/receipts';
 import type { QueueInspector, QueueSnapshot } from '../jobs/queue';
 import { QUEUE_CHECK_FRESH_MINUTES } from './queue-waits';
 import { deadLetterRetryBlock, deadLetterRetryableUntil } from './dead-letter-retries';
+import { MESSAGE_DAYS_KEPT, keptMessageDays, messageYear, type MessageYear } from './message-days';
 import { parseInput } from '../validation';
 import {
   OPS_SIGNAL_RULES,
@@ -998,6 +999,20 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
         queuesCheckedAt: data.queueWaitCheck.checkedAt,
         queueCheckFresh: data.queueWaitCheck.fresh,
       };
+    },
+
+    /**
+     * Every company's messages a day over the 365 days before today, from the counts the worker
+     * keeps as days pass (ADR-341): the run of counted days ending at the latest one, and how many
+     * of the 365 are not counted yet.
+     */
+    async messageYear(actor: PlatformActor): Promise<MessageYear> {
+      const days = await platformDb.run(
+        actor.userId,
+        (tx) => keptMessageDays(tx, MESSAGE_DAYS_KEPT, null),
+        { accessMode: 'read only' },
+      );
+      return messageYear(days);
     },
 
     /** One company's health and its activity over the last 30 days (null when unknown). */

@@ -398,15 +398,17 @@ describe('database roles', () => {
         expect(await can(role, fn), `${role} ${fn}`).toBe(false);
       }
     }
-    // Platform operations (0026): the read functions with the messages a day (0254, 0255), the
-    // receipt retry, the dead letter retry (0086) and acknowledgement (0117), and the late queue
-    // (0125), receipt (0127) and quarantine (0139) acknowledgements for platform staff only; the
-    // dead-letter purge for the worker; the URL host helper for the definer functions.
+    // Platform operations (0026): the read functions with the messages a day (0254, 0255) and the
+    // kept days (0262), the receipt retry, the dead letter retry (0086) and acknowledgement (0117),
+    // and the late queue (0125), receipt (0127) and quarantine (0139) acknowledgements for platform
+    // staff only; the dead-letter purge and the counting of the kept days for the worker; the URL
+    // host helper for the definer functions.
     for (const fn of [
       'ops.platform_ops_health(uuid)',
       'ops.platform_ops_activity(timestamp with time zone,uuid)',
       'ops.platform_ops_daily_activity(timestamp with time zone)',
       'ops.platform_ops_daily_activity(timestamp with time zone,uuid)',
+      'ops.platform_ops_message_days(integer,uuid)',
       'ops.platform_ops_signup_sessions(timestamp with time zone,integer)',
       'ops.platform_ops_integration_failures(integer)',
       'ops.platform_retry_webhook_receipt(uuid,text,text)',
@@ -422,6 +424,9 @@ describe('database roles', () => {
     }
     expect(await can('w360_app', 'ops.purge_dead_letters(integer)')).toBe(true);
     expect(await can('w360_platform', 'ops.purge_dead_letters(integer)')).toBe(false);
+    expect(await can('w360_app', 'ops.count_platform_message_days(integer)')).toBe(true);
+    expect(await can('w360_platform', 'ops.count_platform_message_days(integer)')).toBe(false);
+    expect(await can('w360_auth', 'ops.count_platform_message_days(integer)')).toBe(false);
     // Settling work whose job ran out of retries (0089): the sweep's lookup and the mark for the
     // worker only; whether a job is waiting or running again for the definer functions only.
     for (const fn of [

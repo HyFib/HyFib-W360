@@ -46,7 +46,16 @@ const describe = (d: DailyChartDay) =>
  * its value the chosen day's numbers (the last day's until another is chosen). The table beside it
  * gives every number without the chart.
  */
-export function DailyMessagesChart({ days, label }: { days: DailyChartDay[]; label: string }) {
+export function DailyMessagesChart({
+  days,
+  label,
+  legendLabel = 'Lines',
+}: {
+  days: DailyChartDay[];
+  label: string;
+  /** The legend's accessible name, told apart when a page draws two charts. */
+  legendLabel?: string;
+}) {
   const box = useRef<HTMLDivElement>(null);
   const tip = useRef<HTMLDivElement>(null);
   // Drawn at 720 pixels on the server and until the browser measures the room it has, and never
@@ -114,7 +123,7 @@ export function DailyMessagesChart({ days, label }: { days: DailyChartDay[]; lab
 
   return (
     <div className="flex min-w-0 flex-col gap-3">
-      <ul aria-label="Lines" className="flex flex-wrap items-center gap-4 text-sm">
+      <ul aria-label={legendLabel} className="flex flex-wrap items-center gap-4 text-sm">
         {DAILY_CHART_SERIES.map((s) => (
           <li key={s.key} className="flex items-center gap-2">
             <LineKey color={COLOR[s.key]} />

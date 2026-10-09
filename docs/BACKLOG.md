@@ -1368,10 +1368,14 @@ verification, app review, Embedded Signup configuration).
   default, and add the owners' financial alerts, the reconciliation findings and the payments not
   seen in a settlement, posted with their emails' days and counts and never a failed check's error;
   each change audited).
+  **[A year of messages a day built; its database and browser tests run only in CI]** (ADR-341,
+  migration 0262: the worker counts each UTC day once it ends, for every company, and again once a
+  day for a week, back to a year ago, a few days a minute; the Usage tab draws the year's counted
+  days and says how many are not counted yet).
   Remaining:
   other alert channels (several channels, a channel per alert, formats other than a JSON `text`
   member, such as Microsoft Teams' or PagerDuty's, and the owners' other notices, such as refund
-  requests and personal notices, in a channel), trends further back than 93 days and other charts,
+  requests and personal notices, in a channel), the year on a company's page and other charts,
   Meta's quality webhook (unconfirmed), rollups for many companies and pages read from the
   database.
 - **P5-11 Account export/deletion workflow** **[built, locally verified with test data only]**

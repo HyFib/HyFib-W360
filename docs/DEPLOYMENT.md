@@ -1316,6 +1316,18 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    replace keeps its kinds. After a rollback the kinds stay in the database: old workers post the
    operations alerts the channel gets and no financial one.
 
+   Migration 0262 (ADR-341) adds `ops.platform_message_days` (each company's messages a UTC day,
+   with forced row level security and the definer role's grants only),
+   `ops.platform_message_days_counted`, the counts' step in company deletion and the functions that
+   count and read them; `pnpm db:migrate` also creates the queue `ops.message-days`. Workers of this
+   release schedule the counting every minute: after the deployment they count the 365 days before
+   today, 3 a minute, newest first (about two hours), reading each day's messages once through the
+   `(tenant_id, created_at)` index, and then each day once it ends and once a day for a week after.
+   Web servers of this release need the migration for the Usage tab's year; those from before it do
+   not read it. After a rollback the counts stay in the database unused (company deletion still
+   deletes a company's), and those older than 400 days are deleted once a worker of this release
+   counts again.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

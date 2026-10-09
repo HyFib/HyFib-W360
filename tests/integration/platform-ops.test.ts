@@ -10,6 +10,7 @@ import {
   alertIntegrationFailures,
   alertLateQueues,
   checkQueueWaits,
+  countMessageDays,
   createPlatformOpsService,
   deadLetterJob,
   noticeIntegrationAssignments,
@@ -3830,5 +3831,190 @@ describe('exports of the onboarding, integrations and queues lists (ADR-158)', (
       [outsider.id],
     );
     expect(refused?.n).toBe(0);
+  });
+});
+
+describe('messages a day kept as days pass (ADR-341)', () => {
+  /** Noon UTC `n` days before today: well inside that UTC day. */
+  const noonDaysAgo = (n: number) => {
+    const now = new Date();
+    return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - n, 12));
+  };
+  const utcDay = (d: Date) => d.toISOString().slice(0, 10);
+  const count = (limit: number) => countMessageDays({ db: fx.dbs.app }, limit);
+  const countedDays = async () =>
+    (
+      await fx.query<{ day: string }>(
+        `SELECT to_char(utc_day, 'YYYY-MM-DD') AS day FROM ops.platform_message_days_counted
+          ORDER BY utc_day`,
+      )
+    ).map((r) => r.day);
+  const daysOf = (c: Company) =>
+    fx.query<{ day: string; outbound: number; failed: number; inbound: number }>(
+      `SELECT to_char(utc_day, 'YYYY-MM-DD') AS day, outbound, failed, inbound
+         FROM ops.platform_message_days WHERE tenant_id = $1 ORDER BY utc_day`,
+      [c.tenant.id],
+    );
+
+  it('counts each ended UTC day once for every company not deleted, newest first, a few days a run', async () => {
+    // The counts are the platform's: this test starts them afresh.
+    await fx.query('DELETE FROM ops.platform_message_days');
+    await fx.query('DELETE FROM ops.platform_message_days_counted');
+    const kept = await fx.company();
+    const gone = await fx.company();
+    // Each conversation starts with a customer's message today, which no count holds yet.
+    const keptConversation = await conversationOf(kept, '919876500041');
+    const goneConversation = await conversationOf(gone, '919876500042');
+    await messageAt(kept, keptConversation, 'outbound', 'delivered', noonDaysAgo(1));
+    await messageAt(kept, keptConversation, 'outbound', 'failed', noonDaysAgo(1));
+    await messageAt(kept, keptConversation, 'inbound', 'received', noonDaysAgo(3));
+    await messageAt(kept, keptConversation, 'outbound', 'read', noonDaysAgo(10));
+    // More than a year ago: never counted.
+    await messageAt(kept, keptConversation, 'outbound', 'delivered', noonDaysAgo(366));
+    await messageAt(gone, goneConversation, 'outbound', 'delivered', noonDaysAgo(1));
+    await fx.query(`UPDATE app.tenants SET status = 'deleted' WHERE id = $1`, [gone.tenant.id]);
+
+    // Newest first, as many as asked: yesterday and the day before.
+    expect(await count(2)).toEqual({ counted: 2 });
+    expect(await countedDays()).toEqual([utcDay(noonDaysAgo(2)), utcDay(noonDaysAgo(1))]);
+    expect(await daysOf(kept)).toEqual([
+      { day: utcDay(noonDaysAgo(1)), outbound: 2, failed: 1, inbound: 0 },
+    ]);
+    expect(await daysOf(gone)).toEqual([]);
+
+    // Then the rest of the year, at most 31 days a run, and nothing more until a day has passed.
+    let runs = 0;
+    while ((await count(100)).counted > 0) runs += 1;
+    expect(runs).toBe(12);
+    const year = await countedDays();
+    expect(year).toHaveLength(365);
+    expect([year[0], year.at(-1)]).toEqual([utcDay(noonDaysAgo(365)), utcDay(noonDaysAgo(1))]);
+    expect(await daysOf(kept)).toEqual([
+      { day: utcDay(noonDaysAgo(10)), outbound: 1, failed: 0, inbound: 0 },
+      { day: utcDay(noonDaysAgo(3)), outbound: 0, failed: 0, inbound: 1 },
+      { day: utcDay(noonDaysAgo(1)), outbound: 2, failed: 1, inbound: 0 },
+    ]);
+
+    // Statuses reported late: the 7 days before today are counted again once a day, older days
+    // keep their counts.
+    await fx.query(
+      `UPDATE app.messages SET status = 'failed'
+        WHERE tenant_id = $1 AND direction = 'outbound' AND status IN ('delivered', 'read')
+          AND created_at > now() - interval '11 days'`,
+      [kept.tenant.id],
+    );
+    expect(await count(31)).toEqual({ counted: 0 });
+    await fx.query(
+      `UPDATE ops.platform_message_days_counted SET counted_at = now() - interval '25 hours'`,
+    );
+    expect(await count(31)).toEqual({ counted: 7 });
+    expect(await daysOf(kept)).toEqual([
+      { day: utcDay(noonDaysAgo(10)), outbound: 1, failed: 0, inbound: 0 },
+      { day: utcDay(noonDaysAgo(3)), outbound: 0, failed: 0, inbound: 1 },
+      { day: utcDay(noonDaysAgo(1)), outbound: 2, failed: 2, inbound: 0 },
+    ]);
+
+    // Counts older than 400 days are deleted.
+    await fx.query(
+      `INSERT INTO ops.platform_message_days (tenant_id, utc_day, outbound, failed, inbound)
+       VALUES ($1, (now() AT TIME ZONE 'UTC')::date - 401, 1, 0, 0)`,
+      [kept.tenant.id],
+    );
+    await fx.query(
+      `INSERT INTO ops.platform_message_days_counted (utc_day)
+       VALUES ((now() AT TIME ZONE 'UTC')::date - 401)`,
+    );
+    expect(await count(31)).toEqual({ counted: 0 });
+    expect(await daysOf(kept)).toHaveLength(3);
+    expect(await countedDays()).toEqual(year);
+
+    // The year as the Usage tab reads it: every day counted, each with the counts of the companies
+    // not deleted, a deleted company's count kept before its deletion among none of them.
+    await fx.query(
+      `INSERT INTO ops.platform_message_days (tenant_id, utc_day, outbound, failed, inbound)
+       VALUES ($1, $2::date, 5, 0, 0)`,
+      [gone.tenant.id, utcDay(noonDaysAgo(2))],
+    );
+    const read = await ops().messageYear(staff);
+    expect(read.uncounted).toBe(0);
+    expect(read.days.map((d) => d.day)).toEqual(year);
+    const totals = await fx.query<{
+      day: string;
+      outbound: number;
+      failed: number;
+      inbound: number;
+    }>(
+      `SELECT to_char(m.utc_day, 'YYYY-MM-DD') AS day, sum(m.outbound)::int AS outbound,
+              sum(m.failed)::int AS failed, sum(m.inbound)::int AS inbound
+         FROM ops.platform_message_days m JOIN app.tenants t ON t.id = m.tenant_id
+        WHERE t.status <> 'deleted'
+        GROUP BY m.utc_day`,
+    );
+    const byDay = new Map(totals.map((t) => [t.day, t]));
+    for (const d of read.days) {
+      const t = byDay.get(d.day) ?? { outbound: 0, failed: 0, inbound: 0 };
+      expect({ outbound: d.outbound, failed: d.failed, inbound: d.inbound }, d.day).toEqual({
+        outbound: t.outbound,
+        failed: t.failed,
+        inbound: t.inbound,
+      });
+    }
+    // One company's days, for 30 days, through the same function.
+    const one = await fx.dbs.platform.run(staff.userId, (tx) =>
+      tx.execute<{ day: string; outbound: number; failed: number; inbound: number }>(
+        sql`select to_char(utc_day, 'YYYY-MM-DD') as day, outbound, failed, inbound
+              from ops.platform_ops_message_days(30, ${kept.tenant.id}::uuid)
+             where outbound + inbound > 0 order by utc_day`,
+      ),
+    );
+    expect(one.rows).toEqual(await daysOf(kept));
+    expect(JSON.stringify(read)).not.toContain('Counting the days');
+
+    // Days not counted yet are left out of the year, from the latest uncounted day back.
+    await fx.query(
+      `DELETE FROM ops.platform_message_days_counted
+        WHERE utc_day IN ((now() AT TIME ZONE 'UTC')::date - 1, (now() AT TIME ZONE 'UTC')::date - 5)`,
+    );
+    const partial = await ops().messageYear(staff);
+    expect(partial.uncounted).toBe(2);
+    expect(partial.days.map((d) => d.day)).toEqual([4, 3, 2].map((n) => utcDay(noonDaysAgo(n))));
+  });
+
+  it('lets only platform administrators read the days, 1 to 365 of them, and the worker count them', async () => {
+    const outsider = await createUser(fx.dbs, { twoFactor: true });
+    await expectCode(
+      ops().messageYear({
+        userId: outsider.id,
+        role: 'platform_operator',
+        correlationId: uuidv7(),
+      }),
+      'forbidden',
+    );
+    const read = (days: number | null) =>
+      fx.dbs.platform.run(staff.userId, (tx) =>
+        tx.execute(sql`select * from ops.platform_ops_message_days(${days}::int, null)`),
+      );
+    for (const days of [0, 366, null]) await expectCode(read(days), 'precondition_failed');
+    expect((await read(1)).rows).toHaveLength(1);
+    // The worker counts but cannot read; the console reads but cannot count; neither role touches
+    // the tables, whose counts row level security keeps to the definer role.
+    await expect(
+      fx.dbs.appPool.query('SELECT * FROM ops.platform_ops_message_days(30, null)'),
+    ).rejects.toThrow(/permission denied/);
+    await expect(
+      fx.dbs.platformPool.query('SELECT ops.count_platform_message_days(1)'),
+    ).rejects.toThrow(/permission denied/);
+    for (const pool of [fx.dbs.appPool, fx.dbs.platformPool]) {
+      for (const table of ['ops.platform_message_days', 'ops.platform_message_days_counted']) {
+        await expect(pool.query(`SELECT count(*) FROM ${table}`), table).rejects.toThrow(
+          /permission denied/,
+        );
+      }
+    }
+    const [rls] = await fx.query<{ rls: boolean; forced: boolean }>(
+      `SELECT relrowsecurity AS rls, relforcerowsecurity AS forced FROM pg_class
+        WHERE oid = 'ops.platform_message_days'::regclass`,
+    );
+    expect(rls).toEqual({ rls: true, forced: true });
   });
 });

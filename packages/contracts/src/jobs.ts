@@ -117,6 +117,20 @@ export const QUEUES = {
     expireInSeconds: 300,
     deleteAfterHours: 24,
   },
+  /**
+   * Counts the platform's messages a day kept for the Usage tab's year (ADR-341): every minute, a
+   * few days a run, the days due read from the database, so its payload carries nothing; one queued
+   * and one active run.
+   */
+  messageDays: {
+    name: 'ops.message-days',
+    policy: 'stately',
+    retryLimit: 1,
+    retryDelaySeconds: 30,
+    retryBackoff: false,
+    expireInSeconds: 300,
+    deleteAfterHours: 24,
+  },
   billingEventProcess: {
     name: 'billing.event-process',
     policy: 'exclusive',

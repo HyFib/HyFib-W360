@@ -47,6 +47,8 @@ export default async function OpsUsagePage({
   const { days, page } = await searchParams;
   const { platformOps } = await getRuntime();
   const o = await platformOps.usage(actor, Number(days ?? 30));
+  // The year, from the counts the worker keeps as days pass (ADR-341).
+  const year = await platformOps.messageYear(actor);
   const t = o.totals;
   // A page of the companies (ADR-331); the totals and the CSV cover them all.
   const shown = opsCompanyPage(o.rows, Number(page ?? 1));
@@ -107,6 +109,39 @@ export default async function OpsUsagePage({
             label={`Messages sent and received each UTC day, ${o.days} days`}
             empty="No company sent or received a message since the period started."
           />
+        </CardContent>
+      </Card>
+      <Card>
+        <CardHeader>
+          <CardTitle>The last 12 months</CardTitle>
+          <CardDescription>
+            Every company&apos;s messages each UTC day of the 365 before today, as the worker counts
+            them once each day has ended and again each day for a week while statuses arrive: a
+            failure reported later than that is not among them. Today&apos;s are in the chart above.
+            {year.uncounted > 0
+              ? ` ${year.uncounted} of the 365 days are not counted yet, a few more each minute.`
+              : null}
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="grid gap-4">
+          {year.days.length === 0 ? (
+            <EmptyState
+              title="No day is counted yet"
+              description="The worker counts each day after it ends, and the days before it back to a year ago, a few a minute."
+            />
+          ) : (
+            <DailyMessages
+              days={year.days}
+              label="Messages sent and received each UTC day, the last 12 months"
+              empty="No company sent or received a message in the days counted."
+              // Unlike the window's chart above: names matched in part never find both.
+              names={{
+                legend: 'Legend of the 12 months',
+                summary: 'Table of the 12 months',
+                table: 'The 12 months, day by day',
+              }}
+            />
+          )}
         </CardContent>
       </Card>
       <Card>

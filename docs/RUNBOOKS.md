@@ -3807,6 +3807,17 @@ failed check's error: the email to owners has the error, and Platform → Reconc
 worker logs whether each financial alert was posted (`posted` on `settlement reconciliation alert
 emailed` and `unsettled payments alert emailed`).
 
+**The last 12 months (ADR-341).** The Usage tab's year comes from counts the worker keeps: each UTC
+day is counted once it has ended, for every company not deleted, and again once a day for a week
+while statuses arrive; after a deployment the 365 days before it are counted 3 a minute, newest
+first, so the card says how many days are not counted yet for about two hours. The worker logs
+`messages a day counted` with how many days each run counted. Days staying uncounted, or "No day is
+counted yet" long after a deployment, mean the counting job does not run: look for failures of
+`ops.message-days` in the worker's logs (a run that fails counts nothing and the next minute's tries
+again). A failure Meta reports more than 7 days after its message's day is not in the year; the
+window's chart above it counts live. A company's counts are deleted with the company, and every
+count after 400 days.
+
 **Acknowledging failures (ADR-141).** On Current failures, the administrator who takes a failure
 opens Acknowledge on its row and writes a note of 10 to 500 characters: what was done or found
 ("Called the owner: they will reconnect the number today", "Meta's status page reports an outage").

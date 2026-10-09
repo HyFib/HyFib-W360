@@ -13316,3 +13316,43 @@ emails rolled back, until it is applied (migrations run before workers roll out)
 
 Not built: several channels, a channel per alert, formats other than a JSON `text` member, and the
 owners' other notices (refund requests, ADR-073; personal notices, ADR-314) in the channel.
+
+## ADR-341 Messages a day kept as days pass, for a year on the Usage tab (P5-10) (2026-10-09)
+
+Context: the Usage tab and a company's platform page count messages a day live from
+`app.messages` (ADR-333, ADR-334), which is why they reach back 93 days at most: each read scans
+the window's messages. Trends further back needed daily counts kept as days pass, as ADR-333 left
+unbuilt.
+
+Decision:
+
+- **Kept counts:** `ops.platform_message_days` (migration 0262) holds each company's messages on
+  each UTC day it had any (sent, those of them that failed, received), counted as the live
+  function counts them; `ops.platform_message_days_counted` records which days were counted and
+  when, since a day without messages has no row. The counts table follows the tenant-table rules
+  (`tenant_id` not null, unique with `id`, forced row level security with the definer role's
+  policy, grants to the definer role only); company deletion deletes a company's rows (step 35),
+  and the export leaves them out, the messages themselves being exported. Counts older than 400
+  days are deleted.
+- **Counting:** a worker job (queue `ops.message-days`, every minute, one queued and one running)
+  calls `ops.count_platform_message_days(3)`: up to 3 days due, newest first, each counted whole
+  for every company not deleted under an advisory lock. A day is due when it is one of the 365
+  before today never counted, or one of the 7 before today last counted more than a day ago, so
+  statuses Meta reports late reach the counts; older days keep theirs. A new deployment counts its
+  year in about two hours.
+- **Reading:** `ops.platform_ops_message_days(p_days, p_tenant_id)`, for platform administrators
+  only (`W3403`) and 1 to 365 days (`W3412`), returns each day before today with every company's
+  counts not deleted (or one company's) and whether the day was counted.
+- **The Usage tab** draws "The last 12 months" under the window's chart, with the same component:
+  the run of counted days that ends at the latest one counted, leaving out the latest days not
+  counted yet and everything before an earlier gap, and says how many of the 365 are not counted
+  yet. Its legend, table and summary have names of their own, so a name matched in part never
+  finds both charts.
+
+Consequences: a failure reported more than 7 days after its message's day is not in the kept
+counts, as the tab says; today's messages are in the window's chart only. Each day's messages are
+read once when it is first counted and once a day for a week after, through the
+`(tenant_id, created_at)` index the live counts use.
+
+Not built: the year on a company's page, failures or other measures as charts of their own, the
+year in a CSV, and days in a time zone other than UTC.

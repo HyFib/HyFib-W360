@@ -574,6 +574,20 @@ test('staff read the platform’s messages a day on the Usage tab (ADR-333)', as
   ).toBeVisible();
   await expectNoHorizontalOverflow(page);
 
+  // The last 12 months (ADR-341), from the days the worker counts once they end: drawn, or none
+  // counted yet, or none of those counted with a message.
+  await expect(page.getByText('The last 12 months', { exact: true })).toBeVisible();
+  await expect(
+    page
+      .getByRole('slider', { name: 'Messages sent and received each UTC day, the last 12 months' })
+      .or(page.getByText('No day is counted yet', { exact: true }))
+      .or(
+        page.getByText('No company sent or received a message in the days counted.', {
+          exact: true,
+        }),
+      ),
+  ).toBeVisible();
+
   // The company's own days on its platform page (ADR-334): the customer's one message, and none of
   // the other companies'.
   await page.goto(`/platform?q=${slug}`);
