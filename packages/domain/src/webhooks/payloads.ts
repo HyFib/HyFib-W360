@@ -76,6 +76,15 @@ const channelSchema = z.object({
   phone: z.string().nullable().describe('The WhatsApp number as WhatsApp displays it.'),
 });
 
+/**
+ * A time to the microsecond as webhook bodies give it (ADR-330): UTC with six fractional digits, as
+ * `exactTimestamp` writes it, so such times sort as text in time order.
+ */
+export const WEBHOOK_EXACT_TIME_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/;
+
+/** `createdAt` from the exact time: the same moment cut to the millisecond (ADR-330). */
+export const toWebhookMillisecond = (exact: string): string => `${exact.slice(0, 23)}Z`;
+
 function envelope<T extends string, D extends z.ZodType>(type: T, data: D) {
   return z.object({
     id: z
@@ -83,6 +92,12 @@ function envelope<T extends string, D extends z.ZodType>(type: T, data: D) {
       .describe('The event id: the same for every attempt and replay. Deduplicate on it.'),
     type: z.literal(type),
     createdAt: z.iso.datetime().describe('When it happened.'),
+    createdAtExact: z
+      .string()
+      .regex(WEBHOOK_EXACT_TIME_RE)
+      .describe(
+        'createdAt to the microsecond, in UTC with six fractional digits (like 2026-10-09T08:15:30.123456Z), so such times sort as text. Two events that share a createdAt, cut to the millisecond, can differ in it; events stamped with the same moment, such as changes saved together in one transaction, share it too.',
+      ),
     data,
   });
 }
@@ -918,7 +933,13 @@ export const pingPayloadSchema = envelope(
   z.object({ endpointId: z.uuid(), message: z.string() }),
 );
 
-export type WebhookPayload = { id: string; type: string; createdAt: string; data: unknown };
+export type WebhookPayload = {
+  id: string;
+  type: string;
+  createdAt: string;
+  createdAtExact: string;
+  data: unknown;
+};
 
 /**
  * The event as stored: ids and non-personal facts, and the tags a contact change added and removed,
@@ -940,6 +961,11 @@ export interface StoredWebhookEvent {
   tagsAdded: string[] | null;
   tagsRemoved: string[] | null;
   occurredAt: Date;
+  /**
+   * `occurredAt` to the microsecond, as `exactTimestamp` writes it (ADR-330); null for a time with
+   * no such form (an infinite one).
+   */
+  occurredAtExact: string | null;
 }
 
 const str = (value: unknown): string | null => (typeof value === 'string' ? value : null);
@@ -1538,7 +1564,18 @@ export async function buildWebhookPayload(
   event: StoredWebhookEvent,
   endpointId: string,
 ): Promise<WebhookPayload> {
-  const base = { id: event.id, type: event.type, createdAt: event.occurredAt.toISOString() };
+  // The time to the microsecond, and createdAt as the same moment cut to the millisecond (ADR-330).
+  // A time with no such form cannot be described, as a date with no ISO form could not before.
+  const exact = event.occurredAtExact;
+  if (exact === null || !WEBHOOK_EXACT_TIME_RE.test(exact)) {
+    throw new RangeError('The event has no time to the microsecond.');
+  }
+  const base = {
+    id: event.id,
+    type: event.type,
+    createdAt: toWebhookMillisecond(exact),
+    createdAtExact: exact,
+  };
   const tenantId = event.tenantId;
   switch (event.type) {
     case 'ping':

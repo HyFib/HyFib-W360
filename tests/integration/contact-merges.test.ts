@@ -711,6 +711,10 @@ describe('merging contacts (ADR-224)', () => {
     const second = await contactOf(c, { bsuid: users[1]! });
     await merges().mergeContacts(owner, { keepContactId: first, mergeContactId: second });
     expect(await merges().mergedInto(owner, second)).toMatchObject({ keptContactId: first });
+    const key = await contactsKey(c);
+    const feedDeps = { db: fx.dbs.app, keyring: fx.keyring };
+    const beforeMerge = await apiContactChanges(feedDeps, key, { limit: 100 });
+    expect(beforeMerge.hasMore).toBe(false);
     await merges().mergeContacts(owner, { keepContactId: kept, mergeContactId: first });
     // Both earlier contacts now lead to the contact kept last.
     expect(await merges().mergedInto(owner, second)).toMatchObject({ keptContactId: kept });
@@ -722,7 +726,6 @@ describe('merging contacts (ADR-224)', () => {
 
     // Keys (ADR-225): a merged contact is not found, and the refusal names the contact it belongs
     // to now, through the later merge too; nothing is changed or recorded for it.
-    const key = await contactsKey(c);
     const consentBefore = await rowsOf('consent_events', 'contact_id', kept);
     const merged = {
       status: 404,
@@ -762,10 +765,17 @@ describe('merging contacts (ADR-224)', () => {
     }
     // The change feed reads the kept contact, naming both merged contacts, oldest merge first;
     // the merged contacts are not read.
-    const feed = await apiContactChanges({ db: fx.dbs.app, keyring: fx.keyring }, key, {
-      limit: 100,
-    });
+    const feed = await apiContactChanges(feedDeps, key, { limit: 100 });
     expect(feed.data.map((ch) => [ch.id, ch.mergedContactIds])).toEqual([[kept, [second, first]]]);
+    // Read since the second merge, the kept contact names the merge (ADR-329): it kept its own
+    // name and number, and the merged contact had no email, values, tags or consent to add.
+    const sinceMerge = await apiContactChanges(feedDeps, key, {
+      limit: 100,
+      cursor: beforeMerge.nextCursor,
+    });
+    expect(sinceMerge.data.map((ch) => [ch.id, ch.changes, ch.mergedContactIds])).toEqual([
+      [kept, ['merged'], [second, first]],
+    ]);
     // Erasing the kept contact keeps the records of the merges, which hold no personal data.
     await contacts.eraseContact(owner, { contactId: kept, suppress: false });
     expect(

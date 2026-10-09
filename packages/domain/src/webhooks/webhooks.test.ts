@@ -135,6 +135,8 @@ import {
   automationRunStepPayloadSchema,
   buildWebhookPayload,
   WebhookEventGoneError,
+  WEBHOOK_EXACT_TIME_RE,
+  toWebhookMillisecond,
   capturedCrmChanger,
   campaignStatusChangedPayloadSchema,
   dealCreatedPayloadSchema,
@@ -634,7 +636,11 @@ describe('inbound message summaries', () => {
 });
 
 describe('webhook payload schemas', () => {
-  const base = { id: '0192a1b2-0000-7000-8000-000000000001', createdAt: '2026-09-28T10:00:00Z' };
+  const base = {
+    id: '0192a1b2-0000-7000-8000-000000000001',
+    createdAt: '2026-09-28T10:00:00Z',
+    createdAtExact: '2026-09-28T10:00:00.000000Z',
+  };
   const contact = { id: '0192a1b2-0000-7000-8000-000000000002', phone: null, name: null };
   const channel = { id: '0192a1b2-0000-7000-8000-000000000003', phone: '+91 90000 00000' };
   const conversation = { id: '0192a1b2-0000-7000-8000-000000000004' };
@@ -1835,6 +1841,47 @@ describe('the OpenAPI document', () => {
     }
   });
 
+  it('gives every body its time to the microsecond, and createdAt as the same moment to the millisecond (ADR-330)', () => {
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const schemas = doc.components.schemas as Record<
+      string,
+      {
+        required?: string[];
+        properties?: Record<string, { pattern?: string; description?: string }>;
+      }
+    >;
+    for (const [type, hook] of Object.entries(doc.webhooks)) {
+      const { $ref: ref } = hook.post.requestBody.content['application/json'].schema as {
+        $ref: string;
+      };
+      const body = schemas[ref.replace('#/components/schemas/', '')];
+      expect(body?.required, type).toContain('createdAtExact');
+      expect(body?.properties?.createdAtExact?.pattern, type).toBe(WEBHOOK_EXACT_TIME_RE.source);
+      expect(body?.properties?.createdAtExact?.description, type).toContain(
+        'createdAt to the microsecond, in UTC with six fractional digits (like 2026-10-09T08:15:30.123456Z), so such times sort as text.',
+      );
+    }
+    expect(doc.webhooks['conversation.assignment_changed'].post.description).toContain(
+      "createdAtExact gives each change's own time to the microsecond, as it was captured, which tells the two apart.",
+    );
+    for (const good of ['2026-10-09T08:15:30.123456Z', '2026-12-31T23:59:59.000000Z']) {
+      expect(WEBHOOK_EXACT_TIME_RE.test(good), good).toBe(true);
+    }
+    for (const bad of [
+      '2026-10-09T08:15:30.123Z',
+      '2026-10-09T08:15:30.1234567Z',
+      '2026-10-09T08:15:30.123456',
+      '2026-10-09 08:15:30.123456Z',
+      '2026-10-09T08:15:30.123456+00:00',
+      ' 2026-10-09T08:15:30.123456Z',
+    ]) {
+      expect(WEBHOOK_EXACT_TIME_RE.test(bad), bad).toBe(false);
+    }
+    // createdAt is the exact time cut, never rounded, to the millisecond.
+    expect(toWebhookMillisecond('2026-10-09T08:15:30.123999Z')).toBe('2026-10-09T08:15:30.123Z');
+    expect(toWebhookMillisecond('2026-10-09T08:15:30.000001Z')).toBe('2026-10-09T08:15:30.000Z');
+  });
+
   it('describes the deal events: what each step left, and the order of two from one change (ADR-256)', () => {
     const doc = buildOpenApiDocument('https://app.example.com/api/v1');
     const text = (type: 'deal.created' | 'deal.stage_changed' | 'deal.status_changed') =>
@@ -2064,10 +2111,86 @@ describe('the OpenAPI document', () => {
       tagsAdded: null,
       tagsRemoved: null,
       occurredAt: new Date('2026-10-06T00:00:00Z'),
+      occurredAtExact: '2026-10-06T00:00:00.000000Z',
     } as unknown as Parameters<typeof buildWebhookPayload>[1];
     await expect(buildWebhookPayload(unreadable, event, 'endpoint')).rejects.toThrow(
       'No webhook payload is built for events of type contact.forgotten',
     );
+  });
+
+  it('stamps every body with its event’s time to the microsecond, createdAt cut from it (ADR-330)', async () => {
+    const unreadable = new Proxy(
+      {},
+      {
+        get: () => {
+          throw new Error('the database was read');
+        },
+      },
+    ) as unknown as Parameters<typeof buildWebhookPayload>[0];
+    const event = {
+      id: '0192f3a4-5b6c-7d8e-9f00-112233445566',
+      tenantId: '0192f3a4-5b6c-7d8e-9f00-112233445577',
+      type: 'ping',
+      messageId: null,
+      conversationId: null,
+      contactId: null,
+      templateId: null,
+      status: null,
+      detail: {},
+      contactChanges: null,
+      tagsAdded: null,
+      tagsRemoved: null,
+      // A JavaScript date keeps no microseconds: both times come from the exact one alone.
+      occurredAt: new Date('2026-10-09T08:15:30.999Z'),
+      occurredAtExact: '2026-10-09T08:15:30.123987Z',
+    } as unknown as Parameters<typeof buildWebhookPayload>[1];
+    const built = await buildWebhookPayload(
+      unreadable,
+      event,
+      '0192f3a4-5b6c-7d8e-9f00-112233445588',
+    );
+    expect(built).toMatchObject({
+      id: '0192f3a4-5b6c-7d8e-9f00-112233445566',
+      type: 'ping',
+      createdAt: '2026-10-09T08:15:30.123Z',
+      createdAtExact: '2026-10-09T08:15:30.123987Z',
+    });
+    expect(Object.keys(built)).toEqual(['id', 'type', 'createdAt', 'createdAtExact', 'data']);
+    expect(pingPayloadSchema.safeParse(built).success).toBe(true);
+  });
+
+  it('describes no event whose time has no form to the microsecond, before reading anything (ADR-330)', async () => {
+    const unreadable = new Proxy(
+      {},
+      {
+        get: () => {
+          throw new Error('the database was read');
+        },
+      },
+    ) as unknown as Parameters<typeof buildWebhookPayload>[0];
+    // An infinite time has none (to_char gives null); a time cut short is not one either.
+    for (const occurredAtExact of [null, '2026-10-09T08:15:30.123Z', 'infinity']) {
+      const event = {
+        id: '0192f3a4-5b6c-7d8e-9f00-112233445566',
+        tenantId: '0192f3a4-5b6c-7d8e-9f00-112233445577',
+        type: 'ping',
+        messageId: null,
+        conversationId: null,
+        contactId: null,
+        templateId: null,
+        status: null,
+        detail: {},
+        contactChanges: null,
+        tagsAdded: null,
+        tagsRemoved: null,
+        occurredAt: new Date(Number.NaN),
+        occurredAtExact,
+      } as unknown as Parameters<typeof buildWebhookPayload>[1];
+      await expect(
+        buildWebhookPayload(unreadable, event, '0192f3a4-5b6c-7d8e-9f00-112233445588'),
+        String(occurredAtExact),
+      ).rejects.toBeInstanceOf(RangeError);
+    }
   });
 
   it('says what a contact.updated changed: always given, a list of parts or null (ADR-121)', () => {
@@ -5402,6 +5525,7 @@ describe('the event of a CRM note (ADR-280)', () => {
       id,
       type: 'note.created',
       createdAt: '2026-10-07T10:00:00.000Z',
+      createdAtExact: '2026-10-07T10:00:00.000000Z',
       data: {
         note: { id, dealId: null, writtenBy, apiKeyId, createdAt: '2026-10-07T10:00:00.000Z' },
         contact: { id, phone: '+919845012345', name: 'Asha' },
@@ -5498,6 +5622,7 @@ describe('the event of a Payment Link (ADR-285)', () => {
       id,
       type: 'payment_link.status_changed',
       createdAt: at,
+      createdAtExact: '2026-10-07T10:00:00.000000Z',
       data: {
         paymentLink: {
           id,
@@ -5592,6 +5717,7 @@ describe('the event of a satisfaction survey answer (ADR-293)', () => {
       tagsAdded: null,
       tagsRemoved: null,
       occurredAt: at,
+      occurredAtExact: at.toISOString().replace('Z', '000Z'),
     }) as unknown as Parameters<typeof buildWebhookPayload>[1];
 
   it('is one event on the conversation’s number, labelled as Settings lists it', () => {
@@ -5618,6 +5744,7 @@ describe('the event of a satisfaction survey answer (ADR-293)', () => {
       id,
       type: 'satisfaction_survey.answered',
       createdAt: at.toISOString(),
+      createdAtExact: at.toISOString().replace('Z', '000Z'),
       data: {
         survey: {
           id,
@@ -5680,6 +5807,7 @@ describe('the event of a satisfaction survey answer (ADR-293)', () => {
       id,
       type: 'satisfaction_survey.answered',
       createdAt: '2026-10-07T10:00:00.000Z',
+      createdAtExact: '2026-10-07T10:00:00.000000Z',
       data: {
         survey: {
           id,
@@ -5782,6 +5910,7 @@ describe('the event of an automation run step (ADR-326)', () => {
       tagsAdded: null,
       tagsRemoved: null,
       occurredAt: at,
+      occurredAtExact: at.toISOString().replace('Z', '000Z'),
     }) as unknown as Parameters<typeof buildWebhookPayload>[1];
 
   const runRow = {
@@ -5816,6 +5945,7 @@ describe('the event of an automation run step (ADR-326)', () => {
       id,
       type: 'automation.run_step',
       createdAt: at.toISOString(),
+      createdAtExact: at.toISOString().replace('Z', '000Z'),
       data: {
         run: {
           id: run,
@@ -5877,6 +6007,7 @@ describe('the event of an automation run step (ADR-326)', () => {
       id,
       type: 'automation.run_step',
       createdAt: '2026-10-08T09:00:00.000Z',
+      createdAtExact: '2026-10-08T09:00:00.000000Z',
       data: {
         run: {
           id: run,

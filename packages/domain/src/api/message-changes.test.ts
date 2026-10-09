@@ -101,9 +101,10 @@ describe('message change cursors (ADR-116)', () => {
     expect(
       openChangeCursor(ring, 'contact-changes', TENANT, sealContactChangeCursor(ring, TENANT, at)),
     ).toEqual(at);
+    // Sealed without where its pass began, as before ADR-329: it opens with none known.
     expect(
       openContactChangeCursor(ring, TENANT, sealChangeCursor(ring, 'contact-changes', TENANT, at)),
-    ).toEqual(at);
+    ).toEqual({ at, since: null });
   });
 });
 

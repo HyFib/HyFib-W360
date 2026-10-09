@@ -12753,3 +12753,96 @@ Decision:
 
 Not built: choosing particular nodes of an automation (by node id), and lists that leave chosen
 kinds out.
+
+## ADR-329 Saying what changed of each contact in the contact change feed (P5-08) (2026-10-09)
+
+Context: `GET /contact-changes` (ADR-114) reads each contact once, at its latest change, as it is
+now. An integration keeping a copy had to compare the two field by field to learn what changed, and
+could not tell a field deleted from one never set. The webhooks have named what a `contact.updated`
+event changed since ADR-121, but the feed could not: the compaction folds a contact's changes into
+its latest, and a reader may have passed some of the changes the latest replaced and not others.
+The backlog listed which fields of a contact changed in the contact feed as remaining.
+
+Decision:
+
+- **Each contact read names what changed since the reader's pass through the feed began**
+  (`changes`): the parts, sorted, once each, in the API contact's names as `contact.updated` gives
+  them (`name`, `phone`, `email`, `tags`, `fields.<key>`), with `consent.marketing`,
+  `consent.utility`, `source`, and `merged` when another contact was merged into it; `added` alone
+  when it was added since (from the start, every contact), and `erased` alone once it is erased.
+  Names only: the contact carries the values as they are now. `fields.<key>` is named for any key a
+  field can have, so a value left under a deleted field's key that changes (a merge copying it) is
+  named though the API shows it nowhere.
+- **Counted from where the pass began, not from the page.** The feed reads a contact only at its
+  latest change, so a page passes the earlier changes of contacts changed again later without
+  reading them, and the page that reads such a contact lies beyond them: counted from that page's
+  place, they would be missed (`added` on the second page of a first read, say). The cursor seals
+  the page's place and where the reader's pass began; a pass begins without a cursor or with the
+  `nextCursor` of a page that read all there was (`hasMore` false), and ends at the next such page,
+  since by then every contact changed before that page's place has been read at its latest change.
+  The review before this was pushed found the first version, which counted from each page's place,
+  missing parts across pages.
+- **Exact from any cursor, compacted or not.** Each change records the parts its transaction
+  changed (`app.contact_changes.parts`), named by the triggers that record the change (0091, 0150);
+  a later change of the same contact in the same transaction adds its parts to the change the
+  transaction recorded first, through a definer function that reaches only the calling
+  transaction's own change. The compaction, which deletes the changes a later one replaced, keeps
+  on that later change where each part last changed among them (`replaced`: part → transaction and
+  change id), one entry per part, so the map stays small however often the contact changes. The
+  feed names the parts of the contact's changes after its reader's pass began, up to the change it
+  reads, and the kept entries that lie after that beginning: never a part changed only before it,
+  never missing one changed after it.
+- **At least once, like the feed itself:** a contact read twice in one pass is named with everything
+  since the pass began, and a change saved while the reader read the page before can be named
+  again, its value already in the contact read then, as a contact changed again appears again.
+- **Unknown is said, not guessed.** The changes recorded before migration 0251 have no parts, and
+  nothing is backfilled (nobody knows what they changed): while one lies after the pass's beginning,
+  `changes` is null (take the whole contact), unless the contact was added or erased since. A
+  cursor given before this release seals no pass beginning, so its pass reads null too, until a page
+  reads all there is.
+- **What the API never reads is no change:** a value under a key no custom field can have changes
+  nothing the API describes and is no longer recorded; a deleted field's values are, as
+  `fields.<key>`. A change that changes no part is not recorded.
+- **Erasure keeps no names:** an erasing change names `erased` alone, and the compaction keeps no
+  entries on it, so once compacted nothing says which parts an erased contact had. A contact no
+  longer erased (nothing does this) is read as added.
+- **Permissions unchanged:** `contacts.read`. The runtime role records the parts with the changes it
+  makes and updates no change; the definer role adds parts to its own transaction's change and keeps
+  the entries in the compaction. Not exported, as before.
+- **Migrations:** 0251 adds `parts` (part names, at least one, in one dimension without a null) and
+  `replaced` (an object), both checks `NOT VALID`, with their grants and the definer role's update
+  policy; the capture with parts, `app.contact_change_parts_union` and the definer
+  `app.add_contact_change_parts`; the triggers' functions of 0091 and 0150 replaced with the same
+  signatures; the compaction replaced; and `app.contact_changed_parts`, which the feed calls as the
+  reader. The two-argument capture is dropped. 0252 validates both checks without blocking writes.
+
+Not built: the values before a change (the feed reads the contact as it is now), which tags were
+added or removed (the `contact.updated` webhook names them since ADR-182), and filtering the feed by
+part.
+
+## ADR-330 Webhook bodies give their time to the microsecond (P5-09) (2026-10-09)
+
+Context: every webhook body gives `createdAt`, the time its event was captured, to the millisecond.
+One request can change the same thing twice within a millisecond (ADR-094: taking a conversation off
+its member and moving it to a team whose routing gives it out again), so the two events could share
+a `createdAt`, and a receiver ordering events by it could not tell which came last: the OpenAPI
+document told it to read the conversation again. The events are stored to the microsecond. ADR-094
+listed `createdAt` finer than the millisecond as not built.
+
+Decision:
+
+- **`createdAtExact` in every body:** the event's time to the microsecond, in UTC with six fractional
+  digits (`2026-10-09T08:15:30.123456Z`), so such times sort as text in time order. `createdAt`
+  stays, now cut from the same time to the millisecond (never rounded), so the two always agree;
+  receivers that read only `createdAt` see no change. Fields are only added.
+- **It orders what `createdAt` orders, more finely:** events stamped as each change is captured,
+  conversation and campaign events among them (ADR-087, ADR-094), differ in it even when one request
+  makes two changes within a millisecond; events stamped with their transaction's or their record's
+  own time share it with the changes saved with them, as before. The member assignment event's
+  description now points to it instead of to reading the conversation again.
+- **How:** the delivery reads the stored time with `exactTimestamp`, as the API's cursors do, and the
+  body builder writes both fields from it, for replays and test events too. No migration:
+  `occurred_at` has always kept microseconds.
+
+Not built: a sequence number across events, and an order among the events stamped with one
+transaction's time.

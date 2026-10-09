@@ -1,5 +1,102 @@
 # Progress
 
+## 2026-10-09 — Webhook times to the microsecond (P5-09, H-014, ADR-330)
+
+Status: **Implemented; its database tests run in CI only.** Webhook bodies gave their time to the
+millisecond, so two changes one request made within a millisecond could share it. The local
+PostgreSQL is unavailable, so the integration test below was written but not run here. No
+migration.
+
+### Completed
+
+- **Domain:** `WEBHOOK_EXACT_TIME_RE`, `toWebhookMillisecond` and `createdAtExact` in every body's
+  envelope (`webhooks/payloads.ts`), from the event's time read with `exactTimestamp` in
+  `webhooks/delivery.ts`; the member assignment event's description in the OpenAPI document.
+- **Tests:** unit (3 new in `webhooks/webhooks.test.ts`: every body's schema and the two times'
+  rules, the builder stamping both from the exact time, and refusing a time with no such form; the
+  fixtures of 18 tests there carry the exact time); integration (1 changed: the three member changes of one request in
+  `webhook-events.test.ts` now differ in `createdAtExact`, as stored, in order). Written for CI; the
+  integration test was not run here. No e2e test.
+- **Review fix:** an independent review before the push found that an event whose stored time has
+  no form to the microsecond (an infinite one, which an integration test sets to stand for any row
+  the builder cannot describe) would fail with a `TypeError` where the delivery test expects the
+  `RangeError` such an event raised before; the builder now refuses such a time with a `RangeError`
+  before reading anything.
+- **Docs:** ADR-330; ARCHITECTURE; RUNBOOKS; BACKLOG P5-09; feature matrix H-014.
+- **Mutation checks:** 15/15 deliberate regressions caught on the unit-tested parts (3 of them on
+  the review fix). The
+  delivery's read of the stored time needs the database, so its regressions are left to the
+  integration test, which runs in CI.
+
+### Test commands and results (local, 2026-10-09)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 140 files, 1381 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
+## 2026-10-09 — What changed of each contact in the contact feed (P5-08, H-033, ADR-329)
+
+Status: **Implemented; its database and browser tests run in CI only.** `GET /contact-changes` read
+each contact as it is now without saying what changed since the reader's cursor. The local
+PostgreSQL is unavailable, so the migrations and the integration and e2e tests below were written
+but not run here; migrations 0251 and 0252 passed the pglast parse check (syntax only), and so did
+the bodies of 0251's three SQL functions.
+
+### Completed
+
+- **Database:** migration 0251 (`parts` and `replaced` on `app.contact_changes` with their
+  `NOT VALID` checks, grants and the definer role's update policy; the capture with parts,
+  `app.contact_change_parts_union` and the definer `app.add_contact_change_parts`; the triggers'
+  functions of 0091 and 0150 naming the parts; the compaction keeping where the parts of the rows
+  it deletes last changed; `app.contact_changed_parts` for the feed; the two-argument capture
+  dropped); 0252 validates the checks.
+- **Domain:** `CONTACT_FEED_PART_RE`, `contactChangesSince`, `nextPassSince` and `changes` on each
+  contact the feed reads in `api/contact-changes.ts`; the cursor sealing where the reader's pass
+  began (`openChangePass` in `api/change-cursors.ts`); the OpenAPI description of the feed and of
+  `ContactChange.changes`; the export note for `app.contact_changes`; the schema's two columns.
+- **Tests:** unit (3 new in `api/contact-changes.test.ts`: what the feed answers from the parts, the
+  part names, and where the next pass begins; 3 changed: the cursors there and in
+  `api/message-changes.test.ts` now carry the pass's beginning, and the OpenAPI entry); integration
+  (4 new in `api-contact-changes.test.ts`: exact answers across compaction with one kept place per
+  part, one contact a page in a first and a later pass and from a cursor sealed before passes, a
+  change from before the parts, the database rules; 5 changed: the 4 feed tests there now name each
+  kind of change's part, and `contact-merges.test.ts` names a merge); e2e
+  (`api-contact-changes.spec.ts` reads `added`, `tags` and `erased`). Written for CI; the
+  integration and e2e tests were not run here.
+- **Review fix:** an independent review before the push found that `changes` was counted from each
+  page's place. A page passes the earlier changes of contacts changed again later without reading
+  them, so the later page that read such a contact missed them (`added` on the second page of a
+  first read, say). The cursor now seals where the reader's pass began, `changes` counts from
+  there, and a pass ends at a page that read all there was; a cursor given before carries no
+  beginning and reads null until then. The same review found the runbook's query run as the owner
+  role, which reads no rows of the table under forced row-level security; it now runs as the
+  definer role. A second review found that web instances of the previous release refuse the new
+  cursors, so an integration reaching one during the rollout or after a rollback starts the feed
+  again (now in DEPLOYMENT), and wording still counting from the cursor.
+- **Docs:** ADR-329; ARCHITECTURE; SECURITY; THREAT-MODEL T297 (and T296's mutation count after
+  ADR-328's review fix); DEPLOYMENT; RUNBOOKS; DATA-RETENTION; BACKLOG P5-08; feature matrix W-134
+  and H-033 (and H-014's mutation count).
+- **Mutation checks:** 31/31 deliberate regressions caught on the unit-tested parts after the
+  review fix (18/18 before it). The triggers, the capture, the compaction, the checks and the feed's
+  reading need the database, so their regressions are left to the integration tests, which run in
+  CI.
+
+### Test commands and results (local, 2026-10-09)
+
+| Command                                                                      | Result                                                        |
+| ---------------------------------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck`                           | clean                                                         |
+| `pnpm test` (unit)                                                           | 140 files, 1378 tests passed                                  |
+| `pnpm test:integration`                                                      | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm test:e2e`                                                              | not run here: it needs the database; CI runs it               |
+| `pnpm build`                                                                 | passed                                                        |
+| pglast 7 parse of migrations 0251 and 0252 and of 0251's SQL function bodies | passed (syntax only)                                          |
+| gitleaks 8.30.1 on the staged changes                                        | no leaks found                                                |
+
 ## 2026-10-09 — Step kind filters for webhook endpoints (P5-09, H-014, ADR-328)
 
 Status: **Implemented; its database tests run in CI only.** An endpoint could choose the outcomes of

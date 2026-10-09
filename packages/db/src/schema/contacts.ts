@@ -41,6 +41,20 @@ export const contactChanges = appSchema.table('contact_changes', {
   tenantId: uuid('tenant_id').notNull(),
   contactId: uuid('contact_id').notNull(),
   xact: xid8('xact').notNull(),
+  /**
+   * The parts of the contact the transaction changed, in the API contact's names (migration 0251,
+   * ADR-329): `added` or `erased` alone, else name, phone, email, tags, `fields.<key>`,
+   * `consent.marketing`, `consent.utility`, source and merged; null for a change recorded before
+   * 0251.
+   */
+  parts: text('parts').array(),
+  /**
+   * Where each part last changed among the changes the compaction deleted in this one's favour:
+   * part → [transaction, change id], `*` for those recorded before 0251 (ADR-329).
+   */
+  replaced: jsonb('replaced')
+    .notNull()
+    .default(sql`'{}'::jsonb`),
 });
 
 export const CONTACT_FIELD_TYPES = ['text', 'number', 'date', 'boolean'] as const;

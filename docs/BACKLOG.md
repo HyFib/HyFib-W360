@@ -956,10 +956,13 @@ verification, app review, Embedded Signup configuration).
   **[Adding CRM notes built; its database tests run only in CI]** (ADR-268, migration 0184:
   `notes.write` adds a note to a contact's or a deal's timeline as members do, recorded as written
   through the API; notes are not read through the API).
+  **[What changed of each contact in the contact feed built; its database tests run only in CI]**
+  (ADR-329, migrations 0251 and 0252: `GET /contact-changes` names for each contact the parts that
+  changed since the reader's pass through the feed began, whatever the compaction deleted, `added`
+  or `erased` alone, and null while a change recorded before the parts lies after that beginning).
   Remaining: call-to-action messages through the API, taking
   reactions back,
   changing a field's type,
-  which fields of a contact changed in the contact feed (webhooks name them since ADR-121),
   resuming what members or HyFib paused, campaign
   recipients through webhooks, limits per endpoint, availability per single endpoint (plans choose
   per scope since ADR-092). The one-argument key lookup kept for rolling deploys (0051) is dropped
@@ -1241,10 +1244,12 @@ verification, app review, Embedded Signup configuration).
   **[Step kind filters built; their database tests run only in CI]** (ADR-328, migration 0250: an
   endpoint takes the run steps of chosen kinds of node only, `outside_node` naming the steps outside
   a node).
+  **[Times to the microsecond in every body built; its database tests run only in CI]** (ADR-330, no
+  migration: `createdAtExact` gives the event's time in UTC with six fractional digits, and
+  `createdAt` is its millisecond cut).
   Remaining: filters for other event types and on a message's or contact's values (such as a field's
   value), other authentication (headers computed per delivery, other OAuth grants), mutual TLS,
-  fixed egress addresses, events for store orders, `createdAt` finer than the millisecond, load
-  tests.
+  fixed egress addresses, events for store orders, a sequence number across events, load tests.
 - **P5-10 Platform ops screens** **[built, locally verified with test data only]** (ADR-054):
   `/platform/ops` with Overview, Onboarding (failed and abandoned signups, failed or stuck number
   setups, new companies without a number), Integrations (current failures with host-only labels,

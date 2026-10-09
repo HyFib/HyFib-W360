@@ -15,8 +15,19 @@ export interface ChangePosition {
   id: string;
 }
 
+/**
+ * A cursor of the contact feed (ADR-329): its place, and where the reader's pass through the feed
+ * began (`since`), from which the feed counts what changed; null for a cursor sealed before passes
+ * were, whose pass began nobody knows where.
+ */
+export interface ChangePass {
+  at: ChangePosition;
+  since: ChangePosition | null;
+}
+
 const START: ChangePosition = { xact: '0', id: '0' };
 const POSITION_RE = /^(\d{1,20})\.(\d{1,19})$/;
+const PASS_RE = /^(\d{1,20})\.(\d{1,19})(?:~(\d{1,20})\.(\d{1,19}))?$/;
 const INVALID_CURSOR =
   'Invalid cursor: give the nextCursor of a page of this feed, or no cursor to start again from the first change.';
 
@@ -27,15 +38,28 @@ const invalidCursor = () =>
     issues: [{ path: 'cursor', message: INVALID_CURSOR }],
   });
 
+/** Seals a place, with where the reader's pass began for the contact feed (ADR-329). */
 export function sealChangeCursor(
   keyring: Keyring,
   feed: ChangeFeed,
   tenantId: string,
   at: ChangePosition,
+  since: ChangePosition | null = null,
 ): string {
-  return Buffer.from(keyring.encrypt(`${at.xact}.${at.id}`, cursorAad(feed, tenantId))).toString(
-    'base64url',
-  );
+  const sealed = since ? `${at.xact}.${at.id}~${since.xact}.${since.id}` : `${at.xact}.${at.id}`;
+  return Buffer.from(keyring.encrypt(sealed, cursorAad(feed, tenantId))).toString('base64url');
+}
+
+function openSealed(keyring: Keyring, feed: ChangeFeed, tenantId: string, cursor: string): string {
+  try {
+    return keyring.decryptString(
+      Buffer.from(cursor, 'base64url').toString('utf8'),
+      cursorAad(feed, tenantId),
+    );
+  } catch {
+    // Tampered, another company's or feed's, or sealed with a key the platform no longer holds.
+    throw invalidCursor();
+  }
 }
 
 /** The position a cursor seals; the feed's start without one. */
@@ -46,17 +70,26 @@ export function openChangeCursor(
   cursor: string | undefined,
 ): ChangePosition {
   if (cursor === undefined) return START;
-  let position: string;
-  try {
-    position = keyring.decryptString(
-      Buffer.from(cursor, 'base64url').toString('utf8'),
-      cursorAad(feed, tenantId),
-    );
-  } catch {
-    // Tampered, another company's or feed's, or sealed with a key the platform no longer holds.
-    throw invalidCursor();
-  }
-  const match = POSITION_RE.exec(position);
+  const match = POSITION_RE.exec(openSealed(keyring, feed, tenantId, cursor));
   if (!match?.[1] || !match[2]) throw invalidCursor();
   return { xact: match[1], id: match[2] };
+}
+
+/**
+ * The place a contact feed cursor seals and where its pass began (ADR-329): a new pass from the
+ * feed's start without a cursor; `since` null for a cursor sealed before passes were.
+ */
+export function openChangePass(
+  keyring: Keyring,
+  feed: ChangeFeed,
+  tenantId: string,
+  cursor: string | undefined,
+): ChangePass {
+  if (cursor === undefined) return { at: START, since: START };
+  const match = PASS_RE.exec(openSealed(keyring, feed, tenantId, cursor));
+  if (!match?.[1] || !match[2]) throw invalidCursor();
+  return {
+    at: { xact: match[1], id: match[2] },
+    since: match[3] && match[4] ? { xact: match[3], id: match[4] } : null,
+  };
 }

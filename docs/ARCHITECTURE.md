@@ -1239,9 +1239,21 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   at its latest such row, joined to the contact for its current state; the cursor is sealed with the
   keyring and the company as associated data. `ops.compact_contact_changes` (minute sweep) walks the
   rows in the same order from `ops.contact_change_compaction` and deletes the rows each change
-  replaced. Since 0150 (ADR-225) the trigger on `app.contact_merges` also records a change of the
-  kept contact, and the feed lists for each contact it reads the contacts merged into it
-  (`mergedContactIds`, from `app.contact_merges` in the page's snapshot); the contact endpoints
+  replaced. Since 0251 (ADR-329) each row keeps the parts its transaction changed (`parts`, named by
+  the triggers; a later change of the transaction adds its own through the definer
+  `app.add_contact_change_parts`, which reaches only rows with the caller's `xact`), the compaction
+  keeps on the row that survives where each part of the rows it deletes last changed (`replaced`,
+  part → `[xact, id]`, `*` for rows from before 0251; none on an erasing row), and the feed calls
+  `app.contact_changed_parts` as the reader for each contact it reads (the parts of the contact's
+  rows after the pass's beginning up to the row read, and the kept entries after it), which
+  `contactChangesSince` turns into `changes`: `erased` or `added` alone, null with `*`, else the
+  parts in byte order. The cursor seals the pass's beginning with the place (`a.b~c.d`,
+  `openChangePass` in `api/change-cursors.ts`): none starts a pass at the first change, and
+  `nextPassSince` begins the next pass at a page that read all there was (`hasMore` false); a
+  cursor without one (sealed before 0251's release) reads `changes` null until then. Since 0150 (ADR-225) the trigger on `app.contact_merges` also records a
+  change of the kept contact (named `merged` since 0251), and the feed lists for each contact it
+  reads the contacts merged into it (`mergedContactIds`, from `app.contact_merges` in the page's
+  snapshot); the contact endpoints
   answer a merged contact's id with 404, reason `contact_merged` and `mergedInto`
   (`apiContactNotFound`, `api/contact-view.ts`). Since ADR-227 `POST /contacts/{id}/merge`
   (`apiMergeContacts`, scope `contacts.merge`) checks that both contacts exist in the key's company,
@@ -2003,8 +2015,9 @@ true`); the same key with another request (method, path and body hashed) answers
 - **Delivery** (`webhooks/delivery.ts`): the job claims up to 10 due deliveries (`FOR UPDATE SKIP
 LOCKED`; pending ones due now, then `delivering` ones whose lease expired), builds each payload
   from the company's current data (`webhooks/payloads.ts`; an erased contact has no number or name,
-  a message, conversation, contact, run or order that is gone ends the delivery as `event_gone`),
-  signs it, sets the lease (the 10 s egress deadline plus 35 s) and commits. A delivery whose payload
+  a message, conversation, contact, run or order that is gone ends the delivery as `event_gone`;
+  since ADR-330 every body gives `createdAtExact`, the event's `occurred_at` read with
+  `exactTimestamp`, and `createdAt` as its millisecond cut, `toWebhookMillisecond`), signs it, sets the lease (the 10 s egress deadline plus 35 s) and commits. A delivery whose payload
   or signature cannot be built (a bug, data the builder cannot describe, a secret or the endpoint's
   own headers the keyring cannot open, or a database error while building, each build running in a
   savepoint) ends at once as

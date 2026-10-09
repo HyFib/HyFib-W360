@@ -2349,8 +2349,9 @@ send `deal.updated` to the endpoints that take it (ADR-275), as does erasure's r
 send nothing; a change of its owner sends `deal.owner_changed` to the endpoints that take it
 (ADR-269). Changes made while no endpoint took the type were not recorded and are not sent later. A
 deal reopened in another stage (its own was removed), or moved and closed by one API request, sends
-two events, in the order the steps happened and possibly with the same `createdAt`; each gives the
-stage and status its step left. An erased contact's deal is sent titled "Deal (contact erased)",
+two events, in the order the steps happened and possibly with the same `createdAt`, which their
+`createdAtExact`, to the microsecond, tells apart (ADR-330); each gives the stage and status its
+step left. An erased contact's deal is sent titled "Deal (contact erased)",
 without its contact's number or name or a lost reason.
 
 **An integration misses a task change, or a task event fails as gone (ADR-261).** Endpoints that
@@ -2478,6 +2479,22 @@ a key ends the cursors sealed with it): the integration starts again without a c
 every contact. The worker's minute sweep compacts the change rows (`replaced contact changes
 deleted` in its log); `ops.contact_change_compaction.compacted_at` shows when it last ran. If it
 stops, the feed still answers correctly, with more rows to pass.
+
+**The contact change feed names the wrong parts, or `changes` is null (ADR-329).** `changes` lists
+what changed since the integration's pass through the feed began: without a cursor, or with the
+`nextCursor` of a page whose `hasMore` was false, until the next such page. Null means a change
+recorded before migration 0251 lies after that beginning, or the pass began with a cursor given
+before 0251's release: the integration takes the whole contact, and a later pass names parts again.
+`added` or `erased` alone are expected for a contact added or erased since. A part named again whose
+value the integration already had is expected too: a contact read twice in one pass is named with
+everything since the pass began, and a change saved while the previous page was read is named on
+the next read. To see what is recorded for a contact, as the migration role with
+`SET ROLE w360_definer` (the owner role reads no rows of this table):
+`SELECT xact, id, parts, replaced FROM app.contact_changes WHERE tenant_id = $1 AND contact_id = $2 ORDER BY xact, id`;
+`parts` is what each change named, `replaced` where each part of the changes the compaction deleted
+last changed (`[transaction, change id]`). A part you know changed (from the audit log, say) that
+is missing there points to a trigger: report it with the rows; meanwhile the integration can take
+the whole contact. A value under a key no custom field can have is not a change, by design.
 
 **A key cannot add, rename or delete a custom field (ADR-115).** The key needs the "Define contact
 fields" scope (`contact_fields.manage`), which only owners and administrators can grant, and a plan

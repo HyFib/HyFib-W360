@@ -8,13 +8,14 @@ interface ChangePage {
     id: string;
     erased: boolean;
     contact: { name: string | null; tags: string[] } | null;
+    changes: string[] | null;
     mergedContactIds: string[];
   }[];
   nextCursor: string;
   hasMore: boolean;
 }
 
-test('a key follows contact changes: every contact first, then what members change, an erasure included (ADR-114)', async ({
+test('a key follows contact changes: every contact first, then what members change, an erasure included, each with what changed (ADR-114, ADR-329)', async ({
   page,
   request,
 }) => {
@@ -73,9 +74,9 @@ test('a key follows contact changes: every contact first, then what members chan
   }
   const [lata, mohan] = ids as [string, string];
   const first = await changesUntil(undefined, (page) =>
-    expect(page.data.map((c) => [c.id, c.contact?.name])).toEqual([
-      [lata, 'Lata'],
-      [mohan, 'Mohan'],
+    expect(page.data.map((c) => [c.id, c.contact?.name, c.changes])).toEqual([
+      [lata, 'Lata', ['added']],
+      [mohan, 'Mohan', ['added']],
     ]),
   );
   expect(first.hasMore).toBe(false);
@@ -88,7 +89,9 @@ test('a key follows contact changes: every contact first, then what members chan
   await page.getByRole('button', { name: 'Add', exact: true }).click();
   await expect(page.getByRole('list', { name: 'Tags' })).toContainText('gold');
   const tagged = await changesUntil(first.nextCursor, (page) =>
-    expect(page.data.map((c) => [c.id, c.contact?.tags])).toEqual([[lata, ['gold']]]),
+    expect(page.data.map((c) => [c.id, c.contact?.tags, c.changes])).toEqual([
+      [lata, ['gold'], ['tags']],
+    ]),
   );
 
   // The member erases Mohan: the key reads him as erased, with nothing about him.
@@ -98,7 +101,9 @@ test('a key follows contact changes: every contact first, then what members chan
   await page.getByRole('alertdialog').getByRole('button', { name: 'Erase contact' }).click();
   await expect(page).toHaveURL(new RegExp(`/c/${slug}/contacts$`));
   await changesUntil(tagged.nextCursor, (page) =>
-    expect(page.data).toEqual([{ id: mohan, erased: true, contact: null, mergedContactIds: [] }]),
+    expect(page.data).toEqual([
+      { id: mohan, erased: true, contact: null, changes: ['erased'], mergedContactIds: [] },
+    ]),
   );
 
   // A cursor the feed did not give is refused, naming it.

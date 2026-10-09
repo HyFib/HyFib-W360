@@ -5,6 +5,7 @@ import {
   and,
   asc,
   eq,
+  exactTimestamp,
   inArray,
   lt,
   lte,
@@ -338,6 +339,7 @@ async function claimDeliveries(
             tagsAdded: webhookEvents.tagsAdded,
             tagsRemoved: webhookEvents.tagsRemoved,
             occurredAt: webhookEvents.occurredAt,
+            occurredAtExact: exactTimestamp(webhookEvents.occurredAt),
           })
           .from(webhookEvents)
           .where(
