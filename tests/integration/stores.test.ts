@@ -38,6 +38,7 @@ import {
   syncTemplates,
   WebhookOAuthTokenCache,
   type StoreMessageEvent,
+  type WebhookOrderMessageEvent,
   type StoreVariables,
   type AutomationTrigger,
   type Permission,
@@ -193,7 +194,8 @@ const HOOK_HOST = 'hooks.receiver.test';
 
 /**
  * A webhook endpoint of the company taking `eventTypes`, only those of the numbers (ADR-348),
- * answers and stores (ADR-349) given, on a path of this test's server of its own.
+ * answers and stores (ADR-349) and order messages (ADR-352) given, on a path of this test's server
+ * of its own.
  */
 async function addHook(
   owner: TenantContext,
@@ -202,6 +204,7 @@ async function addHook(
     channelIds?: string[];
     codAnswers?: ('confirmed' | 'cancelled')[];
     storeIds?: string[];
+    orderMessageEvents?: WebhookOrderMessageEvent[];
   } = {},
 ) {
   const path = `/hooks/${randomBytes(6).toString('hex')}`;
@@ -2061,6 +2064,21 @@ describe('Order messages', () => {
     // skipped, the confirmation replacing it, and a confirmation without a number HyFib can message
     // is skipped when due; each sends its event once.
     const skips = await addHook(owner, ['store_order.message_skipped']);
+    // And by order message and store (ADR-352): the confirmations' skips only, this store's, the
+    // other store's only, which hears nothing, and both messages of either store.
+    const confirmationSkips = await addHook(owner, ['store_order.message_skipped'], {
+      orderMessageEvents: ['cod_confirmation'],
+    });
+    const thisStoreSkips = await addHook(owner, ['store_order.message_skipped'], {
+      storeIds: [storeId],
+    });
+    const thatStoreSkips = await addHook(owner, ['store_order.message_skipped'], {
+      storeIds: [otherStore.id],
+    });
+    const eitherStoreSkips = await addHook(owner, ['store_order.message_skipped'], {
+      orderMessageEvents: ['order_placed', 'cod_confirmation'],
+      storeIds: [otherStore.id, storeId],
+    });
     shopify.upsertOrder(shop, {
       id: '5102',
       name: '#2002',
@@ -2092,16 +2110,36 @@ describe('Order messages', () => {
       id: string;
       status: string;
       detail: Record<string, unknown>;
+      deliveries: number;
     }>(
-      `SELECT id, status, detail FROM app.webhook_events
-        WHERE tenant_id = $1 AND type = 'store_order.message_skipped' ORDER BY occurred_at, id`,
+      `SELECT e.id, e.status, e.detail,
+              (SELECT count(*)::int FROM app.webhook_deliveries d
+                WHERE d.tenant_id = e.tenant_id AND d.event_id = e.id) AS deliveries
+         FROM app.webhook_events e
+        WHERE e.tenant_id = $1 AND e.type = 'store_order.message_skipped'
+        ORDER BY e.occurred_at, e.id`,
       [c.tenant.id],
     );
-    expect(
-      skippedEvents.map((e) => [e.status, e.detail.skipReason, e.detail.storeMessageId]),
-    ).toEqual([
-      ['order_placed', 'cash_on_delivery', replaced!.id],
-      ['cod_confirmation', 'no_phone', unconfirmable!.id],
+    // The store travels for the filter only: the event keeps the message, its reason and time.
+    expect(skippedEvents.map((e) => [e.status, e.detail, e.deliveries])).toEqual([
+      [
+        'order_placed',
+        {
+          storeMessageId: replaced!.id,
+          skipReason: 'cash_on_delivery',
+          occurredAt: expect.any(String),
+        },
+        3,
+      ],
+      [
+        'cod_confirmation',
+        {
+          storeMessageId: unconfirmable!.id,
+          skipReason: 'no_phone',
+          occurredAt: expect.any(String),
+        },
+        4,
+      ],
     ]);
     await deliverHooks(c);
     const skipBodies = hookBodiesAt(skips.path);
@@ -2130,6 +2168,13 @@ describe('Order messages', () => {
         }),
       ]),
     );
+    expect(hookBodiesAt(confirmationSkips.path)).toEqual([
+      expect.objectContaining({ id: skippedEvents[1]!.id, type: 'store_order.message_skipped' }),
+    ]);
+    for (const hook of [thisStoreSkips, eitherStoreSkips]) {
+      expect(hookBodiesAt(hook.path)).toHaveLength(2);
+    }
+    expect(hookBodiesAt(thatStoreSkips.path)).toEqual([]);
   });
 
   it('sends nothing about the past, and skips test orders, late events and customers who cannot be messaged', async () => {

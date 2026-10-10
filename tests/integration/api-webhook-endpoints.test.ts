@@ -1464,6 +1464,108 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     });
   });
 
+  it('choose the order messages whose skips an endpoint receives, and its stores for skipped messages alone, kept by changes that leave them out and cleared with the event (ADR-352)', async () => {
+    const c = await fx.company();
+    const key = await apiKey(c, ['webhooks.manage']);
+    const [store] = await fx.query<{ id: string }>(
+      `INSERT INTO app.commerce_stores (id, tenant_id, platform, store_url, name,
+         webhook_public_id, webhook_secret_ciphertext, created_by_membership_id)
+       VALUES (gen_random_uuid(), $1, 'woocommerce', $2, 'Tara Tea', $3, 'x', $4)
+       RETURNING id`,
+      [
+        c.tenant.id,
+        `https://${randomBytes(6).toString('hex')}.example.test`,
+        Array.from(randomBytes(16), (b) => 'abcdefghijklmnopqrstuvwxyz234567'[b % 32]).join(''),
+        c.tenant.ownerMembershipId,
+      ],
+    );
+    if (!store) throw new Error('no store');
+    const tea = store.id;
+    const issueOf = async (promise: Promise<unknown>) => {
+      const error = await expectAppError(promise, 'validation_failed');
+      return isAppError(error) ? error.issues?.[0] : undefined;
+    };
+    // Order messages need the event, at least one, each from the list (named by place).
+    const skipped = ['store_order.message_skipped'];
+    const refusals = [
+      [
+        ['store_order.cod_answered'],
+        { orderMessageEvents: ['order_placed'] },
+        'orderMessageEvents',
+      ],
+      [skipped, { orderMessageEvents: [] }, 'orderMessageEvents'],
+      [skipped, { orderMessageEvents: ['order_placed', 'cart_reminder'] }, 'orderMessageEvents.1'],
+    ] as const;
+    for (const [index, [events, filters, path]] of refusals.entries()) {
+      expect(
+        await issueOf(
+          api().create(
+            key.ctx,
+            { url: receiverUrl(), events, ...filters },
+            idem(`skipped-bad-${index}`, JSON.stringify(filters)),
+          ),
+        ),
+        JSON.stringify(filters),
+      ).toMatchObject({ path });
+    }
+    expect((await api().list(key.ctx)).data).toEqual([]);
+
+    // Skipped messages alone can name the stores; the messages in the store's order, each once.
+    const created = await addThroughApi(key.ctx, 'skipped-1', {
+      url: receiverUrl(),
+      events: ['store_order.message_skipped', 'order.status_changed'],
+      orderMessageEvents: ['order_cancelled', 'cod_confirmation', 'order_cancelled'],
+      storeIds: [tea],
+    });
+    const id = created.body.data.id;
+    const chosen = { orderMessageEvents: ['cod_confirmation', 'order_cancelled'], storeIds: [tea] };
+    expect(created.body.data).toMatchObject(chosen);
+    expect(await api().get(key.ctx, id)).toMatchObject(chosen);
+    const audits = async (action: string) =>
+      (
+        await fx.query<{ metadata: { orderMessageEvents?: unknown } }>(
+          `SELECT metadata FROM app.audit_events
+            WHERE tenant_id = $1 AND subject_id = $2 AND action = $3 ORDER BY occurred_at, id`,
+          [c.tenant.id, id, action],
+        )
+      ).map((a) => a.metadata.orderMessageEvents);
+    expect(await audits('webhook.endpoint_created')).toEqual([chosen.orderMessageEvents]);
+    expect(await api().update(key.ctx, id, { description: 'Order system' })).toMatchObject(chosen);
+    // A list alone is a change.
+    expect(
+      await api().update(key.ctx, id, { orderMessageEvents: ['order_shipped'] }),
+    ).toMatchObject({ orderMessageEvents: ['order_shipped'], storeIds: [tea] });
+    expect(await audits('webhook.endpoint_updated')).toEqual([
+      chosen.orderMessageEvents,
+      ['order_shipped'],
+    ]);
+    // Events without it clear the messages, and the stores with no store event left.
+    expect(await api().update(key.ctx, id, { events: ['store_order.cod_answered'] })).toMatchObject(
+      { orderMessageEvents: null, storeIds: [tea] },
+    );
+    expect(
+      await issueOf(api().update(key.ctx, id, { orderMessageEvents: ['order_placed'] })),
+    ).toMatchObject({ path: 'orderMessageEvents' });
+    expect(await api().update(key.ctx, id, { events: ['order.status_changed'] })).toMatchObject({
+      orderMessageEvents: null,
+      storeIds: null,
+    });
+    expect(
+      await api().update(key.ctx, id, {
+        events: skipped,
+        orderMessageEvents: ['order_delivered'],
+        storeIds: [tea],
+      }),
+    ).toMatchObject({ orderMessageEvents: ['order_delivered'], storeIds: [tea] });
+    expect(await api().update(key.ctx, id, { orderMessageEvents: null })).toMatchObject({
+      orderMessageEvents: null,
+      storeIds: [tea],
+    });
+    expect(await issueOf(api().update(key.ctx, id, { orderMessageEvents: [] }))).toMatchObject({
+      path: 'orderMessageEvents',
+    });
+  });
+
   it('choose who made the order changes an endpoint receives, kept by changes that leave them out and cleared with the event (ADR-322)', async () => {
     const c = await fx.company();
     const key = await apiKey(c, ['webhooks.manage']);

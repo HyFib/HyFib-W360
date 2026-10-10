@@ -2271,7 +2271,7 @@ describe('run step outcome filters (ADR-327)', () => {
   });
 });
 
-describe('cash on delivery answer and store filters (ADR-349)', () => {
+describe('cash on delivery answer, store and order message filters (ADR-349, ADR-352)', () => {
   /** A connected WooCommerce store of the company, named by the store or known by its address. */
   const storeOf = async (company: Company, name: string | null) => {
     const [row] = await fx.query<{ id: string; store_url: string }>(
@@ -2470,6 +2470,136 @@ describe('cash on delivery answer and store filters (ADR-349)', () => {
       { column_name: 'cod_answers', can_update: true },
       { column_name: 'store_ids', can_update: true },
     ]);
+  });
+
+  it('take order messages only with store_order.message_skipped and stores with either store event, kept and cleared with them; the database keeps them so (ADR-352)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const url = 'https://hooks.example.com/skipped';
+    const tea = await storeOf(c, 'Tara Tea');
+    const elsewhere = await storeOf(await fx.company(), 'Tara Tea');
+    const refused = (eventTypes: string[], filters: Record<string, unknown>, message: RegExp) =>
+      expectAppError(
+        webhooks().create(owner, { url, eventTypes, ...filters }),
+        'validation_failed',
+        message,
+      );
+    const messagesNeedTheEvent =
+      /Choose order messages only for an endpoint that receives Order message skipped/;
+    const skipped = ['store_order.message_skipped'];
+    await refused(
+      ['store_order.cod_answered'],
+      { orderMessageEvents: ['order_placed'] },
+      messagesNeedTheEvent,
+    );
+    await refused(skipped, { orderMessageEvents: [] }, /at least one order message/);
+    await refused(
+      skipped,
+      { orderMessageEvents: ['cart_reminder'] },
+      /order messages from the list/,
+    );
+    await refused(
+      skipped,
+      { orderMessageEvents: Array(6).fill('order_placed') },
+      /each order message once/,
+    );
+    await refused(skipped, { storeIds: [elsewhere.id] }, /stores of this company/);
+    expect(await webhooks().list(owner)).toEqual([]);
+
+    // Skipped messages alone can name the stores.
+    const created = await webhooks().create(owner, {
+      url,
+      eventTypes: ['store_order.message_skipped', 'store_order.cod_answered'],
+      orderMessageEvents: ['order_cancelled', 'cod_confirmation', 'order_cancelled'],
+      storeIds: [tea.id],
+    });
+    const [audit] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events WHERE tenant_id = $1 AND action = 'webhook.endpoint_created'`,
+      [c.tenant.id],
+    );
+    expect(audit?.metadata).toMatchObject({
+      orderMessageEvents: ['cod_confirmation', 'order_cancelled'],
+      storeIds: [tea.id],
+    });
+    const change = (eventTypes: string[], fields: Record<string, unknown> = {}) =>
+      webhooks().update(owner, {
+        endpointId: created.id,
+        url,
+        description: '',
+        eventTypes,
+        ...fields,
+      });
+    const current = async () => {
+      const endpoint = (await webhooks().list(owner)).find((e) => e.id === created.id);
+      return { orderMessageEvents: endpoint?.orderMessageEvents, stores: endpoint?.stores };
+    };
+    expect(await current()).toEqual({
+      orderMessageEvents: ['cod_confirmation', 'order_cancelled'],
+      stores: [{ id: tea.id, label: 'Tara Tea' }],
+    });
+    // Without the answers, the skipped messages keep the stores; a change leaving the lists out keeps
+    // them, and one giving the messages changes them, audited.
+    await change(skipped);
+    expect(await current()).toEqual({
+      orderMessageEvents: ['cod_confirmation', 'order_cancelled'],
+      stores: [{ id: tea.id, label: 'Tara Tea' }],
+    });
+    await change(skipped, { orderMessageEvents: ['order_shipped'] });
+    expect((await current()).orderMessageEvents).toEqual(['order_shipped']);
+    const [updated] = await fx.query<{ metadata: { orderMessageEvents?: unknown } }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND action = 'webhook.endpoint_updated' ORDER BY occurred_at DESC LIMIT 1`,
+      [c.tenant.id],
+    );
+    expect(updated?.metadata.orderMessageEvents).toEqual(['order_shipped']);
+    // With the answers only, the stores stay and the order messages go; without either, both go.
+    await change(['store_order.cod_answered']);
+    expect(await current()).toEqual({
+      orderMessageEvents: null,
+      stores: [{ id: tea.id, label: 'Tara Tea' }],
+    });
+    await expectAppError(
+      change(['store_order.cod_answered'], { orderMessageEvents: ['order_placed'] }),
+      'validation_failed',
+      messagesNeedTheEvent,
+    );
+    await change(['consent.changed']);
+    expect(await current()).toEqual({ orderMessageEvents: null, stores: null });
+
+    // The database refuses an empty list, more than 5 or repeated messages, a cart reminder, an
+    // unknown message, a missing entry or a nested list from an endpoint taking the event…
+    await change(skipped, { orderMessageEvents: ['order_placed'] });
+    const setInDatabase = (column: 'order_message_events' | 'store_ids', value: string) =>
+      fx.query(`UPDATE app.webhook_endpoints SET ${column} = ${value} WHERE id = $1`, [created.id]);
+    for (const bad of [
+      `'{}'`,
+      `'{order_placed,cod_confirmation,order_shipped,order_delivered,order_cancelled,order_placed}'`,
+      `'{cart_reminder}'`,
+      `'{order_returned}'`,
+      `ARRAY['order_placed', NULL]::text[]`,
+      `ARRAY[ARRAY['order_placed'], ARRAY['order_shipped']]::text[]`,
+    ]) {
+      await expect(setInDatabase('order_message_events', bad), bad).rejects.toThrow(
+        /webhook_endpoints_order_message_events/,
+      );
+    }
+    // …takes all five, and stores for skipped messages alone…
+    await setInDatabase(
+      'order_message_events',
+      `'{order_placed,cod_confirmation,order_shipped,order_delivered,order_cancelled}'`,
+    );
+    await setInDatabase('store_ids', `ARRAY['${tea.id}']::uuid[]`);
+    // …and refuses the list for an endpoint that does not take the event.
+    await change(['store_order.cod_answered']);
+    await expect(setInDatabase('order_message_events', `'{order_placed}'`)).rejects.toThrow(
+      /webhook_endpoints_order_message_events/,
+    );
+    // The company role changes the list only through its column grant.
+    const [grant] = await fx.query<{ can_update: boolean }>(
+      `SELECT has_column_privilege('w360_app', 'app.webhook_endpoints', 'order_message_events',
+                'UPDATE') AS can_update`,
+    );
+    expect(grant?.can_update).toBe(true);
   });
 });
 

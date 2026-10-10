@@ -4,7 +4,7 @@ import type { AutomationEndReason, AutomationStepOutcome } from './automations';
 import type { OrderStatusChanger, PaymentLinkStatus } from './commerce';
 import type { CrmChanger, DealStatus, TaskStatus } from './crm';
 import type { ContactSource, MessageType } from './messaging';
-import type { StoreMessageAnswer } from './stores';
+import type { StoreMessageAnswer, StoreMessageEvent } from './stores';
 import { appSchema } from './tenancy';
 
 const tz = (name: string) => timestamp(name, { withTimezone: true, mode: 'date' });
@@ -99,6 +99,15 @@ export type WebhookPaymentLinkStatus = Exclude<PaymentLinkStatus, 'creating'>;
  * the customer confirmed the order or cancelled it.
  */
 export type WebhookCodAnswer = StoreMessageAnswer;
+
+/**
+ * The order messages a `store_order.message_skipped` event is about, which an endpoint can choose
+ * (ADR-352): every store message event but the two cart reminders, which send no such event.
+ */
+export type WebhookOrderMessageEvent = Exclude<
+  StoreMessageEvent,
+  'cart_reminder' | 'cart_second_reminder'
+>;
 
 /**
  * Who made an order status change `order.status_changed` reports, as an endpoint can choose them
@@ -306,11 +315,18 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
    */
   codAnswers: text('cod_answers').array().$type<WebhookCodAnswer[]>(),
   /**
-   * The connected stores whose cash on delivery answers it takes (migration 0268, ADR-349), by the
-   * store of the order answered; null takes every store's. Set only while
-   * `store_order.cod_answered` is among its events.
+   * The connected stores whose cash on delivery answers (migration 0268, ADR-349) and skipped order
+   * messages (migration 0272, ADR-352) it takes, by the store of the order; null takes every
+   * store's. Set only while `store_order.cod_answered` or `store_order.message_skipped` is among
+   * its events.
    */
   storeIds: uuid('store_ids').array(),
+  /**
+   * The order messages whose skips it takes as `store_order.message_skipped` (migration 0272,
+   * ADR-352); null takes every message's. Set only while `store_order.message_skipped` is among its
+   * events.
+   */
+  orderMessageEvents: text('order_message_events').array().$type<WebhookOrderMessageEvent[]>(),
   /**
    * The statuses a deal reaches that it takes as `deal.status_changed` (migration 0232, ADR-309);
    * null takes every status. Set only while `deal.status_changed` is among its events.

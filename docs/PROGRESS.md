@@ -1,5 +1,50 @@
 # Progress
 
+## 2026-10-10 — Store and order message filters for skipped order messages (P5-09, H-014, ADR-352)
+
+Status: **Implemented; its database tests run in CI only.** `store_order.message_skipped`
+(ADR-351) went to an endpoint for every skipped message of every store: a company whose stores feed
+different order systems sent each one every store's, and a system that acts on one message alone
+got the others' skips too. The local PostgreSQL is unavailable, so migration 0272 and the
+integration tests below were written but not run here; the migration passed the pglast parse check
+(syntax only), its PL/pgSQL bodies included.
+
+### Completed
+
+- **Database:** migration 0272: `order_message_events` (1 to 5 known order messages, only while
+  the endpoint takes `store_order.message_skipped`) on `app.webhook_endpoints` and the `store_ids`
+  check now naming either store event, both validated at once; the runtime role's update grant on
+  the column; the skipped message's trigger passing its store; `app.capture_webhook_event` matching
+  the store list and the message's event for skipped messages, the store taken out of `detail`
+  (both functions replaced with the same signatures).
+- **Domain:** `WEBHOOK_ORDER_MESSAGE_EVENTS` with Settings' labels, `WEBHOOK_STORE_EVENTS` and
+  `webhookTakesStoreEvents`; `webhookOrderMessageEventsSchema` and `webhookOrderMessageEventsFor`;
+  the store list kept while either store event is taken; the settings service and the API take,
+  keep, clear, audit and answer `orderMessageEvents`; the OpenAPI entries; the data export names the
+  column.
+- **Web:** Settings → Webhooks ticks the order messages under "Order message skipped" and shows
+  "Stores" for either store event ("Every store’s answers and skipped messages"); the endpoints list
+  names the order messages chosen.
+- **Tests:** unit (3 new: the order message schema and texts, the lists kept only with their
+  events and the stores with either store event, the API schemas and OpenAPI entries; the store
+  refusal's text and the ADR-351 test updated); integration (`webhooks.test.ts`: the service's
+  refusals, keeping and clearing, the audit, the database checks and the grant; `api-webhook-endpoints.test.ts`:
+  the API's refusals by place, keeping, clearing and audit; `stores.test.ts`: delivery by order
+  message and store in the cash on delivery flow, and the store not stored with the event). Written
+  for CI; the integration tests were not run here.
+- **Docs:** ADR-352; ARCHITECTURE; SECURITY; THREAT-MODEL T311; DEPLOYMENT (0272); RUNBOOKS (and
+  the ADR-349 entry's names); BACKLOG P5-09; feature matrix W-138, W-139 (which also names
+  ADR-349's API lists now) and H-014.
+
+### Test commands and results (local, 2026-10-10)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 146 files, 1502 tests passed                                    |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+
 ## 2026-10-10 — A webhook event when a store's order message is skipped (P5-09, H-014, ADR-351)
 
 Status: **Implemented; its database tests run in CI only.** A store's order message that HyFib

@@ -13,6 +13,7 @@ import {
   WEBHOOK_ORDER_CHANGE_MAKER_LABELS,
   WEBHOOK_PAYMENT_LINK_STATUS_LABELS,
   WEBHOOK_COD_ANSWER_LABELS,
+  WEBHOOK_ORDER_MESSAGE_EVENT_LABELS,
   WEBHOOK_RUN_STEP_OUTCOME_LABELS,
   WEBHOOK_RUN_STEP_NODE_TYPE_LABELS,
   WEBHOOK_DEAL_STATUS_LABELS,
@@ -276,8 +277,16 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
                     ) : null}
                     {e.stores ? (
                       <p className="text-xs break-all text-muted-foreground">
-                        Stores whose cash on delivery answers are sent:{' '}
+                        Stores whose cash on delivery answers and skipped order messages are sent:{' '}
                         {e.stores.map(webhookStoreText).join(', ')}
+                      </p>
+                    ) : null}
+                    {e.orderMessageEvents ? (
+                      <p className="text-xs text-muted-foreground">
+                        Order messages whose skips are sent:{' '}
+                        {e.orderMessageEvents
+                          .map((m) => WEBHOOK_ORDER_MESSAGE_EVENT_LABELS[m])
+                          .join(', ')}
                       </p>
                     ) : null}
                     {e.runStepOutcomes ? (

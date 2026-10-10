@@ -50,8 +50,13 @@ export async function createWebhookEndpointAction(
     paymentLinkStatuses: string[] | null;
     /** The cash on delivery answers it takes (ADR-349); null takes every answer. */
     codAnswers: string[] | null;
-    /** The stores whose cash on delivery answers it takes (ADR-349); null takes every one's. */
+    /**
+     * The stores whose cash on delivery answers (ADR-349) and skipped order messages (ADR-352) it
+     * takes; null takes every one's.
+     */
     storeIds: string[] | null;
+    /** The order messages whose skips it takes (ADR-352); null takes every message's. */
+    orderMessageEvents: string[] | null;
     /** The outcomes of the run steps it takes (ADR-327); null takes every step. */
     runStepOutcomes: string[] | null;
     /** The kinds of node whose run steps it takes (ADR-328); null takes every step. */
@@ -183,8 +188,13 @@ export async function updateWebhookEndpointAction(
     paymentLinkStatuses: string[] | null;
     /** The cash on delivery answers it takes (ADR-349); null takes every answer. */
     codAnswers: string[] | null;
-    /** The stores whose cash on delivery answers it takes (ADR-349); null takes every one's. */
+    /**
+     * The stores whose cash on delivery answers (ADR-349) and skipped order messages (ADR-352) it
+     * takes; null takes every one's.
+     */
     storeIds: string[] | null;
+    /** The order messages whose skips it takes (ADR-352); null takes every message's. */
+    orderMessageEvents: string[] | null;
     /** The outcomes of the run steps it takes (ADR-327); null takes every step. */
     runStepOutcomes: string[] | null;
     /** The kinds of node whose run steps it takes (ADR-328); null takes every step. */

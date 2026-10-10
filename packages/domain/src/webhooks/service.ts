@@ -64,6 +64,7 @@ import {
   WEBHOOK_ORDER_STATUSES,
   WEBHOOK_PAYMENT_LINK_STATUSES,
   WEBHOOK_COD_ANSWERS,
+  WEBHOOK_ORDER_MESSAGE_EVENTS,
   WEBHOOK_RUN_STEP_OUTCOMES,
   WEBHOOK_RUN_STEP_NODE_TYPES,
   WEBHOOK_ORDER_CHANGE_MAKERS,
@@ -127,9 +128,11 @@ import {
   type WebhookOrderStatus,
   type WebhookPaymentLinkStatus,
   type WebhookCodAnswer,
+  type WebhookOrderMessageEvent,
   type WebhookEndpointStore,
   type WebhookStoreChoice,
   webhookStoreLabel,
+  webhookTakesStoreEvents,
   type WebhookRunStepOutcome,
   type WebhookRunStepNodeType,
   type WebhookOrderChangeMaker,
@@ -1524,8 +1527,9 @@ export function webhookCodAnswersFor(
 }
 
 /**
- * The connected stores whose cash on delivery answers an endpoint takes (ADR-349), each once; null
- * takes every store's, including stores connected later.
+ * The connected stores whose cash on delivery answers (ADR-349) and skipped order messages
+ * (ADR-352) an endpoint takes, each once; null takes every store's, including stores connected
+ * later.
  */
 export const webhookStoreIdsSchema = z
   .array(z.uuid({ error: 'Choose stores from the list.' }))
@@ -1535,20 +1539,21 @@ export const webhookStoreIdsSchema = z
   .nullable();
 
 export const WEBHOOK_STORES_NEED_THE_EVENT =
-  'Choose stores only for an endpoint that receives Cash on delivery answered.';
+  'Choose stores only for an endpoint that receives Cash on delivery answered or Order message skipped.';
 
 export const WEBHOOK_STORES_NOT_FOUND = 'Choose stores of this company.';
 
 /**
  * The stores an endpoint keeps after it is added or changed: every store (null) unless it takes
- * `store_order.cod_answered`; then those given, or else the ones it had.
+ * `store_order.cod_answered` or `store_order.message_skipped`; then those given, or else the ones
+ * it had.
  */
 export function webhookStoreIdsFor(
   eventTypes: readonly WebhookEventType[],
   given: readonly string[] | null | undefined,
   current: readonly string[] | null,
 ): string[] | null {
-  if (!eventTypes.includes('store_order.cod_answered')) return null;
+  if (!webhookTakesStoreEvents(eventTypes)) return null;
   const kept = given === undefined ? current : given;
   return kept ? [...kept] : null;
 }
@@ -1575,6 +1580,34 @@ export async function assertWebhookStores(
   throw new AppError('validation_failed', WEBHOOK_STORES_NOT_FOUND, {
     issues: [{ path: `storeIds.${index}`, message: WEBHOOK_STORES_NOT_FOUND }],
   });
+}
+
+/**
+ * The order messages whose skips an endpoint takes as `store_order.message_skipped` (ADR-352), in
+ * the order a store's order messages list them; null takes every message's.
+ */
+export const webhookOrderMessageEventsSchema = z
+  .array(z.enum(WEBHOOK_ORDER_MESSAGE_EVENTS, { error: 'Choose order messages from the list.' }))
+  .min(1, 'Choose at least one order message, or take every order message.')
+  .max(WEBHOOK_ORDER_MESSAGE_EVENTS.length, 'Give each order message once.')
+  .transform((chosen) => WEBHOOK_ORDER_MESSAGE_EVENTS.filter((event) => chosen.includes(event)))
+  .nullable();
+
+export const WEBHOOK_ORDER_MESSAGES_NEED_THE_EVENT =
+  'Choose order messages only for an endpoint that receives Order message skipped.';
+
+/**
+ * The order messages an endpoint keeps after it is added or changed: every message (null) unless it
+ * takes `store_order.message_skipped`; then those given, or else the ones it had.
+ */
+export function webhookOrderMessageEventsFor(
+  eventTypes: readonly WebhookEventType[],
+  given: readonly WebhookOrderMessageEvent[] | null | undefined,
+  current: readonly WebhookOrderMessageEvent[] | null,
+): WebhookOrderMessageEvent[] | null {
+  if (!eventTypes.includes('store_order.message_skipped')) return null;
+  const kept = given === undefined ? current : given;
+  return kept ? [...kept] : null;
 }
 
 /**
@@ -3002,6 +3035,11 @@ const endpointFields = z.object({
    * out, they stay.
    */
   storeIds: webhookStoreIdsSchema.optional(),
+  /**
+   * Given, the order messages whose skips it takes (null: every message's, ADR-352); left out, they
+   * stay.
+   */
+  orderMessageEvents: webhookOrderMessageEventsSchema.optional(),
   /** Given, the outcomes of the steps it takes (null: every step, ADR-327); left out, they stay. */
   runStepOutcomes: webhookRunStepOutcomesSchema.optional(),
   /** Given, the kinds of node whose steps it takes (null: every step, ADR-328); left out, kept. */
@@ -3255,11 +3293,20 @@ const codAnswersNeedTheEvent = {
     !data.codAnswers || data.eventTypes.includes('store_order.cod_answered'),
   options: { path: ['codAnswers'], message: WEBHOOK_COD_ANSWERS_NEED_THE_EVENT },
 };
-/** Stores are chosen only for an endpoint that takes cash on delivery answers (ADR-349). */
+/**
+ * Stores are chosen only for an endpoint that takes cash on delivery answers (ADR-349) or skipped
+ * order messages (ADR-352).
+ */
 const storesNeedTheEvent = {
   check: (data: { eventTypes: WebhookEventType[]; storeIds?: unknown }) =>
-    !data.storeIds || data.eventTypes.includes('store_order.cod_answered'),
+    !data.storeIds || webhookTakesStoreEvents(data.eventTypes),
   options: { path: ['storeIds'], message: WEBHOOK_STORES_NEED_THE_EVENT },
+};
+/** Order messages are chosen only for an endpoint that takes skipped order messages (ADR-352). */
+const orderMessagesNeedTheEvent = {
+  check: (data: { eventTypes: WebhookEventType[]; orderMessageEvents?: unknown }) =>
+    !data.orderMessageEvents || data.eventTypes.includes('store_order.message_skipped'),
+  options: { path: ['orderMessageEvents'], message: WEBHOOK_ORDER_MESSAGES_NEED_THE_EVENT },
 };
 /** Kinds of step are chosen only for an endpoint that takes run steps (ADR-328). */
 const runStepNodeTypesNeedTheEvent = {
@@ -3559,6 +3606,7 @@ const endpointSchema = endpointFields
   .refine(runStepOutcomesNeedTheEvent.check, runStepOutcomesNeedTheEvent.options)
   .refine(codAnswersNeedTheEvent.check, codAnswersNeedTheEvent.options)
   .refine(storesNeedTheEvent.check, storesNeedTheEvent.options)
+  .refine(orderMessagesNeedTheEvent.check, orderMessagesNeedTheEvent.options)
   .refine(runStepNodeTypesNeedTheEvent.check, runStepNodeTypesNeedTheEvent.options)
   .refine(orderChangeMakersNeedTheEvent.check, orderChangeMakersNeedTheEvent.options)
   .refine(orderExcludedApiKeysNeedTheEvent.check, orderExcludedApiKeysNeedTheEvent.options)
@@ -3617,6 +3665,7 @@ const updateSchema = endpointFields
   .refine(runStepOutcomesNeedTheEvent.check, runStepOutcomesNeedTheEvent.options)
   .refine(codAnswersNeedTheEvent.check, codAnswersNeedTheEvent.options)
   .refine(storesNeedTheEvent.check, storesNeedTheEvent.options)
+  .refine(orderMessagesNeedTheEvent.check, orderMessagesNeedTheEvent.options)
   .refine(runStepNodeTypesNeedTheEvent.check, runStepNodeTypesNeedTheEvent.options)
   .refine(orderChangeMakersNeedTheEvent.check, orderChangeMakersNeedTheEvent.options)
   .refine(orderExcludedApiKeysNeedTheEvent.check, orderExcludedApiKeysNeedTheEvent.options)
@@ -3719,10 +3768,12 @@ export interface WebhookEndpointView {
   /** The cash on delivery answers it takes (ADR-349); null takes every answer. */
   codAnswers: WebhookCodAnswer[] | null;
   /**
-   * The stores whose cash on delivery answers it takes (ADR-349), as stored, named; null takes
-   * every store's.
+   * The stores whose cash on delivery answers (ADR-349) and skipped order messages (ADR-352) it
+   * takes, as stored, named; null takes every store's.
    */
   stores: WebhookEndpointStore[] | null;
+  /** The order messages whose skips it takes (ADR-352); null takes every message's. */
+  orderMessageEvents: WebhookOrderMessageEvent[] | null;
   /** The outcomes of the run steps it takes (ADR-327); null takes every step. */
   runStepOutcomes: WebhookRunStepOutcome[] | null;
   /** The kinds of node whose run steps it takes (ADR-328); null takes every step. */
@@ -4127,6 +4178,7 @@ export async function lockWebhookEndpoint(
       paymentLinkStatuses: webhookEndpoints.paymentLinkStatuses,
       codAnswers: webhookEndpoints.codAnswers,
       storeIds: webhookEndpoints.storeIds,
+      orderMessageEvents: webhookEndpoints.orderMessageEvents,
       runStepOutcomes: webhookEndpoints.runStepOutcomes,
       runStepNodeTypes: webhookEndpoints.runStepNodeTypes,
       orderChangeMakers: webhookEndpoints.orderChangeMakers,
@@ -4220,6 +4272,7 @@ export async function insertWebhookEndpoint(
     paymentLinkStatuses: WebhookPaymentLinkStatus[] | null;
     codAnswers: WebhookCodAnswer[] | null;
     storeIds: string[] | null;
+    orderMessageEvents: WebhookOrderMessageEvent[] | null;
     orderChangeMakers: WebhookOrderChangeMaker[] | null;
     runStepOutcomes: WebhookRunStepOutcome[] | null;
     runStepNodeTypes: WebhookRunStepNodeType[] | null;
@@ -4302,6 +4355,7 @@ export async function insertWebhookEndpoint(
     paymentLinkStatuses: input.paymentLinkStatuses,
     codAnswers: input.codAnswers,
     storeIds: input.storeIds,
+    orderMessageEvents: input.orderMessageEvents,
     runStepOutcomes: input.runStepOutcomes,
     runStepNodeTypes: input.runStepNodeTypes,
     orderChangeMakers: input.orderChangeMakers,
@@ -4733,6 +4787,7 @@ export function createWebhooksService(deps: {
               paymentLinkStatuses: webhookEndpoints.paymentLinkStatuses,
               codAnswers: webhookEndpoints.codAnswers,
               storeIds: webhookEndpoints.storeIds,
+              orderMessageEvents: webhookEndpoints.orderMessageEvents,
               runStepOutcomes: webhookEndpoints.runStepOutcomes,
               runStepNodeTypes: webhookEndpoints.runStepNodeTypes,
               orderChangeMakers: webhookEndpoints.orderChangeMakers,
@@ -5620,6 +5675,11 @@ export function createWebhooksService(deps: {
         const codAnswers = webhookCodAnswersFor(data.eventTypes, data.codAnswers, null);
         const storeIds = webhookStoreIdsFor(data.eventTypes, data.storeIds, null);
         await assertWebhookStores(tx, ctx.tenant.id, storeIds);
+        const orderMessageEvents = webhookOrderMessageEventsFor(
+          data.eventTypes,
+          data.orderMessageEvents,
+          null,
+        );
         const runStepNodeTypes = webhookRunStepNodeTypesFor(
           data.eventTypes,
           data.runStepNodeTypes,
@@ -5798,6 +5858,7 @@ export function createWebhooksService(deps: {
           paymentLinkStatuses,
           codAnswers,
           storeIds,
+          orderMessageEvents,
           orderChangeMakers,
           runStepOutcomes,
           runStepNodeTypes,
@@ -5870,6 +5931,7 @@ export function createWebhooksService(deps: {
               ...(runStepOutcomes ? { runStepOutcomes } : {}),
               ...(codAnswers ? { codAnswers } : {}),
               ...(storeIds ? { storeIds } : {}),
+              ...(orderMessageEvents ? { orderMessageEvents } : {}),
               ...(runStepNodeTypes ? { runStepNodeTypes } : {}),
               ...(orderChangeMakers ? { orderChangeMakers } : {}),
               ...(orderExcludedApiKeyIds ? { orderExcludedApiKeyIds } : {}),
@@ -6012,6 +6074,11 @@ export function createWebhooksService(deps: {
         if (data.storeIds !== undefined) {
           await assertWebhookStores(tx, ctx.tenant.id, storeIds, endpoint.storeIds);
         }
+        const orderMessageEvents = webhookOrderMessageEventsFor(
+          data.eventTypes,
+          data.orderMessageEvents,
+          endpoint.orderMessageEvents,
+        );
         const runStepNodeTypes = webhookRunStepNodeTypesFor(
           data.eventTypes,
           data.runStepNodeTypes,
@@ -6363,6 +6430,7 @@ export function createWebhooksService(deps: {
             paymentLinkStatuses,
             codAnswers,
             storeIds,
+            orderMessageEvents,
             orderChangeMakers,
             runStepOutcomes,
             runStepNodeTypes,
@@ -6446,6 +6514,7 @@ export function createWebhooksService(deps: {
               ...(runStepOutcomes ? { runStepOutcomes } : {}),
               ...(codAnswers ? { codAnswers } : {}),
               ...(storeIds ? { storeIds } : {}),
+              ...(orderMessageEvents ? { orderMessageEvents } : {}),
               ...(runStepNodeTypes ? { runStepNodeTypes } : {}),
               ...(orderChangeMakers ? { orderChangeMakers } : {}),
               ...(orderExcludedApiKeyIds ? { orderExcludedApiKeyIds } : {}),

@@ -1920,6 +1920,13 @@ state` for one that becomes skipped from another state, each only for a message 
   event happened in `detail`; no conversation or contact. `buildWebhookPayload` reads the message
   with `storeOrderMessageOf` (its order and store joined; the columns are those of ADR-348's
   confirmation) and gives the message as captured, the order and store as they are now.
+- **Store and order message filters for skipped messages** (migration 0272, ADR-352):
+  `order_message_events` on an endpoint lists the order messages whose skips it takes as
+  `store_order.message_skipped`, null for every message's; a check keeps it to 1 to 5 known
+  messages and to endpoints that take the event, and `store_ids` (0268) now to endpoints that take
+  either store event. The skipped message's trigger passes its store in `detail` for
+  `app.capture_webhook_event` (replaced with the same signature), which matches the store list and
+  the message's event (the status) and takes the store out before the event is stored.
 - **Step outcome filters** (migration 0249, ADR-327): `run_step_outcomes` on an endpoint lists the
   outcomes of the run steps it takes as `automation.run_step`, null for every step; a check keeps it
   to 1 to 21 known outcomes and to endpoints that take `automation.run_step`.

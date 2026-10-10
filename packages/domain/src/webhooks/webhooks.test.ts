@@ -37,7 +37,11 @@ import {
   type CampaignAnalytics,
 } from '../campaigns/results';
 import { renderEmail } from '../email/templates';
-import { STORE_MESSAGE_SKIP_REASONS } from '../stores/messages-model';
+import {
+  ORDER_MESSAGE_EVENTS,
+  STORE_MESSAGE_EVENT_INFO,
+  STORE_MESSAGE_SKIP_REASONS,
+} from '../stores/messages-model';
 import {
   WEBHOOK_AUTOMATION_EVENTS,
   WEBHOOK_CAMPAIGN_STATUS_LABELS,
@@ -80,6 +84,10 @@ import {
   WEBHOOK_RUN_STEP_OUTCOME_LABELS,
   WEBHOOK_COD_ANSWERS,
   WEBHOOK_COD_ANSWER_LABELS,
+  WEBHOOK_ORDER_MESSAGE_EVENT_LABELS,
+  WEBHOOK_ORDER_MESSAGE_EVENTS,
+  WEBHOOK_STORE_EVENTS,
+  webhookTakesStoreEvents,
   webhookStoreLabel,
   webhookStoreText,
   WEBHOOK_RUN_STEP_OUTCOMES,
@@ -276,6 +284,9 @@ import {
   WEBHOOK_COD_ANSWERS_NEED_THE_EVENT,
   WEBHOOK_STORES_NEED_THE_EVENT,
   WEBHOOK_STORES_NOT_FOUND,
+  webhookOrderMessageEventsFor,
+  webhookOrderMessageEventsSchema,
+  WEBHOOK_ORDER_MESSAGES_NEED_THE_EVENT,
   WEBHOOK_RUN_STEP_OUTCOMES_NEED_THE_EVENT,
   webhookRunStepNodeTypesFor,
   webhookRunStepNodeTypesSchema,
@@ -7381,7 +7392,7 @@ describe('cash on delivery answer and store filters (ADR-349)', () => {
       `Choose answers only for an endpoint that receives ${label}.`,
     );
     expect(WEBHOOK_STORES_NEED_THE_EVENT).toBe(
-      `Choose stores only for an endpoint that receives ${label}.`,
+      `Choose stores only for an endpoint that receives ${label} or ${WEBHOOK_EVENT_INFO['store_order.message_skipped'].label}.`,
     );
   });
 
@@ -7507,7 +7518,7 @@ describe('the event of a skipped store order message (ADR-351)', () => {
     },
   };
 
-  it('is one event of no number, labelled as Settings lists it, which no store, answer or number narrows', () => {
+  it('is one event of no number, labelled as Settings lists it, which no answer or number narrows', () => {
     expect(WEBHOOK_EVENT_INFO['store_order.message_skipped']).toEqual({
       label: 'Order message skipped',
       description:
@@ -7527,7 +7538,6 @@ describe('the event of a skipped store order message (ADR-351)', () => {
     ]) {
       expect(takes(['store_order.message_skipped']), takes.name).toBe(false);
     }
-    expect(webhookStoreIdsFor(['store_order.message_skipped'], [store], null)).toBeNull();
     expect(webhookCodAnswersFor(['store_order.message_skipped'], ['cancelled'], null)).toBeNull();
   });
 
@@ -7685,5 +7695,99 @@ describe('the event of a skipped store order message (ADR-351)', () => {
       expect(described).toContain(words);
     }
     expect(doc.components.schemas).toHaveProperty('WebhookStoreOrderMessageSkipped');
+  });
+});
+
+describe('store and order message filters for skipped order messages (ADR-352)', () => {
+  const [shop, outlet] = [
+    '0192f4b9-d370-7b62-8f8d-a0b1c2d3e401',
+    '0192f4b9-d370-7b62-8f8d-a0b1c2d3e402',
+  ];
+
+  it('take one to five order messages, once each, in the store’s order; null takes every message', () => {
+    expect(
+      webhookOrderMessageEventsSchema.parse([
+        'order_cancelled',
+        'cod_confirmation',
+        'order_cancelled',
+      ]),
+    ).toEqual(['cod_confirmation', 'order_cancelled']);
+    expect(webhookOrderMessageEventsSchema.parse(null)).toBeNull();
+    // The messages about an order, as orderMessage.event names them; cart reminders send no event.
+    expect(WEBHOOK_ORDER_MESSAGE_EVENTS).toEqual([...ORDER_MESSAGE_EVENTS]);
+    expect(webhookOrderMessageEventsSchema.parse([...WEBHOOK_ORDER_MESSAGE_EVENTS])).toEqual([
+      ...WEBHOOK_ORDER_MESSAGE_EVENTS,
+    ]);
+    for (const refused of [
+      [],
+      ['cart_reminder'],
+      ['Order_placed'],
+      'order_placed',
+      [null],
+      Array(6).fill('order_placed'),
+    ]) {
+      expect(
+        webhookOrderMessageEventsSchema.safeParse(refused).success,
+        JSON.stringify(refused),
+      ).toBe(false);
+    }
+    expect(webhookOrderMessageEventsSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one order message, or take every order message.',
+    );
+    expect(
+      webhookOrderMessageEventsSchema.safeParse(['cart_reminder']).error?.issues[0]?.message,
+    ).toBe('Choose order messages from the list.');
+    expect(
+      webhookOrderMessageEventsSchema.safeParse(Array(6).fill('order_placed')).error?.issues[0]
+        ?.message,
+    ).toBe('Give each order message once.');
+    // Named as a store's order messages name them, in the list's order.
+    expect(Object.keys(WEBHOOK_ORDER_MESSAGE_EVENT_LABELS)).toEqual([
+      ...WEBHOOK_ORDER_MESSAGE_EVENTS,
+    ]);
+    for (const event of WEBHOOK_ORDER_MESSAGE_EVENTS) {
+      expect(WEBHOOK_ORDER_MESSAGE_EVENT_LABELS[event], event).toBe(
+        STORE_MESSAGE_EVENT_INFO[event].label,
+      );
+    }
+  });
+
+  it('are kept only while the endpoint takes skipped order messages; stores while it takes either store event', () => {
+    const skipped = ['store_order.message_skipped', 'order.received'] as const;
+    expect(webhookOrderMessageEventsFor([...skipped], ['order_placed'], null)).toEqual([
+      'order_placed',
+    ]);
+    expect(webhookOrderMessageEventsFor([...skipped], undefined, ['order_shipped'])).toEqual([
+      'order_shipped',
+    ]);
+    expect(webhookOrderMessageEventsFor([...skipped], null, ['order_shipped'])).toBeNull();
+    expect(webhookOrderMessageEventsFor([...skipped], undefined, null)).toBeNull();
+    // Cash on delivery answers have no order message to choose.
+    expect(
+      webhookOrderMessageEventsFor(
+        ['store_order.cod_answered'],
+        ['order_placed'],
+        ['order_shipped'],
+      ),
+    ).toBeNull();
+    // The stores narrow both events of a store's orders, each alone or together.
+    for (const events of [
+      ['store_order.message_skipped'],
+      ['store_order.cod_answered'],
+      ['store_order.cod_answered', 'store_order.message_skipped'],
+    ] as const) {
+      expect(webhookTakesStoreEvents([...events]), events.join()).toBe(true);
+      expect(webhookStoreIdsFor([...events], [shop], null), events.join()).toEqual([shop]);
+      expect(webhookStoreIdsFor([...events], undefined, [outlet]), events.join()).toEqual([outlet]);
+    }
+    expect(WEBHOOK_STORE_EVENTS).toEqual([
+      'store_order.cod_answered',
+      'store_order.message_skipped',
+    ]);
+    expect(webhookTakesStoreEvents(['order.received', 'order.status_changed'])).toBe(false);
+    expect(webhookStoreIdsFor(['order.received'], [shop], [outlet])).toBeNull();
+    expect(WEBHOOK_ORDER_MESSAGES_NEED_THE_EVENT).toBe(
+      `Choose order messages only for an endpoint that receives ${WEBHOOK_EVENT_INFO['store_order.message_skipped'].label}.`,
+    );
   });
 });

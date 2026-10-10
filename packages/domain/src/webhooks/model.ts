@@ -5,6 +5,7 @@ import type {
   ContactSource,
   WebhookCampaignStatus,
   WebhookCodAnswer,
+  WebhookOrderMessageEvent,
   WebhookConsentChange,
   WebhookContactPart,
   WebhookConversationStatus,
@@ -34,6 +35,7 @@ export type {
   ContactSource,
   WebhookCampaignStatus,
   WebhookCodAnswer,
+  WebhookOrderMessageEvent,
   WebhookConsentChange,
   WebhookContactPart,
   WebhookConversationStatus,
@@ -641,6 +643,27 @@ export const WEBHOOK_COD_ANSWER_LABELS: Record<WebhookCodAnswer, string> = {
 };
 
 /**
+ * The order messages a `store_order.message_skipped` event is about, which an endpoint can choose
+ * (ADR-352), in the order a store's order messages list them.
+ */
+export const WEBHOOK_ORDER_MESSAGE_EVENTS = [
+  'order_placed',
+  'cod_confirmation',
+  'order_shipped',
+  'order_delivered',
+  'order_cancelled',
+] as const satisfies readonly WebhookOrderMessageEvent[];
+
+/** How Settings names each order message an endpoint can choose (ADR-352), as Stores does. */
+export const WEBHOOK_ORDER_MESSAGE_EVENT_LABELS: Record<WebhookOrderMessageEvent, string> = {
+  order_placed: 'Order placed',
+  cod_confirmation: 'Cash on delivery confirmation',
+  order_shipped: 'Order shipped',
+  order_delivered: 'Order delivered',
+  order_cancelled: 'Order cancelled',
+};
+
+/**
  * The statuses a `deal.status_changed` event reports, which an endpoint can choose (ADR-309), in
  * the order the CRM lists them: `open` is a deal reopened.
  */
@@ -1181,8 +1204,9 @@ export const WEBHOOK_LIMITS = {
   /** The campaigns an endpoint can choose to take the statuses and changes of (ADR-185). */
   campaigns: 50,
   /**
-   * The stores an endpoint can choose to take the cash on delivery answers of (ADR-349): a company
-   * has at most 5 at once, and a store removed since it was chosen stays on the list.
+   * The stores an endpoint can choose to take the cash on delivery answers (ADR-349) and skipped
+   * order messages (ADR-352) of: a company has at most 5 at once, and a store removed since it was
+   * chosen stays on the list.
    */
   stores: 20,
   /** The newest campaigns Settings offers to choose from (ADR-185); the API takes any of them. */
@@ -1489,7 +1513,7 @@ export const webhookCampaignText = (campaign: WebhookEndpointCampaign): string =
 
 /**
  * A connected store of the company, which an endpoint can choose to take the cash on delivery
- * answers of (ADR-349).
+ * answers (ADR-349) and skipped order messages (ADR-352) of.
  */
 export interface WebhookStoreChoice {
   id: string;
@@ -1497,7 +1521,7 @@ export interface WebhookStoreChoice {
   label: string;
 }
 
-/** A store an endpoint takes the cash on delivery answers of (ADR-349), as stored. */
+/** A store an endpoint takes the cash on delivery answers and skipped order messages of, as stored. */
 export interface WebhookEndpointStore {
   id: string;
   /** Its name or address; null for a store removed since it was chosen, which matches nothing. */
@@ -1511,6 +1535,20 @@ export const webhookStoreLabel = (store: { name: string | null; storeUrl: string
 /** A store as Settings → Webhooks lists it. */
 export const webhookStoreText = (store: WebhookEndpointStore): string =>
   store.label ?? 'A removed store';
+
+/**
+ * The events of a store's orders, which the stores an endpoint names narrow: cash on delivery
+ * answers (ADR-349) and skipped order messages (ADR-352).
+ */
+export const WEBHOOK_STORE_EVENTS = [
+  'store_order.cod_answered',
+  'store_order.message_skipped',
+] as const satisfies readonly WebhookEventType[];
+
+/** Whether an endpoint with these events takes events of stores' orders, and can choose stores. */
+export function webhookTakesStoreEvents(eventTypes: readonly WebhookEventType[]): boolean {
+  return WEBHOOK_STORE_EVENTS.some((type) => eventTypes.includes(type));
+}
 
 /** Whether an endpoint with these events takes events of campaigns, and can choose campaigns. */
 export function webhookTakesCampaignEvents(eventTypes: readonly WebhookEventType[]): boolean {

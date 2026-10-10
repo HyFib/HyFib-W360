@@ -13819,3 +13819,40 @@ test orders out (the default) sends an event for each test order its rules would
 
 Not built: the store filter for skipped messages, and filters by event or reason; an event when an
 order message is sent (its statuses are `message.status`); events for cart reminders.
+
+## ADR-352 Choosing the stores and order messages of the skipped messages a webhook endpoint receives (P5-09) (2026-10-10)
+
+Context: `store_order.message_skipped` (ADR-351) sends every skipped order message of every
+connected store. A company whose stores feed different order systems sent each system every
+store's skips, and a system that acts on one message alone, such as a cash on delivery
+confirmation that will not go out, was sent the order placed, shipped, delivered and cancelled
+messages' skips too. ADR-349's store list narrowed cash on delivery answers only, and ADR-351 left
+the filters out.
+
+Decision:
+
+- **The stores narrow both events of a store's orders:** an endpoint's `storeIds` (ADR-349) now
+  applies to `store_order.message_skipped` as to `store_order.cod_answered`, by the store of the
+  message's order; it can be set while the endpoint takes either event and is cleared when it takes
+  neither (the database check names both).
+- **A list of order messages:** `orderMessageEvents`, 1 to 5 of `order_placed`,
+  `cod_confirmation`, `order_shipped`, `order_delivered` and `order_cancelled`, each once, kept in
+  the order a store's order messages list them, as `orderMessage.event` names them. A skipped
+  message is sent when its event and its store are on the lists; null receives every message's, as
+  before. Only while the endpoint takes `store_order.message_skipped`, so the list never outlives
+  its event (migration 0272's check).
+- **Where it applies:** in `app.capture_webhook_event`, replaced with the same signature: the
+  message's event is the event's status (ADR-351) and its store travels in `detail` for the filter
+  only, taken out before the event is stored, as the confirmation's does (0268). A skip no endpoint
+  takes is not recorded.
+- **Who sets it:** owners and administrators in Settings → Webhooks (ticked under "Order message
+  skipped"; the stores under "Stores", now shown for either event) and keys with
+  `webhooks.manage` through the API, audited with the endpoint and in the company data export.
+  Refusals name the field: a list without its event, an empty list, an unknown or cart reminder
+  message.
+
+Consequences: a store removed since it was chosen stays on the list and matches nothing for both
+events, as before. Cash on delivery answers keep their answer list (ADR-349).
+
+Not built: a filter by skip reason (a receiver can leave `cash_on_delivery` and `test_order`
+alone, ADR-351), and order messages sent as their own events.

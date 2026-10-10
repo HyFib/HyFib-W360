@@ -1903,6 +1903,15 @@ Phase 5 rules (outgoing webhooks, P5-09):
   address, tracking or status page from the store's order. A message deleted with its order or
   store fails its pending deliveries as `event_gone` (unit tests; integration tests, run in CI
   only).
+- An endpoint can take the skipped order messages of chosen stores and order messages only
+  (ADR-352). The messages are checked against the five a store's order messages offer; the stores
+  as for cash on delivery answers (the company's, checked in its scope); both lists are kept only
+  while the endpoint takes their events (database checks too, which also refuse a null entry), and
+  applied in `app.capture_webhook_event` to the message's event and to the store its trigger passes
+  in the same transaction, which is not stored with the event. They only narrow what one endpoint
+  receives and never add an event or a delivery for another endpoint or company; the payload is
+  unchanged. Audited with the lists and in the company data export (unit tests; integration tests,
+  run in CI only).
 - An endpoint can take the run steps of chosen outcomes only (ADR-327). The list holds only the
   outcomes a run's log records (checked by the services and the database), is kept only while the
   endpoint takes `automation.run_step` (a database check too), and is applied in
