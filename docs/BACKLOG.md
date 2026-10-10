@@ -1444,12 +1444,15 @@ verification, app review, Embedded Signup configuration).
   **[The year's failed sends by company month by month built; its database tests run only in CI]**
   (ADR-362, migration 0285: the Usage tab lists the companies whose sends failed most over the
   year, each with its months).
+  **[Each company's failed sends as a share of its sends built; its database tests run only in
+  CI]** (ADR-364, migration 0285 changed before release: each listed company's sends of the same
+  days, those cancelled left out, and the share of them failed, over the year and month by month).
   Remaining:
   other alert channels (several channels, a channel per alert, formats other than a JSON `text`
   member, such as Microsoft Teams' or PagerDuty's, and the owners' other notices, such as personal
   notices, in a channel; Microsoft's documentation of Teams' webhooks could not be opened from
-  here), other charts (other measures, such as failures as a share of each company's sends over
-  time), Meta's quality
+  here), other charts (other measures, such as the companies ranked by the share of their sends
+  failed), Meta's quality
   webhook (unconfirmed), rollups for many companies and pages read from the database.
 - **P5-11 Account export/deletion workflow** **[built, locally verified with test data only]**
   (ADR-055): Settings → Company data for owners. A streamed, gzip-compressed JSON Lines export of

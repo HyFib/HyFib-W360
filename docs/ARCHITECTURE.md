@@ -2893,7 +2893,11 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   `readFailureCompanyYear` reads it with the days counted and today in one snapshot, and
   `failureCompanyYear` lists the companies by place with their year, share and months.
   `FailureCompaniesTable` (Usage tab) shares `ShareBar`, `MonthBars` and `YearMonths` (the note and
-  the folded table) with `FailureReasonsTable`.
+  the folded table) with `FailureReasonsTable`. Since ADR-364 each row also has its companies'
+  sends of the same days from `ops.platform_message_days`, those cancelled left out (a listed
+  company's months without a failed send included); `failedOfSent` (`platform/ops-chart.ts`) gives
+  the share of them failed, or none, which the table, the month bars and a second folded table
+  show.
 - **Exports (ADR-154, ADR-155, ADR-158):** `/platform/ops/export/[list]` (a route handler behind the
   pages' platform actor check; a name of `OPS_EXPORT_LISTS`, any other not found) calls
   `exportList`, which checks in its transaction that the actor is a platform administrator, reads

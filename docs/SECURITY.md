@@ -2357,7 +2357,8 @@ message text, contact details, payloads, email addresses, secrets or full URLs:
   `ops.platform_ops_failure_reason_days` (0269, ADR-350: codes and counts) and their months from
   `ops.platform_ops_failure_reason_months` (0283, ADR-360: codes and counts), and the year's failed
   sends by company from `ops.platform_ops_failure_company_months` (0285, ADR-362: counts with each
-  company's name and slug, as the Usage tab's other tables show them): owned by `w360_definer`,
+  company's name and slug, as the Usage tab's other tables show them, and each company's sends of
+  the same days, ADR-364): owned by `w360_definer`,
   executable only by `w360_platform`, raising `W3403` unless the session's user is in
   `ops.platform_admins`.
   The year's counts are kept per company and UTC day in `ops.platform_message_days`, a table with

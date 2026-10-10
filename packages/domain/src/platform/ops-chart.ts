@@ -234,6 +234,15 @@ export function failedShare(day: DailyChartDay): number | null {
 }
 
 /**
+ * A company's failed sends as a share of its sends (ADR-364), those cancelled left out, from 0 to 1;
+ * null when it sent none, or when fewer sends than failed sends are left, as of a company whose
+ * deletion removes its sends before its failed sends by code: no share, rather than one above all.
+ */
+export function failedOfSent(failed: number, sent: number): number | null {
+  return sent > 0 && failed <= sent ? failed / sent : null;
+}
+
+/**
  * A share as the chart writes it, by the same hand as the counts: 3%, 2.5%, to a tenth of a
  * percent; a share above 0 too small for a tenth is "<0.1%", and one below 1 that would round to
  * 100% is ">99.9%", so neither reads as none or as all of them.

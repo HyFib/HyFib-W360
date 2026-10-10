@@ -256,6 +256,7 @@ export default async function OpsUsagePage({
               year={companyYear}
               label="Failed sends by company, the last 12 months"
               monthsLabel="Failed sends by company and month, the last 12 months"
+              sharesLabel="Share of each company’s sends failed by month, the last 12 months"
               empty="No send of any company failed in the days counted."
             />
           )}

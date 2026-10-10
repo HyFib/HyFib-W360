@@ -247,10 +247,10 @@ describe('failed sends by reason month by month (ADR-360)', () => {
   });
 });
 
-describe('failed sends by company month by month (ADR-362)', () => {
+describe('failed sends by company month by month (ADR-362, ADR-364)', () => {
   const months = failureReasonYearMonths('2026-10-10');
-  /** A month row of the company in `place`, as read. */
-  const row = (place: number, month: string, failed: number, rest = false) => ({
+  /** A month row of the company in `place`, as read: its failed sends and its sends (ADR-364). */
+  const row = (place: number, month: string, failed: number, sent: number, rest = false) => ({
     place,
     tenantId: rest ? null : `tenant-${place}`,
     name: rest ? null : `Company ${place}`,
@@ -258,19 +258,22 @@ describe('failed sends by company month by month (ADR-362)', () => {
     companies: rest ? 3 : 1,
     month,
     failed,
+    sent,
   });
 
-  it('lists the companies in the order of their places, each with its year, share and months, the rest last', () => {
+  it('lists the companies in the order of their places, each with its year, share, sends and months, the rest last', () => {
     expect(FAILURE_COMPANIES_SHOWN).toBe(8);
-    // The function orders its rows by month, then place: each company is listed once, in place.
+    // The function orders its rows by month, then place: each company is listed once, in place. A
+    // month a company sent in without a failed send has a row too (ADR-364).
     const year = failureCompanyYear(
       [
-        row(2, '2025-10', 1),
-        row(9, '2025-10', 2, true),
-        row(1, '2026-03', 5),
-        row(2, '2026-03', 2),
-        row(1, '2026-10', 1),
-        row(9, '2026-10', 1, true),
+        row(2, '2025-10', 1, 50),
+        row(9, '2025-10', 2, 40, true),
+        row(1, '2026-01', 0, 80),
+        row(1, '2026-03', 5, 100),
+        row(2, '2026-03', 2, 50),
+        row(1, '2026-10', 1, 20),
+        row(9, '2026-10', 1, 10, true),
       ],
       '2026-10-10',
       4,
@@ -284,6 +287,8 @@ describe('failed sends by company month by month (ADR-362)', () => {
         companies: 1,
         failed: 6,
         share: 0.5,
+        sent: 200,
+        failedShare: 0.03,
       },
       {
         place: 2,
@@ -293,8 +298,20 @@ describe('failed sends by company month by month (ADR-362)', () => {
         companies: 1,
         failed: 3,
         share: 0.25,
+        sent: 100,
+        failedShare: 0.03,
       },
-      { place: 9, tenantId: null, name: null, slug: null, companies: 3, failed: 3, share: 0.25 },
+      {
+        place: 9,
+        tenantId: null,
+        name: null,
+        slug: null,
+        companies: 3,
+        failed: 3,
+        share: 0.25,
+        sent: 50,
+        failedShare: 0.06,
+      },
     ]);
     expect(year.failed).toBe(12);
     expect(year.uncounted).toBe(4);
@@ -304,6 +321,11 @@ describe('failed sends by company month by month (ADR-362)', () => {
       [1, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0],
       [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
     ]);
+    expect(year.sentByMonth).toEqual([
+      [0, 0, 0, 80, 0, 100, 0, 0, 0, 0, 0, 0, 20],
+      [50, 0, 0, 0, 0, 50, 0, 0, 0, 0, 0, 0, 0],
+      [40, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 10],
+    ]);
     // Nothing failed: no company, every month's count nowhere.
     expect(failureCompanyYear([], '2026-10-10', 0)).toEqual({
       companies: [],
@@ -311,19 +333,39 @@ describe('failed sends by company month by month (ADR-362)', () => {
       uncounted: 0,
       months,
       byMonth: [],
+      sentByMonth: [],
     });
   });
 
+  it('gives a company no share of its sends when it has none, or fewer than its failed sends (ADR-364)', () => {
+    // A company being deleted loses its sends before its failed sends by code.
+    const year = failureCompanyYear(
+      [row(1, '2026-03', 5, 0), row(2, '2026-03', 3, 2), row(3, '2026-03', 1, 4)],
+      '2026-10-10',
+      0,
+    );
+    expect(year.companies.map((c) => [c.sent, c.failedShare])).toEqual([
+      [0, null],
+      [2, null],
+      [4, 0.25],
+    ]);
+  });
+
   it('adds the rows of one company and month, and refuses a month the year does not list or a place two companies share', () => {
-    expect(
-      failureCompanyYear([row(1, '2026-03', 2), row(1, '2026-03', 3)], '2026-10-10', 0).byMonth,
-    ).toEqual([[0, 0, 0, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0]]);
-    expect(() => failureCompanyYear([row(1, '2025-09', 2)], '2026-10-10', 0)).toThrow(
+    const added = failureCompanyYear(
+      [row(1, '2026-03', 2, 10), row(1, '2026-03', 3, 30)],
+      '2026-10-10',
+      0,
+    );
+    expect(added.byMonth).toEqual([[0, 0, 0, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0]]);
+    expect(added.sentByMonth).toEqual([[0, 0, 0, 0, 0, 40, 0, 0, 0, 0, 0, 0, 0]]);
+    expect(added.companies[0]).toMatchObject({ failed: 5, sent: 40, failedShare: 0.125 });
+    expect(() => failureCompanyYear([row(1, '2025-09', 2, 4)], '2026-10-10', 0)).toThrow(
       "The year's failed sends by company name a month the year does not list",
     );
     expect(() =>
       failureCompanyYear(
-        [row(1, '2026-03', 2), { ...row(1, '2026-04', 1), tenantId: 'tenant-2' }],
+        [row(1, '2026-03', 2, 4), { ...row(1, '2026-04', 1, 4), tenantId: 'tenant-2' }],
         '2026-10-10',
         0,
       ),
@@ -342,6 +384,7 @@ describe('failed sends by company month by month (ADR-362)', () => {
             companies: '1',
             month: '2026-03',
             failed_sends: '4',
+            sends: '160',
           },
           {
             place: 9,
@@ -351,6 +394,7 @@ describe('failed sends by company month by month (ADR-362)', () => {
             companies: 2,
             month: '2026-10',
             failed_sends: 4,
+            sends: 40,
           },
         ],
       },
@@ -367,8 +411,20 @@ describe('failed sends by company month by month (ADR-362)', () => {
           companies: 1,
           failed: 4,
           share: 0.5,
+          sent: 160,
+          failedShare: 0.025,
         },
-        { place: 9, tenantId: null, name: null, slug: null, companies: 2, failed: 4, share: 0.5 },
+        {
+          place: 9,
+          tenantId: null,
+          name: null,
+          slug: null,
+          companies: 2,
+          failed: 4,
+          share: 0.5,
+          sent: 40,
+          failedShare: 0.1,
+        },
       ],
       failed: 8,
       uncounted: 1,
@@ -377,10 +433,14 @@ describe('failed sends by company month by month (ADR-362)', () => {
         [0, 0, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0],
         [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4],
       ],
+      sentByMonth: [
+        [0, 0, 0, 0, 0, 160, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 40],
+      ],
     });
     expect(statements).toEqual([
       {
-        sql: "select place, tenant_id, tenant_name, tenant_slug, companies, to_char(month, 'YYYY-MM') as month, failed_sends from ops.platform_ops_failure_company_months()",
+        sql: "select place, tenant_id, tenant_name, tenant_slug, companies, to_char(month, 'YYYY-MM') as month, failed_sends, sends from ops.platform_ops_failure_company_months()",
         params: [],
       },
       { sql: 'select ops.platform_ops_failure_reason_days() as days', params: [] },

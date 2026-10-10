@@ -29,24 +29,32 @@ function CompanyName({ company }: { company: FailureCompany }) {
   );
 }
 
+/** A share of a company's sends failed, or a dash when it has none (`failedOfSent`). */
+const failedShareText = (share: number | null) => (share === null ? '—' : chartShare(share));
+
 /**
  * The year's failed sends by company (ADR-362): the companies with the most first, then the rest
- * together; each with its sends and its share of those failed, written and drawn as a bar in the
- * failed sends' colour, and its months beside it (`MonthBars`), so a company whose sends began
- * failing, or one failing all year, stands out; a folded table under it gives every month's count.
- * When no send failed, a note says so.
+ * together; each with its failed sends and its share of those failed, written and drawn as a bar in
+ * the failed sends' colour, its sends and the share of them failed (ADR-364), so a company that
+ * fails much because it sends much reads apart from one whose sends fail often, and its months
+ * beside it (`MonthBars`), so a company whose sends began failing, or one failing all year, stands
+ * out; folded tables under it give every month's count and share. When no send failed, a note says
+ * so.
  */
 export function FailureCompaniesTable({
   year,
   label,
   monthsLabel,
+  sharesLabel,
   empty,
 }: {
   year: FailureCompanyYear;
   /** The table's accessible name. */
   label: string;
-  /** The folded table's, which holds the table's own in no part. */
+  /** The folded table of counts', which holds no other table's name. */
   monthsLabel: string;
+  /** The folded table of shares', which holds no other table's name (ADR-364). */
+  sharesLabel: string;
   /** What the note says when no send failed. */
   empty: string;
 }) {
@@ -60,6 +68,8 @@ export function FailureCompaniesTable({
             <TH>Company</TH>
             <TH>Failed</TH>
             <TH>Share of the failed</TH>
+            <TH>Sent</TH>
+            <TH>Share of its sends failed</TH>
             <TH>Month by month</TH>
           </TR>
         </THead>
@@ -76,11 +86,14 @@ export function FailureCompaniesTable({
                   <span className="tabular-nums">{chartShare(company.share)}</span>
                 </div>
               </TD>
+              <TD className="tabular-nums">{chartCount(company.sent)}</TD>
+              <TD className="tabular-nums">{failedShareText(company.failedShare)}</TD>
               <TD>
                 <MonthBars
                   label={companySpoken(company)}
                   months={year.months}
                   counts={year.byMonth[index] ?? []}
+                  sent={year.sentByMonth[index] ?? []}
                 />
               </TD>
             </TR>
@@ -97,7 +110,12 @@ export function FailureCompaniesTable({
           key: company.tenantId ?? 'the rest',
           name: <CompanyName company={company} />,
           counts: year.byMonth[index] ?? [],
+          sent: year.sentByMonth[index] ?? [],
         }))}
+        shares={{
+          label: sharesLabel,
+          summary: 'Share of each company’s sends failed, month by month, as a table',
+        }}
       />
     </div>
   );

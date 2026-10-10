@@ -10,6 +10,7 @@ import {
   dailyChartLayout,
   deliveredShare,
   deliveryShareLayout,
+  failedOfSent,
   failedShare,
   failedShareLayout,
   nearestDayIndex,
@@ -500,5 +501,18 @@ describe('failed sends by reason month by month (ADR-360)', () => {
     expect(monthBarHeights([3, 3], 24)).toEqual([24, 24]);
     expect(monthBarHeights([0, 0], 24)).toEqual([0, 0]);
     expect(monthBarHeights([], 24)).toEqual([]);
+  });
+});
+
+describe('a company’s failed sends as a share of its sends (ADR-364)', () => {
+  it('divides the failed sends by the sends, none without sends or with fewer sends than failed', () => {
+    expect(failedOfSent(2, 8)).toBe(0.25);
+    expect(failedOfSent(0, 5)).toBe(0);
+    expect(failedOfSent(5, 5)).toBe(1);
+    // No sends: no share, whether or not a send failed.
+    expect(failedOfSent(0, 0)).toBeNull();
+    expect(failedOfSent(1, 0)).toBeNull();
+    // Fewer sends than failed sends, as a company being deleted can leave: no share above all.
+    expect(failedOfSent(3, 2)).toBeNull();
   });
 });

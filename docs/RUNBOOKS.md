@@ -4037,6 +4037,12 @@ counts, until its deletion removes them. Open a company's name for its platform 
 reasons say why its sends failed.
 The card reads its own snapshot: while the worker counts a day, its total can differ from the
 reasons' by that day's failures.
+Each company also has its sends of the same days, those cancelled left out, and the share of them
+that failed (ADR-364), over the year and, when a month is pointed at or in the second folded
+table, month by month. A high share with many failures points at a company whose sending is
+broken; a high share from a few failures may come from a handful of sends. A dash means no share:
+the company sent nothing that month, or its deletion has already removed more of its sends than of
+its failed sends.
 
 **Acknowledging failures (ADR-141).** On Current failures, the administrator who takes a failure
 opens Acknowledge on its row and writes a note of 10 to 500 characters: what was done or found

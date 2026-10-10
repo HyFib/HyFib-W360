@@ -5,6 +5,7 @@ import {
   chartCount,
   chartMonthLabel,
   chartShare,
+  failedOfSent,
   monthBarHeights,
   shareBarPath,
 } from '@w360/domain/ops-chart';
@@ -46,28 +47,47 @@ const monthText = (month: FailureReasonMonth) =>
     ? `${chartMonthLabel(month.month)} (${month.days} ${month.days === 1 ? 'day' : 'days'})`
     : chartMonthLabel(month.month);
 
+/** The share of a row's sends failed in a month, as a month says it (ADR-364); none without one. */
+const shareText = (share: number | null) =>
+  share === null ? '' : `, ${chartShare(share)} of its sends`;
+
 /**
  * A row's failed sends month by month (ADR-360), a reason's or a company's (ADR-362): a bar a month
  * in the failed sends' colour, the oldest month first, the row to its own height (its most in one
  * month fills it), so one that began, grew or faded shows at a glance; a partial first or last month
  * is drawn in outline, its edge in the full colour and its inside lighter. Each month says its count
- * when pointed at, and the whole reads as one sentence to a screen reader, named after the row;
- * every count is in the folded table too (`YearMonths`).
+ * when pointed at, with a company's the share of its sends failed (ADR-364), and the whole reads as
+ * one sentence to a screen reader, named after the row; every count and share is in the folded
+ * tables too (`YearMonths`).
  */
 export function MonthBars({
   label,
   months,
   counts,
+  sent,
 }: {
   /** The row's name, as the sentence starts. */
   label: string;
   months: readonly FailureReasonMonth[];
   counts: readonly number[];
+  /** A company's sends each month, those cancelled left out (ADR-364); a reason has none. */
+  sent?: readonly number[];
 }) {
   const heights = monthBarHeights(counts, MONTH_HEIGHT);
   const width = Math.max(0, months.length * (MONTH_BAR + MONTH_GAP) - MONTH_GAP);
+  // A month's failed sends, with a company's share of its sends failed that month (ADR-364).
+  const failedText = (index: number) => {
+    const failed = counts[index] ?? 0;
+    const share = sent === undefined ? null : failedOfSent(failed, sent[index] ?? 0);
+    return `${chartCount(failed)} failed${shareText(share)}`;
+  };
+  // A reason's months say their counts alone, as before; a company's say what they count.
   const spoken = months
-    .map((month, index) => `${monthText(month)}: ${chartCount(counts[index] ?? 0)}`)
+    .map((month, index) =>
+      sent === undefined
+        ? `${monthText(month)}: ${chartCount(counts[index] ?? 0)}`
+        : `${monthText(month)}: ${failedText(index)}`,
+    )
     .join(', ');
   return (
     <svg
@@ -92,7 +112,7 @@ export function MonthBars({
         const height = month.partial && drawn > 0 ? Math.max(drawn, PARTIAL_MONTH_MIN) : drawn;
         return (
           <g key={month.month}>
-            <title>{`${monthText(month)}: ${chartCount(counts[index] ?? 0)} failed`}</title>
+            <title>{`${monthText(month)}: ${failedText(index)}`}</title>
             {/* The month's whole height answers the pointer, a bar or not. */}
             <rect x={x} y="0" width={MONTH_BAR} height={MONTH_HEIGHT} fill="transparent" />
             {height > 0 && month.partial ? (
@@ -133,7 +153,10 @@ function partialNote(first: boolean, last: boolean): string {
     : '';
 }
 
-/** A row of the folded table of months: its name, its code for a reason's, its count each month. */
+/**
+ * A row of the folded tables of months: its name, its code for a reason's, its count each month and
+ * a company's sends (ADR-364).
+ */
 export interface MonthRow {
   key: string;
   /** Its name, as text or a link. */
@@ -141,12 +164,15 @@ export interface MonthRow {
   /** A reason's code, as the table above shows it, in a column of its own. */
   code?: string;
   counts: readonly number[];
+  /** A company's sends each month, those cancelled left out, for the share of them failed. */
+  sent?: readonly number[];
 }
 
 /**
  * Under a table whose rows draw their months (ADR-360, ADR-362): a note saying which months the
  * bars run from and to and which are partial, and a folded table of every month's count, for
- * keyboards and touch screens as for screen readers. Nothing without months.
+ * keyboards and touch screens as for screen readers; with the rows' sends, a second of the share of
+ * them failed each month (ADR-364). Nothing without months.
  */
 export function YearMonths({
   label,
@@ -155,6 +181,7 @@ export function YearMonths({
   each,
   months,
   rows,
+  shares,
 }: {
   /** The folded table's accessible name, which holds the table's own in no part. */
   label: string;
@@ -166,6 +193,11 @@ export function YearMonths({
   each: string;
   months: readonly FailureReasonMonth[];
   rows: readonly MonthRow[];
+  /**
+   * The folded table of the share of the rows' sends failed each month (ADR-364): its accessible
+   * name, which holds no other table's, and what its fold says. None without.
+   */
+  shares?: { label: string; summary: string };
 }) {
   const first = months[0];
   const last = months.at(-1);
@@ -175,7 +207,10 @@ export function YearMonths({
     <>
       <p className="text-xs text-muted-foreground">
         Month by month, from {chartMonthLabel(first.month)} to {chartMonthLabel(last.month)}, {each}{' '}
-        to its own height: point at a month for its count, or open the table below for every count.
+        to its own height:{' '}
+        {shares
+          ? 'point at a month for its count and the share of the sends failed, or open the tables below for every count and share.'
+          : 'point at a month for its count, or open the table below for every count.'}
         {partialNote(first.partial, last.partial)}
       </p>
       {/* min-w-0: the table scrolls in its box rather than widening the card on a phone. */}
@@ -208,6 +243,39 @@ export function YearMonths({
           </TBody>
         </Table>
       </details>
+      {shares ? (
+        <details className="min-w-0 rounded-md border border-border p-3">
+          <summary className="cursor-pointer text-sm font-medium">{shares.summary}</summary>
+          <Table aria-label={shares.label} className="mt-3">
+            <THead>
+              <TR>
+                <TH>{heading}</TH>
+                {months.map((month) => (
+                  <TH key={month.month} className="whitespace-nowrap">
+                    {monthText(month)}
+                  </TH>
+                ))}
+              </TR>
+            </THead>
+            <TBody>
+              {rows.map((row) => (
+                <TR key={row.key}>
+                  <TD className="min-w-48">{row.name}</TD>
+                  {months.map((month, at) => {
+                    // No share when it sent none (or fewer than failed): a dash, not 0%.
+                    const share = failedOfSent(row.counts[at] ?? 0, row.sent?.[at] ?? 0);
+                    return (
+                      <TD key={month.month} className="tabular-nums">
+                        {share === null ? '—' : chartShare(share)}
+                      </TD>
+                    );
+                  })}
+                </TR>
+              ))}
+            </TBody>
+          </Table>
+        </details>
+      ) : null}
     </>
   );
 }

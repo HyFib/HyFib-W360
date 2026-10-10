@@ -14291,8 +14291,8 @@ year's failed sends by company and by reason are read in separate snapshots, so 
 counts a day the two cards can differ by that day's failures. A company's page already shows its own
 year, so this table is the Usage tab's only.
 
-Not built: a company's rank changes over time, failures as a share of each company's sends, and a CSV
-of the table.
+Not built: a company's rank changes over time, failures as a share of each company's sends (built
+since ADR-364), and a CSV of the table.
 
 ## ADR-363 Endpoint audit entries name a long list once, by its length and digest (P5-09) (2026-10-10)
 
@@ -14323,3 +14323,38 @@ Consequences: webhook filters can add lists again without a change to the audit.
 written before this release with a later one means reading both shapes. No migration.
 
 Not built: naming a list's changed items rather than its digest.
+
+## ADR-364 Each company's failed sends as a share of its sends, over the year and month by month (P5-10) (2026-10-10)
+
+Context: the Usage tab's failed sends by company (ADR-362) ranks the companies by their failed sends
+over the year. A company that sends much fails more by count though its sends may seldom fail, and
+one that sends little may fail at much of what it sends: the counts alone did not tell them apart,
+and ADR-362 left failures as a share of each company's sends unbuilt.
+
+Decision:
+
+- **Each month with its sends:** `ops.platform_ops_failure_company_months()` (migration 0285, not
+  yet applied anywhere, so changed in place) gives each row the sends of its companies on the same
+  days, from the kept counts (`ops.platform_message_days`, ADR-341) of the days whose codes are
+  counted, those cancelled left out, as the shares of ADR-344 and ADR-346 count them. The day's count
+  writes a company's sends and its failed sends by code in one statement (0269), so the two cover
+  the same messages. A listed company's months it sent in without a failed send have rows too, so
+  its sends are whole; the ranking, the rest and the filters are unchanged, and a company that never
+  failed is in neither.
+- **The share, or none:** `failedOfSent` divides a company's failed sends by its sends, over the year
+  and in each month: none when it sent none, or when fewer sends than failed sends are left, as of a
+  company whose deletion removes its sends (step 35) before its failed sends by code (step 36),
+  rather than a share above all of them.
+- **Shown on the Usage tab:** the companies table gains "Sent" and "Share of its sends failed"
+  columns, a dash for no share; each month's bar says the share of the company's sends failed when
+  pointed at and to a screen reader; a second folded table gives every month's share, with a dash
+  for a month without one. The reasons' tables are unchanged.
+
+Consequences: staff can tell a company that fails much because it sends much from one whose sends
+fail often. A company with few sends shows a high share from few failures; its count beside the share
+says how few. The ranking stays by count, so a company with a high share and few failures can be in
+the rest. A company being deleted shows what is left of its sends, so its share can read high until
+its deletion ends.
+
+Not built: a ranking by share (it needs a floor of sends below which a share means little, a product
+decision), the share of each of the rest's companies, and a CSV of the table.
