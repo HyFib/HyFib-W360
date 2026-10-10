@@ -5795,6 +5795,14 @@ describe('campaign events (ADR-087)', () => {
       by_reason: { no_marketing_opt_in: 10_000 },
       deliveries: 10_000,
     });
+    // The send worker would take the sends just queued: here they are accepted directly, as the
+    // 10,000-recipient campaign test does, so none is left for the sweep of stale sends, which
+    // reads every company's (ops.stale_send_intents) and which other tests read.
+    await fx.query(
+      `UPDATE app.send_intents SET state = 'accepted' WHERE state = 'queued'
+         AND message_id IN (SELECT id FROM app.messages WHERE campaign_id = $1)`,
+      [id],
+    );
 
     // The sending period ends with the rest still waiting: skipped together, captured together.
     s.clock.advance(25 * 3_600_000);

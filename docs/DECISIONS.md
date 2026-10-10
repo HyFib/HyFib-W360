@@ -14136,11 +14136,12 @@ campaign whose audience was mostly skipped writes that many events and deliverie
 in the runner's transaction, as one whose sending period ends with recipients waiting does. An
 integration test starts a campaign with 10,000 recipients skipped when the audience was taken and
 ends it with the rest waiting, each tick under the pool's 15-second statement timeout, and logs how
-long each took. The 50,000 a campaign may hold are not tested (seeding 10,000 contacts already
-takes about 36 seconds in CI), and the test runs in CI only (no local PostgreSQL), so no time was
-measured here. A recipient a contact
-merge removed (both contacts were in the audience) can no longer be described, and a delivery not
-yet made then fails as `event_gone`.
+long each took: in CI (on 22c58df) the start captured the 10,000 in 1.6 seconds on PostgreSQL 18
+and 2.1 on 17, and the end the 2,500 left in 0.3 and 0.4. The 50,000 a campaign may hold are not
+tested (seeding 10,000 contacts already takes about 36 seconds in CI); in proportion they would
+take about 8 to 11 of the 15 seconds, an estimate, not a measurement. No time was measured here
+(no local PostgreSQL). A recipient a contact merge removed (both contacts were in the audience) can
+no longer be described, and a delivery not yet made then fails as `event_gone`.
 
 Not built: a filter by skip reason, recipients' sent messages as events of their own (their
 `message.status` events name the campaign), and events for recipients a cancelled campaign never

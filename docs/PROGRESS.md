@@ -37,10 +37,13 @@ migrations passed the pglast parse check (syntax only), their PL/pgSQL bodies in
   expired ones at the end of the sending period, nothing again on resume, the campaign and number
   lists, the detail kept, the bodies, a recipient gone ending as `event_gone`; 10,000 skips at a
   start and the rest at the end of the sending period, each tick under the pool's statement
-  timeout; `webhooks.test.ts`: the campaign list kept with only this event;
-  `tenant-isolation.test.ts`: the trigger functions executable by no runtime role, the set-based
-  capture by the runtime and definer roles only); the endpoints list text in the e2e test. Written
-  for CI; the integration tests were not run here.
+  timeout (in CI on 22c58df: the start's 10,000 in 1,559 ms on PostgreSQL 18 and 2,091 ms on 17,
+  the end's 2,500 in 340 and 435 ms; its queued sends are then accepted directly, as the
+  10,000-recipient campaign test does, since the 500 it left queued filled the stale-send sweep that
+  `messaging.test.ts` reads and failed it on both versions); `webhooks.test.ts`: the campaign list
+  kept with only this event; `tenant-isolation.test.ts`: the trigger functions executable by no
+  runtime role, the set-based capture by the runtime and definer roles only); the endpoints list
+  text in the e2e test. Written for CI; the integration tests were not run here.
 - **Review fixes:** the independent review found that capturing each skip through
   `app.capture_webhook_event` once per recipient could outrun the runner's 15-second statement
   timeout for a start with up to 50,000 skipped recipients or a sending period ending with many
