@@ -717,7 +717,7 @@ function CartReminderSkipReasonChoices({
 /**
  * The reasons whose campaign recipient skips an endpoint takes as `campaign.recipient_skipped`
  * (ADR-359), shown while it takes the event: every reason unless some are unticked, in the order
- * and words a campaign's page counts them.
+ * 0006 lists them and the words a campaign's page uses for them.
  */
 function CampaignSkipReasonChoices({
   prefix,
@@ -731,8 +731,8 @@ function CampaignSkipReasonChoices({
   return (
     <fieldset className="ml-6 grid gap-1">
       <legend className="mb-1 text-xs text-muted-foreground">
-        Campaign skip reasons sent (all of them unless you untick some, as a campaign&rsquo;s page
-        counts them)
+        Campaign skip reasons sent (all of them unless you untick some, in the words of a
+        campaign&rsquo;s page)
       </legend>
       {WEBHOOK_CAMPAIGN_SKIP_REASONS.map((reason) => {
         const id = `${prefix}-campaign-skip-reason-${reason}`;

@@ -42,6 +42,22 @@ check (syntax only), its SQL function body included.
   change and field descriptions, the answer schema's enum, the webhook's description). The other
   five are database paths (the settings refusal and audits, the API's answer and audit, the
   export), covered by the integration tests.
+- **Review fixes:** the independent review found that the API test comparing a whole endpoint
+  (`api-webhook-endpoints.test.ts`) did not list `campaignSkipReasons: null`, which it would have
+  failed on in CI (added); that the reasons were said to follow a campaign page's order, which has
+  none (they follow 0006's order, in the page's words); and suggested more capture cases, now in the
+  capture test: an endpoint naming a reason still receives every change of the campaign's status,
+  another event's reason list (cart reminders') narrows no campaign skip, and a reason on the list
+  does not pass the campaign and number lists for it.
+
+### Test commands and results (local, 2026-10-10)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 146 files, 1540 tests passed                                    |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
 
 ## 2026-10-10 — Webhook events for a campaign's skipped recipients (P5-09, H-014, ADR-358)
 

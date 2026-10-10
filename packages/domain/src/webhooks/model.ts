@@ -773,10 +773,10 @@ export const WEBHOOK_CART_REMINDER_SKIP_REASONS = [
 
 /**
  * The reasons a `campaign.recipient_skipped` event gives (ADR-358), which an endpoint can choose
- * (ADR-359), in the order a campaign's page counts them: every reason a campaign skips a recipient
- * for, when its audience is taken (no number, suppressed, opted out, no marketing opt-in, a missing
- * variable) or as it sends (those again, an erased contact, the frequency cap, no price under a
- * spending cap, the end of its sending period).
+ * (ADR-359), in the order 0006 lists them: every reason a campaign skips a recipient for, when its
+ * audience is taken (no number, suppressed, opted out, no marketing opt-in, a missing variable) or
+ * as it sends (those again, an erased contact, the frequency cap, no price under a spending cap,
+ * the end of its sending period).
  */
 export const WEBHOOK_CAMPAIGN_SKIP_REASONS = [
   'contact_erased',

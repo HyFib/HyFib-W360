@@ -1696,7 +1696,7 @@ export function webhookCartReminderSkipReasonsFor(
 
 /**
  * The reasons whose campaign recipient skips an endpoint takes as `campaign.recipient_skipped`
- * (ADR-359), in the order a campaign's page counts them; null takes every reason.
+ * (ADR-359), in the order 0006 lists them; null takes every reason.
  */
 export const webhookCampaignSkipReasonsSchema = z
   .array(

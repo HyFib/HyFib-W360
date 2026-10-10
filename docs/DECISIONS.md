@@ -14160,11 +14160,11 @@ their events' own.
 Decision:
 
 - **A list of reasons:** `campaignSkipReasons`, 1 to 9 of the reasons a campaign skips a recipient
-  for (`WEBHOOK_CAMPAIGN_SKIP_REASONS`, every reason 0006 allows), each once, kept in the order a
-  campaign's page counts them, as `recipient.skipReason` names them. A skipped recipient is sent
-  when its reason is on the list, as well as its campaign and number on those lists; null receives
-  every reason, as before. Only while the endpoint takes `campaign.recipient_skipped` (migration
-  0282's check), so the list never outlives its event.
+  for (`WEBHOOK_CAMPAIGN_SKIP_REASONS`, every reason 0006 allows), each once, kept in the order
+  0006 lists them, as `recipient.skipReason` names them. A skipped recipient is sent when its
+  reason is on the list, as well as its campaign and number on those lists; null receives every
+  reason, as before. Only while the endpoint takes `campaign.recipient_skipped` (migration 0282's
+  check), so the list never outlives its event.
 - **A list of its own:** not the order messages' or cart reminders' lists, whose reasons and events
   differ (a reason they share, such as `no_phone`, is chosen for each event apart).
 - **Where it applies:** in `app.capture_campaign_recipient_skips` (ADR-358), replaced with the same

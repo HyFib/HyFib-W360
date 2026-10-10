@@ -269,6 +269,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       orderMessageEvents: null,
       orderMessageSkipReasons: null,
       cartReminderSkipReasons: null,
+      campaignSkipReasons: null,
       runStepOutcomes: null,
       runStepNodeTypes: null,
       orderChangeMakers: null,
