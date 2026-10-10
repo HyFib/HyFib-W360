@@ -37,6 +37,7 @@ import {
   WEBHOOK_ORDER_MESSAGE_EVENTS,
   WEBHOOK_ORDER_MESSAGE_SKIP_REASONS,
   WEBHOOK_CART_REMINDER_SKIP_REASONS,
+  WEBHOOK_CAMPAIGN_SKIP_REASONS,
   WEBHOOK_RUN_STEP_OUTCOMES,
   WEBHOOK_RUN_STEP_NODE_TYPES,
   WEBHOOK_ORDER_CHANGE_MAKERS,
@@ -1263,6 +1264,12 @@ export const apiWebhookEndpointSchema = z.object({
     .nullable()
     .describe(
       'The reasons whose cart reminder skips the endpoint receives as store_checkout.reminder_skipped, as reminder.skipReason names them; null receives every reason’s.',
+    ),
+  campaignSkipReasons: z
+    .array(z.enum(WEBHOOK_CAMPAIGN_SKIP_REASONS))
+    .nullable()
+    .describe(
+      'The reasons whose campaign recipient skips the endpoint receives as campaign.recipient_skipped, as recipient.skipReason names them; null receives every reason’s.',
     ),
   runStepOutcomes: z
     .array(z.enum(WEBHOOK_RUN_STEP_OUTCOMES))
@@ -4411,7 +4418,7 @@ export function buildOpenApiDocument(serverUrl: string) {
       'campaign.recipient_skipped': webhook(
         'webhookCampaignRecipientSkipped',
         WEBHOOK_EVENT_INFO['campaign.recipient_skipped'].label,
-        `${WEBHOOK_EVENT_INFO['campaign.recipient_skipped'].description} message.status reports the recipients a campaign’s message went to; this event reports the others, once each, so a system that reaches contacts another way learns whom a campaign left out and why. recipient gives the recipient (as GET /campaigns/{id}/recipients lists it) and the reason, as captured; the campaign, the contact and the number are as they are when the event is delivered, the contact as erasure left it. Those skipped when the audience was taken, at submission, are sent when the campaign starts, so a campaign sent back to draft or cancelled before it starts sends none; the others are sent as the campaign skips them while it sends, many at once when its sending period ends. It happens on the WhatsApp number the campaign sends from, so an endpoint that names numbers receives it for those numbers only, and the campaigns an endpoint names (its \`campaignIds\`, or the campaigns ticked in Settings → Webhooks) narrow it as they narrow the campaign’s other events; with both lists, a skipped recipient must pass them both. A recipient a contact merge removed (both contacts were in the audience) can no longer be described, after which a delivery not yet made fails as event_gone.`,
+        `${WEBHOOK_EVENT_INFO['campaign.recipient_skipped'].description} message.status reports the recipients a campaign’s message went to; this event reports the others, once each, so a system that reaches contacts another way learns whom a campaign left out and why. recipient gives the recipient (as GET /campaigns/{id}/recipients lists it) and the reason, as captured; the campaign, the contact and the number are as they are when the event is delivered, the contact as erasure left it. Those skipped when the audience was taken, at submission, are sent when the campaign starts, so a campaign sent back to draft or cancelled before it starts sends none; the others are sent as the campaign skips them while it sends, many at once when its sending period ends. It happens on the WhatsApp number the campaign sends from, so an endpoint that names numbers receives it for those numbers only, and the campaigns an endpoint names (its \`campaignIds\`, or the campaigns ticked in Settings → Webhooks) narrow it as they narrow the campaign’s other events, and an endpoint receives every reason’s skips unless it names the reasons (its \`campaignSkipReasons\`, or the reasons ticked under Campaign recipient skipped); with more than one of these lists, a skipped recipient must pass them all. A recipient a contact merge removed (both contacts were in the audience) can no longer be described, after which a delivery not yet made fails as event_gone.`,
         'WebhookCampaignRecipientSkipped',
       ),
       'deal.created': webhook(

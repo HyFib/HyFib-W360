@@ -8,7 +8,9 @@ import type {
   WebhookOrderMessageEvent,
   WebhookOrderMessageSkipReason,
   WebhookCartReminderSkipReason,
+  WebhookCampaignSkipReason,
   WebhookOAuthClientAuth,
+  SkipReason,
   WebhookConsentChange,
   WebhookContactPart,
   WebhookConversationStatus,
@@ -42,6 +44,7 @@ export type {
   WebhookOrderMessageEvent,
   WebhookOrderMessageSkipReason,
   WebhookCartReminderSkipReason,
+  WebhookCampaignSkipReason,
   WebhookOAuthClientAuth,
   WebhookConsentChange,
   WebhookContactPart,
@@ -767,6 +770,25 @@ export const WEBHOOK_CART_REMINDER_SKIP_REASONS = [
   'frequency_capped',
   'not_in_plan',
 ] as const satisfies readonly (WebhookCartReminderSkipReason & StoreMessageSkipReason)[];
+
+/**
+ * The reasons a `campaign.recipient_skipped` event gives (ADR-358), which an endpoint can choose
+ * (ADR-359), in the order 0006 lists them: every reason a campaign skips a recipient for, when its
+ * audience is taken (no number, suppressed, opted out, no marketing opt-in, a missing variable) or
+ * as it sends (those again, an erased contact, the frequency cap, no price under a spending cap,
+ * the end of its sending period).
+ */
+export const WEBHOOK_CAMPAIGN_SKIP_REASONS = [
+  'contact_erased',
+  'no_phone',
+  'suppressed',
+  'opted_out',
+  'no_marketing_opt_in',
+  'missing_variable',
+  'frequency_capped',
+  'cost_unknown',
+  'expired',
+] as const satisfies readonly (WebhookCampaignSkipReason & SkipReason)[];
 
 /**
  * The statuses a `deal.status_changed` event reports, which an endpoint can choose (ADR-309), in

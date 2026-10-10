@@ -1311,12 +1311,14 @@ verification, app review, Embedded Signup configuration).
   (ADR-358, migrations 0280 and 0281: `campaign.recipient_skipped` once per recipient a campaign
   skips, with the reason, the campaign, the contact and the number; those skipped when the
   audience was taken when the campaign starts; written set-based, per campaign and statement;
-  narrowed by campaigns and numbers).
+  narrowed by campaigns and numbers). **[Skip reason filter for skipped campaign recipients built;
+  its database tests run only in CI]** (ADR-359, migration 0282: an endpoint takes
+  `campaign.recipient_skipped` only for chosen reasons, 1 to 9 of those a campaign recipient can be
+  skipped for).
   Remaining: filters for other event types and on a message's values other than its type and words,
   field value comparisons beyond
   values, words and ranges, other authentication (headers computed per delivery, other OAuth
-  grants, JWT client assertions), mutual TLS, fixed egress addresses, a filter by campaign skip
-  reason, other store events (a
+  grants, JWT client assertions), mutual TLS, fixed egress addresses, other store events (a
   filter by cart reminder, first or second; the store's orders and checkouts themselves are
   reported by the store, ADR-085),
   a sequence number across events, load tests.

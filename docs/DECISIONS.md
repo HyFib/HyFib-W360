@@ -14146,3 +14146,41 @@ no longer be described, and a delivery not yet made then fails as `event_gone`.
 Not built: a filter by skip reason, recipients' sent messages as events of their own (their
 `message.status` events name the campaign), and events for recipients a cancelled campaign never
 reached.
+
+## ADR-359 Choosing the skip reasons of the skipped campaign recipients a webhook endpoint receives (P5-09) (2026-10-10)
+
+Context: `campaign.recipient_skipped` (ADR-358) is sent for every recipient a campaign skips,
+whatever the reason, narrowed by campaign and number only. A receiver that acts on one kind of skip,
+for example reaching contacts by email or a call list when WhatsApp could not (no number, no
+marketing opt-in, the frequency cap, the end of the sending period), was sent the recipients who
+opted out, are suppressed or were erased as well, whom it must not reach at all, and had to leave
+them alone itself. The order messages' and cart reminders' skip reasons (ADR-354, ADR-356) are
+their events' own.
+
+Decision:
+
+- **A list of reasons:** `campaignSkipReasons`, 1 to 9 of the reasons a campaign skips a recipient
+  for (`WEBHOOK_CAMPAIGN_SKIP_REASONS`, every reason 0006 allows), each once, kept in the order
+  0006 lists them, as `recipient.skipReason` names them. A skipped recipient is sent when its
+  reason is on the list, as well as its campaign and number on those lists; null receives every
+  reason, as before. Only while the endpoint takes `campaign.recipient_skipped` (migration 0282's
+  check), so the list never outlives its event.
+- **A list of its own:** not the order messages' or cart reminders' lists, whose reasons and events
+  differ (a reason they share, such as `no_phone`, is chosen for each event apart).
+- **Where it applies:** in `app.capture_campaign_recipient_skips` (ADR-358), replaced with the same
+  signature: a skip's event is written only when an endpoint takes it (its reason on the endpoint's
+  list, or no list) and delivered to each such endpoint, so a skip no endpoint takes is not
+  recorded. The triggers are unchanged.
+- **Who sets it:** owners and administrators in Settings → Webhooks (ticked under Campaign
+  recipient skipped, each reason in the words of a campaign's page) and keys with `webhooks.manage`
+  through the API, audited with the endpoint and in the company data export. Refusals name the
+  field: a list without its event, an empty list, an unknown or another event's reason.
+
+Consequences: a receiver can take only what it acts on, and never see the recipients who opted out
+or were erased if it chooses so. A reason added to campaigns later is not on an existing list until
+it is ticked. The audit of an endpoint's change at its largest (every event type, the 61 lists and
+the longest hosts) is now 6,711 bytes, under the test's 6,800 bound (ADR-356) and the 7,000 bytes
+the audit keeps; the next lists will need the entry named more compactly.
+
+Not built: a filter by when a recipient was skipped (when the audience was taken or while the
+campaign sent); the reasons mostly tell them apart.

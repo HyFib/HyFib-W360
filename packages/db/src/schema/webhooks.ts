@@ -185,6 +185,22 @@ export type WebhookCartReminderSkipReason =
   | 'not_in_plan';
 
 /**
+ * The reasons a campaign skips a recipient for, which an endpoint can choose to take the skips of as
+ * `campaign.recipient_skipped` (ADR-359): every reason a campaign recipient can be skipped for
+ * (0006), when the audience is taken or as the campaign sends.
+ */
+export type WebhookCampaignSkipReason =
+  | 'contact_erased'
+  | 'no_phone'
+  | 'suppressed'
+  | 'opted_out'
+  | 'no_marketing_opt_in'
+  | 'missing_variable'
+  | 'frequency_capped'
+  | 'cost_unknown'
+  | 'expired';
+
+/**
  * Who made an order status change `order.status_changed` reports, as an endpoint can choose them
  * (ADR-322): a member on the order page, an API key, or HyFib applying what Razorpay reports for
  * the order's Payment Link, as the event's `changedBy` names them.
@@ -416,6 +432,11 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
   cartReminderSkipReasons: text('cart_reminder_skip_reasons')
     .array()
     .$type<WebhookCartReminderSkipReason[]>(),
+  /**
+   * The reasons whose campaign recipient skips it takes as `campaign.recipient_skipped` (migration
+   * 0282, ADR-359); null takes every reason. Set only while that event is among its events.
+   */
+  campaignSkipReasons: text('campaign_skip_reasons').array().$type<WebhookCampaignSkipReason[]>(),
   /**
    * The statuses a deal reaches that it takes as `deal.status_changed` (migration 0232, ADR-309);
    * null takes every status. Set only while `deal.status_changed` is among its events.

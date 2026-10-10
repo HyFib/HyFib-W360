@@ -192,6 +192,7 @@ import {
   WEBHOOK_ORDER_MESSAGES_NEED_THE_EVENT,
   WEBHOOK_ORDER_MESSAGE_SKIP_REASONS_NEED_THE_EVENT,
   WEBHOOK_CART_REMINDER_SKIP_REASONS_NEED_THE_EVENT,
+  WEBHOOK_CAMPAIGN_SKIP_REASONS_NEED_THE_EVENT,
   WEBHOOK_RUN_STEP_NODE_TYPES_NEED_THE_EVENT,
   WEBHOOK_ORDER_CHANGE_MAKERS_NEED_THE_EVENT,
   WEBHOOK_ORDER_EXCLUDED_API_KEYS_NEED_THE_EVENT,
@@ -222,6 +223,7 @@ import {
   WEBHOOK_ORDER_MESSAGE_EVENTS,
   WEBHOOK_ORDER_MESSAGE_SKIP_REASONS,
   WEBHOOK_CART_REMINDER_SKIP_REASONS,
+  WEBHOOK_CAMPAIGN_SKIP_REASONS,
   WEBHOOK_RUN_STEP_NODE_TYPES,
   WEBHOOK_ORDER_CHANGE_MAKERS,
   WEBHOOK_DEAL_STATUSES,
@@ -1491,6 +1493,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'assigneeIds',
       'automationIds',
       'campaignIds',
+      'campaignSkipReasons',
       'campaignStatuses',
       'cartReminderSkipReasons',
       'channelIds',
@@ -3654,7 +3657,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       storeIds: [shop],
     });
     expect(apiUpdateWebhookEndpointSchema.safeParse({}).error?.issues[0]?.message).toContain(
-      'the templates, the cash on delivery answers, the stores of store events, the order messages whose skips and sends are sent, the skip reasons of skipped order messages, the skip reasons of skipped cart reminders, the campaigns,',
+      'the templates, the cash on delivery answers, the stores of store events, the order messages whose skips and sends are sent, the skip reasons of skipped order messages, the skip reasons of skipped cart reminders, the skip reasons of skipped campaign recipients, the campaigns,',
     );
     const doc = buildOpenApiDocument('https://app.example.com/api/v1');
     const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
@@ -3858,6 +3861,71 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       .properties;
     expect(JSON.stringify(changed.cartReminderSkipReasons)).toContain(
       'unless the events no longer include store_checkout.reminder_skipped, which clears them',
+    );
+  });
+
+  it('take campaign skip reasons only with campaign.recipient_skipped, and a list of them alone is a change (ADR-359)', () => {
+    const base = {
+      url: 'https://hooks.example.com/w360',
+      events: ['campaign.recipient_skipped'],
+    };
+    expect(
+      apiCreateWebhookEndpointSchema.parse({
+        ...base,
+        campaignSkipReasons: ['expired', 'no_phone', 'expired'],
+      }).campaignSkipReasons,
+    ).toEqual(['no_phone', 'expired']);
+    // A campaign's status changes and its messages' statuses have no skip reason, and skipped cart
+    // reminders have a list of their own.
+    for (const events of [
+      ['campaign.status_changed'],
+      ['message.status'],
+      ['store_checkout.reminder_skipped'],
+    ]) {
+      expect(
+        apiCreateWebhookEndpointSchema
+          .safeParse({ ...base, events, campaignSkipReasons: ['no_phone'] })
+          .error?.issues.map((i) => [i.path.join('.'), i.message]),
+        events.join(),
+      ).toEqual([['campaignSkipReasons', WEBHOOK_CAMPAIGN_SKIP_REASONS_NEED_THE_EVENT]]);
+    }
+    for (const body of [
+      { ...base, campaignSkipReasons: [] },
+      { ...base, campaignSkipReasons: ['cart_too_old'] },
+      { ...base, campaignSkipReasons: ['canceled'] },
+      { ...base, campaignSkipReasons: 'expired' },
+    ]) {
+      expect(apiCreateWebhookEndpointSchema.safeParse(body).success, JSON.stringify(body)).toBe(
+        false,
+      );
+    }
+    expect(apiUpdateWebhookEndpointSchema.parse({ campaignSkipReasons: ['cost_unknown'] })).toEqual(
+      { campaignSkipReasons: ['cost_unknown'] },
+    );
+    expect(apiUpdateWebhookEndpointSchema.parse({ campaignSkipReasons: null })).toEqual({
+      campaignSkipReasons: null,
+    });
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas;
+    const answered = schemas.WebhookEndpoint as {
+      properties: Record<string, { anyOf?: { items?: { enum?: string[] } }[] }>;
+    };
+    expect(answered.properties.campaignSkipReasons?.anyOf?.[0]?.items?.enum).toEqual([
+      ...WEBHOOK_CAMPAIGN_SKIP_REASONS,
+    ]);
+    const given = (schemas.CreateWebhookEndpoint as { properties: Record<string, unknown> })
+      .properties;
+    expect(JSON.stringify(given.campaignSkipReasons)).toContain(
+      'as recipient.skipReason names them, only with that event',
+    );
+    expect(JSON.stringify(given.campaignSkipReasons)).toContain(
+      'With the campaigns or the numbers chosen too, a skipped recipient must pass them all.',
+    );
+    const changed = (schemas.UpdateWebhookEndpoint as { properties: Record<string, unknown> })
+      .properties;
+    expect(JSON.stringify(changed.campaignSkipReasons)).toContain(
+      'unless the events no longer include campaign.recipient_skipped, which clears them',
     );
   });
 
