@@ -1047,6 +1047,48 @@ export const storeOrderMessageSkippedPayloadSchema = envelope(
   }),
 );
 
+/**
+ * A store's order message that went out (ADR-353): the event it was for, when that happened and the
+ * message or the run, as captured; the order, its store, the conversation's contact and its number
+ * as they are when the event is delivered. Never the customer's details from the store, which the
+ * contact replaces.
+ */
+const webhookSentOrderMessageSchema = z.object({
+  event: z
+    .enum(ORDER_MESSAGE_EVENTS)
+    .describe(
+      'What the message was about, as the store’s order messages name it: order_placed, cod_confirmation (asking the customer to confirm or cancel an order paid on delivery), order_shipped, order_delivered or order_cancelled.',
+    ),
+  occurredAt: z.iso
+    .datetime()
+    .describe(
+      'When the order’s event happened, as the store dated it; for a cancellation the store gives no time for, when HyFib saw it.',
+    ),
+  messageId: z
+    .uuid()
+    .nullable()
+    .describe(
+      'The template message HyFib sent, among the conversation’s messages: its delivery follows as message.status events with this message.id. Null when the rule started an automation instead.',
+    ),
+  automationRunId: z
+    .uuid()
+    .nullable()
+    .describe(
+      'The automation run the rule started instead of sending a template, as automation.run_started events give it in run.id; null for a template.',
+    ),
+});
+export const storeOrderMessageSentPayloadSchema = envelope(
+  'store_order.message_sent',
+  z.object({
+    orderMessage: webhookSentOrderMessageSchema,
+    storeOrder: webhookStoreOrderSchema,
+    store: webhookStoreSchema,
+    conversation: z.object({ id: z.uuid() }),
+    contact: contactSchema,
+    channel: channelSchema,
+  }),
+);
+
 export const pingPayloadSchema = envelope(
   'ping',
   z.object({ endpointId: z.uuid(), message: z.string() }),
@@ -1709,6 +1751,63 @@ async function storeOrderMessageOf(tx: Tx, tenantId: string, storeMessageId: str
   return row ?? null;
 }
 
+/**
+ * A store's sent order message (ADR-353) with its order, the store, and the conversation it went
+ * out in with that conversation's contact and number, in the company; null if there is none.
+ */
+async function sentStoreOrderMessageOf(
+  tx: Tx,
+  tenantId: string,
+  storeMessageId: string | null,
+  conversationId: string,
+) {
+  if (!storeMessageId || !z.uuid().safeParse(storeMessageId).success) return null;
+  const [row] = await tx
+    .select({
+      order: storeOrderColumns,
+      store: storeColumns,
+      contactId: conversations.contactId,
+      channelId: conversations.channelAccountId,
+      channelPhone: channelAccounts.displayPhoneNumber,
+    })
+    .from(commerceStoreMessages)
+    .innerJoin(
+      commerceStoreOrders,
+      and(
+        eq(commerceStoreOrders.tenantId, commerceStoreMessages.tenantId),
+        eq(commerceStoreOrders.id, commerceStoreMessages.orderId),
+      ),
+    )
+    .innerJoin(
+      commerceStores,
+      and(
+        eq(commerceStores.tenantId, commerceStoreMessages.tenantId),
+        eq(commerceStores.id, commerceStoreMessages.storeId),
+      ),
+    )
+    .innerJoin(
+      conversations,
+      and(
+        eq(conversations.tenantId, commerceStoreMessages.tenantId),
+        eq(conversations.id, conversationId),
+      ),
+    )
+    .leftJoin(
+      channelAccounts,
+      and(
+        eq(channelAccounts.tenantId, conversations.tenantId),
+        eq(channelAccounts.id, conversations.channelAccountId),
+      ),
+    )
+    .where(
+      and(
+        eq(commerceStoreMessages.tenantId, tenantId),
+        eq(commerceStoreMessages.id, storeMessageId),
+      ),
+    );
+  return row ?? null;
+}
+
 /** A WhatsApp order with its items in cart order and its number, in the company. */
 async function orderOf(tx: Tx, tenantId: string, orderId: string | null) {
   if (!orderId || !z.uuid().safeParse(orderId).success) return null;
@@ -2111,6 +2210,48 @@ export async function buildWebhookPayload(
           },
           storeOrder: toWebhookStoreOrder(skipped.order),
           store: skipped.store,
+        },
+      };
+    }
+    case 'store_order.message_sent': {
+      // The event, when the order's event happened, the message or the run and the conversation as
+      // captured; the order, its store, the conversation's contact and its number as they are now.
+      // A message goes with its order or its store, so one that is gone can no longer be described.
+      const occurredAt = str(event.detail.occurredAt);
+      const automationRunId = str(event.detail.automationRunId);
+      // Every such event is captured with them, and with a message or a run (0273): one without
+      // cannot be described.
+      if (
+        event.status === null ||
+        occurredAt === null ||
+        event.conversationId === null ||
+        (event.messageId === null) === (automationRunId === null)
+      ) {
+        throw new Error(
+          'The sent order message was captured without its event, time, conversation, message or run',
+        );
+      }
+      const sent = await sentStoreOrderMessageOf(
+        tx,
+        tenantId,
+        str(event.detail.storeMessageId),
+        event.conversationId,
+      );
+      if (!sent) throw new WebhookEventGoneError();
+      return {
+        ...base,
+        data: {
+          orderMessage: {
+            event: event.status,
+            occurredAt: new Date(occurredAt).toISOString(),
+            messageId: event.messageId,
+            automationRunId,
+          },
+          storeOrder: toWebhookStoreOrder(sent.order),
+          store: sent.store,
+          conversation: { id: event.conversationId },
+          contact: await contactOf(tx, tenantId, sent.contactId),
+          channel: { id: sent.channelId, phone: sent.channelPhone ?? null },
         },
       };
     }

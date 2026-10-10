@@ -277,13 +277,13 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
                     ) : null}
                     {e.stores ? (
                       <p className="text-xs break-all text-muted-foreground">
-                        Stores whose cash on delivery answers and skipped order messages are sent:{' '}
+                        Stores whose cash on delivery answers and order messages are sent:{' '}
                         {e.stores.map(webhookStoreText).join(', ')}
                       </p>
                     ) : null}
                     {e.orderMessageEvents ? (
                       <p className="text-xs text-muted-foreground">
-                        Order messages whose skips are sent:{' '}
+                        Order messages whose skips and sends are sent:{' '}
                         {e.orderMessageEvents
                           .map((m) => WEBHOOK_ORDER_MESSAGE_EVENT_LABELS[m])
                           .join(', ')}

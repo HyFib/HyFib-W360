@@ -1912,6 +1912,17 @@ Phase 5 rules (outgoing webhooks, P5-09):
   receives and never add an event or a delivery for another endpoint or company; the payload is
   unchanged. Audited with the lists and in the company data export (unit tests; integration tests,
   run in CI only).
+- `store_order.message_sent` (ADR-353) is captured by a trigger in the transaction of the
+  message's job that queues a store's order message or starts its automation, as the runtime role
+  in the company's scope (no runtime role can call its function directly), once per message:
+  it fires only when a message with an order leaves `pending`, which happens once. The event keeps
+  ids and the event's name and time; the number and store it passes for the filters are taken out
+  before it is stored. The body, built when delivered in the company's scope, gives the store's
+  order and store as ADR-348 does and the conversation's contact as HyFib keeps it (null phone and
+  name once erased), never the customer's name, phone, email, address or tracking from the store's
+  order. The number, store and order message lists of an endpoint narrow it in
+  `app.capture_webhook_event`. A message deleted with its order or store fails its pending
+  deliveries as `event_gone` (unit tests; integration tests, run in CI only).
 - An endpoint can take the run steps of chosen outcomes only (ADR-327). The list holds only the
   outcomes a run's log records (checked by the services and the database), is kept only while the
   endpoint takes `automation.run_step` (a database check too), and is applied in

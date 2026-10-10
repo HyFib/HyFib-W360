@@ -1567,6 +1567,62 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     });
   });
 
+  it('choose the numbers, stores and order messages of sent order messages alone, the numbers going with the event (ADR-353)', async () => {
+    const c = await fx.company();
+    const key = await apiKey(c, ['webhooks.manage']);
+    const [store] = await fx.query<{ id: string }>(
+      `INSERT INTO app.commerce_stores (id, tenant_id, platform, store_url, name,
+         webhook_public_id, webhook_secret_ciphertext, created_by_membership_id)
+       VALUES (gen_random_uuid(), $1, 'woocommerce', $2, 'Tara Tea', $3, 'x', $4)
+       RETURNING id`,
+      [
+        c.tenant.id,
+        `https://${randomBytes(6).toString('hex')}.example.test`,
+        Array.from(randomBytes(16), (b) => 'abcdefghijklmnopqrstuvwxyz234567'[b % 32]).join(''),
+        c.tenant.ownerMembershipId,
+      ],
+    );
+    if (!store) throw new Error('no store');
+    const issueOf = async (promise: Promise<unknown>) => {
+      const error = await expectAppError(promise, 'validation_failed');
+      return isAppError(error) ? error.issues?.[0] : undefined;
+    };
+    const sent = ['store_order.message_sent'];
+    const created = await addThroughApi(key.ctx, 'sent-1', {
+      url: receiverUrl(),
+      events: sent,
+      channelIds: [c.channelAccountId],
+      storeIds: [store.id],
+      orderMessageEvents: ['order_shipped', 'order_placed'],
+    });
+    const id = created.body.data.id;
+    const chosen = {
+      channelIds: [c.channelAccountId],
+      storeIds: [store.id],
+      orderMessageEvents: ['order_placed', 'order_shipped'],
+    };
+    expect(created.body.data).toMatchObject(chosen);
+    // A list alone is a change while the endpoint takes the event.
+    expect(
+      await api().update(key.ctx, id, { orderMessageEvents: ['order_cancelled'] }),
+    ).toMatchObject({ ...chosen, orderMessageEvents: ['order_cancelled'] });
+    // Skipped messages instead keep the stores and the order messages; they happen on no number,
+    // so the numbers go and cannot be given.
+    expect(
+      await api().update(key.ctx, id, { events: ['store_order.message_skipped'] }),
+    ).toMatchObject({
+      channelIds: null,
+      storeIds: [store.id],
+      orderMessageEvents: ['order_cancelled'],
+    });
+    expect(
+      await issueOf(api().update(key.ctx, id, { channelIds: [c.channelAccountId] })),
+    ).toMatchObject({ path: 'channelIds' });
+    expect(
+      await api().update(key.ctx, id, { events: sent, channelIds: [c.channelAccountId] }),
+    ).toMatchObject({ ...chosen, orderMessageEvents: ['order_cancelled'] });
+  });
+
   it('choose who made the order changes an endpoint receives, kept by changes that leave them out and cleared with the event (ADR-322)', async () => {
     const c = await fx.company();
     const key = await apiKey(c, ['webhooks.manage']);

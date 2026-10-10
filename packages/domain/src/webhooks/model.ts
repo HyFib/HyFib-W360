@@ -86,6 +86,7 @@ export const WEBHOOK_EVENT_KEYS = [
   'payment_link.status_changed',
   'store_order.cod_answered',
   'store_order.message_skipped',
+  'store_order.message_sent',
   'campaign.status_changed',
   'deal.created',
   'deal.updated',
@@ -197,6 +198,11 @@ export const WEBHOOK_EVENT_INFO: Record<WebhookEventType, { label: string; descr
       label: 'Order message skipped',
       description:
         'A connected store’s message about an order (placed, cash on delivery confirmation, shipped, delivered or cancelled) was not sent: a test order, an event HyFib saw too late, an order placed message the cash on delivery confirmation replaced, or a check that failed when it was due, such as a customer who opted out or an order without a phone number.',
+    },
+    'store_order.message_sent': {
+      label: 'Order message sent',
+      description:
+        'A connected store’s message about an order (placed, cash on delivery confirmation, shipped, delivered or cancelled) went out: its template message was queued for WhatsApp, whose statuses follow as message status events, or the automation its rule chose started.',
     },
     'campaign.status_changed': {
       label: 'Campaign status',
@@ -643,8 +649,8 @@ export const WEBHOOK_COD_ANSWER_LABELS: Record<WebhookCodAnswer, string> = {
 };
 
 /**
- * The order messages a `store_order.message_skipped` event is about, which an endpoint can choose
- * (ADR-352), in the order a store's order messages list them.
+ * The order messages a `store_order.message_skipped` or `store_order.message_sent` event is about,
+ * which an endpoint can choose (ADR-352, ADR-353), in the order a store's order messages list them.
  */
 export const WEBHOOK_ORDER_MESSAGE_EVENTS = [
   'order_placed',
@@ -1205,8 +1211,8 @@ export const WEBHOOK_LIMITS = {
   campaigns: 50,
   /**
    * The stores an endpoint can choose to take the cash on delivery answers (ADR-349) and skipped
-   * order messages (ADR-352) of: a company has at most 5 at once, and a store removed since it was
-   * chosen stays on the list.
+   * (ADR-352) and sent (ADR-353) order messages of: a company has at most 5 at once, and a store
+   * removed since it was chosen stays on the list.
    */
   stores: 20,
   /** The newest campaigns Settings offers to choose from (ADR-185); the API takes any of them. */
@@ -1346,8 +1352,9 @@ export const webhookApiKeyText = (key: WebhookEndpointApiKey): string => {
  * The events that happen on a WhatsApp number, which an endpoint can take for chosen numbers
  * (ADR-170): a campaign's are on the number it sends from, a Payment Link's on its order's (ADR-285),
  * a survey's answer on its conversation's (ADR-293), a run's step on its run's (ADR-326), a cash on
- * delivery answer on its confirmation's (ADR-348). Consent, contact, template, skipped order message
- * (ADR-351), deal, task and note events belong to no number.
+ * delivery answer on its confirmation's (ADR-348), a sent order message on the number it went from
+ * (ADR-353). Consent, contact, template, skipped order message (ADR-351), deal, task and note events
+ * belong to no number.
  */
 export const WEBHOOK_CHANNEL_EVENTS = [
   'message.received',
@@ -1363,6 +1370,7 @@ export const WEBHOOK_CHANNEL_EVENTS = [
   'order.status_changed',
   'payment_link.status_changed',
   'store_order.cod_answered',
+  'store_order.message_sent',
   'campaign.status_changed',
 ] as const satisfies readonly WebhookEventType[];
 
@@ -1538,16 +1546,31 @@ export const webhookStoreText = (store: WebhookEndpointStore): string =>
 
 /**
  * The events of a store's orders, which the stores an endpoint names narrow: cash on delivery
- * answers (ADR-349) and skipped order messages (ADR-352).
+ * answers (ADR-349) and skipped (ADR-352) and sent (ADR-353) order messages.
  */
 export const WEBHOOK_STORE_EVENTS = [
   'store_order.cod_answered',
   'store_order.message_skipped',
+  'store_order.message_sent',
 ] as const satisfies readonly WebhookEventType[];
 
 /** Whether an endpoint with these events takes events of stores' orders, and can choose stores. */
 export function webhookTakesStoreEvents(eventTypes: readonly WebhookEventType[]): boolean {
   return WEBHOOK_STORE_EVENTS.some((type) => eventTypes.includes(type));
+}
+
+/**
+ * The events of a store's order messages, which the order messages an endpoint names narrow:
+ * skipped (ADR-352) and sent (ADR-353).
+ */
+export const WEBHOOK_ORDER_MESSAGE_TYPES = [
+  'store_order.message_skipped',
+  'store_order.message_sent',
+] as const satisfies readonly WebhookEventType[];
+
+/** Whether an endpoint with these events takes events of order messages, and can choose them. */
+export function webhookTakesOrderMessages(eventTypes: readonly WebhookEventType[]): boolean {
+  return WEBHOOK_ORDER_MESSAGE_TYPES.some((type) => eventTypes.includes(type));
 }
 
 /** Whether an endpoint with these events takes events of campaigns, and can choose campaigns. */

@@ -384,6 +384,7 @@ describe('database roles', () => {
       'app.contact_merges_capture()',
       'app.webhook_capture_store_cod_answer()',
       'app.webhook_capture_store_message_skipped()',
+      'app.webhook_capture_store_message_sent()',
     ]) {
       for (const role of ['w360_app', 'w360_auth', 'w360_platform']) {
         expect(await can(role, fn), `${role} ${fn}`).toBe(false);

@@ -1,5 +1,60 @@
 # Progress
 
+## 2026-10-10 — A webhook event when a store's order message is sent (P5-09, H-014, ADR-353)
+
+Status: **Implemented; its database tests run in CI only.** A store's order messages went out as
+chat messages and automation runs whose events named no order, so an order system could not tie a
+delivery, a failure or a run to its order; it learned of skipped messages only (ADR-351). The local
+PostgreSQL is unavailable, so migrations 0273 and 0274 and the integration tests below were written
+but not run here; the migrations passed the pglast parse check (syntax only), their PL/pgSQL bodies
+included.
+
+### Completed
+
+- **Database:** migration 0273: the event type in the endpoints' and the events' checks (the
+  events' NOT VALID, validated by 0274) and in the number, store and order message checks;
+  `app.webhook_capture_store_message_sent` and its trigger on `app.commerce_store_messages` (a
+  message with an order leaving `pending` for `queued` or `started`), reading the conversation and
+  number from the chat message or the run; `app.capture_webhook_event` matching the number, store
+  and order message lists for it (replaced with the same signature).
+- **Domain:** the event type with its label and description, an event of a number, a store and an
+  order message; `storeOrderMessageSentPayloadSchema` and its body built when delivered
+  (`sentStoreOrderMessageOf`); the stores and order messages kept while either order message event
+  is taken; the refusals naming it; the OpenAPI entry and the filters' descriptions.
+- **Web:** Settings → Webhooks lists the event and shows the order messages as their own list
+  ("Order messages") while an endpoint takes either order message event, and the stores and the
+  numbers for it.
+- **Tests:** unit (8 new: the event's label, place and lists, the payload schema, the body of a
+  template and of a run, a message gone, an event captured incomplete, the OpenAPI entry, the API
+  schemas; the refusal texts and the audit's largest entry updated); integration (`stores.test.ts`:
+  four template messages captured once each with their message, conversation, contact and time and
+  delivered by number, store and order message, an automation run captured with its run, the
+  skipped messages' test and cart reminders capturing none; `webhooks.test.ts`: numbers, stores and
+  order messages with the event alone, the numbers going without it, the database checks;
+  `api-webhook-endpoints.test.ts`: the same through the API, a list alone a change; the isolation
+  suite lists the trigger function). Written for CI; the integration tests were not run here.
+- **Docs:** ADR-353; ARCHITECTURE; SECURITY; THREAT-MODEL T312; DEPLOYMENT (0273); RUNBOOKS (and
+  the ADR-349, ADR-351 and ADR-352 entries' names and lists); BACKLOG P5-09; feature matrix W-138,
+  W-139 and H-014. The audit's largest entry is now 6,264 bytes (ADR-336 said under 6,000; the
+  test's bound is 6,500, within the 7,000 kept).
+- **Mutation checks:** 22 deliberate regressions, 21 caught by the unit tests (the event not one of
+  a number, a store or an order message, another label or place, an event without its conversation
+  or with neither or both a message and a run described, the run, the message or the number's phone
+  left out, a message gone not `event_gone`, the time not in UTC, a read for an id that is not one,
+  another conversation id, the schema's message id or number loosened, the refusals and the API's
+  fields not naming the event, the API taking messages with skipped messages only, the event not
+  described as tying the order). The other, an API change taking order messages only with skipped
+  messages, runs against the database: the new API integration test covers it, in CI only.
+
+### Test commands and results (local, 2026-10-10)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 146 files, 1510 tests passed                                    |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+
 ## 2026-10-10 — Store and order message filters for skipped order messages (P5-09, H-014, ADR-352)
 
 Status: **Implemented; its database tests run in CI only.** `store_order.message_skipped`

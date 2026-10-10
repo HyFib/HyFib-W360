@@ -13856,3 +13856,46 @@ events, as before. Cash on delivery answers keep their answer list (ADR-349).
 
 Not built: a filter by skip reason (a receiver can leave `cash_on_delivery` and `test_order`
 alone, ADR-351), and order messages sent as their own events.
+
+## ADR-353 A webhook event when a store's order message is sent (P5-09) (2026-10-10)
+
+Context: a connected store's order messages (ADR-048) go out as template messages HyFib sends, or
+as the automation run their rule chose (ADR-050). Their statuses arrive as `message.status` and
+the runs as `automation.run_*` events, but neither names the store's order: an order system could
+not tell which order a delivery, a failure or a run was about. It learned of skipped messages
+(ADR-351) and of cash on delivery answers (ADR-348) only.
+
+Decision:
+
+- **The event:** `store_order.message_sent`, captured by a trigger on
+  `app.commerce_store_messages` when an order message leaves pending for queued (its template
+  message created and put on the send queue, with the message in the same update) or for started
+  (its rule's automation run started, with the run). A message leaves pending once, so each sends
+  one event; cart reminders, about checkouts, send none. The message's job writes the state, as the
+  runtime role in the company's scope.
+- **When:** as the message is queued, before WhatsApp accepts it. The store message never changes
+  state again; what happens to the chat message after that is its own status, which
+  `message.status` already sends with the same message id, so the event names the message
+  (`orderMessage.messageId`) instead of waiting for a status. For a run, `orderMessage.automationRunId`
+  is `run.id` of the run's events.
+- **What it keeps:** the event the message was for (its status), when the order's event happened,
+  the store message and the run in `detail`; the chat message and the conversation (the chat
+  message's, or the run's) as the event's message and conversation, and the customer's contact.
+  The body gives the order, its store, the conversation's contact and its number as they are when
+  the event is delivered, never the customer's details from the store.
+- **Filters:** it happens on the number the message went from, so an endpoint that names numbers
+  receives it for those numbers only; the stores and order messages an endpoint names (ADR-349,
+  ADR-352) narrow it as they narrow skipped messages, in `app.capture_webhook_event`, replaced with
+  the same signature (the number and the store travel in `detail` for the filters only). Settings
+  now shows the order messages as their own list ("Order messages") while an endpoint takes either
+  order message event, and the stores for any of the three store events.
+- **Gone:** a message is deleted with its order or its store, so a delivery not yet made then fails
+  as `event_gone`. Conversations are never deleted on their own.
+
+Consequences: an order system can tie each message status and run to its order, and with
+`store_order.message_skipped` account for every order message. The audit of an endpoint's change at
+its largest (every event type, the 58 lists and the longest hosts) is now 6,264 bytes; the test's
+bound rises from ADR-336's 6,000 to 6,500, within the 7,000 bytes the audit keeps.
+
+Not built: an event when WhatsApp accepts or delivers an order message (that is `message.status`
+of `orderMessage.messageId`), events for cart reminders, and a filter by skip reason.
