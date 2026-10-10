@@ -1,5 +1,61 @@
 # Progress
 
+## 2026-10-10 — Webhook events for a store's cart reminders (P5-09, H-014, ADR-355)
+
+Status: **Implemented; its database tests run in CI only.** A Shopify store's cart reminders went
+out as chat messages whose statuses named no checkout, and reminders skipped when due sent nothing:
+order messages had events when skipped or sent (ADR-351, ADR-353), cart reminders none, so a cart
+recovery system could not tell which checkouts were reminded or why a reminder never went out. The
+local PostgreSQL is unavailable, so migrations 0276 and 0277 and the integration tests below were
+written but not run here; the migrations passed the pglast parse check (syntax only), their
+PL/pgSQL bodies included.
+
+### Completed
+
+- **Database:** migration 0276: the two event types in the endpoints' and the events' checks (the
+  events' NOT VALID, validated by 0277), the sent one in the number check and both in the store
+  check; `app.webhook_capture_store_cart_reminder` and its trigger on `app.commerce_store_messages`
+  (a message with a checkout becoming `skipped`, or leaving `pending` for `queued`), reading a sent
+  one's conversation and number from its chat message; `app.capture_webhook_event` matching the
+  store list for both and the number list for the sent one (replaced with the same signature).
+- **Domain:** `store_checkout.reminder_skipped` and `store_checkout.reminder_sent` with their
+  labels and descriptions, events of a store, the sent one also of a number; `WEBHOOK_CART_REMINDERS`
+  and `WEBHOOK_CART_REMINDER_SKIP_REASONS` (the store's reasons but order messages' ten);
+  `storeCheckoutReminderSkippedPayloadSchema` and `storeCheckoutReminderSentPayloadSchema` and
+  their bodies built when delivered (`storeCartReminderOf`, `sentStoreCartReminderOf`), the checkout
+  without its customer, items or link; the refusals naming them; the OpenAPI entries and the
+  filters' descriptions, which no longer say that cart reminders send nothing.
+- **Web:** Settings → Webhooks lists the events; the stores and numbers copy and the endpoints
+  list name cart reminders.
+- **Tests:** unit (9 new: the events' labels, places and lists, the reasons, the payload schemas,
+  a skipped and a sent body, a reminder gone, an event captured incomplete, the OpenAPI entries, the
+  API schemas; the event lists, the refusal texts, the numbers' and stores' descriptions updated);
+  integration (`stores.test.ts`: five skipped and two sent reminders captured once each with their
+  reason or message, conversation, contact and time, delivered by store and number, the bodies, no
+  order message event; `webhooks.test.ts`: numbers with the sent event, stores with either, no
+  order messages or reasons, the database checks; `api-webhook-endpoints.test.ts`: the same through
+  the API; the isolation suite lists the trigger function). Written for CI; the integration tests
+  were not run here.
+- **Docs:** ADR-355; ARCHITECTURE; SECURITY; THREAT-MODEL T314; DEPLOYMENT (0276); RUNBOOKS (and
+  the ADR-349, ADR-351, ADR-352 and ADR-353 entries); BACKLOG P5-09; feature matrix W-138, W-139
+  and H-014. The audit's largest entry is now 6,433 bytes (34 event types, 59 lists), within the
+  test's bound of 6,500.
+- **Mutation checks:** 32 deliberate regressions, all caught by the unit tests (an event not of a
+  store or a number, or of a number it is not, another label or place, a reminder or a reason left
+  out, an order message's reason taken, the reasons in another order, the schemas loosened, a time
+  not written out in UTC, an event without its reason or message described, a reminder gone not
+  `event_gone`, a read for an id that is not one, another conversation id, the number's phone left
+  out, a sent reminder with a reason, the refusals and the descriptions not naming the events).
+
+### Test commands and results (local, 2026-10-10)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 146 files, 1524 tests passed                                    |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+
 ## 2026-10-10 — Skip reason filter for skipped order messages (P5-09, H-014, ADR-354)
 
 Status: **Implemented; its database tests run in CI only.** `store_order.message_skipped` went to

@@ -442,12 +442,12 @@ const invalidCodAnswers = () =>
   });
 
 const storeIdsField = webhookStoreIdsSchema.describe(
-  `The connected stores whose cash on delivery answers and skipped and sent order messages the endpoint receives: 1 to ${WEBHOOK_LIMITS.stores} ids of the company's stores (as store_order.cod_answered, store_order.message_skipped and store_order.message_sent events give them in \`store.id\`), only with one of those events. An answer or an order message belongs to the store of its order. A store removed since it was chosen stays on the list and matches nothing; a company has at most 5 stores at once. With the answers, the order messages or the numbers chosen too, an event must pass each list that applies to it (a skipped message belongs to no number). null receives every store's, including those of stores connected later.`,
+  `The connected stores whose cash on delivery answers, skipped and sent order messages and skipped and sent cart reminders the endpoint receives: 1 to ${WEBHOOK_LIMITS.stores} ids of the company's stores (as store_order.cod_answered, store_order.message_skipped, store_order.message_sent, store_checkout.reminder_skipped and store_checkout.reminder_sent events give them in \`store.id\`), only with one of those events. An answer or an order message belongs to the store of its order, and a cart reminder to the store of its checkout. A store removed since it was chosen stays on the list and matches nothing; a company has at most 5 stores at once. With the answers, the order messages, the skip reasons or the numbers chosen too, an event must pass each list that applies to it (a skipped message or reminder belongs to no number). null receives every store's, including those of stores connected later.`,
 );
 
 /**
- * Stores are chosen only for an endpoint that receives cash on delivery answers (ADR-349) or
- * skipped (ADR-352) or sent (ADR-353) order messages.
+ * Stores are chosen only for an endpoint that receives cash on delivery answers (ADR-349), skipped
+ * (ADR-352) or sent (ADR-353) order messages, or cart reminders (ADR-355).
  */
 const invalidStores = () =>
   new AppError('validation_failed', WEBHOOK_STORES_NEED_THE_EVENT, {
@@ -465,7 +465,7 @@ const invalidOrderMessageEvents = () =>
   });
 
 const orderMessageSkipReasonsField = webhookOrderMessageSkipReasonsSchema.describe(
-  `The reasons whose order message skips the endpoint receives as store_order.message_skipped (${WEBHOOK_ORDER_MESSAGE_SKIP_REASONS.join(', ')}), as orderMessage.skipReason names them, only with that event; null receives every reason's, as a list of all of them does. The reasons that concern cart reminders only are not among them: cart reminders send no event. With the stores or the order messages chosen too, a skipped message must pass them all.`,
+  `The reasons whose order message skips the endpoint receives as store_order.message_skipped (${WEBHOOK_ORDER_MESSAGE_SKIP_REASONS.join(', ')}), as orderMessage.skipReason names them, only with that event; null receives every reason's, as a list of all of them does. The reasons that concern cart reminders only are not among them: a skipped cart reminder sends store_checkout.reminder_skipped, which the list does not narrow. With the stores or the order messages chosen too, a skipped message must pass them all.`,
 );
 
 /** Skip reasons are chosen only for an endpoint that receives skipped order messages (ADR-354). */
@@ -666,7 +666,7 @@ const invalidRunEndReasons = () =>
   });
 
 const channelIdsField = webhookChannelIdsSchema.describe(
-  `The WhatsApp numbers whose events the endpoint receives: 1 to ${WEBHOOK_LIMITS.channels} ids of the company's numbers (messages, conversations and orders give a number's id as \`channelId\`, templates in \`channels\` and webhook events as \`channel.id\`), only with an event that happens on a number: ${WEBHOOK_CHANNEL_EVENTS.slice(0, -1).join(', ')} or ${WEBHOOK_CHANNEL_EVENTS.at(-1)}. A campaign's events are those of the number it sends from; a campaign without a number yet is on none. A Payment Link's are those of its order's number, a satisfaction survey's or a cash on delivery confirmation's answer that of its conversation, and a sent order message's (store_order.message_sent) the number it went from. Consent, contact, template, skipped order message (store_order.message_skipped), deal, task and note events belong to no number: an endpoint that names numbers still receives every one of them it takes. null receives the events of every number, including numbers connected later.`,
+  `The WhatsApp numbers whose events the endpoint receives: 1 to ${WEBHOOK_LIMITS.channels} ids of the company's numbers (messages, conversations and orders give a number's id as \`channelId\`, templates in \`channels\` and webhook events as \`channel.id\`), only with an event that happens on a number: ${WEBHOOK_CHANNEL_EVENTS.slice(0, -1).join(', ')} or ${WEBHOOK_CHANNEL_EVENTS.at(-1)}. A campaign's events are those of the number it sends from; a campaign without a number yet is on none. A Payment Link's are those of its order's number, a satisfaction survey's or a cash on delivery confirmation's answer that of its conversation, and a sent order message's (store_order.message_sent) or cart reminder's (store_checkout.reminder_sent) the number it went from. Consent, contact, template, skipped order message (store_order.message_skipped), skipped cart reminder (store_checkout.reminder_skipped), deal, task and note events belong to no number: an endpoint that names numbers still receives every one of them it takes. null receives the events of every number, including numbers connected later.`,
 );
 
 /** Numbers are chosen only for an endpoint that receives events of numbers (ADR-170). */
@@ -1339,7 +1339,7 @@ export const apiUpdateWebhookEndpointSchema = z
     storeIds: storeIdsField
       .optional()
       .describe(
-        "The connected stores whose cash on delivery answers and skipped and sent order messages the endpoint receives (the company's stores); null receives every store's. Left out, they stay, unless the events include none of store_order.cod_answered, store_order.message_skipped and store_order.message_sent any more, which clears them.",
+        "The connected stores whose cash on delivery answers, order messages and cart reminders the endpoint receives (the company's stores); null receives every store's. Left out, they stay, unless the events include none of store_order.cod_answered, store_order.message_skipped, store_order.message_sent, store_checkout.reminder_skipped and store_checkout.reminder_sent any more, which clears them.",
       ),
     orderMessageEvents: orderMessageEventsField
       .optional()
@@ -1689,8 +1689,8 @@ export interface ApiWebhookEndpoint {
   /** The cash on delivery answers it receives (ADR-349); null receives every answer. */
   codAnswers: WebhookCodAnswer[] | null;
   /**
-   * The stores whose cash on delivery answers (ADR-349) and skipped (ADR-352) and sent (ADR-353)
-   * order messages it receives; null receives every one's.
+   * The stores whose cash on delivery answers (ADR-349), skipped (ADR-352) and sent (ADR-353) order
+   * messages and cart reminders (ADR-355) it receives; null receives every one's.
    */
   storeIds: string[] | null;
   /** The order messages whose skips and sends it receives (ADR-352, ADR-353); null: every one's. */

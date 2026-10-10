@@ -87,6 +87,8 @@ import {
   WEBHOOK_ORDER_MESSAGE_EVENT_LABELS,
   WEBHOOK_ORDER_MESSAGE_EVENTS,
   WEBHOOK_ORDER_MESSAGE_SKIP_REASONS,
+  WEBHOOK_CART_REMINDERS,
+  WEBHOOK_CART_REMINDER_SKIP_REASONS,
   WEBHOOK_STORE_EVENTS,
   webhookTakesStoreEvents,
   WEBHOOK_ORDER_MESSAGE_TYPES,
@@ -162,6 +164,8 @@ import {
   storeOrderCodAnsweredPayloadSchema,
   storeOrderMessageSkippedPayloadSchema,
   storeOrderMessageSentPayloadSchema,
+  storeCheckoutReminderSkippedPayloadSchema,
+  storeCheckoutReminderSentPayloadSchema,
   paymentLinkStatusChangedPayloadSchema,
   automationRunEndedPayloadSchema,
   automationRunStartedPayloadSchema,
@@ -287,6 +291,7 @@ import {
   assertWebhookStores,
   WEBHOOK_COD_ANSWERS_NEED_THE_EVENT,
   WEBHOOK_STORES_NEED_THE_EVENT,
+  WEBHOOK_CHANNELS_NEED_THE_EVENTS,
   WEBHOOK_STORES_NOT_FOUND,
   webhookOrderMessageEventsFor,
   webhookOrderMessageEventsSchema,
@@ -1866,6 +1871,8 @@ describe('the OpenAPI document', () => {
       'store_order.cod_answered',
       'store_order.message_skipped',
       'store_order.message_sent',
+      'store_checkout.reminder_skipped',
+      'store_checkout.reminder_sent',
       'campaign.status_changed',
       'deal.created',
       'deal.updated',
@@ -1957,7 +1964,7 @@ describe('the OpenAPI document', () => {
     // No number filter narrows them: an endpoint that names numbers still receives every one it
     // takes (pipelines can, ADR-263).
     expect(doc.info.description).toContain(
-      'still every consent, contact, template, skipped order message, deal, task and note event it takes',
+      'still every consent, contact, template, skipped order message, skipped cart reminder, deal, task and note event it takes',
     );
     const schemas = doc.components.schemas as unknown as Record<
       string,
@@ -1965,17 +1972,17 @@ describe('the OpenAPI document', () => {
     >;
     const described = (schema: string) => schemas[schema]?.properties.channelIds?.description;
     expect(described('WebhookEndpoint')).toContain(
-      'Consent, contact, template, skipped order message, deal, task and note events are not narrowed.',
+      'Consent, contact, template, skipped order message, skipped cart reminder, deal, task and note events are not narrowed.',
     );
     expect(described('CreateWebhookEndpoint')).toContain(
-      'Consent, contact, template, skipped order message (store_order.message_skipped), deal, task and note events belong to no number',
+      'Consent, contact, template, skipped order message (store_order.message_skipped), skipped cart reminder (store_checkout.reminder_skipped), deal, task and note events belong to no number',
     );
     // The events of a number, every one of them (ADR-348 named those the lists had left out).
     expect(described('WebhookEndpoint')).toContain(
-      'message, conversation, satisfaction survey answer, automation run, order, Payment Link, cash on delivery answer, sent order message and campaign events',
+      'message, conversation, satisfaction survey answer, automation run, order, Payment Link, cash on delivery answer, sent order message, sent cart reminder and campaign events',
     );
     expect(doc.info.description).toContain(
-      'message, conversation, satisfaction survey answer, automation run, order, Payment Link, cash on delivery answer, sent order message and campaign events of those numbers only',
+      'message, conversation, satisfaction survey answer, automation run, order, Payment Link, cash on delivery answer, sent order message, sent cart reminder and campaign events of those numbers only',
     );
     expect(described('CreateWebhookEndpoint')).toContain(
       `only with an event that happens on a number: ${WEBHOOK_CHANNEL_EVENTS.slice(0, -1).join(', ')} or campaign.status_changed.`,
@@ -4663,6 +4670,7 @@ describe('number filters (ADR-170)', () => {
       'payment_link.status_changed',
       'store_order.cod_answered',
       'store_order.message_sent',
+      'store_checkout.reminder_sent',
       'campaign.status_changed',
     ]);
     const payloads = {
@@ -4687,6 +4695,8 @@ describe('number filters (ADR-170)', () => {
       'store_order.cod_answered': storeOrderCodAnsweredPayloadSchema,
       'store_order.message_skipped': storeOrderMessageSkippedPayloadSchema,
       'store_order.message_sent': storeOrderMessageSentPayloadSchema,
+      'store_checkout.reminder_skipped': storeCheckoutReminderSkippedPayloadSchema,
+      'store_checkout.reminder_sent': storeCheckoutReminderSentPayloadSchema,
       'campaign.status_changed': campaignStatusChangedPayloadSchema,
       'deal.created': dealCreatedPayloadSchema,
       'deal.updated': dealUpdatedPayloadSchema,
@@ -7407,7 +7417,7 @@ describe('cash on delivery answer and store filters (ADR-349)', () => {
       `Choose answers only for an endpoint that receives ${label}.`,
     );
     expect(WEBHOOK_STORES_NEED_THE_EVENT).toBe(
-      `Choose stores only for an endpoint that receives ${label}, ${WEBHOOK_EVENT_INFO['store_order.message_skipped'].label} or ${WEBHOOK_EVENT_INFO['store_order.message_sent'].label}.`,
+      `Choose stores only for an endpoint that receives ${label}, ${WEBHOOK_EVENT_INFO['store_order.message_skipped'].label}, ${WEBHOOK_EVENT_INFO['store_order.message_sent'].label}, ${WEBHOOK_EVENT_INFO['store_checkout.reminder_skipped'].label} or ${WEBHOOK_EVENT_INFO['store_checkout.reminder_sent'].label}.`,
     );
   });
 
@@ -7703,7 +7713,7 @@ describe('the event of a skipped store order message (ADR-351)', () => {
       'an endpoint that names numbers receives it whichever numbers it names',
       'more than 48 hours after it happened',
       'a message sent, or waiting for the store’s sending hours, sends nothing',
-      'cart reminders, which are about checkouts, send nothing either',
+      'cart reminders, which are about checkouts, send store_checkout.reminder_skipped instead',
       'A skipReason of cash_on_delivery marks an order placed message that the cash on delivery confirmation replaced: the customer was asked to confirm the order instead',
       'fails as event_gone',
     ]) {
@@ -7728,7 +7738,8 @@ describe('store and order message filters for skipped order messages (ADR-352)',
       ]),
     ).toEqual(['cod_confirmation', 'order_cancelled']);
     expect(webhookOrderMessageEventsSchema.parse(null)).toBeNull();
-    // The messages about an order, as orderMessage.event names them; cart reminders send no event.
+    // The messages about an order, as orderMessage.event names them; cart reminders send events of
+    // their own (ADR-355).
     expect(WEBHOOK_ORDER_MESSAGE_EVENTS).toEqual([...ORDER_MESSAGE_EVENTS]);
     expect(webhookOrderMessageEventsSchema.parse([...WEBHOOK_ORDER_MESSAGE_EVENTS])).toEqual([
       ...WEBHOOK_ORDER_MESSAGE_EVENTS,
@@ -7799,6 +7810,8 @@ describe('store and order message filters for skipped order messages (ADR-352)',
       'store_order.cod_answered',
       'store_order.message_skipped',
       'store_order.message_sent',
+      'store_checkout.reminder_skipped',
+      'store_checkout.reminder_sent',
     ]);
     expect(webhookTakesStoreEvents(['order.received', 'order.status_changed'])).toBe(false);
     expect(webhookStoreIdsFor(['order.received'], [shop], [outlet])).toBeNull();
@@ -8185,5 +8198,471 @@ describe('skip reason filters for skipped order messages (ADR-354)', () => {
       'every reason’s unless it names the reasons (its `orderMessageSkipReasons`, or the reasons ticked under Order message skipped)',
     );
     expect(described).toContain('with more than one list, a skipped message must pass them all');
+  });
+});
+
+describe('the events of a store’s cart reminders (ADR-355)', () => {
+  const id = '0192f4d1-a5b2-7c83-9d4e-c1d2e3f4a601';
+  const tenantId = '0192f4d1-a5b2-7c83-9d4e-c1d2e3f4a602';
+  const [storeMessage, checkout, store, conversation, contact, channel, message] = [
+    '0192f4d1-a5b2-7c83-9d4e-c1d2e3f4a603',
+    '0192f4d1-a5b2-7c83-9d4e-c1d2e3f4a604',
+    '0192f4d1-a5b2-7c83-9d4e-c1d2e3f4a605',
+    '0192f4d1-a5b2-7c83-9d4e-c1d2e3f4a606',
+    '0192f4d1-a5b2-7c83-9d4e-c1d2e3f4a607',
+    '0192f4d1-a5b2-7c83-9d4e-c1d2e3f4a608',
+    '0192f4d1-a5b2-7c83-9d4e-c1d2e3f4a609',
+  ];
+  const at = new Date('2026-10-10T12:00:00.123Z');
+  const startedAt = new Date('2026-10-10T09:00:00.000Z');
+  /** The reasons that concern order messages only: a cart reminder is never skipped for them. */
+  const orderOnly = [
+    'test_order',
+    'too_late',
+    'cash_on_delivery',
+    'order_deleted',
+    'order_cancelled',
+    'automation_unavailable',
+    'conversation_assigned',
+    'automation_busy',
+    'automation_limit',
+    'automation_quota',
+  ];
+
+  /** A transaction that answers its reads, in order, with `answers`; another read fails the test. */
+  function answering(answers: unknown[][]) {
+    const queue = [...answers];
+    const chain = {
+      from: () => chain,
+      innerJoin: () => chain,
+      leftJoin: () => chain,
+      where: () => {
+        const rows = queue.shift();
+        if (!rows) throw new Error('an unexpected read');
+        return Promise.resolve(rows);
+      },
+    };
+    return {
+      tx: { select: () => chain } as unknown as Parameters<typeof buildWebhookPayload>[0],
+      unread: () => queue.length,
+    };
+  }
+
+  const event = (
+    type: 'store_checkout.reminder_skipped' | 'store_checkout.reminder_sent',
+    detail: Record<string, unknown>,
+    opts: {
+      status?: string | null;
+      messageId?: string | null;
+      conversationId?: string | null;
+    } = {},
+  ) => {
+    const sent = type === 'store_checkout.reminder_sent';
+    return {
+      id,
+      tenantId,
+      type,
+      messageId: opts.messageId === undefined ? (sent ? message : null) : opts.messageId,
+      conversationId:
+        opts.conversationId === undefined ? (sent ? conversation : null) : opts.conversationId,
+      contactId: sent ? contact : null,
+      templateId: null,
+      status: opts.status === undefined ? 'cart_reminder' : opts.status,
+      detail,
+      contactChanges: null,
+      tagsAdded: null,
+      tagsRemoved: null,
+      occurredAt: at,
+      occurredAtExact: '2026-10-10T12:00:00.123456Z',
+    } as unknown as Parameters<typeof buildWebhookPayload>[1];
+  };
+  // As the triggers capture them (0276), the time with its offset.
+  const skippedDetail = {
+    storeMessageId: storeMessage,
+    skipReason: 'checkout_completed',
+    occurredAt: '2026-10-10T15:00:00+05:30',
+  };
+  const sentDetail = { storeMessageId: storeMessage, occurredAt: '2026-10-10T15:00:00+05:30' };
+  const checkoutRow = {
+    id: checkout,
+    externalId: '37298746245307',
+    name: '#C1007',
+    currency: 'INR',
+    totalMinor: 189_900,
+    itemCount: 3,
+    startedAt,
+    completedAt: null,
+  };
+  const storeRow = {
+    id: store,
+    platform: 'shopify',
+    name: 'Asha Textiles',
+    url: 'https://asha-textiles.myshopify.com',
+  };
+  const sentRow = {
+    checkout: checkoutRow,
+    store: storeRow,
+    contactId: contact,
+    channelId: channel,
+    channelPhone: '+91 80 4567 8901',
+  };
+  const person = { phone: '+919845012345', name: 'Asha', erasedAt: null };
+  const writtenCheckout = {
+    ...checkoutRow,
+    startedAt: '2026-10-10T09:00:00.000Z',
+    completedAt: null,
+  };
+
+  it('are two events of a store, the sent one also of a number, labelled as Settings lists them', () => {
+    expect(WEBHOOK_EVENT_INFO['store_checkout.reminder_skipped']).toEqual({
+      label: 'Cart reminder skipped',
+      description:
+        'A connected Shopify store’s cart reminder (the first or the second) about a checkout a customer left was not sent when it was due: the checkout was completed, deleted or too old, an order was placed since, the first reminder was not sent, or a check failed, such as a customer without a number or marketing opt-in, or the frequency cap.',
+    });
+    expect(WEBHOOK_EVENT_INFO['store_checkout.reminder_sent']).toEqual({
+      label: 'Cart reminder sent',
+      description:
+        'A connected Shopify store’s cart reminder (the first or the second) about a checkout a customer left went out: its template message was queued for WhatsApp, whose statuses follow as message status events.',
+    });
+    expect(WEBHOOK_EVENT_KEYS.indexOf('store_checkout.reminder_skipped')).toBe(
+      WEBHOOK_EVENT_KEYS.indexOf('store_order.message_sent') + 1,
+    );
+    expect(WEBHOOK_EVENT_KEYS.indexOf('store_checkout.reminder_sent')).toBe(
+      WEBHOOK_EVENT_KEYS.indexOf('store_order.message_sent') + 2,
+    );
+    expect(WEBHOOK_CART_REMINDERS).toEqual(['cart_reminder', 'cart_second_reminder']);
+    expect(WEBHOOK_CART_REMINDERS.map((r) => STORE_MESSAGE_EVENT_INFO[r].label)).toEqual([
+      'Cart reminder',
+      'Second cart reminder',
+    ]);
+    const skipped = ['store_checkout.reminder_skipped'] as const;
+    const sent = ['store_checkout.reminder_sent'] as const;
+    expect(webhookTakesChannelEvents([...skipped])).toBe(false);
+    expect(webhookTakesChannelEvents([...sent])).toBe(true);
+    for (const events of [skipped, sent, [...skipped, ...sent]]) {
+      expect(webhookTakesStoreEvents([...events]), events.join()).toBe(true);
+      expect(webhookStoreIdsFor([...events], [store], null), events.join()).toEqual([store]);
+      // A reminder is no order message, has no reason to choose and no answer.
+      expect(webhookTakesOrderMessages([...events]), events.join()).toBe(false);
+      expect(
+        webhookOrderMessageEventsFor([...events], ['order_placed'], ['order_shipped']),
+        events.join(),
+      ).toBeNull();
+      expect(
+        webhookOrderMessageSkipReasonsFor([...events], ['no_phone'], ['opted_out']),
+        events.join(),
+      ).toBeNull();
+      expect(webhookCodAnswersFor([...events], ['cancelled'], null), events.join()).toBeNull();
+      for (const takes of [
+        webhookTakesTaskEvents,
+        webhookTakesPipelineEvents,
+        webhookTakesTeamEvents,
+        webhookTakesCampaignEvents,
+        webhookTakesTemplateEvents,
+        webhookTakesAutomationRuns,
+      ]) {
+        expect(takes([...events]), `${takes.name} ${events.join()}`).toBe(false);
+      }
+    }
+    expect(WEBHOOK_CHANNELS_NEED_THE_EVENTS).toContain('sent order message, sent cart reminder or');
+  });
+
+  it('skip for the reasons a store’s Messages page explains, but order messages’ own', () => {
+    expect(WEBHOOK_CART_REMINDER_SKIP_REASONS).toEqual(
+      Object.keys(STORE_MESSAGE_SKIP_REASONS).filter((reason) => !orderOnly.includes(reason)),
+    );
+    expect(WEBHOOK_CART_REMINDER_SKIP_REASONS).toHaveLength(21);
+    for (const reason of orderOnly) {
+      expect(STORE_MESSAGE_SKIP_REASONS, reason).toHaveProperty(reason);
+    }
+    // The six that concern cart reminders only are the ones the order message list leaves out.
+    expect(
+      WEBHOOK_CART_REMINDER_SKIP_REASONS.filter(
+        (reason) => !(WEBHOOK_ORDER_MESSAGE_SKIP_REASONS as readonly string[]).includes(reason),
+      ),
+    ).toEqual([
+      'checkout_completed',
+      'checkout_deleted',
+      'order_placed',
+      'first_reminder_not_sent',
+      'cart_too_old',
+      'not_marketing_template',
+    ]);
+  });
+
+  it('give the reminder, the checkout without the customer, its store, and when sent the conversation, contact and number', () => {
+    const skippedData = storeCheckoutReminderSkippedPayloadSchema.shape.data.shape;
+    expect(Object.keys(skippedData)).toEqual(['reminder', 'storeCheckout', 'store']);
+    expect(Object.keys(skippedData.reminder.shape)).toEqual(['event', 'skipReason', 'occurredAt']);
+    expect(Object.keys(skippedData.storeCheckout.shape)).toEqual([
+      'id',
+      'externalId',
+      'name',
+      'currency',
+      'totalMinor',
+      'itemCount',
+      'startedAt',
+      'completedAt',
+    ]);
+    expect(skippedData.store).toBe(storeOrderCodAnsweredPayloadSchema.shape.data.shape.store);
+    const sentData = storeCheckoutReminderSentPayloadSchema.shape.data.shape;
+    expect(Object.keys(sentData)).toEqual([
+      'reminder',
+      'storeCheckout',
+      'store',
+      'conversation',
+      'contact',
+      'channel',
+    ]);
+    expect(Object.keys(sentData.reminder.shape)).toEqual(['event', 'occurredAt', 'messageId']);
+    expect(sentData.storeCheckout).toBe(skippedData.storeCheckout);
+    const skippedBody = (reminder: Record<string, unknown>, checkoutPart = {}) => ({
+      id,
+      type: 'store_checkout.reminder_skipped',
+      createdAt: at.toISOString(),
+      createdAtExact: '2026-10-10T12:00:00.123456Z',
+      data: {
+        reminder: {
+          event: 'cart_reminder',
+          skipReason: 'checkout_completed',
+          occurredAt: startedAt.toISOString(),
+          ...reminder,
+        },
+        storeCheckout: { ...writtenCheckout, ...checkoutPart },
+        store: storeRow,
+      },
+    });
+    const skippedParses = (value: unknown) =>
+      storeCheckoutReminderSkippedPayloadSchema.safeParse(value).success;
+    expect(skippedParses(skippedBody({}))).toBe(true);
+    expect(skippedParses(skippedBody({ event: 'cart_second_reminder' }))).toBe(true);
+    expect(skippedParses(skippedBody({}, { name: null, currency: null, totalMinor: null }))).toBe(
+      true,
+    );
+    expect(skippedParses(skippedBody({}, { completedAt: at.toISOString() }))).toBe(true);
+    for (const skipReason of WEBHOOK_CART_REMINDER_SKIP_REASONS) {
+      expect(skippedParses(skippedBody({ skipReason })), skipReason).toBe(true);
+    }
+    for (const refused of [
+      { event: 'order_placed' },
+      { skipReason: 'test_order' },
+      { skipReason: 'automation_busy' },
+      { occurredAt: 'today' },
+    ]) {
+      expect(skippedParses(skippedBody(refused)), JSON.stringify(refused)).toBe(false);
+    }
+    const sentBody = (reminder: Record<string, unknown>) => ({
+      id,
+      type: 'store_checkout.reminder_sent',
+      createdAt: at.toISOString(),
+      createdAtExact: '2026-10-10T12:00:00.123456Z',
+      data: {
+        reminder: {
+          event: 'cart_second_reminder',
+          occurredAt: startedAt.toISOString(),
+          messageId: message,
+          ...reminder,
+        },
+        storeCheckout: writtenCheckout,
+        store: storeRow,
+        conversation: { id: conversation },
+        contact: { id: contact, phone: '+919845012345', name: 'Asha' },
+        channel: { id: channel, phone: '+91 80 4567 8901' },
+      },
+    });
+    const sentParses = (value: unknown) =>
+      storeCheckoutReminderSentPayloadSchema.safeParse(value).success;
+    expect(sentParses(sentBody({}))).toBe(true);
+    expect(sentParses(sentBody({ event: 'order_shipped' }))).toBe(false);
+    expect(sentParses(sentBody({ messageId: null }))).toBe(false);
+    expect(sentParses(sentBody({ messageId: 'wamid.HBg' }))).toBe(false);
+  });
+
+  it('builds a skipped reminder’s body from the reminder as captured and the rest as it is now', async () => {
+    const reads = answering([[{ checkout: checkoutRow, store: storeRow }]]);
+    const built = await buildWebhookPayload(
+      reads.tx,
+      event('store_checkout.reminder_skipped', skippedDetail),
+      'endpoint',
+    );
+    expect(built).toEqual({
+      id,
+      type: 'store_checkout.reminder_skipped',
+      createdAt: '2026-10-10T12:00:00.123Z',
+      createdAtExact: '2026-10-10T12:00:00.123456Z',
+      data: {
+        reminder: {
+          event: 'cart_reminder',
+          skipReason: 'checkout_completed',
+          occurredAt: '2026-10-10T09:30:00.000Z',
+        },
+        storeCheckout: {
+          id: checkout,
+          externalId: '37298746245307',
+          name: '#C1007',
+          currency: 'INR',
+          totalMinor: 189_900,
+          itemCount: 3,
+          startedAt: '2026-10-10T09:00:00.000Z',
+          completedAt: null,
+        },
+        store: {
+          id: store,
+          platform: 'shopify',
+          name: 'Asha Textiles',
+          url: 'https://asha-textiles.myshopify.com',
+        },
+      },
+    });
+    expect(storeCheckoutReminderSkippedPayloadSchema.safeParse(built).success).toBe(true);
+    expect(reads.unread()).toBe(0);
+  });
+
+  it('builds a sent reminder’s body with the message and conversation as captured, the contact as erasure left it', async () => {
+    const reads = answering([[sentRow], [person]]);
+    const built = await buildWebhookPayload(
+      reads.tx,
+      event('store_checkout.reminder_sent', sentDetail, { status: 'cart_second_reminder' }),
+      'endpoint',
+    );
+    expect(built).toEqual({
+      id,
+      type: 'store_checkout.reminder_sent',
+      createdAt: '2026-10-10T12:00:00.123Z',
+      createdAtExact: '2026-10-10T12:00:00.123456Z',
+      data: {
+        reminder: {
+          event: 'cart_second_reminder',
+          occurredAt: '2026-10-10T09:30:00.000Z',
+          messageId: message,
+        },
+        storeCheckout: writtenCheckout,
+        store: storeRow,
+        conversation: { id: conversation },
+        contact: { id: contact, phone: '+919845012345', name: 'Asha' },
+        channel: { id: channel, phone: '+91 80 4567 8901' },
+      },
+    });
+    expect(storeCheckoutReminderSentPayloadSchema.safeParse(built).success).toBe(true);
+    expect(reads.unread()).toBe(0);
+    const erased = answering([
+      [{ ...sentRow, channelPhone: null, checkout: { ...checkoutRow, completedAt: at } }],
+      [{ ...person, erasedAt: at }],
+    ]);
+    const later = await buildWebhookPayload(
+      erased.tx,
+      event('store_checkout.reminder_sent', sentDetail),
+      'endpoint',
+    );
+    expect(later.data).toMatchObject({
+      reminder: { event: 'cart_reminder', messageId: message },
+      storeCheckout: { completedAt: '2026-10-10T12:00:00.123Z' },
+      contact: { id: contact, phone: null, name: null },
+      channel: { id: channel, phone: null },
+    });
+    expect(storeCheckoutReminderSentPayloadSchema.safeParse(later).success).toBe(true);
+    expect(erased.unread()).toBe(0);
+  });
+
+  it('sends nothing for a reminder that is gone, an order message or another company’s, reading nothing for an id that is not one', async () => {
+    for (const [type, detail] of [
+      ['store_checkout.reminder_skipped', skippedDetail],
+      ['store_checkout.reminder_sent', sentDetail],
+    ] as const) {
+      const gone = answering([[]]);
+      await expect(
+        buildWebhookPayload(gone.tx, event(type, detail), 'endpoint'),
+        type,
+      ).rejects.toBeInstanceOf(WebhookEventGoneError);
+      expect(gone.unread(), type).toBe(0);
+      for (const storeMessageId of ['message', null, 7]) {
+        const none = answering([]);
+        await expect(
+          buildWebhookPayload(none.tx, event(type, { ...detail, storeMessageId }), 'endpoint'),
+          `${type} ${String(storeMessageId)}`,
+        ).rejects.toBeInstanceOf(WebhookEventGoneError);
+      }
+    }
+  });
+
+  it('describes no event captured without its reminder, reason, time, message or conversation, reading nothing', async () => {
+    const cases: [Parameters<typeof event>[0], Record<string, unknown>, string][] = [
+      [
+        'store_checkout.reminder_skipped',
+        { storeMessageId: storeMessage, occurredAt: skippedDetail.occurredAt },
+        'The skipped cart reminder was captured without its reminder, reason or time',
+      ],
+      [
+        'store_checkout.reminder_skipped',
+        { storeMessageId: storeMessage, skipReason: 'no_phone' },
+        'The skipped cart reminder was captured without its reminder, reason or time',
+      ],
+      [
+        'store_checkout.reminder_sent',
+        { storeMessageId: storeMessage },
+        'The sent cart reminder was captured without its reminder, time, message or conversation',
+      ],
+    ];
+    for (const [type, detail, message] of cases) {
+      const none = answering([]);
+      const built = buildWebhookPayload(none.tx, event(type, detail), 'endpoint');
+      await expect(built, JSON.stringify(detail)).rejects.toThrow(message);
+      await expect(built).rejects.not.toBeInstanceOf(WebhookEventGoneError);
+    }
+    const withouts: [
+      Parameters<typeof event>[0],
+      Record<string, unknown>,
+      Parameters<typeof event>[2],
+    ][] = [
+      ['store_checkout.reminder_skipped', skippedDetail, { status: null }],
+      ['store_checkout.reminder_sent', sentDetail, { status: null }],
+      ['store_checkout.reminder_sent', sentDetail, { messageId: null }],
+      ['store_checkout.reminder_sent', sentDetail, { conversationId: null }],
+    ];
+    for (const [type, detail, opts] of withouts) {
+      const none = answering([]);
+      const built = buildWebhookPayload(none.tx, event(type, detail, opts), 'endpoint');
+      await expect(built, `${type} ${JSON.stringify(opts)}`).rejects.toThrow(
+        'was captured without',
+      );
+      await expect(built).rejects.not.toBeInstanceOf(WebhookEventGoneError);
+    }
+  });
+
+  it('are described: the reminder tied to its checkout, as captured, and what sends nothing', () => {
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const skipped = doc.webhooks['store_checkout.reminder_skipped'].post.description;
+    for (const words of [
+      'A connected Shopify store’s cart reminder',
+      'this event is how a store system learns that one did not, and why',
+      'reminder gives which reminder it was, the reason and when the checkout was last left, as captured',
+      'the store’s own checkout id (storeCheckout.externalId) to find it there',
+      'Never the customer’s details from the store, the items or the link back to the checkout, and no contact or number',
+      'an endpoint that names numbers receives it whichever numbers it names',
+      'unless it names the stores (its `storeIds`',
+      'a reminder sent, or waiting for its delay, the store’s sending hours or the first reminder, sends nothing',
+      'HyFib deletes a checkout 30 days after the store last updated it',
+      'fails as event_gone',
+    ]) {
+      expect(skipped).toContain(words);
+    }
+    const sent = doc.webhooks['store_checkout.reminder_sent'].post.description;
+    for (const words of [
+      'whose message.status events name no checkout: this event ties it to the checkout',
+      'reminder.messageId, the template message whose message.status events follow',
+      'contact is the conversation’s contact, as erasure left it',
+      'when HyFib queues its template message for WhatsApp, before WhatsApp accepts or delivers anything',
+      'a skipped reminder sends store_checkout.reminder_skipped instead',
+      'an endpoint that names numbers receives it for those numbers only',
+      'with both lists, a sent reminder must pass them both',
+      'fails as event_gone',
+    ]) {
+      expect(sent).toContain(words);
+    }
+    expect(doc.components.schemas).toHaveProperty('WebhookStoreCheckoutReminderSkipped');
+    expect(doc.components.schemas).toHaveProperty('WebhookStoreCheckoutReminderSent');
+    expect(doc.webhooks['store_order.message_sent'].post.description).toContain(
+      'cart reminders, which are about checkouts, send store_checkout.reminder_sent and store_checkout.reminder_skipped instead',
+    );
   });
 });

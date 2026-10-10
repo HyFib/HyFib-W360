@@ -51,8 +51,8 @@ export async function createWebhookEndpointAction(
     /** The cash on delivery answers it takes (ADR-349); null takes every answer. */
     codAnswers: string[] | null;
     /**
-     * The stores whose cash on delivery answers (ADR-349) and order messages (ADR-352, ADR-353) it
-     * takes; null takes every one's.
+     * The stores whose cash on delivery answers (ADR-349), order messages (ADR-352, ADR-353) and
+     * cart reminders (ADR-355) it takes; null takes every one's.
      */
     storeIds: string[] | null;
     /** The order messages whose skips and sends it takes (ADR-352, ADR-353); null takes every message's. */
@@ -191,8 +191,8 @@ export async function updateWebhookEndpointAction(
     /** The cash on delivery answers it takes (ADR-349); null takes every answer. */
     codAnswers: string[] | null;
     /**
-     * The stores whose cash on delivery answers (ADR-349) and order messages (ADR-352, ADR-353) it
-     * takes; null takes every one's.
+     * The stores whose cash on delivery answers (ADR-349), order messages (ADR-352, ADR-353) and
+     * cart reminders (ADR-355) it takes; null takes every one's.
      */
     storeIds: string[] | null;
     /** The order messages whose skips and sends it takes (ADR-352, ADR-353); null takes every message's. */

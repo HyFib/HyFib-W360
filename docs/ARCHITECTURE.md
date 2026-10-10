@@ -1944,6 +1944,18 @@ state` for one that becomes skipped from another state, each only for a message 
   messages' reasons and to endpoints that take the event. `app.capture_webhook_event` (replaced
   with the same signature) matches it with the reason the skipped message's trigger keeps in
   `detail` (0270).
+- **Cart reminders as webhook events** (migrations 0276–0277, ADR-355): a trigger on
+  `app.commerce_store_messages` (`AFTER UPDATE OF state`), for a message with a checkout that
+  becomes `skipped` or leaves `pending` for `queued` (its chat message set in the same update),
+  calls `app.webhook_capture_store_cart_reminder`, which captures `store_checkout.reminder_skipped`
+  with the reminder as status and the store message, the reason and when the checkout was last left
+  in `detail`, or `store_checkout.reminder_sent` with the chat message's conversation, the contact
+  and the store message and time; the store, and a sent one's number, pass for the filters only.
+  `app.capture_webhook_event` (replaced with the same signature) matches the store list for both
+  and the number list for a sent one; the order message and skip reason lists do not apply.
+  `buildWebhookPayload` reads the reminder with `storeCartReminderOf` (its checkout and store) or
+  `sentStoreCartReminderOf` (with the captured conversation's contact and number) and gives the
+  reminder as captured, the rest as it is now, never the checkout's customer, items or link.
 - **Step outcome filters** (migration 0249, ADR-327): `run_step_outcomes` on an endpoint lists the
   outcomes of the run steps it takes as `automation.run_step`, null for every step; a check keeps it
   to 1 to 21 known outcomes and to endpoints that take `automation.run_step`.

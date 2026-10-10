@@ -3393,18 +3393,19 @@ answer is sent only when its answer and its order's store are on the lists, and 
 the endpoint names numbers; when no endpoint takes it, it is not recorded at all, so there is
 nothing to replay. A store removed since it was chosen shows as "A removed store" and matches
 nothing; a store connected again after its removal is a new store, so tick it again. To take more,
-tick the answers under "Answers sent" or the stores under "Stores" (or choose "Every store’s answers
-and order messages") on the endpoint's page, or `PATCH /webhook-endpoints/{id}` with `codAnswers`
-or `storeIds` (null for every answer or store). Removing Cash on delivery answered clears the
-answers, and the stores too unless the endpoint still takes Order message skipped or Order message
-sent.
+tick the answers under "Answers sent" or the stores under "Stores" (or choose "Every store’s
+answers, order messages and cart reminders") on the endpoint's page, or
+`PATCH /webhook-endpoints/{id}` with `codAnswers` or `storeIds` (null for every answer or store).
+Removing Cash on delivery answered clears the answers, and the stores too unless the endpoint still
+takes another event of a store (Order message skipped or sent, Cart reminder skipped or sent).
 
 **A receiver misses a skipped order message, or gets `event_gone` for one (ADR-351).**
 `store_order.message_skipped` is sent once for each of a store's order messages (order placed, cash
 on delivery confirmation, shipped, delivered, cancelled) that HyFib records without sending or skips
 when it is due; a store's Messages page (Commerce → Stores) shows each message's state and reason. A
 message sent or started as an automation sends `store_order.message_sent` instead (ADR-353), one
-still waiting (the store's sending hours) nothing yet, and cart reminders never send it. It belongs
+still waiting (the store's sending hours) nothing yet, and cart reminders send
+`store_checkout.reminder_skipped` instead (ADR-355). It belongs
 to no number: an endpoint that names numbers still gets it; the stores and order messages it names
 narrow it (ADR-352). Events no endpoint takes are not recorded, so there is nothing to replay for
 messages skipped before the endpoint took the event. Removing the store deletes its copy of the
@@ -3418,15 +3419,16 @@ sends its own event).
 **A receiver misses some skipped order messages, or one store's (ADR-352).** An endpoint can take
 the skips of chosen order messages only, or those of chosen stores' orders only (the same stores as
 its cash on delivery answers). The endpoints list shows them ("Order messages whose events are
-sent: …", "Stores whose cash on delivery answers and order messages are sent: …"), and the API
+sent: …", "Stores whose cash on delivery answers, order messages and cart reminders are sent: …"),
+and the API
 answers `orderMessageEvents` and `storeIds` (null takes every message's, or every store's). A
 skipped message is sent only when its message and its order's store are on the lists; when no
 endpoint takes it, it is not recorded at all, so there is nothing to replay. To take more, tick the
 messages under "Order messages" or the stores under "Stores" on the endpoint's page, or
 `PATCH /webhook-endpoints/{id}` with `orderMessageEvents` or `storeIds`. The lists are shared with
 sent order messages (ADR-353): removing Order message skipped clears the messages unless the
-endpoint still takes Order message sent, and the stores unless it still takes either other store
-event.
+endpoint still takes Order message sent, and the stores unless it still takes another event of a
+store.
 
 **A receiver misses some skipped order messages of one reason (ADR-354).** An endpoint can take the
 skips of chosen reasons only. The endpoints list shows them ("Skip reasons sent: …"), and the API
@@ -3445,7 +3447,8 @@ as `message.status` events of that message) or when the automation its rule chos
 (`orderMessage.automationRunId`; the run's own events follow). It comes before WhatsApp answers, so
 a message WhatsApp later refuses still sent this event, and its `message.status` event says
 `failed`. A message skipped sends `store_order.message_skipped` instead, one still waiting (the
-store's sending hours) nothing yet, and cart reminders never send it. It happens on the number the
+store's sending hours) nothing yet, and cart reminders send `store_checkout.reminder_sent` instead
+(ADR-355). It happens on the number the
 message went from: an endpoint that names numbers gets it only for those, and the stores and order
 messages it names narrow it as they narrow skipped messages; a message must pass every list.
 Events no endpoint takes are not recorded, so there is nothing to replay for messages sent before
@@ -3453,6 +3456,25 @@ the endpoint took the event. Removing the store deletes its copy of the orders w
 a delivery not yet made then fails as `event_gone`, and a replay fails the same way. The body never
 holds the customer's details from the store; `contact` is the conversation's contact as it is when
 the event is delivered (without its number and name once erased).
+
+**A receiver misses a cart reminder event, or gets `event_gone` for one (ADR-355).** Each of a
+Shopify store's cart reminders (the first, `cart_reminder`, and the second, `cart_second_reminder`)
+sends one event when it is due: `store_checkout.reminder_sent` when its template message is queued
+for WhatsApp (`reminder.messageId`; whether WhatsApp accepted and delivered it follows as
+`message.status` events of that message), or `store_checkout.reminder_skipped` with its reason
+(`reminder.skipReason`) when a check stopped it. A store's Messages page (Commerce → Stores) shows
+each reminder's state and reason. A reminder still waiting (its delay, the store's sending hours or
+the first reminder) sends nothing yet, and a checkout that calls for no reminder (completed, or
+without a number, when HyFib reads it) sends nothing at all. A sent reminder happens on the number
+it went from, so an endpoint that names numbers gets it only for those; a skipped one belongs to no
+number. The stores an endpoint names narrow both; its order messages and skip reasons do not apply.
+Events no endpoint takes are not recorded, so there is nothing to replay for reminders due before
+the endpoint took the events. HyFib deletes a checkout 30 days after the store last updated it, and
+removing the store deletes its checkouts, each with its reminders: a delivery not yet made then
+fails as `event_gone`, and a replay fails the same way. The body never holds the customer's details,
+the items or the link back to the checkout; `storeCheckout.externalId` finds the checkout in the
+store, and a sent reminder's `contact` is the conversation's contact as it is when the event is
+delivered.
 
 **A receiver misses the events of a member's conversations (ADR-181).** An endpoint can take the
 message and conversation events of the conversations assigned to chosen members only. The endpoints

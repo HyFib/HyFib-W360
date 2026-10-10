@@ -277,8 +277,8 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
                     ) : null}
                     {e.stores ? (
                       <p className="text-xs break-all text-muted-foreground">
-                        Stores whose cash on delivery answers and order messages are sent:{' '}
-                        {e.stores.map(webhookStoreText).join(', ')}
+                        Stores whose cash on delivery answers, order messages and cart reminders are
+                        sent: {e.stores.map(webhookStoreText).join(', ')}
                       </p>
                     ) : null}
                     {e.orderMessageEvents ? (

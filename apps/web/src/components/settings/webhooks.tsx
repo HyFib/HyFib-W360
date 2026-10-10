@@ -1486,9 +1486,9 @@ function ChannelChoices({
       <legend className="mb-1 text-sm font-medium">WhatsApp numbers</legend>
       <p className="text-xs text-muted-foreground">
         Message, conversation, survey answer, automation, order, Payment Link, cash on delivery
-        answer, sent order message and campaign events happen on a number. Consent, contact,
-        template, skipped order message, deal, task and note events are sent whichever numbers are
-        chosen.
+        answer, sent order message, sent cart reminder and campaign events happen on a number.
+        Consent, contact, template, skipped order message, skipped cart reminder, deal, task and
+        note events are sent whichever numbers are chosen.
       </p>
       <label className="flex items-start gap-2 text-sm">
         <input
@@ -1996,9 +1996,10 @@ function CampaignChoices({
 }
 
 /**
- * The stores whose cash on delivery answers (ADR-349) and skipped and sent order messages (ADR-352,
- * ADR-353) an endpoint takes: every store's, or those of the stores ticked. A store the endpoint
- * names that was removed since stays listed, ticked, until it is unticked.
+ * The stores whose cash on delivery answers (ADR-349), skipped and sent order messages (ADR-352,
+ * ADR-353) and cart reminders (ADR-355) an endpoint takes: every store's, or those of the stores
+ * ticked. A store the endpoint names that was removed since stays listed, ticked, until it is
+ * unticked.
  */
 function StoreChoices({
   prefix,
@@ -2027,7 +2028,8 @@ function StoreChoices({
       <legend className="mb-1 text-sm font-medium">Stores</legend>
       <p className="text-xs text-muted-foreground">
         A cash on delivery answer or an order message, skipped or sent, belongs to the store of its
-        order. Other events are sent whichever stores are chosen.
+        order, and a cart reminder, skipped or sent, to the store of its checkout. Other events are
+        sent whichever stores are chosen.
       </p>
       <label className="flex items-start gap-2 text-sm">
         <input
@@ -2038,7 +2040,7 @@ function StoreChoices({
           onChange={() => onEveryChange(true)}
         />
         <span>
-          Every store’s answers and order messages
+          Every store’s answers, order messages and cart reminders
           <span className="block text-xs text-muted-foreground">
             Including stores connected later.
           </span>
@@ -3511,8 +3513,8 @@ export function WebhookEndpointForm({
     /** The cash on delivery answers it takes (ADR-349); null for every answer. */
     codAnswers: WebhookCodAnswer[] | null;
     /**
-     * The stores whose cash on delivery answers (ADR-349) and order messages (ADR-352, ADR-353) it
-     * takes, named; null for every one's.
+     * The stores whose cash on delivery answers (ADR-349), order messages (ADR-352, ADR-353) and
+     * cart reminders (ADR-355) it takes, named; null for every one's.
      */
     stores: WebhookEndpointStore[] | null;
     /** The order messages whose skips and sends it takes (ADR-352, ADR-353); null for every message's. */

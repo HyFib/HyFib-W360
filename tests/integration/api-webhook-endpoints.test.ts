@@ -1702,6 +1702,67 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     });
   });
 
+  it('choose the numbers of sent cart reminders and the stores of either cart reminder event, never order messages or reasons (ADR-355)', async () => {
+    const c = await fx.company();
+    const key = await apiKey(c, ['webhooks.manage']);
+    const [store] = await fx.query<{ id: string }>(
+      `INSERT INTO app.commerce_stores (id, tenant_id, platform, store_url, name,
+         webhook_public_id, webhook_secret_ciphertext, created_by_membership_id)
+       VALUES (gen_random_uuid(), $1, 'woocommerce', $2, 'Tara Tea', $3, 'x', $4)
+       RETURNING id`,
+      [
+        c.tenant.id,
+        `https://${randomBytes(6).toString('hex')}.example.test`,
+        Array.from(randomBytes(16), (b) => 'abcdefghijklmnopqrstuvwxyz234567'[b % 32]).join(''),
+        c.tenant.ownerMembershipId,
+      ],
+    );
+    if (!store) throw new Error('no store');
+    const issueOf = async (promise: Promise<unknown>) => {
+      const error = await expectAppError(promise, 'validation_failed');
+      return isAppError(error) ? error.issues?.[0] : undefined;
+    };
+    const both = ['store_checkout.reminder_skipped', 'store_checkout.reminder_sent'];
+    const created = await addThroughApi(key.ctx, 'carts-1', {
+      url: receiverUrl(),
+      events: both,
+      channelIds: [c.channelAccountId],
+      storeIds: [store.id],
+    });
+    const id = created.body.data.id;
+    expect(created.body.data).toMatchObject({
+      events: both,
+      channelIds: [c.channelAccountId],
+      storeIds: [store.id],
+      orderMessageEvents: null,
+      orderMessageSkipReasons: null,
+    });
+    expect(await api().get(key.ctx, id)).toMatchObject({
+      channelIds: [c.channelAccountId],
+      storeIds: [store.id],
+    });
+    // A reminder is no order message and has no order message reason.
+    expect(
+      await issueOf(api().update(key.ctx, id, { orderMessageEvents: ['order_placed'] })),
+    ).toMatchObject({ path: 'orderMessageEvents' });
+    expect(
+      await issueOf(api().update(key.ctx, id, { orderMessageSkipReasons: ['no_phone'] })),
+    ).toMatchObject({ path: 'orderMessageSkipReasons' });
+    // Skipped reminders alone keep the stores; they happen on no number, so the numbers go and
+    // cannot be given.
+    expect(
+      await api().update(key.ctx, id, { events: ['store_checkout.reminder_skipped'] }),
+    ).toMatchObject({ channelIds: null, storeIds: [store.id] });
+    expect(
+      await issueOf(api().update(key.ctx, id, { channelIds: [c.channelAccountId] })),
+    ).toMatchObject({ path: 'channelIds' });
+    // An event of no store clears the stores.
+    expect(await api().update(key.ctx, id, { events: ['order.received'] })).toMatchObject({
+      channelIds: null,
+      storeIds: null,
+    });
+  });
+
   it('choose who made the order changes an endpoint receives, kept by changes that leave them out and cleared with the event (ADR-322)', async () => {
     const c = await fx.company();
     const key = await apiKey(c, ['webhooks.manage']);

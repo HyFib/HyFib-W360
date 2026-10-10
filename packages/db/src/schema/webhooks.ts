@@ -11,7 +11,7 @@ const tz = (name: string) => timestamp(name, { withTimezone: true, mode: 'date' 
 
 /**
  * Event types an endpoint can receive (ADR-053, ADR-074, ADR-078, ADR-085, ADR-225, ADR-256,
- * ADR-261, ADR-326, ADR-348, ADR-351, ADR-353); `ping` is only sent as a test.
+ * ADR-261, ADR-326, ADR-348, ADR-351, ADR-353, ADR-355); `ping` is only sent as a test.
  */
 export const WEBHOOK_EVENT_TYPES = [
   'message.received',
@@ -35,6 +35,8 @@ export const WEBHOOK_EVENT_TYPES = [
   'store_order.cod_answered',
   'store_order.message_skipped',
   'store_order.message_sent',
+  'store_checkout.reminder_skipped',
+  'store_checkout.reminder_sent',
   'campaign.status_changed',
   'deal.created',
   'deal.updated',
@@ -104,7 +106,7 @@ export type WebhookCodAnswer = StoreMessageAnswer;
 /**
  * The order messages a `store_order.message_skipped` or `store_order.message_sent` event is about,
  * which an endpoint can choose (ADR-352, ADR-353): every store message event but the two cart
- * reminders, which send no such event.
+ * reminders, which send `store_checkout.*` events instead (ADR-355).
  */
 export type WebhookOrderMessageEvent = Exclude<
   StoreMessageEvent,
@@ -116,7 +118,7 @@ export type WebhookOrderMessageEvent = Exclude<
  * skips of as `store_order.message_skipped` (ADR-354): the reasons a store's Messages page
  * (Commerce → Stores) explains for a message not sent, but the six that concern cart reminders
  * only (checkout_completed, checkout_deleted, order_placed, first_reminder_not_sent, cart_too_old,
- * not_marketing_template), which send no event.
+ * not_marketing_template), which `store_checkout.reminder_skipped` gives instead (ADR-355).
  */
 export type WebhookOrderMessageSkipReason =
   | 'test_order'
@@ -351,9 +353,10 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
    */
   codAnswers: text('cod_answers').array().$type<WebhookCodAnswer[]>(),
   /**
-   * The connected stores whose cash on delivery answers (migration 0268, ADR-349) and skipped and
-   * sent order messages (migrations 0272 and 0273, ADR-352, ADR-353) it takes, by the store of the
-   * order; null takes every store's. Set only while one of those events is among its events.
+   * The connected stores whose cash on delivery answers (migration 0268, ADR-349), skipped and
+   * sent order messages (migrations 0272 and 0273, ADR-352, ADR-353) and cart reminders (migration
+   * 0276, ADR-355) it takes, by the store of the order or the checkout; null takes every store's.
+   * Set only while one of those events is among its events.
    */
   storeIds: uuid('store_ids').array(),
   /**
@@ -432,8 +435,9 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
   /**
    * The WhatsApp numbers (channel accounts) whose events it takes (ADR-170): message,
    * conversation, survey answer, automation run and step, order, Payment Link, cash on delivery
-   * answer (ADR-348), sent order message (ADR-353) and campaign events, as `WEBHOOK_CHANNEL_EVENTS`
-   * lists them; null takes every number. Set only while one of those is among its events.
+   * answer (ADR-348), sent order message (ADR-353), sent cart reminder (ADR-355) and campaign
+   * events, as `WEBHOOK_CHANNEL_EVENTS` lists them; null takes every number. Set only while one of
+   * those is among its events.
    */
   channelAccountIds: uuid('channel_account_ids').array(),
   /**
