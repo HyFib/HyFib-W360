@@ -27,6 +27,7 @@ import {
   WEBHOOK_EVENT_KEYS,
   WEBHOOK_LIMITS,
   WEBHOOK_MESSAGE_SENDERS,
+  WEBHOOK_OAUTH_CLIENT_AUTHENTICATIONS,
   WEBHOOK_CRM_CHANGE_MAKERS,
   WEBHOOK_SURVEY_SCORES,
   WEBHOOK_MESSAGE_STATUSES,
@@ -1567,6 +1568,11 @@ export const apiWebhookEndpointSchema = z.object({
       tokenUrl: z.string().describe('Where HyFib asks for access tokens.'),
       clientId: z.string(),
       scope: z.string().nullable().describe('The scope it asks for; null: none.'),
+      clientAuthentication: z
+        .enum(WEBHOOK_OAUTH_CLIENT_AUTHENTICATIONS)
+        .describe(
+          'How the client ID and secret reach the token URL: `client_secret_basic` in an HTTP Basic Authorization header, `client_secret_post` as `client_id` and `client_secret` in the request body.',
+        ),
     })
     .nullable()
     .describe(

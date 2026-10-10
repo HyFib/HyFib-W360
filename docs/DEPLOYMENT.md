@@ -1469,6 +1469,21 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    other changes keep the list, and its API refuses `cartReminderSkipReasons` (422) and leaves it
    out of the endpoints it answers.
 
+   Migration 0279 (ADR-357) adds `oauth_client_auth` to `app.webhook_endpoints`, not null with a
+   constant default (`client_secret_basic`, no table rewrite) and its check validated by reading
+   the table. Workers and web servers of this release need it, as their reads of endpoints name the
+   column. Workers roll out before web servers, and only web servers of this release can choose
+   `client_secret_post`, so every worker sends the credentials in the body once a client asks for
+   it; a worker from before it sends HTTP Basic for such a client, failing its token requests
+   (retried as usual), so set those clients back to HTTP Basic before rolling workers back to such
+   an image. Until the web rollout ends, an old web server adds, changes and removes clients without
+   the column, leaving the method as it is, and its API refuses `clientAuthentication` (422) and
+   leaves it out of the endpoints it answers. A body client an old server removes leaves the body in
+   the column of an endpoint without a client, which a client an old server adds there afterwards
+   would use; web servers of this release treat such an endpoint as HTTP Basic and set the way with
+   every client they add, so only a client added by an old server during the rollout can inherit
+   it (its endpoint's page then shows "its ID and secret sent in the request body": choose again).
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

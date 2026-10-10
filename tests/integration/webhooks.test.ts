@@ -659,8 +659,15 @@ describe('OAuth clients (ADR-173)', () => {
     ).map((row) => row.metadata);
   const SECRET = 's3cr:et/+';
 
-  /** An endpoint on a /bearer/ path of its own, getting tokens from a /token/ path of its own. */
-  async function addOAuthEndpoint(c: Company, scope: string | null = 'events.write read') {
+  /**
+   * An endpoint on a /bearer/ path of its own, getting tokens from a /token/ path of its own; its
+   * client authenticates as `clientAuthentication` says, or with HTTP Basic (ADR-357).
+   */
+  async function addOAuthEndpoint(
+    c: Company,
+    scope: string | null = 'events.write read',
+    clientAuthentication?: 'client_secret_basic' | 'client_secret_post',
+  ) {
     const id = randomBytes(6).toString('hex');
     const bearer = `/bearer/${id}`;
     const token = `/token/${id}`;
@@ -673,6 +680,7 @@ describe('OAuth clients (ADR-173)', () => {
         clientId: 'hyfib-test',
         clientSecret: SECRET,
         scope,
+        ...(clientAuthentication ? { clientAuthentication } : {}),
       },
     });
     return { ...created, owner, bearer, token, tokenUrl: `http://${HOST}:${port}${token}` };
@@ -725,6 +733,119 @@ describe('OAuth clients (ADR-173)', () => {
     expect(await deliverDue(c)).toMatchObject({ attempted: 3, succeeded: 3 });
     expect(requestsTo(e.token)).toHaveLength(2);
     expect(authorizations(e.bearer)).toEqual(Array.from({ length: 7 }, () => 'Bearer tok-1'));
+  });
+
+  it('send the client ID and secret in the request body when the endpoint asks, and go back to HTTP Basic (ADR-357)', async () => {
+    const c = await fx.company();
+    const e = await addOAuthEndpoint(c, 'events.write read', 'client_secret_post');
+    issue(e.token, 'tok-body');
+    acceptedTokens.set(e.bearer, 'tok-body');
+    const tokens = new WebhookOAuthTokenCache();
+    await webhooks().sendTest(e.owner, { endpointId: e.id });
+    expect(await deliverDue(c, systemClock, egress(), failOnLog, tokens)).toMatchObject({
+      attempted: 1,
+      succeeded: 1,
+    });
+    // RFC 6749 section 2.3.1's other way: the identifier and secret among the form's parameters,
+    // form-encoded like the others, and no Authorization header.
+    const [asked] = requestsTo(e.token);
+    expect(asked?.headers.authorization).toBeUndefined();
+    expect(asked?.headers['content-type']).toBe('application/x-www-form-urlencoded');
+    expect(asked?.body).toBe(
+      'grant_type=client_credentials&scope=events.write+read&client_id=hyfib-test&client_secret=s3cr%3Aet%2F%2B',
+    );
+    expect(authorizations(e.bearer)).toEqual(['Bearer tok-body']);
+    const method = async () => {
+      const [row] = await fx.query<{ oauth_client_auth: string }>(
+        'SELECT oauth_client_auth FROM app.webhook_endpoints WHERE id = $1',
+        [e.id],
+      );
+      return row?.oauth_client_auth;
+    };
+    expect(await method()).toBe('client_secret_post');
+    expect((await webhooks().list(e.owner))[0]?.oauth).toEqual({
+      tokenUrl: e.tokenUrl,
+      clientId: 'hyfib-test',
+      scope: 'events.write read',
+      clientAuthentication: 'client_secret_post',
+    });
+    expect(await auditsOf(c, 'webhook.endpoint_created')).toEqual([
+      {
+        host: HOST,
+        eventTypes: ['consent.changed'],
+        oauthTokenHost: HOST,
+        oauthClientAuthentication: 'client_secret_post',
+      },
+    ]);
+
+    // A change that leaves the method out keeps it while the token URL stays the same, as a
+    // connector written before ADR-357 rotating the secret does; its audit entry names it.
+    const change = (oauth: Record<string, unknown> | null) =>
+      webhooks().update(e.owner, {
+        endpointId: e.id,
+        url: `http://${HOST}:${port}${e.bearer}`,
+        description: '',
+        eventTypes: ['consent.changed'],
+        oauth,
+      });
+    await change({
+      tokenUrl: e.tokenUrl,
+      clientId: 'hyfib-test',
+      clientSecret: 'r0t:ated/+',
+      scope: 'events.write read',
+    });
+    expect(await method()).toBe('client_secret_post');
+    expect((await auditsOf(c, 'webhook.endpoint_updated')).at(-1)).toEqual({
+      host: HOST,
+      eventTypes: ['consent.changed'],
+      oauthTokenHost: HOST,
+      oauthSecretReplaced: true,
+      oauthClientAuthentication: 'client_secret_post',
+    });
+    // One that names HTTP Basic goes back to it, which its audit entry names, and the token kept
+    // for the client as it was serves no longer: the next delivery asks again.
+    await change({
+      tokenUrl: e.tokenUrl,
+      clientId: 'hyfib-test',
+      scope: 'events.write read',
+      clientAuthentication: 'client_secret_basic',
+    });
+    expect(await method()).toBe('client_secret_basic');
+    expect((await auditsOf(c, 'webhook.endpoint_updated')).at(-1)).toEqual({
+      host: HOST,
+      eventTypes: ['consent.changed'],
+      oauthTokenHost: HOST,
+      oauthSecretReplaced: false,
+      oauthClientAuthentication: 'client_secret_basic',
+    });
+    issue(e.token, 'tok-basic');
+    acceptedTokens.set(e.bearer, 'tok-basic');
+    await webhooks().sendTest(e.owner, { endpointId: e.id });
+    expect(await deliverDue(c, systemClock, egress(), failOnLog, tokens)).toMatchObject({
+      attempted: 1,
+      succeeded: 1,
+    });
+    const [, again] = requestsTo(e.token);
+    expect(again?.headers.authorization).toBe(
+      `Basic ${Buffer.from('hyfib-test:r0t%3Aated%2F%2B').toString('base64')}`,
+    );
+    expect(again?.body).toBe('grant_type=client_credentials&scope=events.write+read');
+    expect(authorizations(e.bearer)).toEqual(['Bearer tok-body', 'Bearer tok-basic']);
+    // Removing a client that sent them in the body puts the default back.
+    await change({
+      tokenUrl: e.tokenUrl,
+      clientId: 'hyfib-test',
+      clientAuthentication: 'client_secret_post',
+    });
+    expect(await method()).toBe('client_secret_post');
+    await change(null);
+    expect(await method()).toBe('client_secret_basic');
+    const audits = await fx.query<{ metadata: unknown }>(
+      'SELECT metadata FROM app.audit_events WHERE tenant_id = $1',
+      [c.tenant.id],
+    );
+    expect(JSON.stringify(audits)).not.toContain('s3cr');
+    expect(JSON.stringify(audits)).not.toContain('r0t');
   });
 
   it('fail an attempt without calling the endpoint when no token comes, and ask again at the next one', async () => {
@@ -860,6 +981,7 @@ describe('OAuth clients (ADR-173)', () => {
       tokenUrl: e.tokenUrl,
       clientId: 'hyfib-test',
       scope: 'events.write read',
+      clientAuthentication: 'client_secret_basic',
     });
     expect(JSON.stringify(await webhooks().list(e.owner))).not.toContain(SECRET);
     expect(await auditsOf(c, 'webhook.endpoint_created')).toEqual([
@@ -922,9 +1044,36 @@ describe('OAuth clients (ADR-173)', () => {
     expect(JSON.stringify(audits)).not.toContain('s3cr');
   });
 
-  it('are kept by the database together or not at all, with the scope alone optional', async () => {
+  it('are kept by the database together or not at all, with the scope alone optional, authenticating one of two ways', async () => {
     const c = await fx.company();
     const e = await addOAuthEndpoint(c);
+    // The way a client authenticates is one of the two RFC 7591 names, never none (ADR-357).
+    for (const set of [
+      "oauth_client_auth = 'private_key_jwt'",
+      "oauth_client_auth = 'none'",
+      "oauth_client_auth = 'CLIENT_SECRET_POST'",
+    ]) {
+      await expect(
+        fx.query(`UPDATE app.webhook_endpoints SET ${set} WHERE id = $1`, [e.id]),
+        set,
+      ).rejects.toThrow(/webhook_endpoints_oauth_client_auth/);
+    }
+    await expect(
+      fx.query('UPDATE app.webhook_endpoints SET oauth_client_auth = NULL WHERE id = $1', [e.id]),
+    ).rejects.toThrow(/oauth_client_auth/);
+    await fx.query(
+      "UPDATE app.webhook_endpoints SET oauth_client_auth = 'client_secret_post' WHERE id = $1",
+      [e.id],
+    );
+    // The company role changes it only through its column grant: it has no update grant on the
+    // whole table.
+    const [grant] = await fx.query<{ can_update: boolean; can_update_table: boolean }>(
+      `SELECT has_column_privilege('w360_app', 'app.webhook_endpoints', 'oauth_client_auth',
+                'UPDATE') AS can_update,
+              has_table_privilege('w360_app', 'app.webhook_endpoints', 'UPDATE')
+                AS can_update_table`,
+    );
+    expect(grant).toEqual({ can_update: true, can_update_table: false });
     for (const set of [
       'oauth_token_url = NULL',
       'oauth_client_id = NULL',

@@ -1302,12 +1302,16 @@ verification, app review, Embedded Signup configuration).
   its customer's details, and the store; narrowed by stores, and the sent one by numbers).
   **[Skip reason filter for skipped cart reminders built; its database tests run only in CI]**
   (ADR-356, migration 0278: an endpoint takes `store_checkout.reminder_skipped` only for chosen
-  reasons, 1 to 20 of those a cart reminder can be skipped for).
+  reasons, 1 to 20 of those a cart reminder can be skipped for). **[OAuth client credentials in the
+  token request body built; their database tests run only in CI]** (ADR-357, migration 0279: an
+  endpoint's OAuth client sends its ID and secret as `client_id` and `client_secret` in the token
+  request's form when it chooses `client_secret_post`, in an HTTP Basic header otherwise).
   Remaining: filters for other event types and on a message's values other than its type and words,
   field value comparisons beyond
   values, words and ranges, other authentication (headers computed per delivery, other OAuth
-  grants), mutual TLS, fixed egress addresses, other store events (a filter by cart reminder,
-  first or second; the store's orders and checkouts themselves are reported by the store, ADR-085),
+  grants, JWT client assertions), mutual TLS, fixed egress addresses, other store events (a
+  filter by cart reminder, first or second; the store's orders and checkouts themselves are
+  reported by the store, ADR-085),
   a sequence number across events, load tests.
 - **P5-10 Platform ops screens** **[built, locally verified with test data only]** (ADR-054):
   `/platform/ops` with Overview, Onboarding (failed and abandoned signups, failed or stuck number

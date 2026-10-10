@@ -222,6 +222,7 @@ import {
   WEBHOOK_OAUTH_SECRET_FOR_NEW_URL,
   WEBHOOK_OAUTH_SECRET_NEEDED,
   webhookOAuthAudit,
+  webhookOAuthClientAuthAudit,
   webhookOAuthColumns,
   webhookOAuthSchema,
   webhookAssigneeIdsFor,
@@ -4392,9 +4393,9 @@ describe('endpoint audit entries within an audit entry’s 8 KiB (ADR-336)', () 
         listDigests: { contactTags: digest(tags(10)) },
       });
     }
-    // Every event type, hosts of 253 characters and the 60 lists an entry can name, each too
-    // long to name item by item beside the others: named by count, the entry takes under 6,800,
-    // within the 7,000 bytes kept.
+    // Every event type, hosts of 253 characters, an OAuth client's method and the 60 lists an
+    // entry can name, each too long to name item by item beside the others: named by count, the
+    // entry takes under 6,800 (6,587), within the 7,000 bytes kept.
     const keys = [
       'assigneeIds',
       'automationIds',
@@ -4464,6 +4465,7 @@ describe('endpoint audit entries within an audit entry’s 8 KiB (ADR-336)', () 
       ...Object.fromEntries(keys.map((key) => [key, tags(20)])),
       oauthTokenHost: 'o'.repeat(253),
       oauthSecretReplaced: true,
+      oauthClientAuthentication: 'client_secret_basic',
     });
     expect(Object.keys(whole.listCounts as object)).toHaveLength(60);
     expect(jsonbSize(whole)).toBeLessThan(6800);
@@ -4921,6 +4923,7 @@ describe('endpoint OAuth clients (ADR-173)', () => {
       clientId: 'hyfib',
       clientSecret: 's',
       scope: null,
+      clientAuthentication: 'client_secret_basic',
     });
     for (const [tokenUrl, message] of [
       ['http://auth.example.com/t', 'Only https:// addresses can be called.'],
@@ -4958,6 +4961,7 @@ describe('endpoint OAuth clients (ADR-173)', () => {
       oauthClientId: 'renamed',
       oauthClientSecretCiphertext: stored.oauthClientSecretCiphertext,
       oauthScope: 'read',
+      oauthClientAuth: 'client_secret_basic',
     });
     // Another token URL would receive the secret: it is needed again.
     expect(
@@ -4995,12 +4999,78 @@ describe('endpoint OAuth clients (ADR-173)', () => {
       clientId: 'hyfib',
       clientSecret: 's3cret',
       scope: 'read',
+      clientAuthentication: 'client_secret_basic',
     });
     expect(() => openWebhookOAuthClient(ring, other, endpoint, columns)).toThrow();
     expect(() => openWebhookOAuthClient(ring, tenant, other, columns)).toThrow();
     // No client keeps nothing, and opens as none.
     expect(webhookOAuthColumns(ring, tenant, endpoint, null, columns)).toEqual(NO_WEBHOOK_OAUTH);
     expect(openWebhookOAuthClient(ring, tenant, endpoint, NO_WEBHOOK_OAUTH)).toBeNull();
+  });
+
+  it('send the client ID and secret in a Basic header unless the request body is chosen (ADR-357)', () => {
+    const post = { ...base, clientSecret: 's', clientAuthentication: 'client_secret_post' };
+    expect(webhookOAuthSchema.parse(post)).toEqual(post);
+    expect(
+      webhookOAuthSchema.parse({ ...base, clientAuthentication: 'client_secret_basic' }),
+    ).toEqual({ ...base, clientAuthentication: 'client_secret_basic' });
+    // Left out: the schema adds nothing, and the client uses HTTP Basic.
+    expect(webhookOAuthSchema.parse(base)).not.toHaveProperty('clientAuthentication');
+    for (const bad of ['private_key_jwt', 'none', 'CLIENT_SECRET_POST', '', null]) {
+      expect(problems({ ...base, clientAuthentication: bad }), String(bad)).toEqual([
+        [
+          'clientAuthentication',
+          'Choose how the client ID and secret are sent: client_secret_basic or client_secret_post.',
+        ],
+      ]);
+    }
+    expect(
+      checkedWebhookOAuth({ ...base, clientSecret: 's' }, NO_WEBHOOK_OAUTH, policy)
+        .clientAuthentication,
+    ).toBe('client_secret_basic');
+    const columns = webhookOAuthColumns(
+      ring,
+      tenant,
+      endpoint,
+      checkedWebhookOAuth(webhookOAuthSchema.parse(post), NO_WEBHOOK_OAUTH, policy),
+      NO_WEBHOOK_OAUTH,
+    );
+    expect(columns.oauthClientAuth).toBe('client_secret_post');
+    expect(openWebhookOAuthClient(ring, tenant, endpoint, columns)?.clientAuthentication).toBe(
+      'client_secret_post',
+    );
+    // A change that leaves the method out keeps it while the token URL stays the same, as a
+    // connector written before ADR-357 rotating the secret does; one naming it changes it.
+    const rotated = checkedWebhookOAuth({ ...base, clientSecret: 'rotated' }, columns, policy);
+    expect(rotated.clientAuthentication).toBe('client_secret_post');
+    expect(webhookOAuthColumns(ring, tenant, endpoint, rotated, columns).oauthClientAuth).toBe(
+      'client_secret_post',
+    );
+    expect(
+      checkedWebhookOAuth({ ...base, clientAuthentication: 'client_secret_basic' }, columns, policy)
+        .clientAuthentication,
+    ).toBe('client_secret_basic');
+    // Another token URL is another server: left out, HTTP Basic, as for a new client, and as for
+    // an endpoint without a client whatever its column holds.
+    expect(
+      checkedWebhookOAuth(
+        { ...base, tokenUrl: 'https://elsewhere.example.com/t', clientSecret: 's' },
+        columns,
+        policy,
+      ).clientAuthentication,
+    ).toBe('client_secret_basic');
+    expect(
+      checkedWebhookOAuth(
+        { ...base, clientSecret: 's' },
+        { ...NO_WEBHOOK_OAUTH, oauthClientAuth: 'client_secret_post' },
+        policy,
+      ).clientAuthentication,
+    ).toBe('client_secret_basic');
+    // Removing the client puts the default back.
+    expect(webhookOAuthColumns(ring, tenant, endpoint, null, columns).oauthClientAuth).toBe(
+      'client_secret_basic',
+    );
+    expect(NO_WEBHOOK_OAUTH.oauthClientAuth).toBe('client_secret_basic');
   });
 
   it('refuse an Authorization header of the endpoint’s own beside a client, naming what was given', () => {
@@ -5044,12 +5114,72 @@ describe('endpoint OAuth clients (ADR-173)', () => {
     expect(webhookOAuthAudit(null, NO_WEBHOOK_OAUTH)).toEqual({});
   });
 
+  it('name the way a client authenticates in the audit when it is not HTTP Basic or goes back to it (ADR-357)', () => {
+    const basic = webhookOAuthColumns(
+      ring,
+      tenant,
+      endpoint,
+      checkedWebhookOAuth({ ...base, clientSecret: 's' }, NO_WEBHOOK_OAUTH, policy),
+      NO_WEBHOOK_OAUTH,
+    );
+    const toPost = checkedWebhookOAuth(
+      { ...base, clientAuthentication: 'client_secret_post' },
+      basic,
+      policy,
+    );
+    expect(webhookOAuthAudit(toPost, basic)).toEqual({
+      oauthTokenHost: 'auth.example.com',
+      oauthSecretReplaced: false,
+      oauthClientAuthentication: 'client_secret_post',
+    });
+    const post = webhookOAuthColumns(ring, tenant, endpoint, toPost, basic);
+    // Kept in the body, named or left out: named again, since it is not the default.
+    expect(webhookOAuthClientAuthAudit(toPost, post)).toEqual({
+      oauthClientAuthentication: 'client_secret_post',
+    });
+    expect(webhookOAuthAudit(checkedWebhookOAuth(base, post, policy), post)).toEqual({
+      oauthTokenHost: 'auth.example.com',
+      oauthSecretReplaced: false,
+      oauthClientAuthentication: 'client_secret_post',
+    });
+    // Back to HTTP Basic: named, so the entry says the method changed.
+    const toBasic = checkedWebhookOAuth(
+      { ...base, clientAuthentication: 'client_secret_basic' },
+      post,
+      policy,
+    );
+    expect(webhookOAuthAudit(toBasic, post)).toEqual({
+      oauthTokenHost: 'auth.example.com',
+      oauthSecretReplaced: false,
+      oauthClientAuthentication: 'client_secret_basic',
+    });
+    // HTTP Basic kept, or a new client using it: nothing to say, even where a removal left the
+    // body in the column of an endpoint without a client (a web server from before ADR-357).
+    expect(webhookOAuthClientAuthAudit(toBasic, basic)).toEqual({});
+    expect(webhookOAuthClientAuthAudit(toBasic, NO_WEBHOOK_OAUTH)).toEqual({});
+    expect(
+      webhookOAuthClientAuthAudit(toBasic, {
+        ...NO_WEBHOOK_OAUTH,
+        oauthClientAuth: 'client_secret_post',
+      }),
+    ).toEqual({});
+    expect(webhookOAuthClientAuthAudit(toPost, NO_WEBHOOK_OAUTH)).toEqual({
+      oauthClientAuthentication: 'client_secret_post',
+    });
+  });
+
   it('are described by the token URL’s host, and their failures named for members', () => {
-    expect(webhookOAuthText({ ...base, scope: null })).toBe(
+    const basic = { ...base, clientAuthentication: 'client_secret_basic' as const };
+    expect(webhookOAuthText({ ...basic, scope: null })).toBe(
       'OAuth access tokens from auth.example.com, as client hyfib',
     );
-    expect(webhookOAuthText({ ...base, scope: 'read write' })).toBe(
+    expect(webhookOAuthText({ ...basic, scope: 'read write' })).toBe(
       'OAuth access tokens from auth.example.com, as client hyfib, scope read write',
+    );
+    expect(
+      webhookOAuthText({ ...basic, scope: 'read', clientAuthentication: 'client_secret_post' }),
+    ).toBe(
+      'OAuth access tokens from auth.example.com, as client hyfib, scope read, its ID and secret sent in the request body',
     );
     expect(webhookErrorLabel('oauth_token_refused_401', null)).toBe(
       'The authorization server refused an access token (HTTP 401)',

@@ -18,6 +18,7 @@ const client = {
   clientId: 'hyfib-webhooks',
   clientSecret: 's3cret',
   scope: null,
+  clientAuthentication: 'client_secret_basic' as const,
 };
 const at = new Date('2026-10-05T10:00:00Z');
 const answer = (status: number, body: unknown) => ({
@@ -65,6 +66,34 @@ describe('OAuth client credentials for webhook endpoints (ADR-173)', () => {
       'ua',
     );
     expect(longest.headers.authorization!.length).toBeLessThanOrEqual(4096);
+  });
+
+  it('send the client in the form instead, without an Authorization header, for client_secret_post (ADR-357)', () => {
+    const post = { ...client, clientAuthentication: 'client_secret_post' as const };
+    expect(webhookOAuthTokenRequest(post, 'HyFib-W360-Webhooks/1')).toEqual({
+      method: 'POST',
+      url: 'https://auth.example.com/oauth2/token',
+      headers: {
+        'content-type': 'application/x-www-form-urlencoded',
+        accept: 'application/json',
+        'user-agent': 'HyFib-W360-Webhooks/1',
+      },
+      body: 'grant_type=client_credentials&client_id=hyfib-webhooks&client_secret=s3cret',
+    });
+    // Form-encoded like every parameter, after the scope.
+    expect(
+      webhookOAuthTokenRequest(
+        {
+          ...post,
+          clientId: 'id with:colon',
+          clientSecret: 'p@ss+w/rd',
+          scope: 'events.write read',
+        },
+        'ua',
+      ).body,
+    ).toBe(
+      'grant_type=client_credentials&scope=events.write+read&client_id=id+with%3Acolon&client_secret=p%40ss%2Bw%2Frd',
+    );
   });
 
   it('take a 200 with a bearer token, kept until a minute before it expires and at most a day', () => {
@@ -224,13 +253,25 @@ describe('the access tokens a worker keeps (ADR-173)', () => {
     // Usable until, not at, its time.
     expect(await tokens.token(owner, client, minutes(10), ask)).toEqual(issued('two', minutes(30)));
     expect(asked.count).toBe(2);
-    // Another endpoint, or the same one with a new secret, a new scope or a new token URL, asks.
+    // Another endpoint asks.
     await tokens.token({ ...owner, endpointId: 'e2' }, client, minutes(11), ask);
     await tokens.token({ ...owner, tenantId: 't2' }, client, minutes(11), ask);
-    await tokens.token(owner, { ...client, clientSecret: 'rotated' }, minutes(11), ask);
-    await tokens.token(owner, { ...client, scope: 'read' }, minutes(11), ask);
-    await tokens.token(owner, { ...client, tokenUrl: 'https://auth2.example.com/t' }, at, ask);
-    expect(asked.count).toBe(7);
+    expect(asked.count).toBe(4);
+    // So does the same one with a new secret, scope or token URL, or another way of sending its
+    // credentials (ADR-357), each while the client as it was has a token kept.
+    for (const changed of [
+      { ...client, clientSecret: 'rotated' },
+      { ...client, scope: 'read' },
+      { ...client, tokenUrl: 'https://auth2.example.com/t' },
+      { ...client, clientAuthentication: 'client_secret_post' as const },
+    ]) {
+      await tokens.token(owner, client, minutes(11), ask);
+      const before = asked.count;
+      await tokens.token(owner, client, minutes(11), ask);
+      expect(asked.count).toBe(before);
+      await tokens.token(owner, changed, minutes(11), ask);
+      expect(asked.count, JSON.stringify(changed)).toBe(before + 1);
+    }
   });
 
   it('share one request among the deliveries that need a token at once, keeping no failure', async () => {

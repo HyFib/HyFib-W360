@@ -67,6 +67,7 @@ import {
   WEBHOOK_ORDER_MESSAGE_EVENTS,
   WEBHOOK_ORDER_MESSAGE_SKIP_REASONS,
   WEBHOOK_CART_REMINDER_SKIP_REASONS,
+  WEBHOOK_OAUTH_CLIENT_AUTHENTICATIONS,
   WEBHOOK_RUN_STEP_OUTCOMES,
   WEBHOOK_RUN_STEP_NODE_TYPES,
   WEBHOOK_ORDER_CHANGE_MAKERS,
@@ -133,6 +134,7 @@ import {
   type WebhookOrderMessageEvent,
   type WebhookOrderMessageSkipReason,
   type WebhookCartReminderSkipReason,
+  type WebhookOAuthClientAuth,
   type WebhookEndpointStore,
   type WebhookStoreChoice,
   webhookStoreLabel,
@@ -242,9 +244,10 @@ export const webhookHeadersSchema = z
 
 /**
  * An endpoint's OAuth client (ADR-173): the token endpoint of its receiver's authorization server,
- * the client identifier and secret that server issued, and the scope to ask for, if any (empty or
- * left out: none). A change may leave the secret out to keep the stored one while the token URL
- * stays the same.
+ * the client identifier and secret that server issued, the scope to ask for, if any (empty or left
+ * out: none), and how the client authenticates (ADR-357). A change may leave the secret, and the
+ * way the client authenticates, out to keep the stored ones while the token URL stays the same; a
+ * new client or token URL left without a way uses HTTP Basic.
  */
 export const webhookOAuthSchema = z
   .object({
@@ -285,6 +288,12 @@ export const webhookOAuthSchema = z
       )
       .transform((scope) => scope || null)
       .nullable()
+      .optional(),
+    clientAuthentication: z
+      .enum(WEBHOOK_OAUTH_CLIENT_AUTHENTICATIONS, {
+        error:
+          'Choose how the client ID and secret are sent: client_secret_basic or client_secret_post.',
+      })
       .optional(),
   })
   .strict();
@@ -4119,12 +4128,16 @@ export function checkedWebhookUrl(
   return { url, host: target.hostname };
 }
 
-/** An endpoint's OAuth columns (ADR-173): all null without an OAuth client. */
+/**
+ * An endpoint's OAuth columns (ADR-173): all null without an OAuth client, but the way a client
+ * authenticates (ADR-357), which then stays at its default, HTTP Basic.
+ */
 export interface WebhookOAuthColumns {
   oauthTokenUrl: string | null;
   oauthClientId: string | null;
   oauthClientSecretCiphertext: string | null;
   oauthScope: string | null;
+  oauthClientAuth: WebhookOAuthClientAuth;
 }
 
 export const NO_WEBHOOK_OAUTH: WebhookOAuthColumns = {
@@ -4132,6 +4145,7 @@ export const NO_WEBHOOK_OAUTH: WebhookOAuthColumns = {
   oauthClientId: null,
   oauthClientSecretCiphertext: null,
   oauthScope: null,
+  oauthClientAuth: 'client_secret_basic',
 };
 
 /**
@@ -4146,7 +4160,10 @@ export interface CheckedWebhookOAuth extends Omit<WebhookOAuthClient, 'clientSec
 /**
  * Checks an OAuth client given for an endpoint (ADR-173): its token URL like an endpoint's URL, and
  * that a secret is given unless the endpoint keeps the one it has, which it can only while the token
- * URL stays the same, since the secret is sent there.
+ * URL stays the same, since the secret is sent there. The way the client authenticates, left out,
+ * is likewise kept while the token URL stays the same, so a connector written before ADR-357 that
+ * rotates the secret keeps a client set to send it in the request body; a new client or token URL
+ * uses HTTP Basic.
  */
 export function checkedWebhookOAuth(
   given: WebhookOAuthInput,
@@ -4155,6 +4172,7 @@ export function checkedWebhookOAuth(
 ): CheckedWebhookOAuth {
   const { url, host } = checkedWebhookUrl(given.tokenUrl, policy, 'oauth.tokenUrl');
   const keeps = current.oauthClientSecretCiphertext !== null && current.oauthTokenUrl === url;
+  const keepsMethod = current.oauthTokenUrl !== null && current.oauthTokenUrl === url;
   if (given.clientSecret === undefined && !keeps) {
     const message = current.oauthTokenUrl
       ? WEBHOOK_OAUTH_SECRET_FOR_NEW_URL
@@ -4169,6 +4187,8 @@ export function checkedWebhookOAuth(
     clientId: given.clientId,
     clientSecret: given.clientSecret ?? null,
     scope: given.scope ?? null,
+    clientAuthentication:
+      given.clientAuthentication ?? (keepsMethod ? current.oauthClientAuth : 'client_secret_basic'),
   };
 }
 
@@ -4194,6 +4214,7 @@ export function webhookOAuthColumns(
     oauthClientId: oauth.clientId,
     oauthClientSecretCiphertext: sealed,
     oauthScope: oauth.scope,
+    oauthClientAuth: oauth.clientAuthentication,
   };
 }
 
@@ -4217,6 +4238,7 @@ export function openWebhookOAuthClient(
       webhookOAuthSecretAad(tenantId, endpointId),
     ),
     scope: columns.oauthScope,
+    clientAuthentication: columns.oauthClientAuth,
   };
 }
 
@@ -4249,7 +4271,27 @@ export function webhookOAuthAudit(
 ): Record<string, unknown> {
   if (oauth === undefined) return {};
   if (oauth === null) return current.oauthTokenUrl ? { oauthRemoved: true } : {};
-  return { oauthTokenHost: oauth.host, oauthSecretReplaced: oauth.clientSecret !== null };
+  return {
+    oauthTokenHost: oauth.host,
+    oauthSecretReplaced: oauth.clientSecret !== null,
+    ...webhookOAuthClientAuthAudit(oauth, current),
+  };
+}
+
+/**
+ * How a client authenticates, named in an audit entry when it is not HTTP Basic, or when a change
+ * goes back to it (ADR-357), so entries name every way an endpoint has used. An endpoint without a
+ * client counts as HTTP Basic, whatever its column holds.
+ */
+export function webhookOAuthClientAuthAudit(
+  oauth: CheckedWebhookOAuth,
+  current: WebhookOAuthColumns,
+): { oauthClientAuthentication?: WebhookOAuthClientAuth } {
+  const before = current.oauthTokenUrl ? current.oauthClientAuth : 'client_secret_basic';
+  return oauth.clientAuthentication !== 'client_secret_basic' ||
+    before !== oauth.clientAuthentication
+    ? { oauthClientAuthentication: oauth.clientAuthentication }
+    : {};
 }
 
 /** Takes the company's endpoint lock, so two creations cannot pass the endpoint limit together. */
@@ -4343,6 +4385,7 @@ export async function lockWebhookEndpoint(
       oauthClientId: webhookEndpoints.oauthClientId,
       oauthClientSecretCiphertext: webhookEndpoints.oauthClientSecretCiphertext,
       oauthScope: webhookEndpoints.oauthScope,
+      oauthClientAuth: webhookEndpoints.oauthClientAuth,
     })
     .from(webhookEndpoints)
     .where(
@@ -4956,6 +4999,7 @@ export function createWebhooksService(deps: {
               oauthTokenUrl: webhookEndpoints.oauthTokenUrl,
               oauthClientId: webhookEndpoints.oauthClientId,
               oauthScope: webhookEndpoints.oauthScope,
+              oauthClientAuth: webhookEndpoints.oauthClientAuth,
               createdAt: webhookEndpoints.createdAt,
               createdBy: users.name,
               keyName: apiKeys.name,
@@ -5296,13 +5340,19 @@ export function createWebhooksService(deps: {
               oauthTokenUrl,
               oauthClientId,
               oauthScope,
+              oauthClientAuth,
               ...endpoint
             } = r;
             return {
               ...endpoint,
               oauth:
                 oauthTokenUrl && oauthClientId
-                  ? { tokenUrl: oauthTokenUrl, clientId: oauthClientId, scope: oauthScope }
+                  ? {
+                      tokenUrl: oauthTokenUrl,
+                      clientId: oauthClientId,
+                      scope: oauthScope,
+                      clientAuthentication: oauthClientAuth,
+                    }
                   : null,
               channels: channelAccountIds
                 ? channelAccountIds.map((id): WebhookEndpointChannel => {
@@ -6111,7 +6161,12 @@ export function createWebhooksService(deps: {
               ...(assigneeIds ? { assigneeIds } : {}),
               ...(contactTags ? { contactTags } : {}),
               ...(conversationTags ? { conversationTags } : {}),
-              ...(oauth ? { oauthTokenHost: oauth.host } : {}),
+              ...(oauth
+                ? {
+                    oauthTokenHost: oauth.host,
+                    ...webhookOAuthClientAuthAudit(oauth, NO_WEBHOOK_OAUTH),
+                  }
+                : {}),
             }),
           },
           meta,

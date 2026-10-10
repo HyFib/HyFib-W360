@@ -8,6 +8,7 @@ import type {
   WebhookOrderMessageEvent,
   WebhookOrderMessageSkipReason,
   WebhookCartReminderSkipReason,
+  WebhookOAuthClientAuth,
   WebhookConsentChange,
   WebhookContactPart,
   WebhookConversationStatus,
@@ -41,6 +42,7 @@ export type {
   WebhookOrderMessageEvent,
   WebhookOrderMessageSkipReason,
   WebhookCartReminderSkipReason,
+  WebhookOAuthClientAuth,
   WebhookConsentChange,
   WebhookContactPart,
   WebhookConversationStatus,
@@ -1869,13 +1871,35 @@ export interface WebhookEndpointOAuth {
   clientId: string;
   /** The scope it asks for (space-separated values), or none. */
   scope: string | null;
+  /** How the client authenticates to the authorization server (ADR-357). */
+  clientAuthentication: WebhookOAuthClientAuth;
 }
 
-/** How Settings → Webhooks describes an endpoint's OAuth client (ADR-173). */
+/**
+ * How an endpoint's OAuth client can authenticate to its authorization server (ADR-357), as RFC
+ * 7591 names the methods of RFC 6749 section 2.3.1, the default first: its identifier and secret
+ * in an HTTP Basic header, or as form parameters in the request body.
+ */
+export const WEBHOOK_OAUTH_CLIENT_AUTHENTICATIONS = [
+  'client_secret_basic',
+  'client_secret_post',
+] as const satisfies readonly WebhookOAuthClientAuth[];
+
+/** How Settings → Webhooks names each way a client authenticates (ADR-357). */
+export const WEBHOOK_OAUTH_CLIENT_AUTHENTICATION_LABELS: Record<WebhookOAuthClientAuth, string> = {
+  client_secret_basic: 'In an Authorization header (HTTP Basic)',
+  client_secret_post: 'In the request body (client_id and client_secret)',
+};
+
+/** How Settings → Webhooks describes an endpoint's OAuth client (ADR-173, ADR-357). */
 export function webhookOAuthText(oauth: WebhookEndpointOAuth): string {
   const host = webhookHost(oauth.tokenUrl) ?? oauth.tokenUrl;
   const scope = oauth.scope ? `, scope ${oauth.scope}` : '';
-  return `OAuth access tokens from ${host}, as client ${oauth.clientId}${scope}`;
+  const body =
+    oauth.clientAuthentication === 'client_secret_post'
+      ? ', its ID and secret sent in the request body'
+      : '';
+  return `OAuth access tokens from ${host}, as client ${oauth.clientId}${scope}${body}`;
 }
 
 /** How Settings → Webhooks notes a number that is not active, as Settings → Channels names it. */

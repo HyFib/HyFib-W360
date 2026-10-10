@@ -1430,13 +1430,16 @@ Phase 5 rules (outgoing webhooks, P5-09):
   `webhook-oauth-secret:<company>:<endpoint>` and is never shown again, logged, put in audit entries
   (which name the token URL's host), exported or kept in an API key's idempotency record; a change
   keeps it only while the token URL stays the same, so it cannot be sent to another server by
-  someone who does not know it. The worker sends it only to the token URL, in an HTTP Basic header.
-  Access tokens live only in the worker's memory, keyed by the company, the endpoint and a hash of
-  the client: never stored, logged or shown, a day at most, replaced after a 401 or a change of the
-  client. A token's characters are checked (RFC 6750) before it goes in the `Authorization` header,
-  and an endpoint with a client cannot send an `Authorization` header of its own. A token request
-  that fails is recorded by its code only; a secret that does not open fails that delivery alone as
-  `payload_failed` (stage `oauth`). Tested (unit; integration and e2e tests run in CI only).
+  someone who does not know it. The worker sends it only to the token URL, in an HTTP Basic header
+  or, for a client set to `client_secret_post` (ADR-357), in the token request's form, which the
+  egress client never sends on to a redirect's target; the way a client authenticates is audited,
+  the secret never. Access tokens live only in the worker's memory, keyed by the company, the
+  endpoint and a hash of the client (its way of authenticating included): never stored, logged or
+  shown, a day at most, replaced after a 401 or a change of the client. A token's characters are
+  checked (RFC 6750) before it goes in the `Authorization` header, and an endpoint with a client
+  cannot send an `Authorization` header of its own. A token request that fails is recorded by its
+  code only; a secret that does not open fails that delivery alone as `payload_failed` (stage
+  `oauth`). Tested (unit; integration and e2e tests run in CI only).
 - An endpoint can take only some `message.status` statuses (ADR-119), chosen by whoever may change
   it (members with `developer.manage`, or the key that manages it). The list is checked against
   the statuses the message trigger captures, kept only while the endpoint takes `message.status`
