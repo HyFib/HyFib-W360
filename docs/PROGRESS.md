@@ -59,6 +59,11 @@ migration passed the pglast parse check (syntax only), its PL/pgSQL body include
   HTTP status, any other Meta's; the migration's header is wrapped again; the threat model, runbook
   and comments say a ninth code is listed and where codes come from; and the e2e fixture ties the
   number to the conversation and gives the failed send its rank.
+- **CI fix:** the new e2e test failed on WebKit alone, twice: with the table on a company's page,
+  the page 360 pixels wide measured 409 (the earlier tests' company failed no send, so showed the
+  note). The table's box now has inline-size containment (`contain: inline-size`, in WebKit since
+  Safari 16), so its width counts towards nothing around it and it scrolls in its own box. WebKit is
+  not installed here, so the fix was checked in CI only.
 
 ### Test commands and results (local, 2026-10-10)
 

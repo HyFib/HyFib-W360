@@ -37,8 +37,10 @@ export function FailureReasonsTable({
 }) {
   if (reasons.failed === 0) return <p className="text-sm text-muted-foreground">{empty}</p>;
   return (
-    // min-w-0 and the table's own box: it scrolls there rather than widening the card on a phone.
-    <div className="min-w-0">
+    // The table scrolls in its own box rather than widening the card on a phone. Inline-size
+    // containment keeps the table's width out of the sizes around it: WebKit otherwise let it widen
+    // a company's platform page 360 pixels wide to 409.
+    <div className="min-w-0 [contain:inline-size]">
       <Table aria-label={label}>
         <THead>
           <TR>
