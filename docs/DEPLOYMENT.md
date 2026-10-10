@@ -1418,7 +1418,12 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    read it. Web servers from before it neither show nor change the column: until the web rollout
    ends, an old server's change that drops `store_order.message_skipped` from an endpoint with a
    list fails on the check, its other changes keep the list, and its API refuses
-   `orderMessageEvents` (422) and leaves it out of the endpoints it answers.
+   `orderMessageEvents` (422) and leaves it out of the endpoints it answers. Such a server also
+   clears the stores of an endpoint that takes `store_order.message_skipped` without
+   `store_order.cod_answered` whenever it changes that endpoint (its store list needs the answers),
+   which then receives every store's skips, and its API refuses `storeIds` for such an endpoint
+   (422): choose stores for skipped messages alone once the rollout ends, and check them after
+   rolling web servers back.
 
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.

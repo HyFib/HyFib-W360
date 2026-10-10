@@ -2062,7 +2062,25 @@ describe('Order messages', () => {
 
     // Skipped order messages (ADR-351): an order paid on delivery records its order placed message
     // skipped, the confirmation replacing it, and a confirmation without a number HyFib can message
-    // is skipped when due; each sends its event once.
+    // is skipped when due; each sends its event once. The answers' endpoints are done with: a
+    // company keeps at most 10 endpoints.
+    const hooks = createWebhooksService({
+      db: fx.dbs.app,
+      clock: systemClock,
+      keyring: fx.keyring,
+      egressPolicy: { allowLoopbackForTests: true },
+    });
+    for (const hook of [
+      everyNumber,
+      itsNumber,
+      otherNumber,
+      cancellations,
+      thisStore,
+      thatStore,
+      confirmationsHere,
+    ]) {
+      await hooks.remove(owner, { endpointId: hook.id });
+    }
     const skips = await addHook(owner, ['store_order.message_skipped']);
     // And by order message and store (ADR-352): the confirmations' skips only, this store's, the
     // other store's only, which hears nothing, and both messages of either store.

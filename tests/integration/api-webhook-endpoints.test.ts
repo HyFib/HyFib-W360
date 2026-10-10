@@ -266,6 +266,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       paymentLinkStatuses: null,
       codAnswers: null,
       storeIds: null,
+      orderMessageEvents: null,
       runStepOutcomes: null,
       runStepNodeTypes: null,
       orderChangeMakers: null,

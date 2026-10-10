@@ -35,6 +35,17 @@ integration tests below were written but not run here; the migration passed the 
 - **Docs:** ADR-352; ARCHITECTURE; SECURITY; THREAT-MODEL T311; DEPLOYMENT (0272); RUNBOOKS (and
   the ADR-349 entry's names); BACKLOG P5-09; feature matrix W-138, W-139 (which also names
   ADR-349's API lists now) and H-014.
+- **Review fixes:** the store flow's integration test removes the answers' seven endpoints before
+  adding the skipped messages' five (a company keeps at most 10 endpoints); the API's whole answer
+  in the Idempotency-Key test names `orderMessageEvents`; DEPLOYMENT says that a web server from
+  before the migration clears the stores of an endpoint taking skipped messages without answers;
+  two test comments say only what their checks show.
+- **Mutation checks:** 17/17 deliberate regressions caught on the unit-tested parts (the messages
+  not put in order, six or none taken, another refusal, the messages kept with the answers or the
+  ones held forgotten, the stores kept with the answers only, the refusals naming one or no event,
+  the API taking messages without the event or stores with the answers only, its field not naming
+  the event, the messages in another order, a label unlike Stores, skipped messages not a store
+  event, the API answer without the list of messages, the event's filters not described).
 
 ### Test commands and results (local, 2026-10-10)
 

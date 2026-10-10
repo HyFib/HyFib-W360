@@ -2506,7 +2506,7 @@ describe('cash on delivery answer, store and order message filters (ADR-349, ADR
     await refused(skipped, { storeIds: [elsewhere.id] }, /stores of this company/);
     expect(await webhooks().list(owner)).toEqual([]);
 
-    // Skipped messages alone can name the stores.
+    // Added with both store events; the skipped messages alone keep the stores below.
     const created = await webhooks().create(owner, {
       url,
       eventTypes: ['store_order.message_skipped', 'store_order.cod_answered'],
@@ -2566,8 +2566,9 @@ describe('cash on delivery answer, store and order message filters (ADR-349, ADR
     await change(['consent.changed']);
     expect(await current()).toEqual({ orderMessageEvents: null, stores: null });
 
-    // The database refuses an empty list, more than 5 or repeated messages, a cart reminder, an
-    // unknown message, a missing entry or a nested list from an endpoint taking the event…
+    // The database refuses an empty list, more than 5 messages, a cart reminder, an unknown
+    // message, a missing entry or a nested list from an endpoint taking the event (the services
+    // give each message once)…
     await change(skipped, { orderMessageEvents: ['order_placed'] });
     const setInDatabase = (column: 'order_message_events' | 'store_ids', value: string) =>
       fx.query(`UPDATE app.webhook_endpoints SET ${column} = ${value} WHERE id = $1`, [created.id]);
