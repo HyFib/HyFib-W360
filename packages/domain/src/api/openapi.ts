@@ -32,6 +32,8 @@ import {
   WEBHOOK_MESSAGE_STATUSES,
   WEBHOOK_ORDER_STATUSES,
   WEBHOOK_PAYMENT_LINK_STATUSES,
+  WEBHOOK_COD_ANSWERS,
+  WEBHOOK_ORDER_MESSAGE_EVENTS,
   WEBHOOK_RUN_STEP_OUTCOMES,
   WEBHOOK_RUN_STEP_NODE_TYPES,
   WEBHOOK_ORDER_CHANGE_MAKERS,
@@ -64,6 +66,8 @@ import {
   taskStatusChangedPayloadSchema,
   noteCreatedPayloadSchema,
   satisfactionSurveyAnsweredPayloadSchema,
+  storeOrderCodAnsweredPayloadSchema,
+  storeOrderMessageSkippedPayloadSchema,
   paymentLinkStatusChangedPayloadSchema,
   consentChangedPayloadSchema,
   contactCreatedPayloadSchema,
@@ -91,6 +95,7 @@ import { CRM_LIMITS } from '../crm/common';
 import { CONTACT_FIELD_KEY_RE } from '../contacts/field-definitions';
 import { MAX_CONTACT_FIELDS } from '../contacts/fields';
 import { MAX_TAGS_PER_CONVERSATION } from '../inbox/conversation-tags';
+import { STORE_MESSAGE_LIMITS } from '../stores/messages-model';
 import { TEMPLATE_HEADER_MEDIA } from '../templates/definition';
 import {
   apiCreateMessageTemplateSchema,
@@ -1222,6 +1227,24 @@ export const apiWebhookEndpointSchema = z.object({
     .describe(
       'The statuses a Payment Link reaches that the endpoint receives as payment_link.status_changed; null receives every status.',
     ),
+  codAnswers: z
+    .array(z.enum(WEBHOOK_COD_ANSWERS))
+    .nullable()
+    .describe(
+      'The cash on delivery answers the endpoint receives as store_order.cod_answered, as confirmation.answer names them; null receives every answer.',
+    ),
+  storeIds: z
+    .array(z.uuid())
+    .nullable()
+    .describe(
+      "The connected stores whose cash on delivery answers (store_order.cod_answered) and skipped order messages (store_order.message_skipped) the endpoint receives, as store.id names them; a store removed since it was chosen stays and matches nothing. null receives every store's. Other events are not narrowed.",
+    ),
+  orderMessageEvents: z
+    .array(z.enum(WEBHOOK_ORDER_MESSAGE_EVENTS))
+    .nullable()
+    .describe(
+      'The order messages whose skips the endpoint receives as store_order.message_skipped, as orderMessage.event names them; null receives every message’s.',
+    ),
   runStepOutcomes: z
     .array(z.enum(WEBHOOK_RUN_STEP_OUTCOMES))
     .nullable()
@@ -1340,7 +1363,7 @@ export const apiWebhookEndpointSchema = z.object({
     .array(z.uuid())
     .nullable()
     .describe(
-      "The WhatsApp numbers whose message, conversation, automation run, order and campaign events the endpoint receives; null receives every number's, including numbers connected later. Consent, contact, template, deal and task events are not narrowed.",
+      "The WhatsApp numbers whose message, conversation, satisfaction survey answer, automation run, order, Payment Link, cash on delivery answer and campaign events the endpoint receives; null receives every number's, including numbers connected later. Consent, contact, template, skipped order message, deal, task and note events are not narrowed.",
     ),
   teamIds: z
     .array(z.uuid())
@@ -1753,7 +1776,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         `POST /messages needs an \`Idempotency-Key\` header: a retry with the same key and body returns the first response (header \`Idempotent-Replayed: true\`) and never sends twice; responses are kept ${API_LIMITS.idempotencyHours} hours. Delivery itself follows WhatsApp: read the status with GET /messages/{id}.`,
         `A response kept for an \`Idempotency-Key\`, on POST /messages and the other requests that take one, holds up to ${API_LIMITS.idempotentResponseBytes / 1024} KiB: a request whose response would be larger is refused with 422 and reason \`idempotency_response_too_large\`, and nothing is done. Only requests whose key is optional can give a response that large, so send such a request again without a key.`,
         '',
-        `Webhooks: endpoints added in Settings → Webhooks receive the events below as signed JSON POSTs. \`W360-Signature: t=<unix time>,v1=<hex HMAC-SHA256 of "<t>.<raw body>" with the endpoint secret>\` (two \`v1\` values for ${WEBHOOK_LIMITS.previousSecretHours} hours after the secret is rotated); reject a time more than 5 minutes from yours. Answer with a 2xx status within 10 seconds; anything else is retried (${retrySchedule}; ${WEBHOOK_LIMITS.attempts} attempts). Delivery is at least once and unordered: deduplicate on the event id. An endpoint failing for ${WEBHOOK_LIMITS.disableAfterHours} hours is turned off. An endpoint can also send up to ${WEBHOOK_LIMITS.headers} headers of its own with every delivery, such as an \`Authorization\` header its receiver issued; they never replace HyFib's. Or it can get an access token from its receiver's authorization server (OAuth 2.0 client credentials) and send it as \`Authorization: Bearer <token>\`. An endpoint receives the events of every WhatsApp number unless it names the numbers it takes (its \`channelIds\`, or the numbers chosen in Settings → Webhooks): then it receives the message, conversation, automation run, order and campaign events of those numbers only (a campaign's are those of the number it sends from), and still every consent, contact, template, deal, task and note event it takes. It can likewise name teams (its \`teamIds\`, or the teams chosen in Settings → Webhooks): then it receives the message and conversation events of those teams' conversations only, by the team a conversation is in when the event happens, or members (its \`assigneeIds\`): then those of the conversations assigned to them only, by the member a conversation is assigned to when the event happens, or contact tags (its \`contactTags\`): then those of the conversations whose contact has any of the tags when the event happens only, or conversation tags (its \`conversationTags\`): then those of the conversations that have any of the tags when the event happens only. And it can name templates (its \`templateIds\`): then it receives the statuses of the messages sent with them and their changes only, or campaigns (its \`campaignIds\`): then the statuses of the messages they sent and their changes only. And it can name CRM pipelines (its \`pipelineIds\`): then it receives the events of those pipelines' deals only, by the pipeline an event gives, a move to another pipeline reaching the endpoints of the pipeline it left as well, or stages (its \`stageIds\`): then those of the deals in those stages only, a move reaching the endpoints of the stage it left as well, or the deals' owners (its \`ownerIds\`): then those of the deals the members own when the event happens only, a change of owner reaching the endpoints of the owner it left as well; with more than one of these, an event must pass them all. And it can name the members whose tasks it takes (its \`taskAssigneeIds\`): then it receives the events of the tasks assigned to them when the event happens only, a change of assignee reaching the endpoints of the member it left as well, or the pipelines, stages or owners of the deals whose tasks it takes (its \`taskPipelineIds\`, \`taskStageIds\` and \`taskDealOwnerIds\`): then those of the tasks about deals in those pipelines or stages, or owned by those members, when the event happens only; with more than one of these, an event must pass them all. And it can name the pipelines, stages or owners of the deals whose notes it takes (its \`notePipelineIds\`, \`noteStageIds\` and \`noteDealOwnerIds\`): then it receives the events of the notes about deals in those pipelines or stages, or owned by those members, when the note is added only; with more than one of these, an event must pass them all. And it can name who made the changes whose deal, task and note events it takes (its \`crmChangeMakers\`: members, automations or API keys, as \`changedBy\` and \`writtenBy\` name them): then it receives the events of the changes they made only, and those HyFib did not record the maker of, so an integration can leave out the changes keys make; or it can leave out only the changes chosen keys made (its \`crmExcludedApiKeyIds\`, a key rotated from or into one of them included), to be sent every change but its own.`,
+        `Webhooks: endpoints added in Settings → Webhooks receive the events below as signed JSON POSTs. \`W360-Signature: t=<unix time>,v1=<hex HMAC-SHA256 of "<t>.<raw body>" with the endpoint secret>\` (two \`v1\` values for ${WEBHOOK_LIMITS.previousSecretHours} hours after the secret is rotated); reject a time more than 5 minutes from yours. Answer with a 2xx status within 10 seconds; anything else is retried (${retrySchedule}; ${WEBHOOK_LIMITS.attempts} attempts). Delivery is at least once and unordered: deduplicate on the event id. An endpoint failing for ${WEBHOOK_LIMITS.disableAfterHours} hours is turned off. An endpoint can also send up to ${WEBHOOK_LIMITS.headers} headers of its own with every delivery, such as an \`Authorization\` header its receiver issued; they never replace HyFib's. Or it can get an access token from its receiver's authorization server (OAuth 2.0 client credentials) and send it as \`Authorization: Bearer <token>\`. An endpoint receives the events of every WhatsApp number unless it names the numbers it takes (its \`channelIds\`, or the numbers chosen in Settings → Webhooks): then it receives the message, conversation, satisfaction survey answer, automation run, order, Payment Link, cash on delivery answer and campaign events of those numbers only (a campaign's are those of the number it sends from), and still every consent, contact, template, skipped order message, deal, task and note event it takes. It can likewise name teams (its \`teamIds\`, or the teams chosen in Settings → Webhooks): then it receives the message and conversation events of those teams' conversations only, by the team a conversation is in when the event happens, or members (its \`assigneeIds\`): then those of the conversations assigned to them only, by the member a conversation is assigned to when the event happens, or contact tags (its \`contactTags\`): then those of the conversations whose contact has any of the tags when the event happens only, or conversation tags (its \`conversationTags\`): then those of the conversations that have any of the tags when the event happens only. And it can name templates (its \`templateIds\`): then it receives the statuses of the messages sent with them and their changes only, or campaigns (its \`campaignIds\`): then the statuses of the messages they sent and their changes only. And it can name CRM pipelines (its \`pipelineIds\`): then it receives the events of those pipelines' deals only, by the pipeline an event gives, a move to another pipeline reaching the endpoints of the pipeline it left as well, or stages (its \`stageIds\`): then those of the deals in those stages only, a move reaching the endpoints of the stage it left as well, or the deals' owners (its \`ownerIds\`): then those of the deals the members own when the event happens only, a change of owner reaching the endpoints of the owner it left as well; with more than one of these, an event must pass them all. And it can name the members whose tasks it takes (its \`taskAssigneeIds\`): then it receives the events of the tasks assigned to them when the event happens only, a change of assignee reaching the endpoints of the member it left as well, or the pipelines, stages or owners of the deals whose tasks it takes (its \`taskPipelineIds\`, \`taskStageIds\` and \`taskDealOwnerIds\`): then those of the tasks about deals in those pipelines or stages, or owned by those members, when the event happens only; with more than one of these, an event must pass them all. And it can name the pipelines, stages or owners of the deals whose notes it takes (its \`notePipelineIds\`, \`noteStageIds\` and \`noteDealOwnerIds\`): then it receives the events of the notes about deals in those pipelines or stages, or owned by those members, when the note is added only; with more than one of these, an event must pass them all. And it can name who made the changes whose deal, task and note events it takes (its \`crmChangeMakers\`: members, automations or API keys, as \`changedBy\` and \`writtenBy\` name them): then it receives the events of the changes they made only, and those HyFib did not record the maker of, so an integration can leave out the changes keys make; or it can leave out only the changes chosen keys made (its \`crmExcludedApiKeyIds\`, a key rotated from or into one of them included), to be sent every change but its own.`,
       ].join('\n'),
     },
     servers: [{ url: serverUrl }],
@@ -4325,6 +4348,18 @@ export function buildOpenApiDocument(serverUrl: string) {
         `${WEBHOOK_EVENT_INFO['payment_link.status_changed'].description} paymentLink.status and paymentLink.previousStatus are the change, as the worker wrote it from what it did at Razorpay or what Razorpay reported; the rest is the link as GET /orders/{id}/payment-links reads it when the event is delivered: its amounts, expiry, the message that sent it in the chat or why it was not sent (notSentReason), what went wrong at Razorpay, and who asked for it (a member, never which, or an API key by its id). Never the link’s address or Razorpay’s ids. Only a link Razorpay reports paid marks the order paid, which order.status_changed reports. Asking for payment and asking to cancel a link send no event of their own here: the link is \`creating\` until the worker creates it, and cancelled when Razorpay reports it. An endpoint receives every status unless it names the statuses it takes (its \`paymentLinkStatuses\`, or the statuses ticked in Settings → Webhooks), and every link's changes unless it names the API keys whose links it takes (its \`paymentLinkApiKeyIds\`, a key rotated from or into one of them included): then those of the links they asked for only. It happens on the order’s WhatsApp number, so an endpoint that names numbers receives it for those numbers only. Deliveries are not ordered: the latest change is the one with the latest createdAt.`,
         'WebhookPaymentLinkStatusChanged',
       ),
+      'store_order.cod_answered': webhook(
+        'webhookStoreOrderCodAnswered',
+        WEBHOOK_EVENT_INFO['store_order.cod_answered'].label,
+        `${WEBHOOK_EVENT_INFO['store_order.cod_answered'].description} A store’s cash on delivery message carries two quick-reply buttons, one confirming the order and one cancelling it, and HyFib changes nothing in the store: this event is how an order system learns the answer. confirmation.answer and confirmation.previousAnswer are the change, with when the customer tapped and the tap’s message, as captured; the order is HyFib’s copy of the store’s order and the store the one it came from, as they are when the event is delivered, with the store’s own order id (storeOrder.externalId) to find it there. Never the customer’s details from the store: contact is the conversation’s contact, as erasure left it. The event is sent for the first answer and whenever a later tap replaces it with the other one; a tap that repeats the answer, an older tap arriving late and a tap outside the confirmation’s conversation send nothing. Store orders themselves are not sent: the store reports them through its own webhooks. It happens on the WhatsApp number the confirmation was sent from, so an endpoint that names numbers receives it for those numbers only. An endpoint receives both answers unless it names the answers it takes (its \`codAnswers\`, or the answers ticked in Settings → Webhooks), and the answers to every store’s orders unless it names the stores (its \`storeIds\`, or the stores ticked in Settings → Webhooks); with more than one list, an answer must pass them all. A confirmation is deleted with its order or its store, after which a delivery not yet made fails as event_gone. Deliveries are not ordered: the latest answer is the one with the latest createdAt.`,
+        'WebhookStoreOrderCodAnswered',
+      ),
+      'store_order.message_skipped': webhook(
+        'webhookStoreOrderMessageSkipped',
+        WEBHOOK_EVENT_INFO['store_order.message_skipped'].label,
+        `${WEBHOOK_EVENT_INFO['store_order.message_skipped'].description} A store’s order messages go out from the template or automation each event’s rule chose: this event is how an order system learns that one did not, and why, for example to call a customer whose cash on delivery confirmation never went out. orderMessage gives the event the message was for, the reason and when the order’s event happened, as captured; the order is HyFib’s copy of the store’s order and the store the one it came from, as they are when the event is delivered, with the store’s own order id (storeOrder.externalId) to find it there. Never the customer’s details from the store, and no contact or number: the message was never sent, so an endpoint that names numbers receives it whichever numbers it names. An endpoint receives every store’s skipped messages unless it names the stores (its \`storeIds\`, or the stores ticked in Settings → Webhooks, as for cash on delivery answers), and every order message’s unless it names the order messages (its \`orderMessageEvents\`, or the messages ticked under Order message skipped); with both lists, a skipped message must pass both. The event is sent once for each order message HyFib records without sending (a test order, an event it first saw more than ${STORE_MESSAGE_LIMITS.latenessHours} hours after it happened, or an order paid on delivery that the cash on delivery confirmation covers) or skips when it is due; a message sent, or waiting for the store’s sending hours, sends nothing, and cart reminders, which are about checkouts, send nothing either. A skipReason of cash_on_delivery marks an order placed message that the cash on delivery confirmation replaced: the customer was asked to confirm the order instead, and the confirmation sends its own event if it is skipped too. A message is deleted with its order or its store, after which a delivery not yet made fails as event_gone.`,
+        'WebhookStoreOrderMessageSkipped',
+      ),
       'campaign.status_changed': webhook(
         'webhookCampaignStatusChanged',
         WEBHOOK_EVENT_INFO['campaign.status_changed'].label,
@@ -4697,6 +4732,8 @@ export function buildOpenApiDocument(serverUrl: string) {
         WebhookTaskStatusChanged: jsonSchema(taskStatusChangedPayloadSchema),
         WebhookNoteCreated: jsonSchema(noteCreatedPayloadSchema),
         WebhookSatisfactionSurveyAnswered: jsonSchema(satisfactionSurveyAnsweredPayloadSchema),
+        WebhookStoreOrderCodAnswered: jsonSchema(storeOrderCodAnsweredPayloadSchema),
+        WebhookStoreOrderMessageSkipped: jsonSchema(storeOrderMessageSkippedPayloadSchema),
         WebhookPing: jsonSchema(pingPayloadSchema),
       },
     },

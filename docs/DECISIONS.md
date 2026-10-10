@@ -13633,3 +13633,226 @@ counts do not keep them.
 
 Not built: failed sends by reason over the year, by reason and day, in a CSV, and the error titles,
 which stay in the company's inbox.
+
+## ADR-348 A webhook event when a customer answers a cash on delivery confirmation (P5-09) (2026-10-10)
+
+Context: a connected store's cash on delivery message carries two quick-reply buttons, one
+confirming the order and one cancelling it (ADR-048). The customer's tap is recorded on the store
+message as its answer, and HyFib changes nothing in the store: a cancellation reopens the
+conversation so the team cancels the order there. An order system learned of the answer only from
+`message.received`, a tap that is not always an answer (only a tap in the confirmation's own
+conversation, replying to it when it names a message, counts, and an older tap arriving late does
+not replace a newer answer) and that names no order. ADR-085 left store orders out of webhooks,
+since the store reports its orders through its own webhooks; BACKLOG kept "events for store orders"
+as remaining. The answer is the one fact about a store order that only HyFib knows.
+
+Decision:
+
+- **`store_order.cod_answered`** ("Cash on delivery answered"), captured by a trigger on
+  `app.commerce_store_messages` when a confirmation's answer changes: its first answer, and each
+  later tap that replaces it with the other one. A tap that repeats the answer kept only moves its
+  time and sends nothing; an older tap, another customer's and one replying to another message are
+  not recorded and send nothing. Only the ingestion of the customer's tap writes an answer, as the
+  runtime role in the company's scope (migrations 0266 and 0267).
+- **As captured and as now:** the event keeps the answer (its status), the one before it, when the
+  customer tapped and the tap's message, so a later answer cannot change what an earlier event
+  reports. The body gives them as `confirmation` with the confirmation message's id, and, as they
+  are when the event is delivered, `storeOrder` (HyFib's copy: the store's own order id and name,
+  the status, Shopify's payment and fulfilment statuses, test, the currency and total in minor
+  units, when it was placed and cancelled, and when HyFib learned the store deleted it) and `store`
+  (platform, name and address), with the conversation, its contact and the number.
+- **Never the customer's details from the store:** no name, phone, email, address, tracking or
+  status page from the order; the contact stands for the customer, as erasure left it. Store orders
+  themselves are still not sent, as ADR-085 decided.
+- **Filters:** it happens on the number the confirmation was sent from, the conversation's, so the
+  number filter narrows it (0266 replaces 0257's capture with the event among the number's events,
+  and the endpoints' number check). No other filter applies to it.
+- **Gone:** a confirmation is deleted with its order or its store (removing a store deletes its
+  copy), so a delivery not yet made then fails as `event_gone`.
+- **Who receives it:** endpoints, which owners and administrators add in Settings → Webhooks or keys
+  add with `webhooks.manage`, as for every other event. The number filter's descriptions in the API
+  document and Settings now name every event of a number: survey answers and Payment Links had been
+  left out of them, and run steps of the endpoint field's list.
+
+Not built: the order messages a store sends as their own events (their statuses are
+`message.status`), events for the store's orders themselves, a filter by store, and an event when a
+confirmation is sent or skipped.
+
+## ADR-349 Choosing the cash on delivery answers a webhook endpoint receives and their stores (P5-09) (2026-10-10)
+
+Context: `store_order.cod_answered` (ADR-348) sends every answer of every connected store, narrowed
+only by the number the confirmation went from. An order system that acts on cancellations alone
+(cancelling the order in the store) was sent every confirmation too, and a company with several
+stores whose orders go to different systems sent each system every store's answers, which the
+number filter cannot separate when the stores share a number. ADR-348 left a filter by store out.
+
+Decision:
+
+- **Two lists per endpoint:** `codAnswers`, the answers it takes (confirmed, cancelled), each once
+  and kept in the order the confirmation offers them; and `storeIds`, 1 to 20 of the company's
+  stores, each once, as `store.id` names them. An answer is sent when the answer it reports, as
+  `confirmation.answer` names it, is on the first list and its order's store on the second; null
+  receives every answer, or every store's answers including stores connected later, as before. With
+  the numbers chosen too (ADR-348), an answer must pass every list.
+- **Chosen in Settings → Webhooks** ("Answers sent" under Cash on delivery answered, both ticked by
+  default; "Stores", every store's answers by default or only the stores ticked, named as the store
+  names itself, else by its address), shown on the endpoint as "Cash on delivery answers sent: …" and
+  "Stores whose cash on delivery answers are sent: …", and through the API as `codAnswers` and
+  `storeIds` on `POST /webhook-endpoints` and `PATCH /webhook-endpoints/{id}` and in every endpoint
+  the API answers.
+- **Only while `store_order.cod_answered` is taken:** a list given for an endpoint that does not take
+  it is refused (422 through the API), whatever order events it takes; a change that drops the event
+  clears both lists, a `PATCH` that leaves a list out keeps it, and one that gives only a list is a
+  change. Checks in the database hold the same rule and the lists' shape (null, or 1 to 2 known
+  answers, or 1 to 20 stores, in one dimension without a null, with `store_order.cod_answered`).
+- **The company's stores only:** the services refuse a store a list adds unless it is the company's,
+  named by its place in the list. A store removed since it was chosen (removing a store deletes its
+  copy of the orders, their confirmations and their answers) stays on the list, matches nothing and
+  is named by its absence ("A removed store") until a change leaves it out; once off the list it is
+  refused like any unknown id. A company has at most 5 stores at once, so 20 leaves room for those.
+- **Applied at capture:** the confirmation's trigger passes its store, and `app.capture_webhook_event`
+  creates an answer's delivery only for the endpoints whose lists are null or hold the answer, the
+  event's status, and the store, which it then takes out of the stored detail (the body reads the
+  store through the confirmation when delivered); it writes no event when no active endpoint takes
+  it.
+- **Audited, exported, permissions unchanged,** as for the other lists: `webhook.endpoint_created`
+  and `webhook.endpoint_updated` carry `codAnswers` and `storeIds` when the endpoint has them, and
+  the company data export carries the columns.
+- **Migration 0268:** `cod_answers text[]` and `store_ids uuid[]` on `app.webhook_endpoints` with
+  their checks, validated at once (a company has at most 10 endpoints), the update grant on the
+  columns for the runtime role, and the trigger function and `app.capture_webhook_event` replaced
+  with the same signatures (0266's, with the store and both lists), so their owners and grants stay.
+  Existing endpoints keep null; nothing is backfilled.
+
+Not built: lists that leave chosen answers out, choosing stores for other events (the order
+messages a store sends are `message.status` events, and the store's orders stay out, ADR-085), and
+narrowing by the order's values (its total, currency or statuses).
+
+## ADR-350 Failed sends by reason over the year, kept as days pass (P5-10) (2026-10-10)
+
+Context: the Usage tab and a company's platform page list a window's failed sends by the code they
+failed with (ADR-347), counted live from `app.messages`, so 93 days back at most. Whether a reason
+is new or has been there all year, as a template rejected since spring or a number that lost its
+quality, was not visible, and ADR-347 left failed sends by reason over the year unbuilt. The worker
+already counts each UTC day once it has ended, for a year of messages a day (ADR-341).
+
+Decision:
+
+- **Kept with the day's counts:** `ops.platform_failure_reason_days` (migration 0269) holds each
+  company's failed sends on each UTC day by code (the empty code for a failure recorded without
+  one), counted by `ops.count_platform_message_days` in the statement that counts the day's
+  messages, from the same read of them (one snapshot), for the same companies (not deleted, deletion
+  not started), so a day's codes add up to its failed sends. A failure Meta reports later reaches the codes while its day is among the 7 counted again
+  each day, as it reaches the day's failed sends. The table follows the tenant-table rules (forced
+  row level security, the definer role's policy and grants alone), is deleted with the company
+  (step 36) and left out of the company data export (its messages are exported), and its rows older
+  than 400 days or of a company deleted in the last 30 days are deleted at every run with the day
+  counts (`ops.purge_platform_message_days`).
+- **Days counted before:** `ops.platform_message_days_counted.reasons` says whether a counted day's
+  codes were counted with it. The days counted before the migration have none and are due again,
+  newest first, as 0264's days without their sends cancelled, delivered and read were: a deployment
+  counts its year's codes in about two hours. Each day's counts are counted afresh with them,
+  readable meanwhile, so days older than a week take the statuses reported since they were last
+  counted, once.
+- **Reading:** `ops.platform_ops_failure_reason_year(p_tenant_id)`, for platform administrators
+  only (`W3403`), lists the failed sends of the 365 days before today whose codes are counted, every
+  company's not deleted or one company's, as 0265 lists a window's: the eight most frequent, ties by
+  code, then the rest together when two or more are left. `ops.platform_ops_failure_reason_days()`
+  says how many of those days are counted; both are read in one snapshot. Codes and counts only,
+  never a contact, a message or its error title.
+- **Shown:** the Usage tab's "Failed sends by reason (12 months)" under the year, and a company's
+  platform page under its year (none while its deletion runs, as its year), with the same table and
+  meanings as the window's and how many of the 365 days are not counted yet; "None counted yet"
+  while no day is.
+
+Consequences: today's failed sends are in the window's table only; a failure reported more than 7
+days after its day is not among the year's, as the year's messages say.
+
+Not built: the reasons drawn over time (a reason's days as a chart), by company over time, in a CSV,
+and the year's error titles, which stay in the company's inbox.
+
+## ADR-351 A webhook event when a store's order message is skipped (P5-09) (2026-10-10)
+
+Context: a connected store's order messages go out when an order is placed, asked to confirm cash
+on delivery, shipped, delivered or cancelled, each from the template or automation its rule chose
+(ADR-048, ADR-050). A message HyFib does not send is kept as skipped with its reason: recorded
+skipped (a test order, an event first seen more than 48 hours late, an order paid on delivery that
+the cash on delivery confirmation covers) or skipped by a check when it was due (the store, its
+opt-in confirmation, the plan, the rule, the order, the customer's number, the template, the
+number, consent, the frequency cap or the automation). Only Settings → Stores showed it, so an
+order whose cash on delivery confirmation never went out (no phone, an opted-out customer) waited
+there for someone to look, while its order system expected an answer (ADR-348) that would never
+come. ADR-348 left an event for a skipped confirmation out.
+
+Decision:
+
+- **`store_order.message_skipped`** ("Order message skipped"), captured by triggers on
+  `app.commerce_store_messages` when an order message becomes skipped: inserted skipped by the
+  store's read, or updated to skipped from pending by the message's job (migrations 0270 and 0271).
+  A skipped message never leaves that state, so each message sends one event. Both writers run as
+  the runtime role in the company's scope.
+- **Every order event, no cart reminder:** the five events about an order send it, whatever the
+  rule does (a template or an automation); the two cart reminders, about checkouts, send nothing.
+  A message sent, started, or waiting for the store's sending hours sends nothing.
+- **As captured and as now:** the event keeps the event the message was for (its status, at most 20
+  characters), the reason (in `detail`, since 0020 allows reasons of 40 characters, more than a
+  status holds) and when the order's event happened. The body gives them as `orderMessage`, with
+  `storeOrder` and `store` as ADR-348 gives them, read when the event is delivered.
+- **Nobody:** no contact, number or conversation. The message was never sent, and most skips come
+  before a contact is found; the customer's details stay in the store, and `storeOrder.externalId`
+  finds the order there. The event belongs to no number, so an endpoint that names numbers receives
+  it whichever numbers it names, as consent, contact and template events.
+- **Filters:** none in this step. The store and answer lists of ADR-349 stay with
+  `store_order.cod_answered`; the capture is unchanged.
+- **Gone:** a message is deleted with its order or its store, so a delivery not yet made then fails
+  as `event_gone`.
+- **Reasons:** the body's `skipReason` is one of the reasons Settings → Stores explains; the
+  schema lists them all, and those of cart reminders never appear. `cash_on_delivery` marks an
+  order placed message that the order's cash on delivery confirmation replaced: the customer was
+  asked to confirm instead, and the confirmation sends its own event if it is skipped too, so a
+  receiver acting on skipped messages leaves that reason alone (the event's description and the
+  API document say so).
+
+Consequences: an order system can act on a confirmation that will not be answered (call the
+customer, confirm by other means) and see why each order message was not sent. A store that leaves
+test orders out (the default) sends an event for each test order its rules would have messaged.
+
+Not built: the store filter for skipped messages, and filters by event or reason; an event when an
+order message is sent (its statuses are `message.status`); events for cart reminders.
+
+## ADR-352 Choosing the stores and order messages of the skipped messages a webhook endpoint receives (P5-09) (2026-10-10)
+
+Context: `store_order.message_skipped` (ADR-351) sends every skipped order message of every
+connected store. A company whose stores feed different order systems sent each system every
+store's skips, and a system that acts on one message alone, such as a cash on delivery
+confirmation that will not go out, was sent the order placed, shipped, delivered and cancelled
+messages' skips too. ADR-349's store list narrowed cash on delivery answers only, and ADR-351 left
+the filters out.
+
+Decision:
+
+- **The stores narrow both events of a store's orders:** an endpoint's `storeIds` (ADR-349) now
+  applies to `store_order.message_skipped` as to `store_order.cod_answered`, by the store of the
+  message's order; it can be set while the endpoint takes either event and is cleared when it takes
+  neither (the database check names both).
+- **A list of order messages:** `orderMessageEvents`, 1 to 5 of `order_placed`,
+  `cod_confirmation`, `order_shipped`, `order_delivered` and `order_cancelled`, each once, kept in
+  the order a store's order messages list them, as `orderMessage.event` names them. A skipped
+  message is sent when its event and its store are on the lists; null receives every message's, as
+  before. Only while the endpoint takes `store_order.message_skipped`, so the list never outlives
+  its event (migration 0272's check).
+- **Where it applies:** in `app.capture_webhook_event`, replaced with the same signature: the
+  message's event is the event's status (ADR-351) and its store travels in `detail` for the filter
+  only, taken out before the event is stored, as the confirmation's does (0268). A skip no endpoint
+  takes is not recorded.
+- **Who sets it:** owners and administrators in Settings → Webhooks (ticked under "Order message
+  skipped"; the stores under "Stores", now shown for either event) and keys with
+  `webhooks.manage` through the API, audited with the endpoint and in the company data export.
+  Refusals name the field: a list without its event, an empty list, an unknown or cart reminder
+  message.
+
+Consequences: a store removed since it was chosen stays on the list and matches nothing for both
+events, as before. Cash on delivery answers keep their answer list (ADR-349).
+
+Not built: a filter by skip reason (a receiver can leave `cash_on_delivery` and `test_order`
+alone, ADR-351), and order messages sent as their own events.

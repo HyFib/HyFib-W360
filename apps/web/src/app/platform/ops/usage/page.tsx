@@ -15,7 +15,13 @@ import {
   TR,
   Table,
 } from '@w360/ui';
-import { FAILURE_REASONS_SHOWN, USAGE_WINDOWS, opsCompanyPage, usageChange } from '@w360/domain';
+import {
+  FAILURE_REASONS_SHOWN,
+  MESSAGE_DAYS_KEPT,
+  USAGE_WINDOWS,
+  opsCompanyPage,
+  usageChange,
+} from '@w360/domain';
 import { CompanyLink, CompanyPager, StatTile } from '@/components/platform/ops';
 import { DailyMessages } from '@/components/platform/daily-messages';
 import { FailureReasonsTable } from '@/components/platform/failure-reasons';
@@ -48,8 +54,10 @@ export default async function OpsUsagePage({
   const { days, page } = await searchParams;
   const { platformOps } = await getRuntime();
   const o = await platformOps.usage(actor, Number(days ?? 30));
-  // The year, from the counts the worker keeps as days pass (ADR-341).
+  // The year, from the counts the worker keeps as days pass (ADR-341), and its failed sends by
+  // reason (ADR-350).
   const year = await platformOps.messageYear(actor);
+  const reasonYear = await platformOps.failureReasonYear(actor);
   const t = o.totals;
   // A page of the companies (ADR-331); the totals and the CSV cover them all.
   const shown = opsCompanyPage(o.rows, Number(page ?? 1));
@@ -183,6 +191,34 @@ export default async function OpsUsagePage({
                 summary: 'Table of the 12 months',
                 table: 'The 12 months, day by day',
               }}
+            />
+          )}
+        </CardContent>
+      </Card>
+      <Card>
+        <CardHeader>
+          <CardTitle>Failed sends by reason (12 months)</CardTitle>
+          <CardDescription>
+            Every company&apos;s failed sends of the 365 days before today by the code they failed
+            with, as the worker counts them with each day&apos;s messages: the{' '}
+            {FAILURE_REASONS_SHOWN} most frequent, then the rest together when two or more are left;
+            companies deleted are left out.
+            {reasonYear.uncounted > 0
+              ? ` ${reasonYear.uncounted} of the 365 days ${reasonYear.uncounted === 1 ? 'is' : 'are'} not counted yet, a few more each minute.`
+              : null}
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          {reasonYear.uncounted >= MESSAGE_DAYS_KEPT ? (
+            <EmptyState
+              title="None counted yet"
+              description="The worker counts each day's failed sends by code after the day ends, back to a year ago, a few days a minute."
+            />
+          ) : (
+            <FailureReasonsTable
+              reasons={reasonYear.reasons}
+              label="Failed sends by reason, the last 12 months"
+              empty="No company's send failed in the days counted."
             />
           )}
         </CardContent>

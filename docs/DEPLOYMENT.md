@@ -1360,6 +1360,71 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    it before web servers of this release roll out: the Usage tab and a company's platform page call
    it. Web servers from before it do not, and after a rollback the function stays unused.
 
+   Migration 0266 (ADR-348) replaces the endpoints' event and number checks (validated at once: at
+   most 10 endpoints per company) and the events' type check (NOT VALID; 0267 validates it while
+   captures go on), adds the trigger on `app.commerce_store_messages` and its function, and replaces
+   `app.capture_webhook_event` with the same signature (0257's, with `store_order.cod_answered`
+   among the events of a number). Each change of a cash on delivery answer then calls the capture,
+   which writes nothing while no endpoint takes the event. Workers roll out before web servers, so no
+   endpoint takes the event before every worker can describe it. A worker from before it fails each
+   delivery of the event without an attempt (`payload_failed`; replay it once newer workers run), so
+   before rolling workers back to such an image, turn the event off on the endpoints that take it.
+   Until the web rollout ends, an old web server answers Settings → Webhooks with an error for a
+   company with an endpoint taking it: add it to endpoints once the rollout ends, and turn it off
+   before rolling web servers back.
+
+   Migration 0268 (ADR-349) adds `cod_answers` and `store_ids` to `app.webhook_endpoints` with checks
+   validated by reading the table, and replaces the confirmation trigger's
+   `app.webhook_capture_store_cod_answer` and `app.capture_webhook_event` with the same signatures
+   (keeping 0266's filters; the trigger now passes the store, which the capture takes out before the
+   event is stored); every endpoint starts without a list. Web servers of this release need it, as
+   their reads of endpoints name the columns; workers do not read them. Web servers from before it
+   neither show nor change the columns: until the web rollout ends, an old server's change that
+   drops `store_order.cod_answered` from an endpoint with a list fails on the checks, its other
+   changes keep the lists, and its API refuses `codAnswers` and `storeIds` (422) and leaves them out
+   of the endpoints it answers.
+
+   Migration 0269 (ADR-350) creates `ops.platform_failure_reason_days` (each company's failed sends
+   a UTC day by code, the definer role's alone, deleted with the company at step 36), adds
+   `reasons` to `ops.platform_message_days_counted` (false on every day counted so far), replaces
+   `ops.count_platform_message_days` and `ops.purge_platform_message_days` with the same signatures
+   (dropped as their owner and created again, as 0264 did) and creates
+   `ops.platform_ops_failure_reason_year` and `ops.platform_ops_failure_reason_days` for the platform
+   role. The worker's counting job, unchanged, then counts every day of the year again, newest
+   first, 3 days a minute: the year's reasons cover more days each minute, and the day counts stay
+   readable meanwhile (each day's are replaced in one transaction, so days older than a week take
+   the statuses reported since they were last counted). Web servers of this release
+   need it; web servers from before it never read the new table or functions, and after a rollback
+   the counting goes on keeping the codes, unused.
+
+   Migration 0270 (ADR-351) replaces the endpoints' event check (validated at once: at most 10
+   endpoints per company) and the events' type check (NOT VALID; 0271 validates it while captures go
+   on), and adds two triggers on `app.commerce_store_messages` with their function; the capture is
+   unchanged. Each order message skipped, by a store's read or a message's job, then calls the
+   capture, which writes nothing while no endpoint takes the event. Workers roll out before web
+   servers, so no endpoint takes the event before every worker can describe it. A worker from before
+   it fails each delivery of the event without an attempt (`payload_failed`; replay it once newer
+   workers run), so before rolling workers back to such an image, turn the event off on the
+   endpoints that take it. Until the web rollout ends, an old web server answers Settings → Webhooks
+   with an error for a company with an endpoint taking it: add it to endpoints once the rollout
+   ends, and turn it off before rolling web servers back.
+
+   Migration 0272 (ADR-352) adds `order_message_events` to `app.webhook_endpoints` and replaces the
+   `store_ids` check (so skipped order messages can name stores), both validated by reading the
+   table, and replaces `app.webhook_capture_store_message_skipped` and `app.capture_webhook_event`
+   with the same signatures (keeping 0268's filters; the trigger now passes the store, which the
+   capture takes out before the event is stored); every endpoint starts without the list. Web
+   servers of this release need it, as their reads of endpoints name the column; workers do not
+   read it. Web servers from before it neither show nor change the column: until the web rollout
+   ends, an old server's change that drops `store_order.message_skipped` from an endpoint with a
+   list fails on the check, its other changes keep the list, and its API refuses
+   `orderMessageEvents` (422) and leaves it out of the endpoints it answers. Such a server also
+   clears the stores of an endpoint that takes `store_order.message_skipped` without
+   `store_order.cod_answered` whenever it changes that endpoint (its store list needs the answers),
+   which then receives every store's skips, and its API refuses `storeIds` for such an endpoint
+   (422): choose stores for skipped messages alone once the rollout ends, and check them after
+   rolling web servers back.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

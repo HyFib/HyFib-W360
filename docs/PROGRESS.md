@@ -1,5 +1,287 @@
 # Progress
 
+## 2026-10-10 — Store and order message filters for skipped order messages (P5-09, H-014, ADR-352)
+
+Status: **Implemented; its database tests run in CI only.** `store_order.message_skipped`
+(ADR-351) went to an endpoint for every skipped message of every store: a company whose stores feed
+different order systems sent each one every store's, and a system that acts on one message alone
+got the others' skips too. The local PostgreSQL is unavailable, so migration 0272 and the
+integration tests below were written but not run here; the migration passed the pglast parse check
+(syntax only), its PL/pgSQL bodies included.
+
+### Completed
+
+- **Database:** migration 0272: `order_message_events` (1 to 5 known order messages, only while
+  the endpoint takes `store_order.message_skipped`) on `app.webhook_endpoints` and the `store_ids`
+  check now naming either store event, both validated at once; the runtime role's update grant on
+  the column; the skipped message's trigger passing its store; `app.capture_webhook_event` matching
+  the store list and the message's event for skipped messages, the store taken out of `detail`
+  (both functions replaced with the same signatures).
+- **Domain:** `WEBHOOK_ORDER_MESSAGE_EVENTS` with Settings' labels, `WEBHOOK_STORE_EVENTS` and
+  `webhookTakesStoreEvents`; `webhookOrderMessageEventsSchema` and `webhookOrderMessageEventsFor`;
+  the store list kept while either store event is taken; the settings service and the API take,
+  keep, clear, audit and answer `orderMessageEvents`; the OpenAPI entries; the data export names the
+  column.
+- **Web:** Settings → Webhooks ticks the order messages under "Order message skipped" and shows
+  "Stores" for either store event ("Every store’s answers and skipped messages"); the endpoints list
+  names the order messages chosen.
+- **Tests:** unit (3 new: the order message schema and texts, the lists kept only with their
+  events and the stores with either store event, the API schemas and OpenAPI entries; the store
+  refusal's text and the ADR-351 test updated); integration (`webhooks.test.ts`: the service's
+  refusals, keeping and clearing, the audit, the database checks and the grant; `api-webhook-endpoints.test.ts`:
+  the API's refusals by place, keeping, clearing and audit; `stores.test.ts`: delivery by order
+  message and store in the cash on delivery flow, and the store not stored with the event). Written
+  for CI; the integration tests were not run here.
+- **Docs:** ADR-352; ARCHITECTURE; SECURITY; THREAT-MODEL T311; DEPLOYMENT (0272); RUNBOOKS (and
+  the ADR-349 entry's names); BACKLOG P5-09; feature matrix W-138, W-139 (which also names
+  ADR-349's API lists now) and H-014.
+- **Review fixes:** the store flow's integration test removes the answers' seven endpoints before
+  adding the skipped messages' five (a company keeps at most 10 endpoints); the API's whole answer
+  in the Idempotency-Key test names `orderMessageEvents`; DEPLOYMENT says that a web server from
+  before the migration clears the stores of an endpoint taking skipped messages without answers;
+  two test comments say only what their checks show.
+- **Mutation checks:** 17/17 deliberate regressions caught on the unit-tested parts (the messages
+  not put in order, six or none taken, another refusal, the messages kept with the answers or the
+  ones held forgotten, the stores kept with the answers only, the refusals naming one or no event,
+  the API taking messages without the event or stores with the answers only, its field not naming
+  the event, the messages in another order, a label unlike Stores, skipped messages not a store
+  event, the API answer without the list of messages, the event's filters not described).
+
+### Test commands and results (local, 2026-10-10)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 146 files, 1502 tests passed                                    |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+
+## 2026-10-10 — A webhook event when a store's order message is skipped (P5-09, H-014, ADR-351)
+
+Status: **Implemented; its database tests run in CI only.** A store's order message that HyFib
+recorded without sending, or skipped when it was due, showed only in Settings → Stores: an order
+system waiting for a cash on delivery answer (ADR-348) never learned that the confirmation did not
+go out. The local PostgreSQL is unavailable, so migrations 0270 and 0271 and the integration tests
+below were written but not run here; the migrations passed the pglast parse check (syntax only),
+the trigger function's PL/pgSQL body included.
+
+### Completed
+
+- **Database:** migration 0270: `store_order.message_skipped` in the endpoints' event check
+  (validated at once) and the events' type check (NOT VALID; 0271 validates it); two triggers on
+  `app.commerce_store_messages`, after an insert of a skipped message and after an update of the
+  state to skipped from another state, each only for a message about an order, calling
+  `app.webhook_capture_store_message_skipped` (not executable by PUBLIC), which captures the event
+  with the message's event as the status and the store message, the reason and the order event's
+  time in `detail`; the capture is unchanged.
+- **Domain:** the event among the webhook types with its label ("Order message skipped"), not an
+  event of a number; `storeOrderMessageSkippedPayloadSchema` (`orderMessage` with the event, reason
+  and time as captured; `storeOrder` and `store` as ADR-348 gives them, now read with shared
+  columns); `ORDER_MESSAGE_EVENTS` and `STORE_MESSAGE_SKIP_REASON_CODES` in the store messages
+  model; the OpenAPI webhook and schema; the number filter's descriptions in the API document and
+  Settings name it among the events of no number.
+- **Tests:** unit (7 new in `webhooks/webhooks.test.ts`: the label, no number and no list, the
+  schema without contact or customer details, the body as captured and as now, an order cancelled
+  and deleted since, a message gone, a cart reminder or not an id, an event without its event,
+  reason or time, the OpenAPI wording; the type lists and descriptions in two existing tests);
+  integration (`stores.test.ts`: a test order and a late event recorded skipped and four messages
+  skipped by their checks captured once each with their event, reason and time, the message sent
+  capturing nothing, delivery to the endpoint taking the event and none to one taking answers
+  only, the bodies, a message gone with its order failing as `event_gone`, and five skipped cart
+  reminders capturing nothing; the trigger function in the isolation suite). Written for CI; the
+  integration tests were not run here.
+- **Docs:** ADR-351; ARCHITECTURE; SECURITY; THREAT-MODEL T310; DEPLOYMENT (0270, 0271); RUNBOOKS;
+  BACKLOG P5-09; feature matrix W-138 and H-014.
+- **Review fixes:** the event's description, the body's reason and the API document say that
+  `cash_on_delivery` marks an order placed message the cash on delivery confirmation replaced, so
+  a receiver acting on skipped messages does not call every customer asked to confirm; the
+  integration tests also cover a cash on delivery order without a number (its replaced order
+  placed message and its skipped confirmation, one event each, and a message skipped again
+  capturing nothing) and the eight orders an automation could not take, each captured once with
+  its reason.
+- **Mutation checks:** 22/22 deliberate regressions caught on the unit-tested parts (the event,
+  reason or time not as captured, each missing part described, a gone message or an id that is not
+  one read, the order's times dropped, the store not as read, any event, reason or time accepted, a
+  contact in the body, the event listed elsewhere, labelled otherwise or made one of a number, a cart
+  reminder among the order events, a reason left out, another lateness, the number filter's text).
+
+### Test commands and results (local, 2026-10-10)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 146 files, 1499 tests passed                                    |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+
+## 2026-10-10 — Failed sends by reason over the year (P5-10, H-034, ADR-350)
+
+Status: **Implemented; its database and browser tests run in CI only.** The Usage tab and a
+company's platform page listed a window's failed sends by code (ADR-347), counted live and so 93
+days back at most: whether a reason was new or there all year was not visible. The worker already
+keeps each day's counts (ADR-341); it now keeps each day's failed sends by code with them. The
+local PostgreSQL is unavailable, so migration 0269 and the integration tests below were written
+but not run here; the migration passed the pglast parse check (syntax only), its PL/pgSQL bodies
+included.
+
+### Completed
+
+- **Database:** migration 0269: `ops.platform_failure_reason_days` (each company's failed sends a
+  UTC day by code; forced row level security, the definer role's policies and grants alone,
+  deleted with the company at step 36, left out of the export); `reasons` on
+  `ops.platform_message_days_counted`, false on the days counted before, which are counted again,
+  newest first; `ops.count_platform_message_days` counting the codes in the statement that counts
+  each day, from one read of its messages, and `ops.purge_platform_message_days` deleting the old and a
+  deleted company's codes too (both dropped as their owner and created again with the same
+  signatures); `ops.platform_ops_failure_reason_year(p_tenant_id)` and
+  `ops.platform_ops_failure_reason_days()` for platform administrators only.
+- **Domain:** `readFailureReasonYear` reads the year's codes, listed as the window's are, and the
+  days counted in one snapshot; `failureReasonYear()` for the Usage tab and `companyHealth()`'s
+  `reasonYear` (none while the company's deletion runs, as its year).
+- **Web:** "Failed sends by reason (12 months)" on the Usage tab under the year, and on a company's
+  platform page under its year, with the same table and meanings as the window's, how many of the
+  365 days are not counted yet, and "None counted yet" while no day is.
+- **Tests:** unit (3 new in `platform/failure-reasons.test.ts`: the reader's two statements, its
+  numbers and days not counted, the platform's with none failed, and an unanswered count refused);
+  integration (`platform-ops.test.ts`: each day's codes counted with its counts and adding up to
+  its failed sends, a deleted company and one being deleted left out, a failure reported late
+  counted again, a day counted before the codes left out of the year and counted again alone, the
+  company's exact year and the platform's adding up to the year's failed sends, the purge, the
+  table's checks, administrators only and the runtime role refused; the two functions in the
+  isolation suite's platform list; the ADR-346 test's counted days now carry the codes' flag, so
+  only its two days without outcomes are due); e2e (the ADR-347 test checks the year's reasons, or their note,
+  on a company's page and the Usage tab). Written for CI; the integration and e2e tests were not run
+  here.
+- **Docs:** ADR-350; ARCHITECTURE; SECURITY (the console's definer functions, whose stale count is
+  dropped); THREAT-MODEL T309; DEPLOYMENT (0269); RUNBOOKS; DATA-RETENTION; BACKLOG P5-10; feature
+  matrix H-034.
+- **Review fixes:** each day's counts and codes are counted in one statement from one read of its
+  messages, so a status change committed while a day is counted is in both or in neither (two
+  statements could each see it differently); ADR-350, DEPLOYMENT and RUNBOOKS say that recounted
+  days older than a week take the statuses reported since, and SECURITY what each read function
+  gives; the Drizzle schema copy has the new column and table.
+- **Mutation checks:** 7/7 deliberate regressions caught on the unit-tested parts (the company left
+  out of the read, the rows read in no order, the days counted given as not counted, a year of 366
+  days, an unanswered count not refused, counts left as text, the days counted read elsewhere).
+
+### Test commands and results (local, 2026-10-10)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 146 files, 1492 tests passed                                    |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+
+## 2026-10-10 — Cash on delivery answer and store filters for webhooks (P5-09, H-014, ADR-349)
+
+Status: **Implemented; its database tests run in CI only.** `store_order.cod_answered` (ADR-348)
+went to an endpoint for every answer of every store, narrowed only by number: an order system that
+acts on cancellations alone got every confirmation, and a company whose stores feed different
+systems sent each one every store's answers. The local PostgreSQL is unavailable, so migration 0268
+and the integration tests below were written but not run here; the migration passed the pglast
+parse check (syntax only), its PL/pgSQL bodies included.
+
+### Completed
+
+- **Database:** migration 0268: `cod_answers` (1 to 2 known answers) and `store_ids` (1 to 20
+  stores) on `app.webhook_endpoints`, each with a check that also keeps it to endpoints taking
+  `store_order.cod_answered`, validated at once; the runtime role's update grant on both; the
+  confirmation trigger's function passing its store for the filter only; `app.capture_webhook_event`
+  replaced with the same signature, 0266's with both lists matched and the store taken out of the
+  stored detail.
+- **Domain:** `codAnswers` and `storeIds` on endpoints in Settings and the API: the schemas (answers
+  in the confirmation's order, store ids once each whatever their case), kept only with the event,
+  a list given alone a change, refusals by place; the stores a list adds checked against the
+  company's (`assertWebhookStores`), those it held kept when removed since and named "A removed
+  store"; the store choices (the company's stores in the order they were added, named by the store
+  or by address); the audit, the company data export, the API document and the OpenAPI webhook.
+- **Web:** Settings → Webhooks: "Answers sent" under Cash on delivery answered (both ticked by
+  default) and "Stores" (every store's answers by default, or the stores ticked); the endpoints list
+  says which are sent.
+- **Tests:** unit (5 new in `webhooks/webhooks.test.ts`: the answers' and stores' schemas and
+  messages, the lists kept only with the event, a store's name or address and a removed one, the
+  stores a list adds checked and those it held not read; 1 in `api/api.test.ts`: the API's schemas,
+  refusals and documents); integration (`webhooks.test.ts`: Settings' refusals, keeping, clearing,
+  audit, a removed store kept and refused once off the list, each clause of both checks and the
+  grants; `api-webhook-endpoints.test.ts`: the API's round trip, refusals by place, another
+  company's store and a removed one; `stores.test.ts`: the cash on delivery flow delivering the
+  cancellation and the confirmation by answer and by store, with a number filter too). Written for
+  CI; the integration tests were not run here. No e2e test covers the new Settings fields.
+- **Docs:** ADR-349; ARCHITECTURE; SECURITY; THREAT-MODEL T308; DEPLOYMENT (0268); RUNBOOKS;
+  DATA-RETENTION; BACKLOG P5-09; feature matrix W-138 and H-014.
+- **Mutation checks:** 27/27 deliberate regressions caught on the unit-tested parts (the answers'
+  and stores' schemas: order, repeats, case, limits and unknown entries; the lists kept without the
+  event or given null; the stores a list adds: held ones read again, a read for none, another
+  company's taken, the refusal's place; the answers' order, a blank store name, a removed store's
+  name, the store limit; the API's refinements and a list alone as a change; the OpenAPI
+  properties).
+
+### Test commands and results (local, 2026-10-10)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 146 files, 1489 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+
+## 2026-10-10 — Cash on delivery answers as webhook events (P5-09, H-014, ADR-348)
+
+Status: **Implemented; its database tests run in CI only.** A store's cash on delivery message asks
+the customer to confirm or cancel the order with a button, and HyFib changes nothing in the store:
+an order system learned the answer only from `message.received`, a tap that is not always an answer
+and names no order. Store orders themselves stay out of webhooks (ADR-085): the store reports them.
+The local PostgreSQL is unavailable, so migrations 0266 and 0267 and the integration tests below
+were written but not run here; the migrations passed the pglast parse check (syntax only), their
+PL/pgSQL bodies included.
+
+### Completed
+
+- **Database:** migration 0266: `store_order.cod_answered` in the endpoints' event and number checks
+  and the events' type check (`NOT VALID`; 0267 validates it), the trigger
+  `commerce_store_messages_webhook_cod_answer` (after an update of the answer that changes it to
+  another one) with `app.webhook_capture_store_cod_answer`, executable by no runtime role, and
+  `app.capture_webhook_event` replaced with the same signature, 0257's with the event among a
+  number's (only the two lists differ). The event keeps the store message, the answer before, the
+  tap's time and message; the number travels for the filter only.
+- **Domain:** the event type, its label and its place among a number's events;
+  `storeOrderCodAnsweredPayloadSchema` and `storeConfirmationOf`: `confirmation` (the answer, the one
+  before, when the customer tapped, the confirmation and the tap's messages, as captured),
+  `storeOrder` (the store's order id and name, the status, Shopify's payment and fulfilment statuses,
+  test, currency, total in minor units, placed, cancelled and deleted times) and `store` (platform,
+  name, address) as they are when delivered, with the conversation, its contact and the number;
+  never the customer's details from the store. A confirmation gone fails as `event_gone`; an event
+  without its tap is refused. The OpenAPI webhook, and the number filter's descriptions in the API
+  document and Settings, which now name every event of a number.
+- **Tests:** unit (7 new in `webhooks/webhooks.test.ts`: the label and number, the schema without
+  the store's customer details, the body as captured and as now, a first answer, a cancelled and
+  deleted order and an erased contact, a confirmation gone or not an id, an event without its tap,
+  the OpenAPI wording; the event lists, the number filter's payloads and descriptions updated);
+  integration (the cash on delivery test in `stores.test.ts`, against the Shopify stand-in: endpoints
+  on every number, on the confirmation's and on another number; the cancellation and the later
+  confirmation captured once each with the answer before them, the late older tap, another
+  customer's tap and a reply to another message capturing nothing; the bodies delivered to the first
+  two and none to the third; the trigger function in the isolation suite's list for nobody). Written
+  for CI; the integration tests were not run here. No e2e test: Settings lists the event from the
+  model.
+- **Docs:** ADR-348; ARCHITECTURE; SECURITY; THREAT-MODEL T307; DEPLOYMENT (0266, 0267); RUNBOOKS;
+  BACKLOG P5-09; feature matrix W-138 and H-014.
+- **Mutation checks:** 19/19 deliberate regressions caught on the unit-tested parts (the answer, the
+  one before, the tap's time, the confirmation's id, an event without its tap message, the order's
+  times, the contact and number, an id that is not one read, the schemas opened to any answer or a
+  fractional total, the payload without its number, the event left out of a number's, the OpenAPI
+  wording and the number filter's descriptions).
+
+### Test commands and results (local, 2026-10-10)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 146 files, 1483 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+
 ## 2026-10-10 — Failed sends by reason (P5-10, H-034, ADR-347)
 
 Status: **Implemented; its database and browser tests run in CI only.** The console drew each day's

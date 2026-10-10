@@ -33,6 +33,16 @@ export type CartEvent = (typeof CART_EVENTS)[number];
 export const isCartEvent = (event: StoreMessageEvent): event is CartEvent =>
   event === 'cart_reminder' || event === 'cart_second_reminder';
 
+/** The events about an order: every event but the two cart reminders. */
+export const ORDER_MESSAGE_EVENTS = [
+  'order_placed',
+  'cod_confirmation',
+  'order_shipped',
+  'order_delivered',
+  'order_cancelled',
+] as const satisfies readonly StoreMessageEvent[];
+export type OrderMessageEvent = (typeof ORDER_MESSAGE_EVENTS)[number];
+
 /**
  * The events whose rule can start an automation instead of sending a template (ADR-050): the cash
  * on delivery confirmation records its answer from its own template, and the cart reminders' checks
@@ -179,6 +189,11 @@ export const STORE_MESSAGE_SKIP_REASONS = {
   automation_quota: "The company's automation runs for this month were used up.",
 } as const;
 export type StoreMessageSkipReason = keyof typeof STORE_MESSAGE_SKIP_REASONS;
+/** The reasons' codes, in the order they are explained. */
+export const STORE_MESSAGE_SKIP_REASON_CODES = Object.keys(STORE_MESSAGE_SKIP_REASONS) as [
+  StoreMessageSkipReason,
+  ...StoreMessageSkipReason[],
+];
 
 // Detection -------------------------------------------------------------------------------------------
 

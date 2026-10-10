@@ -1894,6 +1894,39 @@ true`); the same key with another request (method, path and body hashed) answers
   takes any of the three. The payload is built when delivered from the step and the run: the step's
   number, node type, outcome and message id, never its branch or detail; the run's id, automation,
   trigger, key and start; the conversation, contact and number.
+- **Cash on delivery answers as webhook events** (migrations 0266–0267, ADR-348):
+  `commerce_store_messages_webhook_cod_answer`, an `AFTER UPDATE OF answer` trigger on
+  `app.commerce_store_messages` that fires only when the answer changes to another one
+  (`app.webhook_capture_store_cod_answer`), captures `store_order.cod_answered` through
+  `app.capture_webhook_event` (replaced with the same signature, the event among a number's): the
+  answer as the status; the store message, the answer before it, the tap's time and message in
+  `detail`; the confirmation's conversation, its contact and, for the number filter
+  only, its number. `buildWebhookPayload` reads the confirmation with `storeConfirmationOf` (the
+  order, its store and the confirmation message's conversation and number joined) and gives the
+  answer as captured, the order and store as they are now, never the store's customer details.
+- **Cash on delivery answer and store filters** (migration 0268, ADR-349): `cod_answers` on an
+  endpoint lists the answers it takes as `store_order.cod_answered` and `store_ids` the stores, null
+  for every answer or store; checks keep them to 1 to 2 known answers and 1 to 20 stores, and to
+  endpoints that take the event. The confirmation's trigger passes its store in `detail` for
+  `app.capture_webhook_event`, which matches both lists and takes the store out before the event is
+  stored. The services refuse a store a list adds unless it is the company's (`assertWebhookStores`)
+  and keep stores removed since they were chosen.
+- **Skipped order messages as webhook events** (migrations 0270–0271, ADR-351): two triggers on
+  `app.commerce_store_messages`, `AFTER INSERT` for a message recorded skipped and `AFTER UPDATE OF
+state` for one that becomes skipped from another state, each only for a message with an order
+  (cart reminders have a checkout), call `app.webhook_capture_store_message_skipped`, which captures
+  `store_order.message_skipped` through `app.capture_webhook_event` (unchanged; the event belongs to
+  no number): the message's event as the status; the store message, the reason and when the order's
+  event happened in `detail`; no conversation or contact. `buildWebhookPayload` reads the message
+  with `storeOrderMessageOf` (its order and store joined; the columns are those of ADR-348's
+  confirmation) and gives the message as captured, the order and store as they are now.
+- **Store and order message filters for skipped messages** (migration 0272, ADR-352):
+  `order_message_events` on an endpoint lists the order messages whose skips it takes as
+  `store_order.message_skipped`, null for every message's; a check keeps it to 1 to 5 known
+  messages and to endpoints that take the event, and `store_ids` (0268) now to endpoints that take
+  either store event. The skipped message's trigger passes its store in `detail` for
+  `app.capture_webhook_event` (replaced with the same signature), which matches the store list and
+  the message's event (the status) and takes the store out before the event is stored.
 - **Step outcome filters** (migration 0249, ADR-327): `run_step_outcomes` on an endpoint lists the
   outcomes of the run steps it takes as `automation.run_step`, null for every step; a check keeps it
   to 1 to 21 known outcomes and to endpoints that take `automation.run_step`.
@@ -2766,6 +2799,16 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   `companyHealth()`, and `failureReasons` gives each row its share. `FailureReasonsTable`
   (`components/platform/failure-reasons.tsx`) lists them with the meanings of `failureReasonLabel`
   (`lib/campaign-labels.ts`) and the bars of `shareBarPath` (`platform/ops-chart.ts`).
+- **Failed sends by reason over the year (ADR-350, migration 0269):** `ops.count_platform_message_days`
+  also counts each company's failed sends of the day by error code into
+  `ops.platform_failure_reason_days` (forced row level security, the definer role's alone), in the
+  statement that counts the day, from the same read of its messages, and marks the day with
+  `ops.platform_message_days_counted.reasons`; days counted before 0269 are due again, newest first.
+  `ops.purge_platform_message_days` deletes their old rows and a deleted company's with the day
+  counts. `readFailureReasonYear` (`platform/failure-reasons.ts`) reads
+  `ops.platform_ops_failure_reason_year` and `ops.platform_ops_failure_reason_days` in one snapshot
+  (`failureReasonYear()` for the Usage tab, `companyHealth()` for a company's page, none while its
+  deletion runs), and `FailureReasonsTable` lists them under the year.
 - **Exports (ADR-154, ADR-155, ADR-158):** `/platform/ops/export/[list]` (a route handler behind the
   pages' platform actor check; a name of `OPS_EXPORT_LISTS`, any other not found) calls
   `exportList`, which checks in its transaction that the actor is a platform administrator, reads

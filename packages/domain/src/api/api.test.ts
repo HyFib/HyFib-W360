@@ -187,6 +187,9 @@ import {
   WEBHOOK_ORDER_STATUSES_NEED_THE_EVENT,
   WEBHOOK_PAYMENT_LINK_STATUSES_NEED_THE_EVENT,
   WEBHOOK_RUN_STEP_OUTCOMES_NEED_THE_EVENT,
+  WEBHOOK_COD_ANSWERS_NEED_THE_EVENT,
+  WEBHOOK_STORES_NEED_THE_EVENT,
+  WEBHOOK_ORDER_MESSAGES_NEED_THE_EVENT,
   WEBHOOK_RUN_STEP_NODE_TYPES_NEED_THE_EVENT,
   WEBHOOK_ORDER_CHANGE_MAKERS_NEED_THE_EVENT,
   WEBHOOK_ORDER_EXCLUDED_API_KEYS_NEED_THE_EVENT,
@@ -213,6 +216,8 @@ import {
   WEBHOOK_LIMITS,
   WEBHOOK_PAYMENT_LINK_STATUSES,
   WEBHOOK_RUN_STEP_OUTCOMES,
+  WEBHOOK_COD_ANSWERS,
+  WEBHOOK_ORDER_MESSAGE_EVENTS,
   WEBHOOK_RUN_STEP_NODE_TYPES,
   WEBHOOK_ORDER_CHANGE_MAKERS,
   WEBHOOK_DEAL_STATUSES,
@@ -1484,6 +1489,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'campaignIds',
       'campaignStatuses',
       'channelIds',
+      'codAnswers',
       'consentChanges',
       'contactEventFieldValues',
       'contactEventTags',
@@ -1512,6 +1518,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'oauth',
       'orderChangeMakers',
       'orderExcludedApiKeyIds',
+      'orderMessageEvents',
       'orderStatuses',
       'ownerIds',
       'paymentLinkApiKeyIds',
@@ -1524,6 +1531,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'runStepOutcomes',
       'runTriggers',
       'stageIds',
+      'storeIds',
       'surveyAssigneeIds',
       'surveyContactTags',
       'surveyConversationTags',
@@ -2502,7 +2510,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'And it can name the pipelines, stages or owners of the deals whose notes it takes (its `notePipelineIds`, `noteStageIds` and `noteDealOwnerIds`): then it receives the events of the notes about deals in those pipelines or stages, or owned by those members, when the note is added only',
     );
     expect(doc.info.description).toContain(
-      'and still every consent, contact, template, deal, task and note event it takes',
+      'and still every consent, contact, template, skipped order message, deal, task and note event it takes',
     );
     const noteEvent = (doc.webhooks as Record<string, { post?: { description?: string } }>)[
       'note.created'
@@ -3245,7 +3253,8 @@ describe('webhook endpoints through the API (ADR-081)', () => {
         event,
       ).toEqual([b, a]);
     }
-    // Consent, contact, template, deal, task and note events happen on no number.
+    // Consent, contact, template, skipped order message, deal, task and note events happen on no
+    // number.
     expect(WEBHOOK_EVENT_KEYS.filter((e) => !WEBHOOK_CHANNEL_EVENTS.some((c) => c === e))).toEqual([
       'consent.changed',
       'template.status_changed',
@@ -3253,6 +3262,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'contact.updated',
       'contact.erased',
       'contact.merged',
+      'store_order.message_skipped',
       'deal.created',
       'deal.updated',
       'deal.stage_changed',
@@ -3532,6 +3542,145 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       .properties;
     expect(JSON.stringify(changed.runStepOutcomes)).toContain(
       'unless the events no longer include automation.run_step, which clears them',
+    );
+  });
+
+  it('take cash on delivery answers and stores only with store_order.cod_answered, and a list of them alone is a change (ADR-349)', () => {
+    const base = { url: 'https://hooks.example.com/w360', events: ['store_order.cod_answered'] };
+    const [shop, outlet] = [
+      '0192f3f7-b15e-7f40-8d6b-8e9fa0b1c301',
+      '0192f3f7-b15e-7f40-8d6b-8e9fa0b1c302',
+    ];
+    const created = apiCreateWebhookEndpointSchema.parse({
+      ...base,
+      codAnswers: ['cancelled', 'confirmed'],
+      storeIds: [outlet.toUpperCase(), outlet, shop],
+    });
+    expect(created.codAnswers).toEqual(['confirmed', 'cancelled']);
+    expect(created.storeIds).toEqual([outlet, shop]);
+    const refused = apiCreateWebhookEndpointSchema.safeParse({
+      ...base,
+      events: ['order.received'],
+      codAnswers: ['cancelled'],
+      storeIds: [shop],
+    });
+    expect(refused.error?.issues.map((i) => [i.path.join('.'), i.message])).toEqual([
+      ['codAnswers', WEBHOOK_COD_ANSWERS_NEED_THE_EVENT],
+      ['storeIds', WEBHOOK_STORES_NEED_THE_EVENT],
+    ]);
+    for (const body of [
+      { ...base, codAnswers: [] },
+      { ...base, codAnswers: ['declined'] },
+      { ...base, storeIds: [] },
+      { ...base, storeIds: ['shop'] },
+    ]) {
+      expect(apiCreateWebhookEndpointSchema.safeParse(body).success, JSON.stringify(body)).toBe(
+        false,
+      );
+    }
+    expect(apiUpdateWebhookEndpointSchema.parse({ codAnswers: null })).toEqual({
+      codAnswers: null,
+    });
+    expect(apiUpdateWebhookEndpointSchema.parse({ storeIds: [shop] })).toEqual({
+      storeIds: [shop],
+    });
+    expect(apiUpdateWebhookEndpointSchema.safeParse({}).error?.issues[0]?.message).toContain(
+      'the templates, the cash on delivery answers, the stores of store orders’ events, the order messages whose skips are sent, the campaigns,',
+    );
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas;
+    const answered = schemas.WebhookEndpoint as {
+      properties: Record<string, { anyOf?: { items?: { enum?: string[]; format?: string } }[] }>;
+    };
+    expect(answered.properties.codAnswers?.anyOf?.[0]?.items?.enum).toEqual([
+      ...WEBHOOK_COD_ANSWERS,
+    ]);
+    expect(answered.properties.storeIds?.anyOf?.[0]?.items?.format).toBe('uuid');
+    const given = (schemas.CreateWebhookEndpoint as { properties: Record<string, unknown> })
+      .properties;
+    expect(JSON.stringify(given.codAnswers)).toContain(
+      'as store_order.cod_answered (confirmed, cancelled), as confirmation.answer names them, only with the store_order.cod_answered event',
+    );
+    expect(JSON.stringify(given.storeIds)).toContain(
+      'A store removed since it was chosen stays on the list and matches nothing',
+    );
+    const changed = (schemas.UpdateWebhookEndpoint as { properties: Record<string, unknown> })
+      .properties;
+    expect(JSON.stringify(changed.codAnswers)).toContain(
+      'unless the events no longer include store_order.cod_answered, which clears them',
+    );
+    expect(JSON.stringify(changed.storeIds)).toContain(
+      'unless the events include neither store_order.cod_answered nor store_order.message_skipped any more, which clears them',
+    );
+    expect(doc.webhooks['store_order.cod_answered'].post.description).toContain(
+      'An endpoint receives both answers unless it names the answers it takes (its `codAnswers`',
+    );
+  });
+
+  it('take order messages only with store_order.message_skipped, and stores with either store event (ADR-352)', () => {
+    const base = { url: 'https://hooks.example.com/w360', events: ['store_order.message_skipped'] };
+    const shop = '0192f4b9-d370-7b62-8f8d-a0b1c2d3e501';
+    const created = apiCreateWebhookEndpointSchema.parse({
+      ...base,
+      orderMessageEvents: ['order_cancelled', 'cod_confirmation'],
+      storeIds: [shop.toUpperCase()],
+    });
+    expect(created.orderMessageEvents).toEqual(['cod_confirmation', 'order_cancelled']);
+    expect(created.storeIds).toEqual([shop]);
+    const refused = apiCreateWebhookEndpointSchema.safeParse({
+      ...base,
+      events: ['store_order.cod_answered'],
+      orderMessageEvents: ['order_placed'],
+      storeIds: [shop],
+    });
+    expect(refused.error?.issues.map((i) => [i.path.join('.'), i.message])).toEqual([
+      ['orderMessageEvents', WEBHOOK_ORDER_MESSAGES_NEED_THE_EVENT],
+    ]);
+    expect(
+      apiCreateWebhookEndpointSchema
+        .safeParse({
+          ...base,
+          events: ['order.received'],
+          storeIds: [shop],
+        })
+        .error?.issues.map((i) => [i.path.join('.'), i.message]),
+    ).toEqual([['storeIds', WEBHOOK_STORES_NEED_THE_EVENT]]);
+    for (const body of [
+      { ...base, orderMessageEvents: [] },
+      { ...base, orderMessageEvents: ['cart_reminder'] },
+    ]) {
+      expect(apiCreateWebhookEndpointSchema.safeParse(body).success, JSON.stringify(body)).toBe(
+        false,
+      );
+    }
+    expect(apiUpdateWebhookEndpointSchema.parse({ orderMessageEvents: null })).toEqual({
+      orderMessageEvents: null,
+    });
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas;
+    const answered = schemas.WebhookEndpoint as {
+      properties: Record<string, { anyOf?: { items?: { enum?: string[] } }[] }>;
+    };
+    expect(answered.properties.orderMessageEvents?.anyOf?.[0]?.items?.enum).toEqual([
+      ...WEBHOOK_ORDER_MESSAGE_EVENTS,
+    ]);
+    const given = (schemas.CreateWebhookEndpoint as { properties: Record<string, unknown> })
+      .properties;
+    expect(JSON.stringify(given.orderMessageEvents)).toContain(
+      'as store_order.message_skipped (order_placed, cod_confirmation, order_shipped, order_delivered, order_cancelled), as orderMessage.event names them, only with the store_order.message_skipped event',
+    );
+    expect(JSON.stringify(given.storeIds)).toContain(
+      'whose cash on delivery answers and skipped order messages the endpoint receives',
+    );
+    const changed = (schemas.UpdateWebhookEndpoint as { properties: Record<string, unknown> })
+      .properties;
+    expect(JSON.stringify(changed.orderMessageEvents)).toContain(
+      'unless the events no longer include store_order.message_skipped, which clears them',
+    );
+    expect(doc.webhooks['store_order.message_skipped'].post.description).toContain(
+      'An endpoint receives every store’s skipped messages unless it names the stores (its `storeIds`',
     );
   });
 

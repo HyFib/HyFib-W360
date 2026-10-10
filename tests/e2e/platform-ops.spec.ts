@@ -848,6 +848,16 @@ test('staff read the failed sends by reason on the Usage tab and a company’s p
     '1',
     '100%',
   ]);
+  // Its year's failed sends by reason (ADR-350), from the counts the worker keeps once each day
+  // has ended: today's failure is not among them, unless the day ended since.
+  await expect(
+    page
+      .getByRole('table', { name: "This company's failed sends by reason, the last 12 months" })
+      .or(
+        page.getByText("None of the company's sends failed in the days counted.", { exact: true }),
+      )
+      .or(page.getByText(/^None counted yet: the worker counts/)),
+  ).toBeVisible();
   // On a phone narrower than this project's, the table scrolls in its own box, not the page.
   const viewport = page.viewportSize();
   await page.setViewportSize({ width: 360, height: viewport?.height ?? 800 });
@@ -862,6 +872,13 @@ test('staff read the failed sends by reason on the Usage tab and a company’s p
   await expect(
     platformReasons.getByRole('cell', { name: 'window_closed', exact: true }),
   ).toHaveCount(1);
+  // And the year's (ADR-350): a table of the days counted, none failed in them, or none counted.
+  await expect(
+    page
+      .getByRole('table', { name: 'Failed sends by reason, the last 12 months' })
+      .or(page.getByText("No company's send failed in the days counted.", { exact: true }))
+      .or(page.getByText('None counted yet', { exact: true })),
+  ).toBeVisible();
   await expectNoHorizontalOverflow(page);
 });
 

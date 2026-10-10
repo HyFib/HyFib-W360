@@ -6,6 +6,7 @@ import {
   API_SCOPE_INFO,
   dayOf,
   DELETION_GRACE_DAYS,
+  MESSAGE_DAYS_KEPT,
   STAFF_DELETION_REASON,
   PLAN_INTERVAL_LABELS,
   PLAN_MODULE_KEYS,
@@ -825,6 +826,37 @@ export default async function PlatformTenantPage({ params }: { params: Promise<{
                   />
                 )}
               </section>
+              {/* Its year's failed sends by reason, from the same kept counts (ADR-350); none while
+                  its deletion runs, as the year above says. */}
+              {ops.reasonYear ? (
+                <section
+                  aria-labelledby="company-year-reasons"
+                  className="grid min-w-0 gap-3 lg:col-span-2"
+                >
+                  <h3 id="company-year-reasons" className="font-medium">
+                    Failed sends by reason (12 months)
+                  </h3>
+                  <p className="text-muted-foreground">
+                    The company&apos;s failed sends of the 365 days before today by the code they
+                    failed with, as the worker counts them with each day&apos;s messages.
+                    {ops.reasonYear.uncounted > 0
+                      ? ` ${ops.reasonYear.uncounted} of the 365 days ${ops.reasonYear.uncounted === 1 ? 'is' : 'are'} not counted yet.`
+                      : null}
+                  </p>
+                  {ops.reasonYear.uncounted >= MESSAGE_DAYS_KEPT ? (
+                    <p className="text-muted-foreground">
+                      None counted yet: the worker counts each day&apos;s failed sends by code after
+                      the day ends, back to a year ago, a few days a minute.
+                    </p>
+                  ) : (
+                    <FailureReasonsTable
+                      reasons={ops.reasonYear.reasons}
+                      label="This company's failed sends by reason, the last 12 months"
+                      empty="None of the company's sends failed in the days counted."
+                    />
+                  )}
+                </section>
+              ) : null}
             </CardContent>
           </Card>
         ) : null}

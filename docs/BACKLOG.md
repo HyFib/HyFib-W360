@@ -1273,11 +1273,27 @@ verification, app review, Embedded Signup configuration).
   CI]** (ADR-339, migrations 0259 and 0260: an endpoint's whole configuration, about 103 KB at
   most, is kept with the key of `POST /webhook-endpoints` and its secret rotation, which failed past
   64 KiB).
+  **[Cash on delivery answer events built; their database tests run only in CI]** (ADR-348,
+  migrations 0266 and 0267: `store_order.cod_answered` when a customer's tap on a store's cash on
+  delivery confirmation changes the answer kept, with the answer before it, the store's order and
+  the store, never the store's customer details; the number filter narrows it).
+  **[Cash on delivery answer and store filters built; their database tests run only in CI]**
+  (ADR-349, migration 0268: an endpoint takes `store_order.cod_answered` only for chosen answers,
+  confirmed or cancelled, and for the orders of 1 to 20 chosen stores of the company).
+  **[Skipped order message events built; their database tests run only in CI]** (ADR-351,
+  migrations 0270 and 0271: `store_order.message_skipped` when a store's order message is recorded
+  skipped or skipped when due, with the event it was for, the reason, the store's order and the
+  store; no contact or number; cart reminders send nothing).
+  **[Store and order message filters for skipped messages built; their database tests run only in
+  CI]** (ADR-352, migration 0272: an endpoint takes `store_order.message_skipped` only for chosen
+  order messages and for the orders of chosen stores, the stores shared with cash on delivery
+  answers).
   Remaining: filters for other event types and on a message's values other than its type and words,
   field value comparisons beyond
   values, words and ranges, other authentication (headers computed per delivery, other OAuth
-  grants), mutual TLS, fixed egress addresses, events for store orders, a sequence number across
-  events, load tests.
+  grants), mutual TLS, fixed egress addresses, other store events (an order message sent, a
+  filter by reason for skipped messages; the store's orders themselves are reported by the store,
+  ADR-085), a sequence number across events, load tests.
 - **P5-10 Platform ops screens** **[built, locally verified with test data only]** (ADR-054):
   `/platform/ops` with Overview, Onboarding (failed and abandoned signups, failed or stuck number
   setups, new companies without a number), Integrations (current failures with host-only labels,
@@ -1389,11 +1405,14 @@ verification, app review, Embedded Signup configuration).
   migration 0265: under the messages a day, the Usage tab's window and a company's 30 days list the
   failed sends by code, the eight most frequent and the rest, with each code's meaning where HyFib
   knows it and a bar of its share).
+  **[Failed sends by reason over the year built; its database and browser tests run only in CI]**
+  (ADR-350, migration 0269: the worker keeps each company's failed sends a day by code with the
+  day's counts, and the Usage tab and a company's page list the year's under the year).
   Remaining:
   other alert channels (several channels, a channel per alert, formats other than a JSON `text`
   member, such as Microsoft Teams' or PagerDuty's, and the owners' other notices, such as personal
   notices, in a channel; Microsoft's documentation of Teams' webhooks could not be opened from
-  here), other charts (other measures, such as failures by reason over the year or by company over time), Meta's quality
+  here), other charts (other measures, such as failures by reason drawn over time or by company over time), Meta's quality
   webhook (unconfirmed), rollups for many companies and pages read from the database.
 - **P5-11 Account export/deletion workflow** **[built, locally verified with test data only]**
   (ADR-055): Settings → Company data for owners. A streamed, gzip-compressed JSON Lines export of

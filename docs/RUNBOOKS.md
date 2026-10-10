@@ -3373,6 +3373,57 @@ To take more, tick the kinds under "Kinds of step sent" on the endpoint's page (
 the steps outside a node), or `PATCH /webhook-endpoints/{id}` with `runStepNodeTypes` (null for
 every step). Removing Automation step clears the list.
 
+**A receiver misses a cash on delivery answer, or gets `event_gone` for one (ADR-348).**
+`store_order.cod_answered` is sent when a customer's tap on a store's cash on delivery confirmation
+changes the answer kept: the first answer, and a later tap with the other button. A tap repeating
+the answer, an older tap arriving late, another customer's tap or one replying to another message
+records nothing and sends nothing (the order's page in Stores shows the answer kept). An endpoint
+that names numbers gets it only for the number the confirmation was sent from. Events no endpoint
+takes are not recorded, so there is nothing to replay for answers given before the endpoint took
+the event. Removing the store deletes its copy of the orders with their confirmations: a delivery
+not yet made then fails as `event_gone`, and a replay fails the same way. An order the store
+deleted stays in the copy and is sent with `storeOrder.deletedAt`. The body never holds the
+customer's details from the store; `contact` is the conversation's contact.
+
+**A receiver misses some cash on delivery answers, or one store's (ADR-349).** An endpoint can take
+chosen answers only, or the answers of chosen stores only. The endpoints list shows them ("Cash on
+delivery answers sent: …", "Stores whose cash on delivery answers and skipped order messages are sent: …"), and the API answers
+`codAnswers` and `storeIds` (null takes every answer, or every store's). An answer is sent only when
+its answer and its order's store are on the lists, and its number too when the endpoint names
+numbers; when no endpoint takes it, it is not recorded at all, so there is nothing to replay. A
+store removed since it was chosen shows as "A removed store" and matches nothing; a store connected
+again after its removal is a new store, so tick it again. To take more, tick the answers under
+"Answers sent" or the stores under "Stores" (or choose "Every store’s answers and skipped messages") on the endpoint's
+page, or `PATCH /webhook-endpoints/{id}` with `codAnswers` or `storeIds` (null for every answer or
+store). Removing Cash on delivery answered clears both lists.
+
+**A receiver misses a skipped order message, or gets `event_gone` for one (ADR-351).**
+`store_order.message_skipped` is sent once for each of a store's order messages (order placed, cash
+on delivery confirmation, shipped, delivered, cancelled) that HyFib records without sending or
+skips when it is due; Settings → Stores shows each message's state and reason. A message sent,
+started as an automation or still waiting (the store's sending hours) sends nothing, and cart
+reminders never send it. It belongs to no number: an endpoint that names numbers still gets it, and
+the store and answer lists apply to cash on delivery answers only. Events no endpoint takes are not
+recorded, so there is nothing to replay for messages skipped before the endpoint took the event.
+Removing the store deletes its copy of the orders with their messages: a delivery not yet made
+then fails as `event_gone`, and a replay fails the same way. An order the store deleted stays in
+the copy and is sent with `storeOrder.deletedAt`. The body holds no contact or customer details:
+`storeOrder.externalId` finds the order in the store. A receiver that calls customers on skipped
+messages should leave `cash_on_delivery` alone: the order placed message gave way to the cash on
+delivery confirmation, which the customer did get (or which sends its own event).
+
+**A receiver misses some skipped order messages, or one store's (ADR-352).** An endpoint can take
+the skips of chosen order messages only, or those of chosen stores' orders only (the same stores as
+its cash on delivery answers). The endpoints list shows them ("Order messages whose skips are sent:
+…", "Stores whose cash on delivery answers and skipped order messages are sent: …"), and the API
+answers `orderMessageEvents` and `storeIds` (null takes every message's, or every store's). A
+skipped message is sent only when its message and its order's store are on the lists; when no
+endpoint takes it, it is not recorded at all, so there is nothing to replay. To take more, tick the
+messages under "Order message skipped" or the stores under "Stores" on the endpoint's page, or
+`PATCH /webhook-endpoints/{id}` with `orderMessageEvents` or `storeIds`. Removing Order message
+skipped clears the messages, and the stores too unless the endpoint still takes Cash on delivery
+answered.
+
 **A receiver misses the events of a member's conversations (ADR-181).** An endpoint can take the
 message and conversation events of the conversations assigned to chosen members only. The endpoints
 list shows them ("Members whose conversations’ events are sent: …"), and the API answers
@@ -3858,6 +3909,16 @@ codes before adding it to the labels (`lib/campaign-labels.ts`); meanings from t
 documentation are marked. A code rising across companies at once points at Meta or HyFib, one
 company's at its own sending (its window, its consent, its templates); the company's inbox gives
 each failed message's error text, which the console never shows.
+
+**Failed sends by reason over the year (ADR-350).** Under the year, the Usage tab and a company's
+platform page list the failed sends of the 365 days before today by code, from counts the worker
+keeps with each day's messages: today's failures are in the window's table only, and a failure Meta
+reports more than 7 days after its day is not among them. The note says how many of the 365 days
+are not counted yet; after a deployment of migration 0269 every day is counted again, newest first,
+3 a minute, so the year's reasons cover more days each minute for about two hours (and the year's
+days older than a week take the statuses reported since they were last counted). "None counted
+yet" means no day is: check that the worker's `ops.message-days` job runs (the Queues tab). A
+company being deleted shows no year's reasons; its counts are deleted with it.
 
 **Acknowledging failures (ADR-141).** On Current failures, the administrator who takes a failure
 opens Acknowledge on its row and writes a note of 10 to 500 characters: what was done or found

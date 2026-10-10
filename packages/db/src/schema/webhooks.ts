@@ -4,13 +4,14 @@ import type { AutomationEndReason, AutomationStepOutcome } from './automations';
 import type { OrderStatusChanger, PaymentLinkStatus } from './commerce';
 import type { CrmChanger, DealStatus, TaskStatus } from './crm';
 import type { ContactSource, MessageType } from './messaging';
+import type { StoreMessageAnswer, StoreMessageEvent } from './stores';
 import { appSchema } from './tenancy';
 
 const tz = (name: string) => timestamp(name, { withTimezone: true, mode: 'date' });
 
 /**
  * Event types an endpoint can receive (ADR-053, ADR-074, ADR-078, ADR-085, ADR-225, ADR-256,
- * ADR-261, ADR-326); `ping` is only sent as a test.
+ * ADR-261, ADR-326, ADR-348, ADR-351); `ping` is only sent as a test.
  */
 export const WEBHOOK_EVENT_TYPES = [
   'message.received',
@@ -31,6 +32,8 @@ export const WEBHOOK_EVENT_TYPES = [
   'order.received',
   'order.status_changed',
   'payment_link.status_changed',
+  'store_order.cod_answered',
+  'store_order.message_skipped',
   'campaign.status_changed',
   'deal.created',
   'deal.updated',
@@ -90,6 +93,21 @@ export type WebhookOrderStatus =
  * (ADR-308); a link is `creating` only until the worker creates it, which sends no event.
  */
 export type WebhookPaymentLinkStatus = Exclude<PaymentLinkStatus, 'creating'>;
+
+/**
+ * The answers a `store_order.cod_answered` event reports, which an endpoint can choose (ADR-349):
+ * the customer confirmed the order or cancelled it.
+ */
+export type WebhookCodAnswer = StoreMessageAnswer;
+
+/**
+ * The order messages a `store_order.message_skipped` event is about, which an endpoint can choose
+ * (ADR-352): every store message event but the two cart reminders, which send no such event.
+ */
+export type WebhookOrderMessageEvent = Exclude<
+  StoreMessageEvent,
+  'cart_reminder' | 'cart_second_reminder'
+>;
 
 /**
  * Who made an order status change `order.status_changed` reports, as an endpoint can choose them
@@ -292,6 +310,24 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
    */
   paymentLinkApiKeyIds: uuid('payment_link_api_key_ids').array(),
   /**
+   * The answers it takes as `store_order.cod_answered` (migration 0268, ADR-349); null takes every
+   * answer. Set only while `store_order.cod_answered` is among its events.
+   */
+  codAnswers: text('cod_answers').array().$type<WebhookCodAnswer[]>(),
+  /**
+   * The connected stores whose cash on delivery answers (migration 0268, ADR-349) and skipped order
+   * messages (migration 0272, ADR-352) it takes, by the store of the order; null takes every
+   * store's. Set only while `store_order.cod_answered` or `store_order.message_skipped` is among
+   * its events.
+   */
+  storeIds: uuid('store_ids').array(),
+  /**
+   * The order messages whose skips it takes as `store_order.message_skipped` (migration 0272,
+   * ADR-352); null takes every message's. Set only while `store_order.message_skipped` is among its
+   * events.
+   */
+  orderMessageEvents: text('order_message_events').array().$type<WebhookOrderMessageEvent[]>(),
+  /**
    * The statuses a deal reaches that it takes as `deal.status_changed` (migration 0232, ADR-309);
    * null takes every status. Set only while `deal.status_changed` is among its events.
    */
@@ -353,8 +389,9 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
   runApiKeyIds: uuid('run_api_key_ids').array(),
   /**
    * The WhatsApp numbers (channel accounts) whose events it takes (ADR-170): message,
-   * conversation, automation run, order and campaign events; null takes every number. Set only
-   * while one of those is among its events.
+   * conversation, survey answer, automation run and step, order, Payment Link, cash on delivery
+   * answer (ADR-348) and campaign events, as `WEBHOOK_CHANNEL_EVENTS` lists them; null takes every
+   * number. Set only while one of those is among its events.
    */
   channelAccountIds: uuid('channel_account_ids').array(),
   /**

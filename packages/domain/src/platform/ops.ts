@@ -48,7 +48,11 @@ import {
   messageYear,
   type MessageYear,
 } from './message-days';
-import { readFailureReasons } from './failure-reasons';
+import {
+  readFailureReasonYear,
+  readFailureReasons,
+  type FailureReasonYear,
+} from './failure-reasons';
 import { parseInput } from '../validation';
 import {
   OPS_SIGNAL_RULES,
@@ -1036,9 +1040,20 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
     },
 
     /**
+     * Every company's failed sends by reason over the 365 days before today, from the counts the
+     * worker keeps as days pass (ADR-350), with how many of the days are not counted yet.
+     */
+    async failureReasonYear(actor: PlatformActor): Promise<FailureReasonYear> {
+      return platformDb.run(actor.userId, (tx) => readFailureReasonYear(tx, null), {
+        isolationLevel: 'repeatable read',
+        accessMode: 'read only',
+      });
+    },
+
+    /**
      * One company's health, its activity over the last 30 days with its failed sends by reason
-     * (ADR-347) and its year of kept days, none while its deletion runs (ADR-342); null when
-     * unknown.
+     * (ADR-347) and its year of kept days with their failed sends by reason (ADR-350), none while
+     * its deletion runs (ADR-342); null when unknown.
      */
     async companyHealth(actor: PlatformActor, tenantId: string) {
       if (!z.uuid().safeParse(tenantId).success) return null;
@@ -1055,10 +1070,19 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
           const reasons = await readFailureReasons(tx, since, tenantId);
           // None while its deletion runs: the deletion deletes its kept counts, and the worker no
           // longer counts it (ADR-342).
-          const year = (await deletionStarted(tx, tenantId))
+          const deleting = await deletionStarted(tx, tenantId);
+          const year = deleting
             ? null
             : messageYear(await keptMessageDays(tx, MESSAGE_DAYS_KEPT, tenantId));
-          return { health: assess(facts), activity: activity ?? null, daily, reasons, year };
+          const reasonYear = deleting ? null : await readFailureReasonYear(tx, tenantId);
+          return {
+            health: assess(facts),
+            activity: activity ?? null,
+            daily,
+            reasons,
+            year,
+            reasonYear,
+          };
         },
         { isolationLevel: 'repeatable read', accessMode: 'read only' },
       );

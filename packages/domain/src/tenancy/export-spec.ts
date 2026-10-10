@@ -35,6 +35,8 @@ export const EXPORT_EXCLUDED_TABLES: Readonly<Record<string, string>> = {
   'app.webhook_events': 'Outgoing webhook events, kept 30 days.',
   'ops.dead_letters': "Records of HyFib's job system.",
   'ops.email_outbox': 'The encrypted queue of emails.',
+  'ops.platform_failure_reason_days':
+    "HyFib's counts of the company's failed sends each day by code for the operations console (ADR-350); the messages themselves are exported.",
   'ops.platform_message_days':
     "HyFib's counts of the company's messages each day for the operations console (ADR-341); the messages themselves are exported.",
   'ops.provider_asset_bindings': 'Internal routing of WhatsApp account and number ids.',
@@ -1613,6 +1615,9 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
       'campaign_statuses',
       'order_statuses',
       'payment_link_statuses',
+      'cod_answers',
+      'store_ids',
+      'order_message_events',
       'order_change_makers',
       'order_excluded_api_key_ids',
       'payment_link_api_key_ids',

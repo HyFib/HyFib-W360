@@ -4,6 +4,8 @@ import type {
   ContactFieldType,
   ContactSource,
   WebhookCampaignStatus,
+  WebhookCodAnswer,
+  WebhookOrderMessageEvent,
   WebhookConsentChange,
   WebhookContactPart,
   WebhookConversationStatus,
@@ -32,6 +34,8 @@ export type {
   AutomationEndReason,
   ContactSource,
   WebhookCampaignStatus,
+  WebhookCodAnswer,
+  WebhookOrderMessageEvent,
   WebhookConsentChange,
   WebhookContactPart,
   WebhookConversationStatus,
@@ -80,6 +84,8 @@ export const WEBHOOK_EVENT_KEYS = [
   'order.received',
   'order.status_changed',
   'payment_link.status_changed',
+  'store_order.cod_answered',
+  'store_order.message_skipped',
   'campaign.status_changed',
   'deal.created',
   'deal.updated',
@@ -181,6 +187,16 @@ export const WEBHOOK_EVENT_INFO: Record<WebhookEventType, { label: string; descr
       label: 'Payment Link status',
       description:
         'A Payment Link for a WhatsApp order was created at Razorpay (sent in the chat or not), partly paid, paid, expired or cancelled, or Razorpay could not create it.',
+    },
+    'store_order.cod_answered': {
+      label: 'Cash on delivery answered',
+      description:
+        'A customer confirmed or cancelled a cash on delivery order from a connected store by tapping a button of its confirmation message, or changed their answer.',
+    },
+    'store_order.message_skipped': {
+      label: 'Order message skipped',
+      description:
+        'A connected store’s message about an order (placed, cash on delivery confirmation, shipped, delivered or cancelled) was not sent: a test order, an event HyFib saw too late, an order placed message the cash on delivery confirmation replaced, or a check that failed when it was due, such as a customer who opted out or an order without a phone number.',
     },
     'campaign.status_changed': {
       label: 'Campaign status',
@@ -609,6 +625,42 @@ export const WEBHOOK_PAYMENT_LINK_STATUS_LABELS: Record<WebhookPaymentLinkStatus
   expired: 'Expired',
   cancelled: 'Cancelled',
   failed: 'Not created',
+};
+
+/**
+ * The answers a `store_order.cod_answered` event reports, which an endpoint can choose (ADR-349),
+ * in the order the store's confirmation offers them.
+ */
+export const WEBHOOK_COD_ANSWERS = [
+  'confirmed',
+  'cancelled',
+] as const satisfies readonly WebhookCodAnswer[];
+
+/** How Settings names each answer an endpoint can choose (ADR-349), as an order's page does. */
+export const WEBHOOK_COD_ANSWER_LABELS: Record<WebhookCodAnswer, string> = {
+  confirmed: 'Confirmed',
+  cancelled: 'Cancelled',
+};
+
+/**
+ * The order messages a `store_order.message_skipped` event is about, which an endpoint can choose
+ * (ADR-352), in the order a store's order messages list them.
+ */
+export const WEBHOOK_ORDER_MESSAGE_EVENTS = [
+  'order_placed',
+  'cod_confirmation',
+  'order_shipped',
+  'order_delivered',
+  'order_cancelled',
+] as const satisfies readonly WebhookOrderMessageEvent[];
+
+/** How Settings names each order message an endpoint can choose (ADR-352), as Stores does. */
+export const WEBHOOK_ORDER_MESSAGE_EVENT_LABELS: Record<WebhookOrderMessageEvent, string> = {
+  order_placed: 'Order placed',
+  cod_confirmation: 'Cash on delivery confirmation',
+  order_shipped: 'Order shipped',
+  order_delivered: 'Order delivered',
+  order_cancelled: 'Order cancelled',
 };
 
 /**
@@ -1151,6 +1203,12 @@ export const WEBHOOK_LIMITS = {
   contactFields: 50,
   /** The campaigns an endpoint can choose to take the statuses and changes of (ADR-185). */
   campaigns: 50,
+  /**
+   * The stores an endpoint can choose to take the cash on delivery answers (ADR-349) and skipped
+   * order messages (ADR-352) of: a company has at most 5 at once, and a store removed since it was
+   * chosen stays on the list.
+   */
+  stores: 20,
   /** The newest campaigns Settings offers to choose from (ADR-185); the API takes any of them. */
   campaignChoices: 200,
   /** The CRM pipelines an endpoint can choose to take the deals' events of (ADR-263). */
@@ -1287,8 +1345,9 @@ export const webhookApiKeyText = (key: WebhookEndpointApiKey): string => {
 /**
  * The events that happen on a WhatsApp number, which an endpoint can take for chosen numbers
  * (ADR-170): a campaign's are on the number it sends from, a Payment Link's on its order's (ADR-285),
- * a survey's answer on its conversation's (ADR-293), a run's step on its run's (ADR-326). Consent,
- * contact, template, deal, task and note events belong to no number.
+ * a survey's answer on its conversation's (ADR-293), a run's step on its run's (ADR-326), a cash on
+ * delivery answer on its confirmation's (ADR-348). Consent, contact, template, skipped order message
+ * (ADR-351), deal, task and note events belong to no number.
  */
 export const WEBHOOK_CHANNEL_EVENTS = [
   'message.received',
@@ -1303,6 +1362,7 @@ export const WEBHOOK_CHANNEL_EVENTS = [
   'order.received',
   'order.status_changed',
   'payment_link.status_changed',
+  'store_order.cod_answered',
   'campaign.status_changed',
 ] as const satisfies readonly WebhookEventType[];
 
@@ -1450,6 +1510,45 @@ export const webhookCampaignText = (campaign: WebhookEndpointCampaign): string =
   campaign.status === null
     ? campaign.name
     : `${campaign.name} (${WEBHOOK_CAMPAIGN_STATUS_LABELS[campaign.status]})`;
+
+/**
+ * A connected store of the company, which an endpoint can choose to take the cash on delivery
+ * answers (ADR-349) and skipped order messages (ADR-352) of.
+ */
+export interface WebhookStoreChoice {
+  id: string;
+  /** Its name as the store gives it, else its address (`webhookStoreLabel`). */
+  label: string;
+}
+
+/** A store an endpoint takes the cash on delivery answers and skipped order messages of, as stored. */
+export interface WebhookEndpointStore {
+  id: string;
+  /** Its name or address; null for a store removed since it was chosen, which matches nothing. */
+  label: string | null;
+}
+
+/** How a store is named for an endpoint (ADR-349): its name as the store gives it, else its address. */
+export const webhookStoreLabel = (store: { name: string | null; storeUrl: string }): string =>
+  store.name?.trim() || store.storeUrl;
+
+/** A store as Settings → Webhooks lists it. */
+export const webhookStoreText = (store: WebhookEndpointStore): string =>
+  store.label ?? 'A removed store';
+
+/**
+ * The events of a store's orders, which the stores an endpoint names narrow: cash on delivery
+ * answers (ADR-349) and skipped order messages (ADR-352).
+ */
+export const WEBHOOK_STORE_EVENTS = [
+  'store_order.cod_answered',
+  'store_order.message_skipped',
+] as const satisfies readonly WebhookEventType[];
+
+/** Whether an endpoint with these events takes events of stores' orders, and can choose stores. */
+export function webhookTakesStoreEvents(eventTypes: readonly WebhookEventType[]): boolean {
+  return WEBHOOK_STORE_EVENTS.some((type) => eventTypes.includes(type));
+}
 
 /** Whether an endpoint with these events takes events of campaigns, and can choose campaigns. */
 export function webhookTakesCampaignEvents(eventTypes: readonly WebhookEventType[]): boolean {

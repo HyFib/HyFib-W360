@@ -16,6 +16,9 @@ import {
   commerceOrderItems,
   commerceOrders,
   commercePaymentLinks,
+  commerceStoreMessages,
+  commerceStoreOrders,
+  commerceStores,
   contactMerges,
   contacts,
   CONVERSATION_STATUSES,
@@ -34,6 +37,8 @@ import {
   ORDER_STATUS_CHANGERS,
   PAYMENT_LINK_STATUSES,
   sql,
+  STORE_MESSAGE_ANSWERS,
+  STORE_PLATFORMS,
   TASK_STATUSES,
   type OrderStatusChanger,
   type Tx,
@@ -55,6 +60,7 @@ import { campaignAnalytics, campaignResultsSchema, toCampaignResults } from '../
 import { COMMERCE_LIMITS } from '../commerce/model';
 import { crmCreatedBy, noteWriter } from '../crm/common';
 import { findAnsweredMessageId } from '../messaging/reply-context';
+import { ORDER_MESSAGE_EVENTS, STORE_MESSAGE_SKIP_REASON_CODES } from '../stores/messages-model';
 import { WEBHOOK_MESSAGE_STATUSES, WEBHOOK_RUN_TRIGGERS } from './model';
 
 /**
@@ -928,6 +934,119 @@ export const satisfactionSurveyAnsweredPayloadSchema = envelope(
   }),
 );
 
+/**
+ * A customer's answer to a store order's cash on delivery confirmation (ADR-348): the answer, the one
+ * before it, the tap and the confirmation as captured; the order and its store as they are when the
+ * event is delivered. Never the customer's details from the store, which the contact replaces.
+ */
+const webhookStoreConfirmationSchema = z.object({
+  answer: z
+    .enum(STORE_MESSAGE_ANSWERS)
+    .describe(
+      'The answer this event reports, by the button the customer tapped: confirmed or cancelled.',
+    ),
+  previousAnswer: z
+    .enum(STORE_MESSAGE_ANSWERS)
+    .nullable()
+    .describe('The answer it replaced; null for the first.'),
+  answeredAt: z.iso.datetime().describe('When the customer tapped, as WhatsApp dated the tap.'),
+  messageId: z
+    .uuid()
+    .describe('The cash on delivery confirmation HyFib sent, among the conversation’s messages.'),
+  answerMessageId: z.uuid().describe('The customer’s tap, among the conversation’s messages.'),
+});
+const webhookStoreOrderSchema = z.object({
+  id: z.uuid().describe('HyFib’s copy of the order.'),
+  externalId: z.string().describe('The order’s id at the store, to find it there.'),
+  name: z.string().describe('The order’s name at the store, like #1001.'),
+  status: z
+    .string()
+    .describe(
+      'The order’s status as HyFib’s copy keeps it: open, closed or cancelled for a Shopify order; the store’s own status, like processing or completed, for a WooCommerce order.',
+    ),
+  financialStatus: z
+    .string()
+    .nullable()
+    .describe(
+      'Shopify’s payment status in lower case, like pending or paid; null for WooCommerce.',
+    ),
+  fulfillmentStatus: z
+    .string()
+    .nullable()
+    .describe(
+      'Shopify’s fulfilment status in lower case, like unfulfilled or fulfilled; null for WooCommerce.',
+    ),
+  test: z.boolean().describe('A test order.'),
+  currency: z.string().nullable().describe('ISO 4217 code; null when the store gave none.'),
+  totalMinor: z
+    .number()
+    .int()
+    .nullable()
+    .describe(
+      'The order’s total as an integer in the currency’s minor units; null without a currency.',
+    ),
+  placedAt: z.iso.datetime(),
+  cancelledAt: z.iso
+    .datetime()
+    .nullable()
+    .describe(
+      'When the store says the order was cancelled; null when it was not, or when the store gives no time (WooCommerce).',
+    ),
+  deletedAt: z.iso
+    .datetime()
+    .nullable()
+    .describe('When HyFib learned that the store deleted the order; null while it has not.'),
+});
+const webhookStoreSchema = z.object({
+  id: z.uuid(),
+  platform: z.enum(STORE_PLATFORMS),
+  name: z.string().nullable().describe('The store’s name, as the store gives it.'),
+  url: z.string().describe('The store’s address.'),
+});
+export const storeOrderCodAnsweredPayloadSchema = envelope(
+  'store_order.cod_answered',
+  z.object({
+    confirmation: webhookStoreConfirmationSchema,
+    storeOrder: webhookStoreOrderSchema,
+    store: webhookStoreSchema,
+    conversation: z.object({ id: z.uuid() }),
+    contact: contactSchema,
+    channel: channelSchema,
+  }),
+);
+
+/**
+ * A store's order message that HyFib did not send (ADR-351): the event it was for, why, and when the
+ * order's event happened, as captured; the order and its store as they are when the event is
+ * delivered. Never the customer's details from the store, and no contact or number: the message was
+ * never sent.
+ */
+const webhookSkippedOrderMessageSchema = z.object({
+  event: z
+    .enum(ORDER_MESSAGE_EVENTS)
+    .describe(
+      'What the message was about, as the store’s order messages name it: order_placed, cod_confirmation (asking the customer to confirm or cancel an order paid on delivery), order_shipped, order_delivered or order_cancelled.',
+    ),
+  skipReason: z
+    .enum(STORE_MESSAGE_SKIP_REASON_CODES)
+    .describe(
+      'Why HyFib did not send it, as Settings → Stores explains it among the store’s messages: recorded without sending (test_order, too_late, or cash_on_delivery for an order placed message that the order’s cash on delivery confirmation replaced) or a check that failed when it was due (for example store_disconnected, rule_disabled, order_deleted, order_cancelled, no_phone, suppressed, opted_out, template_unavailable, channel_unavailable, frequency_capped, automation_busy). The reasons that concern only cart reminders never appear here.',
+    ),
+  occurredAt: z.iso
+    .datetime()
+    .describe(
+      'When the order’s event happened, as the store dated it; for a cancellation the store gives no time for, when HyFib saw it.',
+    ),
+});
+export const storeOrderMessageSkippedPayloadSchema = envelope(
+  'store_order.message_skipped',
+  z.object({
+    orderMessage: webhookSkippedOrderMessageSchema,
+    storeOrder: webhookStoreOrderSchema,
+    store: webhookStoreSchema,
+  }),
+);
+
 export const pingPayloadSchema = envelope(
   'ping',
   z.object({ endpointId: z.uuid(), message: z.string() }),
@@ -1462,6 +1581,134 @@ async function paymentLinkOf(tx: Tx, tenantId: string, linkId: string | null) {
   return row ?? null;
 }
 
+/** A store's order as the store order events give it (ADR-348, ADR-351). */
+const storeOrderColumns = {
+  id: commerceStoreOrders.id,
+  externalId: commerceStoreOrders.externalId,
+  name: commerceStoreOrders.name,
+  status: commerceStoreOrders.status,
+  financialStatus: commerceStoreOrders.financialStatus,
+  fulfillmentStatus: commerceStoreOrders.fulfillmentStatus,
+  test: commerceStoreOrders.test,
+  currency: commerceStoreOrders.currency,
+  totalMinor: commerceStoreOrders.totalMinor,
+  placedAt: commerceStoreOrders.placedAt,
+  cancelledAt: commerceStoreOrders.cancelledAt,
+  deletedAt: commerceStoreOrders.deletedAt,
+};
+/** A store as the store order events give it. */
+const storeColumns = {
+  id: commerceStores.id,
+  platform: commerceStores.platform,
+  name: commerceStores.name,
+  url: commerceStores.storeUrl,
+};
+/** A store's order as read with `storeOrderColumns`, its times written out. */
+const toWebhookStoreOrder = <
+  T extends { placedAt: Date; cancelledAt: Date | null; deletedAt: Date | null },
+>(
+  order: T,
+) => ({
+  ...order,
+  placedAt: order.placedAt.toISOString(),
+  cancelledAt: order.cancelledAt?.toISOString() ?? null,
+  deletedAt: order.deletedAt?.toISOString() ?? null,
+});
+
+/**
+ * A store order's cash on delivery confirmation (ADR-348) with the order, its store and the
+ * confirmation's conversation, contact and number, in the company; null if there is none.
+ */
+async function storeConfirmationOf(tx: Tx, tenantId: string, storeMessageId: string | null) {
+  if (!storeMessageId || !z.uuid().safeParse(storeMessageId).success) return null;
+  const [row] = await tx
+    .select({
+      messageId: messages.id,
+      order: storeOrderColumns,
+      store: storeColumns,
+      conversationId: messages.conversationId,
+      contactId: conversations.contactId,
+      channelId: messages.channelAccountId,
+      channelPhone: channelAccounts.displayPhoneNumber,
+    })
+    .from(commerceStoreMessages)
+    .innerJoin(
+      commerceStoreOrders,
+      and(
+        eq(commerceStoreOrders.tenantId, commerceStoreMessages.tenantId),
+        eq(commerceStoreOrders.id, commerceStoreMessages.orderId),
+      ),
+    )
+    .innerJoin(
+      commerceStores,
+      and(
+        eq(commerceStores.tenantId, commerceStoreMessages.tenantId),
+        eq(commerceStores.id, commerceStoreMessages.storeId),
+      ),
+    )
+    .innerJoin(
+      messages,
+      and(
+        eq(messages.tenantId, commerceStoreMessages.tenantId),
+        eq(messages.id, commerceStoreMessages.messageId),
+      ),
+    )
+    .innerJoin(
+      conversations,
+      and(
+        eq(conversations.tenantId, messages.tenantId),
+        eq(conversations.id, messages.conversationId),
+      ),
+    )
+    .leftJoin(
+      channelAccounts,
+      and(
+        eq(channelAccounts.tenantId, messages.tenantId),
+        eq(channelAccounts.id, messages.channelAccountId),
+      ),
+    )
+    .where(
+      and(
+        eq(commerceStoreMessages.tenantId, tenantId),
+        eq(commerceStoreMessages.id, storeMessageId),
+        eq(commerceStoreMessages.event, 'cod_confirmation'),
+      ),
+    );
+  return row ?? null;
+}
+
+/**
+ * A store's order message (ADR-351) with its order and the store, in the company; null if there is
+ * none (a cart reminder has a checkout, not an order).
+ */
+async function storeOrderMessageOf(tx: Tx, tenantId: string, storeMessageId: string | null) {
+  if (!storeMessageId || !z.uuid().safeParse(storeMessageId).success) return null;
+  const [row] = await tx
+    .select({ order: storeOrderColumns, store: storeColumns })
+    .from(commerceStoreMessages)
+    .innerJoin(
+      commerceStoreOrders,
+      and(
+        eq(commerceStoreOrders.tenantId, commerceStoreMessages.tenantId),
+        eq(commerceStoreOrders.id, commerceStoreMessages.orderId),
+      ),
+    )
+    .innerJoin(
+      commerceStores,
+      and(
+        eq(commerceStores.tenantId, commerceStoreMessages.tenantId),
+        eq(commerceStores.id, commerceStoreMessages.storeId),
+      ),
+    )
+    .where(
+      and(
+        eq(commerceStoreMessages.tenantId, tenantId),
+        eq(commerceStoreMessages.id, storeMessageId),
+      ),
+    );
+  return row ?? null;
+}
+
 /** A WhatsApp order with its items in cart order and its number, in the company. */
 async function orderOf(tx: Tx, tenantId: string, orderId: string | null) {
   if (!orderId || !z.uuid().safeParse(orderId).success) return null;
@@ -1804,6 +2051,66 @@ export async function buildWebhookPayload(
           conversation: { id: link.conversationId },
           contact: await contactOf(tx, tenantId, link.contactId),
           channel: { id: link.channelId, phone: link.channelPhone ?? null },
+        },
+      };
+    }
+    case 'store_order.cod_answered': {
+      // The answer, the one before it and the tap as captured, so a later answer changes nothing
+      // here; the order and its store as they are now. A confirmation goes with its order or its
+      // store (removing a store deletes its copy), so one that is gone can no longer be described.
+      const answeredAt = str(event.detail.answeredAt);
+      const answerMessageId = str(event.detail.answerMessageId);
+      // Every such event is captured with its tap (0266): one without cannot be described.
+      if (answeredAt === null || answerMessageId === null) {
+        throw new Error('The cash on delivery answer was captured without its tap');
+      }
+      const confirmation = await storeConfirmationOf(
+        tx,
+        tenantId,
+        str(event.detail.storeMessageId),
+      );
+      if (!confirmation) throw new WebhookEventGoneError();
+      const { order, store } = confirmation;
+      return {
+        ...base,
+        data: {
+          confirmation: {
+            answer: event.status,
+            previousAnswer: str(event.detail.previousAnswer),
+            answeredAt: new Date(answeredAt).toISOString(),
+            messageId: confirmation.messageId,
+            answerMessageId,
+          },
+          storeOrder: toWebhookStoreOrder(order),
+          store,
+          conversation: { id: confirmation.conversationId },
+          contact: await contactOf(tx, tenantId, confirmation.contactId),
+          channel: { id: confirmation.channelId, phone: confirmation.channelPhone ?? null },
+        },
+      };
+    }
+    case 'store_order.message_skipped': {
+      // The event, the reason and when the order's event happened as captured (a skipped message
+      // keeps them); the order and its store as they are now. A message goes with its order or its
+      // store (removing a store deletes its copy), so one that is gone can no longer be described.
+      const skipReason = str(event.detail.skipReason);
+      const occurredAt = str(event.detail.occurredAt);
+      // Every such event is captured with them (0270): one without cannot be described.
+      if (event.status === null || skipReason === null || occurredAt === null) {
+        throw new Error('The skipped order message was captured without its event, reason or time');
+      }
+      const skipped = await storeOrderMessageOf(tx, tenantId, str(event.detail.storeMessageId));
+      if (!skipped) throw new WebhookEventGoneError();
+      return {
+        ...base,
+        data: {
+          orderMessage: {
+            event: event.status,
+            skipReason,
+            occurredAt: new Date(occurredAt).toISOString(),
+          },
+          storeOrder: toWebhookStoreOrder(skipped.order),
+          store: skipped.store,
         },
       };
     }
