@@ -522,6 +522,8 @@ test('staff read the platform’s messages a day on the Usage tab (ADR-333)', as
     'Failed',
     'Received',
     'Share failed',
+    'Delivered',
+    'Read',
   ]);
   const rows = table.getByRole('row').filter({ has: page.getByRole('cell') });
   const days = (await rows.locator('td:first-child').allTextContents()).map((d) => d.trim());
@@ -584,6 +586,32 @@ test('staff read the platform’s messages a day on the Usage tab (ADR-333)', as
     await expect(noneSent).toBeVisible();
     await expect(failedChart).toHaveCount(0);
   }
+  // And the shares delivered and read (ADR-346), the live days' always counted: its value names the
+  // last day's shares of those sent, or none sent.
+  const deliveryChart = page.getByRole('slider', {
+    name: 'Share of the messages sent that were delivered and read each UTC day, 7 days',
+  });
+  const noneDelivered = page.getByText(
+    'No company sent a message in these days, so none was delivered.',
+    { exact: true },
+  );
+  if (sent.some((n) => n > 0)) {
+    await expect(noneDelivered).toHaveCount(0);
+    await expect(
+      page.getByRole('list', { name: 'Delivered and read, legend' }).getByRole('listitem'),
+    ).toHaveText(['Delivered', 'Read']);
+    await expect(deliveryChart).toHaveAttribute(
+      'aria-valuetext',
+      sent.at(-1) === 0
+        ? `${chartDay(days.at(-1)!)}: none sent`
+        : new RegExp(
+            `^${chartDay(days.at(-1)!)}: [<>]?[\\d.]+% of [\\d,]+ sent delivered \\([\\d,]+\\), [<>]?[\\d.]+% read \\([\\d,]+\\)$`,
+          ),
+    );
+  } else {
+    await expect(noneDelivered).toBeVisible();
+    await expect(deliveryChart).toHaveCount(0);
+  }
 
   // On a phone narrower than this project's, the chart and the open table stay inside the page:
   // the table scrolls in its own box rather than widening the card.
@@ -644,6 +672,16 @@ test('staff read the platform’s messages a day on the Usage tab (ADR-333)', as
   ).toBeVisible();
   const shares = await companyDays.locator('tbody td:nth-child(5)').allTextContents();
   expect(new Set(shares.map((share) => share.trim()))).toEqual(new Set(['None sent']));
+  // Nor any delivered or read (ADR-346): the note in place of their chart, and none in the table.
+  await expect(
+    page.getByText('The company sent no message in these 30 days, so none was delivered.', {
+      exact: true,
+    }),
+  ).toBeVisible();
+  for (const column of [6, 7]) {
+    const counts = await companyDays.locator(`tbody td:nth-child(${column})`).allTextContents();
+    expect(new Set(counts.map((count) => count.trim()))).toEqual(new Set(['0']));
+  }
   await expectNoHorizontalOverflow(page);
   // Its last 12 months (ADR-342), from the days the worker counts once they end: drawn, or none
   // counted yet, or none of those counted with a message.

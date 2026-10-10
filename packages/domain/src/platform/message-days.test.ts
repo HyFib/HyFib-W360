@@ -31,8 +31,15 @@ function answering(answers: { rows: unknown[] }[]) {
   return { tx, statements };
 }
 
-const day = (date: string, counted: boolean, outbound = 0, failed = 0, inbound = 0) =>
-  ({ day: date, outbound, failed, inbound, counted }) satisfies KeptMessageDay;
+const day = (
+  date: string,
+  counted: boolean,
+  outbound = 0,
+  failed = 0,
+  inbound = 0,
+  delivered: number | null = null,
+  read: number | null = null,
+) => ({ day: date, outbound, failed, inbound, counted, delivered, read }) satisfies KeptMessageDay;
 
 describe('the year of messages a day (ADR-341)', () => {
   it('keeps a year, counted a few days a run by one job at a time', () => {
@@ -43,11 +50,12 @@ describe('the year of messages a day (ADR-341)', () => {
 
   it('draws every day when all are counted, without the flag', () => {
     expect(
-      messageYear([day('2026-10-06', true, 2, 1, 3), day('2026-10-07', true, 0, 0, 1)]),
+      messageYear([day('2026-10-06', true, 2, 1, 3), day('2026-10-07', true, 4, 0, 1, 3, 2)]),
     ).toEqual({
       days: [
-        { day: '2026-10-06', outbound: 2, failed: 1, inbound: 3 },
-        { day: '2026-10-07', outbound: 0, failed: 0, inbound: 1 },
+        // Counted before the deliveries were (ADR-346): none yet.
+        { day: '2026-10-06', outbound: 2, failed: 1, inbound: 3, delivered: null, read: null },
+        { day: '2026-10-07', outbound: 4, failed: 0, inbound: 1, delivered: 3, read: 2 },
       ],
       uncounted: 0,
     });
@@ -64,8 +72,8 @@ describe('the year of messages a day (ADR-341)', () => {
     ]);
     expect(year).toEqual({
       days: [
-        { day: '2026-10-04', outbound: 1, failed: 0, inbound: 0 },
-        { day: '2026-10-05', outbound: 2, failed: 0, inbound: 0 },
+        { day: '2026-10-04', outbound: 1, failed: 0, inbound: 0, delivered: null, read: null },
+        { day: '2026-10-05', outbound: 2, failed: 0, inbound: 0, delivered: null, read: null },
       ],
       uncounted: 3,
     });
@@ -83,18 +91,69 @@ describe('the year of messages a day (ADR-341)', () => {
     const { tx, statements } = answering([
       {
         rows: [
-          { day: '2026-10-07', outbound: '4', failed: 1, inbound: '2', counted: true },
-          { day: '2026-10-08', outbound: 0, failed: 0, inbound: 0, counted: false },
+          {
+            day: '2026-10-07',
+            outbound: '4',
+            failed: 1,
+            inbound: '2',
+            counted: true,
+            delivered: '3',
+            read: 0,
+          },
+          // Counted before the deliveries were (ADR-346), and not counted at all.
+          {
+            day: '2026-10-08',
+            outbound: 2,
+            failed: 0,
+            inbound: 0,
+            counted: true,
+            delivered: null,
+            read: null,
+          },
+          {
+            day: '2026-10-09',
+            outbound: 0,
+            failed: 0,
+            inbound: 0,
+            counted: false,
+            delivered: null,
+            read: null,
+          },
         ],
       },
     ]);
     expect(await keptMessageDays(tx as unknown as Tx, 365, 'tenant-1')).toEqual([
-      { day: '2026-10-07', outbound: 4, failed: 1, inbound: 2, counted: true },
-      { day: '2026-10-08', outbound: 0, failed: 0, inbound: 0, counted: false },
+      {
+        day: '2026-10-07',
+        outbound: 4,
+        failed: 1,
+        inbound: 2,
+        counted: true,
+        delivered: 3,
+        read: 0,
+      },
+      {
+        day: '2026-10-08',
+        outbound: 2,
+        failed: 0,
+        inbound: 0,
+        counted: true,
+        delivered: null,
+        read: null,
+      },
+      {
+        day: '2026-10-09',
+        outbound: 0,
+        failed: 0,
+        inbound: 0,
+        counted: false,
+        delivered: null,
+        read: null,
+      },
     ]);
     expect(statements).toEqual([
       {
-        sql: "select to_char(utc_day, 'YYYY-MM-DD') as day, outbound, failed, inbound, counted from ops.platform_ops_message_days($1::int, $2::uuid) order by utc_day",
+        sql: "select to_char(utc_day, 'YYYY-MM-DD') as day, outbound, failed, inbound, counted, delivered, read from ops.platform_ops_message_days($1::int, $2::uuid) order by utc_day",
         params: [365, 'tenant-1'],
       },
     ]);

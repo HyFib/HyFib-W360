@@ -3832,6 +3832,15 @@ first deletes, in a transaction of its own that a failing count never holds back
 than 400 days and those of companies deleted in the last 30 days, which a count racing a deletion
 as it finishes could leave.
 
+**Delivered and read (ADR-346).** Under the failed sends' chart, the Usage tab and a company's page
+draw the share of each day's sends delivered (their status delivered, read or played) and read (read
+or played). Read counts what WhatsApp reported read. The latest days' shares grow as statuses
+arrive, so today's is low while its sends are on their way. After the deployment of 0264 the worker
+counts every day of the year again, 3 a minute, newest first, for about two hours: until it has, the
+year's chart has gaps, or a note that the deliveries are not counted yet, and the table says "Not
+counted". Gaps that stay long after a deployment mean the counting job does not run or fails, as for
+the days not counted.
+
 **Acknowledging failures (ADR-141).** On Current failures, the administrator who takes a failure
 opens Acknowledge on its row and writes a note of 10 to 500 characters: what was done or found
 ("Called the owner: they will reconnect the number today", "Meta's status page reports an outage").

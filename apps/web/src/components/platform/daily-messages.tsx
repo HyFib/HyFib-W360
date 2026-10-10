@@ -1,18 +1,31 @@
 import { EmptyState, TBody, TD, TH, THead, TR, Table } from '@w360/ui';
 import type { OpsDailyActivity } from '@w360/domain';
-import { chartShare, failedShare } from '@w360/domain/ops-chart';
-import { DailyFailedShareChart, DailyMessagesChart } from '@/components/platform/daily-chart';
+import { chartShare, deliveredShare, failedShare } from '@w360/domain/ops-chart';
+import {
+  DailyDeliveryShareChart,
+  DailyFailedShareChart,
+  DailyMessagesChart,
+} from '@/components/platform/daily-chart';
+
+/** A count of the sent, with its share of them: "970 (97%)"; "Not counted" before it is (ADR-346). */
+const ofSent = (count: number | null, sent: number) =>
+  count === null
+    ? 'Not counted'
+    : sent > 0
+      ? `${count} (${chartShare(count / sent)})`
+      : String(count);
 
 /**
  * Messages a day (ADR-333, ADR-334): the chart of the days, under it the share of each day's sends
- * that failed (ADR-344), and the folded table of every day's numbers; or, when no message was sent
- * or received in them, an empty state saying so.
+ * that failed (ADR-344) and the shares delivered and read (ADR-346), and the folded table of every
+ * day's numbers; or, when no message was sent or received in them, an empty state saying so.
  */
 export function DailyMessages({
   days,
   label,
   empty,
   failed,
+  delivered,
   names = { legend: 'Lines', summary: 'Table of the days', table: 'Messages a day' },
 }: {
   days: OpsDailyActivity[];
@@ -25,6 +38,11 @@ export function DailyMessages({
    * period its caption ends with, so the two captions of a page with two charts differ.
    */
   failed: { label: string; noneSent: string; period: string };
+  /**
+   * The delivery chart's accessible name and its legend's, told apart on a page with two, and what
+   * it says when nothing was sent.
+   */
+  delivered: { label: string; legend: string; noneSent: string };
   /** The legend's, the folded table's and its summary's names, told apart on a page with two. */
   names?: { legend: string; summary: string; table: string };
 }) {
@@ -45,6 +63,26 @@ export function DailyMessages({
           <p className="text-sm text-muted-foreground">{failed.noneSent}</p>
         )}
       </figure>
+      <figure className="grid min-w-0 gap-2">
+        <figcaption className="text-sm font-medium">
+          Sends delivered and read, as shares of those sent, {failed.period}
+        </figcaption>
+        {!sent ? (
+          <p className="text-sm text-muted-foreground">{delivered.noneSent}</p>
+        ) : days.some((d) => deliveredShare(d) !== null) ? (
+          <DailyDeliveryShareChart
+            days={days}
+            label={delivered.label}
+            legendLabel={delivered.legend}
+          />
+        ) : (
+          // Kept days counted before their deliveries were, until the worker counts them again.
+          <p className="text-sm text-muted-foreground">
+            The deliveries of these days are not counted yet: the worker counts each day again, a
+            few days a minute.
+          </p>
+        )}
+      </figure>
       {/* min-w-0: the table scrolls in its box rather than widening the card on a phone. */}
       <details className="min-w-0 rounded-md border border-border p-3">
         <summary className="cursor-pointer text-sm font-medium">{names.summary}</summary>
@@ -56,6 +94,8 @@ export function DailyMessages({
               <TH>Failed</TH>
               <TH>Received</TH>
               <TH>Share failed</TH>
+              <TH>Delivered</TH>
+              <TH>Read</TH>
             </TR>
           </THead>
           <TBody>
@@ -70,6 +110,10 @@ export function DailyMessages({
                   <TD className="tabular-nums">
                     {share === null ? 'None sent' : chartShare(share)}
                   </TD>
+                  <TD className="whitespace-nowrap tabular-nums">
+                    {ofSent(d.delivered, d.outbound)}
+                  </TD>
+                  <TD className="whitespace-nowrap tabular-nums">{ofSent(d.read, d.outbound)}</TD>
                 </TR>
               );
             })}

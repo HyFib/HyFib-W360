@@ -42,11 +42,13 @@ export function messageYear(days: readonly KeptMessageDay[]): MessageYear {
   let start = end;
   while (start > 0 && counted(start - 1)) start -= 1;
   return {
-    days: days.slice(start, end).map(({ day, outbound, failed, inbound }) => ({
+    days: days.slice(start, end).map(({ day, outbound, failed, inbound, delivered, read }) => ({
       day,
       outbound,
       failed,
       inbound,
+      delivered,
+      read,
     })),
     uncounted: days.filter((d) => !d.counted).length,
   };
@@ -67,8 +69,11 @@ export async function keptMessageDays(
     failed: number;
     inbound: number;
     counted: boolean;
+    delivered: number | null;
+    read: number | null;
   }>(sql`
-    select to_char(utc_day, 'YYYY-MM-DD') as day, outbound, failed, inbound, counted
+    select to_char(utc_day, 'YYYY-MM-DD') as day, outbound, failed, inbound, counted, delivered,
+           read
       from ops.platform_ops_message_days(${days}::int, ${tenantId}::uuid)
      order by utc_day`);
   return result.rows.map((r) => ({
@@ -77,6 +82,9 @@ export async function keptMessageDays(
     failed: Number(r.failed),
     inbound: Number(r.inbound),
     counted: r.counted === true,
+    // Null on a day counted before the deliveries were (0264), until the worker counts it again.
+    delivered: r.delivered === null ? null : Number(r.delivered),
+    read: r.read === null ? null : Number(r.read),
   }));
 }
 

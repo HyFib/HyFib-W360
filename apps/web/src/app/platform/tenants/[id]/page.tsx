@@ -744,6 +744,13 @@ export default async function PlatformTenantPage({ params }: { params: Promise<{
                     noneSent: 'The company sent no message in these 30 days, so none failed.',
                     period: '30 days',
                   }}
+                  delivered={{
+                    label:
+                      "Share of this company's messages sent that were delivered and read each UTC day, 30 days",
+                    legend: 'Delivered and read, legend',
+                    noneSent:
+                      'The company sent no message in these 30 days, so none was delivered.',
+                  }}
                 />
               </section>
               {/* Its year, from the counts the worker keeps as days pass (ADR-342). */}
@@ -781,6 +788,13 @@ export default async function PlatformTenantPage({ params }: { params: Promise<{
                         "Share of this company's messages sent that failed each UTC day, the last 12 months",
                       noneSent: 'The company sent no message in the days counted, so none failed.',
                       period: 'the last 12 months',
+                    }}
+                    delivered={{
+                      label:
+                        "Share of this company's messages sent that were delivered and read each UTC day, the last 12 months",
+                      legend: 'Delivered and read in the 12 months, legend',
+                      noneSent:
+                        'The company sent no message in the days counted, so none was delivered.',
                     }}
                     // Unlike the 30 days' chart above: names matched in part never find both.
                     names={{

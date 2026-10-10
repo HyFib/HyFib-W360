@@ -1,24 +1,30 @@
 import { describe, expect, it } from 'vitest';
 import {
   DAILY_CHART_SERIES,
+  DELIVERY_CHART_SERIES,
   chartCount,
   chartDayLabel,
   chartShare,
   chartStep,
   dailyChartLayout,
+  deliveredShare,
+  deliveryShareLayout,
   failedShare,
   failedShareLayout,
   nearestDayIndex,
+  readShare,
   sharedPlotEdges,
   type DailyChartDay,
 } from './ops-chart';
 
-const day = (date: string, outbound: number, inbound: number, failed = 0): DailyChartDay => ({
-  day: date,
-  outbound,
-  failed,
-  inbound,
-});
+const day = (
+  date: string,
+  outbound: number,
+  inbound: number,
+  failed = 0,
+  delivered: number | null = null,
+  read: number | null = null,
+): DailyChartDay => ({ day: date, outbound, failed, inbound, delivered, read });
 
 describe('the messages a day chart (ADR-333)', () => {
   it('writes counts and days the same way on the server and in the browser', () => {
@@ -319,18 +325,23 @@ describe('the failed sends a day chart (ADR-344)', () => {
       day('2026-10-09', 25, 8, 2),
     ];
     // Alone, the messages chart's labels take 26 pixels and its end labels 120; the shares' labels
-    // ("10%") take 33 and their end label 60.
+    // ("10%") take 33 and their end label 60; the deliveries' ("100%", ADR-346) take 40.
     expect(dailyChartLayout(days, 720, 240).plot).toMatchObject({ left: 26, right: 600 });
     expect(failedShareLayout(days, 720, 240).plot).toMatchObject({ left: 33, right: 660 });
+    expect(deliveryShareLayout(days, 720, 240).plot).toMatchObject({ left: 40, right: 704 });
     const edges = sharedPlotEdges(days, 720, 240);
-    expect(edges).toEqual({ left: 33, right: 600 });
+    expect(edges).toEqual({ left: 40, right: 600 });
     const messages = dailyChartLayout(days, 720, 240, edges);
     const shares = failedShareLayout(days, 720, 240, edges);
+    const deliveries = deliveryShareLayout(days, 720, 240, edges);
     expect(messages.plot).toMatchObject(edges);
     expect(shares.plot).toMatchObject(edges);
+    expect(deliveries.plot).toMatchObject(edges);
     expect(shares.xs).toEqual(messages.xs);
+    expect(deliveries.xs).toEqual(messages.xs);
     expect(shares.xTicks).toEqual(messages.xTicks);
-    expect(messages.xs).toEqual([33, 316.5, 600]);
+    expect(deliveries.xTicks).toEqual(messages.xTicks);
+    expect(messages.xs).toEqual([40, 320, 600]);
     // The scales stay each chart's own.
     expect(messages.yTicks.map((t) => t.label)).toEqual(['0', '10', '20', '30']);
     expect(shares.yTicks.map((t) => t.label)).toEqual(['0%', '5%', '10%']);
@@ -341,5 +352,90 @@ describe('the failed sends a day chart (ADR-344)', () => {
     const closeEdges = sharedPlotEdges(close, 720, 240);
     expect(closeEdges.right).toBe(660);
     expect(dailyChartLayout(close, 720, 240, closeEdges).plot.right).toBe(660);
+  });
+});
+
+describe('the sends delivered and read a day chart (ADR-346)', () => {
+  it('gives a day’s sends delivered and read as shares of those sent, none without sends or counts', () => {
+    const counted = day('2026-10-09', 8, 0, 1, 6, 4);
+    expect(deliveredShare(counted)).toBe(0.75);
+    expect(readShare(counted)).toBe(0.5);
+    // Nothing sent: no share, though messages were received.
+    expect(deliveredShare(day('2026-10-09', 0, 5, 0, 0, 0))).toBeNull();
+    expect(readShare(day('2026-10-09', 0, 5, 0, 0, 0))).toBeNull();
+    // A kept day counted before its deliveries were: no share until it is counted again.
+    expect(deliveredShare(day('2026-10-09', 8, 0))).toBeNull();
+    expect(readShare(day('2026-10-09', 8, 0))).toBeNull();
+    expect(DELIVERY_CHART_SERIES.map((s) => [s.key, s.label])).toEqual([
+      ['delivered', 'Delivered'],
+      ['read', 'Read'],
+    ]);
+  });
+
+  it('draws both shares from 0% to 100%, broken at days without one, lone days as dots', () => {
+    const days = [
+      day('2026-10-04', 4, 0, 0, 4, 2),
+      day('2026-10-05', 10, 1, 1, 9, 5),
+      // Nothing sent, then a day counted before its deliveries were.
+      day('2026-10-06', 0, 3),
+      day('2026-10-07', 8, 0, 2, 6, 2),
+      day('2026-10-08', 8, 2),
+      day('2026-10-09', 5, 0, 0, 4, 1),
+    ];
+    const layout = deliveryShareLayout(days, 720, 240);
+    expect(layout.yTicks).toEqual([
+      { value: 0, y: 212, label: '0%' },
+      { value: 25, y: 162, label: '25%' },
+      { value: 50, y: 112, label: '50%' },
+      { value: 75, y: 62, label: '75%' },
+      { value: 100, y: 12, label: '100%' },
+    ]);
+    // The last day's shares are written at the lines' ends, with the room they take on the right.
+    expect(layout.endLabels).toBe(true);
+    expect(layout.plot).toEqual({ left: 40, right: 600, top: 12, bottom: 212 });
+    expect(layout.xs).toEqual([40, 152, 264, 376, 488, 600]);
+    expect(layout.xTicks).toEqual(
+      dailyChartLayout(days, 720, 240, { left: 40, right: 600 }).xTicks,
+    );
+    expect(layout.series).toEqual([
+      {
+        key: 'delivered',
+        label: 'Delivered',
+        path: 'M40 12 L152 32 M376 62 M600 52',
+        ys: [12, 32, null, 62, null, 52],
+        lone: [3, 5],
+        end: { x: 600, y: 52, share: 0.8 },
+      },
+      {
+        key: 'read',
+        label: 'Read',
+        path: 'M40 112 L152 112 M376 162 M600 172',
+        ys: [112, 112, null, 162, null, 172],
+        lone: [3, 5],
+        end: { x: 600, y: 172, share: 0.2 },
+      },
+    ]);
+  });
+
+  it('writes no end labels where the ends nearly meet, the chart is narrow or the last day has no share', () => {
+    const close = [day('2026-10-08', 4, 0, 0, 4, 4), day('2026-10-09', 20, 0, 0, 10, 9)];
+    // 50% and 45%: 10 pixels apart.
+    expect(deliveryShareLayout(close, 720, 240).endLabels).toBe(false);
+    expect(deliveryShareLayout(close, 720, 240).plot.right).toBe(704);
+    const apart = [day('2026-10-08', 4, 0, 0, 4, 4), day('2026-10-09', 20, 0, 0, 20, 5)];
+    expect(deliveryShareLayout(apart, 720, 240).endLabels).toBe(true);
+    expect(deliveryShareLayout(apart, 479, 240).endLabels).toBe(false);
+    expect(deliveryShareLayout(apart, 480, 240).endLabels).toBe(true);
+    const lastWithout = [day('2026-10-08', 4, 0, 0, 4, 1), day('2026-10-09', 0, 2)];
+    const without = deliveryShareLayout(lastWithout, 720, 240);
+    expect(without.endLabels).toBe(false);
+    expect(without.series.map((s) => s.end)).toEqual([null, null]);
+    expect(without.series.map((s) => s.lone)).toEqual([[0], [0]]);
+    const empty = deliveryShareLayout([], 720, 240);
+    expect(empty.series.map((s) => [s.path, s.end])).toEqual([
+      ['', null],
+      ['', null],
+    ]);
+    expect(empty.endLabels).toBe(false);
   });
 });

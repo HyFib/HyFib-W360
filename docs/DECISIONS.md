@@ -13518,3 +13518,55 @@ since they send the kinds they know.
 
 Not built: the owners' other notices in a channel, several channels, a channel per alert, and
 formats other than a JSON `text` member.
+
+## ADR-346 Sends delivered and read a day, as shares of those sent (P5-10) (2026-10-10)
+
+Context: the messages a day charts draw each UTC day's messages sent and received and, under them,
+the share of the sends that failed (ADR-344). Whether the sends reached the customers was left to
+WhatsApp Manager: a day when deliveries fell, as when a number's quality drops or a template is
+paused, looked like any other on the Usage tab and a company's page. BACKLOG listed delivered or
+read shares among the charts remaining.
+
+Decision:
+
+- **What counts:** a message's status only moves forward (sent, delivered, read, played for a voice
+  message), so its status says the furthest it got. A send was delivered when its status is
+  delivered, read or played, and read when read or played. Both are counted among the outbound
+  messages, as the failed ones are, and given as shares of those sent. The counts never overlap
+  wrongly: a message has one status, so a send counted delivered is not counted failed (a failure
+  reported after a delivery does not undo it, messaging/status.ts), and one counted read is counted
+  delivered. Read counts the messages WhatsApp reported read; whether a customer who turned read
+  receipts off is ever reported could not be checked here, since Meta's documentation was not
+  reachable, so the read share may be lower than what was read.
+- **The live days and the kept ones:** `ops.platform_ops_daily_activity` counts both for the window
+  (0264, replacing 0255's function with two more columns, read by name). The kept counts gain
+  `delivered` and `read` (null on a row counted before 0264), and
+  `ops.platform_message_days_counted.deliveries` says whether a day was counted with them: the
+  counting job counts again, newest first, every day counted without them, as it counts the days
+  never counted, so after a deployment the year has them within about two hours.
+  `ops.platform_ops_message_days` gives null for a day counted without them.
+- **A chart of their own:** under the failed sends' chart, "Sends delivered and read, as shares of
+  those sent", its caption ending with the days drawn, draws two lines on an axis from 0% to 100%
+  with a legend: Delivered solid, Read dashed, so the two differ without their colours. A day
+  without sends, or whose deliveries are not counted yet, breaks the lines; a lone day is a dot; the
+  last day's shares are written at the lines' ends where they fit and do not meet. The crosshair,
+  slider and tooltip are the shared frame (`DayChartFrame`), on the plot's edges all three charts
+  share. A note replaces the chart when nothing was sent, or when no day drawn has its deliveries
+  counted yet.
+- **Colour:** the fourth and fifth categorical slots (`--chart-4` yellow, `--chart-5` magenta),
+  checked with the palette validator against the card: their colour-vision separation passes light
+  and dark, but both are under 3:1 on the light card, so the lines' last shares are written at their
+  ends, the read line is dashed and the table gives every share: its new "Delivered" and "Read"
+  columns give each count with its share of the sent ("970 (97%)"), or "Not counted". The five slots
+  are told apart within each chart, not across all three: the validator's all-pairs check fails (in
+  dark mode, magenta and aqua are closest for deuteranopia), so no chart relies on another's
+  colours: each has its caption, and this one its legend.
+
+Consequences: staff see a day whose sends stopped reaching the customers, platform-wide or a
+company's, beside the day's failures. The latest days' shares grow as statuses arrive (today's sends
+may still be on their way); the 7 days before today are counted again once a day, and a status
+reported later than that is not among a kept day's counts. Every day of the year is counted again
+once after the deployment, its sent, failed and received too.
+
+Not built: other measures (failures by reason or by company), the shares in a CSV, and the time a
+send took to be delivered or read.
