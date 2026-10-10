@@ -1277,12 +1277,15 @@ verification, app review, Embedded Signup configuration).
   migrations 0266 and 0267: `store_order.cod_answered` when a customer's tap on a store's cash on
   delivery confirmation changes the answer kept, with the answer before it, the store's order and
   the store, never the store's customer details; the number filter narrows it).
+  **[Cash on delivery answer and store filters built; their database tests run only in CI]**
+  (ADR-349, migration 0268: an endpoint takes `store_order.cod_answered` only for chosen answers,
+  confirmed or cancelled, and for the orders of 1 to 20 chosen stores of the company).
   Remaining: filters for other event types and on a message's values other than its type and words,
   field value comparisons beyond
   values, words and ranges, other authentication (headers computed per delivery, other OAuth
   grants), mutual TLS, fixed egress addresses, other store events (the order messages a store
-  sends, a filter by store; the store's orders themselves are reported by the store, ADR-085), a
-  sequence number across events, load tests.
+  sends; the store's orders themselves are reported by the store, ADR-085), a sequence number across
+  events, load tests.
 - **P5-10 Platform ops screens** **[built, locally verified with test data only]** (ADR-054):
   `/platform/ops` with Overview, Onboarding (failed and abandoned signups, failed or stuck number
   setups, new companies without a number), Integrations (current failures with host-only labels,

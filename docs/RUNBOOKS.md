@@ -3385,6 +3385,18 @@ not yet made then fails as `event_gone`, and a replay fails the same way. An ord
 deleted stays in the copy and is sent with `storeOrder.deletedAt`. The body never holds the
 customer's details from the store; `contact` is the conversation's contact.
 
+**A receiver misses some cash on delivery answers, or one store's (ADR-349).** An endpoint can take
+chosen answers only, or the answers of chosen stores only. The endpoints list shows them ("Cash on
+delivery answers sent: …", "Stores whose cash on delivery answers are sent: …"), and the API answers
+`codAnswers` and `storeIds` (null takes every answer, or every store's). An answer is sent only when
+its answer and its order's store are on the lists, and its number too when the endpoint names
+numbers; when no endpoint takes it, it is not recorded at all, so there is nothing to replay. A
+store removed since it was chosen shows as "A removed store" and matches nothing; a store connected
+again after its removal is a new store, so tick it again. To take more, tick the answers under
+"Answers sent" or the stores under "Stores" (or choose "Every store’s answers") on the endpoint's
+page, or `PATCH /webhook-endpoints/{id}` with `codAnswers` or `storeIds` (null for every answer or
+store). Removing Cash on delivery answered clears both lists.
+
 **A receiver misses the events of a member's conversations (ADR-181).** An endpoint can take the
 message and conversation events of the conversations assigned to chosen members only. The endpoints
 list shows them ("Members whose conversations’ events are sent: …"), and the API answers

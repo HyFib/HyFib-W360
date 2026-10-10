@@ -1373,6 +1373,17 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    company with an endpoint taking it: add it to endpoints once the rollout ends, and turn it off
    before rolling web servers back.
 
+   Migration 0268 (ADR-349) adds `cod_answers` and `store_ids` to `app.webhook_endpoints` with checks
+   validated by reading the table, and replaces the confirmation trigger's
+   `app.webhook_capture_store_cod_answer` and `app.capture_webhook_event` with the same signatures
+   (keeping 0266's filters; the trigger now passes the store, which the capture takes out before the
+   event is stored); every endpoint starts without a list. Web servers of this release need it, as
+   their reads of endpoints name the columns; workers do not read them. Web servers from before it
+   neither show nor change the columns: until the web rollout ends, an old server's change that
+   drops `store_order.cod_answered` from an endpoint with a list fails on the checks, its other
+   changes keep the lists, and its API refuses `codAnswers` and `storeIds` (422) and leaves them out
+   of the endpoints it answers.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

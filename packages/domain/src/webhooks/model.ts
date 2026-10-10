@@ -4,6 +4,7 @@ import type {
   ContactFieldType,
   ContactSource,
   WebhookCampaignStatus,
+  WebhookCodAnswer,
   WebhookConsentChange,
   WebhookContactPart,
   WebhookConversationStatus,
@@ -32,6 +33,7 @@ export type {
   AutomationEndReason,
   ContactSource,
   WebhookCampaignStatus,
+  WebhookCodAnswer,
   WebhookConsentChange,
   WebhookContactPart,
   WebhookConversationStatus,
@@ -618,6 +620,21 @@ export const WEBHOOK_PAYMENT_LINK_STATUS_LABELS: Record<WebhookPaymentLinkStatus
 };
 
 /**
+ * The answers a `store_order.cod_answered` event reports, which an endpoint can choose (ADR-349),
+ * in the order the store's confirmation offers them.
+ */
+export const WEBHOOK_COD_ANSWERS = [
+  'confirmed',
+  'cancelled',
+] as const satisfies readonly WebhookCodAnswer[];
+
+/** How Settings names each answer an endpoint can choose (ADR-349), as an order's page does. */
+export const WEBHOOK_COD_ANSWER_LABELS: Record<WebhookCodAnswer, string> = {
+  confirmed: 'Confirmed',
+  cancelled: 'Cancelled',
+};
+
+/**
  * The statuses a `deal.status_changed` event reports, which an endpoint can choose (ADR-309), in
  * the order the CRM lists them: `open` is a deal reopened.
  */
@@ -1157,6 +1174,11 @@ export const WEBHOOK_LIMITS = {
   contactFields: 50,
   /** The campaigns an endpoint can choose to take the statuses and changes of (ADR-185). */
   campaigns: 50,
+  /**
+   * The stores an endpoint can choose to take the cash on delivery answers of (ADR-349): a company
+   * has at most 5 at once, and a store removed since it was chosen stays on the list.
+   */
+  stores: 20,
   /** The newest campaigns Settings offers to choose from (ADR-185); the API takes any of them. */
   campaignChoices: 200,
   /** The CRM pipelines an endpoint can choose to take the deals' events of (ADR-263). */
@@ -1458,6 +1480,31 @@ export const webhookCampaignText = (campaign: WebhookEndpointCampaign): string =
   campaign.status === null
     ? campaign.name
     : `${campaign.name} (${WEBHOOK_CAMPAIGN_STATUS_LABELS[campaign.status]})`;
+
+/**
+ * A connected store of the company, which an endpoint can choose to take the cash on delivery
+ * answers of (ADR-349).
+ */
+export interface WebhookStoreChoice {
+  id: string;
+  /** Its name as the store gives it, else its address (`webhookStoreLabel`). */
+  label: string;
+}
+
+/** A store an endpoint takes the cash on delivery answers of (ADR-349), as stored. */
+export interface WebhookEndpointStore {
+  id: string;
+  /** Its name or address; null for a store removed since it was chosen, which matches nothing. */
+  label: string | null;
+}
+
+/** How a store is named for an endpoint (ADR-349): its name as the store gives it, else its address. */
+export const webhookStoreLabel = (store: { name: string | null; storeUrl: string }): string =>
+  store.name?.trim() || store.storeUrl;
+
+/** A store as Settings → Webhooks lists it. */
+export const webhookStoreText = (store: WebhookEndpointStore): string =>
+  store.label ?? 'A removed store';
 
 /** Whether an endpoint with these events takes events of campaigns, and can choose campaigns. */
 export function webhookTakesCampaignEvents(eventTypes: readonly WebhookEventType[]): boolean {

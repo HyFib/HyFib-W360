@@ -18,6 +18,7 @@ import {
   automations,
   campaigns,
   channelAccounts,
+  commerceStores,
   contactFields,
   crmPipelines,
   crmStages,
@@ -62,6 +63,7 @@ import {
   WEBHOOK_LIMITS,
   WEBHOOK_ORDER_STATUSES,
   WEBHOOK_PAYMENT_LINK_STATUSES,
+  WEBHOOK_COD_ANSWERS,
   WEBHOOK_RUN_STEP_OUTCOMES,
   WEBHOOK_RUN_STEP_NODE_TYPES,
   WEBHOOK_ORDER_CHANGE_MAKERS,
@@ -124,6 +126,10 @@ import {
   type WebhookMessageStatus,
   type WebhookOrderStatus,
   type WebhookPaymentLinkStatus,
+  type WebhookCodAnswer,
+  type WebhookEndpointStore,
+  type WebhookStoreChoice,
+  webhookStoreLabel,
   type WebhookRunStepOutcome,
   type WebhookRunStepNodeType,
   type WebhookOrderChangeMaker,
@@ -1486,6 +1492,88 @@ export async function assertWebhookCampaigns(
   if (index === -1) return;
   throw new AppError('validation_failed', WEBHOOK_CAMPAIGNS_NOT_FOUND, {
     issues: [{ path: `campaignIds.${index}`, message: WEBHOOK_CAMPAIGNS_NOT_FOUND }],
+  });
+}
+
+/**
+ * The answers an endpoint takes as `store_order.cod_answered` (ADR-349), in the order the store's
+ * confirmation offers them; null takes every answer.
+ */
+export const webhookCodAnswersSchema = z
+  .array(z.enum(WEBHOOK_COD_ANSWERS, { error: 'Choose answers from the list.' }))
+  .min(1, 'Choose at least one answer, or take every answer.')
+  .max(WEBHOOK_COD_ANSWERS.length, 'Give each answer once.')
+  .transform((chosen) => WEBHOOK_COD_ANSWERS.filter((answer) => chosen.includes(answer)))
+  .nullable();
+
+export const WEBHOOK_COD_ANSWERS_NEED_THE_EVENT =
+  'Choose answers only for an endpoint that receives Cash on delivery answered.';
+
+/**
+ * The answers an endpoint keeps after it is added or changed: every answer (null) unless it takes
+ * `store_order.cod_answered`; then those given, or else the ones it had.
+ */
+export function webhookCodAnswersFor(
+  eventTypes: readonly WebhookEventType[],
+  given: readonly WebhookCodAnswer[] | null | undefined,
+  current: readonly WebhookCodAnswer[] | null,
+): WebhookCodAnswer[] | null {
+  if (!eventTypes.includes('store_order.cod_answered')) return null;
+  const kept = given === undefined ? current : given;
+  return kept ? [...kept] : null;
+}
+
+/**
+ * The connected stores whose cash on delivery answers an endpoint takes (ADR-349), each once; null
+ * takes every store's, including stores connected later.
+ */
+export const webhookStoreIdsSchema = z
+  .array(z.uuid({ error: 'Choose stores from the list.' }))
+  .min(1, 'Choose at least one store, or take every store.')
+  .max(WEBHOOK_LIMITS.stores, `Choose at most ${WEBHOOK_LIMITS.stores} stores.`)
+  .transform((ids) => [...new Set(ids.map((id) => id.toLowerCase()))])
+  .nullable();
+
+export const WEBHOOK_STORES_NEED_THE_EVENT =
+  'Choose stores only for an endpoint that receives Cash on delivery answered.';
+
+export const WEBHOOK_STORES_NOT_FOUND = 'Choose stores of this company.';
+
+/**
+ * The stores an endpoint keeps after it is added or changed: every store (null) unless it takes
+ * `store_order.cod_answered`; then those given, or else the ones it had.
+ */
+export function webhookStoreIdsFor(
+  eventTypes: readonly WebhookEventType[],
+  given: readonly string[] | null | undefined,
+  current: readonly string[] | null,
+): string[] | null {
+  if (!eventTypes.includes('store_order.cod_answered')) return null;
+  const kept = given === undefined ? current : given;
+  return kept ? [...kept] : null;
+}
+
+/**
+ * Refuses stores a list adds to an endpoint unless each is the company's (ADR-349). Stores the list
+ * already held may have been removed since, and stay. `tx` is in the company's scope.
+ */
+export async function assertWebhookStores(
+  tx: Tx,
+  tenantId: string,
+  ids: readonly string[] | null | undefined,
+  held: readonly string[] | null = null,
+): Promise<void> {
+  const added = (ids ?? []).filter((id) => !held?.includes(id));
+  if (added.length === 0) return;
+  const rows = await tx
+    .select({ id: commerceStores.id })
+    .from(commerceStores)
+    .where(and(eq(commerceStores.tenantId, tenantId), inArray(commerceStores.id, added)));
+  const found = new Set(rows.map((r) => r.id));
+  const index = (ids ?? []).findIndex((id) => added.includes(id) && !found.has(id));
+  if (index === -1) return;
+  throw new AppError('validation_failed', WEBHOOK_STORES_NOT_FOUND, {
+    issues: [{ path: `storeIds.${index}`, message: WEBHOOK_STORES_NOT_FOUND }],
   });
 }
 
@@ -2905,6 +2993,15 @@ const endpointFields = z.object({
    * Given, the Payment Link statuses it takes (null: every status, ADR-308); left out, they stay.
    */
   paymentLinkStatuses: webhookPaymentLinkStatusesSchema.optional(),
+  /**
+   * Given, the cash on delivery answers it takes (null: every answer, ADR-349); left out, they stay.
+   */
+  codAnswers: webhookCodAnswersSchema.optional(),
+  /**
+   * Given, the stores whose cash on delivery answers it takes (null: every store's, ADR-349); left
+   * out, they stay.
+   */
+  storeIds: webhookStoreIdsSchema.optional(),
   /** Given, the outcomes of the steps it takes (null: every step, ADR-327); left out, they stay. */
   runStepOutcomes: webhookRunStepOutcomesSchema.optional(),
   /** Given, the kinds of node whose steps it takes (null: every step, ADR-328); left out, kept. */
@@ -3151,6 +3248,18 @@ const runStepOutcomesNeedTheEvent = {
   check: (data: { eventTypes: WebhookEventType[]; runStepOutcomes?: unknown }) =>
     !data.runStepOutcomes || data.eventTypes.includes('automation.run_step'),
   options: { path: ['runStepOutcomes'], message: WEBHOOK_RUN_STEP_OUTCOMES_NEED_THE_EVENT },
+};
+/** Answers are chosen only for an endpoint that takes cash on delivery answers (ADR-349). */
+const codAnswersNeedTheEvent = {
+  check: (data: { eventTypes: WebhookEventType[]; codAnswers?: unknown }) =>
+    !data.codAnswers || data.eventTypes.includes('store_order.cod_answered'),
+  options: { path: ['codAnswers'], message: WEBHOOK_COD_ANSWERS_NEED_THE_EVENT },
+};
+/** Stores are chosen only for an endpoint that takes cash on delivery answers (ADR-349). */
+const storesNeedTheEvent = {
+  check: (data: { eventTypes: WebhookEventType[]; storeIds?: unknown }) =>
+    !data.storeIds || data.eventTypes.includes('store_order.cod_answered'),
+  options: { path: ['storeIds'], message: WEBHOOK_STORES_NEED_THE_EVENT },
 };
 /** Kinds of step are chosen only for an endpoint that takes run steps (ADR-328). */
 const runStepNodeTypesNeedTheEvent = {
@@ -3448,6 +3557,8 @@ const endpointSchema = endpointFields
   .refine(orderStatusesNeedTheEvent.check, orderStatusesNeedTheEvent.options)
   .refine(paymentLinkStatusesNeedTheEvent.check, paymentLinkStatusesNeedTheEvent.options)
   .refine(runStepOutcomesNeedTheEvent.check, runStepOutcomesNeedTheEvent.options)
+  .refine(codAnswersNeedTheEvent.check, codAnswersNeedTheEvent.options)
+  .refine(storesNeedTheEvent.check, storesNeedTheEvent.options)
   .refine(runStepNodeTypesNeedTheEvent.check, runStepNodeTypesNeedTheEvent.options)
   .refine(orderChangeMakersNeedTheEvent.check, orderChangeMakersNeedTheEvent.options)
   .refine(orderExcludedApiKeysNeedTheEvent.check, orderExcludedApiKeysNeedTheEvent.options)
@@ -3504,6 +3615,8 @@ const updateSchema = endpointFields
   .refine(orderStatusesNeedTheEvent.check, orderStatusesNeedTheEvent.options)
   .refine(paymentLinkStatusesNeedTheEvent.check, paymentLinkStatusesNeedTheEvent.options)
   .refine(runStepOutcomesNeedTheEvent.check, runStepOutcomesNeedTheEvent.options)
+  .refine(codAnswersNeedTheEvent.check, codAnswersNeedTheEvent.options)
+  .refine(storesNeedTheEvent.check, storesNeedTheEvent.options)
   .refine(runStepNodeTypesNeedTheEvent.check, runStepNodeTypesNeedTheEvent.options)
   .refine(orderChangeMakersNeedTheEvent.check, orderChangeMakersNeedTheEvent.options)
   .refine(orderExcludedApiKeysNeedTheEvent.check, orderExcludedApiKeysNeedTheEvent.options)
@@ -3603,6 +3716,13 @@ export interface WebhookEndpointView {
   orderStatuses: WebhookOrderStatus[] | null;
   /** The Payment Link statuses it takes (ADR-308); null takes every status. */
   paymentLinkStatuses: WebhookPaymentLinkStatus[] | null;
+  /** The cash on delivery answers it takes (ADR-349); null takes every answer. */
+  codAnswers: WebhookCodAnswer[] | null;
+  /**
+   * The stores whose cash on delivery answers it takes (ADR-349), as stored, named; null takes
+   * every store's.
+   */
+  stores: WebhookEndpointStore[] | null;
   /** The outcomes of the run steps it takes (ADR-327); null takes every step. */
   runStepOutcomes: WebhookRunStepOutcome[] | null;
   /** The kinds of node whose run steps it takes (ADR-328); null takes every step. */
@@ -4005,6 +4125,8 @@ export async function lockWebhookEndpoint(
       campaignStatuses: webhookEndpoints.campaignStatuses,
       orderStatuses: webhookEndpoints.orderStatuses,
       paymentLinkStatuses: webhookEndpoints.paymentLinkStatuses,
+      codAnswers: webhookEndpoints.codAnswers,
+      storeIds: webhookEndpoints.storeIds,
       runStepOutcomes: webhookEndpoints.runStepOutcomes,
       runStepNodeTypes: webhookEndpoints.runStepNodeTypes,
       orderChangeMakers: webhookEndpoints.orderChangeMakers,
@@ -4096,6 +4218,8 @@ export async function insertWebhookEndpoint(
     campaignStatuses: WebhookCampaignStatus[] | null;
     orderStatuses: WebhookOrderStatus[] | null;
     paymentLinkStatuses: WebhookPaymentLinkStatus[] | null;
+    codAnswers: WebhookCodAnswer[] | null;
+    storeIds: string[] | null;
     orderChangeMakers: WebhookOrderChangeMaker[] | null;
     runStepOutcomes: WebhookRunStepOutcome[] | null;
     runStepNodeTypes: WebhookRunStepNodeType[] | null;
@@ -4176,6 +4300,8 @@ export async function insertWebhookEndpoint(
     campaignStatuses: input.campaignStatuses,
     orderStatuses: input.orderStatuses,
     paymentLinkStatuses: input.paymentLinkStatuses,
+    codAnswers: input.codAnswers,
+    storeIds: input.storeIds,
     runStepOutcomes: input.runStepOutcomes,
     runStepNodeTypes: input.runStepNodeTypes,
     orderChangeMakers: input.orderChangeMakers,
@@ -4605,6 +4731,8 @@ export function createWebhooksService(deps: {
               campaignStatuses: webhookEndpoints.campaignStatuses,
               orderStatuses: webhookEndpoints.orderStatuses,
               paymentLinkStatuses: webhookEndpoints.paymentLinkStatuses,
+              codAnswers: webhookEndpoints.codAnswers,
+              storeIds: webhookEndpoints.storeIds,
               runStepOutcomes: webhookEndpoints.runStepOutcomes,
               runStepNodeTypes: webhookEndpoints.runStepNodeTypes,
               orderChangeMakers: webhookEndpoints.orderChangeMakers,
@@ -4754,6 +4882,26 @@ export function createWebhooksService(deps: {
                     and(eq(campaigns.tenantId, ctx.tenant.id), inArray(campaigns.id, campaignIds)),
                   );
           const campaignById = new Map(namedCampaigns.map((c) => [c.id, c]));
+          // The stores endpoints chose for cash on delivery answers (ADR-349), named; a store
+          // removed since it was chosen has no row.
+          const listedStoreIds = [...new Set(rows.flatMap((r) => r.storeIds ?? []))];
+          const namedStores =
+            listedStoreIds.length === 0
+              ? []
+              : await tx
+                  .select({
+                    id: commerceStores.id,
+                    name: commerceStores.name,
+                    storeUrl: commerceStores.storeUrl,
+                  })
+                  .from(commerceStores)
+                  .where(
+                    and(
+                      eq(commerceStores.tenantId, ctx.tenant.id),
+                      inArray(commerceStores.id, listedStoreIds),
+                    ),
+                  );
+          const storeLabelById = new Map(namedStores.map((st) => [st.id, webhookStoreLabel(st)]));
           // The pipelines endpoints chose for deals (ADR-263), tasks (ADR-303) and notes (ADR-305),
           // and whether they are archived.
           const pipelineIds = [
@@ -4955,6 +5103,7 @@ export function createWebhooksService(deps: {
               teamIds: chosenTeams,
               templateIds: chosenTemplates,
               campaignIds: chosenCampaigns,
+              storeIds: chosenStores,
               pipelineIds: chosenPipelines,
               stageIds: chosenStages,
               ownerIds: chosenOwners,
@@ -5001,6 +5150,12 @@ export function createWebhooksService(deps: {
                     (id): WebhookEndpointCampaign =>
                       campaignById.get(id) ?? { id, name: 'Unknown campaign', status: null },
                   )
+                : null,
+              stores: chosenStores
+                ? chosenStores.map((id): WebhookEndpointStore => ({
+                    id,
+                    label: storeLabelById.get(id) ?? null,
+                  }))
                 : null,
               pipelines: chosenPipelines ? chosenPipelines.map(namedPipeline) : null,
               stages: chosenStages ? chosenStages.map(namedStage) : null,
@@ -5248,6 +5403,30 @@ export function createWebhooksService(deps: {
     },
 
     /**
+     * The connected stores an endpoint can choose to take the cash on delivery answers of (ADR-349):
+     * the company's stores, at most 5 at once, in the order they were added, each named as the
+     * store gives it, else by its address.
+     */
+    async storeChoices(ctx: TenantContext): Promise<WebhookStoreChoice[]> {
+      assertCan(ctx, 'developer.manage');
+      const rows = await db.run(
+        ctx.scope,
+        (tx) =>
+          tx
+            .select({
+              id: commerceStores.id,
+              name: commerceStores.name,
+              storeUrl: commerceStores.storeUrl,
+            })
+            .from(commerceStores)
+            .where(eq(commerceStores.tenantId, ctx.tenant.id))
+            .orderBy(asc(commerceStores.createdAt), asc(commerceStores.id)),
+        { accessMode: 'read only' },
+      );
+      return rows.map((store) => ({ id: store.id, label: webhookStoreLabel(store) }));
+    },
+
+    /**
      * The CRM pipelines an endpoint can choose to take the deals' events of (ADR-263): those the
      * company uses (at most `CRM_LIMITS.pipelines`), in board order. An archived one has no open
      * deal and takes none until restored, so it is not offered; the API takes it, and Settings keeps
@@ -5438,6 +5617,9 @@ export function createWebhooksService(deps: {
           data.runStepOutcomes,
           null,
         );
+        const codAnswers = webhookCodAnswersFor(data.eventTypes, data.codAnswers, null);
+        const storeIds = webhookStoreIdsFor(data.eventTypes, data.storeIds, null);
+        await assertWebhookStores(tx, ctx.tenant.id, storeIds);
         const runStepNodeTypes = webhookRunStepNodeTypesFor(
           data.eventTypes,
           data.runStepNodeTypes,
@@ -5614,6 +5796,8 @@ export function createWebhooksService(deps: {
           campaignStatuses,
           orderStatuses,
           paymentLinkStatuses,
+          codAnswers,
+          storeIds,
           orderChangeMakers,
           runStepOutcomes,
           runStepNodeTypes,
@@ -5684,6 +5868,8 @@ export function createWebhooksService(deps: {
               ...(orderStatuses ? { orderStatuses } : {}),
               ...(paymentLinkStatuses ? { paymentLinkStatuses } : {}),
               ...(runStepOutcomes ? { runStepOutcomes } : {}),
+              ...(codAnswers ? { codAnswers } : {}),
+              ...(storeIds ? { storeIds } : {}),
               ...(runStepNodeTypes ? { runStepNodeTypes } : {}),
               ...(orderChangeMakers ? { orderChangeMakers } : {}),
               ...(orderExcludedApiKeyIds ? { orderExcludedApiKeyIds } : {}),
@@ -5816,6 +6002,16 @@ export function createWebhooksService(deps: {
           data.runStepOutcomes,
           endpoint.runStepOutcomes,
         );
+        const codAnswers = webhookCodAnswersFor(
+          data.eventTypes,
+          data.codAnswers,
+          endpoint.codAnswers,
+        );
+        const storeIds = webhookStoreIdsFor(data.eventTypes, data.storeIds, endpoint.storeIds);
+        // Only the stores a list given now adds are checked: those it held may have been removed.
+        if (data.storeIds !== undefined) {
+          await assertWebhookStores(tx, ctx.tenant.id, storeIds, endpoint.storeIds);
+        }
         const runStepNodeTypes = webhookRunStepNodeTypesFor(
           data.eventTypes,
           data.runStepNodeTypes,
@@ -6165,6 +6361,8 @@ export function createWebhooksService(deps: {
             campaignStatuses,
             orderStatuses,
             paymentLinkStatuses,
+            codAnswers,
+            storeIds,
             orderChangeMakers,
             runStepOutcomes,
             runStepNodeTypes,
@@ -6246,6 +6444,8 @@ export function createWebhooksService(deps: {
               ...(orderStatuses ? { orderStatuses } : {}),
               ...(paymentLinkStatuses ? { paymentLinkStatuses } : {}),
               ...(runStepOutcomes ? { runStepOutcomes } : {}),
+              ...(codAnswers ? { codAnswers } : {}),
+              ...(storeIds ? { storeIds } : {}),
               ...(runStepNodeTypes ? { runStepNodeTypes } : {}),
               ...(orderChangeMakers ? { orderChangeMakers } : {}),
               ...(orderExcludedApiKeyIds ? { orderExcludedApiKeyIds } : {}),

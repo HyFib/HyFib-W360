@@ -191,13 +191,17 @@ const later = (ms: number): Clock => ({ now: () => new Date(Date.now() + ms) });
 const HOOK_HOST = 'hooks.receiver.test';
 
 /**
- * A webhook endpoint of the company taking `eventTypes` (and only the events of the numbers given),
- * on a path of this test's server of its own (ADR-348).
+ * A webhook endpoint of the company taking `eventTypes`, only those of the numbers (ADR-348),
+ * answers and stores (ADR-349) given, on a path of this test's server of its own.
  */
 async function addHook(
   owner: TenantContext,
   eventTypes: 'store_order.cod_answered'[],
-  channelIds: string[] | null = null,
+  filters: {
+    channelIds?: string[];
+    codAnswers?: ('confirmed' | 'cancelled')[];
+    storeIds?: string[];
+  } = {},
 ) {
   const path = `/hooks/${randomBytes(6).toString('hex')}`;
   const created = await createWebhooksService({
@@ -208,7 +212,7 @@ async function addHook(
   }).create(owner, {
     url: `http://${HOOK_HOST}:${new URL(appBase).port}${path}`,
     eventTypes,
-    channelIds,
+    ...filters,
   });
   return { ...created, path };
 }
@@ -1802,16 +1806,40 @@ describe('Order messages', () => {
     if (!sentFrom) throw new Error('no number');
     const outlet = await fx.addNumber(c, { phone: '+91 90000 54329' });
     const everyNumber = await addHook(owner, ['store_order.cod_answered']);
-    const itsNumber = await addHook(
-      owner,
-      ['store_order.cod_answered'],
-      [sentFrom.channel_account_id],
+    const itsNumber = await addHook(owner, ['store_order.cod_answered'], {
+      channelIds: [sentFrom.channel_account_id],
+    });
+    const otherNumber = await addHook(owner, ['store_order.cod_answered'], {
+      channelIds: [outlet.channelAccountId],
+    });
+    // And by answer and store (ADR-349): the cancellations only, this store's answers, another
+    // store's only, which hears nothing, and the confirmations from the message's number and either
+    // store, which must pass all three lists.
+    const [otherStore] = await fx.query<{ id: string }>(
+      `INSERT INTO app.commerce_stores (id, tenant_id, platform, store_url, name, webhook_public_id,
+         webhook_secret_ciphertext, created_by_membership_id)
+       VALUES (gen_random_uuid(), $1, 'woocommerce', 'https://spices.example.test', 'Tara Spices',
+               $2, 'x', $3)
+       RETURNING id`,
+      [
+        c.tenant.id,
+        Array.from(randomBytes(16), (b) => 'abcdefghijklmnopqrstuvwxyz234567'[b % 32]).join(''),
+        c.tenant.ownerMembershipId,
+      ],
     );
-    const otherNumber = await addHook(
-      owner,
-      ['store_order.cod_answered'],
-      [outlet.channelAccountId],
-    );
+    if (!otherStore) throw new Error('no store');
+    const cancellations = await addHook(owner, ['store_order.cod_answered'], {
+      codAnswers: ['cancelled'],
+    });
+    const thisStore = await addHook(owner, ['store_order.cod_answered'], { storeIds: [storeId] });
+    const thatStore = await addHook(owner, ['store_order.cod_answered'], {
+      storeIds: [otherStore.id],
+    });
+    const confirmationsHere = await addHook(owner, ['store_order.cod_answered'], {
+      channelIds: [sentFrom.channel_account_id],
+      codAnswers: ['confirmed'],
+      storeIds: [otherStore.id, storeId],
+    });
     const now = Math.floor(Date.now() / 1000);
     const tap = (
       answer: 'confirm' | 'cancel',
@@ -1896,7 +1924,8 @@ describe('Order messages', () => {
     // One event per change of the answer kept (ADR-348): the first, cancelled, then confirmed. The
     // repeated confirmation, the late older tap, another customer's and a reply to another message
     // sent nothing. Each reaches the endpoints on every number and on its own, not the other
-    // number's.
+    // number's, and this store's but not the other store's (ADR-349); the cancellation reaches the
+    // cancellations' and the confirmation the confirmations'.
     const events = await fx.query<{
       id: string;
       status: string;
@@ -1932,7 +1961,7 @@ describe('Order messages', () => {
         },
         out.conversation_id,
         contactRow.id,
-        2,
+        4,
       ],
       [
         'confirmed',
@@ -1944,7 +1973,7 @@ describe('Order messages', () => {
         },
         out.conversation_id,
         contactRow.id,
-        2,
+        4,
       ],
     ]);
     // The tap's time as WhatsApp dated it, whole seconds.
@@ -1969,7 +1998,7 @@ describe('Order messages', () => {
          FROM app.contacts ct, app.channel_accounts ch WHERE ct.id = $1 AND ch.id = $2`,
       [contactRow.id, sentFrom.channel_account_id],
     );
-    for (const hook of [everyNumber, itsNumber]) {
+    for (const hook of [everyNumber, itsNumber, thisStore]) {
       const bodies = hookBodiesAt(hook.path);
       expect(bodies).toHaveLength(2);
       for (const body of bodies) {
@@ -2019,6 +2048,13 @@ describe('Order messages', () => {
       );
     }
     expect(hookBodiesAt(otherNumber.path)).toEqual([]);
+    expect(hookBodiesAt(thatStore.path)).toEqual([]);
+    expect(hookBodiesAt(cancellations.path)).toEqual([
+      expect.objectContaining({ id: events[0]!.id, type: 'store_order.cod_answered' }),
+    ]);
+    expect(hookBodiesAt(confirmationsHere.path)).toEqual([
+      expect.objectContaining({ id: events[1]!.id, type: 'store_order.cod_answered' }),
+    ]);
   });
 
   it('sends nothing about the past, and skips test orders, late events and customers who cannot be messaged', async () => {

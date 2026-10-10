@@ -264,6 +264,8 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       campaignStatuses: null,
       orderStatuses: null,
       paymentLinkStatuses: null,
+      codAnswers: null,
+      storeIds: null,
       runStepOutcomes: null,
       runStepNodeTypes: null,
       orderChangeMakers: null,
@@ -1312,6 +1314,153 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     });
     expect(await issueOf(api().update(key.ctx, id, { paymentLinkStatuses: [] }))).toMatchObject({
       path: 'paymentLinkStatuses',
+    });
+  });
+
+  it('choose the cash on delivery answers an endpoint receives and the stores they come from, a removed store too, kept by changes that leave them out and cleared with the event (ADR-349)', async () => {
+    const c = await fx.company();
+    const key = await apiKey(c, ['webhooks.manage']);
+    const storeOf = async (company: Company, name: string) => {
+      const [row] = await fx.query<{ id: string }>(
+        `INSERT INTO app.commerce_stores (id, tenant_id, platform, store_url, name,
+           webhook_public_id, webhook_secret_ciphertext, created_by_membership_id)
+         VALUES (gen_random_uuid(), $1, 'woocommerce', $2, $3, $4, 'x', $5)
+         RETURNING id`,
+        [
+          company.tenant.id,
+          `https://${randomBytes(6).toString('hex')}.example.test`,
+          name,
+          Array.from(randomBytes(16), (b) => 'abcdefghijklmnopqrstuvwxyz234567'[b % 32]).join(''),
+          company.tenant.ownerMembershipId,
+        ],
+      );
+      if (!row) throw new Error('no store');
+      return row.id;
+    };
+    const tea = await storeOf(c, 'Tara Tea');
+    const spices = await storeOf(c, 'Tara Spices');
+    const elsewhere = await storeOf(await fx.company(), 'Tara Tea');
+    const issueOf = async (promise: Promise<unknown>) => {
+      const error = await expectAppError(promise, 'validation_failed');
+      return isAppError(error) ? error.issues?.[0] : undefined;
+    };
+    // Answers and stores need the event, at least one, each an answer from the list or an id of
+    // the company's stores (named by place).
+    const cod = ['store_order.cod_answered'];
+    const refusals = [
+      [['order.status_changed'], { codAnswers: ['cancelled'] }, 'codAnswers'],
+      [cod, { codAnswers: [] }, 'codAnswers'],
+      [cod, { codAnswers: ['confirmed', 'declined'] }, 'codAnswers.1'],
+      [['order.received'], { storeIds: [tea] }, 'storeIds'],
+      [cod, { storeIds: [] }, 'storeIds'],
+      [cod, { storeIds: [tea, 'Tara Spices'] }, 'storeIds.1'],
+      [cod, { storeIds: [tea, elsewhere] }, 'storeIds.1'],
+      [cod, { storeIds: [uuidv7()] }, 'storeIds.0'],
+    ] as const;
+    for (const [index, [events, filters, path]] of refusals.entries()) {
+      expect(
+        await issueOf(
+          api().create(
+            key.ctx,
+            { url: receiverUrl(), events, ...filters },
+            idem(`cod-bad-${index}`, JSON.stringify(filters)),
+          ),
+        ),
+        JSON.stringify(filters),
+      ).toMatchObject({ path });
+    }
+    expect((await api().list(key.ctx)).data).toEqual([]);
+
+    const created = await addThroughApi(key.ctx, 'cod-1', {
+      url: receiverUrl(),
+      events: ['store_order.cod_answered', 'order.status_changed'],
+      codAnswers: ['cancelled', 'confirmed'],
+      storeIds: [spices, tea.toUpperCase(), spices],
+    });
+    const id = created.body.data.id;
+    // The answers in the order the confirmation offers them, the stores as given, each once.
+    const chosen = { codAnswers: ['confirmed', 'cancelled'], storeIds: [spices, tea] };
+    expect(created.body.data).toMatchObject(chosen);
+    expect(await api().get(key.ctx, id)).toMatchObject(chosen);
+    const audits = async (action: string) =>
+      (
+        await fx.query<{ metadata: { codAnswers?: unknown; storeIds?: unknown } }>(
+          `SELECT metadata FROM app.audit_events
+            WHERE tenant_id = $1 AND subject_id = $2 AND action = $3 ORDER BY occurred_at, id`,
+          [c.tenant.id, id, action],
+        )
+      ).map((a) => [a.metadata.codAnswers, a.metadata.storeIds]);
+    expect(await audits('webhook.endpoint_created')).toEqual([
+      [chosen.codAnswers, chosen.storeIds],
+    ]);
+    // Settings names the stores.
+    const owner = await fx.ctx(c, c.owner);
+    const named = async () => (await settings().list(owner)).find((e) => e.id === id)?.stores;
+    expect(await named()).toEqual([
+      { id: spices, label: 'Tara Spices' },
+      { id: tea, label: 'Tara Tea' },
+    ]);
+    expect(await api().update(key.ctx, id, { description: 'Order system' })).toMatchObject(chosen);
+    // A list alone is a change.
+    expect(await api().update(key.ctx, id, { codAnswers: ['cancelled'] })).toMatchObject({
+      codAnswers: ['cancelled'],
+      storeIds: [spices, tea],
+    });
+    // A store removed while on the list stays on it, named by its absence; once off the list it is
+    // refused like any unknown one.
+    await fx.query('DELETE FROM app.commerce_stores WHERE id = $1', [spices]);
+    expect(await named()).toEqual([
+      { id: spices, label: null },
+      { id: tea, label: 'Tara Tea' },
+    ]);
+    expect(await api().update(key.ctx, id, { storeIds: [tea, spices] })).toMatchObject({
+      storeIds: [tea, spices],
+    });
+    expect(await api().update(key.ctx, id, { storeIds: [tea] })).toMatchObject({
+      storeIds: [tea],
+    });
+    expect(await issueOf(api().update(key.ctx, id, { storeIds: [tea, spices] }))).toMatchObject({
+      path: 'storeIds.1',
+    });
+    expect(await audits('webhook.endpoint_updated')).toEqual([
+      [chosen.codAnswers, chosen.storeIds],
+      [['cancelled'], [spices, tea]],
+      [['cancelled'], [tea, spices]],
+      [['cancelled'], [tea]],
+    ]);
+    // Events without it clear both lists, and take neither.
+    expect(await api().update(key.ctx, id, { events: ['order.status_changed'] })).toMatchObject({
+      events: ['order.status_changed'],
+      codAnswers: null,
+      storeIds: null,
+    });
+    expect(await issueOf(api().update(key.ctx, id, { codAnswers: ['confirmed'] }))).toMatchObject({
+      path: 'codAnswers',
+    });
+    expect(await issueOf(api().update(key.ctx, id, { storeIds: [tea] }))).toMatchObject({
+      path: 'storeIds',
+    });
+    expect(
+      await api().update(key.ctx, id, {
+        events: ['store_order.cod_answered'],
+        codAnswers: ['confirmed'],
+        storeIds: [tea],
+      }),
+    ).toMatchObject({ codAnswers: ['confirmed'], storeIds: [tea] });
+    // A list given again is checked again, changing nothing when it is refused.
+    expect(await issueOf(api().update(key.ctx, id, { storeIds: [elsewhere] }))).toMatchObject({
+      path: 'storeIds.0',
+    });
+    expect((await api().get(key.ctx, id)).storeIds).toEqual([tea]);
+    expect(await api().update(key.ctx, id, { codAnswers: null, storeIds: null })).toMatchObject({
+      codAnswers: null,
+      storeIds: null,
+    });
+    expect(await issueOf(api().update(key.ctx, id, { codAnswers: [] }))).toMatchObject({
+      path: 'codAnswers',
+    });
+    expect(await issueOf(api().update(key.ctx, id, { storeIds: [] }))).toMatchObject({
+      path: 'storeIds',
     });
   });
 

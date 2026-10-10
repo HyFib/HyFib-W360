@@ -12,6 +12,7 @@ import {
   WEBHOOK_ORDER_STATUS_LABELS,
   WEBHOOK_ORDER_CHANGE_MAKER_LABELS,
   WEBHOOK_PAYMENT_LINK_STATUS_LABELS,
+  WEBHOOK_COD_ANSWER_LABELS,
   WEBHOOK_RUN_STEP_OUTCOME_LABELS,
   WEBHOOK_RUN_STEP_NODE_TYPE_LABELS,
   WEBHOOK_DEAL_STATUS_LABELS,
@@ -41,6 +42,7 @@ import {
   webhookPipelineText,
   webhookApiKeyText,
   webhookStageText,
+  webhookStoreText,
   webhookTeamText,
   webhookTemplateText,
   type WebhookEndpointView,
@@ -84,6 +86,7 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
     teamChoices,
     templateChoices,
     campaignChoices,
+    storeChoices,
     pipelineChoices,
     stageChoices,
     ownerChoices,
@@ -101,6 +104,7 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
     webhooks.teamChoices(ctx),
     webhooks.templateChoices(ctx),
     webhooks.campaignChoices(ctx),
+    webhooks.storeChoices(ctx),
     webhooks.pipelineChoices(ctx),
     webhooks.stageChoices(ctx),
     webhooks.ownerChoices(ctx),
@@ -262,6 +266,18 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
                         {e.paymentLinkStatuses
                           .map((s) => WEBHOOK_PAYMENT_LINK_STATUS_LABELS[s])
                           .join(', ')}
+                      </p>
+                    ) : null}
+                    {e.codAnswers ? (
+                      <p className="text-xs text-muted-foreground">
+                        Cash on delivery answers sent:{' '}
+                        {e.codAnswers.map((a) => WEBHOOK_COD_ANSWER_LABELS[a]).join(', ')}
+                      </p>
+                    ) : null}
+                    {e.stores ? (
+                      <p className="text-xs break-all text-muted-foreground">
+                        Stores whose cash on delivery answers are sent:{' '}
+                        {e.stores.map(webhookStoreText).join(', ')}
                       </p>
                     ) : null}
                     {e.runStepOutcomes ? (
@@ -655,6 +671,7 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
             teamChoices={teamChoices}
             templateChoices={templateChoices}
             campaignChoices={campaignChoices}
+            storeChoices={storeChoices}
             pipelineChoices={pipelineChoices}
             stageChoices={stageChoices}
             ownerChoices={ownerChoices}

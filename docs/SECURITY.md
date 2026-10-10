@@ -1883,6 +1883,16 @@ Phase 5 rules (outgoing webhooks, P5-09):
   phone, email, address, tracking or status page from the store's order, which the contact stands
   for. A confirmation deleted with its order or store fails its pending deliveries as `event_gone`
   (unit tests; an integration test, run in CI only).
+- An endpoint can take the cash on delivery answers of chosen answers and stores only (ADR-349). The
+  answers are checked against the two a confirmation offers; a list may add only stores of the
+  endpoint's company (checked in its scope); both are kept only while the endpoint takes
+  `store_order.cod_answered` (database checks too, which also refuse a null entry), and applied in
+  `app.capture_webhook_event` to the answer and to the store the confirmation's trigger passes in the
+  same transaction, which is not stored with the event. They only narrow what one endpoint receives
+  and never add an event or a delivery for another endpoint or company; the payload is unchanged. A
+  store removed later stays on the list and matches nothing, so a list never widens by itself.
+  Audited with the lists and in the company data export (unit tests; integration tests, run in CI
+  only).
 - An endpoint can take the run steps of chosen outcomes only (ADR-327). The list holds only the
   outcomes a run's log records (checked by the services and the database), is kept only while the
   endpoint takes `automation.run_step` (a database check too), and is applied in

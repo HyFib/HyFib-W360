@@ -13677,3 +13677,53 @@ Decision:
 Not built: the order messages a store sends as their own events (their statuses are
 `message.status`), events for the store's orders themselves, a filter by store, and an event when a
 confirmation is sent or skipped.
+
+## ADR-349 Choosing the cash on delivery answers a webhook endpoint receives and their stores (P5-09) (2026-10-10)
+
+Context: `store_order.cod_answered` (ADR-348) sends every answer of every connected store, narrowed
+only by the number the confirmation went from. An order system that acts on cancellations alone
+(cancelling the order in the store) was sent every confirmation too, and a company with several
+stores whose orders go to different systems sent each system every store's answers, which the
+number filter cannot separate when the stores share a number. ADR-348 left a filter by store out.
+
+Decision:
+
+- **Two lists per endpoint:** `codAnswers`, the answers it takes (confirmed, cancelled), each once
+  and kept in the order the confirmation offers them; and `storeIds`, 1 to 20 of the company's
+  stores, each once, as `store.id` names them. An answer is sent when the answer it reports, as
+  `confirmation.answer` names it, is on the first list and its order's store on the second; null
+  receives every answer, or every store's answers including stores connected later, as before. With
+  the numbers chosen too (ADR-348), an answer must pass every list.
+- **Chosen in Settings → Webhooks** ("Answers sent" under Cash on delivery answered, both ticked by
+  default; "Stores", every store's answers by default or only the stores ticked, named as the store
+  names itself, else by its address), shown on the endpoint as "Cash on delivery answers sent: …" and
+  "Stores whose cash on delivery answers are sent: …", and through the API as `codAnswers` and
+  `storeIds` on `POST /webhook-endpoints` and `PATCH /webhook-endpoints/{id}` and in every endpoint
+  the API answers.
+- **Only while `store_order.cod_answered` is taken:** a list given for an endpoint that does not take
+  it is refused (422 through the API), whatever order events it takes; a change that drops the event
+  clears both lists, a `PATCH` that leaves a list out keeps it, and one that gives only a list is a
+  change. Checks in the database hold the same rule and the lists' shape (null, or 1 to 2 known
+  answers, or 1 to 20 stores, in one dimension without a null, with `store_order.cod_answered`).
+- **The company's stores only:** the services refuse a store a list adds unless it is the company's,
+  named by its place in the list. A store removed since it was chosen (removing a store deletes its
+  copy of the orders, their confirmations and their answers) stays on the list, matches nothing and
+  is named by its absence ("A removed store") until a change leaves it out; once off the list it is
+  refused like any unknown id. A company has at most 5 stores at once, so 20 leaves room for those.
+- **Applied at capture:** the confirmation's trigger passes its store, and `app.capture_webhook_event`
+  creates an answer's delivery only for the endpoints whose lists are null or hold the answer, the
+  event's status, and the store, which it then takes out of the stored detail (the body reads the
+  store through the confirmation when delivered); it writes no event when no active endpoint takes
+  it.
+- **Audited, exported, permissions unchanged,** as for the other lists: `webhook.endpoint_created`
+  and `webhook.endpoint_updated` carry `codAnswers` and `storeIds` when the endpoint has them, and
+  the company data export carries the columns.
+- **Migration 0268:** `cod_answers text[]` and `store_ids uuid[]` on `app.webhook_endpoints` with
+  their checks, validated at once (a company has at most 10 endpoints), the update grant on the
+  columns for the runtime role, and the trigger function and `app.capture_webhook_event` replaced
+  with the same signatures (0266's, with the store and both lists), so their owners and grants stay.
+  Existing endpoints keep null; nothing is backfilled.
+
+Not built: lists that leave chosen answers out, choosing stores for other events (the order
+messages a store sends are `message.status` events, and the store's orders stay out, ADR-085), and
+narrowing by the order's values (its total, currency or statuses).

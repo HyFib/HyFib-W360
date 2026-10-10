@@ -28,6 +28,7 @@ import {
   type WebhookMessageStatus,
   type WebhookOrderStatus,
   type WebhookPaymentLinkStatus,
+  type WebhookCodAnswer,
   type WebhookRunStepOutcome,
   type WebhookRunStepNodeType,
   type WebhookOrderChangeMaker,
@@ -65,6 +66,7 @@ import {
   WEBHOOK_SURVEY_SCORES,
   WEBHOOK_PAYMENT_LINK_STATUSES,
   WEBHOOK_RUN_STEP_OUTCOMES,
+  WEBHOOK_COD_ANSWERS,
   WEBHOOK_RUN_STEP_NODE_TYPES,
   WEBHOOK_ORDER_CHANGE_MAKERS,
   WEBHOOK_DEAL_STATUSES,
@@ -86,6 +88,7 @@ import {
   assertWebhookOrderExcludedApiKeys,
   assertWebhookPaymentLinkApiKeys,
   assertWebhookCampaigns,
+  assertWebhookStores,
   assertWebhookChannels,
   assertWebhookPipelines,
   assertWebhookOwners,
@@ -121,6 +124,8 @@ import {
   WEBHOOK_ORDER_STATUSES_NEED_THE_EVENT,
   WEBHOOK_PAYMENT_LINK_STATUSES_NEED_THE_EVENT,
   WEBHOOK_RUN_STEP_OUTCOMES_NEED_THE_EVENT,
+  WEBHOOK_COD_ANSWERS_NEED_THE_EVENT,
+  WEBHOOK_STORES_NEED_THE_EVENT,
   WEBHOOK_RUN_STEP_NODE_TYPES_NEED_THE_EVENT,
   WEBHOOK_ORDER_CHANGE_MAKERS_NEED_THE_EVENT,
   WEBHOOK_ORDER_EXCLUDED_API_KEYS_NEED_THE_EVENT,
@@ -271,6 +276,10 @@ import {
   webhookPaymentLinkStatusesSchema,
   webhookRunStepOutcomesFor,
   webhookRunStepOutcomesSchema,
+  webhookCodAnswersFor,
+  webhookCodAnswersSchema,
+  webhookStoreIdsFor,
+  webhookStoreIdsSchema,
   webhookRunStepNodeTypesFor,
   webhookRunStepNodeTypesSchema,
   webhookOrderChangeMakersFor,
@@ -408,6 +417,26 @@ const runStepOutcomesField = webhookRunStepOutcomesSchema.describe(
 const invalidRunStepOutcomes = () =>
   new AppError('validation_failed', WEBHOOK_RUN_STEP_OUTCOMES_NEED_THE_EVENT, {
     issues: [{ path: 'runStepOutcomes', message: WEBHOOK_RUN_STEP_OUTCOMES_NEED_THE_EVENT }],
+  });
+
+const codAnswersField = webhookCodAnswersSchema.describe(
+  `The cash on delivery answers the endpoint receives as store_order.cod_answered (${WEBHOOK_COD_ANSWERS.join(', ')}), as confirmation.answer names them, only with the store_order.cod_answered event; null receives every answer, as a list of both does. With the stores or the numbers chosen too, an answer must pass them all.`,
+);
+
+/** Answers are chosen only for an endpoint that receives cash on delivery answers (ADR-349). */
+const invalidCodAnswers = () =>
+  new AppError('validation_failed', WEBHOOK_COD_ANSWERS_NEED_THE_EVENT, {
+    issues: [{ path: 'codAnswers', message: WEBHOOK_COD_ANSWERS_NEED_THE_EVENT }],
+  });
+
+const storeIdsField = webhookStoreIdsSchema.describe(
+  `The connected stores whose cash on delivery answers the endpoint receives: 1 to ${WEBHOOK_LIMITS.stores} ids of the company's stores (as store_order.cod_answered events give them in \`store.id\`), only with the store_order.cod_answered event. An answer belongs to the store of the order it answers. A store removed since it was chosen stays on the list and matches nothing; a company has at most 5 stores at once. With the answers or the numbers chosen too, an answer must pass them all. null receives every store's answers, including those of stores connected later.`,
+);
+
+/** Stores are chosen only for an endpoint that receives cash on delivery answers (ADR-349). */
+const invalidStores = () =>
+  new AppError('validation_failed', WEBHOOK_STORES_NEED_THE_EVENT, {
+    issues: [{ path: 'storeIds', message: WEBHOOK_STORES_NEED_THE_EVENT }],
   });
 
 const runStepNodeTypesField = webhookRunStepNodeTypesSchema.describe(
@@ -894,6 +923,8 @@ export const apiCreateWebhookEndpointSchema = z
     campaignStatuses: campaignStatusesField.optional(),
     orderStatuses: orderStatusesField.optional(),
     paymentLinkStatuses: paymentLinkStatusesField.optional(),
+    codAnswers: codAnswersField.optional(),
+    storeIds: storeIdsField.optional(),
     runStepOutcomes: runStepOutcomesField.optional(),
     runStepNodeTypes: runStepNodeTypesField.optional(),
     orderChangeMakers: orderChangeMakersField.optional(),
@@ -982,6 +1013,14 @@ export const apiCreateWebhookEndpointSchema = z
   .refine((data) => !data.runStepOutcomes || data.events.includes('automation.run_step'), {
     path: ['runStepOutcomes'],
     message: WEBHOOK_RUN_STEP_OUTCOMES_NEED_THE_EVENT,
+  })
+  .refine((data) => !data.codAnswers || data.events.includes('store_order.cod_answered'), {
+    path: ['codAnswers'],
+    message: WEBHOOK_COD_ANSWERS_NEED_THE_EVENT,
+  })
+  .refine((data) => !data.storeIds || data.events.includes('store_order.cod_answered'), {
+    path: ['storeIds'],
+    message: WEBHOOK_STORES_NEED_THE_EVENT,
   })
   .refine((data) => !data.runStepNodeTypes || data.events.includes('automation.run_step'), {
     path: ['runStepNodeTypes'],
@@ -1239,6 +1278,16 @@ export const apiUpdateWebhookEndpointSchema = z
       .describe(
         'The statuses a Payment Link reaches that the endpoint receives as payment_link.status_changed; null receives every status. Left out, they stay, unless the events no longer include payment_link.status_changed, which clears them.',
       ),
+    codAnswers: codAnswersField
+      .optional()
+      .describe(
+        'The cash on delivery answers the endpoint receives as store_order.cod_answered; null receives every answer. Left out, they stay, unless the events no longer include store_order.cod_answered, which clears them.',
+      ),
+    storeIds: storeIdsField
+      .optional()
+      .describe(
+        "The connected stores whose cash on delivery answers the endpoint receives (the company's stores); null receives every store's. Left out, they stay, unless the events no longer include store_order.cod_answered, which clears them.",
+      ),
     runStepOutcomes: runStepOutcomesField
       .optional()
       .describe(
@@ -1487,6 +1536,8 @@ export const apiUpdateWebhookEndpointSchema = z
       data.campaignStatuses !== undefined ||
       data.orderStatuses !== undefined ||
       data.paymentLinkStatuses !== undefined ||
+      data.codAnswers !== undefined ||
+      data.storeIds !== undefined ||
       data.runStepOutcomes !== undefined ||
       data.runStepNodeTypes !== undefined ||
       data.orderChangeMakers !== undefined ||
@@ -1533,7 +1584,7 @@ export const apiUpdateWebhookEndpointSchema = z
       data.contactTags !== undefined ||
       data.conversationTags !== undefined ||
       data.oauth !== undefined,
-    'Give the events, the description, the headers, the message statuses, who sent the messages, the API keys that sent them, the contact parts, the deal and task details, the custom fields, the automations, the campaign statuses, the order statuses, who made the order changes, the API keys whose order changes are left out, the Payment Link statuses, the API keys that asked for the Payment Links, the template statuses, the conversation statuses, the deal statuses, the task statuses, the run end statuses, the step outcomes, the kinds of step, what started the runs, the API keys that started them, the consent changes, where contacts came from, the received message types, the run end reasons, the numbers, the teams, the templates, the campaigns, the pipelines, the stages, the deal owners, the task assignees, the pipelines, stages and owners of tasks’ deals and of notes’ deals, who made the CRM changes, the API keys whose CRM changes are left out, the survey scores, the members credited with survey answers and the teams of their conversations, the contact and conversation tags of survey answers, the tags and field values of added and changed contacts, the members, the contact tags, the conversation tags, the OAuth client or whether the endpoint is enabled',
+    'Give the events, the description, the headers, the message statuses, who sent the messages, the API keys that sent them, the contact parts, the deal and task details, the custom fields, the automations, the campaign statuses, the order statuses, who made the order changes, the API keys whose order changes are left out, the Payment Link statuses, the API keys that asked for the Payment Links, the template statuses, the conversation statuses, the deal statuses, the task statuses, the run end statuses, the step outcomes, the kinds of step, what started the runs, the API keys that started them, the consent changes, where contacts came from, the received message types, the run end reasons, the numbers, the teams, the templates, the cash on delivery answers and their stores, the campaigns, the pipelines, the stages, the deal owners, the task assignees, the pipelines, stages and owners of tasks’ deals and of notes’ deals, who made the CRM changes, the API keys whose CRM changes are left out, the survey scores, the members credited with survey answers and the teams of their conversations, the contact and conversation tags of survey answers, the tags and field values of added and changed contacts, the members, the contact tags, the conversation tags, the OAuth client or whether the endpoint is enabled',
   );
 
 export interface ApiWebhookEndpoint {
@@ -1570,6 +1621,10 @@ export interface ApiWebhookEndpoint {
   orderStatuses: WebhookOrderStatus[] | null;
   /** The Payment Link statuses it receives (ADR-308); null receives every status. */
   paymentLinkStatuses: WebhookPaymentLinkStatus[] | null;
+  /** The cash on delivery answers it receives (ADR-349); null receives every answer. */
+  codAnswers: WebhookCodAnswer[] | null;
+  /** The stores whose cash on delivery answers it receives (ADR-349); null receives every one's. */
+  storeIds: string[] | null;
   /** The outcomes of the run steps it receives (ADR-327); null receives every step. */
   runStepOutcomes: WebhookRunStepOutcome[] | null;
   /** The kinds of node whose run steps it receives (ADR-328); null receives every step. */
@@ -1762,6 +1817,8 @@ const columns = {
   campaignStatuses: webhookEndpoints.campaignStatuses,
   orderStatuses: webhookEndpoints.orderStatuses,
   paymentLinkStatuses: webhookEndpoints.paymentLinkStatuses,
+  codAnswers: webhookEndpoints.codAnswers,
+  storeIds: webhookEndpoints.storeIds,
   runStepOutcomes: webhookEndpoints.runStepOutcomes,
   runStepNodeTypes: webhookEndpoints.runStepNodeTypes,
   orderChangeMakers: webhookEndpoints.orderChangeMakers,
@@ -1838,6 +1895,8 @@ type EndpointRow = Pick<
   | 'campaignStatuses'
   | 'orderStatuses'
   | 'paymentLinkStatuses'
+  | 'codAnswers'
+  | 'storeIds'
   | 'runStepOutcomes'
   | 'runStepNodeTypes'
   | 'orderChangeMakers'
@@ -1919,6 +1978,8 @@ function toApiEndpoint(row: EndpointRow, now: Date): ApiWebhookEndpoint {
     campaignStatuses: row.campaignStatuses,
     orderStatuses: row.orderStatuses,
     paymentLinkStatuses: row.paymentLinkStatuses,
+    codAnswers: row.codAnswers,
+    storeIds: row.storeIds,
     runStepOutcomes: row.runStepOutcomes,
     runStepNodeTypes: row.runStepNodeTypes,
     orderChangeMakers: row.orderChangeMakers,
@@ -2207,6 +2268,9 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               data.runStepOutcomes,
               null,
             );
+            const codAnswers = webhookCodAnswersFor(data.events, data.codAnswers, null);
+            const storeIds = webhookStoreIdsFor(data.events, data.storeIds, null);
+            await assertWebhookStores(tx, ctx.tenant.id, storeIds);
             const runStepNodeTypes = webhookRunStepNodeTypesFor(
               data.events,
               data.runStepNodeTypes,
@@ -2369,6 +2433,8 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               campaignStatuses,
               orderStatuses,
               paymentLinkStatuses,
+              codAnswers,
+              storeIds,
               orderChangeMakers,
               runStepOutcomes,
               runStepNodeTypes,
@@ -2431,6 +2497,8 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               ...(orderStatuses ? { orderStatuses } : {}),
               ...(paymentLinkStatuses ? { paymentLinkStatuses } : {}),
               ...(runStepOutcomes ? { runStepOutcomes } : {}),
+              ...(codAnswers ? { codAnswers } : {}),
+              ...(storeIds ? { storeIds } : {}),
               ...(runStepNodeTypes ? { runStepNodeTypes } : {}),
               ...(orderChangeMakers ? { orderChangeMakers } : {}),
               ...(orderExcludedApiKeyIds ? { orderExcludedApiKeyIds } : {}),
@@ -2524,6 +2592,12 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
         }
         if (data.runStepOutcomes && !events.includes('automation.run_step')) {
           throw invalidRunStepOutcomes();
+        }
+        if (data.codAnswers && !events.includes('store_order.cod_answered')) {
+          throw invalidCodAnswers();
+        }
+        if (data.storeIds && !events.includes('store_order.cod_answered')) {
+          throw invalidStores();
         }
         if (data.runStepNodeTypes && !events.includes('automation.run_step')) {
           throw invalidRunStepNodeTypes();
@@ -2677,6 +2751,10 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
         if (data.campaignIds !== undefined) {
           await assertWebhookCampaigns(tx, ctx.tenant.id, data.campaignIds);
         }
+        // And the stores a list given now adds (ADR-349): those it held may have been removed.
+        if (data.storeIds !== undefined) {
+          await assertWebhookStores(tx, ctx.tenant.id, data.storeIds, endpoint.storeIds);
+        }
         // And the pipelines given now (ADR-263).
         if (data.pipelineIds !== undefined) {
           await assertWebhookPipelines(tx, ctx.tenant.id, data.pipelineIds);
@@ -2785,6 +2863,8 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
           data.campaignStatuses !== undefined ||
           data.orderStatuses !== undefined ||
           data.paymentLinkStatuses !== undefined ||
+          data.codAnswers !== undefined ||
+          data.storeIds !== undefined ||
           data.runStepOutcomes !== undefined ||
           data.runStepNodeTypes !== undefined ||
           data.orderChangeMakers !== undefined ||
@@ -2885,6 +2965,8 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
                 data.paymentLinkStatuses,
                 endpoint.paymentLinkStatuses,
               ),
+              codAnswers: webhookCodAnswersFor(events, data.codAnswers, endpoint.codAnswers),
+              storeIds: webhookStoreIdsFor(events, data.storeIds, endpoint.storeIds),
               runStepOutcomes: webhookRunStepOutcomesFor(
                 events,
                 data.runStepOutcomes,
@@ -3073,6 +3155,8 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               campaignStatuses: webhookEndpoints.campaignStatuses,
               orderStatuses: webhookEndpoints.orderStatuses,
               paymentLinkStatuses: webhookEndpoints.paymentLinkStatuses,
+              codAnswers: webhookEndpoints.codAnswers,
+              storeIds: webhookEndpoints.storeIds,
               runStepOutcomes: webhookEndpoints.runStepOutcomes,
               runStepNodeTypes: webhookEndpoints.runStepNodeTypes,
               orderChangeMakers: webhookEndpoints.orderChangeMakers,
@@ -3135,6 +3219,8 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
             ...(changed.paymentLinkStatuses
               ? { paymentLinkStatuses: changed.paymentLinkStatuses }
               : {}),
+            ...(changed.codAnswers ? { codAnswers: changed.codAnswers } : {}),
+            ...(changed.storeIds ? { storeIds: changed.storeIds } : {}),
             ...(changed.runStepOutcomes ? { runStepOutcomes: changed.runStepOutcomes } : {}),
             ...(changed.runStepNodeTypes ? { runStepNodeTypes: changed.runStepNodeTypes } : {}),
             ...(changed.orderChangeMakers ? { orderChangeMakers: changed.orderChangeMakers } : {}),

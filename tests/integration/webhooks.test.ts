@@ -2271,6 +2271,208 @@ describe('run step outcome filters (ADR-327)', () => {
   });
 });
 
+describe('cash on delivery answer and store filters (ADR-349)', () => {
+  /** A connected WooCommerce store of the company, named by the store or known by its address. */
+  const storeOf = async (company: Company, name: string | null) => {
+    const [row] = await fx.query<{ id: string; store_url: string }>(
+      `INSERT INTO app.commerce_stores (id, tenant_id, platform, store_url, name, webhook_public_id,
+         webhook_secret_ciphertext, created_by_membership_id)
+       VALUES (gen_random_uuid(), $1, 'woocommerce', $2, $3, $4, 'x', $5)
+       RETURNING id, store_url`,
+      [
+        company.tenant.id,
+        `https://${randomBytes(6).toString('hex')}.example.test`,
+        name,
+        Array.from(randomBytes(16), (b) => 'abcdefghijklmnopqrstuvwxyz234567'[b % 32]).join(''),
+        company.tenant.ownerMembershipId,
+      ],
+    );
+    if (!row) throw new Error('no store');
+    return row;
+  };
+
+  it('are refused without store_order.cod_answered, unknown, empty or of another company, kept by a change that leaves them out (a removed store too) and cleared with the event; the database keeps them to that event', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const url = 'https://hooks.example.com/in';
+    const tea = await storeOf(c, 'Tara Tea');
+    const spices = await storeOf(c, null);
+    const elsewhere = await storeOf(await fx.company(), 'Tara Tea');
+    // Settings offers the company's stores in the order they were added, named or by address.
+    expect(await webhooks().storeChoices(owner)).toEqual([
+      { id: tea.id, label: 'Tara Tea' },
+      { id: spices.id, label: spices.store_url },
+    ]);
+    const refused = (eventTypes: string[], filters: Record<string, unknown>, message: RegExp) =>
+      expectAppError(
+        webhooks().create(owner, { url, eventTypes, ...filters }),
+        'validation_failed',
+        message,
+      );
+    // An order's own events have no store confirmation answer to choose.
+    const answersNeedTheEvent =
+      /Choose answers only for an endpoint that receives Cash on delivery/;
+    const storesNeedTheEvent = /Choose stores only for an endpoint that receives Cash on delivery/;
+    const cod = ['store_order.cod_answered'];
+    await refused(['order.received'], { codAnswers: ['cancelled'] }, answersNeedTheEvent);
+    await refused(['order.status_changed'], { storeIds: [tea.id] }, storesNeedTheEvent);
+    await refused(cod, { codAnswers: [] }, /at least one answer/);
+    await refused(cod, { codAnswers: ['declined'] }, /answers from the list/);
+    await refused(cod, { codAnswers: ['Confirmed'] }, /answers from the list/);
+    await refused(cod, { codAnswers: ['confirmed', 'cancelled', 'confirmed'] }, /each answer once/);
+    await refused(cod, { storeIds: [] }, /at least one store/);
+    await refused(cod, { storeIds: ['Tara Tea'] }, /stores from the list/);
+    await refused(cod, { storeIds: [tea.id, elsewhere.id] }, /stores of this company/);
+    await refused(cod, { storeIds: [uuidv7()] }, /stores of this company/);
+    await refused(cod, { storeIds: Array.from({ length: 21 }, () => uuidv7()) }, /at most 20/);
+    expect(await webhooks().list(owner)).toEqual([]);
+
+    const created = await webhooks().create(owner, {
+      url,
+      eventTypes: ['store_order.cod_answered', 'consent.changed'],
+      codAnswers: ['cancelled', 'confirmed'],
+      storeIds: [spices.id, tea.id.toUpperCase(), spices.id],
+    });
+    const [audit] = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events WHERE tenant_id = $1 AND action = 'webhook.endpoint_created'`,
+      [c.tenant.id],
+    );
+    // The answers in the order the confirmation offers them, the stores as given, each once.
+    expect(audit?.metadata).toMatchObject({
+      codAnswers: ['confirmed', 'cancelled'],
+      storeIds: [spices.id, tea.id],
+    });
+    const change = (fields: Record<string, unknown>) =>
+      webhooks().update(owner, {
+        endpointId: created.id,
+        url,
+        description: '',
+        eventTypes: ['store_order.cod_answered', 'consent.changed'],
+        ...fields,
+      });
+    const current = async () => {
+      const endpoint = (await webhooks().list(owner)).find((e) => e.id === created.id);
+      return { codAnswers: endpoint?.codAnswers, stores: endpoint?.stores };
+    };
+    expect(await current()).toEqual({
+      codAnswers: ['confirmed', 'cancelled'],
+      stores: [
+        { id: spices.id, label: spices.store_url },
+        { id: tea.id, label: 'Tara Tea' },
+      ],
+    });
+    await change({ description: 'kept' });
+    expect(await current()).toEqual({
+      codAnswers: ['confirmed', 'cancelled'],
+      stores: [
+        { id: spices.id, label: spices.store_url },
+        { id: tea.id, label: 'Tara Tea' },
+      ],
+    });
+    await change({ codAnswers: ['cancelled'], storeIds: [tea.id] });
+    expect(await current()).toEqual({
+      codAnswers: ['cancelled'],
+      stores: [{ id: tea.id, label: 'Tara Tea' }],
+    });
+    const updates = await fx.query<{ metadata: { codAnswers?: unknown; storeIds?: unknown } }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND action = 'webhook.endpoint_updated' ORDER BY occurred_at`,
+      [c.tenant.id],
+    );
+    expect(updates.map((u) => [u.metadata.codAnswers, u.metadata.storeIds])).toEqual([
+      [
+        ['confirmed', 'cancelled'],
+        [spices.id, tea.id],
+      ],
+      [['cancelled'], [tea.id]],
+    ]);
+
+    // A store removed while on the list stays on it, named by its absence, through changes that
+    // leave the list out or give it again; once off the list it is refused like any unknown one.
+    await change({ storeIds: [tea.id, spices.id] });
+    await fx.query('DELETE FROM app.commerce_stores WHERE id = $1', [spices.id]);
+    expect((await current()).stores).toEqual([
+      { id: tea.id, label: 'Tara Tea' },
+      { id: spices.id, label: null },
+    ]);
+    await change({ description: 'removed store kept' });
+    await change({ storeIds: [spices.id, tea.id] });
+    expect((await current()).stores?.map((s) => s.id)).toEqual([spices.id, tea.id]);
+    await change({ storeIds: [tea.id] });
+    await expectAppError(
+      change({ storeIds: [tea.id, spices.id] }),
+      'validation_failed',
+      /stores of this company/,
+    );
+    expect((await current()).stores?.map((s) => s.id)).toEqual([tea.id]);
+    expect(await webhooks().storeChoices(owner)).toEqual([{ id: tea.id, label: 'Tara Tea' }]);
+
+    await change({ codAnswers: null, storeIds: null });
+    expect(await current()).toEqual({ codAnswers: null, stores: null });
+    await change({ codAnswers: ['confirmed'], storeIds: [tea.id] });
+    // The database refuses an empty list, more than 2 answers or 20 stores, an unknown answer, a
+    // missing entry or a nested list from an endpoint taking the event…
+    const setInDatabase = (column: 'cod_answers' | 'store_ids', value: string) =>
+      fx.query(`UPDATE app.webhook_endpoints SET ${column} = ${value} WHERE id = $1`, [created.id]);
+    for (const bad of [
+      `'{}'`,
+      `'{confirmed,cancelled,confirmed}'`,
+      `'{declined}'`,
+      `'{confirmed,Cancelled}'`,
+      `ARRAY['confirmed', NULL]::text[]`,
+      `ARRAY[ARRAY['confirmed'], ARRAY['cancelled']]::text[]`,
+    ]) {
+      await expect(setInDatabase('cod_answers', bad), bad).rejects.toThrow(
+        /webhook_endpoints_cod_answers/,
+      );
+    }
+    for (const bad of [
+      `'{}'`,
+      `ARRAY(SELECT gen_random_uuid() FROM generate_series(1, 21))`,
+      `ARRAY[gen_random_uuid(), NULL]::uuid[]`,
+      `ARRAY[ARRAY[gen_random_uuid()], ARRAY[gen_random_uuid()]]::uuid[]`,
+    ]) {
+      await expect(setInDatabase('store_ids', bad), bad).rejects.toThrow(
+        /webhook_endpoints_store_ids/,
+      );
+    }
+    // Both answers and 20 stores are lists the database takes.
+    await setInDatabase('cod_answers', `'{confirmed,cancelled}'`);
+    await setInDatabase('store_ids', `ARRAY(SELECT gen_random_uuid() FROM generate_series(1, 20))`);
+    await change({ eventTypes: ['consent.changed'] });
+    expect(await current()).toEqual({ codAnswers: null, stores: null });
+    await expectAppError(
+      change({ eventTypes: ['consent.changed'], codAnswers: ['confirmed'] }),
+      'validation_failed',
+      answersNeedTheEvent,
+    );
+    await expectAppError(
+      change({ eventTypes: ['consent.changed'], storeIds: [tea.id] }),
+      'validation_failed',
+      storesNeedTheEvent,
+    );
+    // …and any list for an endpoint that does not take it, an order's own events included.
+    await change({ eventTypes: ['order.received', 'order.status_changed'] });
+    await expect(setInDatabase('cod_answers', `'{confirmed}'`)).rejects.toThrow(
+      /webhook_endpoints_cod_answers/,
+    );
+    await expect(setInDatabase('store_ids', `ARRAY['${tea.id}']::uuid[]`)).rejects.toThrow(
+      /webhook_endpoints_store_ids/,
+    );
+    // The company role changes the lists only through their column grants.
+    const grants = await fx.query<{ column_name: string; can_update: boolean }>(
+      `SELECT c AS column_name,
+              has_column_privilege('w360_app', 'app.webhook_endpoints', c, 'UPDATE') AS can_update
+         FROM unnest(ARRAY['cod_answers', 'store_ids']) AS c
+        ORDER BY 1`,
+    );
+    expect(grants).toEqual([
+      { column_name: 'cod_answers', can_update: true },
+      { column_name: 'store_ids', can_update: true },
+    ]);
+  });
+});
+
 describe('template status filters (ADR-148)', () => {
   /** A utility template HyFib submits and Meta's stand-in takes for review: `pending`. */
   async function submitted(c: Company, owner: TenantContext) {

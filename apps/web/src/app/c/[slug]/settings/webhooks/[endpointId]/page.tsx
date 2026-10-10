@@ -54,6 +54,7 @@ export default async function WebhookEndpointPage({
     teamChoices,
     templateChoices,
     campaignChoices,
+    storeChoices,
     pipelineChoices,
     stageChoices,
     ownerChoices,
@@ -71,6 +72,7 @@ export default async function WebhookEndpointPage({
     webhooks.teamChoices(ctx),
     webhooks.templateChoices(ctx),
     webhooks.campaignChoices(ctx),
+    webhooks.storeChoices(ctx),
     webhooks.pipelineChoices(ctx),
     webhooks.stageChoices(ctx),
     webhooks.ownerChoices(ctx),
@@ -221,6 +223,8 @@ export default async function WebhookEndpointPage({
               campaignStatuses: endpoint.campaignStatuses,
               orderStatuses: endpoint.orderStatuses,
               paymentLinkStatuses: endpoint.paymentLinkStatuses,
+              codAnswers: endpoint.codAnswers,
+              stores: endpoint.stores,
               runStepOutcomes: endpoint.runStepOutcomes,
               runStepNodeTypes: endpoint.runStepNodeTypes,
               orderChangeMakers: endpoint.orderChangeMakers,
@@ -278,6 +282,7 @@ export default async function WebhookEndpointPage({
             teamChoices={teamChoices}
             templateChoices={templateChoices}
             campaignChoices={campaignChoices}
+            storeChoices={storeChoices}
             pipelineChoices={pipelineChoices}
             stageChoices={stageChoices}
             ownerChoices={ownerChoices}

@@ -4,6 +4,7 @@ import type { AutomationEndReason, AutomationStepOutcome } from './automations';
 import type { OrderStatusChanger, PaymentLinkStatus } from './commerce';
 import type { CrmChanger, DealStatus, TaskStatus } from './crm';
 import type { ContactSource, MessageType } from './messaging';
+import type { StoreMessageAnswer } from './stores';
 import { appSchema } from './tenancy';
 
 const tz = (name: string) => timestamp(name, { withTimezone: true, mode: 'date' });
@@ -91,6 +92,12 @@ export type WebhookOrderStatus =
  * (ADR-308); a link is `creating` only until the worker creates it, which sends no event.
  */
 export type WebhookPaymentLinkStatus = Exclude<PaymentLinkStatus, 'creating'>;
+
+/**
+ * The answers a `store_order.cod_answered` event reports, which an endpoint can choose (ADR-349):
+ * the customer confirmed the order or cancelled it.
+ */
+export type WebhookCodAnswer = StoreMessageAnswer;
 
 /**
  * Who made an order status change `order.status_changed` reports, as an endpoint can choose them
@@ -292,6 +299,17 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
    * null takes every link's. Set only while `payment_link.status_changed` is among its events.
    */
   paymentLinkApiKeyIds: uuid('payment_link_api_key_ids').array(),
+  /**
+   * The answers it takes as `store_order.cod_answered` (migration 0268, ADR-349); null takes every
+   * answer. Set only while `store_order.cod_answered` is among its events.
+   */
+  codAnswers: text('cod_answers').array().$type<WebhookCodAnswer[]>(),
+  /**
+   * The connected stores whose cash on delivery answers it takes (migration 0268, ADR-349), by the
+   * store of the order answered; null takes every store's. Set only while
+   * `store_order.cod_answered` is among its events.
+   */
+  storeIds: uuid('store_ids').array(),
   /**
    * The statuses a deal reaches that it takes as `deal.status_changed` (migration 0232, ADR-309);
    * null takes every status. Set only while `deal.status_changed` is among its events.

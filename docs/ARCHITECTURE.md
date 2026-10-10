@@ -1904,6 +1904,13 @@ true`); the same key with another request (method, path and body hashed) answers
   only, its number. `buildWebhookPayload` reads the confirmation with `storeConfirmationOf` (the
   order, its store and the confirmation message's conversation and number joined) and gives the
   answer as captured, the order and store as they are now, never the store's customer details.
+- **Cash on delivery answer and store filters** (migration 0268, ADR-349): `cod_answers` on an
+  endpoint lists the answers it takes as `store_order.cod_answered` and `store_ids` the stores, null
+  for every answer or store; checks keep them to 1 to 2 known answers and 1 to 20 stores, and to
+  endpoints that take the event. The confirmation's trigger passes its store in `detail` for
+  `app.capture_webhook_event`, which matches both lists and takes the store out before the event is
+  stored. The services refuse a store a list adds unless it is the company's (`assertWebhookStores`)
+  and keep stores removed since they were chosen.
 - **Step outcome filters** (migration 0249, ADR-327): `run_step_outcomes` on an endpoint lists the
   outcomes of the run steps it takes as `automation.run_step`, null for every step; a check keeps it
   to 1 to 21 known outcomes and to endpoints that take `automation.run_step`.

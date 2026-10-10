@@ -25,6 +25,8 @@ import {
   WEBHOOK_ORDER_STATUS_LABELS,
   WEBHOOK_ORDER_STATUSES,
   WEBHOOK_PAYMENT_LINK_STATUS_LABELS,
+  WEBHOOK_COD_ANSWER_LABELS,
+  WEBHOOK_COD_ANSWERS,
   WEBHOOK_PAYMENT_LINK_STATUSES,
   WEBHOOK_RUN_STEP_OUTCOME_LABELS,
   WEBHOOK_RUN_STEP_OUTCOMES,
@@ -58,6 +60,7 @@ import {
   WEBHOOK_TEMPLATE_STATUSES,
   webhookAssigneeText,
   webhookCampaignText,
+  webhookStoreText,
   webhookChannelText,
   webhookContactFieldConditionText,
   webhookContactFieldKind,
@@ -96,6 +99,9 @@ import {
   type WebhookCampaignStatus,
   type WebhookChannelChoice,
   type WebhookCampaignChoice,
+  type WebhookCodAnswer,
+  type WebhookStoreChoice,
+  type WebhookEndpointStore,
   type WebhookContactFieldValue,
   type WebhookContactPart,
   type WebhookCrmChangeMaker,
@@ -495,6 +501,50 @@ function StepOutcomeChoices({
             <Label htmlFor={id} className="font-normal">
               {WEBHOOK_RUN_STEP_OUTCOME_LABELS[outcome]}{' '}
               <span className="font-mono text-xs">({outcome})</span>
+            </Label>
+          </div>
+        );
+      })}
+    </fieldset>
+  );
+}
+
+/**
+ * The answers an endpoint takes as `store_order.cod_answered` (ADR-349), shown while it takes the
+ * event: both unless one is unticked, in the order the store's confirmation offers them.
+ */
+function CodAnswerChoices({
+  prefix,
+  chosen,
+  onChange,
+}: {
+  prefix: string;
+  chosen: WebhookCodAnswer[];
+  onChange: (next: WebhookCodAnswer[]) => void;
+}) {
+  return (
+    <fieldset className="ml-6 grid gap-1">
+      <legend className="mb-1 text-xs text-muted-foreground">
+        Answers sent (both unless you untick one)
+      </legend>
+      {WEBHOOK_COD_ANSWERS.map((answer) => {
+        const id = `${prefix}-cod-answer-${answer}`;
+        return (
+          <div key={answer} className="flex items-center gap-2">
+            <Checkbox
+              id={id}
+              checked={chosen.includes(answer)}
+              onChange={(e) =>
+                onChange(
+                  e.target.checked
+                    ? WEBHOOK_COD_ANSWERS.filter((a) => a === answer || chosen.includes(a))
+                    : chosen.filter((a) => a !== answer),
+                )
+              }
+            />
+            <Label htmlFor={id} className="font-normal">
+              {WEBHOOK_COD_ANSWER_LABELS[answer]}{' '}
+              <span className="font-mono text-xs">({answer})</span>
             </Label>
           </div>
         );
@@ -1841,6 +1891,104 @@ function CampaignChoices({
 }
 
 /**
+ * The stores whose cash on delivery answers an endpoint takes (ADR-349): every store's, or those of
+ * the stores ticked. A store the endpoint names that was removed since stays listed, ticked, until
+ * it is unticked.
+ */
+function StoreChoices({
+  prefix,
+  choices,
+  stored,
+  every,
+  onEveryChange,
+  chosen,
+  onChange,
+}: {
+  prefix: string;
+  choices: WebhookStoreChoice[];
+  /** The stores the endpoint names now, so a removed one stays listed until it is saved without. */
+  stored: readonly WebhookEndpointStore[];
+  every: boolean;
+  onEveryChange: (next: boolean) => void;
+  chosen: string[];
+  onChange: (next: string[]) => void;
+}) {
+  const listed: WebhookEndpointStore[] = [
+    ...choices,
+    ...stored.filter((s) => !choices.some((c) => c.id === s.id)),
+  ];
+  return (
+    <fieldset className="grid gap-2">
+      <legend className="mb-1 text-sm font-medium">Stores</legend>
+      <p className="text-xs text-muted-foreground">
+        A cash on delivery answer belongs to the store of the order it answers. Other events are
+        sent whichever stores are chosen.
+      </p>
+      <label className="flex items-start gap-2 text-sm">
+        <input
+          type="radio"
+          name={`${prefix}-stores`}
+          className="mt-1"
+          checked={every}
+          onChange={() => onEveryChange(true)}
+        />
+        <span>
+          Every store’s answers
+          <span className="block text-xs text-muted-foreground">
+            Including stores connected later.
+          </span>
+        </span>
+      </label>
+      <label className="flex items-start gap-2 text-sm">
+        <input
+          type="radio"
+          name={`${prefix}-stores`}
+          className="mt-1"
+          checked={!every}
+          disabled={listed.length === 0}
+          onChange={() => onEveryChange(false)}
+        />
+        <span>
+          Only those of the stores ticked
+          {listed.length === 0 ? (
+            <span className="block text-xs text-muted-foreground">
+              The company has no connected store.
+            </span>
+          ) : null}
+        </span>
+      </label>
+      {!every ? (
+        <div className="ml-6 grid gap-1">
+          {listed.map((st) => {
+            const id = `${prefix}-store-${st.id}`;
+            return (
+              <div key={st.id} className="flex items-center gap-2">
+                <Checkbox
+                  id={id}
+                  checked={chosen.includes(st.id)}
+                  onChange={(e) =>
+                    onChange(
+                      e.target.checked
+                        ? listed
+                            .filter((l) => l.id === st.id || chosen.includes(l.id))
+                            .map((l) => l.id)
+                        : chosen.filter((x) => x !== st.id),
+                    )
+                  }
+                />
+                <Label htmlFor={id} className="font-normal break-all">
+                  {webhookStoreText(st)}
+                </Label>
+              </div>
+            );
+          })}
+        </div>
+      ) : null}
+    </fieldset>
+  );
+}
+
+/**
  * What the pipelines' fieldset says for deals' events (ADR-263), tasks' events (ADR-303) and notes'
  * events (ADR-305).
  */
@@ -2687,6 +2835,8 @@ function EventChoices({
   onOrderStatusesChange,
   paymentLinkStatuses,
   onPaymentLinkStatusesChange,
+  codAnswers,
+  onCodAnswersChange,
   runStepOutcomes,
   onRunStepOutcomesChange,
   runStepNodeTypes,
@@ -2735,6 +2885,8 @@ function EventChoices({
   onOrderStatusesChange: (next: WebhookOrderStatus[]) => void;
   paymentLinkStatuses: WebhookPaymentLinkStatus[];
   onPaymentLinkStatusesChange: (next: WebhookPaymentLinkStatus[]) => void;
+  codAnswers: WebhookCodAnswer[];
+  onCodAnswersChange: (next: WebhookCodAnswer[]) => void;
   runStepOutcomes: WebhookRunStepOutcome[];
   onRunStepOutcomesChange: (next: WebhookRunStepOutcome[]) => void;
   runStepNodeTypes: WebhookRunStepNodeType[];
@@ -2891,6 +3043,9 @@ function EventChoices({
                 chosen={paymentLinkStatuses}
                 onChange={onPaymentLinkStatusesChange}
               />
+            ) : null}
+            {type === 'store_order.cod_answered' && chosen.includes(type) ? (
+              <CodAnswerChoices prefix={prefix} chosen={codAnswers} onChange={onCodAnswersChange} />
             ) : null}
             {type === 'automation.run_step' && chosen.includes(type) ? (
               <StepOutcomeChoices
@@ -3210,6 +3365,7 @@ export function WebhookEndpointForm({
   teamChoices,
   templateChoices,
   campaignChoices,
+  storeChoices,
   pipelineChoices,
   stageChoices,
   ownerChoices,
@@ -3236,6 +3392,10 @@ export function WebhookEndpointForm({
     orderStatuses: WebhookOrderStatus[] | null;
     /** The Payment Link statuses it takes (ADR-308); null for every status. */
     paymentLinkStatuses: WebhookPaymentLinkStatus[] | null;
+    /** The cash on delivery answers it takes (ADR-349); null for every answer. */
+    codAnswers: WebhookCodAnswer[] | null;
+    /** The stores whose cash on delivery answers it takes (ADR-349), named; null for every one's. */
+    stores: WebhookEndpointStore[] | null;
     /** The outcomes of the run steps it takes (ADR-327); null for every step. */
     runStepOutcomes: WebhookRunStepOutcome[] | null;
     /** The kinds of node whose run steps it takes (ADR-328); null for every step. */
@@ -3343,6 +3503,8 @@ export function WebhookEndpointForm({
   templateChoices: WebhookTemplateChoice[];
   /** The company's newest campaigns, which an endpoint can choose, and whether there are more. */
   campaignChoices: { campaigns: WebhookCampaignChoice[]; more: boolean };
+  /** The company's connected stores, which an endpoint can choose (ADR-349). */
+  storeChoices: WebhookStoreChoice[];
   /** The CRM pipelines the company uses, which an endpoint can choose (ADR-263). */
   pipelineChoices: WebhookPipelineChoice[];
   /** The stages in use of the pipelines the company uses, which an endpoint can choose (ADR-264). */
@@ -3380,6 +3542,11 @@ export function WebhookEndpointForm({
   const [paymentLinkStatuses, setPaymentLinkStatuses] = useState<WebhookPaymentLinkStatus[]>(
     endpoint?.paymentLinkStatuses ?? [...WEBHOOK_PAYMENT_LINK_STATUSES],
   );
+  const [codAnswers, setCodAnswers] = useState<WebhookCodAnswer[]>(
+    endpoint?.codAnswers ?? [...WEBHOOK_COD_ANSWERS],
+  );
+  const [everyStore, setEveryStore] = useState(!endpoint?.stores);
+  const [storeIds, setStoreIds] = useState<string[]>(endpoint?.stores?.map((st) => st.id) ?? []);
   const [runStepOutcomes, setRunStepOutcomes] = useState<WebhookRunStepOutcome[]>(
     endpoint?.runStepOutcomes ?? [...WEBHOOK_RUN_STEP_OUTCOMES],
   );
@@ -3681,6 +3848,15 @@ export function WebhookEndpointForm({
           paymentLinkStatuses.length < WEBHOOK_PAYMENT_LINK_STATUSES.length
             ? paymentLinkStatuses
             : null;
+        // Both answers ticked take every answer (null, ADR-349).
+        const chosenCodAnswers =
+          eventTypes.includes('store_order.cod_answered') &&
+          codAnswers.length < WEBHOOK_COD_ANSWERS.length
+            ? codAnswers
+            : null;
+        // Every store's answers unless the stores ticked are chosen (ADR-349).
+        const chosenStores =
+          eventTypes.includes('store_order.cod_answered') && !everyStore ? storeIds : null;
         // Every step outcome ticked takes every step (null, ADR-327).
         const chosenRunStepOutcomes =
           eventTypes.includes('automation.run_step') &&
@@ -3967,6 +4143,8 @@ export function WebhookEndpointForm({
           campaignStatuses: chosenCampaignStatuses,
           orderStatuses: chosenOrderStatuses,
           paymentLinkStatuses: chosenPaymentLinkStatuses,
+          codAnswers: chosenCodAnswers,
+          storeIds: chosenStores,
           runStepOutcomes: chosenRunStepOutcomes,
           runStepNodeTypes: chosenRunStepNodeTypes,
           orderChangeMakers: chosenOrderChangeMakers,
@@ -4062,6 +4240,9 @@ export function WebhookEndpointForm({
               setCampaignStatuses([...WEBHOOK_CAMPAIGN_STATUSES]);
               setOrderStatuses([...WEBHOOK_ORDER_STATUSES]);
               setPaymentLinkStatuses([...WEBHOOK_PAYMENT_LINK_STATUSES]);
+              setCodAnswers([...WEBHOOK_COD_ANSWERS]);
+              setEveryStore(true);
+              setStoreIds([]);
               setRunStepOutcomes([...WEBHOOK_RUN_STEP_OUTCOMES]);
               setRunStepNodeTypes([...WEBHOOK_RUN_STEP_NODE_TYPES]);
               setOrderChangeMakers([...WEBHOOK_ORDER_CHANGE_MAKERS]);
@@ -4204,6 +4385,8 @@ export function WebhookEndpointForm({
         onOrderStatusesChange={setOrderStatuses}
         paymentLinkStatuses={paymentLinkStatuses}
         onPaymentLinkStatusesChange={setPaymentLinkStatuses}
+        codAnswers={codAnswers}
+        onCodAnswersChange={setCodAnswers}
         runStepOutcomes={runStepOutcomes}
         onRunStepOutcomesChange={setRunStepOutcomes}
         runStepNodeTypes={runStepNodeTypes}
@@ -4316,6 +4499,17 @@ export function WebhookEndpointForm({
           onEveryChange={setEveryCampaign}
           chosen={campaignIds}
           onChange={setCampaignIds}
+        />
+      ) : null}
+      {eventTypes.includes('store_order.cod_answered') ? (
+        <StoreChoices
+          prefix={prefix}
+          choices={storeChoices}
+          stored={endpoint?.stores ?? []}
+          every={everyStore}
+          onEveryChange={setEveryStore}
+          chosen={storeIds}
+          onChange={setStoreIds}
         />
       ) : null}
       {webhookTakesTeamEvents(eventTypes) ? (

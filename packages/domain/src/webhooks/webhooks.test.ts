@@ -19,6 +19,7 @@ import {
   ORDER_STATUS_CHANGERS,
   ORDER_STATUSES,
   PAYMENT_LINK_STATUSES,
+  STORE_MESSAGE_ANSWERS,
   TASK_STATUSES,
   TEMPLATE_STATUSES,
   WEBHOOK_EVENT_TYPES,
@@ -76,6 +77,10 @@ import {
   WEBHOOK_PAYMENT_LINK_STATUS_LABELS,
   WEBHOOK_PAYMENT_LINK_STATUSES,
   WEBHOOK_RUN_STEP_OUTCOME_LABELS,
+  WEBHOOK_COD_ANSWERS,
+  WEBHOOK_COD_ANSWER_LABELS,
+  webhookStoreLabel,
+  webhookStoreText,
   WEBHOOK_RUN_STEP_OUTCOMES,
   WEBHOOK_RUN_STEP_NODE_TYPE_LABELS,
   WEBHOOK_RUN_STEP_NODE_TYPES,
@@ -261,6 +266,14 @@ import {
   WEBHOOK_PAYMENT_LINK_STATUSES_NEED_THE_EVENT,
   webhookRunStepOutcomesFor,
   webhookRunStepOutcomesSchema,
+  webhookCodAnswersFor,
+  webhookCodAnswersSchema,
+  webhookStoreIdsFor,
+  webhookStoreIdsSchema,
+  assertWebhookStores,
+  WEBHOOK_COD_ANSWERS_NEED_THE_EVENT,
+  WEBHOOK_STORES_NEED_THE_EVENT,
+  WEBHOOK_STORES_NOT_FOUND,
   WEBHOOK_RUN_STEP_OUTCOMES_NEED_THE_EVENT,
   webhookRunStepNodeTypesFor,
   webhookRunStepNodeTypesSchema,
@@ -7278,5 +7291,138 @@ describe('the event of a cash on delivery answer (ADR-348)', () => {
       expect(described).toContain(words);
     }
     expect(doc.components.schemas).toHaveProperty('WebhookStoreOrderCodAnswered');
+  });
+});
+
+describe('cash on delivery answer and store filters (ADR-349)', () => {
+  const [shop, outlet, gone] = [
+    '0192f3f7-b15e-7f40-8d6b-8e9fa0b1c201',
+    '0192f3f7-b15e-7f40-8d6b-8e9fa0b1c202',
+    '0192f3f7-b15e-7f40-8d6b-8e9fa0b1c203',
+  ];
+
+  it('take one or both answers, once each, in the confirmation’s order; null takes every answer', () => {
+    expect(webhookCodAnswersSchema.parse(['cancelled', 'confirmed'])).toEqual([
+      'confirmed',
+      'cancelled',
+    ]);
+    expect(webhookCodAnswersSchema.parse(['cancelled', 'cancelled'])).toEqual(['cancelled']);
+    expect(webhookCodAnswersSchema.parse(null)).toBeNull();
+    // The answers a store message records, as confirmation.answer names them.
+    expect(WEBHOOK_COD_ANSWERS).toEqual([...STORE_MESSAGE_ANSWERS]);
+    for (const refused of [
+      [],
+      ['declined'],
+      ['Confirmed'],
+      'confirmed',
+      [null],
+      Array(3).fill('confirmed'),
+    ]) {
+      expect(webhookCodAnswersSchema.safeParse(refused).success, JSON.stringify(refused)).toBe(
+        false,
+      );
+    }
+    expect(webhookCodAnswersSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one answer, or take every answer.',
+    );
+    expect(webhookCodAnswersSchema.safeParse(['declined']).error?.issues[0]?.message).toBe(
+      'Choose answers from the list.',
+    );
+    expect(
+      webhookCodAnswersSchema.safeParse(Array(3).fill('confirmed')).error?.issues[0]?.message,
+    ).toBe('Give each answer once.');
+    // Named as an order's page names them, in the list's order.
+    expect(Object.keys(WEBHOOK_COD_ANSWER_LABELS)).toEqual([...WEBHOOK_COD_ANSWERS]);
+    expect(WEBHOOK_COD_ANSWER_LABELS).toEqual({ confirmed: 'Confirmed', cancelled: 'Cancelled' });
+  });
+
+  it('take 1 to 20 of the company’s stores, once each, whatever their case; null takes every store', () => {
+    expect(WEBHOOK_LIMITS.stores).toBe(20);
+    expect(webhookStoreIdsSchema.parse([shop.toUpperCase(), shop, outlet])).toEqual([shop, outlet]);
+    expect(webhookStoreIdsSchema.parse(null)).toBeNull();
+    const ids = (n: number) =>
+      Array.from({ length: n }, (_, i) => `0192f3f7-b15e-7f40-8d6b-${String(i).padStart(12, '0')}`);
+    expect(webhookStoreIdsSchema.parse(ids(20))).toHaveLength(20);
+    for (const refused of [[], ['shop'], [null], shop, ids(21)]) {
+      expect(webhookStoreIdsSchema.safeParse(refused).success, JSON.stringify(refused)).toBe(false);
+    }
+    expect(webhookStoreIdsSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one store, or take every store.',
+    );
+    expect(webhookStoreIdsSchema.safeParse(['shop']).error?.issues[0]?.message).toBe(
+      'Choose stores from the list.',
+    );
+    expect(webhookStoreIdsSchema.safeParse(ids(21)).error?.issues[0]?.message).toBe(
+      'Choose at most 20 stores.',
+    );
+  });
+
+  it('are kept only while the endpoint takes store_order.cod_answered: given, kept, or cleared', () => {
+    const both = ['store_order.cod_answered', 'order.received'] as const;
+    expect(webhookCodAnswersFor([...both], ['cancelled'], null)).toEqual(['cancelled']);
+    expect(webhookCodAnswersFor([...both], undefined, ['confirmed'])).toEqual(['confirmed']);
+    expect(webhookCodAnswersFor([...both], null, ['confirmed'])).toBeNull();
+    expect(webhookCodAnswersFor([...both], undefined, null)).toBeNull();
+    expect(webhookStoreIdsFor([...both], [shop], null)).toEqual([shop]);
+    expect(webhookStoreIdsFor([...both], undefined, [outlet])).toEqual([outlet]);
+    expect(webhookStoreIdsFor([...both], null, [outlet])).toBeNull();
+    expect(webhookStoreIdsFor([...both], undefined, null)).toBeNull();
+    // WhatsApp orders' events have no answer or store to choose.
+    for (const events of [['order.received', 'order.status_changed'] as const]) {
+      expect(webhookCodAnswersFor([...events], ['cancelled'], ['confirmed'])).toBeNull();
+      expect(webhookStoreIdsFor([...events], [shop], [outlet])).toBeNull();
+    }
+    const label = WEBHOOK_EVENT_INFO['store_order.cod_answered'].label;
+    expect(WEBHOOK_COD_ANSWERS_NEED_THE_EVENT).toBe(
+      `Choose answers only for an endpoint that receives ${label}.`,
+    );
+    expect(WEBHOOK_STORES_NEED_THE_EVENT).toBe(
+      `Choose stores only for an endpoint that receives ${label}.`,
+    );
+  });
+
+  it('name a store by its name, else its address, and one removed since it was chosen as such', () => {
+    const url = 'https://asha-textiles.myshopify.com';
+    expect(webhookStoreLabel({ name: ' Asha Textiles ', storeUrl: url })).toBe('Asha Textiles');
+    expect(webhookStoreLabel({ name: null, storeUrl: url })).toBe(url);
+    expect(webhookStoreLabel({ name: '   ', storeUrl: url })).toBe(url);
+    expect(webhookStoreText({ id: shop, label: 'Asha Textiles' })).toBe('Asha Textiles');
+    expect(webhookStoreText({ id: gone, label: null })).toBe('A removed store');
+  });
+
+  /** A transaction that answers the store read with the stores given, counting its reads. */
+  function storesTx(found: string[]) {
+    let reads = 0;
+    const tx = {
+      select: () => ({
+        from: () => ({
+          where: () => {
+            reads += 1;
+            return Promise.resolve(found.map((id) => ({ id })));
+          },
+        }),
+      }),
+    } as unknown as Tx;
+    return { tx, reads: () => reads };
+  }
+
+  it('check only the stores a list adds, which must be the company’s; those it held may be gone', async () => {
+    const ok = storesTx([shop, outlet]);
+    await assertWebhookStores(ok.tx, 'tenant', [shop, outlet]);
+    expect(ok.reads()).toBe(1);
+    // Held stores are not read again, so a store removed since stays on the list.
+    const held = storesTx([]);
+    await assertWebhookStores(held.tx, 'tenant', [gone, shop], [gone, shop]);
+    await assertWebhookStores(held.tx, 'tenant', null, [gone]);
+    expect(held.reads()).toBe(0);
+    // A store that is not the company's (or not one) is refused at its place in the list.
+    const refused = await assertWebhookStores(storesTx([shop]).tx, 'tenant', [shop, gone], [shop])
+      .then(() => null)
+      .catch((error: unknown) => error);
+    expect(isAppError(refused) && refused.code).toBe('validation_failed');
+    expect(isAppError(refused) && refused.issues).toEqual([
+      { path: 'storeIds.1', message: WEBHOOK_STORES_NOT_FOUND },
+    ]);
+    expect(WEBHOOK_STORES_NOT_FOUND).toBe('Choose stores of this company.');
   });
 });

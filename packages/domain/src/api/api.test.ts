@@ -187,6 +187,8 @@ import {
   WEBHOOK_ORDER_STATUSES_NEED_THE_EVENT,
   WEBHOOK_PAYMENT_LINK_STATUSES_NEED_THE_EVENT,
   WEBHOOK_RUN_STEP_OUTCOMES_NEED_THE_EVENT,
+  WEBHOOK_COD_ANSWERS_NEED_THE_EVENT,
+  WEBHOOK_STORES_NEED_THE_EVENT,
   WEBHOOK_RUN_STEP_NODE_TYPES_NEED_THE_EVENT,
   WEBHOOK_ORDER_CHANGE_MAKERS_NEED_THE_EVENT,
   WEBHOOK_ORDER_EXCLUDED_API_KEYS_NEED_THE_EVENT,
@@ -213,6 +215,7 @@ import {
   WEBHOOK_LIMITS,
   WEBHOOK_PAYMENT_LINK_STATUSES,
   WEBHOOK_RUN_STEP_OUTCOMES,
+  WEBHOOK_COD_ANSWERS,
   WEBHOOK_RUN_STEP_NODE_TYPES,
   WEBHOOK_ORDER_CHANGE_MAKERS,
   WEBHOOK_DEAL_STATUSES,
@@ -1484,6 +1487,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'campaignIds',
       'campaignStatuses',
       'channelIds',
+      'codAnswers',
       'consentChanges',
       'contactEventFieldValues',
       'contactEventTags',
@@ -1524,6 +1528,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'runStepOutcomes',
       'runTriggers',
       'stageIds',
+      'storeIds',
       'surveyAssigneeIds',
       'surveyContactTags',
       'surveyConversationTags',
@@ -3532,6 +3537,78 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       .properties;
     expect(JSON.stringify(changed.runStepOutcomes)).toContain(
       'unless the events no longer include automation.run_step, which clears them',
+    );
+  });
+
+  it('take cash on delivery answers and stores only with store_order.cod_answered, and a list of them alone is a change (ADR-349)', () => {
+    const base = { url: 'https://hooks.example.com/w360', events: ['store_order.cod_answered'] };
+    const [shop, outlet] = [
+      '0192f3f7-b15e-7f40-8d6b-8e9fa0b1c301',
+      '0192f3f7-b15e-7f40-8d6b-8e9fa0b1c302',
+    ];
+    const created = apiCreateWebhookEndpointSchema.parse({
+      ...base,
+      codAnswers: ['cancelled', 'confirmed'],
+      storeIds: [outlet.toUpperCase(), outlet, shop],
+    });
+    expect(created.codAnswers).toEqual(['confirmed', 'cancelled']);
+    expect(created.storeIds).toEqual([outlet, shop]);
+    const refused = apiCreateWebhookEndpointSchema.safeParse({
+      ...base,
+      events: ['order.received'],
+      codAnswers: ['cancelled'],
+      storeIds: [shop],
+    });
+    expect(refused.error?.issues.map((i) => [i.path.join('.'), i.message])).toEqual([
+      ['codAnswers', WEBHOOK_COD_ANSWERS_NEED_THE_EVENT],
+      ['storeIds', WEBHOOK_STORES_NEED_THE_EVENT],
+    ]);
+    for (const body of [
+      { ...base, codAnswers: [] },
+      { ...base, codAnswers: ['declined'] },
+      { ...base, storeIds: [] },
+      { ...base, storeIds: ['shop'] },
+    ]) {
+      expect(apiCreateWebhookEndpointSchema.safeParse(body).success, JSON.stringify(body)).toBe(
+        false,
+      );
+    }
+    expect(apiUpdateWebhookEndpointSchema.parse({ codAnswers: null })).toEqual({
+      codAnswers: null,
+    });
+    expect(apiUpdateWebhookEndpointSchema.parse({ storeIds: [shop] })).toEqual({
+      storeIds: [shop],
+    });
+    expect(apiUpdateWebhookEndpointSchema.safeParse({}).error?.issues[0]?.message).toContain(
+      'the templates, the cash on delivery answers and their stores, the campaigns,',
+    );
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas;
+    const answered = schemas.WebhookEndpoint as {
+      properties: Record<string, { anyOf?: { items?: { enum?: string[]; format?: string } }[] }>;
+    };
+    expect(answered.properties.codAnswers?.anyOf?.[0]?.items?.enum).toEqual([
+      ...WEBHOOK_COD_ANSWERS,
+    ]);
+    expect(answered.properties.storeIds?.anyOf?.[0]?.items?.format).toBe('uuid');
+    const given = (schemas.CreateWebhookEndpoint as { properties: Record<string, unknown> })
+      .properties;
+    expect(JSON.stringify(given.codAnswers)).toContain(
+      'as store_order.cod_answered (confirmed, cancelled), as confirmation.answer names them, only with the store_order.cod_answered event',
+    );
+    expect(JSON.stringify(given.storeIds)).toContain(
+      'A store removed since it was chosen stays on the list and matches nothing',
+    );
+    const changed = (schemas.UpdateWebhookEndpoint as { properties: Record<string, unknown> })
+      .properties;
+    for (const field of ['codAnswers', 'storeIds']) {
+      expect(JSON.stringify(changed[field]), field).toContain(
+        'unless the events no longer include store_order.cod_answered, which clears them',
+      );
+    }
+    expect(doc.webhooks['store_order.cod_answered'].post.description).toContain(
+      'An endpoint receives both answers unless it names the answers it takes (its `codAnswers`',
     );
   });
 

@@ -32,6 +32,7 @@ import {
   WEBHOOK_MESSAGE_STATUSES,
   WEBHOOK_ORDER_STATUSES,
   WEBHOOK_PAYMENT_LINK_STATUSES,
+  WEBHOOK_COD_ANSWERS,
   WEBHOOK_RUN_STEP_OUTCOMES,
   WEBHOOK_RUN_STEP_NODE_TYPES,
   WEBHOOK_ORDER_CHANGE_MAKERS,
@@ -1222,6 +1223,18 @@ export const apiWebhookEndpointSchema = z.object({
     .nullable()
     .describe(
       'The statuses a Payment Link reaches that the endpoint receives as payment_link.status_changed; null receives every status.',
+    ),
+  codAnswers: z
+    .array(z.enum(WEBHOOK_COD_ANSWERS))
+    .nullable()
+    .describe(
+      'The cash on delivery answers the endpoint receives as store_order.cod_answered, as confirmation.answer names them; null receives every answer.',
+    ),
+  storeIds: z
+    .array(z.uuid())
+    .nullable()
+    .describe(
+      "The connected stores whose cash on delivery answers (store_order.cod_answered) the endpoint receives, as store.id names them; a store removed since it was chosen stays and matches nothing. null receives every store's. Other events are not narrowed.",
     ),
   runStepOutcomes: z
     .array(z.enum(WEBHOOK_RUN_STEP_OUTCOMES))
@@ -4329,7 +4342,7 @@ export function buildOpenApiDocument(serverUrl: string) {
       'store_order.cod_answered': webhook(
         'webhookStoreOrderCodAnswered',
         WEBHOOK_EVENT_INFO['store_order.cod_answered'].label,
-        `${WEBHOOK_EVENT_INFO['store_order.cod_answered'].description} A store’s cash on delivery message carries two quick-reply buttons, one confirming the order and one cancelling it, and HyFib changes nothing in the store: this event is how an order system learns the answer. confirmation.answer and confirmation.previousAnswer are the change, with when the customer tapped and the tap’s message, as captured; the order is HyFib’s copy of the store’s order and the store the one it came from, as they are when the event is delivered, with the store’s own order id (storeOrder.externalId) to find it there. Never the customer’s details from the store: contact is the conversation’s contact, as erasure left it. The event is sent for the first answer and whenever a later tap replaces it with the other one; a tap that repeats the answer, an older tap arriving late and a tap outside the confirmation’s conversation send nothing. Store orders themselves are not sent: the store reports them through its own webhooks. It happens on the WhatsApp number the confirmation was sent from, so an endpoint that names numbers receives it for those numbers only. A confirmation is deleted with its order or its store, after which a delivery not yet made fails as event_gone. Deliveries are not ordered: the latest answer is the one with the latest createdAt.`,
+        `${WEBHOOK_EVENT_INFO['store_order.cod_answered'].description} A store’s cash on delivery message carries two quick-reply buttons, one confirming the order and one cancelling it, and HyFib changes nothing in the store: this event is how an order system learns the answer. confirmation.answer and confirmation.previousAnswer are the change, with when the customer tapped and the tap’s message, as captured; the order is HyFib’s copy of the store’s order and the store the one it came from, as they are when the event is delivered, with the store’s own order id (storeOrder.externalId) to find it there. Never the customer’s details from the store: contact is the conversation’s contact, as erasure left it. The event is sent for the first answer and whenever a later tap replaces it with the other one; a tap that repeats the answer, an older tap arriving late and a tap outside the confirmation’s conversation send nothing. Store orders themselves are not sent: the store reports them through its own webhooks. It happens on the WhatsApp number the confirmation was sent from, so an endpoint that names numbers receives it for those numbers only. An endpoint receives both answers unless it names the answers it takes (its \`codAnswers\`, or the answers ticked in Settings → Webhooks), and the answers to every store’s orders unless it names the stores (its \`storeIds\`, or the stores ticked in Settings → Webhooks); with more than one list, an answer must pass them all. A confirmation is deleted with its order or its store, after which a delivery not yet made fails as event_gone. Deliveries are not ordered: the latest answer is the one with the latest createdAt.`,
         'WebhookStoreOrderCodAnswered',
       ),
       'campaign.status_changed': webhook(

@@ -1,5 +1,58 @@
 # Progress
 
+## 2026-10-10 — Cash on delivery answer and store filters for webhooks (P5-09, H-014, ADR-349)
+
+Status: **Implemented; its database tests run in CI only.** `store_order.cod_answered` (ADR-348)
+went to an endpoint for every answer of every store, narrowed only by number: an order system that
+acts on cancellations alone got every confirmation, and a company whose stores feed different
+systems sent each one every store's answers. The local PostgreSQL is unavailable, so migration 0268
+and the integration tests below were written but not run here; the migration passed the pglast
+parse check (syntax only), its PL/pgSQL bodies included.
+
+### Completed
+
+- **Database:** migration 0268: `cod_answers` (1 to 2 known answers) and `store_ids` (1 to 20
+  stores) on `app.webhook_endpoints`, each with a check that also keeps it to endpoints taking
+  `store_order.cod_answered`, validated at once; the runtime role's update grant on both; the
+  confirmation trigger's function passing its store for the filter only; `app.capture_webhook_event`
+  replaced with the same signature, 0266's with both lists matched and the store taken out of the
+  stored detail.
+- **Domain:** `codAnswers` and `storeIds` on endpoints in Settings and the API: the schemas (answers
+  in the confirmation's order, store ids once each whatever their case), kept only with the event,
+  a list given alone a change, refusals by place; the stores a list adds checked against the
+  company's (`assertWebhookStores`), those it held kept when removed since and named "A removed
+  store"; the store choices (the company's stores in the order they were added, named by the store
+  or by address); the audit, the company data export, the API document and the OpenAPI webhook.
+- **Web:** Settings → Webhooks: "Answers sent" under Cash on delivery answered (both ticked by
+  default) and "Stores" (every store's answers by default, or the stores ticked); the endpoints list
+  says which are sent.
+- **Tests:** unit (5 new in `webhooks/webhooks.test.ts`: the answers' and stores' schemas and
+  messages, the lists kept only with the event, a store's name or address and a removed one, the
+  stores a list adds checked and those it held not read; 1 in `api/api.test.ts`: the API's schemas,
+  refusals and documents); integration (`webhooks.test.ts`: Settings' refusals, keeping, clearing,
+  audit, a removed store kept and refused once off the list, each clause of both checks and the
+  grants; `api-webhook-endpoints.test.ts`: the API's round trip, refusals by place, another
+  company's store and a removed one; `stores.test.ts`: the cash on delivery flow delivering the
+  cancellation and the confirmation by answer and by store, with a number filter too). Written for
+  CI; the integration tests were not run here. No e2e test covers the new Settings fields.
+- **Docs:** ADR-349; ARCHITECTURE; SECURITY; THREAT-MODEL T308; DEPLOYMENT (0268); RUNBOOKS;
+  DATA-RETENTION; BACKLOG P5-09; feature matrix W-138 and H-014.
+- **Mutation checks:** 27/27 deliberate regressions caught on the unit-tested parts (the answers'
+  and stores' schemas: order, repeats, case, limits and unknown entries; the lists kept without the
+  event or given null; the stores a list adds: held ones read again, a read for none, another
+  company's taken, the refusal's place; the answers' order, a blank store name, a removed store's
+  name, the store limit; the API's refinements and a list alone as a change; the OpenAPI
+  properties).
+
+### Test commands and results (local, 2026-10-10)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 146 files, 1489 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+
 ## 2026-10-10 — Cash on delivery answers as webhook events (P5-09, H-014, ADR-348)
 
 Status: **Implemented; its database tests run in CI only.** A store's cash on delivery message asks
