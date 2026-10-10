@@ -114,14 +114,40 @@ export function totp(secretBase32: string, now = Date.now()): string {
 
 /**
  * WCAG reflow: the page must not scroll sideways at the current viewport (wide tables scroll
- * inside their own container instead).
+ * inside their own container instead). A failure names the elements that stick out of a parent
+ * inside the viewport, which no ancestor clips: where the overflow starts.
  */
 export async function expectNoHorizontalOverflow(page: Page) {
-  const [scrollWidth, viewportWidth] = await page.evaluate(() => [
-    document.documentElement.scrollWidth,
-    document.documentElement.clientWidth,
-  ]);
-  expect(scrollWidth, 'page is wider than the viewport').toBeLessThanOrEqual(viewportWidth);
+  const { scrollWidth, viewportWidth, outside } = await page.evaluate(() => {
+    const viewportWidth = document.documentElement.clientWidth;
+    const scrollWidth = document.documentElement.scrollWidth;
+    const outside: string[] = [];
+    if (scrollWidth > viewportWidth) {
+      const fits = (el: Element) => el.getBoundingClientRect().right <= viewportWidth + 0.5;
+      const clipped = (el: Element) => {
+        for (let p = el.parentElement; p && p !== document.body; p = p.parentElement) {
+          if (getComputedStyle(p).overflowX !== 'visible') return true;
+        }
+        return false;
+      };
+      for (const el of document.body.querySelectorAll('*')) {
+        if (fits(el) || (el.parentElement && !fits(el.parentElement)) || clipped(el)) continue;
+        const classes = el.getAttribute('class')?.trim().split(/\s+/).slice(0, 6).join('.') ?? '';
+        const box = el.getBoundingClientRect();
+        const text = (el.textContent ?? '').replace(/\s+/g, ' ').trim().slice(0, 60);
+        outside.push(
+          `${el.tagName.toLowerCase()}${classes ? `.${classes}` : ''} ` +
+            `(${Math.round(box.left)} to ${Math.round(box.right)}) "${text}"`,
+        );
+        if (outside.length === 5) break;
+      }
+    }
+    return { scrollWidth, viewportWidth, outside };
+  });
+  expect(
+    scrollWidth,
+    `page is wider than the viewport; sticking out: ${outside.join('; ') || 'none found'}`,
+  ).toBeLessThanOrEqual(viewportWidth);
 }
 
 /** Platform staff steps need the owner and auth database connections (fixture steps only). */

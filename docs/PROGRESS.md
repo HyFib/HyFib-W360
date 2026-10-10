@@ -59,11 +59,15 @@ migration passed the pglast parse check (syntax only), its PL/pgSQL body include
   HTTP status, any other Meta's; the migration's header is wrapped again; the threat model, runbook
   and comments say a ninth code is listed and where codes come from; and the e2e fixture ties the
   number to the conversation and gives the failed send its rank.
-- **CI fix:** the new e2e test failed on WebKit alone, twice: with the table on a company's page,
-  the page 360 pixels wide measured 409 (the earlier tests' company failed no send, so showed the
-  note). The table's box now has inline-size containment (`contain: inline-size`, in WebKit since
-  Safari 16), so its width counts towards nothing around it and it scrolls in its own box. WebKit is
-  not installed here, so the fix was checked in CI only.
+- **CI fix:** the new e2e test failed on WebKit alone, on every try: a company's platform page 360
+  pixels wide measured 409, the first check of a whole platform page at that width. Not the reasons
+  table: inline-size containment of its box (f12c51a) left the width at 409 and is taken out again.
+  The platform header's brand and its "Platform administration" badge sat in a row that does not
+  wrap. Chromium and Firefox wrap the badge's text; WebKit's 409 matches the row with the badge on
+  one line: with a wide font and the badge kept on one line, Chromium measures the row at 360
+  pixels, 408 with the header's padding. The row now wraps, so the badge goes under the brand on a
+  phone (no overflow at 320, 360 or 393 pixels in that local check). A failed overflow check now names the elements that stick out of a
+  parent inside the viewport. WebKit is not installed here, so the fix is checked in CI only.
 
 ### Test commands and results (local, 2026-10-10)
 
