@@ -1,5 +1,54 @@
 # Progress
 
+## 2026-10-10 — The year's failed sends by company, month by month (P5-10, H-034, ADR-362)
+
+Status: **Implemented; its database tests run in CI only.** The Usage tab showed the year's failed
+sends by reason, month by month (ADR-360), every company's together, and its companies table counts
+no failures: a company whose sends began failing, or one failing all year, did not stand out. The
+local PostgreSQL is unavailable, so migration 0285 and the integration tests below were written but
+not run here; the migration passed the pglast parse check (syntax only), its PL/pgSQL body included.
+
+### Completed
+
+- **Database:** migration 0285: `ops.platform_ops_failure_company_months()`, the year's failed sends
+  (counted days, companies not deleted) by company and UTC calendar month, the companies ranked by
+  their year (the eight with the most, ties by name and id, then the rest together, a ninth alone
+  being listed), each row with its place; for platform administrators only (`W3403`), owned by the
+  definer role, executable by the platform role alone.
+- **Domain:** `readFailureCompanyYear` reads the months, the days counted and the transaction's
+  today in one snapshot; `failureCompanyYear` lists the companies by place with their year, share
+  and months, and refuses a month the year does not list or a place two companies share;
+  `platformOps.failureCompanyYear` reads it in a repeatable-read transaction.
+- **Web:** "Failed sends by company (12 months)" on the Usage tab, under the year's reasons: each
+  company linked to its platform page with its failed sends, share and months, the rest last, with
+  the reasons' note and folded table. `ShareBar`, `MonthBars` and `YearMonths` are now shared by
+  both tables (`failure-reasons.tsx`); its empty texts differ from the reasons' card, which an e2e
+  test matches exactly.
+- **Tests:** unit (3 new: the companies listed by place with their year, share and months, the rest
+  last; rows of one month added, an unknown month or a shared place refused; the reads in one
+  transaction and their failures); integration (`platform-ops.test.ts`: the ranking over the whole
+  year with a tie by name and the rest together, a ninth listed alone, months adding up to each
+  company's year, a day not counted and a deleted company left out, the refusals with the new
+  function; `tenant-isolation.test.ts`: its grants). Written for CI; the integration tests were not
+  run here. No e2e test of the table.
+- **Docs:** ADR-362; ARCHITECTURE; SECURITY; THREAT-MODEL T321; DEPLOYMENT (0285); RUNBOOKS; BACKLOG
+  P5-10; feature matrix H-034.
+- **Mutation checks:** 11 deliberate regressions, all caught by the unit tests (nine companies
+  shown, the companies in the order their rows come, a place two companies share passed over, a
+  company's year from one month, rows of one month replaced, an unknown month passed over, shares
+  of the wrong total, the days counted taken for those not counted, the read cut short, no days
+  counted answered passed over, the rest named as one company). The function's ranking and filters
+  run in the database and are covered by the integration tests, which run in CI only.
+
+### Test commands and results (local, 2026-10-10)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 146 files, 1551 tests passed                                    |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+
 ## 2026-10-10 — Cart reminder filter for cart reminder webhook events (P5-09, H-014, ADR-361)
 
 Status: **Implemented; its database tests run in CI only.** `store_checkout.reminder_skipped` and

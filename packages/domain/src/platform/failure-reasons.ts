@@ -210,3 +210,144 @@ export async function readFailureReasonYear(
     ),
   };
 }
+
+/**
+ * Companies listed one by one in the year's failed sends by company
+ * (`ops.platform_ops_failure_company_months`, ADR-362); the rest share one row when two or more are
+ * left, and a ninth alone is listed.
+ */
+export const FAILURE_COMPANIES_SHOWN = 8;
+
+/** A company among the year's failed sends (ADR-362), as listed. */
+export interface FailureCompany {
+  /** Its place in the year's ranking: 1 for the most failed sends; the rest's comes last. */
+  place: number;
+  /** The company; null for the rest of the companies together. */
+  tenantId: string | null;
+  name: string | null;
+  slug: string | null;
+  /** How many companies the row holds: 1, or the rest's. */
+  companies: number;
+  /** Its failed sends over the year. */
+  failed: number;
+  /** Its share of the year's failed sends, from 0 to 1. */
+  share: number;
+}
+
+/**
+ * The year's failed sends by company (ADR-362), from the counts the worker keeps as days pass: the
+ * companies whose sends failed most on the days whose failed sends by code are counted, each with
+ * its months, and how many of the 365 days before today are not counted yet.
+ */
+export interface FailureCompanyYear {
+  /** The companies with the most failed sends first, ties by name, then the rest; none if none. */
+  companies: FailureCompany[];
+  /** The year's failed sends. */
+  failed: number;
+  /** Days of the 365 before today whose failed sends by code are not counted yet. */
+  uncounted: number;
+  /** The months the year spans, oldest first. */
+  months: FailureReasonMonth[];
+  /** Each listed company's failed sends in each month, in the order of the companies and months. */
+  byMonth: number[][];
+}
+
+/**
+ * The companies of the year's month rows (ADR-362), each once in the order of its place, with its
+ * failed sends over the year, its share of them and its months (0 for a month without one). The rows
+ * are read with the year's ranking in its snapshot, so one naming a month the year does not list,
+ * or a place two companies share, is an error.
+ */
+export function failureCompanyYear(
+  rows: readonly {
+    place: number;
+    tenantId: string | null;
+    name: string | null;
+    slug: string | null;
+    companies: number;
+    month: string;
+    failed: number;
+  }[],
+  today: string,
+  uncounted: number,
+): FailureCompanyYear {
+  const months = failureReasonYearMonths(today);
+  const places = [...new Set(rows.map((r) => r.place))].sort((a, b) => a - b);
+  const byMonth = places.map(() => months.map(() => 0));
+  const listed = places.map((place) => {
+    const of = rows.filter((r) => r.place === place);
+    const first = of[0];
+    if (!first || of.some((r) => r.tenantId !== first.tenantId)) {
+      throw new Error(`The year's failed sends by company give place ${place} to two companies`);
+    }
+    return {
+      place,
+      tenantId: first.tenantId,
+      name: first.name,
+      slug: first.slug,
+      companies: first.companies,
+      failed: of.reduce((total, r) => total + r.failed, 0),
+    };
+  });
+  for (const row of rows) {
+    const counts = byMonth[places.indexOf(row.place)];
+    const month = months.findIndex((m) => m.month === row.month);
+    if (!counts || month < 0) {
+      throw new Error("The year's failed sends by company name a month the year does not list");
+    }
+    counts[month] = (counts[month] ?? 0) + row.failed;
+  }
+  const failed = listed.reduce((total, c) => total + c.failed, 0);
+  return {
+    companies: listed.map((c) => ({ ...c, share: failed > 0 ? c.failed / failed : 0 })),
+    failed,
+    uncounted,
+    months,
+    byMonth,
+  };
+}
+
+/**
+ * The year's failed sends by company (platform administrators; companies deleted are left out),
+ * with the days not counted yet and each listed company's months. Read in one snapshot, so the days
+ * counted are those the companies cover, and a company's months add up to its year.
+ */
+export async function readFailureCompanyYear(tx: Tx): Promise<FailureCompanyYear> {
+  const result = await tx.execute<{
+    place: number | string;
+    tenant_id: string | null;
+    tenant_name: string | null;
+    tenant_slug: string | null;
+    companies: number | string;
+    month: string;
+    failed_sends: number | string;
+  }>(sql`
+    select place, tenant_id, tenant_name, tenant_slug, companies,
+           to_char(month, 'YYYY-MM') as month, failed_sends
+      from ops.platform_ops_failure_company_months()`);
+  const counted = await tx.execute<{ days: number | string }>(
+    sql`select ops.platform_ops_failure_reason_days() as days`,
+  );
+  const [row] = counted.rows;
+  if (!row) throw new Error('ops.platform_ops_failure_reason_days answered no row');
+  // The day the functions above take for today: the transaction's.
+  const [day] = (
+    await tx.execute<{ today: string }>(
+      sql`select to_char((now() at time zone 'UTC')::date, 'YYYY-MM-DD') as today`,
+    )
+  ).rows;
+  if (!day) throw new Error('The database answered no day for today');
+  return failureCompanyYear(
+    result.rows.map((r) => ({
+      place: Number(r.place),
+      tenantId: r.tenant_id,
+      name: r.tenant_name,
+      slug: r.tenant_slug,
+      companies: Number(r.companies),
+      month: r.month,
+      failed: Number(r.failed_sends),
+    })),
+    day.today,
+    MESSAGE_DAYS_KEPT - Number(row.days),
+  );
+}

@@ -14257,3 +14257,37 @@ type needs the entry named more compactly, or the bound rechecked against those 
 it is added.
 
 Not built: filters on a checkout's values, such as its total or items.
+
+## ADR-362 The year's failed sends by company, month by month (P5-10) (2026-10-10)
+
+Context: the Usage tab shows the year's failed sends by reason, month by month (ADR-350, ADR-360),
+every company's together, and its companies table counts sends, not failures (ADR-157). A company
+whose sends began failing in one month, or one failing all year, did not stand out: staff had to
+open each company's page to find it, and ADR-360 left failures by company over time unbuilt.
+
+Decision:
+
+- **Read by company and month:** `ops.platform_ops_failure_company_months()` (migration 0285) reads
+  the same 365 days before today as the year's failed sends by reason, with the same filters (days
+  whose codes are counted, companies not deleted), by company and UTC calendar month, the companies
+  ranked by their failed sends over the whole year: the eight with the most, ties by name and id,
+  then the rest together (with how many companies it holds) when two or more are left, a ninth alone
+  being listed. Each row gives its place in that ranking, so the domain lists the companies as the
+  database ranked them. For platform administrators only (`W3403`), owned by the definer role,
+  executable by the platform role alone; counts with each company's name and slug, as the Usage
+  tab's other tables show them.
+- **One snapshot:** `readFailureCompanyYear` reads the months, the days counted and the
+  transaction's today in one repeatable-read transaction, so a company's months add up to its year;
+  a month the year does not list, or a place two companies share, is an error, not dropped.
+- **Shown on the Usage tab:** "Failed sends by company (12 months)", under the year's reasons: each
+  company (a link to its platform page) with its failed sends, its share of the year's and its
+  months as ADR-360 draws them (the same bars, note and folded table, now shared components), the
+  rest last.
+
+Consequences: staff see which companies fail most and since when without opening each one. The
+year's failed sends by company and by reason are read in separate snapshots, so while the worker
+counts a day the two cards can differ by that day's failures. A company's page already shows its own
+year, so this table is the Usage tab's only.
+
+Not built: a company's rank changes over time, failures as a share of each company's sends, and a CSV
+of the table.

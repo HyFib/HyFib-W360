@@ -1522,6 +1522,10 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    changes keep the list, and its API refuses `cartReminders` (422) and leaves it out of the
    endpoints it answers.
 
+   Migration 0285 (ADR-362) creates `ops.platform_ops_failure_company_months` for the platform role
+   (owned by the definer role, granted before it is handed over); no table changes. Web servers of
+   this release need it; web servers from before it never call it, and workers do not.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

@@ -2,10 +2,13 @@ import { describe, expect, it } from 'vitest';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import type { SQL, Tx } from '@w360/db';
 import {
+  FAILURE_COMPANIES_SHOWN,
   FAILURE_REASONS_SHOWN,
+  failureCompanyYear,
   failureReasonYearMonths,
   failureReasons,
   failureReasonsByMonth,
+  readFailureCompanyYear,
   readFailureReasonYear,
   readFailureReasons,
 } from './failure-reasons';
@@ -241,5 +244,159 @@ describe('failed sends by reason month by month (ADR-360)', () => {
     expect(() =>
       failureReasonsByMonth(reasons, months, [{ month: '2025-09', code: '131049', failed: 1 }]),
     ).toThrow("The year's failed sends by month name a month the year does not list");
+  });
+});
+
+describe('failed sends by company month by month (ADR-362)', () => {
+  const months = failureReasonYearMonths('2026-10-10');
+  /** A month row of the company in `place`, as read. */
+  const row = (place: number, month: string, failed: number, rest = false) => ({
+    place,
+    tenantId: rest ? null : `tenant-${place}`,
+    name: rest ? null : `Company ${place}`,
+    slug: rest ? null : `company-${place}`,
+    companies: rest ? 3 : 1,
+    month,
+    failed,
+  });
+
+  it('lists the companies in the order of their places, each with its year, share and months, the rest last', () => {
+    expect(FAILURE_COMPANIES_SHOWN).toBe(8);
+    // The function orders its rows by month, then place: each company is listed once, in place.
+    const year = failureCompanyYear(
+      [
+        row(2, '2025-10', 1),
+        row(9, '2025-10', 2, true),
+        row(1, '2026-03', 5),
+        row(2, '2026-03', 2),
+        row(1, '2026-10', 1),
+        row(9, '2026-10', 1, true),
+      ],
+      '2026-10-10',
+      4,
+    );
+    expect(year.companies).toEqual([
+      {
+        place: 1,
+        tenantId: 'tenant-1',
+        name: 'Company 1',
+        slug: 'company-1',
+        companies: 1,
+        failed: 6,
+        share: 0.5,
+      },
+      {
+        place: 2,
+        tenantId: 'tenant-2',
+        name: 'Company 2',
+        slug: 'company-2',
+        companies: 1,
+        failed: 3,
+        share: 0.25,
+      },
+      { place: 9, tenantId: null, name: null, slug: null, companies: 3, failed: 3, share: 0.25 },
+    ]);
+    expect(year.failed).toBe(12);
+    expect(year.uncounted).toBe(4);
+    expect(year.months).toEqual(months);
+    expect(year.byMonth).toEqual([
+      [0, 0, 0, 0, 0, 5, 0, 0, 0, 0, 0, 0, 1],
+      [1, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0],
+      [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+    ]);
+    // Nothing failed: no company, every month's count nowhere.
+    expect(failureCompanyYear([], '2026-10-10', 0)).toEqual({
+      companies: [],
+      failed: 0,
+      uncounted: 0,
+      months,
+      byMonth: [],
+    });
+  });
+
+  it('adds the rows of one company and month, and refuses a month the year does not list or a place two companies share', () => {
+    expect(
+      failureCompanyYear([row(1, '2026-03', 2), row(1, '2026-03', 3)], '2026-10-10', 0).byMonth,
+    ).toEqual([[0, 0, 0, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0]]);
+    expect(() => failureCompanyYear([row(1, '2025-09', 2)], '2026-10-10', 0)).toThrow(
+      "The year's failed sends by company name a month the year does not list",
+    );
+    expect(() =>
+      failureCompanyYear(
+        [row(1, '2026-03', 2), { ...row(1, '2026-04', 1), tenantId: 'tenant-2' }],
+        '2026-10-10',
+        0,
+      ),
+    ).toThrow("The year's failed sends by company give place 1 to two companies");
+  });
+
+  it('reads the companies’ months, how many days are counted and today, in that order', async () => {
+    const { tx, statements } = answering([
+      {
+        rows: [
+          {
+            place: '1',
+            tenant_id: 'tenant-1',
+            tenant_name: 'Acme',
+            tenant_slug: 'acme',
+            companies: '1',
+            month: '2026-03',
+            failed_sends: '4',
+          },
+          {
+            place: 9,
+            tenant_id: null,
+            tenant_name: null,
+            tenant_slug: null,
+            companies: 2,
+            month: '2026-10',
+            failed_sends: 4,
+          },
+        ],
+      },
+      { rows: [{ days: '364' }] },
+      { rows: [{ today: '2026-10-10' }] },
+    ]);
+    expect(await readFailureCompanyYear(tx as unknown as Tx)).toEqual({
+      companies: [
+        {
+          place: 1,
+          tenantId: 'tenant-1',
+          name: 'Acme',
+          slug: 'acme',
+          companies: 1,
+          failed: 4,
+          share: 0.5,
+        },
+        { place: 9, tenantId: null, name: null, slug: null, companies: 2, failed: 4, share: 0.5 },
+      ],
+      failed: 8,
+      uncounted: 1,
+      months,
+      byMonth: [
+        [0, 0, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4],
+      ],
+    });
+    expect(statements).toEqual([
+      {
+        sql: "select place, tenant_id, tenant_name, tenant_slug, companies, to_char(month, 'YYYY-MM') as month, failed_sends from ops.platform_ops_failure_company_months()",
+        params: [],
+      },
+      { sql: 'select ops.platform_ops_failure_reason_days() as days', params: [] },
+      {
+        sql: "select to_char((now() at time zone 'UTC')::date, 'YYYY-MM-DD') as today",
+        params: [],
+      },
+    ]);
+    // Without the days counted or today, the read fails.
+    await expect(
+      readFailureCompanyYear(answering([{ rows: [] }, { rows: [] }]).tx as unknown as Tx),
+    ).rejects.toThrow('ops.platform_ops_failure_reason_days answered no row');
+    await expect(
+      readFailureCompanyYear(
+        answering([{ rows: [] }, { rows: [{ days: 365 }] }, { rows: [] }]).tx as unknown as Tx,
+      ),
+    ).rejects.toThrow('The database answered no day for today');
   });
 });

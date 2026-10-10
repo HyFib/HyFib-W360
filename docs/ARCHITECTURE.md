@@ -2885,6 +2885,13 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   error). `FailureReasonsTable` draws each reason's months in a column (`MonthBars`, heights from
   `monthBarHeights` and month names from `chartMonthLabel` in `platform/ops-chart.ts`) and folds a
   table of every month's count under it (`<details>`, as `DailyMessages` does).
+- **Failed sends by company month by month (ADR-362, migration 0285):**
+  `ops.platform_ops_failure_company_months` reads the same rows by company and UTC calendar month,
+  the companies ranked by their year (eight, ties by name, then the rest), each row with its place.
+  `readFailureCompanyYear` reads it with the days counted and today in one snapshot, and
+  `failureCompanyYear` lists the companies by place with their year, share and months.
+  `FailureCompaniesTable` (Usage tab) shares `ShareBar`, `MonthBars` and `YearMonths` (the note and
+  the folded table) with `FailureReasonsTable`.
 - **Exports (ADR-154, ADR-155, ADR-158):** `/platform/ops/export/[list]` (a route handler behind the
   pages' platform actor check; a name of `OPS_EXPORT_LISTS`, any other not found) calls
   `exportList`, which checks in its transaction that the actor is a platform administrator, reads

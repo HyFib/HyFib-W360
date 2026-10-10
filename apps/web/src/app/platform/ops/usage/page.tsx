@@ -16,6 +16,7 @@ import {
   Table,
 } from '@w360/ui';
 import {
+  FAILURE_COMPANIES_SHOWN,
   FAILURE_REASONS_SHOWN,
   MESSAGE_DAYS_KEPT,
   USAGE_WINDOWS,
@@ -24,6 +25,7 @@ import {
 } from '@w360/domain';
 import { CompanyLink, CompanyPager, StatTile } from '@/components/platform/ops';
 import { DailyMessages } from '@/components/platform/daily-messages';
+import { FailureCompaniesTable } from '@/components/platform/failure-companies';
 import { FailureReasonsTable } from '@/components/platform/failure-reasons';
 import { getRuntime } from '@/server/runtime';
 import { requirePlatformActor } from '@/server/session';
@@ -58,6 +60,8 @@ export default async function OpsUsagePage({
   // reason (ADR-350).
   const year = await platformOps.messageYear(actor);
   const reasonYear = await platformOps.failureReasonYear(actor);
+  // And by company, month by month (ADR-362).
+  const companyYear = await platformOps.failureCompanyYear(actor);
   const t = o.totals;
   // A page of the companies (ADR-331); the totals and the CSV cover them all.
   const shown = opsCompanyPage(o.rows, Number(page ?? 1));
@@ -224,6 +228,35 @@ export default async function OpsUsagePage({
                 byMonth: reasonYear.byMonth,
                 label: 'Failed sends by reason and month, the last 12 months',
               }}
+            />
+          )}
+        </CardContent>
+      </Card>
+      <Card>
+        <CardHeader>
+          <CardTitle>Failed sends by company (12 months)</CardTitle>
+          <CardDescription>
+            The companies whose sends failed most in the 365 days before today, as the worker counts
+            them with each day&apos;s messages: the {FAILURE_COMPANIES_SHOWN} with the most, then
+            the rest together when two or more are left; companies deleted are left out. Each
+            company&apos;s months show when its failures began, grew or faded.
+            {companyYear.uncounted > 0
+              ? ` ${companyYear.uncounted} of the 365 days ${companyYear.uncounted === 1 ? 'is' : 'are'} not counted yet, a few more each minute.`
+              : null}
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          {companyYear.uncounted >= MESSAGE_DAYS_KEPT ? (
+            <EmptyState
+              title="No company counted yet"
+              description="The worker counts each day's failed sends by company after the day ends, back to a year ago, a few days a minute."
+            />
+          ) : (
+            <FailureCompaniesTable
+              year={companyYear}
+              label="Failed sends by company, the last 12 months"
+              monthsLabel="Failed sends by company and month, the last 12 months"
+              empty="No send of any company failed in the days counted."
             />
           )}
         </CardContent>
