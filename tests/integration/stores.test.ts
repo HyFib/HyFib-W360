@@ -2352,12 +2352,20 @@ describe('Order messages', () => {
     const vars = update({ source: 'static', value: 'we received it' });
     await saveRule(owner, c, storeId, 'order_placed', { templateId: template.id, variables: vars });
     // The order system learns of each message skipped (ADR-351), and of each sent (ADR-353); a
-    // call centre only of the customers who opted out or have no number (ADR-354).
+    // call centre of the skips of customers who opted out or have no number only, and of every
+    // message sent, which has no reason (ADR-354); another of the shipments' skips for no number
+    // only, which must pass both lists and hears nothing (only orders placed go out here).
     const skips = await addHook(owner, ['store_order.message_skipped']);
     const answers = await addHook(owner, ['store_order.cod_answered']);
     const sends = await addHook(owner, ['store_order.message_sent']);
-    const callCentre = await addHook(owner, ['store_order.message_skipped'], {
-      orderMessageSkipReasons: ['opted_out', 'no_phone'],
+    const callCentre = await addHook(
+      owner,
+      ['store_order.message_skipped', 'store_order.message_sent'],
+      { orderMessageSkipReasons: ['opted_out', 'no_phone'] },
+    );
+    const shipmentsWithoutNumber = await addHook(owner, ['store_order.message_skipped'], {
+      orderMessageSkipReasons: ['no_phone'],
+      orderMessageEvents: ['order_shipped'],
     });
 
     const contacts = createContactsService({ db: fx.dbs.app, clock: systemClock });
@@ -2572,9 +2580,16 @@ describe('Order messages', () => {
       expect.arrayContaining([
         expect.objectContaining({ id: events[1]!.id, type: 'store_order.message_skipped' }),
         expect.objectContaining({ id: events[3]!.id, type: 'store_order.message_skipped' }),
+        expect.objectContaining({
+          type: 'store_order.message_sent',
+          data: expect.objectContaining({
+            storeOrder: expect.objectContaining({ externalId: '6006' }),
+          }),
+        }),
       ]),
     );
-    expect(hookBodiesAt(callCentre.path)).toHaveLength(2);
+    expect(hookBodiesAt(callCentre.path)).toHaveLength(3);
+    expect(hookBodiesAt(shipmentsWithoutNumber.path)).toEqual([]);
     // The one message that went out, the test order's once the store allowed them, sent its own
     // event and no skipped one (ADR-353).
     expect(hookBodiesAt(sends.path)).toEqual([

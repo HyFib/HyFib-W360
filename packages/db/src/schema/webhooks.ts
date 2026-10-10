@@ -113,10 +113,10 @@ export type WebhookOrderMessageEvent = Exclude<
 
 /**
  * The reasons a store's order message can be skipped for, which an endpoint can choose to take the
- * skips of as `store_order.message_skipped` (ADR-354): the reasons Settings → Stores explains for a
- * message not sent, but the six that concern cart reminders only (checkout_completed,
- * checkout_deleted, order_placed, first_reminder_not_sent, cart_too_old, not_marketing_template),
- * which send no event.
+ * skips of as `store_order.message_skipped` (ADR-354): the reasons a store's Messages page
+ * (Commerce → Stores) explains for a message not sent, but the six that concern cart reminders
+ * only (checkout_completed, checkout_deleted, order_placed, first_reminder_not_sent, cart_too_old,
+ * not_marketing_template), which send no event.
  */
 export type WebhookOrderMessageSkipReason =
   | 'test_order'

@@ -1034,7 +1034,7 @@ const webhookSkippedOrderMessageSchema = z.object({
   skipReason: z
     .enum(WEBHOOK_ORDER_MESSAGE_SKIP_REASONS)
     .describe(
-      'Why HyFib did not send it, as Settings → Stores explains it among the store’s messages: recorded without sending (test_order, too_late, or cash_on_delivery for an order placed message that the order’s cash on delivery confirmation replaced) or a check that failed when it was due (for example store_disconnected, rule_disabled, order_deleted, order_cancelled, no_phone, suppressed, opted_out, template_unavailable, channel_unavailable, frequency_capped, automation_busy). The reasons that concern only cart reminders never appear here.',
+      'Why HyFib did not send it, as the store’s Messages page (Commerce → Stores) explains it: recorded without sending (test_order, too_late, or cash_on_delivery for an order placed message that the order’s cash on delivery confirmation replaced) or a check that failed when it was due (for example store_disconnected, rule_disabled, order_deleted, order_cancelled, no_phone, suppressed, opted_out, template_unavailable, channel_unavailable, frequency_capped, automation_busy). The reasons that concern only cart reminders never appear here.',
     ),
   occurredAt: z.iso
     .datetime()

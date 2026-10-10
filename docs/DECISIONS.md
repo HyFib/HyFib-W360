@@ -13779,7 +13779,7 @@ on delivery, shipped, delivered or cancelled, each from the template or automati
 skipped (a test order, an event first seen more than 48 hours late, an order paid on delivery that
 the cash on delivery confirmation covers) or skipped by a check when it was due (the store, its
 opt-in confirmation, the plan, the rule, the order, the customer's number, the template, the
-number, consent, the frequency cap or the automation). Only Settings → Stores showed it, so an
+number, consent, the frequency cap or the automation). Only Commerce → Stores showed it, so an
 order whose cash on delivery confirmation never went out (no phone, an opted-out customer) waited
 there for someone to look, while its order system expected an answer (ADR-348) that would never
 come. ADR-348 left an event for a skipped confirmation out.
@@ -13806,7 +13806,7 @@ Decision:
   `store_order.cod_answered`; the capture is unchanged.
 - **Gone:** a message is deleted with its order or its store, so a delivery not yet made then fails
   as `event_gone`.
-- **Reasons:** the body's `skipReason` is one of the reasons Settings → Stores explains; the
+- **Reasons:** the body's `skipReason` is one of the reasons Commerce → Stores explains; the
   schema lists them all, and those of cart reminders never appear. `cash_on_delivery` marks an
   order placed message that the order's cash on delivery confirmation replaced: the customer was
   asked to confirm instead, and the confirmation sends its own event if it is skipped too, so a
@@ -13911,8 +13911,8 @@ delivery confirmation replaced as well, and had to leave them alone itself (ADR-
 Decision:
 
 - **A list of reasons:** `orderMessageSkipReasons`, 1 to 25 of the reasons an order message can be
-  skipped for (`WEBHOOK_ORDER_MESSAGE_SKIP_REASONS`: Settings → Stores' reasons without the six
-  that concern cart reminders only, which send no event), each once, kept in the order Settings →
+  skipped for (`WEBHOOK_ORDER_MESSAGE_SKIP_REASONS`: Commerce → Stores' reasons without the six
+  that concern cart reminders only, which send no event), each once, kept in the order Commerce →
   Stores explains them, as `orderMessage.skipReason` names them. A skipped message is sent when its
   reason is on the list and its store and order message on theirs; null receives every reason, as
   before. Only while the endpoint takes `store_order.message_skipped` (migration 0275's check), so
@@ -13921,7 +13921,7 @@ Decision:
   reason the skipped message's trigger keeps in `detail` (0270). A skip no endpoint takes is not
   recorded. Sent order messages (ADR-353) have no reason and are not narrowed by it.
 - **Who sets it:** owners and administrators in Settings → Webhooks (ticked under Order message
-  skipped, each reason in Settings → Stores' words) and keys with `webhooks.manage` through the
+  skipped, each reason in Commerce → Stores' words) and keys with `webhooks.manage` through the
   API, audited with the endpoint and in the company data export. Refusals name the field: a list
   without its event, an empty list, an unknown or cart reminder reason.
 - **The event's own reasons:** `orderMessage.skipReason` in the skipped event's schema now lists

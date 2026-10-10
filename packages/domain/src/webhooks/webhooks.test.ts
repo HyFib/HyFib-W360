@@ -40,7 +40,6 @@ import { renderEmail } from '../email/templates';
 import {
   ORDER_MESSAGE_EVENTS,
   STORE_MESSAGE_EVENT_INFO,
-  STORE_MESSAGE_SKIP_REASON_CODES,
   STORE_MESSAGE_SKIP_REASONS,
 } from '../stores/messages-model';
 import {
@@ -8109,9 +8108,9 @@ describe('skip reason filters for skipped order messages (ADR-354)', () => {
     'not_marketing_template',
   ];
 
-  it('are the reasons Settings → Stores explains but cart reminders’ own, in its order and words', () => {
+  it('are the reasons a store’s Messages page explains, but cart reminders’ own', () => {
     expect(WEBHOOK_ORDER_MESSAGE_SKIP_REASONS).toEqual(
-      STORE_MESSAGE_SKIP_REASON_CODES.filter((reason) => !cartOnly.includes(reason)),
+      Object.keys(STORE_MESSAGE_SKIP_REASONS).filter((reason) => !cartOnly.includes(reason)),
     );
     expect(WEBHOOK_ORDER_MESSAGE_SKIP_REASONS).toHaveLength(25);
     for (const reason of cartOnly) {

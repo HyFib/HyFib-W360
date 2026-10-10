@@ -1617,7 +1617,7 @@ export function webhookOrderMessageEventsFor(
 
 /**
  * The reasons whose order message skips an endpoint takes as `store_order.message_skipped`
- * (ADR-354), in the order Settings → Stores explains them; null takes every reason.
+ * (ADR-354), in the order a store's Messages page explains them; null takes every reason.
  */
 export const webhookOrderMessageSkipReasonsSchema = z
   .array(

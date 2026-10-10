@@ -611,7 +611,7 @@ function OrderMessageChoices({
 /**
  * The reasons whose order message skips an endpoint takes as `store_order.message_skipped`
  * (ADR-354), shown while it takes the event: every reason unless some are unticked, in the order
- * and words Settings → Stores explains them.
+ * and words a store's Messages page (Commerce → Stores) explains them.
  */
 function SkipReasonChoices({
   prefix,
@@ -625,7 +625,8 @@ function SkipReasonChoices({
   return (
     <fieldset className="ml-6 grid gap-1">
       <legend className="mb-1 text-xs text-muted-foreground">
-        Skip reasons sent (all of them unless you untick some, as Settings → Stores explains them)
+        Skip reasons sent (all of them unless you untick some, as a store&rsquo;s Messages page
+        explains them)
       </legend>
       {WEBHOOK_ORDER_MESSAGE_SKIP_REASONS.map((reason) => {
         const id = `${prefix}-skip-reason-${reason}`;

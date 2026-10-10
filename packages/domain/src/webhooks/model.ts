@@ -673,8 +673,8 @@ export const WEBHOOK_ORDER_MESSAGE_EVENT_LABELS: Record<WebhookOrderMessageEvent
 
 /**
  * The reasons a `store_order.message_skipped` event gives, which an endpoint can choose (ADR-354),
- * in the order Settings → Stores explains them: every reason a store's message can be skipped for
- * but the six that concern cart reminders only, which send no event.
+ * in the order a store's Messages page explains them: every reason a store's message can be
+ * skipped for but the six that concern cart reminders only, which send no event.
  */
 export const WEBHOOK_ORDER_MESSAGE_SKIP_REASONS = [
   'test_order',
