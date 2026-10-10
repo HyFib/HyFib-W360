@@ -85,8 +85,9 @@ GRANT EXECUTE ON FUNCTION ops.purge_platform_message_days() TO w360_app;
 ALTER FUNCTION ops.purge_platform_message_days() OWNER TO w360_definer;
 
 -- Counting (the worker, every minute, a few days a call), as 0264 counts, with each company's
--- failed sends of the day by code, and one more kind of day due: a day counted before this
--- migration, without them. Newest first, so the latest days have them first after a deployment.
+-- failed sends of the day by code read in the same statement, and one more kind of day due: a day
+-- counted before this migration, without them. Newest first, so the latest days have them first
+-- after a deployment.
 CREATE FUNCTION ops.count_platform_message_days(p_limit integer)
   RETURNS integer
   LANGUAGE plpgsql SECURITY DEFINER
@@ -108,46 +109,50 @@ BEGIN
      LIMIT least(greatest(coalesce(p_limit, 0), 0), 31)
   LOOP
     DELETE FROM ops.platform_message_days d WHERE d.utc_day = v_day;
-    INSERT INTO ops.platform_message_days
-      (tenant_id, utc_day, outbound, failed, inbound, canceled, delivered, read)
-    SELECT t.id, v_day, m.sent, m.sent_failed, m.received, m.sent_canceled, m.sent_delivered,
-           m.sent_read
-      FROM app.tenants t
-      CROSS JOIN LATERAL (
-        SELECT count(*) FILTER (WHERE mm.direction = 'outbound')::integer AS sent,
-               count(*) FILTER (WHERE mm.direction = 'outbound' AND mm.status = 'failed')::integer
-                 AS sent_failed,
-               count(*) FILTER (WHERE mm.direction = 'inbound')::integer AS received,
-               count(*) FILTER (WHERE mm.direction = 'outbound' AND mm.status = 'canceled')::integer
-                 AS sent_canceled,
-               count(*) FILTER (WHERE mm.direction = 'outbound'
-                                  AND mm.status IN ('delivered', 'read', 'played'))::integer
-                 AS sent_delivered,
-               count(*) FILTER (WHERE mm.direction = 'outbound'
-                                  AND mm.status IN ('read', 'played'))::integer AS sent_read
-          FROM app.messages mm
-         WHERE mm.tenant_id = t.id
-           AND mm.created_at >= (v_day::timestamp AT TIME ZONE 'UTC')
-           AND mm.created_at < ((v_day + 1)::timestamp AT TIME ZONE 'UTC')) m
-     WHERE t.status <> 'deleted' AND m.sent + m.received > 0
-       AND NOT EXISTS (SELECT 1 FROM ops.tenant_deletions dl
-                        WHERE dl.tenant_id = t.id AND dl.started_at IS NOT NULL);
-    -- The same day's failed sends by code, of the same companies: they add up to its failed sends.
     DELETE FROM ops.platform_failure_reason_days r WHERE r.utc_day = v_day;
+    -- One statement reads the day's messages once, in one snapshot, and fills both tables: each
+    -- company's counts, and its failed sends by code, which add up to its failed sends. A message
+    -- whose status changes while the day is counted is in both or in neither.
+    WITH tallies AS (
+      SELECT t.id AS tenant_id, x.code, x.sent, x.sent_failed, x.received, x.sent_canceled,
+             x.sent_delivered, x.sent_read
+        FROM app.tenants t
+        CROSS JOIN LATERAL (
+          -- A row per code of the failed sends, and one (code null) for the other messages.
+          SELECT CASE WHEN mm.direction = 'outbound' AND mm.status = 'failed'
+                      THEN coalesce(mm.error_code, '') END AS code,
+                 count(*) FILTER (WHERE mm.direction = 'outbound')::integer AS sent,
+                 count(*) FILTER (WHERE mm.direction = 'outbound'
+                                    AND mm.status = 'failed')::integer AS sent_failed,
+                 count(*) FILTER (WHERE mm.direction = 'inbound')::integer AS received,
+                 count(*) FILTER (WHERE mm.direction = 'outbound'
+                                    AND mm.status = 'canceled')::integer AS sent_canceled,
+                 count(*) FILTER (WHERE mm.direction = 'outbound'
+                                    AND mm.status IN ('delivered', 'read', 'played'))::integer
+                   AS sent_delivered,
+                 count(*) FILTER (WHERE mm.direction = 'outbound'
+                                    AND mm.status IN ('read', 'played'))::integer AS sent_read
+            FROM app.messages mm
+           WHERE mm.tenant_id = t.id
+             AND mm.created_at >= (v_day::timestamp AT TIME ZONE 'UTC')
+             AND mm.created_at < ((v_day + 1)::timestamp AT TIME ZONE 'UTC')
+           GROUP BY 1) x
+       WHERE t.status <> 'deleted'
+         AND NOT EXISTS (SELECT 1 FROM ops.tenant_deletions dl
+                          WHERE dl.tenant_id = t.id AND dl.started_at IS NOT NULL)),
+    counts AS (
+      INSERT INTO ops.platform_message_days
+        (tenant_id, utc_day, outbound, failed, inbound, canceled, delivered, read)
+      SELECT g.tenant_id, v_day, sum(g.sent)::integer, sum(g.sent_failed)::integer,
+             sum(g.received)::integer, sum(g.sent_canceled)::integer,
+             sum(g.sent_delivered)::integer, sum(g.sent_read)::integer
+        FROM tallies g
+       GROUP BY g.tenant_id
+      HAVING sum(g.sent) + sum(g.received) > 0)
     INSERT INTO ops.platform_failure_reason_days (tenant_id, utc_day, reason_code, failed)
-    SELECT t.id, v_day, f.code, f.n
-      FROM app.tenants t
-      CROSS JOIN LATERAL (
-        SELECT coalesce(mm.error_code, '') AS code, count(*)::integer AS n
-          FROM app.messages mm
-         WHERE mm.tenant_id = t.id
-           AND mm.created_at >= (v_day::timestamp AT TIME ZONE 'UTC')
-           AND mm.created_at < ((v_day + 1)::timestamp AT TIME ZONE 'UTC')
-           AND mm.direction = 'outbound' AND mm.status = 'failed'
-         GROUP BY 1) f
-     WHERE t.status <> 'deleted'
-       AND NOT EXISTS (SELECT 1 FROM ops.tenant_deletions dl
-                        WHERE dl.tenant_id = t.id AND dl.started_at IS NOT NULL);
+    SELECT g.tenant_id, v_day, g.code, g.sent_failed
+      FROM tallies g
+     WHERE g.code IS NOT NULL;
     INSERT INTO ops.platform_message_days_counted (utc_day, counted_at, outcomes, reasons)
     VALUES (v_day, now(), true, true)
     ON CONFLICT (utc_day) DO UPDATE

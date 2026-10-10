@@ -1392,7 +1392,8 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    `ops.platform_ops_failure_reason_year` and `ops.platform_ops_failure_reason_days` for the platform
    role. The worker's counting job, unchanged, then counts every day of the year again, newest
    first, 3 days a minute: the year's reasons cover more days each minute, and the day counts stay
-   readable meanwhile (each day's are replaced in one transaction). Web servers of this release
+   readable meanwhile (each day's are replaced in one transaction, so days older than a week take
+   the statuses reported since they were last counted). Web servers of this release
    need it; web servers from before it never read the new table or functions, and after a rollback
    the counting goes on keeping the codes, unused.
 

@@ -13740,9 +13740,9 @@ Decision:
 
 - **Kept with the day's counts:** `ops.platform_failure_reason_days` (migration 0269) holds each
   company's failed sends on each UTC day by code (the empty code for a failure recorded without
-  one), counted by `ops.count_platform_message_days` in the same transaction as the day's messages,
-  for the same companies (not deleted, deletion not started), so a day's codes add up to its failed
-  sends. A failure Meta reports later reaches the codes while its day is among the 7 counted again
+  one), counted by `ops.count_platform_message_days` in the statement that counts the day's
+  messages, from the same read of them (one snapshot), for the same companies (not deleted, deletion
+  not started), so a day's codes add up to its failed sends. A failure Meta reports later reaches the codes while its day is among the 7 counted again
   each day, as it reaches the day's failed sends. The table follows the tenant-table rules (forced
   row level security, the definer role's policy and grants alone), is deleted with the company
   (step 36) and left out of the company data export (its messages are exported), and its rows older
@@ -13751,7 +13751,9 @@ Decision:
 - **Days counted before:** `ops.platform_message_days_counted.reasons` says whether a counted day's
   codes were counted with it. The days counted before the migration have none and are due again,
   newest first, as 0264's days without their sends cancelled, delivered and read were: a deployment
-  counts its year's codes in about two hours, its day counts unchanged meanwhile.
+  counts its year's codes in about two hours. Each day's counts are counted afresh with them,
+  readable meanwhile, so days older than a week take the statuses reported since they were last
+  counted, once.
 - **Reading:** `ops.platform_ops_failure_reason_year(p_tenant_id)`, for platform administrators
   only (`W3403`), lists the failed sends of the 365 days before today whose codes are counted, every
   company's not deleted or one company's, as 0265 lists a window's: the eight most frequent, ties by

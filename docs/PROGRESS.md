@@ -16,8 +16,8 @@ included.
   UTC day by code; forced row level security, the definer role's policies and grants alone,
   deleted with the company at step 36, left out of the export); `reasons` on
   `ops.platform_message_days_counted`, false on the days counted before, which are counted again,
-  newest first; `ops.count_platform_message_days` counting the codes in each day's transaction, for
-  the same companies as its counts, and `ops.purge_platform_message_days` deleting the old and a
+  newest first; `ops.count_platform_message_days` counting the codes in the statement that counts
+  each day, from one read of its messages, and `ops.purge_platform_message_days` deleting the old and a
   deleted company's codes too (both dropped as their owner and created again with the same
   signatures); `ops.platform_ops_failure_reason_year(p_tenant_id)` and
   `ops.platform_ops_failure_reason_days()` for platform administrators only.
@@ -41,6 +41,11 @@ included.
 - **Docs:** ADR-350; ARCHITECTURE; SECURITY (the console's definer functions, whose stale count is
   dropped); THREAT-MODEL T309; DEPLOYMENT (0269); RUNBOOKS; DATA-RETENTION; BACKLOG P5-10; feature
   matrix H-034.
+- **Review fixes:** each day's counts and codes are counted in one statement from one read of its
+  messages, so a status change committed while a day is counted is in both or in neither (two
+  statements could each see it differently); ADR-350, DEPLOYMENT and RUNBOOKS say that recounted
+  days older than a week take the statuses reported since, and SECURITY what each read function
+  gives; the Drizzle schema copy has the new column and table.
 - **Mutation checks:** 7/7 deliberate regressions caught on the unit-tested parts (the company left
   out of the read, the rows read in no order, the days counted given as not counted, a year of 366
   days, an unanswered count not refused, counts left as text, the days counted read elsewhere).

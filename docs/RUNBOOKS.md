@@ -3888,7 +3888,8 @@ platform page list the failed sends of the 365 days before today by code, from c
 keeps with each day's messages: today's failures are in the window's table only, and a failure Meta
 reports more than 7 days after its day is not among them. The note says how many of the 365 days
 are not counted yet; after a deployment of migration 0269 every day is counted again, newest first,
-3 a minute, so the year's reasons cover more days each minute for about two hours. "None counted
+3 a minute, so the year's reasons cover more days each minute for about two hours (and the year's
+days older than a week take the statuses reported since they were last counted). "None counted
 yet" means no day is: check that the worker's `ops.message-days` job runs (the Queues tab). A
 company being deleted shows no year's reasons; its counts are deleted with it.
 

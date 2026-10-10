@@ -2786,7 +2786,7 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
 - **Failed sends by reason over the year (ADR-350, migration 0269):** `ops.count_platform_message_days`
   also counts each company's failed sends of the day by error code into
   `ops.platform_failure_reason_days` (forced row level security, the definer role's alone), in the
-  day's transaction and for the same companies, and marks the day with
+  statement that counts the day, from the same read of its messages, and marks the day with
   `ops.platform_message_days_counted.reasons`; days counted before 0269 are due again, newest first.
   `ops.purge_platform_message_days` deletes their old rows and a deleted company's with the day
   counts. `readFailureReasonYear` (`platform/failure-reasons.ts`) reads

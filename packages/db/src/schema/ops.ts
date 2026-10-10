@@ -278,11 +278,26 @@ export const platformMessageDays = opsSchema.table('platform_message_days', {
 });
 
 /**
- * The days `platformMessageDays` holds counts of, when each was last counted (ADR-341), and whether
- * it was counted with its sends cancelled, delivered and read (ADR-346).
+ * The days `platformMessageDays` holds counts of, when each was last counted (ADR-341), whether it
+ * was counted with its sends cancelled, delivered and read (ADR-346), and whether with its failed
+ * sends by code (ADR-350).
  */
 export const platformMessageDaysCounted = opsSchema.table('platform_message_days_counted', {
   utcDay: date('utc_day', { mode: 'string' }).primaryKey(),
   countedAt: tz('counted_at').notNull().defaultNow(),
   outcomes: boolean('outcomes').notNull().default(false),
+  reasons: boolean('reasons').notNull().default(false),
+});
+
+/**
+ * Each company's failed sends on each UTC day by error code (ADR-350; the empty code for a failure
+ * recorded without one), counted with the day's counts. Written and read only through the definer
+ * functions of migration 0269; a company's rows are deleted with the company.
+ */
+export const platformFailureReasonDays = opsSchema.table('platform_failure_reason_days', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  tenantId: uuid('tenant_id').notNull(),
+  utcDay: date('utc_day', { mode: 'string' }).notNull(),
+  reasonCode: text('reason_code').notNull(),
+  failed: integer('failed').notNull(),
 });
