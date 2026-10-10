@@ -13107,10 +13107,12 @@ Decision:
   `listDigests`, instead of item by item, until it fits (`webhookEndpointAuditMetadata`). The digest
   shows whether a list named by count in two entries changed between them; its items are not in the
   entry. It hashes each object's keys in order, so a list read back from the database (jsonb keeps
-  an object's keys by length) hashes as the services wrote it. The host, the events (`eventTypes`, or a replay's `events`) and the other facts are always
-  named, and an entry that fits is unchanged. With every list named by count, an entry with every
-  event and the longest hosts takes under 6,000 bytes. The endpoint keeps every list whole, as
-  Settings, the API and the company data export show it.
+  an object's keys by length) hashes as the services wrote it. The host, the events (`eventTypes`,
+  or a replay's `events`) and the other facts are always named, and an entry that fits is
+  unchanged. With every list named by count, an entry with every event and the longest hosts takes
+  under 6,000 bytes. The endpoint keeps every list whole, as Settings, the API and the company data
+  export show it. (Since ADR-363 such a list is named once, under `lists`, as
+  `"<length>:<digest>"`; the largest entry took 6,793 bytes before it, 4,075 after.)
 - **Both paths:** Settings and the API name lists by count the same way when an endpoint is added
   or changed; the API's other endpoint entries (turned off or on, deleted, a secret rotated,
   deliveries replayed) pass through the same function and name no list long enough to change.
@@ -14297,8 +14299,9 @@ of the table.
 Context: an endpoint's audit entry too large for its 8 KiB of metadata names its largest lists by
 count under `listCounts` and by digest under `listDigests` until it fits (ADR-336). Each such list is
 named twice, under both objects, and jsonb keeps a number as a numeric, so at its largest (every event
-type, the 62 lists and the longest hosts) the entry took 6,793 bytes, 7 under the test's 6,800 bound
-(ADR-361), and every further list or event type needed the entry named more compactly first.
+type, the 62 lists and the longest hosts) the entry took 6,793 bytes (ADR-361), 7 under the unit
+test's 6,800 bound (ADR-356), and every further list or event type needed the entry named more
+compactly first.
 
 Decision:
 
@@ -14309,7 +14312,9 @@ Decision:
   first, by name when as large, until the entry fits; the host and the events are always named, and
   the endpoint keeps every list whole.
 - **Room:** at its largest the entry now takes 4,075 bytes (the unit test's bound is 4,200), within
-  the 7,000 bytes kept, about 42 bytes a list named, so many more lists and event types fit.
+  the 7,000 bytes kept, about 42 bytes a list named, so many more lists and event types fit. The
+  test's bound is close on purpose, about three lists or four event types above the entry: a filter
+  that adds them raises it, saying what they cost.
 - **Older entries are kept as written:** entries written before this release name their lists
   under `listCounts` and `listDigests`; nothing reads either shape but people and the tests, and no
   migration rewrites the audit.

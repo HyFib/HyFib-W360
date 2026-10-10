@@ -8505,15 +8505,15 @@ describe('contact event field value filters (ADR-332)', () => {
     ).toEqual(long);
   });
 });
-describe('endpoint audit entries within an audit entry’s 8 KiB (ADR-336)', () => {
-  it('save an endpoint whose lists would not fit its audit entry, the entry naming the largest by count and keeping the others', async () => {
+describe('endpoint audit entries within an audit entry’s 8 KiB (ADR-336, ADR-363)', () => {
+  it('save an endpoint whose lists would not fit its audit entry, the entry naming the largest by length and digest and keeping the others', async () => {
     const c = await fx.company();
     const owner = await fx.ctx(c, c.owner);
     // Tags of 36 Tamil letters and four digits, 112 bytes each: five lists of 50 take about
     // 29,000 bytes, which an audit entry's 8 KiB refused, rolling the change back, before ADR-336.
     const tags = (list: number) =>
       Array.from({ length: 50 }, (_, i) => `${'க'.repeat(36)}${list}${String(i).padStart(3, '0')}`);
-    const lists = {
+    const tagLists = {
       contactTags: tags(1),
       conversationTags: tags(2),
       contactEventTags: tags(3),
@@ -8522,7 +8522,7 @@ describe('endpoint audit entries within an audit entry’s 8 KiB (ADR-336)', () 
     };
     const url = 'https://hooks.example.com/in';
     const eventTypes = ['message.received', 'contact.updated', 'satisfaction_survey.answered'];
-    const created = await webhooks().create(owner, { url, eventTypes, ...lists });
+    const created = await webhooks().create(owner, { url, eventTypes, ...tagLists });
     await webhooks().update(owner, {
       endpointId: created.id,
       url,
@@ -8530,8 +8530,8 @@ describe('endpoint audit entries within an audit entry’s 8 KiB (ADR-336)', () 
       eventTypes,
     });
     // The endpoint keeps every list whole.
-    expect((await webhooks().list(owner)).find((e) => e.id === created.id)).toMatchObject(lists);
-    // A change of a list named by count changes its digest alone.
+    expect((await webhooks().list(owner)).find((e) => e.id === created.id)).toMatchObject(tagLists);
+    // A change of a list named by length and digest changes its digest alone.
     const otherTags = tags(6);
     await webhooks().update(owner, {
       endpointId: created.id,
@@ -8555,10 +8555,10 @@ describe('endpoint audit entries within an audit entry’s 8 KiB (ADR-336)', () 
     ]);
     const digest = (list: string[]) => sha256Hex(JSON.stringify(list)).slice(0, 16);
     const digests = {
-      contactEventTags: digest(lists.contactEventTags),
-      contactTags: digest(lists.contactTags),
-      conversationTags: digest(lists.conversationTags),
-      surveyContactTags: digest(lists.surveyContactTags),
+      contactEventTags: digest(tagLists.contactEventTags),
+      contactTags: digest(tagLists.contactTags),
+      conversationTags: digest(tagLists.conversationTags),
+      surveyContactTags: digest(tagLists.surveyContactTags),
     };
     for (const [index, audit] of audits.entries()) {
       // The count takes no fewer bytes than PostgreSQL does, uncompressed, and the entry fits.
@@ -8572,7 +8572,7 @@ describe('endpoint audit entries within an audit entry’s 8 KiB (ADR-336)', () 
         lists: Object.fromEntries(
           Object.entries(named).map(([key, listDigest]) => [key, `50:${listDigest}`]),
         ),
-        surveyConversationTags: lists.surveyConversationTags,
+        surveyConversationTags: tagLists.surveyConversationTags,
       });
       expect(audit.metadata.eventTypes).toHaveLength(3);
       for (const counted of ['contactEventTags', 'contactTags', 'conversationTags']) {

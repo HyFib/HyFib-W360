@@ -3787,13 +3787,13 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     ).toMatchObject({ contactEventFieldValues: [{ key: 'score', atMost: 0 }] });
   });
 
-  it('add and change an endpoint whose lists would not fit its audit entry, the entry naming the largest by count (ADR-336)', async () => {
+  it('add and change an endpoint whose lists would not fit its audit entry, the entry naming the largest by length and digest (ADR-336, ADR-363)', async () => {
     const c = await fx.company();
     const key = await apiKey(c, ['webhooks.manage']);
     // Five lists of 50 tags of 112 bytes each, as in the Settings test: about 29,000 bytes.
     const tags = (list: number) =>
       Array.from({ length: 50 }, (_, i) => `${'க'.repeat(36)}${list}${String(i).padStart(3, '0')}`);
-    const lists = {
+    const tagLists = {
       contactTags: tags(1),
       conversationTags: tags(2),
       contactEventTags: tags(3),
@@ -3803,13 +3803,13 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     const created = await addThroughApi(key.ctx, 'audit-lists-1', {
       url: receiverUrl(),
       events: ['message.received', 'contact.updated', 'satisfaction_survey.answered'],
-      ...lists,
+      ...tagLists,
     });
     expect(created.status).toBe(201);
-    expect(created.body.data).toMatchObject(lists);
+    expect(created.body.data).toMatchObject(tagLists);
     expect(
       await api().update(key.ctx, created.body.data.id, { description: 'Tamil tags' }),
-    ).toMatchObject({ description: 'Tamil tags', ...lists });
+    ).toMatchObject({ description: 'Tamil tags', ...tagLists });
     const audits = await fx.query<{
       action: string;
       metadata: Record<string, unknown>;
@@ -3830,12 +3830,12 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       expect(audit.metadata).toMatchObject({
         source: 'api',
         lists: {
-          contactEventTags: `50:${digest(lists.contactEventTags)}`,
-          contactTags: `50:${digest(lists.contactTags)}`,
-          conversationTags: `50:${digest(lists.conversationTags)}`,
-          surveyContactTags: `50:${digest(lists.surveyContactTags)}`,
+          contactEventTags: `50:${digest(tagLists.contactEventTags)}`,
+          contactTags: `50:${digest(tagLists.contactTags)}`,
+          conversationTags: `50:${digest(tagLists.conversationTags)}`,
+          surveyContactTags: `50:${digest(tagLists.surveyContactTags)}`,
         },
-        surveyConversationTags: lists.surveyConversationTags,
+        surveyConversationTags: tagLists.surveyConversationTags,
       });
       expect(audit.metadata).not.toHaveProperty('contactTags');
     }

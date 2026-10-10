@@ -13,9 +13,10 @@ further webhook list or event type could be added without first naming the lists
   and digest joined by a colon (`"50:1a2b3c4d5e6f7a8b"`), chosen as before (largest first, by name
   when as large, until the entry fits). At its largest (every event type, the 62 lists, the longest
   hosts) the entry now takes 4,075 bytes. No migration: entries written before keep their shape.
-- **Tests:** unit (the four tests of ADR-336 updated to the new shape: a list's digest from its
+- **Tests:** unit (two of ADR-336's three tests updated to the new shape: a list's digest from its
   objects' keys in order, a changed list with another digest, the events always named, the largest
-  entry under 4,200 bytes with all 62 lists named, each list 30 tags long so none fits whole);
+  entry under 4,200 bytes with all 62 lists named, each list 30 tags long so none fits whole; the
+  bound is close on purpose, so a filter adding lists raises it);
   integration (`webhooks.test.ts` and `api-webhook-endpoints.test.ts`: the stored entries name the
   four largest lists under `lists`, a changed list's digest alone changing). Written for CI; the
   integration tests were not run here.
@@ -23,6 +24,16 @@ further webhook list or event type could be added without first naming the lists
 - **Mutation checks:** 6 deliberate regressions, all caught by the unit tests (another separator, a
   shorter digest, keys hashed in the order read, a wrong length, the old key, stopping before the
   entry fits).
+- **Review fixes:** an independent review (the unit tests, the integration tests' typecheck and a
+  size script run; the integration expectations checked by hand) found nothing that would fail CI
+  and no correctness or security bug, and these, all LOW, fixed:
+  - T301 said every list was counted within 6,000 bytes; it says named within 4,200.
+  - ADR-363 credited the unit test's 6,800-byte bound to ADR-361; ADR-356 set it.
+  - Comments, test titles and SECURITY still said lists are named by count; they say by length
+    and digest, and ADR-336 notes the shape since ADR-363.
+  - The 4,200-byte bound, about three lists or four event types above the entry, is said to be
+    close on purpose in the test and in ADR-363.
+  - The integration tests' tag lists are named `tagLists`, apart from the entry's `lists`.
 
 ### Test commands and results (local, 2026-10-10)
 

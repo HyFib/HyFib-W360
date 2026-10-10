@@ -2346,7 +2346,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
     }
   }
 
-  // An endpoint's entry names its largest lists by count when they would not fit (ADR-336).
+  // An endpoint's entry names its largest lists by length and digest if it would not fit (ADR-363).
   const audit = (
     tx: Tx,
     ctx: ApiContext,

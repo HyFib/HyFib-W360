@@ -6215,7 +6215,7 @@ export function createWebhooksService(deps: {
             action: 'webhook.endpoint_created',
             subjectType: 'webhook_endpoint',
             subjectId: id,
-            // Its largest lists named by count when they would not fit (ADR-336).
+            // Its largest lists named by length and digest if the entry would not fit (ADR-363).
             metadata: webhookEndpointAuditMetadata({
               host,
               eventTypes: data.eventTypes,
@@ -6831,7 +6831,7 @@ export function createWebhooksService(deps: {
             action: 'webhook.endpoint_updated',
             subjectType: 'webhook_endpoint',
             subjectId: data.endpointId,
-            // Its largest lists named by count when they would not fit (ADR-336).
+            // Its largest lists named by length and digest if the entry would not fit (ADR-363).
             metadata: webhookEndpointAuditMetadata({
               host,
               eventTypes: data.eventTypes,

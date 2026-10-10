@@ -4413,7 +4413,8 @@ describe('endpoint audit entries within an audit entry’s 8 KiB (ADR-336, ADR-3
     // Every event type, hosts of 253 characters, an OAuth client's method and the 62 lists an
     // entry can name, each too long to keep whole beside the others named (30 tags of 114 bytes):
     // each named by its length and digest (ADR-363), the entry takes under 4,200 (4,075), within
-    // the 7,000 kept.
+    // the 7,000 kept. The bound is close on purpose, about three lists or four event types above
+    // the entry: a filter that adds them raises it, saying what they cost.
     const keys = [
       'assigneeIds',
       'automationIds',

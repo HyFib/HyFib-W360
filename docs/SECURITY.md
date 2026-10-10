@@ -1389,9 +1389,9 @@ Phase 5 rules (outgoing webhooks, P5-09):
   with `webhooks.manage` do the same for the endpoints keys added (ADR-081, ADR-083). Every change
   is audited with the endpoint's host only; the full URL (which may carry a receiver's token) and
   the secret are never logged. An entry whose lists together would pass 7,000 bytes, counted as
-  jsonb by `jsonbSize` (an upper bound), names the largest by count and by a digest of their items
-  instead of item by item (ADR-336), so no change is refused for its audit entry and two entries
-  still show whether such a list changed; the endpoint keeps every list whole.
+  jsonb by `jsonbSize` (an upper bound), names the largest by length and by a digest of their items
+  instead of item by item (ADR-336, ADR-363), so no change is refused for its audit entry and two
+  entries still show whether such a list changed; the endpoint keeps every list whole.
 - An endpoint's URL must pass the egress guard's rules when saved (https, no credentials, port 443
   or from 1024) and every request goes through the egress guard: private, loopback, link-local,
   metadata and reserved addresses are refused after DNS resolution, the connection is pinned to the
@@ -1706,8 +1706,8 @@ Phase 5 rules (outgoing webhooks, P5-09):
   its type, read as the API reads a contact's value; the list is kept only while the endpoint takes
   `contact.created` or `contact.updated`, and a database check keeps it to 1 to 50 pairs of a
   field's key and text, a number or a boolean; the services keep it to 4,000 bytes as JSON, and an
-  audit entry whose lists together would not fit names the largest by count (ADR-336). It is
-  applied in `app.capture_contact_webhook_event`
+  audit entry whose lists together would not fit names the largest by length and digest (ADR-336,
+  ADR-363). It is applied in `app.capture_contact_webhook_event`
   and `app.deliver_contact_webhook_tag` through `app.webhook_contact_values_match`; none is a
   definer function: they run as the role making the change, under the company's row-level
   security, or as the definer role merging and erasing contacts, which reads the contact's values
