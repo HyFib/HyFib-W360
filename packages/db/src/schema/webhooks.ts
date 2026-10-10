@@ -148,6 +148,14 @@ export type WebhookOrderMessageSkipReason =
   | 'automation_quota';
 
 /**
+ * How a webhook endpoint's OAuth client authenticates to its authorization server (ADR-357), as
+ * RFC 7591 names the methods of RFC 6749 section 2.3.1: its identifier and secret in an HTTP Basic
+ * header, or as form parameters in the request body.
+ */
+export const WEBHOOK_OAUTH_CLIENT_AUTHS = ['client_secret_basic', 'client_secret_post'] as const;
+export type WebhookOAuthClientAuth = (typeof WEBHOOK_OAUTH_CLIENT_AUTHS)[number];
+
+/**
  * The reasons a store's cart reminder can be skipped for, which an endpoint can choose to take the
  * skips of as `store_checkout.reminder_skipped` (ADR-356): the reasons a store's Messages page
  * (Commerce → Stores) explains for a message not sent, but those that concern order messages only
@@ -669,6 +677,14 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
   oauthClientId: text('oauth_client_id'),
   oauthClientSecretCiphertext: text('oauth_client_secret_ciphertext'),
   oauthScope: text('oauth_scope'),
+  /**
+   * How the OAuth client authenticates to its authorization server (migration 0279, ADR-357), as
+   * RFC 7591 names the methods: HTTP Basic (the default, kept unused without a client) or its
+   * identifier and secret in the request body.
+   */
+  oauthClientAuth: text('oauth_client_auth', { enum: WEBHOOK_OAUTH_CLIENT_AUTHS })
+    .notNull()
+    .default('client_secret_basic'),
   state: text('state', { enum: ['active', 'disabled'] })
     .notNull()
     .default('active'),

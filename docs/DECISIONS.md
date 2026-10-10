@@ -14026,3 +14026,48 @@ event type, the 60 lists and the longest hosts) is now 6,535 bytes, over ADR-353
 the entry named more compactly.
 
 Not built: a filter by reminder (first or second).
+
+## ADR-357 OAuth client credentials in the token request body for webhook endpoints (P5-09) (2026-10-10)
+
+Context: an endpoint's OAuth client (ADR-173) authenticates to its receiver's authorization server
+with HTTP Basic, the method RFC 6749 section 2.3.1 says a server must support for clients issued a
+password. Some authorization servers take a client's credentials only in the request body, as the
+same section also allows (`client_id` and `client_secret` among the form's parameters), and answer a
+Basic header with 401 (`oauth_token_refused_401`): their receivers needed a proxy, and ADR-173 left
+the body method unbuilt. The RFC and RFC 7591 (whose `token_endpoint_auth_method` names the methods
+`client_secret_basic` and `client_secret_post`) were cited from knowledge; their pages were not
+fetched for this decision.
+
+Decision:
+
+- **A way of authenticating per client:** `clientAuthentication`, `client_secret_basic` (an HTTP
+  Basic header, as before and the default) or `client_secret_post` (`client_id` and
+  `client_secret` added to the token request's form, after the grant and the scope, each
+  form-encoded, and no Authorization header). Named as RFC 7591 names them, so a receiver's
+  documentation reads the same.
+- **Part of the client:** given with `oauth` on `POST /webhook-endpoints` and
+  `PATCH /webhook-endpoints/{id}` and left out for HTTP Basic, as a change that leaves the scope
+  out asks for none; answered with the client (the secret still never is). Settings → Webhooks
+  shows it among the client's fields ("Send the client ID and secret": in an Authorization header
+  or in the request body, HTTP Basic being the standard way) and in the endpoint's description
+  when it is the body. Refusals name the field (`oauth.clientAuthentication`).
+- **Tokens:** a client that changes the way it authenticates gets a new token, as one with a new
+  token URL, identifier, secret or scope does (the fingerprint the worker keeps tokens by includes
+  it). The secret still goes only to its token URL: the egress client follows no redirect, and the
+  form is sent only there; it is never logged, audited or exported.
+- **Audited** when it is the body, or when a change goes back to HTTP Basic
+  (`oauthClientAuthentication`), so an endpoint's entries name every way it has used; never the
+  client ID or the secret. The company data export carries it with the client.
+- **Migration 0279:** `oauth_client_auth` on `app.webhook_endpoints`, not null with the constant
+  default `client_secret_basic` (no table rewrite) and a check validated at once naming the two
+  methods; an update grant on the column for the runtime role. Endpoints without a client keep the
+  default unused, and the services put it back when a client is removed.
+
+Consequences: a receiver whose server takes only the body no longer needs a proxy. During a rollout,
+a worker from before this decision sends HTTP Basic for a client set to the body, failing its token
+requests until it is replaced (retried as usual); a web server from before it adds and changes
+clients without the column, leaving the method as it is. RFC 6749 does not recommend the body
+method for clients able to use HTTP Basic, so the form explains that Basic is the standard way.
+
+Not built: JWT client assertions (`private_key_jwt`, `client_secret_jwt`), mutual TLS, a public
+client (`none`), and discovering the method from the server's metadata.

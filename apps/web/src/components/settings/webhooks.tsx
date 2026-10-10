@@ -22,6 +22,8 @@ import {
   WEBHOOK_MESSAGE_SENDERS,
   WEBHOOK_MESSAGE_STATUS_LABELS,
   WEBHOOK_MESSAGE_STATUSES,
+  WEBHOOK_OAUTH_CLIENT_AUTHENTICATION_LABELS,
+  WEBHOOK_OAUTH_CLIENT_AUTHENTICATIONS,
   WEBHOOK_ORDER_STATUS_LABELS,
   WEBHOOK_ORDER_STATUSES,
   WEBHOOK_PAYMENT_LINK_STATUS_LABELS,
@@ -120,6 +122,7 @@ import {
   type WebhookEndpointCampaign,
   type WebhookEndpointField,
   type WebhookEndpointOAuth,
+  type WebhookOAuthClientAuth,
   type WebhookEndpointOwner,
   type WebhookEndpointPipeline,
   type WebhookEndpointApiKey,
@@ -3376,6 +3379,8 @@ interface OAuthFields {
   clientId: string;
   clientSecret: string;
   scope: string;
+  /** How the client ID and secret reach the token URL (ADR-357). */
+  clientAuthentication: WebhookOAuthClientAuth;
 }
 
 /**
@@ -3514,6 +3519,27 @@ function OAuthClientFields({
               />
             )}
           </Field>
+          <Field
+            id={`${prefix}-oauth-client-authentication`}
+            label="Send the client ID and secret"
+            description="HTTP Basic is the standard way; choose the request body only for an authorization server that asks for it."
+          >
+            {(aria) => (
+              <Select
+                {...aria}
+                value={fields.clientAuthentication}
+                onChange={(e) =>
+                  set({ clientAuthentication: e.target.value as WebhookOAuthClientAuth })
+                }
+              >
+                {WEBHOOK_OAUTH_CLIENT_AUTHENTICATIONS.map((method) => (
+                  <option key={method} value={method}>
+                    {WEBHOOK_OAUTH_CLIENT_AUTHENTICATION_LABELS[method]}
+                  </option>
+                ))}
+              </Select>
+            )}
+          </Field>
         </div>
       ) : null}
     </fieldset>
@@ -3526,6 +3552,7 @@ const oauthFieldsOf = (stored: WebhookEndpointOAuth | null | undefined): OAuthFi
   clientId: stored?.clientId ?? '',
   clientSecret: '',
   scope: stored?.scope ?? '',
+  clientAuthentication: stored?.clientAuthentication ?? 'client_secret_basic',
 });
 
 /**
@@ -4418,6 +4445,7 @@ export function WebhookEndpointForm({
           tokenUrl: oauthFields.tokenUrl,
           clientId: oauthFields.clientId,
           scope: oauthFields.scope,
+          clientAuthentication: oauthFields.clientAuthentication,
           ...(oauthFields.clientSecret ? { clientSecret: oauthFields.clientSecret } : {}),
         };
         if (endpoint) {

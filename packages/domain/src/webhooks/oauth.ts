@@ -1,14 +1,16 @@
 import { createHash } from 'node:crypto';
 import { EgressError, type EgressClient, type EgressRequest } from '@w360/core/egress';
+import type { WebhookOAuthClientAuth } from '@w360/db';
 import { WEBHOOK_LIMITS } from './model';
 
 /**
  * OAuth 2.0 client credentials for webhook endpoints (ADR-173). An endpoint may get an access token
  * from its receiver's authorization server and send it as a bearer token with every delivery: the
  * token request of RFC 6749 section 4.4 (`grant_type=client_credentials`, the client authenticated
- * with HTTP Basic as section 2.3.1 says) and the bearer usage of RFC 6750 section 2.1. Only what a
- * client needs is here: the request, reading the answer of section 5.1 or the refusal of 5.2, and
- * the tokens a worker keeps in memory.
+ * as section 2.3.1 says, with HTTP Basic or, for a server that wants them there, its credentials in
+ * the request body, ADR-357) and the bearer usage of RFC 6750 section 2.1. Only what a client needs
+ * is here: the request, reading the answer of section 5.1 or the refusal of 5.2, and the tokens a
+ * worker keeps in memory.
  */
 
 /** Binds an endpoint's OAuth client secret to its company and the endpoint. */
@@ -22,6 +24,12 @@ export interface WebhookOAuthClient {
   clientSecret: string;
   /** The scope to ask for (space-separated scope tokens), or none. */
   scope: string | null;
+  /**
+   * How the client authenticates (ADR-357), as RFC 7591 names the methods: its identifier and secret
+   * in an HTTP Basic header (`client_secret_basic`, the default) or as form parameters in the
+   * request body (`client_secret_post`).
+   */
+  clientAuthentication: WebhookOAuthClientAuth;
 }
 
 /** An access token from the authorization server. */
@@ -57,9 +65,11 @@ const formEncode = (value: string) => new URLSearchParams([['', value]]).toStrin
 
 /**
  * The token request (RFC 6749 section 4.4.2): `grant_type=client_credentials`, with the scope when
- * one is set, the client authenticated with HTTP Basic (section 2.3.1: its identifier and secret
- * each form-encoded, joined by a colon, base64-encoded). Sent through the egress client, like
- * deliveries, so the authorization server is held to the same address rules.
+ * one is set, the client authenticated as section 2.3.1 says: with HTTP Basic (its identifier and
+ * secret each form-encoded, joined by a colon, base64-encoded) or, for `client_secret_post`, with
+ * `client_id` and `client_secret` among the form's parameters and no Authorization header (ADR-357).
+ * Sent through the egress client, like deliveries, so the authorization server is held to the same
+ * address rules.
  */
 export function webhookOAuthTokenRequest(
   client: WebhookOAuthClient,
@@ -67,21 +77,22 @@ export function webhookOAuthTokenRequest(
 ): EgressRequest {
   const form = new URLSearchParams([['grant_type', 'client_credentials']]);
   if (client.scope) form.append('scope', client.scope);
-  const basic = Buffer.from(
-    `${formEncode(client.clientId)}:${formEncode(client.clientSecret)}`,
-    'utf8',
-  ).toString('base64');
-  return {
-    method: 'POST',
-    url: client.tokenUrl,
-    headers: {
-      authorization: `Basic ${basic}`,
-      'content-type': 'application/x-www-form-urlencoded',
-      accept: 'application/json',
-      'user-agent': userAgent,
-    },
-    body: form.toString(),
+  const headers: Record<string, string> = {
+    'content-type': 'application/x-www-form-urlencoded',
+    accept: 'application/json',
+    'user-agent': userAgent,
   };
+  if (client.clientAuthentication === 'client_secret_post') {
+    form.append('client_id', client.clientId);
+    form.append('client_secret', client.clientSecret);
+  } else {
+    const basic = Buffer.from(
+      `${formEncode(client.clientId)}:${formEncode(client.clientSecret)}`,
+      'utf8',
+    ).toString('base64');
+    headers.authorization = `Basic ${basic}`;
+  }
+  return { method: 'POST', url: client.tokenUrl, headers, body: form.toString() };
 }
 
 /** A lifetime in seconds as RFC 6749 section 5.1 gives it (a few servers send it as a string). */
@@ -182,13 +193,22 @@ const MAX_KEPT_TOKENS = 1_000;
 /** Tells clients apart without keeping their secrets: a hash of everything a token request sends. */
 const clientFingerprint = (client: WebhookOAuthClient) =>
   createHash('sha256')
-    .update(JSON.stringify([client.tokenUrl, client.clientId, client.clientSecret, client.scope]))
+    .update(
+      JSON.stringify([
+        client.tokenUrl,
+        client.clientId,
+        client.clientSecret,
+        client.scope,
+        client.clientAuthentication,
+      ]),
+    )
     .digest('base64url');
 
 /**
  * The access tokens a worker keeps for webhook endpoints (ADR-173), in its memory only: never
  * stored, logged or shown. A token is kept for its endpoint and client, so a changed token URL,
- * identifier, secret or scope gets a new one, and until a minute before it expires (at most a day).
+ * identifier, secret, scope or way of authenticating gets a new one, and until a minute before it
+ * expires (at most a day).
  * The deliveries of an endpoint that need a token at the same time share one request; a token
  * without a lifetime serves only them, and a failure is never kept: the next attempt asks again.
  */

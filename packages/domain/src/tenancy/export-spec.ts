@@ -1668,6 +1668,7 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
       'oauth_token_url',
       'oauth_client_id',
       'oauth_scope',
+      'oauth_client_auth',
       'state',
       'disabled_reason',
       'disabled_at',

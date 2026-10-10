@@ -673,7 +673,12 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     const created = await addThroughApi(key.ctx, 'oauth-1', body);
     expect(created.status).toBe(201);
     const { secret: _signing, ...endpoint } = created.body.data;
-    expect(endpoint.oauth).toEqual({ tokenUrl, clientId: 'crm-client', scope: 'hooks.write' });
+    expect(endpoint.oauth).toEqual({
+      tokenUrl,
+      clientId: 'crm-client',
+      scope: 'hooks.write',
+      clientAuthentication: 'client_secret_basic',
+    });
     expect((await addThroughApi(key.ctx, 'oauth-1', body)).body.data.oauth).toEqual(endpoint.oauth);
     expect(await api().get(key.ctx, endpoint.id)).toEqual(endpoint);
     const audits = async () =>
@@ -694,6 +699,19 @@ describe('webhook endpoints through the API (ADR-081)', () => {
         oauth: { tokenUrl, clientId: 'renamed-client' },
       }),
     ).toMatchObject({ oauth: { tokenUrl, clientId: 'renamed-client', scope: null } });
+    // The client may send its ID and secret in the request body instead (ADR-357).
+    expect(
+      await api().update(key.ctx, endpoint.id, {
+        oauth: { tokenUrl, clientId: 'renamed-client', clientAuthentication: 'client_secret_post' },
+      }),
+    ).toMatchObject({
+      oauth: {
+        tokenUrl,
+        clientId: 'renamed-client',
+        scope: null,
+        clientAuthentication: 'client_secret_post',
+      },
+    });
     const [row] = await fx.query<{ oauth_client_secret_ciphertext: string }>(
       'SELECT oauth_client_secret_ciphertext FROM app.webhook_endpoints WHERE id = $1',
       [endpoint.id],
@@ -715,6 +733,13 @@ describe('webhook endpoints through the API (ADR-081)', () => {
         }),
       ),
     ).toMatchObject({ path: 'oauth.clientSecret', message: expect.stringMatching(/again/) });
+    expect(
+      await issue(
+        api().update(key.ctx, endpoint.id, {
+          oauth: { tokenUrl, clientId: 'renamed-client', clientAuthentication: 'private_key_jwt' },
+        }),
+      ),
+    ).toMatchObject({ path: 'oauth.clientAuthentication' });
     expect(
       await issue(
         api().update(key.ctx, endpoint.id, {
@@ -753,6 +778,14 @@ describe('webhook endpoints through the API (ADR-081)', () => {
         oauthSecretReplaced: false,
         source: 'api',
       },
+      {
+        host: HOST,
+        eventTypes: ['contact.created'],
+        oauthTokenHost: HOST,
+        oauthSecretReplaced: false,
+        oauthClientAuthentication: 'client_secret_post',
+        source: 'api',
+      },
       { host: HOST, eventTypes: ['contact.created'], oauthRemoved: true, source: 'api' },
     ]);
     // Neither the answers, the kept replay, the audit nor the owners' notice holds the secret.
@@ -770,6 +803,31 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       ]),
     ).not.toContain(SECRET);
     expect((await api().list(key.ctx)).data).toHaveLength(1);
+
+    // An endpoint added with a client that sends them in the request body names the way in its
+    // audit entry (ADR-357).
+    const inBody = await addThroughApi(key.ctx, 'oauth-post', {
+      ...body,
+      oauth: { ...body.oauth, clientAuthentication: 'client_secret_post' },
+    });
+    expect(inBody.status).toBe(201);
+    expect(inBody.body.data.oauth).toEqual({
+      tokenUrl,
+      clientId: 'crm-client',
+      scope: 'hooks.write',
+      clientAuthentication: 'client_secret_post',
+    });
+    const [added] = await fx.query<{ metadata: Record<string, unknown> }>(
+      'SELECT metadata FROM app.audit_events WHERE tenant_id = $1 AND subject_id = $2',
+      [c.tenant.id, inBody.body.data.id],
+    );
+    expect(added?.metadata).toEqual({
+      host: HOST,
+      eventTypes: ['contact.created'],
+      oauthTokenHost: HOST,
+      oauthClientAuthentication: 'client_secret_post',
+      source: 'api',
+    });
   });
 
   it('choose the message statuses an endpoint receives, kept by changes that leave them out and cleared with the event (ADR-119)', async () => {

@@ -3,6 +3,7 @@ import { refresh } from 'next/cache';
 import {
   webhookHost,
   type WebhookContactFieldValue,
+  type WebhookOAuthClientAuth,
   type WebhookReplayPeriod,
 } from '@w360/domain/webhook-model';
 import { getRuntime } from '@/server/runtime';
@@ -15,13 +16,14 @@ import { tenantForAction } from '@/server/tenant-action';
  * here, when an endpoint is created or its secret rotated.
  */
 
-/** An endpoint's OAuth client as the form gives it (ADR-173). */
+/** An endpoint's OAuth client as the form gives it (ADR-173, ADR-357). */
 interface WebhookOAuthActionInput {
   tokenUrl: string;
   clientId: string;
   /** Left out, a change keeps the stored secret. */
   clientSecret?: string;
   scope: string;
+  clientAuthentication: WebhookOAuthClientAuth;
 }
 export async function createWebhookEndpointAction(
   slug: string,

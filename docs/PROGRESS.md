@@ -1,5 +1,50 @@
 # Progress
 
+## 2026-10-10 — OAuth client credentials in the token request body (P5-09, H-014, ADR-357)
+
+Status: **Implemented; its database and browser tests run in CI only.** An endpoint's OAuth client
+(ADR-173) always authenticated to the receiver's authorization server with HTTP Basic, so a server
+that takes the client ID and secret only in the request body refused every token request
+(`oauth_token_refused_401`). The local PostgreSQL is unavailable, so migration 0279 and the
+integration and end-to-end tests below were written but not run here; the migration passed the
+pglast parse check (syntax only).
+
+### Completed
+
+- **Database:** migration 0279: `oauth_client_auth` on `app.webhook_endpoints`
+  (`client_secret_basic`, the default, or `client_secret_post`), not null with a constant default
+  and a check validated at once; the runtime role's update grant on the column.
+- **Domain:** the token request sends `client_id` and `client_secret` in the form, without an
+  Authorization header, for `client_secret_post`, and HTTP Basic otherwise; the worker's token
+  fingerprint includes the method; `webhookOAuthSchema` takes `clientAuthentication` (left out,
+  HTTP Basic); the settings service and the API store, answer and audit it
+  (`oauthClientAuthentication` when it is the body or goes back to HTTP Basic); the OpenAPI entries;
+  the delivery job reads it; the data export names the column.
+- **Web:** Settings → Webhooks chooses "Send the client ID and secret" (in an Authorization header
+  or in the request body) with the client's fields, and the endpoints list names the body method.
+- **Tests:** unit (3 new: the token request in the body and its encoding, the schema with its
+  default and refusal and the columns, the audit cases; the worker's kept tokens now compare each
+  changed client, its method included, with a token kept for the client as it was, which they did
+  not for the scope and the token URL either; the client text, the OpenAPI entries, the audit's
+  largest entry, now 6,587 bytes, and the kept answer's size updated); integration
+  (`webhooks.test.ts`: a token asked with the credentials in the body and no Authorization header,
+  a change back to HTTP Basic asking a new token, the column, the list, the audits, the database
+  check and the grant; `api-webhook-endpoints.test.ts`: the method set, answered, audited and
+  refused through the API, and an endpoint added with it); end-to-end (`webhooks.spec.ts`: the
+  body method chosen on the endpoint's page, described in the list, and the worker's token request
+  sent with it). Written for CI; the integration and end-to-end tests were not run here.
+- **Docs:** ADR-357; ARCHITECTURE; SECURITY; THREAT-MODEL T316; DEPLOYMENT (0279); RUNBOOKS (the
+  `oauth_token_refused_401` entry); BACKLOG P5-09; feature matrix W-138, W-139 and H-014.
+- **Mutation checks:** 24 deliberate regressions, 19 caught by the unit tests (the body method never
+  used, a Basic header sent with it, the body without the client ID, the secret encoded twice, the
+  parameters in another order, a token kept across methods, caught once the kept tokens' test was
+  tightened, an unknown method taken, another refusal, the method given dropped or kept by a change
+  leaving it out, the method stored from before, the worker ignoring it, no client meaning the
+  body, three audit cases, the description, the API field's text and the answer schema). The other
+  five (the settings service's audit of a new endpoint and its list, the API's answer and its audit
+  of a new endpoint, the export) run against the database and are covered by the integration
+  tests, which run in CI only.
+
 ## 2026-10-10 — Skip reason filter for skipped cart reminders (P5-09, H-014, ADR-356)
 
 Status: **Implemented; its database tests run in CI only.** `store_checkout.reminder_skipped` went

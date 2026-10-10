@@ -185,6 +185,7 @@ describe('answers kept with an Idempotency-Key (ADR-339)', () => {
         tokenUrl: `https://${'o'.repeat(WEBHOOK_LIMITS.urlLength - 8)}`,
         clientId: text(WEBHOOK_LIMITS.oauthClientIdLength),
         scope: text(WEBHOOK_LIMITS.oauthScopeLength),
+        clientAuthentication: 'client_secret_basic',
       },
       apiKeyId: ids(1)[0]!,
       createdAt: at,

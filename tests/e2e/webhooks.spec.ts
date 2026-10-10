@@ -623,7 +623,7 @@ test('an endpoint sends its own headers with every delivery: set in settings and
   expect(viaApi()[1]!.headers['x-gateway-token']).toBeUndefined();
 });
 
-test('an endpoint gets OAuth access tokens as its client and sends them as a bearer token: set in settings with the secret never shown again, changed on its page, removed, and given by an API key (ADR-173)', async ({
+test('an endpoint gets OAuth access tokens as its client and sends them as a bearer token: set in settings with the secret never shown again, changed on its page to send it in the request body, removed, and given by an API key (ADR-173, ADR-357)', async ({
   page,
   request,
 }) => {
@@ -680,7 +680,8 @@ test('an endpoint gets OAuth access tokens as its client and sends them as a bea
   expect(forUs()[0]!.headers.authorization).toBe(`Bearer ${tokenPaths.get(firstTokenPath)}`);
   expect(signatureValid(forUs()[0]!.headers, forUs()[0]!.body, secret)).toBe(true);
 
-  // On the endpoint's page: another token URL needs the secret again, since it is sent there.
+  // On the endpoint's page: another token URL needs the secret again, since it is sent there. Its
+  // server takes the client ID and secret in the request body (ADR-357).
   await page.getByRole('link', { name: `Deliveries and settings for ${HOST}` }).click();
   await expect(page.getByText(/OAuth access tokens from .*, as client e2e-client/)).toBeVisible();
   expect(await page.content()).not.toContain(clientSecret);
@@ -688,6 +689,12 @@ test('an endpoint gets OAuth access tokens as its client and sends them as a bea
   await page
     .getByLabel('Token URL', { exact: true })
     .fill(`http://${HOST}:${port}${secondTokenPath}`);
+  await expect(page.getByLabel('Send the client ID and secret', { exact: true })).toHaveValue(
+    'client_secret_basic',
+  );
+  await page
+    .getByLabel('Send the client ID and secret', { exact: true })
+    .selectOption('client_secret_post');
   await page.getByRole('button', { name: 'Save endpoint' }).click();
   await expect(
     page.getByText('Enter the client secret again: it is sent to the token URL, which changed.'),
@@ -697,9 +704,18 @@ test('an endpoint gets OAuth access tokens as its client and sends them as a bea
   await page.getByRole('button', { name: 'Save endpoint' }).click();
   await expect(page.getByText('Endpoint saved.')).toBeVisible();
   await page.goto(`/c/${slug}/settings/webhooks`);
+  await expect(
+    page.getByText(
+      `OAuth access tokens from ${HOST}, as client e2e-client, scope hooks.write, its ID and secret sent in the request body`,
+    ),
+  ).toBeVisible();
   await page.getByRole('button', { name: `Send test event to ${HOST}` }).click();
   await expect(async () => expect(forUs()).toHaveLength(2)).toPass({ timeout: 30_000 });
   expect(asked(secondTokenPath)).toHaveLength(1);
+  expect(asked(secondTokenPath)[0]!.headers.authorization).toBeUndefined();
+  expect(asked(secondTokenPath)[0]!.body).toBe(
+    `grant_type=client_credentials&scope=hooks.write&client_id=e2e-client&client_secret=${clientSecret}-2`,
+  );
   expect(forUs()[1]!.headers.authorization).toBe(`Bearer ${tokenPaths.get(secondTokenPath)}`);
 
   // Removed: deliveries go without a token.
@@ -746,6 +762,7 @@ test('an endpoint gets OAuth access tokens as its client and sends them as a bea
     tokenUrl: `http://${HOST}:${port}${apiTokenPath}`,
     clientId: 'api-client',
     scope: null,
+    clientAuthentication: 'client_secret_basic',
   });
   expect(JSON.stringify(endpoint)).not.toContain(clientSecret);
   const testEvent = await request.post(`/api/v1/webhook-endpoints/${endpoint.id}/test`, {

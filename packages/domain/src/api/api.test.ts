@@ -1802,6 +1802,17 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     expect(apiUpdateWebhookEndpointSchema.parse({ oauth: kept })).toEqual({
       oauth: { ...kept, scope: null },
     });
+    // The client may send its ID and secret in the request body instead (ADR-357).
+    const post = { ...oauth, clientAuthentication: 'client_secret_post' };
+    expect(apiCreateWebhookEndpointSchema.parse({ ...base, oauth: post }).oauth).toEqual({
+      ...post,
+      scope: null,
+    });
+    expect(
+      apiUpdateWebhookEndpointSchema.safeParse({
+        oauth: { ...kept, clientAuthentication: 'private_key_jwt' },
+      }).success,
+    ).toBe(false);
     const doc = buildOpenApiDocument('https://app.example.com/api/v1');
     type Client = { anyOf?: { properties?: Record<string, unknown> }[] };
     const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
@@ -1814,9 +1825,32 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     };
     const keys = (client: Client | undefined) =>
       Object.keys(client?.anyOf?.find((s) => s.properties)?.properties ?? {}).sort();
-    expect(keys(given)).toEqual(['clientId', 'clientSecret', 'scope', 'tokenUrl']);
-    // The secret is never answered.
-    expect(keys(answered.properties.oauth)).toEqual(['clientId', 'scope', 'tokenUrl']);
+    expect(keys(given)).toEqual([
+      'clientAuthentication',
+      'clientId',
+      'clientSecret',
+      'scope',
+      'tokenUrl',
+    ]);
+    // The secret is never answered; the way the client authenticates always is (ADR-357).
+    expect(keys(answered.properties.oauth)).toEqual([
+      'clientAuthentication',
+      'clientId',
+      'scope',
+      'tokenUrl',
+    ]);
+    const methodOf = (client: Client | undefined) =>
+      client?.anyOf?.find((s) => s.properties)?.properties?.clientAuthentication;
+    for (const client of [given, answered.properties.oauth]) {
+      expect(methodOf(client)).toMatchObject({
+        enum: ['client_secret_basic', 'client_secret_post'],
+      });
+    }
+    expect(given?.anyOf?.find((s) => s.properties)).toMatchObject({
+      description: expect.stringContaining(
+        'or as `client_id` and `client_secret` in the request body when `clientAuthentication` is `client_secret_post`; left out, `client_secret_basic`)',
+      ),
+    });
     expect(answered.required).toContain('oauth');
     expect(doc.info.description).toContain('send it as `Authorization: Bearer <token>`');
   });
