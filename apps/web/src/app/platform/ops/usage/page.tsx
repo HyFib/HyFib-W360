@@ -108,6 +108,11 @@ export default async function OpsUsagePage({
             days={o.daily}
             label={`Messages sent and received each UTC day, ${o.days} days`}
             empty="No company sent or received a message since the period started."
+            failed={{
+              label: `Share of the messages sent that failed each UTC day, ${o.days} days`,
+              noneSent: 'No company sent a message in these days, so none failed.',
+              period: `${o.days} days`,
+            }}
           />
         </CardContent>
       </Card>
@@ -134,6 +139,11 @@ export default async function OpsUsagePage({
               days={year.days}
               label="Messages sent and received each UTC day, the last 12 months"
               empty="No company sent or received a message in the days counted."
+              failed={{
+                label: 'Share of the messages sent that failed each UTC day, the last 12 months',
+                noneSent: 'No company sent a message in the days counted, so none failed.',
+                period: 'the last 12 months',
+              }}
               // Unlike the window's chart above: names matched in part never find both.
               names={{
                 legend: 'Legend of the 12 months',

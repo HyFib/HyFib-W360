@@ -1,5 +1,111 @@
 # Progress
 
+## 2026-10-09 — Refund requests in the chat channel, an owners' alert (P5-10, H-034, ADR-345)
+
+Status: **Implemented; its database and browser tests run in CI only.** The refund requests' notice
+(ADR-073, ADR-104) reached platform owners' mailboxes alone: ADR-340's chat channel could get the
+owners' financial alerts but not it. The local PostgreSQL is unavailable, so migration 0263 and the
+integration tests below were written but not run here; the migration passed the pglast parse check
+(syntax only), its PL/pgSQL body included.
+
+### Completed
+
+- **Database:** migration 0263 (the channel's kinds check with `refund_requests`, one to six known
+  kinds; the posts' kind check; `ops.platform_set_alert_channel_kinds` replaced with the kind in its
+  order, the rest as 0261 left it).
+- **Domain:** `refund_requests` among `ALERT_CHANNEL_KINDS` and the owners' alerts
+  (`ALERT_CHANNEL_FINANCIAL_KINDS`), labelled "Refund requests"; `announceRefundRequests` queues the
+  email's text as the channel's post in the transaction of the emails and says whether it posted.
+- **Worker:** the sweep's log of announced requests says whether the notice was posted (`posted`).
+- **Web:** Operations → Alerts lists "Refund requests (platform owners’ alert)"; the page names
+  refund requests among the alerts emailed to platform owners, the form a refund's reason among what
+  posts never give, and the replace field lists three owners' alerts as a sentence does.
+- **Tests:** unit (the kinds, the owners' alerts and the labels, and the state's kinds in the
+  console's order with the new kind; 2 changed in `platform/alert-channel.test.ts`; 3 new in
+  `billing/refund-requests.test.ts`: the post after the emails in their transaction with the email's
+  text, `posted` as the queueing answers, and nothing posted without an owner or a request marked);
+  integration (1 new in `alert-channel.test.ts`: refund requests ticked through the definer
+  function, kept in the console's order and queued only while ticked; 1 new in
+  `refund-requests.test.ts`: the notice posted to a channel that gets refund requests, the email's
+  text without a company, an amount or a reason, and not posted once the kind is unticked; the
+  strict results of the announcement tests in both refund requests files gain `posted`); e2e (a new
+  channel leaves refund requests unticked). Written for CI; the integration and e2e tests were not
+  run here.
+- **Docs:** ADR-345; ARCHITECTURE; SECURITY; THREAT-MODEL T304; DEPLOYMENT (0263); RUNBOOKS;
+  DATA-RETENTION; BACKLOG P5-10; feature matrix H-034.
+- **Mutation checks:** 4/4 deliberate regressions caught on the unit-tested parts (the kind left out
+  of the list, placed before the financial alerts, not marked an owners' alert, or labelled
+  otherwise). 5/5 more on the announcement's post (another kind, another text, `posted` never
+  reported, the post before the emails, the post in a transaction of its own).
+- **Review fixes:** an independent review found nothing that would fail CI, one gap and a few small
+  things, fixed. No test ticked refund requests through `ops.platform_set_alert_channel_kinds`, so a
+  kind missing from its order would have refused every owner who ticked it: an integration test now
+  does. The announcement's post had no unit test, though a fake transaction can show it: three now
+  do. SECURITY's refund request rules and summary and DATA-RETENTION's posts row now name the
+  channel's posts, DEPLOYMENT says old workers still send a post already waiting after a rollback,
+  and a comment and an import's order were corrected.
+
+### Test commands and results (local, 2026-10-09)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 144 files, 1465 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
+## 2026-10-09 — Failed sends a day as a share of those sent (P5-10, H-034, ADR-344)
+
+Status: **Implemented; its browser test runs in CI only.** The messages a day charts left failed
+sends to the tooltip and the table: beside the messages sent they would lie flat on the axis.
+
+### Completed
+
+- **Domain:** `platform/ops-chart.ts`: `failedShare` (a day's failed sends divided by its sends,
+  none on a day that sent nothing), `chartShare` (to a tenth of a percent, "<0.1%" and ">99.9%"
+  where rounding would read as none or all) and `failedShareLayout` (a scale in tenths of a percent,
+  the line broken at days without sends, lone days as dots, the end label's room); the days along
+  the x axis now come from one `dayAxis` for both charts, which share the plot's edges
+  (`sharedPlotEdges`), so each day sits at the same x in both. No migration, no query changed.
+- **Web:** `DailyFailedShareChart` under each messages chart (the Usage tab's window and year, a
+  company's 30 days and year), captioned "Sends that failed, as a share of those sent" and the days
+  drawn, or a note when nothing was sent; both charts drawn in the shared `DayChartFrame` (the
+  slider, the gridlines, the days' names, the crosshair and the tooltip); a "Share failed" column in
+  the table of the days; the colour token `--chart-3` (aqua), light and dark.
+- **Colour:** the palette validator passed the three slots against the card, light (`#ffffff`) and
+  dark (`#1b1815`), for colour-vision separation (worst all-pairs ΔE 9.2 light, 9.4 dark) and
+  normal vision; aqua is under 3:1 on the light card (2.82), so the line's last share is written at
+  its end where it fits and the table gives every share.
+- **Tests:** unit (7 new in `platform/ops-chart.test.ts`: the share and its gap, the shares written,
+  the scale and the line broken with a lone day, the top above every share including one just past a
+  step, the end label's room, the days named as on the messages chart, the edges both charts share;
+  the 8 earlier tests unchanged and passing over the shared axis); e2e (the Usage tab's chart, with
+  the slider's value, when the table shows a day with sends, else its note; a company that only
+  received a message shows the note and "None sent" every day). Written for CI; the e2e test was not
+  run here.
+- **Docs:** ADR-344; ARCHITECTURE; BACKLOG P5-10 (with the Teams format noted as blocked on
+  Microsoft's documentation); feature matrix H-034.
+- **Mutation checks:** 21/21 deliberate regressions caught on the unit-tested parts (2 after
+  assertions were added: the left edge sized by counts rather than percentages, and the messages
+  chart ignoring the shared right edge where only the share writes an end label).
+- **Review fixes:** an independent review found nothing that would fail CI and two small things,
+  fixed. The Usage tab's e2e check accepted the share's chart or its note, whichever showed: it now
+  reads the table's Sent column and requires the chart, its value the last day's share or "none
+  sent", when a company sent in the window, and the note otherwise. And the two captions of a page
+  with two charts were the same: each now ends with the days drawn ("7 days", "the last 12 months").
+  Neither touches unit-tested logic.
+
+### Test commands and results (local, 2026-10-09)
+
+| Command                                            | Result                                                         |
+| -------------------------------------------------- | -------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                          |
+| `pnpm test` (unit)                                 | 144 files, 1462 tests passed                                   |
+| `pnpm test:e2e`                                    | not run here: it needs the web, worker and Mailpit; CI runs it |
+| `pnpm build`                                       | passed                                                         |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                 |
+
 ## 2026-10-09 — Each browser project's end-to-end tests in a CI job of its own (ADR-343)
 
 Status: **Implemented and measured in CI: its first complete run ended the check of the four in 52

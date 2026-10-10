@@ -6,14 +6,20 @@ import {
   useState,
   type KeyboardEvent,
   type PointerEvent,
+  type ReactNode,
 } from 'react';
 import {
   DAILY_CHART_SERIES,
   chartCount,
   chartDayLabel,
+  chartShare,
   dailyChartLayout,
+  failedShare,
+  failedShareLayout,
   nearestDayIndex,
+  sharedPlotEdges,
   type DailyChartDay,
+  type DailyChartLayout,
   type DailyChartSeriesKey,
 } from '@w360/domain/ops-chart';
 
@@ -25,6 +31,8 @@ const COLOR: Record<DailyChartSeriesKey, string> = {
   outbound: 'var(--chart-1)',
   inbound: 'var(--chart-2)',
 };
+/** The failed sends' share (ADR-344): a measure of its own, so a colour of its own. */
+const FAILED_COLOR = 'var(--chart-3)';
 
 /** A short stroke of a series' colour: how the legend and the tooltip name a line. */
 function LineKey({ color }: { color: string }) {
@@ -35,33 +43,78 @@ function LineKey({ color }: { color: string }) {
   );
 }
 
-const describe = (d: DailyChartDay) =>
-  `${chartDayLabel(d.day)}: ${chartCount(d.outbound)} sent, ${chartCount(d.inbound)} received, ${chartCount(d.failed)} failed`;
+/**
+ * The tooltip beside the crosshair at `x` (in the drawing's pixels), kept inside the box however
+ * long its lines: its own width is measured again for each day it shows and each width of the box.
+ */
+function ChartTip({
+  shownIndex,
+  boxWidth,
+  x,
+  drawnWidth,
+  children,
+}: {
+  shownIndex: number;
+  boxWidth: number;
+  x: number;
+  drawnWidth: number;
+  children: ReactNode;
+}) {
+  const tip = useRef<HTMLDivElement>(null);
+  const [tipWidth, setTipWidth] = useState(TIP);
+  useLayoutEffect(() => {
+    const measured = tip.current?.offsetWidth;
+    if (measured !== undefined) setTipWidth(measured);
+  }, [shownIndex, boxWidth]);
+  // Beside the crosshair, in the box's pixels, as near as the box's edges allow.
+  const tipX = (x * boxWidth) / drawnWidth;
+  const tipRoom = Math.max(0, boxWidth - tipWidth);
+  const place =
+    tipX > boxWidth / 2
+      ? { right: Math.min(Math.max(0, boxWidth - tipX + 12), tipRoom) }
+      : { left: Math.min(tipX + 12, tipRoom) };
+  return (
+    <div
+      ref={tip}
+      aria-hidden="true"
+      className="pointer-events-none absolute top-2 z-10 grid w-max min-w-36 max-w-full gap-1 rounded-md border border-border bg-popover px-3 py-2 text-sm text-popover-foreground shadow-sm"
+      style={place}
+    >
+      {children}
+    </div>
+  );
+}
+
+/** What a chart draws for the frame at the width it has, with the day chosen or none. */
+interface DayChartDrawing {
+  layout: Pick<DailyChartLayout, 'width' | 'plot' | 'yTicks' | 'xTicks' | 'xs'>;
+  /** The slider's value: the chosen day's numbers, or the last day's until another is chosen. */
+  valueText: string;
+  marks: ReactNode;
+  /** The chosen day's tooltip, or null when no day is chosen. */
+  tip: ReactNode;
+}
 
 /**
- * The platform's messages sent and received each UTC day of the window (ADR-333): two lines on one
- * axis with a legend, the last day's values at the lines' ends when they fit, and a crosshair whose
- * tooltip gives the day's sent, received and failed messages, on hover or on the arrow keys, Home
- * and End once the chart has focus. To assistive technology the chart is a slider over the days,
- * its value the chosen day's numbers (the last day's until another is chosen). The table beside it
- * gives every number without the chart.
+ * The frame both charts share: drawn at 720 pixels on the server and until the browser measures
+ * the room it has, and never narrower than 280 (a narrower box shows the drawing scaled to fit); a
+ * slider over the days to assistive technology; the gridlines, the days named under the axis and
+ * the crosshair, which follows the pointer or the arrow keys, Home and End once the chart has focus
+ * (Escape puts it away); and the tooltip of the chosen day. `draw` gives the chart's layout, marks
+ * and tooltip for a width and a chosen day (`shownIndex`, null for none; `current` is the day the
+ * slider names, the last until another is chosen).
  */
-export function DailyMessagesChart({
-  days,
+function DayChartFrame({
+  count,
   label,
-  legendLabel = 'Lines',
+  draw,
 }: {
-  days: DailyChartDay[];
+  count: number;
   label: string;
-  /** The legend's accessible name, told apart when a page draws two charts. */
-  legendLabel?: string;
+  draw: (drawn: number, shownIndex: number | null, current: number) => DayChartDrawing;
 }) {
   const box = useRef<HTMLDivElement>(null);
-  const tip = useRef<HTMLDivElement>(null);
-  // Drawn at 720 pixels on the server and until the browser measures the room it has, and never
-  // narrower than 280: a narrower box shows the drawing scaled to fit.
   const [size, setSize] = useState({ box: 720, drawn: 720 });
-  const [tipWidth, setTipWidth] = useState(TIP);
   const [active, setActive] = useState<number | null>(null);
   useEffect(() => {
     const element = box.current;
@@ -74,27 +127,11 @@ export function DailyMessagesChart({
     observer.observe(element);
     return () => observer.disconnect();
   }, []);
-  const layout = dailyChartLayout(days, size.drawn, HEIGHT);
-  const last = days.length - 1;
+  const last = count - 1;
   const shownIndex = active !== null && active <= last ? active : null;
-  const shown = shownIndex === null ? undefined : days[shownIndex];
-  const shownX = shownIndex === null ? 0 : (layout.xs[shownIndex] ?? 0);
   const current = shownIndex ?? last;
-  const currentDay = days[current];
-  // The tooltip's own width keeps it inside the box, however long its numbers: measured again for
-  // each day it shows and each width of the box.
-  useLayoutEffect(() => {
-    const measured = tip.current?.offsetWidth;
-    if (measured !== undefined) setTipWidth(measured);
-  }, [shownIndex, size.box]);
-  // Beside the crosshair, in the box's pixels, as near as the box's edges allow.
-  const tipX = (shownX * size.box) / layout.width;
-  const tipRoom = Math.max(0, size.box - tipWidth);
-  const tipPlace =
-    tipX > size.box / 2
-      ? { right: Math.min(Math.max(0, size.box - tipX + 12), tipRoom) }
-      : { left: Math.min(tipX + 12, tipRoom) };
-
+  const { layout, valueText, marks, tip } = draw(size.drawn, shownIndex, current);
+  const shownX = shownIndex === null ? null : (layout.xs[shownIndex] ?? null);
   const onPointerMove = (event: PointerEvent<SVGSVGElement>) => {
     const rect = event.currentTarget.getBoundingClientRect();
     if (rect.width === 0) return;
@@ -120,7 +157,114 @@ export function DailyMessagesChart({
     event.preventDefault();
     setActive(next);
   };
+  return (
+    <div
+      ref={box}
+      role="slider"
+      aria-label={label}
+      aria-orientation="horizontal"
+      aria-valuemin={0}
+      aria-valuemax={Math.max(last, 0)}
+      aria-valuenow={Math.max(current, 0)}
+      aria-valuetext={valueText}
+      tabIndex={0}
+      className="relative w-full overflow-hidden rounded-md outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      onFocus={() => setActive((chosen) => chosen ?? (last >= 0 ? last : null))}
+      onBlur={() => setActive(null)}
+      onKeyDown={onKeyDown}
+    >
+      <svg
+        width={layout.width}
+        height={HEIGHT}
+        viewBox={`0 0 ${layout.width} ${HEIGHT}`}
+        aria-hidden="true"
+        className="block max-w-full touch-pan-y"
+        onPointerMove={onPointerMove}
+        onPointerLeave={() => setActive(null)}
+      >
+        {layout.yTicks.map((tick) => (
+          <g key={tick.value}>
+            <line
+              x1={layout.plot.left}
+              x2={layout.plot.right}
+              y1={tick.y}
+              y2={tick.y}
+              stroke="var(--border)"
+              strokeWidth="1"
+            />
+            <text
+              x={layout.plot.left - 8}
+              y={tick.y}
+              textAnchor="end"
+              dominantBaseline="middle"
+              fill="var(--muted-foreground)"
+              className="text-xs tabular-nums"
+            >
+              {tick.label}
+            </text>
+          </g>
+        ))}
+        {layout.xTicks.map((tick) => (
+          <text
+            key={tick.index}
+            x={tick.x}
+            y={layout.plot.bottom + 18}
+            textAnchor={
+              tick.index === 0 && layout.xTicks.length > 1
+                ? 'start'
+                : tick.index === last && layout.xTicks.length > 1
+                  ? 'end'
+                  : 'middle'
+            }
+            fill="var(--muted-foreground)"
+            className="text-xs"
+          >
+            {tick.label}
+          </text>
+        ))}
+        {shownX !== null ? (
+          <line
+            x1={shownX}
+            x2={shownX}
+            y1={layout.plot.top}
+            y2={layout.plot.bottom}
+            stroke="var(--muted-foreground)"
+            strokeWidth="1"
+          />
+        ) : null}
+        {marks}
+      </svg>
+      {shownIndex !== null && shownX !== null && tip !== null ? (
+        <ChartTip shownIndex={shownIndex} boxWidth={size.box} x={shownX} drawnWidth={layout.width}>
+          {tip}
+        </ChartTip>
+      ) : null}
+    </div>
+  );
+}
 
+const describe = (d: DailyChartDay) =>
+  `${chartDayLabel(d.day)}: ${chartCount(d.outbound)} sent, ${chartCount(d.inbound)} received, ${chartCount(d.failed)} failed`;
+
+/**
+ * The platform's messages sent and received each UTC day of the window (ADR-333): two lines on one
+ * axis with a legend, the last day's values at the lines' ends when they fit, and a crosshair whose
+ * tooltip gives the day's sent, received and failed messages. The table beside it gives every
+ * number without the chart.
+ */
+export function DailyMessagesChart({
+  days,
+  label,
+  legendLabel = 'Lines',
+  aligned = false,
+}: {
+  days: DailyChartDay[];
+  label: string;
+  /** The legend's accessible name, told apart when a page draws two charts. */
+  legendLabel?: string;
+  /** Drawn above the failed sends' chart, on the plot's edges both share (ADR-344). */
+  aligned?: boolean;
+}) {
   return (
     <div className="flex min-w-0 flex-col gap-3">
       <ul aria-label={legendLabel} className="flex flex-wrap items-center gap-4 text-sm">
@@ -131,142 +275,197 @@ export function DailyMessagesChart({
           </li>
         ))}
       </ul>
-      <div
-        ref={box}
-        role="slider"
-        aria-label={label}
-        aria-orientation="horizontal"
-        aria-valuemin={0}
-        aria-valuemax={Math.max(last, 0)}
-        aria-valuenow={Math.max(current, 0)}
-        aria-valuetext={currentDay ? describe(currentDay) : 'No days'}
-        tabIndex={0}
-        className="relative w-full overflow-hidden rounded-md outline-none focus-visible:ring-2 focus-visible:ring-ring"
-        onFocus={() => setActive((chosen) => chosen ?? (last >= 0 ? last : null))}
-        onBlur={() => setActive(null)}
-        onKeyDown={onKeyDown}
-      >
-        <svg
-          width={layout.width}
-          height={HEIGHT}
-          viewBox={`0 0 ${layout.width} ${HEIGHT}`}
-          aria-hidden="true"
-          className="block max-w-full touch-pan-y"
-          onPointerMove={onPointerMove}
-          onPointerLeave={() => setActive(null)}
-        >
-          {layout.yTicks.map((tick) => (
-            <g key={tick.value}>
-              <line
-                x1={layout.plot.left}
-                x2={layout.plot.right}
-                y1={tick.y}
-                y2={tick.y}
-                stroke="var(--border)"
-                strokeWidth="1"
+      <DayChartFrame
+        count={days.length}
+        label={label}
+        draw={(drawn, shownIndex, current) => {
+          const layout = dailyChartLayout(
+            days,
+            drawn,
+            HEIGHT,
+            aligned ? sharedPlotEdges(days, drawn, HEIGHT) : undefined,
+          );
+          const shown = shownIndex === null ? undefined : days[shownIndex];
+          const shownX = shownIndex === null ? 0 : (layout.xs[shownIndex] ?? 0);
+          const currentDay = days[current];
+          return {
+            layout,
+            valueText: currentDay ? describe(currentDay) : 'No days',
+            marks: (
+              <>
+                {layout.series.map((s) => (
+                  <path
+                    key={s.key}
+                    d={s.path}
+                    fill="none"
+                    stroke={COLOR[s.key]}
+                    strokeWidth="2"
+                    strokeLinejoin="round"
+                    strokeLinecap="round"
+                  />
+                ))}
+                {days.length > 0
+                  ? layout.series.map((s) => (
+                      <circle
+                        key={s.key}
+                        cx={shown ? shownX : s.end.x}
+                        cy={shownIndex === null ? s.end.y : (s.ys[shownIndex] ?? s.end.y)}
+                        r="4"
+                        fill={COLOR[s.key]}
+                        stroke="var(--card)"
+                        strokeWidth="2"
+                      />
+                    ))
+                  : null}
+                {layout.endLabels
+                  ? layout.series.map((s) => (
+                      <text
+                        key={s.key}
+                        x={s.end.x + 10}
+                        y={s.end.y}
+                        dominantBaseline="middle"
+                        fill="var(--foreground)"
+                        className="text-xs"
+                      >
+                        {s.label} {chartCount(s.end.value)}
+                      </text>
+                    ))
+                  : null}
+              </>
+            ),
+            tip: shown ? (
+              <>
+                <span className="text-xs text-muted-foreground">
+                  {chartDayLabel(shown.day)} (UTC)
+                </span>
+                {DAILY_CHART_SERIES.map((s) => (
+                  <span key={s.key} className="flex items-center gap-2">
+                    <LineKey color={COLOR[s.key]} />
+                    <strong className="tabular-nums">{chartCount(shown[s.key])}</strong>
+                    <span className="text-muted-foreground">{s.label.toLowerCase()}</span>
+                  </span>
+                ))}
+                <span className="flex items-center gap-2">
+                  <span className="w-4 shrink-0" />
+                  <strong className="tabular-nums">{chartCount(shown.failed)}</strong>
+                  <span className="text-muted-foreground">failed</span>
+                </span>
+              </>
+            ) : null,
+          };
+        }}
+      />
+    </div>
+  );
+}
+
+const describeShare = (d: DailyChartDay) => {
+  const share = failedShare(d);
+  return share === null
+    ? `${chartDayLabel(d.day)}: none sent`
+    : `${chartDayLabel(d.day)}: ${chartShare(share)} of ${chartCount(d.outbound)} sent failed (${chartCount(d.failed)})`;
+};
+
+/**
+ * The share of the messages sent each UTC day that failed (ADR-344), under the messages chart: one
+ * line on an axis of percentages, where the failed sends do not lie flat beside thousands sent; a
+ * gap on a day that sent nothing, and a dot for a day alone between such days; the last day's share
+ * at the line's end when it fits; and a crosshair whose tooltip gives the day's share, failed and
+ * sent. One measure needs no legend: the caption above names it, and the table gives every share.
+ */
+export function DailyFailedShareChart({ days, label }: { days: DailyChartDay[]; label: string }) {
+  return (
+    <DayChartFrame
+      count={days.length}
+      label={label}
+      draw={(drawn, shownIndex, current) => {
+        // On the plot's edges the messages chart above shares, so each day sits under its own.
+        const layout = failedShareLayout(days, drawn, HEIGHT, sharedPlotEdges(days, drawn, HEIGHT));
+        const shown = shownIndex === null ? undefined : days[shownIndex];
+        const shownShare = shown ? failedShare(shown) : null;
+        const shownY = shownIndex === null ? null : (layout.ys[shownIndex] ?? null);
+        // The dot rides the crosshair, on a day with a share; without a chosen day, the line's end.
+        const dot =
+          shownIndex === null
+            ? layout.end
+            : shownY === null
+              ? null
+              : { x: layout.xs[shownIndex] ?? 0, y: shownY };
+        const currentDay = days[current];
+        return {
+          layout,
+          valueText: currentDay ? describeShare(currentDay) : 'No days',
+          marks: (
+            <>
+              <path
+                d={layout.path}
+                fill="none"
+                stroke={FAILED_COLOR}
+                strokeWidth="2"
+                strokeLinejoin="round"
+                strokeLinecap="round"
               />
-              <text
-                x={layout.plot.left - 8}
-                y={tick.y}
-                textAnchor="end"
-                dominantBaseline="middle"
-                fill="var(--muted-foreground)"
-                className="text-xs tabular-nums"
-              >
-                {tick.label}
-              </text>
-            </g>
-          ))}
-          {layout.xTicks.map((tick) => (
-            <text
-              key={tick.index}
-              x={tick.x}
-              y={layout.plot.bottom + 18}
-              textAnchor={
-                tick.index === 0 && layout.xTicks.length > 1
-                  ? 'start'
-                  : tick.index === last && layout.xTicks.length > 1
-                    ? 'end'
-                    : 'middle'
-              }
-              fill="var(--muted-foreground)"
-              className="text-xs"
-            >
-              {tick.label}
-            </text>
-          ))}
-          {shown ? (
-            <line
-              x1={shownX}
-              x2={shownX}
-              y1={layout.plot.top}
-              y2={layout.plot.bottom}
-              stroke="var(--muted-foreground)"
-              strokeWidth="1"
-            />
-          ) : null}
-          {layout.series.map((s) => (
-            <path
-              key={s.key}
-              d={s.path}
-              fill="none"
-              stroke={COLOR[s.key]}
-              strokeWidth="2"
-              strokeLinejoin="round"
-              strokeLinecap="round"
-            />
-          ))}
-          {last >= 0
-            ? layout.series.map((s) => (
+              {layout.lone.map((index) => (
                 <circle
-                  key={s.key}
-                  cx={shown ? shownX : s.end.x}
-                  cy={shownIndex === null ? s.end.y : (s.ys[shownIndex] ?? s.end.y)}
+                  key={index}
+                  cx={layout.xs[index]}
+                  cy={layout.ys[index] ?? undefined}
+                  r="3"
+                  fill={FAILED_COLOR}
+                />
+              ))}
+              {dot ? (
+                <circle
+                  cx={dot.x}
+                  cy={dot.y}
                   r="4"
-                  fill={COLOR[s.key]}
+                  fill={FAILED_COLOR}
                   stroke="var(--card)"
                   strokeWidth="2"
                 />
-              ))
-            : null}
-          {layout.endLabels
-            ? layout.series.map((s) => (
+              ) : null}
+              {layout.endLabel && layout.end ? (
                 <text
-                  key={s.key}
-                  x={s.end.x + 10}
-                  y={s.end.y}
+                  x={layout.end.x + 10}
+                  y={layout.end.y}
                   dominantBaseline="middle"
                   fill="var(--foreground)"
-                  className="text-xs"
+                  className="text-xs tabular-nums"
                 >
-                  {s.label} {chartCount(s.end.value)}
+                  {chartShare(layout.end.share)}
                 </text>
-              ))
-            : null}
-        </svg>
-        {shown ? (
-          <div
-            ref={tip}
-            aria-hidden="true"
-            className="pointer-events-none absolute top-2 z-10 grid w-max min-w-36 max-w-full gap-1 rounded-md border border-border bg-popover px-3 py-2 text-sm text-popover-foreground shadow-sm"
-            style={tipPlace}
-          >
-            <span className="text-xs text-muted-foreground">{chartDayLabel(shown.day)} (UTC)</span>
-            {DAILY_CHART_SERIES.map((s) => (
-              <span key={s.key} className="flex items-center gap-2">
-                <LineKey color={COLOR[s.key]} />
-                <strong className="tabular-nums">{chartCount(shown[s.key])}</strong>
-                <span className="text-muted-foreground">{s.label.toLowerCase()}</span>
+              ) : null}
+            </>
+          ),
+          tip: shown ? (
+            <>
+              <span className="text-xs text-muted-foreground">
+                {chartDayLabel(shown.day)} (UTC)
               </span>
-            ))}
-            <span className="flex items-center gap-2">
-              <span className="w-4 shrink-0" />
-              <strong className="tabular-nums">{chartCount(shown.failed)}</strong>
-              <span className="text-muted-foreground">failed</span>
-            </span>
-          </div>
-        ) : null}
-      </div>
-    </div>
+              {shownShare === null ? (
+                <span className="text-muted-foreground">No message sent</span>
+              ) : (
+                <>
+                  <span className="flex items-center gap-2">
+                    <LineKey color={FAILED_COLOR} />
+                    <strong className="tabular-nums">{chartShare(shownShare)}</strong>
+                    <span className="text-muted-foreground">failed</span>
+                  </span>
+                  <span className="flex items-center gap-2">
+                    <span className="w-4 shrink-0" />
+                    <span className="tabular-nums">
+                      <strong>{chartCount(shown.failed)}</strong>
+                      <span className="text-muted-foreground"> of </span>
+                      <strong>{chartCount(shown.outbound)}</strong>
+                    </span>
+                    <span className="text-muted-foreground">sent</span>
+                  </span>
+                </>
+              )}
+            </>
+          ) : null,
+        };
+      }}
+    />
   );
 }

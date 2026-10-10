@@ -1333,6 +1333,17 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    deletion still deletes a company's), and those older than 400 days are deleted once a worker of
    this release counts again.
 
+   Migration 0263 (ADR-345) lets the chat channel get refund requests: the channel's kinds check
+   (one to six known kinds), the posts' kind check and `ops.platform_set_alert_channel_kinds`,
+   replaced with the new kind in its order. Apply it before web servers of this release roll out:
+   they offer "Refund requests" among the alerts, which the kinds function from before it refuses
+   ("Choose at least one of the alerts listed"). Workers of this release work either way: they post
+   refund requests only while the channel gets them, which only 0263 allows. Web servers from before
+   it neither list the kind nor keep it: saving the alerts from one unticks refund requests, so
+   finish the web rollout before an owner ticks them. After a rollback the kind stays in the
+   database: old workers queue no post of it, though their posting job still sends one already
+   waiting.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

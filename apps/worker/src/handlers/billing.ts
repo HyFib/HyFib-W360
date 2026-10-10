@@ -350,7 +350,7 @@ export function billingSweepHandler(rt: WorkerRuntime) {
     });
     if (requests.announced > 0) {
       rt.logger.info(
-        { requests: requests.announced, recipients: requests.recipients },
+        { requests: requests.announced, recipients: requests.recipients, posted: requests.posted },
         'refund requests announced to platform owners',
       );
     }

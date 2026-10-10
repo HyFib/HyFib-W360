@@ -1353,7 +1353,12 @@ describe('emails', () => {
     // A request of a plan payment alone.
     const since = await dbNow();
     const first = await ask(c, '50');
-    expect(await announce()).toEqual({ announced: 1, unsent: 0, recipients: owners.length });
+    expect(await announce()).toEqual({
+      announced: 1,
+      unsent: 0,
+      recipients: owners.length,
+      posted: false,
+    });
     const sent = await platformNotices(since);
     expect(sent.map((n) => n.to).sort()).toEqual(owners);
     for (const notice of sent) {
@@ -1371,7 +1376,7 @@ describe('emails', () => {
     }
     expect((await requestRow(first.requestId)).announced_at).toBeInstanceOf(Date);
     // Once, however often the sweep runs.
-    expect(await announce()).toEqual({ announced: 0, unsent: 0, recipients: 0 });
+    expect(await announce()).toEqual({ announced: 0, unsent: 0, recipients: 0, posted: false });
     expect(await platformNotices(since)).toHaveLength(owners.length);
 
     // Both kinds in one email.
@@ -1379,7 +1384,12 @@ describe('emails', () => {
     const since2 = await dbNow();
     const second = await ask(other, '60');
     await askForCredit(c, topupId, '10');
-    expect(await announce()).toEqual({ announced: 2, unsent: 0, recipients: owners.length });
+    expect(await announce()).toEqual({
+      announced: 2,
+      unsent: 0,
+      recipients: owners.length,
+      posted: false,
+    });
     expect((await platformNotices(since2)).map((n) => n.payload)).toEqual(
       owners.map(() => ({
         kind: 'platform.notice',
@@ -1392,7 +1402,7 @@ describe('emails', () => {
     await requests().withdraw(c.ctx, first.requestId);
     const third = await ask(c, '70');
     await requests().withdraw(c.ctx, third.requestId);
-    expect(await announce()).toEqual({ announced: 0, unsent: 0, recipients: 0 });
+    expect(await announce()).toEqual({ announced: 0, unsent: 0, recipients: 0, posted: false });
     expect((await requestRow(third.requestId)).announced_at).toBeNull();
 
     // Two sweeps at once announce a request once.
@@ -1411,7 +1421,7 @@ describe('emails', () => {
        RETURNING user_id`,
     );
     try {
-      expect(await announce()).toEqual({ announced: 0, unsent: 1, recipients: 0 });
+      expect(await announce()).toEqual({ announced: 0, unsent: 1, recipients: 0, posted: false });
     } finally {
       await adminQuery(
         `UPDATE ops.platform_admins SET role = 'platform_owner' WHERE user_id = ANY($1::text[])`,
@@ -1420,7 +1430,12 @@ describe('emails', () => {
     }
     expect((await requestRow(fifth.requestId)).announced_at).toBeNull();
     const since4 = await dbNow();
-    expect(await announce()).toEqual({ announced: 1, unsent: 0, recipients: owners.length });
+    expect(await announce()).toEqual({
+      announced: 1,
+      unsent: 0,
+      recipients: owners.length,
+      posted: false,
+    });
     expect((await platformNotices(since4)).map((n) => n.payload)).toEqual(
       owners.map(() => ({
         kind: 'platform.notice',

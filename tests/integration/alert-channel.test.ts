@@ -543,7 +543,8 @@ describe('the chat channel (ADR-338)', () => {
     ]);
     expect(audit[1]!.correlation_id).toBe(owner.correlationId);
 
-    // The column holds one to five known kinds, and the posts a known kind, whoever writes them.
+    // The column holds one to six known kinds (0263), and the posts a known kind, whoever writes
+    // them.
     for (const kinds of [
       `'{}'`,
       `ARRAY['payments']`,
@@ -561,6 +562,34 @@ describe('the chat channel (ADR-338)', () => {
         [uuidv7()],
       ),
     ).rejects.toThrow(/platform_alert_posts_kind_check/);
+  });
+
+  it('lets platform owners add refund requests, queued only while the channel gets them (ADR-345)', async () => {
+    await service().setChannel(owner, { url: hookUrl });
+    const queue = async (kind: string) =>
+      (
+        await fx.dbs.app.run(systemScope, (tx) =>
+          tx.execute<{ queued: boolean }>(
+            sql`select ops.queue_platform_alert_post(${kind}, ${'Refund requests wait.'}) as queued`,
+          ),
+        )
+      ).rows[0]?.queued;
+    // An owners' alert, not on a new channel.
+    expect((await service().state(operator)).channel?.kinds).toEqual(OPERATIONS);
+    expect(await queue('refund_requests')).toBe(false);
+    // Ticked through the definer function, kept after the alerts before it in the console's order.
+    expect(await service().setKinds(owner, { kinds: ['refund_requests', 'failures'] })).toEqual({
+      kinds: ['failures', 'refund_requests'],
+    });
+    expect(await queue('refund_requests')).toBe(true);
+    // Unticked, its post waiting fails and no other is queued.
+    expect(await service().setKinds(owner, { kinds: ['failures'] })).toEqual({
+      kinds: ['failures'],
+    });
+    expect(await queue('refund_requests')).toBe(false);
+    expect((await posts()).map((p) => [p.kind, p.failed, p.last_error])).toEqual([
+      ['refund_requests', true, 'unticked'],
+    ]);
   });
 
   it('fails the posts waiting of an alert no longer ticked, so no address gets them (ADR-340)', async () => {

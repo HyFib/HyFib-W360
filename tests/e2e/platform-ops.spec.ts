@@ -521,6 +521,7 @@ test('staff read the platform’s messages a day on the Usage tab (ADR-333)', as
     'Sent',
     'Failed',
     'Received',
+    'Share failed',
   ]);
   const rows = table.getByRole('row').filter({ has: page.getByRole('cell') });
   const days = (await rows.locator('td:first-child').allTextContents()).map((d) => d.trim());
@@ -555,6 +556,34 @@ test('staff read the platform’s messages a day on the Usage tab (ADR-333)', as
   await expectNoHorizontalOverflow(page);
   await page.keyboard.press('Escape');
   await expect(tooltip(days.at(-1)!)).toHaveCount(0);
+
+  // Under it, the share of each day's sends that failed (ADR-344): drawn when a company sent a
+  // message in the window, as the table's Sent column says (earlier tests may or may not have),
+  // else a note; its value names the last day's share of those sent, or none sent.
+  const sent = (await rows.locator('td:nth-child(2)').allTextContents()).map((n) => Number(n));
+  const failedChart = page.getByRole('slider', {
+    name: 'Share of the messages sent that failed each UTC day, 7 days',
+  });
+  const noneSent = page.getByText('No company sent a message in these days, so none failed.', {
+    exact: true,
+  });
+  // The pointer off the charts first: left on the table's summary, it rests on this chart once
+  // focusing the chart above has scrolled the page, and WebKit then names the day under it.
+  await page.mouse.move(0, 0);
+  if (sent.some((n) => n > 0)) {
+    await expect(noneSent).toHaveCount(0);
+    await expect(failedChart).toHaveAttribute(
+      'aria-valuetext',
+      sent.at(-1) === 0
+        ? `${chartDay(days.at(-1)!)}: none sent`
+        : new RegExp(
+            `^${chartDay(days.at(-1)!)}: [<>]?[\\d.]+% of [\\d,]+ sent failed \\([\\d,]+\\)$`,
+          ),
+    );
+  } else {
+    await expect(noneSent).toBeVisible();
+    await expect(failedChart).toHaveCount(0);
+  }
 
   // On a phone narrower than this project's, the chart and the open table stay inside the page:
   // the table scrolls in its own box rather than widening the card.
@@ -606,6 +635,15 @@ test('staff read the platform’s messages a day on the Usage tab (ADR-333)', as
   const received = await companyDays.locator('tbody td:nth-child(4)').allTextContents();
   expect(received.length).toBeGreaterThanOrEqual(31);
   expect(received.reduce((total, n) => total + Number(n), 0)).toBe(1);
+  // It sent nothing, so no share failed (ADR-344): the note in place of the chart, and the table's
+  // last column says so for every day.
+  await expect(
+    page.getByText('The company sent no message in these 30 days, so none failed.', {
+      exact: true,
+    }),
+  ).toBeVisible();
+  const shares = await companyDays.locator('tbody td:nth-child(5)').allTextContents();
+  expect(new Set(shares.map((share) => share.trim()))).toEqual(new Set(['None sent']));
   await expectNoHorizontalOverflow(page);
   // Its last 12 months (ADR-342), from the days the worker counts once they end: drawn, or none
   // counted yet, or none of those counted with a message.
@@ -719,9 +757,11 @@ test('an owner posts the operations alerts to a chat channel and sends it a test
     await expect(page.getByText(token)).toHaveCount(0);
     await expect(page.getByLabel('Replace the channel’s address')).toHaveValue('');
 
-    // A new channel gets the operations alerts; an owner adds a financial one (ADR-340).
+    // A new channel gets the operations alerts, not the owners' (refund requests among them,
+    // ADR-345); an owner adds a financial one (ADR-340).
     const kinds = page.getByRole('group', { name: 'Alerts posted' });
     await expect(kinds.getByLabel('Failures')).toBeChecked();
+    await expect(kinds.getByLabel('Refund requests (platform owners’ alert)')).not.toBeChecked();
     await expect(kinds.getByLabel('Reconciliation findings')).not.toBeChecked();
     await kinds.getByLabel('Reconciliation findings').check();
     await page.getByRole('button', { name: 'Save the alerts posted' }).click();

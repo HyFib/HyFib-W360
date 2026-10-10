@@ -105,17 +105,22 @@ describe('a chat channel post’s text (ADR-338)', () => {
   });
 });
 
-describe('the alerts a channel gets (ADR-340)', () => {
-  it('lists the operations alerts and then the owners’ financial ones, the operations ones by default', () => {
+describe('the alerts a channel gets (ADR-340, ADR-345)', () => {
+  it('lists the operations alerts and then the owners’ ones, the operations ones by default', () => {
     expect(ALERT_CHANNEL_KINDS).toEqual([
       'failures',
       'queues',
       'integrations',
       'reconciliation',
       'unsettled',
+      'refund_requests',
     ]);
     expect(ALERT_CHANNEL_DEFAULT_KINDS).toEqual(['failures', 'queues', 'integrations']);
-    expect(ALERT_CHANNEL_FINANCIAL_KINDS).toEqual(['reconciliation', 'unsettled']);
+    expect(ALERT_CHANNEL_FINANCIAL_KINDS).toEqual([
+      'reconciliation',
+      'unsettled',
+      'refund_requests',
+    ]);
     expect(ALERT_POST_KINDS).toEqual([...ALERT_CHANNEL_KINDS, 'test']);
     expect(ALERT_POST_KIND_LABELS).toEqual({
       failures: 'Failures',
@@ -123,6 +128,7 @@ describe('the alerts a channel gets (ADR-340)', () => {
       integrations: 'Failing integrations',
       reconciliation: 'Reconciliation findings',
       unsettled: 'Payments not seen in a settlement',
+      refund_requests: 'Refund requests',
       test: 'Test post',
     });
   });
@@ -421,7 +427,7 @@ describe('Operations → Alerts’ service (ADR-338)', () => {
             last_error: null,
             posts_waiting: 1,
             posts_failed: '2',
-            kinds: ['unsettled', 'failures', 'gone'],
+            kinds: ['refund_requests', 'unsettled', 'failures', 'gone'],
           },
         ],
       },
@@ -446,7 +452,7 @@ describe('Operations → Alerts’ service (ADR-338)', () => {
       channel: {
         host: 'hooks.slack.com',
         // In the console's order, without a kind the services do not know.
-        kinds: ['failures', 'unsettled'],
+        kinds: ['failures', 'unsettled', 'refund_requests'],
         setByName: 'Asha Rao',
         setAt: new Date('2026-10-09T10:00:00Z'),
         lastSentAt: null,

@@ -13449,3 +13449,72 @@ to the same branch, or by hand, now shows the check of the four as failed rather
 expected, since a skipped required check would pass.
 
 Not built: splitting a project's tests across jobs, and tests run in parallel within a job.
+
+## ADR-344 Failed sends a day as a share of those sent, a chart of their own (P5-10) (2026-10-09)
+
+Context: the messages a day charts (ADR-333, ADR-334, ADR-341, ADR-342) draw sent and received
+messages on one axis and leave failed sends to the tooltip and the table: far fewer than the
+others, they would lie flat on the axis, so a day when many sends failed looked like any other.
+
+Decision:
+
+- **A chart of their own:** under each messages chart (the Usage tab's window and year, a company's
+  30 days and year), "Sends that failed, as a share of those sent", its caption ending with the days
+  drawn ("30 days", "the last 12 months") so a page's two captions differ, draws each UTC day's
+  failed sends divided by its sends, one line on an axis of percentages from 0% to the first
+  gridline at or above the largest share, in steps of a tenth of a percent at least. A day that sent
+  nothing has no share, so the line breaks there rather than draw 0%, and a day alone between such
+  days is drawn as a dot. Shares are written to a tenth of a percent, a share above 0 too small for
+  one as "<0.1%" and one below all as ">99.9%". When nothing was sent in the days drawn, a note says
+  so in place of the chart.
+- **The same days, a measure of its own:** both charts share the plot's edges (room for either
+  chart's gridline labels on the left and end labels on the right, `sharedPlotEdges`), so each day
+  sits at the same x in both and a peak lines up with the day above it, and the days are named
+  alike. The crosshair, the slider over the days, the keys and the tooltip are the messages chart's
+  frame, now shared (`DayChartFrame`); the tooltip gives the day's share, failed and sent, and the
+  slider's value the same in words. Each chart keeps its own scale. One measure needs no legend:
+  the caption names it.
+- **Colour:** the third categorical slot (`--chart-3`, aqua), so the share never takes Sent's or
+  Received's colour; checked with the palette validator against the card for colour-vision
+  separation from the other two, light and dark. On the light card it is under 3:1, so the line's
+  last share is written at its end where it fits and the table gives every share: the folded table
+  of the days has a "Share failed" column, "None sent" on a day without sends.
+- **No migration:** the counts are those the charts already read.
+
+Consequences: a day whose sends failed in numbers small beside those sent shows as a peak. A share
+counts the failures known when the day was read: the live days' as they are, the year's as last
+counted (ADR-341).
+
+Not built: other measures (delivered or read shares, failures by reason or by company), and the
+share in a CSV.
+
+## ADR-345 Refund requests in the chat channel, an owners' alert (P5-10) (2026-10-09)
+
+Context: the minute billing sweep emails platform owners once about refund requests waiting for a
+decision, of service credit (ADR-073) and of plan payments (ADR-104), with counts only. ADR-340 let
+owners add their financial alerts to the chat channel, but the refund requests' notice reached the
+mailbox alone, so an owner watching the channel learned of a request from the email only; BACKLOG
+listed it as remaining.
+
+Decision:
+
+- **An owners' alert of its own:** the kind `refund_requests` (migration 0263), "Refund requests" in
+  the console, after the financial alerts and marked, as they are, a platform owners' alert: a
+  channel gets it only once an owner ticks it, since its posts reach whoever reads the channel. A
+  new channel gets the operations alerts only, as before, and a channel set before keeps its kinds.
+- **The email's text:** `announceRefundRequests` queues the post in the transaction that queues the
+  emails and marks the requests announced, as the other alerts are posted: the same counts-only
+  text, how many requests of which kind and where they are listed, never a company, an amount or a
+  reason. Nothing is posted while there is no platform owner, as nothing is emailed or marked then.
+- **Migration 0263:** the channel's kinds check (one to six known kinds), the posts' kind check, and
+  `ops.platform_set_alert_channel_kinds` with the new kind in its order; the claim, the outcome and
+  the rest are 0261's, which already treat any kind the channel stops getting as unticked.
+
+Consequences: an owner who adds refund requests tells whoever reads the channel how many requests
+wait and of which kind; the companies, amounts and reasons stay on Platform → Refunds. The worker
+logs whether the notice was posted (`posted` on `refund requests announced to platform owners`). Web
+servers from before 0263's release do not list the kind, and saving the alerts from one unticks it,
+since they send the kinds they know.
+
+Not built: the owners' other notices in a channel, several channels, a channel per alert, and
+formats other than a JSON `text` member.

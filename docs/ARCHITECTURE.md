@@ -2626,6 +2626,11 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   `alertUnsettledPayments`) queue their posts after their emails, in their transaction: the
   reconciliation's without a failed check's error (`settlementReconPost`), the unsettled payments'
   with the email's text.
+- **Refund requests in the channel** (ADR-345, migration 0263): `refund_requests`, after the
+  financial kinds, is an owners' alert like them: `announceRefundRequests` queues its post with
+  `queueAlertPost` in the transaction that queues the owners' emails and marks the requests
+  announced, the email's counts-only text, and returns whether it posted. 0263 widens the kinds and
+  posts checks and replaces `ops.platform_set_alert_channel_kinds` with the kind in its order.
 - **Acknowledging failures** (ADR-141, migration 0107): a platform administrator acknowledges a
   failure on Current failures with a note, through `ops.platform_acknowledge_integration_failure`
   (definer, platform role only), which checks the administrator and that `ops.integration_failures`
@@ -2733,6 +2738,15 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   the same way, with its health and 30 days, for its platform page (ADR-342), which says the counts
   are deleted with the company instead while its deletion runs (`deletionStarted`, read in the same
   snapshot).
+- **Failed sends as a share (ADR-344):** `DailyMessages` draws, under each messages chart,
+  `DailyFailedShareChart`: each day's failed sends divided by its sends (`failedShare`, null on a
+  day that sent nothing), laid out by `failedShareLayout` in `platform/ops-chart.ts` (a scale in
+  tenths of a percent, the line broken at days without sends, lone days as dots, the days named as
+  on the messages chart by the same `dayAxis`, on the plot edges both charts share,
+  `sharedPlotEdges`) and written by `chartShare`. Both charts are drawn in `DayChartFrame`
+  (`components/platform/daily-chart.tsx`), which measures the room, holds the chosen day, and draws
+  the slider, the gridlines, the days' names, the crosshair and the tooltip; each chart gives it a
+  `draw` callback for its layout, marks and tooltip at the measured width. No query changed.
 - **Exports (ADR-154, ADR-155, ADR-158):** `/platform/ops/export/[list]` (a route handler behind the
   pages' platform actor check; a name of `OPS_EXPORT_LISTS`, any other not found) calls
   `exportList`, which checks in its transaction that the actor is a platform administrator, reads

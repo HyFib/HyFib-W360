@@ -29,6 +29,7 @@ import { assertCan, type TenantContext } from '../authz/context';
 import { assertRecentSignIn } from '../authz/step-up';
 import { enqueueEmail, type OutboxDeps } from '../email/outbox';
 import { NOTICE_LINE_MAX, splitEmailText } from '../email/templates';
+import { queueAlertPost } from '../platform/alert-channel';
 import { parseInput } from '../validation';
 import { notifyBillingManagers, type BillingNoticeDeps } from './notices';
 
@@ -495,13 +496,14 @@ export interface RefundRequestNoticeDeps {
 
 /**
  * The minute sweep's email to platform owners about requests not announced yet, of both kinds (counts
- * only), each marked in the transaction that queues the email. Nothing is marked while there is no
- * platform owner, so the requests are announced once there is one.
+ * only), each marked in the transaction that queues the email, which also queues its post to the
+ * chat channel when the channel gets refund requests (ADR-345). Nothing is marked while there is
+ * no platform owner, so the requests are announced once there is one.
  */
 export async function announceRefundRequests(
   deps: Pick<RefundRequestNoticeDeps, 'db' | 'outbox' | 'appBaseUrl'>,
   limit: number = REFUND_REQUEST_LIMITS.sweepBatch,
-): Promise<{ announced: number; unsent: number; recipients: number }> {
+): Promise<{ announced: number; unsent: number; recipients: number; posted: boolean }> {
   const due = await deps.db.run(
     systemScope,
     async (tx) => {
@@ -519,7 +521,7 @@ export async function announceRefundRequests(
     { accessMode: 'read only' },
   );
   const dueCount = due.credit.length + due.plan.length;
-  if (dueCount === 0) return { announced: 0, unsent: 0, recipients: 0 };
+  if (dueCount === 0) return { announced: 0, unsent: 0, recipients: 0, posted: false };
   const recipients = await deps.db.run(
     systemScope,
     (tx) =>
@@ -529,7 +531,7 @@ export async function announceRefundRequests(
     { accessMode: 'read only' },
   );
   if (recipients.rows.length === 0) {
-    return { announced: 0, unsent: dueCount, recipients: 0 };
+    return { announced: 0, unsent: dueCount, recipients: 0, posted: false };
   }
   return deps.db.run(systemScope, async (tx) => {
     const credit =
@@ -546,7 +548,7 @@ export async function announceRefundRequests(
         : { rows: [] };
     const announced = credit.rows.length + plan.rows.length;
     if (announced === 0) {
-      return { announced: 0, unsent: 0, recipients: recipients.rows.length };
+      return { announced: 0, unsent: 0, recipients: recipients.rows.length, posted: false };
     }
     const alert = refundRequestsAnnouncement(credit.rows.length, deps.appBaseUrl, plan.rows.length);
     for (const recipient of recipients.rows) {
@@ -557,7 +559,9 @@ export async function announceRefundRequests(
         payload: { kind: 'platform.notice', ...alert },
       });
     }
-    return { announced, unsent: 0, recipients: recipients.rows.length };
+    // The email's counts-only text, posted only once an owner added refund requests to the channel.
+    const posted = await queueAlertPost(deps.outbox, tx, 'refund_requests', alert);
+    return { announced, unsent: 0, recipients: recipients.rows.length, posted };
   });
 }
 
