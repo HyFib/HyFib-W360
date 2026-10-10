@@ -1492,13 +1492,22 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    runner that skips recipients then ask whether an endpoint of the company takes
    `campaign.recipient_skipped`, which none does before web servers of this release offer it, and
    every update of recipients keeps its old and new rows for the statement trigger (transition
-   tables), in proportion to the rows it changes. As for 0276: workers roll out before web servers, so no endpoint takes the event
-   before every worker can describe it; a worker from before it fails each delivery of it without
-   an attempt (`payload_failed`; replay them once newer workers run), so turn the event off on the
-   endpoints that take it before rolling workers back to such an image; and until the web rollout
-   ends, an old web server answers Settings → Webhooks with an error for a company with an endpoint
-   taking it, so add it to endpoints once the rollout ends and turn it off before rolling web
-   servers back.
+   tables), in proportion to the rows it changes. As for 0276: workers roll out before web servers,
+   so no endpoint takes the event before every worker can describe it; a worker from before it
+   fails each delivery of it without an attempt (`payload_failed`; replay them once newer workers
+   run), so turn the event off on the endpoints that take it before rolling workers back to such an
+   image; and until the web rollout ends, an old web server answers Settings → Webhooks with an
+   error for a company with an endpoint taking it, so add it to endpoints once the rollout ends and
+   turn it off before rolling web servers back.
+
+   Migration 0282 (ADR-359) adds `campaign_skip_reasons` to `app.webhook_endpoints`, its check
+   validated by reading the table, and replaces `app.capture_campaign_recipient_skips` (0280) with
+   the same signature; every endpoint starts without the list. Web servers of this release need it,
+   as their reads of endpoints name the column; workers do not read it. Web servers from before it
+   neither show nor change the column: until the web rollout ends, an old server's change that
+   drops `campaign.recipient_skipped` from an endpoint with a list fails on the check, its other
+   changes keep the list, and its API refuses `campaignSkipReasons` (422) and leaves it out of the
+   endpoints it answers.
 
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.

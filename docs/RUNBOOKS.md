@@ -3411,10 +3411,21 @@ audience was taken (at submission: no number, suppressed, opted out, no marketin
 variable) are sent when the campaign starts, so a campaign sent back to draft or cancelled before it
 starts sends none; the others as the runner skips them, many at once when the sending period ends
 (`expired`). Recipients a message went to send `message.status` instead. The campaigns and numbers an
-endpoint names narrow it (ADR-185, ADR-170), as the campaign's other events. Events no endpoint
-takes are not recorded, so there is nothing to replay for recipients skipped before the endpoint
-took the event. A recipient a contact merge removed (both contacts were in the audience) can no
-longer be described: a delivery not yet made then fails as `event_gone`.
+endpoint names narrow it (ADR-185, ADR-170), as the campaign's other events, and so do the skip
+reasons it names (ADR-359). Events no endpoint takes are not recorded, so there is nothing to
+replay for recipients skipped before the endpoint took the event. A recipient a contact merge
+removed (both contacts were in the audience) can no longer be described: a delivery not yet made
+then fails as `event_gone`.
+
+**A receiver misses some skipped campaign recipients of one reason (ADR-359).** An endpoint can take
+the skips of chosen campaign reasons only, a list apart from the order messages' and cart reminders'
+reasons. The endpoints list shows them ("Campaign skip reasons sent: …"), and the API answers
+`campaignSkipReasons` (null takes every reason). A skipped recipient is sent only when its reason is
+on the list, as well as its campaign and number on those lists; when no endpoint takes it, it is not
+recorded at all, so there is nothing to replay. The campaign's page shows each skipped recipient's
+reason. To take more, tick the reasons under Campaign recipient skipped on the endpoint's page, or
+`PATCH /webhook-endpoints/{id}` with `campaignSkipReasons` (null for every reason). Removing
+Campaign recipient skipped clears the list.
 
 **A receiver misses a skipped order message, or gets `event_gone` for one (ADR-351).**
 `store_order.message_skipped` is sent once for each of a store's order messages (order placed, cash

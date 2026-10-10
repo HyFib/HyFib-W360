@@ -45,6 +45,7 @@ import {
   WEBHOOK_LIMITS,
   WEBHOOK_ORDER_MESSAGE_SKIP_REASONS,
   WEBHOOK_CART_REMINDER_SKIP_REASONS,
+  WEBHOOK_CAMPAIGN_SKIP_REASONS,
   WEBHOOK_TEMPLATE_STATUSES,
   WEBHOOK_USER_AGENT,
   webhookHeadersAad,
@@ -5949,6 +5950,116 @@ describe('campaign filters (ADR-185)', () => {
         ['message.status', diwali.id],
       ].sort(),
     );
+  });
+});
+
+describe('campaign skip reason filters (ADR-359)', () => {
+  it('take campaign skip reasons only with campaign.recipient_skipped, kept and cleared with it; the database keeps them so', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const url = 'https://hooks.example.com/campaign-reasons';
+    const refused = (eventTypes: string[], filters: Record<string, unknown>, message: RegExp) =>
+      expectAppError(
+        webhooks().create(owner, { url, eventTypes, ...filters }),
+        'validation_failed',
+        message,
+      );
+    const skipped = ['campaign.recipient_skipped'];
+    await refused(
+      ['campaign.status_changed'],
+      { campaignSkipReasons: ['no_phone'] },
+      /Choose campaign skip reasons only for an endpoint that receives Campaign recipient skipped/,
+    );
+    await refused(
+      ['store_checkout.reminder_skipped'],
+      { campaignSkipReasons: ['no_phone'] },
+      /Choose campaign skip reasons only/,
+    );
+    await refused(skipped, { campaignSkipReasons: [] }, /at least one campaign skip reason/);
+    await refused(
+      skipped,
+      { campaignSkipReasons: ['cart_too_old'] },
+      /campaign skip reasons from the list/,
+    );
+    expect(await webhooks().list(owner)).toEqual([]);
+
+    // Added with a campaign's skipped recipients and status changes; the skips alone keep the list.
+    const created = await webhooks().create(owner, {
+      url,
+      eventTypes: ['campaign.recipient_skipped', 'campaign.status_changed'],
+      campaignSkipReasons: ['expired', 'no_phone', 'expired'],
+    });
+    const audits = async (action: string) =>
+      (
+        await fx.query<{ metadata: { campaignSkipReasons?: unknown } }>(
+          `SELECT metadata FROM app.audit_events
+            WHERE tenant_id = $1 AND action = $2 ORDER BY occurred_at, id`,
+          [c.tenant.id, action],
+        )
+      ).map((a) => a.metadata.campaignSkipReasons);
+    expect(await audits('webhook.endpoint_created')).toEqual([['no_phone', 'expired']]);
+    const change = (eventTypes: string[], fields: Record<string, unknown> = {}) =>
+      webhooks().update(owner, {
+        endpointId: created.id,
+        url,
+        description: '',
+        eventTypes,
+        ...fields,
+      });
+    const current = async () =>
+      (await webhooks().list(owner)).find((e) => e.id === created.id)?.campaignSkipReasons;
+    expect(await current()).toEqual(['no_phone', 'expired']);
+    // A change leaving the list out keeps it, one giving it changes it, audited.
+    await change(skipped);
+    expect(await current()).toEqual(['no_phone', 'expired']);
+    await change(skipped, { campaignSkipReasons: ['cost_unknown'] });
+    expect(await current()).toEqual(['cost_unknown']);
+    expect((await audits('webhook.endpoint_updated')).at(-1)).toEqual(['cost_unknown']);
+    // A campaign's status changes alone have no skip reason: the list goes, and cannot be given.
+    await change(['campaign.status_changed']);
+    expect(await current()).toBeNull();
+    await expectAppError(
+      change(['campaign.status_changed'], { campaignSkipReasons: ['no_phone'] }),
+      'validation_failed',
+      /Choose campaign skip reasons only/,
+    );
+
+    // The database refuses an empty list, more than 9, a cart reminder's or an unknown reason, a
+    // missing entry or a nested list from an endpoint taking the event (the services give each
+    // reason once)…
+    await change(skipped, { campaignSkipReasons: ['no_phone'] });
+    const setInDatabase = (value: string) =>
+      fx.query(`UPDATE app.webhook_endpoints SET campaign_skip_reasons = ${value} WHERE id = $1`, [
+        created.id,
+      ]);
+    const all = `ARRAY[${WEBHOOK_CAMPAIGN_SKIP_REASONS.map((r) => `'${r}'`).join(', ')}]::text[]`;
+    for (const bad of [
+      `'{}'`,
+      `ARRAY[${[...WEBHOOK_CAMPAIGN_SKIP_REASONS, 'no_phone'].map((r) => `'${r}'`).join(', ')}]::text[]`,
+      `'{cart_too_old}'`,
+      `'{canceled}'`,
+      `'{not_a_reason}'`,
+      `ARRAY['no_phone', NULL]::text[]`,
+      `ARRAY[ARRAY['no_phone'], ARRAY['expired']]::text[]`,
+    ]) {
+      await expect(setInDatabase(bad), bad).rejects.toThrow(
+        /webhook_endpoints_campaign_skip_reasons/,
+      );
+    }
+    // …takes all 9…
+    await setInDatabase(all);
+    expect(await current()).toEqual([...WEBHOOK_CAMPAIGN_SKIP_REASONS]);
+    // …and refuses the list for an endpoint that does not take the event.
+    await change(['campaign.status_changed']);
+    await expect(setInDatabase(`'{no_phone}'`)).rejects.toThrow(
+      /webhook_endpoints_campaign_skip_reasons/,
+    );
+    // The company role changes the list only through its column grant.
+    const [grant] = await fx.query<{ can_update: boolean }>(
+      `SELECT has_column_privilege('w360_app', 'app.webhook_endpoints',
+                'campaign_skip_reasons', 'UPDATE') AS can_update`,
+    );
+    expect(grant?.can_update).toBe(true);
   });
 });
 

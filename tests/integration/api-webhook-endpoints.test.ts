@@ -1854,6 +1854,76 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     });
   });
 
+  it('choose the skip reasons of skipped campaign recipients, kept by changes that leave them out and cleared with the event (ADR-359)', async () => {
+    const c = await fx.company();
+    const key = await apiKey(c, ['webhooks.manage']);
+    const issueOf = async (promise: Promise<unknown>) => {
+      const error = await expectAppError(promise, 'validation_failed');
+      return isAppError(error) ? error.issues?.[0] : undefined;
+    };
+    // Reasons need the event, at least one, each from the list (named by place).
+    const skipped = ['campaign.recipient_skipped'];
+    const refusals = [
+      [['campaign.status_changed'], { campaignSkipReasons: ['no_phone'] }, 'campaignSkipReasons'],
+      [skipped, { campaignSkipReasons: [] }, 'campaignSkipReasons'],
+      [skipped, { campaignSkipReasons: ['no_phone', 'cart_too_old'] }, 'campaignSkipReasons.1'],
+    ] as const;
+    for (const [index, [events, filters, path]] of refusals.entries()) {
+      expect(
+        await issueOf(
+          api().create(
+            key.ctx,
+            { url: receiverUrl(), events, ...filters },
+            idem(`campaign-skips-bad-${index}`, JSON.stringify(filters)),
+          ),
+        ),
+        JSON.stringify(filters),
+      ).toMatchObject({ path });
+    }
+    expect((await api().list(key.ctx)).data).toEqual([]);
+
+    const created = await addThroughApi(key.ctx, 'campaign-skips-1', {
+      url: receiverUrl(),
+      events: ['campaign.recipient_skipped', 'campaign.status_changed'],
+      campaignSkipReasons: ['expired', 'no_phone', 'expired'],
+    });
+    const id = created.body.data.id;
+    expect(created.body.data).toMatchObject({ campaignSkipReasons: ['no_phone', 'expired'] });
+    expect(await api().get(key.ctx, id)).toMatchObject({
+      campaignSkipReasons: ['no_phone', 'expired'],
+    });
+    const audits = async (action: string) =>
+      (
+        await fx.query<{ metadata: { campaignSkipReasons?: unknown } }>(
+          `SELECT metadata FROM app.audit_events
+            WHERE tenant_id = $1 AND subject_id = $2 AND action = $3 ORDER BY occurred_at, id`,
+          [c.tenant.id, id, action],
+        )
+      ).map((a) => a.metadata.campaignSkipReasons);
+    expect(await audits('webhook.endpoint_created')).toEqual([['no_phone', 'expired']]);
+    expect(await api().update(key.ctx, id, { description: 'Call list' })).toMatchObject({
+      campaignSkipReasons: ['no_phone', 'expired'],
+    });
+    // A list alone is a change.
+    expect(
+      await api().update(key.ctx, id, { campaignSkipReasons: ['cost_unknown'] }),
+    ).toMatchObject({ campaignSkipReasons: ['cost_unknown'] });
+    expect((await audits('webhook.endpoint_updated')).at(-1)).toEqual(['cost_unknown']);
+    // A campaign's status changes alone clear the reasons and refuse them.
+    expect(await api().update(key.ctx, id, { events: ['campaign.status_changed'] })).toMatchObject({
+      campaignSkipReasons: null,
+    });
+    expect(
+      await issueOf(api().update(key.ctx, id, { campaignSkipReasons: ['no_phone'] })),
+    ).toMatchObject({ path: 'campaignSkipReasons' });
+    expect(
+      await api().update(key.ctx, id, { events: skipped, campaignSkipReasons: ['opted_out'] }),
+    ).toMatchObject({ campaignSkipReasons: ['opted_out'] });
+    expect(await api().update(key.ctx, id, { campaignSkipReasons: null })).toMatchObject({
+      campaignSkipReasons: null,
+    });
+  });
+
   it('choose the numbers of sent cart reminders and the stores of either cart reminder event, never order messages or reasons (ADR-355)', async () => {
     const c = await fx.company();
     const key = await apiKey(c, ['webhooks.manage']);

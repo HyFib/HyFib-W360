@@ -67,6 +67,7 @@ import {
   WEBHOOK_ORDER_MESSAGE_EVENTS,
   WEBHOOK_ORDER_MESSAGE_SKIP_REASONS,
   WEBHOOK_CART_REMINDER_SKIP_REASONS,
+  WEBHOOK_CAMPAIGN_SKIP_REASONS,
   WEBHOOK_OAUTH_CLIENT_AUTHENTICATIONS,
   WEBHOOK_RUN_STEP_OUTCOMES,
   WEBHOOK_RUN_STEP_NODE_TYPES,
@@ -134,6 +135,7 @@ import {
   type WebhookOrderMessageEvent,
   type WebhookOrderMessageSkipReason,
   type WebhookCartReminderSkipReason,
+  type WebhookCampaignSkipReason,
   type WebhookOAuthClientAuth,
   type WebhookEndpointStore,
   type WebhookStoreChoice,
@@ -1693,6 +1695,38 @@ export function webhookCartReminderSkipReasonsFor(
 }
 
 /**
+ * The reasons whose campaign recipient skips an endpoint takes as `campaign.recipient_skipped`
+ * (ADR-359), in the order a campaign's page counts them; null takes every reason.
+ */
+export const webhookCampaignSkipReasonsSchema = z
+  .array(
+    z.enum(WEBHOOK_CAMPAIGN_SKIP_REASONS, {
+      error: 'Choose campaign skip reasons from the list.',
+    }),
+  )
+  .min(1, 'Choose at least one campaign skip reason, or take every reason.')
+  .max(WEBHOOK_CAMPAIGN_SKIP_REASONS.length, 'Give each campaign skip reason once.')
+  .transform((chosen) => WEBHOOK_CAMPAIGN_SKIP_REASONS.filter((reason) => chosen.includes(reason)))
+  .nullable();
+
+export const WEBHOOK_CAMPAIGN_SKIP_REASONS_NEED_THE_EVENT =
+  'Choose campaign skip reasons only for an endpoint that receives Campaign recipient skipped.';
+
+/**
+ * The campaign skip reasons an endpoint keeps after it is added or changed: every reason (null)
+ * unless it takes `campaign.recipient_skipped`; then those given, or else the ones it had.
+ */
+export function webhookCampaignSkipReasonsFor(
+  eventTypes: readonly WebhookEventType[],
+  given: readonly WebhookCampaignSkipReason[] | null | undefined,
+  current: readonly WebhookCampaignSkipReason[] | null,
+): WebhookCampaignSkipReason[] | null {
+  if (!eventTypes.includes('campaign.recipient_skipped')) return null;
+  const kept = given === undefined ? current : given;
+  return kept ? [...kept] : null;
+}
+
+/**
  * The CRM pipelines whose deals' events an endpoint takes (ADR-263), each once; null takes every
  * pipeline's, including pipelines added later.
  */
@@ -2954,7 +2988,7 @@ function canonicalJson(value: unknown): string {
  * order (`canonicalJson`), under `listDigests`, so that two entries still show whether a list named
  * by count in both changed, until it fits. Its events (`eventTypes`, or a replay's `events`) are
  * always named, and the endpoint keeps every list whole. With every list named by count an entry
- * takes under 6,800 bytes (every event type, the 60 lists and the longest hosts), so it then fits.
+ * takes under 6,800 bytes (every event type, the 61 lists and the longest hosts), so it then fits.
  */
 export function webhookEndpointAuditMetadata(
   metadata: Record<string, unknown>,
@@ -3132,6 +3166,11 @@ const endpointFields = z.object({
    * they stay.
    */
   cartReminderSkipReasons: webhookCartReminderSkipReasonsSchema.optional(),
+  /**
+   * Given, the reasons whose campaign recipient skips it takes (null: every reason, ADR-359); left
+   * out, they stay.
+   */
+  campaignSkipReasons: webhookCampaignSkipReasonsSchema.optional(),
   /** Given, the outcomes of the steps it takes (null: every step, ADR-327); left out, they stay. */
   runStepOutcomes: webhookRunStepOutcomesSchema.optional(),
   /** Given, the kinds of node whose steps it takes (null: every step, ADR-328); left out, kept. */
@@ -3419,6 +3458,15 @@ const cartReminderSkipReasonsNeedTheEvent = {
   options: {
     path: ['cartReminderSkipReasons'],
     message: WEBHOOK_CART_REMINDER_SKIP_REASONS_NEED_THE_EVENT,
+  },
+};
+/** Campaign skip reasons are chosen only for an endpoint that takes skipped recipients (ADR-359). */
+const campaignSkipReasonsNeedTheEvent = {
+  check: (data: { eventTypes: WebhookEventType[]; campaignSkipReasons?: unknown }) =>
+    !data.campaignSkipReasons || data.eventTypes.includes('campaign.recipient_skipped'),
+  options: {
+    path: ['campaignSkipReasons'],
+    message: WEBHOOK_CAMPAIGN_SKIP_REASONS_NEED_THE_EVENT,
   },
 };
 /** Kinds of step are chosen only for an endpoint that takes run steps (ADR-328). */
@@ -3722,6 +3770,7 @@ const endpointSchema = endpointFields
   .refine(orderMessagesNeedTheEvent.check, orderMessagesNeedTheEvent.options)
   .refine(orderMessageSkipReasonsNeedTheEvent.check, orderMessageSkipReasonsNeedTheEvent.options)
   .refine(cartReminderSkipReasonsNeedTheEvent.check, cartReminderSkipReasonsNeedTheEvent.options)
+  .refine(campaignSkipReasonsNeedTheEvent.check, campaignSkipReasonsNeedTheEvent.options)
   .refine(runStepNodeTypesNeedTheEvent.check, runStepNodeTypesNeedTheEvent.options)
   .refine(orderChangeMakersNeedTheEvent.check, orderChangeMakersNeedTheEvent.options)
   .refine(orderExcludedApiKeysNeedTheEvent.check, orderExcludedApiKeysNeedTheEvent.options)
@@ -3783,6 +3832,7 @@ const updateSchema = endpointFields
   .refine(orderMessagesNeedTheEvent.check, orderMessagesNeedTheEvent.options)
   .refine(orderMessageSkipReasonsNeedTheEvent.check, orderMessageSkipReasonsNeedTheEvent.options)
   .refine(cartReminderSkipReasonsNeedTheEvent.check, cartReminderSkipReasonsNeedTheEvent.options)
+  .refine(campaignSkipReasonsNeedTheEvent.check, campaignSkipReasonsNeedTheEvent.options)
   .refine(runStepNodeTypesNeedTheEvent.check, runStepNodeTypesNeedTheEvent.options)
   .refine(orderChangeMakersNeedTheEvent.check, orderChangeMakersNeedTheEvent.options)
   .refine(orderExcludedApiKeysNeedTheEvent.check, orderExcludedApiKeysNeedTheEvent.options)
@@ -3895,6 +3945,8 @@ export interface WebhookEndpointView {
   orderMessageSkipReasons: WebhookOrderMessageSkipReason[] | null;
   /** The reasons whose cart reminder skips it takes (ADR-356); null takes every reason. */
   cartReminderSkipReasons: WebhookCartReminderSkipReason[] | null;
+  /** The reasons whose campaign recipient skips it takes (ADR-359); null takes every reason. */
+  campaignSkipReasons: WebhookCampaignSkipReason[] | null;
   /** The outcomes of the run steps it takes (ADR-327); null takes every step. */
   runStepOutcomes: WebhookRunStepOutcome[] | null;
   /** The kinds of node whose run steps it takes (ADR-328); null takes every step. */
@@ -4335,6 +4387,7 @@ export async function lockWebhookEndpoint(
       orderMessageEvents: webhookEndpoints.orderMessageEvents,
       orderMessageSkipReasons: webhookEndpoints.orderMessageSkipReasons,
       cartReminderSkipReasons: webhookEndpoints.cartReminderSkipReasons,
+      campaignSkipReasons: webhookEndpoints.campaignSkipReasons,
       runStepOutcomes: webhookEndpoints.runStepOutcomes,
       runStepNodeTypes: webhookEndpoints.runStepNodeTypes,
       orderChangeMakers: webhookEndpoints.orderChangeMakers,
@@ -4432,6 +4485,7 @@ export async function insertWebhookEndpoint(
     orderMessageEvents: WebhookOrderMessageEvent[] | null;
     orderMessageSkipReasons: WebhookOrderMessageSkipReason[] | null;
     cartReminderSkipReasons: WebhookCartReminderSkipReason[] | null;
+    campaignSkipReasons: WebhookCampaignSkipReason[] | null;
     orderChangeMakers: WebhookOrderChangeMaker[] | null;
     runStepOutcomes: WebhookRunStepOutcome[] | null;
     runStepNodeTypes: WebhookRunStepNodeType[] | null;
@@ -4517,6 +4571,7 @@ export async function insertWebhookEndpoint(
     orderMessageEvents: input.orderMessageEvents,
     orderMessageSkipReasons: input.orderMessageSkipReasons,
     cartReminderSkipReasons: input.cartReminderSkipReasons,
+    campaignSkipReasons: input.campaignSkipReasons,
     runStepOutcomes: input.runStepOutcomes,
     runStepNodeTypes: input.runStepNodeTypes,
     orderChangeMakers: input.orderChangeMakers,
@@ -4951,6 +5006,7 @@ export function createWebhooksService(deps: {
               orderMessageEvents: webhookEndpoints.orderMessageEvents,
               orderMessageSkipReasons: webhookEndpoints.orderMessageSkipReasons,
               cartReminderSkipReasons: webhookEndpoints.cartReminderSkipReasons,
+              campaignSkipReasons: webhookEndpoints.campaignSkipReasons,
               runStepOutcomes: webhookEndpoints.runStepOutcomes,
               runStepNodeTypes: webhookEndpoints.runStepNodeTypes,
               orderChangeMakers: webhookEndpoints.orderChangeMakers,
@@ -5861,6 +5917,11 @@ export function createWebhooksService(deps: {
           data.cartReminderSkipReasons,
           null,
         );
+        const campaignSkipReasons = webhookCampaignSkipReasonsFor(
+          data.eventTypes,
+          data.campaignSkipReasons,
+          null,
+        );
         const runStepNodeTypes = webhookRunStepNodeTypesFor(
           data.eventTypes,
           data.runStepNodeTypes,
@@ -6042,6 +6103,7 @@ export function createWebhooksService(deps: {
           orderMessageEvents,
           orderMessageSkipReasons,
           cartReminderSkipReasons,
+          campaignSkipReasons,
           orderChangeMakers,
           runStepOutcomes,
           runStepNodeTypes,
@@ -6117,6 +6179,7 @@ export function createWebhooksService(deps: {
               ...(orderMessageEvents ? { orderMessageEvents } : {}),
               ...(orderMessageSkipReasons ? { orderMessageSkipReasons } : {}),
               ...(cartReminderSkipReasons ? { cartReminderSkipReasons } : {}),
+              ...(campaignSkipReasons ? { campaignSkipReasons } : {}),
               ...(runStepNodeTypes ? { runStepNodeTypes } : {}),
               ...(orderChangeMakers ? { orderChangeMakers } : {}),
               ...(orderExcludedApiKeyIds ? { orderExcludedApiKeyIds } : {}),
@@ -6278,6 +6341,11 @@ export function createWebhooksService(deps: {
           data.eventTypes,
           data.cartReminderSkipReasons,
           endpoint.cartReminderSkipReasons,
+        );
+        const campaignSkipReasons = webhookCampaignSkipReasonsFor(
+          data.eventTypes,
+          data.campaignSkipReasons,
+          endpoint.campaignSkipReasons,
         );
         const runStepNodeTypes = webhookRunStepNodeTypesFor(
           data.eventTypes,
@@ -6633,6 +6701,7 @@ export function createWebhooksService(deps: {
             orderMessageEvents,
             orderMessageSkipReasons,
             cartReminderSkipReasons,
+            campaignSkipReasons,
             orderChangeMakers,
             runStepOutcomes,
             runStepNodeTypes,
@@ -6719,6 +6788,7 @@ export function createWebhooksService(deps: {
               ...(orderMessageEvents ? { orderMessageEvents } : {}),
               ...(orderMessageSkipReasons ? { orderMessageSkipReasons } : {}),
               ...(cartReminderSkipReasons ? { cartReminderSkipReasons } : {}),
+              ...(campaignSkipReasons ? { campaignSkipReasons } : {}),
               ...(runStepNodeTypes ? { runStepNodeTypes } : {}),
               ...(orderChangeMakers ? { orderChangeMakers } : {}),
               ...(orderExcludedApiKeyIds ? { orderExcludedApiKeyIds } : {}),

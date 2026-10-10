@@ -349,6 +349,12 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
                           .join(', ')}
                       </p>
                     ) : null}
+                    {e.campaignSkipReasons ? (
+                      <p className="text-xs break-all text-muted-foreground">
+                        Campaign skip reasons sent:{' '}
+                        <span className="font-mono">{e.campaignSkipReasons.join(', ')}</span>
+                      </p>
+                    ) : null}
                     {e.automations ? (
                       <p className="text-xs text-muted-foreground">
                         Automation runs sent:{' '}

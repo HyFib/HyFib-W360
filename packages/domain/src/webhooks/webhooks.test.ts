@@ -90,6 +90,7 @@ import {
   WEBHOOK_ORDER_MESSAGE_SKIP_REASONS,
   WEBHOOK_CART_REMINDERS,
   WEBHOOK_CART_REMINDER_SKIP_REASONS,
+  WEBHOOK_CAMPAIGN_SKIP_REASONS,
   WEBHOOK_STORE_EVENTS,
   webhookTakesStoreEvents,
   WEBHOOK_ORDER_MESSAGE_TYPES,
@@ -304,6 +305,9 @@ import {
   webhookCartReminderSkipReasonsFor,
   webhookCartReminderSkipReasonsSchema,
   WEBHOOK_CART_REMINDER_SKIP_REASONS_NEED_THE_EVENT,
+  webhookCampaignSkipReasonsFor,
+  webhookCampaignSkipReasonsSchema,
+  WEBHOOK_CAMPAIGN_SKIP_REASONS_NEED_THE_EVENT,
   WEBHOOK_ORDER_MESSAGE_SKIP_REASONS_NEED_THE_EVENT,
   WEBHOOK_RUN_STEP_OUTCOMES_NEED_THE_EVENT,
   webhookRunStepNodeTypesFor,
@@ -4396,13 +4400,14 @@ describe('endpoint audit entries within an audit entry’s 8 KiB (ADR-336)', () 
         listDigests: { contactTags: digest(tags(10)) },
       });
     }
-    // Every event type, hosts of 253 characters, an OAuth client's method and the 60 lists an
+    // Every event type, hosts of 253 characters, an OAuth client's method and the 61 lists an
     // entry can name, each too long to name item by item beside the others: named by count, the
-    // entry takes under 6,800 (6,587), within the 7,000 bytes kept.
+    // entry takes under 6,800 (6,711), within the 7,000 bytes kept.
     const keys = [
       'assigneeIds',
       'automationIds',
       'campaignIds',
+      'campaignSkipReasons',
       'campaignStatuses',
       'cartReminderSkipReasons',
       'channelIds',
@@ -4461,7 +4466,7 @@ describe('endpoint audit entries within an audit entry’s 8 KiB (ADR-336)', () 
       'templateIds',
       'templateStatuses',
     ];
-    expect(keys).toHaveLength(60);
+    expect(keys).toHaveLength(61);
     const whole = webhookEndpointAuditMetadata({
       host: 'h'.repeat(253),
       eventTypes: [...WEBHOOK_EVENT_TYPES],
@@ -4470,7 +4475,7 @@ describe('endpoint audit entries within an audit entry’s 8 KiB (ADR-336)', () 
       oauthSecretReplaced: true,
       oauthClientAuthentication: 'client_secret_basic',
     });
-    expect(Object.keys(whole.listCounts as object)).toHaveLength(60);
+    expect(Object.keys(whole.listCounts as object)).toHaveLength(61);
     expect(jsonbSize(whole)).toBeLessThan(6800);
   });
 });
@@ -9094,6 +9099,80 @@ describe('skip reason filters for skipped cart reminders (ADR-356)', () => {
     const described = doc.webhooks['store_checkout.reminder_skipped'].post.description;
     expect(described).toContain(
       'every reason’s unless it names the reasons (its `cartReminderSkipReasons`, or the reasons ticked under Cart reminder skipped); with both lists, a skipped reminder must pass them both',
+    );
+  });
+});
+
+describe('skip reason filters for skipped campaign recipients (ADR-359)', () => {
+  it('take 1 to 9 of a campaign recipient’s reasons, once each, in that order; null takes every reason', () => {
+    expect(webhookCampaignSkipReasonsSchema.parse(['expired', 'no_phone', 'expired'])).toEqual([
+      'no_phone',
+      'expired',
+    ]);
+    expect(webhookCampaignSkipReasonsSchema.parse(null)).toBeNull();
+    expect(
+      webhookCampaignSkipReasonsSchema.parse([...WEBHOOK_CAMPAIGN_SKIP_REASONS].reverse()),
+    ).toEqual([...WEBHOOK_CAMPAIGN_SKIP_REASONS]);
+    // Every reason a campaign recipient can be skipped for, in the database's order.
+    expect(WEBHOOK_CAMPAIGN_SKIP_REASONS).toEqual([...SKIP_REASONS]);
+    for (const refused of [
+      [],
+      ['cart_too_old'],
+      ['canceled'],
+      ['No_phone'],
+      'no_phone',
+      [null],
+      Array(10).fill('no_phone'),
+    ]) {
+      expect(
+        webhookCampaignSkipReasonsSchema.safeParse(refused).success,
+        JSON.stringify(refused),
+      ).toBe(false);
+    }
+    expect(webhookCampaignSkipReasonsSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one campaign skip reason, or take every reason.',
+    );
+    expect(
+      webhookCampaignSkipReasonsSchema.safeParse(['cart_too_old']).error?.issues[0]?.message,
+    ).toBe('Choose campaign skip reasons from the list.');
+    expect(
+      webhookCampaignSkipReasonsSchema.safeParse(Array(10).fill('no_phone')).error?.issues[0]
+        ?.message,
+    ).toBe('Give each campaign skip reason once.');
+  });
+
+  it('are kept only while the endpoint takes skipped campaign recipients: given, kept, or cleared', () => {
+    const skipped = ['campaign.recipient_skipped', 'campaign.status_changed'] as const;
+    expect(webhookCampaignSkipReasonsFor([...skipped], ['no_phone'], null)).toEqual(['no_phone']);
+    expect(webhookCampaignSkipReasonsFor([...skipped], undefined, ['expired'])).toEqual([
+      'expired',
+    ]);
+    expect(webhookCampaignSkipReasonsFor([...skipped], null, ['expired'])).toBeNull();
+    expect(webhookCampaignSkipReasonsFor([...skipped], undefined, null)).toBeNull();
+    // A campaign's other events have no skip reason, and skipped cart reminders a list of their own.
+    for (const events of [
+      ['campaign.status_changed'],
+      ['message.status'],
+      ['store_checkout.reminder_skipped'],
+    ] as const) {
+      expect(
+        webhookCampaignSkipReasonsFor([...events], ['no_phone'], ['expired']),
+        events.join(),
+      ).toBeNull();
+    }
+    expect(
+      webhookCartReminderSkipReasonsFor(['campaign.recipient_skipped'], ['no_phone'], null),
+    ).toBeNull();
+    expect(WEBHOOK_CAMPAIGN_SKIP_REASONS_NEED_THE_EVENT).toBe(
+      `Choose campaign skip reasons only for an endpoint that receives ${WEBHOOK_EVENT_INFO['campaign.recipient_skipped'].label}.`,
+    );
+  });
+
+  it('are described with the skipped recipient event, which names them', () => {
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const described = doc.webhooks['campaign.recipient_skipped'].post.description;
+    expect(described).toContain(
+      'an endpoint receives every reason’s skips unless it names the reasons (its `campaignSkipReasons`, or the reasons ticked under Campaign recipient skipped); with more than one of these lists, a skipped recipient must pass them all',
     );
   });
 });

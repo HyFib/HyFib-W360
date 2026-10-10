@@ -33,6 +33,7 @@ import {
   WEBHOOK_ORDER_MESSAGE_EVENTS,
   WEBHOOK_ORDER_MESSAGE_SKIP_REASONS,
   WEBHOOK_CART_REMINDER_SKIP_REASONS,
+  WEBHOOK_CAMPAIGN_SKIP_REASONS,
   WEBHOOK_PAYMENT_LINK_STATUSES,
   WEBHOOK_RUN_STEP_OUTCOME_LABELS,
   WEBHOOK_RUN_STEP_OUTCOMES,
@@ -111,6 +112,7 @@ import {
   type WebhookOrderMessageEvent,
   type WebhookOrderMessageSkipReason,
   type WebhookCartReminderSkipReason,
+  type WebhookCampaignSkipReason,
   type WebhookStoreChoice,
   type WebhookEndpointStore,
   type WebhookContactFieldValue,
@@ -157,6 +159,7 @@ import {
   type WebhookTemplateStatus,
 } from '@w360/domain/webhook-model';
 import { STORE_MESSAGE_SKIP_REASONS } from '@w360/domain/store-messages-model';
+import { SKIP_REASONS as CAMPAIGN_SKIP_REASON_LABELS } from '@/lib/campaign-labels';
 import {
   createWebhookEndpointAction,
   deleteWebhookEndpointAction,
@@ -702,6 +705,55 @@ function CartReminderSkipReasonChoices({
             />
             <Label htmlFor={id} className="font-normal">
               {STORE_MESSAGE_SKIP_REASONS[reason]}{' '}
+              <span className="font-mono text-xs">({reason})</span>
+            </Label>
+          </div>
+        );
+      })}
+    </fieldset>
+  );
+}
+
+/**
+ * The reasons whose campaign recipient skips an endpoint takes as `campaign.recipient_skipped`
+ * (ADR-359), shown while it takes the event: every reason unless some are unticked, in the order
+ * and words a campaign's page counts them.
+ */
+function CampaignSkipReasonChoices({
+  prefix,
+  chosen,
+  onChange,
+}: {
+  prefix: string;
+  chosen: WebhookCampaignSkipReason[];
+  onChange: (next: WebhookCampaignSkipReason[]) => void;
+}) {
+  return (
+    <fieldset className="ml-6 grid gap-1">
+      <legend className="mb-1 text-xs text-muted-foreground">
+        Campaign skip reasons sent (all of them unless you untick some, as a campaign&rsquo;s page
+        counts them)
+      </legend>
+      {WEBHOOK_CAMPAIGN_SKIP_REASONS.map((reason) => {
+        const id = `${prefix}-campaign-skip-reason-${reason}`;
+        return (
+          <div key={reason} className="flex items-start gap-2">
+            <Checkbox
+              id={id}
+              className="mt-0.5"
+              checked={chosen.includes(reason)}
+              onChange={(e) =>
+                onChange(
+                  e.target.checked
+                    ? WEBHOOK_CAMPAIGN_SKIP_REASONS.filter(
+                        (r) => r === reason || chosen.includes(r),
+                      )
+                    : chosen.filter((r) => r !== reason),
+                )
+              }
+            />
+            <Label htmlFor={id} className="font-normal">
+              {CAMPAIGN_SKIP_REASON_LABELS[reason]}{' '}
               <span className="font-mono text-xs">({reason})</span>
             </Label>
           </div>
@@ -3003,6 +3055,8 @@ function EventChoices({
   onSkipReasonsChange,
   cartSkipReasons,
   onCartSkipReasonsChange,
+  campaignSkipReasons,
+  onCampaignSkipReasonsChange,
   runStepOutcomes,
   onRunStepOutcomesChange,
   runStepNodeTypes,
@@ -3057,6 +3111,8 @@ function EventChoices({
   onSkipReasonsChange: (next: WebhookOrderMessageSkipReason[]) => void;
   cartSkipReasons: WebhookCartReminderSkipReason[];
   onCartSkipReasonsChange: (next: WebhookCartReminderSkipReason[]) => void;
+  campaignSkipReasons: WebhookCampaignSkipReason[];
+  onCampaignSkipReasonsChange: (next: WebhookCampaignSkipReason[]) => void;
   runStepOutcomes: WebhookRunStepOutcome[];
   onRunStepOutcomesChange: (next: WebhookRunStepOutcome[]) => void;
   runStepNodeTypes: WebhookRunStepNodeType[];
@@ -3229,6 +3285,13 @@ function EventChoices({
                 prefix={prefix}
                 chosen={cartSkipReasons}
                 onChange={onCartSkipReasonsChange}
+              />
+            ) : null}
+            {type === 'campaign.recipient_skipped' && chosen.includes(type) ? (
+              <CampaignSkipReasonChoices
+                prefix={prefix}
+                chosen={campaignSkipReasons}
+                onChange={onCampaignSkipReasonsChange}
               />
             ) : null}
             {type === 'automation.run_step' && chosen.includes(type) ? (
@@ -3613,6 +3676,8 @@ export function WebhookEndpointForm({
     orderMessageSkipReasons: WebhookOrderMessageSkipReason[] | null;
     /** The reasons whose cart reminder skips it takes (ADR-356); null for every reason. */
     cartReminderSkipReasons: WebhookCartReminderSkipReason[] | null;
+    /** The reasons whose campaign recipient skips it takes (ADR-359); null for every reason. */
+    campaignSkipReasons: WebhookCampaignSkipReason[] | null;
     /** The outcomes of the run steps it takes (ADR-327); null for every step. */
     runStepOutcomes: WebhookRunStepOutcome[] | null;
     /** The kinds of node whose run steps it takes (ADR-328); null for every step. */
@@ -3772,6 +3837,9 @@ export function WebhookEndpointForm({
   );
   const [cartSkipReasons, setCartSkipReasons] = useState<WebhookCartReminderSkipReason[]>(
     endpoint?.cartReminderSkipReasons ?? [...WEBHOOK_CART_REMINDER_SKIP_REASONS],
+  );
+  const [campaignSkipReasons, setCampaignSkipReasons] = useState<WebhookCampaignSkipReason[]>(
+    endpoint?.campaignSkipReasons ?? [...WEBHOOK_CAMPAIGN_SKIP_REASONS],
   );
   const [runStepOutcomes, setRunStepOutcomes] = useState<WebhookRunStepOutcome[]>(
     endpoint?.runStepOutcomes ?? [...WEBHOOK_RUN_STEP_OUTCOMES],
@@ -4100,6 +4168,12 @@ export function WebhookEndpointForm({
           cartSkipReasons.length < WEBHOOK_CART_REMINDER_SKIP_REASONS.length
             ? cartSkipReasons
             : null;
+        // Every campaign skip reason ticked takes every reason's skips (null, ADR-359).
+        const chosenCampaignSkipReasons =
+          eventTypes.includes('campaign.recipient_skipped') &&
+          campaignSkipReasons.length < WEBHOOK_CAMPAIGN_SKIP_REASONS.length
+            ? campaignSkipReasons
+            : null;
         // Every step outcome ticked takes every step (null, ADR-327).
         const chosenRunStepOutcomes =
           eventTypes.includes('automation.run_step') &&
@@ -4391,6 +4465,7 @@ export function WebhookEndpointForm({
           orderMessageEvents: chosenOrderMessageEvents,
           orderMessageSkipReasons: chosenSkipReasons,
           cartReminderSkipReasons: chosenCartSkipReasons,
+          campaignSkipReasons: chosenCampaignSkipReasons,
           runStepOutcomes: chosenRunStepOutcomes,
           runStepNodeTypes: chosenRunStepNodeTypes,
           orderChangeMakers: chosenOrderChangeMakers,
@@ -4493,6 +4568,7 @@ export function WebhookEndpointForm({
               setOrderMessageEvents([...WEBHOOK_ORDER_MESSAGE_EVENTS]);
               setSkipReasons([...WEBHOOK_ORDER_MESSAGE_SKIP_REASONS]);
               setCartSkipReasons([...WEBHOOK_CART_REMINDER_SKIP_REASONS]);
+              setCampaignSkipReasons([...WEBHOOK_CAMPAIGN_SKIP_REASONS]);
               setRunStepOutcomes([...WEBHOOK_RUN_STEP_OUTCOMES]);
               setRunStepNodeTypes([...WEBHOOK_RUN_STEP_NODE_TYPES]);
               setOrderChangeMakers([...WEBHOOK_ORDER_CHANGE_MAKERS]);
@@ -4641,6 +4717,8 @@ export function WebhookEndpointForm({
         onSkipReasonsChange={setSkipReasons}
         cartSkipReasons={cartSkipReasons}
         onCartSkipReasonsChange={setCartSkipReasons}
+        campaignSkipReasons={campaignSkipReasons}
+        onCampaignSkipReasonsChange={setCampaignSkipReasons}
         runStepOutcomes={runStepOutcomes}
         onRunStepOutcomesChange={setRunStepOutcomes}
         runStepNodeTypes={runStepNodeTypes}

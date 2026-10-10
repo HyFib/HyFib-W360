@@ -1,5 +1,48 @@
 # Progress
 
+## 2026-10-10 — Skip reason filter for skipped campaign recipients (P5-09, H-014, ADR-359)
+
+Status: **Implemented; its database tests run in CI only.** `campaign.recipient_skipped` (ADR-358)
+went to an endpoint for every reason a campaign skipped a recipient, so a receiver that reaches
+contacts another way when WhatsApp could not had to leave alone the recipients who opted out, are
+suppressed or were erased itself. The local PostgreSQL is unavailable, so migration 0282 and the
+integration tests below were written but not run here; the migration passed the pglast parse
+check (syntax only), its SQL function body included.
+
+### Completed
+
+- **Database:** migration 0282: `campaign_skip_reasons` (1 to 9 of the reasons a campaign recipient
+  can be skipped for, only while the endpoint takes `campaign.recipient_skipped`) on
+  `app.webhook_endpoints`, validated at once; the runtime role's update grant on the column;
+  `app.capture_campaign_recipient_skips` (replaced with the same signature) writing a skip's event
+  only when an endpoint whose list is null or holds the reason takes it, and delivering it to those
+  endpoints only.
+- **Domain:** `WEBHOOK_CAMPAIGN_SKIP_REASONS`, `webhookCampaignSkipReasonsSchema` and
+  `webhookCampaignSkipReasonsFor`, a list apart from the other events' reasons; the settings service
+  and the API take, keep, clear, audit and answer `campaignSkipReasons`; the OpenAPI entries and the
+  skipped recipient event's description; the data export names the column.
+- **Web:** Settings → Webhooks ticks the reasons under Campaign recipient skipped, in the words of a
+  campaign's page; the endpoints list names the reasons chosen.
+- **Tests:** unit (4 new: the schema and refusals with the list equal to the database's reasons, the
+  list kept only with its event and apart from the cart reminders', the skipped recipient event's
+  description, the API schemas and OpenAPI entries; the audit's largest entry, the update body's
+  fields, the empty change's message and the largest stored answer updated); integration
+  (`webhooks.test.ts`: the service's refusals, keeping and clearing, the audit, the database checks
+  and the grant; `api-webhook-endpoints.test.ts`: the same through the API, a list alone a change;
+  `webhook-events.test.ts`: endpoints naming reasons receive those skips only, one taking every
+  reason all of them, and a skip no endpoint takes writes no event). Written for CI; the
+  integration tests were not run here. No e2e test of the Settings field.
+- **Docs:** ADR-359; ARCHITECTURE; SECURITY; THREAT-MODEL T318; DEPLOYMENT (0282, and a long line
+  of the 0280 note rewrapped); RUNBOOKS (and the ADR-358 entry); BACKLOG P5-09; feature matrix
+  W-138, W-139 and H-014. The audit's largest entry is now 6,711 bytes (61 lists), under the test's
+  6,800 bound.
+- **Mutation checks:** 18 deliberate regressions; the unit tests catch 13 (a reason missing from the
+  list, the list kept as given, an empty list or a reason given twice taken, the list kept with the
+  wrong event or by a null, the refusal text, the API's refusal, a list alone not a change, the
+  change and field descriptions, the answer schema's enum, the webhook's description). The other
+  five are database paths (the settings refusal and audits, the API's answer and audit, the
+  export), covered by the integration tests.
+
 ## 2026-10-10 — Webhook events for a campaign's skipped recipients (P5-09, H-014, ADR-358)
 
 Status: **Implemented; its database tests run in CI only.** `message.status` reported the

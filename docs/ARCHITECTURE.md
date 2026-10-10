@@ -1979,6 +1979,13 @@ state` for one that becomes skipped from another state, each only for a message 
   `app.capture_webhook_event` (unchanged) captures one event per call. `buildWebhookPayload` reads
   the recipient with `campaignRecipientOf` and its campaign with `campaignOf`, giving the reason as
   captured and the rest as it is now.
+- **Skip reason filters for skipped campaign recipients** (migration 0282, ADR-359):
+  `campaign_skip_reasons` on an endpoint lists the reasons whose campaign recipient skips it takes
+  as `campaign.recipient_skipped`, null for every reason; a check keeps it to 1 to 9 of the
+  campaign recipients' reasons and to endpoints that take the event.
+  `app.capture_campaign_recipient_skips` (replaced with the same signature) writes a skip's event
+  only when an endpoint whose list is null or holds the reason takes it, and joins the deliveries
+  on the same condition.
 - **Step outcome filters** (migration 0249, ADR-327): `run_step_outcomes` on an endpoint lists the
   outcomes of the run steps it takes as `automation.run_step`, null for every step; a check keeps it
   to 1 to 21 known outcomes and to endpoints that take `automation.run_step`.

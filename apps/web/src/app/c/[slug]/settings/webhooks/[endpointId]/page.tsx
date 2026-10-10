@@ -228,6 +228,7 @@ export default async function WebhookEndpointPage({
               orderMessageEvents: endpoint.orderMessageEvents,
               orderMessageSkipReasons: endpoint.orderMessageSkipReasons,
               cartReminderSkipReasons: endpoint.cartReminderSkipReasons,
+              campaignSkipReasons: endpoint.campaignSkipReasons,
               runStepOutcomes: endpoint.runStepOutcomes,
               runStepNodeTypes: endpoint.runStepNodeTypes,
               orderChangeMakers: endpoint.orderChangeMakers,

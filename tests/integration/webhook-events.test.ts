@@ -5819,6 +5819,110 @@ describe('campaign events (ADR-087)', () => {
     );
   }, 180_000);
 
+  it('sends an endpoint that names skip reasons only the skips of those reasons, and writes no skip that no endpoint takes (ADR-359)', async () => {
+    const s = await campaignCompany(3);
+    const { c } = s;
+    const owner = await fx.ctx(c, c.owner);
+    // Two more contacts in the audience: one without marketing opt-in, one without a number.
+    const { id: unconsented } = await contactsService().createContact(owner, {
+      phone: `+${waId()}`,
+      displayName: 'No consent',
+      tags: ['vip'],
+    });
+    const [added] = await fx.query<{ id: string }>(
+      `WITH added AS (
+         INSERT INTO app.contacts (id, tenant_id, display_name, source)
+         VALUES (gen_random_uuid(), $1, 'No number', 'import') RETURNING id)
+       INSERT INTO app.contact_tags (id, tenant_id, contact_id, tag)
+       SELECT gen_random_uuid(), $1, id, 'vip' FROM added RETURNING contact_id AS id`,
+      [c.tenant.id],
+    );
+    const numberless = added!.id;
+    /** An endpoint taking the skipped recipients of the reasons given only. */
+    const addReasonEndpoint = async (campaignSkipReasons: string[] | null) => {
+      const path = `/ok/${randomBytes(6).toString('hex')}`;
+      const created = await webhooks().create(owner, {
+        url: `http://${HOST}:${port}${path}`,
+        eventTypes: ['campaign.recipient_skipped'],
+        campaignSkipReasons,
+      });
+      return { ...created, path };
+    };
+    const phoneOrExpired = await addReasonEndpoint(['no_phone', 'expired']);
+    const optedOutOnly = await addReasonEndpoint(['opted_out']);
+    /** The skipped recipients captured, oldest first: reason, contact and deliveries. */
+    const captured = () =>
+      fx.query<{ reason: string; contact: string; deliveries: number }>(
+        `SELECT e.status AS reason, e.contact_id AS contact,
+                (SELECT count(*)::int FROM app.webhook_deliveries d
+                  WHERE d.tenant_id = e.tenant_id AND d.event_id = e.id) AS deliveries
+           FROM app.webhook_events e
+          WHERE e.tenant_id = $1 AND e.type = 'campaign.recipient_skipped'
+          ORDER BY e.occurred_at, e.id`,
+        [c.tenant.id],
+      );
+
+    const id = await s.draft(owner, 'Festive sale');
+    expect(await s.campaigns.submitCampaign(owner, id, { expectedVersion: 1 }, {})).toMatchObject({
+      audience: 5,
+      pending: 3,
+    });
+    // A contact opts out before the campaign reaches them.
+    const shoppers = await fx.query<{ id: string }>(
+      `SELECT id FROM app.contacts
+        WHERE tenant_id = $1 AND display_name LIKE 'Shopper %' ORDER BY display_name`,
+      [c.tenant.id],
+    );
+    const optedOut = shoppers[2]!.id;
+    await createConsentService({ db: fx.dbs.app, clock: systemClock }).recordConsent(owner, {
+      contactId: optedOut,
+      purpose: 'marketing',
+      action: 'opt_out',
+      note: 'Asked by phone',
+    });
+
+    // The start: of the two skipped when the audience was taken, the one without a number goes to
+    // the endpoint naming no_phone, and the one without opt-in, which no endpoint takes, is not
+    // written; the opt-out the runner skips goes to the endpoint naming opted_out alone.
+    expect(await s.tick(id)).toMatchObject({ outcome: 'progress', queued: 2, skipped: 1 });
+    expect(await captured()).toEqual([
+      { reason: 'no_phone', contact: numberless, deliveries: 1 },
+      { reason: 'opted_out', contact: optedOut, deliveries: 1 },
+    ]);
+    expect(
+      await fx.query(
+        `SELECT state, skip_reason FROM app.campaign_recipients
+          WHERE campaign_id = $1 AND contact_id = $2`,
+        [id, unconsented],
+      ),
+    ).toEqual([{ state: 'skipped', skip_reason: 'no_marketing_opt_in' }]);
+
+    // An endpoint taking every reason, then the sending period ends with the two still waiting
+    // (paused, which sends their messages back, and resumed): both expired skips go to it and to
+    // the endpoint naming expired, never to the one naming opted_out.
+    const every = await addReasonEndpoint(null);
+    expect(await s.campaigns.pauseCampaign(owner, id, {})).toEqual({ released: 2 });
+    await s.campaigns.resumeCampaign(owner, id, {});
+    s.clock.advance(25 * 3_600_000);
+    expect(await s.tick(id)).toMatchObject({ outcome: 'completed' });
+    expect((await captured()).slice(2)).toEqual(
+      expect.arrayContaining([
+        { reason: 'expired', contact: shoppers[0]!.id, deliveries: 2 },
+        { reason: 'expired', contact: shoppers[1]!.id, deliveries: 2 },
+      ]),
+    );
+    expect(await captured()).toHaveLength(4);
+
+    await deliverDue(c);
+    const reasonsAt = (path: string) =>
+      bodiesAt(path)
+        .map((b) => (b.data.recipient as { skipReason: string }).skipReason)
+        .sort();
+    expect(reasonsAt(phoneOrExpired.path)).toEqual(['expired', 'expired', 'no_phone']);
+    expect(reasonsAt(optedOutOnly.path)).toEqual(['opted_out']);
+    expect(reasonsAt(every.path)).toEqual(['expired', 'expired']);
+  });
+
   it('sends an endpoint that names numbers only the campaigns that send from them; a campaign without a number is on none (ADR-170)', async () => {
     const s = await campaignCompany(0);
     const { c } = s;
