@@ -1,5 +1,51 @@
 # Progress
 
+## 2026-10-10 — A webhook event when a store's order message is skipped (P5-09, H-014, ADR-351)
+
+Status: **Implemented; its database tests run in CI only.** A store's order message that HyFib
+recorded without sending, or skipped when it was due, showed only in Settings → Stores: an order
+system waiting for a cash on delivery answer (ADR-348) never learned that the confirmation did not
+go out. The local PostgreSQL is unavailable, so migrations 0270 and 0271 and the integration tests
+below were written but not run here; the migrations passed the pglast parse check (syntax only),
+the trigger function's PL/pgSQL body included.
+
+### Completed
+
+- **Database:** migration 0270: `store_order.message_skipped` in the endpoints' event check
+  (validated at once) and the events' type check (NOT VALID; 0271 validates it); two triggers on
+  `app.commerce_store_messages`, after an insert of a skipped message and after an update of the
+  state to skipped from another state, each only for a message about an order, calling
+  `app.webhook_capture_store_message_skipped` (not executable by PUBLIC), which captures the event
+  with the message's event as the status and the store message, the reason and the order event's
+  time in `detail`; the capture is unchanged.
+- **Domain:** the event among the webhook types with its label ("Order message skipped"), not an
+  event of a number; `storeOrderMessageSkippedPayloadSchema` (`orderMessage` with the event, reason
+  and time as captured; `storeOrder` and `store` as ADR-348 gives them, now read with shared
+  columns); `ORDER_MESSAGE_EVENTS` and `STORE_MESSAGE_SKIP_REASON_CODES` in the store messages
+  model; the OpenAPI webhook and schema; the number filter's descriptions in the API document and
+  Settings name it among the events of no number.
+- **Tests:** unit (7 new in `webhooks/webhooks.test.ts`: the label, no number and no list, the
+  schema without contact or customer details, the body as captured and as now, an order cancelled
+  and deleted since, a message gone, a cart reminder or not an id, an event without its event,
+  reason or time, the OpenAPI wording; the type lists and descriptions in two existing tests);
+  integration (`stores.test.ts`: a test order and a late event recorded skipped and four messages
+  skipped by their checks captured once each with their event, reason and time, the message sent
+  capturing nothing, delivery to the endpoint taking the event and none to one taking answers
+  only, the bodies, a message gone with its order failing as `event_gone`, and five skipped cart
+  reminders capturing nothing; the trigger function in the isolation suite). Written for CI; the
+  integration tests were not run here.
+- **Docs:** ADR-351; ARCHITECTURE; SECURITY; THREAT-MODEL T310; DEPLOYMENT (0270, 0271); RUNBOOKS;
+  BACKLOG P5-09; feature matrix W-138 and H-014.
+
+### Test commands and results (local, 2026-10-10)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 146 files, 1499 tests passed                                    |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+
 ## 2026-10-10 — Failed sends by reason over the year (P5-10, H-034, ADR-350)
 
 Status: **Implemented; its database and browser tests run in CI only.** The Usage tab and a

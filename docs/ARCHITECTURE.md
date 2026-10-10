@@ -1911,6 +1911,15 @@ true`); the same key with another request (method, path and body hashed) answers
   `app.capture_webhook_event`, which matches both lists and takes the store out before the event is
   stored. The services refuse a store a list adds unless it is the company's (`assertWebhookStores`)
   and keep stores removed since they were chosen.
+- **Skipped order messages as webhook events** (migrations 0270–0271, ADR-351): two triggers on
+  `app.commerce_store_messages`, `AFTER INSERT` for a message recorded skipped and `AFTER UPDATE OF
+state` for one that becomes skipped from another state, each only for a message with an order
+  (cart reminders have a checkout), call `app.webhook_capture_store_message_skipped`, which captures
+  `store_order.message_skipped` through `app.capture_webhook_event` (unchanged; the event belongs to
+  no number): the message's event as the status; the store message, the reason and when the order's
+  event happened in `detail`; no conversation or contact. `buildWebhookPayload` reads the message
+  with `storeOrderMessageOf` (its order and store joined; the columns are those of ADR-348's
+  confirmation) and gives the message as captured, the order and store as they are now.
 - **Step outcome filters** (migration 0249, ADR-327): `run_step_outcomes` on an endpoint lists the
   outcomes of the run steps it takes as `automation.run_step`, null for every step; a check keeps it
   to 1 to 21 known outcomes and to endpoints that take `automation.run_step`.

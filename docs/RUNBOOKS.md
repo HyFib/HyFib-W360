@@ -3397,6 +3397,19 @@ again after its removal is a new store, so tick it again. To take more, tick the
 page, or `PATCH /webhook-endpoints/{id}` with `codAnswers` or `storeIds` (null for every answer or
 store). Removing Cash on delivery answered clears both lists.
 
+**A receiver misses a skipped order message, or gets `event_gone` for one (ADR-351).**
+`store_order.message_skipped` is sent once for each of a store's order messages (order placed, cash
+on delivery confirmation, shipped, delivered, cancelled) that HyFib records without sending or
+skips when it is due; Settings → Stores shows each message's state and reason. A message sent,
+started as an automation or still waiting (the store's sending hours) sends nothing, and cart
+reminders never send it. It belongs to no number: an endpoint that names numbers still gets it, and
+the store and answer lists apply to cash on delivery answers only. Events no endpoint takes are not
+recorded, so there is nothing to replay for messages skipped before the endpoint took the event.
+Removing the store deletes its copy of the orders with their messages: a delivery not yet made
+then fails as `event_gone`, and a replay fails the same way. An order the store deleted stays in
+the copy and is sent with `storeOrder.deletedAt`. The body holds no contact or customer details:
+`storeOrder.externalId` finds the order in the store.
+
 **A receiver misses the events of a member's conversations (ADR-181).** An endpoint can take the
 message and conversation events of the conversations assigned to chosen members only. The endpoints
 list shows them ("Members whose conversations’ events are sent: …"), and the API answers

@@ -34,6 +34,7 @@ import {
   saveStoreProducts,
   STORE_LIMITS,
   storeOrderCodAnsweredPayloadSchema,
+  storeOrderMessageSkippedPayloadSchema,
   syncTemplates,
   WebhookOAuthTokenCache,
   type StoreMessageEvent,
@@ -196,7 +197,7 @@ const HOOK_HOST = 'hooks.receiver.test';
  */
 async function addHook(
   owner: TenantContext,
-  eventTypes: 'store_order.cod_answered'[],
+  eventTypes: ('store_order.cod_answered' | 'store_order.message_skipped')[],
   filters: {
     channelIds?: string[];
     codAnswers?: ('confirmed' | 'cancelled')[];
@@ -2065,6 +2066,9 @@ describe('Order messages', () => {
     await optIn(owner, storeId);
     const vars = update({ source: 'static', value: 'we received it' });
     await saveRule(owner, c, storeId, 'order_placed', { templateId: template.id, variables: vars });
+    // The order system learns of each message skipped (ADR-351).
+    const skips = await addHook(owner, ['store_order.message_skipped']);
+    const answers = await addHook(owner, ['store_order.cod_answered']);
 
     const contacts = createContactsService({ db: fx.dbs.app, clock: systemClock });
     const consent = createConsentService({ db: fx.dbs.app, clock: systemClock });
@@ -2169,6 +2173,110 @@ describe('Order messages', () => {
       state: 'skipped',
       skip_reason: 'too_late',
     });
+
+    // Each message skipped, recorded so or by its checks, was captured once with its event, reason
+    // and when the order's event happened, for the endpoint taking the event; the one sent was not.
+    const skipped = new Map((await messageRows(storeId)).map((r) => [r.id, r]));
+    const events = await fx.query<{
+      id: string;
+      status: string;
+      detail: Record<string, unknown>;
+      conversation_id: string | null;
+      contact_id: string | null;
+      deliveries: number;
+    }>(
+      `SELECT e.id, e.status, e.detail, e.conversation_id, e.contact_id,
+              (SELECT count(*)::int FROM app.webhook_deliveries d
+                WHERE d.tenant_id = e.tenant_id AND d.event_id = e.id) AS deliveries
+         FROM app.webhook_events e
+        WHERE e.tenant_id = $1 AND e.type = 'store_order.message_skipped'
+        ORDER BY e.occurred_at, e.id`,
+      [c.tenant.id],
+    );
+    const messageOf = (e: (typeof events)[number]) => {
+      const message = skipped.get(String(e.detail.storeMessageId));
+      if (!message) throw new Error('an event of no message');
+      return message;
+    };
+    expect(
+      events.map((e) => [
+        messageOf(e).external_id,
+        e.status,
+        e.detail.skipReason,
+        e.conversation_id,
+        e.contact_id,
+        e.deliveries,
+      ]),
+    ).toEqual([
+      ['6001', 'order_placed', 'test_order', null, null, 1],
+      ['6002', 'order_placed', 'opted_out', null, null, 1],
+      ['6003', 'order_placed', 'suppressed', null, null, 1],
+      ['6004', 'order_placed', 'no_phone', null, null, 1],
+      ['6005', 'order_placed', 'customer_erased', null, null, 1],
+      ['6007', 'order_placed', 'too_late', null, null, 1],
+    ]);
+    for (const e of events) {
+      expect(new Date(String(e.detail.occurredAt)).getTime()).toBe(
+        (messageOf(e).occurred_at as Date).getTime(),
+      );
+    }
+
+    // Built when delivered: the message as captured, the order and the store as they are now. A
+    // message gone with its order by then can no longer be described.
+    const lateOrder = messageOf(events[5]!).order_id as string;
+    await fx.query('DELETE FROM app.commerce_store_orders WHERE id = $1', [lateOrder]);
+    await deliverHooks(c);
+    const [storeNow] = await fx.query<{ name: string | null; store_url: string }>(
+      'SELECT name, store_url FROM app.commerce_stores WHERE id = $1',
+      [storeId],
+    );
+    const orders = new Map((await orderRows(storeId)).map((o) => [String(o.id), o]));
+    const bodies = hookBodiesAt(skips.path);
+    expect(bodies).toHaveLength(5);
+    for (const body of bodies) {
+      expect(storeOrderMessageSkippedPayloadSchema.safeParse(body).success).toBe(true);
+    }
+    expect(bodies).toEqual(
+      expect.arrayContaining(
+        events.slice(0, 5).map((e) => {
+          const message = messageOf(e);
+          const order = orders.get(String(message.order_id));
+          if (!order) throw new Error('an order gone');
+          return expect.objectContaining({
+            id: e.id,
+            type: 'store_order.message_skipped',
+            data: {
+              orderMessage: {
+                event: 'order_placed',
+                skipReason: e.detail.skipReason,
+                occurredAt: (message.occurred_at as Date).toISOString(),
+              },
+              storeOrder: expect.objectContaining({
+                id: order.id,
+                externalId: order.external_id,
+                name: order.name,
+                test: order.test,
+                placedAt: (order.placed_at as Date).toISOString(),
+                deletedAt: null,
+              }),
+              store: {
+                id: storeId,
+                platform: 'shopify',
+                name: storeNow!.name,
+                url: storeNow!.store_url,
+              },
+            },
+          });
+        }),
+      ),
+    );
+    expect(
+      await fx.query(
+        'SELECT state, attempts, last_error FROM app.webhook_deliveries WHERE event_id = $1',
+        [events[5]!.id],
+      ),
+    ).toEqual([{ state: 'failed', attempts: 0, last_error: 'event_gone' }]);
+    expect(hookBodiesAt(answers.path)).toEqual([]);
   });
 
   it('waits for the sending hours, and stops messages whose rule, template or number changed', async () => {
@@ -2935,6 +3043,7 @@ describe('Cart reminders', () => {
     const template = await approvedTemplate(c, owner, cartReminder);
     await optIn(owner, storeId);
     await marketingOptIn(owner, '+919822200001');
+    await addHook(owner, ['store_order.message_skipped']);
 
     // The second reminder needs the first, and comes later.
     await expectAppError(
@@ -3072,6 +3181,16 @@ describe('Cart reminders', () => {
       event: 'cart_reminder',
       secondReminderSwitchedOff: true,
     });
+
+    // Cart reminders are about checkouts, not orders: the five skipped send nothing (ADR-351).
+    expect((await cartRows(storeId)).filter((r) => r.state === 'skipped')).toHaveLength(5);
+    expect(
+      await fx.query(
+        `SELECT count(*)::int AS events FROM app.webhook_events
+          WHERE tenant_id = $1 AND type = 'store_order.message_skipped'`,
+        [c.tenant.id],
+      ),
+    ).toEqual([{ events: 0 }]);
   });
 
   it('asks Shopify for customer access only when a manager allows it, and uses the consent the store records', async () => {

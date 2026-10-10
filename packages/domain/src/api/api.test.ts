@@ -2507,7 +2507,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'And it can name the pipelines, stages or owners of the deals whose notes it takes (its `notePipelineIds`, `noteStageIds` and `noteDealOwnerIds`): then it receives the events of the notes about deals in those pipelines or stages, or owned by those members, when the note is added only',
     );
     expect(doc.info.description).toContain(
-      'and still every consent, contact, template, deal, task and note event it takes',
+      'and still every consent, contact, template, skipped order message, deal, task and note event it takes',
     );
     const noteEvent = (doc.webhooks as Record<string, { post?: { description?: string } }>)[
       'note.created'
@@ -3250,7 +3250,8 @@ describe('webhook endpoints through the API (ADR-081)', () => {
         event,
       ).toEqual([b, a]);
     }
-    // Consent, contact, template, deal, task and note events happen on no number.
+    // Consent, contact, template, skipped order message, deal, task and note events happen on no
+    // number.
     expect(WEBHOOK_EVENT_KEYS.filter((e) => !WEBHOOK_CHANNEL_EVENTS.some((c) => c === e))).toEqual([
       'consent.changed',
       'template.status_changed',
@@ -3258,6 +3259,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'contact.updated',
       'contact.erased',
       'contact.merged',
+      'store_order.message_skipped',
       'deal.created',
       'deal.updated',
       'deal.stage_changed',

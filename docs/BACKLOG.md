@@ -1280,12 +1280,16 @@ verification, app review, Embedded Signup configuration).
   **[Cash on delivery answer and store filters built; their database tests run only in CI]**
   (ADR-349, migration 0268: an endpoint takes `store_order.cod_answered` only for chosen answers,
   confirmed or cancelled, and for the orders of 1 to 20 chosen stores of the company).
+  **[Skipped order message events built; their database tests run only in CI]** (ADR-351,
+  migrations 0270 and 0271: `store_order.message_skipped` when a store's order message is recorded
+  skipped or skipped when due, with the event it was for, the reason, the store's order and the
+  store; no contact or number; cart reminders send nothing).
   Remaining: filters for other event types and on a message's values other than its type and words,
   field value comparisons beyond
   values, words and ranges, other authentication (headers computed per delivery, other OAuth
-  grants), mutual TLS, fixed egress addresses, other store events (the order messages a store
-  sends; the store's orders themselves are reported by the store, ADR-085), a sequence number across
-  events, load tests.
+  grants), mutual TLS, fixed egress addresses, other store events (an order message sent, the
+  store filter and filters by event or reason for skipped messages; the store's orders themselves
+  are reported by the store, ADR-085), a sequence number across events, load tests.
 - **P5-10 Platform ops screens** **[built, locally verified with test data only]** (ADR-054):
   `/platform/ops` with Overview, Onboarding (failed and abandoned signups, failed or stuck number
   setups, new companies without a number), Integrations (current failures with host-only labels,

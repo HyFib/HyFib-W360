@@ -1382,8 +1382,8 @@ function ChannelChoices({
       <legend className="mb-1 text-sm font-medium">WhatsApp numbers</legend>
       <p className="text-xs text-muted-foreground">
         Message, conversation, survey answer, automation, order, Payment Link, cash on delivery
-        answer and campaign events happen on a number. Consent, contact, template, deal, task and
-        note events are sent whichever numbers are chosen.
+        answer and campaign events happen on a number. Consent, contact, template, skipped order
+        message, deal, task and note events are sent whichever numbers are chosen.
       </p>
       <label className="flex items-start gap-2 text-sm">
         <input

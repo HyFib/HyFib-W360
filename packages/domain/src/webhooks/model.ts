@@ -83,6 +83,7 @@ export const WEBHOOK_EVENT_KEYS = [
   'order.status_changed',
   'payment_link.status_changed',
   'store_order.cod_answered',
+  'store_order.message_skipped',
   'campaign.status_changed',
   'deal.created',
   'deal.updated',
@@ -189,6 +190,11 @@ export const WEBHOOK_EVENT_INFO: Record<WebhookEventType, { label: string; descr
       label: 'Cash on delivery answered',
       description:
         'A customer confirmed or cancelled a cash on delivery order from a connected store by tapping a button of its confirmation message, or changed their answer.',
+    },
+    'store_order.message_skipped': {
+      label: 'Order message skipped',
+      description:
+        'A connected store’s message about an order (placed, cash on delivery confirmation, shipped, delivered or cancelled) was not sent: a test order, an event HyFib saw too late, or a check that failed when it was due, such as a customer who opted out or an order without a phone number.',
     },
     'campaign.status_changed': {
       label: 'Campaign status',
@@ -1316,8 +1322,8 @@ export const webhookApiKeyText = (key: WebhookEndpointApiKey): string => {
  * The events that happen on a WhatsApp number, which an endpoint can take for chosen numbers
  * (ADR-170): a campaign's are on the number it sends from, a Payment Link's on its order's (ADR-285),
  * a survey's answer on its conversation's (ADR-293), a run's step on its run's (ADR-326), a cash on
- * delivery answer on its confirmation's (ADR-348). Consent, contact, template, deal, task and note
- * events belong to no number.
+ * delivery answer on its confirmation's (ADR-348). Consent, contact, template, skipped order message
+ * (ADR-351), deal, task and note events belong to no number.
  */
 export const WEBHOOK_CHANNEL_EVENTS = [
   'message.received',

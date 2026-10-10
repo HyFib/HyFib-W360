@@ -13770,3 +13770,48 @@ days after its day is not among the year's, as the year's messages say.
 
 Not built: the reasons drawn over time (a reason's days as a chart), by company over time, in a CSV,
 and the year's error titles, which stay in the company's inbox.
+
+## ADR-351 A webhook event when a store's order message is skipped (P5-09) (2026-10-10)
+
+Context: a connected store's order messages go out when an order is placed, asked to confirm cash
+on delivery, shipped, delivered or cancelled, each from the template or automation its rule chose
+(ADR-048, ADR-050). A message HyFib does not send is kept as skipped with its reason: recorded
+skipped (a test order, an event first seen more than 48 hours late, an order paid on delivery that
+the cash on delivery confirmation covers) or skipped by a check when it was due (the store, its
+opt-in confirmation, the plan, the rule, the order, the customer's number, the template, the
+number, consent, the frequency cap or the automation). Only Settings → Stores showed it, so an
+order whose cash on delivery confirmation never went out (no phone, an opted-out customer) waited
+there for someone to look, while its order system expected an answer (ADR-348) that would never
+come. ADR-348 left an event for a skipped confirmation out.
+
+Decision:
+
+- **`store_order.message_skipped`** ("Order message skipped"), captured by triggers on
+  `app.commerce_store_messages` when an order message becomes skipped: inserted skipped by the
+  store's read, or updated to skipped from pending by the message's job (migrations 0270 and 0271).
+  A skipped message never leaves that state, so each message sends one event. Both writers run as
+  the runtime role in the company's scope.
+- **Every order event, no cart reminder:** the five events about an order send it, whatever the
+  rule does (a template or an automation); the two cart reminders, about checkouts, send nothing.
+  A message sent, started, or waiting for the store's sending hours sends nothing.
+- **As captured and as now:** the event keeps the event the message was for (its status, at most 20
+  characters), the reason (in `detail`, since 0020 allows reasons of 40 characters, more than a
+  status holds) and when the order's event happened. The body gives them as `orderMessage`, with
+  `storeOrder` and `store` as ADR-348 gives them, read when the event is delivered.
+- **Nobody:** no contact, number or conversation. The message was never sent, and most skips come
+  before a contact is found; the customer's details stay in the store, and `storeOrder.externalId`
+  finds the order there. The event belongs to no number, so an endpoint that names numbers receives
+  it whichever numbers it names, as consent, contact and template events.
+- **Filters:** none in this step. The store and answer lists of ADR-349 stay with
+  `store_order.cod_answered`; the capture is unchanged.
+- **Gone:** a message is deleted with its order or its store, so a delivery not yet made then fails
+  as `event_gone`.
+- **Reasons:** the body's `skipReason` is one of the reasons Settings → Stores explains; the
+  schema lists them all, and those of cart reminders never appear.
+
+Consequences: an order system can act on a confirmation that will not be answered (call the
+customer, confirm by other means) and see why each order message was not sent. A store that leaves
+test orders out (the default) sends an event for each test order its rules would have messaged.
+
+Not built: the store filter for skipped messages, and filters by event or reason; an event when an
+order message is sent (its statuses are `message.status`); events for cart reminders.

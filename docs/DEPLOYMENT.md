@@ -1397,6 +1397,18 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    need it; web servers from before it never read the new table or functions, and after a rollback
    the counting goes on keeping the codes, unused.
 
+   Migration 0270 (ADR-351) replaces the endpoints' event check (validated at once: at most 10
+   endpoints per company) and the events' type check (NOT VALID; 0271 validates it while captures go
+   on), and adds two triggers on `app.commerce_store_messages` with their function; the capture is
+   unchanged. Each order message skipped, by a store's read or a message's job, then calls the
+   capture, which writes nothing while no endpoint takes the event. Workers roll out before web
+   servers, so no endpoint takes the event before every worker can describe it. A worker from before
+   it fails each delivery of the event without an attempt (`payload_failed`; replay it once newer
+   workers run), so before rolling workers back to such an image, turn the event off on the
+   endpoints that take it. Until the web rollout ends, an old web server answers Settings → Webhooks
+   with an error for a company with an endpoint taking it: add it to endpoints once the rollout
+   ends, and turn it off before rolling web servers back.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

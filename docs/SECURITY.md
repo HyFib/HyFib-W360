@@ -1893,6 +1893,16 @@ Phase 5 rules (outgoing webhooks, P5-09):
   store removed later stays on the list and matches nothing, so a list never widens by itself.
   Audited with the lists and in the company data export (unit tests; integration tests, run in CI
   only).
+- Skipped order message events (ADR-351): `store_order.message_skipped` is captured by triggers in
+  the transaction that records an order message skipped or skips it, as the runtime role in the
+  company's scope (the store's read and the message's job, the only writers of the state), only for
+  messages about an order, and delivered only to the company's endpoints that take it. The trigger
+  function is not executable by PUBLIC or any runtime role. The body gives the message's event,
+  reason and time, the store's order id, name, statuses and total, and the store's platform, name
+  and address; no contact, conversation or number, and never the customer's name, phone, email,
+  address, tracking or status page from the store's order. A message deleted with its order or
+  store fails its pending deliveries as `event_gone` (unit tests; integration tests, run in CI
+  only).
 - An endpoint can take the run steps of chosen outcomes only (ADR-327). The list holds only the
   outcomes a run's log records (checked by the services and the database), is kept only while the
   endpoint takes `automation.run_step` (a database check too), and is applied in

@@ -37,6 +37,7 @@ import {
   type CampaignAnalytics,
 } from '../campaigns/results';
 import { renderEmail } from '../email/templates';
+import { STORE_MESSAGE_SKIP_REASONS } from '../stores/messages-model';
 import {
   WEBHOOK_AUTOMATION_EVENTS,
   WEBHOOK_CAMPAIGN_STATUS_LABELS,
@@ -148,6 +149,7 @@ import {
   noteCreatedPayloadSchema,
   satisfactionSurveyAnsweredPayloadSchema,
   storeOrderCodAnsweredPayloadSchema,
+  storeOrderMessageSkippedPayloadSchema,
   paymentLinkStatusChangedPayloadSchema,
   automationRunEndedPayloadSchema,
   automationRunStartedPayloadSchema,
@@ -1844,6 +1846,7 @@ describe('the OpenAPI document', () => {
       'order.status_changed',
       'payment_link.status_changed',
       'store_order.cod_answered',
+      'store_order.message_skipped',
       'campaign.status_changed',
       'deal.created',
       'deal.updated',
@@ -1935,7 +1938,7 @@ describe('the OpenAPI document', () => {
     // No number filter narrows them: an endpoint that names numbers still receives every one it
     // takes (pipelines can, ADR-263).
     expect(doc.info.description).toContain(
-      'still every consent, contact, template, deal, task and note event it takes',
+      'still every consent, contact, template, skipped order message, deal, task and note event it takes',
     );
     const schemas = doc.components.schemas as unknown as Record<
       string,
@@ -1943,10 +1946,10 @@ describe('the OpenAPI document', () => {
     >;
     const described = (schema: string) => schemas[schema]?.properties.channelIds?.description;
     expect(described('WebhookEndpoint')).toContain(
-      'Consent, contact, template, deal, task and note events are not narrowed.',
+      'Consent, contact, template, skipped order message, deal, task and note events are not narrowed.',
     );
     expect(described('CreateWebhookEndpoint')).toContain(
-      'Consent, contact, template, deal, task and note events belong to no number',
+      'Consent, contact, template, skipped order message (store_order.message_skipped), deal, task and note events belong to no number',
     );
     // The events of a number, every one of them (ADR-348 named those the lists had left out).
     expect(described('WebhookEndpoint')).toContain(
@@ -4657,6 +4660,7 @@ describe('number filters (ADR-170)', () => {
       'order.status_changed': orderStatusChangedPayloadSchema,
       'payment_link.status_changed': paymentLinkStatusChangedPayloadSchema,
       'store_order.cod_answered': storeOrderCodAnsweredPayloadSchema,
+      'store_order.message_skipped': storeOrderMessageSkippedPayloadSchema,
       'campaign.status_changed': campaignStatusChangedPayloadSchema,
       'deal.created': dealCreatedPayloadSchema,
       'deal.updated': dealUpdatedPayloadSchema,
@@ -7424,5 +7428,261 @@ describe('cash on delivery answer and store filters (ADR-349)', () => {
       { path: 'storeIds.1', message: WEBHOOK_STORES_NOT_FOUND },
     ]);
     expect(WEBHOOK_STORES_NOT_FOUND).toBe('Choose stores of this company.');
+  });
+});
+
+describe('the event of a skipped store order message (ADR-351)', () => {
+  const id = '0192f4a8-c26f-7a51-9e7c-9fa0b1c2d301';
+  const tenantId = '0192f4a8-c26f-7a51-9e7c-9fa0b1c2d302';
+  const [storeMessage, order, store] = [
+    '0192f4a8-c26f-7a51-9e7c-9fa0b1c2d303',
+    '0192f4a8-c26f-7a51-9e7c-9fa0b1c2d304',
+    '0192f4a8-c26f-7a51-9e7c-9fa0b1c2d305',
+  ];
+  const at = new Date('2026-10-10T08:00:00.123Z');
+  const placedAt = new Date('2026-10-10T07:00:00.000Z');
+
+  /** A transaction that answers its reads, in order, with `answers`; another read fails the test. */
+  function answering(answers: unknown[][]) {
+    const queue = [...answers];
+    const chain = {
+      from: () => chain,
+      innerJoin: () => chain,
+      leftJoin: () => chain,
+      where: () => {
+        const rows = queue.shift();
+        if (!rows) throw new Error('an unexpected read');
+        return Promise.resolve(rows);
+      },
+    };
+    return {
+      tx: { select: () => chain } as unknown as Parameters<typeof buildWebhookPayload>[0],
+      unread: () => queue.length,
+    };
+  }
+
+  const event = (detail: Record<string, unknown>, status: string | null = 'cod_confirmation') =>
+    ({
+      id,
+      tenantId,
+      type: 'store_order.message_skipped',
+      messageId: null,
+      conversationId: null,
+      contactId: null,
+      templateId: null,
+      status,
+      detail,
+      contactChanges: null,
+      tagsAdded: null,
+      tagsRemoved: null,
+      occurredAt: at,
+      occurredAtExact: '2026-10-10T08:00:00.123456Z',
+    }) as unknown as Parameters<typeof buildWebhookPayload>[1];
+  // As the trigger captures it (0270): PostgreSQL writes the event's time with its offset.
+  const capturedDetail = {
+    storeMessageId: storeMessage,
+    skipReason: 'no_phone',
+    occurredAt: '2026-10-10T12:30:00.25+05:30',
+  };
+  const row = {
+    order: {
+      id: order,
+      externalId: '5640149885114',
+      name: '#1043',
+      status: 'open',
+      financialStatus: 'pending',
+      fulfillmentStatus: 'unfulfilled',
+      test: false,
+      currency: 'INR',
+      totalMinor: 89_900,
+      placedAt,
+      cancelledAt: null,
+      deletedAt: null,
+    },
+    store: {
+      id: store,
+      platform: 'woocommerce',
+      name: 'Asha Textiles',
+      url: 'https://asha-textiles.example',
+    },
+  };
+
+  it('is one event of no number, labelled as Settings lists it, which no store, answer or number narrows', () => {
+    expect(WEBHOOK_EVENT_INFO['store_order.message_skipped']).toEqual({
+      label: 'Order message skipped',
+      description:
+        'A connected store’s message about an order (placed, cash on delivery confirmation, shipped, delivered or cancelled) was not sent: a test order, an event HyFib saw too late, or a check that failed when it was due, such as a customer who opted out or an order without a phone number.',
+    });
+    expect(WEBHOOK_EVENT_KEYS.indexOf('store_order.message_skipped')).toBe(
+      WEBHOOK_EVENT_KEYS.indexOf('store_order.cod_answered') + 1,
+    );
+    for (const takes of [
+      webhookTakesChannelEvents,
+      webhookTakesTaskEvents,
+      webhookTakesPipelineEvents,
+      webhookTakesTeamEvents,
+      webhookTakesCampaignEvents,
+      webhookTakesTemplateEvents,
+      webhookTakesAutomationRuns,
+    ]) {
+      expect(takes(['store_order.message_skipped']), takes.name).toBe(false);
+    }
+    expect(webhookStoreIdsFor(['store_order.message_skipped'], [store], null)).toBeNull();
+    expect(webhookCodAnswersFor(['store_order.message_skipped'], ['cancelled'], null)).toBeNull();
+  });
+
+  it('gives the message’s event, reason and time, the store’s order and its store, and nobody', () => {
+    const data = storeOrderMessageSkippedPayloadSchema.shape.data.shape;
+    // Never the customer's details from the store, and no contact or number: nothing was sent.
+    expect(Object.keys(data)).toEqual(['orderMessage', 'storeOrder', 'store']);
+    expect(Object.keys(data.orderMessage.shape)).toEqual(['event', 'skipReason', 'occurredAt']);
+    expect(data.orderMessage.shape.event.options).toEqual([
+      'order_placed',
+      'cod_confirmation',
+      'order_shipped',
+      'order_delivered',
+      'order_cancelled',
+    ]);
+    expect(data.orderMessage.shape.skipReason.options).toEqual(
+      Object.keys(STORE_MESSAGE_SKIP_REASONS),
+    );
+    expect(data.storeOrder).toBe(storeOrderCodAnsweredPayloadSchema.shape.data.shape.storeOrder);
+    expect(data.store).toBe(storeOrderCodAnsweredPayloadSchema.shape.data.shape.store);
+    const body = (orderMessage: Record<string, unknown>) => ({
+      id,
+      type: 'store_order.message_skipped',
+      createdAt: at.toISOString(),
+      createdAtExact: '2026-10-10T08:00:00.123456Z',
+      data: {
+        orderMessage: {
+          event: 'cod_confirmation',
+          skipReason: 'no_phone',
+          occurredAt: placedAt.toISOString(),
+          ...orderMessage,
+        },
+        storeOrder: { ...row.order, placedAt: placedAt.toISOString() },
+        store: row.store,
+      },
+    });
+    const parses = (value: unknown) =>
+      storeOrderMessageSkippedPayloadSchema.safeParse(value).success;
+    expect(parses(body({}))).toBe(true);
+    expect(parses(body({ event: 'order_shipped', skipReason: 'test_order' }))).toBe(true);
+    expect(parses(body({ event: 'cart_reminder' }))).toBe(false);
+    expect(parses(body({ skipReason: 'not_a_reason' }))).toBe(false);
+    expect(parses(body({ occurredAt: 'yesterday' }))).toBe(false);
+  });
+
+  it('builds the body from the message as captured and the order and store as they are now', async () => {
+    const reads = answering([[row]]);
+    const built = await buildWebhookPayload(reads.tx, event(capturedDetail), 'endpoint');
+    expect(built).toEqual({
+      id,
+      type: 'store_order.message_skipped',
+      createdAt: '2026-10-10T08:00:00.123Z',
+      createdAtExact: '2026-10-10T08:00:00.123456Z',
+      data: {
+        orderMessage: {
+          event: 'cod_confirmation',
+          skipReason: 'no_phone',
+          occurredAt: '2026-10-10T07:00:00.250Z',
+        },
+        storeOrder: {
+          id: order,
+          externalId: '5640149885114',
+          name: '#1043',
+          status: 'open',
+          financialStatus: 'pending',
+          fulfillmentStatus: 'unfulfilled',
+          test: false,
+          currency: 'INR',
+          totalMinor: 89_900,
+          placedAt: '2026-10-10T07:00:00.000Z',
+          cancelledAt: null,
+          deletedAt: null,
+        },
+        store: {
+          id: store,
+          platform: 'woocommerce',
+          name: 'Asha Textiles',
+          url: 'https://asha-textiles.example',
+        },
+      },
+    });
+    expect(storeOrderMessageSkippedPayloadSchema.safeParse(built).success).toBe(true);
+    expect(reads.unread()).toBe(0);
+  });
+
+  it('gives an order the store cancelled and deleted since with their times', async () => {
+    const cancelledAt = new Date('2026-10-10T09:00:00.000Z');
+    const deletedAt = new Date('2026-10-10T10:00:00.000Z');
+    const reads = answering([
+      [{ ...row, order: { ...row.order, status: 'cancelled', cancelledAt, deletedAt } }],
+    ]);
+    const built = await buildWebhookPayload(
+      reads.tx,
+      event({ ...capturedDetail, skipReason: 'test_order' }, 'order_placed'),
+      'endpoint',
+    );
+    expect(built.data).toMatchObject({
+      orderMessage: { event: 'order_placed', skipReason: 'test_order' },
+      storeOrder: {
+        status: 'cancelled',
+        cancelledAt: '2026-10-10T09:00:00.000Z',
+        deletedAt: '2026-10-10T10:00:00.000Z',
+      },
+    });
+    expect(storeOrderMessageSkippedPayloadSchema.safeParse(built).success).toBe(true);
+    expect(reads.unread()).toBe(0);
+  });
+
+  it('sends nothing for a message that is gone, a cart reminder or another company’s, reading nothing for an id that is not one', async () => {
+    const gone = answering([[]]);
+    await expect(
+      buildWebhookPayload(gone.tx, event(capturedDetail), 'endpoint'),
+    ).rejects.toBeInstanceOf(WebhookEventGoneError);
+    expect(gone.unread()).toBe(0);
+    for (const storeMessageId of ['message', null, 7]) {
+      const none = answering([]);
+      await expect(
+        buildWebhookPayload(none.tx, event({ ...capturedDetail, storeMessageId }), 'endpoint'),
+      ).rejects.toBeInstanceOf(WebhookEventGoneError);
+    }
+  });
+
+  it('describes no event captured without its event, reason or time, reading nothing', async () => {
+    const cases: [Record<string, unknown>, string | null][] = [
+      [capturedDetail, null],
+      [{ storeMessageId: storeMessage, occurredAt: capturedDetail.occurredAt }, 'order_placed'],
+      [{ storeMessageId: storeMessage, skipReason: 'no_phone' }, 'order_placed'],
+    ];
+    for (const [detail, status] of cases) {
+      const none = answering([]);
+      const built = buildWebhookPayload(none.tx, event(detail, status), 'endpoint');
+      await expect(built).rejects.toThrow(
+        'The skipped order message was captured without its event, reason or time',
+      );
+      await expect(built).rejects.not.toBeInstanceOf(WebhookEventGoneError);
+    }
+  });
+
+  it('is described: the message as captured, the order as it is now, and what sends nothing', () => {
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const described = doc.webhooks['store_order.message_skipped'].post.description;
+    for (const words of [
+      'A connected store’s message about an order',
+      'this event is how an order system learns that one did not, and why',
+      'orderMessage gives the event the message was for, the reason and when the order’s event happened, as captured',
+      'the store’s own order id (storeOrder.externalId) to find it there',
+      'Never the customer’s details from the store, and no contact or number',
+      'an endpoint that names numbers receives it whichever numbers it names',
+      'more than 48 hours after it happened',
+      'a message sent, or waiting for the store’s sending hours, sends nothing',
+      'cart reminders, which are about checkouts, send nothing either',
+      'fails as event_gone',
+    ]) {
+      expect(described).toContain(words);
+    }
+    expect(doc.components.schemas).toHaveProperty('WebhookStoreOrderMessageSkipped');
   });
 });
