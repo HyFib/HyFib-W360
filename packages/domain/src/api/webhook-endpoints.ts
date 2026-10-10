@@ -60,6 +60,7 @@ import {
   webhookTakesFieldChanges,
   webhookTakesPipelineEvents,
   webhookTakesStoreEvents,
+  webhookTakesOrderMessages,
   webhookRunEndTakesReason,
   webhookTakesTaskEvents,
   webhookTakesNoteEvents,
@@ -436,12 +437,12 @@ const invalidCodAnswers = () =>
   });
 
 const storeIdsField = webhookStoreIdsSchema.describe(
-  `The connected stores whose cash on delivery answers and skipped order messages the endpoint receives: 1 to ${WEBHOOK_LIMITS.stores} ids of the company's stores (as store_order.cod_answered and store_order.message_skipped events give them in \`store.id\`), only with one of those events. An answer or a skipped message belongs to the store of its order. A store removed since it was chosen stays on the list and matches nothing; a company has at most 5 stores at once. With the answers, the order messages or the numbers chosen too, an event must pass them all. null receives every store's, including those of stores connected later.`,
+  `The connected stores whose cash on delivery answers and skipped and sent order messages the endpoint receives: 1 to ${WEBHOOK_LIMITS.stores} ids of the company's stores (as store_order.cod_answered, store_order.message_skipped and store_order.message_sent events give them in \`store.id\`), only with one of those events. An answer or an order message belongs to the store of its order. A store removed since it was chosen stays on the list and matches nothing; a company has at most 5 stores at once. With the answers, the order messages or the numbers chosen too, an event must pass each list that applies to it (a skipped message belongs to no number). null receives every store's, including those of stores connected later.`,
 );
 
 /**
  * Stores are chosen only for an endpoint that receives cash on delivery answers (ADR-349) or
- * skipped order messages (ADR-352).
+ * skipped (ADR-352) or sent (ADR-353) order messages.
  */
 const invalidStores = () =>
   new AppError('validation_failed', WEBHOOK_STORES_NEED_THE_EVENT, {
@@ -449,10 +450,10 @@ const invalidStores = () =>
   });
 
 const orderMessageEventsField = webhookOrderMessageEventsSchema.describe(
-  `The order messages whose skips the endpoint receives as store_order.message_skipped (${WEBHOOK_ORDER_MESSAGE_EVENTS.join(', ')}), as orderMessage.event names them, only with the store_order.message_skipped event; null receives every message's, as a list of all five does. With the stores chosen too, a skipped message must pass both.`,
+  `The order messages whose skips and sends the endpoint receives as store_order.message_skipped and store_order.message_sent (${WEBHOOK_ORDER_MESSAGE_EVENTS.join(', ')}), as orderMessage.event names them, only with one of those events; null receives every message's, as a list of all five does. With the stores chosen too, or the numbers for sent messages (a skipped message belongs to no number), an event must pass them all.`,
 );
 
-/** Order messages are chosen only for an endpoint that receives skipped ones (ADR-352). */
+/** Order messages are chosen only for an endpoint that receives skipped or sent ones (ADR-352, ADR-353). */
 const invalidOrderMessageEvents = () =>
   new AppError('validation_failed', WEBHOOK_ORDER_MESSAGES_NEED_THE_EVENT, {
     issues: [{ path: 'orderMessageEvents', message: WEBHOOK_ORDER_MESSAGES_NEED_THE_EVENT }],
@@ -645,7 +646,7 @@ const invalidRunEndReasons = () =>
   });
 
 const channelIdsField = webhookChannelIdsSchema.describe(
-  `The WhatsApp numbers whose events the endpoint receives: 1 to ${WEBHOOK_LIMITS.channels} ids of the company's numbers (messages, conversations and orders give a number's id as \`channelId\`, templates in \`channels\` and webhook events as \`channel.id\`), only with an event that happens on a number: ${WEBHOOK_CHANNEL_EVENTS.slice(0, -1).join(', ')} or ${WEBHOOK_CHANNEL_EVENTS.at(-1)}. A campaign's events are those of the number it sends from; a campaign without a number yet is on none. A Payment Link's are those of its order's number, and a satisfaction survey's or a cash on delivery confirmation's answer that of its conversation. Consent, contact, template, skipped order message (store_order.message_skipped), deal, task and note events belong to no number: an endpoint that names numbers still receives every one of them it takes. null receives the events of every number, including numbers connected later.`,
+  `The WhatsApp numbers whose events the endpoint receives: 1 to ${WEBHOOK_LIMITS.channels} ids of the company's numbers (messages, conversations and orders give a number's id as \`channelId\`, templates in \`channels\` and webhook events as \`channel.id\`), only with an event that happens on a number: ${WEBHOOK_CHANNEL_EVENTS.slice(0, -1).join(', ')} or ${WEBHOOK_CHANNEL_EVENTS.at(-1)}. A campaign's events are those of the number it sends from; a campaign without a number yet is on none. A Payment Link's are those of its order's number, a satisfaction survey's or a cash on delivery confirmation's answer that of its conversation, and a sent order message's (store_order.message_sent) the number it went from. Consent, contact, template, skipped order message (store_order.message_skipped), deal, task and note events belong to no number: an endpoint that names numbers still receives every one of them it takes. null receives the events of every number, including numbers connected later.`,
 );
 
 /** Numbers are chosen only for an endpoint that receives events of numbers (ADR-170). */
@@ -1042,10 +1043,10 @@ export const apiCreateWebhookEndpointSchema = z
     path: ['storeIds'],
     message: WEBHOOK_STORES_NEED_THE_EVENT,
   })
-  .refine(
-    (data) => !data.orderMessageEvents || data.events.includes('store_order.message_skipped'),
-    { path: ['orderMessageEvents'], message: WEBHOOK_ORDER_MESSAGES_NEED_THE_EVENT },
-  )
+  .refine((data) => !data.orderMessageEvents || webhookTakesOrderMessages(data.events), {
+    path: ['orderMessageEvents'],
+    message: WEBHOOK_ORDER_MESSAGES_NEED_THE_EVENT,
+  })
   .refine((data) => !data.runStepNodeTypes || data.events.includes('automation.run_step'), {
     path: ['runStepNodeTypes'],
     message: WEBHOOK_RUN_STEP_NODE_TYPES_NEED_THE_EVENT,
@@ -1310,12 +1311,12 @@ export const apiUpdateWebhookEndpointSchema = z
     storeIds: storeIdsField
       .optional()
       .describe(
-        "The connected stores whose cash on delivery answers and skipped order messages the endpoint receives (the company's stores); null receives every store's. Left out, they stay, unless the events include neither store_order.cod_answered nor store_order.message_skipped any more, which clears them.",
+        "The connected stores whose cash on delivery answers and skipped and sent order messages the endpoint receives (the company's stores); null receives every store's. Left out, they stay, unless the events include none of store_order.cod_answered, store_order.message_skipped and store_order.message_sent any more, which clears them.",
       ),
     orderMessageEvents: orderMessageEventsField
       .optional()
       .describe(
-        'The order messages whose skips the endpoint receives as store_order.message_skipped; null receives every message’s. Left out, they stay, unless the events no longer include store_order.message_skipped, which clears them.',
+        'The order messages whose skips and sends the endpoint receives as store_order.message_skipped and store_order.message_sent; null receives every message’s. Left out, they stay, unless the events include neither store_order.message_skipped nor store_order.message_sent any more, which clears them.',
       ),
     runStepOutcomes: runStepOutcomesField
       .optional()
@@ -1614,7 +1615,7 @@ export const apiUpdateWebhookEndpointSchema = z
       data.contactTags !== undefined ||
       data.conversationTags !== undefined ||
       data.oauth !== undefined,
-    'Give the events, the description, the headers, the message statuses, who sent the messages, the API keys that sent them, the contact parts, the deal and task details, the custom fields, the automations, the campaign statuses, the order statuses, who made the order changes, the API keys whose order changes are left out, the Payment Link statuses, the API keys that asked for the Payment Links, the template statuses, the conversation statuses, the deal statuses, the task statuses, the run end statuses, the step outcomes, the kinds of step, what started the runs, the API keys that started them, the consent changes, where contacts came from, the received message types, the run end reasons, the numbers, the teams, the templates, the cash on delivery answers, the stores of store orders’ events, the order messages whose skips are sent, the campaigns, the pipelines, the stages, the deal owners, the task assignees, the pipelines, stages and owners of tasks’ deals and of notes’ deals, who made the CRM changes, the API keys whose CRM changes are left out, the survey scores, the members credited with survey answers and the teams of their conversations, the contact and conversation tags of survey answers, the tags and field values of added and changed contacts, the members, the contact tags, the conversation tags, the OAuth client or whether the endpoint is enabled',
+    'Give the events, the description, the headers, the message statuses, who sent the messages, the API keys that sent them, the contact parts, the deal and task details, the custom fields, the automations, the campaign statuses, the order statuses, who made the order changes, the API keys whose order changes are left out, the Payment Link statuses, the API keys that asked for the Payment Links, the template statuses, the conversation statuses, the deal statuses, the task statuses, the run end statuses, the step outcomes, the kinds of step, what started the runs, the API keys that started them, the consent changes, where contacts came from, the received message types, the run end reasons, the numbers, the teams, the templates, the cash on delivery answers, the stores of store orders’ events, the order messages whose skips and sends are sent, the campaigns, the pipelines, the stages, the deal owners, the task assignees, the pipelines, stages and owners of tasks’ deals and of notes’ deals, who made the CRM changes, the API keys whose CRM changes are left out, the survey scores, the members credited with survey answers and the teams of their conversations, the contact and conversation tags of survey answers, the tags and field values of added and changed contacts, the members, the contact tags, the conversation tags, the OAuth client or whether the endpoint is enabled',
   );
 
 export interface ApiWebhookEndpoint {
@@ -1654,11 +1655,11 @@ export interface ApiWebhookEndpoint {
   /** The cash on delivery answers it receives (ADR-349); null receives every answer. */
   codAnswers: WebhookCodAnswer[] | null;
   /**
-   * The stores whose cash on delivery answers (ADR-349) and skipped order messages (ADR-352) it
-   * receives; null receives every one's.
+   * The stores whose cash on delivery answers (ADR-349) and skipped (ADR-352) and sent (ADR-353)
+   * order messages it receives; null receives every one's.
    */
   storeIds: string[] | null;
-  /** The order messages whose skips it receives (ADR-352); null receives every message's. */
+  /** The order messages whose skips and sends it receives (ADR-352, ADR-353); null: every one's. */
   orderMessageEvents: WebhookOrderMessageEvent[] | null;
   /** The outcomes of the run steps it receives (ADR-327); null receives every step. */
   runStepOutcomes: WebhookRunStepOutcome[] | null;
@@ -2644,7 +2645,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
         if (data.storeIds && !webhookTakesStoreEvents(events)) {
           throw invalidStores();
         }
-        if (data.orderMessageEvents && !events.includes('store_order.message_skipped')) {
+        if (data.orderMessageEvents && !webhookTakesOrderMessages(events)) {
           throw invalidOrderMessageEvents();
         }
         if (data.runStepNodeTypes && !events.includes('automation.run_step')) {

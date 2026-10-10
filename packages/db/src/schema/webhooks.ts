@@ -11,7 +11,7 @@ const tz = (name: string) => timestamp(name, { withTimezone: true, mode: 'date' 
 
 /**
  * Event types an endpoint can receive (ADR-053, ADR-074, ADR-078, ADR-085, ADR-225, ADR-256,
- * ADR-261, ADR-326, ADR-348, ADR-351); `ping` is only sent as a test.
+ * ADR-261, ADR-326, ADR-348, ADR-351, ADR-353); `ping` is only sent as a test.
  */
 export const WEBHOOK_EVENT_TYPES = [
   'message.received',
@@ -34,6 +34,7 @@ export const WEBHOOK_EVENT_TYPES = [
   'payment_link.status_changed',
   'store_order.cod_answered',
   'store_order.message_skipped',
+  'store_order.message_sent',
   'campaign.status_changed',
   'deal.created',
   'deal.updated',
@@ -101,8 +102,9 @@ export type WebhookPaymentLinkStatus = Exclude<PaymentLinkStatus, 'creating'>;
 export type WebhookCodAnswer = StoreMessageAnswer;
 
 /**
- * The order messages a `store_order.message_skipped` event is about, which an endpoint can choose
- * (ADR-352): every store message event but the two cart reminders, which send no such event.
+ * The order messages a `store_order.message_skipped` or `store_order.message_sent` event is about,
+ * which an endpoint can choose (ADR-352, ADR-353): every store message event but the two cart
+ * reminders, which send no such event.
  */
 export type WebhookOrderMessageEvent = Exclude<
   StoreMessageEvent,
@@ -315,16 +317,15 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
    */
   codAnswers: text('cod_answers').array().$type<WebhookCodAnswer[]>(),
   /**
-   * The connected stores whose cash on delivery answers (migration 0268, ADR-349) and skipped order
-   * messages (migration 0272, ADR-352) it takes, by the store of the order; null takes every
-   * store's. Set only while `store_order.cod_answered` or `store_order.message_skipped` is among
-   * its events.
+   * The connected stores whose cash on delivery answers (migration 0268, ADR-349) and skipped and
+   * sent order messages (migrations 0272 and 0273, ADR-352, ADR-353) it takes, by the store of the
+   * order; null takes every store's. Set only while one of those events is among its events.
    */
   storeIds: uuid('store_ids').array(),
   /**
-   * The order messages whose skips it takes as `store_order.message_skipped` (migration 0272,
-   * ADR-352); null takes every message's. Set only while `store_order.message_skipped` is among its
-   * events.
+   * The order messages whose skips and sends it takes as `store_order.message_skipped` and
+   * `store_order.message_sent` (migrations 0272 and 0273, ADR-352, ADR-353); null takes every
+   * message's. Set only while one of those events is among its events.
    */
   orderMessageEvents: text('order_message_events').array().$type<WebhookOrderMessageEvent[]>(),
   /**
@@ -390,8 +391,8 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
   /**
    * The WhatsApp numbers (channel accounts) whose events it takes (ADR-170): message,
    * conversation, survey answer, automation run and step, order, Payment Link, cash on delivery
-   * answer (ADR-348) and campaign events, as `WEBHOOK_CHANNEL_EVENTS` lists them; null takes every
-   * number. Set only while one of those is among its events.
+   * answer (ADR-348), sent order message (ADR-353) and campaign events, as `WEBHOOK_CHANNEL_EVENTS`
+   * lists them; null takes every number. Set only while one of those is among its events.
    */
   channelAccountIds: uuid('channel_account_ids').array(),
   /**

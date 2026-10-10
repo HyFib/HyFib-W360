@@ -3585,7 +3585,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       storeIds: [shop],
     });
     expect(apiUpdateWebhookEndpointSchema.safeParse({}).error?.issues[0]?.message).toContain(
-      'the templates, the cash on delivery answers, the stores of store orders’ events, the order messages whose skips are sent, the campaigns,',
+      'the templates, the cash on delivery answers, the stores of store orders’ events, the order messages whose skips and sends are sent, the campaigns,',
     );
     const doc = buildOpenApiDocument('https://app.example.com/api/v1');
     const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
@@ -3611,7 +3611,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'unless the events no longer include store_order.cod_answered, which clears them',
     );
     expect(JSON.stringify(changed.storeIds)).toContain(
-      'unless the events include neither store_order.cod_answered nor store_order.message_skipped any more, which clears them',
+      'unless the events include none of store_order.cod_answered, store_order.message_skipped and store_order.message_sent any more, which clears them',
     );
     expect(doc.webhooks['store_order.cod_answered'].post.description).toContain(
       'An endpoint receives both answers unless it names the answers it takes (its `codAnswers`',
@@ -3669,18 +3669,51 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     const given = (schemas.CreateWebhookEndpoint as { properties: Record<string, unknown> })
       .properties;
     expect(JSON.stringify(given.orderMessageEvents)).toContain(
-      'as store_order.message_skipped (order_placed, cod_confirmation, order_shipped, order_delivered, order_cancelled), as orderMessage.event names them, only with the store_order.message_skipped event',
+      'as store_order.message_skipped and store_order.message_sent (order_placed, cod_confirmation, order_shipped, order_delivered, order_cancelled), as orderMessage.event names them, only with one of those events',
     );
     expect(JSON.stringify(given.storeIds)).toContain(
-      'whose cash on delivery answers and skipped order messages the endpoint receives',
+      'whose cash on delivery answers and skipped and sent order messages the endpoint receives',
     );
     const changed = (schemas.UpdateWebhookEndpoint as { properties: Record<string, unknown> })
       .properties;
     expect(JSON.stringify(changed.orderMessageEvents)).toContain(
-      'unless the events no longer include store_order.message_skipped, which clears them',
+      'unless the events include neither store_order.message_skipped nor store_order.message_sent any more, which clears them',
     );
     expect(doc.webhooks['store_order.message_skipped'].post.description).toContain(
       'An endpoint receives every store’s skipped messages unless it names the stores (its `storeIds`',
+    );
+  });
+
+  it('take numbers, stores and order messages with store_order.message_sent alone (ADR-353)', () => {
+    const [shop, number] = [
+      '0192f4ca-e481-7c73-9a9e-b1c2d3e4f701',
+      '0192f4ca-e481-7c73-9a9e-b1c2d3e4f702',
+    ];
+    expect(
+      apiCreateWebhookEndpointSchema.parse({
+        url: 'https://hooks.example.com/w360',
+        events: ['store_order.message_sent'],
+        channelIds: [number],
+        storeIds: [shop],
+        orderMessageEvents: ['order_shipped', 'cod_confirmation'],
+      }),
+    ).toMatchObject({
+      channelIds: [number],
+      storeIds: [shop],
+      orderMessageEvents: ['cod_confirmation', 'order_shipped'],
+    });
+    // A skipped message happens on no number, so the numbers need another event of one.
+    expect(
+      apiCreateWebhookEndpointSchema
+        .safeParse({
+          url: 'https://hooks.example.com/w360',
+          events: ['store_order.message_skipped'],
+          channelIds: [number],
+        })
+        .error?.issues.map((i) => [i.path.join('.'), i.message]),
+    ).toEqual([['channelIds', WEBHOOK_CHANNELS_NEED_THE_EVENTS]]);
+    expect(WEBHOOK_CHANNELS_NEED_THE_EVENTS).toContain(
+      'cash on delivery answer, sent order message or campaign events',
     );
   });
 

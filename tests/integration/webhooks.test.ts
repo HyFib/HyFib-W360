@@ -2271,7 +2271,7 @@ describe('run step outcome filters (ADR-327)', () => {
   });
 });
 
-describe('cash on delivery answer, store and order message filters (ADR-349, ADR-352)', () => {
+describe('cash on delivery answer, store and order message filters (ADR-349, ADR-352, ADR-353)', () => {
   /** A connected WooCommerce store of the company, named by the store or known by its address. */
   const storeOf = async (company: Company, name: string | null) => {
     const [row] = await fx.query<{ id: string; store_url: string }>(
@@ -2472,7 +2472,7 @@ describe('cash on delivery answer, store and order message filters (ADR-349, ADR
     ]);
   });
 
-  it('take order messages only with store_order.message_skipped and stores with either store event, kept and cleared with them; the database keeps them so (ADR-352)', async () => {
+  it('take order messages only with an order message event and stores with any store event, kept and cleared with them; the database keeps them so (ADR-352)', async () => {
     const c = await fx.company();
     const owner = await fx.ctx(c, c.owner);
     const url = 'https://hooks.example.com/skipped';
@@ -2601,6 +2601,73 @@ describe('cash on delivery answer, store and order message filters (ADR-349, ADR
                 'UPDATE') AS can_update`,
     );
     expect(grant?.can_update).toBe(true);
+  });
+
+  it('take numbers, stores and order messages with store_order.message_sent alone, the numbers going with it; the database keeps them so (ADR-353)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const url = 'https://hooks.example.com/sent';
+    const tea = await storeOf(c, 'Tara Tea');
+    const sent = ['store_order.message_sent'];
+    const skipped = ['store_order.message_skipped'];
+    const created = await webhooks().create(owner, {
+      url,
+      eventTypes: sent,
+      channelIds: [c.channelAccountId],
+      storeIds: [tea.id],
+      orderMessageEvents: ['order_shipped', 'order_placed'],
+    });
+    const current = async () => {
+      const endpoint = (await webhooks().list(owner)).find((e) => e.id === created.id);
+      return {
+        channels: endpoint?.channels?.map((n) => n.id) ?? null,
+        stores: endpoint?.stores?.map((s) => s.id) ?? null,
+        orderMessageEvents: endpoint?.orderMessageEvents,
+      };
+    };
+    expect(await current()).toEqual({
+      channels: [c.channelAccountId],
+      stores: [tea.id],
+      orderMessageEvents: ['order_placed', 'order_shipped'],
+    });
+    const change = (eventTypes: string[], fields: Record<string, unknown> = {}) =>
+      webhooks().update(owner, {
+        endpointId: created.id,
+        url,
+        description: '',
+        eventTypes,
+        ...fields,
+      });
+    // Skipped messages instead keep the stores and the order messages; they happen on no number, so
+    // the numbers go, and cannot be given.
+    await change(skipped);
+    expect(await current()).toEqual({
+      channels: null,
+      stores: [tea.id],
+      orderMessageEvents: ['order_placed', 'order_shipped'],
+    });
+    await expectAppError(
+      change(skipped, { channelIds: [c.channelAccountId] }),
+      'validation_failed',
+      /sent order message or campaign events/,
+    );
+    // The database takes the three lists for an endpoint taking sent messages alone…
+    await change(sent);
+    const setInDatabase = (column: string, value: string) =>
+      fx.query(`UPDATE app.webhook_endpoints SET ${column} = ${value} WHERE id = $1`, [created.id]);
+    await setInDatabase('channel_account_ids', `ARRAY['${c.channelAccountId}']::uuid[]`);
+    await setInDatabase('store_ids', `ARRAY['${tea.id}']::uuid[]`);
+    await setInDatabase('order_message_events', `'{order_delivered}'`);
+    expect(await current()).toEqual({
+      channels: [c.channelAccountId],
+      stores: [tea.id],
+      orderMessageEvents: ['order_delivered'],
+    });
+    // …and the numbers only while it takes them.
+    await change(skipped);
+    await expect(
+      setInDatabase('channel_account_ids', `ARRAY['${c.channelAccountId}']::uuid[]`),
+    ).rejects.toThrow(/webhook_endpoints_channel_account_ids/);
   });
 });
 
@@ -3854,7 +3921,7 @@ describe('number filters (ADR-170)', () => {
       expect(isAppError(error) && error.issues?.[0]?.path, JSON.stringify(channelIds)).toBe(path);
     };
     const needsTheEvents =
-      /only for an endpoint that receives message, conversation, survey answer, automation, order, Payment Link, cash on delivery answer or campaign events/;
+      /only for an endpoint that receives message, conversation, survey answer, automation, order, Payment Link, cash on delivery answer, sent order message or campaign events/;
     await refused(
       ['consent.changed', 'contact.updated', 'template.status_changed'],
       [main],

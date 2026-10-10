@@ -3387,24 +3387,27 @@ customer's details from the store; `contact` is the conversation's contact.
 
 **A receiver misses some cash on delivery answers, or one store's (ADR-349).** An endpoint can take
 chosen answers only, or the answers of chosen stores only. The endpoints list shows them ("Cash on
-delivery answers sent: …", "Stores whose cash on delivery answers and skipped order messages are sent: …"), and the API answers
-`codAnswers` and `storeIds` (null takes every answer, or every store's). An answer is sent only when
-its answer and its order's store are on the lists, and its number too when the endpoint names
-numbers; when no endpoint takes it, it is not recorded at all, so there is nothing to replay. A
-store removed since it was chosen shows as "A removed store" and matches nothing; a store connected
-again after its removal is a new store, so tick it again. To take more, tick the answers under
-"Answers sent" or the stores under "Stores" (or choose "Every store’s answers and skipped messages") on the endpoint's
-page, or `PATCH /webhook-endpoints/{id}` with `codAnswers` or `storeIds` (null for every answer or
-store). Removing Cash on delivery answered clears both lists.
+delivery answers sent: …", "Stores whose cash on delivery answers and order messages are sent: …"),
+and the API answers `codAnswers` and `storeIds` (null takes every answer, or every store's). An
+answer is sent only when its answer and its order's store are on the lists, and its number too when
+the endpoint names numbers; when no endpoint takes it, it is not recorded at all, so there is
+nothing to replay. A store removed since it was chosen shows as "A removed store" and matches
+nothing; a store connected again after its removal is a new store, so tick it again. To take more,
+tick the answers under "Answers sent" or the stores under "Stores" (or choose "Every store’s answers
+and order messages") on the endpoint's page, or `PATCH /webhook-endpoints/{id}` with `codAnswers`
+or `storeIds` (null for every answer or store). Removing Cash on delivery answered clears the
+answers, and the stores too unless the endpoint still takes Order message skipped or Order message
+sent.
 
 **A receiver misses a skipped order message, or gets `event_gone` for one (ADR-351).**
 `store_order.message_skipped` is sent once for each of a store's order messages (order placed, cash
 on delivery confirmation, shipped, delivered, cancelled) that HyFib records without sending or
-skips when it is due; Settings → Stores shows each message's state and reason. A message sent,
-started as an automation or still waiting (the store's sending hours) sends nothing, and cart
-reminders never send it. It belongs to no number: an endpoint that names numbers still gets it, and
-the store and answer lists apply to cash on delivery answers only. Events no endpoint takes are not
-recorded, so there is nothing to replay for messages skipped before the endpoint took the event.
+skips when it is due; Settings → Stores shows each message's state and reason. A message sent or
+started as an automation sends `store_order.message_sent` instead (ADR-353), one still waiting (the
+store's sending hours) nothing yet, and cart reminders never send it. It belongs to no number: an
+endpoint that names numbers still gets it; the stores and order messages it names narrow it
+(ADR-352). Events no endpoint takes are not recorded, so there is nothing to replay for messages
+skipped before the endpoint took the event.
 Removing the store deletes its copy of the orders with their messages: a delivery not yet made
 then fails as `event_gone`, and a replay fails the same way. An order the store deleted stays in
 the copy and is sent with `storeOrder.deletedAt`. The body holds no contact or customer details:
@@ -3414,15 +3417,33 @@ delivery confirmation, which the customer did get (or which sends its own event)
 
 **A receiver misses some skipped order messages, or one store's (ADR-352).** An endpoint can take
 the skips of chosen order messages only, or those of chosen stores' orders only (the same stores as
-its cash on delivery answers). The endpoints list shows them ("Order messages whose skips are sent:
-…", "Stores whose cash on delivery answers and skipped order messages are sent: …"), and the API
+its cash on delivery answers). The endpoints list shows them ("Order messages whose events are
+sent: …", "Stores whose cash on delivery answers and order messages are sent: …"), and the API
 answers `orderMessageEvents` and `storeIds` (null takes every message's, or every store's). A
 skipped message is sent only when its message and its order's store are on the lists; when no
 endpoint takes it, it is not recorded at all, so there is nothing to replay. To take more, tick the
-messages under "Order message skipped" or the stores under "Stores" on the endpoint's page, or
-`PATCH /webhook-endpoints/{id}` with `orderMessageEvents` or `storeIds`. Removing Order message
-skipped clears the messages, and the stores too unless the endpoint still takes Cash on delivery
-answered.
+messages under "Order messages" or the stores under "Stores" on the endpoint's page, or
+`PATCH /webhook-endpoints/{id}` with `orderMessageEvents` or `storeIds`. The lists are shared with
+sent order messages (ADR-353): removing Order message skipped clears the messages unless the
+endpoint still takes Order message sent, and the stores unless it still takes either other store
+event.
+
+**A receiver misses a sent order message, or gets `event_gone` for one (ADR-353).**
+`store_order.message_sent` is sent once for each of a store's order messages (order placed, cash on
+delivery confirmation, shipped, delivered, cancelled) that goes out: when its template message is
+queued for WhatsApp (`orderMessage.messageId`; whether WhatsApp accepted and delivered it follows
+as `message.status` events of that message) or when the automation its rule chose starts
+(`orderMessage.automationRunId`; the run's own events follow). It comes before WhatsApp answers, so
+a message WhatsApp later refuses still sent this event, and its `message.status` event says
+`failed`. A message skipped sends `store_order.message_skipped` instead, one still waiting (the
+store's sending hours) nothing yet, and cart reminders never send it. It happens on the number the
+message went from: an endpoint that names numbers gets it only for those, and the stores and order
+messages it names narrow it as they narrow skipped messages; a message must pass every list.
+Events no endpoint takes are not recorded, so there is nothing to replay for messages sent before
+the endpoint took the event. Removing the store deletes its copy of the orders with their messages:
+a delivery not yet made then fails as `event_gone`, and a replay fails the same way. The body never
+holds the customer's details from the store; `contact` is the conversation's contact as it is when
+the event is delivered (without its number and name once erased).
 
 **A receiver misses the events of a member's conversations (ADR-181).** An endpoint can take the
 message and conversation events of the conversations assigned to chosen members only. The endpoints

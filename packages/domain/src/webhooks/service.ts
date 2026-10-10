@@ -133,6 +133,7 @@ import {
   type WebhookStoreChoice,
   webhookStoreLabel,
   webhookTakesStoreEvents,
+  webhookTakesOrderMessages,
   type WebhookRunStepOutcome,
   type WebhookRunStepNodeType,
   type WebhookOrderChangeMaker,
@@ -1314,7 +1315,7 @@ export const webhookChannelIdsSchema = z
   .nullable();
 
 export const WEBHOOK_CHANNELS_NEED_THE_EVENTS =
-  'Choose numbers only for an endpoint that receives message, conversation, survey answer, automation, order, Payment Link, cash on delivery answer or campaign events.';
+  'Choose numbers only for an endpoint that receives message, conversation, survey answer, automation, order, Payment Link, cash on delivery answer, sent order message or campaign events.';
 
 export const WEBHOOK_CHANNELS_NOT_FOUND = 'Choose WhatsApp numbers of this company.';
 
@@ -1527,9 +1528,9 @@ export function webhookCodAnswersFor(
 }
 
 /**
- * The connected stores whose cash on delivery answers (ADR-349) and skipped order messages
- * (ADR-352) an endpoint takes, each once; null takes every store's, including stores connected
- * later.
+ * The connected stores whose cash on delivery answers (ADR-349) and skipped (ADR-352) and sent
+ * (ADR-353) order messages an endpoint takes, each once; null takes every store's, including stores
+ * connected later.
  */
 export const webhookStoreIdsSchema = z
   .array(z.uuid({ error: 'Choose stores from the list.' }))
@@ -1539,14 +1540,14 @@ export const webhookStoreIdsSchema = z
   .nullable();
 
 export const WEBHOOK_STORES_NEED_THE_EVENT =
-  'Choose stores only for an endpoint that receives Cash on delivery answered or Order message skipped.';
+  'Choose stores only for an endpoint that receives Cash on delivery answered, Order message skipped or Order message sent.';
 
 export const WEBHOOK_STORES_NOT_FOUND = 'Choose stores of this company.';
 
 /**
  * The stores an endpoint keeps after it is added or changed: every store (null) unless it takes
- * `store_order.cod_answered` or `store_order.message_skipped`; then those given, or else the ones
- * it had.
+ * `store_order.cod_answered`, `store_order.message_skipped` or `store_order.message_sent`; then
+ * those given, or else the ones it had.
  */
 export function webhookStoreIdsFor(
   eventTypes: readonly WebhookEventType[],
@@ -1583,8 +1584,9 @@ export async function assertWebhookStores(
 }
 
 /**
- * The order messages whose skips an endpoint takes as `store_order.message_skipped` (ADR-352), in
- * the order a store's order messages list them; null takes every message's.
+ * The order messages whose skips and sends an endpoint takes as `store_order.message_skipped`
+ * (ADR-352) and `store_order.message_sent` (ADR-353), in the order a store's order messages list
+ * them; null takes every message's.
  */
 export const webhookOrderMessageEventsSchema = z
   .array(z.enum(WEBHOOK_ORDER_MESSAGE_EVENTS, { error: 'Choose order messages from the list.' }))
@@ -1594,18 +1596,19 @@ export const webhookOrderMessageEventsSchema = z
   .nullable();
 
 export const WEBHOOK_ORDER_MESSAGES_NEED_THE_EVENT =
-  'Choose order messages only for an endpoint that receives Order message skipped.';
+  'Choose order messages only for an endpoint that receives Order message skipped or Order message sent.';
 
 /**
  * The order messages an endpoint keeps after it is added or changed: every message (null) unless it
- * takes `store_order.message_skipped`; then those given, or else the ones it had.
+ * takes `store_order.message_skipped` or `store_order.message_sent`; then those given, or else the
+ * ones it had.
  */
 export function webhookOrderMessageEventsFor(
   eventTypes: readonly WebhookEventType[],
   given: readonly WebhookOrderMessageEvent[] | null | undefined,
   current: readonly WebhookOrderMessageEvent[] | null,
 ): WebhookOrderMessageEvent[] | null {
-  if (!eventTypes.includes('store_order.message_skipped')) return null;
+  if (!webhookTakesOrderMessages(eventTypes)) return null;
   const kept = given === undefined ? current : given;
   return kept ? [...kept] : null;
 }
@@ -2872,7 +2875,7 @@ function canonicalJson(value: unknown): string {
  * order (`canonicalJson`), under `listDigests`, so that two entries still show whether a list named
  * by count in both changed, until it fits. Its events (`eventTypes`, or a replay's `events`) are
  * always named, and the endpoint keeps every list whole. With every list named by count an entry
- * takes under 6,000 bytes, so it then fits.
+ * takes under 6,500 bytes (every event type, the 58 lists and the longest hosts), so it then fits.
  */
 export function webhookEndpointAuditMetadata(
   metadata: Record<string, unknown>,
@@ -3031,13 +3034,13 @@ const endpointFields = z.object({
    */
   codAnswers: webhookCodAnswersSchema.optional(),
   /**
-   * Given, the stores whose cash on delivery answers it takes (null: every store's, ADR-349); left
-   * out, they stay.
+   * Given, the stores whose cash on delivery answers and skipped and sent order messages it takes
+   * (null: every store's, ADR-349, ADR-352, ADR-353); left out, they stay.
    */
   storeIds: webhookStoreIdsSchema.optional(),
   /**
-   * Given, the order messages whose skips it takes (null: every message's, ADR-352); left out, they
-   * stay.
+   * Given, the order messages whose skips and sends it takes (null: every message's, ADR-352,
+   * ADR-353); left out, they stay.
    */
   orderMessageEvents: webhookOrderMessageEventsSchema.optional(),
   /** Given, the outcomes of the steps it takes (null: every step, ADR-327); left out, they stay. */
@@ -3295,17 +3298,20 @@ const codAnswersNeedTheEvent = {
 };
 /**
  * Stores are chosen only for an endpoint that takes cash on delivery answers (ADR-349) or skipped
- * order messages (ADR-352).
+ * (ADR-352) or sent (ADR-353) order messages.
  */
 const storesNeedTheEvent = {
   check: (data: { eventTypes: WebhookEventType[]; storeIds?: unknown }) =>
     !data.storeIds || webhookTakesStoreEvents(data.eventTypes),
   options: { path: ['storeIds'], message: WEBHOOK_STORES_NEED_THE_EVENT },
 };
-/** Order messages are chosen only for an endpoint that takes skipped order messages (ADR-352). */
+/**
+ * Order messages are chosen only for an endpoint that takes skipped (ADR-352) or sent (ADR-353)
+ * order messages.
+ */
 const orderMessagesNeedTheEvent = {
   check: (data: { eventTypes: WebhookEventType[]; orderMessageEvents?: unknown }) =>
-    !data.orderMessageEvents || data.eventTypes.includes('store_order.message_skipped'),
+    !data.orderMessageEvents || webhookTakesOrderMessages(data.eventTypes),
   options: { path: ['orderMessageEvents'], message: WEBHOOK_ORDER_MESSAGES_NEED_THE_EVENT },
 };
 /** Kinds of step are chosen only for an endpoint that takes run steps (ADR-328). */
@@ -3768,11 +3774,11 @@ export interface WebhookEndpointView {
   /** The cash on delivery answers it takes (ADR-349); null takes every answer. */
   codAnswers: WebhookCodAnswer[] | null;
   /**
-   * The stores whose cash on delivery answers (ADR-349) and skipped order messages (ADR-352) it
-   * takes, as stored, named; null takes every store's.
+   * The stores whose cash on delivery answers (ADR-349) and skipped (ADR-352) and sent (ADR-353)
+   * order messages it takes, as stored, named; null takes every store's.
    */
   stores: WebhookEndpointStore[] | null;
-  /** The order messages whose skips it takes (ADR-352); null takes every message's. */
+  /** The order messages whose skips and sends it takes (ADR-352, ADR-353); null: every one's. */
   orderMessageEvents: WebhookOrderMessageEvent[] | null;
   /** The outcomes of the run steps it takes (ADR-327); null takes every step. */
   runStepOutcomes: WebhookRunStepOutcome[] | null;
@@ -4937,8 +4943,8 @@ export function createWebhooksService(deps: {
                     and(eq(campaigns.tenantId, ctx.tenant.id), inArray(campaigns.id, campaignIds)),
                   );
           const campaignById = new Map(namedCampaigns.map((c) => [c.id, c]));
-          // The stores endpoints chose for cash on delivery answers (ADR-349), named; a store
-          // removed since it was chosen has no row.
+          // The stores endpoints chose for cash on delivery answers and order messages (ADR-349,
+          // ADR-352, ADR-353), named; a store removed since it was chosen has no row.
           const listedStoreIds = [...new Set(rows.flatMap((r) => r.storeIds ?? []))];
           const namedStores =
             listedStoreIds.length === 0
@@ -5458,9 +5464,9 @@ export function createWebhooksService(deps: {
     },
 
     /**
-     * The connected stores an endpoint can choose to take the cash on delivery answers of (ADR-349):
-     * the company's stores, at most 5 at once, in the order they were added, each named as the
-     * store gives it, else by its address.
+     * The connected stores an endpoint can choose to take the cash on delivery answers (ADR-349) and
+     * the skipped and sent order messages (ADR-352, ADR-353) of: the company's stores, at most 5 at
+     * once, in the order they were added, each named as the store gives it, else by its address.
      */
     async storeChoices(ctx: TenantContext): Promise<WebhookStoreChoice[]> {
       assertCan(ctx, 'developer.manage');

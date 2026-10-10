@@ -1927,6 +1927,17 @@ state` for one that becomes skipped from another state, each only for a message 
   either store event. The skipped message's trigger passes its store in `detail` for
   `app.capture_webhook_event` (replaced with the same signature), which matches the store list and
   the message's event (the status) and takes the store out before the event is stored.
+- **Sent order messages as webhook events** (migrations 0273–0274, ADR-353): a trigger on
+  `app.commerce_store_messages` (`AFTER UPDATE OF state`), for a message with an order that leaves
+  `pending` for `queued` (its chat message set in the same update) or `started` (its run), calls
+  `app.webhook_capture_store_message_sent`, which reads the conversation and number from the chat
+  message or the run and captures `store_order.message_sent` with the event as status, the chat
+  message, conversation and contact as the event's, and the store message, the run and when the
+  order's event happened in `detail`; the number and store pass for the filters only.
+  `app.capture_webhook_event` (replaced with the same signature) matches the number, store and
+  order message lists as for the other store events. `buildWebhookPayload` reads the message with
+  `sentStoreOrderMessageOf` (its order and store, and the captured conversation with its contact and
+  number) and gives the message as captured, the rest as it is now.
 - **Step outcome filters** (migration 0249, ADR-327): `run_step_outcomes` on an endpoint lists the
   outcomes of the run steps it takes as `automation.run_step`, null for every step; a check keeps it
   to 1 to 21 known outcomes and to endpoints that take `automation.run_step`.

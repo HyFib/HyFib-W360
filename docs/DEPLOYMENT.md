@@ -1425,6 +1425,19 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    (422): choose stores for skipped messages alone once the rollout ends, and check them after
    rolling web servers back.
 
+   Migration 0273 (ADR-353) replaces the endpoints' event, number, store and order message checks
+   (validated at once: at most 10 endpoints per company) and the events' type check (NOT VALID;
+   0274 validates it while captures go on), adds a trigger on `app.commerce_store_messages` with
+   its function and replaces `app.capture_webhook_event` with the same signature (keeping 0272's
+   filters). Each order message a message's job queues or starts as an automation then calls the
+   capture, which writes nothing while no endpoint takes the event. As for 0270: workers roll out
+   before web servers, so no endpoint takes the event before every worker can describe it; a worker
+   from before it fails each delivery of the event without an attempt (`payload_failed`; replay it
+   once newer workers run), so turn the event off on the endpoints that take it before rolling
+   workers back to such an image; and until the web rollout ends, an old web server answers
+   Settings → Webhooks with an error for a company with an endpoint taking it, so add it to
+   endpoints once the rollout ends and turn it off before rolling web servers back.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

@@ -1288,11 +1288,16 @@ verification, app review, Embedded Signup configuration).
   CI]** (ADR-352, migration 0272: an endpoint takes `store_order.message_skipped` only for chosen
   order messages and for the orders of chosen stores, the stores shared with cash on delivery
   answers).
+  **[Sent order message events built; their database tests run only in CI]** (ADR-353, migrations
+  0273 and 0274: `store_order.message_sent` when a store's order message is queued for WhatsApp or
+  starts its automation, with the message or the run, the conversation, the store's order, the
+  store, the contact and the number; narrowed by numbers, stores and order messages; cart
+  reminders send nothing).
   Remaining: filters for other event types and on a message's values other than its type and words,
   field value comparisons beyond
   values, words and ranges, other authentication (headers computed per delivery, other OAuth
-  grants), mutual TLS, fixed egress addresses, other store events (an order message sent, a
-  filter by reason for skipped messages; the store's orders themselves are reported by the store,
+  grants), mutual TLS, fixed egress addresses, other store events (a filter by reason for skipped
+  messages, cart reminder events; the store's orders themselves are reported by the store,
   ADR-085), a sequence number across events, load tests.
 - **P5-10 Platform ops screens** **[built, locally verified with test data only]** (ADR-054):
   `/platform/ops` with Overview, Onboarding (failed and abandoned signups, failed or stuck number

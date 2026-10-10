@@ -1885,14 +1885,15 @@ Phase 5 rules (outgoing webhooks, P5-09):
   (unit tests; an integration test, run in CI only).
 - An endpoint can take the cash on delivery answers of chosen answers and stores only (ADR-349). The
   answers are checked against the two a confirmation offers; a list may add only stores of the
-  endpoint's company (checked in its scope); both are kept only while the endpoint takes
-  `store_order.cod_answered` (database checks too, which also refuse a null entry), and applied in
-  `app.capture_webhook_event` to the answer and to the store the confirmation's trigger passes in the
-  same transaction, which is not stored with the event. They only narrow what one endpoint receives
-  and never add an event or a delivery for another endpoint or company; the payload is unchanged. A
-  store removed later stays on the list and matches nothing, so a list never widens by itself.
-  Audited with the lists and in the company data export (unit tests; integration tests, run in CI
-  only).
+  endpoint's company (checked in its scope); the answers are kept only while the endpoint takes
+  `store_order.cod_answered`, and the stores while it takes an event of a store's orders (answers,
+  skipped or sent order messages, ADR-352, ADR-353; database checks too, which also refuse a null
+  entry), and applied in `app.capture_webhook_event` to the answer and to the store the
+  confirmation's trigger passes in the same transaction, which is not stored with the event. They
+  only narrow what one endpoint receives and never add an event or a delivery for another endpoint
+  or company; the payload is unchanged. A store removed later stays on the list and matches nothing,
+  so a list never widens by itself. Audited with the lists and in the company data export (unit
+  tests; integration tests, run in CI only).
 - Skipped order message events (ADR-351): `store_order.message_skipped` is captured by triggers in
   the transaction that records an order message skipped or skips it, as the runtime role in the
   company's scope (the store's read and the message's job, the only writers of the state), only for
@@ -1912,6 +1913,17 @@ Phase 5 rules (outgoing webhooks, P5-09):
   receives and never add an event or a delivery for another endpoint or company; the payload is
   unchanged. Audited with the lists and in the company data export (unit tests; integration tests,
   run in CI only).
+- `store_order.message_sent` (ADR-353) is captured by a trigger in the transaction of the
+  message's job that queues a store's order message or starts its automation, as the runtime role
+  in the company's scope (no runtime role can call its function directly), once per message:
+  it fires only when a message with an order leaves `pending`, which happens once. The event keeps
+  ids and the event's name and time; the number and store it passes for the filters are taken out
+  before it is stored. The body, built when delivered in the company's scope, gives the store's
+  order and store as ADR-348 does and the conversation's contact as HyFib keeps it (null phone and
+  name once erased), never the customer's name, phone, email, address or tracking from the store's
+  order. The number, store and order message lists of an endpoint narrow it in
+  `app.capture_webhook_event`. A message deleted with its order or store fails its pending
+  deliveries as `event_gone` (unit tests; integration tests, run in CI only).
 - An endpoint can take the run steps of chosen outcomes only (ADR-327). The list holds only the
   outcomes a run's log records (checked by the services and the database), is kept only while the
   endpoint takes `automation.run_step` (a database check too), and is applied in
