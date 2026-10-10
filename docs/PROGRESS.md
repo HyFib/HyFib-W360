@@ -21,25 +21,36 @@ integration tests below were written but not run here; the migration passed the 
   refund requests among the alerts emailed to platform owners, the form a refund's reason among what
   posts never give, and the replace field lists three owners' alerts as a sentence does.
 - **Tests:** unit (the kinds, the owners' alerts and the labels, and the state's kinds in the
-  console's order with the new kind; 2 changed in `platform/alert-channel.test.ts`); integration (1
-  new in `refund-requests.test.ts`: the notice posted to a channel that gets refund requests, the
-  email's text without a company, an amount or a reason, and not posted once the kind is unticked;
-  the strict results of the announcement tests in both refund requests files gain `posted`); e2e (a
-  new channel leaves refund requests unticked). Written for CI; the integration and e2e tests were
-  not run here.
-- **Docs:** ADR-345; ARCHITECTURE; SECURITY; THREAT-MODEL T304; DEPLOYMENT (0263); RUNBOOKS; BACKLOG
-  P5-10; feature matrix H-034.
+  console's order with the new kind; 2 changed in `platform/alert-channel.test.ts`; 3 new in
+  `billing/refund-requests.test.ts`: the post after the emails in their transaction with the email's
+  text, `posted` as the queueing answers, and nothing posted without an owner or a request marked);
+  integration (1 new in `alert-channel.test.ts`: refund requests ticked through the definer
+  function, kept in the console's order and queued only while ticked; 1 new in
+  `refund-requests.test.ts`: the notice posted to a channel that gets refund requests, the email's
+  text without a company, an amount or a reason, and not posted once the kind is unticked; the
+  strict results of the announcement tests in both refund requests files gain `posted`); e2e (a new
+  channel leaves refund requests unticked). Written for CI; the integration and e2e tests were not
+  run here.
+- **Docs:** ADR-345; ARCHITECTURE; SECURITY; THREAT-MODEL T304; DEPLOYMENT (0263); RUNBOOKS;
+  DATA-RETENTION; BACKLOG P5-10; feature matrix H-034.
 - **Mutation checks:** 4/4 deliberate regressions caught on the unit-tested parts (the kind left out
   of the list, placed before the financial alerts, not marked an owners' alert, or labelled
-  otherwise). The announcement's post needs the database, so its regressions are left to the
-  integration test, which runs in CI.
+  otherwise). 5/5 more on the announcement's post (another kind, another text, `posted` never
+  reported, the post before the emails, the post in a transaction of its own).
+- **Review fixes:** an independent review found nothing that would fail CI, one gap and a few small
+  things, fixed. No test ticked refund requests through `ops.platform_set_alert_channel_kinds`, so a
+  kind missing from its order would have refused every owner who ticked it: an integration test now
+  does. The announcement's post had no unit test, though a fake transaction can show it: three now
+  do. SECURITY's refund request rules and summary and DATA-RETENTION's posts row now name the
+  channel's posts, DEPLOYMENT says old workers still send a post already waiting after a rollback,
+  and a comment and an import's order were corrected.
 
 ### Test commands and results (local, 2026-10-09)
 
 | Command                                            | Result                                                        |
 | -------------------------------------------------- | ------------------------------------------------------------- |
 | `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
-| `pnpm test` (unit)                                 | 144 files, 1462 tests passed                                  |
+| `pnpm test` (unit)                                 | 144 files, 1465 tests passed                                  |
 | `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
 | `pnpm build`                                       | passed                                                        |
 | gitleaks 8.30.1 on the staged changes              | no leaks found                                                |

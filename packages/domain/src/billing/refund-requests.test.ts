@@ -1,6 +1,15 @@
+import { randomBytes } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
+import { PgDialect } from 'drizzle-orm/pg-core';
+import { Keyring } from '@w360/core';
+import type { Database, SQL } from '@w360/db';
 import { renderEmail } from '../email/templates';
-import { REFUND_REQUEST_LIMITS, refundRequestsAnnouncement } from './refund-requests';
+import { alertPostBody } from '../platform/alert-channel';
+import {
+  REFUND_REQUEST_LIMITS,
+  announceRefundRequests,
+  refundRequestsAnnouncement,
+} from './refund-requests';
 
 const BASE = 'https://app.example.test';
 
@@ -78,5 +87,118 @@ describe('the refund request announcement to platform owners (ADR-073)', () => {
     expect(REFUND_REQUEST_LIMITS.reasonMin).toBe(10);
     expect(REFUND_REQUEST_LIMITS.reasonMax).toBe(1000);
     expect(REFUND_REQUEST_LIMITS.perDay).toBe(5);
+  });
+});
+
+/** The sweep's database: each statement takes the next answer, in one transaction per run. */
+function sweeping(answers: { rows: unknown[] }[]) {
+  const statements: { tx: number; sql: string; params: unknown[] }[] = [];
+  const emails: { toAddress: string; id: string; payloadCiphertext: string }[] = [];
+  /** Each statement and email in turn. */
+  const order: string[] = [];
+  const keyring = new Keyring({ primaryKeyId: 'k1', keys: { k1: randomBytes(32) } });
+  let transactions = 0;
+  const db = {
+    run: async (_scope: unknown, fn: (t: unknown) => Promise<unknown>) => {
+      const tx = ++transactions;
+      return fn({
+        execute: async (q: SQL) => {
+          const built = new PgDialect().sqlToQuery(q);
+          statements.push({ tx, sql: built.sql.replace(/\s+/g, ' ').trim(), params: built.params });
+          order.push(built.sql.includes('queue_platform_alert_post') ? 'post' : 'statement');
+          const next = answers.shift();
+          if (!next) throw new Error(`unexpected statement: ${built.sql}`);
+          return next;
+        },
+        insert: () => ({
+          values: async (values: { toAddress: string; id: string; payloadCiphertext: string }) => {
+            emails.push(values);
+            order.push('email');
+          },
+        }),
+      });
+    },
+  } as unknown as Database;
+  const outbox = {
+    keyring,
+    jobs: { enqueue: async () => 'job-1' },
+    signer: { sign: (envelope: unknown) => envelope },
+  } as never;
+  return { db, outbox, statements, emails, order };
+}
+
+const OWNERS = {
+  rows: [
+    { user_id: 'u-1', email: 'owner-1@example.test' },
+    { user_id: 'u-2', email: 'owner-2@example.test' },
+  ],
+};
+
+describe('the refund requests’ post (ADR-345)', () => {
+  it('posts the email’s text after the emails, in their transaction, as the channel’s kind', async () => {
+    const { db, outbox, statements, emails, order } = sweeping([
+      { rows: [{ request_id: 'c-1' }] },
+      { rows: [{ request_id: 'p-1' }] },
+      OWNERS,
+      { rows: [{ request_id: 'c-1' }] },
+      { rows: [{ request_id: 'p-1' }] },
+      { rows: [{ queued: true }] },
+    ]);
+    expect(await announceRefundRequests({ db, outbox, appBaseUrl: BASE })).toEqual({
+      announced: 2,
+      unsent: 0,
+      recipients: 2,
+      posted: true,
+    });
+    expect(emails.map((e) => e.toAddress)).toEqual([
+      'owner-1@example.test',
+      'owner-2@example.test',
+    ]);
+    const marked = statements.filter((s) => s.sql.includes('mark_announced'));
+    expect(statements.at(-1)).toEqual({
+      tx: marked[0]!.tx,
+      sql: 'select ops.queue_platform_alert_post($1, $2) as queued',
+      params: ['refund_requests', alertPostBody(refundRequestsAnnouncement(1, BASE, 1))],
+    });
+    expect(marked.map((s) => s.tx)).toEqual([3, 3]);
+    expect(order.slice(-3)).toEqual(['email', 'email', 'post']);
+  });
+
+  it('says it did not post when the channel does not get refund requests', async () => {
+    const { db, outbox, statements } = sweeping([
+      { rows: [{ request_id: 'c-1' }] },
+      { rows: [] },
+      OWNERS,
+      { rows: [{ request_id: 'c-1' }] },
+      { rows: [{ queued: false }] },
+    ]);
+    expect(await announceRefundRequests({ db, outbox, appBaseUrl: BASE })).toEqual({
+      announced: 1,
+      unsent: 0,
+      recipients: 2,
+      posted: false,
+    });
+    expect(statements.at(-1)?.params).toEqual([
+      'refund_requests',
+      alertPostBody(refundRequestsAnnouncement(1, BASE)),
+    ]);
+  });
+
+  it('posts nothing while there is no platform owner to email, or nothing was marked', async () => {
+    const ownerless = sweeping([{ rows: [{ request_id: 'c-1' }] }, { rows: [] }, { rows: [] }]);
+    expect(
+      await announceRefundRequests({
+        db: ownerless.db,
+        outbox: ownerless.outbox,
+        appBaseUrl: BASE,
+      }),
+    ).toEqual({ announced: 0, unsent: 1, recipients: 0, posted: false });
+    expect(ownerless.statements).toHaveLength(3);
+    const raced = sweeping([{ rows: [{ request_id: 'c-1' }] }, { rows: [] }, OWNERS, { rows: [] }]);
+    expect(
+      await announceRefundRequests({ db: raced.db, outbox: raced.outbox, appBaseUrl: BASE }),
+    ).toEqual({ announced: 0, unsent: 0, recipients: 2, posted: false });
+    expect(raced.statements).toHaveLength(4);
+    expect(raced.emails).toEqual([]);
   });
 });

@@ -1341,7 +1341,8 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    refund requests only while the channel gets them, which only 0263 allows. Web servers from before
    it neither list the kind nor keep it: saving the alerts from one unticks refund requests, so
    finish the web rollout before an owner ticks them. After a rollback the kind stays in the
-   database and old workers do not post it.
+   database: old workers queue no post of it, though their posting job still sends one already
+   waiting.
 
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.

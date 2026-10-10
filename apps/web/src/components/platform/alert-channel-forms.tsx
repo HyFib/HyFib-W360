@@ -133,7 +133,7 @@ export function AlertChannelForms({
 export interface AlertKindOption {
   kind: AlertChannelKind;
   label: string;
-  /** One of the owners' financial alerts, which platform owners alone are emailed. */
+  /** One of the platform owners' alerts (financial ones and refund requests), emailed to them alone. */
   financial: boolean;
 }
 
