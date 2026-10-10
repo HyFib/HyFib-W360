@@ -6,6 +6,7 @@ import type {
   WebhookCampaignStatus,
   WebhookCodAnswer,
   WebhookOrderMessageEvent,
+  WebhookOrderMessageSkipReason,
   WebhookConsentChange,
   WebhookContactPart,
   WebhookConversationStatus,
@@ -36,6 +37,7 @@ export type {
   WebhookCampaignStatus,
   WebhookCodAnswer,
   WebhookOrderMessageEvent,
+  WebhookOrderMessageSkipReason,
   WebhookConsentChange,
   WebhookContactPart,
   WebhookConversationStatus,
@@ -668,6 +670,39 @@ export const WEBHOOK_ORDER_MESSAGE_EVENT_LABELS: Record<WebhookOrderMessageEvent
   order_delivered: 'Order delivered',
   order_cancelled: 'Order cancelled',
 };
+
+/**
+ * The reasons a `store_order.message_skipped` event gives, which an endpoint can choose (ADR-354),
+ * in the order Settings → Stores explains them: every reason a store's message can be skipped for
+ * but the six that concern cart reminders only, which send no event.
+ */
+export const WEBHOOK_ORDER_MESSAGE_SKIP_REASONS = [
+  'test_order',
+  'too_late',
+  'cash_on_delivery',
+  'rule_disabled',
+  'store_disconnected',
+  'no_opt_in',
+  'order_deleted',
+  'order_cancelled',
+  'customer_erased',
+  'no_phone',
+  'contact_erased',
+  'suppressed',
+  'opted_out',
+  'no_marketing_opt_in',
+  'template_unavailable',
+  'channel_unavailable',
+  'missing_variable',
+  'template_changed',
+  'frequency_capped',
+  'automation_unavailable',
+  'conversation_assigned',
+  'automation_busy',
+  'automation_limit',
+  'not_in_plan',
+  'automation_quota',
+] as const satisfies readonly WebhookOrderMessageSkipReason[];
 
 /**
  * The statuses a `deal.status_changed` event reports, which an endpoint can choose (ADR-309), in

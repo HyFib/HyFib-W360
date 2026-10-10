@@ -267,6 +267,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       codAnswers: null,
       storeIds: null,
       orderMessageEvents: null,
+      orderMessageSkipReasons: null,
       runStepOutcomes: null,
       runStepNodeTypes: null,
       orderChangeMakers: null,
@@ -1621,6 +1622,84 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     expect(
       await api().update(key.ctx, id, { events: sent, channelIds: [c.channelAccountId] }),
     ).toMatchObject({ ...chosen, orderMessageEvents: ['order_cancelled'] });
+  });
+
+  it('choose the skip reasons of skipped order messages, kept by changes that leave them out and cleared with the event (ADR-354)', async () => {
+    const c = await fx.company();
+    const key = await apiKey(c, ['webhooks.manage']);
+    const issueOf = async (promise: Promise<unknown>) => {
+      const error = await expectAppError(promise, 'validation_failed');
+      return isAppError(error) ? error.issues?.[0] : undefined;
+    };
+    // Reasons need the event, at least one, each from the list (named by place).
+    const skipped = ['store_order.message_skipped'];
+    const refusals = [
+      [
+        ['store_order.message_sent'],
+        { orderMessageSkipReasons: ['no_phone'] },
+        'orderMessageSkipReasons',
+      ],
+      [skipped, { orderMessageSkipReasons: [] }, 'orderMessageSkipReasons'],
+      [
+        skipped,
+        { orderMessageSkipReasons: ['no_phone', 'cart_too_old'] },
+        'orderMessageSkipReasons.1',
+      ],
+    ] as const;
+    for (const [index, [events, filters, path]] of refusals.entries()) {
+      expect(
+        await issueOf(
+          api().create(
+            key.ctx,
+            { url: receiverUrl(), events, ...filters },
+            idem(`reasons-bad-${index}`, JSON.stringify(filters)),
+          ),
+        ),
+        JSON.stringify(filters),
+      ).toMatchObject({ path });
+    }
+    expect((await api().list(key.ctx)).data).toEqual([]);
+
+    const created = await addThroughApi(key.ctx, 'reasons-1', {
+      url: receiverUrl(),
+      events: ['store_order.message_skipped', 'store_order.message_sent'],
+      orderMessageSkipReasons: ['opted_out', 'no_phone', 'opted_out'],
+    });
+    const id = created.body.data.id;
+    expect(created.body.data).toMatchObject({ orderMessageSkipReasons: ['no_phone', 'opted_out'] });
+    expect(await api().get(key.ctx, id)).toMatchObject({
+      orderMessageSkipReasons: ['no_phone', 'opted_out'],
+    });
+    const audits = async (action: string) =>
+      (
+        await fx.query<{ metadata: { orderMessageSkipReasons?: unknown } }>(
+          `SELECT metadata FROM app.audit_events
+            WHERE tenant_id = $1 AND subject_id = $2 AND action = $3 ORDER BY occurred_at, id`,
+          [c.tenant.id, id, action],
+        )
+      ).map((a) => a.metadata.orderMessageSkipReasons);
+    expect(await audits('webhook.endpoint_created')).toEqual([['no_phone', 'opted_out']]);
+    expect(await api().update(key.ctx, id, { description: 'Order system' })).toMatchObject({
+      orderMessageSkipReasons: ['no_phone', 'opted_out'],
+    });
+    // A list alone is a change.
+    expect(
+      await api().update(key.ctx, id, { orderMessageSkipReasons: ['too_late'] }),
+    ).toMatchObject({ orderMessageSkipReasons: ['too_late'] });
+    expect((await audits('webhook.endpoint_updated')).at(-1)).toEqual(['too_late']);
+    // Sent messages alone clear the reasons and refuse them.
+    expect(await api().update(key.ctx, id, { events: ['store_order.message_sent'] })).toMatchObject(
+      { orderMessageSkipReasons: null },
+    );
+    expect(
+      await issueOf(api().update(key.ctx, id, { orderMessageSkipReasons: ['no_phone'] })),
+    ).toMatchObject({ path: 'orderMessageSkipReasons' });
+    expect(
+      await api().update(key.ctx, id, { events: skipped, orderMessageSkipReasons: ['opted_out'] }),
+    ).toMatchObject({ orderMessageSkipReasons: ['opted_out'] });
+    expect(await api().update(key.ctx, id, { orderMessageSkipReasons: null })).toMatchObject({
+      orderMessageSkipReasons: null,
+    });
   });
 
   it('choose who made the order changes an endpoint receives, kept by changes that leave them out and cleared with the event (ADR-322)', async () => {

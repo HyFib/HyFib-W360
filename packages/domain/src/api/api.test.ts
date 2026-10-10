@@ -190,6 +190,7 @@ import {
   WEBHOOK_COD_ANSWERS_NEED_THE_EVENT,
   WEBHOOK_STORES_NEED_THE_EVENT,
   WEBHOOK_ORDER_MESSAGES_NEED_THE_EVENT,
+  WEBHOOK_ORDER_MESSAGE_SKIP_REASONS_NEED_THE_EVENT,
   WEBHOOK_RUN_STEP_NODE_TYPES_NEED_THE_EVENT,
   WEBHOOK_ORDER_CHANGE_MAKERS_NEED_THE_EVENT,
   WEBHOOK_ORDER_EXCLUDED_API_KEYS_NEED_THE_EVENT,
@@ -218,6 +219,7 @@ import {
   WEBHOOK_RUN_STEP_OUTCOMES,
   WEBHOOK_COD_ANSWERS,
   WEBHOOK_ORDER_MESSAGE_EVENTS,
+  WEBHOOK_ORDER_MESSAGE_SKIP_REASONS,
   WEBHOOK_RUN_STEP_NODE_TYPES,
   WEBHOOK_ORDER_CHANGE_MAKERS,
   WEBHOOK_DEAL_STATUSES,
@@ -1519,6 +1521,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'orderChangeMakers',
       'orderExcludedApiKeyIds',
       'orderMessageEvents',
+      'orderMessageSkipReasons',
       'orderStatuses',
       'ownerIds',
       'paymentLinkApiKeyIds',
@@ -3585,7 +3588,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       storeIds: [shop],
     });
     expect(apiUpdateWebhookEndpointSchema.safeParse({}).error?.issues[0]?.message).toContain(
-      'the templates, the cash on delivery answers, the stores of store orders’ events, the order messages whose skips and sends are sent, the campaigns,',
+      'the templates, the cash on delivery answers, the stores of store orders’ events, the order messages whose skips and sends are sent, the skip reasons of skipped order messages, the campaigns,',
     );
     const doc = buildOpenApiDocument('https://app.example.com/api/v1');
     const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
@@ -3681,6 +3684,58 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     );
     expect(doc.webhooks['store_order.message_skipped'].post.description).toContain(
       'An endpoint receives every store’s skipped messages unless it names the stores (its `storeIds`',
+    );
+  });
+
+  it('take skip reasons only with store_order.message_skipped, and a list of them alone is a change (ADR-354)', () => {
+    const base = { url: 'https://hooks.example.com/w360', events: ['store_order.message_skipped'] };
+    expect(
+      apiCreateWebhookEndpointSchema.parse({
+        ...base,
+        orderMessageSkipReasons: ['opted_out', 'no_phone', 'opted_out'],
+      }).orderMessageSkipReasons,
+    ).toEqual(['no_phone', 'opted_out']);
+    // Sent messages have no reason: the list needs the skipped messages.
+    for (const events of [['store_order.message_sent'], ['store_order.cod_answered']]) {
+      expect(
+        apiCreateWebhookEndpointSchema
+          .safeParse({ ...base, events, orderMessageSkipReasons: ['no_phone'] })
+          .error?.issues.map((i) => [i.path.join('.'), i.message]),
+        events.join(),
+      ).toEqual([['orderMessageSkipReasons', WEBHOOK_ORDER_MESSAGE_SKIP_REASONS_NEED_THE_EVENT]]);
+    }
+    for (const body of [
+      { ...base, orderMessageSkipReasons: [] },
+      { ...base, orderMessageSkipReasons: ['cart_too_old'] },
+    ]) {
+      expect(apiCreateWebhookEndpointSchema.safeParse(body).success, JSON.stringify(body)).toBe(
+        false,
+      );
+    }
+    expect(apiUpdateWebhookEndpointSchema.parse({ orderMessageSkipReasons: ['too_late'] })).toEqual(
+      { orderMessageSkipReasons: ['too_late'] },
+    );
+    expect(apiUpdateWebhookEndpointSchema.parse({ orderMessageSkipReasons: null })).toEqual({
+      orderMessageSkipReasons: null,
+    });
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas;
+    const answered = schemas.WebhookEndpoint as {
+      properties: Record<string, { anyOf?: { items?: { enum?: string[] } }[] }>;
+    };
+    expect(answered.properties.orderMessageSkipReasons?.anyOf?.[0]?.items?.enum).toEqual([
+      ...WEBHOOK_ORDER_MESSAGE_SKIP_REASONS,
+    ]);
+    const given = (schemas.CreateWebhookEndpoint as { properties: Record<string, unknown> })
+      .properties;
+    expect(JSON.stringify(given.orderMessageSkipReasons)).toContain(
+      'as orderMessage.skipReason names them, only with that event',
+    );
+    const changed = (schemas.UpdateWebhookEndpoint as { properties: Record<string, unknown> })
+      .properties;
+    expect(JSON.stringify(changed.orderMessageSkipReasons)).toContain(
+      'unless the events no longer include store_order.message_skipped, which clears them',
     );
   });
 

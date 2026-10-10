@@ -57,6 +57,8 @@ export async function createWebhookEndpointAction(
     storeIds: string[] | null;
     /** The order messages whose skips and sends it takes (ADR-352, ADR-353); null takes every message's. */
     orderMessageEvents: string[] | null;
+    /** The reasons whose order message skips it takes (ADR-354); null takes every reason. */
+    orderMessageSkipReasons: string[] | null;
     /** The outcomes of the run steps it takes (ADR-327); null takes every step. */
     runStepOutcomes: string[] | null;
     /** The kinds of node whose run steps it takes (ADR-328); null takes every step. */
@@ -195,6 +197,8 @@ export async function updateWebhookEndpointAction(
     storeIds: string[] | null;
     /** The order messages whose skips and sends it takes (ADR-352, ADR-353); null takes every message's. */
     orderMessageEvents: string[] | null;
+    /** The reasons whose order message skips it takes (ADR-354); null takes every reason. */
+    orderMessageSkipReasons: string[] | null;
     /** The outcomes of the run steps it takes (ADR-327); null takes every step. */
     runStepOutcomes: string[] | null;
     /** The kinds of node whose run steps it takes (ADR-328); null takes every step. */

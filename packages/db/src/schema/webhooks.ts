@@ -112,6 +112,40 @@ export type WebhookOrderMessageEvent = Exclude<
 >;
 
 /**
+ * The reasons a store's order message can be skipped for, which an endpoint can choose to take the
+ * skips of as `store_order.message_skipped` (ADR-354): the reasons Settings → Stores explains for a
+ * message not sent, but the six that concern cart reminders only (checkout_completed,
+ * checkout_deleted, order_placed, first_reminder_not_sent, cart_too_old, not_marketing_template),
+ * which send no event.
+ */
+export type WebhookOrderMessageSkipReason =
+  | 'test_order'
+  | 'too_late'
+  | 'cash_on_delivery'
+  | 'rule_disabled'
+  | 'store_disconnected'
+  | 'no_opt_in'
+  | 'order_deleted'
+  | 'order_cancelled'
+  | 'customer_erased'
+  | 'no_phone'
+  | 'contact_erased'
+  | 'suppressed'
+  | 'opted_out'
+  | 'no_marketing_opt_in'
+  | 'template_unavailable'
+  | 'channel_unavailable'
+  | 'missing_variable'
+  | 'template_changed'
+  | 'frequency_capped'
+  | 'automation_unavailable'
+  | 'conversation_assigned'
+  | 'automation_busy'
+  | 'automation_limit'
+  | 'not_in_plan'
+  | 'automation_quota';
+
+/**
  * Who made an order status change `order.status_changed` reports, as an endpoint can choose them
  * (ADR-322): a member on the order page, an API key, or HyFib applying what Razorpay reports for
  * the order's Payment Link, as the event's `changedBy` names them.
@@ -328,6 +362,13 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
    * message's. Set only while one of those events is among its events.
    */
   orderMessageEvents: text('order_message_events').array().$type<WebhookOrderMessageEvent[]>(),
+  /**
+   * The reasons whose order message skips it takes as `store_order.message_skipped` (migration
+   * 0275, ADR-354); null takes every reason. Set only while that event is among its events.
+   */
+  orderMessageSkipReasons: text('order_message_skip_reasons')
+    .array()
+    .$type<WebhookOrderMessageSkipReason[]>(),
   /**
    * The statuses a deal reaches that it takes as `deal.status_changed` (migration 0232, ADR-309);
    * null takes every status. Set only while `deal.status_changed` is among its events.

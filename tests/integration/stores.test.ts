@@ -40,6 +40,7 @@ import {
   WebhookOAuthTokenCache,
   type StoreMessageEvent,
   type WebhookOrderMessageEvent,
+  type WebhookOrderMessageSkipReason,
   type StoreVariables,
   type AutomationTrigger,
   type Permission,
@@ -195,8 +196,8 @@ const HOOK_HOST = 'hooks.receiver.test';
 
 /**
  * A webhook endpoint of the company taking `eventTypes`, only those of the numbers (ADR-348),
- * answers and stores (ADR-349) and order messages (ADR-352) given, on a path of this test's server
- * of its own.
+ * answers and stores (ADR-349), order messages (ADR-352) and skip reasons (ADR-354) given, on a path
+ * of this test's server of its own.
  */
 async function addHook(
   owner: TenantContext,
@@ -208,6 +209,7 @@ async function addHook(
     codAnswers?: ('confirmed' | 'cancelled')[];
     storeIds?: string[];
     orderMessageEvents?: WebhookOrderMessageEvent[];
+    orderMessageSkipReasons?: WebhookOrderMessageSkipReason[];
   } = {},
 ) {
   const path = `/hooks/${randomBytes(6).toString('hex')}`;
@@ -2349,10 +2351,14 @@ describe('Order messages', () => {
     await optIn(owner, storeId);
     const vars = update({ source: 'static', value: 'we received it' });
     await saveRule(owner, c, storeId, 'order_placed', { templateId: template.id, variables: vars });
-    // The order system learns of each message skipped (ADR-351), and of each sent (ADR-353).
+    // The order system learns of each message skipped (ADR-351), and of each sent (ADR-353); a
+    // call centre only of the customers who opted out or have no number (ADR-354).
     const skips = await addHook(owner, ['store_order.message_skipped']);
     const answers = await addHook(owner, ['store_order.cod_answered']);
     const sends = await addHook(owner, ['store_order.message_sent']);
+    const callCentre = await addHook(owner, ['store_order.message_skipped'], {
+      orderMessageSkipReasons: ['opted_out', 'no_phone'],
+    });
 
     const contacts = createContactsService({ db: fx.dbs.app, clock: systemClock });
     const consent = createConsentService({ db: fx.dbs.app, clock: systemClock });
@@ -2459,7 +2465,8 @@ describe('Order messages', () => {
     });
 
     // Each message skipped, recorded so or by its checks, was captured once with its event, reason
-    // and when the order's event happened, for the endpoint taking the event; the one sent was not.
+    // and when the order's event happened, for the endpoint taking the event and, for the two
+    // reasons it names, the call centre's; the one sent was not.
     const skipped = new Map((await messageRows(storeId)).map((r) => [r.id, r]));
     const events = await fx.query<{
       id: string;
@@ -2493,9 +2500,9 @@ describe('Order messages', () => {
       ]),
     ).toEqual([
       ['6001', 'order_placed', 'test_order', null, null, 1],
-      ['6002', 'order_placed', 'opted_out', null, null, 1],
+      ['6002', 'order_placed', 'opted_out', null, null, 2],
       ['6003', 'order_placed', 'suppressed', null, null, 1],
-      ['6004', 'order_placed', 'no_phone', null, null, 1],
+      ['6004', 'order_placed', 'no_phone', null, null, 2],
       ['6005', 'order_placed', 'customer_erased', null, null, 1],
       ['6007', 'order_placed', 'too_late', null, null, 1],
     ]);
@@ -2561,6 +2568,13 @@ describe('Order messages', () => {
       ),
     ).toEqual([{ state: 'failed', attempts: 0, last_error: 'event_gone' }]);
     expect(hookBodiesAt(answers.path)).toEqual([]);
+    expect(hookBodiesAt(callCentre.path)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: events[1]!.id, type: 'store_order.message_skipped' }),
+        expect.objectContaining({ id: events[3]!.id, type: 'store_order.message_skipped' }),
+      ]),
+    );
+    expect(hookBodiesAt(callCentre.path)).toHaveLength(2);
     // The one message that went out, the test order's once the store allowed them, sent its own
     // event and no skipped one (ADR-353).
     expect(hookBodiesAt(sends.path)).toEqual([

@@ -13899,3 +13899,38 @@ bound rises from ADR-336's 6,000 to 6,500, within the 7,000 bytes the audit keep
 
 Not built: an event when WhatsApp accepts or delivers an order message (that is `message.status`
 of `orderMessage.messageId`), events for cart reminders, and a filter by skip reason.
+
+## ADR-354 Choosing the skip reasons of the skipped order messages a webhook endpoint receives (P5-09) (2026-10-10)
+
+Context: `store_order.message_skipped` (ADR-351) is sent for every order message a store's rules
+did not send, whatever the reason, and ADR-352 narrowed it by store and order message only. A
+receiver that acts on one kind of skip (call the customers HyFib could not message, fix a template
+or a number) was sent the test orders, the late events and the order placed messages the cash on
+delivery confirmation replaced as well, and had to leave them alone itself (ADR-351 said so).
+
+Decision:
+
+- **A list of reasons:** `orderMessageSkipReasons`, 1 to 25 of the reasons an order message can be
+  skipped for (`WEBHOOK_ORDER_MESSAGE_SKIP_REASONS`: Settings → Stores' reasons without the six
+  that concern cart reminders only, which send no event), each once, kept in the order Settings →
+  Stores explains them, as `orderMessage.skipReason` names them. A skipped message is sent when its
+  reason is on the list and its store and order message on theirs; null receives every reason, as
+  before. Only while the endpoint takes `store_order.message_skipped` (migration 0275's check), so
+  the list never outlives its event.
+- **Where it applies:** in `app.capture_webhook_event`, replaced with the same signature, from the
+  reason the skipped message's trigger keeps in `detail` (0270). A skip no endpoint takes is not
+  recorded. Sent order messages (ADR-353) have no reason and are not narrowed by it.
+- **Who sets it:** owners and administrators in Settings → Webhooks (ticked under Order message
+  skipped, each reason in Settings → Stores' words) and keys with `webhooks.manage` through the
+  API, audited with the endpoint and in the company data export. Refusals name the field: a list
+  without its event, an empty list, an unknown or cart reminder reason.
+- **The event's own reasons:** `orderMessage.skipReason` in the skipped event's schema now lists
+  these 25 too, as the event never carried the cart reminders' six.
+
+Consequences: a receiver can take only what it acts on, for example every reason but `test_order`,
+`too_late` and `cash_on_delivery`. A reason added to order messages later is not on an existing
+list until it is ticked, as a new order message event would not be. The audit of an endpoint's
+change at its largest (every event type, the 59 lists and the longest hosts) is now 6,366 bytes,
+within the test's bound of 6,500.
+
+Not built: events for cart reminders, and a filter by reason for anything else.
