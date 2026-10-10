@@ -272,9 +272,11 @@ export interface OpsDailyActivity {
   failed: number;
   inbound: number;
   /**
-   * Of the sent, those delivered (their status delivered, read or played) and those read (read or
-   * played), ADR-346: always counted on the live days; null on a kept day counted before they were.
+   * Of the sent, those cancelled before they left (their status canceled), those delivered
+   * (delivered, read or played) and those read (read or played), ADR-346: always counted on the
+   * live days; null on a kept day counted before they were.
    */
+  canceled: number | null;
   delivered: number | null;
   read: number | null;
 }
@@ -290,7 +292,8 @@ async function dailyActivity(
   tenantId: string | null,
 ): Promise<OpsDailyActivity[]> {
   const result = await tx.execute<Row>(sql`
-    select to_char(utc_day, 'YYYY-MM-DD') as day, outbound, failed, inbound, delivered, read
+    select to_char(utc_day, 'YYYY-MM-DD') as day, outbound, failed, inbound, canceled, delivered,
+           read
       from ops.platform_ops_daily_activity(${since.toISOString()}::timestamptz, ${tenantId}::uuid)
      order by utc_day`);
   return result.rows.map((r) => ({
@@ -298,6 +301,7 @@ async function dailyActivity(
     outbound: num(r.outbound),
     failed: num(r.failed),
     inbound: num(r.inbound),
+    canceled: num(r.canceled),
     delivered: num(r.delivered),
     read: num(r.read),
   }));

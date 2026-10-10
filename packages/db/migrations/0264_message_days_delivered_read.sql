@@ -8,24 +8,29 @@
 -- messaging/status.ts), so its status says the furthest it got: a send was delivered when its
 -- status is delivered, read or played, and read when read or played. The live days' function (0254,
 -- 0255) and the kept counts (0262) now count both, outbound messages only, as they count the
--- failed ones. Counts a day only, never a contact or a message.
+-- failed ones, and the sends cancelled before they left (status canceled: a paused or cancelled
+-- campaign's queued sends, sent again as new messages when it resumes), which the shares leave
+-- out, as the company reports do. Counts a day only, never a contact or a message.
 
--- The kept counts gain the day's sends delivered and read: both null on a row counted before this
--- migration, which the counting job counts again (below), both set on every row it counts. A send
--- delivered did not fail (its status is one or the other), and one read was delivered.
+-- The kept counts gain the day's sends cancelled, delivered and read: all null on a row counted
+-- before this migration, which the counting job counts again (below), all set on every row it
+-- counts. A message has one status, so a send is at most one of cancelled, failed and delivered,
+-- and one read was delivered.
 ALTER TABLE ops.platform_message_days
+  ADD COLUMN canceled integer,
   ADD COLUMN delivered integer,
   ADD COLUMN read integer,
-  ADD CONSTRAINT platform_message_days_delivered_check
-    CHECK ((delivered IS NULL) = (read IS NULL)
+  ADD CONSTRAINT platform_message_days_statuses_check
+    CHECK ((canceled IS NULL) = (delivered IS NULL) AND (delivered IS NULL) = (read IS NULL)
            AND (delivered IS NULL
-                OR (delivered >= 0 AND delivered + failed <= outbound
+                OR (canceled >= 0 AND delivered >= 0 AND canceled + failed + delivered <= outbound
                     AND read BETWEEN 0 AND delivered)));
 
--- Whether a counted day's sends delivered and read were counted with it: false for the days counted
--- before this migration, which are counted again, newest first, as the days never counted are.
+-- Whether a counted day's sends cancelled, delivered and read were counted with it: false for the
+-- days counted before this migration, which are counted again, newest first, as the days never
+-- counted are.
 ALTER TABLE ops.platform_message_days_counted
-  ADD COLUMN deliveries boolean NOT NULL DEFAULT false;
+  ADD COLUMN outcomes boolean NOT NULL DEFAULT false;
 
 -- Definer-owned functions are replaced as 0261 replaced its own: dropped as their owner, created
 -- again, granted and handed back, all in this migration's transaction. 0255's one-argument
@@ -36,11 +41,11 @@ DROP FUNCTION ops.count_platform_message_days(integer);
 DROP FUNCTION ops.platform_ops_message_days(integer, uuid);
 RESET ROLE;
 
--- The live days (platform administrators), as 0255 counts them, with each day's sends delivered and
--- read. Web servers from before this migration read the columns they know by name.
+-- The live days (platform administrators), as 0255 counts them, with each day's sends cancelled,
+-- delivered and read. Web servers from before this migration read the columns they know by name.
 CREATE FUNCTION ops.platform_ops_daily_activity(p_since timestamptz, p_tenant_id uuid)
   RETURNS TABLE (utc_day date, outbound integer, failed integer, inbound integer,
-                 delivered integer, read integer)
+                 canceled integer, delivered integer, read integer)
   LANGUAGE plpgsql STABLE SECURITY DEFINER
   SET search_path = pg_catalog, pg_temp
   AS $$
@@ -60,6 +65,8 @@ BEGIN
            count(*) FILTER (WHERE m.direction = 'outbound' AND m.status = 'failed')::integer
              AS sent_failed,
            count(*) FILTER (WHERE m.direction = 'inbound')::integer AS received,
+           count(*) FILTER (WHERE m.direction = 'outbound' AND m.status = 'canceled')::integer
+             AS sent_canceled,
            count(*) FILTER (WHERE m.direction = 'outbound'
                               AND m.status IN ('delivered', 'read', 'played'))::integer
              AS sent_delivered,
@@ -73,7 +80,7 @@ BEGIN
      WHERE t.status <> 'deleted' AND (p_tenant_id IS NULL OR t.id = p_tenant_id)
      GROUP BY 1)
   SELECT d.on_day::date, coalesce(c.sent, 0), coalesce(c.sent_failed, 0), coalesce(c.received, 0),
-         coalesce(c.sent_delivered, 0), coalesce(c.sent_read, 0)
+         coalesce(c.sent_canceled, 0), coalesce(c.sent_delivered, 0), coalesce(c.sent_read, 0)
     FROM generate_series((p_since AT TIME ZONE 'UTC')::date::timestamp,
                          greatest((now() AT TIME ZONE 'UTC')::date,
                                   (SELECT max(l.on_day) FROM counted l))::timestamp,
@@ -87,8 +94,8 @@ GRANT EXECUTE ON FUNCTION ops.platform_ops_daily_activity(timestamptz, uuid) TO 
 ALTER FUNCTION ops.platform_ops_daily_activity(timestamptz, uuid) OWNER TO w360_definer;
 
 -- Counting (the worker, every minute, one day a call), as 0262 counts, with each company's sends
--- delivered and read, and one more kind of day due: a day counted before this migration, without
--- them. Newest first, so the latest days have their deliveries first after a deployment.
+-- cancelled, delivered and read, and one more kind of day due: a day counted before this migration,
+-- without them. Newest first, so the latest days have them first after a deployment.
 CREATE FUNCTION ops.count_platform_message_days(p_limit integer)
   RETURNS integer
   LANGUAGE plpgsql SECURITY DEFINER
@@ -104,21 +111,24 @@ BEGIN
     SELECT v_today - g.n
       FROM generate_series(1, 365) AS g(n)
       LEFT JOIN ops.platform_message_days_counted c ON c.utc_day = v_today - g.n
-     WHERE c.utc_day IS NULL OR NOT c.deliveries
+     WHERE c.utc_day IS NULL OR NOT c.outcomes
         OR (g.n <= 7 AND c.counted_at < now() - interval '1 day')
      ORDER BY g.n
      LIMIT least(greatest(coalesce(p_limit, 0), 0), 31)
   LOOP
     DELETE FROM ops.platform_message_days d WHERE d.utc_day = v_day;
     INSERT INTO ops.platform_message_days
-      (tenant_id, utc_day, outbound, failed, inbound, delivered, read)
-    SELECT t.id, v_day, m.sent, m.sent_failed, m.received, m.sent_delivered, m.sent_read
+      (tenant_id, utc_day, outbound, failed, inbound, canceled, delivered, read)
+    SELECT t.id, v_day, m.sent, m.sent_failed, m.received, m.sent_canceled, m.sent_delivered,
+           m.sent_read
       FROM app.tenants t
       CROSS JOIN LATERAL (
         SELECT count(*) FILTER (WHERE mm.direction = 'outbound')::integer AS sent,
                count(*) FILTER (WHERE mm.direction = 'outbound' AND mm.status = 'failed')::integer
                  AS sent_failed,
                count(*) FILTER (WHERE mm.direction = 'inbound')::integer AS received,
+               count(*) FILTER (WHERE mm.direction = 'outbound' AND mm.status = 'canceled')::integer
+                 AS sent_canceled,
                count(*) FILTER (WHERE mm.direction = 'outbound'
                                   AND mm.status IN ('delivered', 'read', 'played'))::integer
                  AS sent_delivered,
@@ -131,9 +141,9 @@ BEGIN
      WHERE t.status <> 'deleted' AND m.sent + m.received > 0
        AND NOT EXISTS (SELECT 1 FROM ops.tenant_deletions dl
                         WHERE dl.tenant_id = t.id AND dl.started_at IS NOT NULL);
-    INSERT INTO ops.platform_message_days_counted (utc_day, counted_at, deliveries)
+    INSERT INTO ops.platform_message_days_counted (utc_day, counted_at, outcomes)
     VALUES (v_day, now(), true)
-    ON CONFLICT (utc_day) DO UPDATE SET counted_at = excluded.counted_at, deliveries = true;
+    ON CONFLICT (utc_day) DO UPDATE SET counted_at = excluded.counted_at, outcomes = true;
     v_counted := v_counted + 1;
   END LOOP;
   RETURN v_counted;
@@ -143,12 +153,12 @@ REVOKE EXECUTE ON FUNCTION ops.count_platform_message_days(integer) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION ops.count_platform_message_days(integer) TO w360_app;
 ALTER FUNCTION ops.count_platform_message_days(integer) OWNER TO w360_definer;
 
--- The kept days (platform administrators), as 0262 reads them, with the sends delivered and read:
--- null on a day counted without them (before this migration) or not counted at all. Web servers
--- from before this migration read the columns they know by name.
+-- The kept days (platform administrators), as 0262 reads them, with the sends cancelled, delivered
+-- and read: null on a day counted without them (before this migration) or not counted at all. Web
+-- servers from before this migration read the columns they know by name.
 CREATE FUNCTION ops.platform_ops_message_days(p_days integer, p_tenant_id uuid)
   RETURNS TABLE (utc_day date, outbound integer, failed integer, inbound integer, counted boolean,
-                 delivered integer, read integer)
+                 canceled integer, delivered integer, read integer)
   LANGUAGE plpgsql STABLE SECURITY DEFINER
   SET search_path = pg_catalog, pg_temp
   AS $$
@@ -165,14 +175,15 @@ BEGIN
   RETURN QUERY
   SELECT d.day, coalesce(sum(m.outbound), 0)::integer, coalesce(sum(m.failed), 0)::integer,
          coalesce(sum(m.inbound), 0)::integer, (c.utc_day IS NOT NULL),
-         CASE WHEN c.deliveries THEN coalesce(sum(m.delivered), 0)::integer END,
-         CASE WHEN c.deliveries THEN coalesce(sum(m.read), 0)::integer END
+         CASE WHEN c.outcomes THEN coalesce(sum(m.canceled), 0)::integer END,
+         CASE WHEN c.outcomes THEN coalesce(sum(m.delivered), 0)::integer END,
+         CASE WHEN c.outcomes THEN coalesce(sum(m.read), 0)::integer END
     FROM (SELECT v_today - g.n AS day FROM generate_series(1, p_days) AS g(n)) d
     LEFT JOIN ops.platform_message_days_counted c ON c.utc_day = d.day
     LEFT JOIN ops.platform_message_days m
       ON m.utc_day = d.day AND (p_tenant_id IS NULL OR m.tenant_id = p_tenant_id)
      AND EXISTS (SELECT 1 FROM app.tenants t WHERE t.id = m.tenant_id AND t.status <> 'deleted')
-   GROUP BY d.day, c.utc_day, c.deliveries
+   GROUP BY d.day, c.utc_day, c.outcomes
    ORDER BY d.day;
 END
 $$;

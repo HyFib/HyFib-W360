@@ -13,10 +13,12 @@ import {
   failedShareLayout,
   nearestDayIndex,
   readShare,
+  shareBase,
   sharedPlotEdges,
   type DailyChartDay,
 } from './ops-chart';
 
+// A day with its deliveries counts none cancelled unless told: a kept day without them, none known.
 const day = (
   date: string,
   outbound: number,
@@ -24,7 +26,8 @@ const day = (
   failed = 0,
   delivered: number | null = null,
   read: number | null = null,
-): DailyChartDay => ({ day: date, outbound, failed, inbound, delivered, read });
+  canceled: number | null = delivered === null ? null : 0,
+): DailyChartDay => ({ day: date, outbound, failed, inbound, canceled, delivered, read });
 
 describe('the messages a day chart (ADR-333)', () => {
   it('writes counts and days the same way on the server and in the browser', () => {
@@ -200,6 +203,29 @@ describe('the failed sends a day chart (ADR-344)', () => {
     expect(failedShare(day('2026-10-09', 2, 0, 2))).toBe(1);
     // Received messages have no share: only sends fail.
     expect(failedShare(day('2026-10-09', 0, 12, 0))).toBeNull();
+  });
+
+  it('leaves the sends cancelled before they left out of every share (ADR-346)', () => {
+    // 10 sent, 6 of them cancelled as a campaign paused: of the 4 others, 2 failed and 1 delivered
+    // and read.
+    const paused = day('2026-10-09', 10, 0, 2, 1, 1, 6);
+    expect(shareBase(paused)).toBe(4);
+    expect(failedShare(paused)).toBe(0.5);
+    expect(deliveredShare(paused)).toBe(0.25);
+    expect(readShare(paused)).toBe(0.25);
+    // Every send cancelled: no share, as on a day that sent nothing.
+    const cancelled = day('2026-10-09', 3, 1, 0, 0, 0, 3);
+    expect(shareBase(cancelled)).toBe(0);
+    expect(failedShare(cancelled)).toBeNull();
+    expect(deliveredShare(cancelled)).toBeNull();
+    expect(readShare(cancelled)).toBeNull();
+    // A kept day counted before the cancellations were: of every send, as ADR-344 took them.
+    expect(shareBase(day('2026-10-09', 40, 3, 1))).toBe(40);
+    expect(failedShare(day('2026-10-09', 40, 3, 1))).toBe(0.025);
+    // The failed share's scale reaches the share of those not cancelled: 1 of 5 is 20%, not 10%.
+    expect(
+      failedShareLayout([day('2026-10-09', 10, 0, 1, 4, 2, 5)], 720, 240).yTicks.at(-1)?.label,
+    ).toBe('20%');
   });
 
   it('writes shares to a tenth of a percent, never as none or all when they are not', () => {

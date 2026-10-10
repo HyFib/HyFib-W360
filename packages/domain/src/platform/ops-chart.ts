@@ -15,9 +15,11 @@ export interface DailyChartDay {
   failed: number;
   inbound: number;
   /**
-   * Of the sent, those delivered (their status delivered, read or played) and those read (read or
+   * Of the sent, those cancelled before they left (their status canceled: a paused or cancelled
+   * campaign's queued sends), those delivered (delivered, read or played) and those read (read or
    * played), ADR-346; null on a kept day counted before they were.
    */
+  canceled: number | null;
   delivered: number | null;
   read: number | null;
 }
@@ -182,11 +184,23 @@ export function dailyChartLayout(
 }
 
 /**
- * The share of a day's sent messages that failed (ADR-344), from 0 to 1, or null on a day that
- * sent none: it has no share, and the chart leaves a gap there rather than draw it as 0%.
+ * The sends a day's shares are of (ADR-346): those sent less those cancelled before they left, as
+ * the company reports count them, so a campaign paused, whose queued sends are cancelled and sent
+ * again as new messages when it resumes, does not read as fewer deliveries or failures. All those
+ * sent on a kept day counted before the cancellations were.
+ */
+export function shareBase(day: DailyChartDay): number {
+  return day.outbound - (day.canceled ?? 0);
+}
+
+/**
+ * The share of a day's sent messages that failed (ADR-344), from 0 to 1, of those not cancelled
+ * (`shareBase`), or null on a day that sent none: it has no share, and the chart leaves a gap there
+ * rather than draw it as 0%.
  */
 export function failedShare(day: DailyChartDay): number | null {
-  return day.outbound > 0 ? day.failed / day.outbound : null;
+  const base = shareBase(day);
+  return base > 0 ? day.failed / base : null;
 }
 
 /**
@@ -240,8 +254,10 @@ export function failedShareLayout(
   const shares = days.map(failedShare);
   // Each day's share rounded up to a tenth of a percent, in whole numbers, so the scale's top is at
   // or above every day's.
-  const tenthsUp = (d: DailyChartDay) =>
-    d.outbound > 0 ? Math.floor((d.failed * 1000 + d.outbound - 1) / d.outbound) : 0;
+  const tenthsUp = (d: DailyChartDay) => {
+    const base = shareBase(d);
+    return base > 0 ? Math.floor((d.failed * 1000 + base - 1) / base) : 0;
+  };
   const max = Math.max(0, ...days.map(tenthsUp));
   const step = chartStep(max);
   const top = Math.max(step, Math.ceil(max / step) * step);
@@ -289,17 +305,20 @@ export function failedShareLayout(
 }
 
 /**
- * The share of a day's sent messages delivered (ADR-346), from 0 to 1: those whose status got to
- * delivered, read or played. Null on a day that sent none, or on a kept day counted before the
- * deliveries were: the chart leaves a gap there rather than draw it as 0%.
+ * The share of a day's sent messages delivered (ADR-346), from 0 to 1, of those not cancelled
+ * (`shareBase`): those whose status got to delivered, read or played. Null on a day that sent none,
+ * or on a kept day counted before the deliveries were: the chart leaves a gap there rather than
+ * draw it as 0%.
  */
 export function deliveredShare(day: DailyChartDay): number | null {
-  return day.outbound > 0 && day.delivered !== null ? day.delivered / day.outbound : null;
+  const base = shareBase(day);
+  return base > 0 && day.delivered !== null ? day.delivered / base : null;
 }
 
 /** The share of a day's sent messages read (ADR-346), read or played; null as the delivered one. */
 export function readShare(day: DailyChartDay): number | null {
-  return day.outbound > 0 && day.read !== null ? day.read / day.outbound : null;
+  const base = shareBase(day);
+  return base > 0 && day.read !== null ? day.read / base : null;
 }
 
 /** The delivery chart's two series, in their fixed order: they keep their colours whatever the data. */

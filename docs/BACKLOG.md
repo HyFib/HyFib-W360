@@ -1382,8 +1382,9 @@ verification, app review, Embedded Signup configuration).
   posted with the email's counts and never a company, an amount or a reason).
   **[Sends delivered and read built; its database and browser tests run only in CI]** (ADR-346,
   migration 0264: under the failed sends' chart, the share of each day's sends delivered and read,
-  two lines on an axis of percentages, with "Delivered" and "Read" columns in the table of the days;
-  the kept days counted again once with their deliveries).
+  two lines on an axis of percentages, with "Cancelled", "Delivered" and "Read" columns in the table
+  of the days; every share, the failed one too, of the sends not cancelled; the kept days counted
+  again once with them).
   Remaining:
   other alert channels (several channels, a channel per alert, formats other than a JSON `text`
   member, such as Microsoft Teams' or PagerDuty's, and the owners' other notices, such as personal

@@ -1,19 +1,25 @@
 import { EmptyState, TBody, TD, TH, THead, TR, Table } from '@w360/ui';
 import type { OpsDailyActivity } from '@w360/domain';
-import { chartShare, deliveredShare, failedShare } from '@w360/domain/ops-chart';
+import { chartShare, deliveredShare, failedShare, shareBase } from '@w360/domain/ops-chart';
 import {
   DailyDeliveryShareChart,
   DailyFailedShareChart,
   DailyMessagesChart,
 } from '@/components/platform/daily-chart';
 
-/** A count of the sent, with its share of them: "970 (97%)"; "Not counted" before it is (ADR-346). */
-const ofSent = (count: number | null, sent: number) =>
-  count === null
-    ? 'Not counted'
-    : sent > 0
-      ? `${count} (${chartShare(count / sent)})`
-      : String(count);
+/**
+ * A count of the sends not cancelled, with its share of them: "970 (97%)"; "None sent" as the
+ * failed share says, and "Not counted" before it is (ADR-346).
+ */
+const ofSent = (count: number | null, base: number) =>
+  base <= 0
+    ? 'None sent'
+    : count === null
+      ? 'Not counted'
+      : `${count} (${chartShare(count / base)})`;
+
+/** In place of a share chart when every send of the days drawn was cancelled before it left. */
+const ALL_CANCELLED = 'Every send of these days was cancelled before it left: none has a share.';
 
 /**
  * Messages a day (ADR-333, ADR-334): the chart of the days, under it the share of each day's sends
@@ -50,25 +56,29 @@ export function DailyMessages({
     return <EmptyState title="No messages in these days" description={empty} />;
   }
   const sent = days.some((d) => d.outbound > 0);
+  // The shares are of the sends not cancelled before they left (ADR-346).
+  const shared = days.some((d) => shareBase(d) > 0);
   return (
     <>
-      <DailyMessagesChart days={days} label={label} legendLabel={names.legend} aligned={sent} />
+      <DailyMessagesChart days={days} label={label} legendLabel={names.legend} aligned={shared} />
       <figure className="grid min-w-0 gap-2">
         <figcaption className="text-sm font-medium">
-          Sends that failed, as a share of those sent, {failed.period}
+          Sends that failed, as a share of those not cancelled, {failed.period}
         </figcaption>
-        {sent ? (
+        {shared ? (
           <DailyFailedShareChart days={days} label={failed.label} />
         ) : (
-          <p className="text-sm text-muted-foreground">{failed.noneSent}</p>
+          <p className="text-sm text-muted-foreground">{sent ? ALL_CANCELLED : failed.noneSent}</p>
         )}
       </figure>
       <figure className="grid min-w-0 gap-2">
         <figcaption className="text-sm font-medium">
-          Sends delivered and read, as shares of those sent, {failed.period}
+          Sends delivered and read, as shares of those not cancelled, {failed.period}
         </figcaption>
-        {!sent ? (
-          <p className="text-sm text-muted-foreground">{delivered.noneSent}</p>
+        {!shared ? (
+          <p className="text-sm text-muted-foreground">
+            {sent ? ALL_CANCELLED : delivered.noneSent}
+          </p>
         ) : days.some((d) => deliveredShare(d) !== null) ? (
           <DailyDeliveryShareChart
             days={days}
@@ -91,6 +101,7 @@ export function DailyMessages({
             <TR>
               <TH>Day (UTC)</TH>
               <TH>Sent</TH>
+              <TH>Cancelled</TH>
               <TH>Failed</TH>
               <TH>Received</TH>
               <TH>Share failed</TH>
@@ -101,19 +112,21 @@ export function DailyMessages({
           <TBody>
             {days.map((d) => {
               const share = failedShare(d);
+              const base = shareBase(d);
               return (
                 <TR key={d.day}>
                   <TD className="whitespace-nowrap">{d.day}</TD>
                   <TD className="tabular-nums">{d.outbound}</TD>
+                  <TD className="whitespace-nowrap tabular-nums">
+                    {d.canceled === null ? 'Not counted' : d.canceled}
+                  </TD>
                   <TD className="tabular-nums">{d.failed}</TD>
                   <TD className="tabular-nums">{d.inbound}</TD>
                   <TD className="tabular-nums">
                     {share === null ? 'None sent' : chartShare(share)}
                   </TD>
-                  <TD className="whitespace-nowrap tabular-nums">
-                    {ofSent(d.delivered, d.outbound)}
-                  </TD>
-                  <TD className="whitespace-nowrap tabular-nums">{ofSent(d.read, d.outbound)}</TD>
+                  <TD className="whitespace-nowrap tabular-nums">{ofSent(d.delivered, base)}</TD>
+                  <TD className="whitespace-nowrap tabular-nums">{ofSent(d.read, base)}</TD>
                 </TR>
               );
             })}

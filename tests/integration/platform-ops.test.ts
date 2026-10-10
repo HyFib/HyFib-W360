@@ -448,21 +448,23 @@ describe('company health and signals', () => {
     const nineDaysAgo = ago(9 * 24 * hour);
     await messageAt(counted, countedConversation, 'outbound', 'delivered', threeDaysAgo);
     await messageAt(counted, countedConversation, 'outbound', 'failed', threeDaysAgo);
+    await messageAt(counted, countedConversation, 'outbound', 'canceled', threeDaysAgo);
     await messageAt(counted, countedConversation, 'inbound', 'received', yesterday);
     await messageAt(counted, countedConversation, 'outbound', 'read', justNow);
     await messageAt(counted, countedConversation, 'outbound', 'delivered', nineDaysAgo);
     // A deleted company's messages are no longer counted, whenever they were written.
     await fx.query(`UPDATE app.tenants SET status = 'deleted' WHERE id = $1`, [gone.tenant.id]);
-    // Of the sends, those delivered (delivered, read or played) and read (read or played), ADR-346.
+    // Of the sends, those cancelled before they left, delivered (delivered, read or played) and read
+    // (read or played), ADR-346.
+    const none = { outbound: 0, failed: 0, inbound: 0, canceled: 0, delivered: 0, read: 0 };
     const changes = [
-      { at: threeDaysAgo, outbound: 2, failed: 1, inbound: 0, delivered: 1, read: 0 },
-      { at: yesterday, outbound: 0, failed: 0, inbound: 1, delivered: 0, read: 0 },
-      { at: justNow, outbound: 1, failed: 0, inbound: 0, delivered: 1, read: 1 },
-      { at: nineDaysAgo, outbound: 1, failed: 0, inbound: 0, delivered: 1, read: 0 },
-      { at: yesterday, outbound: -1, failed: 0, inbound: 0, delivered: -1, read: 0 },
-      { at: goneInbound!.created_at, outbound: 0, failed: 0, inbound: -1, delivered: 0, read: 0 },
+      { ...none, at: threeDaysAgo, outbound: 3, failed: 1, canceled: 1, delivered: 1 },
+      { ...none, at: yesterday, inbound: 1 },
+      { ...none, at: justNow, outbound: 1, delivered: 1, read: 1 },
+      { ...none, at: nineDaysAgo, outbound: 1, delivered: 1 },
+      { ...none, at: yesterday, outbound: -1, delivered: -1 },
+      { ...none, at: goneInbound!.created_at, inbound: -1 },
     ];
-    const none = { outbound: 0, failed: 0, inbound: 0, delivered: 0, read: 0 };
     for (const days of [7, 30] as const) {
       const call = new Date();
       const after = await ops().usage(staff, days);
@@ -488,6 +490,7 @@ describe('company health and signals', () => {
           outbound: e.outbound + c.outbound,
           failed: e.failed + c.failed,
           inbound: e.inbound + c.inbound,
+          canceled: e.canceled + c.canceled,
           delivered: e.delivered + c.delivered,
           read: e.read + c.read,
         });
@@ -500,13 +503,14 @@ describe('company health and signals', () => {
             outbound: d.outbound - was.outbound,
             failed: d.failed - was.failed,
             inbound: d.inbound - was.inbound,
+            canceled: (d.canceled ?? 0) - (was.canceled ?? 0),
             delivered: (d.delivered ?? 0) - (was.delivered ?? 0),
             read: (d.read ?? 0) - (was.read ?? 0),
           },
           `${days} days, ${d.day}`,
         ).toEqual(expected.get(d.day) ?? none);
-        // Live days always count their deliveries.
-        expect([d.delivered, d.read], d.day).not.toContain(null);
+        // Live days always count their sends cancelled, delivered and read.
+        expect([d.canceled, d.delivered, d.read], d.day).not.toContain(null);
       }
     }
     expect(JSON.stringify(before)).not.toContain('Counting the days');
@@ -523,10 +527,12 @@ describe('company health and signals', () => {
     const yesterday = ago(24 * hour);
     await messageAt(one, oneConversation, 'outbound', 'delivered', fourDaysAgo);
     await messageAt(one, oneConversation, 'outbound', 'failed', fourDaysAgo);
-    // Its sends delivered and read (ADR-346): read, played and still on their way.
+    // Its sends cancelled, delivered and read (ADR-346): read, played, still on their way and
+    // cancelled before they left.
     await messageAt(one, oneConversation, 'outbound', 'read', fourDaysAgo);
     await messageAt(one, oneConversation, 'outbound', 'played', fourDaysAgo);
     await messageAt(one, oneConversation, 'outbound', 'sent', fourDaysAgo);
+    await messageAt(one, oneConversation, 'outbound', 'canceled', fourDaysAgo);
     await messageAt(one, oneConversation, 'inbound', 'received', yesterday);
     // Before the 30 days, and another company's on a day counted.
     await messageAt(one, oneConversation, 'outbound', 'delivered', ago(31 * 24 * hour));
@@ -550,18 +556,19 @@ describe('company health and signals', () => {
     expectConsecutiveDays(days);
     expect([call, returned].map(utcDay)).toContain(days.at(-1));
     // Exactly the company's own messages of the 30 days, each on its day; of its sends, those
-    // delivered (delivered, read or played) and read (read or played).
+    // cancelled, delivered (delivered, read or played) and read (read or played).
     type Counts = {
       outbound: number;
       failed: number;
       inbound: number;
+      canceled: number;
       delivered: number;
       read: number;
     };
-    const zero: Counts = { outbound: 0, failed: 0, inbound: 0, delivered: 0, read: 0 };
+    const zero: Counts = { outbound: 0, failed: 0, inbound: 0, canceled: 0, delivered: 0, read: 0 };
     const expected = new Map<string, Counts>();
     for (const [at, change] of [
-      [fourDaysAgo, { outbound: 5, failed: 1, inbound: 0, delivered: 3, read: 2 }],
+      [fourDaysAgo, { outbound: 6, failed: 1, inbound: 0, canceled: 1, delivered: 3, read: 2 }],
       [yesterday, { ...zero, inbound: 1 }],
       [first!.created_at, { ...zero, inbound: 1 }],
     ] as const) {
@@ -570,6 +577,7 @@ describe('company health and signals', () => {
         outbound: e.outbound + change.outbound,
         failed: e.failed + change.failed,
         inbound: e.inbound + change.inbound,
+        canceled: e.canceled + change.canceled,
         delivered: e.delivered + change.delivered,
         read: e.read + change.read,
       });
@@ -580,6 +588,7 @@ describe('company health and signals', () => {
           outbound: d.outbound,
           failed: d.failed,
           inbound: d.inbound,
+          canceled: d.canceled,
           delivered: d.delivered,
           read: d.read,
         },
@@ -594,7 +603,7 @@ describe('company health and signals', () => {
       activity!.failed,
       activity!.inbound,
     ]);
-    expect(activity).toMatchObject({ outbound: 5, failed: 1, inbound: 2 });
+    expect(activity).toMatchObject({ outbound: 6, failed: 1, inbound: 2 });
     expect(JSON.stringify(health)).not.toContain('Counting the days');
   });
 
@@ -4057,9 +4066,11 @@ describe('messages a day kept as days pass (ADR-341)', () => {
     const health = await ops().companyHealth(staff, kept.tenant.id);
     expect(health?.year?.uncounted).toBe(0);
     expect(health?.year?.days.map((d) => d.day)).toEqual(year);
-    expect(health?.year?.days.filter((d) => d.outbound + d.inbound > 0)).toEqual(
-      await daysOf(kept),
-    );
+    expect(
+      health?.year?.days
+        .filter((d) => d.outbound + d.inbound > 0)
+        .map(({ day, outbound, failed, inbound }) => ({ day, outbound, failed, inbound })),
+    ).toEqual(await daysOf(kept));
     expect(JSON.stringify(read)).not.toContain('Counting the days');
 
     // Days not counted yet are left out of the year, from the latest uncounted day back.
@@ -4077,7 +4088,7 @@ describe('messages a day kept as days pass (ADR-341)', () => {
     expect((await ops().messageYear(staff)).uncounted).toBe(0);
   });
 
-  it('keeps each day’s sends delivered and read, and counts again the days counted before them (ADR-346)', async () => {
+  it('keeps each day’s sends cancelled, delivered and read, and counts again the days counted before them (ADR-346)', async () => {
     // The counts are the platform's: this test starts them afresh.
     await fx.query('DELETE FROM ops.platform_message_days');
     await fx.query('DELETE FROM ops.platform_message_days_counted');
@@ -4087,25 +4098,32 @@ describe('messages a day kept as days pass (ADR-341)', () => {
     today = clock!.day;
     const sender = await fx.company();
     const conversation = await conversationOf(sender, '919876500045');
-    for (const status of ['delivered', 'read', 'played', 'failed', 'sent']) {
+    for (const status of ['delivered', 'read', 'played', 'failed', 'sent', 'canceled']) {
       await messageAt(sender, conversation, 'outbound', status, noonDaysAgo(9));
     }
     await messageAt(sender, conversation, 'outbound', 'read', noonDaysAgo(10));
-    // Days 9 and 10 counted before 0264, without their deliveries, as a deployment finds them; every
-    // other day of the year counted with them.
+    // Days 9 and 10 counted before 0264, without their sends cancelled, delivered and read, as a
+    // deployment finds them; every other day of the year counted with them.
     await fx.query(
-      `INSERT INTO ops.platform_message_days_counted (utc_day, counted_at, deliveries)
+      `INSERT INTO ops.platform_message_days_counted (utc_day, counted_at, outcomes)
        SELECT (now() AT TIME ZONE 'UTC')::date - g.n, now(), g.n NOT IN (9, 10)
          FROM generate_series(1, 365) AS g(n)`,
     );
     await fx.query(
       `INSERT INTO ops.platform_message_days (tenant_id, utc_day, outbound, failed, inbound)
-       VALUES ($1, $2::date, 5, 1, 0), ($1, $3::date, 1, 0, 0)`,
+       VALUES ($1, $2::date, 6, 1, 0), ($1, $3::date, 1, 0, 0)`,
       [sender.tenant.id, utcDay(noonDaysAgo(9)), utcDay(noonDaysAgo(10))],
     );
+    type Kept = {
+      day: string;
+      outbound: number;
+      canceled: number | null;
+      delivered: number | null;
+      read: number | null;
+    };
     const keptOf = (c: Company) =>
-      fx.query<{ day: string; outbound: number; delivered: number | null; read: number | null }>(
-        `SELECT to_char(utc_day, 'YYYY-MM-DD') AS day, outbound, delivered, read
+      fx.query<Kept>(
+        `SELECT to_char(utc_day, 'YYYY-MM-DD') AS day, outbound, canceled, delivered, read
            FROM ops.platform_message_days WHERE tenant_id = $1 ORDER BY utc_day`,
         [c.tenant.id],
       );
@@ -4113,28 +4131,42 @@ describe('messages a day kept as days pass (ADR-341)', () => {
       (await ops().companyHealth(staff, sender.tenant.id))?.year?.days.find(
         (d) => d.day === utcDay(noonDaysAgo(n)),
       );
-    // Until they are counted again, the year has those days without their deliveries.
-    expect(await yearOf(9)).toMatchObject({ outbound: 5, failed: 1, delivered: null, read: null });
+    const unknown = { canceled: null, delivered: null, read: null };
+    // Until they are counted again, the year has those days without them.
+    expect(await yearOf(9)).toMatchObject({ outbound: 6, failed: 1, ...unknown });
 
-    // Counted again newest first, with their deliveries; then nothing is due.
+    // Counted again newest first, with them; then nothing is due.
     expect(await count(1)).toEqual({ purged: 0, counted: 1 });
     expect(await keptOf(sender)).toEqual([
-      { day: utcDay(noonDaysAgo(10)), outbound: 1, delivered: null, read: null },
-      { day: utcDay(noonDaysAgo(9)), outbound: 5, delivered: 3, read: 2 },
+      { day: utcDay(noonDaysAgo(10)), outbound: 1, ...unknown },
+      { day: utcDay(noonDaysAgo(9)), outbound: 6, canceled: 1, delivered: 3, read: 2 },
     ]);
     expect(await count(31)).toEqual({ purged: 0, counted: 1 });
     expect(await count(31)).toEqual({ purged: 0, counted: 0 });
     expect(await keptOf(sender)).toEqual([
-      { day: utcDay(noonDaysAgo(10)), outbound: 1, delivered: 1, read: 1 },
-      { day: utcDay(noonDaysAgo(9)), outbound: 5, delivered: 3, read: 2 },
+      { day: utcDay(noonDaysAgo(10)), outbound: 1, canceled: 0, delivered: 1, read: 1 },
+      { day: utcDay(noonDaysAgo(9)), outbound: 6, canceled: 1, delivered: 3, read: 2 },
     ]);
-    expect(await yearOf(9)).toMatchObject({ outbound: 5, failed: 1, delivered: 3, read: 2 });
-    expect(await yearOf(10)).toMatchObject({ outbound: 1, failed: 0, delivered: 1, read: 1 });
-    // A day counted with its deliveries and without messages has none, not none counted.
-    expect(await yearOf(20)).toMatchObject({ outbound: 0, delivered: 0, read: 0 });
+    expect(await yearOf(9)).toMatchObject({
+      outbound: 6,
+      failed: 1,
+      canceled: 1,
+      delivered: 3,
+      read: 2,
+    });
+    expect(await yearOf(10)).toMatchObject({
+      outbound: 1,
+      failed: 0,
+      canceled: 0,
+      delivered: 1,
+      read: 1,
+    });
+    // A day counted with them and without messages has none, not none counted.
+    expect(await yearOf(20)).toMatchObject({ outbound: 0, canceled: 0, delivered: 0, read: 0 });
     // The platform's year sums the companies not deleted, as for the other counts.
-    const [sums] = await fx.query<{ delivered: number; read: number }>(
-      `SELECT sum(m.delivered)::int AS delivered, sum(m.read)::int AS read
+    const [sums] = await fx.query<{ canceled: number; delivered: number; read: number }>(
+      `SELECT sum(m.canceled)::int AS canceled, sum(m.delivered)::int AS delivered,
+              sum(m.read)::int AS read
          FROM ops.platform_message_days m JOIN app.tenants t ON t.id = m.tenant_id
         WHERE t.status <> 'deleted' AND m.utc_day = $1::date`,
       [utcDay(noonDaysAgo(9))],
@@ -4143,24 +4175,28 @@ describe('messages a day kept as days pass (ADR-341)', () => {
       (await ops().messageYear(staff)).days.find((d) => d.day === utcDay(noonDaysAgo(9))),
     ).toMatchObject(sums!);
 
-    // Delivered and read are given together; a send delivered did not fail, and one read was
-    // delivered.
-    for (const [delivered, read] of [
-      [1, null],
-      [null, 1],
-      [5, 1],
-      [2, 3],
-      [-1, 0],
+    // Cancelled, delivered and read are given together; a send is at most one of cancelled, failed
+    // and delivered, and one read was delivered (5 sent, 1 failed).
+    for (const [canceled, delivered, read] of [
+      [0, 1, null],
+      [0, null, 1],
+      [null, 1, 1],
+      [1, null, null],
+      [0, 5, 1],
+      [2, 3, 0],
+      [0, 2, 3],
+      [0, -1, 0],
+      [-1, 1, 0],
     ]) {
       await expect(
         fx.query(
           `INSERT INTO ops.platform_message_days
-             (tenant_id, utc_day, outbound, failed, inbound, delivered, read)
-           VALUES ($1, (now() AT TIME ZONE 'UTC')::date - 30, 5, 1, 0, $2, $3)`,
-          [sender.tenant.id, delivered, read],
+             (tenant_id, utc_day, outbound, failed, inbound, canceled, delivered, read)
+           VALUES ($1, (now() AT TIME ZONE 'UTC')::date - 30, 5, 1, 0, $2, $3, $4)`,
+          [sender.tenant.id, canceled, delivered, read],
         ),
-        `${delivered}, ${read}`,
-      ).rejects.toThrow(/platform_message_days_delivered_check/);
+        `${canceled}, ${delivered}, ${read}`,
+      ).rejects.toThrow(/platform_message_days_statuses_check/);
     }
   });
 

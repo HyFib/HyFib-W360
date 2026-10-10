@@ -2748,13 +2748,15 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   the slider, the gridlines, the days' names, the crosshair and the tooltip; each chart gives it a
   `draw` callback for its layout, marks and tooltip at the measured width. No query changed.
 - **Sends delivered and read (ADR-346, migration 0264):** `ops.platform_ops_daily_activity` and the
-  kept counts (`ops.platform_message_days.delivered` and `.read`, with
-  `ops.platform_message_days_counted.deliveries`) count the sends whose status got to delivered
-  (delivered, read or played) and to read (read or played). The counting job counts again, newest
-  first, the days counted without them, and `ops.platform_ops_message_days` gives null for those
-  until it has. `deliveredShare`, `readShare` and `deliveryShareLayout` (`platform/ops-chart.ts`)
-  lay out `DailyDeliveryShareChart` under the failed sends' chart, on the edges all three charts
-  share (`sharedPlotEdges`), and the table of the days gives each count with its share of the sent.
+  kept counts (`ops.platform_message_days.canceled`, `.delivered` and `.read`, with
+  `ops.platform_message_days_counted.outcomes`) count the sends cancelled before they left (status
+  `canceled`), those whose status got to delivered (delivered, read or played) and those that got to
+  read (read or played). The counting job counts again, newest first, the days counted without them,
+  and `ops.platform_ops_message_days` gives null for those until it has. The shares are of the sends
+  not cancelled (`shareBase`), the failed one of ADR-344 too, as the company reports count them.
+  `deliveredShare`, `readShare` and `deliveryShareLayout` (`platform/ops-chart.ts`) lay out
+  `DailyDeliveryShareChart` under the failed sends' chart, on the edges all three charts share
+  (`sharedPlotEdges`), and the table of the days gives the cancelled and each count with its share.
 - **Exports (ADR-154, ADR-155, ADR-158):** `/platform/ops/export/[list]` (a route handler behind the
   pages' platform actor check; a name of `OPS_EXPORT_LISTS`, any other not found) calls
   `exportList`, which checks in its transaction that the actor is a platform administrator, reads

@@ -3834,12 +3834,14 @@ as it finishes could leave.
 
 **Delivered and read (ADR-346).** Under the failed sends' chart, the Usage tab and a company's page
 draw the share of each day's sends delivered (their status delivered, read or played) and read (read
-or played). Read counts what WhatsApp reported read. The latest days' shares grow as statuses
-arrive, so today's is low while its sends are on their way. After the deployment of 0264 the worker
-counts every day of the year again, 3 a minute, newest first, for about two hours: until it has, the
-year's chart has gaps, or a note that the deliveries are not counted yet, and the table says "Not
-counted". Gaps that stay long after a deployment mean the counting job does not run or fails, as for
-the days not counted.
+or played). Read counts what WhatsApp reported read. Every share, the failed one too, is of the
+sends not cancelled: a paused or cancelled campaign's queued sends are cancelled, and the table's
+"Cancelled" column counts them, so a pause is not a fall in deliveries; a day whose sends were all
+cancelled has no share. The latest days' shares grow as statuses arrive, so today's is low while its
+sends are on their way. After the deployment of 0264 the worker counts every day of the year again,
+3 a minute, newest first, for about two hours: until it has, the year's chart has gaps, or a note
+that the deliveries are not counted yet, and the table says "Not counted". Gaps that stay long after
+a deployment mean the counting job does not run or fails, as for the days not counted.
 
 **Acknowledging failures (ADR-141).** On Current failures, the administrator who takes a failure
 opens Acknowledge on its row and writes a note of 10 to 500 characters: what was done or found

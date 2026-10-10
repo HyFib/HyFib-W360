@@ -19,6 +19,7 @@ import {
   failedShare,
   failedShareLayout,
   nearestDayIndex,
+  shareBase,
   sharedPlotEdges,
   type DailyChartDay,
   type DailyChartLayout,
@@ -379,11 +380,12 @@ export function DailyMessagesChart({
   );
 }
 
+// Of the sends not cancelled before they left (`shareBase`, ADR-346), as the shares are.
 const describeShare = (d: DailyChartDay) => {
   const share = failedShare(d);
   return share === null
     ? `${chartDayLabel(d.day)}: none sent`
-    : `${chartDayLabel(d.day)}: ${chartShare(share)} of ${chartCount(d.outbound)} sent failed (${chartCount(d.failed)})`;
+    : `${chartDayLabel(d.day)}: ${chartShare(share)} of ${chartCount(shareBase(d))} sent failed (${chartCount(d.failed)})`;
 };
 
 /**
@@ -476,7 +478,7 @@ export function DailyFailedShareChart({ days, label }: { days: DailyChartDay[]; 
                     <span className="tabular-nums">
                       <strong>{chartCount(shown.failed)}</strong>
                       <span className="text-muted-foreground"> of </span>
-                      <strong>{chartCount(shown.outbound)}</strong>
+                      <strong>{chartCount(shareBase(shown))}</strong>
                     </span>
                     <span className="text-muted-foreground">sent</span>
                   </span>
@@ -491,11 +493,12 @@ export function DailyFailedShareChart({ days, label }: { days: DailyChartDay[]; 
 }
 
 const describeDelivery = (d: DailyChartDay) => {
-  if (d.outbound === 0) return `${chartDayLabel(d.day)}: none sent`;
+  const base = shareBase(d);
+  if (base <= 0) return `${chartDayLabel(d.day)}: none sent`;
   if (d.delivered === null || d.read === null) {
     return `${chartDayLabel(d.day)}: deliveries not counted yet`;
   }
-  return `${chartDayLabel(d.day)}: ${chartShare(d.delivered / d.outbound)} of ${chartCount(d.outbound)} sent delivered (${chartCount(d.delivered)}), ${chartShare(d.read / d.outbound)} read (${chartCount(d.read)})`;
+  return `${chartDayLabel(d.day)}: ${chartShare(d.delivered / base)} of ${chartCount(base)} sent delivered (${chartCount(d.delivered)}), ${chartShare(d.read / base)} read (${chartCount(d.read)})`;
 };
 
 /**
@@ -611,7 +614,7 @@ export function DailyDeliveryShareChart({
                 <span className="text-xs text-muted-foreground">
                   {chartDayLabel(shown.day)} (UTC)
                 </span>
-                {shown.outbound === 0 ? (
+                {shareBase(shown) <= 0 ? (
                   <span className="text-muted-foreground">No message sent</span>
                 ) : shown.delivered === null || shown.read === null ? (
                   <span className="text-muted-foreground">Deliveries not counted yet</span>
@@ -636,7 +639,7 @@ export function DailyDeliveryShareChart({
                     })}
                     <span className="flex items-center gap-2">
                       <span className="w-4 shrink-0" />
-                      <strong className="tabular-nums">{chartCount(shown.outbound)}</strong>
+                      <strong className="tabular-nums">{chartCount(shareBase(shown))}</strong>
                       <span className="text-muted-foreground">sent</span>
                     </span>
                   </>

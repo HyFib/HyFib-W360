@@ -760,7 +760,7 @@ export default async function PlatformTenantPage({ params }: { params: Promise<{
                 </h3>
                 <p className="text-muted-foreground">
                   Each UTC day of the 365 before today, as the worker counts them once each day has
-                  ended and again each day for a week: a failure reported later than that is not
+                  ended and again each day for a week: a status reported later than that is not
                   among them.
                   {ops.year && ops.year.uncounted > 0
                     ? ` ${ops.year.uncounted} of the 365 days ${ops.year.uncounted === 1 ? 'is' : 'are'} not counted yet.`
