@@ -3373,6 +3373,18 @@ To take more, tick the kinds under "Kinds of step sent" on the endpoint's page (
 the steps outside a node), or `PATCH /webhook-endpoints/{id}` with `runStepNodeTypes` (null for
 every step). Removing Automation step clears the list.
 
+**A receiver misses a cash on delivery answer, or gets `event_gone` for one (ADR-348).**
+`store_order.cod_answered` is sent when a customer's tap on a store's cash on delivery confirmation
+changes the answer kept: the first answer, and a later tap with the other button. A tap repeating
+the answer, an older tap arriving late, another customer's tap or one replying to another message
+records nothing and sends nothing (the order's page in Stores shows the answer kept). An endpoint
+that names numbers gets it only for the number the confirmation was sent from. Events no endpoint
+takes are not recorded, so there is nothing to replay for answers given before the endpoint took
+the event. Removing the store deletes its copy of the orders with their confirmations: a delivery
+not yet made then fails as `event_gone`, and a replay fails the same way. An order the store
+deleted stays in the copy and is sent with `storeOrder.deletedAt`. The body never holds the
+customer's details from the store; `contact` is the conversation's contact.
+
 **A receiver misses the events of a member's conversations (ADR-181).** An endpoint can take the
 message and conversation events of the conversations assigned to chosen members only. The endpoints
 list shows them ("Members whose conversations’ events are sent: …"), and the API answers

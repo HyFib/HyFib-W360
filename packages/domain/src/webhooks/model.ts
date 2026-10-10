@@ -80,6 +80,7 @@ export const WEBHOOK_EVENT_KEYS = [
   'order.received',
   'order.status_changed',
   'payment_link.status_changed',
+  'store_order.cod_answered',
   'campaign.status_changed',
   'deal.created',
   'deal.updated',
@@ -181,6 +182,11 @@ export const WEBHOOK_EVENT_INFO: Record<WebhookEventType, { label: string; descr
       label: 'Payment Link status',
       description:
         'A Payment Link for a WhatsApp order was created at Razorpay (sent in the chat or not), partly paid, paid, expired or cancelled, or Razorpay could not create it.',
+    },
+    'store_order.cod_answered': {
+      label: 'Cash on delivery answered',
+      description:
+        'A customer confirmed or cancelled a cash on delivery order from a connected store by tapping a button of its confirmation message, or changed their answer.',
     },
     'campaign.status_changed': {
       label: 'Campaign status',
@@ -1287,8 +1293,9 @@ export const webhookApiKeyText = (key: WebhookEndpointApiKey): string => {
 /**
  * The events that happen on a WhatsApp number, which an endpoint can take for chosen numbers
  * (ADR-170): a campaign's are on the number it sends from, a Payment Link's on its order's (ADR-285),
- * a survey's answer on its conversation's (ADR-293), a run's step on its run's (ADR-326). Consent,
- * contact, template, deal, task and note events belong to no number.
+ * a survey's answer on its conversation's (ADR-293), a run's step on its run's (ADR-326), a cash on
+ * delivery answer on its confirmation's (ADR-348). Consent, contact, template, deal, task and note
+ * events belong to no number.
  */
 export const WEBHOOK_CHANNEL_EVENTS = [
   'message.received',
@@ -1303,6 +1310,7 @@ export const WEBHOOK_CHANNEL_EVENTS = [
   'order.received',
   'order.status_changed',
   'payment_link.status_changed',
+  'store_order.cod_answered',
   'campaign.status_changed',
 ] as const satisfies readonly WebhookEventType[];
 

@@ -10,7 +10,7 @@ const tz = (name: string) => timestamp(name, { withTimezone: true, mode: 'date' 
 
 /**
  * Event types an endpoint can receive (ADR-053, ADR-074, ADR-078, ADR-085, ADR-225, ADR-256,
- * ADR-261, ADR-326); `ping` is only sent as a test.
+ * ADR-261, ADR-326, ADR-348); `ping` is only sent as a test.
  */
 export const WEBHOOK_EVENT_TYPES = [
   'message.received',
@@ -31,6 +31,7 @@ export const WEBHOOK_EVENT_TYPES = [
   'order.received',
   'order.status_changed',
   'payment_link.status_changed',
+  'store_order.cod_answered',
   'campaign.status_changed',
   'deal.created',
   'deal.updated',

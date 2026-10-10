@@ -1873,6 +1873,16 @@ Phase 5 rules (outgoing webhooks, P5-09):
   withheld as the run's answers are) or its detail. The run filters narrow it as they narrow the run
   events, and the run's number, trigger and key are taken out of the stored detail (unit tests;
   integration tests, run in CI only).
+- Cash on delivery answer events (ADR-348): `store_order.cod_answered` is captured by a trigger in
+  the transaction that records a confirmation's answer, as the runtime role in the company's scope
+  (the ingestion of the customer's tap, the only writer of an answer), and delivered only to the
+  company's endpoints that take it (and name the confirmation's number, when they name numbers). The
+  trigger function is not executable by PUBLIC or any role. The body gives ids, the answers, the
+  store's order id, name, statuses and total, the store's platform, name and address, and the
+  contact's name and number (null once erased) as the message events do; never the customer's name,
+  phone, email, address, tracking or status page from the store's order, which the contact stands
+  for. A confirmation deleted with its order or store fails its pending deliveries as `event_gone`
+  (unit tests; an integration test, run in CI only).
 - An endpoint can take the run steps of chosen outcomes only (ADR-327). The list holds only the
   outcomes a run's log records (checked by the services and the database), is kept only while the
   endpoint takes `automation.run_step` (a database check too), and is applied in

@@ -1,5 +1,61 @@
 # Progress
 
+## 2026-10-10 — Cash on delivery answers as webhook events (P5-09, H-014, ADR-348)
+
+Status: **Implemented; its database tests run in CI only.** A store's cash on delivery message asks
+the customer to confirm or cancel the order with a button, and HyFib changes nothing in the store:
+an order system learned the answer only from `message.received`, a tap that is not always an answer
+and names no order. Store orders themselves stay out of webhooks (ADR-085): the store reports them.
+The local PostgreSQL is unavailable, so migrations 0266 and 0267 and the integration tests below
+were written but not run here; the migrations passed the pglast parse check (syntax only), their
+PL/pgSQL bodies included.
+
+### Completed
+
+- **Database:** migration 0266: `store_order.cod_answered` in the endpoints' event and number checks
+  and the events' type check (`NOT VALID`; 0267 validates it), the trigger
+  `commerce_store_messages_webhook_cod_answer` (after an update of the answer that changes it to
+  another one) with `app.webhook_capture_store_cod_answer`, executable by no role, and
+  `app.capture_webhook_event` replaced with the same signature, 0257's with the event among a
+  number's (only the two lists differ). The event keeps the store message, its order, the answer
+  before, the tap's time and message; the number travels for the filter only.
+- **Domain:** the event type, its label and its place among a number's events;
+  `storeOrderCodAnsweredPayloadSchema` and `storeConfirmationOf`: `confirmation` (the answer, the one
+  before, when the customer tapped, the confirmation and the tap's messages, as captured),
+  `storeOrder` (the store's order id and name, the status, Shopify's payment and fulfilment statuses,
+  test, currency, total in minor units, placed, cancelled and deleted times) and `store` (platform,
+  name, address) as they are when delivered, with the conversation, its contact and the number;
+  never the customer's details from the store. A confirmation gone fails as `event_gone`; an event
+  without its tap is refused. The OpenAPI webhook, and the number filter's descriptions in the API
+  document and Settings, which now name every event of a number.
+- **Tests:** unit (7 new in `webhooks/webhooks.test.ts`: the label and number, the schema without
+  the store's customer details, the body as captured and as now, a first answer, a cancelled and
+  deleted order and an erased contact, a confirmation gone or not an id, an event without its tap,
+  the OpenAPI wording; the event lists, the number filter's payloads and descriptions updated);
+  integration (the cash on delivery test in `stores.test.ts`, against the Shopify stand-in: endpoints
+  on every number, on the confirmation's and on another number; the cancellation and the later
+  confirmation captured once each with the answer before them, the late older tap, another
+  customer's tap and a reply to another message capturing nothing; the bodies delivered to the first
+  two and none to the third; the trigger function in the isolation suite's list for nobody). Written
+  for CI; the integration tests were not run here. No e2e test: Settings lists the event from the
+  model.
+- **Docs:** ADR-348; ARCHITECTURE; SECURITY; THREAT-MODEL T307; DEPLOYMENT (0266, 0267); RUNBOOKS;
+  BACKLOG P5-09; feature matrix W-138 and H-014.
+- **Mutation checks:** 19/19 deliberate regressions caught on the unit-tested parts (the answer, the
+  one before, the tap's time, the confirmation's id, an event without its tap message, the order's
+  times, the contact and number, an id that is not one read, the schemas opened to any answer or a
+  fractional total, the payload without its number, the event left out of a number's, the OpenAPI
+  wording and the number filter's descriptions).
+
+### Test commands and results (local, 2026-10-10)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 146 files, 1483 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+
 ## 2026-10-10 — Failed sends by reason (P5-10, H-034, ADR-347)
 
 Status: **Implemented; its database and browser tests run in CI only.** The console drew each day's

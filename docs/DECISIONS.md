@@ -13633,3 +13633,47 @@ counts do not keep them.
 
 Not built: failed sends by reason over the year, by reason and day, in a CSV, and the error titles,
 which stay in the company's inbox.
+
+## ADR-348 A webhook event when a customer answers a cash on delivery confirmation (P5-09) (2026-10-10)
+
+Context: a connected store's cash on delivery message carries two quick-reply buttons, one
+confirming the order and one cancelling it (ADR-048). The customer's tap is recorded on the store
+message as its answer, and HyFib changes nothing in the store: a cancellation reopens the
+conversation so the team cancels the order there. An order system learned of the answer only from
+`message.received`, a tap that is not always an answer (only a tap in the confirmation's own
+conversation, replying to it when it names a message, counts, and an older tap arriving late does
+not replace a newer answer) and that names no order. ADR-085 left store orders out of webhooks,
+since the store reports its orders through its own webhooks; BACKLOG kept "events for store orders"
+as remaining. The answer is the one fact about a store order that only HyFib knows.
+
+Decision:
+
+- **`store_order.cod_answered`** ("Cash on delivery answered"), captured by a trigger on
+  `app.commerce_store_messages` when a confirmation's answer changes: its first answer, and each
+  later tap that replaces it with the other one. A tap that repeats the answer kept only moves its
+  time and sends nothing; an older tap, another customer's and one replying to another message are
+  not recorded and send nothing. Only the ingestion of the customer's tap writes an answer, as the
+  runtime role in the company's scope (migrations 0266 and 0267).
+- **As captured and as now:** the event keeps the answer (its status), the one before it, when the
+  customer tapped and the tap's message, so a later answer cannot change what an earlier event
+  reports. The body gives them as `confirmation` with the confirmation message's id, and, as they
+  are when the event is delivered, `storeOrder` (HyFib's copy: the store's own order id and name,
+  the status, Shopify's payment and fulfilment statuses, test, the currency and total in minor
+  units, when it was placed and cancelled, and when HyFib learned the store deleted it) and `store`
+  (platform, name and address), with the conversation, its contact and the number.
+- **Never the customer's details from the store:** no name, phone, email, address, tracking or
+  status page from the order; the contact stands for the customer, as erasure left it. Store orders
+  themselves are still not sent, as ADR-085 decided.
+- **Filters:** it happens on the number the confirmation was sent from, the conversation's, so the
+  number filter narrows it (0266 replaces 0257's capture with the event among the number's events,
+  and the endpoints' number check). No other filter applies to it.
+- **Gone:** a confirmation is deleted with its order or its store (removing a store deletes its
+  copy), so a delivery not yet made then fails as `event_gone`.
+- **Who receives it:** endpoints, which owners and administrators add in Settings → Webhooks or keys
+  add with `webhooks.manage`, as for every other event. The number filter's descriptions in the API
+  document and Settings now name every event of a number: survey answers and Payment Links had been
+  left out of them, and run steps of the endpoint field's list.
+
+Not built: the order messages a store sends as their own events (their statuses are
+`message.status`), events for the store's orders themselves, a filter by store, and an event when a
+confirmation is sent or skipped.

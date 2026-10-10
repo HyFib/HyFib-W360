@@ -48,6 +48,7 @@ import { enqueueEmail, type OutboxDeps } from '../email/outbox';
 import { deletionRecipients, formatCompanyTime } from '../tenancy/deletion';
 import { decodeKeysetCursor, encodeKeysetCursor, parseInput } from '../validation';
 import {
+  WEBHOOK_CHANNEL_EVENTS,
   WEBHOOK_EVENT_INFO,
   WEBHOOK_LIMITS,
   webhookHost,
@@ -596,7 +597,7 @@ const invalidRunEndReasons = () =>
   });
 
 const channelIdsField = webhookChannelIdsSchema.describe(
-  `The WhatsApp numbers whose events the endpoint receives: 1 to ${WEBHOOK_LIMITS.channels} ids of the company's numbers (messages, conversations and orders give a number's id as \`channelId\`, templates in \`channels\` and webhook events as \`channel.id\`), only with an event that happens on a number: message.received, message.status, conversation.status_changed, conversation.assignment_changed, conversation.team_changed, automation.run_started, automation.run_ended, order.received, order.status_changed or campaign.status_changed. A campaign's events are those of the number it sends from; a campaign without a number yet is on none. Consent, contact, template, deal and task events belong to no number: an endpoint that names numbers still receives every one of them it takes. null receives the events of every number, including numbers connected later.`,
+  `The WhatsApp numbers whose events the endpoint receives: 1 to ${WEBHOOK_LIMITS.channels} ids of the company's numbers (messages, conversations and orders give a number's id as \`channelId\`, templates in \`channels\` and webhook events as \`channel.id\`), only with an event that happens on a number: ${WEBHOOK_CHANNEL_EVENTS.slice(0, -1).join(', ')} or ${WEBHOOK_CHANNEL_EVENTS.at(-1)}. A campaign's events are those of the number it sends from; a campaign without a number yet is on none. A Payment Link's are those of its order's number, and a satisfaction survey's or a cash on delivery confirmation's answer that of its conversation. Consent, contact, template, deal, task and note events belong to no number: an endpoint that names numbers still receives every one of them it takes. null receives the events of every number, including numbers connected later.`,
 );
 
 /** Numbers are chosen only for an endpoint that receives events of numbers (ADR-170). */

@@ -1894,6 +1894,16 @@ true`); the same key with another request (method, path and body hashed) answers
   takes any of the three. The payload is built when delivered from the step and the run: the step's
   number, node type, outcome and message id, never its branch or detail; the run's id, automation,
   trigger, key and start; the conversation, contact and number.
+- **Cash on delivery answers as webhook events** (migrations 0266–0267, ADR-348):
+  `commerce_store_messages_webhook_cod_answer`, an `AFTER UPDATE OF answer` trigger on
+  `app.commerce_store_messages` that fires only when the answer changes to another one
+  (`app.webhook_capture_store_cod_answer`), captures `store_order.cod_answered` through
+  `app.capture_webhook_event` (replaced with the same signature, the event among a number's): the
+  answer as the status; the store message, its order, the answer before it, the tap's time and
+  message in `detail`; the confirmation's conversation, its contact and, for the number filter
+  only, its number. `buildWebhookPayload` reads the confirmation with `storeConfirmationOf` (the
+  order, its store and the confirmation message's conversation and number joined) and gives the
+  answer as captured, the order and store as they are now, never the store's customer details.
 - **Step outcome filters** (migration 0249, ADR-327): `run_step_outcomes` on an endpoint lists the
   outcomes of the run steps it takes as `automation.run_step`, null for every step; a check keeps it
   to 1 to 21 known outcomes and to endpoints that take `automation.run_step`.

@@ -16,6 +16,9 @@ import {
   commerceOrderItems,
   commerceOrders,
   commercePaymentLinks,
+  commerceStoreMessages,
+  commerceStoreOrders,
+  commerceStores,
   contactMerges,
   contacts,
   CONVERSATION_STATUSES,
@@ -34,6 +37,8 @@ import {
   ORDER_STATUS_CHANGERS,
   PAYMENT_LINK_STATUSES,
   sql,
+  STORE_MESSAGE_ANSWERS,
+  STORE_PLATFORMS,
   TASK_STATUSES,
   type OrderStatusChanger,
   type Tx,
@@ -928,6 +933,87 @@ export const satisfactionSurveyAnsweredPayloadSchema = envelope(
   }),
 );
 
+/**
+ * A customer's answer to a store order's cash on delivery confirmation (ADR-348): the answer, the one
+ * before it, the tap and the confirmation as captured; the order and its store as they are when the
+ * event is delivered. Never the customer's details from the store, which the contact replaces.
+ */
+const webhookStoreConfirmationSchema = z.object({
+  answer: z
+    .enum(STORE_MESSAGE_ANSWERS)
+    .describe(
+      'The answer this event reports, by the button the customer tapped: confirmed or cancelled.',
+    ),
+  previousAnswer: z
+    .enum(STORE_MESSAGE_ANSWERS)
+    .nullable()
+    .describe('The answer it replaced; null for the first.'),
+  answeredAt: z.iso.datetime().describe('When the customer tapped, as WhatsApp dated the tap.'),
+  messageId: z
+    .uuid()
+    .describe('The cash on delivery confirmation HyFib sent, among the conversation’s messages.'),
+  answerMessageId: z.uuid().describe('The customer’s tap, among the conversation’s messages.'),
+});
+const webhookStoreOrderSchema = z.object({
+  id: z.uuid().describe('HyFib’s copy of the order.'),
+  externalId: z.string().describe('The order’s id at the store, to find it there.'),
+  name: z.string().describe('The order’s name at the store, like #1001.'),
+  status: z
+    .string()
+    .describe(
+      'The order’s status as HyFib’s copy keeps it: open, closed or cancelled for a Shopify order; the store’s own status, like processing or completed, for a WooCommerce order.',
+    ),
+  financialStatus: z
+    .string()
+    .nullable()
+    .describe(
+      'Shopify’s payment status in lower case, like pending or paid; null for WooCommerce.',
+    ),
+  fulfillmentStatus: z
+    .string()
+    .nullable()
+    .describe(
+      'Shopify’s fulfilment status in lower case, like unfulfilled or fulfilled; null for WooCommerce.',
+    ),
+  test: z.boolean().describe('A test order.'),
+  currency: z.string().nullable().describe('ISO 4217 code; null when the store gave none.'),
+  totalMinor: z
+    .number()
+    .int()
+    .nullable()
+    .describe(
+      'The order’s total as an integer in the currency’s minor units; null without a currency.',
+    ),
+  placedAt: z.iso.datetime(),
+  cancelledAt: z.iso
+    .datetime()
+    .nullable()
+    .describe(
+      'When the store says the order was cancelled; null when it was not, or when the store gives no time (WooCommerce).',
+    ),
+  deletedAt: z.iso
+    .datetime()
+    .nullable()
+    .describe('When HyFib learned that the store deleted the order; null while it has not.'),
+});
+const webhookStoreSchema = z.object({
+  id: z.uuid(),
+  platform: z.enum(STORE_PLATFORMS),
+  name: z.string().nullable().describe('The store’s name, as the store gives it.'),
+  url: z.string().describe('The store’s address.'),
+});
+export const storeOrderCodAnsweredPayloadSchema = envelope(
+  'store_order.cod_answered',
+  z.object({
+    confirmation: webhookStoreConfirmationSchema,
+    storeOrder: webhookStoreOrderSchema,
+    store: webhookStoreSchema,
+    conversation: z.object({ id: z.uuid() }),
+    contact: contactSchema,
+    channel: channelSchema,
+  }),
+);
+
 export const pingPayloadSchema = envelope(
   'ping',
   z.object({ endpointId: z.uuid(), message: z.string() }),
@@ -1462,6 +1548,86 @@ async function paymentLinkOf(tx: Tx, tenantId: string, linkId: string | null) {
   return row ?? null;
 }
 
+/**
+ * A store order's cash on delivery confirmation (ADR-348) with the order, its store and the
+ * confirmation's conversation, contact and number, in the company; null if there is none.
+ */
+async function storeConfirmationOf(tx: Tx, tenantId: string, storeMessageId: string | null) {
+  if (!storeMessageId || !z.uuid().safeParse(storeMessageId).success) return null;
+  const [row] = await tx
+    .select({
+      messageId: commerceStoreMessages.messageId,
+      order: {
+        id: commerceStoreOrders.id,
+        externalId: commerceStoreOrders.externalId,
+        name: commerceStoreOrders.name,
+        status: commerceStoreOrders.status,
+        financialStatus: commerceStoreOrders.financialStatus,
+        fulfillmentStatus: commerceStoreOrders.fulfillmentStatus,
+        test: commerceStoreOrders.test,
+        currency: commerceStoreOrders.currency,
+        totalMinor: commerceStoreOrders.totalMinor,
+        placedAt: commerceStoreOrders.placedAt,
+        cancelledAt: commerceStoreOrders.cancelledAt,
+        deletedAt: commerceStoreOrders.deletedAt,
+      },
+      store: {
+        id: commerceStores.id,
+        platform: commerceStores.platform,
+        name: commerceStores.name,
+        url: commerceStores.storeUrl,
+      },
+      conversationId: messages.conversationId,
+      contactId: conversations.contactId,
+      channelId: messages.channelAccountId,
+      channelPhone: channelAccounts.displayPhoneNumber,
+    })
+    .from(commerceStoreMessages)
+    .innerJoin(
+      commerceStoreOrders,
+      and(
+        eq(commerceStoreOrders.tenantId, commerceStoreMessages.tenantId),
+        eq(commerceStoreOrders.id, commerceStoreMessages.orderId),
+      ),
+    )
+    .innerJoin(
+      commerceStores,
+      and(
+        eq(commerceStores.tenantId, commerceStoreMessages.tenantId),
+        eq(commerceStores.id, commerceStoreMessages.storeId),
+      ),
+    )
+    .innerJoin(
+      messages,
+      and(
+        eq(messages.tenantId, commerceStoreMessages.tenantId),
+        eq(messages.id, commerceStoreMessages.messageId),
+      ),
+    )
+    .innerJoin(
+      conversations,
+      and(
+        eq(conversations.tenantId, messages.tenantId),
+        eq(conversations.id, messages.conversationId),
+      ),
+    )
+    .leftJoin(
+      channelAccounts,
+      and(
+        eq(channelAccounts.tenantId, messages.tenantId),
+        eq(channelAccounts.id, messages.channelAccountId),
+      ),
+    )
+    .where(
+      and(
+        eq(commerceStoreMessages.tenantId, tenantId),
+        eq(commerceStoreMessages.id, storeMessageId),
+        eq(commerceStoreMessages.event, 'cod_confirmation'),
+      ),
+    );
+  return row ?? null;
+}
+
 /** A WhatsApp order with its items in cart order and its number, in the company. */
 async function orderOf(tx: Tx, tenantId: string, orderId: string | null) {
   if (!orderId || !z.uuid().safeParse(orderId).success) return null;
@@ -1804,6 +1970,46 @@ export async function buildWebhookPayload(
           conversation: { id: link.conversationId },
           contact: await contactOf(tx, tenantId, link.contactId),
           channel: { id: link.channelId, phone: link.channelPhone ?? null },
+        },
+      };
+    }
+    case 'store_order.cod_answered': {
+      // The answer, the one before it and the tap as captured, so a later answer changes nothing
+      // here; the order and its store as they are now. A confirmation goes with its order or its
+      // store (removing a store deletes its copy), so one that is gone can no longer be described.
+      const answeredAt = str(event.detail.answeredAt);
+      const answerMessageId = str(event.detail.answerMessageId);
+      // Every such event is captured with its tap (0266): one without cannot be described.
+      if (answeredAt === null || answerMessageId === null) {
+        throw new Error('The cash on delivery answer was captured without its tap');
+      }
+      const confirmation = await storeConfirmationOf(
+        tx,
+        tenantId,
+        str(event.detail.storeMessageId),
+      );
+      if (!confirmation?.messageId) throw new WebhookEventGoneError();
+      const { order, store } = confirmation;
+      return {
+        ...base,
+        data: {
+          confirmation: {
+            answer: event.status,
+            previousAnswer: str(event.detail.previousAnswer),
+            answeredAt: new Date(answeredAt).toISOString(),
+            messageId: confirmation.messageId,
+            answerMessageId,
+          },
+          storeOrder: {
+            ...order,
+            placedAt: order.placedAt.toISOString(),
+            cancelledAt: order.cancelledAt?.toISOString() ?? null,
+            deletedAt: order.deletedAt?.toISOString() ?? null,
+          },
+          store,
+          conversation: { id: confirmation.conversationId },
+          contact: await contactOf(tx, tenantId, confirmation.contactId),
+          channel: { id: confirmation.channelId, phone: confirmation.channelPhone ?? null },
         },
       };
     }

@@ -1273,11 +1273,16 @@ verification, app review, Embedded Signup configuration).
   CI]** (ADR-339, migrations 0259 and 0260: an endpoint's whole configuration, about 103 KB at
   most, is kept with the key of `POST /webhook-endpoints` and its secret rotation, which failed past
   64 KiB).
+  **[Cash on delivery answer events built; their database tests run only in CI]** (ADR-348,
+  migrations 0266 and 0267: `store_order.cod_answered` when a customer's tap on a store's cash on
+  delivery confirmation changes the answer kept, with the answer before it, the store's order and
+  the store, never the store's customer details; the number filter narrows it).
   Remaining: filters for other event types and on a message's values other than its type and words,
   field value comparisons beyond
   values, words and ranges, other authentication (headers computed per delivery, other OAuth
-  grants), mutual TLS, fixed egress addresses, events for store orders, a sequence number across
-  events, load tests.
+  grants), mutual TLS, fixed egress addresses, other store events (the order messages a store
+  sends, a filter by store; the store's orders themselves are reported by the store, ADR-085), a
+  sequence number across events, load tests.
 - **P5-10 Platform ops screens** **[built, locally verified with test data only]** (ADR-054):
   `/platform/ops` with Overview, Onboarding (failed and abandoned signups, failed or stuck number
   setups, new companies without a number), Integrations (current failures with host-only labels,

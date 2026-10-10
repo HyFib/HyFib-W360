@@ -1360,6 +1360,19 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    it before web servers of this release roll out: the Usage tab and a company's platform page call
    it. Web servers from before it do not, and after a rollback the function stays unused.
 
+   Migration 0266 (ADR-348) replaces the endpoints' event and number checks (validated at once: at
+   most 10 endpoints per company) and the events' type check (NOT VALID; 0267 validates it while
+   captures go on), adds the trigger on `app.commerce_store_messages` and its function, and replaces
+   `app.capture_webhook_event` with the same signature (0257's, with `store_order.cod_answered`
+   among the events of a number). Each change of a cash on delivery answer then calls the capture,
+   which writes nothing while no endpoint takes the event. Workers roll out before web servers, so no
+   endpoint takes the event before every worker can describe it. A worker from before it fails each
+   delivery of the event without an attempt (`payload_failed`; replay it once newer workers run), so
+   before rolling workers back to such an image, turn the event off on the endpoints that take it.
+   Until the web rollout ends, an old web server answers Settings → Webhooks with an error for a
+   company with an endpoint taking it: add it to endpoints once the rollout ends, and turn it off
+   before rolling web servers back.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

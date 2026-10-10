@@ -1,4 +1,4 @@
-import { createHmac } from 'node:crypto';
+import { createHmac, randomBytes } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -19,6 +19,7 @@ import {
   createStoreMessagesService,
   createStoreService,
   createTemplatesService,
+  createWebhooksService,
   findDueStoreMessages,
   findDueStoreWork,
   handleShopifyWebhook,
@@ -27,11 +28,14 @@ import {
   processStoreJob,
   processStoreMessage,
   processTemplateSubmit,
+  processWebhookDeliveries,
   dayOf,
   saveStoreOrders,
   saveStoreProducts,
   STORE_LIMITS,
+  storeOrderCodAnsweredPayloadSchema,
   syncTemplates,
+  WebhookOAuthTokenCache,
   type StoreMessageEvent,
   type StoreVariables,
   type AutomationTrigger,
@@ -47,7 +51,7 @@ import {
   type StandInCheckout,
 } from '../support/shopify-stand-in';
 import { startWooStandIn, type WooStandIn } from '../support/woocommerce-stand-in';
-import { acceptInvitation, createUser, invite, type TestUser } from './helpers';
+import { acceptInvitation, createUser, failOnLog, invite, type TestUser } from './helpers';
 import { startWhatsAppFixture, type Company, type WhatsAppFixture } from './whatsapp-fixture';
 
 /**
@@ -69,6 +73,8 @@ let app: Server;
 let appBase = '';
 /** The time webhooks are handled at (a test can make every signal share one instant). */
 let webhookClock: Clock = systemClock;
+/** What the company's own webhook endpoints received (ADR-348), by path, in the order it came. */
+const hookBodies: { path: string; body: string }[] = [];
 
 beforeAll(async () => {
   fx = await startWhatsAppFixture();
@@ -100,6 +106,9 @@ beforeAll(async () => {
             deliveryId: header('x-wc-webhook-delivery-id'),
           })
         ).status;
+      } else if (url.pathname.startsWith('/hooks/')) {
+        hookBodies.push({ path: url.pathname, body: body.toString('utf8') });
+        status = 204;
       } else if (url.pathname === '/api/stores/woocommerce/callback') {
         let parsed: unknown;
         try {
@@ -177,6 +186,62 @@ const webhookDeps = () => ({
 });
 const scopeOf = (c: Company) => authorizedTenantScope(c.tenant.id, null);
 const later = (ms: number): Clock => ({ now: () => new Date(Date.now() + ms) });
+
+/** A name for the company's webhook receiver, which deliveries resolve to this test's server. */
+const HOOK_HOST = 'hooks.receiver.test';
+
+/**
+ * A webhook endpoint of the company taking `eventTypes` (and only the events of the numbers given),
+ * on a path of this test's server of its own (ADR-348).
+ */
+async function addHook(
+  owner: TenantContext,
+  eventTypes: 'store_order.cod_answered'[],
+  channelIds: string[] | null = null,
+) {
+  const path = `/hooks/${randomBytes(6).toString('hex')}`;
+  const created = await createWebhooksService({
+    db: fx.dbs.app,
+    clock: systemClock,
+    keyring: fx.keyring,
+    egressPolicy: { allowLoopbackForTests: true },
+  }).create(owner, {
+    url: `http://${HOOK_HOST}:${new URL(appBase).port}${path}`,
+    eventTypes,
+    channelIds,
+  });
+  return { ...created, path };
+}
+
+/** Delivers the company's due webhooks through the egress client, the receiver's name local. */
+async function deliverHooks(c: Company) {
+  const jobs = fx.jobs();
+  await processWebhookDeliveries(
+    {
+      db: fx.dbs.app,
+      clock: systemClock,
+      keyring: fx.keyring,
+      egress: createEgressClient(
+        { ...DEFAULT_EGRESS_POLICY, allowLoopbackForTests: true, timeoutMs: 2_000 },
+        { resolve: async () => [{ address: '127.0.0.1', family: 4 }] },
+      ),
+      timeoutMs: 2_000,
+      jobs,
+      signer: fx.signer,
+      notices: {
+        outbox: { keyring: fx.keyring, jobs, signer: fx.signer },
+        appBaseUrl: 'https://app.w360.test',
+      },
+      logger: failOnLog,
+      oauthTokens: new WebhookOAuthTokenCache(),
+    },
+    scopeOf(c),
+  );
+}
+
+/** The bodies the receiver got on a path, parsed, in the order they arrived. */
+const hookBodiesAt = (path: string) =>
+  hookBodies.filter((r) => r.path === path).map((r) => JSON.parse(r.body) as unknown);
 let shopCounter = 0;
 const newShop = () => `store-${Date.now().toString(36)}-${(shopCounter += 1)}.myshopify.com`;
 const iso = (offsetMs = 0) =>
@@ -1728,6 +1793,25 @@ describe('Order messages', () => {
       optInKeywords: '',
       requireMarketingOptIn: false,
     });
+    // The company's order system takes the answers (ADR-348): on every number, on the number the
+    // message went from, and on another number only, which hears nothing.
+    const [sentFrom] = await fx.query<{ channel_account_id: string }>(
+      'SELECT channel_account_id FROM app.messages WHERE id = $1',
+      [codRow.message_id],
+    );
+    if (!sentFrom) throw new Error('no number');
+    const outlet = await fx.addNumber(c, { phone: '+91 90000 54329' });
+    const everyNumber = await addHook(owner, ['store_order.cod_answered']);
+    const itsNumber = await addHook(
+      owner,
+      ['store_order.cod_answered'],
+      [sentFrom.channel_account_id],
+    );
+    const otherNumber = await addHook(
+      owner,
+      ['store_order.cod_answered'],
+      [outlet.channelAccountId],
+    );
     const now = Math.floor(Date.now() / 1000);
     const tap = (
       answer: 'confirm' | 'cancel',
@@ -1793,6 +1877,142 @@ describe('Order messages', () => {
         (m) => m.event === 'cod_confirmation',
       ),
     ).toMatchObject({ answer: 'confirmed' });
+
+    // The two taps that answered, in the order they came: the cancellation at `now`, the
+    // confirmation five seconds later, as WhatsApp dated them.
+    const taps = (
+      await fx.query<{ id: string }>(
+        `SELECT id FROM app.messages WHERE conversation_id = $1 AND direction = 'inbound'
+          ORDER BY created_at, id LIMIT 2`,
+        [out.conversation_id],
+      )
+    ).map((t, i) => ({ id: t.id, answered: new Date((now + i * 5) * 1000) }));
+    // One event per change of the answer kept (ADR-348): the first, cancelled, then confirmed. The
+    // late older tap, another customer's and a reply to another message changed nothing and sent
+    // nothing. Each reaches the endpoints on every number and on its own, not the other number's.
+    const events = await fx.query<{
+      id: string;
+      status: string;
+      detail: Record<string, unknown>;
+      conversation_id: string;
+      contact_id: string;
+      occurred_at: Date;
+      deliveries: number;
+    }>(
+      `SELECT e.id, e.status, e.detail, e.conversation_id, e.contact_id, e.occurred_at,
+              (SELECT count(*)::int FROM app.webhook_deliveries d
+                WHERE d.tenant_id = e.tenant_id AND d.event_id = e.id) AS deliveries
+         FROM app.webhook_events e
+        WHERE e.tenant_id = $1 AND e.type = 'store_order.cod_answered'
+        ORDER BY e.occurred_at, e.id`,
+      [c.tenant.id],
+    );
+    const [contactRow] = await fx.query<{ id: string }>(
+      'SELECT contact_id AS id FROM app.conversations WHERE id = $1',
+      [out.conversation_id],
+    );
+    if (!contactRow) throw new Error('no conversation');
+    expect(
+      events.map((e) => [e.status, e.detail, e.conversation_id, e.contact_id, e.deliveries]),
+    ).toEqual([
+      [
+        'cancelled',
+        {
+          storeMessageId: codRow.id,
+          storeOrderId: codRow.order_id,
+          previousAnswer: null,
+          answeredAt: expect.any(String),
+          answerMessageId: taps[0]!.id,
+        },
+        out.conversation_id,
+        contactRow.id,
+        2,
+      ],
+      [
+        'confirmed',
+        {
+          storeMessageId: codRow.id,
+          storeOrderId: codRow.order_id,
+          previousAnswer: 'cancelled',
+          answeredAt: expect.any(String),
+          answerMessageId: taps[1]!.id,
+        },
+        out.conversation_id,
+        contactRow.id,
+        2,
+      ],
+    ]);
+    // The tap's time as WhatsApp dated it, whole seconds.
+    expect(events.map((e) => new Date(String(e.detail.answeredAt)).getTime())).toEqual(
+      taps.map((t) => t.answered.getTime()),
+    );
+
+    // Built when delivered: the answers as captured, the order and the store as they are now, the
+    // conversation's contact and the number.
+    await deliverHooks(c);
+    const [store] = await fx.query<{ name: string | null; store_url: string }>(
+      'SELECT name, store_url FROM app.commerce_stores WHERE id = $1',
+      [storeId],
+    );
+    const [orderNow] = await fx.query<{ id: string; placed_at: Date }>(
+      'SELECT id, placed_at FROM app.commerce_store_orders WHERE id = $1',
+      [codRow.order_id],
+    );
+    const [people] = await fx.query<{ name: string | null; number: string | null }>(
+      `SELECT ct.display_name AS name, ch.display_phone_number AS number
+         FROM app.contacts ct, app.channel_accounts ch WHERE ct.id = $1 AND ch.id = $2`,
+      [contactRow.id, sentFrom.channel_account_id],
+    );
+    for (const hook of [everyNumber, itsNumber]) {
+      const bodies = hookBodiesAt(hook.path);
+      expect(bodies).toHaveLength(2);
+      for (const body of bodies) {
+        expect(storeOrderCodAnsweredPayloadSchema.safeParse(body).success).toBe(true);
+      }
+      expect(bodies).toEqual(
+        expect.arrayContaining(
+          events.map((e, i) =>
+            expect.objectContaining({
+              id: e.id,
+              type: 'store_order.cod_answered',
+              data: {
+                confirmation: {
+                  answer: e.status,
+                  previousAnswer: i === 0 ? null : 'cancelled',
+                  answeredAt: taps[i]!.answered.toISOString(),
+                  messageId: codRow.message_id,
+                  answerMessageId: taps[i]!.id,
+                },
+                storeOrder: {
+                  id: orderNow!.id,
+                  externalId: '5101',
+                  name: '#2001',
+                  status: 'open',
+                  financialStatus: 'pending',
+                  fulfillmentStatus: 'unfulfilled',
+                  test: false,
+                  currency: 'INR',
+                  totalMinor: 149_900,
+                  placedAt: orderNow!.placed_at.toISOString(),
+                  cancelledAt: null,
+                  deletedAt: null,
+                },
+                store: {
+                  id: storeId,
+                  platform: 'shopify',
+                  name: store!.name,
+                  url: store!.store_url,
+                },
+                conversation: { id: out.conversation_id },
+                contact: { id: contactRow.id, phone: '+919812399999', name: people!.name },
+                channel: { id: sentFrom.channel_account_id, phone: people!.number },
+              },
+            }),
+          ),
+        ),
+      );
+    }
+    expect(hookBodiesAt(otherNumber.path)).toEqual([]);
   });
 
   it('sends nothing about the past, and skips test orders, late events and customers who cannot be messaged', async () => {

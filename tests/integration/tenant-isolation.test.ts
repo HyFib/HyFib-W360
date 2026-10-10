@@ -346,7 +346,8 @@ describe('database roles', () => {
     // Outgoing webhooks (0025, 0047, 0096): the dispatch and retention sweeps for the worker;
     // capture, which the triggers call as the role making the change (the runtime role, or a
     // definer function), and adding what a contact's change changed to the event its transaction
-    // captured; the trigger functions, with the merge's capture (0150), for nobody.
+    // captured; the trigger functions, with the merge's capture (0150) and a cash on delivery
+    // answer's (0266), for nobody.
     for (const fn of ['ops.webhook_dispatch_due(integer)', 'ops.purge_webhook_data(integer)']) {
       expect(await can('w360_app', fn), fn).toBe(true);
       expect(await can('w360_auth', fn), fn).toBe(false);
@@ -381,6 +382,7 @@ describe('database roles', () => {
       'app.webhook_capture_contact_tag()',
       'app.webhook_capture_contact_fields()',
       'app.contact_merges_capture()',
+      'app.webhook_capture_store_cod_answer()',
     ]) {
       for (const role of ['w360_app', 'w360_auth', 'w360_platform']) {
         expect(await can(role, fn), `${role} ${fn}`).toBe(false);

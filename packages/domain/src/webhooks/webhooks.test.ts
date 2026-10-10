@@ -142,6 +142,7 @@ import {
 import {
   noteCreatedPayloadSchema,
   satisfactionSurveyAnsweredPayloadSchema,
+  storeOrderCodAnsweredPayloadSchema,
   paymentLinkStatusChangedPayloadSchema,
   automationRunEndedPayloadSchema,
   automationRunStartedPayloadSchema,
@@ -1829,6 +1830,7 @@ describe('the OpenAPI document', () => {
       'order.received',
       'order.status_changed',
       'payment_link.status_changed',
+      'store_order.cod_answered',
       'campaign.status_changed',
       'deal.created',
       'deal.updated',
@@ -1928,10 +1930,20 @@ describe('the OpenAPI document', () => {
     >;
     const described = (schema: string) => schemas[schema]?.properties.channelIds?.description;
     expect(described('WebhookEndpoint')).toContain(
-      'Consent, contact, template, deal and task events are not narrowed.',
+      'Consent, contact, template, deal, task and note events are not narrowed.',
     );
     expect(described('CreateWebhookEndpoint')).toContain(
-      'Consent, contact, template, deal and task events belong to no number',
+      'Consent, contact, template, deal, task and note events belong to no number',
+    );
+    // The events of a number, every one of them (ADR-348 named those the lists had left out).
+    expect(described('WebhookEndpoint')).toContain(
+      'message, conversation, satisfaction survey answer, automation run, order, Payment Link, cash on delivery answer and campaign events',
+    );
+    expect(doc.info.description).toContain(
+      'message, conversation, satisfaction survey answer, automation run, order, Payment Link, cash on delivery answer and campaign events of those numbers only',
+    );
+    expect(described('CreateWebhookEndpoint')).toContain(
+      `only with an event that happens on a number: ${WEBHOOK_CHANNEL_EVENTS.slice(0, -1).join(', ')} or campaign.status_changed.`,
     );
     expect(
       Object.keys(doc.components.schemas).filter((name) => name.startsWith('WebhookDeal')),
@@ -4609,6 +4621,7 @@ describe('number filters (ADR-170)', () => {
       'order.received',
       'order.status_changed',
       'payment_link.status_changed',
+      'store_order.cod_answered',
       'campaign.status_changed',
     ]);
     const payloads = {
@@ -4630,6 +4643,7 @@ describe('number filters (ADR-170)', () => {
       'order.received': orderReceivedPayloadSchema,
       'order.status_changed': orderStatusChangedPayloadSchema,
       'payment_link.status_changed': paymentLinkStatusChangedPayloadSchema,
+      'store_order.cod_answered': storeOrderCodAnsweredPayloadSchema,
       'campaign.status_changed': campaignStatusChangedPayloadSchema,
       'deal.created': dealCreatedPayloadSchema,
       'deal.updated': dealUpdatedPayloadSchema,
@@ -6979,5 +6993,291 @@ describe('the event of an automation run step (ADR-326)', () => {
         /only for an endpoint that receives Automation started, Automation ended or Automation step\.$/,
       );
     }
+  });
+});
+
+describe('the event of a cash on delivery answer (ADR-348)', () => {
+  const id = '0192f2e6-a04d-7e3f-9c5a-7d8e9fa0b101';
+  const tenantId = '0192f2e6-a04d-7e3f-9c5a-7d8e9fa0b102';
+  const [order, store, conversation, contact, channel, message, tap, captured] = [
+    '0192f2e6-a04d-7e3f-9c5a-7d8e9fa0b103',
+    '0192f2e6-a04d-7e3f-9c5a-7d8e9fa0b104',
+    '0192f2e6-a04d-7e3f-9c5a-7d8e9fa0b105',
+    '0192f2e6-a04d-7e3f-9c5a-7d8e9fa0b106',
+    '0192f2e6-a04d-7e3f-9c5a-7d8e9fa0b107',
+    '0192f2e6-a04d-7e3f-9c5a-7d8e9fa0b108',
+    '0192f2e6-a04d-7e3f-9c5a-7d8e9fa0b109',
+    '0192f2e6-a04d-7e3f-9c5a-7d8e9fa0b10a',
+  ];
+  const at = new Date('2026-10-10T05:00:00.123Z');
+  const placedAt = new Date('2026-10-10T04:00:00.000Z');
+
+  /** A transaction that answers its reads, in order, with `answers`; another read fails the test. */
+  function answering(answers: unknown[][]) {
+    const queue = [...answers];
+    const chain = {
+      from: () => chain,
+      innerJoin: () => chain,
+      leftJoin: () => chain,
+      where: () => {
+        const rows = queue.shift();
+        if (!rows) throw new Error('an unexpected read');
+        return Promise.resolve(rows);
+      },
+    };
+    return {
+      tx: { select: () => chain } as unknown as Parameters<typeof buildWebhookPayload>[0],
+      unread: () => queue.length,
+    };
+  }
+
+  const event = (detail: Record<string, unknown>, status = 'cancelled') =>
+    ({
+      id,
+      tenantId,
+      type: 'store_order.cod_answered',
+      messageId: null,
+      conversationId: conversation,
+      contactId: captured,
+      templateId: null,
+      status,
+      detail,
+      contactChanges: null,
+      tagsAdded: null,
+      tagsRemoved: null,
+      occurredAt: at,
+      occurredAtExact: '2026-10-10T05:00:00.123456Z',
+    }) as unknown as Parameters<typeof buildWebhookPayload>[1];
+  // As the trigger captures it (0266): PostgreSQL writes the tap's time with its offset.
+  const capturedDetail = {
+    storeMessageId: id,
+    storeOrderId: order,
+    previousAnswer: 'confirmed',
+    answeredAt: '2026-10-10T10:29:58+05:30',
+    answerMessageId: tap,
+  };
+  const row = {
+    messageId: message,
+    order: {
+      id: order,
+      externalId: '5640149885113',
+      name: '#1042',
+      status: 'open',
+      financialStatus: 'pending',
+      fulfillmentStatus: 'unfulfilled',
+      test: false,
+      currency: 'INR',
+      totalMinor: 149_900,
+      placedAt,
+      cancelledAt: null,
+      deletedAt: null,
+    },
+    store: {
+      id: store,
+      platform: 'shopify',
+      name: 'Asha Textiles',
+      url: 'https://asha-textiles.myshopify.com',
+    },
+    conversationId: conversation,
+    contactId: contact,
+    channelId: channel,
+    channelPhone: '+91 80 4567 8901',
+  };
+
+  it('is one event on the confirmation’s number, labelled as Settings lists it', () => {
+    expect(WEBHOOK_EVENT_INFO['store_order.cod_answered']).toEqual({
+      label: 'Cash on delivery answered',
+      description:
+        'A customer confirmed or cancelled a cash on delivery order from a connected store by tapping a button of its confirmation message, or changed their answer.',
+    });
+    expect(webhookTakesChannelEvents(['store_order.cod_answered'])).toBe(true);
+    for (const takes of [
+      webhookTakesTaskEvents,
+      webhookTakesPipelineEvents,
+      webhookTakesTeamEvents,
+      webhookTakesCampaignEvents,
+      webhookTakesTemplateEvents,
+      webhookTakesAutomationRuns,
+    ]) {
+      expect(takes(['store_order.cod_answered']), takes.name).toBe(false);
+    }
+  });
+
+  it('gives the answer, the store’s order and its store, with the conversation, contact and number', () => {
+    const data = storeOrderCodAnsweredPayloadSchema.shape.data.shape;
+    expect(Object.keys(data)).toEqual([
+      'confirmation',
+      'storeOrder',
+      'store',
+      'conversation',
+      'contact',
+      'channel',
+    ]);
+    // Never the customer's details from the store: the contact stands for them.
+    expect(Object.keys(data.storeOrder.shape)).toEqual([
+      'id',
+      'externalId',
+      'name',
+      'status',
+      'financialStatus',
+      'fulfillmentStatus',
+      'test',
+      'currency',
+      'totalMinor',
+      'placedAt',
+      'cancelledAt',
+      'deletedAt',
+    ]);
+    const body = (answer: unknown, previousAnswer: unknown, totalMinor: unknown = 149_900) => ({
+      id,
+      type: 'store_order.cod_answered',
+      createdAt: at.toISOString(),
+      createdAtExact: '2026-10-10T05:00:00.123456Z',
+      data: {
+        confirmation: {
+          answer,
+          previousAnswer,
+          answeredAt: at.toISOString(),
+          messageId: message,
+          answerMessageId: tap,
+        },
+        storeOrder: { ...row.order, totalMinor, placedAt: placedAt.toISOString() },
+        store: row.store,
+        conversation: { id: conversation },
+        contact: { id: contact, phone: '+919845012345', name: 'Asha' },
+        channel: { id: channel, phone: '+91 80 4567 8901' },
+      },
+    });
+    const parses = (value: unknown) => storeOrderCodAnsweredPayloadSchema.safeParse(value).success;
+    expect(parses(body('confirmed', null))).toBe(true);
+    expect(parses(body('cancelled', 'confirmed'))).toBe(true);
+    expect(parses(body('declined', null))).toBe(false);
+    expect(parses(body('confirmed', 'declined'))).toBe(false);
+    expect(parses(body('confirmed', null, 1499.5))).toBe(false);
+  });
+
+  it('builds the body from the answer as captured and the order and store as they are now', async () => {
+    const reads = answering([[row], [{ phone: '+919845012345', name: 'Asha', erasedAt: null }]]);
+    // The contact captured with the event, since merged away: the conversation's contact now is sent.
+    const built = await buildWebhookPayload(reads.tx, event(capturedDetail), 'endpoint');
+    expect(built).toEqual({
+      id,
+      type: 'store_order.cod_answered',
+      createdAt: '2026-10-10T05:00:00.123Z',
+      createdAtExact: '2026-10-10T05:00:00.123456Z',
+      data: {
+        confirmation: {
+          answer: 'cancelled',
+          previousAnswer: 'confirmed',
+          answeredAt: '2026-10-10T04:59:58.000Z',
+          messageId: message,
+          answerMessageId: tap,
+        },
+        storeOrder: {
+          id: order,
+          externalId: '5640149885113',
+          name: '#1042',
+          status: 'open',
+          financialStatus: 'pending',
+          fulfillmentStatus: 'unfulfilled',
+          test: false,
+          currency: 'INR',
+          totalMinor: 149_900,
+          placedAt: '2026-10-10T04:00:00.000Z',
+          cancelledAt: null,
+          deletedAt: null,
+        },
+        store: {
+          id: store,
+          platform: 'shopify',
+          name: 'Asha Textiles',
+          url: 'https://asha-textiles.myshopify.com',
+        },
+        conversation: { id: conversation },
+        contact: { id: contact, phone: '+919845012345', name: 'Asha' },
+        channel: { id: channel, phone: '+91 80 4567 8901' },
+      },
+    });
+    expect(storeOrderCodAnsweredPayloadSchema.safeParse(built).success).toBe(true);
+    expect(reads.unread()).toBe(0);
+  });
+
+  it('gives a first answer without one before it, an order the store cancelled or deleted with its times, and the contact as erasure left it', async () => {
+    const cancelledAt = new Date('2026-10-10T06:00:00.000Z');
+    const deletedAt = new Date('2026-10-10T07:00:00.000Z');
+    const reads = answering([
+      [
+        {
+          ...row,
+          order: { ...row.order, status: 'cancelled', cancelledAt, deletedAt },
+          channelPhone: null,
+        },
+      ],
+      [{ phone: '+919845012345', name: 'Asha', erasedAt: at }],
+    ]);
+    const built = await buildWebhookPayload(
+      reads.tx,
+      event({ ...capturedDetail, previousAnswer: null }, 'confirmed'),
+      'endpoint',
+    );
+    expect(built.data).toMatchObject({
+      confirmation: { answer: 'confirmed', previousAnswer: null },
+      storeOrder: {
+        status: 'cancelled',
+        cancelledAt: '2026-10-10T06:00:00.000Z',
+        deletedAt: '2026-10-10T07:00:00.000Z',
+      },
+      contact: { id: contact, phone: null, name: null },
+      channel: { id: channel, phone: null },
+    });
+    expect(storeOrderCodAnsweredPayloadSchema.safeParse(built).success).toBe(true);
+    expect(reads.unread()).toBe(0);
+  });
+
+  it('sends nothing for a confirmation that is gone or not the company’s, reading nothing for an id that is not one', async () => {
+    const gone = answering([[]]);
+    await expect(
+      buildWebhookPayload(gone.tx, event(capturedDetail), 'endpoint'),
+    ).rejects.toBeInstanceOf(WebhookEventGoneError);
+    expect(gone.unread()).toBe(0);
+    for (const storeMessageId of ['confirmation', null, 7]) {
+      const none = answering([]);
+      await expect(
+        buildWebhookPayload(none.tx, event({ ...capturedDetail, storeMessageId }), 'endpoint'),
+      ).rejects.toBeInstanceOf(WebhookEventGoneError);
+    }
+  });
+
+  it('describes no event captured without its tap, reading nothing', async () => {
+    for (const missing of ['answeredAt', 'answerMessageId']) {
+      const none = answering([]);
+      const detail = Object.fromEntries(
+        Object.entries(capturedDetail).filter(([key]) => key !== missing),
+      );
+      const built = buildWebhookPayload(none.tx, event(detail), 'endpoint');
+      await expect(built, missing).rejects.toThrow(
+        'The cash on delivery answer was captured without its tap',
+      );
+      await expect(built, missing).rejects.not.toBeInstanceOf(WebhookEventGoneError);
+    }
+  });
+
+  it('is described: the answer as captured, the order as it is now, and what sends nothing', () => {
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const described = doc.webhooks['store_order.cod_answered'].post.description;
+    for (const words of [
+      'A customer confirmed or cancelled a cash on delivery order from a connected store',
+      'HyFib changes nothing in the store: this event is how an order system learns the answer',
+      'confirmation.answer and confirmation.previousAnswer are the change',
+      'the store’s own order id (storeOrder.externalId) to find it there',
+      'Never the customer’s details from the store',
+      'a tap that repeats the answer, an older tap arriving late and a tap outside the confirmation’s conversation send nothing',
+      'Store orders themselves are not sent',
+      'an endpoint that names numbers receives it for those numbers only',
+      'fails as event_gone',
+    ]) {
+      expect(described).toContain(words);
+    }
+    expect(doc.components.schemas).toHaveProperty('WebhookStoreOrderCodAnswered');
   });
 });
