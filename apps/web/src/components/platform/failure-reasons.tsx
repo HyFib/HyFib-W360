@@ -49,7 +49,7 @@ const monthText = (month: FailureReasonMonth) =>
 
 /** The share of a row's sends failed in a month, as a month says it (ADR-364); none without one. */
 const shareText = (share: number | null) =>
-  share === null ? '' : `, ${chartShare(share)} of its sends`;
+  share === null ? '' : `, ${chartShare(share)} of the sends`;
 
 /**
  * A row's failed sends month by month (ADR-360), a reason's or a company's (ADR-362): a bar a month
@@ -81,14 +81,14 @@ export function MonthBars({
     const share = sent === undefined ? null : failedOfSent(failed, sent[index] ?? 0);
     return `${chartCount(failed)} failed${shareText(share)}`;
   };
-  // A reason's months say their counts alone, as before; a company's say what they count.
-  const spoken = months
-    .map((month, index) =>
-      sent === undefined
-        ? `${monthText(month)}: ${chartCount(counts[index] ?? 0)}`
-        : `${monthText(month)}: ${failedText(index)}`,
-    )
-    .join(', ');
+  // A reason's months say their counts alone, as before; a company's say what they count, a
+  // semicolon between months, as each says two things.
+  const spoken =
+    sent === undefined
+      ? months
+          .map((month, index) => `${monthText(month)}: ${chartCount(counts[index] ?? 0)}`)
+          .join(', ')
+      : months.map((month, index) => `${monthText(month)}: ${failedText(index)}`).join('; ');
   return (
     <svg
       width={width}

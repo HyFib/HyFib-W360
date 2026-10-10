@@ -370,6 +370,14 @@ describe('failed sends by company month by month (ADR-362, ADR-364)', () => {
         0,
       ),
     ).toThrow("The year's failed sends by company give place 1 to two companies");
+    // The rest is one row a month at one place, whichever of its companies have rows in a month.
+    expect(() =>
+      failureCompanyYear(
+        [row(9, '2026-03', 2, 4, true), row(10, '2026-04', 1, 4, true)],
+        '2026-10-10',
+        0,
+      ),
+    ).toThrow("The year's failed sends by company give the rest two places");
   });
 
   it('reads the companies’ months, how many days are counted and today, in that order', async () => {

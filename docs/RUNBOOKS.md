@@ -4041,8 +4041,8 @@ Each company also has its sends of the same days, those cancelled left out, and 
 that failed (ADR-364), over the year and, when a month is pointed at or in the second folded
 table, month by month. A high share with many failures points at a company whose sending is
 broken; a high share from a few failures may come from a handful of sends. A dash means no share:
-the company sent nothing that month, or its deletion has already removed more of its sends than of
-its failed sends.
+the company sent nothing that month, or its deletion has started (from then on its sends are not
+counted, as its deletion removes them).
 
 **Acknowledging failures (ADR-141).** On Current failures, the administrator who takes a failure
 opens Acknowledge on its row and writes a note of 10 to 500 characters: what was done or found

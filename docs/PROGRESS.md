@@ -19,8 +19,8 @@ its sends may seldom fail, and the counts did not tell it from one whose sends f
   of them failed, and `sentByMonth`; `readFailureCompanyYear` reads the sends.
 - **Web:** the companies table's "Sent" and "Share of its sends failed" columns; each month's bar
   says the share of the company's sends failed when pointed at and to a screen reader; a second
-  folded table gives every month's share; a dash where there is none. Rendered and looked at, wide
-  and at phone width.
+  folded table gives every month's share; a dash where there is none. Rendered from sample data
+  with React's server renderer and looked at in Chromium, wide and at phone width.
 - **Tests:** unit (2 new: the share and its absence, a company without a share; 3 updated: the
   companies with their sends over the year and by month, a month sent in without a failed send,
   rows of one month added, the read with the sends); integration (`platform-ops.test.ts`: the
@@ -36,6 +36,19 @@ its sends may seldom fail, and the counts did not tell it from one whose sends f
   company's sends in the first's, failed sends added to the sends, the year's failed sends for the
   company's, the sends not read, the sends read from the failed sends). The function's join and
   filters run in the database and are covered by the integration tests, which run in CI only.
+- **Review fixes:** an independent review, and CI's first run of migration 0285, found:
+  - **HIGH (CI failed):** the rest's place was the lowest rank among the rest's companies with a
+    row in each month, so the rest split over several places; the integration tests failed on
+    PostgreSQL 17 and 18 at the ADR-362 test, which ran there for the first time. Every rest row
+    now has place 9, the domain refuses the rest at two places, and the test adds a month in which
+    the rest's second company sent without a failed send. The ADR-362 review's "nothing that would
+    fail CI" was wrong: like this one, it could not run the integration tests.
+  - **LOW:** a company whose deletion has started has no sends, so no share: its deletion removes
+    its sends before its failed sends, which left a share of what was left. The test starts one
+    listed company's deletion.
+  - **LOW:** the card says what Sent counts; a company's months are separated by semicolons for a
+    screen reader and say "of the sends", which fits the rest too; this entry says how the table
+    was rendered.
 
 ### Test commands and results (local, 2026-10-10)
 

@@ -14274,10 +14274,10 @@ Decision:
   whose codes are counted, companies not deleted), by company and UTC calendar month, the companies
   ranked by their failed sends over the whole year: the eight with the most, ties by name and id,
   then the rest together (with how many companies it holds) when two or more are left, a ninth alone
-  being listed. Each row gives its place in that ranking, so the domain lists the companies as the
-  database ranked them. For platform administrators only (`W3403`), owned by the definer role,
-  executable by the platform role alone; counts with each company's name and slug, as the Usage
-  tab's other tables show them.
+  being listed. Each row gives its place in that ranking (the rest's is 9 in every month), so the
+  domain lists the companies as the database ranked them. For platform administrators only
+  (`W3403`), owned by the definer role, executable by the platform role alone; counts with each
+  company's name and slug, as the Usage tab's other tables show them.
 - **One snapshot:** `readFailureCompanyYear` reads the months, the days counted and the
   transaction's today in one repeatable-read transaction, so a company's months add up to its year;
   a month the year does not list, or a place two companies share, is an error, not dropped.
@@ -14342,9 +14342,10 @@ Decision:
   its sends are whole; the ranking, the rest and the filters are unchanged, and a company that never
   failed is in neither.
 - **The share, or none:** `failedOfSent` divides a company's failed sends by its sends, over the year
-  and in each month: none when it sent none, or when fewer sends than failed sends are left, as of a
-  company whose deletion removes its sends (step 35) before its failed sends by code (step 36),
-  rather than a share above all of them.
+  and in each month: none when it sent none, or when fewer sends than failed sends are counted,
+  rather than a share above all of them. A company whose deletion has started has no sends here, as
+  the day's count leaves it out: its deletion removes its sends (step 35) before its failed sends by
+  code (step 36), which would leave a share of what is left.
 - **Shown on the Usage tab:** the companies table gains "Sent" and "Share of its sends failed"
   columns, a dash for no share; each month's bar says the share of the company's sends failed when
   pointed at and to a screen reader; a second folded table gives every month's share, with a dash
@@ -14353,8 +14354,7 @@ Decision:
 Consequences: staff can tell a company that fails much because it sends much from one whose sends
 fail often. A company with few sends shows a high share from few failures; its count beside the share
 says how few. The ranking stays by count, so a company with a high share and few failures can be in
-the rest. A company being deleted shows what is left of its sends, so its share can read high until
-its deletion ends.
+the rest. A company whose deletion has started shows its failed sends but no sends and no share.
 
 Not built: a ranking by share (it needs a floor of sends below which a share means little, a product
 decision), the share of each of the rest's companies, and a CSV of the table.

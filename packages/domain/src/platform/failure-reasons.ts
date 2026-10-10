@@ -264,8 +264,8 @@ export interface FailureCompanyYear {
  * The companies of the year's month rows (ADR-362), each once in the order of its place, with its
  * failed sends over the year, its share of them, its sends and the share of them failed (ADR-364),
  * and its months (0 for a month without one). The rows are read with the year's ranking in its
- * snapshot, so one naming a month the year does not list, or a place two companies share, is an
- * error.
+ * snapshot, so one naming a month the year does not list, a place two companies share, or the rest
+ * at two places, is an error.
  */
 export function failureCompanyYear(
   rows: readonly {
@@ -285,12 +285,17 @@ export function failureCompanyYear(
   const places = [...new Set(rows.map((r) => r.place))].sort((a, b) => a - b);
   const byMonth = places.map(() => months.map(() => 0));
   const sentByMonth = places.map(() => months.map(() => 0));
+  let rest: number | undefined;
   const listed = places.map((place) => {
     const of = rows.filter((r) => r.place === place);
     const first = of[0];
     if (!first || of.some((r) => r.tenantId !== first.tenantId)) {
       throw new Error(`The year's failed sends by company give place ${place} to two companies`);
     }
+    if (first.tenantId === null && rest !== undefined && rest !== place) {
+      throw new Error("The year's failed sends by company give the rest two places");
+    }
+    if (first.tenantId === null) rest = place;
     return {
       place,
       tenantId: first.tenantId,

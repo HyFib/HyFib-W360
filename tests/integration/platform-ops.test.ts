@@ -4781,8 +4781,10 @@ describe('failed sends by reason kept as days pass (ADR-350)', () => {
     await failed(gone, 1, 'c01', 50);
     // The first company's sends on its days and on a day it sent without a failure, those cancelled
     // left out: 100 + 250 + 50; on the day not counted with its codes and more than a year ago, none.
-    // The rest's two: 40 + 10. Seven listed companies have no sends left, as when a deletion has
-    // removed them, and no share. A company that never failed and a deleted one: in neither.
+    // The rest's two: 40 + 10, and 20 in a month the second sent in without a failed send, still the
+    // rest's at place 9. Listed companies without sends have no share, nor one whose deletion has
+    // started, whatever is left of its sends. A company that never failed and a deleted one: in
+    // neither.
     const quiet = await named('Never failing');
     await sent(first, 365, 110, 5, 10);
     await sent(first, 1, 250, 15);
@@ -4791,8 +4793,16 @@ describe('failed sends by reason kept as days pass (ADR-350)', () => {
     await sent(first, 366, 1000, 50);
     await sent(restOne, 365, 40, 4);
     await sent(restTwo, 1, 10, 2);
+    await sent(restTwo, 300, 20, 0);
     await sent(quiet, 1, 1000, 0);
     await sent(gone, 1, 500, 50);
+    await sent(seventh, 1, 100, 8);
+    await fx.query(
+      `INSERT INTO ops.tenant_deletions
+         (id, tenant_id, requested_by_user_id, due_at, previous_status, company_name, started_at)
+       VALUES ($1, $2, $3, now(), 'active', 'Failing seventh', now())`,
+      [uuidv7(), seventh.tenant.id, seventh.owner.id],
+    );
     await fx.query(
       `UPDATE app.tenants SET status = 'deleted', status_changed_at = now() WHERE id = $1`,
       [gone.tenant.id],
@@ -4852,10 +4862,10 @@ describe('failed sends by reason kept as days pass (ADR-350)', () => {
       [6, 0, null],
       [7, 0, null],
       [8, 0, null],
-      [9, 50, 0.12],
+      [9, 70, 6 / 70],
     ]);
     expect(year.sentByMonth.map((sends) => sends.reduce((total, n) => total + n, 0))).toEqual([
-      400, 0, 0, 0, 0, 0, 0, 0, 50,
+      400, 0, 0, 0, 0, 0, 0, 0, 70,
     ]);
     expect(year.sentByMonth[0]?.[monthOf(365)]).toBe(100);
     expect(year.sentByMonth[0]?.[monthOf(1)]).toBe(250);
@@ -4864,6 +4874,8 @@ describe('failed sends by reason kept as days pass (ADR-350)', () => {
     expect(year.byMonth[0]?.[monthOf(300)]).toBe(0);
     expect(year.sentByMonth[8]?.[monthOf(365)]).toBe(40);
     expect(year.sentByMonth[8]?.[monthOf(1)]).toBe(10);
+    expect(year.sentByMonth[8]?.[monthOf(300)]).toBe(20);
+    expect(year.byMonth[8]?.[monthOf(300)]).toBe(0);
     // Nine companies or fewer are each listed: without the second of the rest, the ninth is.
     await fx.query('DELETE FROM ops.platform_failure_reason_days WHERE tenant_id = $1', [
       restTwo.tenant.id,
@@ -4879,5 +4891,13 @@ describe('failed sends by reason kept as days pass (ADR-350)', () => {
       failedShare: 0.1,
     });
     expect(nine.companies).toHaveLength(9);
+    // Ended as the deletion run ends it, so no other test finds a deletion open.
+    await fx.query(`UPDATE ops.tenant_deletions SET completed_at = now() WHERE tenant_id = $1`, [
+      seventh.tenant.id,
+    ]);
+    await fx.query(
+      `UPDATE app.tenants SET status = 'deleted', status_changed_at = now() WHERE id = $1`,
+      [seventh.tenant.id],
+    );
   });
 });

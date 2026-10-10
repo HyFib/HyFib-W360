@@ -239,7 +239,9 @@ export default async function OpsUsagePage({
             The companies whose sends failed most in the 365 days before today, as the worker counts
             them with each day&apos;s messages: the {FAILURE_COMPANIES_SHOWN} with the most, then
             the rest together when two or more are left; companies deleted are left out. Each
-            company&apos;s months show when its failures began, grew or faded.
+            company&apos;s months show when its failures began, grew or faded. Sent counts the same
+            days&apos; sends, those cancelled left out, so it can differ from a company&apos;s sends
+            elsewhere; a company whose deletion has started shows none.
             {companyYear.uncounted > 0
               ? ` ${companyYear.uncounted} of the 365 days ${companyYear.uncounted === 1 ? 'is' : 'are'} not counted yet, a few more each minute.`
               : null}
