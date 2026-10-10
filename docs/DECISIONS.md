@@ -13727,3 +13727,44 @@ Decision:
 Not built: lists that leave chosen answers out, choosing stores for other events (the order
 messages a store sends are `message.status` events, and the store's orders stay out, ADR-085), and
 narrowing by the order's values (its total, currency or statuses).
+
+## ADR-350 Failed sends by reason over the year, kept as days pass (P5-10) (2026-10-10)
+
+Context: the Usage tab and a company's platform page list a window's failed sends by the code they
+failed with (ADR-347), counted live from `app.messages`, so 93 days back at most. Whether a reason
+is new or has been there all year, as a template rejected since spring or a number that lost its
+quality, was not visible, and ADR-347 left failed sends by reason over the year unbuilt. The worker
+already counts each UTC day once it has ended, for a year of messages a day (ADR-341).
+
+Decision:
+
+- **Kept with the day's counts:** `ops.platform_failure_reason_days` (migration 0269) holds each
+  company's failed sends on each UTC day by code (the empty code for a failure recorded without
+  one), counted by `ops.count_platform_message_days` in the same transaction as the day's messages,
+  for the same companies (not deleted, deletion not started), so a day's codes add up to its failed
+  sends. A failure Meta reports later reaches the codes while its day is among the 7 counted again
+  each day, as it reaches the day's failed sends. The table follows the tenant-table rules (forced
+  row level security, the definer role's policy and grants alone), is deleted with the company
+  (step 36) and left out of the company data export (its messages are exported), and its rows older
+  than 400 days or of a company deleted in the last 30 days are deleted at every run with the day
+  counts (`ops.purge_platform_message_days`).
+- **Days counted before:** `ops.platform_message_days_counted.reasons` says whether a counted day's
+  codes were counted with it. The days counted before the migration have none and are due again,
+  newest first, as 0264's days without their sends cancelled, delivered and read were: a deployment
+  counts its year's codes in about two hours, its day counts unchanged meanwhile.
+- **Reading:** `ops.platform_ops_failure_reason_year(p_tenant_id)`, for platform administrators
+  only (`W3403`), lists the failed sends of the 365 days before today whose codes are counted, every
+  company's not deleted or one company's, as 0265 lists a window's: the eight most frequent, ties by
+  code, then the rest together when two or more are left. `ops.platform_ops_failure_reason_days()`
+  says how many of those days are counted; both are read in one snapshot. Codes and counts only,
+  never a contact, a message or its error title.
+- **Shown:** the Usage tab's "Failed sends by reason (12 months)" under the year, and a company's
+  platform page under its year (none while its deletion runs, as its year), with the same table and
+  meanings as the window's and how many of the 365 days are not counted yet; "None counted yet"
+  while no day is.
+
+Consequences: today's failed sends are in the window's table only; a failure reported more than 7
+days after its day is not among the year's, as the year's messages say.
+
+Not built: the reasons drawn over time (a reason's days as a chart), by company over time, in a CSV,
+and the year's error titles, which stay in the company's inbox.

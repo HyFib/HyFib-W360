@@ -412,6 +412,8 @@ describe('database roles', () => {
       'ops.platform_ops_daily_activity(timestamp with time zone,uuid)',
       'ops.platform_ops_message_days(integer,uuid)',
       'ops.platform_ops_failure_reasons(timestamp with time zone,uuid)',
+      'ops.platform_ops_failure_reason_year(uuid)',
+      'ops.platform_ops_failure_reason_days()',
       'ops.platform_ops_signup_sessions(timestamp with time zone,integer)',
       'ops.platform_ops_integration_failures(integer)',
       'ops.platform_retry_webhook_receipt(uuid,text,text)',

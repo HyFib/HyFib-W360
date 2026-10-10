@@ -1384,6 +1384,18 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    changes keep the lists, and its API refuses `codAnswers` and `storeIds` (422) and leaves them out
    of the endpoints it answers.
 
+   Migration 0269 (ADR-350) creates `ops.platform_failure_reason_days` (each company's failed sends
+   a UTC day by code, the definer role's alone, deleted with the company at step 36), adds
+   `reasons` to `ops.platform_message_days_counted` (false on every day counted so far), replaces
+   `ops.count_platform_message_days` and `ops.purge_platform_message_days` with the same signatures
+   (dropped as their owner and created again, as 0264 did) and creates
+   `ops.platform_ops_failure_reason_year` and `ops.platform_ops_failure_reason_days` for the platform
+   role. The worker's counting job, unchanged, then counts every day of the year again, newest
+   first, 3 days a minute: the year's reasons cover more days each minute, and the day counts stay
+   readable meanwhile (each day's are replaced in one transaction). Web servers of this release
+   need it; web servers from before it never read the new table or functions, and after a rollback
+   the counting goes on keeping the codes, unused.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

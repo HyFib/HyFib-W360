@@ -3883,6 +3883,15 @@ documentation are marked. A code rising across companies at once points at Meta 
 company's at its own sending (its window, its consent, its templates); the company's inbox gives
 each failed message's error text, which the console never shows.
 
+**Failed sends by reason over the year (ADR-350).** Under the year, the Usage tab and a company's
+platform page list the failed sends of the 365 days before today by code, from counts the worker
+keeps with each day's messages: today's failures are in the window's table only, and a failure Meta
+reports more than 7 days after its day is not among them. The note says how many of the 365 days
+are not counted yet; after a deployment of migration 0269 every day is counted again, newest first,
+3 a minute, so the year's reasons cover more days each minute for about two hours. "None counted
+yet" means no day is: check that the worker's `ops.message-days` job runs (the Queues tab). A
+company being deleted shows no year's reasons; its counts are deleted with it.
+
 **Acknowledging failures (ADR-141).** On Current failures, the administrator who takes a failure
 opens Acknowledge on its row and writes a note of 10 to 500 characters: what was done or found
 ("Called the owner: they will reconnect the number today", "Meta's status page reports an outage").

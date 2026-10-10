@@ -1,5 +1,59 @@
 # Progress
 
+## 2026-10-10 — Failed sends by reason over the year (P5-10, H-034, ADR-350)
+
+Status: **Implemented; its database and browser tests run in CI only.** The Usage tab and a
+company's platform page listed a window's failed sends by code (ADR-347), counted live and so 93
+days back at most: whether a reason was new or there all year was not visible. The worker already
+keeps each day's counts (ADR-341); it now keeps each day's failed sends by code with them. The
+local PostgreSQL is unavailable, so migration 0269 and the integration tests below were written
+but not run here; the migration passed the pglast parse check (syntax only), its PL/pgSQL bodies
+included.
+
+### Completed
+
+- **Database:** migration 0269: `ops.platform_failure_reason_days` (each company's failed sends a
+  UTC day by code; forced row level security, the definer role's policies and grants alone,
+  deleted with the company at step 36, left out of the export); `reasons` on
+  `ops.platform_message_days_counted`, false on the days counted before, which are counted again,
+  newest first; `ops.count_platform_message_days` counting the codes in each day's transaction, for
+  the same companies as its counts, and `ops.purge_platform_message_days` deleting the old and a
+  deleted company's codes too (both dropped as their owner and created again with the same
+  signatures); `ops.platform_ops_failure_reason_year(p_tenant_id)` and
+  `ops.platform_ops_failure_reason_days()` for platform administrators only.
+- **Domain:** `readFailureReasonYear` reads the year's codes, listed as the window's are, and the
+  days counted in one snapshot; `failureReasonYear()` for the Usage tab and `companyHealth()`'s
+  `reasonYear` (none while the company's deletion runs, as its year).
+- **Web:** "Failed sends by reason (12 months)" on the Usage tab under the year, and on a company's
+  platform page under its year, with the same table and meanings as the window's, how many of the
+  365 days are not counted yet, and "None counted yet" while no day is.
+- **Tests:** unit (3 new in `platform/failure-reasons.test.ts`: the reader's two statements, its
+  numbers and days not counted, the platform's with none failed, and an unanswered count refused);
+  integration (`platform-ops.test.ts`: each day's codes counted with its counts and adding up to
+  its failed sends, a deleted company and one being deleted left out, a failure reported late
+  counted again, a day counted before the codes left out of the year and counted again alone, the
+  company's exact year and the platform's adding up to the year's failed sends, the purge, the
+  table's checks, administrators only and the runtime role refused; the two functions in the
+  isolation suite's platform list; the ADR-346 test's counted days now carry the codes' flag, so
+  only its two days without outcomes are due); e2e (the ADR-347 test checks the year's reasons, or their note,
+  on a company's page and the Usage tab). Written for CI; the integration and e2e tests were not run
+  here.
+- **Docs:** ADR-350; ARCHITECTURE; SECURITY (the console's definer functions, whose stale count is
+  dropped); THREAT-MODEL T309; DEPLOYMENT (0269); RUNBOOKS; DATA-RETENTION; BACKLOG P5-10; feature
+  matrix H-034.
+- **Mutation checks:** 7/7 deliberate regressions caught on the unit-tested parts (the company left
+  out of the read, the rows read in no order, the days counted given as not counted, a year of 366
+  days, an unanswered count not refused, counts left as text, the days counted read elsewhere).
+
+### Test commands and results (local, 2026-10-10)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 146 files, 1492 tests passed                                    |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+
 ## 2026-10-10 — Cash on delivery answer and store filters for webhooks (P5-09, H-014, ADR-349)
 
 Status: **Implemented; its database tests run in CI only.** `store_order.cod_answered` (ADR-348)

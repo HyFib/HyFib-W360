@@ -4104,10 +4104,11 @@ describe('messages a day kept as days pass (ADR-341)', () => {
     }
     await messageAt(sender, conversation, 'outbound', 'read', noonDaysAgo(10));
     // Days 9 and 10 counted before 0264, without their sends cancelled, delivered and read, as a
-    // deployment finds them; every other day of the year counted with them.
+    // deployment finds them; every other day of the year counted with them (and every day with its
+    // failed sends by code, ADR-350, so that only those two are due).
     await fx.query(
-      `INSERT INTO ops.platform_message_days_counted (utc_day, counted_at, outcomes)
-       SELECT (now() AT TIME ZONE 'UTC')::date - g.n, now(), g.n NOT IN (9, 10)
+      `INSERT INTO ops.platform_message_days_counted (utc_day, counted_at, outcomes, reasons)
+       SELECT (now() AT TIME ZONE 'UTC')::date - g.n, now(), g.n NOT IN (9, 10), true
          FROM generate_series(1, 365) AS g(n)`,
     );
     await fx.query(
@@ -4361,5 +4362,234 @@ describe('failed sends by reason (ADR-347)', () => {
         "SELECT * FROM ops.platform_ops_failure_reasons(now() - interval '1 day', null)",
       ),
     ).rejects.toThrow(/permission denied/);
+  });
+});
+
+describe('failed sends by reason kept as days pass (ADR-350)', () => {
+  /** Today's UTC day by the database's clock, which the counting reads (YYYY-MM-DD). */
+  let today = '';
+  /** Noon UTC `n` days before the database's today, as the kept days' tests place their messages. */
+  const noonDaysAgo = (n: number) =>
+    new Date(Date.parse(`${today}T12:00:00Z`) - n * 24 * 60 * 60 * 1000);
+  const utcDay = (d: Date) => d.toISOString().slice(0, 10);
+  const count = (limit: number) => countMessageDays({ db: fx.dbs.app }, limit);
+  /** A send left with a status and a code at a time, as the sending code leaves it. */
+  const sent = (
+    c: Company,
+    conversationId: string,
+    status: 'failed' | 'delivered' | 'canceled',
+    code: string | null,
+    at: Date,
+  ) =>
+    fx.query(
+      `INSERT INTO app.messages (id, tenant_id, conversation_id, channel_account_id, direction,
+         type, status, sender_type, created_at, error_code)
+       VALUES ($1, $2, $3, $4, 'outbound', 'text', $5, 'agent', $6, $7)`,
+      [uuidv7(), c.tenant.id, conversationId, c.channelAccountId, status, at, code],
+    );
+  const reasonsOf = (c: Company) =>
+    fx.query<{ day: string; code: string; failed: number }>(
+      `SELECT to_char(utc_day, 'YYYY-MM-DD') AS day, reason_code AS code, failed
+         FROM ops.platform_failure_reason_days WHERE tenant_id = $1
+        ORDER BY utc_day, reason_code COLLATE "C"`,
+      [c.tenant.id],
+    );
+
+  it('keeps each ended day’s failed sends by code with its counts, counts again the days counted before them, and reads the year’s', async () => {
+    // The counts are the platform's: this test starts them afresh.
+    await fx.query('DELETE FROM ops.platform_failure_reason_days');
+    await fx.query('DELETE FROM ops.platform_message_days');
+    await fx.query('DELETE FROM ops.platform_message_days_counted');
+    const [clock] = await fx.query<{ day: string }>(
+      `SELECT to_char((now() AT TIME ZONE 'UTC')::date, 'YYYY-MM-DD') AS day`,
+    );
+    today = clock!.day;
+    const kept = await fx.company();
+    const gone = await fx.company();
+    const leaving = await fx.company();
+    // Each conversation starts with a customer's message today, which no count holds yet.
+    const keptConversation = await conversationOf(kept, '919876500061');
+    const goneConversation = await conversationOf(gone, '919876500062');
+    const leavingConversation = await conversationOf(leaving, '919876500063');
+    for (const code of ['131049', '131049', 'window_closed', null]) {
+      await sent(kept, keptConversation, 'failed', code, noonDaysAgo(1));
+    }
+    // A delivered send, and a cancelled one that keeps a code: neither failed.
+    await sent(kept, keptConversation, 'delivered', null, noonDaysAgo(1));
+    await sent(kept, keptConversation, 'canceled', 'campaign_paused', noonDaysAgo(1));
+    await sent(kept, keptConversation, 'failed', '131049', noonDaysAgo(3));
+    await sent(kept, keptConversation, 'failed', 'opted_out', noonDaysAgo(10));
+    // More than a year ago: never counted.
+    await sent(kept, keptConversation, 'failed', '131049', noonDaysAgo(366));
+    // A deleted company, and one whose deletion has started: neither is counted.
+    await sent(gone, goneConversation, 'failed', '131049', noonDaysAgo(1));
+    await fx.query(
+      `UPDATE app.tenants SET status = 'deleted', status_changed_at = now() WHERE id = $1`,
+      [gone.tenant.id],
+    );
+    await sent(leaving, leavingConversation, 'failed', '131049', noonDaysAgo(1));
+    await fx.query(
+      `UPDATE app.tenants SET status = 'pending_deletion', status_changed_at = now() WHERE id = $1`,
+      [leaving.tenant.id],
+    );
+    await fx.query(
+      `INSERT INTO ops.tenant_deletions
+         (id, tenant_id, requested_by_user_id, due_at, previous_status, company_name, started_at)
+       VALUES ($1, $2, $3, now(), 'active', 'Leaving company', now())`,
+      [uuidv7(), leaving.tenant.id, leaving.owner.id],
+    );
+
+    // Counted with each day's counts, newest first: yesterday's codes add up to its failed sends.
+    expect(await count(2)).toEqual({ purged: 0, counted: 2 });
+    expect(await reasonsOf(kept)).toEqual([
+      { day: utcDay(noonDaysAgo(1)), code: '', failed: 1 },
+      { day: utcDay(noonDaysAgo(1)), code: '131049', failed: 2 },
+      { day: utcDay(noonDaysAgo(1)), code: 'window_closed', failed: 1 },
+    ]);
+    const [yesterday] = await fx.query<{ failed: number }>(
+      `SELECT failed FROM ops.platform_message_days WHERE tenant_id = $1 AND utc_day = $2::date`,
+      [kept.tenant.id, utcDay(noonDaysAgo(1))],
+    );
+    expect(yesterday?.failed).toBe(4);
+    expect(await reasonsOf(gone)).toEqual([]);
+    expect(await reasonsOf(leaving)).toEqual([]);
+    // Its platform page reads no year's reasons while its deletion runs, as no year (ADR-342).
+    const leavingHealth = await ops().companyHealth(staff, leaving.tenant.id);
+    expect(leavingHealth?.health).toBeDefined();
+    expect(leavingHealth?.reasonYear).toBeNull();
+    // Ended as the deletion run ends it, so no other test finds a deletion open.
+    await fx.query(`UPDATE ops.tenant_deletions SET completed_at = now() WHERE tenant_id = $1`, [
+      leaving.tenant.id,
+    ]);
+    await fx.query(
+      `UPDATE app.tenants SET status = 'deleted', status_changed_at = now() WHERE id = $1`,
+      [leaving.tenant.id],
+    );
+
+    // The rest of the year.
+    let runs = 0;
+    while ((await count(100)).counted > 0) runs += 1;
+    expect(runs).toBeGreaterThan(0);
+    expect(await reasonsOf(kept)).toEqual([
+      { day: utcDay(noonDaysAgo(10)), code: 'opted_out', failed: 1 },
+      { day: utcDay(noonDaysAgo(3)), code: '131049', failed: 1 },
+      { day: utcDay(noonDaysAgo(1)), code: '', failed: 1 },
+      { day: utcDay(noonDaysAgo(1)), code: '131049', failed: 2 },
+      { day: utcDay(noonDaysAgo(1)), code: 'window_closed', failed: 1 },
+    ]);
+
+    // A failure reported late: the 7 days before today are counted again once a day, their codes
+    // too; older days keep theirs.
+    await fx.query(
+      `UPDATE app.messages SET status = 'failed', error_code = '131026'
+        WHERE tenant_id = $1 AND direction = 'outbound' AND status = 'delivered'`,
+      [kept.tenant.id],
+    );
+    expect(await count(31)).toEqual({ purged: 0, counted: 0 });
+    await fx.query(
+      `UPDATE ops.platform_message_days_counted SET counted_at = now() - interval '25 hours'`,
+    );
+    expect(await count(31)).toEqual({ purged: 0, counted: 7 });
+    expect(await reasonsOf(kept)).toContainEqual({
+      day: utcDay(noonDaysAgo(1)),
+      code: '131026',
+      failed: 1,
+    });
+
+    // The company's year: the most frequent first, ties by code, every day counted.
+    const yearOf = async () => (await ops().companyHealth(staff, kept.tenant.id))?.reasonYear;
+    const share = (n: number, of: number) => n / of;
+    expect(await yearOf()).toEqual({
+      reasons: {
+        reasons: [
+          { code: '131049', failed: 3, codes: 1, share: share(3, 7) },
+          { code: '', failed: 1, codes: 1, share: share(1, 7) },
+          { code: '131026', failed: 1, codes: 1, share: share(1, 7) },
+          { code: 'opted_out', failed: 1, codes: 1, share: share(1, 7) },
+          { code: 'window_closed', failed: 1, codes: 1, share: share(1, 7) },
+        ],
+        failed: 7,
+      },
+      uncounted: 0,
+    });
+    // A day counted before its failed sends by code were (before migration 0269) is left out of
+    // the year, and counted again at the next run, alone.
+    await fx.query(
+      `UPDATE ops.platform_message_days_counted SET reasons = false WHERE utc_day = $1::date`,
+      [utcDay(noonDaysAgo(3))],
+    );
+    expect(await yearOf()).toMatchObject({
+      reasons: { reasons: [{ code: '131049', failed: 2 }, {}, {}, {}, {}], failed: 6 },
+      uncounted: 1,
+    });
+    expect(await count(31)).toEqual({ purged: 0, counted: 1 });
+    expect((await yearOf())?.reasons.failed).toBe(7);
+    expect((await yearOf())?.uncounted).toBe(0);
+
+    // The platform's year, read with no company's details, adds up to the year's failed sends.
+    const platform = await ops().failureReasonYear(staff);
+    expect(platform.uncounted).toBe(0);
+    const year = await ops().messageYear(staff);
+    expect(platform.reasons.failed).toBe(year.days.reduce((total, d) => total + d.failed, 0));
+    expect(platform.reasons.failed).toBeGreaterThanOrEqual(7);
+    expect(JSON.stringify(platform)).not.toContain(kept.tenant.id);
+
+    // Counts older than 400 days and a deleted company's are deleted, the codes too, before any
+    // day is counted.
+    await fx.query(
+      `INSERT INTO ops.platform_message_days (tenant_id, utc_day, outbound, failed, inbound)
+       VALUES ($1, (now() AT TIME ZONE 'UTC')::date - 401, 1, 1, 0)`,
+      [kept.tenant.id],
+    );
+    await fx.query(
+      `INSERT INTO ops.platform_failure_reason_days (tenant_id, utc_day, reason_code, failed)
+       VALUES ($1, (now() AT TIME ZONE 'UTC')::date - 401, '131049', 1),
+              ($2, $3::date, '131049', 1)`,
+      [kept.tenant.id, gone.tenant.id, utcDay(noonDaysAgo(2))],
+    );
+    expect(await count(31)).toEqual({ purged: 1, counted: 0 });
+    expect(
+      await fx.query(
+        `SELECT reason_code FROM ops.platform_failure_reason_days
+          WHERE utc_day < (now() AT TIME ZONE 'UTC')::date - 400 OR tenant_id = $1`,
+        [gone.tenant.id],
+      ),
+    ).toEqual([]);
+
+    // The table keeps a count of one or more and a code as long as a message's.
+    await expect(
+      fx.query(
+        `INSERT INTO ops.platform_failure_reason_days (tenant_id, utc_day, reason_code, failed)
+         VALUES ($1, (now() AT TIME ZONE 'UTC')::date - 20, 'x', 0)`,
+        [kept.tenant.id],
+      ),
+    ).rejects.toThrow(/platform_failure_reason_days_failed_check/);
+    await expect(
+      fx.query(
+        `INSERT INTO ops.platform_failure_reason_days (tenant_id, utc_day, reason_code, failed)
+         VALUES ($1, (now() AT TIME ZONE 'UTC')::date - 20, repeat('x', 33), 1)`,
+        [kept.tenant.id],
+      ),
+    ).rejects.toThrow(/platform_failure_reason_days_reason_code_check/);
+  });
+
+  it('lets only platform administrators read the year’s reasons and the days counted', async () => {
+    const outsider = await createUser(fx.dbs, { twoFactor: true });
+    for (const statement of [
+      sql`select * from ops.platform_ops_failure_reason_year(null)`,
+      sql`select ops.platform_ops_failure_reason_days()`,
+    ]) {
+      await expectCode(
+        fx.dbs.platform.run(outsider.id, (tx) => tx.execute(statement)),
+        'forbidden',
+      );
+    }
+    // The worker's role cannot read them.
+    for (const statement of [
+      'SELECT * FROM ops.platform_ops_failure_reason_year(null)',
+      'SELECT ops.platform_ops_failure_reason_days()',
+    ]) {
+      await expect(fx.dbs.appPool.query(statement), statement).rejects.toThrow(/permission denied/);
+    }
   });
 });

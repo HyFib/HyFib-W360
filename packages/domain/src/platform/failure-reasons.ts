@@ -1,4 +1,5 @@
 import { sql, type Tx } from '@w360/db';
+import { MESSAGE_DAYS_KEPT } from './message-days';
 
 /**
  * Failed sends by reason (P5-10, ADR-347). A failed message keeps the code it failed with: Meta's,
@@ -69,4 +70,49 @@ export async function readFailureReasons(
       codes: Number(r.codes),
     })),
   );
+}
+
+/**
+ * The year's failed sends by reason (ADR-350), from the counts the worker keeps as days pass: the
+ * codes of the days whose failed sends by code are counted, and how many of the 365 days before
+ * today are not counted yet.
+ */
+export interface FailureReasonYear {
+  reasons: FailureReasons;
+  /** Days of the 365 before today whose failed sends by code are not counted yet. */
+  uncounted: number;
+}
+
+/**
+ * The year's failed sends by code, the platform's or one company's (platform administrators;
+ * companies deleted are left out), with the days not counted yet. Read in one snapshot, so the
+ * days counted are those the reasons cover.
+ */
+export async function readFailureReasonYear(
+  tx: Tx,
+  tenantId: string | null,
+): Promise<FailureReasonYear> {
+  const result = await tx.execute<{
+    reason_code: string | null;
+    failed_sends: number | string;
+    codes: number | string;
+  }>(sql`
+    select reason_code, failed_sends, codes
+      from ops.platform_ops_failure_reason_year(${tenantId}::uuid)
+     order by reason_code is null, failed_sends desc, reason_code`);
+  const counted = await tx.execute<{ days: number | string }>(
+    sql`select ops.platform_ops_failure_reason_days() as days`,
+  );
+  const [row] = counted.rows;
+  if (!row) throw new Error('ops.platform_ops_failure_reason_days answered no row');
+  return {
+    reasons: failureReasons(
+      result.rows.map((r) => ({
+        code: r.reason_code,
+        failed: Number(r.failed_sends),
+        codes: Number(r.codes),
+      })),
+    ),
+    uncounted: MESSAGE_DAYS_KEPT - Number(row.days),
+  };
 }
