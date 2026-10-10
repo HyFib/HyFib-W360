@@ -1885,14 +1885,15 @@ Phase 5 rules (outgoing webhooks, P5-09):
   (unit tests; an integration test, run in CI only).
 - An endpoint can take the cash on delivery answers of chosen answers and stores only (ADR-349). The
   answers are checked against the two a confirmation offers; a list may add only stores of the
-  endpoint's company (checked in its scope); both are kept only while the endpoint takes
-  `store_order.cod_answered` (database checks too, which also refuse a null entry), and applied in
-  `app.capture_webhook_event` to the answer and to the store the confirmation's trigger passes in the
-  same transaction, which is not stored with the event. They only narrow what one endpoint receives
-  and never add an event or a delivery for another endpoint or company; the payload is unchanged. A
-  store removed later stays on the list and matches nothing, so a list never widens by itself.
-  Audited with the lists and in the company data export (unit tests; integration tests, run in CI
-  only).
+  endpoint's company (checked in its scope); the answers are kept only while the endpoint takes
+  `store_order.cod_answered`, and the stores while it takes an event of a store's orders (answers,
+  skipped or sent order messages, ADR-352, ADR-353; database checks too, which also refuse a null
+  entry), and applied in `app.capture_webhook_event` to the answer and to the store the
+  confirmation's trigger passes in the same transaction, which is not stored with the event. They
+  only narrow what one endpoint receives and never add an event or a delivery for another endpoint
+  or company; the payload is unchanged. A store removed later stays on the list and matches nothing,
+  so a list never widens by itself. Audited with the lists and in the company data export (unit
+  tests; integration tests, run in CI only).
 - Skipped order message events (ADR-351): `store_order.message_skipped` is captured by triggers in
   the transaction that records an order message skipped or skips it, as the runtime role in the
   company's scope (the store's read and the message's job, the only writers of the state), only for

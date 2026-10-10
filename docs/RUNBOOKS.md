@@ -3417,8 +3417,8 @@ delivery confirmation, which the customer did get (or which sends its own event)
 
 **A receiver misses some skipped order messages, or one store's (ADR-352).** An endpoint can take
 the skips of chosen order messages only, or those of chosen stores' orders only (the same stores as
-its cash on delivery answers). The endpoints list shows them ("Order messages whose skips and sends
-are sent: …", "Stores whose cash on delivery answers and order messages are sent: …"), and the API
+its cash on delivery answers). The endpoints list shows them ("Order messages whose events are
+sent: …", "Stores whose cash on delivery answers and order messages are sent: …"), and the API
 answers `orderMessageEvents` and `storeIds` (null takes every message's, or every store's). A
 skipped message is sent only when its message and its order's store are on the lists; when no
 endpoint takes it, it is not recorded at all, so there is nothing to replay. To take more, tick the

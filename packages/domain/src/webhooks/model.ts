@@ -1529,7 +1529,7 @@ export interface WebhookStoreChoice {
   label: string;
 }
 
-/** A store an endpoint takes the cash on delivery answers and skipped order messages of, as stored. */
+/** A store an endpoint takes the cash on delivery answers and order messages of, as stored. */
 export interface WebhookEndpointStore {
   id: string;
   /** Its name or address; null for a store removed since it was chosen, which matches nothing. */

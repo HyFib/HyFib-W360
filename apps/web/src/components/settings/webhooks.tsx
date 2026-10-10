@@ -576,7 +576,7 @@ function OrderMessageChoices({
     <fieldset className="grid gap-1">
       <legend className="mb-1 text-sm font-medium">Order messages</legend>
       <p className="mb-1 text-xs text-muted-foreground">
-        Order message skipped and Order message sent are sent for the messages ticked (all five
+        The order message events the endpoint takes are sent for the messages ticked (all five
         unless you untick some).
       </p>
       {WEBHOOK_ORDER_MESSAGE_EVENTS.map((event) => {
@@ -3917,7 +3917,7 @@ export function WebhookEndpointForm({
             : null;
         // Every store's unless the stores ticked are chosen (ADR-349, ADR-352).
         const chosenStores = webhookTakesStoreEvents(eventTypes) && !everyStore ? storeIds : null;
-        // Every order message ticked takes every message's skips (null, ADR-352).
+        // Every order message ticked takes every message's skips and sends (null, ADR-352, ADR-353).
         const chosenOrderMessageEvents =
           webhookTakesOrderMessages(eventTypes) &&
           orderMessageEvents.length < WEBHOOK_ORDER_MESSAGE_EVENTS.length

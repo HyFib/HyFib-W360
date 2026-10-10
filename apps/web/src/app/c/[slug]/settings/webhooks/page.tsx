@@ -283,7 +283,7 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
                     ) : null}
                     {e.orderMessageEvents ? (
                       <p className="text-xs text-muted-foreground">
-                        Order messages whose skips and sends are sent:{' '}
+                        Order messages whose events are sent:{' '}
                         {e.orderMessageEvents
                           .map((m) => WEBHOOK_ORDER_MESSAGE_EVENT_LABELS[m])
                           .join(', ')}

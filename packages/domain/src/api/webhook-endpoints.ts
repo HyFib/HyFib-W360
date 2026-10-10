@@ -437,7 +437,7 @@ const invalidCodAnswers = () =>
   });
 
 const storeIdsField = webhookStoreIdsSchema.describe(
-  `The connected stores whose cash on delivery answers and skipped and sent order messages the endpoint receives: 1 to ${WEBHOOK_LIMITS.stores} ids of the company's stores (as store_order.cod_answered, store_order.message_skipped and store_order.message_sent events give them in \`store.id\`), only with one of those events. An answer or an order message belongs to the store of its order. A store removed since it was chosen stays on the list and matches nothing; a company has at most 5 stores at once. With the answers, the order messages or the numbers chosen too, an event must pass them all. null receives every store's, including those of stores connected later.`,
+  `The connected stores whose cash on delivery answers and skipped and sent order messages the endpoint receives: 1 to ${WEBHOOK_LIMITS.stores} ids of the company's stores (as store_order.cod_answered, store_order.message_skipped and store_order.message_sent events give them in \`store.id\`), only with one of those events. An answer or an order message belongs to the store of its order. A store removed since it was chosen stays on the list and matches nothing; a company has at most 5 stores at once. With the answers, the order messages or the numbers chosen too, an event must pass each list that applies to it (a skipped message belongs to no number). null receives every store's, including those of stores connected later.`,
 );
 
 /**
@@ -450,7 +450,7 @@ const invalidStores = () =>
   });
 
 const orderMessageEventsField = webhookOrderMessageEventsSchema.describe(
-  `The order messages whose skips and sends the endpoint receives as store_order.message_skipped and store_order.message_sent (${WEBHOOK_ORDER_MESSAGE_EVENTS.join(', ')}), as orderMessage.event names them, only with one of those events; null receives every message's, as a list of all five does. With the stores or the numbers chosen too, an event must pass them all.`,
+  `The order messages whose skips and sends the endpoint receives as store_order.message_skipped and store_order.message_sent (${WEBHOOK_ORDER_MESSAGE_EVENTS.join(', ')}), as orderMessage.event names them, only with one of those events; null receives every message's, as a list of all five does. With the stores chosen too, or the numbers for sent messages (a skipped message belongs to no number), an event must pass them all.`,
 );
 
 /** Order messages are chosen only for an endpoint that receives skipped or sent ones (ADR-352, ADR-353). */
@@ -646,7 +646,7 @@ const invalidRunEndReasons = () =>
   });
 
 const channelIdsField = webhookChannelIdsSchema.describe(
-  `The WhatsApp numbers whose events the endpoint receives: 1 to ${WEBHOOK_LIMITS.channels} ids of the company's numbers (messages, conversations and orders give a number's id as \`channelId\`, templates in \`channels\` and webhook events as \`channel.id\`), only with an event that happens on a number: ${WEBHOOK_CHANNEL_EVENTS.slice(0, -1).join(', ')} or ${WEBHOOK_CHANNEL_EVENTS.at(-1)}. A campaign's events are those of the number it sends from; a campaign without a number yet is on none. A Payment Link's are those of its order's number, and a satisfaction survey's or a cash on delivery confirmation's answer that of its conversation. Consent, contact, template, skipped order message (store_order.message_skipped), deal, task and note events belong to no number: an endpoint that names numbers still receives every one of them it takes. null receives the events of every number, including numbers connected later.`,
+  `The WhatsApp numbers whose events the endpoint receives: 1 to ${WEBHOOK_LIMITS.channels} ids of the company's numbers (messages, conversations and orders give a number's id as \`channelId\`, templates in \`channels\` and webhook events as \`channel.id\`), only with an event that happens on a number: ${WEBHOOK_CHANNEL_EVENTS.slice(0, -1).join(', ')} or ${WEBHOOK_CHANNEL_EVENTS.at(-1)}. A campaign's events are those of the number it sends from; a campaign without a number yet is on none. A Payment Link's are those of its order's number, a satisfaction survey's or a cash on delivery confirmation's answer that of its conversation, and a sent order message's (store_order.message_sent) the number it went from. Consent, contact, template, skipped order message (store_order.message_skipped), deal, task and note events belong to no number: an endpoint that names numbers still receives every one of them it takes. null receives the events of every number, including numbers connected later.`,
 );
 
 /** Numbers are chosen only for an endpoint that receives events of numbers (ADR-170). */

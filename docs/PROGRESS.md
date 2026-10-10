@@ -37,6 +37,13 @@ included.
   the ADR-349, ADR-351 and ADR-352 entries' names and lists); BACKLOG P5-09; feature matrix W-138,
   W-139 and H-014. The audit's largest entry is now 6,264 bytes (ADR-336 said under 6,000; the
   test's bound is 6,500, within the 7,000 kept).
+- **Review fixes:** the skipped event's API description and the Settings copy name the order
+  messages' new place ("Order messages") and no longer name both events for an endpoint that takes
+  one; the order message and store lists' descriptions say that numbers narrow sent messages only;
+  the numbers' description says which number a sent order message belongs to; SECURITY's store list
+  note names the three events; two code comments updated. Not changed: a guard against a message
+  started without its run (no path writes one, and its event would then fail its deliveries with a
+  logged error rather than vanish).
 - **Mutation checks:** 22 deliberate regressions, 21 caught by the unit tests (the event not one of
   a number, a store or an order message, another label or place, an event without its conversation
   or with neither or both a message and a run described, the run, the message or the number's phone
