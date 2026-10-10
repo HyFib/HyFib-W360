@@ -515,6 +515,9 @@ test('staff read the platform’s messages a day on the Usage tab (ADR-333)', as
   // The table gives every day: each UTC day from the window's start to today (the server's, read
   // between the two times).
   await page.getByText('Table of the days', { exact: true }).click();
+  // The pointer off the charts: left on the summary, it would rest on a chart once focusing the
+  // chart scrolls the page, and WebKit then moves that chart's day to the one under it.
+  await page.mouse.move(0, 0);
   const table = page.getByRole('table', { name: 'Messages a day' });
   await expect(table.getByRole('columnheader')).toHaveText([
     'Day (UTC)',
