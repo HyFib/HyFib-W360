@@ -26,7 +26,7 @@ BEGIN
   END IF;
   RETURN QUERY
   WITH by_month AS (
-    SELECT r.reason_code AS code, date_trunc('month', r.utc_day)::date AS m,
+    SELECT r.reason_code AS code, date_trunc('month', r.utc_day::timestamp)::date AS m,
            sum(r.failed)::integer AS n
       FROM ops.platform_failure_reason_days r
       JOIN ops.platform_message_days_counted c ON c.utc_day = r.utc_day AND c.reasons

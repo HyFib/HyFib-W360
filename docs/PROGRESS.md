@@ -77,8 +77,9 @@ run here; the migration passed the pglast parse check (syntax only), its PL/pgSQ
   `chartMonthLabel` in `platform/ops-chart.ts`.
 - **Web:** the year's tables on the Usage tab and a company's page draw each reason's months in a
   "Month by month" column: a bar a month in the failed sends' colour, each reason to its own height,
-  the partial months lighter, each month's count when pointed at, one sentence for a screen reader,
-  and a note saying which months the bars run from and to.
+  the partial months in outline, each month's count when pointed at, one sentence for a screen
+  reader, a note saying which months the bars run from and to, and a folded table of every month's
+  count.
 - **Tests:** unit (5 new: the year's months, partial and whole and with a leap day, a malformed day
   refused; each row placed in its reason's month, rows of one month added, an unknown code or month
   refused; the month names; the bar heights; three updated: the reader's four statements, the
@@ -96,6 +97,18 @@ run here; the migration passed the pglast parse check (syntax only), its PL/pgSQ
   over, every company's months read for one, a small month drawn without a bar, the month named year
   first). The function's ranking and filters run in the database and are covered by the integration
   tests, which run in CI only.
+- **Review fixes:** an independent review found nothing that would fail CI and no correctness or
+  security bug, and these, all fixed:
+  - **MEDIUM:** a month's count could be read only by pointing at it with a mouse or with a screen
+    reader, not from a keyboard or a touch screen. A folded table under the year's table ("Month by
+    month as a table") now gives every month's count, as the daily charts' does (ADR-333).
+  - The partial months, drawn at half opacity, were faint; they are drawn in outline now, their edge
+    in the full colour.
+  - **LOW:** the ADR and the runbook said the first and last months are always partial and there
+    are always 13; the first is whole when the year starts on a 1st and the last when today is one.
+  - **LOW:** DEPLOYMENT's note on 0283 sat among 0269's and 0270's; it follows 0282's now.
+  - 0283 truncates the month from the day as a timestamp without time zone, so the session's time
+    zone never enters (the review's optional point; 0283 has not been applied anywhere yet).
 
 ### Test commands and results (local, 2026-10-10)
 

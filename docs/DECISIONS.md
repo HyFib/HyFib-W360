@@ -14203,15 +14203,18 @@ Decision:
   executable by the platform role alone; codes and counts only.
 - **One snapshot:** `readFailureReasonYear` reads the months and the transaction's today with the
   year (repeatable read, as both callers already did), spans the calendar months of the 365 days
-  (`failureReasonYearMonths`: 13 when the year starts after a 1st, the first and last partial) and
-  places each row in its reason's month (`failureReasonsByMonth`, 0 for a month without one); a row
-  naming a code or a month the year does not list is an error, not dropped.
+  (`failureReasonYearMonths`: 13 unless today or the year's first day is a 1st; the first month
+  partial unless the year starts on a 1st, the last unless today is a 1st) and places each row in
+  its reason's month (`failureReasonsByMonth`, 0 for a month without one); a row naming a code or a
+  month the year does not list is an error, not dropped.
 - **Shown in the year's table:** a "Month by month" column beside each reason: a bar a month in the
   failed sends' colour, oldest first, each reason to its own height (its most in one month fills
-  it), at least 2 pixels for a month with a failed send; the partial first and last months are
-  drawn lighter and named with their days. Each month says its count when pointed at, the whole
-  reads as one sentence to a screen reader, and a note under the table says which months the bars
-  run from and to. The window's table (93 days at most) has no months.
+  it), at least 2 pixels for a month with a failed send; a partial month is drawn in outline (its
+  edge in the full colour, its inside lighter) and named with its days. Each month says its count
+  when pointed at, the whole reads as one sentence to a screen reader, a note under the table says
+  which months the bars run from and to and which are partial, and a folded table under it gives
+  every month's count, as the daily charts' does (ADR-333), for keyboards and touch screens. The
+  window's table (93 days at most) has no months.
 
 Consequences: platform staff see when a reason began, grew or faded without querying the database.
 Rows scaled to their own height compare a reason's months, not one reason's months with another's

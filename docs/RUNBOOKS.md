@@ -4021,10 +4021,13 @@ are not counted yet; after a deployment of migration 0269 every day is counted a
 days older than a week take the statuses reported since they were last counted). "None counted
 yet" means no day is: check that the worker's `ops.message-days` job runs (the Queues tab). A
 company being deleted shows no year's reasons; its counts are deleted with it. Beside each reason
-are its months (ADR-360): a bar a month from the month of 365 days ago to this one, each reason to
-its own height, so a reason that began or faded shows; point at a month for its count. The first
-and last months are partial (the year starts 365 days ago and ends yesterday), drawn lighter. A
-reason's months add up to its year; they too cover the counted days only.
+are its months (ADR-360): a bar a month from the month of the year's first day (365 days ago) to
+the month of its last (yesterday), each reason to its own height, so a reason that began or faded
+shows; point at a month for its count, or open "Month by month as a table" under the table for
+every count. A month the year holds only part of is drawn in outline and named with its days in
+that table: usually the first and the last, but the first is whole when the year starts on a 1st
+and the last when today is one (the note under the table says which). A reason's months add up to
+its year; they too cover the counted days only.
 
 **Acknowledging failures (ADR-141).** On Current failures, the administrator who takes a failure
 opens Acknowledge on its row and writes a note of 10 to 500 characters: what was done or found

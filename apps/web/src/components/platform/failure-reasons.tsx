@@ -37,9 +37,9 @@ const monthText = (month: FailureReasonMonth) =>
 /**
  * A reason's failed sends month by month (ADR-360): a bar a month in the failed sends' colour, the
  * oldest month first, the row to its own height (its most in one month fills it), so a reason that
- * began, grew or faded shows at a glance; a partial first or last month is drawn lighter. Each month
- * says its count when pointed at, and the whole reads as one sentence to a screen reader; the counts
- * are the year's, in the same table.
+ * began, grew or faded shows at a glance; a partial first or last month is drawn in outline, its
+ * edge in the full colour and its inside lighter. Each month says its count when pointed at, and the
+ * whole reads as one sentence to a screen reader; every count is in the folded table too.
  */
 function MonthBars({
   reason,
@@ -79,7 +79,19 @@ function MonthBars({
             <title>{`${monthText(month)}: ${chartCount(counts[index] ?? 0)} failed`}</title>
             {/* The month's whole height answers the pointer, a bar or not. */}
             <rect x={x} y="0" width={MONTH_BAR} height={MONTH_HEIGHT} fill="transparent" />
-            {height > 0 ? (
+            {height > 0 && month.partial ? (
+              // Inset by half the stroke, so the outline keeps the bar's width and height.
+              <rect
+                x={x + 0.5}
+                y={MONTH_HEIGHT - height + 0.5}
+                width={MONTH_BAR - 1}
+                height={height - 1}
+                rx="1"
+                fill="var(--chart-3)"
+                fillOpacity={0.3}
+                stroke="var(--chart-3)"
+              />
+            ) : height > 0 ? (
               <rect
                 x={x}
                 y={MONTH_HEIGHT - height}
@@ -87,7 +99,6 @@ function MonthBars({
                 height={height}
                 rx="1"
                 fill="var(--chart-3)"
-                fillOpacity={month.partial ? 0.5 : 1}
               />
             ) : null}
           </g>
@@ -97,12 +108,12 @@ function MonthBars({
   );
 }
 
-/** Which of the year's months are partial, drawn lighter: none, the first, the last or both. */
+/** Which of the year's months are partial, drawn in outline: none, the first, the last or both. */
 function partialNote(first: boolean, last: boolean): string {
   const which =
     first && last ? 'first and last months are' : first ? 'first month is' : 'last month is';
   return first || last
-    ? ` The year starts 365 days ago and ends yesterday, so its ${which} partial, drawn lighter.`
+    ? ` The year starts 365 days ago and ends yesterday, so its ${which} partial, drawn in outline.`
     : '';
 }
 
@@ -110,8 +121,9 @@ function partialNote(first: boolean, last: boolean): string {
  * A window's failed sends by the code they failed with (ADR-347): the most frequent first, then the
  * rest together; each with its sends and its share of those failed, written and drawn as a bar in
  * the failed sends' colour, so the reasons compare at a glance while every number stays in the
- * table. With the year's months (ADR-360), each reason's months are drawn beside it. When no send
- * failed, a note says so.
+ * table. With the year's months (ADR-360), each reason's months are drawn beside it, and a folded
+ * table under it gives every month's count, for keyboards and touch screens as for screen readers.
+ * When no send failed, a note says so.
  */
 export function FailureReasonsTable({
   reasons,
@@ -171,11 +183,44 @@ export function FailureReasonsTable({
         </TBody>
       </Table>
       {months && first && last ? (
-        <p className="text-xs text-muted-foreground">
-          Month by month, from {chartMonthLabel(first.month)} to {chartMonthLabel(last.month)}, each
-          reason to its own height: point at a month for its count.
-          {partialNote(first.partial, last.partial)}
-        </p>
+        <>
+          <p className="text-xs text-muted-foreground">
+            Month by month, from {chartMonthLabel(first.month)} to {chartMonthLabel(last.month)},
+            each reason to its own height: point at a month for its count, or open the table below
+            for every count.
+            {partialNote(first.partial, last.partial)}
+          </p>
+          {/* min-w-0: the table scrolls in its box rather than widening the card on a phone. */}
+          <details className="min-w-0 rounded-md border border-border p-3">
+            <summary className="cursor-pointer text-sm font-medium">
+              Month by month as a table
+            </summary>
+            <Table aria-label={`${label}, month by month`} className="mt-3">
+              <THead>
+                <TR>
+                  <TH>Reason</TH>
+                  {months.months.map((month) => (
+                    <TH key={month.month} className="whitespace-nowrap">
+                      {monthText(month)}
+                    </TH>
+                  ))}
+                </TR>
+              </THead>
+              <TBody>
+                {reasons.reasons.map((r, index) => (
+                  <TR key={r.code ?? 'the rest'}>
+                    <TD className="min-w-48">{failureReasonLabel(r.code, r.codes)}</TD>
+                    {months.months.map((month, at) => (
+                      <TD key={month.month} className="tabular-nums">
+                        {chartCount(months.byMonth[index]?.[at] ?? 0)}
+                      </TD>
+                    ))}
+                  </TR>
+                ))}
+              </TBody>
+            </Table>
+          </details>
+        </>
       ) : null}
     </div>
   );
