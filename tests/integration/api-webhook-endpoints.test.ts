@@ -3829,17 +3829,11 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       expect(audit.bytes).toBeLessThanOrEqual(8192);
       expect(audit.metadata).toMatchObject({
         source: 'api',
-        listCounts: {
-          contactEventTags: 50,
-          contactTags: 50,
-          conversationTags: 50,
-          surveyContactTags: 50,
-        },
-        listDigests: {
-          contactEventTags: digest(lists.contactEventTags),
-          contactTags: digest(lists.contactTags),
-          conversationTags: digest(lists.conversationTags),
-          surveyContactTags: digest(lists.surveyContactTags),
+        lists: {
+          contactEventTags: `50:${digest(lists.contactEventTags)}`,
+          contactTags: `50:${digest(lists.contactTags)}`,
+          conversationTags: `50:${digest(lists.conversationTags)}`,
+          surveyContactTags: `50:${digest(lists.surveyContactTags)}`,
         },
         surveyConversationTags: lists.surveyConversationTags,
       });

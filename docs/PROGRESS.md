@@ -1,5 +1,38 @@
 # Progress
 
+## 2026-10-10 — Endpoint audit entries name a long list once (P5-09, H-014, ADR-363)
+
+Status: **Implemented; its database tests run in CI only.** An endpoint's audit entry too large for
+its metadata named each of its largest lists twice, by count under `listCounts` and by digest under
+`listDigests` (ADR-336); at its largest it took 6,793 bytes, 7 under the test's 6,800 bound, so no
+further webhook list or event type could be added without first naming the lists more compactly.
+
+### Completed
+
+- **Domain:** `webhookEndpointAuditMetadata` names such lists once, under `lists`, each as its length
+  and digest joined by a colon (`"50:1a2b3c4d5e6f7a8b"`), chosen as before (largest first, by name
+  when as large, until the entry fits). At its largest (every event type, the 62 lists, the longest
+  hosts) the entry now takes 4,075 bytes. No migration: entries written before keep their shape.
+- **Tests:** unit (the four tests of ADR-336 updated to the new shape: a list's digest from its
+  objects' keys in order, a changed list with another digest, the events always named, the largest
+  entry under 4,200 bytes with all 62 lists named, each list 30 tags long so none fits whole);
+  integration (`webhooks.test.ts` and `api-webhook-endpoints.test.ts`: the stored entries name the
+  four largest lists under `lists`, a changed list's digest alone changing). Written for CI; the
+  integration tests were not run here.
+- **Docs:** ADR-363; ARCHITECTURE; THREAT-MODEL T301; BACKLOG P5-09.
+- **Mutation checks:** 6 deliberate regressions, all caught by the unit tests (another separator, a
+  shorter digest, keys hashed in the order read, a wrong length, the old key, stopping before the
+  entry fits).
+
+### Test commands and results (local, 2026-10-10)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 146 files, 1551 tests passed                                    |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+
 ## 2026-10-10 — The year's failed sends by company, month by month (P5-10, H-034, ADR-362)
 
 Status: **Implemented; its database tests run in CI only.** The Usage tab showed the year's failed

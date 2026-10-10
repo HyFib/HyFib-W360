@@ -1269,7 +1269,8 @@ verification, app review, Embedded Signup configuration).
   **[Audit entries of endpoints with long lists fixed; their database tests run only in CI]**
   (ADR-336, no migration: an added or changed endpoint's entry whose lists together would pass
   7,000 bytes as jsonb names the largest by count and digest, so no change is refused for its audit
-  entry).
+  entry; since ADR-363 each such list once, as `"<length>:<digest>"` under `lists`, so at its
+  largest the entry takes 4,075 bytes and more lists fit).
   **[Answers kept with an Idempotency-Key up to 256 KiB built; their database test runs only in
   CI]** (ADR-339, migrations 0259 and 0260: an endpoint's whole configuration, about 103 KB at
   most, is kept with the key of `POST /webhook-endpoints` and its secret rotation, which failed past

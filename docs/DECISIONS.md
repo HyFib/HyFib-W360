@@ -14291,3 +14291,30 @@ year, so this table is the Usage tab's only.
 
 Not built: a company's rank changes over time, failures as a share of each company's sends, and a CSV
 of the table.
+
+## ADR-363 Endpoint audit entries name a long list once, by its length and digest (P5-09) (2026-10-10)
+
+Context: an endpoint's audit entry too large for its 8 KiB of metadata names its largest lists by
+count under `listCounts` and by digest under `listDigests` until it fits (ADR-336). Each such list is
+named twice, under both objects, and jsonb keeps a number as a numeric, so at its largest (every event
+type, the 62 lists and the longest hosts) the entry took 6,793 bytes, 7 under the test's 6,800 bound
+(ADR-361), and every further list or event type needed the entry named more compactly first.
+
+Decision:
+
+- **One object, one string a list:** the lists named so go under `lists`, each as its length and the
+  first 16 hex digits of the SHA-256 of its JSON (each object's keys in order, as before) joined by a
+  colon: `"lists": { "contactTags": "50:1a2b3c4d5e6f7a8b" }`. Two entries still show whether a list
+  named so in both changed, and how many items it holds. The lists are chosen as before: the largest
+  first, by name when as large, until the entry fits; the host and the events are always named, and
+  the endpoint keeps every list whole.
+- **Room:** at its largest the entry now takes 4,075 bytes (the unit test's bound is 4,200), within
+  the 7,000 bytes kept, about 42 bytes a list named, so many more lists and event types fit.
+- **Older entries are kept as written:** entries written before this release name their lists
+  under `listCounts` and `listDigests`; nothing reads either shape but people and the tests, and no
+  migration rewrites the audit.
+
+Consequences: webhook filters can add lists again without a change to the audit. Comparing an entry
+written before this release with a later one means reading both shapes. No migration.
+
+Not built: naming a list's changed items rather than its digest.

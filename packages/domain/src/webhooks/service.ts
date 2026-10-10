@@ -3015,12 +3015,13 @@ function canonicalJson(value: unknown): string {
 /**
  * An endpoint's audit entry within the 8 KiB of metadata an audit entry holds (ADR-336): as given
  * while `jsonbSize` counts at most `WEBHOOK_LIMITS.auditMetadataBytes` for it; otherwise its largest
- * lists, one after another (by name when two are as large), are named by their lengths under
- * `listCounts` and by the first 16 hex digits of the SHA-256 of their JSON, each object's keys in
- * order (`canonicalJson`), under `listDigests`, so that two entries still show whether a list named
- * by count in both changed, until it fits. Its events (`eventTypes`, or a replay's `events`) are
- * always named, and the endpoint keeps every list whole. With every list named by count an entry
- * takes under 6,800 bytes (every event type, the 62 lists and the longest hosts), so it then fits.
+ * lists, one after another (by name when two are as large), are named under `lists` by their length
+ * and the first 16 hex digits of the SHA-256 of their JSON, each object's keys in order
+ * (`canonicalJson`), joined by a colon (`"50:1a2b3c4d5e6f7a8b"`, ADR-363), so that two entries still
+ * show whether a list named so in both changed, until it fits. Its events (`eventTypes`, or a
+ * replay's `events`) are always named, and the endpoint keeps every list whole. With every list
+ * named so an entry takes under 4,200 bytes (every event type, the 62 lists and the longest hosts),
+ * so it then fits, with room for many more lists.
  */
 export function webhookEndpointAuditMetadata(
   metadata: Record<string, unknown>,
@@ -3040,9 +3041,11 @@ export function webhookEndpointAuditMetadata(
     const keys = new Set(counted.map((list) => list.key));
     return {
       ...Object.fromEntries(Object.entries(metadata).filter(([key]) => !keys.has(key))),
-      listCounts: Object.fromEntries(counted.map((list) => [list.key, list.list.length])),
-      listDigests: Object.fromEntries(
-        counted.map((list) => [list.key, sha256Hex(canonicalJson(list.list)).slice(0, 16)]),
+      lists: Object.fromEntries(
+        counted.map((list) => [
+          list.key,
+          `${list.list.length}:${sha256Hex(canonicalJson(list.list)).slice(0, 16)}`,
+        ]),
       ),
     };
   };

@@ -8564,17 +8564,14 @@ describe('endpoint audit entries within an audit entry’s 8 KiB (ADR-336)', () 
       // The count takes no fewer bytes than PostgreSQL does, uncompressed, and the entry fits.
       expect(audit.bytes).toBeLessThanOrEqual(jsonbSize(audit.metadata));
       expect(jsonbSize(audit.metadata)).toBeLessThanOrEqual(WEBHOOK_LIMITS.auditMetadataBytes);
-      // Four lists as large named by count and digest, by name; the fifth whole, with the events
-      // and the host.
+      // Four lists as large named by length and digest (ADR-363), by name; the fifth whole, with
+      // the events and the host.
+      const named = index < 2 ? digests : { ...digests, contactTags: digest(otherTags) };
       expect(audit.metadata).toMatchObject({
         host: 'hooks.example.com',
-        listCounts: {
-          contactEventTags: 50,
-          contactTags: 50,
-          conversationTags: 50,
-          surveyContactTags: 50,
-        },
-        listDigests: index < 2 ? digests : { ...digests, contactTags: digest(otherTags) },
+        lists: Object.fromEntries(
+          Object.entries(named).map(([key, listDigest]) => [key, `50:${listDigest}`]),
+        ),
         surveyConversationTags: lists.surveyConversationTags,
       });
       expect(audit.metadata.eventTypes).toHaveLength(3);
