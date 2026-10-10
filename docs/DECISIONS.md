@@ -14218,3 +14218,38 @@ Rows scaled to their own height compare a reason's months, not one reason's mont
 (the counts and shares do that). The months cover the counted days only, as the year does.
 
 Not built: failures by company over time, a CSV of the months, and weeks or days instead of months.
+
+## ADR-361 Choosing the cart reminders, first or second, whose events a webhook endpoint receives (P5-09) (2026-10-10)
+
+Context: `store_checkout.reminder_skipped` and `store_checkout.reminder_sent` (ADR-355) are sent for
+both of a checkout's cart reminders, the first and the second, narrowed by store, number and (for a
+skipped one) reason only. A receiver that steps in only once the second, last reminder has gone out
+or was not sent, or one that tracks the first reminders alone, was sent the other reminder's events
+as well, and had to tell them apart itself (`reminder.event`). ADR-356 left a filter by reminder
+unbuilt.
+
+Decision:
+
+- **A list of reminders:** `cartReminders`, `cart_reminder` (the first), `cart_second_reminder`
+  (the second) or both (`WEBHOOK_CART_REMINDERS`), each once, the first then the second, as
+  `reminder.event` names them. A reminder's event is sent when its reminder is on the list, as well
+  as its store, number and reason on those lists; null receives both, as before. Only while the
+  endpoint takes either event (migration 0284's check), so the list never outlives them; it narrows
+  both events alike.
+- **Where it applies:** in `app.capture_webhook_event`, replaced with the same signature (0278's with
+  one condition more where the endpoints are matched and where the deliveries are written), from
+  the event's status, which is the reminder (0276). A reminder's event no endpoint takes is not
+  recorded. Order messages and cash on delivery answers have no reminder and are not narrowed by it.
+- **Who sets it:** owners and administrators in Settings → Webhooks (ticked under Cart reminders,
+  shown while the endpoint takes either event, each reminder in the words of a store's Messages
+  page) and keys with `webhooks.manage` through the API, audited with the endpoint and in the
+  company data export. Refusals name the field: a list without either event, an empty list, an
+  unknown reminder or an order message.
+
+Consequences: a receiver can take the reminder it acts on alone. The audit of an endpoint's change
+at its largest (every event type, the 62 lists and the longest hosts) is now 6,793 bytes, 7 under
+the test's 6,800 bound (ADR-356) and within the 7,000 bytes the audit keeps; the next list or event
+type needs the entry named more compactly, or the bound rechecked against those 7,000 bytes, before
+it is added.
+
+Not built: filters on a checkout's values, such as its total or items.

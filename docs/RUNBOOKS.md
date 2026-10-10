@@ -3495,8 +3495,9 @@ each reminder's state and reason. A reminder still waiting (its delay, the store
 the first reminder) sends nothing yet, and a checkout that calls for no reminder (completed, or
 without a number, when HyFib reads it) sends nothing at all. A sent reminder happens on the number
 it went from, so an endpoint that names numbers gets it only for those; a skipped one belongs to no
-number. The stores an endpoint names narrow both, and its cart reminder skip reasons the skipped
-one (ADR-356); its order messages and order message skip reasons do not apply.
+number. The stores and the cart reminders an endpoint names narrow both (ADR-361), and its cart
+reminder skip reasons the skipped one (ADR-356); its order messages and order message skip reasons
+do not apply.
 Events no endpoint takes are not recorded, so there is nothing to replay for reminders due before
 the endpoint took the events. HyFib deletes a checkout 30 days after the store last updated it, and
 removing the store deletes its checkouts, each with its reminders: a delivery not yet made then
@@ -3514,6 +3515,16 @@ recorded at all, so there is nothing to replay. A store's Messages page (Commerc
 each reminder's reason. To take more, tick the reasons under Cart reminder skipped on the endpoint's
 page, or `PATCH /webhook-endpoints/{id}` with `cartReminderSkipReasons` (null for every reason).
 Removing Cart reminder skipped clears the list.
+
+**A receiver misses the events of one cart reminder, the first or the second (ADR-361).** An
+endpoint can take the events of the first cart reminder (`cart_reminder`) or the second
+(`cart_second_reminder`) only, skipped and sent alike. The endpoints list shows them ("Cart
+reminders whose events are sent: …"), and the API answers `cartReminders` (null takes both). A
+reminder's event is sent only when its reminder is on the list, as well as its store, number and
+reason on those lists; when no endpoint takes it, it is not recorded at all, so there is nothing to
+replay. A store's Messages page (Commerce → Stores) shows each reminder. To take both, tick them
+under Cart reminders on the endpoint's page, or `PATCH /webhook-endpoints/{id}` with
+`cartReminders` (null for both). Removing both cart reminder events clears the list.
 
 **A receiver misses the events of a member's conversations (ADR-181).** An endpoint can take the
 message and conversation events of the conversations assigned to chosen members only. The endpoints

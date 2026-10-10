@@ -39,6 +39,7 @@ import {
 } from '../campaigns/results';
 import { renderEmail } from '../email/templates';
 import {
+  CART_EVENTS,
   ORDER_MESSAGE_EVENTS,
   STORE_MESSAGE_EVENT_INFO,
   STORE_MESSAGE_SKIP_REASONS,
@@ -95,6 +96,8 @@ import {
   webhookTakesStoreEvents,
   WEBHOOK_ORDER_MESSAGE_TYPES,
   webhookTakesOrderMessages,
+  WEBHOOK_CART_REMINDER_TYPES,
+  webhookTakesCartReminders,
   webhookStoreLabel,
   webhookStoreText,
   WEBHOOK_RUN_STEP_OUTCOMES,
@@ -302,6 +305,9 @@ import {
   WEBHOOK_ORDER_MESSAGES_NEED_THE_EVENT,
   webhookOrderMessageSkipReasonsFor,
   webhookOrderMessageSkipReasonsSchema,
+  webhookCartRemindersFor,
+  webhookCartRemindersSchema,
+  WEBHOOK_CART_REMINDERS_NEED_THE_EVENT,
   webhookCartReminderSkipReasonsFor,
   webhookCartReminderSkipReasonsSchema,
   WEBHOOK_CART_REMINDER_SKIP_REASONS_NEED_THE_EVENT,
@@ -4400,9 +4406,9 @@ describe('endpoint audit entries within an audit entry’s 8 KiB (ADR-336)', () 
         listDigests: { contactTags: digest(tags(10)) },
       });
     }
-    // Every event type, hosts of 253 characters, an OAuth client's method and the 61 lists an
+    // Every event type, hosts of 253 characters, an OAuth client's method and the 62 lists an
     // entry can name, each too long to name item by item beside the others: named by count, the
-    // entry takes under 6,800 (6,711), within the 7,000 bytes kept.
+    // entry takes under 6,800 (6,793), within the 7,000 bytes kept.
     const keys = [
       'assigneeIds',
       'automationIds',
@@ -4410,6 +4416,7 @@ describe('endpoint audit entries within an audit entry’s 8 KiB (ADR-336)', () 
       'campaignSkipReasons',
       'campaignStatuses',
       'cartReminderSkipReasons',
+      'cartReminders',
       'channelIds',
       'codAnswers',
       'consentChanges',
@@ -4466,7 +4473,7 @@ describe('endpoint audit entries within an audit entry’s 8 KiB (ADR-336)', () 
       'templateIds',
       'templateStatuses',
     ];
-    expect(keys).toHaveLength(61);
+    expect(keys).toHaveLength(62);
     const whole = webhookEndpointAuditMetadata({
       host: 'h'.repeat(253),
       eventTypes: [...WEBHOOK_EVENT_TYPES],
@@ -4475,7 +4482,7 @@ describe('endpoint audit entries within an audit entry’s 8 KiB (ADR-336)', () 
       oauthSecretReplaced: true,
       oauthClientAuthentication: 'client_secret_basic',
     });
-    expect(Object.keys(whole.listCounts as object)).toHaveLength(61);
+    expect(Object.keys(whole.listCounts as object)).toHaveLength(62);
     expect(jsonbSize(whole)).toBeLessThan(6800);
   });
 });
@@ -9015,7 +9022,7 @@ describe('the events of a store’s cart reminders (ADR-355)', () => {
       'when HyFib queues its template message for WhatsApp, before WhatsApp accepts or delivers anything',
       'a skipped reminder sends store_checkout.reminder_skipped instead',
       'an endpoint that names numbers receives it for those numbers only',
-      'with both lists, a sent reminder must pass them both',
+      'with more than one of these lists, a sent reminder must pass them all',
       'fails as event_gone',
     ]) {
       expect(sent).toContain(words);
@@ -9098,7 +9105,7 @@ describe('skip reason filters for skipped cart reminders (ADR-356)', () => {
     const doc = buildOpenApiDocument('https://app.example.com/api/v1');
     const described = doc.webhooks['store_checkout.reminder_skipped'].post.description;
     expect(described).toContain(
-      'every reason’s unless it names the reasons (its `cartReminderSkipReasons`, or the reasons ticked under Cart reminder skipped); with both lists, a skipped reminder must pass them both',
+      'every reason’s unless it names the reasons (its `cartReminderSkipReasons`, or the reasons ticked under Cart reminder skipped); with more than one of these lists, a skipped reminder must pass them all',
     );
   });
 });
@@ -9173,6 +9180,91 @@ describe('skip reason filters for skipped campaign recipients (ADR-359)', () => 
     const described = doc.webhooks['campaign.recipient_skipped'].post.description;
     expect(described).toContain(
       'an endpoint receives every reason’s skips unless it names the reasons (its `campaignSkipReasons`, or the reasons ticked under Campaign recipient skipped); with more than one of these lists, a skipped recipient must pass them all',
+    );
+  });
+});
+
+describe('cart reminder filters for cart reminder events (ADR-361)', () => {
+  it('take the first, the second or both cart reminders, once each, in that order; null takes both', () => {
+    expect(webhookCartRemindersSchema.parse(['cart_second_reminder', 'cart_reminder'])).toEqual([
+      'cart_reminder',
+      'cart_second_reminder',
+    ]);
+    expect(webhookCartRemindersSchema.parse(['cart_reminder', 'cart_reminder'])).toEqual([
+      'cart_reminder',
+    ]);
+    expect(webhookCartRemindersSchema.parse(['cart_second_reminder'])).toEqual([
+      'cart_second_reminder',
+    ]);
+    expect(webhookCartRemindersSchema.parse(null)).toBeNull();
+    // A store's two cart reminders, as its Messages page lists them.
+    expect(WEBHOOK_CART_REMINDERS).toEqual([...CART_EVENTS]);
+    for (const refused of [
+      [],
+      ['order_placed'],
+      ['cart_third_reminder'],
+      ['Cart_reminder'],
+      'cart_reminder',
+      [null],
+      Array(3).fill('cart_reminder'),
+    ]) {
+      expect(webhookCartRemindersSchema.safeParse(refused).success, JSON.stringify(refused)).toBe(
+        false,
+      );
+    }
+    expect(webhookCartRemindersSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one cart reminder, or take both.',
+    );
+    expect(webhookCartRemindersSchema.safeParse(['order_placed']).error?.issues[0]?.message).toBe(
+      'Choose cart reminders from the list.',
+    );
+    expect(
+      webhookCartRemindersSchema.safeParse(Array(3).fill('cart_reminder')).error?.issues[0]
+        ?.message,
+    ).toBe('Give each cart reminder once.');
+  });
+
+  it('are kept only while the endpoint takes skipped or sent cart reminders: given, kept, or cleared', () => {
+    expect(WEBHOOK_CART_REMINDER_TYPES).toEqual([
+      'store_checkout.reminder_skipped',
+      'store_checkout.reminder_sent',
+    ]);
+    for (const events of [
+      ['store_checkout.reminder_skipped'],
+      ['store_checkout.reminder_sent'],
+      ['store_checkout.reminder_skipped', 'store_checkout.reminder_sent'],
+      ['store_order.cod_answered', 'store_checkout.reminder_sent'],
+    ] as const) {
+      expect(webhookTakesCartReminders([...events]), events.join()).toBe(true);
+      expect(webhookCartRemindersFor([...events], ['cart_reminder'], null)).toEqual([
+        'cart_reminder',
+      ]);
+      expect(webhookCartRemindersFor([...events], undefined, ['cart_second_reminder'])).toEqual([
+        'cart_second_reminder',
+      ]);
+      expect(webhookCartRemindersFor([...events], null, ['cart_second_reminder'])).toBeNull();
+      expect(webhookCartRemindersFor([...events], undefined, null)).toBeNull();
+    }
+    // A store's other events are of no cart reminder.
+    for (const events of [
+      ['store_order.cod_answered'],
+      ['store_order.message_skipped'],
+      ['store_order.message_sent'],
+      ['campaign.recipient_skipped'],
+      [],
+    ] as const) {
+      expect(webhookTakesCartReminders([...events]), events.join()).toBe(false);
+      expect(
+        webhookCartRemindersFor([...events], ['cart_reminder'], ['cart_second_reminder']),
+        events.join(),
+      ).toBeNull();
+    }
+    // The skip reasons stay a list of the skipped event alone.
+    expect(
+      webhookCartReminderSkipReasonsFor(['store_checkout.reminder_sent'], ['no_phone'], null),
+    ).toBeNull();
+    expect(WEBHOOK_CART_REMINDERS_NEED_THE_EVENT).toBe(
+      `Choose cart reminders only for an endpoint that receives ${WEBHOOK_EVENT_INFO['store_checkout.reminder_skipped'].label} or ${WEBHOOK_EVENT_INFO['store_checkout.reminder_sent'].label}.`,
     );
   });
 });

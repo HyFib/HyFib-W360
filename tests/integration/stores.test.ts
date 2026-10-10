@@ -43,6 +43,7 @@ import {
   type StoreMessageEvent,
   type WebhookOrderMessageEvent,
   type WebhookOrderMessageSkipReason,
+  type WebhookCartReminder,
   type WebhookCartReminderSkipReason,
   type StoreVariables,
   type AutomationTrigger,
@@ -199,8 +200,8 @@ const HOOK_HOST = 'hooks.receiver.test';
 
 /**
  * A webhook endpoint of the company taking `eventTypes`, only those of the numbers (ADR-348),
- * answers and stores (ADR-349), order messages (ADR-352) and skip reasons (ADR-354, ADR-356) given,
- * on a path of this test's server of its own.
+ * answers and stores (ADR-349), order messages (ADR-352), cart reminders (ADR-361) and skip reasons
+ * (ADR-354, ADR-356) given, on a path of this test's server of its own.
  */
 async function addHook(
   owner: TenantContext,
@@ -217,6 +218,7 @@ async function addHook(
     storeIds?: string[];
     orderMessageEvents?: WebhookOrderMessageEvent[];
     orderMessageSkipReasons?: WebhookOrderMessageSkipReason[];
+    cartReminders?: WebhookCartReminder[];
     cartReminderSkipReasons?: WebhookCartReminderSkipReason[];
   } = {},
 ) {
@@ -3420,6 +3422,15 @@ describe('Cart reminders', () => {
       ['store_order.message_skipped', 'store_checkout.reminder_skipped'],
       { orderMessageSkipReasons: ['test_order'] },
     );
+    // One taking the second reminder's events alone, and one taking the first reminder's skips of
+    // two reasons only, one of which only the second reminder is skipped for (ADR-361).
+    const secondOnly = await addHook(owner, bothReminders, {
+      cartReminders: ['cart_second_reminder'],
+    });
+    const firstSkips = await addHook(owner, ['store_checkout.reminder_skipped'], {
+      cartReminders: ['cart_reminder'],
+      cartReminderSkipReasons: ['first_reminder_not_sent', 'frequency_capped'],
+    });
 
     // The second reminder needs the first, and comes later.
     await expectAppError(
@@ -3609,15 +3620,15 @@ describe('Cart reminders', () => {
     ).toEqual([
       ['10', 'store_checkout.reminder_sent', 'cart_reminder', null, 3],
       ['11', 'store_checkout.reminder_skipped', 'cart_reminder', 'no_marketing_opt_in', 5],
-      ['10', 'store_checkout.reminder_sent', 'cart_second_reminder', null, 3],
+      ['10', 'store_checkout.reminder_sent', 'cart_second_reminder', null, 4],
       [
         '11',
         'store_checkout.reminder_skipped',
         'cart_second_reminder',
         'first_reminder_not_sent',
-        4,
+        5,
       ],
-      ['12', 'store_checkout.reminder_skipped', 'cart_reminder', 'frequency_capped', 5],
+      ['12', 'store_checkout.reminder_skipped', 'cart_reminder', 'frequency_capped', 6],
       ['13', 'store_checkout.reminder_skipped', 'cart_reminder', 'cart_too_old', 4],
       ['14', 'store_checkout.reminder_skipped', 'cart_reminder', 'not_marketing_template', 4],
     ]);
@@ -3761,6 +3772,28 @@ describe('Cart reminders', () => {
         .map((e) => e.id)
         .sort(),
     );
+    // The second reminder's endpoint received its send and its skip and none of the first's; the
+    // other, only the first reminder's skip whose reason its list holds too.
+    type ReminderBody = {
+      type: string;
+      data: {
+        reminder: { event: string; skipReason?: string };
+        storeCheckout: { externalId: string };
+      };
+    };
+    const reminderOfBody = (body: ReminderBody) => [
+      body.type,
+      body.data.storeCheckout.externalId,
+      body.data.reminder.event,
+      body.data.reminder.skipReason ?? null,
+    ];
+    expect((hookBodiesAt(secondOnly.path) as ReminderBody[]).map(reminderOfBody).sort()).toEqual([
+      ['store_checkout.reminder_sent', '10', 'cart_second_reminder', null],
+      ['store_checkout.reminder_skipped', '11', 'cart_second_reminder', 'first_reminder_not_sent'],
+    ]);
+    expect((hookBodiesAt(firstSkips.path) as ReminderBody[]).map(reminderOfBody)).toEqual([
+      ['store_checkout.reminder_skipped', '12', 'cart_reminder', 'frequency_capped'],
+    ]);
   });
 
   it('asks Shopify for customer access only when a manager allows it, and uses the consent the store records', async () => {

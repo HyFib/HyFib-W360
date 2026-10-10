@@ -1962,6 +1962,13 @@ state` for one that becomes skipped from another state, each only for a message 
   cart reminders' reasons and to endpoints that take the event. `app.capture_webhook_event`
   (replaced with the same signature) matches it with the reason the cart reminder's trigger keeps
   in `detail` (0276), as it matches order messages' with theirs.
+- **Cart reminder filters** (migration 0284, ADR-361): `cart_reminders` on an endpoint lists the
+  cart reminders (`cart_reminder`, the first, and `cart_second_reminder`, the second) whose
+  `store_checkout.reminder_skipped` and `store_checkout.reminder_sent` events it takes, null for
+  both; a check keeps it to 1 or 2 of them and to endpoints that take either event.
+  `app.capture_webhook_event` (replaced with the same signature) matches it with the event's
+  status, which is the reminder (0276), where it decides whether an endpoint takes the event and
+  where it writes the deliveries.
 - **Skipped campaign recipients as webhook events** (migrations 0280–0281, ADR-358): two triggers
   capture `campaign.recipient_skipped` with the skip reason as status, the recipient's contact as
   the event's and the recipient in `detail`; its campaign and the campaign's number serve the

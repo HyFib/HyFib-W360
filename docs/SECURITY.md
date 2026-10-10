@@ -1956,6 +1956,14 @@ Phase 5 rules (outgoing webhooks, P5-09):
   The list only narrows what one endpoint receives and never adds an event or a delivery for
   another endpoint or company; the payload is unchanged. Audited with the list and in the company
   data export (unit tests; integration tests, run in CI only).
+- An endpoint can take the events of chosen cart reminders only, the first or the second (ADR-361).
+  The list holds only `cart_reminder` and `cart_second_reminder` (checked by the services and the
+  database), is kept only while the endpoint takes `store_checkout.reminder_skipped` or
+  `store_checkout.reminder_sent` (a database check too, which also refuses a null entry), and is
+  applied in `app.capture_webhook_event` to the reminder each event keeps as its status. The list
+  only narrows what one endpoint receives and never adds an event or a delivery for another
+  endpoint or company; the payload is unchanged. Audited with the list and in the company data
+  export (unit tests; integration tests, run in CI only).
 - Skipped campaign recipients (ADR-358): `campaign.recipient_skipped` is captured by triggers in
   the runner's transaction, as the runtime role in the company's scope (no runtime role can call
   the trigger functions directly), once per recipient: when the campaign starts (scheduled to

@@ -61,6 +61,8 @@ export async function createWebhookEndpointAction(
     orderMessageEvents: string[] | null;
     /** The reasons whose order message skips it takes (ADR-354); null takes every reason. */
     orderMessageSkipReasons: string[] | null;
+    /** The cart reminders whose skips and sends it takes (ADR-361); null takes both. */
+    cartReminders: string[] | null;
     /** The reasons whose cart reminder skips it takes (ADR-356); null takes every reason. */
     cartReminderSkipReasons: string[] | null;
     /** The reasons whose campaign recipient skips it takes (ADR-359); null takes every reason. */
@@ -205,6 +207,8 @@ export async function updateWebhookEndpointAction(
     orderMessageEvents: string[] | null;
     /** The reasons whose order message skips it takes (ADR-354); null takes every reason. */
     orderMessageSkipReasons: string[] | null;
+    /** The cart reminders whose skips and sends it takes (ADR-361); null takes both. */
+    cartReminders: string[] | null;
     /** The reasons whose cart reminder skips it takes (ADR-356); null takes every reason. */
     cartReminderSkipReasons: string[] | null;
     /** The reasons whose campaign recipient skips it takes (ADR-359); null takes every reason. */

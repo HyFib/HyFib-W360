@@ -1,5 +1,61 @@
 # Progress
 
+## 2026-10-10 — Cart reminder filter for cart reminder webhook events (P5-09, H-014, ADR-361)
+
+Status: **Implemented; its database tests run in CI only.** `store_checkout.reminder_skipped` and
+`store_checkout.reminder_sent` (ADR-355) went to an endpoint for both of a checkout's cart
+reminders, so a receiver that steps in only once the second reminder has gone out or was not sent
+had to tell the reminders apart itself. The local PostgreSQL is unavailable, so migration 0284 and
+the integration tests below were written but not run here; the migration passed the pglast parse
+check (syntax only), its PL/pgSQL body included.
+
+### Completed
+
+- **Database:** migration 0284: `cart_reminders` on `app.webhook_endpoints` (1 or 2 of
+  `cart_reminder` and `cart_second_reminder`, no null entry, one dimension, only with either cart
+  reminder event), its check validated at once and the runtime role's column update grant;
+  `app.capture_webhook_event` replaced with the same signature, 0278's with one condition more where
+  it decides whether an endpoint takes the event and where it writes the deliveries: a reminder's
+  event goes only to endpoints whose list is null or holds its reminder (the event's status).
+- **Domain:** `WEBHOOK_CART_REMINDER_TYPES` and `webhookTakesCartReminders`; the schema, the keep
+  rule (kept with either event, cleared with neither) and the refusals; the settings service and
+  the API take, keep, clear, audit and answer `cartReminders`; the OpenAPI document describes the
+  field and the two events' narrowing; the company data export names the column.
+- **Web:** Settings → Webhooks ticks the reminders under Cart reminders (shown while the endpoint
+  takes either event, in the words of a store's Messages page); the endpoints list names those
+  chosen.
+- **Tests:** unit (3 new: the schema and its refusals, with the list equal to a store's cart
+  events; the list kept with either event and cleared with neither, apart from the skip reasons;
+  the API schemas, the OpenAPI entries and the two events' descriptions; updated: the audit's
+  largest entry, now 6,793 bytes with the 62nd list, the update body's fields, the empty change's
+  message, the largest stored answer and the two events' older descriptions); integration
+  (`webhooks.test.ts`: the service's refusals, keeping with either event and clearing with neither,
+  the audit, the database checks and the grant; `api-webhook-endpoints.test.ts`: the same through
+  the API, a list alone a change, and the whole endpoints with the new null field;
+  `stores.test.ts`: an endpoint taking the second reminder alone receives its send and its skip and
+  none of the first's, and one taking the first reminder's skips of two reasons receives only the
+  skip both lists hold). Written for CI; the integration tests were not run here. No e2e test of
+  the Settings field.
+- **Docs:** ADR-361; ARCHITECTURE; SECURITY; THREAT-MODEL T320; DEPLOYMENT (0284); RUNBOOKS (the
+  ADR-355 entry and a new one); BACKLOG P5-09; feature matrix W-138, W-139 and H-014.
+- **Mutation checks:** 19 deliberate regressions. The unit tests catch 14: sent reminders not a
+  cart reminder event, both events required, the list kept as given, an empty list or a reminder
+  three times taken, the list kept with the skipped event only, null keeping the old list, the
+  refusal's text, the API refusing a sent reminder's list, a list alone not a change, the change's
+  and the field's descriptions, the answer's schema without its values, and the sent event's
+  description silent on the reminders. The other five are database paths (the settings refusal and
+  audits, the API's answer and audit, the export), covered by the integration tests, which run in
+  CI only.
+
+### Test commands and results (local, 2026-10-10)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 146 files, 1548 tests passed                                    |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+
 ## 2026-10-10 — The year's failed sends by reason, month by month (P5-10, H-034, ADR-360)
 
 Status: **Implemented; its database tests run in CI only.** The Usage tab and a company's platform

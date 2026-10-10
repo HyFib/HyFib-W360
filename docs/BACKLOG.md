@@ -1314,13 +1314,14 @@ verification, app review, Embedded Signup configuration).
   narrowed by campaigns and numbers). **[Skip reason filter for skipped campaign recipients built;
   its database tests run only in CI]** (ADR-359, migration 0282: an endpoint takes
   `campaign.recipient_skipped` only for chosen reasons, 1 to 9 of those a campaign recipient can be
-  skipped for).
+  skipped for). **[Cart reminder filter built; its database tests run only in CI]** (ADR-361,
+  migration 0284: an endpoint takes `store_checkout.reminder_skipped` and
+  `store_checkout.reminder_sent` only for the first or the second cart reminder).
   Remaining: filters for other event types and on a message's values other than its type and words,
   field value comparisons beyond
   values, words and ranges, other authentication (headers computed per delivery, other OAuth
-  grants, JWT client assertions), mutual TLS, fixed egress addresses, other store events (a
-  filter by cart reminder, first or second; the store's orders and checkouts themselves are
-  reported by the store, ADR-085),
+  grants, JWT client assertions), mutual TLS, fixed egress addresses, other store events (the
+  store's orders and checkouts themselves are reported by the store, ADR-085),
   a sequence number across events, load tests.
 - **P5-10 Platform ops screens** **[built, locally verified with test data only]** (ADR-054):
   `/platform/ops` with Overview, Onboarding (failed and abandoned signups, failed or stuck number

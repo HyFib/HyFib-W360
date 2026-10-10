@@ -3038,6 +3038,123 @@ describe('cash on delivery answer, store and order message filters (ADR-349, ADR
     expect(grant?.can_update).toBe(true);
   });
 
+  it('take cart reminders only with a cart reminder event, kept with either and cleared with neither; the database keeps them so (ADR-361)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const url = 'https://hooks.example.com/cart-reminders';
+    const refused = (eventTypes: string[], filters: Record<string, unknown>, message: RegExp) =>
+      expectAppError(
+        webhooks().create(owner, { url, eventTypes, ...filters }),
+        'validation_failed',
+        message,
+      );
+    const both = ['store_checkout.reminder_skipped', 'store_checkout.reminder_sent'];
+    await refused(
+      ['store_order.message_skipped'],
+      { cartReminders: ['cart_reminder'] },
+      /Choose cart reminders only for an endpoint that receives Cart reminder skipped or Cart reminder sent/,
+    );
+    await refused(
+      ['store_order.cod_answered'],
+      { cartReminders: ['cart_reminder'] },
+      /Choose cart reminders only/,
+    );
+    await refused(both, { cartReminders: [] }, /at least one cart reminder/);
+    await refused(both, { cartReminders: ['order_placed'] }, /cart reminders from the list/);
+    expect(await webhooks().list(owner)).toEqual([]);
+
+    // Added with both cart reminder events and the second reminder alone.
+    const created = await webhooks().create(owner, {
+      url,
+      eventTypes: both,
+      cartReminders: ['cart_second_reminder'],
+    });
+    const audits = async (action: string) =>
+      (
+        await fx.query<{ metadata: { cartReminders?: unknown } }>(
+          `SELECT metadata FROM app.audit_events
+            WHERE tenant_id = $1 AND action = $2 ORDER BY occurred_at, id`,
+          [c.tenant.id, action],
+        )
+      ).map((a) => a.metadata.cartReminders);
+    expect(await audits('webhook.endpoint_created')).toEqual([['cart_second_reminder']]);
+    const change = (eventTypes: string[], fields: Record<string, unknown> = {}) =>
+      webhooks().update(owner, {
+        endpointId: created.id,
+        url,
+        description: '',
+        eventTypes,
+        ...fields,
+      });
+    const current = async () =>
+      (await webhooks().list(owner)).find((e) => e.id === created.id)?.cartReminders;
+    expect(await current()).toEqual(['cart_second_reminder']);
+    // Either event alone keeps the list when a change leaves it out; one giving it changes it,
+    // audited, the first then the second.
+    await change(['store_checkout.reminder_sent']);
+    expect(await current()).toEqual(['cart_second_reminder']);
+    await change(['store_checkout.reminder_skipped']);
+    expect(await current()).toEqual(['cart_second_reminder']);
+    await change(['store_checkout.reminder_skipped'], {
+      cartReminders: ['cart_second_reminder', 'cart_reminder'],
+    });
+    expect(await current()).toEqual(['cart_reminder', 'cart_second_reminder']);
+    expect((await audits('webhook.endpoint_updated')).at(-1)).toEqual([
+      'cart_reminder',
+      'cart_second_reminder',
+    ]);
+    // null takes both reminders again, and names no list in the audit.
+    await change(['store_checkout.reminder_skipped'], { cartReminders: null });
+    expect(await current()).toBeNull();
+    expect((await audits('webhook.endpoint_updated')).at(-1)).toBeUndefined();
+    // Neither event: the list goes, and cannot be given.
+    await change(both, { cartReminders: ['cart_reminder'] });
+    expect(await current()).toEqual(['cart_reminder']);
+    await change(['store_order.cod_answered']);
+    expect(await current()).toBeNull();
+    await expectAppError(
+      change(['store_order.cod_answered'], { cartReminders: ['cart_reminder'] }),
+      'validation_failed',
+      /Choose cart reminders only/,
+    );
+
+    // The database refuses an empty list, more than 2, an order message or an unknown reminder, a
+    // missing entry or a nested list from an endpoint taking either event (the services give each
+    // reminder once)…
+    await change(both, { cartReminders: ['cart_reminder'] });
+    const setInDatabase = (value: string) =>
+      fx.query(`UPDATE app.webhook_endpoints SET cart_reminders = ${value} WHERE id = $1`, [
+        created.id,
+      ]);
+    for (const bad of [
+      `'{}'`,
+      `'{cart_reminder,cart_second_reminder,cart_reminder}'`,
+      `'{order_placed}'`,
+      `'{cart_third_reminder}'`,
+      `ARRAY['cart_reminder', NULL]::text[]`,
+      `ARRAY[ARRAY['cart_reminder'], ARRAY['cart_second_reminder']]::text[]`,
+    ]) {
+      await expect(setInDatabase(bad), bad).rejects.toThrow(/webhook_endpoints_cart_reminders/);
+    }
+    // …takes both, for either event…
+    await setInDatabase(`'{cart_reminder,cart_second_reminder}'`);
+    expect(await current()).toEqual(['cart_reminder', 'cart_second_reminder']);
+    await change(['store_checkout.reminder_sent']);
+    await setInDatabase(`'{cart_reminder}'`);
+    expect(await current()).toEqual(['cart_reminder']);
+    // …and refuses the list for an endpoint that takes neither.
+    await change(['store_order.cod_answered']);
+    await expect(setInDatabase(`'{cart_reminder}'`)).rejects.toThrow(
+      /webhook_endpoints_cart_reminders/,
+    );
+    // The company role changes the list only through its column grant.
+    const [grant] = await fx.query<{ can_update: boolean }>(
+      `SELECT has_column_privilege('w360_app', 'app.webhook_endpoints',
+                'cart_reminders', 'UPDATE') AS can_update`,
+    );
+    expect(grant?.can_update).toBe(true);
+  });
+
   it('take numbers with store_checkout.reminder_sent and stores with either cart reminder event, never order messages or reasons; the database keeps them so (ADR-355)', async () => {
     const c = await fx.company();
     const owner = await fx.ctx(c, c.owner);
