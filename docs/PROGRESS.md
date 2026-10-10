@@ -72,6 +72,17 @@ not run here; the migration passed the pglast parse check (syntax only), its PL/
   of the wrong total, the days counted taken for those not counted, the read cut short, no days
   counted answered passed over, the rest named as one company). The function's ranking and filters
   run in the database and are covered by the integration tests, which run in CI only.
+- **Review fixes:** an independent review found nothing that would fail CI and no correctness or
+  security bug, and these, fixed:
+  - **LOW:** a company's bars were named for a screen reader by its name alone, which two companies
+    can share; they are named with its slug too, as the reasons' are with their codes.
+  - **LOW:** migration 0285's comment, rewrapped, says the first month is partial unless the year
+    starts on a 1st and the last unless today is one (0285 has not been applied anywhere).
+  - **LOW:** the runbook said a company being deleted is listed until its deletion ends; the
+    deletion removes its counts as it runs, so it is listed with what is left of them.
+  - The card's empty state says no day of the year is counted yet, not that no company is.
+  - Not changed: the feature matrix keeps "locally verified" on H-034, whose text says its database
+    tests run in CI only.
 
 ### Test commands and results (local, 2026-10-10)
 

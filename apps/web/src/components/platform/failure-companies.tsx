@@ -10,6 +10,16 @@ function companyText(company: FailureCompany): string {
   return `${company.companies} other ${company.companies === 1 ? 'company' : 'companies'}`;
 }
 
+/**
+ * A listed company as a screen reader names its months: its name with its slug, which tells two
+ * companies of one name apart; the rest by how many companies it holds.
+ */
+function companySpoken(company: FailureCompany): string {
+  return company.tenantId !== null && company.name !== null && company.slug !== null
+    ? `${company.name} (/${company.slug})`
+    : companyText(company);
+}
+
 /** A listed company as a link to its platform page, or the rest as text. */
 function CompanyName({ company }: { company: FailureCompany }) {
   return company.tenantId !== null && company.name !== null && company.slug !== null ? (
@@ -68,7 +78,7 @@ export function FailureCompaniesTable({
               </TD>
               <TD>
                 <MonthBars
-                  label={companyText(company)}
+                  label={companySpoken(company)}
                   months={year.months}
                   counts={year.byMonth[index] ?? []}
                 />

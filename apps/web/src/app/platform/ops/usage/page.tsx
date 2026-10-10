@@ -248,7 +248,7 @@ export default async function OpsUsagePage({
         <CardContent>
           {companyYear.uncounted >= MESSAGE_DAYS_KEPT ? (
             <EmptyState
-              title="No company counted yet"
+              title="No day of the year is counted yet"
               description="The worker counts each day's failed sends by company after the day ends, back to a year ago, a few days a minute."
             />
           ) : (

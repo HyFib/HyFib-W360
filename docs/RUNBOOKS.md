@@ -4032,8 +4032,9 @@ its year; they too cover the counted days only.
 **Failed sends by company over the year (ADR-362).** Under the year's reasons, the Usage tab lists
 the companies whose sends failed most in the same days (the eight with the most, then the rest
 together), each with its share of the year's failed sends and its months drawn as the reasons'
-are. A company deleted is left out, and a company being deleted is listed until its deletion
-ends. Open a company's name for its platform page, whose year's reasons say why its sends failed.
+are. A company deleted is left out; a company being deleted is listed, with what is left of its
+counts, until its deletion removes them. Open a company's name for its platform page, whose year's
+reasons say why its sends failed.
 The card reads its own snapshot: while the worker counts a day, its total can differ from the
 reasons' by that day's failures.
 

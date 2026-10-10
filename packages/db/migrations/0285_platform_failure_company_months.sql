@@ -7,12 +7,13 @@
 -- those failing most show their months beside their totals. Counts only, with each company's name
 -- and slug, as the Usage tab's other tables show them.
 
--- The failed sends of the 365 days before today whose codes are counted, by company and UTC calendar
--- month (platform administrators; companies not deleted), the companies ranked by their failed sends
--- over the whole year: the eight with the most, ties by name and id, then the rest together (no
--- company, with how many it holds) when two or more are left, each row with its place in that
--- ranking (the rest's is 9). A month without a failed send of a company has no row. The first and last months are partial unless the year starts on a 1st or
--- today is one. Read in the year's snapshot, a company's months add up to its year.
+-- The failed sends of the 365 days before today whose codes are counted, by company and UTC
+-- calendar month (platform administrators; companies not deleted), the companies ranked by their
+-- failed sends over the whole year: the eight with the most, ties by name and id, then the rest
+-- together (no company, with how many it holds) when two or more are left, each row with its place
+-- in that ranking (the rest's is 9). A month without a failed send of a company has no row. The
+-- first month is partial unless the year starts on a 1st, the last unless today is one. Read in the
+-- year's snapshot, a company's months add up to its year.
 CREATE FUNCTION ops.platform_ops_failure_company_months()
   RETURNS TABLE (place integer, tenant_id uuid, tenant_name text, tenant_slug text,
     companies integer, month date, failed_sends integer)
