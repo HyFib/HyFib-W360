@@ -8215,8 +8215,12 @@ describe('the events of a store’s cart reminders (ADR-355)', () => {
   ];
   const at = new Date('2026-10-10T12:00:00.123Z');
   const startedAt = new Date('2026-10-10T09:00:00.000Z');
-  /** The reasons that concern order messages only: a cart reminder is never skipped for them. */
-  const orderOnly = [
+  /**
+   * The reasons a cart reminder is never skipped for: those of order messages only, and
+   * `checkout_deleted`, as a reminder is deleted with its checkout.
+   */
+  const neverForReminders = [
+    'checkout_deleted',
     'test_order',
     'too_late',
     'cash_on_delivery',
@@ -8317,7 +8321,7 @@ describe('the events of a store’s cart reminders (ADR-355)', () => {
     expect(WEBHOOK_EVENT_INFO['store_checkout.reminder_skipped']).toEqual({
       label: 'Cart reminder skipped',
       description:
-        'A connected Shopify store’s cart reminder (the first or the second) about a checkout a customer left was not sent when it was due: the checkout was completed, deleted or too old, an order was placed since, the first reminder was not sent, or a check failed, such as a customer without a number or marketing opt-in, or the frequency cap.',
+        'A connected Shopify store’s cart reminder (the first or the second) about a checkout a customer left was not sent when it was due: the checkout was completed or too old, an order was placed since, the first reminder was not sent, or a check failed, such as a customer without a number or marketing opt-in, or the frequency cap.',
     });
     expect(WEBHOOK_EVENT_INFO['store_checkout.reminder_sent']).toEqual({
       label: 'Cart reminder sent',
@@ -8369,20 +8373,21 @@ describe('the events of a store’s cart reminders (ADR-355)', () => {
 
   it('skip for the reasons a store’s Messages page explains, but order messages’ own', () => {
     expect(WEBHOOK_CART_REMINDER_SKIP_REASONS).toEqual(
-      Object.keys(STORE_MESSAGE_SKIP_REASONS).filter((reason) => !orderOnly.includes(reason)),
+      Object.keys(STORE_MESSAGE_SKIP_REASONS).filter(
+        (reason) => !neverForReminders.includes(reason),
+      ),
     );
-    expect(WEBHOOK_CART_REMINDER_SKIP_REASONS).toHaveLength(21);
-    for (const reason of orderOnly) {
+    expect(WEBHOOK_CART_REMINDER_SKIP_REASONS).toHaveLength(20);
+    for (const reason of neverForReminders) {
       expect(STORE_MESSAGE_SKIP_REASONS, reason).toHaveProperty(reason);
     }
-    // The six that concern cart reminders only are the ones the order message list leaves out.
+    // Five of the six the order message list leaves out: checkout_deleted is never sent either.
     expect(
       WEBHOOK_CART_REMINDER_SKIP_REASONS.filter(
         (reason) => !(WEBHOOK_ORDER_MESSAGE_SKIP_REASONS as readonly string[]).includes(reason),
       ),
     ).toEqual([
       'checkout_completed',
-      'checkout_deleted',
       'order_placed',
       'first_reminder_not_sent',
       'cart_too_old',
@@ -8447,6 +8452,7 @@ describe('the events of a store’s cart reminders (ADR-355)', () => {
       { event: 'order_placed' },
       { skipReason: 'test_order' },
       { skipReason: 'automation_busy' },
+      { skipReason: 'checkout_deleted' },
       { occurredAt: 'today' },
     ]) {
       expect(skippedParses(skippedBody(refused)), JSON.stringify(refused)).toBe(false);

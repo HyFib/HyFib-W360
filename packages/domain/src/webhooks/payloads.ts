@@ -1135,7 +1135,7 @@ export const storeCheckoutReminderSkippedPayloadSchema = envelope(
       skipReason: z
         .enum(WEBHOOK_CART_REMINDER_SKIP_REASONS)
         .describe(
-          'Why HyFib did not send it, as the store’s Messages page (Commerce → Stores) explains it: for example checkout_completed, checkout_deleted, cart_too_old, order_placed (an order with the same number since the checkout began), first_reminder_not_sent, no_phone, no_marketing_opt_in or frequency_capped.',
+          'Why HyFib did not send it, as the store’s Messages page (Commerce → Stores) explains it: for example checkout_completed, cart_too_old, order_placed (an order with the same number since the checkout began), first_reminder_not_sent, no_phone, no_marketing_opt_in or frequency_capped.',
         ),
       occurredAt: z.iso
         .datetime()

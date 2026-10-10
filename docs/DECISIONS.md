@@ -13962,10 +13962,12 @@ Decision:
   delivered, and for a sent reminder the conversation's contact as erasure left it and its number;
   never the customer's name, number or consent from the store, the items' titles or the link back
   to the checkout.
-- **Reasons:** `reminder.skipReason` lists the 21 reasons a cart reminder can be skipped for
+- **Reasons:** `reminder.skipReason` lists the 20 reasons a cart reminder can be skipped for
   (`WEBHOOK_CART_REMINDER_SKIP_REASONS`): the reasons a store's Messages page explains without the
   ten that concern order messages only (a test order, a late or replaced event, the order deleted or
-  cancelled, an automation's).
+  cancelled, an automation's) and `checkout_deleted`, which no reminder gets: a reminder is deleted
+  with its checkout, and the message's job holds the reminder's row, so a checkout deleted meanwhile
+  waits for it.
 - **Filters:** a sent reminder happens on the number it went from, so an endpoint that names numbers
   receives it for those numbers only; a skipped one belongs to no number. The stores an endpoint
   names (ADR-349) narrow both, in `app.capture_webhook_event`, replaced with the same signature (the

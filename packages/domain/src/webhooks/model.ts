@@ -30,6 +30,7 @@ import type {
   WebhookTemplateStatus,
 } from '@w360/db';
 import { coerceFieldValue, validDate, type AttributeValue } from '../contacts/fields';
+import type { CartEvent, StoreMessageSkipReason } from '../stores/messages-model';
 
 export type {
   AutomationEndReason,
@@ -211,7 +212,7 @@ export const WEBHOOK_EVENT_INFO: Record<WebhookEventType, { label: string; descr
     'store_checkout.reminder_skipped': {
       label: 'Cart reminder skipped',
       description:
-        'A connected Shopify store’s cart reminder (the first or the second) about a checkout a customer left was not sent when it was due: the checkout was completed, deleted or too old, an order was placed since, the first reminder was not sent, or a check failed, such as a customer without a number or marketing opt-in, or the frequency cap.',
+        'A connected Shopify store’s cart reminder (the first or the second) about a checkout a customer left was not sent when it was due: the checkout was completed or too old, an order was placed since, the first reminder was not sent, or a check failed, such as a customer without a number or marketing opt-in, or the frequency cap.',
     },
     'store_checkout.reminder_sent': {
       label: 'Cart reminder sent',
@@ -721,7 +722,10 @@ export const WEBHOOK_ORDER_MESSAGE_SKIP_REASONS = [
  * The cart reminders a `store_checkout.reminder_skipped` or `store_checkout.reminder_sent` event is
  * about (ADR-355): a Shopify store's first reminder about a checkout a customer left, and the second.
  */
-export const WEBHOOK_CART_REMINDERS = ['cart_reminder', 'cart_second_reminder'] as const;
+export const WEBHOOK_CART_REMINDERS = [
+  'cart_reminder',
+  'cart_second_reminder',
+] as const satisfies readonly CartEvent[];
 export type WebhookCartReminder = (typeof WEBHOOK_CART_REMINDERS)[number];
 
 /**
@@ -729,6 +733,7 @@ export type WebhookCartReminder = (typeof WEBHOOK_CART_REMINDERS)[number];
  * Messages page explains them: the checks a cart reminder goes through when it is due. Never the
  * reasons only order messages are skipped for (a test order, a late or replaced event, the order
  * deleted or cancelled, an automation's): reminders are recorded waiting and send no automation.
+ * Nor `checkout_deleted`: a reminder is deleted with its checkout, so none is ever skipped for it.
  */
 export const WEBHOOK_CART_REMINDER_SKIP_REASONS = [
   'rule_disabled',
@@ -745,14 +750,13 @@ export const WEBHOOK_CART_REMINDER_SKIP_REASONS = [
   'missing_variable',
   'template_changed',
   'checkout_completed',
-  'checkout_deleted',
   'order_placed',
   'first_reminder_not_sent',
   'cart_too_old',
   'not_marketing_template',
   'frequency_capped',
   'not_in_plan',
-] as const;
+] as const satisfies readonly StoreMessageSkipReason[];
 
 /**
  * The statuses a `deal.status_changed` event reports, which an endpoint can choose (ADR-309), in

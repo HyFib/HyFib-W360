@@ -20,7 +20,8 @@ PL/pgSQL bodies included.
   store list for both and the number list for the sent one (replaced with the same signature).
 - **Domain:** `store_checkout.reminder_skipped` and `store_checkout.reminder_sent` with their
   labels and descriptions, events of a store, the sent one also of a number; `WEBHOOK_CART_REMINDERS`
-  and `WEBHOOK_CART_REMINDER_SKIP_REASONS` (the store's reasons but order messages' ten);
+  and `WEBHOOK_CART_REMINDER_SKIP_REASONS` (the store's reasons but order messages' ten and
+  `checkout_deleted`, which no reminder gets);
   `storeCheckoutReminderSkippedPayloadSchema` and `storeCheckoutReminderSentPayloadSchema` and
   their bodies built when delivered (`storeCartReminderOf`, `sentStoreCartReminderOf`), the checkout
   without its customer, items or link; the refusals naming them; the OpenAPI entries and the
@@ -40,6 +41,11 @@ PL/pgSQL bodies included.
   the ADR-349, ADR-351, ADR-352 and ADR-353 entries); BACKLOG P5-09; feature matrix W-138, W-139
   and H-014. The audit's largest entry is now 6,433 bytes (34 event types, 59 lists), within the
   test's bound of 6,500.
+- **Review fixes:** `checkout_deleted` left out of the reminders' reasons (a reminder is deleted with
+  its checkout, so it can never be sent with that reason); the reason and reminder lists typed
+  against the store's own; THREAT-MODEL T310 and T312 and two BACKLOG lines no longer say that cart
+  reminders send nothing; the database test of an unknown type clears the store list first, so it
+  does not rest on the order PostgreSQL checks constraints in.
 - **Mutation checks:** 32 deliberate regressions, all caught by the unit tests (an event not of a
   store or a number, or of a number it is not, another label or place, a reminder or a reason left
   out, an order message's reason taken, the reasons in another order, the schemas loosened, a time

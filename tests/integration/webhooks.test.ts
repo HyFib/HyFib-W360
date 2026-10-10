@@ -2865,6 +2865,8 @@ describe('cash on delivery answer, store and order message filters (ADR-349, ADR
     await expect(setInDatabase('order_message_skip_reasons', `'{no_phone}'`)).rejects.toThrow(
       /webhook_endpoints_order_message_skip_reasons/,
     );
+    // An unknown type, with no store list for its own check to trip over.
+    await setInDatabase('store_ids', 'NULL');
     await expect(setInDatabase('event_types', `'{store_checkout.reminder_left}'`)).rejects.toThrow(
       /webhook_endpoints_event_types_check/,
     );
