@@ -567,6 +567,9 @@ test('staff read the platform’s messages a day on the Usage tab (ADR-333)', as
   const noneSent = page.getByText('No company sent a message in these days, so none failed.', {
     exact: true,
   });
+  // The pointer off the charts first: left on the table's summary, it rests on this chart once
+  // focusing the chart above has scrolled the page, and WebKit then names the day under it.
+  await page.mouse.move(0, 0);
   if (sent.some((n) => n > 0)) {
     await expect(noneSent).toHaveCount(0);
     await expect(failedChart).toHaveAttribute(
