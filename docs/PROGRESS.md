@@ -1,5 +1,55 @@
 # Progress
 
+## 2026-10-10 — The year's failed sends by reason, month by month (P5-10, H-034, ADR-360)
+
+Status: **Implemented; its database tests run in CI only.** The Usage tab and a company's platform
+page listed the year's failed sends by reason (ADR-350) without saying when they happened, so a
+reason that began in the spring or faded since read the same as one there all year. The local
+PostgreSQL is unavailable, so migration 0283 and the integration tests below were written but not
+run here; the migration passed the pglast parse check (syntax only), its PL/pgSQL body included.
+
+### Completed
+
+- **Database:** migration 0283: `ops.platform_ops_failure_reason_months(p_tenant_id)`, the year's
+  rows (counted days, companies not deleted, every company's or one) by UTC calendar month and code,
+  ranked as the year ranks them over the whole year, the rest together; for platform administrators
+  only (`W3403`), owned by the definer role, executable by the platform role alone.
+- **Domain:** `readFailureReasonYear` reads the months and the transaction's today in the year's
+  snapshot; `failureReasonYearMonths` spans the calendar months of the 365 days (the first and last
+  partial unless the year starts on a 1st or today is one); `failureReasonsByMonth` places each row
+  in its reason's month and refuses a code or month the year does not list; `monthBarHeights` and
+  `chartMonthLabel` in `platform/ops-chart.ts`.
+- **Web:** the year's tables on the Usage tab and a company's page draw each reason's months in a
+  "Month by month" column: a bar a month in the failed sends' colour, each reason to its own height,
+  the partial months lighter, each month's count when pointed at, one sentence for a screen reader,
+  and a note saying which months the bars run from and to.
+- **Tests:** unit (5 new: the year's months, partial and whole and with a leap day, a malformed day
+  refused; each row placed in its reason's month, rows of one month added, an unknown code or month
+  refused; the month names; the bar heights; three updated: the reader's four statements, the
+  platform's read and an unanswered today); integration (`platform-ops.test.ts`: the company's year with its months adding up to
+  each reason, a new test of the ranking over the whole year with ten codes and the rest together,
+  a day not counted and a deleted company left out, the platform's and a company's read; the
+  refusals with the months function; `tenant-isolation.test.ts`: its grants). Written for CI; the
+  integration tests were not run here. No e2e test of the bars (the e2e run has no failed sends on
+  days already counted).
+- **Docs:** ADR-360; ARCHITECTURE; SECURITY; THREAT-MODEL T319; DEPLOYMENT (0283); RUNBOOKS (the
+  ADR-350 entry); BACKLOG P5-10; feature matrix H-034.
+- **Mutation checks:** 12 deliberate regressions, all caught by the unit tests (a day short of the
+  year, every month partial, the last month whole, months named a month early, an unknown month or
+  code passed over, rows of one month replaced, any text taken for today, no today answered passed
+  over, every company's months read for one, a small month drawn without a bar, the month named year
+  first). The function's ranking and filters run in the database and are covered by the integration
+  tests, which run in CI only.
+
+### Test commands and results (local, 2026-10-10)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 146 files, 1545 tests passed                                    |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+
 ## 2026-10-10 — Skip reason filter for skipped campaign recipients (P5-09, H-014, ADR-359)
 
 Status: **Implemented; its database tests run in CI only.** `campaign.recipient_skipped` (ADR-358)

@@ -219,6 +219,7 @@ export default async function OpsUsagePage({
               reasons={reasonYear.reasons}
               label="Failed sends by reason, the last 12 months"
               empty="No company's send failed in the days counted."
+              months={{ months: reasonYear.months, byMonth: reasonYear.byMonth }}
             />
           )}
         </CardContent>

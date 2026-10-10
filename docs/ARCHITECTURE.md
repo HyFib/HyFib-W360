@@ -2870,6 +2870,13 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   `ops.platform_ops_failure_reason_year` and `ops.platform_ops_failure_reason_days` in one snapshot
   (`failureReasonYear()` for the Usage tab, `companyHealth()` for a company's page, none while its
   deletion runs), and `FailureReasonsTable` lists them under the year.
+- **Failed sends by reason month by month (ADR-360, migration 0283):**
+  `ops.platform_ops_failure_reason_months` reads the year's rows by UTC calendar month and code,
+  ranked as `ops.platform_ops_failure_reason_year` ranks them. `readFailureReasonYear` reads it and
+  the transaction's today in the year's snapshot; `failureReasonYearMonths` spans the months of the
+  365 days and `failureReasonsByMonth` places the rows (a code or month the year does not list is an
+  error). `FailureReasonsTable` draws each reason's months in a column (`MonthBars`, heights from
+  `monthBarHeights` and month names from `chartMonthLabel` in `platform/ops-chart.ts`).
 - **Exports (ADR-154, ADR-155, ADR-158):** `/platform/ops/export/[list]` (a route handler behind the
   pages' platform actor check; a name of `OPS_EXPORT_LISTS`, any other not found) calls
   `exportList`, which checks in its transaction that the actor is a platform administrator, reads

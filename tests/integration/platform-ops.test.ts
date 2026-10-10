@@ -11,6 +11,7 @@ import {
   alertLateQueues,
   checkQueueWaits,
   countMessageDays,
+  failureReasonYearMonths,
   createPlatformOpsService,
   deadLetterJob,
   noticeIntegrationAssignments,
@@ -4496,9 +4497,20 @@ describe('failed sends by reason kept as days pass (ADR-350)', () => {
       failed: 1,
     });
 
-    // The company's year: the most frequent first, ties by code, every day counted.
+    // The company's year: the most frequent first, ties by code, every day counted; and each
+    // code's months, which add up to its year (ADR-360).
     const yearOf = async () => (await ops().companyHealth(staff, kept.tenant.id))?.reasonYear;
     const share = (n: number, of: number) => n / of;
+    const months = failureReasonYearMonths(today);
+    /** A code's failed sends month by month, from the days before today that hold them. */
+    const monthsOf = (...days: [daysAgo: number, failed: number][]) => {
+      const counts = months.map(() => 0);
+      for (const [daysAgo, failed] of days) {
+        const index = months.findIndex((m) => m.month === utcDay(noonDaysAgo(daysAgo)).slice(0, 7));
+        counts[index] = (counts[index] ?? 0) + failed;
+      }
+      return counts;
+    };
     expect(await yearOf()).toEqual({
       reasons: {
         reasons: [
@@ -4511,6 +4523,14 @@ describe('failed sends by reason kept as days pass (ADR-350)', () => {
         failed: 7,
       },
       uncounted: 0,
+      months,
+      byMonth: [
+        monthsOf([3, 1], [1, 2]),
+        monthsOf([1, 1]),
+        monthsOf([1, 1]),
+        monthsOf([10, 1]),
+        monthsOf([1, 1]),
+      ],
     });
     // A day counted before its failed sends by code were (before migration 0269) is left out of
     // the year, and counted again at the next run, alone.
@@ -4573,10 +4593,11 @@ describe('failed sends by reason kept as days pass (ADR-350)', () => {
     ).rejects.toThrow(/platform_failure_reason_days_reason_code_check/);
   });
 
-  it('lets only platform administrators read the year’s reasons and the days counted', async () => {
+  it('lets only platform administrators read the year’s reasons, their months and the days counted', async () => {
     const outsider = await createUser(fx.dbs, { twoFactor: true });
     for (const statement of [
       sql`select * from ops.platform_ops_failure_reason_year(null)`,
+      sql`select * from ops.platform_ops_failure_reason_months(null)`,
       sql`select ops.platform_ops_failure_reason_days()`,
     ]) {
       await expectCode(
@@ -4587,9 +4608,94 @@ describe('failed sends by reason kept as days pass (ADR-350)', () => {
     // The worker's role cannot read them.
     for (const statement of [
       'SELECT * FROM ops.platform_ops_failure_reason_year(null)',
+      'SELECT * FROM ops.platform_ops_failure_reason_months(null)',
       'SELECT ops.platform_ops_failure_reason_days()',
     ]) {
       await expect(fx.dbs.appPool.query(statement), statement).rejects.toThrow(/permission denied/);
     }
+  });
+
+  it('reads the year’s reasons month by month, ranked as the year, the rest together, from counted days only (ADR-360)', async () => {
+    // The counts are the platform's: this test sets them itself.
+    await fx.query('DELETE FROM ops.platform_failure_reason_days');
+    await fx.query('DELETE FROM ops.platform_message_days');
+    await fx.query('DELETE FROM ops.platform_message_days_counted');
+    const [clock] = await fx.query<{ day: string }>(
+      `SELECT to_char((now() AT TIME ZONE 'UTC')::date, 'YYYY-MM-DD') AS day`,
+    );
+    today = clock!.day;
+    const c = await fx.company();
+    const gone = await fx.company();
+    // Every day of the year counted with its codes, as the worker leaves them, but one.
+    await fx.query(
+      `INSERT INTO ops.platform_message_days_counted (utc_day, outcomes, reasons)
+       SELECT (now() AT TIME ZONE 'UTC')::date - g, true, true FROM generate_series(1, 365) AS g`,
+    );
+    await fx.query(
+      `UPDATE ops.platform_message_days_counted SET reasons = false
+        WHERE utc_day = (now() AT TIME ZONE 'UTC')::date - 100`,
+    );
+    /** A company's failed sends with a code on the day `daysAgo` days before today. */
+    const failed = (tenantId: string, daysAgo: number, code: string, n: number) =>
+      fx.query(
+        `INSERT INTO ops.platform_failure_reason_days (tenant_id, utc_day, reason_code, failed)
+         VALUES ($1, (now() AT TIME ZONE 'UTC')::date - $2::int, $3, $4)`,
+        [tenantId, daysAgo, code, n],
+      );
+    // Ten codes: c01 is the year's most frequent though c02 has the most in one month; c09 and c10
+    // are the rest. The first day of the year, a day in the middle and yesterday.
+    await failed(c.tenant.id, 365, 'c01', 4);
+    await failed(c.tenant.id, 1, 'c01', 6);
+    await failed(c.tenant.id, 200, 'c02', 9);
+    for (const [index, code] of ['c03', 'c04', 'c05', 'c06', 'c07', 'c08'].entries()) {
+      await failed(c.tenant.id, 200, code, 8 - index);
+    }
+    await failed(c.tenant.id, 365, 'c09', 2);
+    await failed(c.tenant.id, 1, 'c10', 1);
+    // A day not counted with its codes, and a deleted company's sends: in neither the year nor its
+    // months. More than a year ago: never.
+    await failed(c.tenant.id, 100, 'c01', 50);
+    await failed(c.tenant.id, 366, 'c01', 50);
+    await failed(gone.tenant.id, 1, 'c01', 50);
+    await fx.query(
+      `UPDATE app.tenants SET status = 'deleted', status_changed_at = now() WHERE id = $1`,
+      [gone.tenant.id],
+    );
+
+    const months = failureReasonYearMonths(today);
+    const monthOf = (daysAgo: number) =>
+      months.findIndex(
+        (m) =>
+          m.month ===
+          new Date(Date.parse(`${today}T12:00:00Z`) - daysAgo * 24 * 60 * 60 * 1000)
+            .toISOString()
+            .slice(0, 7),
+      );
+    const year = (await ops().companyHealth(staff, c.tenant.id))?.reasonYear;
+    expect(year?.reasons.reasons.map((r) => [r.code, r.failed, r.codes])).toEqual([
+      ['c01', 10, 1],
+      ['c02', 9, 1],
+      ['c03', 8, 1],
+      ['c04', 7, 1],
+      ['c05', 6, 1],
+      ['c06', 5, 1],
+      ['c07', 4, 1],
+      ['c08', 3, 1],
+      [null, 3, 2],
+    ]);
+    expect(year?.months).toEqual(months);
+    // Each code's months add up to its year, each in the month of its days, the rest's too.
+    expect(year?.byMonth.map((counts) => counts.reduce((total, n) => total + n, 0))).toEqual([
+      10, 9, 8, 7, 6, 5, 4, 3, 3,
+    ]);
+    expect(year?.byMonth[0]?.[monthOf(365)]).toBe(4);
+    expect(year?.byMonth[0]?.[monthOf(1)]).toBe(6);
+    expect(year?.byMonth[1]?.[monthOf(200)]).toBe(9);
+    expect(year?.byMonth[8]?.[monthOf(365)]).toBe(2);
+    expect(year?.byMonth[8]?.[monthOf(1)]).toBe(1);
+    // The platform's reads every company's not deleted: the same.
+    const platform = await ops().failureReasonYear(staff);
+    expect(platform.byMonth).toEqual(year?.byMonth);
+    expect(platform.uncounted).toBe(1);
   });
 });

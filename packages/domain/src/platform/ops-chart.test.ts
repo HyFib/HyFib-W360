@@ -4,6 +4,7 @@ import {
   DELIVERY_CHART_SERIES,
   chartCount,
   chartDayLabel,
+  chartMonthLabel,
   chartShare,
   chartStep,
   dailyChartLayout,
@@ -17,6 +18,7 @@ import {
   shareBase,
   shareGap,
   sharedPlotEdges,
+  monthBarHeights,
   type DailyChartDay,
 } from './ops-chart';
 
@@ -484,5 +486,19 @@ describe('the share bars of the failed sends by reason (ADR-347)', () => {
     expect(shareBarPath(0.001, 96)).toBe('M0 0 H1 A1 4 0 0 1 1 8 H0 Z');
     expect(shareBarPath(1.5, 96)).toBe('M0 0 H92 A4 4 0 0 1 92 8 H0 Z');
     expect(shareBarPath(0.25, 40, 12)).toBe('M0 0 H5 A5 6 0 0 1 5 12 H0 Z');
+  });
+});
+
+describe('failed sends by reason month by month (ADR-360)', () => {
+  it('names a month as the console does', () => {
+    expect(chartMonthLabel('2025-10')).toBe('Oct 2025');
+    expect(chartMonthLabel('2026-01')).toBe('Jan 2026');
+  });
+
+  it('draws each row to its own most, at least 2 pixels for a month with a failed send, none without', () => {
+    expect(monthBarHeights([0, 1, 50, 100, 25], 24)).toEqual([0, 2, 12, 24, 6]);
+    expect(monthBarHeights([3, 3], 24)).toEqual([24, 24]);
+    expect(monthBarHeights([0, 0], 24)).toEqual([0, 0]);
+    expect(monthBarHeights([], 24)).toEqual([]);
   });
 });

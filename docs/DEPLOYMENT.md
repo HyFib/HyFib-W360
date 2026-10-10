@@ -1397,6 +1397,10 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    need it; web servers from before it never read the new table or functions, and after a rollback
    the counting goes on keeping the codes, unused.
 
+   Migration 0283 (ADR-360) creates `ops.platform_ops_failure_reason_months` for the platform role
+   (owned by the definer role, granted before it is handed over); no table changes. Web servers of
+   this release need it; web servers from before it never call it, and workers do not.
+
    Migration 0270 (ADR-351) replaces the endpoints' event check (validated at once: at most 10
    endpoints per company) and the events' type check (NOT VALID; 0271 validates it while captures go
    on), and adds two triggers on `app.commerce_store_messages` with their function; the capture is

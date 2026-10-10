@@ -853,6 +853,7 @@ export default async function PlatformTenantPage({ params }: { params: Promise<{
                       reasons={ops.reasonYear.reasons}
                       label="This company's failed sends by reason, the last 12 months"
                       empty="None of the company's sends failed in the days counted."
+                      months={{ months: ops.reasonYear.months, byMonth: ops.reasonYear.byMonth }}
                     />
                   )}
                 </section>

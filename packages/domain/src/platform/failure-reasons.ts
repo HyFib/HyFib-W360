@@ -73,20 +73,88 @@ export async function readFailureReasons(
 }
 
 /**
+ * A UTC calendar month the year's failed sends by reason span (ADR-360). The year starts 365 days
+ * before today and ends yesterday, so its first month is partial unless it starts on the 1st, and
+ * its last unless today is the 1st.
+ */
+export interface FailureReasonMonth {
+  /** The month, YYYY-MM. */
+  month: string;
+  /** The days of it the year holds. */
+  days: number;
+  /** Whether the year holds only some of its days. */
+  partial: boolean;
+}
+
+/**
  * The year's failed sends by reason (ADR-350), from the counts the worker keeps as days pass: the
  * codes of the days whose failed sends by code are counted, and how many of the 365 days before
- * today are not counted yet.
+ * today are not counted yet; and each listed reason's failed sends month by month (ADR-360).
  */
 export interface FailureReasonYear {
   reasons: FailureReasons;
   /** Days of the 365 before today whose failed sends by code are not counted yet. */
   uncounted: number;
+  /** The months the year spans, oldest first. */
+  months: FailureReasonMonth[];
+  /** Each listed reason's failed sends in each month, in the order of the reasons and the months. */
+  byMonth: number[][];
+}
+
+const DAY_MS = 86_400_000;
+
+/** The UTC calendar months of the 365 days before `today` (YYYY-MM-DD), oldest first. */
+export function failureReasonYearMonths(today: string): FailureReasonMonth[] {
+  const end = /^\d{4}-\d{2}-\d{2}$/.test(today) ? Date.parse(`${today}T00:00:00Z`) : Number.NaN;
+  if (Number.isNaN(end)) throw new Error(`Not a day: ${today}`);
+  const months: FailureReasonMonth[] = [];
+  for (let from = end - MESSAGE_DAYS_KEPT * DAY_MS; from < end;) {
+    const day = new Date(from);
+    const year = day.getUTCFullYear();
+    const month = day.getUTCMonth();
+    const next = Date.UTC(year, month + 1, 1);
+    const days = Math.round((Math.min(next, end) - from) / DAY_MS);
+    months.push({
+      month: `${year}-${String(month + 1).padStart(2, '0')}`,
+      days,
+      partial: days < Math.round((next - Date.UTC(year, month, 1)) / DAY_MS),
+    });
+    from = next;
+  }
+  return months;
+}
+
+/**
+ * Each listed reason's failed sends in each month (ADR-360), in the order of the reasons and of
+ * the months, 0 for a month without one, from the months' rows, which name the rest of the codes
+ * together as the year lists them (null). The rows are read with the year's ranking in its snapshot,
+ * so one naming a code or a month the year does not list is an error.
+ */
+export function failureReasonsByMonth(
+  reasons: readonly FailureReason[],
+  months: readonly FailureReasonMonth[],
+  rows: readonly { month: string; code: string | null; failed: number }[],
+): number[][] {
+  const byMonth = reasons.map(() => months.map(() => 0));
+  for (const row of rows) {
+    const reason = reasons.findIndex((r) => r.code === row.code);
+    const month = months.findIndex((m) => m.month === row.month);
+    const counts = byMonth[reason];
+    if (!counts || month < 0) {
+      throw new Error(
+        `The year's failed sends by month name ${counts ? 'a month' : 'a code'} the year does not list`,
+      );
+    }
+    counts[month] = (counts[month] ?? 0) + row.failed;
+  }
+  return byMonth;
 }
 
 /**
  * The year's failed sends by code, the platform's or one company's (platform administrators;
- * companies deleted are left out), with the days not counted yet. Read in one snapshot, so the
- * days counted are those the reasons cover.
+ * companies deleted are left out), with the days not counted yet and each listed code's months.
+ * Read in one snapshot, so the days counted are those the reasons cover, and a code's months add up
+ * to its year.
  */
 export async function readFailureReasonYear(
   tx: Tx,
@@ -105,14 +173,40 @@ export async function readFailureReasonYear(
   );
   const [row] = counted.rows;
   if (!row) throw new Error('ops.platform_ops_failure_reason_days answered no row');
+  const monthRows = await tx.execute<{
+    month: string;
+    reason_code: string | null;
+    failed_sends: number | string;
+  }>(sql`
+    select to_char(month, 'YYYY-MM') as month, reason_code, failed_sends
+      from ops.platform_ops_failure_reason_months(${tenantId}::uuid)`);
+  // The day the functions above take for today: the transaction's.
+  const [day] = (
+    await tx.execute<{ today: string }>(
+      sql`select to_char((now() at time zone 'UTC')::date, 'YYYY-MM-DD') as today`,
+    )
+  ).rows;
+  if (!day) throw new Error('The database answered no day for today');
+  const reasons = failureReasons(
+    result.rows.map((r) => ({
+      code: r.reason_code,
+      failed: Number(r.failed_sends),
+      codes: Number(r.codes),
+    })),
+  );
+  const months = failureReasonYearMonths(day.today);
   return {
-    reasons: failureReasons(
-      result.rows.map((r) => ({
+    reasons,
+    uncounted: MESSAGE_DAYS_KEPT - Number(row.days),
+    months,
+    byMonth: failureReasonsByMonth(
+      reasons.reasons,
+      months,
+      monthRows.rows.map((r) => ({
+        month: r.month,
         code: r.reason_code,
         failed: Number(r.failed_sends),
-        codes: Number(r.codes),
       })),
     ),
-    uncounted: MESSAGE_DAYS_KEPT - Number(row.days),
   };
 }

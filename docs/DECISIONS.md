@@ -14184,3 +14184,37 @@ the audit keeps; the next lists will need the entry named more compactly.
 
 Not built: a filter by when a recipient was skipped (when the audience was taken or while the
 campaign sent); the reasons mostly tell them apart.
+
+## ADR-360 The year's failed sends by reason, month by month (P5-10) (2026-10-10)
+
+Context: the Usage tab and a company's platform page list the year's failed sends by the code they
+failed with (ADR-350): which reasons, not when. A reason that began in the spring, one that has
+faded since or one that came back read the same as one there all year, and ADR-350 left the
+reasons drawn over time unbuilt.
+
+Decision:
+
+- **Read by month:** `ops.platform_ops_failure_reason_months(p_tenant_id)` (migration 0283) reads
+  the same 365 days before today as `ops.platform_ops_failure_reason_year`, with the same filters
+  (days whose codes are counted, companies not deleted, every company's or one), by UTC calendar
+  month and code, the codes ranked as the year ranks them over the whole year (the eight most
+  frequent, ties by code, then the rest together when two or more are left), so each listed row's
+  months add up to its year. For platform administrators only (`W3403`), owned by the definer role,
+  executable by the platform role alone; codes and counts only.
+- **One snapshot:** `readFailureReasonYear` reads the months and the transaction's today with the
+  year (repeatable read, as both callers already did), spans the calendar months of the 365 days
+  (`failureReasonYearMonths`: 13 when the year starts after a 1st, the first and last partial) and
+  places each row in its reason's month (`failureReasonsByMonth`, 0 for a month without one); a row
+  naming a code or a month the year does not list is an error, not dropped.
+- **Shown in the year's table:** a "Month by month" column beside each reason: a bar a month in the
+  failed sends' colour, oldest first, each reason to its own height (its most in one month fills
+  it), at least 2 pixels for a month with a failed send; the partial first and last months are
+  drawn lighter and named with their days. Each month says its count when pointed at, the whole
+  reads as one sentence to a screen reader, and a note under the table says which months the bars
+  run from and to. The window's table (93 days at most) has no months.
+
+Consequences: platform staff see when a reason began, grew or faded without querying the database.
+Rows scaled to their own height compare a reason's months, not one reason's months with another's
+(the counts and shares do that). The months cover the counted days only, as the year does.
+
+Not built: failures by company over time, a CSV of the months, and weeks or days instead of months.

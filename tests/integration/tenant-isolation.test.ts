@@ -410,10 +410,11 @@ describe('database roles', () => {
       }
     }
     // Platform operations (0026): the read functions with the messages a day (0254, 0255), the kept
-    // days (0262) and the failed sends by reason (0265), the receipt retry, the dead letter retry
-    // (0086) and acknowledgement (0117), and the late queue (0125), receipt (0127) and quarantine
-    // (0139) acknowledgements for platform staff only; the dead-letter purge and the counting of
-    // the kept days for the worker; the URL host helper for the definer functions.
+    // days (0262) and the failed sends by reason (0265), the year's (0269) and its months (0283),
+    // the receipt retry, the dead letter retry (0086) and acknowledgement (0117), and the late queue
+    // (0125), receipt (0127) and quarantine (0139) acknowledgements for platform staff only; the
+    // dead-letter purge and the counting of the kept days for the worker; the URL host helper for
+    // the definer functions.
     for (const fn of [
       'ops.platform_ops_health(uuid)',
       'ops.platform_ops_activity(timestamp with time zone,uuid)',
@@ -422,6 +423,7 @@ describe('database roles', () => {
       'ops.platform_ops_message_days(integer,uuid)',
       'ops.platform_ops_failure_reasons(timestamp with time zone,uuid)',
       'ops.platform_ops_failure_reason_year(uuid)',
+      'ops.platform_ops_failure_reason_months(uuid)',
       'ops.platform_ops_failure_reason_days()',
       'ops.platform_ops_signup_sessions(timestamp with time zone,integer)',
       'ops.platform_ops_integration_failures(integer)',
