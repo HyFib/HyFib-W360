@@ -1269,7 +1269,8 @@ verification, app review, Embedded Signup configuration).
   **[Audit entries of endpoints with long lists fixed; their database tests run only in CI]**
   (ADR-336, no migration: an added or changed endpoint's entry whose lists together would pass
   7,000 bytes as jsonb names the largest by count and digest, so no change is refused for its audit
-  entry).
+  entry; since ADR-363 each such list once, as `"<length>:<digest>"` under `lists`, so at its
+  largest the entry takes 4,075 bytes and more lists fit).
   **[Answers kept with an Idempotency-Key up to 256 KiB built; their database test runs only in
   CI]** (ADR-339, migrations 0259 and 0260: an endpoint's whole configuration, about 103 KB at
   most, is kept with the key of `POST /webhook-endpoints` and its secret rotation, which failed past
@@ -1439,12 +1440,19 @@ verification, app review, Embedded Signup configuration).
   day's counts, and the Usage tab and a company's page list the year's under the year).
   **[The year's failed sends by reason month by month built; its database tests run only in CI]**
   (ADR-360, migration 0283: each reason of the year's table draws its months beside it, ranked as
-  the year, the partial first and last months drawn lighter).
+  the year, the partial months drawn in outline, with a folded table of every month's count).
+  **[The year's failed sends by company month by month built; its database tests run only in CI]**
+  (ADR-362, migration 0285: the Usage tab lists the companies whose sends failed most over the
+  year, each with its months).
+  **[Each company's failed sends as a share of its sends built; its database tests run only in
+  CI]** (ADR-364, migration 0285 changed before release: each listed company's sends of the same
+  days, those cancelled left out, and the share of them failed, over the year and month by month).
   Remaining:
   other alert channels (several channels, a channel per alert, formats other than a JSON `text`
   member, such as Microsoft Teams' or PagerDuty's, and the owners' other notices, such as personal
   notices, in a channel; Microsoft's documentation of Teams' webhooks could not be opened from
-  here), other charts (other measures, such as failures by company over time), Meta's quality
+  here), other charts (other measures, such as the companies ranked by the share of their sends
+  failed), Meta's quality
   webhook (unconfirmed), rollups for many companies and pages read from the database.
 - **P5-11 Account export/deletion workflow** **[built, locally verified with test data only]**
   (ADR-055): Settings → Company data for owners. A streamed, gzip-compressed JSON Lines export of

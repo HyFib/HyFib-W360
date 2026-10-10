@@ -4593,11 +4593,12 @@ describe('failed sends by reason kept as days pass (ADR-350)', () => {
     ).rejects.toThrow(/platform_failure_reason_days_reason_code_check/);
   });
 
-  it('lets only platform administrators read the year’s reasons, their months and the days counted', async () => {
+  it('lets only platform administrators read the year’s reasons, their months, the companies’ months and the days counted', async () => {
     const outsider = await createUser(fx.dbs, { twoFactor: true });
     for (const statement of [
       sql`select * from ops.platform_ops_failure_reason_year(null)`,
       sql`select * from ops.platform_ops_failure_reason_months(null)`,
+      sql`select * from ops.platform_ops_failure_company_months()`,
       sql`select ops.platform_ops_failure_reason_days()`,
     ]) {
       await expectCode(
@@ -4609,6 +4610,7 @@ describe('failed sends by reason kept as days pass (ADR-350)', () => {
     for (const statement of [
       'SELECT * FROM ops.platform_ops_failure_reason_year(null)',
       'SELECT * FROM ops.platform_ops_failure_reason_months(null)',
+      'SELECT * FROM ops.platform_ops_failure_company_months()',
       'SELECT ops.platform_ops_failure_reason_days()',
     ]) {
       await expect(fx.dbs.appPool.query(statement), statement).rejects.toThrow(/permission denied/);
@@ -4697,5 +4699,205 @@ describe('failed sends by reason kept as days pass (ADR-350)', () => {
     const platform = await ops().failureReasonYear(staff);
     expect(platform.byMonth).toEqual(year?.byMonth);
     expect(platform.uncounted).toBe(1);
+  });
+
+  it('reads the year’s failed sends by company month by month, ranked over the whole year, ties by name, the rest together, from counted days only, with their sends (ADR-362, ADR-364)', async () => {
+    // The counts are the platform's: this test sets them itself.
+    await fx.query('DELETE FROM ops.platform_failure_reason_days');
+    await fx.query('DELETE FROM ops.platform_message_days');
+    await fx.query('DELETE FROM ops.platform_message_days_counted');
+    const [clock] = await fx.query<{ day: string }>(
+      `SELECT to_char((now() AT TIME ZONE 'UTC')::date, 'YYYY-MM-DD') AS day`,
+    );
+    today = clock!.day;
+    // Every day of the year counted with its codes, as the worker leaves them, but one.
+    await fx.query(
+      `INSERT INTO ops.platform_message_days_counted (utc_day, outcomes, reasons)
+       SELECT (now() AT TIME ZONE 'UTC')::date - g, true, true FROM generate_series(1, 365) AS g`,
+    );
+    await fx.query(
+      `UPDATE ops.platform_message_days_counted SET reasons = false
+        WHERE utc_day = (now() AT TIME ZONE 'UTC')::date - 100`,
+    );
+    /** A company named `name`, so that a tie is ordered by name whatever its id. */
+    const named = async (name: string) => {
+      const c = await fx.company();
+      await fx.query('UPDATE app.tenants SET name = $2 WHERE id = $1', [c.tenant.id, name]);
+      return c;
+    };
+    /** A company's failed sends with a code on the day `daysAgo` days before today. */
+    const failed = (c: Company, daysAgo: number, code: string, n: number) =>
+      fx.query(
+        `INSERT INTO ops.platform_failure_reason_days (tenant_id, utc_day, reason_code, failed)
+         VALUES ($1, (now() AT TIME ZONE 'UTC')::date - $2::int, $3, $4)`,
+        [c.tenant.id, daysAgo, code, n],
+      );
+    /**
+     * A company's sends on the day `daysAgo` days before today, as the day's count keeps them, with
+     * those failed and cancelled among them (ADR-364).
+     */
+    const sent = (
+      c: Company,
+      daysAgo: number,
+      outbound: number,
+      failedSends: number,
+      canceled = 0,
+    ) =>
+      fx.query(
+        `INSERT INTO ops.platform_message_days
+           (tenant_id, utc_day, outbound, failed, inbound, canceled, delivered, read)
+         VALUES ($1, (now() AT TIME ZONE 'UTC')::date - $2::int, $3, $4, 0, $5, 0, 0)`,
+        [c.tenant.id, daysAgo, outbound, failedSends, canceled],
+      );
+    const first = await named('Failing first');
+    const second = await named('Failing second');
+    const third = await named('Failing third');
+    // Two with the same year, the later created first by name.
+    const tieB = await named('Tie B');
+    const tieA = await named('Tie A');
+    const sixth = await named('Failing sixth');
+    const seventh = await named('Failing seventh');
+    const eighth = await named('Failing eighth');
+    const restOne = await named('The rest one');
+    const restTwo = await named('The rest two');
+    const gone = await named('Deleted since');
+    // The first day of the year, a day in the middle and yesterday; one company's codes add up.
+    await failed(first, 365, 'c01', 5);
+    await failed(first, 1, 'c01', 15);
+    await failed(second, 200, 'c01', 10);
+    await failed(second, 200, 'c02', 6);
+    await failed(third, 365, 'c03', 14);
+    await failed(tieB, 1, 'c01', 12);
+    await failed(tieA, 200, 'c01', 12);
+    await failed(sixth, 1, 'c01', 10);
+    await failed(seventh, 1, 'c01', 8);
+    await failed(eighth, 1, 'c01', 6);
+    await failed(restOne, 365, 'c01', 4);
+    await failed(restTwo, 1, 'c01', 2);
+    // A day not counted with its codes, and a deleted company's sends: in neither a company's year
+    // nor the rest. More than a year ago: never.
+    await failed(first, 100, 'c01', 50);
+    await failed(first, 366, 'c01', 50);
+    await failed(gone, 1, 'c01', 50);
+    // The first company's sends on its days and on a day it sent without a failure, those cancelled
+    // left out: 100 + 250 + 50; on the day not counted with its codes and more than a year ago, none.
+    // The rest's two: 40 + 10, and 20 in a month the second sent in without a failed send, still the
+    // rest's at place 9. Listed companies without sends have no share, nor one whose deletion has
+    // started, whatever is left of its sends. A company that never failed and a deleted one: in
+    // neither.
+    const quiet = await named('Never failing');
+    await sent(first, 365, 110, 5, 10);
+    await sent(first, 1, 250, 15);
+    await sent(first, 300, 50, 0);
+    await sent(first, 100, 1000, 50);
+    await sent(first, 366, 1000, 50);
+    await sent(restOne, 365, 40, 4);
+    await sent(restTwo, 1, 10, 2);
+    await sent(restTwo, 300, 20, 0);
+    await sent(quiet, 1, 1000, 0);
+    await sent(gone, 1, 500, 50);
+    await sent(seventh, 1, 100, 8);
+    await fx.query(
+      `INSERT INTO ops.tenant_deletions
+         (id, tenant_id, requested_by_user_id, due_at, previous_status, company_name, started_at)
+       VALUES ($1, $2, $3, now(), 'active', 'Failing seventh', now())`,
+      [uuidv7(), seventh.tenant.id, seventh.owner.id],
+    );
+    await fx.query(
+      `UPDATE app.tenants SET status = 'deleted', status_changed_at = now() WHERE id = $1`,
+      [gone.tenant.id],
+    );
+
+    const months = failureReasonYearMonths(today);
+    const monthOf = (daysAgo: number) =>
+      months.findIndex(
+        (m) =>
+          m.month ===
+          new Date(Date.parse(`${today}T12:00:00Z`) - daysAgo * 24 * 60 * 60 * 1000)
+            .toISOString()
+            .slice(0, 7),
+      );
+    const year = await ops().failureCompanyYear(staff);
+    const ranked = [first, second, third, tieA, tieB, sixth, seventh, eighth];
+    const slugs = new Map(
+      (
+        await fx.query<{ id: string; slug: string }>(
+          'SELECT id, slug FROM app.tenants WHERE id = ANY ($1::uuid[])',
+          [ranked.map((c) => c.tenant.id)],
+        )
+      ).map((t) => [t.id, t.slug]),
+    );
+    expect(
+      year.companies.map((c) => [c.place, c.tenantId, c.name, c.slug, c.companies, c.failed]),
+    ).toEqual([
+      [1, first.tenant.id, 'Failing first', slugs.get(first.tenant.id), 1, 20],
+      [2, second.tenant.id, 'Failing second', slugs.get(second.tenant.id), 1, 16],
+      [3, third.tenant.id, 'Failing third', slugs.get(third.tenant.id), 1, 14],
+      [4, tieA.tenant.id, 'Tie A', slugs.get(tieA.tenant.id), 1, 12],
+      [5, tieB.tenant.id, 'Tie B', slugs.get(tieB.tenant.id), 1, 12],
+      [6, sixth.tenant.id, 'Failing sixth', slugs.get(sixth.tenant.id), 1, 10],
+      [7, seventh.tenant.id, 'Failing seventh', slugs.get(seventh.tenant.id), 1, 8],
+      [8, eighth.tenant.id, 'Failing eighth', slugs.get(eighth.tenant.id), 1, 6],
+      [9, null, null, null, 2, 6],
+    ]);
+    expect(year.failed).toBe(104);
+    expect(year.uncounted).toBe(1);
+    expect(year.months).toEqual(months);
+    // Each company's months add up to its year, each in the month of its days, the rest's too.
+    expect(year.byMonth.map((counts) => counts.reduce((total, n) => total + n, 0))).toEqual([
+      20, 16, 14, 12, 12, 10, 8, 6, 6,
+    ]);
+    expect(year.byMonth[0]?.[monthOf(365)]).toBe(5);
+    expect(year.byMonth[0]?.[monthOf(1)]).toBe(15);
+    expect(year.byMonth[1]?.[monthOf(200)]).toBe(16);
+    expect(year.byMonth[8]?.[monthOf(365)]).toBe(4);
+    expect(year.byMonth[8]?.[monthOf(1)]).toBe(2);
+    // Each company's sends of the same days and the share of them failed (ADR-364).
+    expect(year.companies.map((c) => [c.place, c.sent, c.failedShare])).toEqual([
+      [1, 400, 0.05],
+      [2, 0, null],
+      [3, 0, null],
+      [4, 0, null],
+      [5, 0, null],
+      [6, 0, null],
+      [7, 0, null],
+      [8, 0, null],
+      [9, 70, 6 / 70],
+    ]);
+    expect(year.sentByMonth.map((sends) => sends.reduce((total, n) => total + n, 0))).toEqual([
+      400, 0, 0, 0, 0, 0, 0, 0, 70,
+    ]);
+    expect(year.sentByMonth[0]?.[monthOf(365)]).toBe(100);
+    expect(year.sentByMonth[0]?.[monthOf(1)]).toBe(250);
+    // A month the company sent in without a failed send: its sends, no failed send.
+    expect(year.sentByMonth[0]?.[monthOf(300)]).toBe(50);
+    expect(year.byMonth[0]?.[monthOf(300)]).toBe(0);
+    expect(year.sentByMonth[8]?.[monthOf(365)]).toBe(40);
+    expect(year.sentByMonth[8]?.[monthOf(1)]).toBe(10);
+    expect(year.sentByMonth[8]?.[monthOf(300)]).toBe(20);
+    expect(year.byMonth[8]?.[monthOf(300)]).toBe(0);
+    // Nine companies or fewer are each listed: without the second of the rest, the ninth is.
+    await fx.query('DELETE FROM ops.platform_failure_reason_days WHERE tenant_id = $1', [
+      restTwo.tenant.id,
+    ]);
+    const nine = await ops().failureCompanyYear(staff);
+    expect(nine.companies.at(-1)).toMatchObject({
+      place: 9,
+      tenantId: restOne.tenant.id,
+      name: 'The rest one',
+      companies: 1,
+      failed: 4,
+      sent: 40,
+      failedShare: 0.1,
+    });
+    expect(nine.companies).toHaveLength(9);
+    // Ended as the deletion run ends it, so no other test finds a deletion open.
+    await fx.query(`UPDATE ops.tenant_deletions SET completed_at = now() WHERE tenant_id = $1`, [
+      seventh.tenant.id,
+    ]);
+    await fx.query(
+      `UPDATE app.tenants SET status = 'deleted', status_changed_at = now() WHERE id = $1`,
+      [seventh.tenant.id],
+    );
   });
 });

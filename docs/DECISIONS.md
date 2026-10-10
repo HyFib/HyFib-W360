@@ -13107,10 +13107,12 @@ Decision:
   `listDigests`, instead of item by item, until it fits (`webhookEndpointAuditMetadata`). The digest
   shows whether a list named by count in two entries changed between them; its items are not in the
   entry. It hashes each object's keys in order, so a list read back from the database (jsonb keeps
-  an object's keys by length) hashes as the services wrote it. The host, the events (`eventTypes`, or a replay's `events`) and the other facts are always
-  named, and an entry that fits is unchanged. With every list named by count, an entry with every
-  event and the longest hosts takes under 6,000 bytes. The endpoint keeps every list whole, as
-  Settings, the API and the company data export show it.
+  an object's keys by length) hashes as the services wrote it. The host, the events (`eventTypes`,
+  or a replay's `events`) and the other facts are always named, and an entry that fits is
+  unchanged. With every list named by count, an entry with every event and the longest hosts takes
+  under 6,000 bytes. The endpoint keeps every list whole, as Settings, the API and the company data
+  export show it. (Since ADR-363 such a list is named once, under `lists`, as
+  `"<length>:<digest>"`; the largest entry took 6,793 bytes before it, 4,075 after.)
 - **Both paths:** Settings and the API name lists by count the same way when an endpoint is added
   or changed; the API's other endpoint entries (turned off or on, deleted, a secret rotated,
   deliveries replayed) pass through the same function and name no list long enough to change.
@@ -14257,3 +14259,102 @@ type needs the entry named more compactly, or the bound rechecked against those 
 it is added.
 
 Not built: filters on a checkout's values, such as its total or items.
+
+## ADR-362 The year's failed sends by company, month by month (P5-10) (2026-10-10)
+
+Context: the Usage tab shows the year's failed sends by reason, month by month (ADR-350, ADR-360),
+every company's together, and its companies table counts sends, not failures (ADR-157). A company
+whose sends began failing in one month, or one failing all year, did not stand out: staff had to
+open each company's page to find it, and ADR-360 left failures by company over time unbuilt.
+
+Decision:
+
+- **Read by company and month:** `ops.platform_ops_failure_company_months()` (migration 0285) reads
+  the same 365 days before today as the year's failed sends by reason, with the same filters (days
+  whose codes are counted, companies not deleted), by company and UTC calendar month, the companies
+  ranked by their failed sends over the whole year: the eight with the most, ties by name and id,
+  then the rest together (with how many companies it holds) when two or more are left, a ninth alone
+  being listed. Each row gives its place in that ranking (the rest's is 9 in every month), so the
+  domain lists the companies as the database ranked them. For platform administrators only
+  (`W3403`), owned by the definer role, executable by the platform role alone; counts with each
+  company's name and slug, as the Usage tab's other tables show them.
+- **One snapshot:** `readFailureCompanyYear` reads the months, the days counted and the
+  transaction's today in one repeatable-read transaction, so a company's months add up to its year;
+  a month the year does not list, or a place two companies share, is an error, not dropped.
+- **Shown on the Usage tab:** "Failed sends by company (12 months)", under the year's reasons: each
+  company (a link to its platform page) with its failed sends, its share of the year's and its
+  months as ADR-360 draws them (the same bars, note and folded table, now shared components), the
+  rest last.
+
+Consequences: staff see which companies fail most and since when without opening each one. The
+year's failed sends by company and by reason are read in separate snapshots, so while the worker
+counts a day the two cards can differ by that day's failures. A company's page already shows its own
+year, so this table is the Usage tab's only.
+
+Not built: a company's rank changes over time, failures as a share of each company's sends (built
+since ADR-364), and a CSV of the table.
+
+## ADR-363 Endpoint audit entries name a long list once, by its length and digest (P5-09) (2026-10-10)
+
+Context: an endpoint's audit entry too large for its 8 KiB of metadata names its largest lists by
+count under `listCounts` and by digest under `listDigests` until it fits (ADR-336). Each such list is
+named twice, under both objects, and jsonb keeps a number as a numeric, so at its largest (every event
+type, the 62 lists and the longest hosts) the entry took 6,793 bytes (ADR-361), 7 under the unit
+test's 6,800 bound (ADR-356), and every further list or event type needed the entry named more
+compactly first.
+
+Decision:
+
+- **One object, one string a list:** the lists named so go under `lists`, each as its length and the
+  first 16 hex digits of the SHA-256 of its JSON (each object's keys in order, as before) joined by a
+  colon: `"lists": { "contactTags": "50:1a2b3c4d5e6f7a8b" }`. Two entries still show whether a list
+  named so in both changed, and how many items it holds. The lists are chosen as before: the largest
+  first, by name when as large, until the entry fits; the host and the events are always named, and
+  the endpoint keeps every list whole.
+- **Room:** at its largest the entry now takes 4,075 bytes (the unit test's bound is 4,200), within
+  the 7,000 bytes kept, about 42 bytes a list named, so many more lists and event types fit. The
+  test's bound is close on purpose, about three lists or four event types above the entry: a filter
+  that adds them raises it, saying what they cost.
+- **Older entries are kept as written:** entries written before this release name their lists
+  under `listCounts` and `listDigests`; nothing reads either shape but people and the tests, and no
+  migration rewrites the audit.
+
+Consequences: webhook filters can add lists again without a change to the audit. Comparing an entry
+written before this release with a later one means reading both shapes. No migration.
+
+Not built: naming a list's changed items rather than its digest.
+
+## ADR-364 Each company's failed sends as a share of its sends, over the year and month by month (P5-10) (2026-10-10)
+
+Context: the Usage tab's failed sends by company (ADR-362) ranks the companies by their failed sends
+over the year. A company that sends much fails more by count though its sends may seldom fail, and
+one that sends little may fail at much of what it sends: the counts alone did not tell them apart,
+and ADR-362 left failures as a share of each company's sends unbuilt.
+
+Decision:
+
+- **Each month with its sends:** `ops.platform_ops_failure_company_months()` (migration 0285, not
+  yet applied anywhere, so changed in place) gives each row the sends of its companies on the same
+  days, from the kept counts (`ops.platform_message_days`, ADR-341) of the days whose codes are
+  counted, those cancelled left out, as the shares of ADR-344 and ADR-346 count them. The day's count
+  writes a company's sends and its failed sends by code in one statement (0269), so the two cover
+  the same messages. A listed company's months it sent in without a failed send have rows too, so
+  its sends are whole; the ranking, the rest and the filters are unchanged, and a company that never
+  failed is in neither.
+- **The share, or none:** `failedOfSent` divides a company's failed sends by its sends, over the year
+  and in each month: none when it sent none, or when fewer sends than failed sends are counted,
+  rather than a share above all of them. A company whose deletion has started has no sends here, as
+  the day's count leaves it out: its deletion removes its sends (step 35) before its failed sends by
+  code (step 36), which would leave a share of what is left.
+- **Shown on the Usage tab:** the companies table gains "Sent" and "Share of its sends failed"
+  columns, a dash for no share; each month's bar says the share of the company's sends failed when
+  pointed at and to a screen reader; a second folded table gives every month's share, with a dash
+  for a month without one. The reasons' tables are unchanged.
+
+Consequences: staff can tell a company that fails much because it sends much from one whose sends
+fail often. A company with few sends shows a high share from few failures; its count beside the share
+says how few. The ranking stays by count, so a company with a high share and few failures can be in
+the rest. A company whose deletion has started shows its failed sends but no sends and no share.
+
+Not built: a ranking by share (it needs a floor of sends below which a share means little, a product
+decision), the share of each of the rest's companies, and a CSV of the table.

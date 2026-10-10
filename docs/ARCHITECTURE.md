@@ -2430,8 +2430,10 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   each value a list adds by its field's type (`webhookContactEventFieldValuesChecked`) and keep a
   list to 4,000 bytes as JSON. The audit entries of added and changed endpoints name every list,
   and one whose lists together would pass 7,000 bytes as jsonb (`jsonbSize`, an upper bound) names
-  the largest by count under `listCounts` and by a digest under `listDigests` until it fits within
-  its 8 KiB of metadata (`webhookEndpointAuditMetadata`, ADR-336).
+  the largest by count and digest until it fits within its 8 KiB of metadata
+  (`webhookEndpointAuditMetadata`, ADR-336): since ADR-363 under one `lists` object, each list's
+  length and digest joined by a colon (`"50:1a2b3c4d5e6f7a8b"`); entries written before name them
+  under `listCounts` and `listDigests`.
   `app.webhook_contact_values_match` passes a change when the contact has one of the values (text
   whatever its case, numbers as numbers) or, for a `contact.updated`, when its transaction changed
   one of the fields. `app.capture_contact_webhook_event` and `app.deliver_contact_webhook_tag`
@@ -2885,6 +2887,17 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   error). `FailureReasonsTable` draws each reason's months in a column (`MonthBars`, heights from
   `monthBarHeights` and month names from `chartMonthLabel` in `platform/ops-chart.ts`) and folds a
   table of every month's count under it (`<details>`, as `DailyMessages` does).
+- **Failed sends by company month by month (ADR-362, migration 0285):**
+  `ops.platform_ops_failure_company_months` reads the same rows by company and UTC calendar month,
+  the companies ranked by their year (eight, ties by name, then the rest), each row with its place.
+  `readFailureCompanyYear` reads it with the days counted and today in one snapshot, and
+  `failureCompanyYear` lists the companies by place with their year, share and months.
+  `FailureCompaniesTable` (Usage tab) shares `ShareBar`, `MonthBars` and `YearMonths` (the note and
+  the folded table) with `FailureReasonsTable`. Since ADR-364 each row also has its companies'
+  sends of the same days from `ops.platform_message_days`, those cancelled left out (a listed
+  company's months without a failed send included); `failedOfSent` (`platform/ops-chart.ts`) gives
+  the share of them failed, or none, which the table, the month bars and a second folded table
+  show.
 - **Exports (ADR-154, ADR-155, ADR-158):** `/platform/ops/export/[list]` (a route handler behind the
   pages' platform actor check; a name of `OPS_EXPORT_LISTS`, any other not found) calls
   `exportList`, which checks in its transaction that the actor is a platform administrator, reads

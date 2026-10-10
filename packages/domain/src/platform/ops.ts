@@ -49,8 +49,10 @@ import {
   type MessageYear,
 } from './message-days';
 import {
+  readFailureCompanyYear,
   readFailureReasonYear,
   readFailureReasons,
+  type FailureCompanyYear,
   type FailureReasonYear,
 } from './failure-reasons';
 import { parseInput } from '../validation';
@@ -1045,6 +1047,18 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
      */
     async failureReasonYear(actor: PlatformActor): Promise<FailureReasonYear> {
       return platformDb.run(actor.userId, (tx) => readFailureReasonYear(tx, null), {
+        isolationLevel: 'repeatable read',
+        accessMode: 'read only',
+      });
+    },
+
+    /**
+     * The companies whose sends failed most over the 365 days before today, each month by month,
+     * from the counts the worker keeps as days pass (ADR-362), with how many of the days are not
+     * counted yet.
+     */
+    async failureCompanyYear(actor: PlatformActor): Promise<FailureCompanyYear> {
+      return platformDb.run(actor.userId, (tx) => readFailureCompanyYear(tx), {
         isolationLevel: 'repeatable read',
         accessMode: 'read only',
       });

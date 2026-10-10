@@ -1,5 +1,169 @@
 # Progress
 
+## 2026-10-10 — Each company's failed sends as a share of its sends (P5-10, H-034, ADR-364)
+
+Status: **Implemented; its database tests run in CI only.** The Usage tab's failed sends by company
+(ADR-362) ranked the companies by count alone: a company that sends much fails more by count though
+its sends may seldom fail, and the counts did not tell it from one whose sends fail often.
+
+### Completed
+
+- **Database:** migration 0285, not applied anywhere yet and so changed in place:
+  `ops.platform_ops_failure_company_months` gives each row its companies' sends of the same days
+  (the kept counts of the days whose codes are counted, those cancelled left out), and a listed
+  company's months it sent in without a failed send have rows too. The ranking, the rest and the
+  filters are unchanged; a company that never failed is in neither.
+- **Domain:** `failedOfSent` (`platform/ops-chart.ts`) divides failed sends by sends, with no share
+  without sends or with fewer sends than failed sends (a company whose deletion removes its sends
+  before its failed sends by code); `failureCompanyYear` gives each company its sends and the share
+  of them failed, and `sentByMonth`; `readFailureCompanyYear` reads the sends.
+- **Web:** the companies table's "Sent" and "Share of its sends failed" columns; each month's bar
+  says the share of the company's sends failed when pointed at and to a screen reader; a second
+  folded table gives every month's share; a dash where there is none. Rendered from sample data
+  with React's server renderer and looked at in Chromium, wide and at phone width.
+- **Tests:** unit (2 new: the share and its absence, a company without a share; 3 updated: the
+  companies with their sends over the year and by month, a month sent in without a failed send,
+  rows of one month added, the read with the sends); integration (`platform-ops.test.ts`: the
+  ADR-362 test now gives companies their sends, checking each company's sends of the counted days
+  with those cancelled left out, a month sent in without a failed send, a day not counted, more than
+  a year ago, a company never failing and a deleted company left out, and listed companies without
+  sends having no share). Written for CI; the integration tests were not run here.
+- **Docs:** ADR-364 (and ADR-362's "not built" note); ARCHITECTURE; SECURITY; THREAT-MODEL T322;
+  DEPLOYMENT (0285); RUNBOOKS; BACKLOG P5-10; the feature matrix (H-034, status unchanged).
+- **Mutation checks:** 12 deliberate regressions, all caught by the unit tests (all sends failed
+  taken for none, a share above all of them, a share without sends, no share drawn as 0, the year's
+  sends as its largest month, one row of a month's sends kept, failed sends taken for sends, every
+  company's sends in the first's, failed sends added to the sends, the year's failed sends for the
+  company's, the sends not read, the sends read from the failed sends). The function's join and
+  filters run in the database and are covered by the integration tests, which run in CI only.
+- **Review fixes:** an independent review, and CI's first run of migration 0285, found:
+  - **HIGH (CI failed):** the rest's place was the lowest rank among the rest's companies with a
+    row in each month, so the rest split over several places; the integration tests failed on
+    PostgreSQL 17 and 18 at the ADR-362 test, which ran there for the first time. Every rest row
+    now has place 9, the domain refuses the rest at two places, and the test adds a month in which
+    the rest's second company sent without a failed send. The ADR-362 review's "nothing that would
+    fail CI" was wrong: like this one, it could not run the integration tests.
+  - **LOW:** a company whose deletion has started has no sends, so no share: its deletion removes
+    its sends before its failed sends, which left a share of what was left. The test starts one
+    listed company's deletion.
+  - **LOW:** the card says what Sent counts; a company's months are separated by semicolons for a
+    screen reader and say "of the sends", which fits the rest too; this entry says how the table
+    was rendered.
+
+### Test commands and results (local, 2026-10-10)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 146 files, 1553 tests passed                                    |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+| migration 0285                                     | pglast parse check passed (syntax only, PL/pgSQL body included) |
+
+## 2026-10-10 — Endpoint audit entries name a long list once (P5-09, H-014, ADR-363)
+
+Status: **Implemented; its database tests run in CI only.** An endpoint's audit entry too large for
+its metadata named each of its largest lists twice, by count under `listCounts` and by digest under
+`listDigests` (ADR-336); at its largest it took 6,793 bytes, 7 under the test's 6,800 bound, so no
+further webhook list or event type could be added without first naming the lists more compactly.
+
+### Completed
+
+- **Domain:** `webhookEndpointAuditMetadata` names such lists once, under `lists`, each as its length
+  and digest joined by a colon (`"50:1a2b3c4d5e6f7a8b"`), chosen as before (largest first, by name
+  when as large, until the entry fits). At its largest (every event type, the 62 lists, the longest
+  hosts) the entry now takes 4,075 bytes. No migration: entries written before keep their shape.
+- **Tests:** unit (two of ADR-336's three tests updated to the new shape: a list's digest from its
+  objects' keys in order, a changed list with another digest, the events always named, the largest
+  entry under 4,200 bytes with all 62 lists named, each list 30 tags long so none fits whole; the
+  bound is close on purpose, so a filter adding lists raises it);
+  integration (`webhooks.test.ts` and `api-webhook-endpoints.test.ts`: the stored entries name the
+  four largest lists under `lists`, a changed list's digest alone changing). Written for CI; the
+  integration tests were not run here.
+- **Docs:** ADR-363; ARCHITECTURE; THREAT-MODEL T301; BACKLOG P5-09.
+- **Mutation checks:** 6 deliberate regressions, all caught by the unit tests (another separator, a
+  shorter digest, keys hashed in the order read, a wrong length, the old key, stopping before the
+  entry fits).
+- **Review fixes:** an independent review (the unit tests, the integration tests' typecheck and a
+  size script run; the integration expectations checked by hand) found nothing that would fail CI
+  and no correctness or security bug, and these, all LOW, fixed:
+  - T301 said every list was counted within 6,000 bytes; it says named within 4,200.
+  - ADR-363 credited the unit test's 6,800-byte bound to ADR-361; ADR-356 set it.
+  - Comments, test titles and SECURITY still said lists are named by count; they say by length
+    and digest, and ADR-336 notes the shape since ADR-363.
+  - The 4,200-byte bound, about three lists or four event types above the entry, is said to be
+    close on purpose in the test and in ADR-363.
+  - The integration tests' tag lists are named `tagLists`, apart from the entry's `lists`.
+
+### Test commands and results (local, 2026-10-10)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 146 files, 1551 tests passed                                    |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+
+## 2026-10-10 — The year's failed sends by company, month by month (P5-10, H-034, ADR-362)
+
+Status: **Implemented; its database tests run in CI only.** The Usage tab showed the year's failed
+sends by reason, month by month (ADR-360), every company's together, and its companies table counts
+no failures: a company whose sends began failing, or one failing all year, did not stand out. The
+local PostgreSQL is unavailable, so migration 0285 and the integration tests below were written but
+not run here; the migration passed the pglast parse check (syntax only), its PL/pgSQL body included.
+
+### Completed
+
+- **Database:** migration 0285: `ops.platform_ops_failure_company_months()`, the year's failed sends
+  (counted days, companies not deleted) by company and UTC calendar month, the companies ranked by
+  their year (the eight with the most, ties by name and id, then the rest together, a ninth alone
+  being listed), each row with its place; for platform administrators only (`W3403`), owned by the
+  definer role, executable by the platform role alone.
+- **Domain:** `readFailureCompanyYear` reads the months, the days counted and the transaction's
+  today in one snapshot; `failureCompanyYear` lists the companies by place with their year, share
+  and months, and refuses a month the year does not list or a place two companies share;
+  `platformOps.failureCompanyYear` reads it in a repeatable-read transaction.
+- **Web:** "Failed sends by company (12 months)" on the Usage tab, under the year's reasons: each
+  company linked to its platform page with its failed sends, share and months, the rest last, with
+  the reasons' note and folded table. `ShareBar`, `MonthBars` and `YearMonths` are now shared by
+  both tables (`failure-reasons.tsx`); its empty texts differ from the reasons' card, which an e2e
+  test matches exactly.
+- **Tests:** unit (3 new: the companies listed by place with their year, share and months, the rest
+  last; rows of one month added, an unknown month or a shared place refused; the reads in one
+  transaction and their failures); integration (`platform-ops.test.ts`: the ranking over the whole
+  year with a tie by name and the rest together, a ninth listed alone, months adding up to each
+  company's year, a day not counted and a deleted company left out, the refusals with the new
+  function; `tenant-isolation.test.ts`: its grants). Written for CI; the integration tests were not
+  run here. No e2e test of the table.
+- **Docs:** ADR-362; ARCHITECTURE; SECURITY; THREAT-MODEL T321; DEPLOYMENT (0285); RUNBOOKS; BACKLOG
+  P5-10; feature matrix H-034.
+- **Mutation checks:** 11 deliberate regressions, all caught by the unit tests (nine companies
+  shown, the companies in the order their rows come, a place two companies share passed over, a
+  company's year from one month, rows of one month replaced, an unknown month passed over, shares
+  of the wrong total, the days counted taken for those not counted, the read cut short, no days
+  counted answered passed over, the rest named as one company). The function's ranking and filters
+  run in the database and are covered by the integration tests, which run in CI only.
+- **Review fixes:** an independent review found nothing that would fail CI and no correctness or
+  security bug, and these, fixed:
+  - **LOW:** a company's bars were named for a screen reader by its name alone, which two companies
+    can share; they are named with its slug too, as the reasons' are with their codes.
+  - **LOW:** migration 0285's comment, rewrapped, says the first month is partial unless the year
+    starts on a 1st and the last unless today is one (0285 has not been applied anywhere).
+  - **LOW:** the runbook said a company being deleted is listed until its deletion ends; the
+    deletion removes its counts as it runs, so it is listed with what is left of them.
+  - The card's empty state says no day of the year is counted yet, not that no company is.
+  - Not changed: the feature matrix keeps "locally verified" on H-034, whose text says its database
+    tests run in CI only.
+
+### Test commands and results (local, 2026-10-10)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 146 files, 1551 tests passed                                    |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+
 ## 2026-10-10 — Cart reminder filter for cart reminder webhook events (P5-09, H-014, ADR-361)
 
 Status: **Implemented; its database tests run in CI only.** `store_checkout.reminder_skipped` and

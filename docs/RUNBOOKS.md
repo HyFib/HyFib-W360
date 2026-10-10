@@ -4029,6 +4029,21 @@ that table: usually the first and the last, but the first is whole when the year
 and the last when today is one (the note under the table says which). A reason's months add up to
 its year; they too cover the counted days only.
 
+**Failed sends by company over the year (ADR-362).** Under the year's reasons, the Usage tab lists
+the companies whose sends failed most in the same days (the eight with the most, then the rest
+together), each with its share of the year's failed sends and its months drawn as the reasons'
+are. A company deleted is left out; a company being deleted is listed, with what is left of its
+counts, until its deletion removes them. Open a company's name for its platform page, whose year's
+reasons say why its sends failed.
+The card reads its own snapshot: while the worker counts a day, its total can differ from the
+reasons' by that day's failures.
+Each company also has its sends of the same days, those cancelled left out, and the share of them
+that failed (ADR-364), over the year and, when a month is pointed at or in the second folded
+table, month by month. A high share with many failures points at a company whose sending is
+broken; a high share from a few failures may come from a handful of sends. A dash means no share:
+the company sent nothing that month, or its deletion has started (from then on its sends are not
+counted, as its deletion removes them).
+
 **Acknowledging failures (ADR-141).** On Current failures, the administrator who takes a failure
 opens Acknowledge on its row and writes a note of 10 to 500 characters: what was done or found
 ("Called the owner: they will reconnect the number today", "Meta's status page reports an outage").

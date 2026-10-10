@@ -1,9 +1,11 @@
+import type { ReactNode } from 'react';
 import { TBody, TD, TH, THead, TR, Table } from '@w360/ui';
 import type { FailureReason, FailureReasonMonth, FailureReasons } from '@w360/domain';
 import {
   chartCount,
   chartMonthLabel,
   chartShare,
+  failedOfSent,
   monthBarHeights,
   shareBarPath,
 } from '@w360/domain/ops-chart';
@@ -22,7 +24,7 @@ const PARTIAL_MONTH_MIN = 4;
  * A share as a bar 8 pixels thick in the failed sends' colour, repeating the number beside it: a
  * square start, a rounded end, the leftover air (`shareBarPath`).
  */
-function ShareBar({ share }: { share: number }) {
+export function ShareBar({ share }: { share: number }) {
   return (
     <svg width={BAR} height="8" viewBox={`0 0 ${BAR} 8`} aria-hidden="true" className="shrink-0">
       <path d={shareBarPath(share, BAR)} fill="var(--chart-3)" />
@@ -45,34 +47,55 @@ const monthText = (month: FailureReasonMonth) =>
     ? `${chartMonthLabel(month.month)} (${month.days} ${month.days === 1 ? 'day' : 'days'})`
     : chartMonthLabel(month.month);
 
+/** The share of a row's sends failed in a month, as a month says it (ADR-364); none without one. */
+const shareText = (share: number | null) =>
+  share === null ? '' : `, ${chartShare(share)} of the sends`;
+
 /**
- * A reason's failed sends month by month (ADR-360): a bar a month in the failed sends' colour, the
- * oldest month first, the row to its own height (its most in one month fills it), so a reason that
- * began, grew or faded shows at a glance; a partial first or last month is drawn in outline, its
- * edge in the full colour and its inside lighter. Each month says its count when pointed at, and the
- * whole reads as one sentence to a screen reader; every count is in the folded table too.
+ * A row's failed sends month by month (ADR-360), a reason's or a company's (ADR-362): a bar a month
+ * in the failed sends' colour, the oldest month first, the row to its own height (its most in one
+ * month fills it), so one that began, grew or faded shows at a glance; a partial first or last month
+ * is drawn in outline, its edge in the full colour and its inside lighter. Each month says its count
+ * when pointed at, with a company's the share of its sends failed (ADR-364), and the whole reads as
+ * one sentence to a screen reader, named after the row; every count and share is in the folded
+ * tables too (`YearMonths`).
  */
-function MonthBars({
-  reason,
+export function MonthBars({
+  label,
   months,
   counts,
+  sent,
 }: {
-  reason: string;
+  /** The row's name, as the sentence starts. */
+  label: string;
   months: readonly FailureReasonMonth[];
   counts: readonly number[];
+  /** A company's sends each month, those cancelled left out (ADR-364); a reason has none. */
+  sent?: readonly number[];
 }) {
   const heights = monthBarHeights(counts, MONTH_HEIGHT);
   const width = Math.max(0, months.length * (MONTH_BAR + MONTH_GAP) - MONTH_GAP);
-  const spoken = months
-    .map((month, index) => `${monthText(month)}: ${chartCount(counts[index] ?? 0)}`)
-    .join(', ');
+  // A month's failed sends, with a company's share of its sends failed that month (ADR-364).
+  const failedText = (index: number) => {
+    const failed = counts[index] ?? 0;
+    const share = sent === undefined ? null : failedOfSent(failed, sent[index] ?? 0);
+    return `${chartCount(failed)} failed${shareText(share)}`;
+  };
+  // A reason's months say their counts alone, as before; a company's say what they count, a
+  // semicolon between months, as each says two things.
+  const spoken =
+    sent === undefined
+      ? months
+          .map((month, index) => `${monthText(month)}: ${chartCount(counts[index] ?? 0)}`)
+          .join(', ')
+      : months.map((month, index) => `${monthText(month)}: ${failedText(index)}`).join('; ');
   return (
     <svg
       width={width}
       height={MONTH_HEIGHT + 1}
       viewBox={`0 0 ${width} ${MONTH_HEIGHT + 1}`}
       role="img"
-      aria-label={`${reason}, month by month: ${spoken}`}
+      aria-label={`${label}, month by month: ${spoken}`}
       className="shrink-0"
     >
       <line
@@ -89,7 +112,7 @@ function MonthBars({
         const height = month.partial && drawn > 0 ? Math.max(drawn, PARTIAL_MONTH_MIN) : drawn;
         return (
           <g key={month.month}>
-            <title>{`${monthText(month)}: ${chartCount(counts[index] ?? 0)} failed`}</title>
+            <title>{`${monthText(month)}: ${failedText(index)}`}</title>
             {/* The month's whole height answers the pointer, a bar or not. */}
             <rect x={x} y="0" width={MONTH_BAR} height={MONTH_HEIGHT} fill="transparent" />
             {height > 0 && month.partial ? (
@@ -131,6 +154,133 @@ function partialNote(first: boolean, last: boolean): string {
 }
 
 /**
+ * A row of the folded tables of months: its name, its code for a reason's, its count each month and
+ * a company's sends (ADR-364).
+ */
+export interface MonthRow {
+  key: string;
+  /** Its name, as text or a link. */
+  name: ReactNode;
+  /** A reason's code, as the table above shows it, in a column of its own. */
+  code?: string;
+  counts: readonly number[];
+  /** A company's sends each month, those cancelled left out, for the share of them failed. */
+  sent?: readonly number[];
+}
+
+/**
+ * Under a table whose rows draw their months (ADR-360, ADR-362): a note saying which months the
+ * bars run from and to and which are partial, and a folded table of every month's count, for
+ * keyboards and touch screens as for screen readers; with the rows' sends, a second of the share of
+ * them failed each month (ADR-364). Nothing without months.
+ */
+export function YearMonths({
+  label,
+  summary = 'Month by month as a table',
+  heading,
+  each,
+  months,
+  rows,
+  shares,
+}: {
+  /** The folded table's accessible name, which holds the table's own in no part. */
+  label: string;
+  /** What its fold says. */
+  summary?: string;
+  /** Its first column's heading, naming the rows. */
+  heading: string;
+  /** The rows as the note names them: each reason, each company. */
+  each: string;
+  months: readonly FailureReasonMonth[];
+  rows: readonly MonthRow[];
+  /**
+   * The folded table of the share of the rows' sends failed each month (ADR-364): its accessible
+   * name, which holds no other table's, and what its fold says. None without.
+   */
+  shares?: { label: string; summary: string };
+}) {
+  const first = months[0];
+  const last = months.at(-1);
+  if (!first || !last) return null;
+  const coded = rows.some((row) => row.code !== undefined);
+  return (
+    <>
+      <p className="text-xs text-muted-foreground">
+        Month by month, from {chartMonthLabel(first.month)} to {chartMonthLabel(last.month)}, {each}{' '}
+        to its own height:{' '}
+        {shares
+          ? 'point at a month for its count and the share of the sends failed, or open the tables below for every count and share.'
+          : 'point at a month for its count, or open the table below for every count.'}
+        {partialNote(first.partial, last.partial)}
+      </p>
+      {/* min-w-0: the table scrolls in its box rather than widening the card on a phone. */}
+      <details className="min-w-0 rounded-md border border-border p-3">
+        <summary className="cursor-pointer text-sm font-medium">{summary}</summary>
+        <Table aria-label={label} className="mt-3">
+          <THead>
+            <TR>
+              <TH>{heading}</TH>
+              {coded ? <TH>Code</TH> : null}
+              {months.map((month) => (
+                <TH key={month.month} className="whitespace-nowrap">
+                  {monthText(month)}
+                </TH>
+              ))}
+            </TR>
+          </THead>
+          <TBody>
+            {rows.map((row) => (
+              <TR key={row.key}>
+                <TD className="min-w-48">{row.name}</TD>
+                {coded ? <TD className="whitespace-nowrap font-mono text-xs">{row.code}</TD> : null}
+                {months.map((month, at) => (
+                  <TD key={month.month} className="tabular-nums">
+                    {chartCount(row.counts[at] ?? 0)}
+                  </TD>
+                ))}
+              </TR>
+            ))}
+          </TBody>
+        </Table>
+      </details>
+      {shares ? (
+        <details className="min-w-0 rounded-md border border-border p-3">
+          <summary className="cursor-pointer text-sm font-medium">{shares.summary}</summary>
+          <Table aria-label={shares.label} className="mt-3">
+            <THead>
+              <TR>
+                <TH>{heading}</TH>
+                {months.map((month) => (
+                  <TH key={month.month} className="whitespace-nowrap">
+                    {monthText(month)}
+                  </TH>
+                ))}
+              </TR>
+            </THead>
+            <TBody>
+              {rows.map((row) => (
+                <TR key={row.key}>
+                  <TD className="min-w-48">{row.name}</TD>
+                  {months.map((month, at) => {
+                    // No share when it sent none (or fewer than failed): a dash, not 0%.
+                    const share = failedOfSent(row.counts[at] ?? 0, row.sent?.[at] ?? 0);
+                    return (
+                      <TD key={month.month} className="tabular-nums">
+                        {share === null ? '—' : chartShare(share)}
+                      </TD>
+                    );
+                  })}
+                </TR>
+              ))}
+            </TBody>
+          </Table>
+        </details>
+      ) : null}
+    </>
+  );
+}
+
+/**
  * A window's failed sends by the code they failed with (ADR-347): the most frequent first, then the
  * rest together; each with its sends and its share of those failed, written and drawn as a bar in
  * the failed sends' colour, so the reasons compare at a glance while every number stays in the
@@ -160,8 +310,6 @@ export function FailureReasonsTable({
   };
 }) {
   if (reasons.failed === 0) return <p className="text-sm text-muted-foreground">{empty}</p>;
-  const first = months?.months[0];
-  const last = months?.months.at(-1);
   return (
     // min-w-0 and the table's own box: it scrolls there rather than widening the card on a phone.
     <div className="grid min-w-0 gap-2">
@@ -190,7 +338,7 @@ export function FailureReasonsTable({
               {months ? (
                 <TD>
                   <MonthBars
-                    reason={reasonText(r)}
+                    label={reasonText(r)}
                     months={months.months}
                     counts={months.byMonth[index] ?? []}
                   />
@@ -200,47 +348,19 @@ export function FailureReasonsTable({
           ))}
         </TBody>
       </Table>
-      {months && first && last ? (
-        <>
-          <p className="text-xs text-muted-foreground">
-            Month by month, from {chartMonthLabel(first.month)} to {chartMonthLabel(last.month)},
-            each reason to its own height: point at a month for its count, or open the table below
-            for every count.
-            {partialNote(first.partial, last.partial)}
-          </p>
-          {/* min-w-0: the table scrolls in its box rather than widening the card on a phone. */}
-          <details className="min-w-0 rounded-md border border-border p-3">
-            <summary className="cursor-pointer text-sm font-medium">
-              Month by month as a table
-            </summary>
-            <Table aria-label={months.label} className="mt-3">
-              <THead>
-                <TR>
-                  <TH>Reason</TH>
-                  <TH>Code</TH>
-                  {months.months.map((month) => (
-                    <TH key={month.month} className="whitespace-nowrap">
-                      {monthText(month)}
-                    </TH>
-                  ))}
-                </TR>
-              </THead>
-              <TBody>
-                {reasons.reasons.map((r, index) => (
-                  <TR key={r.code ?? 'the rest'}>
-                    <TD className="min-w-48">{failureReasonLabel(r.code, r.codes)}</TD>
-                    <TD className="whitespace-nowrap font-mono text-xs">{codeText(r)}</TD>
-                    {months.months.map((month, at) => (
-                      <TD key={month.month} className="tabular-nums">
-                        {chartCount(months.byMonth[index]?.[at] ?? 0)}
-                      </TD>
-                    ))}
-                  </TR>
-                ))}
-              </TBody>
-            </Table>
-          </details>
-        </>
+      {months ? (
+        <YearMonths
+          label={months.label}
+          heading="Reason"
+          each="each reason"
+          months={months.months}
+          rows={reasons.reasons.map((r, index) => ({
+            key: r.code ?? 'the rest',
+            name: failureReasonLabel(r.code, r.codes),
+            code: codeText(r),
+            counts: months.byMonth[index] ?? [],
+          }))}
+        />
       ) : null}
     </div>
   );

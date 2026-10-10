@@ -4287,11 +4287,13 @@ describe('words in received messages (ADR-337)', () => {
   });
 });
 
-describe('endpoint audit entries within an audit entry’s 8 KiB (ADR-336)', () => {
+describe('endpoint audit entries within an audit entry’s 8 KiB (ADR-336, ADR-363)', () => {
   // A tag of 40 Tamil letters and digits: 114 bytes of UTF-8, as a company's tags may be.
   const tamil = (i: number) => `${'க'.repeat(37)}${String(i).padStart(3, '0')}`;
   const tags = (count: number) => Array.from({ length: count }, (_, i) => tamil(i));
   const digest = (list: unknown[]) => sha256Hex(JSON.stringify(list)).slice(0, 16);
+  /** A list as an entry names it when it is too long to name item by item (ADR-363). */
+  const named = (list: unknown[]) => `${list.length}:${digest(list)}`;
 
   it('keep an entry that fits as it is, with room for the source the API adds', () => {
     const metadata = {
@@ -4307,7 +4309,7 @@ describe('endpoint audit entries within an audit entry’s 8 KiB (ADR-336)', () 
     );
   });
 
-  it('name the largest lists by count and digest, one after another and by name when as large, until the entry fits', () => {
+  it('name the largest lists by length and digest, one after another and by name when as large, until the entry fits', () => {
     const teamIds = ['019245c1-5a4c-7b1e-9a1e-1f2d3c4b5a69'];
     const eventTypes = ['message.received', 'contact.updated', 'satisfaction_survey.answered'];
     // The largest list alone.
@@ -4323,8 +4325,7 @@ describe('endpoint audit entries within an audit entry’s 8 KiB (ADR-336)', () 
       eventTypes,
       conversationTags: tags(40),
       teamIds,
-      listCounts: { contactTags: 50 },
-      listDigests: { contactTags: digest(tags(50)) },
+      lists: { contactTags: named(tags(50)) },
     });
     expect(jsonbSize(one)).toBeLessThanOrEqual(WEBHOOK_LIMITS.auditMetadataBytes);
     // Two lists as large: by name, and only as many as it takes.
@@ -4339,8 +4340,7 @@ describe('endpoint audit entries within an audit entry’s 8 KiB (ADR-336)', () 
       host: 'hooks.example.com',
       eventTypes,
       surveyContactTags: tags(50),
-      listCounts: { contactEventTags: 50, contactTags: 50 },
-      listDigests: { contactEventTags: digest(tags(50)), contactTags: digest(tags(50)) },
+      lists: { contactEventTags: named(tags(50)), contactTags: named(tags(50)) },
     });
     // The largest in bytes, not in items: 45 tags take more than 60 ids.
     const ids = Array.from(
@@ -4353,8 +4353,7 @@ describe('endpoint audit entries within an audit entry’s 8 KiB (ADR-336)', () 
       host: 'h',
       eventTypes,
       teamIds: ids,
-      listCounts: { contactTags: 45 },
-      listDigests: { contactTags: digest(tags(45)) },
+      lists: { contactTags: named(tags(45)) },
     });
     // A list read back from the database, each object's keys in jsonb's order (by length: key,
     // atMost, atLeast), has the digest of the list as the services built it.
@@ -4369,7 +4368,12 @@ describe('endpoint audit entries within an audit entry’s 8 KiB (ADR-336)', () 
       conversationTags: tags(20),
       contactEventFieldValues: ranges,
     });
-    expect(written.listCounts).toEqual({ contactEventFieldValues: 50 });
+    // Named by the digest of its JSON with each object's keys in order (atLeast, atMost, key).
+    expect(written.lists).toEqual({
+      contactEventFieldValues: named(
+        ranges.map(({ key, atLeast, atMost }) => ({ atLeast, atMost, key })),
+      ),
+    });
     expect(
       webhookEndpointAuditMetadata({
         host: 'h',
@@ -4380,8 +4384,8 @@ describe('endpoint audit entries within an audit entry’s 8 KiB (ADR-336)', () 
           atMost,
           atLeast,
         })),
-      }).listDigests,
-    ).toEqual(written.listDigests);
+      }).lists,
+    ).toEqual(written.lists);
     // A list changed to as many tags has another digest.
     const changed = webhookEndpointAuditMetadata({
       host: 'hooks.example.com',
@@ -4390,11 +4394,12 @@ describe('endpoint audit entries within an audit entry’s 8 KiB (ADR-336)', () 
       contactTags: tags(51).slice(1),
       teamIds,
     });
-    expect(changed).toMatchObject({ listCounts: { contactTags: 50 } });
-    expect(changed.listDigests).not.toEqual(one.listDigests);
+    expect(changed).toMatchObject({ lists: { contactTags: named(tags(51).slice(1)) } });
+    expect((changed.lists as Record<string, string>).contactTags).toMatch(/^50:[0-9a-f]{16}$/);
+    expect(changed.lists).not.toEqual(one.lists);
   });
 
-  it('always name the events, of a change or of a replay, and fit with every list named by count', () => {
+  it('always name the events, of a change or of a replay, and fit with every list named by length and digest', () => {
     const events = Array.from({ length: 60 }, (_, i) => `event.${i}`.padEnd(100, 'x'));
     for (const key of ['eventTypes', 'events']) {
       expect(
@@ -4402,13 +4407,14 @@ describe('endpoint audit entries within an audit entry’s 8 KiB (ADR-336)', () 
       ).toEqual({
         host: 'h',
         [key]: events,
-        listCounts: { contactTags: 10 },
-        listDigests: { contactTags: digest(tags(10)) },
+        lists: { contactTags: named(tags(10)) },
       });
     }
     // Every event type, hosts of 253 characters, an OAuth client's method and the 62 lists an
-    // entry can name, each too long to name item by item beside the others: named by count, the
-    // entry takes under 6,800 (6,793), within the 7,000 bytes kept.
+    // entry can name, each too long to keep whole beside the others named (30 tags of 114 bytes):
+    // each named by its length and digest (ADR-363), the entry takes under 4,200 (4,075), within
+    // the 7,000 kept. The bound is close on purpose, about three lists or four event types above
+    // the entry: a filter that adds them raises it, saying what they cost.
     const keys = [
       'assigneeIds',
       'automationIds',
@@ -4477,13 +4483,13 @@ describe('endpoint audit entries within an audit entry’s 8 KiB (ADR-336)', () 
     const whole = webhookEndpointAuditMetadata({
       host: 'h'.repeat(253),
       eventTypes: [...WEBHOOK_EVENT_TYPES],
-      ...Object.fromEntries(keys.map((key) => [key, tags(20)])),
+      ...Object.fromEntries(keys.map((key) => [key, tags(30)])),
       oauthTokenHost: 'o'.repeat(253),
       oauthSecretReplaced: true,
       oauthClientAuthentication: 'client_secret_basic',
     });
-    expect(Object.keys(whole.listCounts as object)).toHaveLength(62);
-    expect(jsonbSize(whole)).toBeLessThan(6800);
+    expect(Object.keys(whole.lists as object)).toHaveLength(62);
+    expect(jsonbSize(whole)).toBeLessThan(4200);
   });
 });
 
