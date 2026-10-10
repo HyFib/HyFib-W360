@@ -4310,11 +4310,24 @@ describe('failed sends by reason (ADR-347)', () => {
     const usage = await ops().usage(staff, 30);
     expect(usage.reasons.failed).toBe(usage.daily.reduce((total, d) => total + d.failed, 0));
     expect(usage.reasons.failed).toBeGreaterThanOrEqual(23);
+    // The company's ten codes alone make the platform's more than nine: eight listed, the rest last.
     const listed = usage.reasons.reasons;
-    expect(listed.filter((r) => r.code !== null).length).toBeLessThanOrEqual(8);
-    expect(listed.findIndex((r) => r.code === null)).toBeOneOf([-1, listed.length - 1]);
-    const named = listed.filter((r) => r.code !== null).map((r) => r.failed);
+    expect(listed).toHaveLength(9);
+    expect(listed.at(-1)).toMatchObject({ code: null });
+    expect(listed.at(-1)?.codes).toBeGreaterThanOrEqual(2);
+    const named = listed.slice(0, 8).map((r) => r.failed);
     expect(named).toEqual([...named].sort((a, b) => b - a));
+
+    // Nine codes are listed one by one: a ninth alone does not make a row of the rest.
+    const nine = await fx.company();
+    const nineConversation = await conversationOf(nine, '919876500053');
+    for (const code of ['n1', 'n2', 'n3', 'n4', 'n5', 'n6', 'n7', 'n8', 'n9']) {
+      await sentWith(nine, nineConversation, 'failed', code, recent);
+    }
+    const nineHealth = await ops().companyHealth(staff, nine.tenant.id);
+    expect(nineHealth?.reasons.reasons.map((r) => [r.code, r.failed, r.codes])).toEqual(
+      ['n1', 'n2', 'n3', 'n4', 'n5', 'n6', 'n7', 'n8', 'n9'].map((code) => [code, 1, 1]),
+    );
 
     // A deleted company's failures are no longer counted.
     const gone = await fx.company();
@@ -4340,7 +4353,8 @@ describe('failed sends by reason (ADR-347)', () => {
     for (const since of [null, new Date(Date.now() + hour), ago(94 * 24 * hour)]) {
       await expectCode(read(staff.userId, since), 'precondition_failed');
     }
-    await read(staff.userId, ago(93 * 24 * hour - hour));
+    // 92 days back, not 93 less an hour: a time zone with daylight saving moves the bound an hour.
+    await read(staff.userId, ago(92 * 24 * hour));
     // The worker's role cannot read them.
     await expect(
       fx.dbs.appPool.query(

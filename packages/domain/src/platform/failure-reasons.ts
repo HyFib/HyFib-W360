@@ -8,7 +8,10 @@ import { sql, type Tx } from '@w360/db';
  * Codes and counts only: never a contact, a message or its error title.
  */
 
-/** Codes listed one by one (`ops.platform_ops_failure_reasons`); the rest share one row. */
+/**
+ * Codes listed one by one (`ops.platform_ops_failure_reasons`); the rest share one row when two or
+ * more are left, and a ninth alone is listed.
+ */
 export const FAILURE_REASONS_SHOWN = 8;
 
 /** A code the window's failed sends failed with, as listed. */

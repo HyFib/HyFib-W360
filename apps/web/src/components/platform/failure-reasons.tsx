@@ -1,36 +1,19 @@
 import { TBody, TD, TH, THead, TR, Table } from '@w360/ui';
 import type { FailureReasons } from '@w360/domain';
-import { chartCount, chartShare } from '@w360/domain/ops-chart';
-import { FAILURE_CODES } from '@/lib/campaign-labels';
-
-/** What a code means, as far as HyFib knows it (ADR-347); the code itself has its own column. */
-function reasonLabel(code: string | null, codes: number): string {
-  if (code === null) return `${codes} other ${codes === 1 ? 'code' : 'codes'}`;
-  if (code === '') return 'Failed without a code';
-  const known = FAILURE_CODES[code];
-  if (!known) return 'Not described here';
-  return known.official ? known.label : `${known.label} (meaning from third-party documentation)`;
-}
+import { chartCount, chartShare, shareBarPath } from '@w360/domain/ops-chart';
+import { failureReasonLabel } from '@/lib/campaign-labels';
 
 /** The bar's full length, a share of 100%. */
 const BAR = 96;
-const round = (n: number) => Math.round(n * 100) / 100;
 
 /**
  * A share as a bar 8 pixels thick in the failed sends' colour, repeating the number beside it: a
- * square start, a rounded end, the leftover air; at least 2 pixels, so a share too small to see
- * still shows.
+ * square start, a rounded end, the leftover air (`shareBarPath`).
  */
 function ShareBar({ share }: { share: number }) {
-  const length = Math.min(BAR, Math.max(share * BAR, 2));
-  const radius = Math.min(4, length / 2);
-  const straight = round(length - radius);
   return (
     <svg width={BAR} height="8" viewBox={`0 0 ${BAR} 8`} aria-hidden="true" className="shrink-0">
-      <path
-        d={`M0 0 H${straight} A${round(radius)} 4 0 0 1 ${straight} 8 H0 Z`}
-        fill="var(--chart-3)"
-      />
+      <path d={shareBarPath(share, BAR)} fill="var(--chart-3)" />
     </svg>
   );
 }
@@ -68,7 +51,7 @@ export function FailureReasonsTable({
         <TBody>
           {reasons.reasons.map((r) => (
             <TR key={r.code ?? 'the rest'}>
-              <TD className="min-w-48">{reasonLabel(r.code, r.codes)}</TD>
+              <TD className="min-w-48">{failureReasonLabel(r.code, r.codes)}</TD>
               <TD className="whitespace-nowrap font-mono text-xs">
                 {r.code === null ? '—' : r.code === '' ? 'None' : r.code}
               </TD>

@@ -14,38 +14,53 @@ migration passed the pglast parse check (syntax only), its PL/pgSQL body include
   function for platform administrators (`W3403`, `W3412` outside the last 93 days), executable by
   the platform role only: a window's failed outbound messages of the companies not deleted, the
   platform's or one company's, by error code (the empty code for none), the eight most frequent,
-  ties by code, and one row for the rest with how many codes it holds. Codes and counts only: never
-  a contact, a message or its error title.
+  ties by code, and one row for the rest with how many codes it holds when two or more are left (a
+  ninth alone is listed). Codes and counts only: never a contact, a message or its error title.
 - **Domain:** `platform/failure-reasons.ts`: `FAILURE_REASONS_SHOWN`, `failureReasons` (each row's
   share of the failed) and `readFailureReasons` (the function, in its order, the rest last), read by
   `usage()` and `companyHealth()` in the snapshot of their days.
 - **Web:** `FailureReasonsTable`: each reason with its meaning where HyFib knows it
-  (`FAILURE_CODES`, which gains HyFib's `window_closed` and `no_credential`; "Not described here"
-  otherwise, "Failed without a code", "N other codes"), its code, its sends and its share, written
-  and drawn as a bar 8 pixels thick in the failed sends' colour, or a note when none failed; a
-  "Failed sends by reason" card on the Usage tab for its window and a section under a company's 30
-  days.
+  (`failureReasonLabel` over `FAILURE_CODES`, which gains HyFib's `window_closed`, `no_credential`
+  and `retryable`; "Not described here" otherwise, a Meta code or an HTTP status alike, "Failed
+  without a code", "N other codes"), its code, its sends and its share, written and drawn as a bar 8
+  pixels thick in the failed sends' colour (`shareBarPath`), or a note when none failed; a "Failed
+  sends by reason" card on the Usage tab for its window and a section under a company's 30 days.
 - **Tests:** unit (4 new in `platform/failure-reasons.test.ts`: the eight codes, the shares in the
-  order listed, nothing when none failed, the read through the definer function); integration (2 new
-  in `platform-ops.test.ts`: a company's exact codes, ties by code and the rest together, a
-  delivered send, a cancelled one and a failure before the window left out, the reasons adding up to
-  the days' failed sends for a company and the platform, a deleted company's failures left out; the
-  refusals and the runtime role refused; the function in the isolation suite's platform list); e2e
-  (`platform-ops.spec.ts`: the Usage tab's table adding up to the days' failed sends, or its note; a
-  company's page without failures saying so). Written for CI; the integration and e2e tests were not
-  run here.
+  order listed, nothing when none failed, the read through the definer function; 2 in
+  `apps/web/src/lib/campaign-labels.test.ts`: the meanings, third-party ones marked and none
+  guessed, failures without a code and the codes left over; 1 in `platform/ops-chart.test.ts`: the
+  share bar's path); integration (2 new in `platform-ops.test.ts`: a company's exact codes, ties by
+  code and the rest together, a delivered send, a cancelled one and a failure before the window left
+  out, the reasons adding up to the days' failed sends for a company and the platform, nine codes
+  listed one by one, a deleted company's failures left out; the refusals and the runtime role
+  refused, 92 days back accepted; the function in the isolation suite's platform list); e2e
+  (`platform-ops.spec.ts`: a new test records a send the sender refused for its company, as
+  `failNumber` records a number's failure, and reads its row on the company's page, its meaning,
+  code, 1 and 100%, inside a phone's width, and its code on the Usage tab; the Usage tab's table
+  adding up to the days' failed sends, or its note; a company's page without failures saying so).
+  Written for CI; the integration and e2e tests were not run here.
 - **Docs:** ADR-347; ARCHITECTURE; SECURITY; THREAT-MODEL T306; DEPLOYMENT (0265); RUNBOOKS; BACKLOG
   P5-10; feature matrix H-034.
 - **Mutation checks:** 8/8 deliberate regressions caught on the unit-tested parts (nine codes
   listed; the count for its share; the rest left out of the total, or the largest taken for it;
-  counts left as text; the rest read as one code, or as failures without a code; no order).
+  counts left as text; the rest read as one code, or as failures without a code; no order). 9/9 more
+  on the review's fixes (a tiny share's bar invisible, a bar past its box, an end rounder than the
+  bar is long or rounded inwards; one code called codes, a failure without a code or an unknown code
+  given a meaning, third-party meanings not marked, `retryable` without its meaning).
+- **Review fixes:** an independent review found nothing that would fail CI, one gap and a few small
+  things, fixed. No test that runs in CI rendered the table, since no e2e run makes a send fail: a
+  new e2e test records one for its company and reads both pages, and the reasons' labels and bars
+  moved into unit-tested functions. Codes can also be an answer's HTTP status or `retryable` (no
+  attempt could connect): the pages, ADR-347 and RUNBOOKS say so, and `retryable` has its meaning. A
+  ninth code alone is listed rather than called "1 other code". The integration test's bound moved
+  to 92 days back, which a time zone with daylight saving cannot push past 93.
 
 ### Test commands and results (local, 2026-10-10)
 
 | Command                                            | Result                                                        |
 | -------------------------------------------------- | ------------------------------------------------------------- |
 | `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
-| `pnpm test` (unit)                                 | 145 files, 1473 tests passed                                  |
+| `pnpm test` (unit)                                 | 146 files, 1476 tests passed                                  |
 | `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
 | `pnpm build`                                       | passed                                                        |
 | gitleaks 8.30.1 on the staged changes              | no leaks found                                                |

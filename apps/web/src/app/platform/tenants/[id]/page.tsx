@@ -764,7 +764,8 @@ export default async function PlatformTenantPage({ params }: { params: Promise<{
                 </h3>
                 <p className="text-muted-foreground">
                   The company&apos;s failed sends of the 30 days by the code they failed with,
-                  Meta&apos;s or HyFib&apos;s own, the most frequent first.
+                  Meta&apos;s (or the HTTP status of an answer without one) or HyFib&apos;s own, the
+                  most frequent first.
                 </p>
                 <FailureReasonsTable
                   reasons={ops.reasons}

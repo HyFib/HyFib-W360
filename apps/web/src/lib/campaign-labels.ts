@@ -80,6 +80,10 @@ export const FAILURE_CODES: Record<string, { label: string; official: boolean }>
     label: 'The WhatsApp account had no stored credential; it needs reconnecting.',
     official: true,
   },
+  retryable: {
+    label: 'No attempt could connect to Meta, so the message was not sent.',
+    official: true,
+  },
   unknown: {
     label: 'Unknown outcome: the connection dropped after the request left.',
     official: true,
@@ -89,6 +93,20 @@ export const FAILURE_CODES: Record<string, { label: string; official: boolean }>
 export function failureLabel(code: string): string {
   const known = FAILURE_CODES[code];
   if (!known) return `Meta error ${code}`;
+  return known.official ? known.label : `${known.label} (meaning from third-party documentation)`;
+}
+
+/**
+ * A reason in the operations console's failed sends by reason (ADR-347), its code in a column of its
+ * own: `null` for the codes left over together, `''` for failures recorded without a code, and a
+ * code without a recorded meaning says so rather than guess one (a number may be Meta's code or,
+ * when Meta's answer carried none, its HTTP status).
+ */
+export function failureReasonLabel(code: string | null, codes: number): string {
+  if (code === null) return `${codes} other ${codes === 1 ? 'code' : 'codes'}`;
+  if (code === '') return 'Failed without a code';
+  const known = FAILURE_CODES[code];
+  if (!known) return 'Not described here';
   return known.official ? known.label : `${known.label} (meaning from third-party documentation)`;
 }
 

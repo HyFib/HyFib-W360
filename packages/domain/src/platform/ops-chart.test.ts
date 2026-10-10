@@ -13,6 +13,7 @@ import {
   failedShareLayout,
   nearestDayIndex,
   readShare,
+  shareBarPath,
   shareBase,
   shareGap,
   sharedPlotEdges,
@@ -472,5 +473,16 @@ describe('the sends delivered and read a day chart (ADR-346)', () => {
       ['', null],
     ]);
     expect(empty.endLabels).toBe(false);
+  });
+});
+
+describe('the share bars of the failed sends by reason (ADR-347)', () => {
+  it('draws a share from a square start to a rounded end, at least 2 pixels and within its box', () => {
+    expect(shareBarPath(0.5, 96)).toBe('M0 0 H44 A4 4 0 0 1 44 8 H0 Z');
+    expect(shareBarPath(1, 96)).toBe('M0 0 H92 A4 4 0 0 1 92 8 H0 Z');
+    // Too small to see: 2 pixels, its end as round as they allow.
+    expect(shareBarPath(0.001, 96)).toBe('M0 0 H1 A1 4 0 0 1 1 8 H0 Z');
+    expect(shareBarPath(1.5, 96)).toBe('M0 0 H92 A4 4 0 0 1 92 8 H0 Z');
+    expect(shareBarPath(0.25, 40, 12)).toBe('M0 0 H5 A5 6 0 0 1 5 12 H0 Z');
   });
 });

@@ -13593,10 +13593,11 @@ send took to be delivered or read.
 Context: the Usage tab and a company's platform page draw each day's failed sends as a share of
 those not cancelled (ADR-344, ADR-346), and the Signals tab counts two of Meta's errors per company
 (131049, 131050). Why the other sends failed was left to each company's inbox: a failed message
-keeps the code it failed with, Meta's from the status webhook or the answer to the send, or HyFib's
-own when the send was refused before it left (`window_closed`, `no_credential`, `opted_out`,
-`suppressed`, `template_not_approved` and others), but nothing platform staff read counted them.
-BACKLOG listed failures by reason among the charts remaining.
+keeps the code it failed with: Meta's, from the status webhook or the answer to the send, or that
+answer's HTTP status when it carried no code (outbound.ts), or HyFib's own when the send was refused
+before it left (`window_closed`, `no_credential`, `opted_out`, `suppressed`, `template_not_approved`
+and others) or never reached Meta (`retryable`). Nothing platform staff read counted them. BACKLOG
+listed failures by reason among the charts remaining.
 
 Decision:
 
@@ -13605,20 +13606,23 @@ Decision:
   days), companies deleted left out, as the daily counts count them; a failure recorded without a
   code is counted under the empty code. `ops.platform_ops_failure_reasons(p_since, p_tenant_id)`
   (0265, security definer, platform administrators only, `W3412` outside the last 93 days) returns
-  the eight most frequent codes, ties by code, and one row for the rest with how many codes it
-  holds, so the answer stays small whatever codes arrive. It reads codes and counts only: never a
-  contact, a message or its error title, which may quote what was sent. Read in the snapshot of the
-  window's days, the reasons add up to their failed sends.
+  the eight most frequent codes, ties by code, and one row for the rest with how many codes it holds
+  when two or more are left (a ninth alone is listed), so the answer stays small whatever codes
+  arrive. It reads codes and counts only: never a contact, a message or its error title, which may
+  quote what was sent. Read in the snapshot of the window's days, the reasons add up to their failed
+  sends. It scans the window's messages as the daily counts do; an index of the failed sends was
+  left out, since a predicate on the status would make every status change update all of the
+  messages' indexes.
 - **Their meaning:** the labels campaign pages already use (`lib/campaign-labels.ts`): Meta's codes
   confirmed in its error table (research M-062), others from third-party code marked as such, and
-  HyFib's own, with `window_closed` and `no_credential` added. A code without a recorded meaning
-  says "Not described here" beside the code rather than a guess, and a failure without a code says
-  so.
+  HyFib's own, with `window_closed`, `no_credential` and `retryable` added (`failureReasonLabel`). A
+  code without a recorded meaning, a Meta code or an HTTP status alike, says "Not described here"
+  beside the code rather than a guess, and a failure without a code says so.
 - **A table with bars, not a chart:** up to nine reasons with long names compare best as rows. Each
   has its reason, its code, its sends and its share of those failed, written and drawn as a bar 8
-  pixels thick in the failed sends' colour (`--chart-3`), from a square start to a rounded end.
-  Every number is written, so the bars carry no tooltip and are hidden from assistive technology. A
-  note replaces the table when no send failed.
+  pixels thick in the failed sends' colour (`--chart-3`), from a square start to a rounded end
+  (`shareBarPath`). Every number is written, so the bars carry no tooltip and are hidden from
+  assistive technology. A note replaces the table when no send failed.
 - **Where:** a "Failed sends by reason" card under the Usage tab's messages a day, for the tab's
   window, and a section under a company's 30 days on its platform page, read with them.
 

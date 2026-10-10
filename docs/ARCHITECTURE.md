@@ -2760,12 +2760,12 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   edges all three charts share (`sharedPlotEdges`), and the table of the days gives the cancelled
   and each count with its share.
 - **Failed sends by reason (ADR-347, migration 0265):** `ops.platform_ops_failure_reasons` counts a
-  window's failed outbound messages by error code, the eight most frequent and the rest together,
-  for the companies not deleted, the platform's or one company's. `readFailureReasons`
-  (`platform/failure-reasons.ts`) reads it in the snapshot of `usage()` and `companyHealth()`, and
-  `failureReasons` gives each row its share. `FailureReasonsTable`
-  (`components/platform/failure-reasons.tsx`) lists them with the meanings of `FAILURE_CODES`
-  (`lib/campaign-labels.ts`) and a bar of each share.
+  window's failed outbound messages by error code, the eight most frequent and the rest together (a
+  ninth alone listed), for the companies not deleted, the platform's or one company's.
+  `readFailureReasons` (`platform/failure-reasons.ts`) reads it in the snapshot of `usage()` and
+  `companyHealth()`, and `failureReasons` gives each row its share. `FailureReasonsTable`
+  (`components/platform/failure-reasons.tsx`) lists them with the meanings of `failureReasonLabel`
+  (`lib/campaign-labels.ts`) and the bars of `shareBarPath` (`platform/ops-chart.ts`).
 - **Exports (ADR-154, ADR-155, ADR-158):** `/platform/ops/export/[list]` (a route handler behind the
   pages' platform actor check; a name of `OPS_EXPORT_LISTS`, any other not found) calls
   `exportList`, which checks in its transaction that the actor is a platform administrator, reads
