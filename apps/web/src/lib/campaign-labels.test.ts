@@ -10,7 +10,7 @@ describe('the reasons of the failed sends by reason (ADR-347)', () => {
       'The 24-hour customer service window closed before the message could be sent.',
     );
     expect(failureReasonLabel('retryable', 1)).toBe(
-      'No attempt could connect to Meta, so the message was not sent.',
+      'The last attempt could not connect to Meta and no retries were left, so the message was not sent.',
     );
     expect(failureReasonLabel('131026', 1)).toBe(
       'Message undeliverable. (meaning from third-party documentation)',

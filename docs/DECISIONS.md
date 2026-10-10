@@ -13596,8 +13596,8 @@ those not cancelled (ADR-344, ADR-346), and the Signals tab counts two of Meta's
 keeps the code it failed with: Meta's, from the status webhook or the answer to the send, or that
 answer's HTTP status when it carried no code (outbound.ts), or HyFib's own when the send was refused
 before it left (`window_closed`, `no_credential`, `opted_out`, `suppressed`, `template_not_approved`
-and others) or never reached Meta (`retryable`). Nothing platform staff read counted them. BACKLOG
-listed failures by reason among the charts remaining.
+and others) or its last attempt could not reach Meta (`retryable`). Nothing platform staff read
+counted them. BACKLOG listed failures by reason among the charts remaining.
 
 Decision:
 

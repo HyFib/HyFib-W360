@@ -775,11 +775,14 @@ async function failSend(tenantId: string, phoneNumberId: string, code: string, t
     await app.query('BEGIN');
     await app.query(`SELECT set_config('app.tenant_id', $1, true)`, [tenantId]);
     const failed = await app.query(
+      // 35: the failed rank (STATUS_RANK in packages/domain messaging/status.ts).
       `INSERT INTO app.messages (id, tenant_id, conversation_id, channel_account_id, direction,
-         type, status, sender_type, error_code, error_title)
-       SELECT $1, c.tenant_id, c.id, a.id, 'outbound', 'text', 'failed', 'agent', $2, $3
+         type, status, status_rank, sender_type, error_code, error_title)
+       SELECT $1, c.tenant_id, c.id, c.channel_account_id, 'outbound', 'text', 'failed', 35,
+              'agent', $2, $3
          FROM app.conversations c
-         JOIN app.channel_accounts a ON a.tenant_id = c.tenant_id AND a.phone_number_id = $4
+         JOIN app.channel_accounts a
+           ON a.tenant_id = c.tenant_id AND a.id = c.channel_account_id AND a.phone_number_id = $4
         WHERE c.tenant_id = $5
         LIMIT 1`,
       [randomUUID(), code, title, phoneNumberId, tenantId],
@@ -809,7 +812,8 @@ test('staff read the failed sends by reason on the Usage tab and a company’s p
   await expect(page.getByRole('heading', { name: companyName })).toBeVisible();
   await turnOnTwoFactor(page, PASSWORD);
   await makePlatformOwner(email);
-  // A customer writes, then a reply fails as the sender refuses one once the window has closed.
+  // A customer writes; a reply is then recorded as the sender records one it refused once the
+  // window had closed.
   const { tenantId, wabaId, phoneNumberId } = await connectTestChannel({ ownerEmail: email, slug });
   await sendSignedWebhook(
     request,

@@ -40,8 +40,9 @@ export const SKIP_REASONS: Record<string, string> = {
 };
 
 /**
- * Codes failed messages carry: Meta's error codes, and HyFib's own for a send refused before it
- * left. `official` marks HyFib's codes and Meta's confirmed in its error table
+ * Codes failed messages carry: Meta's error codes (or an answer's HTTP status when it carried no
+ * code), and HyFib's own for a send refused before it left or whose last attempt could not reach
+ * Meta. `official` marks HyFib's codes and Meta's confirmed in its error table
  * (docs/research/meta-whatsapp.md M-062); others come from third-party code (M-063). Campaign pages
  * and the operations console's failed sends by reason (ADR-347) read them.
  */
@@ -81,7 +82,8 @@ export const FAILURE_CODES: Record<string, { label: string; official: boolean }>
     official: true,
   },
   retryable: {
-    label: 'No attempt could connect to Meta, so the message was not sent.',
+    label:
+      'The last attempt could not connect to Meta and no retries were left, so the message was not sent.',
     official: true,
   },
   unknown: {

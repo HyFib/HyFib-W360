@@ -129,9 +129,10 @@ export default async function OpsUsagePage({
             Every company&apos;s failed sends of the {o.days} days by the code they failed with:
             Meta&apos;s, from the status it reported or its answer to the send (or that
             answer&apos;s HTTP status when it carried no code), or HyFib&apos;s own for a send
-            refused before it left or that never reached Meta. The {FAILURE_REASONS_SHOWN} most
-            frequent, then the rest together; companies deleted are left out. Codes only: the error
-            texts stay in each company&apos;s inbox.
+            refused before it left or whose last attempt could not reach Meta. The{' '}
+            {FAILURE_REASONS_SHOWN} most frequent, then the rest together when two or more are left;
+            companies deleted are left out. Codes only: the error texts stay in each company&apos;s
+            inbox.
           </CardDescription>
         </CardHeader>
         <CardContent>

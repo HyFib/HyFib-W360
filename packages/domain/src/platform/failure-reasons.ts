@@ -2,8 +2,9 @@ import { sql, type Tx } from '@w360/db';
 
 /**
  * Failed sends by reason (P5-10, ADR-347). A failed message keeps the code it failed with: Meta's,
- * from the status webhook or the answer to the send, or HyFib's own when the send was refused before
- * it left. The Usage tab and a company's platform page list a window's failed sends by code, the
+ * from the status webhook or the answer to the send (or that answer's HTTP status when it carried no
+ * code), or HyFib's own when the send was refused before it left or its last attempt could not reach
+ * Meta. The Usage tab and a company's platform page list a window's failed sends by code, the
  * most frequent first, so platform staff see why sends fail without opening a company's inbox.
  * Codes and counts only: never a contact, a message or its error title.
  */

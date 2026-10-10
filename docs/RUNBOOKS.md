@@ -3847,16 +3847,17 @@ mean the counting job does not run or fails, as for the days not counted.
 
 **Failed sends by reason (ADR-347).** Under the messages a day, the Usage tab lists the window's
 failed sends by the code they failed with, and a company's page its own 30 days: the eight most
-frequent codes, then the rest. Meta's codes are numbers, such as 131049 (Meta limited marketing
-messages to the customer) or 131050 (the customer stopped marketing messages); an answer from Meta
-without a code leaves its HTTP status instead, such as 500 or 503. HyFib's own are words, for a send
-refused before it left, such as `window_closed`, `opted_out` or `template_not_approved`, or that
-never reached Meta (`retryable`: no attempt could connect). "Not described here" is a code without a
-recorded meaning: a number of three digits may be an HTTP status, any other may be looked up in
-Meta's error codes before adding it to the labels (`lib/campaign-labels.ts`); meanings from
-third-party documentation are marked. A code rising across companies at once points at Meta or
-HyFib, one company's at its own sending (its window, its consent, its templates); the company's
-inbox gives each failed message's error text, which the console never shows.
+frequent codes, then the rest when two or more are left. Meta's codes are numbers, such as 131049
+(Meta limited marketing messages to the customer) or 131050 (the customer stopped marketing
+messages); an answer from Meta without a code leaves its HTTP status instead, such as 500 or 503.
+HyFib's own are words, for a send refused before it left, such as `window_closed`, `opted_out` or
+`template_not_approved`, or whose last attempt could not connect to Meta, with no retries left
+(`retryable`). "Not described here" is a code without a recorded meaning: a number from 400 to 599
+is likely an answer's HTTP status; any other number is Meta's code, to be looked up in Meta's error
+codes before adding it to the labels (`lib/campaign-labels.ts`); meanings from third-party
+documentation are marked. A code rising across companies at once points at Meta or HyFib, one
+company's at its own sending (its window, its consent, its templates); the company's inbox gives
+each failed message's error text, which the console never shows.
 
 **Acknowledging failures (ADR-141).** On Current failures, the administrator who takes a failure
 opens Acknowledge on its row and writes a note of 10 to 500 characters: what was done or found

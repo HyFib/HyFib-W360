@@ -53,7 +53,12 @@ migration passed the pglast parse check (syntax only), its PL/pgSQL body include
   moved into unit-tested functions. Codes can also be an answer's HTTP status or `retryable` (no
   attempt could connect): the pages, ADR-347 and RUNBOOKS say so, and `retryable` has its meaning. A
   ninth code alone is listed rather than called "1 other code". The integration test's bound moved
-  to 92 days back, which a time zone with daylight saving cannot push past 93.
+  to 92 days back, which a time zone with daylight saving cannot push past 93. A second review of
+  these fixes found six small things, fixed: `retryable` means the last attempt could not connect,
+  with no retries left, not that none could; the runbook calls a number from 400 to 599 likely an
+  HTTP status, any other Meta's; the migration's header is wrapped again; the threat model, runbook
+  and comments say a ninth code is listed and where codes come from; and the e2e fixture ties the
+  number to the conversation and gives the failed send its rank.
 
 ### Test commands and results (local, 2026-10-10)
 
