@@ -14421,7 +14421,12 @@ Decision:
   section 3.2), so the services refuse the method with a secret under 32 bytes, the one given or
   the one kept, which they open to measure (Settings and the API alike, `oauth.clientSecret`). A
   worker meeting one anyway (an old web server rotating the secret during a rollout) asks nothing
-  and records `oauth_token_secret_too_short`.
+  and records `oauth_token_secret_too_short`. A kept secret the keyring can no longer open is asked
+  for again (`oauth.clientSecret`), as one left out would be, rather than failing the change.
+- **Never back to sending the secret:** a change that moves a client signing JWTs to another token
+  URL without naming a way keeps it signing; any other client moved so uses HTTP Basic, as since
+  ADR-357. A connector that moves its receiver to a new server, written before the method existed,
+  thus never starts sending a secret the member chose never to send.
 - **Shown and audited as the others:** Settings → Webhooks offers it under "How the client
   authenticates" (the field was "Send the client ID and secret"), the endpoint's text says the
   client proves its secret with a signed JWT, audit entries name the method, and the API and its

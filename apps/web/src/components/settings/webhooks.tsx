@@ -3496,7 +3496,7 @@ interface OAuthFields {
   clientId: string;
   clientSecret: string;
   scope: string;
-  /** How the client ID and secret reach the token URL (ADR-357). */
+  /** How the client proves itself to the token URL (ADR-357, ADR-366). */
   clientAuthentication: WebhookOAuthClientAuth;
 }
 

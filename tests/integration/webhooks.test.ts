@@ -904,7 +904,8 @@ describe('OAuth clients (ADR-173)', () => {
     expect(form.get('client_assertion_type')).toBe(
       'urn:ietf:params:oauth:client-assertion-type:jwt-bearer',
     );
-    expect(asked?.body).not.toContain(encodeURIComponent(secret));
+    // Nowhere in the form, read as the server reads it, nor in its raw text.
+    expect([...form.values()].join('\n')).not.toContain(secret);
     expect(asked?.body).not.toContain('forty');
     // The assertion, checked as the server checks it: signed with the secret, issued by the client
     // to the token URL, good for five minutes from now.
@@ -1162,10 +1163,11 @@ describe('OAuth clients (ADR-173)', () => {
     expect(JSON.stringify(audits)).not.toContain('s3cr');
   });
 
-  it('are kept by the database together or not at all, with the scope alone optional, authenticating one of two ways', async () => {
+  it('are kept by the database together or not at all, with the scope alone optional, authenticating one of three ways', async () => {
     const c = await fx.company();
     const e = await addOAuthEndpoint(c);
-    // The way a client authenticates is one of the two RFC 7591 names, never none (ADR-357).
+    // The way a client authenticates is one of the three names (RFC 7591's two and OpenID Connect's
+    // client_secret_jwt), never none (ADR-357, ADR-366).
     for (const set of [
       "oauth_client_auth = 'private_key_jwt'",
       "oauth_client_auth = 'none'",

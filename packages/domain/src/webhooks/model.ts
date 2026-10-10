@@ -1923,10 +1923,11 @@ export interface WebhookEndpointOAuth {
 }
 
 /**
- * How an endpoint's OAuth client can authenticate to its authorization server (ADR-357), as RFC
- * 7591 names the methods of RFC 6749 section 2.3.1, the default first: its identifier and secret
- * in an HTTP Basic header, or as form parameters in the request body; or, the secret never sent, a
- * JWT signed with it as a client assertion (RFC 7523, ADR-366).
+ * How an endpoint's OAuth client can authenticate to its authorization server (ADR-357), the
+ * default first: its identifier and secret in an HTTP Basic header, or as form parameters in the
+ * request body (RFC 6749 section 2.3.1, as RFC 7591 names the two); or, the secret never sent, a
+ * JWT signed with it as a client assertion (RFC 7523, as OpenID Connect Core 1.0 section 9 names
+ * it, ADR-366).
  */
 export const WEBHOOK_OAUTH_CLIENT_AUTHENTICATIONS = [
   'client_secret_basic',

@@ -1435,7 +1435,9 @@ Phase 5 rules (outgoing webhooks, P5-09):
   egress client never sends on to a redirect's target; a client set to `client_secret_jwt`
   (ADR-366) never sends it: it signs a JWT with it (HS256, issuer and subject the client ID,
   audience the token URL, a random `jti`, five minutes' lifetime) as a client assertion, and the
-  services take for it only a secret of at least 32 bytes, opening a kept one to measure it. The way
+  services take for it only a secret of at least 32 bytes, opening a kept one to measure it (one that
+  no longer opens is asked for again); moved to another token URL by a change that names no way, it
+  goes on signing, so a move never starts sending its secret. The way
   a client authenticates is audited, the secret never. Access tokens live only in the worker's memory, keyed by the company, the
   endpoint and a hash of the client (its way of authenticating included): never stored, logged or
   shown, a day at most, replaced after a 401 or a change of the client. A token's characters are

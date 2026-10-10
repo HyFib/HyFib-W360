@@ -1860,14 +1860,14 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     }
     expect(given?.anyOf?.find((s) => s.properties)).toMatchObject({
       description: expect.stringContaining(
-        "or as `client_id` and `client_secret` in the request body when `clientAuthentication` is `client_secret_post`, or, when it is `client_secret_jwt`, as `client_id` and a JWT signed with the secret (HS256: issuer and subject the client ID, audience the token URL, a unique `jti`, five minutes' lifetime) in `client_assertion` (RFC 7523), the secret itself never sent, which takes a secret of at least 32 bytes; left out, a change keeps the client's while the token URL stays the same, and a new client or token URL uses `client_secret_basic`)",
+        "or as `client_id` and `client_secret` in the request body when `clientAuthentication` is `client_secret_post`, or, when it is `client_secret_jwt`, as `client_id` and a JWT signed with the secret (HS256: issuer and subject the client ID, audience the token URL, a unique `jti`, five minutes' lifetime) in `client_assertion` (RFC 7523), the secret itself never sent, which takes a secret of at least 32 bytes; left out, a change keeps the client's while the token URL stays the same, and a client using `client_secret_jwt` keeps it at a new token URL; otherwise a new client or token URL uses `client_secret_basic`)",
       ),
     });
     // A change says it keeps the way the client authenticates as it keeps the secret.
     const changed = (schemas.UpdateWebhookEndpoint as { properties: { oauth?: unknown } })
       .properties.oauth;
     expect(JSON.stringify(changed)).toContain(
-      'Its `clientAuthentication` may be left out to keep the one it has while the token URL stays the same (`client_secret_basic` for a new token URL).',
+      'Its `clientAuthentication` may be left out to keep the one it has while the token URL stays the same (for a new token URL, `client_secret_basic`, unless it is `client_secret_jwt`, which stays).',
     );
     expect(answered.required).toContain('oauth');
     expect(doc.info.description).toContain('send it as `Authorization: Bearer <token>`');

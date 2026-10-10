@@ -37,6 +37,24 @@ that want the secret never sent, taking a client assertion signed with it instea
   than bytes, a short secret still asking, the assertion made at another time than asked, the same
   `jti` every time, the kept secret not measured, the length rule on the wrong method, the short
   secret's error unlabelled).
+- **Review fixes:** an independent review found nothing that would fail CI and no correctness or
+  security bug; it read the integration tests and migration without running them (no PostgreSQL
+  here). Its nine LOW findings are fixed:
+  - A client that signs JWTs keeps its way when a change moves it to another token URL without
+    naming one; it fell back to HTTP Basic, which sends the secret.
+  - A kept secret the keyring can no longer open is asked for again (422 on `oauth.clientSecret`)
+    instead of a server error.
+  - The message for a changed token URL says the secret is used with it, not sent to it (the e2e
+    test follows), and the API's docs say the same; `lastError` names
+    `oauth_token_secret_too_short`.
+  - The method names are credited to RFC 7591 and OpenID Connect Core; the rollout note says what an
+    old worker sends; T316 names the third method, and T323 is in order.
+  - Two checks that the secret is not sent could never fail (they compared another encoding); they
+    now read the form as a server does. A new API integration test sends `client_secret_jwt`: a
+    short secret refused, the way kept at another token URL. A test title says three ways.
+  - Mutation checks: 6 deliberate regressions, all caught by the unit tests (the old wording only
+    after the unit test checked the message's text). The full check passed again (146 files, 1558
+    unit tests, the build).
 
 ### Test commands and results (local, 2026-10-10)
 

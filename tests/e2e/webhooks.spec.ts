@@ -697,7 +697,7 @@ test('an endpoint gets OAuth access tokens as its client and sends them as a bea
     .selectOption('client_secret_post');
   await page.getByRole('button', { name: 'Save endpoint' }).click();
   await expect(
-    page.getByText('Enter the client secret again: it is sent to the token URL, which changed.'),
+    page.getByText('Enter the client secret again: it is used with the token URL, which changed.'),
   ).toBeVisible();
   await page.getByLabel('Client secret', { exact: true }).fill(`${clientSecret}-2`);
   await expectNoHorizontalOverflow(page);

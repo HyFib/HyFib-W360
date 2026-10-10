@@ -4986,7 +4986,7 @@ describe('endpoint OAuth clients (ADR-173)', () => {
       oauthScope: 'read',
       oauthClientAuth: 'client_secret_basic',
     });
-    // Another token URL would receive the secret: it is needed again.
+    // Another token URL would receive the secret, or what it signs: it is needed again.
     expect(
       refusal(() =>
         checkedWebhookOAuth(
@@ -4996,6 +4996,10 @@ describe('endpoint OAuth clients (ADR-173)', () => {
         ),
       ),
     ).toEqual([{ path: 'oauth.clientSecret', message: WEBHOOK_OAUTH_SECRET_FOR_NEW_URL }]);
+    // Said so of every way, the secret used with the token URL rather than sent to it.
+    expect(WEBHOOK_OAUTH_SECRET_FOR_NEW_URL).toBe(
+      'Enter the client secret again: it is used with the token URL, which changed.',
+    );
   });
 
   it('seal the secret bound to the company and the endpoint, and open it only there', () => {
@@ -5171,6 +5175,52 @@ describe('endpoint OAuth clients (ADR-173)', () => {
       checkedWebhookOAuth({ ...base, clientSecret: `${long}-rotated` }, signing, policy)
         .clientAuthentication,
     ).toBe('client_secret_jwt');
+    // Moved to another token URL without naming a way, it goes on signing: a move never starts
+    // sending a secret it kept unsent. Naming one changes it; an endpoint without a client has none
+    // to keep, whatever its column holds.
+    const elsewhere = { ...base, tokenUrl: 'https://elsewhere.example.com/t', clientSecret: long };
+    expect(checkedWebhookOAuth(elsewhere, signing, policy).clientAuthentication).toBe(
+      'client_secret_jwt',
+    );
+    expect(
+      checkedWebhookOAuth(
+        { ...elsewhere, clientAuthentication: 'client_secret_post' },
+        signing,
+        policy,
+      ).clientAuthentication,
+    ).toBe('client_secret_post');
+    expect(
+      checkedWebhookOAuth(
+        { ...base, clientSecret: long },
+        { ...NO_WEBHOOK_OAUTH, oauthClientAuth: 'client_secret_jwt' },
+        policy,
+      ).clientAuthentication,
+    ).toBe('client_secret_basic');
+    // A kept secret the keyring can no longer open is asked for again, not a server error.
+    const elsewhereRing = new Keyring({ primaryKeyId: 'k9', keys: { k9: randomBytes(32) } });
+    const unreadable = webhookOAuthColumns(
+      elsewhereRing,
+      tenant,
+      endpoint,
+      checkedWebhookOAuth({ ...base, clientSecret: long }, NO_WEBHOOK_OAUTH, policy),
+      NO_WEBHOOK_OAUTH,
+    );
+    expect(
+      refusal(() =>
+        webhookOAuthColumns(
+          ring,
+          tenant,
+          endpoint,
+          checkedWebhookOAuth(toJwt, unreadable, policy),
+          unreadable,
+        ),
+      ),
+    ).toEqual([
+      {
+        path: 'oauth.clientSecret',
+        message: 'Enter the client secret again: the one kept can no longer be read.',
+      },
+    ]);
     // Other ways take a secret of any length.
     expect(basicShort.oauthClientAuth).toBe('client_secret_basic');
   });

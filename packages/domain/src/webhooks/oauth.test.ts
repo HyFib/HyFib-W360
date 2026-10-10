@@ -153,7 +153,8 @@ describe('OAuth client credentials for webhook endpoints (ADR-173)', () => {
     expect(WEBHOOK_OAUTH_ASSERTION_TYPE).toBe(
       'urn:ietf:params:oauth:client-assertion-type:jwt-bearer',
     );
-    expect(request.body).not.toContain(secret);
+    // The secret is nowhere in the form, read as the server reads it.
+    expect([...new URLSearchParams(request.body ?? '').values()].join('\n')).not.toContain(secret);
     // Each request makes its own: a new id, and the time it is made.
     const fresh = new URLSearchParams(webhookOAuthTokenRequest(jwt, 'ua').body ?? '').get(
       'client_assertion',

@@ -25,10 +25,11 @@ export interface WebhookOAuthClient {
   /** The scope to ask for (space-separated scope tokens), or none. */
   scope: string | null;
   /**
-   * How the client authenticates (ADR-357), as RFC 7591 names the methods: its identifier and secret
-   * in an HTTP Basic header (`client_secret_basic`, the default) or as form parameters in the
-   * request body (`client_secret_post`); or a JWT signed with its secret (`client_secret_jwt`,
-   * ADR-366), the secret never sent.
+   * How the client authenticates (ADR-357): its identifier and secret in an HTTP Basic header
+   * (`client_secret_basic`, the default) or as form parameters in the request body
+   * (`client_secret_post`), as RFC 7591 names them; or a JWT signed with its secret
+   * (`client_secret_jwt`, as OpenID Connect Core 1.0 section 9 names it, ADR-366), the secret never
+   * sent.
    */
   clientAuthentication: WebhookOAuthClientAuth;
 }

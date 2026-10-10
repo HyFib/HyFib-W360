@@ -1525,9 +1525,9 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    Migration 0286 (ADR-366) lets `app.webhook_endpoints.oauth_client_auth` hold
    `client_secret_jwt`, its check replaced and validated by reading the table. Workers roll out
    before web servers, and only web servers of this release can choose it, so every worker signs
-   JWTs once a client asks for it; a worker from before it sends HTTP Basic for such a client,
-   failing its token requests (retried as usual), so set those clients back to another way before
-   rolling workers back to such an image. Until the web rollout ends, an old web server that
+   JWTs once a client asks for it; a worker from before it sends such a client's secret in an HTTP
+   Basic header, which its server may take or refuse (a refusal is retried as usual), so set those
+   clients back to another way before rolling workers back to such an image. Until the web rollout ends, an old web server that
    rotates such a client's secret keeps the method without the 32-byte check; a worker then asks
    nothing for it and records `oauth_token_secret_too_short` until the secret is set again.
 
