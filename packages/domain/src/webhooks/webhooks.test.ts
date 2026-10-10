@@ -19,6 +19,7 @@ import {
   ORDER_STATUS_CHANGERS,
   ORDER_STATUSES,
   PAYMENT_LINK_STATUSES,
+  SKIP_REASONS,
   STORE_MESSAGE_ANSWERS,
   TASK_STATUSES,
   TEMPLATE_STATUSES,
@@ -176,6 +177,7 @@ import {
   toWebhookMillisecond,
   capturedCrmChanger,
   campaignStatusChangedPayloadSchema,
+  campaignRecipientSkippedPayloadSchema,
   dealCreatedPayloadSchema,
   dealStageChangedPayloadSchema,
   dealOwnerChangedPayloadSchema,
@@ -1878,6 +1880,7 @@ describe('the OpenAPI document', () => {
       'store_checkout.reminder_skipped',
       'store_checkout.reminder_sent',
       'campaign.status_changed',
+      'campaign.recipient_skipped',
       'deal.created',
       'deal.updated',
       'deal.stage_changed',
@@ -1989,7 +1992,7 @@ describe('the OpenAPI document', () => {
       'message, conversation, satisfaction survey answer, automation run, order, Payment Link, cash on delivery answer, sent order message, sent cart reminder and campaign events of those numbers only',
     );
     expect(described('CreateWebhookEndpoint')).toContain(
-      `only with an event that happens on a number: ${WEBHOOK_CHANNEL_EVENTS.slice(0, -1).join(', ')} or campaign.status_changed.`,
+      `only with an event that happens on a number: ${WEBHOOK_CHANNEL_EVENTS.slice(0, -1).join(', ')} or campaign.recipient_skipped.`,
     );
     expect(
       Object.keys(doc.components.schemas).filter((name) => name.startsWith('WebhookDeal')),
@@ -4678,6 +4681,7 @@ describe('number filters (ADR-170)', () => {
       'store_order.message_sent',
       'store_checkout.reminder_sent',
       'campaign.status_changed',
+      'campaign.recipient_skipped',
     ]);
     const payloads = {
       'message.received': messageReceivedPayloadSchema,
@@ -4704,6 +4708,7 @@ describe('number filters (ADR-170)', () => {
       'store_checkout.reminder_skipped': storeCheckoutReminderSkippedPayloadSchema,
       'store_checkout.reminder_sent': storeCheckoutReminderSentPayloadSchema,
       'campaign.status_changed': campaignStatusChangedPayloadSchema,
+      'campaign.recipient_skipped': campaignRecipientSkippedPayloadSchema,
       'deal.created': dealCreatedPayloadSchema,
       'deal.updated': dealUpdatedPayloadSchema,
       'deal.stage_changed': dealStageChangedPayloadSchema,
@@ -5367,8 +5372,12 @@ describe('campaign filters (ADR-185)', () => {
     expect(WEBHOOK_LIMITS.campaignChoices).toBe(200);
   });
 
-  it('apply to message statuses and campaign changes, whose payloads name the campaign, and no other event', () => {
-    expect(WEBHOOK_CAMPAIGN_EVENTS).toEqual(['message.status', 'campaign.status_changed']);
+  it('apply to message statuses, campaign changes and skipped recipients, whose payloads name the campaign, and no other event', () => {
+    expect(WEBHOOK_CAMPAIGN_EVENTS).toEqual([
+      'message.status',
+      'campaign.status_changed',
+      'campaign.recipient_skipped',
+    ]);
     for (const type of WEBHOOK_EVENT_KEYS) {
       const ofACampaign = WEBHOOK_CAMPAIGN_EVENTS.some((t) => t === type);
       expect(webhookTakesCampaignEvents([type]), type).toBe(ofACampaign);
@@ -5376,6 +5385,9 @@ describe('campaign filters (ADR-185)', () => {
     // Each names its campaign, so a receiver can tell them apart.
     expect('campaignId' in messageStatusPayloadSchema.shape.data.shape.message.shape).toBe(true);
     expect('id' in campaignStatusChangedPayloadSchema.shape.data.shape.campaign.shape).toBe(true);
+    expect('id' in campaignRecipientSkippedPayloadSchema.shape.data.shape.campaign.shape).toBe(
+      true,
+    );
     expect(webhookTakesCampaignEvents(['message.received', 'campaign.status_changed'])).toBe(true);
     expect(webhookTakesCampaignEvents(['message.received', 'template.status_changed'])).toBe(false);
   });
@@ -5400,6 +5412,210 @@ describe('campaign filters (ADR-185)', () => {
     expect(webhookCampaignText({ id: autumn, name: 'Autumn launch', status: null })).toBe(
       'Autumn launch',
     );
+  });
+});
+
+describe('skipped campaign recipients (ADR-358)', () => {
+  const body = {
+    id: '0192a1b2-0000-7000-8000-0000000000e1',
+    type: 'campaign.recipient_skipped',
+    createdAt: '2026-10-10T10:00:00.000Z',
+    createdAtExact: '2026-10-10T10:00:00.000123Z',
+    data: {
+      recipient: { id: '0192a1b2-0000-7000-8000-0000000000e2', skipReason: 'opted_out' },
+      campaign: {
+        id: '0192a1b2-0000-7000-8000-0000000000e3',
+        name: 'Festive sale',
+        status: 'running',
+        templateId: '0192a1b2-0000-7000-8000-0000000000e4',
+        templateName: 'festive_sale',
+      },
+      contact: {
+        id: '0192a1b2-0000-7000-8000-0000000000e5',
+        phone: '+919876543210',
+        name: 'Asha',
+      },
+      channel: { id: '0192a1b2-0000-7000-8000-0000000000e6', phone: '+91 90000 00000' },
+    },
+  };
+  const parses = (value: unknown) => campaignRecipientSkippedPayloadSchema.safeParse(value).success;
+
+  it('give the recipient and its reason, the campaign, the contact and the number', () => {
+    expect(parses(body)).toBe(true);
+    // Every reason a campaign skips a recipient for, and none other.
+    expect(
+      campaignRecipientSkippedPayloadSchema.shape.data.shape.recipient.shape.skipReason.options,
+    ).toEqual([...SKIP_REASONS]);
+    for (const skipReason of SKIP_REASONS) {
+      expect(
+        parses({
+          ...body,
+          data: { ...body.data, recipient: { ...body.data.recipient, skipReason } },
+        }),
+        skipReason,
+      ).toBe(true);
+    }
+    for (const skipReason of ['no_opt_in', 'checkout_completed', '', null]) {
+      expect(
+        parses({
+          ...body,
+          data: { ...body.data, recipient: { ...body.data.recipient, skipReason } },
+        }),
+        String(skipReason),
+      ).toBe(false);
+    }
+    // An erased contact without its number or name, a campaign without a template or a number.
+    expect(
+      parses({
+        ...body,
+        data: {
+          ...body.data,
+          contact: { ...body.data.contact, phone: null, name: null },
+          campaign: { ...body.data.campaign, templateId: null, templateName: null },
+          channel: null,
+        },
+      }),
+    ).toBe(true);
+    expect(parses({ ...body, type: 'campaign.status_changed' })).toBe(false);
+    expect(
+      parses({ ...body, data: { ...body.data, recipient: { skipReason: 'opted_out' } } }),
+    ).toBe(false);
+  });
+
+  /** A transaction answering each read with the next rows given, counting what is left. */
+  function answering(answers: unknown[][]) {
+    const queue = [...answers];
+    const chain = {
+      from: () => chain,
+      innerJoin: () => chain,
+      leftJoin: () => chain,
+      where: () => {
+        const rows = queue.shift();
+        if (!rows) throw new Error('an unexpected read');
+        return Promise.resolve(rows);
+      },
+    };
+    return {
+      tx: { select: () => chain } as unknown as Parameters<typeof buildWebhookPayload>[0],
+      unread: () => queue.length,
+    };
+  }
+  const tenantId = '0192a1b2-0000-7000-8000-0000000000f0';
+  const at = new Date('2026-10-10T10:00:00.000Z');
+  const event = (status: unknown, recipientId: unknown) =>
+    ({
+      id: body.id,
+      tenantId,
+      type: 'campaign.recipient_skipped',
+      messageId: null,
+      conversationId: null,
+      contactId: body.data.contact.id,
+      templateId: null,
+      status,
+      detail: { recipientId },
+      contactChanges: null,
+      tagsAdded: null,
+      tagsRemoved: null,
+      occurredAt: at,
+      occurredAtExact: '2026-10-10T10:00:00.000123Z',
+    }) as unknown as Parameters<typeof buildWebhookPayload>[1];
+  const recipientRow = {
+    id: body.data.recipient.id,
+    campaignId: body.data.campaign.id,
+    contactId: body.data.contact.id,
+  };
+  const campaignRow = {
+    ...body.data.campaign,
+    scheduledAt: at,
+    startedAt: at,
+    completedAt: null,
+    canceledAt: null,
+    audienceCount: 5,
+    queuedCount: 2,
+    skippedCount: 3,
+    channelId: body.data.channel.id,
+    channelPhone: body.data.channel.phone,
+  };
+
+  it('build the body from the recipient, its campaign and contact as they are now, and the reason as captured', async () => {
+    const reads = answering([
+      [recipientRow],
+      [campaignRow],
+      [{ phone: '+919876543210', name: 'Asha', erasedAt: null }],
+    ]);
+    const built = await buildWebhookPayload(
+      reads.tx,
+      event('opted_out', recipientRow.id),
+      'endpoint',
+    );
+    expect(built).toEqual(body);
+    expect(campaignRecipientSkippedPayloadSchema.safeParse(built).success).toBe(true);
+    expect(reads.unread()).toBe(0);
+    // An erased contact without its number or name; a campaign without a number.
+    const erased = answering([
+      [recipientRow],
+      [{ ...campaignRow, channelId: null, channelPhone: null }],
+      [{ phone: '+919876543210', name: 'Asha', erasedAt: at }],
+    ]);
+    expect(
+      (await buildWebhookPayload(erased.tx, event('contact_erased', recipientRow.id), 'endpoint'))
+        .data,
+    ).toEqual({
+      ...body.data,
+      recipient: { id: recipientRow.id, skipReason: 'contact_erased' },
+      contact: { id: body.data.contact.id, phone: null, name: null },
+      channel: null,
+    });
+  });
+
+  it('send nothing for a recipient or campaign that is gone, reading nothing for an id that is not one', async () => {
+    for (const answers of [[[]], [[recipientRow], []]]) {
+      const gone = answering(answers);
+      await expect(
+        buildWebhookPayload(gone.tx, event('opted_out', recipientRow.id), 'endpoint'),
+      ).rejects.toBeInstanceOf(WebhookEventGoneError);
+      expect(gone.unread()).toBe(0);
+    }
+    for (const recipientId of ['recipient', null, 7]) {
+      const none = answering([]);
+      await expect(
+        buildWebhookPayload(none.tx, event('opted_out', recipientId), 'endpoint'),
+        String(recipientId),
+      ).rejects.toBeInstanceOf(WebhookEventGoneError);
+    }
+  });
+
+  it('describe no event captured without a campaign skip reason, before reading anything', async () => {
+    for (const status of [null, 'checkout_completed', 'no_opt_in']) {
+      const none = answering([]);
+      await expect(
+        buildWebhookPayload(none.tx, event(status, recipientRow.id), 'endpoint'),
+        String(status),
+      ).rejects.toThrow('The skipped campaign recipient was captured without its reason');
+    }
+  });
+
+  it('are described for members and in the OpenAPI document', () => {
+    expect(WEBHOOK_EVENT_INFO['campaign.recipient_skipped'].label).toBe(
+      'Campaign recipient skipped',
+    );
+    expect(WEBHOOK_EVENT_INFO['campaign.recipient_skipped'].description).toContain(
+      'Those skipped when the audience was taken are reported when the campaign starts.',
+    );
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const hook = (
+      doc.webhooks as Record<string, { post: { description: string; operationId: string } }>
+    )['campaign.recipient_skipped'];
+    expect(hook?.post.operationId).toBe('webhookCampaignRecipientSkipped');
+    for (const part of [
+      'so a campaign sent back to draft or cancelled before it starts sends none',
+      'the campaigns an endpoint names (its `campaignIds`',
+      'an endpoint that names numbers receives it for those numbers only',
+      'fails as event_gone',
+    ]) {
+      expect(hook?.post.description, part).toContain(part);
+    }
+    expect(Object.keys(doc.components.schemas)).toContain('WebhookCampaignRecipientSkipped');
   });
 });
 

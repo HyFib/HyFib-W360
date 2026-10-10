@@ -421,7 +421,7 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
                     ) : null}
                     {e.campaigns ? (
                       <p className="text-xs break-all text-muted-foreground">
-                        Campaigns whose statuses and changes are sent:{' '}
+                        Campaigns whose statuses, changes and skipped recipients are sent:{' '}
                         {e.campaigns.map(webhookCampaignText).join(', ')}
                       </p>
                     ) : null}

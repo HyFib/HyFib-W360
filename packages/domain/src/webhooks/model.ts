@@ -97,6 +97,7 @@ export const WEBHOOK_EVENT_KEYS = [
   'store_checkout.reminder_skipped',
   'store_checkout.reminder_sent',
   'campaign.status_changed',
+  'campaign.recipient_skipped',
   'deal.created',
   'deal.updated',
   'deal.stage_changed',
@@ -227,6 +228,11 @@ export const WEBHOOK_EVENT_INFO: Record<WebhookEventType, { label: string; descr
       label: 'Campaign status',
       description:
         'A campaign was submitted for approval, sent back to draft, scheduled, started, paused, resumed, completed or cancelled, by a member or as it ran.',
+    },
+    'campaign.recipient_skipped': {
+      label: 'Campaign recipient skipped',
+      description:
+        'A campaign did not send its message to a contact in its audience: the contact had no number, was suppressed, opted out, had no marketing opt-in, was missing a variable’s value or was erased, or the frequency cap, a spending cap without a price for their number or the end of the sending period stopped it. Those skipped when the audience was taken are reported when the campaign starts.',
     },
     'deal.created': {
       label: 'Deal added',
@@ -1443,11 +1449,12 @@ export const webhookApiKeyText = (key: WebhookEndpointApiKey): string => {
 
 /**
  * The events that happen on a WhatsApp number, which an endpoint can take for chosen numbers
- * (ADR-170): a campaign's are on the number it sends from, a Payment Link's on its order's (ADR-285),
- * a survey's answer on its conversation's (ADR-293), a run's step on its run's (ADR-326), a cash on
- * delivery answer on its confirmation's (ADR-348), a sent order message (ADR-353) or cart reminder
- * (ADR-355) on the number it went from. Consent, contact, template, skipped order message (ADR-351),
- * skipped cart reminder (ADR-355), deal, task and note events belong to no number.
+ * (ADR-170): a campaign's, and its skipped recipients' (ADR-358), are on the number it sends from, a
+ * Payment Link's on its order's (ADR-285), a survey's answer on its conversation's (ADR-293), a
+ * run's step on its run's (ADR-326), a cash on delivery answer on its confirmation's (ADR-348), a
+ * sent order message (ADR-353) or cart reminder (ADR-355) on the number it went from. Consent,
+ * contact, template, skipped order message (ADR-351), skipped cart reminder (ADR-355), deal, task
+ * and note events belong to no number.
  */
 export const WEBHOOK_CHANNEL_EVENTS = [
   'message.received',
@@ -1466,6 +1473,7 @@ export const WEBHOOK_CHANNEL_EVENTS = [
   'store_order.message_sent',
   'store_checkout.reminder_sent',
   'campaign.status_changed',
+  'campaign.recipient_skipped',
 ] as const satisfies readonly WebhookEventType[];
 
 /**
@@ -1581,11 +1589,12 @@ export function webhookTakesTemplateEvents(eventTypes: readonly WebhookEventType
 
 /**
  * The events of a campaign, which an endpoint can take for chosen campaigns (ADR-185): the statuses
- * of the messages it sent, and its own changes.
+ * of the messages it sent, its own changes, and the recipients it skipped (ADR-358).
  */
 export const WEBHOOK_CAMPAIGN_EVENTS = [
   'message.status',
   'campaign.status_changed',
+  'campaign.recipient_skipped',
 ] as const satisfies readonly WebhookEventType[];
 
 /**

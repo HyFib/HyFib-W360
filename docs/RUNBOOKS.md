@@ -3404,6 +3404,18 @@ answers, order messages and cart reminders") on the endpoint's page, or
 Removing Cash on delivery answered clears the answers, and the stores too unless the endpoint still
 takes another event of a store (Order message skipped or sent, Cart reminder skipped or sent).
 
+**A receiver misses a skipped campaign recipient, or gets them only when the campaign starts
+(ADR-358).** `campaign.recipient_skipped` is sent once for each recipient a campaign does not send
+its message to; the campaign's page shows the skipped recipients and why. Those skipped when the
+audience was taken (at submission: no number, suppressed, opted out, no marketing opt-in, a missing
+variable) are sent when the campaign starts, so a campaign sent back to draft or cancelled before it
+starts sends none; the others as the runner skips them, many at once when the sending period ends
+(`expired`). Recipients a message went to send `message.status` instead. The campaigns and numbers an
+endpoint names narrow it (ADR-185, ADR-170), as the campaign's other events. Events no endpoint
+takes are not recorded, so there is nothing to replay for recipients skipped before the endpoint
+took the event. A recipient a contact merge removed (both contacts were in the audience) can no
+longer be described: a delivery not yet made then fails as `event_gone`.
+
 **A receiver misses a skipped order message, or gets `event_gone` for one (ADR-351).**
 `store_order.message_skipped` is sent once for each of a store's order messages (order placed, cash
 on delivery confirmation, shipped, delivered, cancelled) that HyFib records without sending or skips

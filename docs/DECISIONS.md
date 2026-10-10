@@ -14079,3 +14079,70 @@ Basic, so the form explains that Basic is the standard way.
 
 Not built: JWT client assertions (`private_key_jwt`, `client_secret_jwt`), mutual TLS, a public
 client (`none`), and discovering the method from the server's metadata.
+
+## ADR-358 Webhook events when a campaign skips a recipient (P5-09) (2026-10-10)
+
+Context: a campaign's recipients are taken when it is submitted. A contact HyFib cannot send to
+then (no number, suppressed, opted out, without marketing opt-in, missing a variable's value) is
+kept as a skipped recipient, and the runner skips others as it sends (the same checks again, an
+erased contact, the frequency cap, no price under a spending cap, the end of the sending period).
+`message.status` reports the recipients a message went to; the skipped ones reached no receiver, so
+a system that reaches contacts another way (email, a call list) could not tell whom a campaign left
+out, or why, without paging `GET /campaigns/{id}/recipients`. ADR-127 left recipients through
+webhooks unbuilt.
+
+Decision:
+
+- **`campaign.recipient_skipped`,** once per skipped recipient: the recipient (as
+  `GET /campaigns/{id}/recipients` lists it) and its reason as captured, and the campaign (name,
+  status, template), the recipient's contact (as erasure left it, and the contact it was merged
+  into after a merge) and the campaign's number as they are when the event is delivered.
+- **When:** those skipped when the audience was taken are captured when the campaign starts
+  (scheduled to running, which happens once: a campaign paused before it started resumes to
+  scheduled, one that started resumes to running), so a campaign that never starts reports none:
+  sent back to draft it loses its recipients, cancelled it keeps them unreported. The others are
+  captured as the runner skips them, many at once when the sending period ends. Captured after the
+  campaign's change to running (trigger order), each stamped when it is written.
+- **Captured by triggers,** as other events: `campaigns_webhook_status_skips` on the campaign's
+  start, and `campaign_recipients_webhook_skipped`, a statement trigger with transition tables,
+  after every update of recipients, which finds the recipients the statement moved to skipped, per
+  campaign. Both are run by the runner's job as the runtime role in the company's scope and are
+  executable by no role. Each first asks whether an active endpoint of the company takes the event
+  (the statement trigger only when the statement skipped someone), so a company without one adds
+  one read of its endpoints to a start and to each statement that skips, nothing more; an update
+  of recipients that skips none (queueing, a cancel, a reply, a contact merge) costs its
+  transition tables and a join of them.
+- **Written set-based:** a start can find up to 50,000 recipients skipped when the audience was
+  taken, and the end of a sending period skips every recipient still waiting in one statement,
+  both under the runner's statement timeout. So the triggers do not pass each recipient through
+  the per-event capture (`app.capture_webhook_event`, unchanged): they hand a campaign's skips to
+  `app.capture_campaign_recipient_skips`, which writes one insert of the events and one of their
+  deliveries per campaign and statement, with the rights of the role making the change, as the
+  capture does (executable by the runtime and definer roles only).
+- **Narrowed** by the campaigns an endpoint names (`campaignIds`, the campaign the recipient
+  belongs to) and the numbers (`channelIds`, the number that campaign sends from), as the
+  campaign's other events; both lists are kept while the endpoint takes the event (migration
+  0280's checks). An event keeps only the recipient in its detail; its campaign and number serve
+  the filters only.
+- **Settings and the API** offer the event like any other; the campaign list now says it holds the
+  campaigns whose statuses, changes and skipped recipients are sent. The OpenAPI document
+  describes it under `webhooks` (`WebhookCampaignRecipientSkipped`).
+- **Migrations 0280 and 0281:** the endpoints' event, number and campaign checks (validated at
+  once: at most 10 endpoints per company), the events' type check (NOT VALID; 0281 validates it
+  while captures go on), the set-based capture, and the two trigger functions and triggers.
+
+Consequences: a receiver learns whom a campaign left out and why, without paging recipients. A
+campaign whose audience was mostly skipped writes that many events and deliveries when it starts,
+in the runner's transaction, as one whose sending period ends with recipients waiting does. An
+integration test starts a campaign with 10,000 recipients skipped when the audience was taken and
+ends it with the rest waiting, each tick under the pool's 15-second statement timeout, and logs how
+long each took: in CI (on 22c58df) the start captured the 10,000 in 1.6 seconds on PostgreSQL 18
+and 2.1 on 17, and the end the 2,500 left in 0.3 and 0.4. The 50,000 a campaign may hold are not
+tested (seeding 10,000 contacts already takes about 36 seconds in CI); in proportion they would
+take about 8 to 11 of the 15 seconds, an estimate, not a measurement. No time was measured here
+(no local PostgreSQL). A recipient a contact merge removed (both contacts were in the audience) can
+no longer be described, and a delivery not yet made then fails as `event_gone`.
+
+Not built: a filter by skip reason, recipients' sent messages as events of their own (their
+`message.status` events name the campaign), and events for recipients a cancelled campaign never
+reached.

@@ -1460,8 +1460,8 @@ export async function assertWebhookTemplates(
 }
 
 /**
- * The campaigns whose messages' statuses and changes an endpoint takes (ADR-185), each once; null
- * takes every campaign's, including campaigns added later.
+ * The campaigns whose messages' statuses, changes and skipped recipients (ADR-358) an endpoint takes
+ * (ADR-185), each once; null takes every campaign's, including campaigns added later.
  */
 export const webhookCampaignIdsSchema = z
   .array(z.uuid({ error: 'Choose campaigns from the list.' }))
@@ -1471,7 +1471,7 @@ export const webhookCampaignIdsSchema = z
   .nullable();
 
 export const WEBHOOK_CAMPAIGNS_NEED_THE_EVENTS =
-  'Choose campaigns only for an endpoint that receives Message status or Campaign status.';
+  'Choose campaigns only for an endpoint that receives Message status, Campaign status or Campaign recipient skipped.';
 
 export const WEBHOOK_CAMPAIGNS_NOT_FOUND = 'Choose campaigns of this company.';
 

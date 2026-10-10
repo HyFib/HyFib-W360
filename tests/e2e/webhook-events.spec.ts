@@ -1310,7 +1310,9 @@ test('campaign events reach an endpoint: a member starts a campaign, and the run
   await page.getByRole('button', { name: 'I have stored the secret' }).click();
   await page.reload();
   await expect(
-    page.getByText('Campaigns whose statuses and changes are sent: Autumn launch (Draft)'),
+    page.getByText(
+      'Campaigns whose statuses, changes and skipped recipients are sent: Autumn launch (Draft)',
+    ),
   ).toBeVisible();
   await page.goto(campaignPage);
   await page.getByRole('button', { name: 'Start campaign' }).click();

@@ -687,7 +687,7 @@ const invalidRunEndReasons = () =>
   });
 
 const channelIdsField = webhookChannelIdsSchema.describe(
-  `The WhatsApp numbers whose events the endpoint receives: 1 to ${WEBHOOK_LIMITS.channels} ids of the company's numbers (messages, conversations and orders give a number's id as \`channelId\`, templates in \`channels\` and webhook events as \`channel.id\`), only with an event that happens on a number: ${WEBHOOK_CHANNEL_EVENTS.slice(0, -1).join(', ')} or ${WEBHOOK_CHANNEL_EVENTS.at(-1)}. A campaign's events are those of the number it sends from; a campaign without a number yet is on none. A Payment Link's are those of its order's number, a satisfaction survey's or a cash on delivery confirmation's answer that of its conversation, and a sent order message's (store_order.message_sent) or cart reminder's (store_checkout.reminder_sent) the number it went from. Consent, contact, template, skipped order message (store_order.message_skipped), skipped cart reminder (store_checkout.reminder_skipped), deal, task and note events belong to no number: an endpoint that names numbers still receives every one of them it takes. null receives the events of every number, including numbers connected later.`,
+  `The WhatsApp numbers whose events the endpoint receives: 1 to ${WEBHOOK_LIMITS.channels} ids of the company's numbers (messages, conversations and orders give a number's id as \`channelId\`, templates in \`channels\` and webhook events as \`channel.id\`), only with an event that happens on a number: ${WEBHOOK_CHANNEL_EVENTS.slice(0, -1).join(', ')} or ${WEBHOOK_CHANNEL_EVENTS.at(-1)}. A campaign's events, and its skipped recipients' (campaign.recipient_skipped), are those of the number it sends from; a campaign without a number yet is on none. A Payment Link's are those of its order's number, a satisfaction survey's or a cash on delivery confirmation's answer that of its conversation, and a sent order message's (store_order.message_sent) or cart reminder's (store_checkout.reminder_sent) the number it went from. Consent, contact, template, skipped order message (store_order.message_skipped), skipped cart reminder (store_checkout.reminder_skipped), deal, task and note events belong to no number: an endpoint that names numbers still receives every one of them it takes. null receives the events of every number, including numbers connected later.`,
 );
 
 /** Numbers are chosen only for an endpoint that receives events of numbers (ADR-170). */
@@ -717,7 +717,7 @@ const invalidTemplates = () =>
   });
 
 const campaignIdsField = webhookCampaignIdsSchema.describe(
-  `The campaigns whose messages' statuses and changes the endpoint receives: 1 to ${WEBHOOK_LIMITS.campaigns} ids of the company's campaigns (as GET /campaigns lists them, and as \`message.status\` and \`campaign.status_changed\` events name them), only with one of those two events. message.status is then sent only for messages one of them sent, so a message no campaign sent, such as a member's reply, is left out; campaign.status_changed only for their changes. Other events are not narrowed. null receives every campaign's, including campaigns added later.`,
+  `The campaigns whose messages' statuses, changes and skipped recipients the endpoint receives: 1 to ${WEBHOOK_LIMITS.campaigns} ids of the company's campaigns (as GET /campaigns lists them, and as \`message.status\`, \`campaign.status_changed\` and \`campaign.recipient_skipped\` events name them), only with one of those three events. message.status is then sent only for messages one of them sent, so a message no campaign sent, such as a member's reply, is left out; campaign.status_changed only for their changes, and campaign.recipient_skipped only for their recipients. Other events are not narrowed. null receives every campaign's, including campaigns added later.`,
 );
 
 /** Campaigns are chosen only for an endpoint that receives events of campaigns (ADR-185). */
@@ -1499,7 +1499,7 @@ export const apiUpdateWebhookEndpointSchema = z
     campaignIds: campaignIdsField
       .optional()
       .describe(
-        "The campaigns whose messages' statuses and changes the endpoint receives (the company's campaigns); null receives every campaign's. Left out, they stay, unless the events no longer include message.status or campaign.status_changed, which clears them.",
+        "The campaigns whose messages' statuses, changes and skipped recipients the endpoint receives (the company's campaigns); null receives every campaign's. Left out, they stay, unless the events no longer include message.status, campaign.status_changed or campaign.recipient_skipped, which clears them.",
       ),
     pipelineIds: pipelineIdsField
       .optional()

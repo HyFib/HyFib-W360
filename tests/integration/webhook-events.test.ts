@@ -34,6 +34,7 @@ import {
   automationRunStartedPayloadSchema,
   automationRunStepPayloadSchema,
   campaignStatusChangedPayloadSchema,
+  campaignRecipientSkippedPayloadSchema,
   contactCreatedPayloadSchema,
   contactErasedPayloadSchema,
   contactMergedPayloadSchema,
@@ -5519,6 +5520,304 @@ describe('campaign events (ADR-087)', () => {
       .map((b) => messageStatusPayloadSchema.parse(b).data.message);
     expect(status).toMatchObject({ status: 'accepted', sentBy: 'campaign', campaignId: weekend });
   });
+
+  it('sends each recipient a campaign skips once: those skipped when the audience was taken when it starts, the others as it skips them, narrowed by campaign and number (ADR-358)', async () => {
+    const s = await campaignCompany(3);
+    const { c } = s;
+    const owner = await fx.ctx(c, c.owner);
+    // Two more contacts in the audience: one without marketing opt-in, one without a number.
+    const { id: unconsented } = await contactsService().createContact(owner, {
+      phone: `+${waId()}`,
+      displayName: 'No consent',
+      tags: ['vip'],
+    });
+    // The service takes no contact without a number; an import can leave one (no phone, no
+    // WhatsApp identity).
+    const [added] = await fx.query<{ id: string }>(
+      `WITH added AS (
+         INSERT INTO app.contacts (id, tenant_id, display_name, source)
+         VALUES (gen_random_uuid(), $1, 'No number', 'import') RETURNING id)
+       INSERT INTO app.contact_tags (id, tenant_id, contact_id, tag)
+       SELECT gen_random_uuid(), $1, id, 'vip' FROM added RETURNING contact_id AS id`,
+      [c.tenant.id],
+    );
+    const numberless = added!.id;
+    const outlet = await fx.addNumber(c, { phone: '+91 90000 54322' });
+    const types: WebhookEventType[] = ['campaign.recipient_skipped'];
+    const every = await addEndpoint(c, types);
+    const onMain = await addNumberEndpoint(c, types, [c.channelAccountId]);
+    const onOutlet = await addNumberEndpoint(c, types, [outlet.channelAccountId]);
+    const other = await s.draft(owner, 'Another sale');
+    const forOther = await addEndpoint(
+      c,
+      types,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      [other],
+    );
+    const statusOnly = await addEndpoint(c, ['campaign.status_changed']);
+    /** The skipped recipients captured, as [reason, contact, detail, deliveries], in order. */
+    const skips = async () =>
+      (
+        await fx.query<{
+          status: string;
+          contact_id: string;
+          detail: Record<string, unknown>;
+          deliveries: number;
+        }>(
+          `SELECT e.status, e.contact_id, e.detail,
+                  (SELECT count(*)::int FROM app.webhook_deliveries d
+                    WHERE d.tenant_id = e.tenant_id AND d.event_id = e.id) AS deliveries
+             FROM app.webhook_events e
+            WHERE e.tenant_id = $1 AND e.type = 'campaign.recipient_skipped'
+            ORDER BY e.occurred_at, e.id`,
+          [c.tenant.id],
+        )
+      ).map((e) => [e.status, e.contact_id, e.detail, e.deliveries]);
+    const recipientOf = async (contactId: string) => {
+      const [row] = await fx.query<{ id: string }>(
+        'SELECT id FROM app.campaign_recipients WHERE campaign_id = $1 AND contact_id = $2',
+        [id, contactId],
+      );
+      if (!row) throw new Error('recipient missing');
+      return row.id;
+    };
+
+    // Submitted: the audience is taken, two of its contacts skipped, and nothing is sent yet.
+    const id = await s.draft(owner, 'Festive sale');
+    await s.campaigns.submitCampaign(owner, id, { expectedVersion: 1 }, {});
+    expect(
+      await fx.query(
+        `SELECT state, skip_reason FROM app.campaign_recipients
+          WHERE campaign_id = $1 AND state = 'skipped' ORDER BY skip_reason`,
+        [id],
+      ),
+    ).toEqual([
+      { state: 'skipped', skip_reason: 'no_marketing_opt_in' },
+      { state: 'skipped', skip_reason: 'no_phone' },
+    ]);
+    expect(await skips()).toEqual([]);
+    // A contact opts out before the campaign reaches them.
+    const shoppers = await fx.query<{ id: string; display_name: string }>(
+      `SELECT id, display_name FROM app.contacts
+        WHERE tenant_id = $1 AND display_name LIKE 'Shopper %' ORDER BY display_name`,
+      [c.tenant.id],
+    );
+    const optedOut = shoppers[2]!.id;
+    await createConsentService({ db: fx.dbs.app, clock: systemClock }).recordConsent(owner, {
+      contactId: optedOut,
+      purpose: 'marketing',
+      action: 'opt_out',
+      note: 'Asked by phone',
+    });
+
+    // The runner starts it: the two skipped when it was submitted are captured then, after the
+    // change to running, and the one it skips now as it skips them.
+    expect(await s.tick(id)).toMatchObject({ outcome: 'progress', queued: 2, skipped: 1 });
+    const started = await skips();
+    expect(started.map(([reason]) => reason)).toEqual([
+      expect.stringMatching(/^(no_marketing_opt_in|no_phone)$/),
+      expect.stringMatching(/^(no_marketing_opt_in|no_phone)$/),
+      'opted_out',
+    ]);
+    expect(new Set(started.slice(0, 2).map(([reason]) => reason)).size).toBe(2);
+    const contactFor = {
+      no_marketing_opt_in: unconsented,
+      no_phone: numberless,
+      opted_out: optedOut,
+    };
+    for (const [reason, contact, detail, deliveries] of started) {
+      expect(contact, String(reason)).toBe(contactFor[reason as keyof typeof contactFor]);
+      // Only the recipient is kept: its campaign and number served the filters.
+      expect(detail, String(reason)).toEqual({ recipientId: await recipientOf(contact as string) });
+      // Every endpoint taking the event, and the one naming the campaign's number.
+      expect(deliveries, String(reason)).toBe(2);
+    }
+    // Compared in the database, to the microsecond: a JavaScript date keeps milliseconds only.
+    const [order] = await fx.query<{ after: boolean }>(
+      `SELECT (SELECT min(occurred_at) FROM app.webhook_events
+                WHERE tenant_id = $1 AND type = 'campaign.recipient_skipped')
+            > (SELECT occurred_at FROM app.webhook_events
+                WHERE tenant_id = $1 AND type = 'campaign.status_changed' AND status = 'running')
+              AS after`,
+      [c.tenant.id],
+    );
+    expect(order).toEqual({ after: true });
+
+    // Paused (its unsent messages go back) and resumed: resuming captures nothing again. Its
+    // sending period then ends with the two recipients still waiting: both are skipped at once.
+    expect(await s.campaigns.pauseCampaign(owner, id, {})).toEqual({ released: 2 });
+    await s.campaigns.resumeCampaign(owner, id, {});
+    expect(await skips()).toHaveLength(3);
+    s.clock.advance(25 * 3_600_000);
+    expect(await s.tick(id)).toMatchObject({ outcome: 'completed' });
+    const ended = (await skips()).slice(3);
+    expect(
+      ended.map(([reason, contact, , deliveries]) => [reason, contact, deliveries]).sort(),
+    ).toEqual(
+      [
+        ['expired', shoppers[0]!.id, 2],
+        ['expired', shoppers[1]!.id, 2],
+      ].sort(),
+    );
+    expect(await skips()).toHaveLength(5);
+
+    // Delivered as the campaign and the contacts are now, with each reason as captured.
+    await deliverDue(c);
+    const bodies = bodiesAt(every.path);
+    expect(bodies.map((b) => b.type)).toEqual(Array(5).fill('campaign.recipient_skipped'));
+    for (const b of bodies) {
+      expect(campaignRecipientSkippedPayloadSchema.safeParse(b).success, JSON.stringify(b)).toBe(
+        true,
+      );
+    }
+    const campaign = {
+      id,
+      name: 'Festive sale',
+      status: 'completed',
+      templateId: s.templateId,
+      templateName: s.templateName,
+    };
+    const channel = { id: c.channelAccountId, phone: '+91 90000 00000' };
+    const bodyFor = (contactId: string) =>
+      bodies.find((b) => (b.data.contact as { id: string }).id === contactId)?.data;
+    expect(bodyFor(optedOut)).toEqual({
+      recipient: { id: await recipientOf(optedOut), skipReason: 'opted_out' },
+      campaign,
+      contact: { id: optedOut, phone: expect.stringMatching(/^\+/), name: 'Shopper 2' },
+      channel,
+    });
+    expect(bodyFor(numberless)).toEqual({
+      recipient: { id: await recipientOf(numberless), skipReason: 'no_phone' },
+      campaign,
+      contact: { id: numberless, phone: null, name: 'No number' },
+      channel,
+    });
+    expect(bodyFor(shoppers[0]!.id)).toMatchObject({
+      recipient: { skipReason: 'expired' },
+      contact: { name: 'Shopper 0' },
+    });
+    // The number's endpoint got them all; the other number's, the other campaign's and the one
+    // taking campaign changes only got none.
+    expect(numbersAt(onMain.path, 'campaign')).toEqual(
+      Array.from({ length: 5 }, () => ['campaign.recipient_skipped', id, c.channelAccountId]),
+    );
+    expect(bodiesAt(onOutlet.path)).toEqual([]);
+    expect(bodiesAt(forOther.path)).toEqual([]);
+    expect(bodiesAt(statusOnly.path).every((b) => b.type === 'campaign.status_changed')).toBe(true);
+
+    // A recipient that is gone (a contact merge removes one when both contacts were in the
+    // audience) can no longer be described: a delivery not yet made ends as event_gone.
+    const late = await addEndpoint(c, types);
+    await fx.query(
+      `UPDATE app.campaign_recipients SET state = 'pending', skip_reason = NULL
+        WHERE campaign_id = $1 AND contact_id = $2`,
+      [id, shoppers[0]!.id],
+    );
+    await fx.query(
+      `UPDATE app.campaign_recipients SET state = 'skipped', skip_reason = 'expired'
+        WHERE campaign_id = $1 AND contact_id = $2`,
+      [id, shoppers[0]!.id],
+    );
+    const gone = await recipientOf(shoppers[0]!.id);
+    await fx.query('DELETE FROM app.campaign_recipients WHERE id = $1', [gone]);
+    await deliverDue(c);
+    expect(bodiesAt(late.path)).toEqual([]);
+    expect(
+      await fx.query(
+        `SELECT d.state, d.last_error FROM app.webhook_deliveries d
+          WHERE d.endpoint_id = $1`,
+        [late.id],
+      ),
+    ).toEqual([{ state: 'failed', last_error: 'event_gone' }]);
+  });
+
+  it('captures the skips of a large audience together within the statement timeout: 10,000 when the campaign starts, the rest when its sending period ends (ADR-358)', async () => {
+    const s = await campaignCompany(0);
+    const { c } = s;
+    const owner = await fx.ctx(c, c.owner);
+    const hook = await addEndpoint(c, ['campaign.recipient_skipped']);
+    // 13,000 contacts in the audience: the first 3,000 opted in to marketing, the other 10,000
+    // skipped when the audience is taken (no marketing opt-in).
+    await fx.query(
+      `WITH added AS (
+         INSERT INTO app.contacts (id, tenant_id, display_name, phone_e164, source)
+         SELECT gen_random_uuid(), $1, 'Load ' || g, '+9171' || lpad(g::text, 8, '0'), 'import'
+           FROM generate_series(1, 13000) AS g
+         RETURNING id)
+       INSERT INTO app.contact_tags (id, tenant_id, contact_id, tag)
+       SELECT gen_random_uuid(), $1, id, 'vip' FROM added`,
+      [c.tenant.id],
+    );
+    await fx.query(
+      `INSERT INTO app.consent_events (id, tenant_id, contact_id, purpose, action, source, actor_type, occurred_at)
+       SELECT gen_random_uuid(), tenant_id, id, 'marketing', 'opt_in', 'import', 'system', now()
+         FROM app.contacts WHERE tenant_id = $1 AND substring(display_name FROM 6)::int <= 3000`,
+      [c.tenant.id],
+    );
+    // Statistics as autovacuum leaves them after a bulk import, as the 10,000-recipient campaign
+    // test does: the test is about the capture, not the audience count's plan.
+    await fx.query(
+      'ANALYZE app.contacts, app.contact_tags, app.consent_events, app.contact_consents',
+    );
+    const id = await s.draft(owner, 'Mostly skipped');
+    expect(await s.campaigns.submitCampaign(owner, id, { expectedVersion: 1 }, {})).toMatchObject({
+      audience: 13_000,
+      pending: 3_000,
+    });
+    /** The skipped recipients captured, by reason, and the deliveries made for them. */
+    const captured = async () => {
+      const [row] = await fx.query<{ by_reason: Record<string, number>; deliveries: number }>(
+        `SELECT (SELECT jsonb_object_agg(status, n) FROM (
+                   SELECT status, count(*)::int AS n FROM app.webhook_events
+                    WHERE tenant_id = $1 AND type = 'campaign.recipient_skipped'
+                    GROUP BY status) x) AS by_reason,
+                (SELECT count(*)::int FROM app.webhook_deliveries WHERE endpoint_id = $2)
+                  AS deliveries`,
+        [c.tenant.id, hook.id],
+      );
+      return row;
+    };
+
+    // The start captures the 10,000 in one statement, under the pool's 15-second statement timeout.
+    let t = Date.now();
+    const first = await s.tick(id);
+    const startMs = Date.now() - t;
+    expect(first).toMatchObject({ outcome: 'progress', skipped: 0 });
+    expect(await captured()).toEqual({
+      by_reason: { no_marketing_opt_in: 10_000 },
+      deliveries: 10_000,
+    });
+    // The send worker would take the sends just queued: here they are accepted directly, as the
+    // 10,000-recipient campaign test does, so none is left for the sweep of stale sends, which
+    // reads every company's (ops.stale_send_intents) and which other tests read.
+    await fx.query(
+      `UPDATE app.send_intents SET state = 'accepted' WHERE state = 'queued'
+         AND message_id IN (SELECT id FROM app.messages WHERE campaign_id = $1)`,
+      [id],
+    );
+
+    // The sending period ends with the rest still waiting: skipped together, captured together.
+    s.clock.advance(25 * 3_600_000);
+    t = Date.now();
+    expect(await s.tick(id)).toMatchObject({ outcome: 'completed' });
+    const endMs = Date.now() - t;
+    const waiting = 3_000 - (first as { queued: number }).queued;
+    expect(await captured()).toEqual({
+      by_reason: { no_marketing_opt_in: 10_000, expired: waiting },
+      deliveries: 10_000 + waiting,
+    });
+    console.info(
+      `campaign skips: start ${startMs} ms (10,000 captured), end ${endMs} ms (${waiting} captured)`,
+    );
+  }, 180_000);
 
   it('sends an endpoint that names numbers only the campaigns that send from them; a campaign without a number is on none (ADR-170)', async () => {
     const s = await campaignCompany(0);

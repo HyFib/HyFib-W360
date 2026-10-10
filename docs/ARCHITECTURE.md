@@ -1962,6 +1962,23 @@ state` for one that becomes skipped from another state, each only for a message 
   cart reminders' reasons and to endpoints that take the event. `app.capture_webhook_event`
   (replaced with the same signature) matches it with the reason the cart reminder's trigger keeps
   in `detail` (0276), as it matches order messages' with theirs.
+- **Skipped campaign recipients as webhook events** (migrations 0280–0281, ADR-358): two triggers
+  capture `campaign.recipient_skipped` with the skip reason as status, the recipient's contact as
+  the event's and the recipient in `detail`; its campaign and the campaign's number serve the
+  filters only. On `app.campaigns` (`AFTER UPDATE OF status`, scheduled to running, which happens
+  once), `app.webhook_capture_campaign_start_skips` gathers the recipients skipped when the
+  audience was taken, in the runner's index order. On `app.campaign_recipients`, the statement
+  trigger `campaign_recipients_webhook_skipped` (`AFTER UPDATE` with transition tables, so without
+  a column list) runs `app.webhook_capture_campaign_recipient_skips`, which joins a statement's old
+  and new rows for the recipients it moved to skipped and gathers them per campaign. Only when an
+  active endpoint of the company takes the event (`app.webhook_subscribed`) do they hand the
+  arrays to `app.capture_campaign_recipient_skips`, which writes the events in one insert and
+  their deliveries in another, for the active endpoints whose campaign and number lists are null
+  or hold the campaign and its number: set-based, so the up to 50,000 skips of a start and the
+  expired ones at the end of a sending period fit the runner's statement timeout, where
+  `app.capture_webhook_event` (unchanged) captures one event per call. `buildWebhookPayload` reads
+  the recipient with `campaignRecipientOf` and its campaign with `campaignOf`, giving the reason as
+  captured and the rest as it is now.
 - **Step outcome filters** (migration 0249, ADR-327): `run_step_outcomes` on an endpoint lists the
   outcomes of the run steps it takes as `automation.run_step`, null for every step; a check keeps it
   to 1 to 21 known outcomes and to endpoints that take `automation.run_step`.

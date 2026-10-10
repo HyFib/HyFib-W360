@@ -5709,7 +5709,7 @@ describe('campaign filters (ADR-185)', () => {
       campaignId,
     ]);
 
-  it("are refused without message.status or campaign.status_changed, empty, over 50 or naming another company's campaign; kept by a change that leaves them out and cleared with the events; the database keeps them to those events", async () => {
+  it("are refused without message.status, campaign.status_changed or campaign.recipient_skipped, empty, over 50 or naming another company's campaign; kept by a change that leaves them out and cleared with the events; the database keeps them to those events", async () => {
     const c = await fx.company();
     const owner = await fx.ctx(c, c.owner);
     const autumn = await campaignOf(c, 'Autumn launch');
@@ -5729,7 +5729,8 @@ describe('campaign filters (ADR-185)', () => {
       );
       expect(isAppError(error) && error.issues?.[0]?.path, JSON.stringify(campaignIds)).toBe(path);
     };
-    const needsTheEvents = /only for an endpoint that receives Message status or Campaign status/;
+    const needsTheEvents =
+      /only for an endpoint that receives Message status, Campaign status or Campaign recipient skipped/;
     await refused(['message.received', 'template.status_changed'], [autumn.id], needsTheEvents);
     await refused(['message.status'], [], /at least one campaign/);
     await refused(['message.status'], ['autumn_launch'], /from the list/, 'campaignIds.0');
@@ -5791,8 +5792,10 @@ describe('campaign filters (ADR-185)', () => {
     await change({ campaignIds: null });
     expect(await current()).toBeNull();
     await change({ campaignIds: [diwali.id] });
-    // Either event of a campaign keeps the list.
+    // Any event of a campaign keeps the list: its changes, or its skipped recipients (ADR-358).
     await change({ eventTypes: ['campaign.status_changed', 'contact.created'] });
+    expect((await current())?.map((x) => x.id)).toEqual([diwali.id]);
+    await change({ eventTypes: ['campaign.recipient_skipped', 'contact.created'] });
     expect((await current())?.map((x) => x.id)).toEqual([diwali.id]);
     // The database refuses an empty list, more than 50, a missing id or a list of lists from an
     // endpoint taking such an event…

@@ -1484,6 +1484,22 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    every client they add, so only a client added by an old server during the rollout can inherit
    it (its endpoint's page then shows "its ID and secret sent in the request body": choose again).
 
+   Migration 0280 (ADR-358) replaces the endpoints' event, number and campaign checks (validated at
+   once: at most 10 endpoints per company) and the events' type check (NOT VALID; 0281 validates it
+   while captures go on), and adds a row trigger on `app.campaigns`, a statement trigger on
+   `app.campaign_recipients` and `app.capture_campaign_recipient_skips`, the set-based capture both
+   call; `app.capture_webhook_event` is unchanged. A campaign's start and each statement of the
+   runner that skips recipients then ask whether an endpoint of the company takes
+   `campaign.recipient_skipped`, which none does before web servers of this release offer it, and
+   every update of recipients keeps its old and new rows for the statement trigger (transition
+   tables), in proportion to the rows it changes. As for 0276: workers roll out before web servers, so no endpoint takes the event
+   before every worker can describe it; a worker from before it fails each delivery of it without
+   an attempt (`payload_failed`; replay them once newer workers run), so turn the event off on the
+   endpoints that take it before rolling workers back to such an image; and until the web rollout
+   ends, an old web server answers Settings → Webhooks with an error for a company with an endpoint
+   taking it, so add it to endpoints once the rollout ends and turn it off before rolling web
+   servers back.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back
