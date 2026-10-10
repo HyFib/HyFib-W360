@@ -151,9 +151,14 @@ export type WebhookOrderMessageSkipReason =
 /**
  * How a webhook endpoint's OAuth client authenticates to its authorization server (ADR-357), as
  * RFC 7591 names the methods of RFC 6749 section 2.3.1: its identifier and secret in an HTTP Basic
- * header, or as form parameters in the request body.
+ * header, or as form parameters in the request body; or a JWT signed with its secret, sent as a
+ * client assertion (RFC 7523, ADR-366).
  */
-export const WEBHOOK_OAUTH_CLIENT_AUTHS = ['client_secret_basic', 'client_secret_post'] as const;
+export const WEBHOOK_OAUTH_CLIENT_AUTHS = [
+  'client_secret_basic',
+  'client_secret_post',
+  'client_secret_jwt',
+] as const;
 export type WebhookOAuthClientAuth = (typeof WEBHOOK_OAUTH_CLIENT_AUTHS)[number];
 
 /**

@@ -14394,3 +14394,43 @@ a company's name and address are in it, as in the Usage tab's CSV. The rest stay
 the card.
 
 Not built: a company's own year as CSV from its page, and the days of the year one by one.
+
+## ADR-366 Webhook OAuth clients that prove their secret with a signed JWT (P5-09) (2026-10-10)
+
+Context: an endpoint's OAuth client authenticates to its authorization server with its identifier
+and secret in an HTTP Basic header or, since ADR-357, in the token request's body (RFC 6749
+section 2.3.1). Some servers, and companies' security policies, want the secret never to travel:
+the client proves it holds it with a short-lived JWT signed with it, sent as a client assertion
+(RFC 7523 sections 2.2 and 3; RFC 7521 section 4.2), the method RFC 7591's registry and OpenID
+Connect Core 1.0 section 9 name `client_secret_jwt`. The RFC and OpenID texts could not be opened
+from here (rfc-editor.org, datatracker.ietf.org and openid.net are blocked); the decision follows
+them as known, and the uncertainty is recorded below.
+
+Decision:
+
+- **A third way:** `client_secret_jwt` joins `client_secret_basic` and `client_secret_post`
+  (migration 0286 widens the column's check). The token request carries `grant_type`, the scope,
+  `client_id`, `client_assertion_type` (`urn:ietf:params:oauth:client-assertion-type:jwt-bearer`)
+  and `client_assertion`, and no Authorization header; the secret is never sent.
+- **The assertion:** a JWT with the header `{"alg":"HS256","typ":"JWT"}`; its issuer and subject
+  the client ID, its audience the token URL (which RFC 7523 allows and OpenID Connect recommends),
+  a random UUID as `jti`, `iat` the time it is made and `exp` five minutes later; signed with HMAC
+  SHA-256 keyed by the secret's UTF-8 bytes (`webhookOAuthClientAssertion`). A new one is made for
+  every token request; tokens are kept as before, the method part of the client's fingerprint.
+- **A secret long enough to sign:** HMAC SHA-256 takes a key at least as long as its hash (RFC 7518
+  section 3.2), so the services refuse the method with a secret under 32 bytes, the one given or
+  the one kept, which they open to measure (Settings and the API alike, `oauth.clientSecret`). A
+  worker meeting one anyway (an old web server rotating the secret during a rollout) asks nothing
+  and records `oauth_token_secret_too_short`.
+- **Shown and audited as the others:** Settings → Webhooks offers it under "How the client
+  authenticates" (the field was "Send the client ID and secret"), the endpoint's text says the
+  client proves its secret with a signed JWT, audit entries name the method, and the API and its
+  OpenAPI document take and answer it.
+
+Consequences: a receiver whose server takes client assertions signed with the secret no longer has
+to accept the secret itself. A server that wants an audience other than its token URL (a 2025 draft
+revising RFC 7523 moves to the server's issuer identifier, as recalled here and not confirmed)
+refuses these assertions; such a receiver keeps HTTP Basic or the request body.
+
+Not built: assertions signed with a key pair (`private_key_jwt`, which needs a key HyFib generates
+and a public key the receiver registers), another audience chosen per endpoint, and a JWKS.

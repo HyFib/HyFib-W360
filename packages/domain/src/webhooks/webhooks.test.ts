@@ -5043,7 +5043,7 @@ describe('endpoint OAuth clients (ADR-173)', () => {
       expect(problems({ ...base, clientAuthentication: bad }), String(bad)).toEqual([
         [
           'clientAuthentication',
-          'Choose how the client ID and secret are sent: client_secret_basic or client_secret_post.',
+          'Choose how the client authenticates: client_secret_basic, client_secret_post or client_secret_jwt.',
         ],
       ]);
     }
@@ -5094,6 +5094,85 @@ describe('endpoint OAuth clients (ADR-173)', () => {
       'client_secret_basic',
     );
     expect(NO_WEBHOOK_OAUTH.oauthClientAuth).toBe('client_secret_basic');
+  });
+
+  it('sign JWTs with a secret of at least 32 bytes, the one given or the one kept (ADR-366)', () => {
+    const long = 'k'.repeat(32);
+    const jwt = { ...base, clientSecret: long, clientAuthentication: 'client_secret_jwt' as const };
+    expect(webhookOAuthSchema.parse(jwt)).toEqual(jwt);
+    const signing = webhookOAuthColumns(
+      ring,
+      tenant,
+      endpoint,
+      checkedWebhookOAuth(webhookOAuthSchema.parse(jwt), NO_WEBHOOK_OAUTH, policy),
+      NO_WEBHOOK_OAUTH,
+    );
+    expect(signing.oauthClientAuth).toBe('client_secret_jwt');
+    expect(openWebhookOAuthClient(ring, tenant, endpoint, signing)).toMatchObject({
+      clientSecret: long,
+      clientAuthentication: 'client_secret_jwt',
+    });
+    const shortRefusal = [
+      {
+        path: 'oauth.clientSecret',
+        message: 'A client that signs JWTs needs a secret of at least 32 bytes (HMAC SHA-256).',
+      },
+    ];
+    // A secret given too short is refused, and nothing is sealed.
+    expect(
+      refusal(() =>
+        webhookOAuthColumns(
+          ring,
+          tenant,
+          endpoint,
+          checkedWebhookOAuth({ ...jwt, clientSecret: 'k'.repeat(31) }, NO_WEBHOOK_OAUTH, policy),
+          NO_WEBHOOK_OAUTH,
+        ),
+      ),
+    ).toEqual(shortRefusal);
+    // The secret kept: opened and measured, so a short one sent in a Basic header so far cannot
+    // sign; a long one can, and a client signing JWTs keeps its way when the secret rotates.
+    const basicShort = webhookOAuthColumns(
+      ring,
+      tenant,
+      endpoint,
+      checkedWebhookOAuth({ ...base, clientSecret: 'short' }, NO_WEBHOOK_OAUTH, policy),
+      NO_WEBHOOK_OAUTH,
+    );
+    const toJwt = { ...base, clientAuthentication: 'client_secret_jwt' as const };
+    expect(
+      refusal(() =>
+        webhookOAuthColumns(
+          ring,
+          tenant,
+          endpoint,
+          checkedWebhookOAuth(toJwt, basicShort, policy),
+          basicShort,
+        ),
+      ),
+    ).toEqual(shortRefusal);
+    const basicLong = webhookOAuthColumns(
+      ring,
+      tenant,
+      endpoint,
+      checkedWebhookOAuth({ ...base, clientSecret: long }, NO_WEBHOOK_OAUTH, policy),
+      NO_WEBHOOK_OAUTH,
+    );
+    expect(
+      webhookOAuthColumns(
+        ring,
+        tenant,
+        endpoint,
+        checkedWebhookOAuth(toJwt, basicLong, policy),
+        basicLong,
+      ).oauthClientAuth,
+    ).toBe('client_secret_jwt');
+    expect(
+      checkedWebhookOAuth({ ...base, clientSecret: `${long}-rotated` }, signing, policy)
+        .clientAuthentication,
+    ).toBe('client_secret_jwt');
+    // Other ways take a secret of any length.
+    expect(basicShort.oauthClientAuth).toBe('client_secret_basic');
   });
 
   it('refuse an Authorization header of the endpoint’s own beside a client, naming what was given', () => {
@@ -5203,6 +5282,14 @@ describe('endpoint OAuth clients (ADR-173)', () => {
       webhookOAuthText({ ...basic, scope: 'read', clientAuthentication: 'client_secret_post' }),
     ).toBe(
       'OAuth access tokens from auth.example.com, as client hyfib, scope read, its ID and secret sent in the request body',
+    );
+    expect(
+      webhookOAuthText({ ...basic, scope: null, clientAuthentication: 'client_secret_jwt' }),
+    ).toBe(
+      'OAuth access tokens from auth.example.com, as client hyfib, proving it holds the secret with a signed JWT',
+    );
+    expect(webhookErrorLabel('oauth_token_secret_too_short', null)).toBe(
+      'No access token: the client secret is too short to sign a JWT (at least 32 bytes)',
     );
     expect(webhookErrorLabel('oauth_token_refused_401', null)).toBe(
       'The authorization server refused an access token (HTTP 401)',

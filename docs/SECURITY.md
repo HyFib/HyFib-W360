@@ -1432,8 +1432,11 @@ Phase 5 rules (outgoing webhooks, P5-09):
   keeps it only while the token URL stays the same, so it cannot be sent to another server by
   someone who does not know it. The worker sends it only to the token URL, in an HTTP Basic header
   or, for a client set to `client_secret_post` (ADR-357), in the token request's form, which the
-  egress client never sends on to a redirect's target; the way a client authenticates is audited,
-  the secret never. Access tokens live only in the worker's memory, keyed by the company, the
+  egress client never sends on to a redirect's target; a client set to `client_secret_jwt`
+  (ADR-366) never sends it: it signs a JWT with it (HS256, issuer and subject the client ID,
+  audience the token URL, a random `jti`, five minutes' lifetime) as a client assertion, and the
+  services take for it only a secret of at least 32 bytes, opening a kept one to measure it. The way
+  a client authenticates is audited, the secret never. Access tokens live only in the worker's memory, keyed by the company, the
   endpoint and a hash of the client (its way of authenticating included): never stored, logged or
   shown, a day at most, replaced after a 401 or a change of the client. A token's characters are
   checked (RFC 6750) before it goes in the `Authorization` header, and an endpoint with a client

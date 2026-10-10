@@ -166,7 +166,9 @@ import {
 } from './model';
 import {
   webhookOAuthSecretAad,
+  webhookOAuthSecretSignsJwt,
   WEBHOOK_OAUTH_CLIENT_RE,
+  WEBHOOK_OAUTH_JWT_SECRET_BYTES,
   WEBHOOK_OAUTH_SCOPE_RE,
   type WebhookOAuthClient,
 } from './oauth';
@@ -297,7 +299,7 @@ export const webhookOAuthSchema = z
     clientAuthentication: z
       .enum(WEBHOOK_OAUTH_CLIENT_AUTHENTICATIONS, {
         error:
-          'Choose how the client ID and secret are sent: client_secret_basic or client_secret_post.',
+          'Choose how the client authenticates: client_secret_basic, client_secret_post or client_secret_jwt.',
       })
       .optional(),
   })
@@ -305,6 +307,7 @@ export const webhookOAuthSchema = z
 export type WebhookOAuthInput = z.output<typeof webhookOAuthSchema>;
 
 export const WEBHOOK_OAUTH_SECRET_NEEDED = 'Enter the client secret.';
+export const WEBHOOK_OAUTH_JWT_SECRET_SHORT = `A client that signs JWTs needs a secret of at least ${WEBHOOK_OAUTH_JWT_SECRET_BYTES} bytes (HMAC SHA-256).`;
 export const WEBHOOK_OAUTH_SECRET_FOR_NEW_URL =
   'Enter the client secret again: it is sent to the token URL, which changed.';
 export const WEBHOOK_OAUTH_AUTHORIZATION =
@@ -4296,7 +4299,9 @@ export function checkedWebhookOAuth(
 
 /**
  * The OAuth columns an endpoint keeps (ADR-173): none without a client; else the client, its secret
- * sealed with the keyring, bound to the company and the endpoint, or the one it has kept.
+ * sealed with the keyring, bound to the company and the endpoint, or the one it has kept. A client
+ * that signs JWTs (ADR-366) needs a secret of at least 32 bytes, the one given or the one kept,
+ * which is opened to measure it.
  */
 export function webhookOAuthColumns(
   keyring: Keyring,
@@ -4311,6 +4316,17 @@ export function webhookOAuthColumns(
     sealed = keyring.encrypt(oauth.clientSecret, webhookOAuthSecretAad(tenantId, endpointId));
   }
   if (!sealed) throw new Error('An OAuth client kept its secret without one stored');
+  if (
+    oauth.clientAuthentication === 'client_secret_jwt' &&
+    !webhookOAuthSecretSignsJwt(
+      oauth.clientSecret ??
+        keyring.decryptString(sealed, webhookOAuthSecretAad(tenantId, endpointId)),
+    )
+  ) {
+    throw new AppError('validation_failed', WEBHOOK_OAUTH_JWT_SECRET_SHORT, {
+      issues: [{ path: 'oauth.clientSecret', message: WEBHOOK_OAUTH_JWT_SECRET_SHORT }],
+    });
+  }
   return {
     oauthTokenUrl: oauth.tokenUrl,
     oauthClientId: oauth.clientId,

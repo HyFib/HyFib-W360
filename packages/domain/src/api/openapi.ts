@@ -1586,7 +1586,7 @@ export const apiWebhookEndpointSchema = z.object({
       clientAuthentication: z
         .enum(WEBHOOK_OAUTH_CLIENT_AUTHENTICATIONS)
         .describe(
-          'How the client ID and secret reach the token URL: `client_secret_basic` in an HTTP Basic Authorization header, `client_secret_post` as `client_id` and `client_secret` in the request body.',
+          'How the client authenticates to the token URL: `client_secret_basic` with its ID and secret in an HTTP Basic Authorization header, `client_secret_post` with them as `client_id` and `client_secret` in the request body, `client_secret_jwt` with `client_id` and a JWT signed with the secret as `client_assertion`, the secret never sent.',
         ),
     })
     .nullable()

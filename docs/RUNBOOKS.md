@@ -2853,10 +2853,15 @@ with an OAuth client gets an access token from its token URL before its deliveri
 the attempt fails without calling the endpoint and is retried on the usual schedule.
 `oauth_token_refused_401` or `_400`: the authorization server refused the client ID, the secret or
 the scope, or wants them sent another way: some servers take the client ID and secret only in the
-request body (ADR-357), so if the receiver's documentation says so, choose "In the request body"
-under "Send the client ID and secret" (`clientAuthentication`: `client_secret_post`; a change
-through the API that leaves it out keeps it while the token URL stays the same), and HTTP Basic for
-one that refuses the body; `oauth_token_refused_404` or a 3xx: the token URL is wrong (redirects
+request body (ADR-357), so if the receiver's documentation says so, choose "Its ID and secret in
+the request body" under "How the client authenticates" (`clientAuthentication`:
+`client_secret_post`; a change through the API that leaves it out keeps it while the token URL
+stays the same), and HTTP Basic for one that refuses the body; a server that wants a client
+assertion signed with the secret takes "A JWT signed with the secret" (`client_secret_jwt`,
+ADR-366), which needs a secret of at least 32 bytes and audiences the token URL: a server that
+wants another audience, such as its issuer identifier, refuses it (400 or 401), so use another
+way with it; `oauth_token_secret_too_short`: a client set to sign JWTs keeps a secret under 32
+bytes (set during a rollout by a web server from before ADR-366): enter one of 32 bytes or more; `oauth_token_refused_404` or a 3xx: the token URL is wrong (redirects
 are not followed);
 `oauth_token_invalid`: it answered 200 without a bearer token (an HTML page, or a token type other
 than Bearer); `oauth_token_timeout`, `_dns_failed`, `_connect_failed` or `_address_blocked`: the

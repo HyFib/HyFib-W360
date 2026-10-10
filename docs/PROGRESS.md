@@ -1,5 +1,53 @@
 # Progress
 
+## 2026-10-10 — Webhook OAuth clients that prove their secret with a signed JWT (P5-09, H-014, ADR-366)
+
+Status: **Implemented; its database tests run in CI only.** An endpoint's OAuth client sent its
+secret to the authorization server, in an HTTP Basic header or the request body (ADR-357); servers
+that want the secret never sent, taking a client assertion signed with it instead (RFC 7523,
+`client_secret_jwt`), could not be used.
+
+### Completed
+
+- **Database:** migration 0286 widens `app.webhook_endpoints.oauth_client_auth`'s check to
+  `client_secret_jwt`, validated by reading the table.
+- **Domain:** `webhookOAuthClientAssertion` signs the assertion (HS256: issuer and subject the
+  client ID, audience the token URL, a random `jti`, five minutes' lifetime); the token request
+  sends `client_id`, `client_assertion_type` and `client_assertion`, no Authorization header and
+  never the secret; the services refuse the method with a secret under 32 bytes, given or kept
+  (opened to measure it), and the worker asks nothing for one (`oauth_token_secret_too_short`,
+  labelled for members). The API and its OpenAPI document take and answer the method.
+- **Web:** Settings → Webhooks offers "A JWT signed with the secret" under "How the client
+  authenticates"; the endpoint's text says so.
+- **Tests:** unit (3 new: the assertion against a vector computed apart with Python's hmac, its
+  claims, signature and a fresh `jti` each time, the form; the length rule in bytes; the refusals
+  of a short secret given or kept; plus a short secret asking nothing, the labels, text, error
+  label, the API schemas and OpenAPI entries updated); integration (`webhooks.test.ts`: a delivery
+  whose token request carries an assertion the test verifies with the secret, no Authorization
+  header and no secret, the column, the audit, the refusals on adding and changing, the database
+  check); e2e (`webhooks.spec.ts`: the field's new label). Written for CI; the integration and e2e
+  tests were not run here.
+- **Docs:** ADR-366 (the RFC and OpenID texts could not be opened from here: blocked hosts; the
+  audience follows RFC 7523 and OpenID Connect as known, and a draft that moves it is recorded as
+  unconfirmed); SECURITY; THREAT-MODEL T323; ARCHITECTURE; DEPLOYMENT (0286); RUNBOOKS; BACKLOG
+  P5-09; the feature matrix (status unchanged).
+- **Mutation checks:** 14 deliberate regressions, all caught by the unit tests (the client ID as the
+  audience, a minute-long assertion, an unsigned algorithm named, keyed by the client ID, no
+  `client_id` with the assertion, the secret sent too, 32 bytes refused, characters counted rather
+  than bytes, a short secret still asking, the assertion made at another time than asked, the same
+  `jti` every time, the kept secret not measured, the length rule on the wrong method, the short
+  secret's error unlabelled).
+
+### Test commands and results (local, 2026-10-10)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 146 files, 1558 tests passed                                    |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+| migration 0286                                     | pglast parse check passed (syntax only)                         |
+
 ## 2026-10-10 — The year's failed sends by reason and by company as CSV (P5-10, H-034, ADR-365)
 
 Status: **Implemented; its database and browser tests run in CI only.** The Usage tab's year of

@@ -3638,8 +3638,8 @@ function OAuthClientFields({
           </Field>
           <Field
             id={`${prefix}-oauth-client-authentication`}
-            label="Send the client ID and secret"
-            description="HTTP Basic is the standard way; choose the request body only for an authorization server that asks for it."
+            label="How the client authenticates"
+            description="HTTP Basic is the standard way; choose the request body, or a JWT signed with a secret of at least 32 bytes, only for an authorization server that asks for it."
           >
             {(aria) => (
               <Select
