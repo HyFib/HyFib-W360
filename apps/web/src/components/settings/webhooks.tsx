@@ -29,6 +29,7 @@ import {
   WEBHOOK_COD_ANSWERS,
   WEBHOOK_ORDER_MESSAGE_EVENT_LABELS,
   WEBHOOK_ORDER_MESSAGE_EVENTS,
+  WEBHOOK_ORDER_MESSAGE_SKIP_REASONS,
   WEBHOOK_PAYMENT_LINK_STATUSES,
   WEBHOOK_RUN_STEP_OUTCOME_LABELS,
   WEBHOOK_RUN_STEP_OUTCOMES,
@@ -105,6 +106,7 @@ import {
   type WebhookCampaignChoice,
   type WebhookCodAnswer,
   type WebhookOrderMessageEvent,
+  type WebhookOrderMessageSkipReason,
   type WebhookStoreChoice,
   type WebhookEndpointStore,
   type WebhookContactFieldValue,
@@ -149,6 +151,7 @@ import {
   type WebhookTemplateChoice,
   type WebhookTemplateStatus,
 } from '@w360/domain/webhook-model';
+import { STORE_MESSAGE_SKIP_REASONS } from '@w360/domain/store-messages-model';
 import {
   createWebhookEndpointAction,
   deleteWebhookEndpointAction,
@@ -597,6 +600,55 @@ function OrderMessageChoices({
             <Label htmlFor={id} className="font-normal">
               {WEBHOOK_ORDER_MESSAGE_EVENT_LABELS[event]}{' '}
               <span className="font-mono text-xs">({event})</span>
+            </Label>
+          </div>
+        );
+      })}
+    </fieldset>
+  );
+}
+
+/**
+ * The reasons whose order message skips an endpoint takes as `store_order.message_skipped`
+ * (ADR-354), shown while it takes the event: every reason unless some are unticked, in the order
+ * and words a store's Messages page (Commerce → Stores) explains them.
+ */
+function SkipReasonChoices({
+  prefix,
+  chosen,
+  onChange,
+}: {
+  prefix: string;
+  chosen: WebhookOrderMessageSkipReason[];
+  onChange: (next: WebhookOrderMessageSkipReason[]) => void;
+}) {
+  return (
+    <fieldset className="ml-6 grid gap-1">
+      <legend className="mb-1 text-xs text-muted-foreground">
+        Skip reasons sent (all of them unless you untick some, as a store&rsquo;s Messages page
+        explains them)
+      </legend>
+      {WEBHOOK_ORDER_MESSAGE_SKIP_REASONS.map((reason) => {
+        const id = `${prefix}-skip-reason-${reason}`;
+        return (
+          <div key={reason} className="flex items-start gap-2">
+            <Checkbox
+              id={id}
+              className="mt-0.5"
+              checked={chosen.includes(reason)}
+              onChange={(e) =>
+                onChange(
+                  e.target.checked
+                    ? WEBHOOK_ORDER_MESSAGE_SKIP_REASONS.filter(
+                        (r) => r === reason || chosen.includes(r),
+                      )
+                    : chosen.filter((r) => r !== reason),
+                )
+              }
+            />
+            <Label htmlFor={id} className="font-normal">
+              {STORE_MESSAGE_SKIP_REASONS[reason]}{' '}
+              <span className="font-mono text-xs">({reason})</span>
             </Label>
           </div>
         );
@@ -2890,6 +2942,8 @@ function EventChoices({
   onPaymentLinkStatusesChange,
   codAnswers,
   onCodAnswersChange,
+  skipReasons,
+  onSkipReasonsChange,
   runStepOutcomes,
   onRunStepOutcomesChange,
   runStepNodeTypes,
@@ -2940,6 +2994,8 @@ function EventChoices({
   onPaymentLinkStatusesChange: (next: WebhookPaymentLinkStatus[]) => void;
   codAnswers: WebhookCodAnswer[];
   onCodAnswersChange: (next: WebhookCodAnswer[]) => void;
+  skipReasons: WebhookOrderMessageSkipReason[];
+  onSkipReasonsChange: (next: WebhookOrderMessageSkipReason[]) => void;
   runStepOutcomes: WebhookRunStepOutcome[];
   onRunStepOutcomesChange: (next: WebhookRunStepOutcome[]) => void;
   runStepNodeTypes: WebhookRunStepNodeType[];
@@ -3099,6 +3155,13 @@ function EventChoices({
             ) : null}
             {type === 'store_order.cod_answered' && chosen.includes(type) ? (
               <CodAnswerChoices prefix={prefix} chosen={codAnswers} onChange={onCodAnswersChange} />
+            ) : null}
+            {type === 'store_order.message_skipped' && chosen.includes(type) ? (
+              <SkipReasonChoices
+                prefix={prefix}
+                chosen={skipReasons}
+                onChange={onSkipReasonsChange}
+              />
             ) : null}
             {type === 'automation.run_step' && chosen.includes(type) ? (
               <StepOutcomeChoices
@@ -3454,6 +3517,8 @@ export function WebhookEndpointForm({
     stores: WebhookEndpointStore[] | null;
     /** The order messages whose skips and sends it takes (ADR-352, ADR-353); null for every message's. */
     orderMessageEvents: WebhookOrderMessageEvent[] | null;
+    /** The reasons whose order message skips it takes (ADR-354); null for every reason. */
+    orderMessageSkipReasons: WebhookOrderMessageSkipReason[] | null;
     /** The outcomes of the run steps it takes (ADR-327); null for every step. */
     runStepOutcomes: WebhookRunStepOutcome[] | null;
     /** The kinds of node whose run steps it takes (ADR-328); null for every step. */
@@ -3607,6 +3672,9 @@ export function WebhookEndpointForm({
   const [storeIds, setStoreIds] = useState<string[]>(endpoint?.stores?.map((st) => st.id) ?? []);
   const [orderMessageEvents, setOrderMessageEvents] = useState<WebhookOrderMessageEvent[]>(
     endpoint?.orderMessageEvents ?? [...WEBHOOK_ORDER_MESSAGE_EVENTS],
+  );
+  const [skipReasons, setSkipReasons] = useState<WebhookOrderMessageSkipReason[]>(
+    endpoint?.orderMessageSkipReasons ?? [...WEBHOOK_ORDER_MESSAGE_SKIP_REASONS],
   );
   const [runStepOutcomes, setRunStepOutcomes] = useState<WebhookRunStepOutcome[]>(
     endpoint?.runStepOutcomes ?? [...WEBHOOK_RUN_STEP_OUTCOMES],
@@ -3923,6 +3991,12 @@ export function WebhookEndpointForm({
           orderMessageEvents.length < WEBHOOK_ORDER_MESSAGE_EVENTS.length
             ? orderMessageEvents
             : null;
+        // Every reason ticked takes every reason's skips (null, ADR-354).
+        const chosenSkipReasons =
+          eventTypes.includes('store_order.message_skipped') &&
+          skipReasons.length < WEBHOOK_ORDER_MESSAGE_SKIP_REASONS.length
+            ? skipReasons
+            : null;
         // Every step outcome ticked takes every step (null, ADR-327).
         const chosenRunStepOutcomes =
           eventTypes.includes('automation.run_step') &&
@@ -4212,6 +4286,7 @@ export function WebhookEndpointForm({
           codAnswers: chosenCodAnswers,
           storeIds: chosenStores,
           orderMessageEvents: chosenOrderMessageEvents,
+          orderMessageSkipReasons: chosenSkipReasons,
           runStepOutcomes: chosenRunStepOutcomes,
           runStepNodeTypes: chosenRunStepNodeTypes,
           orderChangeMakers: chosenOrderChangeMakers,
@@ -4311,6 +4386,7 @@ export function WebhookEndpointForm({
               setEveryStore(true);
               setStoreIds([]);
               setOrderMessageEvents([...WEBHOOK_ORDER_MESSAGE_EVENTS]);
+              setSkipReasons([...WEBHOOK_ORDER_MESSAGE_SKIP_REASONS]);
               setRunStepOutcomes([...WEBHOOK_RUN_STEP_OUTCOMES]);
               setRunStepNodeTypes([...WEBHOOK_RUN_STEP_NODE_TYPES]);
               setOrderChangeMakers([...WEBHOOK_ORDER_CHANGE_MAKERS]);
@@ -4455,6 +4531,8 @@ export function WebhookEndpointForm({
         onPaymentLinkStatusesChange={setPaymentLinkStatuses}
         codAnswers={codAnswers}
         onCodAnswersChange={setCodAnswers}
+        skipReasons={skipReasons}
+        onSkipReasonsChange={setSkipReasons}
         runStepOutcomes={runStepOutcomes}
         onRunStepOutcomesChange={setRunStepOutcomes}
         runStepNodeTypes={runStepNodeTypes}

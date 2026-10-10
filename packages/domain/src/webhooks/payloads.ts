@@ -60,8 +60,12 @@ import { campaignAnalytics, campaignResultsSchema, toCampaignResults } from '../
 import { COMMERCE_LIMITS } from '../commerce/model';
 import { crmCreatedBy, noteWriter } from '../crm/common';
 import { findAnsweredMessageId } from '../messaging/reply-context';
-import { ORDER_MESSAGE_EVENTS, STORE_MESSAGE_SKIP_REASON_CODES } from '../stores/messages-model';
-import { WEBHOOK_MESSAGE_STATUSES, WEBHOOK_RUN_TRIGGERS } from './model';
+import { ORDER_MESSAGE_EVENTS } from '../stores/messages-model';
+import {
+  WEBHOOK_MESSAGE_STATUSES,
+  WEBHOOK_ORDER_MESSAGE_SKIP_REASONS,
+  WEBHOOK_RUN_TRIGGERS,
+} from './model';
 
 /**
  * The JSON bodies of outgoing webhooks (ADR-053, ADR-074, ADR-078, ADR-085, ADR-087). The zod schemas
@@ -1028,9 +1032,9 @@ const webhookSkippedOrderMessageSchema = z.object({
       'What the message was about, as the store’s order messages name it: order_placed, cod_confirmation (asking the customer to confirm or cancel an order paid on delivery), order_shipped, order_delivered or order_cancelled.',
     ),
   skipReason: z
-    .enum(STORE_MESSAGE_SKIP_REASON_CODES)
+    .enum(WEBHOOK_ORDER_MESSAGE_SKIP_REASONS)
     .describe(
-      'Why HyFib did not send it, as Settings → Stores explains it among the store’s messages: recorded without sending (test_order, too_late, or cash_on_delivery for an order placed message that the order’s cash on delivery confirmation replaced) or a check that failed when it was due (for example store_disconnected, rule_disabled, order_deleted, order_cancelled, no_phone, suppressed, opted_out, template_unavailable, channel_unavailable, frequency_capped, automation_busy). The reasons that concern only cart reminders never appear here.',
+      'Why HyFib did not send it, as the store’s Messages page (Commerce → Stores) explains it: recorded without sending (test_order, too_late, or cash_on_delivery for an order placed message that the order’s cash on delivery confirmation replaced) or a check that failed when it was due (for example store_disconnected, rule_disabled, order_deleted, order_cancelled, no_phone, suppressed, opted_out, template_unavailable, channel_unavailable, frequency_capped, automation_busy). The reasons that concern only cart reminders never appear here.',
     ),
   occurredAt: z.iso
     .datetime()

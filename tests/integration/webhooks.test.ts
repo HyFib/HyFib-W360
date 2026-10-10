@@ -43,6 +43,7 @@ import {
   templateStatusPayloadSchema,
   verifyWebhookSignature,
   WEBHOOK_LIMITS,
+  WEBHOOK_ORDER_MESSAGE_SKIP_REASONS,
   WEBHOOK_TEMPLATE_STATUSES,
   WEBHOOK_USER_AGENT,
   webhookHeadersAad,
@@ -2668,6 +2669,109 @@ describe('cash on delivery answer, store and order message filters (ADR-349, ADR
     await expect(
       setInDatabase('channel_account_ids', `ARRAY['${c.channelAccountId}']::uuid[]`),
     ).rejects.toThrow(/webhook_endpoints_channel_account_ids/);
+  });
+
+  it('take skip reasons only with store_order.message_skipped, kept and cleared with it; the database keeps them so (ADR-354)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const url = 'https://hooks.example.com/reasons';
+    const refused = (eventTypes: string[], filters: Record<string, unknown>, message: RegExp) =>
+      expectAppError(
+        webhooks().create(owner, { url, eventTypes, ...filters }),
+        'validation_failed',
+        message,
+      );
+    const skipped = ['store_order.message_skipped'];
+    await refused(
+      ['store_order.message_sent'],
+      { orderMessageSkipReasons: ['no_phone'] },
+      /Choose skip reasons only for an endpoint that receives Order message skipped/,
+    );
+    await refused(skipped, { orderMessageSkipReasons: [] }, /at least one skip reason/);
+    await refused(
+      skipped,
+      { orderMessageSkipReasons: ['cart_too_old'] },
+      /skip reasons from the list/,
+    );
+    expect(await webhooks().list(owner)).toEqual([]);
+
+    // Added with both order message events; the skipped messages alone keep the reasons.
+    const created = await webhooks().create(owner, {
+      url,
+      eventTypes: ['store_order.message_skipped', 'store_order.message_sent'],
+      orderMessageSkipReasons: ['opted_out', 'no_phone', 'opted_out'],
+    });
+    const audits = async (action: string) =>
+      (
+        await fx.query<{ metadata: { orderMessageSkipReasons?: unknown } }>(
+          `SELECT metadata FROM app.audit_events
+            WHERE tenant_id = $1 AND action = $2 ORDER BY occurred_at, id`,
+          [c.tenant.id, action],
+        )
+      ).map((a) => a.metadata.orderMessageSkipReasons);
+    expect(await audits('webhook.endpoint_created')).toEqual([['no_phone', 'opted_out']]);
+    const change = (eventTypes: string[], fields: Record<string, unknown> = {}) =>
+      webhooks().update(owner, {
+        endpointId: created.id,
+        url,
+        description: '',
+        eventTypes,
+        ...fields,
+      });
+    const current = async () =>
+      (await webhooks().list(owner)).find((e) => e.id === created.id)?.orderMessageSkipReasons;
+    expect(await current()).toEqual(['no_phone', 'opted_out']);
+    // A change leaving the list out keeps it, one giving it changes it, audited.
+    await change(skipped);
+    expect(await current()).toEqual(['no_phone', 'opted_out']);
+    await change(skipped, { orderMessageSkipReasons: ['too_late'] });
+    expect(await current()).toEqual(['too_late']);
+    expect((await audits('webhook.endpoint_updated')).at(-1)).toEqual(['too_late']);
+    // Sent messages alone have no reason: the list goes, and cannot be given.
+    await change(['store_order.message_sent']);
+    expect(await current()).toBeNull();
+    await expectAppError(
+      change(['store_order.message_sent'], { orderMessageSkipReasons: ['no_phone'] }),
+      'validation_failed',
+      /Choose skip reasons only/,
+    );
+
+    // The database refuses an empty list, more than 25, a cart reminder's or an unknown reason, a
+    // missing entry or a nested list from an endpoint taking the event (the services give each
+    // reason once)…
+    await change(skipped, { orderMessageSkipReasons: ['no_phone'] });
+    const setInDatabase = (value: string) =>
+      fx.query(
+        `UPDATE app.webhook_endpoints SET order_message_skip_reasons = ${value} WHERE id = $1`,
+        [created.id],
+      );
+    const all = `ARRAY[${WEBHOOK_ORDER_MESSAGE_SKIP_REASONS.map((r) => `'${r}'`).join(', ')}]::text[]`;
+    for (const bad of [
+      `'{}'`,
+      `ARRAY[${[...WEBHOOK_ORDER_MESSAGE_SKIP_REASONS, 'no_phone'].map((r) => `'${r}'`).join(', ')}]::text[]`,
+      `'{cart_too_old}'`,
+      `'{not_a_reason}'`,
+      `ARRAY['no_phone', NULL]::text[]`,
+      `ARRAY[ARRAY['no_phone'], ARRAY['opted_out']]::text[]`,
+    ]) {
+      await expect(setInDatabase(bad), bad).rejects.toThrow(
+        /webhook_endpoints_order_message_skip_reasons/,
+      );
+    }
+    // …takes all 25…
+    await setInDatabase(all);
+    expect(await current()).toEqual([...WEBHOOK_ORDER_MESSAGE_SKIP_REASONS]);
+    // …and refuses the list for an endpoint that does not take the event.
+    await change(['store_order.message_sent']);
+    await expect(setInDatabase(`'{no_phone}'`)).rejects.toThrow(
+      /webhook_endpoints_order_message_skip_reasons/,
+    );
+    // The company role changes the list only through its column grant.
+    const [grant] = await fx.query<{ can_update: boolean }>(
+      `SELECT has_column_privilege('w360_app', 'app.webhook_endpoints',
+                'order_message_skip_reasons', 'UPDATE') AS can_update`,
+    );
+    expect(grant?.can_update).toBe(true);
   });
 });
 

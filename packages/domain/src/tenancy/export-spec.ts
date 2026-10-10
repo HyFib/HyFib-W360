@@ -1618,6 +1618,7 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
       'cod_answers',
       'store_ids',
       'order_message_events',
+      'order_message_skip_reasons',
       'order_change_makers',
       'order_excluded_api_key_ids',
       'payment_link_api_key_ids',

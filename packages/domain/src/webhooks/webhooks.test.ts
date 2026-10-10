@@ -86,6 +86,7 @@ import {
   WEBHOOK_COD_ANSWER_LABELS,
   WEBHOOK_ORDER_MESSAGE_EVENT_LABELS,
   WEBHOOK_ORDER_MESSAGE_EVENTS,
+  WEBHOOK_ORDER_MESSAGE_SKIP_REASONS,
   WEBHOOK_STORE_EVENTS,
   webhookTakesStoreEvents,
   WEBHOOK_ORDER_MESSAGE_TYPES,
@@ -290,6 +291,9 @@ import {
   webhookOrderMessageEventsFor,
   webhookOrderMessageEventsSchema,
   WEBHOOK_ORDER_MESSAGES_NEED_THE_EVENT,
+  webhookOrderMessageSkipReasonsFor,
+  webhookOrderMessageSkipReasonsSchema,
+  WEBHOOK_ORDER_MESSAGE_SKIP_REASONS_NEED_THE_EVENT,
   WEBHOOK_RUN_STEP_OUTCOMES_NEED_THE_EVENT,
   webhookRunStepNodeTypesFor,
   webhookRunStepNodeTypesSchema,
@@ -4378,7 +4382,7 @@ describe('endpoint audit entries within an audit entry’s 8 KiB (ADR-336)', () 
         listDigests: { contactTags: digest(tags(10)) },
       });
     }
-    // Every event type, hosts of 253 characters and the 58 lists an entry can name, each too
+    // Every event type, hosts of 253 characters and the 59 lists an entry can name, each too
     // long to name item by item beside the others: named by count, the entry takes under 6,500,
     // within the 7,000 bytes kept.
     const keys = [
@@ -4413,6 +4417,7 @@ describe('endpoint audit entries within an audit entry’s 8 KiB (ADR-336)', () 
       'orderChangeMakers',
       'orderExcludedApiKeyIds',
       'orderMessageEvents',
+      'orderMessageSkipReasons',
       'orderStatuses',
       'ownerIds',
       'paymentLinkApiKeyIds',
@@ -4441,7 +4446,7 @@ describe('endpoint audit entries within an audit entry’s 8 KiB (ADR-336)', () 
       'templateIds',
       'templateStatuses',
     ];
-    expect(keys).toHaveLength(58);
+    expect(keys).toHaveLength(59);
     const whole = webhookEndpointAuditMetadata({
       host: 'h'.repeat(253),
       eventTypes: [...WEBHOOK_EVENT_TYPES],
@@ -4449,7 +4454,7 @@ describe('endpoint audit entries within an audit entry’s 8 KiB (ADR-336)', () 
       oauthTokenHost: 'o'.repeat(253),
       oauthSecretReplaced: true,
     });
-    expect(Object.keys(whole.listCounts as object)).toHaveLength(58);
+    expect(Object.keys(whole.listCounts as object)).toHaveLength(59);
     expect(jsonbSize(whole)).toBeLessThan(6500);
   });
 });
@@ -7563,9 +7568,9 @@ describe('the event of a skipped store order message (ADR-351)', () => {
       'order_delivered',
       'order_cancelled',
     ]);
-    expect(data.orderMessage.shape.skipReason.options).toEqual(
-      Object.keys(STORE_MESSAGE_SKIP_REASONS),
-    );
+    expect(data.orderMessage.shape.skipReason.options).toEqual([
+      ...WEBHOOK_ORDER_MESSAGE_SKIP_REASONS,
+    ]);
     expect(data.storeOrder).toBe(storeOrderCodAnsweredPayloadSchema.shape.data.shape.storeOrder);
     expect(data.store).toBe(storeOrderCodAnsweredPayloadSchema.shape.data.shape.store);
     const body = (orderMessage: Record<string, unknown>) => ({
@@ -8089,5 +8094,96 @@ describe('the event of a sent store order message (ADR-353)', () => {
       expect(described).toContain(words);
     }
     expect(doc.components.schemas).toHaveProperty('WebhookStoreOrderMessageSent');
+  });
+});
+
+describe('skip reason filters for skipped order messages (ADR-354)', () => {
+  /** The reasons that concern cart reminders only: an order message is never skipped for them. */
+  const cartOnly = [
+    'checkout_completed',
+    'checkout_deleted',
+    'order_placed',
+    'first_reminder_not_sent',
+    'cart_too_old',
+    'not_marketing_template',
+  ];
+
+  it('are the reasons a store’s Messages page explains, but cart reminders’ own', () => {
+    expect(WEBHOOK_ORDER_MESSAGE_SKIP_REASONS).toEqual(
+      Object.keys(STORE_MESSAGE_SKIP_REASONS).filter((reason) => !cartOnly.includes(reason)),
+    );
+    expect(WEBHOOK_ORDER_MESSAGE_SKIP_REASONS).toHaveLength(25);
+    for (const reason of cartOnly) {
+      expect(STORE_MESSAGE_SKIP_REASONS, reason).toHaveProperty(reason);
+    }
+  });
+
+  it('take 1 to 25 reasons, once each, in that order; null takes every reason', () => {
+    expect(
+      webhookOrderMessageSkipReasonsSchema.parse(['opted_out', 'test_order', 'opted_out']),
+    ).toEqual(['test_order', 'opted_out']);
+    expect(webhookOrderMessageSkipReasonsSchema.parse(null)).toBeNull();
+    expect(
+      webhookOrderMessageSkipReasonsSchema.parse([...WEBHOOK_ORDER_MESSAGE_SKIP_REASONS].reverse()),
+    ).toEqual([...WEBHOOK_ORDER_MESSAGE_SKIP_REASONS]);
+    for (const refused of [
+      [],
+      ['cart_too_old'],
+      ['order_placed'],
+      ['No_phone'],
+      'no_phone',
+      [null],
+      Array(26).fill('no_phone'),
+    ]) {
+      expect(
+        webhookOrderMessageSkipReasonsSchema.safeParse(refused).success,
+        JSON.stringify(refused),
+      ).toBe(false);
+    }
+    expect(webhookOrderMessageSkipReasonsSchema.safeParse([]).error?.issues[0]?.message).toBe(
+      'Choose at least one skip reason, or take every reason.',
+    );
+    expect(
+      webhookOrderMessageSkipReasonsSchema.safeParse(['cart_too_old']).error?.issues[0]?.message,
+    ).toBe('Choose skip reasons from the list.');
+    expect(
+      webhookOrderMessageSkipReasonsSchema.safeParse(Array(26).fill('no_phone')).error?.issues[0]
+        ?.message,
+    ).toBe('Give each skip reason once.');
+  });
+
+  it('are kept only while the endpoint takes skipped order messages: given, kept, or cleared', () => {
+    const skipped = ['store_order.message_skipped', 'order.received'] as const;
+    expect(webhookOrderMessageSkipReasonsFor([...skipped], ['no_phone'], null)).toEqual([
+      'no_phone',
+    ]);
+    expect(webhookOrderMessageSkipReasonsFor([...skipped], undefined, ['opted_out'])).toEqual([
+      'opted_out',
+    ]);
+    expect(webhookOrderMessageSkipReasonsFor([...skipped], null, ['opted_out'])).toBeNull();
+    expect(webhookOrderMessageSkipReasonsFor([...skipped], undefined, null)).toBeNull();
+    // A sent message or an answer has no reason to choose.
+    for (const events of [
+      ['store_order.message_sent'],
+      ['store_order.cod_answered'],
+      ['store_order.message_sent', 'store_order.cod_answered'],
+    ] as const) {
+      expect(
+        webhookOrderMessageSkipReasonsFor([...events], ['no_phone'], ['opted_out']),
+        events.join(),
+      ).toBeNull();
+    }
+    expect(WEBHOOK_ORDER_MESSAGE_SKIP_REASONS_NEED_THE_EVENT).toBe(
+      `Choose skip reasons only for an endpoint that receives ${WEBHOOK_EVENT_INFO['store_order.message_skipped'].label}.`,
+    );
+  });
+
+  it('are described with the skipped event, which names them', () => {
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const described = doc.webhooks['store_order.message_skipped'].post.description;
+    expect(described).toContain(
+      'every reason’s unless it names the reasons (its `orderMessageSkipReasons`, or the reasons ticked under Order message skipped)',
+    );
+    expect(described).toContain('with more than one list, a skipped message must pass them all');
   });
 });

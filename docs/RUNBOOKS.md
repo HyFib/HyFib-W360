@@ -3401,19 +3401,19 @@ sent.
 
 **A receiver misses a skipped order message, or gets `event_gone` for one (ADR-351).**
 `store_order.message_skipped` is sent once for each of a store's order messages (order placed, cash
-on delivery confirmation, shipped, delivered, cancelled) that HyFib records without sending or
-skips when it is due; Settings → Stores shows each message's state and reason. A message sent or
-started as an automation sends `store_order.message_sent` instead (ADR-353), one still waiting (the
-store's sending hours) nothing yet, and cart reminders never send it. It belongs to no number: an
-endpoint that names numbers still gets it; the stores and order messages it names narrow it
-(ADR-352). Events no endpoint takes are not recorded, so there is nothing to replay for messages
-skipped before the endpoint took the event.
-Removing the store deletes its copy of the orders with their messages: a delivery not yet made
-then fails as `event_gone`, and a replay fails the same way. An order the store deleted stays in
-the copy and is sent with `storeOrder.deletedAt`. The body holds no contact or customer details:
-`storeOrder.externalId` finds the order in the store. A receiver that calls customers on skipped
-messages should leave `cash_on_delivery` alone: the order placed message gave way to the cash on
-delivery confirmation, which the customer did get (or which sends its own event).
+on delivery confirmation, shipped, delivered, cancelled) that HyFib records without sending or skips
+when it is due; a store's Messages page (Commerce → Stores) shows each message's state and reason. A
+message sent or started as an automation sends `store_order.message_sent` instead (ADR-353), one
+still waiting (the store's sending hours) nothing yet, and cart reminders never send it. It belongs
+to no number: an endpoint that names numbers still gets it; the stores and order messages it names
+narrow it (ADR-352). Events no endpoint takes are not recorded, so there is nothing to replay for
+messages skipped before the endpoint took the event. Removing the store deletes its copy of the
+orders with their messages: a delivery not yet made then fails as `event_gone`, and a replay fails
+the same way. An order the store deleted stays in the copy and is sent with `storeOrder.deletedAt`.
+The body holds no contact or customer details: `storeOrder.externalId` finds the order in the store.
+A receiver that calls customers on skipped messages should leave `cash_on_delivery` alone: the order
+placed message gave way to the cash on delivery confirmation, which the customer did get (or which
+sends its own event).
 
 **A receiver misses some skipped order messages, or one store's (ADR-352).** An endpoint can take
 the skips of chosen order messages only, or those of chosen stores' orders only (the same stores as
@@ -3427,6 +3427,15 @@ messages under "Order messages" or the stores under "Stores" on the endpoint's p
 sent order messages (ADR-353): removing Order message skipped clears the messages unless the
 endpoint still takes Order message sent, and the stores unless it still takes either other store
 event.
+
+**A receiver misses some skipped order messages of one reason (ADR-354).** An endpoint can take the
+skips of chosen reasons only. The endpoints list shows them ("Skip reasons sent: …"), and the API
+answers `orderMessageSkipReasons` (null takes every reason). A skipped message is sent only when its
+reason is on the list, as well as its order message and its store on theirs; when no endpoint takes
+it, it is not recorded at all, so there is nothing to replay. A store's Messages page (Commerce →
+Stores) shows each message's reason. To take more, tick the reasons under Order message skipped on
+the endpoint's page, or `PATCH /webhook-endpoints/{id}` with `orderMessageSkipReasons` (null for
+every reason). Removing Order message skipped clears the list.
 
 **A receiver misses a sent order message, or gets `event_gone` for one (ADR-353).**
 `store_order.message_sent` is sent once for each of a store's order messages (order placed, cash on

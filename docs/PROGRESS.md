@@ -1,5 +1,61 @@
 # Progress
 
+## 2026-10-10 — Skip reason filter for skipped order messages (P5-09, H-014, ADR-354)
+
+Status: **Implemented; its database tests run in CI only.** `store_order.message_skipped` went to
+an endpoint for every reason a store's order message was not sent, so a receiver that acts on one
+kind of skip (calling customers HyFib could not message, say) had to leave the test orders, late
+events and replaced order placed messages alone itself. The local PostgreSQL is unavailable, so
+migration 0275 and the integration tests below were written but not run here; the migration passed
+the pglast parse check (syntax only), its PL/pgSQL body included.
+
+### Completed
+
+- **Database:** migration 0275: `order_message_skip_reasons` (1 to 25 of the reasons an order
+  message can be skipped for, only while the endpoint takes `store_order.message_skipped`) on
+  `app.webhook_endpoints`, validated at once; the runtime role's update grant on the column;
+  `app.capture_webhook_event` matching it with the reason the skipped message's trigger keeps
+  (replaced with the same signature).
+- **Domain:** `WEBHOOK_ORDER_MESSAGE_SKIP_REASONS` (Commerce → Stores' reasons but cart reminders'
+  six); `webhookOrderMessageSkipReasonsSchema` and `webhookOrderMessageSkipReasonsFor`; the settings
+  service and the API take, keep, clear, audit and answer `orderMessageSkipReasons`; the OpenAPI
+  entries; the skipped event's `skipReason` lists the same 25; the data export names the column.
+- **Web:** Settings → Webhooks ticks the reasons under Order message skipped, in Commerce →
+  Stores' words; the endpoints list names the reasons chosen.
+- **Tests:** unit (5 new: the reasons against Commerce → Stores', the schema and refusals, the list
+  kept only with its event, the skipped event's description, the API schemas and OpenAPI entries;
+  the audit's largest entry, the update body's fields and the skipped event's reasons updated);
+  integration (`webhooks.test.ts`: the service's refusals, keeping and clearing, the audit, the
+  database checks and the grant; `api-webhook-endpoints.test.ts`: the same through the API, a list
+  alone a change; `stores.test.ts`: a call centre's endpoint taking two reasons receives those
+  skips only). Written for CI; the integration tests were not run here.
+- **Docs:** ADR-354; ARCHITECTURE; SECURITY; THREAT-MODEL T313; DEPLOYMENT (0275); RUNBOOKS;
+  BACKLOG P5-09; feature matrix W-138, W-139 and H-014. The audit's largest entry is now 6,366
+  bytes (59 lists), within the test's bound of 6,500.
+- **Review fixes:** the Settings copy, the runbooks, ADR-351, ADR-354 and the skipped event's API
+  description say where a store's messages and their reasons are shown (a store's Messages page in
+  Commerce → Stores; there is no Settings → Stores); the store flow's test shows that a reason list
+  leaves sent messages alone and that a skip must pass it and the order message list together; the
+  reasons' code list, which only a test used, is gone. Not changed: the endpoints list names the
+  reasons by their codes, as their only words are long sentences.
+- **Mutation checks:** 21 deliberate regressions, 17 caught by the unit tests (a reason left out
+  or a cart reminder's taken, the reasons in another order or not put in order, 26 or none taken,
+  another refusal, the list kept with sent messages or the one held forgotten, the refusal not
+  naming the event, the API taking reasons without the event, the API's fields and the empty
+  change not naming them, the answer schema and the event's reasons loosened, the event not
+  describing the list). The other four (the settings service's and the API change's refusal
+  without the event, the API's answer, the audit) run against the database: the new integration
+  tests cover them, in CI only.
+
+### Test commands and results (local, 2026-10-10)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 146 files, 1515 tests passed                                    |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+
 ## 2026-10-10 — A webhook event when a store's order message is sent (P5-09, H-014, ADR-353)
 
 Status: **Implemented; its database tests run in CI only.** A store's order messages went out as
@@ -121,7 +177,7 @@ integration tests below were written but not run here; the migration passed the 
 ## 2026-10-10 — A webhook event when a store's order message is skipped (P5-09, H-014, ADR-351)
 
 Status: **Implemented; its database tests run in CI only.** A store's order message that HyFib
-recorded without sending, or skipped when it was due, showed only in Settings → Stores: an order
+recorded without sending, or skipped when it was due, showed only in Commerce → Stores: an order
 system waiting for a cash on delivery answer (ADR-348) never learned that the confirmation did not
 go out. The local PostgreSQL is unavailable, so migrations 0270 and 0271 and the integration tests
 below were written but not run here; the migrations passed the pglast parse check (syntax only),
