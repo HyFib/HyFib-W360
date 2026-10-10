@@ -23,7 +23,7 @@ import {
   opsCompanyPage,
   usageChange,
 } from '@w360/domain';
-import { CompanyLink, CompanyPager, StatTile } from '@/components/platform/ops';
+import { CompanyLink, CompanyPager, ListTitle, StatTile } from '@/components/platform/ops';
 import { DailyMessages } from '@/components/platform/daily-messages';
 import { FailureCompaniesTable } from '@/components/platform/failure-companies';
 import { FailureReasonsTable } from '@/components/platform/failure-reasons';
@@ -201,7 +201,7 @@ export default async function OpsUsagePage({
       </Card>
       <Card>
         <CardHeader>
-          <CardTitle>Failed sends by reason (12 months)</CardTitle>
+          <ListTitle title="Failed sends by reason (12 months)" list="failure-reasons" />
           <CardDescription>
             Every company&apos;s failed sends of the 365 days before today by the code they failed
             with, as the worker counts them with each day&apos;s messages: the{' '}
@@ -234,7 +234,7 @@ export default async function OpsUsagePage({
       </Card>
       <Card>
         <CardHeader>
-          <CardTitle>Failed sends by company (12 months)</CardTitle>
+          <ListTitle title="Failed sends by company (12 months)" list="failure-companies" />
           <CardDescription>
             The companies whose sends failed most in the 365 days before today, as the worker counts
             them with each day&apos;s messages: the {FAILURE_COMPANIES_SHOWN} with the most, then

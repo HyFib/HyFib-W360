@@ -2535,6 +2535,10 @@ message text, contact details, payloads, email addresses, secrets or full URLs:
   with the same checks: platform administrators only, refused before the list is read, audited with
   the row count in the same transaction, and the same allow-listed contents without people or notes
   (ADR-158).
+- The year's failed sends by reason and by company as CSV (ADR-365): the same checks and audit
+  (`platform.ops_failure_reasons_exported`, `platform.ops_failure_companies_exported`), read in one
+  snapshot with the cards' own reads; codes, counts and shares, with each listed company's name and
+  address as the card shows them.
 
 Company export and deletion (Settings → Company data, ADR-055):
 

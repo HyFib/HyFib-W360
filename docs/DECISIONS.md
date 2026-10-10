@@ -14223,7 +14223,8 @@ Consequences: platform staff see when a reason began, grew or faded without quer
 Rows scaled to their own height compare a reason's months, not one reason's months with another's
 (the counts and shares do that). The months cover the counted days only, as the year does.
 
-Not built: failures by company over time, a CSV of the months, and weeks or days instead of months.
+Not built: failures by company over time (ADR-362), a CSV of the months (built since ADR-365), and
+weeks or days instead of months.
 
 ## ADR-361 Choosing the cart reminders, first or second, whose events a webhook endpoint receives (P5-09) (2026-10-10)
 
@@ -14292,7 +14293,7 @@ counts a day the two cards can differ by that day's failures. A company's page a
 year, so this table is the Usage tab's only.
 
 Not built: a company's rank changes over time, failures as a share of each company's sends (built
-since ADR-364), and a CSV of the table.
+since ADR-364), and a CSV of the table (built since ADR-365).
 
 ## ADR-363 Endpoint audit entries name a long list once, by its length and digest (P5-09) (2026-10-10)
 
@@ -14357,4 +14358,39 @@ says how few. The ranking stays by count, so a company with a high share and few
 the rest. A company whose deletion has started shows its failed sends but no sends and no share.
 
 Not built: a ranking by share (it needs a floor of sends below which a share means little, a product
-decision), the share of each of the rest's companies, and a CSV of the table.
+decision), the share of each of the rest's companies, and a CSV of the table (built since ADR-365).
+
+## ADR-365 The year's failed sends by reason and by company as CSV (P5-10) (2026-10-10)
+
+Context: the Usage tab's year of failed sends by reason (ADR-350, ADR-360) and by company (ADR-362,
+ADR-364) could be read on the page only: staff who wanted to keep a month's figures, compare them
+in a spreadsheet or hand them on had to copy the folded tables cell by cell, and ADR-360 and ADR-362
+left a CSV unbuilt. The console already exports its other lists as audited, formula-safe CSV
+(ADR-154, ADR-155, ADR-158).
+
+Decision:
+
+- **Two more lists:** `failure-reasons` and `failure-companies` join `OPS_EXPORT_LISTS`, so
+  `/platform/ops/export/<list>` serves them through `exportList` like the others: refused to anyone
+  but a platform administrator before any read, written to the platform audit log
+  (`platform.ops_failure_reasons_exported`, `platform.ops_failure_companies_exported`, with the rows
+  given) in the transaction that reads the rows, and formula-safe. They read the year with the
+  cards' own reads (`readFailureReasonYear` for every company, `readFailureCompanyYear`), in a
+  repeatable-read transaction, so the file's months add up to its years as the cards' do.
+- **What a line says:** a reason's name as the card gives it (the failure codes' words move into
+  the domain, `@w360/domain/failure-codes`, so the page and the file say the same), its code
+  ("None" for failures without one, empty for the rest), how many codes it holds, its failed sends
+  and share of the year's, then its failed sends in each month; a company's name and address (the
+  rest named by how many companies it holds), how many companies it holds, its failed sends and
+  share, its sends and the share of them failed (empty without one, ADR-364), then its failed sends
+  in each month and its sends in each month. Months are headed `2026-03`, a partial one with its
+  days (`2025-10 (22 days)`); shares are numbers from 0 to 1 to six places; every line ends with the
+  year's days counted, so a line read alone says what it covers.
+- **On the page:** each card's title gets "Download CSV", named after its card (`ListTitle`), so the
+  tab's three links are told apart.
+
+Consequences: the year's figures leave the console as a file the platform audit log accounts for;
+a company's name and address are in it, as in the Usage tab's CSV. The rest stays one line, as on
+the card.
+
+Not built: a company's own year as CSV from its page, and the days of the year one by one.

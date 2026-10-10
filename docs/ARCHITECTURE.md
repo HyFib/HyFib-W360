@@ -2907,7 +2907,11 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   which the tabs share), inserts `platform.ops_<list>_exported` (`opsExportAction`) into
   `ops.platform_audit_events` in that transaction and returns the list's CSV (`usageCsv` to
   `deadLettersCsv` in `platform/ops-model.ts`, formula-safe through `contacts/csv`); each tab links
-  to it as "Download CSV", named after its list where a tab has several (`ListTitle`).
+  to it as "Download CSV", named after its list where a tab has several (`ListTitle`). The Usage
+  tab's year of failed sends exports as `failure-reasons` and `failure-companies` (ADR-365:
+  `readFailureReasonYear` and `readFailureCompanyYear` in a repeatable-read transaction,
+  `failureReasonsCsv` and `failureCompaniesCsv`, the failure codes' words from
+  `@w360/domain/failure-codes`).
 - **Not built yet:** other alert channels, trends,
   quality updates from Meta's quality webhook, sweeps for the work of
   `channel.onboard`, `commerce.account` and `template.delete`, retrying several dead letters at

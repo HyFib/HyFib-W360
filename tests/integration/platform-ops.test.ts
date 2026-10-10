@@ -4701,7 +4701,7 @@ describe('failed sends by reason kept as days pass (ADR-350)', () => {
     expect(platform.uncounted).toBe(1);
   });
 
-  it('reads the year’s failed sends by company month by month, ranked over the whole year, ties by name, the rest together, from counted days only, with their sends (ADR-362, ADR-364)', async () => {
+  it('reads the year’s failed sends by company month by month, ranked over the whole year, ties by name, the rest together, from counted days only, with their sends, and exports it (ADR-362, ADR-364, ADR-365)', async () => {
     // The counts are the platform's: this test sets them itself.
     await fx.query('DELETE FROM ops.platform_failure_reason_days');
     await fx.query('DELETE FROM ops.platform_message_days');
@@ -4876,6 +4876,75 @@ describe('failed sends by reason kept as days pass (ADR-350)', () => {
     expect(year.sentByMonth[8]?.[monthOf(1)]).toBe(10);
     expect(year.sentByMonth[8]?.[monthOf(300)]).toBe(20);
     expect(year.byMonth[8]?.[monthOf(300)]).toBe(0);
+    // The year by company and by reason as CSV, each export in the platform audit log (ADR-365).
+    const csvLines = (body: string) => body.replace(/^\uFEFF/, '').split('\r\n');
+    const companiesFile = await ops().exportList(staff, 'failure-companies', 30);
+    expect(companiesFile.filename).toMatch(/^hyfib-failure-companies-\d{4}-\d{2}-\d{2}\.csv$/);
+    const companyLines = csvLines(companiesFile.body);
+    expect(companyLines[0]).toMatch(
+      /^Company,Address,Companies,Failed,Share of the failed,Sent,Share of its sends failed,.*,Days counted$/,
+    );
+    expect(companyLines[0]?.split(',')).toHaveLength(7 + 2 * months.length + 1);
+    expect(companyLines.slice(1, -1)).toHaveLength(9);
+    expect(companyLines.at(-1)).toBe('');
+    expect(companyLines[1]).toMatch(
+      new RegExp(`^Failing first,${slugs.get(first.tenant.id)},1,20,0\\.192308,400,0\\.05,`),
+    );
+    const firstCells = (companyLines[1] ?? '').split(',');
+    const failedIn = (daysAgo: number) => firstCells[7 + monthOf(daysAgo)];
+    const sentIn = (daysAgo: number) => firstCells[7 + months.length + monthOf(daysAgo)];
+    expect([
+      failedIn(365),
+      failedIn(1),
+      failedIn(300),
+      sentIn(365),
+      sentIn(1),
+      sentIn(300),
+    ]).toEqual(['5', '15', '0', '100', '250', '50']);
+    expect(firstCells.at(-1)).toBe('364');
+    // A company without sends left has no share; the rest is named by how many it holds.
+    expect(companyLines[2]).toMatch(
+      new RegExp(`^Failing second,${slugs.get(second.tenant.id)},1,16,0\\.153846,0,,`),
+    );
+    expect(companyLines[9]).toMatch(/^2 other companies,,2,6,0\.057692,70,0\.085714,/);
+    const reasonsFile = await ops().exportList(staff, 'failure-reasons', 30);
+    expect(reasonsFile.filename).toMatch(/^hyfib-failure-reasons-\d{4}-\d{2}-\d{2}\.csv$/);
+    const reasonLines = csvLines(reasonsFile.body);
+    expect(reasonLines[0]).toMatch(
+      /^Reason,Code,Codes,Failed,Share of the failed,.*,Days counted$/,
+    );
+    expect(reasonLines.slice(1, -1).map((line) => line.split(',').slice(0, 5))).toEqual([
+      ['Not described here', 'c01', '1', '84', '0.807692'],
+      ['Not described here', 'c03', '1', '14', '0.134615'],
+      ['Not described here', 'c02', '1', '6', '0.057692'],
+    ]);
+    expect(reasonLines[1]?.split(',').at(-1)).toBe('364');
+    const exported = await fx.query<{ action: string; metadata: Record<string, number> }>(
+      `SELECT action, metadata FROM ops.platform_audit_events
+        WHERE action IN ('platform.ops_failure_companies_exported',
+                         'platform.ops_failure_reasons_exported')
+          AND actor_user_id = $1
+        ORDER BY occurred_at, id`,
+      [staff.userId],
+    );
+    expect(exported).toEqual([
+      { action: 'platform.ops_failure_companies_exported', metadata: { rows: 9 } },
+      { action: 'platform.ops_failure_reasons_exported', metadata: { rows: 3 } },
+    ]);
+    // Someone who is not a platform administrator gets neither file nor entry.
+    const outsider = await createUser(fx.dbs, { twoFactor: true });
+    const outsiderActor: PlatformActor = {
+      userId: outsider.id,
+      role: 'platform_operator',
+      correlationId: uuidv7(),
+    };
+    await expectCode(ops().exportList(outsiderActor, 'failure-companies', 30), 'forbidden');
+    await expectCode(ops().exportList(outsiderActor, 'failure-reasons', 30), 'forbidden');
+    const [refused] = await fx.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM ops.platform_audit_events WHERE actor_user_id = $1`,
+      [outsider.id],
+    );
+    expect(refused?.n).toBe(0);
     // Nine companies or fewer are each listed: without the second of the rest, the ninth is.
     await fx.query('DELETE FROM ops.platform_failure_reason_days WHERE tenant_id = $1', [
       restTwo.tenant.id,

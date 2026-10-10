@@ -67,6 +67,8 @@ import {
   byHealth,
   deadLettersCsv,
   emailsCsv,
+  failureCompaniesCsv,
+  failureReasonsCsv,
   failuresCsv,
   healthCsv,
   newCompaniesCsv,
@@ -971,6 +973,15 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
         const rows = await recentDeadLetters(tx, now, OPS_LIST_ROWS.deadLetters.exported);
         return { counted: { rows: rows.length }, body: deadLettersCsv(rows) };
       }
+      case 'failure-reasons': {
+        // Every company's year, read as its card reads it (ADR-365).
+        const year = await readFailureReasonYear(tx, null);
+        return { counted: { rows: year.reasons.reasons.length }, body: failureReasonsCsv(year) };
+      }
+      case 'failure-companies': {
+        const year = await readFailureCompanyYear(tx);
+        return { counted: { rows: year.companies.length }, body: failureCompaniesCsv(year) };
+      }
     }
   }
 
@@ -1269,10 +1280,11 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
 
     /**
      * One of the console's lists as CSV: the Usage tab for a window (ADR-154), every company's
-     * health or the Signals tab (ADR-155), or a list of the Onboarding, Integrations or Queues tab
-     * (ADR-158). The export is written to the platform audit log (the list, its window and how many
-     * companies or rows) in the transaction that reads the rows, before the file is returned, so no
-     * file leaves without its entry.
+     * health or the Signals tab (ADR-155), a list of the Onboarding, Integrations or Queues tab
+     * (ADR-158), or the Usage tab's year of failed sends by reason or by company (ADR-365, read in
+     * one snapshot). The export is written to the platform audit log (the list, its window and how
+     * many companies or rows) in the transaction that reads the rows, before the file is returned,
+     * so no file leaves without its entry.
      */
     async exportList(
       actor: PlatformActor,
@@ -1280,26 +1292,34 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
       days: number,
     ): Promise<{ filename: string; body: string }> {
       const now = clock.now();
-      return platformDb.run(actor.userId, async (tx) => {
-        // Refused to anyone who is not a platform administrator before any list is read, as the
-        // definer functions refuse, whether or not the list's read goes through one (ADR-158).
-        const [admin] = await tx
-          .select({ userId: platformAdmins.userId })
-          .from(platformAdmins)
-          .where(eq(platformAdmins.userId, actor.userId));
-        if (!admin) throw forbidden('Only platform administrators can export the console’s lists.');
-        const file = await exportFile(tx, list, days, now);
-        await tx.insert(platformAuditEvents).values({
-          id: uuidv7(),
-          actorUserId: actor.userId,
-          action: opsExportAction(list),
-          result: 'success',
-          correlationId: actor.correlationId,
-          metadata:
-            file.window === undefined ? file.counted : { days: file.window, ...file.counted },
-        });
-        return { filename: opsCsvFilename(list, now, file.window), body: file.body };
-      });
+      return platformDb.run(
+        actor.userId,
+        async (tx) => {
+          // Refused to anyone who is not a platform administrator before any list is read, as the
+          // definer functions refuse, whether or not the list's read goes through one (ADR-158).
+          const [admin] = await tx
+            .select({ userId: platformAdmins.userId })
+            .from(platformAdmins)
+            .where(eq(platformAdmins.userId, actor.userId));
+          if (!admin)
+            throw forbidden('Only platform administrators can export the console’s lists.');
+          const file = await exportFile(tx, list, days, now);
+          await tx.insert(platformAuditEvents).values({
+            id: uuidv7(),
+            actorUserId: actor.userId,
+            action: opsExportAction(list),
+            result: 'success',
+            correlationId: actor.correlationId,
+            metadata:
+              file.window === undefined ? file.counted : { days: file.window, ...file.counted },
+          });
+          return { filename: opsCsvFilename(list, now, file.window), body: file.body };
+        },
+        // The year's failed sends are read in one snapshot, as their cards read them (ADR-365).
+        list === 'failure-reasons' || list === 'failure-companies'
+          ? { isolationLevel: 'repeatable read' }
+          : undefined,
+      );
     },
 
     /**

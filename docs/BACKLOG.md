@@ -1447,6 +1447,9 @@ verification, app review, Embedded Signup configuration).
   **[Each company's failed sends as a share of its sends built; its database tests run only in
   CI]** (ADR-364, migration 0285 changed before release: each listed company's sends of the same
   days, those cancelled left out, and the share of them failed, over the year and month by month).
+  **[The year's failed sends by reason and by company as CSV built; their database and browser
+  tests run only in CI]** (ADR-365, no migration: "Download CSV" on both cards, audited and
+  formula-safe as the console's other exports, a line per reason or company with its months).
   Remaining:
   other alert channels (several channels, a channel per alert, formats other than a JSON `text`
   member, such as Microsoft Teams' or PagerDuty's, and the owners' other notices, such as personal

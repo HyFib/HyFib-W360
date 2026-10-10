@@ -1,5 +1,49 @@
 # Progress
 
+## 2026-10-10 — The year's failed sends by reason and by company as CSV (P5-10, H-034, ADR-365)
+
+Status: **Implemented; its database and browser tests run in CI only.** The Usage tab's year of
+failed sends by reason (ADR-350, ADR-360) and by company (ADR-362, ADR-364) could be read on the
+page only; ADR-360 and ADR-362 left a CSV unbuilt.
+
+### Completed
+
+- **Domain:** `failure-reasons` and `failure-companies` join the console's export lists:
+  `exportList` refuses anyone but a platform administrator before any read, reads the year with the
+  cards' own reads in a repeatable-read transaction, writes `platform.ops_failure_reasons_exported`
+  or `platform.ops_failure_companies_exported` with the rows given, and returns the file.
+  `failureReasonsCsv` and `failureCompaniesCsv` write a line per reason or company in the card's
+  order: its name, code or address, counts and shares (numbers from 0 to 1 to six places), each
+  month's failed sends (and a company's sends), a partial month headed with its days, and the
+  year's days counted. The failure codes' words move to `@w360/domain/failure-codes`, which the web
+  re-exports, so the file names a reason as the card does.
+- **Web:** "Download CSV" on both cards, each named after its card (`ListTitle`).
+- **Tests:** unit (2 new: each file's lines, months, codes, shares, the rest, a company without a
+  share, formula safety, a one-day month; the list names, audit actions and file names updated);
+  integration (`platform-ops.test.ts`: both files from the seeded year, their lines, months and days
+  counted, an audit entry each with its rows, a non-administrator refused without an entry); e2e
+  (`platform-ops.spec.ts`: both links download their files). Written for CI; the integration and
+  e2e tests were not run here.
+- **Docs:** ADR-365 (and the "not built" notes of ADR-360, ADR-362 and ADR-364); ARCHITECTURE;
+  SECURITY; THREAT-MODEL T75; RUNBOOKS; BACKLOG P5-10; the feature matrix (H-034, status
+  unchanged).
+- **Mutation checks:** 13 deliberate regressions, all caught by the unit tests (a partial month
+  headed as a whole one, one day said as days, shares to two places, no share written as 0, the
+  days not counted counted, failures without a code given no code, a reason named by its code, one
+  other company said as companies, a month's failed sends for its sends, the share of the failed
+  for the share of its sends, its failed sends for its sends, the companies list left out, an
+  unknown code named by itself). The reads, the audit entries and the refusal run in the database
+  and are covered by the integration tests, which run in CI only.
+
+### Test commands and results (local, 2026-10-10)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 146 files, 1555 tests passed                                    |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+
 ## 2026-10-10 — Each company's failed sends as a share of its sends (P5-10, H-034, ADR-364)
 
 Status: **Implemented; its database tests run in CI only.** The Usage tab's failed sends by company

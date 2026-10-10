@@ -6,7 +6,9 @@
 
 import { CSV_BOM, csvLine } from '../contacts/csv';
 import type { QueueSnapshot } from '../jobs/queue';
+import { failureReasonLabel } from '../messaging/failure-codes';
 import { DEAD_LETTER_RETRY_BLOCK_TEXT, type DeadLetterRetryBlock } from './dead-letter-retries';
+import type { FailureCompanyYear, FailureReasonMonth, FailureReasonYear } from './failure-reasons';
 
 export const OPS_HEALTH_RULES = {
   /** Failure rates are judged only with at least this many outbound messages in 24 hours. */
@@ -310,6 +312,8 @@ export const OPS_EXPORT_LISTS = [
   'emails',
   'queues',
   'dead-letters',
+  'failure-reasons',
+  'failure-companies',
 ] as const;
 export type OpsExportList = (typeof OPS_EXPORT_LISTS)[number];
 
@@ -512,6 +516,96 @@ export function signalsCsv(rows: readonly CompanySignals[]): string {
       a.complaints,
       qualityRank(quality),
       flags.map((f) => f.detail).join('; '),
+    ]),
+  );
+}
+
+/** A month as the year's CSV heads it (ADR-365): `2026-03`, or `2025-10 (22 days)` when partial. */
+const csvMonth = (month: FailureReasonMonth) =>
+  month.partial
+    ? `${month.month} (${month.days} ${month.days === 1 ? 'day' : 'days'})`
+    : month.month;
+
+/** A share from 0 to 1 to six places, a number spreadsheets read; empty where there is none. */
+const csvShare = (share: number | null) => (share === null ? '' : Number(share.toFixed(6)));
+
+/** The year's days counted: those of its months, but those not counted yet. */
+const daysCounted = (months: readonly FailureReasonMonth[], uncounted: number) =>
+  months.reduce((days, month) => days + month.days, 0) - uncounted;
+
+/** The year's failed sends by reason in a CSV (ADR-365): the columns before the months. */
+export const FAILURE_REASONS_CSV_COLUMNS = [
+  'Reason',
+  'Code',
+  'Codes',
+  'Failed',
+  'Share of the failed',
+] as const;
+
+/**
+ * The year's failed sends by reason as CSV (ADR-365): a line per reason in the card's order, named
+ * as the card names it (`failureReasonLabel`), its code ("None" for failures without one, empty for
+ * the rest, which says how many codes it holds), its failed sends and share of the year's, then its
+ * failed sends in each month, oldest first, a partial month saying how many of its days the year
+ * holds, and the year's days counted, so a line read alone says what it covers.
+ */
+export function failureReasonsCsv(year: FailureReasonYear): string {
+  const counted = daysCounted(year.months, year.uncounted);
+  return csvFile(
+    [...FAILURE_REASONS_CSV_COLUMNS, ...year.months.map(csvMonth), 'Days counted'],
+    year.reasons.reasons.map((r, index) => [
+      failureReasonLabel(r.code, r.codes),
+      r.code === null ? '' : r.code === '' ? 'None' : r.code,
+      r.codes,
+      r.failed,
+      csvShare(r.share),
+      ...year.months.map((_, at) => year.byMonth[index]?.[at] ?? 0),
+      counted,
+    ]),
+  );
+}
+
+/** The year's failed sends by company in a CSV (ADR-365): the columns before the months. */
+export const FAILURE_COMPANIES_CSV_COLUMNS = [
+  'Company',
+  'Address',
+  'Companies',
+  'Failed',
+  'Share of the failed',
+  'Sent',
+  'Share of its sends failed',
+] as const;
+
+/**
+ * The year's failed sends by company as CSV (ADR-365): a line per company in the card's order, the
+ * rest last, named by how many companies it holds and with no address; each with its failed sends
+ * and share of the year's, its sends and the share of them failed (ADR-364, empty without one),
+ * then its failed sends in each month and its sends in each month, oldest first, and the year's
+ * days counted. Formula-safe, as every console CSV: a company name starting with `=`, `+`, `-` or
+ * `@` is neutralised.
+ */
+export function failureCompaniesCsv(year: FailureCompanyYear): string {
+  const counted = daysCounted(year.months, year.uncounted);
+  return csvFile(
+    [
+      ...FAILURE_COMPANIES_CSV_COLUMNS,
+      ...year.months.map((month) => `${csvMonth(month)} failed`),
+      ...year.months.map((month) => `${csvMonth(month)} sent`),
+      'Days counted',
+    ],
+    year.companies.map((c, index) => [
+      c.tenantId === null
+        ? `${c.companies} other ${c.companies === 1 ? 'company' : 'companies'}`
+        : c.name,
+      c.slug,
+      c.companies,
+      c.failed,
+      csvShare(c.share),
+      c.sent,
+      csvShare(c.failedShare),
+      ...year.months.map((_, at) => year.byMonth[index]?.[at] ?? 0),
+      ...year.months.map((_, at) => year.sentByMonth[index]?.[at] ?? 0),
+      counted,
     ]),
   );
 }
