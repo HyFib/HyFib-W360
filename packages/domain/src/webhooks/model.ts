@@ -194,7 +194,7 @@ export const WEBHOOK_EVENT_INFO: Record<WebhookEventType, { label: string; descr
     'store_order.message_skipped': {
       label: 'Order message skipped',
       description:
-        'A connected store’s message about an order (placed, cash on delivery confirmation, shipped, delivered or cancelled) was not sent: a test order, an event HyFib saw too late, or a check that failed when it was due, such as a customer who opted out or an order without a phone number.',
+        'A connected store’s message about an order (placed, cash on delivery confirmation, shipped, delivered or cancelled) was not sent: a test order, an event HyFib saw too late, an order placed message the cash on delivery confirmation replaced, or a check that failed when it was due, such as a customer who opted out or an order without a phone number.',
     },
     'campaign.status_changed': {
       label: 'Campaign status',

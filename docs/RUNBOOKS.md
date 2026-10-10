@@ -3408,7 +3408,9 @@ recorded, so there is nothing to replay for messages skipped before the endpoint
 Removing the store deletes its copy of the orders with their messages: a delivery not yet made
 then fails as `event_gone`, and a replay fails the same way. An order the store deleted stays in
 the copy and is sent with `storeOrder.deletedAt`. The body holds no contact or customer details:
-`storeOrder.externalId` finds the order in the store.
+`storeOrder.externalId` finds the order in the store. A receiver that calls customers on skipped
+messages should leave `cash_on_delivery` alone: the order placed message gave way to the cash on
+delivery confirmation, which the customer did get (or which sends its own event).
 
 **A receiver misses the events of a member's conversations (ADR-181).** An endpoint can take the
 message and conversation events of the conversations assigned to chosen members only. The endpoints

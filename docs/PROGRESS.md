@@ -36,6 +36,18 @@ the trigger function's PL/pgSQL body included.
   integration tests were not run here.
 - **Docs:** ADR-351; ARCHITECTURE; SECURITY; THREAT-MODEL T310; DEPLOYMENT (0270, 0271); RUNBOOKS;
   BACKLOG P5-09; feature matrix W-138 and H-014.
+- **Review fixes:** the event's description, the body's reason and the API document say that
+  `cash_on_delivery` marks an order placed message the cash on delivery confirmation replaced, so
+  a receiver acting on skipped messages does not call every customer asked to confirm; the
+  integration tests also cover a cash on delivery order without a number (its replaced order
+  placed message and its skipped confirmation, one event each, and a message skipped again
+  capturing nothing) and the eight orders an automation could not take, each captured once with
+  its reason.
+- **Mutation checks:** 22/22 deliberate regressions caught on the unit-tested parts (the event,
+  reason or time not as captured, each missing part described, a gone message or an id that is not
+  one read, the order's times dropped, the store not as read, any event, reason or time accepted, a
+  contact in the body, the event listed elsewhere, labelled otherwise or made one of a number, a cart
+  reminder among the order events, a reason left out, another lateness, the number filter's text).
 
 ### Test commands and results (local, 2026-10-10)
 

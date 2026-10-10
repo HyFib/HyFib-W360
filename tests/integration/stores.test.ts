@@ -2056,6 +2056,80 @@ describe('Order messages', () => {
     expect(hookBodiesAt(confirmationsHere.path)).toEqual([
       expect.objectContaining({ id: events[1]!.id, type: 'store_order.cod_answered' }),
     ]);
+
+    // Skipped order messages (ADR-351): an order paid on delivery records its order placed message
+    // skipped, the confirmation replacing it, and a confirmation without a number HyFib can message
+    // is skipped when due; each sends its event once.
+    const skips = await addHook(owner, ['store_order.message_skipped']);
+    shopify.upsertOrder(shop, {
+      id: '5102',
+      name: '#2002',
+      phone: null,
+      shippingAddress: null,
+      paymentGatewayNames: ['Cash on Delivery (COD)'],
+      displayFinancialStatus: 'PENDING',
+      total: { amount: '899.00', currencyCode: 'INR' },
+    });
+    await orderSignal(shop, '5102', 'orders/create');
+    await drain(c, storeId);
+    const unreachable = (await messageRows(storeId)).filter((r) => r.external_id === '5102');
+    expect(unreachable.map((r) => [r.event, r.state, r.skip_reason])).toEqual([
+      ['cod_confirmation', 'pending', null],
+      ['order_placed', 'skipped', 'cash_on_delivery'],
+    ]);
+    const [unconfirmable, replaced] = unreachable;
+    expect(await processStoreMessage(messageDeps(), scopeOf(c), unconfirmable!.id)).toEqual({
+      outcome: 'skipped',
+      reason: 'no_phone',
+    });
+    // No code skips a skipped message again; a write that does (here directly) captures nothing.
+    await fx.query(
+      `UPDATE app.commerce_store_messages SET state = 'skipped', skip_reason = 'rule_disabled'
+        WHERE id = $1`,
+      [replaced!.id],
+    );
+    const skippedEvents = await fx.query<{
+      id: string;
+      status: string;
+      detail: Record<string, unknown>;
+    }>(
+      `SELECT id, status, detail FROM app.webhook_events
+        WHERE tenant_id = $1 AND type = 'store_order.message_skipped' ORDER BY occurred_at, id`,
+      [c.tenant.id],
+    );
+    expect(
+      skippedEvents.map((e) => [e.status, e.detail.skipReason, e.detail.storeMessageId]),
+    ).toEqual([
+      ['order_placed', 'cash_on_delivery', replaced!.id],
+      ['cod_confirmation', 'no_phone', unconfirmable!.id],
+    ]);
+    await deliverHooks(c);
+    const skipBodies = hookBodiesAt(skips.path);
+    expect(skipBodies).toHaveLength(2);
+    expect(skipBodies).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: skippedEvents[0]!.id,
+          data: expect.objectContaining({
+            orderMessage: expect.objectContaining({
+              event: 'order_placed',
+              skipReason: 'cash_on_delivery',
+            }),
+            storeOrder: expect.objectContaining({ externalId: '5102', name: '#2002' }),
+          }),
+        }),
+        expect.objectContaining({
+          id: skippedEvents[1]!.id,
+          data: expect.objectContaining({
+            orderMessage: expect.objectContaining({
+              event: 'cod_confirmation',
+              skipReason: 'no_phone',
+            }),
+            storeOrder: expect.objectContaining({ externalId: '5102', name: '#2002' }),
+          }),
+        }),
+      ]),
+    );
   });
 
   it('sends nothing about the past, and skips test orders, late events and customers who cannot be messaged', async () => {
@@ -4198,6 +4272,8 @@ describe('Store events in automations', () => {
       orderFlow(template.id),
     );
     await automationRule(owner, c, storeId, 'order_placed', flow.id);
+    // The order system learns of each order the automation could not take (ADR-351).
+    await addHook(owner, ['store_order.message_skipped']);
     const svc = automationService();
     const skipOf = async (id: string, phone: string) => {
       await placeOrder(c, shop, storeId, id, phone);
@@ -4337,6 +4413,28 @@ describe('Store events in automations', () => {
       outcome: 'skipped',
       reason: 'automation_unavailable',
     });
+
+    // Each skipped order sent its event with the reason, in order; the runs started sent none.
+    expect(
+      await fx.query(
+        `SELECT o.external_id, e.status, e.detail ->> 'skipReason' AS reason
+           FROM app.webhook_events e
+           JOIN app.commerce_store_messages sm ON sm.id = (e.detail ->> 'storeMessageId')::uuid
+           JOIN app.commerce_store_orders o ON o.id = sm.order_id
+          WHERE e.tenant_id = $1 AND e.type = 'store_order.message_skipped'
+          ORDER BY e.occurred_at, e.id`,
+        [c.tenant.id],
+      ),
+    ).toEqual([
+      { external_id: '7101', status: 'order_placed', reason: 'automation_unavailable' },
+      { external_id: '7103', status: 'order_placed', reason: 'automation_busy' },
+      { external_id: '7104', status: 'order_placed', reason: 'conversation_assigned' },
+      { external_id: '7105', status: 'order_placed', reason: 'suppressed' },
+      { external_id: '7106', status: 'order_placed', reason: 'opted_out' },
+      { external_id: '7108', status: 'order_placed', reason: 'automation_limit' },
+      { external_id: '7110', status: 'order_placed', reason: 'channel_unavailable' },
+      { external_id: '7109', status: 'order_placed', reason: 'automation_unavailable' },
+    ]);
   });
 
   it('checks each template again when its step runs, waits for the campaign lock, and stops once the conversation is resolved later', async () => {

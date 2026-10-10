@@ -7511,7 +7511,7 @@ describe('the event of a skipped store order message (ADR-351)', () => {
     expect(WEBHOOK_EVENT_INFO['store_order.message_skipped']).toEqual({
       label: 'Order message skipped',
       description:
-        'A connected store’s message about an order (placed, cash on delivery confirmation, shipped, delivered or cancelled) was not sent: a test order, an event HyFib saw too late, or a check that failed when it was due, such as a customer who opted out or an order without a phone number.',
+        'A connected store’s message about an order (placed, cash on delivery confirmation, shipped, delivered or cancelled) was not sent: a test order, an event HyFib saw too late, an order placed message the cash on delivery confirmation replaced, or a check that failed when it was due, such as a customer who opted out or an order without a phone number.',
     });
     expect(WEBHOOK_EVENT_KEYS.indexOf('store_order.message_skipped')).toBe(
       WEBHOOK_EVENT_KEYS.indexOf('store_order.cod_answered') + 1,
@@ -7679,6 +7679,7 @@ describe('the event of a skipped store order message (ADR-351)', () => {
       'more than 48 hours after it happened',
       'a message sent, or waiting for the store’s sending hours, sends nothing',
       'cart reminders, which are about checkouts, send nothing either',
+      'A skipReason of cash_on_delivery marks an order placed message that the cash on delivery confirmation replaced: the customer was asked to confirm the order instead',
       'fails as event_gone',
     ]) {
       expect(described).toContain(words);

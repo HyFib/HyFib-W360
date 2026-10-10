@@ -13807,7 +13807,11 @@ Decision:
 - **Gone:** a message is deleted with its order or its store, so a delivery not yet made then fails
   as `event_gone`.
 - **Reasons:** the body's `skipReason` is one of the reasons Settings → Stores explains; the
-  schema lists them all, and those of cart reminders never appear.
+  schema lists them all, and those of cart reminders never appear. `cash_on_delivery` marks an
+  order placed message that the order's cash on delivery confirmation replaced: the customer was
+  asked to confirm instead, and the confirmation sends its own event if it is skipped too, so a
+  receiver acting on skipped messages leaves that reason alone (the event's description and the
+  API document say so).
 
 Consequences: an order system can act on a confirmation that will not be answered (call the
 customer, confirm by other means) and see why each order message was not sent. A store that leaves
