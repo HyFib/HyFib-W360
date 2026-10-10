@@ -14,6 +14,7 @@ import {
   WEBHOOK_PAYMENT_LINK_STATUS_LABELS,
   WEBHOOK_COD_ANSWER_LABELS,
   WEBHOOK_ORDER_MESSAGE_EVENT_LABELS,
+  STORE_MESSAGE_EVENT_INFO,
   WEBHOOK_RUN_STEP_OUTCOME_LABELS,
   WEBHOOK_RUN_STEP_NODE_TYPE_LABELS,
   WEBHOOK_DEAL_STATUS_LABELS,
@@ -293,6 +294,12 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
                       <p className="text-xs break-all text-muted-foreground">
                         Order message skip reasons sent:{' '}
                         <span className="font-mono">{e.orderMessageSkipReasons.join(', ')}</span>
+                      </p>
+                    ) : null}
+                    {e.cartReminders ? (
+                      <p className="text-xs text-muted-foreground">
+                        Cart reminders whose events are sent:{' '}
+                        {e.cartReminders.map((r) => STORE_MESSAGE_EVENT_INFO[r].label).join(', ')}
                       </p>
                     ) : null}
                     {e.cartReminderSkipReasons ? (

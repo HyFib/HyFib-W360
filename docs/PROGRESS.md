@@ -1,5 +1,147 @@
 # Progress
 
+## 2026-10-10 — Cart reminder filter for cart reminder webhook events (P5-09, H-014, ADR-361)
+
+Status: **Implemented; its database tests run in CI only.** `store_checkout.reminder_skipped` and
+`store_checkout.reminder_sent` (ADR-355) went to an endpoint for both of a checkout's cart
+reminders, so a receiver that steps in only once the second reminder has gone out or was not sent
+had to tell the reminders apart itself. The local PostgreSQL is unavailable, so migration 0284 and
+the integration tests below were written but not run here; the migration passed the pglast parse
+check (syntax only), its PL/pgSQL body included.
+
+### Completed
+
+- **Database:** migration 0284: `cart_reminders` on `app.webhook_endpoints` (1 or 2 of
+  `cart_reminder` and `cart_second_reminder`, no null entry, one dimension, only with either cart
+  reminder event), its check validated at once and the runtime role's column update grant;
+  `app.capture_webhook_event` replaced with the same signature, 0278's with one condition more where
+  it decides whether an endpoint takes the event and where it writes the deliveries: a reminder's
+  event goes only to endpoints whose list is null or holds its reminder (the event's status).
+- **Domain:** `WEBHOOK_CART_REMINDER_TYPES` and `webhookTakesCartReminders`; the schema, the keep
+  rule (kept with either event, cleared with neither) and the refusals; the settings service and
+  the API take, keep, clear, audit and answer `cartReminders`; the OpenAPI document describes the
+  field and the two events' narrowing; the company data export names the column.
+- **Web:** Settings → Webhooks ticks the reminders under Cart reminders (shown while the endpoint
+  takes either event, in the words of a store's Messages page); the endpoints list names those
+  chosen.
+- **Tests:** unit (3 new: the schema and its refusals, with the list equal to a store's cart
+  events; the list kept with either event and cleared with neither, apart from the skip reasons;
+  the API schemas, the OpenAPI entries and the two events' descriptions; updated: the audit's
+  largest entry, now 6,793 bytes with the 62nd list, the update body's fields, the empty change's
+  message, the largest stored answer and the two events' older descriptions); integration
+  (`webhooks.test.ts`: the service's refusals, keeping with either event and clearing with neither,
+  the audit, the database checks and the grant; `api-webhook-endpoints.test.ts`: the same through
+  the API, a list alone a change, and the whole endpoints with the new null field;
+  `stores.test.ts`: an endpoint taking the second reminder alone receives its send and its skip and
+  none of the first's, and one taking the first reminder's skips of two reasons receives only the
+  skip both lists hold). Written for CI; the integration tests were not run here. No e2e test of
+  the Settings field.
+- **Docs:** ADR-361; ARCHITECTURE; SECURITY; THREAT-MODEL T320; DEPLOYMENT (0284); RUNBOOKS (the
+  ADR-355 entry and a new one); BACKLOG P5-09; feature matrix W-138, W-139 and H-014.
+- **Mutation checks:** 19 deliberate regressions. The unit tests catch 14: sent reminders not a
+  cart reminder event, both events required, the list kept as given, an empty list or a reminder
+  three times taken, the list kept with the skipped event only, null keeping the old list, the
+  refusal's text, the API refusing a sent reminder's list, a list alone not a change, the change's
+  and the field's descriptions, the answer's schema without its values, and the sent event's
+  description silent on the reminders. The other five run only through the services and the
+  database (the settings refusal and audits, the API's answer and audit, the export), covered by
+  the integration tests, which run in CI only.
+- **Review fixes:** an independent review found nothing that would fail CI and no correctness or
+  security bug, and these, fixed:
+  - **LOW:** no test reached the capture's new condition where it decides whether any endpoint
+    takes a reminder's event, since the cart reminders test's first endpoint takes every reminder.
+    A test in `webhooks.test.ts` now captures the first and second reminders' skips and sends as
+    their trigger does, with endpoints taking the second alone: the first's write no event, and the
+    second's go to each endpoint whose reminder and reason lists hold them.
+  - **LOW:** the API field said the stores, the skip reasons and the numbers all narrow a
+    reminder's event; the skip reasons narrow a skipped one only, and the numbers a sent one.
+  - Not changed: the feature matrix keeps "locally verified" on its rows, as for the earlier
+    webhook filters, whose rows say their database tests run in CI only.
+
+### Test commands and results (local, 2026-10-10)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 146 files, 1548 tests passed                                    |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+
+## 2026-10-10 — The year's failed sends by reason, month by month (P5-10, H-034, ADR-360)
+
+Status: **Implemented; its database tests run in CI only.** The Usage tab and a company's platform
+page listed the year's failed sends by reason (ADR-350) without saying when they happened, so a
+reason that began in the spring or faded since read the same as one there all year. The local
+PostgreSQL is unavailable, so migration 0283 and the integration tests below were written but not
+run here; the migration passed the pglast parse check (syntax only), its PL/pgSQL body included.
+
+### Completed
+
+- **Database:** migration 0283: `ops.platform_ops_failure_reason_months(p_tenant_id)`, the year's
+  rows (counted days, companies not deleted, every company's or one) by UTC calendar month and code,
+  ranked as the year ranks them over the whole year, the rest together; for platform administrators
+  only (`W3403`), owned by the definer role, executable by the platform role alone.
+- **Domain:** `readFailureReasonYear` reads the months and the transaction's today in the year's
+  snapshot; `failureReasonYearMonths` spans the calendar months of the 365 days (the first and last
+  partial unless the year starts on a 1st or today is one); `failureReasonsByMonth` places each row
+  in its reason's month and refuses a code or month the year does not list; `monthBarHeights` and
+  `chartMonthLabel` in `platform/ops-chart.ts`.
+- **Web:** the year's tables on the Usage tab and a company's page draw each reason's months in a
+  "Month by month" column: a bar a month in the failed sends' colour, each reason to its own height,
+  the partial months in outline, each month's count when pointed at, one sentence for a screen
+  reader, a note saying which months the bars run from and to, and a folded table of every month's
+  count.
+- **Tests:** unit (5 new: the year's months, partial and whole and with a leap day, a malformed day
+  refused; each row placed in its reason's month, rows of one month added, an unknown code or month
+  refused; the month names; the bar heights; three updated: the reader's four statements, the
+  platform's read and an unanswered today); integration (`platform-ops.test.ts`: the company's year with its months adding up to
+  each reason, a new test of the ranking over the whole year with ten codes and the rest together,
+  a day not counted and a deleted company left out, the platform's and a company's read; the
+  refusals with the months function; `tenant-isolation.test.ts`: its grants). Written for CI; the
+  integration tests were not run here. No e2e test of the bars (the e2e run has no failed sends on
+  days already counted).
+- **Docs:** ADR-360; ARCHITECTURE; SECURITY; THREAT-MODEL T319; DEPLOYMENT (0283); RUNBOOKS (the
+  ADR-350 entry); BACKLOG P5-10; feature matrix H-034.
+- **Mutation checks:** 12 deliberate regressions, all caught by the unit tests (a day short of the
+  year, every month partial, the last month whole, months named a month early, an unknown month or
+  code passed over, rows of one month replaced, any text taken for today, no today answered passed
+  over, every company's months read for one, a small month drawn without a bar, the month named year
+  first). The function's ranking and filters run in the database and are covered by the integration
+  tests, which run in CI only.
+- **Review fixes:** an independent review found nothing that would fail CI and no correctness or
+  security bug, and these, all fixed:
+  - **MEDIUM:** a month's count could be read only by pointing at it with a mouse or with a screen
+    reader, not from a keyboard or a touch screen. A folded table under the year's table ("Month by
+    month as a table") now gives every month's count, as the daily charts' does (ADR-333).
+  - The partial months, drawn at half opacity, were faint; they are drawn in outline now, their edge
+    in the full colour.
+  - **LOW:** the ADR said there are 13 months, the first and last partial, whenever the year starts
+    after a 1st, and the runbook that the first and last are always partial; the first is whole
+    when the year starts on a 1st, the last when today is one, and there are 12 months when either
+    is.
+  - **LOW:** DEPLOYMENT's note on 0283 sat among 0269's and 0270's; it follows 0282's now.
+  - 0283 truncates the month from the day as a timestamp without time zone, so the session's time
+    zone never enters (the review's optional point; 0283 has not been applied anywhere yet).
+- **Second review fixes:** a review of those fixes found nothing that would fail CI and no
+  correctness or security bug, and these, all fixed:
+  - **MEDIUM:** the folded table named each row by its reason alone, so two codes HyFib does not
+    describe both read "Not described here". It has a Code column now, as the table above, and each
+    reason's bars are named with its code for a screen reader.
+  - **LOW:** the folded table's accessible name held the table's own ("…, month by month"), so a
+    test finding the table by its name in part would find both. Each page names it apart now
+    ("Failed sends by reason and month, the last 12 months").
+  - **LOW:** a partial month's bar of 2 or 3 pixels was all outline, and read as a whole month's.
+    A partial month with a failed send is at least 4 pixels high now.
+
+### Test commands and results (local, 2026-10-10)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 146 files, 1545 tests passed                                    |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+
 ## 2026-10-10 — Skip reason filter for skipped campaign recipients (P5-09, H-014, ADR-359)
 
 Status: **Implemented; its database tests run in CI only.** `campaign.recipient_skipped` (ADR-358)

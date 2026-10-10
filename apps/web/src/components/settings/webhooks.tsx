@@ -32,6 +32,7 @@ import {
   WEBHOOK_ORDER_MESSAGE_EVENT_LABELS,
   WEBHOOK_ORDER_MESSAGE_EVENTS,
   WEBHOOK_ORDER_MESSAGE_SKIP_REASONS,
+  WEBHOOK_CART_REMINDERS,
   WEBHOOK_CART_REMINDER_SKIP_REASONS,
   WEBHOOK_CAMPAIGN_SKIP_REASONS,
   WEBHOOK_PAYMENT_LINK_STATUSES,
@@ -70,6 +71,7 @@ import {
   webhookStoreText,
   webhookTakesStoreEvents,
   webhookTakesOrderMessages,
+  webhookTakesCartReminders,
   webhookChannelText,
   webhookContactFieldConditionText,
   webhookContactFieldKind,
@@ -111,6 +113,7 @@ import {
   type WebhookCodAnswer,
   type WebhookOrderMessageEvent,
   type WebhookOrderMessageSkipReason,
+  type WebhookCartReminder,
   type WebhookCartReminderSkipReason,
   type WebhookCampaignSkipReason,
   type WebhookStoreChoice,
@@ -158,7 +161,10 @@ import {
   type WebhookTemplateChoice,
   type WebhookTemplateStatus,
 } from '@w360/domain/webhook-model';
-import { STORE_MESSAGE_SKIP_REASONS } from '@w360/domain/store-messages-model';
+import {
+  STORE_MESSAGE_EVENT_INFO,
+  STORE_MESSAGE_SKIP_REASONS,
+} from '@w360/domain/store-messages-model';
 import { SKIP_REASONS as CAMPAIGN_SKIP_REASON_LABELS } from '@/lib/campaign-labels';
 import {
   createWebhookEndpointAction,
@@ -608,6 +614,53 @@ function OrderMessageChoices({
             <Label htmlFor={id} className="font-normal">
               {WEBHOOK_ORDER_MESSAGE_EVENT_LABELS[event]}{' '}
               <span className="font-mono text-xs">({event})</span>
+            </Label>
+          </div>
+        );
+      })}
+    </fieldset>
+  );
+}
+
+/**
+ * The cart reminders whose skips and sends an endpoint takes as `store_checkout.reminder_skipped`
+ * and `store_checkout.reminder_sent` (ADR-361), shown while it takes either: both unless one is
+ * unticked, the first then the second, as a store's Messages page names them.
+ */
+function CartReminderChoices({
+  prefix,
+  chosen,
+  onChange,
+}: {
+  prefix: string;
+  chosen: WebhookCartReminder[];
+  onChange: (next: WebhookCartReminder[]) => void;
+}) {
+  return (
+    <fieldset className="grid gap-1">
+      <legend className="mb-1 text-sm font-medium">Cart reminders</legend>
+      <p className="mb-1 text-xs text-muted-foreground">
+        The cart reminder events the endpoint takes are sent for the reminders ticked (both unless
+        you untick one).
+      </p>
+      {WEBHOOK_CART_REMINDERS.map((reminder) => {
+        const id = `${prefix}-cart-reminder-${reminder}`;
+        return (
+          <div key={reminder} className="flex items-center gap-2">
+            <Checkbox
+              id={id}
+              checked={chosen.includes(reminder)}
+              onChange={(e) =>
+                onChange(
+                  e.target.checked
+                    ? WEBHOOK_CART_REMINDERS.filter((r) => r === reminder || chosen.includes(r))
+                    : chosen.filter((r) => r !== reminder),
+                )
+              }
+            />
+            <Label htmlFor={id} className="font-normal">
+              {STORE_MESSAGE_EVENT_INFO[reminder].label}{' '}
+              <span className="font-mono text-xs">({reminder})</span>
             </Label>
           </div>
         );
@@ -3674,6 +3727,8 @@ export function WebhookEndpointForm({
     orderMessageEvents: WebhookOrderMessageEvent[] | null;
     /** The reasons whose order message skips it takes (ADR-354); null for every reason. */
     orderMessageSkipReasons: WebhookOrderMessageSkipReason[] | null;
+    /** The cart reminders whose skips and sends it takes (ADR-361); null for both. */
+    cartReminders: WebhookCartReminder[] | null;
     /** The reasons whose cart reminder skips it takes (ADR-356); null for every reason. */
     cartReminderSkipReasons: WebhookCartReminderSkipReason[] | null;
     /** The reasons whose campaign recipient skips it takes (ADR-359); null for every reason. */
@@ -3834,6 +3889,9 @@ export function WebhookEndpointForm({
   );
   const [skipReasons, setSkipReasons] = useState<WebhookOrderMessageSkipReason[]>(
     endpoint?.orderMessageSkipReasons ?? [...WEBHOOK_ORDER_MESSAGE_SKIP_REASONS],
+  );
+  const [cartReminders, setCartReminders] = useState<WebhookCartReminder[]>(
+    endpoint?.cartReminders ?? [...WEBHOOK_CART_REMINDERS],
   );
   const [cartSkipReasons, setCartSkipReasons] = useState<WebhookCartReminderSkipReason[]>(
     endpoint?.cartReminderSkipReasons ?? [...WEBHOOK_CART_REMINDER_SKIP_REASONS],
@@ -4162,6 +4220,12 @@ export function WebhookEndpointForm({
           skipReasons.length < WEBHOOK_ORDER_MESSAGE_SKIP_REASONS.length
             ? skipReasons
             : null;
+        // Both cart reminders ticked take both reminders' skips and sends (null, ADR-361).
+        const chosenCartReminders =
+          webhookTakesCartReminders(eventTypes) &&
+          cartReminders.length < WEBHOOK_CART_REMINDERS.length
+            ? cartReminders
+            : null;
         // Every cart reminder reason ticked takes every reason's skips (null, ADR-356).
         const chosenCartSkipReasons =
           eventTypes.includes('store_checkout.reminder_skipped') &&
@@ -4464,6 +4528,7 @@ export function WebhookEndpointForm({
           storeIds: chosenStores,
           orderMessageEvents: chosenOrderMessageEvents,
           orderMessageSkipReasons: chosenSkipReasons,
+          cartReminders: chosenCartReminders,
           cartReminderSkipReasons: chosenCartSkipReasons,
           campaignSkipReasons: chosenCampaignSkipReasons,
           runStepOutcomes: chosenRunStepOutcomes,
@@ -4567,6 +4632,7 @@ export function WebhookEndpointForm({
               setStoreIds([]);
               setOrderMessageEvents([...WEBHOOK_ORDER_MESSAGE_EVENTS]);
               setSkipReasons([...WEBHOOK_ORDER_MESSAGE_SKIP_REASONS]);
+              setCartReminders([...WEBHOOK_CART_REMINDERS]);
               setCartSkipReasons([...WEBHOOK_CART_REMINDER_SKIP_REASONS]);
               setCampaignSkipReasons([...WEBHOOK_CAMPAIGN_SKIP_REASONS]);
               setRunStepOutcomes([...WEBHOOK_RUN_STEP_OUTCOMES]);
@@ -4850,6 +4916,9 @@ export function WebhookEndpointForm({
           chosen={orderMessageEvents}
           onChange={setOrderMessageEvents}
         />
+      ) : null}
+      {webhookTakesCartReminders(eventTypes) ? (
+        <CartReminderChoices prefix={prefix} chosen={cartReminders} onChange={setCartReminders} />
       ) : null}
       {webhookTakesTeamEvents(eventTypes) ? (
         <TeamChoices

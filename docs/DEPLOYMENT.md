@@ -1509,6 +1509,19 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    changes keep the list, and its API refuses `campaignSkipReasons` (422) and leaves it out of the
    endpoints it answers.
 
+   Migration 0283 (ADR-360) creates `ops.platform_ops_failure_reason_months` for the platform role
+   (owned by the definer role, granted before it is handed over); no table changes. Web servers of
+   this release need it; web servers from before it never call it, and workers do not.
+
+   Migration 0284 (ADR-361) adds `cart_reminders` to `app.webhook_endpoints`, its check validated
+   by reading the table, and replaces `app.capture_webhook_event` with the same signature (keeping
+   0278's filters); every endpoint starts without the list. Web servers of this release need it, as
+   their reads of endpoints name the column; workers do not read it. Web servers from before it
+   neither show nor change the column: until the web rollout ends, an old server's change that
+   drops both cart reminder events from an endpoint with a list fails on the check, its other
+   changes keep the list, and its API refuses `cartReminders` (422) and leaves it out of the
+   endpoints it answers.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

@@ -191,6 +191,7 @@ import {
   WEBHOOK_STORES_NEED_THE_EVENT,
   WEBHOOK_ORDER_MESSAGES_NEED_THE_EVENT,
   WEBHOOK_ORDER_MESSAGE_SKIP_REASONS_NEED_THE_EVENT,
+  WEBHOOK_CART_REMINDERS_NEED_THE_EVENT,
   WEBHOOK_CART_REMINDER_SKIP_REASONS_NEED_THE_EVENT,
   WEBHOOK_CAMPAIGN_SKIP_REASONS_NEED_THE_EVENT,
   WEBHOOK_RUN_STEP_NODE_TYPES_NEED_THE_EVENT,
@@ -222,6 +223,7 @@ import {
   WEBHOOK_COD_ANSWERS,
   WEBHOOK_ORDER_MESSAGE_EVENTS,
   WEBHOOK_ORDER_MESSAGE_SKIP_REASONS,
+  WEBHOOK_CART_REMINDERS,
   WEBHOOK_CART_REMINDER_SKIP_REASONS,
   WEBHOOK_CAMPAIGN_SKIP_REASONS,
   WEBHOOK_RUN_STEP_NODE_TYPES,
@@ -1496,6 +1498,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'campaignSkipReasons',
       'campaignStatuses',
       'cartReminderSkipReasons',
+      'cartReminders',
       'channelIds',
       'codAnswers',
       'consentChanges',
@@ -3657,7 +3660,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       storeIds: [shop],
     });
     expect(apiUpdateWebhookEndpointSchema.safeParse({}).error?.issues[0]?.message).toContain(
-      'the templates, the cash on delivery answers, the stores of store events, the order messages whose skips and sends are sent, the skip reasons of skipped order messages, the skip reasons of skipped cart reminders, the skip reasons of skipped campaign recipients, the campaigns,',
+      'the templates, the cash on delivery answers, the stores of store events, the order messages whose skips and sends are sent, the skip reasons of skipped order messages, the cart reminders whose skips and sends are sent, the skip reasons of skipped cart reminders, the skip reasons of skipped campaign recipients, the campaigns,',
     );
     const doc = buildOpenApiDocument('https://app.example.com/api/v1');
     const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
@@ -3926,6 +3929,97 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       .properties;
     expect(JSON.stringify(changed.campaignSkipReasons)).toContain(
       'unless the events no longer include campaign.recipient_skipped, which clears them',
+    );
+  });
+
+  it('take cart reminders only with a cart reminder event, and a list of them alone is a change (ADR-361)', () => {
+    const base = {
+      url: 'https://hooks.example.com/w360',
+      events: ['store_checkout.reminder_skipped'],
+    };
+    // The first then the second, each once.
+    expect(
+      apiCreateWebhookEndpointSchema.parse({
+        ...base,
+        cartReminders: ['cart_second_reminder', 'cart_reminder'],
+      }).cartReminders,
+    ).toEqual(['cart_reminder', 'cart_second_reminder']);
+    expect(
+      apiCreateWebhookEndpointSchema.parse({
+        ...base,
+        cartReminders: ['cart_reminder', 'cart_reminder'],
+      }).cartReminders,
+    ).toEqual(['cart_reminder']);
+    // Either reminder event takes the list, with or without the other.
+    expect(
+      apiCreateWebhookEndpointSchema.parse({
+        ...base,
+        events: ['store_checkout.reminder_sent'],
+        cartReminders: ['cart_second_reminder'],
+      }).cartReminders,
+    ).toEqual(['cart_second_reminder']);
+    // Order messages and cash on delivery answers are a store's events of no cart reminder.
+    for (const events of [
+      ['store_order.message_skipped'],
+      ['store_order.message_sent'],
+      ['store_order.cod_answered'],
+      ['message.status'],
+    ]) {
+      expect(
+        apiCreateWebhookEndpointSchema
+          .safeParse({ ...base, events, cartReminders: ['cart_reminder'] })
+          .error?.issues.map((i) => [i.path.join('.'), i.message]),
+        events.join(),
+      ).toEqual([['cartReminders', WEBHOOK_CART_REMINDERS_NEED_THE_EVENT]]);
+    }
+    for (const body of [
+      { ...base, cartReminders: [] },
+      { ...base, cartReminders: ['order_placed'] },
+      { ...base, cartReminders: ['cart_third_reminder'] },
+      { ...base, cartReminders: ['cart_reminder', 'cart_second_reminder', 'cart_reminder'] },
+      { ...base, cartReminders: 'cart_reminder' },
+    ]) {
+      expect(apiCreateWebhookEndpointSchema.safeParse(body).success, JSON.stringify(body)).toBe(
+        false,
+      );
+    }
+    expect(apiUpdateWebhookEndpointSchema.parse({ cartReminders: ['cart_reminder'] })).toEqual({
+      cartReminders: ['cart_reminder'],
+    });
+    expect(apiUpdateWebhookEndpointSchema.parse({ cartReminders: null })).toEqual({
+      cartReminders: null,
+    });
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas;
+    const answered = schemas.WebhookEndpoint as {
+      properties: Record<string, { anyOf?: { items?: { enum?: string[] } }[] }>;
+    };
+    expect(answered.properties.cartReminders?.anyOf?.[0]?.items?.enum).toEqual([
+      ...WEBHOOK_CART_REMINDERS,
+    ]);
+    const given = (schemas.CreateWebhookEndpoint as { properties: Record<string, unknown> })
+      .properties;
+    expect(JSON.stringify(given.cartReminders)).toContain(
+      'as reminder.event names them, only with either event',
+    );
+    expect(JSON.stringify(given.cartReminders)).toContain(
+      "With the stores, and the skip reasons for a skipped reminder or the numbers for a sent one, chosen too, a reminder's event must pass them all.",
+    );
+    expect(JSON.stringify(given.cartReminderSkipReasons)).toContain(
+      'With the stores or the cart reminders chosen too, a skipped reminder must pass them all.',
+    );
+    const changed = (schemas.UpdateWebhookEndpoint as { properties: Record<string, unknown> })
+      .properties;
+    expect(JSON.stringify(changed.cartReminders)).toContain(
+      'unless the events include neither store_checkout.reminder_skipped nor store_checkout.reminder_sent any more, which clears them',
+    );
+    const hooks = doc.webhooks as Record<string, { post: { description: string } }>;
+    expect(hooks['store_checkout.reminder_skipped']?.post.description).toContain(
+      'both reminders’ unless it names the reminders (its `cartReminders`, or the reminders ticked under Cart reminders)',
+    );
+    expect(hooks['store_checkout.reminder_sent']?.post.description).toContain(
+      'the stores and the reminders an endpoint names (its `storeIds` and `cartReminders`) narrow it',
     );
   });
 

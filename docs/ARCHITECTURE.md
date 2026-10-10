@@ -1962,6 +1962,13 @@ state` for one that becomes skipped from another state, each only for a message 
   cart reminders' reasons and to endpoints that take the event. `app.capture_webhook_event`
   (replaced with the same signature) matches it with the reason the cart reminder's trigger keeps
   in `detail` (0276), as it matches order messages' with theirs.
+- **Cart reminder filters** (migration 0284, ADR-361): `cart_reminders` on an endpoint lists the
+  cart reminders (`cart_reminder`, the first, and `cart_second_reminder`, the second) whose
+  `store_checkout.reminder_skipped` and `store_checkout.reminder_sent` events it takes, null for
+  both; a check keeps it to 1 or 2 of them and to endpoints that take either event.
+  `app.capture_webhook_event` (replaced with the same signature) matches it with the event's
+  status, which is the reminder (0276), where it decides whether an endpoint takes the event and
+  where it writes the deliveries.
 - **Skipped campaign recipients as webhook events** (migrations 0280–0281, ADR-358): two triggers
   capture `campaign.recipient_skipped` with the skip reason as status, the recipient's contact as
   the event's and the recipient in `detail`; its campaign and the campaign's number serve the
@@ -2870,6 +2877,14 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   `ops.platform_ops_failure_reason_year` and `ops.platform_ops_failure_reason_days` in one snapshot
   (`failureReasonYear()` for the Usage tab, `companyHealth()` for a company's page, none while its
   deletion runs), and `FailureReasonsTable` lists them under the year.
+- **Failed sends by reason month by month (ADR-360, migration 0283):**
+  `ops.platform_ops_failure_reason_months` reads the year's rows by UTC calendar month and code,
+  ranked as `ops.platform_ops_failure_reason_year` ranks them. `readFailureReasonYear` reads it and
+  the transaction's today in the year's snapshot; `failureReasonYearMonths` spans the months of the
+  365 days and `failureReasonsByMonth` places the rows (a code or month the year does not list is an
+  error). `FailureReasonsTable` draws each reason's months in a column (`MonthBars`, heights from
+  `monthBarHeights` and month names from `chartMonthLabel` in `platform/ops-chart.ts`) and folds a
+  table of every month's count under it (`<details>`, as `DailyMessages` does).
 - **Exports (ADR-154, ADR-155, ADR-158):** `/platform/ops/export/[list]` (a route handler behind the
   pages' platform actor check; a name of `OPS_EXPORT_LISTS`, any other not found) calls
   `exportList`, which checks in its transaction that the actor is a platform administrator, reads

@@ -157,6 +157,13 @@ export const WEBHOOK_OAUTH_CLIENT_AUTHS = ['client_secret_basic', 'client_secret
 export type WebhookOAuthClientAuth = (typeof WEBHOOK_OAUTH_CLIENT_AUTHS)[number];
 
 /**
+ * The cart reminders, first and second, whose `store_checkout.reminder_skipped` and
+ * `store_checkout.reminder_sent` events an endpoint can choose to take (ADR-361): a Shopify store's
+ * first reminder about a checkout a customer left, and the second (0021).
+ */
+export type WebhookCartReminder = 'cart_reminder' | 'cart_second_reminder';
+
+/**
  * The reasons a store's cart reminder can be skipped for, which an endpoint can choose to take the
  * skips of as `store_checkout.reminder_skipped` (ADR-356): the reasons a store's Messages page
  * (Commerce → Stores) explains for a message not sent, but those that concern order messages only
@@ -425,6 +432,12 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
   orderMessageSkipReasons: text('order_message_skip_reasons')
     .array()
     .$type<WebhookOrderMessageSkipReason[]>(),
+  /**
+   * The cart reminders whose `store_checkout.reminder_skipped` and `store_checkout.reminder_sent`
+   * events it takes (migration 0284, ADR-361); null takes both. Set only while either event is
+   * among its events.
+   */
+  cartReminders: text('cart_reminders').array().$type<WebhookCartReminder[]>(),
   /**
    * The reasons whose cart reminder skips it takes as `store_checkout.reminder_skipped` (migration
    * 0278, ADR-356); null takes every reason. Set only while that event is among its events.

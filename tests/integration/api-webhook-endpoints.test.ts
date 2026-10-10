@@ -268,6 +268,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       storeIds: null,
       orderMessageEvents: null,
       orderMessageSkipReasons: null,
+      cartReminders: null,
       cartReminderSkipReasons: null,
       campaignSkipReasons: null,
       runStepOutcomes: null,
@@ -1925,6 +1926,84 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     });
   });
 
+  it('choose the cart reminders of either cart reminder event, kept by changes that leave them out and cleared with both events (ADR-361)', async () => {
+    const c = await fx.company();
+    const key = await apiKey(c, ['webhooks.manage']);
+    const issueOf = async (promise: Promise<unknown>) => {
+      const error = await expectAppError(promise, 'validation_failed');
+      return isAppError(error) ? error.issues?.[0] : undefined;
+    };
+    // Reminders need either event, at least one, each from the list (named by place).
+    const both = ['store_checkout.reminder_skipped', 'store_checkout.reminder_sent'];
+    const refusals = [
+      [['store_order.message_sent'], { cartReminders: ['cart_reminder'] }, 'cartReminders'],
+      [both, { cartReminders: [] }, 'cartReminders'],
+      [both, { cartReminders: ['cart_reminder', 'order_placed'] }, 'cartReminders.1'],
+    ] as const;
+    for (const [index, [events, filters, path]] of refusals.entries()) {
+      expect(
+        await issueOf(
+          api().create(
+            key.ctx,
+            { url: receiverUrl(), events, ...filters },
+            idem(`cart-reminders-bad-${index}`, JSON.stringify(filters)),
+          ),
+        ),
+        JSON.stringify(filters),
+      ).toMatchObject({ path });
+    }
+    expect((await api().list(key.ctx)).data).toEqual([]);
+
+    const created = await addThroughApi(key.ctx, 'cart-reminders-1', {
+      url: receiverUrl(),
+      events: both,
+      cartReminders: ['cart_second_reminder'],
+    });
+    const id = created.body.data.id;
+    expect(created.body.data).toMatchObject({ cartReminders: ['cart_second_reminder'] });
+    expect(await api().get(key.ctx, id)).toMatchObject({ cartReminders: ['cart_second_reminder'] });
+    const audits = async (action: string) =>
+      (
+        await fx.query<{ metadata: { cartReminders?: unknown } }>(
+          `SELECT metadata FROM app.audit_events
+            WHERE tenant_id = $1 AND subject_id = $2 AND action = $3 ORDER BY occurred_at, id`,
+          [c.tenant.id, id, action],
+        )
+      ).map((a) => a.metadata.cartReminders);
+    expect(await audits('webhook.endpoint_created')).toEqual([['cart_second_reminder']]);
+    expect(await api().update(key.ctx, id, { description: 'Win-back' })).toMatchObject({
+      cartReminders: ['cart_second_reminder'],
+    });
+    // Either event alone keeps them.
+    expect(
+      await api().update(key.ctx, id, { events: ['store_checkout.reminder_sent'] }),
+    ).toMatchObject({ cartReminders: ['cart_second_reminder'] });
+    // A list alone is a change, the first then the second.
+    expect(
+      await api().update(key.ctx, id, { cartReminders: ['cart_second_reminder', 'cart_reminder'] }),
+    ).toMatchObject({ cartReminders: ['cart_reminder', 'cart_second_reminder'] });
+    expect((await audits('webhook.endpoint_updated')).at(-1)).toEqual([
+      'cart_reminder',
+      'cart_second_reminder',
+    ]);
+    // Neither event clears them and refuses them.
+    expect(await api().update(key.ctx, id, { events: ['store_order.cod_answered'] })).toMatchObject(
+      { cartReminders: null },
+    );
+    expect(
+      await issueOf(api().update(key.ctx, id, { cartReminders: ['cart_reminder'] })),
+    ).toMatchObject({ path: 'cartReminders' });
+    expect(
+      await api().update(key.ctx, id, {
+        events: ['store_checkout.reminder_skipped'],
+        cartReminders: ['cart_reminder'],
+      }),
+    ).toMatchObject({ cartReminders: ['cart_reminder'] });
+    expect(await api().update(key.ctx, id, { cartReminders: null })).toMatchObject({
+      cartReminders: null,
+    });
+  });
+
   it('choose the numbers of sent cart reminders and the stores of either cart reminder event, never order messages or reasons (ADR-355)', async () => {
     const c = await fx.company();
     const key = await apiKey(c, ['webhooks.manage']);
@@ -1959,6 +2038,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       storeIds: [store.id],
       orderMessageEvents: null,
       orderMessageSkipReasons: null,
+      cartReminders: null,
       cartReminderSkipReasons: null,
     });
     expect(await api().get(key.ctx, id)).toMatchObject({

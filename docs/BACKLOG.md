@@ -1314,13 +1314,14 @@ verification, app review, Embedded Signup configuration).
   narrowed by campaigns and numbers). **[Skip reason filter for skipped campaign recipients built;
   its database tests run only in CI]** (ADR-359, migration 0282: an endpoint takes
   `campaign.recipient_skipped` only for chosen reasons, 1 to 9 of those a campaign recipient can be
-  skipped for).
+  skipped for). **[Cart reminder filter built; its database tests run only in CI]** (ADR-361,
+  migration 0284: an endpoint takes `store_checkout.reminder_skipped` and
+  `store_checkout.reminder_sent` only for the first or the second cart reminder).
   Remaining: filters for other event types and on a message's values other than its type and words,
   field value comparisons beyond
   values, words and ranges, other authentication (headers computed per delivery, other OAuth
-  grants, JWT client assertions), mutual TLS, fixed egress addresses, other store events (a
-  filter by cart reminder, first or second; the store's orders and checkouts themselves are
-  reported by the store, ADR-085),
+  grants, JWT client assertions), mutual TLS, fixed egress addresses, other store events (the
+  store's orders and checkouts themselves are reported by the store, ADR-085),
   a sequence number across events, load tests.
 - **P5-10 Platform ops screens** **[built, locally verified with test data only]** (ADR-054):
   `/platform/ops` with Overview, Onboarding (failed and abandoned signups, failed or stuck number
@@ -1436,11 +1437,14 @@ verification, app review, Embedded Signup configuration).
   **[Failed sends by reason over the year built; its database and browser tests run only in CI]**
   (ADR-350, migration 0269: the worker keeps each company's failed sends a day by code with the
   day's counts, and the Usage tab and a company's page list the year's under the year).
+  **[The year's failed sends by reason month by month built; its database tests run only in CI]**
+  (ADR-360, migration 0283: each reason of the year's table draws its months beside it, ranked as
+  the year, the partial first and last months drawn lighter).
   Remaining:
   other alert channels (several channels, a channel per alert, formats other than a JSON `text`
   member, such as Microsoft Teams' or PagerDuty's, and the owners' other notices, such as personal
   notices, in a channel; Microsoft's documentation of Teams' webhooks could not be opened from
-  here), other charts (other measures, such as failures by reason drawn over time or by company over time), Meta's quality
+  here), other charts (other measures, such as failures by company over time), Meta's quality
   webhook (unconfirmed), rollups for many companies and pages read from the database.
 - **P5-11 Account export/deletion workflow** **[built, locally verified with test data only]**
   (ADR-055): Settings → Company data for owners. A streamed, gzip-compressed JSON Lines export of

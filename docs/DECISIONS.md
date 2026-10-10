@@ -14184,3 +14184,76 @@ the audit keeps; the next lists will need the entry named more compactly.
 
 Not built: a filter by when a recipient was skipped (when the audience was taken or while the
 campaign sent); the reasons mostly tell them apart.
+
+## ADR-360 The year's failed sends by reason, month by month (P5-10) (2026-10-10)
+
+Context: the Usage tab and a company's platform page list the year's failed sends by the code they
+failed with (ADR-350): which reasons, not when. A reason that began in the spring, one that has
+faded since or one that came back read the same as one there all year, and ADR-350 left the
+reasons drawn over time unbuilt.
+
+Decision:
+
+- **Read by month:** `ops.platform_ops_failure_reason_months(p_tenant_id)` (migration 0283) reads
+  the same 365 days before today as `ops.platform_ops_failure_reason_year`, with the same filters
+  (days whose codes are counted, companies not deleted, every company's or one), by UTC calendar
+  month and code, the codes ranked as the year ranks them over the whole year (the eight most
+  frequent, ties by code, then the rest together when two or more are left), so each listed row's
+  months add up to its year. For platform administrators only (`W3403`), owned by the definer role,
+  executable by the platform role alone; codes and counts only.
+- **One snapshot:** `readFailureReasonYear` reads the months and the transaction's today with the
+  year (repeatable read, as both callers already did), spans the calendar months of the 365 days
+  (`failureReasonYearMonths`: 13 unless today or the year's first day is a 1st; the first month
+  partial unless the year starts on a 1st, the last unless today is a 1st) and places each row in
+  its reason's month (`failureReasonsByMonth`, 0 for a month without one); a row naming a code or a
+  month the year does not list is an error, not dropped.
+- **Shown in the year's table:** a "Month by month" column beside each reason: a bar a month in the
+  failed sends' colour, oldest first, each reason to its own height (its most in one month fills
+  it), at least 2 pixels for a month with a failed send; a partial month is drawn in outline (its
+  edge in the full colour, its inside lighter, at least 4 pixels high so the outline shows) and
+  named with its days. Each month says its count when pointed at, the whole reads as one sentence
+  to a screen reader (the reason named with its code, so two reasons HyFib does not describe differ),
+  a note under the table says which months the bars run from and to and which are partial, and a
+  folded table under it gives every month's count by reason and code, as the daily charts' does
+  (ADR-333), for keyboards and touch screens. The window's table (93 days at most) has no months.
+
+Consequences: platform staff see when a reason began, grew or faded without querying the database.
+Rows scaled to their own height compare a reason's months, not one reason's months with another's
+(the counts and shares do that). The months cover the counted days only, as the year does.
+
+Not built: failures by company over time, a CSV of the months, and weeks or days instead of months.
+
+## ADR-361 Choosing the cart reminders, first or second, whose events a webhook endpoint receives (P5-09) (2026-10-10)
+
+Context: `store_checkout.reminder_skipped` and `store_checkout.reminder_sent` (ADR-355) are sent for
+both of a checkout's cart reminders, the first and the second, narrowed by store, number and (for a
+skipped one) reason only. A receiver that steps in only once the second, last reminder has gone out
+or was not sent, or one that tracks the first reminders alone, was sent the other reminder's events
+as well, and had to tell them apart itself (`reminder.event`). ADR-356 left a filter by reminder
+unbuilt.
+
+Decision:
+
+- **A list of reminders:** `cartReminders`, `cart_reminder` (the first), `cart_second_reminder`
+  (the second) or both (`WEBHOOK_CART_REMINDERS`), each once, the first then the second, as
+  `reminder.event` names them. A reminder's event is sent when its reminder is on the list, as well
+  as its store, number and reason on those lists; null receives both, as before. Only while the
+  endpoint takes either event (migration 0284's check), so the list never outlives them; it narrows
+  both events alike.
+- **Where it applies:** in `app.capture_webhook_event`, replaced with the same signature (0278's with
+  one condition more where the endpoints are matched and where the deliveries are written), from
+  the event's status, which is the reminder (0276). A reminder's event no endpoint takes is not
+  recorded. Order messages and cash on delivery answers have no reminder and are not narrowed by it.
+- **Who sets it:** owners and administrators in Settings → Webhooks (ticked under Cart reminders,
+  shown while the endpoint takes either event, each reminder in the words of a store's Messages
+  page) and keys with `webhooks.manage` through the API, audited with the endpoint and in the
+  company data export. Refusals name the field: a list without either event, an empty list, an
+  unknown reminder or an order message.
+
+Consequences: a receiver can take the reminder it acts on alone. The audit of an endpoint's change
+at its largest (every event type, the 62 lists and the longest hosts) is now 6,793 bytes, 7 under
+the test's 6,800 bound (ADR-356) and within the 7,000 bytes the audit keeps; the next list or event
+type needs the entry named more compactly, or the bound rechecked against those 7,000 bytes, before
+it is added.
+
+Not built: filters on a checkout's values, such as its total or items.

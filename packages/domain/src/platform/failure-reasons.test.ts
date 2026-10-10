@@ -3,7 +3,9 @@ import { PgDialect } from 'drizzle-orm/pg-core';
 import type { SQL, Tx } from '@w360/db';
 import {
   FAILURE_REASONS_SHOWN,
+  failureReasonYearMonths,
   failureReasons,
+  failureReasonsByMonth,
   readFailureReasonYear,
   readFailureReasons,
 } from './failure-reasons';
@@ -82,7 +84,10 @@ describe('failed sends by reason (ADR-347)', () => {
 });
 
 describe('failed sends by reason over the year (ADR-350)', () => {
-  it('reads the counted days’ reasons and how many days are counted, in that order', async () => {
+  /** The 13 months of the year before 10 October 2026, as read with it. */
+  const monthsBefore10Oct = failureReasonYearMonths('2026-10-10');
+
+  it('reads the counted days’ reasons, how many days are counted, their months and today, in that order', async () => {
     const { tx, statements } = answering([
       {
         rows: [
@@ -91,6 +96,14 @@ describe('failed sends by reason over the year (ADR-350)', () => {
         ],
       },
       { rows: [{ days: '361' }] },
+      {
+        rows: [
+          { month: '2025-10', reason_code: 'window_closed', failed_sends: '1' },
+          { month: '2026-03', reason_code: 'window_closed', failed_sends: 5 },
+          { month: '2026-10', reason_code: '', failed_sends: '2' },
+        ],
+      },
+      { rows: [{ today: '2026-10-10' }] },
     ]);
     expect(await readFailureReasonYear(tx as unknown as Tx, 'tenant-1')).toEqual({
       reasons: {
@@ -101,6 +114,11 @@ describe('failed sends by reason over the year (ADR-350)', () => {
         failed: 8,
       },
       uncounted: 4,
+      months: monthsBefore10Oct,
+      byMonth: [
+        [1, 0, 0, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2],
+      ],
     });
     expect(statements).toEqual([
       {
@@ -108,24 +126,120 @@ describe('failed sends by reason over the year (ADR-350)', () => {
         params: ['tenant-1'],
       },
       { sql: 'select ops.platform_ops_failure_reason_days() as days', params: [] },
+      {
+        sql: "select to_char(month, 'YYYY-MM') as month, reason_code, failed_sends from ops.platform_ops_failure_reason_months($1::uuid)",
+        params: ['tenant-1'],
+      },
+      {
+        sql: "select to_char((now() at time zone 'UTC')::date, 'YYYY-MM-DD') as today",
+        params: [],
+      },
     ]);
   });
 
   it('reads the platform’s, nothing failed and every day counted, or none', async () => {
-    const all = answering([{ rows: [] }, { rows: [{ days: 365 }] }]);
+    const all = answering([
+      { rows: [] },
+      { rows: [{ days: 365 }] },
+      { rows: [] },
+      { rows: [{ today: '2026-10-10' }] },
+    ]);
     expect(await readFailureReasonYear(all.tx as unknown as Tx, null)).toEqual({
       reasons: { reasons: [], failed: 0 },
       uncounted: 0,
+      months: monthsBefore10Oct,
+      byMonth: [],
     });
     expect(all.statements[0]?.params).toEqual([null]);
-    const none = answering([{ rows: [] }, { rows: [{ days: 0 }] }]);
+    expect(all.statements[2]?.params).toEqual([null]);
+    const none = answering([
+      { rows: [] },
+      { rows: [{ days: 0 }] },
+      { rows: [] },
+      { rows: [{ today: '2026-10-10' }] },
+    ]);
     expect((await readFailureReasonYear(none.tx as unknown as Tx, null)).uncounted).toBe(365);
   });
 
-  it('fails when the days counted are not answered', async () => {
+  it('fails when the days counted or today are not answered', async () => {
     const { tx } = answering([{ rows: [] }, { rows: [] }]);
     await expect(readFailureReasonYear(tx as unknown as Tx, null)).rejects.toThrow(
       'ops.platform_ops_failure_reason_days answered no row',
     );
+    const noDay = answering([{ rows: [] }, { rows: [{ days: 365 }] }, { rows: [] }, { rows: [] }]);
+    await expect(readFailureReasonYear(noDay.tx as unknown as Tx, null)).rejects.toThrow(
+      'The database answered no day for today',
+    );
+  });
+});
+
+describe('failed sends by reason month by month (ADR-360)', () => {
+  it('spans the calendar months of the 365 days before today, the first and last in part', () => {
+    const months = failureReasonYearMonths('2026-10-10');
+    expect(months.map((m) => m.month)).toEqual([
+      '2025-10',
+      '2025-11',
+      '2025-12',
+      '2026-01',
+      '2026-02',
+      '2026-03',
+      '2026-04',
+      '2026-05',
+      '2026-06',
+      '2026-07',
+      '2026-08',
+      '2026-09',
+      '2026-10',
+    ]);
+    // 10 to 31 October last year, then whole months, then 1 to 9 October.
+    expect(months[0]).toEqual({ month: '2025-10', days: 22, partial: true });
+    expect(months[1]).toEqual({ month: '2025-11', days: 30, partial: false });
+    expect(months[4]).toEqual({ month: '2026-02', days: 28, partial: false });
+    expect(months.at(-1)).toEqual({ month: '2026-10', days: 9, partial: true });
+    expect(months.reduce((total, m) => total + m.days, 0)).toBe(365);
+  });
+
+  it('spans twelve whole months when the year starts on a 1st, and counts a leap day', () => {
+    const months = failureReasonYearMonths('2026-11-01');
+    expect(months).toHaveLength(12);
+    expect(months[0]).toEqual({ month: '2025-11', days: 30, partial: false });
+    expect(months.at(-1)).toEqual({ month: '2026-10', days: 31, partial: false });
+    expect(months.every((m) => !m.partial)).toBe(true);
+    // A year holding 29 February starts a day later in the month.
+    const leap = failureReasonYearMonths('2028-03-01');
+    expect(leap[0]).toEqual({ month: '2027-03', days: 30, partial: true });
+    expect(leap.at(-1)).toEqual({ month: '2028-02', days: 29, partial: false });
+    expect(leap.reduce((total, m) => total + m.days, 0)).toBe(365);
+    expect(() => failureReasonYearMonths('10 Oct')).toThrow('Not a day: 10 Oct');
+  });
+
+  it('places each row in its reason’s month, the rest together, 0 elsewhere, and refuses a code or a month the year does not list', () => {
+    const months = failureReasonYearMonths('2026-10-10');
+    const reasons = [
+      { code: '131049', failed: 4, codes: 1, share: 0.4 },
+      { code: '', failed: 3, codes: 1, share: 0.3 },
+      { code: null, failed: 3, codes: 2, share: 0.3 },
+    ];
+    expect(
+      failureReasonsByMonth(reasons, months, [
+        { month: '2025-10', code: '131049', failed: 1 },
+        { month: '2026-10', code: '131049', failed: 2 },
+        // Rows of one code and month add up.
+        { month: '2026-10', code: '131049', failed: 1 },
+        { month: '2026-01', code: '', failed: 3 },
+        { month: '2026-01', code: null, failed: 3 },
+      ]),
+    ).toEqual([
+      [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3],
+      [0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+      [0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    ]);
+    expect(failureReasonsByMonth([], months, [])).toEqual([]);
+    expect(() =>
+      failureReasonsByMonth(reasons, months, [{ month: '2026-01', code: '131026', failed: 1 }]),
+    ).toThrow("The year's failed sends by month name a code the year does not list");
+    expect(() =>
+      failureReasonsByMonth(reasons, months, [{ month: '2025-09', code: '131049', failed: 1 }]),
+    ).toThrow("The year's failed sends by month name a month the year does not list");
   });
 });

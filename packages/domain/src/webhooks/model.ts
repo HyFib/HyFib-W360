@@ -7,6 +7,7 @@ import type {
   WebhookCodAnswer,
   WebhookOrderMessageEvent,
   WebhookOrderMessageSkipReason,
+  WebhookCartReminder,
   WebhookCartReminderSkipReason,
   WebhookCampaignSkipReason,
   WebhookOAuthClientAuth,
@@ -43,6 +44,7 @@ export type {
   WebhookCodAnswer,
   WebhookOrderMessageEvent,
   WebhookOrderMessageSkipReason,
+  WebhookCartReminder,
   WebhookCartReminderSkipReason,
   WebhookCampaignSkipReason,
   WebhookOAuthClientAuth,
@@ -733,13 +735,13 @@ export const WEBHOOK_ORDER_MESSAGE_SKIP_REASONS = [
 
 /**
  * The cart reminders a `store_checkout.reminder_skipped` or `store_checkout.reminder_sent` event is
- * about (ADR-355): a Shopify store's first reminder about a checkout a customer left, and the second.
+ * about (ADR-355), which an endpoint can choose (ADR-361): a Shopify store's first reminder about a
+ * checkout a customer left, and the second.
  */
 export const WEBHOOK_CART_REMINDERS = [
   'cart_reminder',
   'cart_second_reminder',
-] as const satisfies readonly CartEvent[];
-export type WebhookCartReminder = (typeof WEBHOOK_CART_REMINDERS)[number];
+] as const satisfies readonly (WebhookCartReminder & CartEvent)[];
 
 /**
  * The reasons a `store_checkout.reminder_skipped` event gives (ADR-355), in the order a store's
@@ -1699,6 +1701,20 @@ export const WEBHOOK_ORDER_MESSAGE_TYPES = [
 /** Whether an endpoint with these events takes events of order messages, and can choose them. */
 export function webhookTakesOrderMessages(eventTypes: readonly WebhookEventType[]): boolean {
   return WEBHOOK_ORDER_MESSAGE_TYPES.some((type) => eventTypes.includes(type));
+}
+
+/**
+ * The events of a store's cart reminders, which the cart reminders an endpoint names narrow
+ * (ADR-361): skipped and sent (ADR-355).
+ */
+export const WEBHOOK_CART_REMINDER_TYPES = [
+  'store_checkout.reminder_skipped',
+  'store_checkout.reminder_sent',
+] as const satisfies readonly WebhookEventType[];
+
+/** Whether an endpoint with these events takes events of cart reminders, and can choose them. */
+export function webhookTakesCartReminders(eventTypes: readonly WebhookEventType[]): boolean {
+  return WEBHOOK_CART_REMINDER_TYPES.some((type) => eventTypes.includes(type));
 }
 
 /** Whether an endpoint with these events takes events of campaigns, and can choose campaigns. */

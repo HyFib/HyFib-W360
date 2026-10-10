@@ -85,6 +85,21 @@ export function chartDayLabel(day: string): string {
   return `${Number(day.slice(8, 10))} ${MONTHS[Number(day.slice(5, 7)) - 1]}`;
 }
 
+/** A month, YYYY-MM, as the console names it, Oct 2025, by the same hand (ADR-360). */
+export function chartMonthLabel(month: string): string {
+  return `${MONTHS[Number(month.slice(5, 7)) - 1]} ${month.slice(0, 4)}`;
+}
+
+/**
+ * The heights of a row of month bars at most `height` pixels high (ADR-360): the most in one month
+ * fills it, the others in proportion, rounded, at least 2 pixels for a month with one failed send so
+ * it still shows, and none for a month without.
+ */
+export function monthBarHeights(counts: readonly number[], height: number): number[] {
+  const most = Math.max(0, ...counts);
+  return counts.map((n) => (n > 0 && most > 0 ? Math.max(2, Math.round((n / most) * height)) : 0));
+}
+
 /**
  * The step between gridlines for counts up to `max`: 1, 2 or 5 times a power of ten, at least 1
  * (counts are whole) and at least a quarter of `max`, so there are at most four gridlines above 0.
