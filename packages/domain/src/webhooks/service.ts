@@ -1305,7 +1305,7 @@ export const webhookChannelIdsSchema = z
   .nullable();
 
 export const WEBHOOK_CHANNELS_NEED_THE_EVENTS =
-  'Choose numbers only for an endpoint that receives message, conversation, automation, order or campaign events.';
+  'Choose numbers only for an endpoint that receives message, conversation, survey answer, automation, order, Payment Link, cash on delivery answer or campaign events.';
 
 export const WEBHOOK_CHANNELS_NOT_FOUND = 'Choose WhatsApp numbers of this company.';
 

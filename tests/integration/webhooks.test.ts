@@ -3521,7 +3521,7 @@ describe('number filters (ADR-170)', () => {
       expect(isAppError(error) && error.issues?.[0]?.path, JSON.stringify(channelIds)).toBe(path);
     };
     const needsTheEvents =
-      /only for an endpoint that receives message, conversation, automation, order or campaign events/;
+      /only for an endpoint that receives message, conversation, survey answer, automation, order, Payment Link, cash on delivery answer or campaign events/;
     await refused(
       ['consent.changed', 'contact.updated', 'template.status_changed'],
       [main],

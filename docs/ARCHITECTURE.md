@@ -1899,8 +1899,8 @@ true`); the same key with another request (method, path and body hashed) answers
   `app.commerce_store_messages` that fires only when the answer changes to another one
   (`app.webhook_capture_store_cod_answer`), captures `store_order.cod_answered` through
   `app.capture_webhook_event` (replaced with the same signature, the event among a number's): the
-  answer as the status; the store message, its order, the answer before it, the tap's time and
-  message in `detail`; the confirmation's conversation, its contact and, for the number filter
+  answer as the status; the store message, the answer before it, the tap's time and message in
+  `detail`; the confirmation's conversation, its contact and, for the number filter
   only, its number. `buildWebhookPayload` reads the confirmation with `storeConfirmationOf` (the
   order, its store and the confirmation message's conversation and number joined) and gives the
   answer as captured, the order and store as they are now, never the store's customer details.

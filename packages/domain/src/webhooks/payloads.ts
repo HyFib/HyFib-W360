@@ -1556,7 +1556,7 @@ async function storeConfirmationOf(tx: Tx, tenantId: string, storeMessageId: str
   if (!storeMessageId || !z.uuid().safeParse(storeMessageId).success) return null;
   const [row] = await tx
     .select({
-      messageId: commerceStoreMessages.messageId,
+      messageId: messages.id,
       order: {
         id: commerceStoreOrders.id,
         externalId: commerceStoreOrders.externalId,
@@ -1988,7 +1988,7 @@ export async function buildWebhookPayload(
         tenantId,
         str(event.detail.storeMessageId),
       );
-      if (!confirmation?.messageId) throw new WebhookEventGoneError();
+      if (!confirmation) throw new WebhookEventGoneError();
       const { order, store } = confirmation;
       return {
         ...base,

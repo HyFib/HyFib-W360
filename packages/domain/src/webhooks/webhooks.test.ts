@@ -7051,7 +7051,6 @@ describe('the event of a cash on delivery answer (ADR-348)', () => {
   // As the trigger captures it (0266): PostgreSQL writes the tap's time with its offset.
   const capturedDetail = {
     storeMessageId: id,
-    storeOrderId: order,
     previousAnswer: 'confirmed',
     answeredAt: '2026-10-10T10:29:58+05:30',
     answerMessageId: tap,

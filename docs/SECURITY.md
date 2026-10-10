@@ -1877,7 +1877,7 @@ Phase 5 rules (outgoing webhooks, P5-09):
   the transaction that records a confirmation's answer, as the runtime role in the company's scope
   (the ingestion of the customer's tap, the only writer of an answer), and delivered only to the
   company's endpoints that take it (and name the confirmation's number, when they name numbers). The
-  trigger function is not executable by PUBLIC or any role. The body gives ids, the answers, the
+  trigger function is not executable by PUBLIC or any runtime role. The body gives ids, the answers, the
   store's order id, name, statuses and total, the store's platform, name and address, and the
   contact's name and number (null once erased) as the message events do; never the customer's name,
   phone, email, address, tracking or status page from the store's order, which the contact stands

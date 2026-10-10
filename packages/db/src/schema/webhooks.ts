@@ -354,8 +354,9 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
   runApiKeyIds: uuid('run_api_key_ids').array(),
   /**
    * The WhatsApp numbers (channel accounts) whose events it takes (ADR-170): message,
-   * conversation, automation run, order and campaign events; null takes every number. Set only
-   * while one of those is among its events.
+   * conversation, survey answer, automation run and step, order, Payment Link, cash on delivery
+   * answer (ADR-348) and campaign events, as `WEBHOOK_CHANNEL_EVENTS` lists them; null takes every
+   * number. Set only while one of those is among its events.
    */
   channelAccountIds: uuid('channel_account_ids').array(),
   /**

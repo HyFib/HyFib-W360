@@ -14,8 +14,8 @@
 -- and each later tap that replaces it with the other one. A tap that repeats the answer kept only
 -- moves its time and sends nothing, and an older tap is not recorded. Only the ingestion of the
 -- customer's tap writes an answer, as the runtime role in the company's scope. The event keeps the
--- store message, its order, the answer it reports, the one before it and the tap; the store, the
--- order and the contact are read when it is delivered. It happens on the number the confirmation
+-- store message, the answer it reports, the one before it and the tap; the store, the order and the
+-- contact are read when it is delivered. It happens on the number the confirmation
 -- was sent from, the conversation's, so the number filter narrows it.
 
 -- Event types ------------------------------------------------------------------------------------
@@ -71,10 +71,10 @@ ALTER TABLE app.webhook_endpoints
 
 -- Cash on delivery answers -----------------------------------------------------------------------
 
--- The event keeps in `detail` the store message, its order, the answer before this one (null for
--- the first), when the customer tapped and the tap's message, so a later answer cannot change what
--- an earlier event reports; and, for the number filter, the number the confirmation was sent from
--- (taken out before the event is stored). The answer it reports is its status, the conversation is
+-- The event keeps in `detail` the store message, the answer before this one (null for the first),
+-- when the customer tapped and the tap's message, so a later answer cannot change what an earlier
+-- event reports; and, for the number filter, the number the confirmation was sent from (taken out
+-- before the event is stored). The order is read through the store message when it is delivered. The answer it reports is its status, the conversation is
 -- the confirmation's and the contact the conversation's. The rest is read when the event is
 -- delivered. It is stamped with the time it is captured, as a survey's answer is (0213).
 CREATE FUNCTION app.webhook_capture_store_cod_answer() RETURNS trigger
@@ -93,9 +93,9 @@ BEGIN
    WHERE m.tenant_id = NEW.tenant_id AND m.id = NEW.message_id;
   PERFORM app.capture_webhook_event(NEW.tenant_id, 'store_order.cod_answered', NULL,
     v_conversation, v_contact, NULL, NEW.answer,
-    jsonb_build_object('storeMessageId', NEW.id, 'storeOrderId', NEW.order_id,
-                       'previousAnswer', OLD.answer, 'answeredAt', NEW.answered_at,
-                       'answerMessageId', NEW.answer_message_id, 'channelId', v_channel),
+    jsonb_build_object('storeMessageId', NEW.id, 'previousAnswer', OLD.answer,
+                       'answeredAt', NEW.answered_at, 'answerMessageId', NEW.answer_message_id,
+                       'channelId', v_channel),
     clock_timestamp());
   RETURN NULL;
 END

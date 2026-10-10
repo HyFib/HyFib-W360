@@ -15,10 +15,10 @@ PL/pgSQL bodies included.
 - **Database:** migration 0266: `store_order.cod_answered` in the endpoints' event and number checks
   and the events' type check (`NOT VALID`; 0267 validates it), the trigger
   `commerce_store_messages_webhook_cod_answer` (after an update of the answer that changes it to
-  another one) with `app.webhook_capture_store_cod_answer`, executable by no role, and
+  another one) with `app.webhook_capture_store_cod_answer`, executable by no runtime role, and
   `app.capture_webhook_event` replaced with the same signature, 0257's with the event among a
-  number's (only the two lists differ). The event keeps the store message, its order, the answer
-  before, the tap's time and message; the number travels for the filter only.
+  number's (only the two lists differ). The event keeps the store message, the answer before, the
+  tap's time and message; the number travels for the filter only.
 - **Domain:** the event type, its label and its place among a number's events;
   `storeOrderCodAnsweredPayloadSchema` and `storeConfirmationOf`: `confirmation` (the answer, the one
   before, when the customer tapped, the confirmation and the tap's messages, as captured),

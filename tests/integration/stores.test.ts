@@ -1864,6 +1864,12 @@ describe('Order messages', () => {
     await tap('confirm', { at: now + 5 });
     expect((await answered())?.answer).toBe('confirmed');
     expect((await thread())?.unread_count).toBe(1);
+    // A tap repeating the answer kept moves its time only (and sends no event, ADR-348).
+    await tap('confirm', { at: now + 7 });
+    expect(await answered()).toEqual({
+      answer: 'confirmed',
+      answered_at: new Date((now + 7) * 1000),
+    });
     await tap('cancel', { at: now - 60 });
     expect((await answered())?.answer).toBe('confirmed');
 
@@ -1878,7 +1884,7 @@ describe('Order messages', () => {
       ),
     ).toMatchObject({ answer: 'confirmed' });
 
-    // The two taps that answered, in the order they came: the cancellation at `now`, the
+    // The two taps that changed the answer, in the order they came: the cancellation at `now`, the
     // confirmation five seconds later, as WhatsApp dated them.
     const taps = (
       await fx.query<{ id: string }>(
@@ -1888,8 +1894,9 @@ describe('Order messages', () => {
       )
     ).map((t, i) => ({ id: t.id, answered: new Date((now + i * 5) * 1000) }));
     // One event per change of the answer kept (ADR-348): the first, cancelled, then confirmed. The
-    // late older tap, another customer's and a reply to another message changed nothing and sent
-    // nothing. Each reaches the endpoints on every number and on its own, not the other number's.
+    // repeated confirmation, the late older tap, another customer's and a reply to another message
+    // sent nothing. Each reaches the endpoints on every number and on its own, not the other
+    // number's.
     const events = await fx.query<{
       id: string;
       status: string;
@@ -1919,7 +1926,6 @@ describe('Order messages', () => {
         'cancelled',
         {
           storeMessageId: codRow.id,
-          storeOrderId: codRow.order_id,
           previousAnswer: null,
           answeredAt: expect.any(String),
           answerMessageId: taps[0]!.id,
@@ -1932,7 +1938,6 @@ describe('Order messages', () => {
         'confirmed',
         {
           storeMessageId: codRow.id,
-          storeOrderId: codRow.order_id,
           previousAnswer: 'cancelled',
           answeredAt: expect.any(String),
           answerMessageId: taps[1]!.id,
@@ -1947,7 +1952,8 @@ describe('Order messages', () => {
       taps.map((t) => t.answered.getTime()),
     );
 
-    // Built when delivered: the answers as captured, the order and the store as they are now, the
+    // Built when delivered: the answers as captured (the repeated tap moved the kept answer's time
+    // and message since, not the event's), the order and the store as they are now, the
     // conversation's contact and the number.
     await deliverHooks(c);
     const [store] = await fx.query<{ name: string | null; store_url: string }>(
