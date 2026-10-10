@@ -268,6 +268,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       storeIds: null,
       orderMessageEvents: null,
       orderMessageSkipReasons: null,
+      cartReminderSkipReasons: null,
       runStepOutcomes: null,
       runStepNodeTypes: null,
       orderChangeMakers: null,
@@ -1814,6 +1815,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       storeIds: [store.id],
       orderMessageEvents: null,
       orderMessageSkipReasons: null,
+      cartReminderSkipReasons: null,
     });
     expect(await api().get(key.ctx, id)).toMatchObject({
       channelIds: [c.channelAccountId],

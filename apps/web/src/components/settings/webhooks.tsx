@@ -627,8 +627,8 @@ function SkipReasonChoices({
   return (
     <fieldset className="ml-6 grid gap-1">
       <legend className="mb-1 text-xs text-muted-foreground">
-        Skip reasons sent (all of them unless you untick some, as a store&rsquo;s Messages page
-        explains them)
+        Order message skip reasons sent (all of them unless you untick some, as a store&rsquo;s
+        Messages page explains them)
       </legend>
       {WEBHOOK_ORDER_MESSAGE_SKIP_REASONS.map((reason) => {
         const id = `${prefix}-skip-reason-${reason}`;

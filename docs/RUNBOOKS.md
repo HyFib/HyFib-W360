@@ -3431,13 +3431,13 @@ endpoint still takes Order message sent, and the stores unless it still takes an
 store.
 
 **A receiver misses some skipped order messages of one reason (ADR-354).** An endpoint can take the
-skips of chosen reasons only. The endpoints list shows them ("Skip reasons sent: …"), and the API
-answers `orderMessageSkipReasons` (null takes every reason). A skipped message is sent only when its
-reason is on the list, as well as its order message and its store on theirs; when no endpoint takes
-it, it is not recorded at all, so there is nothing to replay. A store's Messages page (Commerce →
-Stores) shows each message's reason. To take more, tick the reasons under Order message skipped on
-the endpoint's page, or `PATCH /webhook-endpoints/{id}` with `orderMessageSkipReasons` (null for
-every reason). Removing Order message skipped clears the list.
+skips of chosen reasons only. The endpoints list shows them ("Order message skip reasons sent: …"),
+and the API answers `orderMessageSkipReasons` (null takes every reason). A skipped message is sent
+only when its reason is on the list, as well as its order message and its store on theirs; when no
+endpoint takes it, it is not recorded at all, so there is nothing to replay. A store's Messages page
+(Commerce → Stores) shows each message's reason. To take more, tick the reasons under Order message
+skipped on the endpoint's page, or `PATCH /webhook-endpoints/{id}` with `orderMessageSkipReasons`
+(null for every reason). Removing Order message skipped clears the list.
 
 **A receiver misses a sent order message, or gets `event_gone` for one (ADR-353).**
 `store_order.message_sent` is sent once for each of a store's order messages (order placed, cash on

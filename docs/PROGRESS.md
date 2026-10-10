@@ -29,6 +29,11 @@ integration tests below were written but not run here; the migration passed the 
   audit, the database checks and the grant; `api-webhook-endpoints.test.ts`: the same through the
   API, a list alone a change; `stores.test.ts`: a follow-up endpoint taking two reasons receives
   those skips only). Written for CI; the integration tests were not run here.
+- **Review fixes:** the API flow's test of a whole endpoint names the new field (it would have
+  failed in CI); the store flows show that a cart reason list leaves sent reminders and skipped
+  order messages alone, and an order message reason list leaves cart reminders alone; the order
+  messages' list is named "Order message skip reasons sent" in Settings and the endpoints list, so
+  it is not read as applying to cart reminders too.
 - **Docs:** ADR-356; ARCHITECTURE; SECURITY; THREAT-MODEL T315; DEPLOYMENT (0278); RUNBOOKS (and the
   ADR-355 entry); BACKLOG P5-09; feature matrix W-138, W-139 and H-014. The audit's largest entry is
   now 6,535 bytes (60 lists), over the test's old bound of 6,500, which rises to 6,800, within the
