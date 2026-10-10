@@ -2237,14 +2237,16 @@ message text, contact details, payloads, email addresses, secrets or full URLs:
   `ops.platform_ops_signup_sessions` and `ops.platform_ops_integration_failures`, and the Usage
   tab's messages a day from `ops.platform_ops_daily_activity` (0254, ADR-333: the platform's counts
   each UTC day; since 0255, ADR-334, one company's too, for its platform page; since 0264, ADR-346,
-  its sends cancelled, delivered and read too) and the year from `ops.platform_ops_message_days`
-  (0262, ADR-341): owned by `w360_definer`, executable only by `w360_platform`, raising `W3403`
-  unless the session's user is in `ops.platform_admins`. The year's counts are kept per company and
-  UTC day in `ops.platform_message_days`, a table with forced row level security that only the
-  definer role reads and writes, counted by `ops.count_platform_message_days` and deleted after 400
-  days by `ops.purge_platform_message_days`, both executable by the worker's role only, and deleted
-  with the company. The definer role has column grants for the columns they read (no message text,
-  contact, token, secret or payload column) and a read policy on signup sessions.
+  its sends cancelled, delivered and read too), the failed sends by reason from
+  `ops.platform_ops_failure_reasons` (0265, ADR-347: codes and counts, never an error title) and the
+  year from `ops.platform_ops_message_days` (0262, ADR-341): owned by `w360_definer`, executable
+  only by `w360_platform`, raising `W3403` unless the session's user is in `ops.platform_admins`.
+  The year's counts are kept per company and UTC day in `ops.platform_message_days`, a table with
+  forced row level security that only the definer role reads and writes, counted by
+  `ops.count_platform_message_days` and deleted after 400 days by `ops.purge_platform_message_days`,
+  both executable by the worker's role only, and deleted with the company. The definer role has
+  column grants for the columns they read (no message text, contact, token, secret or payload
+  column) and a read policy on signup sessions.
 - Labels are a display number, an account name or a host (`ops.url_host`, executable only by the
   definer role): store and endpoint URLs can carry tokens in their paths or queries.
 - Errors are the provider's answer as HyFib already stored it for the company's own pages. Emails

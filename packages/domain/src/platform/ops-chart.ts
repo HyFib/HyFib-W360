@@ -375,6 +375,18 @@ export interface DeliveryShareLayout {
 }
 
 /**
+ * A share drawn as a bar `thickness` pixels high in a box `length` long (ADR-347): from a square
+ * start to an end rounded by half the thickness, at least 2 pixels long so a share too small to see
+ * still shows, as an SVG path.
+ */
+export function shareBarPath(share: number, length: number, thickness = 8): string {
+  const drawn = Math.min(length, Math.max(share * length, 2));
+  const radius = Math.min(thickness / 2, drawn / 2);
+  const straight = round(drawn - radius);
+  return `M0 0 H${straight} A${round(radius)} ${thickness / 2} 0 0 1 ${straight} ${thickness} H0 Z`;
+}
+
+/**
  * Where each day and gridline goes on the delivery chart (ADR-346), `width` by `height` pixels: the
  * days along the x axis as on the messages chart, the y axis from 0% to 100%, a line for the share
  * delivered and one for the share read. Days without a share have no point. With `edges`, the plot

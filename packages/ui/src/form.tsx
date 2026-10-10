@@ -18,8 +18,15 @@ export function Textarea({ className, ...props }: TextareaHTMLAttributes<HTMLTex
   return <textarea className={cn(fieldBase, 'min-h-20 py-2', className)} {...props} />;
 }
 
+/**
+ * Paint containment keeps an option wider than the field from widening the page: WebKit counts a
+ * drop-down's unclipped text in the page's width (and ignores `overflow` on one), so a long option
+ * made a company's platform page 360 pixels wide 409 on a phone.
+ */
 export function Select({ className, ...props }: SelectHTMLAttributes<HTMLSelectElement>) {
-  return <select className={cn(fieldBase, 'h-10 py-2 pr-8', className)} {...props} />;
+  return (
+    <select className={cn(fieldBase, 'h-10 py-2 pr-8 [contain:paint]', className)} {...props} />
+  );
 }
 
 export function Label({

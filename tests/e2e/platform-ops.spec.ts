@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { readFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
@@ -629,6 +630,33 @@ test('staff read the platform’s messages a day on the Usage tab (ADR-333)', as
     await expect(deliveryChart).toHaveCount(0);
   }
 
+  // The window's failed sends by reason (ADR-347): a table whose sends add up to the days' failed
+  // ones, read in the same snapshot, or a note when none failed.
+  const failedByDay = (await rows.locator('td:nth-child(4)').allTextContents()).map((n) =>
+    Number(n),
+  );
+  const reasons = page.getByRole('table', { name: 'Failed sends by reason, 7 days' });
+  if (failedByDay.some((n) => n > 0)) {
+    await expect(reasons.getByRole('columnheader')).toHaveText([
+      'Reason',
+      'Code',
+      'Failed',
+      'Share of the failed',
+    ]);
+    const failedByReason = (await reasons.locator('tbody td:nth-child(3)').allTextContents()).map(
+      (n) => Number(n.replaceAll(',', '')),
+    );
+    expect(failedByReason.length).toBeLessThanOrEqual(9);
+    expect(failedByReason.reduce((total, n) => total + n, 0)).toBe(
+      failedByDay.reduce((total, n) => total + n, 0),
+    );
+  } else {
+    await expect(
+      page.getByText("No company's send failed in these days.", { exact: true }),
+    ).toBeVisible();
+    await expect(reasons).toHaveCount(0);
+  }
+
   // On a phone narrower than this project's, the chart and the open table stay inside the page:
   // the table scrolls in its own box rather than widening the card.
   const viewport = page.viewportSize();
@@ -701,6 +729,13 @@ test('staff read the platform’s messages a day on the Usage tab (ADR-333)', as
     const counts = await companyDays.locator(`tbody td:nth-child(${column})`).allTextContents();
     expect(new Set(counts.map((count) => count.trim()))).toEqual(new Set(['None sent']));
   }
+  // Nor any by reason (ADR-347): the note in place of the table.
+  await expect(
+    page.getByText("None of the company's sends failed in these 30 days.", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole('table', { name: "This company's failed sends by reason, 30 days" }),
+  ).toHaveCount(0);
   await expectNoHorizontalOverflow(page);
   // Its last 12 months (ADR-342), from the days the worker counts once they end: drawn, or none
   // counted yet, or none of those counted with a message.
@@ -726,6 +761,108 @@ test('staff read the platform’s messages a day on the Usage tab (ADR-333)', as
     expect(box!.x + box!.width, 'inside the page').toBeLessThanOrEqual(360);
   }
   if (shown) await page.setViewportSize(shown);
+});
+
+/**
+ * Records a send that failed with a code, as the sender leaves one it refused (runtime role, the
+ * company's scope), on the conversation a customer's first message opened; none until the worker has
+ * stored that message.
+ */
+async function failSend(tenantId: string, phoneNumberId: string, code: string, title: string) {
+  const app = new pg.Client({ connectionString: process.env.DATABASE_URL_APP });
+  await app.connect();
+  try {
+    await app.query('BEGIN');
+    await app.query(`SELECT set_config('app.tenant_id', $1, true)`, [tenantId]);
+    const failed = await app.query(
+      // 35: the failed rank (STATUS_RANK in packages/domain messaging/status.ts).
+      `INSERT INTO app.messages (id, tenant_id, conversation_id, channel_account_id, direction,
+         type, status, status_rank, sender_type, error_code, error_title)
+       SELECT $1, c.tenant_id, c.id, c.channel_account_id, 'outbound', 'text', 'failed', 35,
+              'agent', $2, $3
+         FROM app.conversations c
+         JOIN app.channel_accounts a
+           ON a.tenant_id = c.tenant_id AND a.id = c.channel_account_id AND a.phone_number_id = $4
+        WHERE c.tenant_id = $5
+        LIMIT 1`,
+      [randomUUID(), code, title, phoneNumberId, tenantId],
+    );
+    expect(failed.rowCount).toBe(1);
+    await app.query('COMMIT');
+  } finally {
+    await app.end();
+  }
+}
+
+test('staff read the failed sends by reason on the Usage tab and a company’s page (ADR-347)', async ({
+  page,
+  request,
+}) => {
+  test.skip(!platformConfigured, 'needs DATABASE_URL_MIGRATE and E2E_DATABASE_URL_AUTH');
+  test.skip(!messagingConfigured, 'Meta test configuration (stand-in, app secret) not provided');
+  test.setTimeout(150_000);
+  const email = uniqueEmail('reasons');
+  const suffix = `${Date.now().toString(36)}${Math.floor(Math.random() * 1e4)}`;
+  const slug = `reasons-${suffix}`;
+  const companyName = `Reasons Co ${suffix}`;
+  await signUpAndVerify(page, { name: 'Rhea Staff', email, password: PASSWORD });
+  await page.getByLabel('Company name').fill(companyName);
+  await page.getByLabel('Company address').fill(slug);
+  await page.getByRole('button', { name: 'Create company' }).click();
+  await expect(page.getByRole('heading', { name: companyName })).toBeVisible();
+  await turnOnTwoFactor(page, PASSWORD);
+  await makePlatformOwner(email);
+  // A customer writes; a reply is then recorded as the sender records one it refused once the
+  // window had closed.
+  const { tenantId, wabaId, phoneNumberId } = await connectTestChannel({ ownerEmail: email, slug });
+  await sendSignedWebhook(
+    request,
+    inboundMessage(wabaId, phoneNumberId, randomWaId(), 'Is my order on its way?'),
+  );
+  await expect(async () => {
+    await failSend(
+      tenantId,
+      phoneNumberId,
+      'window_closed',
+      'The 24-hour customer service window closed before the message could be sent.',
+    );
+  }).toPass({ timeout: 30_000 });
+
+  // The company's page lists its one failed send: the code's meaning, the code, 1 and all of them.
+  await page.goto(`/platform?q=${slug}`);
+  await page.getByRole('link', { name: companyName }).click();
+  const reasons = page.getByRole('table', {
+    name: "This company's failed sends by reason, 30 days",
+  });
+  await expect(reasons).toBeVisible();
+  await expect(reasons.getByRole('columnheader')).toHaveText([
+    'Reason',
+    'Code',
+    'Failed',
+    'Share of the failed',
+  ]);
+  await expect(reasons.locator('tbody tr')).toHaveCount(1);
+  await expect(reasons.locator('tbody td')).toHaveText([
+    'The 24-hour customer service window closed before the message could be sent.',
+    'window_closed',
+    '1',
+    '100%',
+  ]);
+  // On a phone narrower than this project's, the table scrolls in its own box, not the page.
+  const viewport = page.viewportSize();
+  await page.setViewportSize({ width: 360, height: viewport?.height ?? 800 });
+  await expect(reasons).toBeVisible();
+  await expectNoHorizontalOverflow(page);
+  if (viewport) await page.setViewportSize(viewport);
+
+  // The Usage tab lists the code among every company's failed sends.
+  await page.goto('/platform/ops/usage?days=7');
+  const platformReasons = page.getByRole('table', { name: 'Failed sends by reason, 7 days' });
+  await expect(platformReasons).toBeVisible();
+  await expect(
+    platformReasons.getByRole('cell', { name: 'window_closed', exact: true }),
+  ).toHaveCount(1);
+  await expectNoHorizontalOverflow(page);
 });
 
 /**

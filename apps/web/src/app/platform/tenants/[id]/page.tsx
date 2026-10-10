@@ -46,6 +46,7 @@ import {
   ScheduleDeletionForm,
 } from '@/components/platform/deletion-forms';
 import { DailyMessages } from '@/components/platform/daily-messages';
+import { FailureReasonsTable } from '@/components/platform/failure-reasons';
 import { IssueList, LevelBadge, Utc } from '@/components/platform/ops';
 import {
   PlanPaymentRefundForm,
@@ -751,6 +752,25 @@ export default async function PlatformTenantPage({ params }: { params: Promise<{
                     noneSent:
                       'The company sent no message in these 30 days, so none was delivered.',
                   }}
+                />
+              </section>
+              {/* Its failed sends of the 30 days by reason, read with its health (ADR-347). */}
+              <section
+                aria-labelledby="company-reasons"
+                className="grid min-w-0 gap-3 lg:col-span-2"
+              >
+                <h3 id="company-reasons" className="font-medium">
+                  Failed sends by reason (30 days)
+                </h3>
+                <p className="text-muted-foreground">
+                  The company&apos;s failed sends of the 30 days by the code they failed with,
+                  Meta&apos;s (or the HTTP status of an answer without one) or HyFib&apos;s own, the
+                  most frequent first.
+                </p>
+                <FailureReasonsTable
+                  reasons={ops.reasons}
+                  label="This company's failed sends by reason, 30 days"
+                  empty="None of the company's sends failed in these 30 days."
                 />
               </section>
               {/* Its year, from the counts the worker keeps as days pass (ADR-342). */}

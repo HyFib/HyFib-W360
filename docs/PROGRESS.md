@@ -1,5 +1,89 @@
 # Progress
 
+## 2026-10-10 — Failed sends by reason (P5-10, H-034, ADR-347)
+
+Status: **Implemented; its database and browser tests run in CI only.** The console drew each day's
+failed sends as a share (ADR-344, ADR-346) but not why they failed: a failed message keeps its code,
+Meta's or HyFib's own, and nothing platform staff read counted them. The local PostgreSQL is
+unavailable, so migration 0265 and the integration tests below were written but not run here; the
+migration passed the pglast parse check (syntax only), its PL/pgSQL body included.
+
+### Completed
+
+- **Database:** migration 0265: `ops.platform_ops_failure_reasons(p_since, p_tenant_id)`, a definer
+  function for platform administrators (`W3403`, `W3412` outside the last 93 days), executable by
+  the platform role only: a window's failed outbound messages of the companies not deleted, the
+  platform's or one company's, by error code (the empty code for none), the eight most frequent,
+  ties by code, and one row for the rest with how many codes it holds when two or more are left (a
+  ninth alone is listed). Codes and counts only: never a contact, a message or its error title.
+- **Domain:** `platform/failure-reasons.ts`: `FAILURE_REASONS_SHOWN`, `failureReasons` (each row's
+  share of the failed) and `readFailureReasons` (the function, in its order, the rest last), read by
+  `usage()` and `companyHealth()` in the snapshot of their days.
+- **Web:** `FailureReasonsTable`: each reason with its meaning where HyFib knows it
+  (`failureReasonLabel` over `FAILURE_CODES`, which gains HyFib's `window_closed`, `no_credential`
+  and `retryable`; "Not described here" otherwise, a Meta code or an HTTP status alike, "Failed
+  without a code", "N other codes"), its code, its sends and its share, written and drawn as a bar 8
+  pixels thick in the failed sends' colour (`shareBarPath`), or a note when none failed; a "Failed
+  sends by reason" card on the Usage tab for its window and a section under a company's 30 days.
+- **Tests:** unit (4 new in `platform/failure-reasons.test.ts`: the eight codes, the shares in the
+  order listed, nothing when none failed, the read through the definer function; 2 in
+  `apps/web/src/lib/campaign-labels.test.ts`: the meanings, third-party ones marked and none
+  guessed, failures without a code and the codes left over; 1 in `platform/ops-chart.test.ts`: the
+  share bar's path); integration (2 new in `platform-ops.test.ts`: a company's exact codes, ties by
+  code and the rest together, a delivered send, a cancelled one and a failure before the window left
+  out, the reasons adding up to the days' failed sends for a company and the platform, nine codes
+  listed one by one, a deleted company's failures left out; the refusals and the runtime role
+  refused, 92 days back accepted; the function in the isolation suite's platform list); e2e
+  (`platform-ops.spec.ts`: a new test records a send the sender refused for its company, as
+  `failNumber` records a number's failure, and reads its row on the company's page, its meaning,
+  code, 1 and 100%, inside a phone's width, and its code on the Usage tab; the Usage tab's table
+  adding up to the days' failed sends, or its note; a company's page without failures saying so).
+  Written for CI; the integration and e2e tests were not run here.
+- **Docs:** ADR-347; ARCHITECTURE; SECURITY; THREAT-MODEL T306; DEPLOYMENT (0265); RUNBOOKS; BACKLOG
+  P5-10; feature matrix H-034.
+- **Mutation checks:** 8/8 deliberate regressions caught on the unit-tested parts (nine codes
+  listed; the count for its share; the rest left out of the total, or the largest taken for it;
+  counts left as text; the rest read as one code, or as failures without a code; no order). 9/9 more
+  on the review's fixes (a tiny share's bar invisible, a bar past its box, an end rounder than the
+  bar is long or rounded inwards; one code called codes, a failure without a code or an unknown code
+  given a meaning, third-party meanings not marked, `retryable` without its meaning).
+- **Review fixes:** an independent review found nothing that would fail CI, one gap and a few small
+  things, fixed. No test that runs in CI rendered the table, since no e2e run makes a send fail: a
+  new e2e test records one for its company and reads both pages, and the reasons' labels and bars
+  moved into unit-tested functions. Codes can also be an answer's HTTP status or `retryable` (no
+  attempt could connect): the pages, ADR-347 and RUNBOOKS say so, and `retryable` has its meaning. A
+  ninth code alone is listed rather than called "1 other code". The integration test's bound moved
+  to 92 days back, which a time zone with daylight saving cannot push past 93. A second review of
+  these fixes found six small things, fixed: `retryable` means the last attempt could not connect,
+  with no retries left, not that none could; the runbook calls a number from 400 to 599 likely an
+  HTTP status, any other Meta's; the migration's header is wrapped again; the threat model, runbook
+  and comments say a ninth code is listed and where codes come from; and the e2e fixture ties the
+  number to the conversation and gives the failed send its rank.
+- **CI fix (WebKit, a drop-down's long option):** the new e2e test failed on WebKit alone, on every
+  try: a company's platform page 360 pixels wide measured 409, the first check of a whole platform
+  page at that width. Two changes left it at 409 and were taken out again, so neither was the
+  cause: inline-size containment of the reasons table's box (f12c51a) and a wrapping row for the
+  platform header's brand and badge (94c8739). The overflow check (`expectNoHorizontalOverflow`)
+  now says where an overflow starts: the elements that stick out of a parent inside the viewport,
+  and, when none does, the element whose hiding alone brings the page back inside the viewport.
+  WebKit's next run named the plan form's drop-down ("The company gets"), whose box fits (41 to 319)
+  but whose longest option, "Complimentary (no plan, no limits, every module)", ran past it:
+  WebKit counts a drop-down's text in the page's width even though it clips it, and forces
+  `overflow` visible on one. Every drop-down (the shared `Select`) now has paint containment, which
+  clips that overflow in every browser; a Chromium check here renders a focused drop-down the same
+  with and without it (focus ring included). WebKit is not installed here, so CI's WebKit run is
+  the check of the fix.
+
+### Test commands and results (local, 2026-10-10)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 146 files, 1476 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
 ## 2026-10-10 — Sends delivered and read a day, as shares of those sent (P5-10, H-034, ADR-346)
 
 Status: **Implemented; its database and browser tests run in CI only.** The messages a day charts
