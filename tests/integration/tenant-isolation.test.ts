@@ -367,6 +367,8 @@ describe('database roles', () => {
       'app.webhook_api_key_family(uuid,uuid)',
       // A received message's text, which the capture matches with an endpoint's words (0257).
       'app.webhook_message_text(text,jsonb)',
+      // A campaign's skipped recipients, captured set-based by their triggers (0280).
+      'app.capture_campaign_recipient_skips(uuid,uuid,uuid,uuid[],uuid[],text[])',
     ]) {
       expect(await can('w360_app', fn), fn).toBe(true);
       expect(await can('w360_definer', fn), fn).toBe(true);
@@ -389,7 +391,7 @@ describe('database roles', () => {
       'app.webhook_capture_store_cart_reminder()',
       // A campaign's skipped recipients (0280): when it starts, and as it skips them.
       'app.webhook_capture_campaign_start_skips()',
-      'app.webhook_capture_campaign_recipient_skipped()',
+      'app.webhook_capture_campaign_recipient_skips()',
     ]) {
       for (const role of ['w360_app', 'w360_auth', 'w360_platform']) {
         expect(await can(role, fn), `${role} ${fn}`).toBe(false);

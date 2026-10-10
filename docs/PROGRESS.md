@@ -14,11 +14,13 @@ migrations passed the pglast parse check (syntax only), their PL/pgSQL bodies in
 
 - **Database:** migration 0280: the endpoints' event, number and campaign checks with
   `campaign.recipient_skipped`; the events' type check (NOT VALID, validated by 0281); a trigger on
-  `app.campaigns` capturing the recipients skipped when the audience was taken once the campaign
-  starts (scheduled to running), and one on `app.campaign_recipients` capturing each skip by the
-  runner, both returning at once unless an endpoint of the company takes the event and executable
-  by no role; the capture replaced with the same signature, matching the campaign and number lists
-  and keeping only the recipient in the event's detail.
+  `app.campaigns` gathering the recipients skipped when the audience was taken once the campaign
+  starts (scheduled to running), and a statement trigger on `app.campaign_recipients` gathering
+  those each statement of the runner skips, per campaign, both doing nothing unless an endpoint of
+  the company takes the event and executable by no role; `app.capture_campaign_recipient_skips`
+  writing a campaign's skips set-based (one insert of the events, one of their deliveries, for the
+  endpoints whose campaign and number lists hold the campaign and its number), keeping only the
+  recipient in the event's detail. `app.capture_webhook_event` is unchanged.
 - **Domain:** the event's key, label and description; the payload (`campaignRecipientSkippedPayloadSchema`:
   the recipient and its reason, the campaign, the contact as erasure left it, the number) and its
   builder, a recipient gone ending as `event_gone`; the event among a campaign's and a number's
@@ -26,22 +28,38 @@ migrations passed the pglast parse check (syntax only), their PL/pgSQL bodies in
   of the event.
 - **Web:** Settings → Webhooks offers the event; the campaign list says it holds the campaigns whose
   statuses, changes and skipped recipients are sent.
-- **Tests:** unit (2 new: the payload schema with every reason, an erased contact and a campaign
-  without a number, and the texts with the OpenAPI entry; the event lists, the OpenAPI webhooks and
-  the API's campaign list descriptions updated); integration (`webhook-events.test.ts`: the skips
-  taken at submission captured when the campaign starts, after its change to running, a runtime
-  skip, the expired ones at the end of the sending period, nothing again on resume, the campaign
-  and number lists, the detail kept, the bodies, a recipient gone ending as `event_gone`;
-  `webhooks.test.ts`: the campaign list kept with only this event; `tenant-isolation.test.ts`: the
-  trigger functions executable by no runtime role); the endpoints list text in the e2e test.
-  Written for CI; the integration tests were not run here.
+- **Tests:** unit (5 new: the payload schema with every reason, an erased contact and a campaign
+  without a number; the texts with the OpenAPI entry; the builder over stubbed reads, with an
+  erased contact and a campaign without a number; a recipient or campaign gone and an id that is
+  not one; a status that is not a skip reason; the event lists, the OpenAPI webhooks and the API's
+  campaign list descriptions updated); integration (`webhook-events.test.ts`: the skips taken at
+  submission captured when the campaign starts, after its change to running, a runtime skip, the
+  expired ones at the end of the sending period, nothing again on resume, the campaign and number
+  lists, the detail kept, the bodies, a recipient gone ending as `event_gone`; 10,000 skips at a
+  start and the rest at the end of the sending period, each tick under the pool's statement
+  timeout; `webhooks.test.ts`: the campaign list kept with only this event;
+  `tenant-isolation.test.ts`: the trigger functions executable by no runtime role, the set-based
+  capture by the runtime and definer roles only); the endpoints list text in the e2e test. Written
+  for CI; the integration tests were not run here.
+- **Review fixes:** the independent review found that capturing each skip through
+  `app.capture_webhook_event` once per recipient could outrun the runner's 15-second statement
+  timeout for a start with up to 50,000 skipped recipients or a sending period ending with many
+  waiting (rewritten set-based, with the scale test above, at 10,000 rather than the 50,000 cap);
+  that the payload builder had no unit test (3 added); that the integration test created a contact
+  without a number through the service, which refuses one, and compared timestamps in milliseconds
+  (the contact inserted directly, the order compared in the database); that ADR-358 said a
+  cancelled campaign loses its recipients (only one sent back to draft does); and two nits (a test
+  title, a long comment line).
 - **Docs:** ADR-358; ARCHITECTURE; SECURITY; THREAT-MODEL T317; DEPLOYMENT (0280, 0281); RUNBOOKS;
   BACKLOG P5-08 and P5-09; feature matrix W-138, W-139 and H-014.
-- **Mutation checks:** 13 deliberate regressions, all caught by the unit tests (the event left out
-  of a campaign's or a number's events, the description silent on when, any reason taken, a
-  campaign without a number refused, the campaign without its id, the API's and the OpenAPI
-  document's texts, the component schema missing). The triggers, the capture and the payload
-  builder run against the database and are covered by the integration tests, which run in CI only.
+- **Mutation checks:** 20 deliberate regressions, all caught by the unit tests: 13 before the
+  review (the event left out of a campaign's or a number's events, the description silent on when,
+  any reason taken, a campaign without a number refused, the campaign without its id, the API's and
+  the OpenAPI document's texts, the component schema missing) and 7 after it, in the builder (any
+  status taken as a reason, a gone recipient or campaign not ending the event, an id that is not
+  one read, the reason not as captured, a campaign without a number given one, the campaign's name
+  from its template). The triggers and the set-based capture run in the database and are covered by
+  the integration tests, which run in CI only.
 
 ## 2026-10-10 — OAuth client credentials in the token request body (P5-09, H-014, ADR-357)
 

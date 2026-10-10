@@ -1958,14 +1958,19 @@ Phase 5 rules (outgoing webhooks, P5-09):
   data export (unit tests; integration tests, run in CI only).
 - Skipped campaign recipients (ADR-358): `campaign.recipient_skipped` is captured by triggers in
   the runner's transaction, as the runtime role in the company's scope (no runtime role can call
-  their functions directly), once per recipient: when the campaign starts (scheduled to running,
-  once) for those skipped when the audience was taken, and when the runner skips the others. The
-  event keeps ids and the skip reason; the campaign and its number, passed for the filters, are
-  taken out before it is stored. The body, built when delivered in the company's scope, gives the
-  recipient's id and reason, the campaign's name, status and template, the recipient's contact as
-  HyFib keeps it (null phone and name once erased) and the campaign's number. The campaign and
-  number lists of an endpoint narrow it in `app.capture_webhook_event`; a recipient that is gone
-  fails its pending deliveries as `event_gone` (unit tests; integration tests, run in CI only).
+  the trigger functions directly), once per recipient: when the campaign starts (scheduled to
+  running, once) for those skipped when the audience was taken, and when the runner skips the
+  others (a statement trigger that finds only the recipients a statement moved to skipped). They
+  hand a campaign's skips to `app.capture_campaign_recipient_skips`, which runs with the caller's
+  rights, as `app.capture_webhook_event` does (executable by the runtime and definer roles only,
+  which may insert events and deliveries anyway), so RLS keeps every event and delivery in the
+  company of the recipients; it writes deliveries only for that company's active endpoints whose
+  campaign and number lists hold the campaign and its number. The event keeps ids and the skip
+  reason; the campaign and its number serve the filters and are not stored. The body, built when
+  delivered in the company's scope, gives the recipient's id and reason, the campaign's name,
+  status and template, the recipient's contact as HyFib keeps it (null phone and name once erased)
+  and the campaign's number. A recipient that is gone fails its pending deliveries as
+  `event_gone` (unit tests; integration tests, run in CI only).
 - An endpoint can take the run steps of chosen outcomes only (ADR-327). The list holds only the
   outcomes a run's log records (checked by the services and the database), is kept only while the
   endpoint takes `automation.run_step` (a database check too), and is applied in

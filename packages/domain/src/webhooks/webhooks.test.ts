@@ -5482,6 +5482,119 @@ describe('skipped campaign recipients (ADR-358)', () => {
     ).toBe(false);
   });
 
+  /** A transaction answering each read with the next rows given, counting what is left. */
+  function answering(answers: unknown[][]) {
+    const queue = [...answers];
+    const chain = {
+      from: () => chain,
+      innerJoin: () => chain,
+      leftJoin: () => chain,
+      where: () => {
+        const rows = queue.shift();
+        if (!rows) throw new Error('an unexpected read');
+        return Promise.resolve(rows);
+      },
+    };
+    return {
+      tx: { select: () => chain } as unknown as Parameters<typeof buildWebhookPayload>[0],
+      unread: () => queue.length,
+    };
+  }
+  const tenantId = '0192a1b2-0000-7000-8000-0000000000f0';
+  const at = new Date('2026-10-10T10:00:00.000Z');
+  const event = (status: unknown, recipientId: unknown) =>
+    ({
+      id: body.id,
+      tenantId,
+      type: 'campaign.recipient_skipped',
+      messageId: null,
+      conversationId: null,
+      contactId: body.data.contact.id,
+      templateId: null,
+      status,
+      detail: { recipientId },
+      contactChanges: null,
+      tagsAdded: null,
+      tagsRemoved: null,
+      occurredAt: at,
+      occurredAtExact: '2026-10-10T10:00:00.000123Z',
+    }) as unknown as Parameters<typeof buildWebhookPayload>[1];
+  const recipientRow = {
+    id: body.data.recipient.id,
+    campaignId: body.data.campaign.id,
+    contactId: body.data.contact.id,
+  };
+  const campaignRow = {
+    ...body.data.campaign,
+    scheduledAt: at,
+    startedAt: at,
+    completedAt: null,
+    canceledAt: null,
+    audienceCount: 5,
+    queuedCount: 2,
+    skippedCount: 3,
+    channelId: body.data.channel.id,
+    channelPhone: body.data.channel.phone,
+  };
+
+  it('build the body from the recipient, its campaign and contact as they are now, and the reason as captured', async () => {
+    const reads = answering([
+      [recipientRow],
+      [campaignRow],
+      [{ phone: '+919876543210', name: 'Asha', erasedAt: null }],
+    ]);
+    const built = await buildWebhookPayload(
+      reads.tx,
+      event('opted_out', recipientRow.id),
+      'endpoint',
+    );
+    expect(built).toEqual(body);
+    expect(campaignRecipientSkippedPayloadSchema.safeParse(built).success).toBe(true);
+    expect(reads.unread()).toBe(0);
+    // An erased contact without its number or name; a campaign without a number.
+    const erased = answering([
+      [recipientRow],
+      [{ ...campaignRow, channelId: null, channelPhone: null }],
+      [{ phone: '+919876543210', name: 'Asha', erasedAt: at }],
+    ]);
+    expect(
+      (await buildWebhookPayload(erased.tx, event('contact_erased', recipientRow.id), 'endpoint'))
+        .data,
+    ).toEqual({
+      ...body.data,
+      recipient: { id: recipientRow.id, skipReason: 'contact_erased' },
+      contact: { id: body.data.contact.id, phone: null, name: null },
+      channel: null,
+    });
+  });
+
+  it('send nothing for a recipient or campaign that is gone, reading nothing for an id that is not one', async () => {
+    for (const answers of [[[]], [[recipientRow], []]]) {
+      const gone = answering(answers);
+      await expect(
+        buildWebhookPayload(gone.tx, event('opted_out', recipientRow.id), 'endpoint'),
+      ).rejects.toBeInstanceOf(WebhookEventGoneError);
+      expect(gone.unread()).toBe(0);
+    }
+    for (const recipientId of ['recipient', null, 7]) {
+      const none = answering([]);
+      await expect(
+        buildWebhookPayload(none.tx, event('opted_out', recipientId), 'endpoint'),
+        String(recipientId),
+      ).rejects.toBeInstanceOf(WebhookEventGoneError);
+    }
+  });
+
+  it('describe no event captured without a campaign skip reason, before reading anything', async () => {
+    for (const status of [null, 'checkout_completed', 'no_opt_in']) {
+      const none = answering([]);
+      await expect(
+        buildWebhookPayload(none.tx, event(status, recipientRow.id), 'endpoint'),
+        String(status),
+      ).rejects.toThrow('The skipped campaign recipient was captured without its reason');
+    }
+  });
+
   it('are described for members and in the OpenAPI document', () => {
     expect(WEBHOOK_EVENT_INFO['campaign.recipient_skipped'].label).toBe(
       'Campaign recipient skipped',

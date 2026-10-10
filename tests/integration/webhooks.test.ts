@@ -5709,7 +5709,7 @@ describe('campaign filters (ADR-185)', () => {
       campaignId,
     ]);
 
-  it("are refused without message.status or campaign.status_changed, empty, over 50 or naming another company's campaign; kept by a change that leaves them out and cleared with the events; the database keeps them to those events", async () => {
+  it("are refused without message.status, campaign.status_changed or campaign.recipient_skipped, empty, over 50 or naming another company's campaign; kept by a change that leaves them out and cleared with the events; the database keeps them to those events", async () => {
     const c = await fx.company();
     const owner = await fx.ctx(c, c.owner);
     const autumn = await campaignOf(c, 'Autumn launch');

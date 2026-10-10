@@ -1942,8 +1942,8 @@ function TemplateChoices({
 
 /**
  * The campaigns whose messages' statuses, changes and skipped recipients (ADR-358) an endpoint takes
- * (ADR-185): every campaign's, or those of the campaigns ticked. The company's newest campaigns are offered; one the endpoint
- * already names stays listed, ticked, until it is unticked.
+ * (ADR-185): every campaign's, or those of the campaigns ticked. The company's newest campaigns are
+ * offered; one the endpoint already names stays listed, ticked, until it is unticked.
  */
 function CampaignChoices({
   prefix,

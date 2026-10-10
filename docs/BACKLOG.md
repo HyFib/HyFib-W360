@@ -1310,7 +1310,8 @@ verification, app review, Embedded Signup configuration).
   **[Skipped campaign recipients as webhook events built; their database tests run only in CI]**
   (ADR-358, migrations 0280 and 0281: `campaign.recipient_skipped` once per recipient a campaign
   skips, with the reason, the campaign, the contact and the number; those skipped when the
-  audience was taken when the campaign starts; narrowed by campaigns and numbers).
+  audience was taken when the campaign starts; written set-based, per campaign and statement;
+  narrowed by campaigns and numbers).
   Remaining: filters for other event types and on a message's values other than its type and words,
   field value comparisons beyond
   values, words and ranges, other authentication (headers computed per delivery, other OAuth

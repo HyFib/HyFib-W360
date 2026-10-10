@@ -1486,11 +1486,13 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
 
    Migration 0280 (ADR-358) replaces the endpoints' event, number and campaign checks (validated at
    once: at most 10 endpoints per company) and the events' type check (NOT VALID; 0281 validates it
-   while captures go on), adds triggers on `app.campaigns` and `app.campaign_recipients` with their
-   functions, and replaces `app.capture_webhook_event` with the same signature (keeping 0278's
-   filters). A campaign's start and each skip by the runner then ask whether an endpoint of the
-   company takes `campaign.recipient_skipped`, which none does before web servers of this release
-   offer it. As for 0276: workers roll out before web servers, so no endpoint takes the event
+   while captures go on), and adds a row trigger on `app.campaigns`, a statement trigger on
+   `app.campaign_recipients` and `app.capture_campaign_recipient_skips`, the set-based capture both
+   call; `app.capture_webhook_event` is unchanged. A campaign's start and each statement of the
+   runner that skips recipients then ask whether an endpoint of the company takes
+   `campaign.recipient_skipped`, which none does before web servers of this release offer it, and
+   every update of recipients keeps its old and new rows for the statement trigger (transition
+   tables), in proportion to the rows it changes. As for 0276: workers roll out before web servers, so no endpoint takes the event
    before every worker can describe it; a worker from before it fails each delivery of it without
    an attempt (`payload_failed`; replay them once newer workers run), so turn the event off on the
    endpoints that take it before rolling workers back to such an image; and until the web rollout

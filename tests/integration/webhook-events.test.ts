@@ -5531,10 +5531,17 @@ describe('campaign events (ADR-087)', () => {
       displayName: 'No consent',
       tags: ['vip'],
     });
-    const { id: numberless } = await contactsService().createContact(owner, {
-      displayName: 'No number',
-      tags: ['vip'],
-    });
+    // The service takes no contact without a number; an import can leave one (no phone, no
+    // WhatsApp identity).
+    const [added] = await fx.query<{ id: string }>(
+      `WITH added AS (
+         INSERT INTO app.contacts (id, tenant_id, display_name, source)
+         VALUES (gen_random_uuid(), $1, 'No number', 'import') RETURNING id)
+       INSERT INTO app.contact_tags (id, tenant_id, contact_id, tag)
+       SELECT gen_random_uuid(), $1, id, 'vip' FROM added RETURNING contact_id AS id`,
+      [c.tenant.id],
+    );
+    const numberless = added!.id;
     const outlet = await fx.addNumber(c, { phone: '+91 90000 54322' });
     const types: WebhookEventType[] = ['campaign.recipient_skipped'];
     const every = await addEndpoint(c, types);
@@ -5633,17 +5640,16 @@ describe('campaign events (ADR-087)', () => {
       // Every endpoint taking the event, and the one naming the campaign's number.
       expect(deliveries, String(reason)).toBe(2);
     }
-    const [changed] = await fx.query<{ occurred_at: Date }>(
-      `SELECT occurred_at FROM app.webhook_events
-        WHERE tenant_id = $1 AND type = 'campaign.status_changed' AND status = 'running'`,
+    // Compared in the database, to the microsecond: a JavaScript date keeps milliseconds only.
+    const [order] = await fx.query<{ after: boolean }>(
+      `SELECT (SELECT min(occurred_at) FROM app.webhook_events
+                WHERE tenant_id = $1 AND type = 'campaign.recipient_skipped')
+            > (SELECT occurred_at FROM app.webhook_events
+                WHERE tenant_id = $1 AND type = 'campaign.status_changed' AND status = 'running')
+              AS after`,
       [c.tenant.id],
     );
-    const [firstSkip] = await fx.query<{ occurred_at: Date }>(
-      `SELECT min(occurred_at) AS occurred_at FROM app.webhook_events
-        WHERE tenant_id = $1 AND type = 'campaign.recipient_skipped'`,
-      [c.tenant.id],
-    );
-    expect(firstSkip!.occurred_at.getTime()).toBeGreaterThan(changed!.occurred_at.getTime());
+    expect(order).toEqual({ after: true });
 
     // Paused (its unsent messages go back) and resumed: resuming captures nothing again. Its
     // sending period then ends with the two recipients still waiting: both are skipped at once.
@@ -5732,6 +5738,78 @@ describe('campaign events (ADR-087)', () => {
       ),
     ).toEqual([{ state: 'failed', last_error: 'event_gone' }]);
   });
+
+  it('captures the skips of a large audience together within the statement timeout: 10,000 when the campaign starts, the rest when its sending period ends (ADR-358)', async () => {
+    const s = await campaignCompany(0);
+    const { c } = s;
+    const owner = await fx.ctx(c, c.owner);
+    const hook = await addEndpoint(c, ['campaign.recipient_skipped']);
+    // 13,000 contacts in the audience: the first 3,000 opted in to marketing, the other 10,000
+    // skipped when the audience is taken (no marketing opt-in).
+    await fx.query(
+      `WITH added AS (
+         INSERT INTO app.contacts (id, tenant_id, display_name, phone_e164, source)
+         SELECT gen_random_uuid(), $1, 'Load ' || g, '+9171' || lpad(g::text, 8, '0'), 'import'
+           FROM generate_series(1, 13000) AS g
+         RETURNING id)
+       INSERT INTO app.contact_tags (id, tenant_id, contact_id, tag)
+       SELECT gen_random_uuid(), $1, id, 'vip' FROM added`,
+      [c.tenant.id],
+    );
+    await fx.query(
+      `INSERT INTO app.consent_events (id, tenant_id, contact_id, purpose, action, source, actor_type, occurred_at)
+       SELECT gen_random_uuid(), tenant_id, id, 'marketing', 'opt_in', 'import', 'system', now()
+         FROM app.contacts WHERE tenant_id = $1 AND substring(display_name FROM 6)::int <= 3000`,
+      [c.tenant.id],
+    );
+    // Statistics as autovacuum leaves them after a bulk import, as the 10,000-recipient campaign
+    // test does: the test is about the capture, not the audience count's plan.
+    await fx.query(
+      'ANALYZE app.contacts, app.contact_tags, app.consent_events, app.contact_consents',
+    );
+    const id = await s.draft(owner, 'Mostly skipped');
+    expect(await s.campaigns.submitCampaign(owner, id, { expectedVersion: 1 }, {})).toMatchObject({
+      audience: 13_000,
+      pending: 3_000,
+    });
+    /** The skipped recipients captured, by reason, and the deliveries made for them. */
+    const captured = async () => {
+      const [row] = await fx.query<{ by_reason: Record<string, number>; deliveries: number }>(
+        `SELECT (SELECT jsonb_object_agg(status, n) FROM (
+                   SELECT status, count(*)::int AS n FROM app.webhook_events
+                    WHERE tenant_id = $1 AND type = 'campaign.recipient_skipped'
+                    GROUP BY status) x) AS by_reason,
+                (SELECT count(*)::int FROM app.webhook_deliveries WHERE endpoint_id = $2)
+                  AS deliveries`,
+        [c.tenant.id, hook.id],
+      );
+      return row;
+    };
+
+    // The start captures the 10,000 in one statement, under the pool's 15-second statement timeout.
+    let t = Date.now();
+    const first = await s.tick(id);
+    const startMs = Date.now() - t;
+    expect(first).toMatchObject({ outcome: 'progress', skipped: 0 });
+    expect(await captured()).toEqual({
+      by_reason: { no_marketing_opt_in: 10_000 },
+      deliveries: 10_000,
+    });
+
+    // The sending period ends with the rest still waiting: skipped together, captured together.
+    s.clock.advance(25 * 3_600_000);
+    t = Date.now();
+    expect(await s.tick(id)).toMatchObject({ outcome: 'completed' });
+    const endMs = Date.now() - t;
+    const waiting = 3_000 - (first as { queued: number }).queued;
+    expect(await captured()).toEqual({
+      by_reason: { no_marketing_opt_in: 10_000, expired: waiting },
+      deliveries: 10_000 + waiting,
+    });
+    console.info(
+      `campaign skips: start ${startMs} ms (10,000 captured), end ${endMs} ms (${waiting} captured)`,
+    );
+  }, 180_000);
 
   it('sends an endpoint that names numbers only the campaigns that send from them; a campaign without a number is on none (ADR-170)', async () => {
     const s = await campaignCompany(0);
