@@ -43,9 +43,20 @@ check (syntax only), its PL/pgSQL body included.
   three times taken, the list kept with the skipped event only, null keeping the old list, the
   refusal's text, the API refusing a sent reminder's list, a list alone not a change, the change's
   and the field's descriptions, the answer's schema without its values, and the sent event's
-  description silent on the reminders. The other five are database paths (the settings refusal and
-  audits, the API's answer and audit, the export), covered by the integration tests, which run in
-  CI only.
+  description silent on the reminders. The other five run only through the services and the
+  database (the settings refusal and audits, the API's answer and audit, the export), covered by
+  the integration tests, which run in CI only.
+- **Review fixes:** an independent review found nothing that would fail CI and no correctness or
+  security bug, and these, fixed:
+  - **LOW:** no test reached the capture's new condition where it decides whether any endpoint
+    takes a reminder's event, since the cart reminders test's first endpoint takes every reminder.
+    A test in `webhooks.test.ts` now captures the first and second reminders' skips and sends as
+    their trigger does, with endpoints taking the second alone: the first's write no event, and the
+    second's go to each endpoint whose reminder and reason lists hold them.
+  - **LOW:** the API field said the stores, the skip reasons and the numbers all narrow a
+    reminder's event; the skip reasons narrow a skipped one only, and the numbers a sent one.
+  - Not changed: the feature matrix keeps "locally verified" on its rows, as for the earlier
+    webhook filters, whose rows say their database tests run in CI only.
 
 ### Test commands and results (local, 2026-10-10)
 

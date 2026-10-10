@@ -3155,6 +3155,55 @@ describe('cash on delivery answer, store and order message filters (ADR-349, ADR
     expect(grant?.can_update).toBe(true);
   });
 
+  it('capture a cart reminder’s event only when an endpoint takes its reminder, and deliver it to those only (ADR-361)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    // Both endpoints take the second reminder alone; the second its skips of one reason only.
+    const both = await webhooks().create(owner, {
+      url: 'https://hooks.example.com/cart-reminders-both',
+      eventTypes: ['store_checkout.reminder_skipped', 'store_checkout.reminder_sent'],
+      cartReminders: ['cart_second_reminder'],
+    });
+    const skips = await webhooks().create(owner, {
+      url: 'https://hooks.example.com/cart-reminders-skips',
+      eventTypes: ['store_checkout.reminder_skipped'],
+      cartReminders: ['cart_second_reminder'],
+      cartReminderSkipReasons: ['no_phone'],
+    });
+    // The capture as the cart reminders' trigger calls it (0276), in the company's scope: the
+    // event's status is the reminder; the store and a skipped one's reason are in the detail.
+    const store = uuidv7();
+    const capture = (type: string, reminder: string, detail: Record<string, string>) =>
+      fx.dbs.app.run(authorizedTenantScope(c.tenant.id, null), async (tx) => {
+        await tx.execute(
+          sql`select app.capture_webhook_event(${c.tenant.id}::uuid, ${type}, null, null, null, null, ${reminder}, ${JSON.stringify({ storeId: store, ...detail })}::jsonb, now())`,
+        );
+      });
+    // The first reminder's skip and send: no endpoint takes them, so nothing is written.
+    await capture('store_checkout.reminder_skipped', 'cart_reminder', { skipReason: 'no_phone' });
+    await capture('store_checkout.reminder_sent', 'cart_reminder', {});
+    expect(await eventsOf(c)).toHaveLength(0);
+    // The second reminder's: its skip of the second endpoint's reason goes to both, another
+    // reason's to the first alone, and its send to the first alone.
+    await capture('store_checkout.reminder_skipped', 'cart_second_reminder', {
+      skipReason: 'no_phone',
+    });
+    await capture('store_checkout.reminder_skipped', 'cart_second_reminder', {
+      skipReason: 'opted_out',
+    });
+    await capture('store_checkout.reminder_sent', 'cart_second_reminder', {});
+    const events = await eventsOf(c);
+    expect(events.map((e) => [e.type, e.status])).toEqual([
+      ['store_checkout.reminder_skipped', 'cart_second_reminder'],
+      ['store_checkout.reminder_skipped', 'cart_second_reminder'],
+      ['store_checkout.reminder_sent', 'cart_second_reminder'],
+    ]);
+    const deliveredTo = async (endpointId: string) =>
+      (await deliveriesOf(endpointId)).map((d) => events.findIndex((e) => e.id === d.event_id));
+    expect((await deliveredTo(both.id)).sort()).toEqual([0, 1, 2]);
+    expect(await deliveredTo(skips.id)).toEqual([0]);
+  });
+
   it('take numbers with store_checkout.reminder_sent and stores with either cart reminder event, never order messages or reasons; the database keeps them so (ADR-355)', async () => {
     const c = await fx.company();
     const owner = await fx.ctx(c, c.owner);

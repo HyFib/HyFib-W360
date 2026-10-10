@@ -497,7 +497,7 @@ const invalidOrderMessageSkipReasons = () =>
   });
 
 const cartRemindersField = webhookCartRemindersSchema.describe(
-  `The cart reminders whose skips and sends the endpoint receives as store_checkout.reminder_skipped and store_checkout.reminder_sent (${WEBHOOK_CART_REMINDERS.join(', ')}: the first and the second), as reminder.event names them, only with either event; null receives both, as a list of both does. With the stores, the skip reasons or the numbers chosen too, a reminder's event must pass them all.`,
+  `The cart reminders whose skips and sends the endpoint receives as store_checkout.reminder_skipped and store_checkout.reminder_sent (${WEBHOOK_CART_REMINDERS.join(', ')}: the first and the second), as reminder.event names them, only with either event; null receives both, as a list of both does. With the stores, and the skip reasons for a skipped reminder or the numbers for a sent one, chosen too, a reminder's event must pass them all.`,
 );
 
 /** Cart reminders are chosen only for an endpoint that receives skipped or sent ones (ADR-361). */

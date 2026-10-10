@@ -4004,7 +4004,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'as reminder.event names them, only with either event',
     );
     expect(JSON.stringify(given.cartReminders)).toContain(
-      "With the stores, the skip reasons or the numbers chosen too, a reminder's event must pass them all.",
+      "With the stores, and the skip reasons for a skipped reminder or the numbers for a sent one, chosen too, a reminder's event must pass them all.",
     );
     expect(JSON.stringify(given.cartReminderSkipReasons)).toContain(
       'With the stores or the cart reminders chosen too, a skipped reminder must pass them all.',
