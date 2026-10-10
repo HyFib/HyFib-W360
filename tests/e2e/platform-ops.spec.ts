@@ -629,6 +629,33 @@ test('staff read the platform’s messages a day on the Usage tab (ADR-333)', as
     await expect(deliveryChart).toHaveCount(0);
   }
 
+  // The window's failed sends by reason (ADR-347): a table whose sends add up to the days' failed
+  // ones, read in the same snapshot, or a note when none failed.
+  const failedByDay = (await rows.locator('td:nth-child(4)').allTextContents()).map((n) =>
+    Number(n),
+  );
+  const reasons = page.getByRole('table', { name: 'Failed sends by reason, 7 days' });
+  if (failedByDay.some((n) => n > 0)) {
+    await expect(reasons.getByRole('columnheader')).toHaveText([
+      'Reason',
+      'Code',
+      'Failed',
+      'Share of the failed',
+    ]);
+    const failedByReason = (await reasons.locator('tbody td:nth-child(3)').allTextContents()).map(
+      (n) => Number(n.replaceAll(',', '')),
+    );
+    expect(failedByReason.length).toBeLessThanOrEqual(9);
+    expect(failedByReason.reduce((total, n) => total + n, 0)).toBe(
+      failedByDay.reduce((total, n) => total + n, 0),
+    );
+  } else {
+    await expect(
+      page.getByText("No company's send failed in these days.", { exact: true }),
+    ).toBeVisible();
+    await expect(reasons).toHaveCount(0);
+  }
+
   // On a phone narrower than this project's, the chart and the open table stay inside the page:
   // the table scrolls in its own box rather than widening the card.
   const viewport = page.viewportSize();
@@ -701,6 +728,13 @@ test('staff read the platform’s messages a day on the Usage tab (ADR-333)', as
     const counts = await companyDays.locator(`tbody td:nth-child(${column})`).allTextContents();
     expect(new Set(counts.map((count) => count.trim()))).toEqual(new Set(['None sent']));
   }
+  // Nor any by reason (ADR-347): the note in place of the table.
+  await expect(
+    page.getByText("None of the company's sends failed in these 30 days.", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole('table', { name: "This company's failed sends by reason, 30 days" }),
+  ).toHaveCount(0);
   await expectNoHorizontalOverflow(page);
   // Its last 12 months (ADR-342), from the days the worker counts once they end: drawn, or none
   // counted yet, or none of those counted with a message.

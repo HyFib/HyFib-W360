@@ -15,9 +15,10 @@ import {
   TR,
   Table,
 } from '@w360/ui';
-import { USAGE_WINDOWS, opsCompanyPage, usageChange } from '@w360/domain';
+import { FAILURE_REASONS_SHOWN, USAGE_WINDOWS, opsCompanyPage, usageChange } from '@w360/domain';
 import { CompanyLink, CompanyPager, StatTile } from '@/components/platform/ops';
 import { DailyMessages } from '@/components/platform/daily-messages';
+import { FailureReasonsTable } from '@/components/platform/failure-reasons';
 import { getRuntime } from '@/server/runtime';
 import { requirePlatformActor } from '@/server/session';
 
@@ -118,6 +119,25 @@ export default async function OpsUsagePage({
               legend: 'Delivered and read, legend',
               noneSent: 'No company sent a message in these days, so none was delivered.',
             }}
+          />
+        </CardContent>
+      </Card>
+      <Card>
+        <CardHeader>
+          <CardTitle>Failed sends by reason ({o.days} days)</CardTitle>
+          <CardDescription>
+            Every company&apos;s failed sends of the {o.days} days by the code they failed with:
+            Meta&apos;s, from the status it reported or its answer to the send, or HyFib&apos;s own
+            for a send refused before it left. The {FAILURE_REASONS_SHOWN} most frequent, then the
+            rest together; companies deleted are left out. Codes only: the error texts stay in each
+            company&apos;s inbox.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <FailureReasonsTable
+            reasons={o.reasons}
+            label={`Failed sends by reason, ${o.days} days`}
+            empty="No company's send failed in these days."
           />
         </CardContent>
       </Card>

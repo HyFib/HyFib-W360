@@ -142,6 +142,7 @@ export * from './platform/ops';
 export * from './platform/failure-alerts';
 export * from './platform/alert-channel';
 export * from './platform/message-days';
+export * from './platform/failure-reasons';
 export * from './platform/integration-alerts';
 export * from './platform/integration-assignment-notices';
 export * from './platform/queue-waits';

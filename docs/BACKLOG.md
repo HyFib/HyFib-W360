@@ -1385,11 +1385,15 @@ verification, app review, Embedded Signup configuration).
   two lines on an axis of percentages, with "Cancelled", "Delivered" and "Read" columns in the table
   of the days; every share, the failed one too, of the sends not cancelled; the kept days counted
   again once with them).
+  **[Failed sends by reason built; its database and browser tests run only in CI]** (ADR-347,
+  migration 0265: under the messages a day, the Usage tab's window and a company's 30 days list the
+  failed sends by code, the eight most frequent and the rest, with each code's meaning where HyFib
+  knows it and a bar of its share).
   Remaining:
   other alert channels (several channels, a channel per alert, formats other than a JSON `text`
   member, such as Microsoft Teams' or PagerDuty's, and the owners' other notices, such as personal
   notices, in a channel; Microsoft's documentation of Teams' webhooks could not be opened from
-  here), other charts (other measures, such as failures by reason or by company), Meta's quality
+  here), other charts (other measures, such as failures by reason over the year or by company over time), Meta's quality
   webhook (unconfirmed), rollups for many companies and pages read from the database.
 - **P5-11 Account export/deletion workflow** **[built, locally verified with test data only]**
   (ADR-055): Settings → Company data for owners. A streamed, gzip-compressed JSON Lines export of

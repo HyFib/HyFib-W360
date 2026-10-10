@@ -40,8 +40,10 @@ export const SKIP_REASONS: Record<string, string> = {
 };
 
 /**
- * Meta error codes seen on campaign messages. `official` marks codes confirmed in Meta's error
- * table (docs/research/meta-whatsapp.md M-062); others come from third-party code (M-063).
+ * Codes failed messages carry: Meta's error codes, and HyFib's own for a send refused before it
+ * left. `official` marks HyFib's codes and Meta's confirmed in its error table
+ * (docs/research/meta-whatsapp.md M-062); others come from third-party code (M-063). Campaign pages
+ * and the operations console's failed sends by reason (ADR-347) read them.
  */
 export const FAILURE_CODES: Record<string, { label: string; official: boolean }> = {
   '131049': {
@@ -70,6 +72,14 @@ export const FAILURE_CODES: Record<string, { label: string; official: boolean }>
   },
   company_suspended: { label: 'The company was suspended.', official: true },
   sender_removed: { label: 'The sending member left the company.', official: true },
+  window_closed: {
+    label: 'The 24-hour customer service window closed before the message could be sent.',
+    official: true,
+  },
+  no_credential: {
+    label: 'The WhatsApp account had no stored credential; it needs reconnecting.',
+    official: true,
+  },
   unknown: {
     label: 'Unknown outcome: the connection dropped after the request left.',
     official: true,

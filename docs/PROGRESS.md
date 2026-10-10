@@ -1,5 +1,55 @@
 # Progress
 
+## 2026-10-10 — Failed sends by reason (P5-10, H-034, ADR-347)
+
+Status: **Implemented; its database and browser tests run in CI only.** The console drew each day's
+failed sends as a share (ADR-344, ADR-346) but not why they failed: a failed message keeps its code,
+Meta's or HyFib's own, and nothing platform staff read counted them. The local PostgreSQL is
+unavailable, so migration 0265 and the integration tests below were written but not run here; the
+migration passed the pglast parse check (syntax only), its PL/pgSQL body included.
+
+### Completed
+
+- **Database:** migration 0265: `ops.platform_ops_failure_reasons(p_since, p_tenant_id)`, a definer
+  function for platform administrators (`W3403`, `W3412` outside the last 93 days), executable by
+  the platform role only: a window's failed outbound messages of the companies not deleted, the
+  platform's or one company's, by error code (the empty code for none), the eight most frequent,
+  ties by code, and one row for the rest with how many codes it holds. Codes and counts only: never
+  a contact, a message or its error title.
+- **Domain:** `platform/failure-reasons.ts`: `FAILURE_REASONS_SHOWN`, `failureReasons` (each row's
+  share of the failed) and `readFailureReasons` (the function, in its order, the rest last), read by
+  `usage()` and `companyHealth()` in the snapshot of their days.
+- **Web:** `FailureReasonsTable`: each reason with its meaning where HyFib knows it
+  (`FAILURE_CODES`, which gains HyFib's `window_closed` and `no_credential`; "Not described here"
+  otherwise, "Failed without a code", "N other codes"), its code, its sends and its share, written
+  and drawn as a bar 8 pixels thick in the failed sends' colour, or a note when none failed; a
+  "Failed sends by reason" card on the Usage tab for its window and a section under a company's 30
+  days.
+- **Tests:** unit (4 new in `platform/failure-reasons.test.ts`: the eight codes, the shares in the
+  order listed, nothing when none failed, the read through the definer function); integration (2 new
+  in `platform-ops.test.ts`: a company's exact codes, ties by code and the rest together, a
+  delivered send, a cancelled one and a failure before the window left out, the reasons adding up to
+  the days' failed sends for a company and the platform, a deleted company's failures left out; the
+  refusals and the runtime role refused; the function in the isolation suite's platform list); e2e
+  (`platform-ops.spec.ts`: the Usage tab's table adding up to the days' failed sends, or its note; a
+  company's page without failures saying so). Written for CI; the integration and e2e tests were not
+  run here.
+- **Docs:** ADR-347; ARCHITECTURE; SECURITY; THREAT-MODEL T306; DEPLOYMENT (0265); RUNBOOKS; BACKLOG
+  P5-10; feature matrix H-034.
+- **Mutation checks:** 8/8 deliberate regressions caught on the unit-tested parts (nine codes
+  listed; the count for its share; the rest left out of the total, or the largest taken for it;
+  counts left as text; the rest read as one code, or as failures without a code; no order).
+
+### Test commands and results (local, 2026-10-10)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 145 files, 1473 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
 ## 2026-10-10 — Sends delivered and read a day, as shares of those sent (P5-10, H-034, ADR-346)
 
 Status: **Implemented; its database and browser tests run in CI only.** The messages a day charts

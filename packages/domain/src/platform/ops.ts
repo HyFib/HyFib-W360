@@ -48,6 +48,7 @@ import {
   messageYear,
   type MessageYear,
 } from './message-days';
+import { readFailureReasons } from './failure-reasons';
 import { parseInput } from '../validation';
 import {
   OPS_SIGNAL_RULES,
@@ -1035,8 +1036,9 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
     },
 
     /**
-     * One company's health, its activity over the last 30 days and its year of kept days, none
-     * while its deletion runs (ADR-342); null when unknown.
+     * One company's health, its activity over the last 30 days with its failed sends by reason
+     * (ADR-347) and its year of kept days, none while its deletion runs (ADR-342); null when
+     * unknown.
      */
     async companyHealth(actor: PlatformActor, tenantId: string) {
       if (!z.uuid().safeParse(tenantId).success) return null;
@@ -1050,12 +1052,13 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
           if (!facts) return null;
           const [activity] = await activitySince(tx, since, tenantId);
           const daily = await dailyActivity(tx, since, tenantId);
+          const reasons = await readFailureReasons(tx, since, tenantId);
           // None while its deletion runs: the deletion deletes its kept counts, and the worker no
           // longer counts it (ADR-342).
           const year = (await deletionStarted(tx, tenantId))
             ? null
             : messageYear(await keptMessageDays(tx, MESSAGE_DAYS_KEPT, tenantId));
-          return { health: assess(facts), activity: activity ?? null, daily, year };
+          return { health: assess(facts), activity: activity ?? null, daily, reasons, year };
         },
         { isolationLevel: 'repeatable read', accessMode: 'read only' },
       );
@@ -1191,6 +1194,7 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
         async (tx) => {
           const rows = await usageRows(tx, window, now);
           const daily = await dailyActivity(tx, since, null);
+          const reasons = await readFailureReasons(tx, since, null);
           const sum = (pick: (a: CompanyUsage) => number) =>
             rows.reduce((total, a) => total + pick(a), 0);
           return {
@@ -1199,6 +1203,8 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
             rows,
             /** The platform's messages each UTC day of the window (ADR-333). */
             daily,
+            /** The window's failed sends by the code they failed with (ADR-347). */
+            reasons,
             /** The window before's sending and receipts (ADR-157), null for 90 days. */
             previous: USAGE_COMPARED_WINDOWS.includes(window)
               ? {

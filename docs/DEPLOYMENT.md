@@ -1356,6 +1356,10 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    with its sends cancelled, delivered and read, and the year's delivery chart fills in as it does.
    After a rollback the columns stay, and old web servers do not read them.
 
+   Migration 0265 (ADR-347) creates `ops.platform_ops_failure_reasons` for the platform role. Apply
+   it before web servers of this release roll out: the Usage tab and a company's platform page call
+   it. Web servers from before it do not, and after a rollback the function stays unused.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

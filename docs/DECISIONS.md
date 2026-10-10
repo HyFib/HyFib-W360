@@ -13587,3 +13587,45 @@ after the deployment, its sent, failed and received too.
 
 Not built: other measures (failures by reason or by company), the shares in a CSV, and the time a
 send took to be delivered or read.
+
+## ADR-347 Failed sends by reason (P5-10) (2026-10-10)
+
+Context: the Usage tab and a company's platform page draw each day's failed sends as a share of
+those not cancelled (ADR-344, ADR-346), and the Signals tab counts two of Meta's errors per company
+(131049, 131050). Why the other sends failed was left to each company's inbox: a failed message
+keeps the code it failed with, Meta's from the status webhook or the answer to the send, or HyFib's
+own when the send was refused before it left (`window_closed`, `no_credential`, `opted_out`,
+`suppressed`, `template_not_approved` and others), but nothing platform staff read counted them.
+BACKLOG listed failures by reason among the charts remaining.
+
+Decision:
+
+- **What counts:** a window's outbound messages whose status is failed, by their error code, the
+  platform's (the Usage tab's window of 7, 30 or 90 days) or one company's (its platform page's 30
+  days), companies deleted left out, as the daily counts count them; a failure recorded without a
+  code is counted under the empty code. `ops.platform_ops_failure_reasons(p_since, p_tenant_id)`
+  (0265, security definer, platform administrators only, `W3412` outside the last 93 days) returns
+  the eight most frequent codes, ties by code, and one row for the rest with how many codes it
+  holds, so the answer stays small whatever codes arrive. It reads codes and counts only: never a
+  contact, a message or its error title, which may quote what was sent. Read in the snapshot of the
+  window's days, the reasons add up to their failed sends.
+- **Their meaning:** the labels campaign pages already use (`lib/campaign-labels.ts`): Meta's codes
+  confirmed in its error table (research M-062), others from third-party code marked as such, and
+  HyFib's own, with `window_closed` and `no_credential` added. A code without a recorded meaning
+  says "Not described here" beside the code rather than a guess, and a failure without a code says
+  so.
+- **A table with bars, not a chart:** up to nine reasons with long names compare best as rows. Each
+  has its reason, its code, its sends and its share of those failed, written and drawn as a bar 8
+  pixels thick in the failed sends' colour (`--chart-3`), from a square start to a rounded end.
+  Every number is written, so the bars carry no tooltip and are hidden from assistive technology. A
+  note replaces the table when no send failed.
+- **Where:** a "Failed sends by reason" card under the Usage tab's messages a day, for the tab's
+  window, and a section under a company's 30 days on its platform page, read with them.
+
+Consequences: staff see which errors dominate a window's failures, platform-wide or a company's,
+without opening a company's inbox. A code new to HyFib is listed with its count and "Not described
+here" until its meaning is recorded. The reasons are live, 93 days back at most: the year's kept
+counts do not keep them.
+
+Not built: failed sends by reason over the year, by reason and day, in a CSV, and the error titles,
+which stay in the company's inbox.

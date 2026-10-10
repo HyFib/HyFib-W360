@@ -18,6 +18,7 @@ import {
   pgBossQueueInspector,
   purgeDeadLetters,
   queueWaitLimits,
+  readFailureReasons,
   recordDeadLetters,
   deadLettersCsv,
   emailsCsv,
@@ -4239,5 +4240,112 @@ describe('messages a day kept as days pass (ADR-341)', () => {
         WHERE oid = 'ops.platform_message_days'::regclass`,
     );
     expect(rls).toEqual({ rls: true, forced: true });
+  });
+});
+
+describe('failed sends by reason (ADR-347)', () => {
+  /** A send left with a status and a code at a time, as the sending code leaves it. */
+  const sentWith = (
+    c: Company,
+    conversationId: string,
+    status: 'failed' | 'canceled',
+    code: string | null,
+    at: Date,
+  ) =>
+    fx.query(
+      `INSERT INTO app.messages (id, tenant_id, conversation_id, channel_account_id, direction,
+         type, status, sender_type, created_at, error_code)
+       VALUES ($1, $2, $3, $4, 'outbound', 'text', $5, 'agent', $6, $7)`,
+      [uuidv7(), c.tenant.id, conversationId, c.channelAccountId, status, at, code],
+    );
+  const hour = 60 * 60 * 1000;
+  const ago = (ms: number) => new Date(Date.now() - ms);
+
+  it('counts a window’s failed sends by code, eight one by one and the rest together, a company’s or the platform’s', async () => {
+    const sender = await fx.company();
+    const conversation = await conversationOf(sender, '919876500051');
+    const recent = ago(2 * hour);
+    // Ten codes: Meta's, HyFib's own, failures recorded without one, and four seen once.
+    const counts: [string | null, number][] = [
+      ['131049', 5],
+      ['window_closed', 4],
+      [null, 3],
+      ['131026', 3],
+      ['opted_out', 2],
+      ['131056', 2],
+      ['c1', 1],
+      ['c2', 1],
+      ['c3', 1],
+      ['c4', 1],
+    ];
+    for (const [code, n] of counts) {
+      for (let i = 0; i < n; i += 1) await sentWith(sender, conversation, 'failed', code, recent);
+    }
+    // Not counted: a failure before the 30 days, a send delivered and one cancelled with a code.
+    await sentWith(sender, conversation, 'failed', '131049', ago(31 * 24 * hour));
+    await messageAt(sender, conversation, 'outbound', 'delivered', recent);
+    await sentWith(sender, conversation, 'canceled', 'campaign_paused', recent);
+
+    const health = await ops().companyHealth(staff, sender.tenant.id);
+    // The most frequent first, ties by code, then the two codes left over together.
+    const share = (n: number) => n / 23;
+    expect(health?.reasons).toEqual({
+      reasons: [
+        { code: '131049', failed: 5, codes: 1, share: share(5) },
+        { code: 'window_closed', failed: 4, codes: 1, share: share(4) },
+        { code: '', failed: 3, codes: 1, share: share(3) },
+        { code: '131026', failed: 3, codes: 1, share: share(3) },
+        { code: '131056', failed: 2, codes: 1, share: share(2) },
+        { code: 'opted_out', failed: 2, codes: 1, share: share(2) },
+        { code: 'c1', failed: 1, codes: 1, share: share(1) },
+        { code: 'c2', failed: 1, codes: 1, share: share(1) },
+        { code: null, failed: 2, codes: 2, share: share(2) },
+      ],
+      failed: 23,
+    });
+    // Read with its 30 days, the reasons add up to the days' failed sends.
+    expect(health?.daily.reduce((total, d) => total + d.failed, 0)).toBe(23);
+
+    // The platform's, read with the Usage tab's days, add up to theirs, the rest last.
+    const usage = await ops().usage(staff, 30);
+    expect(usage.reasons.failed).toBe(usage.daily.reduce((total, d) => total + d.failed, 0));
+    expect(usage.reasons.failed).toBeGreaterThanOrEqual(23);
+    const listed = usage.reasons.reasons;
+    expect(listed.filter((r) => r.code !== null).length).toBeLessThanOrEqual(8);
+    expect(listed.findIndex((r) => r.code === null)).toBeOneOf([-1, listed.length - 1]);
+    const named = listed.filter((r) => r.code !== null).map((r) => r.failed);
+    expect(named).toEqual([...named].sort((a, b) => b - a));
+
+    // A deleted company's failures are no longer counted.
+    const gone = await fx.company();
+    const goneConversation = await conversationOf(gone, '919876500052');
+    await sentWith(gone, goneConversation, 'failed', '131049', recent);
+    await fx.query(`UPDATE app.tenants SET status = 'deleted' WHERE id = $1`, [gone.tenant.id]);
+    expect(
+      await fx.dbs.platform.run(staff.userId, (tx) =>
+        readFailureReasons(tx, ago(24 * hour), gone.tenant.id),
+      ),
+    ).toEqual({ reasons: [], failed: 0 });
+  });
+
+  it('lets only platform administrators read them, 93 days back at most', async () => {
+    const read = (userId: string, since: Date | null) =>
+      fx.dbs.platform.run(userId, (tx) =>
+        tx.execute(
+          sql`select * from ops.platform_ops_failure_reasons(${since?.toISOString() ?? null}::timestamptz, null)`,
+        ),
+      );
+    const outsider = await createUser(fx.dbs, { twoFactor: true });
+    await expectCode(read(outsider.id, ago(hour)), 'forbidden');
+    for (const since of [null, new Date(Date.now() + hour), ago(94 * 24 * hour)]) {
+      await expectCode(read(staff.userId, since), 'precondition_failed');
+    }
+    await read(staff.userId, ago(93 * 24 * hour - hour));
+    // The worker's role cannot read them.
+    await expect(
+      fx.dbs.appPool.query(
+        "SELECT * FROM ops.platform_ops_failure_reasons(now() - interval '1 day', null)",
+      ),
+    ).rejects.toThrow(/permission denied/);
   });
 });
