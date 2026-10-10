@@ -167,8 +167,8 @@ importers:
         specifier: 0.45.3
         version: 0.45.3(@types/pg@8.23.1)(kysely@0.29.6)(pg@8.23.0)
       nodemailer:
-        specifier: 10.0.10
-        version: 10.0.10
+        specifier: 10.0.15
+        version: 10.0.15
       pg:
         specifier: 8.23.0
         version: 8.23.0
@@ -245,8 +245,8 @@ importers:
         specifier: 0.45.3
         version: 0.45.3(@types/pg@8.23.1)(kysely@0.29.6)(pg@8.23.0)
       nodemailer:
-        specifier: 10.0.10
-        version: 10.0.10
+        specifier: 10.0.15
+        version: 10.0.15
       pg-boss:
         specifier: 12.34.0
         version: 12.34.0
@@ -3428,8 +3428,8 @@ packages:
     resolution: {integrity: sha512-kQK9LGGFiHtrWiNhZtA7Qbw17AQz+dmsEKODRIVTXA9+e5MS/2gZEBhYJt13GrAz5/IOZKddH/0Z3TP/Zgo+yw==}
     engines: {node: '>=18'}
 
-  nodemailer@10.0.10:
-    resolution: {integrity: sha512-He9XskOFms62SyAKkLu8CcGcYHAo+BSHSsORI8s4PJH8qZgZY4L4lDfvyN0twvmbpyG+eGrxpyBlskj9d9rJ8A==}
+  nodemailer@10.0.15:
+    resolution: {integrity: sha512-EUqp5PhtcsYXs9Fq/lS7s/8zlTrnBqmzZWzFFROrNikMiz+om/YRKMwqN907t+0A1KKyT8jd39CBUbFZmaZmcA==}
     engines: {node: '>=20.0.0'}
 
   non-error@0.1.0:
@@ -7045,7 +7045,7 @@ snapshots:
 
   node-releases@2.0.57: {}
 
-  nodemailer@10.0.10: {}
+  nodemailer@10.0.15: {}
 
   non-error@0.1.0: {}
 
