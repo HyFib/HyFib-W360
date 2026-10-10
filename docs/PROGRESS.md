@@ -82,6 +82,13 @@ page only; ADR-360 and ADR-362 left a CSV unbuilt.
   for the share of its sends, its failed sends for its sends, the companies list left out, an
   unknown code named by itself). The reads, the audit entries and the refusal run in the database
   and are covered by the integration tests, which run in CI only.
+- **Review fixes:** an independent review found nothing that would fail CI and no correctness or
+  security bug. Its LOW findings are fixed: the lists read in one snapshot are named once
+  (`OPS_SNAPSHOT_EXPORT_LISTS`); the card and its file name the rest with one function
+  (`otherCompaniesText`); the export's docs (`exportFile`, `OPS_EXPORT_LISTS`, the route) name the
+  new lists and what their lines count as; ADR-360's note says failures by company are built; the
+  integration test checks the line of the company whose deletion has started (its failed sends, no
+  sends, no share).
 
 ### Test commands and results (local, 2026-10-10)
 

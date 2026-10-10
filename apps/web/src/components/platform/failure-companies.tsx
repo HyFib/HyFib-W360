@@ -1,13 +1,13 @@
 import { TBody, TD, TH, THead, TR, Table } from '@w360/ui';
 import type { FailureCompany, FailureCompanyYear } from '@w360/domain';
-import { chartCount, chartShare } from '@w360/domain/ops-chart';
+import { chartCount, chartShare, otherCompaniesText } from '@w360/domain/ops-chart';
 import { MonthBars, ShareBar, YearMonths } from '@/components/platform/failure-reasons';
 import { CompanyLink } from '@/components/platform/ops';
 
 /** A listed company's name, or how many companies the rest holds, as text. */
 function companyText(company: FailureCompany): string {
   if (company.tenantId !== null && company.name !== null) return company.name;
-  return `${company.companies} other ${company.companies === 1 ? 'company' : 'companies'}`;
+  return otherCompaniesText(company.companies);
 }
 
 /**

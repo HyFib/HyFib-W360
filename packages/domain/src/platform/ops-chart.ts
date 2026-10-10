@@ -234,6 +234,13 @@ export function failedShare(day: DailyChartDay): number | null {
 }
 
 /**
+ * The rest of the year's companies together, as the card and its CSV name them (ADR-362,
+ * ADR-365): "1 other company", "12 other companies".
+ */
+export const otherCompaniesText = (companies: number) =>
+  `${companies} other ${companies === 1 ? 'company' : 'companies'}`;
+
+/**
  * A company's failed sends as a share of its sends (ADR-364), those cancelled left out, from 0 to 1;
  * null when it sent none, or when fewer sends than failed sends are left, as of a company whose
  * deletion removes its sends before its failed sends by code: no share, rather than one above all.

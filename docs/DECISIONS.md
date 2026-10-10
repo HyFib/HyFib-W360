@@ -14223,8 +14223,8 @@ Consequences: platform staff see when a reason began, grew or faded without quer
 Rows scaled to their own height compare a reason's months, not one reason's months with another's
 (the counts and shares do that). The months cover the counted days only, as the year does.
 
-Not built: failures by company over time (ADR-362), a CSV of the months (built since ADR-365), and
-weeks or days instead of months.
+Not built: failures by company over time (built since ADR-362), a CSV of the months (built since
+ADR-365), and weeks or days instead of months.
 
 ## ADR-361 Choosing the cart reminders, first or second, whose events a webhook endpoint receives (P5-09) (2026-10-10)
 

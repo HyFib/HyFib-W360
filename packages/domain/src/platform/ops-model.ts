@@ -9,6 +9,7 @@ import type { QueueSnapshot } from '../jobs/queue';
 import { failureReasonLabel } from '../messaging/failure-codes';
 import { DEAD_LETTER_RETRY_BLOCK_TEXT, type DeadLetterRetryBlock } from './dead-letter-retries';
 import type { FailureCompanyYear, FailureReasonMonth, FailureReasonYear } from './failure-reasons';
+import { otherCompaniesText } from './ops-chart';
 
 export const OPS_HEALTH_RULES = {
   /** Failure rates are judged only with at least this many outbound messages in 24 hours. */
@@ -296,8 +297,8 @@ export function usageChange(current: number, previous: number): string | null {
 
 /**
  * The console's lists staff can download as CSV: the Usage tab (ADR-154), every company's health
- * and the Signals tab (ADR-155), and every list of the Onboarding, Integrations and Queues tabs
- * (ADR-158).
+ * and the Signals tab (ADR-155), every list of the Onboarding, Integrations and Queues tabs
+ * (ADR-158), and the Usage tab's year of failed sends by reason and by company (ADR-365).
  */
 export const OPS_EXPORT_LISTS = [
   'usage',
@@ -316,6 +317,15 @@ export const OPS_EXPORT_LISTS = [
   'failure-companies',
 ] as const;
 export type OpsExportList = (typeof OPS_EXPORT_LISTS)[number];
+
+/**
+ * The lists whose reads take several statements that must agree, exported in one repeatable-read
+ * snapshot as their cards read them (ADR-365): the year's failed sends.
+ */
+export const OPS_SNAPSHOT_EXPORT_LISTS: ReadonlySet<OpsExportList> = new Set([
+  'failure-reasons',
+  'failure-companies',
+]);
 
 export function isOpsExportList(value: string): value is OpsExportList {
   return (OPS_EXPORT_LISTS as readonly string[]).includes(value);
@@ -594,9 +604,7 @@ export function failureCompaniesCsv(year: FailureCompanyYear): string {
       'Days counted',
     ],
     year.companies.map((c, index) => [
-      c.tenantId === null
-        ? `${c.companies} other ${c.companies === 1 ? 'company' : 'companies'}`
-        : c.name,
+      c.tenantId === null ? otherCompaniesText(c.companies) : c.name,
       c.slug,
       c.companies,
       c.failed,

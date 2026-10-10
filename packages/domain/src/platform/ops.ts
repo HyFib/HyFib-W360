@@ -75,6 +75,7 @@ import {
   numberSetupsCsv,
   opsCsvFilename,
   opsExportAction,
+  OPS_SNAPSHOT_EXPORT_LISTS,
   quarantineCsv,
   queuesCsv,
   receiptsCsv,
@@ -896,8 +897,10 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
   /**
    * One of the console's lists as a CSV body, read in the caller's transaction with the tab's own
    * read: the Usage tab over its window (ADR-154), every company's health worst first or the Signals
-   * tab (ADR-155), and the lists of the Onboarding, Integrations and Queues tabs (ADR-158). Lines
-   * per company count as companies, other lines as rows.
+   * tab (ADR-155), the lists of the Onboarding, Integrations and Queues tabs (ADR-158), and the
+   * Usage tab's year of failed sends by reason or by company (ADR-365). Lines of one company each
+   * count as companies; other lines, the year's companies among them (the rest's line holds
+   * several), as rows.
    */
   async function exportFile(
     tx: Tx,
@@ -1316,9 +1319,7 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
           return { filename: opsCsvFilename(list, now, file.window), body: file.body };
         },
         // The year's failed sends are read in one snapshot, as their cards read them (ADR-365).
-        list === 'failure-reasons' || list === 'failure-companies'
-          ? { isolationLevel: 'repeatable read' }
-          : undefined,
+        OPS_SNAPSHOT_EXPORT_LISTS.has(list) ? { isolationLevel: 'repeatable read' } : undefined,
       );
     },
 

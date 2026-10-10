@@ -8,8 +8,10 @@ export const dynamic = 'force-dynamic';
 
 /**
  * One of the operations console's lists as CSV, formula-safe: the Usage tab for `days` (ADR-154),
- * every company's health or the Signals tab (ADR-155). The pages' checks run first, and the service
- * writes the export to the platform audit log before it returns the file.
+ * every company's health or the Signals tab (ADR-155), a list of the Onboarding, Integrations or
+ * Queues tab (ADR-158), or the year's failed sends by reason or by company (ADR-365). The pages'
+ * checks run first, and the service writes the export to the platform audit log before it returns
+ * the file.
  */
 export async function GET(request: Request, { params }: { params: Promise<{ list: string }> }) {
   const actor = await requirePlatformActor();

@@ -4907,6 +4907,10 @@ describe('failed sends by reason kept as days pass (ADR-350)', () => {
       new RegExp(`^Failing second,${slugs.get(second.tenant.id)},1,16,0\\.153846,0,,`),
     );
     expect(companyLines[9]).toMatch(/^2 other companies,,2,6,0\.057692,70,0\.085714,/);
+    // The company whose deletion has started: its failed sends, no sends and no share (ADR-364).
+    expect(companyLines[7]).toMatch(
+      new RegExp(`^Failing seventh,${slugs.get(seventh.tenant.id)},1,8,0\\.076923,0,,`),
+    );
     const reasonsFile = await ops().exportList(staff, 'failure-reasons', 30);
     expect(reasonsFile.filename).toMatch(/^hyfib-failure-reasons-\d{4}-\d{2}-\d{2}\.csv$/);
     const reasonLines = csvLines(reasonsFile.body);
