@@ -1344,6 +1344,18 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    database: old workers queue no post of it, though their posting job still sends one already
    waiting.
 
+   Migration 0264 (ADR-346) counts each day's sends cancelled, delivered and read:
+   `ops.platform_message_days` gains `canceled`, `delivered` and `read` (null on the rows counted
+   before it) with their check, `ops.platform_message_days_counted` gains `outcomes` (false on the
+   days counted before it), and `ops.platform_ops_daily_activity` (the two-argument one),
+   `ops.count_platform_message_days` and `ops.platform_ops_message_days` are replaced, the readers
+   with three more columns. Apply it before web servers of this release roll out: they read the new
+   columns. Web servers from before it read the columns they know by name and work with it, and so
+   does 0255's one-argument function. The worker's code does not change: once it is applied, the
+   counting job counts every day of the year again, 3 a minute, newest first (about two hours), each
+   with its sends cancelled, delivered and read, and the year's delivery chart fills in as it does.
+   After a rollback the columns stay, and old web servers do not read them.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

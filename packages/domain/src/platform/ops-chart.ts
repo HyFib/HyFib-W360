@@ -4,7 +4,7 @@
  * so the browser draws it at the width it has and the unit tests read every number. Failed sends
  * are not drawn on it: far fewer than the others, they would lie flat on the axis. They have a
  * chart of their own under it (ADR-344), as a share of the messages sent each day, on an axis of
- * percentages.
+ * percentages, and so do the sends delivered and read (ADR-346).
  */
 
 /** One UTC day of the platform's messages, as the service reads them. */
@@ -14,6 +14,14 @@ export interface DailyChartDay {
   outbound: number;
   failed: number;
   inbound: number;
+  /**
+   * Of the sent, those cancelled before they left (their status canceled: a paused or cancelled
+   * campaign's queued sends), those delivered (delivered, read or played) and those read (read or
+   * played), ADR-346; null on a kept day counted before they were.
+   */
+  canceled: number | null;
+  delivered: number | null;
+  read: number | null;
 }
 
 /** The two drawn series, in their fixed order: they keep their colours whatever the data. */
@@ -176,11 +184,38 @@ export function dailyChartLayout(
 }
 
 /**
- * The share of a day's sent messages that failed (ADR-344), from 0 to 1, or null on a day that
- * sent none: it has no share, and the chart leaves a gap there rather than draw it as 0%.
+ * The sends a day's shares are of (ADR-346): those sent less those cancelled before they left, as
+ * the company reports' failure rate counts them, so a campaign paused, whose queued sends are
+ * cancelled and sent again as new messages when it resumes, does not read as fewer deliveries or
+ * failures. Null on a kept day counted before the cancellations were, until it is counted again.
+ */
+export function shareBase(day: DailyChartDay): number | null {
+  return day.canceled === null ? null : day.outbound - day.canceled;
+}
+
+/** Why a day has no share (ADR-346): see `shareGap`. */
+export type ShareGap = 'none_sent' | 'all_cancelled' | 'not_counted';
+
+/**
+ * Why a day has no share (ADR-346), or null when it has one: it sent nothing, every send was
+ * cancelled before it left, or it is a kept day whose cancellations are not counted yet.
+ */
+export function shareGap(day: DailyChartDay): ShareGap | null {
+  if (day.outbound === 0) return 'none_sent';
+  const base = shareBase(day);
+  if (base === null) return 'not_counted';
+  return base <= 0 ? 'all_cancelled' : null;
+}
+
+/**
+ * The share of a day's sent messages that failed (ADR-344), from 0 to 1, of those not cancelled
+ * (`shareBase`), or null on a day that sent none, whose sends were all cancelled, or whose
+ * cancellations are not counted yet: it has no share, and the chart leaves a gap there rather than
+ * draw it as 0%.
  */
 export function failedShare(day: DailyChartDay): number | null {
-  return day.outbound > 0 ? day.failed / day.outbound : null;
+  const base = shareBase(day);
+  return base !== null && base > 0 ? day.failed / base : null;
 }
 
 /**
@@ -234,8 +269,10 @@ export function failedShareLayout(
   const shares = days.map(failedShare);
   // Each day's share rounded up to a tenth of a percent, in whole numbers, so the scale's top is at
   // or above every day's.
-  const tenthsUp = (d: DailyChartDay) =>
-    d.outbound > 0 ? Math.floor((d.failed * 1000 + d.outbound - 1) / d.outbound) : 0;
+  const tenthsUp = (d: DailyChartDay) => {
+    const base = shareBase(d);
+    return base !== null && base > 0 ? Math.floor((d.failed * 1000 + base - 1) / base) : 0;
+  };
   const max = Math.max(0, ...days.map(tenthsUp));
   const step = chartStep(max);
   const top = Math.max(step, Math.ceil(max / step) * step);
@@ -283,20 +320,151 @@ export function failedShareLayout(
 }
 
 /**
- * The edges the messages chart and the failed sends' chart drawn under it share (ADR-344), so each
- * day sits at the same x in both: room on the left for either chart's gridline labels, and on the
- * right for either's end labels.
+ * The share of a day's sent messages delivered (ADR-346), from 0 to 1, of those not cancelled
+ * (`shareBase`): those whose status got to delivered, read or played. Null as the failed share is,
+ * and on a kept day counted before the deliveries were: the chart leaves a gap there rather than
+ * draw it as 0%.
+ */
+export function deliveredShare(day: DailyChartDay): number | null {
+  const base = shareBase(day);
+  return base !== null && base > 0 && day.delivered !== null ? day.delivered / base : null;
+}
+
+/** The share of a day's sent messages read (ADR-346), read or played; null as the delivered one. */
+export function readShare(day: DailyChartDay): number | null {
+  const base = shareBase(day);
+  return base !== null && base > 0 && day.read !== null ? day.read / base : null;
+}
+
+/** The delivery chart's two series, in their fixed order: they keep their colours whatever the data. */
+export const DELIVERY_CHART_SERIES = [
+  { key: 'delivered', label: 'Delivered', share: deliveredShare },
+  { key: 'read', label: 'Read', share: readShare },
+] as const;
+
+export type DeliveryChartSeriesKey = (typeof DELIVERY_CHART_SERIES)[number]['key'];
+
+/** The delivery chart's gridlines, in whole percent: the whole range, which a share can take. */
+const DELIVERY_TICKS = [0, 25, 50, 75, 100];
+
+export interface DeliveryShareLayout {
+  width: number;
+  height: number;
+  /** The plot's edges, inside the axis labels. */
+  plot: { left: number; right: number; top: number; bottom: number };
+  /** Gridlines and their labels: 0, 25, 50, 75 and 100%. */
+  yTicks: { value: number; y: number; label: string }[];
+  /** The days named under the axis, as the messages chart names them. */
+  xTicks: { index: number; x: number; label: string }[];
+  /** Each day's x, for the crosshair. */
+  xs: number[];
+  series: {
+    key: DeliveryChartSeriesKey;
+    label: string;
+    /** The line, broken at each day without a share. */
+    path: string;
+    /** Each day's y, or null on a day without a share. */
+    ys: (number | null)[];
+    /** The days with a share between days without one: a line of one point draws nothing. */
+    lone: number[];
+    /** Where the line ends and the last day's share, or null when the last day has none. */
+    end: { x: number; y: number; share: number } | null;
+  }[];
+  /** Whether the last day's shares are written at the lines' ends: not when the ends nearly meet. */
+  endLabels: boolean;
+}
+
+/**
+ * Where each day and gridline goes on the delivery chart (ADR-346), `width` by `height` pixels: the
+ * days along the x axis as on the messages chart, the y axis from 0% to 100%, a line for the share
+ * delivered and one for the share read. Days without a share have no point. With `edges`, the plot
+ * spans those instead of its own (`sharedPlotEdges`).
+ */
+export function deliveryShareLayout(
+  days: readonly DailyChartDay[],
+  width: number,
+  height: number,
+  edges?: PlotEdges,
+): DeliveryShareLayout {
+  const left =
+    edges?.left ??
+    Math.max(...DELIVERY_TICKS.map((value) => chartShare(value / 100).length)) * 7 + 12;
+  const top = TOP_ROOM;
+  const bottom = height - X_AXIS_ROOM;
+  const y = (share: number) => round(bottom - share * (bottom - top));
+  const shares = DELIVERY_CHART_SERIES.map((s) => days.map((d) => s.share(d)));
+  const endYs = shares.map((list) => {
+    const last = list.at(-1) ?? null;
+    return last === null ? null : y(last);
+  });
+  const [deliveredEnd, readEnd] = endYs;
+  const endLabels =
+    width >= END_LABEL_MIN_WIDTH &&
+    deliveredEnd !== null &&
+    deliveredEnd !== undefined &&
+    readEnd !== null &&
+    readEnd !== undefined &&
+    Math.abs(deliveredEnd - readEnd) >= END_LABEL_GAP;
+  const right = edges?.right ?? width - (endLabels ? END_LABEL_ROOM : 16);
+  const { xs, xTicks } = dayAxis(days, left, right);
+  const endX = xs.at(-1);
+  return {
+    width,
+    height,
+    plot: { left, right, top, bottom },
+    yTicks: DELIVERY_TICKS.map((value) => ({
+      value,
+      y: y(value / 100),
+      label: chartShare(value / 100),
+    })),
+    xTicks,
+    xs,
+    series: DELIVERY_CHART_SERIES.map((s, i) => {
+      const list = shares[i] ?? [];
+      const ys = list.map((share) => (share === null ? null : y(share)));
+      const drawn = (index: number) => ys[index] !== undefined && ys[index] !== null;
+      const lastShare = list.at(-1) ?? null;
+      const endY = ys.at(-1);
+      return {
+        key: s.key,
+        label: s.label,
+        path: ys
+          .flatMap((value, index) =>
+            value === null ? [] : [`${drawn(index - 1) ? 'L' : 'M'}${xs[index]} ${value}`],
+          )
+          .join(' '),
+        ys,
+        lone: ys.flatMap((_, index) =>
+          drawn(index) && !drawn(index - 1) && !drawn(index + 1) ? [index] : [],
+        ),
+        end:
+          lastShare !== null && endX !== undefined && endY !== undefined && endY !== null
+            ? { x: endX, y: endY, share: lastShare }
+            : null,
+      };
+    }),
+    endLabels,
+  };
+}
+
+/**
+ * The edges the messages chart and the share charts drawn under it share (ADR-344, ADR-346), so
+ * each day sits at the same x in all: room on the left for any chart's gridline labels, and on the
+ * right for any's end labels.
  */
 export function sharedPlotEdges(
   days: readonly DailyChartDay[],
   width: number,
   height: number,
 ): PlotEdges {
-  const messages = dailyChartLayout(days, width, height).plot;
-  const failed = failedShareLayout(days, width, height).plot;
+  const plots = [
+    dailyChartLayout(days, width, height).plot,
+    failedShareLayout(days, width, height).plot,
+    deliveryShareLayout(days, width, height).plot,
+  ];
   return {
-    left: Math.max(messages.left, failed.left),
-    right: Math.min(messages.right, failed.right),
+    left: Math.max(...plots.map((p) => p.left)),
+    right: Math.min(...plots.map((p) => p.right)),
   };
 }
 

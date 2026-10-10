@@ -7,7 +7,8 @@ import type { OpsDailyActivity } from './ops';
  * company not deleted and whose deletion has not started, and keeps the counts, so the tab can draw
  * a year. A few days a run, newest first, back to 365 days before today; the 7 days before today
  * are counted again once a day while statuses Meta reports late arrive, and older days keep their
- * counts. Counts only: never a contact, a message or its text.
+ * counts, but for the days counted before migration 0264, counted once more with their sends
+ * cancelled, delivered and read (ADR-346). Counts only: never a contact, a message or its text.
  */
 
 /** Days the year reads: the 365 before today. */
@@ -42,12 +43,17 @@ export function messageYear(days: readonly KeptMessageDay[]): MessageYear {
   let start = end;
   while (start > 0 && counted(start - 1)) start -= 1;
   return {
-    days: days.slice(start, end).map(({ day, outbound, failed, inbound }) => ({
-      day,
-      outbound,
-      failed,
-      inbound,
-    })),
+    days: days
+      .slice(start, end)
+      .map(({ day, outbound, failed, inbound, canceled, delivered, read }) => ({
+        day,
+        outbound,
+        failed,
+        inbound,
+        canceled,
+        delivered,
+        read,
+      })),
     uncounted: days.filter((d) => !d.counted).length,
   };
 }
@@ -67,8 +73,12 @@ export async function keptMessageDays(
     failed: number;
     inbound: number;
     counted: boolean;
+    canceled: number | null;
+    delivered: number | null;
+    read: number | null;
   }>(sql`
-    select to_char(utc_day, 'YYYY-MM-DD') as day, outbound, failed, inbound, counted
+    select to_char(utc_day, 'YYYY-MM-DD') as day, outbound, failed, inbound, counted, canceled,
+           delivered, read
       from ops.platform_ops_message_days(${days}::int, ${tenantId}::uuid)
      order by utc_day`);
   return result.rows.map((r) => ({
@@ -77,6 +87,10 @@ export async function keptMessageDays(
     failed: Number(r.failed),
     inbound: Number(r.inbound),
     counted: r.counted === true,
+    // Null on a day counted before these were (0264), until the worker counts it again.
+    canceled: r.canceled === null ? null : Number(r.canceled),
+    delivered: r.delivered === null ? null : Number(r.delivered),
+    read: r.read === null ? null : Number(r.read),
   }));
 }
 

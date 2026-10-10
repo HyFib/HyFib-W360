@@ -515,13 +515,19 @@ test('staff read the platform’s messages a day on the Usage tab (ADR-333)', as
   // The table gives every day: each UTC day from the window's start to today (the server's, read
   // between the two times).
   await page.getByText('Table of the days', { exact: true }).click();
+  // The pointer off the charts: left on the summary, it would rest on a chart once focusing the
+  // chart scrolls the page, and WebKit then moves that chart's day to the one under it.
+  await page.mouse.move(0, 0);
   const table = page.getByRole('table', { name: 'Messages a day' });
   await expect(table.getByRole('columnheader')).toHaveText([
     'Day (UTC)',
     'Sent',
+    'Cancelled',
     'Failed',
     'Received',
     'Share failed',
+    'Delivered',
+    'Read',
   ]);
   const rows = table.getByRole('row').filter({ has: page.getByRole('cell') });
   const days = (await rows.locator('td:first-child').allTextContents()).map((d) => d.trim());
@@ -557,10 +563,18 @@ test('staff read the platform’s messages a day on the Usage tab (ADR-333)', as
   await page.keyboard.press('Escape');
   await expect(tooltip(days.at(-1)!)).toHaveCount(0);
 
-  // Under it, the share of each day's sends that failed (ADR-344): drawn when a company sent a
-  // message in the window, as the table's Sent column says (earlier tests may or may not have),
-  // else a note; its value names the last day's share of those sent, or none sent.
+  // Under it, the share of each day's sends that failed (ADR-344), of those not cancelled before they
+  // left (ADR-346): drawn when a company sent a message in the window that was not cancelled, as
+  // the table's Sent and Cancelled columns say (earlier tests may or may not have), else a note;
+  // its value names the last day's share of those sent, or none sent.
   const sent = (await rows.locator('td:nth-child(2)').allTextContents()).map((n) => Number(n));
+  const cancelled = (await rows.locator('td:nth-child(3)').allTextContents()).map((n) => Number(n));
+  const shared = sent.map((n, i) => n - (cancelled[i] ?? 0));
+  // Every send cancelled: neither chart, and a note saying so in place of each.
+  const allCancelled = page.getByText(
+    'Every send of these days was cancelled before it left: none has a share.',
+    { exact: true },
+  );
   const failedChart = page.getByRole('slider', {
     name: 'Share of the messages sent that failed each UTC day, 7 days',
   });
@@ -570,19 +584,49 @@ test('staff read the platform’s messages a day on the Usage tab (ADR-333)', as
   // The pointer off the charts first: left on the table's summary, it rests on this chart once
   // focusing the chart above has scrolled the page, and WebKit then names the day under it.
   await page.mouse.move(0, 0);
-  if (sent.some((n) => n > 0)) {
+  if (shared.some((n) => n > 0)) {
     await expect(noneSent).toHaveCount(0);
     await expect(failedChart).toHaveAttribute(
       'aria-valuetext',
       sent.at(-1) === 0
         ? `${chartDay(days.at(-1)!)}: none sent`
-        : new RegExp(
-            `^${chartDay(days.at(-1)!)}: [<>]?[\\d.]+% of [\\d,]+ sent failed \\([\\d,]+\\)$`,
-          ),
+        : shared.at(-1) === 0
+          ? new RegExp(`^${chartDay(days.at(-1)!)}: all [\\d,]+ sent were cancelled$`)
+          : new RegExp(
+              `^${chartDay(days.at(-1)!)}: [<>]?[\\d.]+% of [\\d,]+ sends not cancelled failed \\([\\d,]+\\)$`,
+            ),
     );
   } else {
-    await expect(noneSent).toBeVisible();
+    await expect(sent.some((n) => n > 0) ? allCancelled.first() : noneSent).toBeVisible();
     await expect(failedChart).toHaveCount(0);
+  }
+  // And the shares delivered and read (ADR-346), the live days' always counted: its value names the
+  // last day's shares of those sent and not cancelled, or none sent.
+  const deliveryChart = page.getByRole('slider', {
+    name: 'Share of the messages sent that were delivered and read each UTC day, 7 days',
+  });
+  const noneDelivered = page.getByText(
+    'No company sent a message in these days, so none was delivered.',
+    { exact: true },
+  );
+  if (shared.some((n) => n > 0)) {
+    await expect(noneDelivered).toHaveCount(0);
+    await expect(
+      page.getByRole('list', { name: 'Delivered and read, legend' }).getByRole('listitem'),
+    ).toHaveText(['Delivered', 'Read']);
+    await expect(deliveryChart).toHaveAttribute(
+      'aria-valuetext',
+      sent.at(-1) === 0
+        ? `${chartDay(days.at(-1)!)}: none sent`
+        : shared.at(-1) === 0
+          ? new RegExp(`^${chartDay(days.at(-1)!)}: all [\\d,]+ sent were cancelled$`)
+          : new RegExp(
+              `^${chartDay(days.at(-1)!)}: [<>]?[\\d.]+% of [\\d,]+ sends not cancelled delivered \\([\\d,]+\\), [<>]?[\\d.]+% read \\([\\d,]+\\)$`,
+            ),
+    );
+  } else {
+    await expect(sent.some((n) => n > 0) ? allCancelled.first() : noneDelivered).toBeVisible();
+    await expect(deliveryChart).toHaveCount(0);
   }
 
   // On a phone narrower than this project's, the chart and the open table stay inside the page:
@@ -632,7 +676,7 @@ test('staff read the platform’s messages a day on the Usage tab (ADR-333)', as
   await page.getByText('Table of the days', { exact: true }).click();
   const companyDays = page.getByRole('table', { name: 'Messages a day' });
   await expect(companyDays).toBeVisible();
-  const received = await companyDays.locator('tbody td:nth-child(4)').allTextContents();
+  const received = await companyDays.locator('tbody td:nth-child(5)').allTextContents();
   expect(received.length).toBeGreaterThanOrEqual(31);
   expect(received.reduce((total, n) => total + Number(n), 0)).toBe(1);
   // It sent nothing, so no share failed (ADR-344): the note in place of the chart, and the table's
@@ -642,8 +686,21 @@ test('staff read the platform’s messages a day on the Usage tab (ADR-333)', as
       exact: true,
     }),
   ).toBeVisible();
-  const shares = await companyDays.locator('tbody td:nth-child(5)').allTextContents();
+  const shares = await companyDays.locator('tbody td:nth-child(6)').allTextContents();
   expect(new Set(shares.map((share) => share.trim()))).toEqual(new Set(['None sent']));
+  // Nor any cancelled, delivered or read (ADR-346): the note in place of their chart, none
+  // cancelled, and the delivered and read columns saying none was sent, as the failed share does.
+  await expect(
+    page.getByText('The company sent no message in these 30 days, so none was delivered.', {
+      exact: true,
+    }),
+  ).toBeVisible();
+  const cancelledCounts = await companyDays.locator('tbody td:nth-child(3)').allTextContents();
+  expect(new Set(cancelledCounts.map((count) => count.trim()))).toEqual(new Set(['0']));
+  for (const column of [7, 8]) {
+    const counts = await companyDays.locator(`tbody td:nth-child(${column})`).allTextContents();
+    expect(new Set(counts.map((count) => count.trim()))).toEqual(new Set(['None sent']));
+  }
   await expectNoHorizontalOverflow(page);
   // Its last 12 months (ADR-342), from the days the worker counts once they end: drawn, or none
   // counted yet, or none of those counted with a message.

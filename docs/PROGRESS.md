@@ -1,5 +1,102 @@
 # Progress
 
+## 2026-10-10 — Sends delivered and read a day, as shares of those sent (P5-10, H-034, ADR-346)
+
+Status: **Implemented; its database and browser tests run in CI only.** The messages a day charts
+showed the sends that failed (ADR-344) but not whether the others reached the customers: a day when
+deliveries fell looked like any other. The local PostgreSQL is unavailable, so migration 0264 and
+the integration tests below were written but not run here; the migration passed the pglast parse
+check (syntax only), its PL/pgSQL bodies included.
+
+### Completed
+
+- **Database:** migration 0264: `ops.platform_message_days` gains `canceled`, `delivered` and `read`
+  (null on a row counted before it; a check that the three are given together, that a send is at
+  most one of cancelled, failed and delivered, and that one read was delivered);
+  `ops.platform_message_days_counted.outcomes` (whether a day was counted with them);
+  `ops.platform_ops_daily_activity` counts them for the live days (the outbound messages cancelled;
+  delivered, read or played; read or played); `ops.count_platform_message_days` counts them and
+  counts again, newest first, every day counted without them; `ops.platform_ops_message_days` gives
+  them, null for a day counted without them. The three definer functions are dropped and created
+  again as their owner, with their grants as before.
+- **Domain:** `platform/ops-chart.ts`: `shareBase` (the sends not cancelled, null on a kept day
+  counted before the cancellations were), which every share is of, the failed one of ADR-344 too,
+  and `shareGap` (why a day has none: none sent, all cancelled, not counted yet); `deliveredShare`
+  and `readShare` (none without sends, or before a kept day is counted with its deliveries),
+  `DELIVERY_CHART_SERIES` and `deliveryShareLayout` (an axis from 0% to 100% in quarters, both lines
+  broken at days without a share, lone days as dots, the last day's shares at the lines' ends where
+  they fit and do not meet); `sharedPlotEdges` now covers the three charts. The live days
+  (`OpsDailyActivity`) and the kept ones carry `canceled`, `delivered` and `read`.
+- **Web:** `DailyDeliveryShareChart` under each failed sends' chart (the Usage tab's window and
+  year, a company's 30 days and year), captioned "Sends delivered and read, as shares of those not
+  cancelled" and the days drawn, with a legend (Delivered solid, Read dashed), or a note in place of
+  both share charts when nothing was sent, every send was cancelled, or no day drawn with sends is
+  counted again yet; the sliders' values and tooltips give the shares "of 97 sends not cancelled"
+  and say why a day has none; "Cancelled", "Delivered" and "Read" columns in the table of the days
+  ("970 (97%)", "None sent", "All cancelled" or "Not counted"); the colour tokens `--chart-4`
+  (yellow) and `--chart-5` (magenta), light and dark.
+- **Colour:** the palette validator passed the pair against the card, light (`#ffffff`) and dark
+  (`#1b1815`): colour-vision separation ΔE 16.3 light and 13.2 dark (deuteranopia, the worst;
+  tritanopia 5.8 light, which the dash covers) and normal vision 19.6 and 19.3. Both are under 3:1
+  on the light card (2.17 and 2.69), so the last shares are written at the lines' ends and the table
+  gives every share. Across the three charts the five slots fail the all-pairs check, so each chart
+  is named by its own caption or legend.
+- **Tests:** unit (4 new in `platform/ops-chart.test.ts`: the shares and their gaps, the shares of
+  the sends not cancelled, none when all were or before the cancellations are counted, and why a day
+  has none, the layout with its axis, breaks, lone days and ends, and the end labels' cases; the
+  shared edges test covers the third chart; `platform/message-days.test.ts`: the kept days read with
+  their counts or none); integration (`platform-ops.test.ts`: the live days' sends cancelled,
+  delivered and read, never null as the function returns them, in the ADR-333 test, and one
+  company's in the ADR-334 test; 1 new: the days counted before 0264 counted again newest first, the
+  year's days without the new counts until then, zeros on a day counted without messages, the
+  platform's sums, and the check refusing counts that do not fit; the ADR-341 test compares the
+  year's days by its four counts, now that they carry more); e2e (`platform-ops.spec.ts`: the Usage
+  tab's chart or its note, its legend and the slider's value of the sends not cancelled; the company
+  page's note and the table's new columns). Written for CI; the integration and e2e tests were not
+  run here.
+- **Docs:** ADR-346; ARCHITECTURE; SECURITY; THREAT-MODEL T305; DEPLOYMENT (0264); RUNBOOKS;
+  DATA-RETENTION; BACKLOG P5-10; feature matrix H-034.
+- **Mutation checks:** 13/13 deliberate regressions caught on the unit-tested parts (the delivered
+  share from the read count, or without its counts; the read share without sends; other gridlines;
+  end labels however close or narrow, or their room always kept; the line never broken; a lone day
+  with a neighbour after it; the scale upside down; the shared edges without the deliveries; the
+  kept days without their deliveries, or those not counted read as none). 9/9 more on the shares of
+  the sends not cancelled (the cancelled not left out, or every send left out of a kept day counted
+  before; the failed share, its scale, the delivered and read shares of every send; a share on a day
+  whose sends were all cancelled; the kept cancelled read as none, or dropped from the year), one
+  caught after a test was strengthened. 6/6 more on the second review's fixes (a kept day counted
+  before given a base; nothing sent, or not counted, read as all cancelled; all cancelled not told;
+  not counted told before nothing sent; a failed share when all were cancelled), and the first
+  review's seven that still apply, run again on the code as it now is, all caught.
+- **Review fixes:** an independent review found one test that would fail CI, one gap and a few small
+  things, fixed. The ADR-341 integration test compared the year's days, which now carry the
+  deliveries, with rows that do not: it compares their four counts. A paused or cancelled campaign's
+  queued sends are cancelled and sent again as new messages, so counted among the sends a pause read
+  as deliveries falling and failures thinning: every share now leaves out the sends cancelled before
+  they left, as the company reports' failure rate does, and 0264 counts them, with the flag renamed
+  `outcomes`. The pages say a status, not only a failure, reported after a week is not among a kept
+  day's counts; the table says "None sent" for the delivered and read of a day without sends, as for
+  its failed share; a stale comment and this section's account of the ADR-334 test were corrected,
+  and the Drizzle schema has the new columns. A second review of these fixes found nothing that
+  would fail CI, one gap and a few small things, fixed. A day whose sends were all cancelled said
+  "none sent" while the messages chart counted them sent: it says "All cancelled", and its value
+  "all 500 sent were cancelled". The shares' values said "of 97 sent" where the messages chart said
+  100: they say "of 97 sends not cancelled". A kept day counted before 0264 drew a failed share of
+  every send under a caption of those not cancelled: it has no share until counted again. The live
+  days' counts reach the page as the function returns them, so the ADR-333 test's check that none is
+  null can fail, the docs no longer say the shares match the company reports' rates beyond the
+  failure rate's base, and THREAT-MODEL says a status, not a failure, reported late.
+
+### Test commands and results (local, 2026-10-10)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 144 files, 1469 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
 ## 2026-10-09 — Refund requests in the chat channel, an owners' alert (P5-10, H-034, ADR-345)
 
 Status: **Implemented; its database and browser tests run in CI only.** The refund requests' notice
@@ -95,6 +192,11 @@ sends to the tooltip and the table: beside the messages sent they would lie flat
   sent", when a company sent in the window, and the note otherwise. And the two captions of a page
   with two charts were the same: each now ends with the days drawn ("7 days", "the last 12 months").
   Neither touches unit-tested logic.
+- **CI fix (WebKit):** WebKit's run of the Usage tab's e2e test read the share's chart naming 7 Oct,
+  not the last day: the pointer, left on the table's summary, rested on the chart once focusing the
+  messages chart scrolled the page, and the chart followed it to the day under it. The test now
+  moves the pointer to the page's corner before reading the chart; Chromium, mobile Chromium and
+  Firefox had passed.
 
 ### Test commands and results (local, 2026-10-09)
 

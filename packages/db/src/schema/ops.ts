@@ -260,8 +260,10 @@ export const platformAlertPosts = opsSchema.table('platform_alert_posts', {
 
 /**
  * Each company's messages on each UTC day it had any (ADR-341): sent, those of them failed and
- * received, counted by the worker once the day ended. Written and read only through the definer
- * functions of migration 0262; a company's rows are deleted with the company.
+ * received, counted by the worker once the day ended, and since migration 0264 those of them
+ * cancelled, delivered and read (ADR-346; null on a row counted before it). Written and read only
+ * through the definer functions of migrations 0262 and 0264; a company's rows are deleted with the
+ * company.
  */
 export const platformMessageDays = opsSchema.table('platform_message_days', {
   id: uuid('id').primaryKey().defaultRandom(),
@@ -270,10 +272,17 @@ export const platformMessageDays = opsSchema.table('platform_message_days', {
   outbound: integer('outbound').notNull(),
   failed: integer('failed').notNull(),
   inbound: integer('inbound').notNull(),
+  canceled: integer('canceled'),
+  delivered: integer('delivered'),
+  read: integer('read'),
 });
 
-/** The days `platformMessageDays` holds counts of, and when each was last counted (ADR-341). */
+/**
+ * The days `platformMessageDays` holds counts of, when each was last counted (ADR-341), and whether
+ * it was counted with its sends cancelled, delivered and read (ADR-346).
+ */
 export const platformMessageDaysCounted = opsSchema.table('platform_message_days_counted', {
   utcDay: date('utc_day', { mode: 'string' }).primaryKey(),
   countedAt: tz('counted_at').notNull().defaultNow(),
+  outcomes: boolean('outcomes').notNull().default(false),
 });

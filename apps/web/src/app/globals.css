@@ -29,10 +29,13 @@
   --warning: oklch(0.55 0.13 70);
   --sidebar: oklch(0.975 0.004 90);
   /* Chart series (ADR-333): categorical slots validated against the card surface, light and dark;
-     the third (ADR-344) under 3:1 on the light card, so its charts have a table and labels. */
+     the third (ADR-344), fourth and fifth (ADR-346) under 3:1 on the light card, so their charts
+     have a table and labels. */
   --chart-1: #2a78d6;
   --chart-2: #eb6834;
   --chart-3: #1baf7a;
+  --chart-4: #eda100;
+  --chart-5: #e87ba4;
 }
 
 .dark {
@@ -60,6 +63,8 @@
   --chart-1: #3987e5;
   --chart-2: #d95926;
   --chart-3: #199e70;
+  --chart-4: #c98500;
+  --chart-5: #d55181;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -88,6 +93,8 @@
     --chart-1: #3987e5;
     --chart-2: #d95926;
     --chart-3: #199e70;
+    --chart-4: #c98500;
+    --chart-5: #d55181;
   }
 }
 

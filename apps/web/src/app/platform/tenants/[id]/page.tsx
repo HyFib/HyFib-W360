@@ -744,6 +744,13 @@ export default async function PlatformTenantPage({ params }: { params: Promise<{
                     noneSent: 'The company sent no message in these 30 days, so none failed.',
                     period: '30 days',
                   }}
+                  delivered={{
+                    label:
+                      "Share of this company's messages sent that were delivered and read each UTC day, 30 days",
+                    legend: 'Delivered and read, legend',
+                    noneSent:
+                      'The company sent no message in these 30 days, so none was delivered.',
+                  }}
                 />
               </section>
               {/* Its year, from the counts the worker keeps as days pass (ADR-342). */}
@@ -753,7 +760,7 @@ export default async function PlatformTenantPage({ params }: { params: Promise<{
                 </h3>
                 <p className="text-muted-foreground">
                   Each UTC day of the 365 before today, as the worker counts them once each day has
-                  ended and again each day for a week: a failure reported later than that is not
+                  ended and again each day for a week: a status reported later than that is not
                   among them.
                   {ops.year && ops.year.uncounted > 0
                     ? ` ${ops.year.uncounted} of the 365 days ${ops.year.uncounted === 1 ? 'is' : 'are'} not counted yet.`
@@ -781,6 +788,13 @@ export default async function PlatformTenantPage({ params }: { params: Promise<{
                         "Share of this company's messages sent that failed each UTC day, the last 12 months",
                       noneSent: 'The company sent no message in the days counted, so none failed.',
                       period: 'the last 12 months',
+                    }}
+                    delivered={{
+                      label:
+                        "Share of this company's messages sent that were delivered and read each UTC day, the last 12 months",
+                      legend: 'Delivered and read in the 12 months, legend',
+                      noneSent:
+                        'The company sent no message in the days counted, so none was delivered.',
                     }}
                     // Unlike the 30 days' chart above: names matched in part never find both.
                     names={{

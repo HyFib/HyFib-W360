@@ -10,17 +10,22 @@ import {
 } from 'react';
 import {
   DAILY_CHART_SERIES,
+  DELIVERY_CHART_SERIES,
   chartCount,
   chartDayLabel,
   chartShare,
   dailyChartLayout,
+  deliveryShareLayout,
   failedShare,
   failedShareLayout,
   nearestDayIndex,
+  shareBase,
+  shareGap,
   sharedPlotEdges,
   type DailyChartDay,
   type DailyChartLayout,
   type DailyChartSeriesKey,
+  type DeliveryChartSeriesKey,
 } from '@w360/domain/ops-chart';
 
 const HEIGHT = 240;
@@ -33,12 +38,29 @@ const COLOR: Record<DailyChartSeriesKey, string> = {
 };
 /** The failed sends' share (ADR-344): a measure of its own, so a colour of its own. */
 const FAILED_COLOR = 'var(--chart-3)';
+/**
+ * The shares delivered and read (ADR-346): measures of their own, so colours of their own, and the
+ * read line dashed, so the two lines differ without their colours.
+ */
+const DELIVERY_STYLE: Record<DeliveryChartSeriesKey, { color: string; dash?: string }> = {
+  delivered: { color: 'var(--chart-4)' },
+  read: { color: 'var(--chart-5)', dash: '6 4' },
+};
 
 /** A short stroke of a series' colour: how the legend and the tooltip name a line. */
-function LineKey({ color }: { color: string }) {
+function LineKey({ color, dash }: { color: string; dash?: string }) {
   return (
     <svg width="16" height="8" aria-hidden="true" className="shrink-0">
-      <line x1="1" y1="4" x2="15" y2="4" stroke={color} strokeWidth="2" strokeLinecap="round" />
+      <line
+        x1="1"
+        y1="4"
+        x2="15"
+        y2="4"
+        stroke={color}
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeDasharray={dash}
+      />
     </svg>
   );
 }
@@ -359,11 +381,34 @@ export function DailyMessagesChart({
   );
 }
 
+/**
+ * Why a day has no share, as the slider's value says it (ADR-346), or null when it has one: the
+ * shares are of the sends not cancelled before they left (`shareBase`).
+ */
+const gapText = (d: DailyChartDay) => {
+  const gap = shareGap(d);
+  return gap === 'none_sent'
+    ? 'none sent'
+    : gap === 'all_cancelled'
+      ? `all ${chartCount(d.outbound)} sent were cancelled`
+      : gap === 'not_counted'
+        ? 'not counted yet'
+        : null;
+};
+
+/** The same in a tooltip, a sentence of its own. */
+const gapTip = (d: DailyChartDay) => {
+  const text = gapText(d);
+  return text === 'none sent'
+    ? 'No message sent'
+    : text && text.charAt(0).toUpperCase() + text.slice(1);
+};
+
 const describeShare = (d: DailyChartDay) => {
   const share = failedShare(d);
   return share === null
-    ? `${chartDayLabel(d.day)}: none sent`
-    : `${chartDayLabel(d.day)}: ${chartShare(share)} of ${chartCount(d.outbound)} sent failed (${chartCount(d.failed)})`;
+    ? `${chartDayLabel(d.day)}: ${gapText(d) ?? 'none sent'}`
+    : `${chartDayLabel(d.day)}: ${chartShare(share)} of ${chartCount(shareBase(d) ?? 0)} sends not cancelled failed (${chartCount(d.failed)})`;
 };
 
 /**
@@ -443,7 +488,7 @@ export function DailyFailedShareChart({ days, label }: { days: DailyChartDay[]; 
                 {chartDayLabel(shown.day)} (UTC)
               </span>
               {shownShare === null ? (
-                <span className="text-muted-foreground">No message sent</span>
+                <span className="text-muted-foreground">{gapTip(shown) ?? 'No message sent'}</span>
               ) : (
                 <>
                   <span className="flex items-center gap-2">
@@ -456,9 +501,9 @@ export function DailyFailedShareChart({ days, label }: { days: DailyChartDay[]; 
                     <span className="tabular-nums">
                       <strong>{chartCount(shown.failed)}</strong>
                       <span className="text-muted-foreground"> of </span>
-                      <strong>{chartCount(shown.outbound)}</strong>
+                      <strong>{chartCount(shareBase(shown) ?? 0)}</strong>
                     </span>
-                    <span className="text-muted-foreground">sent</span>
+                    <span className="text-muted-foreground">not cancelled</span>
                   </span>
                 </>
               )}
@@ -467,5 +512,167 @@ export function DailyFailedShareChart({ days, label }: { days: DailyChartDay[]; 
         };
       }}
     />
+  );
+}
+
+const describeDelivery = (d: DailyChartDay) => {
+  const base = shareBase(d);
+  const gap = gapText(d);
+  if (gap !== null) return `${chartDayLabel(d.day)}: ${gap}`;
+  if (base === null || d.delivered === null || d.read === null) {
+    return `${chartDayLabel(d.day)}: not counted yet`;
+  }
+  return `${chartDayLabel(d.day)}: ${chartShare(d.delivered / base)} of ${chartCount(base)} sends not cancelled delivered (${chartCount(d.delivered)}), ${chartShare(d.read / base)} read (${chartCount(d.read)})`;
+};
+
+/**
+ * The shares of the messages sent each UTC day that were delivered and read (ADR-346), under the
+ * failed sends' chart: two lines on an axis of percentages with a legend, the read one dashed; a
+ * gap on a day that sent nothing or whose deliveries are not counted yet, and a dot for a day alone
+ * between such days; the last day's shares at the lines' ends when they fit; and a crosshair whose
+ * tooltip gives the day's shares and counts. The table gives every share.
+ */
+export function DailyDeliveryShareChart({
+  days,
+  label,
+  legendLabel,
+}: {
+  days: DailyChartDay[];
+  label: string;
+  /** The legend's accessible name, told apart when a page draws two of these charts. */
+  legendLabel: string;
+}) {
+  return (
+    <div className="flex min-w-0 flex-col gap-3">
+      <ul aria-label={legendLabel} className="flex flex-wrap items-center gap-4 text-sm">
+        {DELIVERY_CHART_SERIES.map((s) => (
+          <li key={s.key} className="flex items-center gap-2">
+            <LineKey color={DELIVERY_STYLE[s.key].color} dash={DELIVERY_STYLE[s.key].dash} />
+            {s.label}
+          </li>
+        ))}
+      </ul>
+      <DayChartFrame
+        count={days.length}
+        label={label}
+        draw={(drawn, shownIndex, current) => {
+          // On the plot's edges the charts above share, so each day sits under its own.
+          const layout = deliveryShareLayout(
+            days,
+            drawn,
+            HEIGHT,
+            sharedPlotEdges(days, drawn, HEIGHT),
+          );
+          const shown = shownIndex === null ? undefined : days[shownIndex];
+          const currentDay = days[current];
+          return {
+            layout,
+            valueText: currentDay ? describeDelivery(currentDay) : 'No days',
+            marks: (
+              <>
+                {layout.series.map((s) => (
+                  <path
+                    key={s.key}
+                    d={s.path}
+                    fill="none"
+                    stroke={DELIVERY_STYLE[s.key].color}
+                    strokeDasharray={DELIVERY_STYLE[s.key].dash}
+                    strokeWidth="2"
+                    strokeLinejoin="round"
+                    strokeLinecap="round"
+                  />
+                ))}
+                {layout.series.flatMap((s) =>
+                  s.lone.map((index) => (
+                    <circle
+                      key={`${s.key}-${index}`}
+                      cx={layout.xs[index]}
+                      cy={s.ys[index] ?? undefined}
+                      r="3"
+                      fill={DELIVERY_STYLE[s.key].color}
+                    />
+                  )),
+                )}
+                {layout.series.map((s) => {
+                  // The dot rides the crosshair, on a day with a share; without a chosen day, the
+                  // line's end.
+                  const shownY = shownIndex === null ? null : (s.ys[shownIndex] ?? null);
+                  const dot =
+                    shownIndex === null
+                      ? s.end
+                      : shownY === null
+                        ? null
+                        : { x: layout.xs[shownIndex] ?? 0, y: shownY };
+                  return dot ? (
+                    <circle
+                      key={s.key}
+                      cx={dot.x}
+                      cy={dot.y}
+                      r="4"
+                      fill={DELIVERY_STYLE[s.key].color}
+                      stroke="var(--card)"
+                      strokeWidth="2"
+                    />
+                  ) : null;
+                })}
+                {layout.endLabels
+                  ? layout.series.map((s) =>
+                      s.end ? (
+                        <text
+                          key={s.key}
+                          x={s.end.x + 10}
+                          y={s.end.y}
+                          dominantBaseline="middle"
+                          fill="var(--foreground)"
+                          className="text-xs tabular-nums"
+                        >
+                          {s.label} {chartShare(s.end.share)}
+                        </text>
+                      ) : null,
+                    )
+                  : null}
+              </>
+            ),
+            tip: shown ? (
+              <>
+                <span className="text-xs text-muted-foreground">
+                  {chartDayLabel(shown.day)} (UTC)
+                </span>
+                {gapTip(shown) !== null ? (
+                  <span className="text-muted-foreground">{gapTip(shown)}</span>
+                ) : shown.delivered === null || shown.read === null ? (
+                  <span className="text-muted-foreground">Not counted yet</span>
+                ) : (
+                  <>
+                    {DELIVERY_CHART_SERIES.map((s) => {
+                      const share = s.share(shown);
+                      return (
+                        <span key={s.key} className="flex items-center gap-2">
+                          <LineKey
+                            color={DELIVERY_STYLE[s.key].color}
+                            dash={DELIVERY_STYLE[s.key].dash}
+                          />
+                          <strong className="tabular-nums">
+                            {share === null ? '' : chartShare(share)}
+                          </strong>
+                          <span className="text-muted-foreground">
+                            {s.label.toLowerCase()} ({chartCount(shown[s.key] ?? 0)})
+                          </span>
+                        </span>
+                      );
+                    })}
+                    <span className="flex items-center gap-2">
+                      <span className="w-4 shrink-0" />
+                      <strong className="tabular-nums">{chartCount(shareBase(shown) ?? 0)}</strong>
+                      <span className="text-muted-foreground">not cancelled</span>
+                    </span>
+                  </>
+                )}
+              </>
+            ) : null,
+          };
+        }}
+      />
+    </div>
   );
 }

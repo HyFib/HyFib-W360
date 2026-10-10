@@ -1380,12 +1380,17 @@ verification, app review, Embedded Signup configuration).
   **[Refund requests in the chat channel built; its database and browser tests run only in CI]**
   (ADR-345, migration 0263: owners add "Refund requests" to the channel's alerts, an owners' alert
   posted with the email's counts and never a company, an amount or a reason).
+  **[Sends delivered and read built; its database and browser tests run only in CI]** (ADR-346,
+  migration 0264: under the failed sends' chart, the share of each day's sends delivered and read,
+  two lines on an axis of percentages, with "Cancelled", "Delivered" and "Read" columns in the table
+  of the days; every share, the failed one too, of the sends not cancelled; the kept days counted
+  again once with them).
   Remaining:
   other alert channels (several channels, a channel per alert, formats other than a JSON `text`
   member, such as Microsoft Teams' or PagerDuty's, and the owners' other notices, such as personal
   notices, in a channel; Microsoft's documentation of Teams' webhooks could not be opened from
-  here), other charts (other measures, such as delivered or read shares), Meta's quality webhook
-  (unconfirmed), rollups for many companies and pages read from the database.
+  here), other charts (other measures, such as failures by reason or by company), Meta's quality
+  webhook (unconfirmed), rollups for many companies and pages read from the database.
 - **P5-11 Account export/deletion workflow** **[built, locally verified with test data only]**
   (ADR-055): Settings → Company data for owners. A streamed, gzip-compressed JSON Lines export of
   every company table from one read-only transaction (each table and column exported or excluded

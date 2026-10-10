@@ -113,6 +113,11 @@ export default async function OpsUsagePage({
               noneSent: 'No company sent a message in these days, so none failed.',
               period: `${o.days} days`,
             }}
+            delivered={{
+              label: `Share of the messages sent that were delivered and read each UTC day, ${o.days} days`,
+              legend: 'Delivered and read, legend',
+              noneSent: 'No company sent a message in these days, so none was delivered.',
+            }}
           />
         </CardContent>
       </Card>
@@ -122,7 +127,7 @@ export default async function OpsUsagePage({
           <CardDescription>
             Every company&apos;s messages each UTC day of the 365 before today, as the worker counts
             them once each day has ended and again each day for a week while statuses arrive: a
-            failure reported later than that is not among them. Today&apos;s are in the chart above.
+            status reported later than that is not among them. Today&apos;s are in the chart above.
             {year.uncounted > 0
               ? ` ${year.uncounted} of the 365 days ${year.uncounted === 1 ? 'is' : 'are'} not counted yet, a few more each minute.`
               : null}
@@ -143,6 +148,12 @@ export default async function OpsUsagePage({
                 label: 'Share of the messages sent that failed each UTC day, the last 12 months',
                 noneSent: 'No company sent a message in the days counted, so none failed.',
                 period: 'the last 12 months',
+              }}
+              delivered={{
+                label:
+                  'Share of the messages sent that were delivered and read each UTC day, the last 12 months',
+                legend: 'Delivered and read in the 12 months, legend',
+                noneSent: 'No company sent a message in the days counted, so none was delivered.',
               }}
               // Unlike the window's chart above: names matched in part never find both.
               names={{
