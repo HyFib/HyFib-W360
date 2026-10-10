@@ -1,5 +1,5 @@
 import { TBody, TD, TH, THead, TR, Table } from '@w360/ui';
-import type { FailureReasonMonth, FailureReasons } from '@w360/domain';
+import type { FailureReason, FailureReasonMonth, FailureReasons } from '@w360/domain';
 import {
   chartCount,
   chartMonthLabel,
@@ -15,6 +15,8 @@ const BAR = 96;
 const MONTH_BAR = 6;
 const MONTH_GAP = 2;
 const MONTH_HEIGHT = 24;
+/** A partial month's bar with a failed send is at least 4 pixels high, so its outline shows. */
+const PARTIAL_MONTH_MIN = 4;
 
 /**
  * A share as a bar 8 pixels thick in the failed sends' colour, repeating the number beside it: a
@@ -27,6 +29,15 @@ function ShareBar({ share }: { share: number }) {
     </svg>
   );
 }
+
+/** A reason's name with its code, so two reasons HyFib does not describe are told apart. */
+function reasonText(r: FailureReason): string {
+  const label = failureReasonLabel(r.code, r.codes);
+  return r.code === null || r.code === '' ? label : `${label} (${r.code})`;
+}
+
+/** A reason's code as the tables show it: none for the rest, None for failures without one. */
+const codeText = (r: FailureReason) => (r.code === null ? '—' : r.code === '' ? 'None' : r.code);
 
 /** A month as its bar and the screen reader name it, with the days of it a partial one holds. */
 const monthText = (month: FailureReasonMonth) =>
@@ -73,7 +84,9 @@ function MonthBars({
       />
       {months.map((month, index) => {
         const x = index * (MONTH_BAR + MONTH_GAP);
-        const height = heights[index] ?? 0;
+        const drawn = heights[index] ?? 0;
+        // The outline needs a bar at least 2 pixels high; a partial one gets 4, so it shows.
+        const height = month.partial && drawn > 0 ? Math.max(drawn, PARTIAL_MONTH_MIN) : drawn;
         return (
           <g key={month.month}>
             <title>{`${monthText(month)}: ${chartCount(counts[index] ?? 0)} failed`}</title>
@@ -136,8 +149,15 @@ export function FailureReasonsTable({
   label: string;
   /** What the note says when no send failed. */
   empty: string;
-  /** The year's months and each reason's failed sends in them, in the order of the reasons. */
-  months?: { months: readonly FailureReasonMonth[]; byMonth: readonly (readonly number[])[] };
+  /**
+   * The year's months and each reason's failed sends in them, in the order of the reasons, with the
+   * folded table's accessible name, which holds the table's own in no part.
+   */
+  months?: {
+    months: readonly FailureReasonMonth[];
+    byMonth: readonly (readonly number[])[];
+    label: string;
+  };
 }) {
   if (reasons.failed === 0) return <p className="text-sm text-muted-foreground">{empty}</p>;
   const first = months?.months[0];
@@ -159,9 +179,7 @@ export function FailureReasonsTable({
           {reasons.reasons.map((r, index) => (
             <TR key={r.code ?? 'the rest'}>
               <TD className="min-w-48">{failureReasonLabel(r.code, r.codes)}</TD>
-              <TD className="whitespace-nowrap font-mono text-xs">
-                {r.code === null ? '—' : r.code === '' ? 'None' : r.code}
-              </TD>
+              <TD className="whitespace-nowrap font-mono text-xs">{codeText(r)}</TD>
               <TD className="tabular-nums">{chartCount(r.failed)}</TD>
               <TD>
                 <div className="flex items-center gap-2">
@@ -172,7 +190,7 @@ export function FailureReasonsTable({
               {months ? (
                 <TD>
                   <MonthBars
-                    reason={failureReasonLabel(r.code, r.codes)}
+                    reason={reasonText(r)}
                     months={months.months}
                     counts={months.byMonth[index] ?? []}
                   />
@@ -195,10 +213,11 @@ export function FailureReasonsTable({
             <summary className="cursor-pointer text-sm font-medium">
               Month by month as a table
             </summary>
-            <Table aria-label={`${label}, month by month`} className="mt-3">
+            <Table aria-label={months.label} className="mt-3">
               <THead>
                 <TR>
                   <TH>Reason</TH>
+                  <TH>Code</TH>
                   {months.months.map((month) => (
                     <TH key={month.month} className="whitespace-nowrap">
                       {monthText(month)}
@@ -210,6 +229,7 @@ export function FailureReasonsTable({
                 {reasons.reasons.map((r, index) => (
                   <TR key={r.code ?? 'the rest'}>
                     <TD className="min-w-48">{failureReasonLabel(r.code, r.codes)}</TD>
+                    <TD className="whitespace-nowrap font-mono text-xs">{codeText(r)}</TD>
                     {months.months.map((month, at) => (
                       <TD key={month.month} className="tabular-nums">
                         {chartCount(months.byMonth[index]?.[at] ?? 0)}

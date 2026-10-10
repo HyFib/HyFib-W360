@@ -104,11 +104,23 @@ run here; the migration passed the pglast parse check (syntax only), its PL/pgSQ
     month as a table") now gives every month's count, as the daily charts' does (ADR-333).
   - The partial months, drawn at half opacity, were faint; they are drawn in outline now, their edge
     in the full colour.
-  - **LOW:** the ADR and the runbook said the first and last months are always partial and there
-    are always 13; the first is whole when the year starts on a 1st and the last when today is one.
+  - **LOW:** the ADR said there are 13 months, the first and last partial, whenever the year starts
+    after a 1st, and the runbook that the first and last are always partial; the first is whole
+    when the year starts on a 1st, the last when today is one, and there are 12 months when either
+    is.
   - **LOW:** DEPLOYMENT's note on 0283 sat among 0269's and 0270's; it follows 0282's now.
   - 0283 truncates the month from the day as a timestamp without time zone, so the session's time
     zone never enters (the review's optional point; 0283 has not been applied anywhere yet).
+- **Second review fixes:** a review of those fixes found nothing that would fail CI and no
+  correctness or security bug, and these, all fixed:
+  - **MEDIUM:** the folded table named each row by its reason alone, so two codes HyFib does not
+    describe both read "Not described here". It has a Code column now, as the table above, and each
+    reason's bars are named with its code for a screen reader.
+  - **LOW:** the folded table's accessible name held the table's own ("…, month by month"), so a
+    test finding the table by its name in part would find both. Each page names it apart now
+    ("Failed sends by reason and month, the last 12 months").
+  - **LOW:** a partial month's bar of 2 or 3 pixels was all outline, and read as a whole month's.
+    A partial month with a failed send is at least 4 pixels high now.
 
 ### Test commands and results (local, 2026-10-10)
 

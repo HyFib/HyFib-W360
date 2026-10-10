@@ -14210,11 +14210,12 @@ Decision:
 - **Shown in the year's table:** a "Month by month" column beside each reason: a bar a month in the
   failed sends' colour, oldest first, each reason to its own height (its most in one month fills
   it), at least 2 pixels for a month with a failed send; a partial month is drawn in outline (its
-  edge in the full colour, its inside lighter) and named with its days. Each month says its count
-  when pointed at, the whole reads as one sentence to a screen reader, a note under the table says
-  which months the bars run from and to and which are partial, and a folded table under it gives
-  every month's count, as the daily charts' does (ADR-333), for keyboards and touch screens. The
-  window's table (93 days at most) has no months.
+  edge in the full colour, its inside lighter, at least 4 pixels high so the outline shows) and
+  named with its days. Each month says its count when pointed at, the whole reads as one sentence
+  to a screen reader (the reason named with its code, so two reasons HyFib does not describe differ),
+  a note under the table says which months the bars run from and to and which are partial, and a
+  folded table under it gives every month's count by reason and code, as the daily charts' does
+  (ADR-333), for keyboards and touch screens. The window's table (93 days at most) has no months.
 
 Consequences: platform staff see when a reason began, grew or faded without querying the database.
 Rows scaled to their own height compare a reason's months, not one reason's months with another's
