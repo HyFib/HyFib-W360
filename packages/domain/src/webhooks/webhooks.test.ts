@@ -5039,12 +5039,34 @@ describe('endpoint OAuth clients (ADR-173)', () => {
     expect(openWebhookOAuthClient(ring, tenant, endpoint, columns)?.clientAuthentication).toBe(
       'client_secret_post',
     );
-    // A change that leaves the method out goes back to HTTP Basic, as one leaving the scope out
-    // asks for none; removing the client keeps the default.
-    const kept = checkedWebhookOAuth(base, columns, policy);
-    expect(webhookOAuthColumns(ring, tenant, endpoint, kept, columns).oauthClientAuth).toBe(
-      'client_secret_basic',
+    // A change that leaves the method out keeps it while the token URL stays the same, as a
+    // connector written before ADR-357 rotating the secret does; one naming it changes it.
+    const rotated = checkedWebhookOAuth({ ...base, clientSecret: 'rotated' }, columns, policy);
+    expect(rotated.clientAuthentication).toBe('client_secret_post');
+    expect(webhookOAuthColumns(ring, tenant, endpoint, rotated, columns).oauthClientAuth).toBe(
+      'client_secret_post',
     );
+    expect(
+      checkedWebhookOAuth({ ...base, clientAuthentication: 'client_secret_basic' }, columns, policy)
+        .clientAuthentication,
+    ).toBe('client_secret_basic');
+    // Another token URL is another server: left out, HTTP Basic, as for a new client, and as for
+    // an endpoint without a client whatever its column holds.
+    expect(
+      checkedWebhookOAuth(
+        { ...base, tokenUrl: 'https://elsewhere.example.com/t', clientSecret: 's' },
+        columns,
+        policy,
+      ).clientAuthentication,
+    ).toBe('client_secret_basic');
+    expect(
+      checkedWebhookOAuth(
+        { ...base, clientSecret: 's' },
+        { ...NO_WEBHOOK_OAUTH, oauthClientAuth: 'client_secret_post' },
+        policy,
+      ).clientAuthentication,
+    ).toBe('client_secret_basic');
+    // Removing the client puts the default back.
     expect(webhookOAuthColumns(ring, tenant, endpoint, null, columns).oauthClientAuth).toBe(
       'client_secret_basic',
     );
@@ -5111,20 +5133,36 @@ describe('endpoint OAuth clients (ADR-173)', () => {
       oauthClientAuthentication: 'client_secret_post',
     });
     const post = webhookOAuthColumns(ring, tenant, endpoint, toPost, basic);
-    // Kept in the body: named again, since it is not the default.
+    // Kept in the body, named or left out: named again, since it is not the default.
     expect(webhookOAuthClientAuthAudit(toPost, post)).toEqual({
       oauthClientAuthentication: 'client_secret_post',
     });
+    expect(webhookOAuthAudit(checkedWebhookOAuth(base, post, policy), post)).toEqual({
+      oauthTokenHost: 'auth.example.com',
+      oauthSecretReplaced: false,
+      oauthClientAuthentication: 'client_secret_post',
+    });
     // Back to HTTP Basic: named, so the entry says the method changed.
-    const toBasic = checkedWebhookOAuth(base, post, policy);
+    const toBasic = checkedWebhookOAuth(
+      { ...base, clientAuthentication: 'client_secret_basic' },
+      post,
+      policy,
+    );
     expect(webhookOAuthAudit(toBasic, post)).toEqual({
       oauthTokenHost: 'auth.example.com',
       oauthSecretReplaced: false,
       oauthClientAuthentication: 'client_secret_basic',
     });
-    // HTTP Basic kept, or a new client using it: nothing to say.
+    // HTTP Basic kept, or a new client using it: nothing to say, even where a removal left the
+    // body in the column of an endpoint without a client (a web server from before ADR-357).
     expect(webhookOAuthClientAuthAudit(toBasic, basic)).toEqual({});
     expect(webhookOAuthClientAuthAudit(toBasic, NO_WEBHOOK_OAUTH)).toEqual({});
+    expect(
+      webhookOAuthClientAuthAudit(toBasic, {
+        ...NO_WEBHOOK_OAUTH,
+        oauthClientAuth: 'client_secret_post',
+      }),
+    ).toEqual({});
     expect(webhookOAuthClientAuthAudit(toPost, NO_WEBHOOK_OAUTH)).toEqual({
       oauthClientAuthentication: 'client_secret_post',
     });

@@ -14046,28 +14046,36 @@ Decision:
   form-encoded, and no Authorization header). Named as RFC 7591 names them, so a receiver's
   documentation reads the same.
 - **Part of the client:** given with `oauth` on `POST /webhook-endpoints` and
-  `PATCH /webhook-endpoints/{id}` and left out for HTTP Basic, as a change that leaves the scope
-  out asks for none; answered with the client (the secret still never is). Settings → Webhooks
-  shows it among the client's fields ("Send the client ID and secret": in an Authorization header
-  or in the request body, HTTP Basic being the standard way) and in the endpoint's description
-  when it is the body. Refusals name the field (`oauth.clientAuthentication`).
+  `PATCH /webhook-endpoints/{id}`; answered with the client (the secret still never is). Left out,
+  a change keeps the one the client has while the token URL stays the same, as it keeps the
+  secret, so a connector written before this decision that rotates the secret does not move a
+  client set to the body back to HTTP Basic; a new client, or a new token URL (another server),
+  uses HTTP Basic. Settings → Webhooks shows it among the client's fields ("Send the client ID
+  and secret": in an Authorization header or in the request body, HTTP Basic being the standard
+  way) and in the endpoint's description when it is the body. Refusals name the field
+  (`oauth.clientAuthentication`).
 - **Tokens:** a client that changes the way it authenticates gets a new token, as one with a new
   token URL, identifier, secret or scope does (the fingerprint the worker keeps tokens by includes
   it). The secret still goes only to its token URL: the egress client follows no redirect, and the
   form is sent only there; it is never logged, audited or exported.
 - **Audited** when it is the body, or when a change goes back to HTTP Basic
   (`oauthClientAuthentication`), so an endpoint's entries name every way it has used; never the
-  client ID or the secret. The company data export carries it with the client.
+  client ID or the secret. An endpoint without a client counts as HTTP Basic, whatever its column
+  holds. The company data export carries it with the client.
 - **Migration 0279:** `oauth_client_auth` on `app.webhook_endpoints`, not null with the constant
   default `client_secret_basic` (no table rewrite) and a check validated at once naming the two
   methods; an update grant on the column for the runtime role. Endpoints without a client keep the
   default unused, and the services put it back when a client is removed.
 
-Consequences: a receiver whose server takes only the body no longer needs a proxy. During a rollout,
-a worker from before this decision sends HTTP Basic for a client set to the body, failing its token
-requests until it is replaced (retried as usual); a web server from before it adds and changes
-clients without the column, leaving the method as it is. RFC 6749 does not recommend the body
-method for clients able to use HTTP Basic, so the form explains that Basic is the standard way.
+Consequences: a receiver whose server takes only the body no longer needs a proxy. Workers roll out
+before web servers, and only web servers of this release choose the body, so a worker from before
+this decision meets such a client only when workers are rolled back: it sends HTTP Basic, failing
+the client's token requests until newer workers run again (retried as usual). Until the web rollout
+ends, a web server from before it adds, changes and removes clients without the column, leaving the
+method as it is: a body client it removes leaves the body in the column of an endpoint without a
+client (the services count that as HTTP Basic), and a client it adds there afterwards would send its
+credentials in the body. RFC 6749 does not recommend the body method for clients able to use HTTP
+Basic, so the form explains that Basic is the standard way.
 
 Not built: JWT client assertions (`private_key_jwt`, `client_secret_jwt`), mutual TLS, a public
 client (`none`), and discovering the method from the server's metadata.

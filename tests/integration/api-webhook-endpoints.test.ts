@@ -740,6 +740,13 @@ describe('webhook endpoints through the API (ADR-081)', () => {
         }),
       ),
     ).toMatchObject({ path: 'oauth.clientAuthentication' });
+    // A change that leaves it out keeps it while the token URL stays the same, as a connector
+    // written before ADR-357 rotating the secret does.
+    expect(
+      await api().update(key.ctx, endpoint.id, {
+        oauth: { tokenUrl, clientId: 'renamed-client', clientSecret: `${SECRET}-rotated` },
+      }),
+    ).toMatchObject({ oauth: { clientAuthentication: 'client_secret_post' } });
     expect(
       await issue(
         api().update(key.ctx, endpoint.id, {
@@ -783,6 +790,14 @@ describe('webhook endpoints through the API (ADR-081)', () => {
         eventTypes: ['contact.created'],
         oauthTokenHost: HOST,
         oauthSecretReplaced: false,
+        oauthClientAuthentication: 'client_secret_post',
+        source: 'api',
+      },
+      {
+        host: HOST,
+        eventTypes: ['contact.created'],
+        oauthTokenHost: HOST,
+        oauthSecretReplaced: true,
         oauthClientAuthentication: 'client_secret_post',
         source: 'api',
       },

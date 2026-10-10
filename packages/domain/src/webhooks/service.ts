@@ -245,8 +245,9 @@ export const webhookHeadersSchema = z
 /**
  * An endpoint's OAuth client (ADR-173): the token endpoint of its receiver's authorization server,
  * the client identifier and secret that server issued, the scope to ask for, if any (empty or left
- * out: none), and how the client authenticates (left out: HTTP Basic, ADR-357). A change may leave
- * the secret out to keep the stored one while the token URL stays the same.
+ * out: none), and how the client authenticates (ADR-357). A change may leave the secret, and the
+ * way the client authenticates, out to keep the stored ones while the token URL stays the same; a
+ * new client or token URL left without a way uses HTTP Basic.
  */
 export const webhookOAuthSchema = z
   .object({
@@ -4159,7 +4160,10 @@ export interface CheckedWebhookOAuth extends Omit<WebhookOAuthClient, 'clientSec
 /**
  * Checks an OAuth client given for an endpoint (ADR-173): its token URL like an endpoint's URL, and
  * that a secret is given unless the endpoint keeps the one it has, which it can only while the token
- * URL stays the same, since the secret is sent there.
+ * URL stays the same, since the secret is sent there. The way the client authenticates, left out,
+ * is likewise kept while the token URL stays the same, so a connector written before ADR-357 that
+ * rotates the secret keeps a client set to send it in the request body; a new client or token URL
+ * uses HTTP Basic.
  */
 export function checkedWebhookOAuth(
   given: WebhookOAuthInput,
@@ -4168,6 +4172,7 @@ export function checkedWebhookOAuth(
 ): CheckedWebhookOAuth {
   const { url, host } = checkedWebhookUrl(given.tokenUrl, policy, 'oauth.tokenUrl');
   const keeps = current.oauthClientSecretCiphertext !== null && current.oauthTokenUrl === url;
+  const keepsMethod = current.oauthTokenUrl !== null && current.oauthTokenUrl === url;
   if (given.clientSecret === undefined && !keeps) {
     const message = current.oauthTokenUrl
       ? WEBHOOK_OAUTH_SECRET_FOR_NEW_URL
@@ -4182,7 +4187,8 @@ export function checkedWebhookOAuth(
     clientId: given.clientId,
     clientSecret: given.clientSecret ?? null,
     scope: given.scope ?? null,
-    clientAuthentication: given.clientAuthentication ?? 'client_secret_basic',
+    clientAuthentication:
+      given.clientAuthentication ?? (keepsMethod ? current.oauthClientAuth : 'client_secret_basic'),
   };
 }
 
@@ -4274,14 +4280,16 @@ export function webhookOAuthAudit(
 
 /**
  * How a client authenticates, named in an audit entry when it is not HTTP Basic, or when a change
- * goes back to it (ADR-357), so entries name every way an endpoint has used.
+ * goes back to it (ADR-357), so entries name every way an endpoint has used. An endpoint without a
+ * client counts as HTTP Basic, whatever its column holds.
  */
 export function webhookOAuthClientAuthAudit(
   oauth: CheckedWebhookOAuth,
   current: WebhookOAuthColumns,
 ): { oauthClientAuthentication?: WebhookOAuthClientAuth } {
+  const before = current.oauthTokenUrl ? current.oauthClientAuth : 'client_secret_basic';
   return oauth.clientAuthentication !== 'client_secret_basic' ||
-    current.oauthClientAuth !== oauth.clientAuthentication
+    before !== oauth.clientAuthentication
     ? { oauthClientAuthentication: oauth.clientAuthentication }
     : {};
 }

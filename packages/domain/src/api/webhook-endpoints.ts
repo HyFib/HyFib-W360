@@ -959,7 +959,7 @@ const invalidConversationTags = () =>
   });
 
 const oauthField = webhookOAuthSchema.describe(
-  `An OAuth 2.0 client of the receiver's authorization server (the client credentials grant): before delivering, HyFib asks the token URL (an https address on the public internet, held to the endpoint URL's rules) for an access token, authenticating with the client ID and secret (in an HTTP Basic header, or as \`client_id\` and \`client_secret\` in the request body when \`clientAuthentication\` is \`client_secret_post\`; left out, \`client_secret_basic\`) and asking for the scope if one is given, and sends the token as \`Authorization: Bearer <token>\`. A token is used until a minute before it expires, for at most a day; one without a lifetime of more than two minutes serves only the deliveries sent with it, and one the endpoint answers 401 to is replaced at the next attempt. A delivery that gets no token fails its attempt (\`lastError\` \`oauth_token_…\`) and is retried. The client ID and secret use printable ASCII characters (up to ${WEBHOOK_LIMITS.oauthClientIdLength} and ${WEBHOOK_LIMITS.oauthClientSecretLength}); the secret is stored encrypted and never shown again. An endpoint with an OAuth client cannot send an Authorization header of its own.`,
+  `An OAuth 2.0 client of the receiver's authorization server (the client credentials grant): before delivering, HyFib asks the token URL (an https address on the public internet, held to the endpoint URL's rules) for an access token, authenticating with the client ID and secret (in an HTTP Basic header, or as \`client_id\` and \`client_secret\` in the request body when \`clientAuthentication\` is \`client_secret_post\`; left out, a change keeps the client's while the token URL stays the same, and a new client or token URL uses \`client_secret_basic\`) and asking for the scope if one is given, and sends the token as \`Authorization: Bearer <token>\`. A token is used until a minute before it expires, for at most a day; one without a lifetime of more than two minutes serves only the deliveries sent with it, and one the endpoint answers 401 to is replaced at the next attempt. A delivery that gets no token fails its attempt (\`lastError\` \`oauth_token_…\`) and is retried. The client ID and secret use printable ASCII characters (up to ${WEBHOOK_LIMITS.oauthClientIdLength} and ${WEBHOOK_LIMITS.oauthClientSecretLength}); the secret is stored encrypted and never shown again. An endpoint with an OAuth client cannot send an Authorization header of its own.`,
 );
 
 export const apiCreateWebhookEndpointSchema = z
@@ -1615,7 +1615,7 @@ export const apiUpdateWebhookEndpointSchema = z
       .nullable()
       .optional()
       .describe(
-        'Replaces the endpoint’s OAuth client: its token URL, client ID and scope (left out: none). The secret may be left out to keep the stored one, unless the token URL changes: the secret is sent there. null removes the client. Left out, it stays.',
+        'Replaces the endpoint’s OAuth client: its token URL, client ID and scope (left out: none). The secret may be left out to keep the stored one, unless the token URL changes: the secret is sent there. Its `clientAuthentication` may be left out to keep the one it has while the token URL stays the same (`client_secret_basic` for a new token URL). null removes the client. Left out, it stays.',
       ),
   })
   .strict()

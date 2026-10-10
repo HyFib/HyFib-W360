@@ -778,8 +778,8 @@ describe('OAuth clients (ADR-173)', () => {
       },
     ]);
 
-    // A change that leaves the method out goes back to HTTP Basic, which its audit entry names, and
-    // the token kept for the client as it was serves no longer: the next delivery asks again.
+    // A change that leaves the method out keeps it while the token URL stays the same, as a
+    // connector written before ADR-357 rotating the secret does; its audit entry names it.
     const change = (oauth: Record<string, unknown> | null) =>
       webhooks().update(e.owner, {
         endpointId: e.id,
@@ -788,7 +788,28 @@ describe('OAuth clients (ADR-173)', () => {
         eventTypes: ['consent.changed'],
         oauth,
       });
-    await change({ tokenUrl: e.tokenUrl, clientId: 'hyfib-test', scope: 'events.write read' });
+    await change({
+      tokenUrl: e.tokenUrl,
+      clientId: 'hyfib-test',
+      clientSecret: 'r0t:ated/+',
+      scope: 'events.write read',
+    });
+    expect(await method()).toBe('client_secret_post');
+    expect((await auditsOf(c, 'webhook.endpoint_updated')).at(-1)).toEqual({
+      host: HOST,
+      eventTypes: ['consent.changed'],
+      oauthTokenHost: HOST,
+      oauthSecretReplaced: true,
+      oauthClientAuthentication: 'client_secret_post',
+    });
+    // One that names HTTP Basic goes back to it, which its audit entry names, and the token kept
+    // for the client as it was serves no longer: the next delivery asks again.
+    await change({
+      tokenUrl: e.tokenUrl,
+      clientId: 'hyfib-test',
+      scope: 'events.write read',
+      clientAuthentication: 'client_secret_basic',
+    });
     expect(await method()).toBe('client_secret_basic');
     expect((await auditsOf(c, 'webhook.endpoint_updated')).at(-1)).toEqual({
       host: HOST,
@@ -806,7 +827,7 @@ describe('OAuth clients (ADR-173)', () => {
     });
     const [, again] = requestsTo(e.token);
     expect(again?.headers.authorization).toBe(
-      `Basic ${Buffer.from('hyfib-test:s3cr%3Aet%2F%2B').toString('base64')}`,
+      `Basic ${Buffer.from('hyfib-test:r0t%3Aated%2F%2B').toString('base64')}`,
     );
     expect(again?.body).toBe('grant_type=client_credentials&scope=events.write+read');
     expect(authorizations(e.bearer)).toEqual(['Bearer tok-body', 'Bearer tok-basic']);
@@ -824,6 +845,7 @@ describe('OAuth clients (ADR-173)', () => {
       [c.tenant.id],
     );
     expect(JSON.stringify(audits)).not.toContain('s3cr');
+    expect(JSON.stringify(audits)).not.toContain('r0t');
   });
 
   it('fail an attempt without calling the endpoint when no token comes, and ask again at the next one', async () => {
@@ -1043,12 +1065,15 @@ describe('OAuth clients (ADR-173)', () => {
       "UPDATE app.webhook_endpoints SET oauth_client_auth = 'client_secret_post' WHERE id = $1",
       [e.id],
     );
-    // The company role changes it only through its column grant.
-    const [grant] = await fx.query<{ can_update: boolean }>(
+    // The company role changes it only through its column grant: it has no update grant on the
+    // whole table.
+    const [grant] = await fx.query<{ can_update: boolean; can_update_table: boolean }>(
       `SELECT has_column_privilege('w360_app', 'app.webhook_endpoints', 'oauth_client_auth',
-                'UPDATE') AS can_update`,
+                'UPDATE') AS can_update,
+              has_table_privilege('w360_app', 'app.webhook_endpoints', 'UPDATE')
+                AS can_update_table`,
     );
-    expect(grant?.can_update).toBe(true);
+    expect(grant).toEqual({ can_update: true, can_update_table: false });
     for (const set of [
       'oauth_token_url = NULL',
       'oauth_client_id = NULL',

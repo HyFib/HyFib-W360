@@ -35,6 +35,14 @@ pglast parse check (syntax only).
   sent with it). Written for CI; the integration and end-to-end tests were not run here.
 - **Docs:** ADR-357; ARCHITECTURE; SECURITY; THREAT-MODEL T316; DEPLOYMENT (0279); RUNBOOKS (the
   `oauth_token_refused_401` entry); BACKLOG P5-09; feature matrix W-138, W-139 and H-014.
+- **Review fixes:** a change that leaves the way out now keeps it while the token URL stays the
+  same, as the secret, so a connector written before ADR-357 that rotates the secret no longer moves
+  a client set to the body back to HTTP Basic (a new client or token URL still uses HTTP Basic), and
+  the API's change description says so; the audit counts an endpoint without a client as HTTP Basic,
+  whatever its column holds; ADR-357 and DEPLOYMENT describe the rollout as it happens (an old worker
+  meets a body client only after a rollback, and an old web server's removal can leave the body in
+  the column); the grant test also shows the runtime role has no update grant on the whole table.
+  Five deliberate regressions of the fixes, all caught by the unit tests.
 - **Mutation checks:** 24 deliberate regressions, 19 caught by the unit tests (the body method never
   used, a Basic header sent with it, the body without the client ID, the secret encoded twice, the
   parameters in another order, a token kept across methods, caught once the kept tokens' test was
