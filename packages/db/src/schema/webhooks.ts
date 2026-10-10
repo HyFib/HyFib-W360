@@ -148,6 +148,34 @@ export type WebhookOrderMessageSkipReason =
   | 'automation_quota';
 
 /**
+ * The reasons a store's cart reminder can be skipped for, which an endpoint can choose to take the
+ * skips of as `store_checkout.reminder_skipped` (ADR-356): the reasons a store's Messages page
+ * (Commerce → Stores) explains for a message not sent, but those that concern order messages only
+ * and `checkout_deleted`, which no reminder gets (it is deleted with its checkout, ADR-355).
+ */
+export type WebhookCartReminderSkipReason =
+  | 'rule_disabled'
+  | 'store_disconnected'
+  | 'no_opt_in'
+  | 'customer_erased'
+  | 'no_phone'
+  | 'contact_erased'
+  | 'suppressed'
+  | 'opted_out'
+  | 'no_marketing_opt_in'
+  | 'template_unavailable'
+  | 'channel_unavailable'
+  | 'missing_variable'
+  | 'template_changed'
+  | 'checkout_completed'
+  | 'order_placed'
+  | 'first_reminder_not_sent'
+  | 'cart_too_old'
+  | 'not_marketing_template'
+  | 'frequency_capped'
+  | 'not_in_plan';
+
+/**
  * Who made an order status change `order.status_changed` reports, as an endpoint can choose them
  * (ADR-322): a member on the order page, an API key, or HyFib applying what Razorpay reports for
  * the order's Payment Link, as the event's `changedBy` names them.
@@ -372,6 +400,13 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
   orderMessageSkipReasons: text('order_message_skip_reasons')
     .array()
     .$type<WebhookOrderMessageSkipReason[]>(),
+  /**
+   * The reasons whose cart reminder skips it takes as `store_checkout.reminder_skipped` (migration
+   * 0278, ADR-356); null takes every reason. Set only while that event is among its events.
+   */
+  cartReminderSkipReasons: text('cart_reminder_skip_reasons')
+    .array()
+    .$type<WebhookCartReminderSkipReason[]>(),
   /**
    * The statuses a deal reaches that it takes as `deal.status_changed` (migration 0232, ADR-309);
    * null takes every status. Set only while `deal.status_changed` is among its events.

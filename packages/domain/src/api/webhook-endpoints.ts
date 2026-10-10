@@ -31,6 +31,7 @@ import {
   type WebhookCodAnswer,
   type WebhookOrderMessageEvent,
   type WebhookOrderMessageSkipReason,
+  type WebhookCartReminderSkipReason,
   type WebhookRunStepOutcome,
   type WebhookRunStepNodeType,
   type WebhookOrderChangeMaker,
@@ -73,6 +74,7 @@ import {
   WEBHOOK_COD_ANSWERS,
   WEBHOOK_ORDER_MESSAGE_EVENTS,
   WEBHOOK_ORDER_MESSAGE_SKIP_REASONS,
+  WEBHOOK_CART_REMINDER_SKIP_REASONS,
   WEBHOOK_RUN_STEP_NODE_TYPES,
   WEBHOOK_ORDER_CHANGE_MAKERS,
   WEBHOOK_DEAL_STATUSES,
@@ -134,6 +136,7 @@ import {
   WEBHOOK_STORES_NEED_THE_EVENT,
   WEBHOOK_ORDER_MESSAGES_NEED_THE_EVENT,
   WEBHOOK_ORDER_MESSAGE_SKIP_REASONS_NEED_THE_EVENT,
+  WEBHOOK_CART_REMINDER_SKIP_REASONS_NEED_THE_EVENT,
   WEBHOOK_RUN_STEP_NODE_TYPES_NEED_THE_EVENT,
   WEBHOOK_ORDER_CHANGE_MAKERS_NEED_THE_EVENT,
   WEBHOOK_ORDER_EXCLUDED_API_KEYS_NEED_THE_EVENT,
@@ -292,6 +295,8 @@ import {
   webhookOrderMessageEventsSchema,
   webhookOrderMessageSkipReasonsFor,
   webhookOrderMessageSkipReasonsSchema,
+  webhookCartReminderSkipReasonsFor,
+  webhookCartReminderSkipReasonsSchema,
   webhookRunStepNodeTypesFor,
   webhookRunStepNodeTypesSchema,
   webhookOrderChangeMakersFor,
@@ -465,7 +470,7 @@ const invalidOrderMessageEvents = () =>
   });
 
 const orderMessageSkipReasonsField = webhookOrderMessageSkipReasonsSchema.describe(
-  `The reasons whose order message skips the endpoint receives as store_order.message_skipped (${WEBHOOK_ORDER_MESSAGE_SKIP_REASONS.join(', ')}), as orderMessage.skipReason names them, only with that event; null receives every reason's, as a list of all of them does. The reasons that concern cart reminders only are not among them: a skipped cart reminder sends store_checkout.reminder_skipped, which the list does not narrow. With the stores or the order messages chosen too, a skipped message must pass them all.`,
+  `The reasons whose order message skips the endpoint receives as store_order.message_skipped (${WEBHOOK_ORDER_MESSAGE_SKIP_REASONS.join(', ')}), as orderMessage.skipReason names them, only with that event; null receives every reason's, as a list of all of them does. The reasons that concern cart reminders only are not among them: a skipped cart reminder sends store_checkout.reminder_skipped, which this list does not narrow (cartReminderSkipReasons does). With the stores or the order messages chosen too, a skipped message must pass them all.`,
 );
 
 /** Skip reasons are chosen only for an endpoint that receives skipped order messages (ADR-354). */
@@ -475,6 +480,21 @@ const invalidOrderMessageSkipReasons = () =>
       {
         path: 'orderMessageSkipReasons',
         message: WEBHOOK_ORDER_MESSAGE_SKIP_REASONS_NEED_THE_EVENT,
+      },
+    ],
+  });
+
+const cartReminderSkipReasonsField = webhookCartReminderSkipReasonsSchema.describe(
+  `The reasons whose cart reminder skips the endpoint receives as store_checkout.reminder_skipped (${WEBHOOK_CART_REMINDER_SKIP_REASONS.join(', ')}), as reminder.skipReason names them, only with that event; null receives every reason's, as a list of all of them does. With the stores chosen too, a skipped reminder must pass both.`,
+);
+
+/** Cart reminder skip reasons are chosen only for an endpoint that receives them (ADR-356). */
+const invalidCartReminderSkipReasons = () =>
+  new AppError('validation_failed', WEBHOOK_CART_REMINDER_SKIP_REASONS_NEED_THE_EVENT, {
+    issues: [
+      {
+        path: 'cartReminderSkipReasons',
+        message: WEBHOOK_CART_REMINDER_SKIP_REASONS_NEED_THE_EVENT,
       },
     ],
   });
@@ -967,6 +987,7 @@ export const apiCreateWebhookEndpointSchema = z
     storeIds: storeIdsField.optional(),
     orderMessageEvents: orderMessageEventsField.optional(),
     orderMessageSkipReasons: orderMessageSkipReasonsField.optional(),
+    cartReminderSkipReasons: cartReminderSkipReasonsField.optional(),
     runStepOutcomes: runStepOutcomesField.optional(),
     runStepNodeTypes: runStepNodeTypesField.optional(),
     orderChangeMakers: orderChangeMakersField.optional(),
@@ -1073,6 +1094,14 @@ export const apiCreateWebhookEndpointSchema = z
     {
       path: ['orderMessageSkipReasons'],
       message: WEBHOOK_ORDER_MESSAGE_SKIP_REASONS_NEED_THE_EVENT,
+    },
+  )
+  .refine(
+    (data) =>
+      !data.cartReminderSkipReasons || data.events.includes('store_checkout.reminder_skipped'),
+    {
+      path: ['cartReminderSkipReasons'],
+      message: WEBHOOK_CART_REMINDER_SKIP_REASONS_NEED_THE_EVENT,
     },
   )
   .refine((data) => !data.runStepNodeTypes || data.events.includes('automation.run_step'), {
@@ -1351,6 +1380,11 @@ export const apiUpdateWebhookEndpointSchema = z
       .describe(
         'The reasons whose order message skips the endpoint receives as store_order.message_skipped; null receives every reason’s. Left out, they stay, unless the events no longer include store_order.message_skipped, which clears them.',
       ),
+    cartReminderSkipReasons: cartReminderSkipReasonsField
+      .optional()
+      .describe(
+        'The reasons whose cart reminder skips the endpoint receives as store_checkout.reminder_skipped; null receives every reason’s. Left out, they stay, unless the events no longer include store_checkout.reminder_skipped, which clears them.',
+      ),
     runStepOutcomes: runStepOutcomesField
       .optional()
       .describe(
@@ -1603,6 +1637,7 @@ export const apiUpdateWebhookEndpointSchema = z
       data.storeIds !== undefined ||
       data.orderMessageEvents !== undefined ||
       data.orderMessageSkipReasons !== undefined ||
+      data.cartReminderSkipReasons !== undefined ||
       data.runStepOutcomes !== undefined ||
       data.runStepNodeTypes !== undefined ||
       data.orderChangeMakers !== undefined ||
@@ -1649,7 +1684,7 @@ export const apiUpdateWebhookEndpointSchema = z
       data.contactTags !== undefined ||
       data.conversationTags !== undefined ||
       data.oauth !== undefined,
-    'Give the events, the description, the headers, the message statuses, who sent the messages, the API keys that sent them, the contact parts, the deal and task details, the custom fields, the automations, the campaign statuses, the order statuses, who made the order changes, the API keys whose order changes are left out, the Payment Link statuses, the API keys that asked for the Payment Links, the template statuses, the conversation statuses, the deal statuses, the task statuses, the run end statuses, the step outcomes, the kinds of step, what started the runs, the API keys that started them, the consent changes, where contacts came from, the received message types, the run end reasons, the numbers, the teams, the templates, the cash on delivery answers, the stores of store orders’ events, the order messages whose skips and sends are sent, the skip reasons of skipped order messages, the campaigns, the pipelines, the stages, the deal owners, the task assignees, the pipelines, stages and owners of tasks’ deals and of notes’ deals, who made the CRM changes, the API keys whose CRM changes are left out, the survey scores, the members credited with survey answers and the teams of their conversations, the contact and conversation tags of survey answers, the tags and field values of added and changed contacts, the members, the contact tags, the conversation tags, the OAuth client or whether the endpoint is enabled',
+    'Give the events, the description, the headers, the message statuses, who sent the messages, the API keys that sent them, the contact parts, the deal and task details, the custom fields, the automations, the campaign statuses, the order statuses, who made the order changes, the API keys whose order changes are left out, the Payment Link statuses, the API keys that asked for the Payment Links, the template statuses, the conversation statuses, the deal statuses, the task statuses, the run end statuses, the step outcomes, the kinds of step, what started the runs, the API keys that started them, the consent changes, where contacts came from, the received message types, the run end reasons, the numbers, the teams, the templates, the cash on delivery answers, the stores of store events, the order messages whose skips and sends are sent, the skip reasons of skipped order messages, the skip reasons of skipped cart reminders, the campaigns, the pipelines, the stages, the deal owners, the task assignees, the pipelines, stages and owners of tasks’ deals and of notes’ deals, who made the CRM changes, the API keys whose CRM changes are left out, the survey scores, the members credited with survey answers and the teams of their conversations, the contact and conversation tags of survey answers, the tags and field values of added and changed contacts, the members, the contact tags, the conversation tags, the OAuth client or whether the endpoint is enabled',
   );
 
 export interface ApiWebhookEndpoint {
@@ -1697,6 +1732,8 @@ export interface ApiWebhookEndpoint {
   orderMessageEvents: WebhookOrderMessageEvent[] | null;
   /** The reasons whose order message skips it receives (ADR-354); null receives every reason. */
   orderMessageSkipReasons: WebhookOrderMessageSkipReason[] | null;
+  /** The reasons whose cart reminder skips it receives (ADR-356); null receives every reason. */
+  cartReminderSkipReasons: WebhookCartReminderSkipReason[] | null;
   /** The outcomes of the run steps it receives (ADR-327); null receives every step. */
   runStepOutcomes: WebhookRunStepOutcome[] | null;
   /** The kinds of node whose run steps it receives (ADR-328); null receives every step. */
@@ -1893,6 +1930,7 @@ const columns = {
   storeIds: webhookEndpoints.storeIds,
   orderMessageEvents: webhookEndpoints.orderMessageEvents,
   orderMessageSkipReasons: webhookEndpoints.orderMessageSkipReasons,
+  cartReminderSkipReasons: webhookEndpoints.cartReminderSkipReasons,
   runStepOutcomes: webhookEndpoints.runStepOutcomes,
   runStepNodeTypes: webhookEndpoints.runStepNodeTypes,
   orderChangeMakers: webhookEndpoints.orderChangeMakers,
@@ -1973,6 +2011,7 @@ type EndpointRow = Pick<
   | 'storeIds'
   | 'orderMessageEvents'
   | 'orderMessageSkipReasons'
+  | 'cartReminderSkipReasons'
   | 'runStepOutcomes'
   | 'runStepNodeTypes'
   | 'orderChangeMakers'
@@ -2058,6 +2097,7 @@ function toApiEndpoint(row: EndpointRow, now: Date): ApiWebhookEndpoint {
     storeIds: row.storeIds,
     orderMessageEvents: row.orderMessageEvents,
     orderMessageSkipReasons: row.orderMessageSkipReasons,
+    cartReminderSkipReasons: row.cartReminderSkipReasons,
     runStepOutcomes: row.runStepOutcomes,
     runStepNodeTypes: row.runStepNodeTypes,
     orderChangeMakers: row.orderChangeMakers,
@@ -2359,6 +2399,11 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               data.orderMessageSkipReasons,
               null,
             );
+            const cartReminderSkipReasons = webhookCartReminderSkipReasonsFor(
+              data.events,
+              data.cartReminderSkipReasons,
+              null,
+            );
             const runStepNodeTypes = webhookRunStepNodeTypesFor(
               data.events,
               data.runStepNodeTypes,
@@ -2525,6 +2570,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               storeIds,
               orderMessageEvents,
               orderMessageSkipReasons,
+              cartReminderSkipReasons,
               orderChangeMakers,
               runStepOutcomes,
               runStepNodeTypes,
@@ -2591,6 +2637,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               ...(storeIds ? { storeIds } : {}),
               ...(orderMessageEvents ? { orderMessageEvents } : {}),
               ...(orderMessageSkipReasons ? { orderMessageSkipReasons } : {}),
+              ...(cartReminderSkipReasons ? { cartReminderSkipReasons } : {}),
               ...(runStepNodeTypes ? { runStepNodeTypes } : {}),
               ...(orderChangeMakers ? { orderChangeMakers } : {}),
               ...(orderExcludedApiKeyIds ? { orderExcludedApiKeyIds } : {}),
@@ -2696,6 +2743,9 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
         }
         if (data.orderMessageSkipReasons && !events.includes('store_order.message_skipped')) {
           throw invalidOrderMessageSkipReasons();
+        }
+        if (data.cartReminderSkipReasons && !events.includes('store_checkout.reminder_skipped')) {
+          throw invalidCartReminderSkipReasons();
         }
         if (data.runStepNodeTypes && !events.includes('automation.run_step')) {
           throw invalidRunStepNodeTypes();
@@ -2965,6 +3015,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
           data.storeIds !== undefined ||
           data.orderMessageEvents !== undefined ||
           data.orderMessageSkipReasons !== undefined ||
+          data.cartReminderSkipReasons !== undefined ||
           data.runStepOutcomes !== undefined ||
           data.runStepNodeTypes !== undefined ||
           data.orderChangeMakers !== undefined ||
@@ -3076,6 +3127,11 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
                 events,
                 data.orderMessageSkipReasons,
                 endpoint.orderMessageSkipReasons,
+              ),
+              cartReminderSkipReasons: webhookCartReminderSkipReasonsFor(
+                events,
+                data.cartReminderSkipReasons,
+                endpoint.cartReminderSkipReasons,
               ),
               runStepOutcomes: webhookRunStepOutcomesFor(
                 events,
@@ -3269,6 +3325,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               storeIds: webhookEndpoints.storeIds,
               orderMessageEvents: webhookEndpoints.orderMessageEvents,
               orderMessageSkipReasons: webhookEndpoints.orderMessageSkipReasons,
+              cartReminderSkipReasons: webhookEndpoints.cartReminderSkipReasons,
               runStepOutcomes: webhookEndpoints.runStepOutcomes,
               runStepNodeTypes: webhookEndpoints.runStepNodeTypes,
               orderChangeMakers: webhookEndpoints.orderChangeMakers,
@@ -3338,6 +3395,9 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
               : {}),
             ...(changed.orderMessageSkipReasons
               ? { orderMessageSkipReasons: changed.orderMessageSkipReasons }
+              : {}),
+            ...(changed.cartReminderSkipReasons
+              ? { cartReminderSkipReasons: changed.cartReminderSkipReasons }
               : {}),
             ...(changed.runStepOutcomes ? { runStepOutcomes: changed.runStepOutcomes } : {}),
             ...(changed.runStepNodeTypes ? { runStepNodeTypes: changed.runStepNodeTypes } : {}),

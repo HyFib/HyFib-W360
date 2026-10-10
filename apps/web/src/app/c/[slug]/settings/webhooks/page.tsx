@@ -295,6 +295,12 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
                         <span className="font-mono">{e.orderMessageSkipReasons.join(', ')}</span>
                       </p>
                     ) : null}
+                    {e.cartReminderSkipReasons ? (
+                      <p className="text-xs break-all text-muted-foreground">
+                        Cart reminder skip reasons sent:{' '}
+                        <span className="font-mono">{e.cartReminderSkipReasons.join(', ')}</span>
+                      </p>
+                    ) : null}
                     {e.runStepOutcomes ? (
                       <p className="text-xs text-muted-foreground">
                         Automation steps sent:{' '}

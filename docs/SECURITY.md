@@ -1946,6 +1946,13 @@ Phase 5 rules (outgoing webhooks, P5-09):
   `app.capture_webhook_event`. A reminder deleted with its checkout (30 days after the store last
   updated it) or its store fails its pending deliveries as `event_gone` (unit tests; integration
   tests, run in CI only).
+- An endpoint can take the skipped cart reminders of chosen reasons only (ADR-356). The reasons are
+  checked against the 20 a cart reminder can be skipped for (the services and the database), kept
+  only while the endpoint takes `store_checkout.reminder_skipped` (a database check too, which also
+  refuses a null entry), and applied in `app.capture_webhook_event` to the reason the event keeps.
+  The list only narrows what one endpoint receives and never adds an event or a delivery for
+  another endpoint or company; the payload is unchanged. Audited with the list and in the company
+  data export (unit tests; integration tests, run in CI only).
 - An endpoint can take the run steps of chosen outcomes only (ADR-327). The list holds only the
   outcomes a run's log records (checked by the services and the database), is kept only while the
   endpoint takes `automation.run_step` (a database check too), and is applied in

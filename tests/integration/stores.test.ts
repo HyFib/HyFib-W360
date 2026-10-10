@@ -43,6 +43,7 @@ import {
   type StoreMessageEvent,
   type WebhookOrderMessageEvent,
   type WebhookOrderMessageSkipReason,
+  type WebhookCartReminderSkipReason,
   type StoreVariables,
   type AutomationTrigger,
   type Permission,
@@ -198,8 +199,8 @@ const HOOK_HOST = 'hooks.receiver.test';
 
 /**
  * A webhook endpoint of the company taking `eventTypes`, only those of the numbers (ADR-348),
- * answers and stores (ADR-349), order messages (ADR-352) and skip reasons (ADR-354) given, on a path
- * of this test's server of its own.
+ * answers and stores (ADR-349), order messages (ADR-352) and skip reasons (ADR-354, ADR-356) given,
+ * on a path of this test's server of its own.
  */
 async function addHook(
   owner: TenantContext,
@@ -216,6 +217,7 @@ async function addHook(
     storeIds?: string[];
     orderMessageEvents?: WebhookOrderMessageEvent[];
     orderMessageSkipReasons?: WebhookOrderMessageSkipReason[];
+    cartReminderSkipReasons?: WebhookCartReminderSkipReason[];
   } = {},
 ) {
   const path = `/hooks/${randomBytes(6).toString('hex')}`;
@@ -3391,6 +3393,10 @@ describe('Cart reminders', () => {
     const otherNumber = await addHook(owner, bothReminders, {
       channelIds: [outlet.channelAccountId],
     });
+    // A follow-up system's endpoint taking the skips of two reasons only (ADR-356).
+    const followUp = await addHook(owner, ['store_checkout.reminder_skipped'], {
+      cartReminderSkipReasons: ['no_marketing_opt_in', 'frequency_capped'],
+    });
 
     // The second reminder needs the first, and comes later.
     await expectAppError(
@@ -3579,7 +3585,7 @@ describe('Cart reminders', () => {
       ]),
     ).toEqual([
       ['10', 'store_checkout.reminder_sent', 'cart_reminder', null, 2],
-      ['11', 'store_checkout.reminder_skipped', 'cart_reminder', 'no_marketing_opt_in', 3],
+      ['11', 'store_checkout.reminder_skipped', 'cart_reminder', 'no_marketing_opt_in', 4],
       ['10', 'store_checkout.reminder_sent', 'cart_second_reminder', null, 2],
       [
         '11',
@@ -3588,7 +3594,7 @@ describe('Cart reminders', () => {
         'first_reminder_not_sent',
         3,
       ],
-      ['12', 'store_checkout.reminder_skipped', 'cart_reminder', 'frequency_capped', 3],
+      ['12', 'store_checkout.reminder_skipped', 'cart_reminder', 'frequency_capped', 4],
       ['13', 'store_checkout.reminder_skipped', 'cart_reminder', 'cart_too_old', 3],
       ['14', 'store_checkout.reminder_skipped', 'cart_reminder', 'not_marketing_template', 3],
     ]);
@@ -3704,6 +3710,18 @@ describe('Cart reminders', () => {
     expect(hookBodiesAt(otherNumber.path).map((body) => (body as { type: string }).type)).toEqual(
       Array(5).fill('store_checkout.reminder_skipped'),
     );
+    // The follow-up endpoint received the skips of its two reasons and no other.
+    const followedUp = hookBodiesAt(followUp.path) as {
+      data: { reminder: { skipReason: string }; storeCheckout: { externalId: string } };
+    }[];
+    expect(
+      followedUp
+        .map((body) => [body.data.storeCheckout.externalId, body.data.reminder.skipReason])
+        .sort(),
+    ).toEqual([
+      ['11', 'no_marketing_opt_in'],
+      ['12', 'frequency_capped'],
+    ]);
   });
 
   it('asks Shopify for customer access only when a manager allows it, and uses the consent the store records', async () => {

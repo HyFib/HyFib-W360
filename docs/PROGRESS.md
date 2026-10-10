@@ -1,5 +1,55 @@
 # Progress
 
+## 2026-10-10 — Skip reason filter for skipped cart reminders (P5-09, H-014, ADR-356)
+
+Status: **Implemented; its database tests run in CI only.** `store_checkout.reminder_skipped` went
+to an endpoint for every reason a store's cart reminder was not sent, so a receiver that reminds
+customers another way when WhatsApp could not reach them had to leave the reminders of completed or
+ordered checkouts alone itself. The local PostgreSQL is unavailable, so migration 0278 and the
+integration tests below were written but not run here; the migration passed the pglast parse check
+(syntax only), its PL/pgSQL body included.
+
+### Completed
+
+- **Database:** migration 0278: `cart_reminder_skip_reasons` (1 to 20 of the reasons a cart reminder
+  can be skipped for, only while the endpoint takes `store_checkout.reminder_skipped`) on
+  `app.webhook_endpoints`, validated at once; the runtime role's update grant on the column;
+  `app.capture_webhook_event` matching it with the reason the cart reminder's trigger keeps
+  (replaced with the same signature).
+- **Domain:** `webhookCartReminderSkipReasonsSchema` and `webhookCartReminderSkipReasonsFor`, a list
+  apart from the order messages' reasons; the settings service and the API take, keep, clear, audit
+  and answer `cartReminderSkipReasons`; the OpenAPI entries and the skipped reminder event's
+  description; the data export names the column.
+- **Web:** Settings → Webhooks ticks the reasons under Cart reminder skipped, in the words of a
+  store's Messages page; the endpoints list names the reasons chosen.
+- **Tests:** unit (4 new: the schema and refusals, the list kept only with its event and apart from
+  the order messages', the skipped reminder event's description, the API schemas and OpenAPI
+  entries; the audit's largest entry, the update body's fields and the empty change's message
+  updated); integration (`webhooks.test.ts`: the service's refusals, keeping and clearing, the
+  audit, the database checks and the grant; `api-webhook-endpoints.test.ts`: the same through the
+  API, a list alone a change; `stores.test.ts`: a follow-up endpoint taking two reasons receives
+  those skips only). Written for CI; the integration tests were not run here.
+- **Docs:** ADR-356; ARCHITECTURE; SECURITY; THREAT-MODEL T315; DEPLOYMENT (0278); RUNBOOKS (and the
+  ADR-355 entry); BACKLOG P5-09; feature matrix W-138, W-139 and H-014. The audit's largest entry is
+  now 6,535 bytes (60 lists), over the test's old bound of 6,500, which rises to 6,800, within the
+  7,000 kept.
+- **Mutation checks:** 18 deliberate regressions, 14 caught by the unit tests (an empty list or 21
+  taken, the reasons not put in order, another refusal, the list kept with any store event or the
+  one held forgotten, the refusal not naming the event, the API taking reasons without the event,
+  the API's fields and the empty change not naming them, the answer schema loosened, the event not
+  describing the list, the update body without the field). The other four (the settings service's
+  and the API change's refusal without the event, the API's answer, the audit) run against the
+  database: the new integration tests cover them, in CI only.
+
+### Test commands and results (local, 2026-10-10)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 146 files, 1528 tests passed                                    |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+
 ## 2026-10-10 — Webhook events for a store's cart reminders (P5-09, H-014, ADR-355)
 
 Status: **Implemented; its database tests run in CI only.** A Shopify store's cart reminders went

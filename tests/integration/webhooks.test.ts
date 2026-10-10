@@ -44,6 +44,7 @@ import {
   verifyWebhookSignature,
   WEBHOOK_LIMITS,
   WEBHOOK_ORDER_MESSAGE_SKIP_REASONS,
+  WEBHOOK_CART_REMINDER_SKIP_REASONS,
   WEBHOOK_TEMPLATE_STATUSES,
   WEBHOOK_USER_AGENT,
   webhookHeadersAad,
@@ -2770,6 +2771,119 @@ describe('cash on delivery answer, store and order message filters (ADR-349, ADR
     const [grant] = await fx.query<{ can_update: boolean }>(
       `SELECT has_column_privilege('w360_app', 'app.webhook_endpoints',
                 'order_message_skip_reasons', 'UPDATE') AS can_update`,
+    );
+    expect(grant?.can_update).toBe(true);
+  });
+
+  it('take cart reminder skip reasons only with store_checkout.reminder_skipped, kept and cleared with it; the database keeps them so (ADR-356)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const url = 'https://hooks.example.com/cart-reasons';
+    const refused = (eventTypes: string[], filters: Record<string, unknown>, message: RegExp) =>
+      expectAppError(
+        webhooks().create(owner, { url, eventTypes, ...filters }),
+        'validation_failed',
+        message,
+      );
+    const skipped = ['store_checkout.reminder_skipped'];
+    await refused(
+      ['store_checkout.reminder_sent'],
+      { cartReminderSkipReasons: ['no_phone'] },
+      /Choose cart reminder skip reasons only for an endpoint that receives Cart reminder skipped/,
+    );
+    await refused(
+      ['store_order.message_skipped'],
+      { cartReminderSkipReasons: ['no_phone'] },
+      /Choose cart reminder skip reasons only/,
+    );
+    await refused(
+      skipped,
+      { cartReminderSkipReasons: [] },
+      /at least one cart reminder skip reason/,
+    );
+    await refused(
+      skipped,
+      { cartReminderSkipReasons: ['test_order'] },
+      /cart reminder skip reasons from the list/,
+    );
+    expect(await webhooks().list(owner)).toEqual([]);
+
+    // Added with both cart reminder events; the skipped reminders alone keep the reasons.
+    const created = await webhooks().create(owner, {
+      url,
+      eventTypes: ['store_checkout.reminder_skipped', 'store_checkout.reminder_sent'],
+      cartReminderSkipReasons: ['opted_out', 'no_phone', 'opted_out'],
+    });
+    const audits = async (action: string) =>
+      (
+        await fx.query<{ metadata: { cartReminderSkipReasons?: unknown } }>(
+          `SELECT metadata FROM app.audit_events
+            WHERE tenant_id = $1 AND action = $2 ORDER BY occurred_at, id`,
+          [c.tenant.id, action],
+        )
+      ).map((a) => a.metadata.cartReminderSkipReasons);
+    expect(await audits('webhook.endpoint_created')).toEqual([['no_phone', 'opted_out']]);
+    const change = (eventTypes: string[], fields: Record<string, unknown> = {}) =>
+      webhooks().update(owner, {
+        endpointId: created.id,
+        url,
+        description: '',
+        eventTypes,
+        ...fields,
+      });
+    const current = async () =>
+      (await webhooks().list(owner)).find((e) => e.id === created.id)?.cartReminderSkipReasons;
+    expect(await current()).toEqual(['no_phone', 'opted_out']);
+    // A change leaving the list out keeps it, one giving it changes it, audited.
+    await change(skipped);
+    expect(await current()).toEqual(['no_phone', 'opted_out']);
+    await change(skipped, { cartReminderSkipReasons: ['cart_too_old'] });
+    expect(await current()).toEqual(['cart_too_old']);
+    expect((await audits('webhook.endpoint_updated')).at(-1)).toEqual(['cart_too_old']);
+    // Sent reminders alone have no reason: the list goes, and cannot be given.
+    await change(['store_checkout.reminder_sent']);
+    expect(await current()).toBeNull();
+    await expectAppError(
+      change(['store_checkout.reminder_sent'], { cartReminderSkipReasons: ['no_phone'] }),
+      'validation_failed',
+      /Choose cart reminder skip reasons only/,
+    );
+
+    // The database refuses an empty list, more than 20, an order message's or an unknown reason, a
+    // missing entry or a nested list from an endpoint taking the event (the services give each
+    // reason once)…
+    await change(skipped, { cartReminderSkipReasons: ['no_phone'] });
+    const setInDatabase = (value: string) =>
+      fx.query(
+        `UPDATE app.webhook_endpoints SET cart_reminder_skip_reasons = ${value} WHERE id = $1`,
+        [created.id],
+      );
+    const all = `ARRAY[${WEBHOOK_CART_REMINDER_SKIP_REASONS.map((r) => `'${r}'`).join(', ')}]::text[]`;
+    for (const bad of [
+      `'{}'`,
+      `ARRAY[${[...WEBHOOK_CART_REMINDER_SKIP_REASONS, 'no_phone'].map((r) => `'${r}'`).join(', ')}]::text[]`,
+      `'{test_order}'`,
+      `'{checkout_deleted}'`,
+      `'{not_a_reason}'`,
+      `ARRAY['no_phone', NULL]::text[]`,
+      `ARRAY[ARRAY['no_phone'], ARRAY['opted_out']]::text[]`,
+    ]) {
+      await expect(setInDatabase(bad), bad).rejects.toThrow(
+        /webhook_endpoints_cart_reminder_skip_reasons/,
+      );
+    }
+    // …takes all 20…
+    await setInDatabase(all);
+    expect(await current()).toEqual([...WEBHOOK_CART_REMINDER_SKIP_REASONS]);
+    // …and refuses the list for an endpoint that does not take the event.
+    await change(['store_checkout.reminder_sent']);
+    await expect(setInDatabase(`'{no_phone}'`)).rejects.toThrow(
+      /webhook_endpoints_cart_reminder_skip_reasons/,
+    );
+    // The company role changes the list only through its column grant.
+    const [grant] = await fx.query<{ can_update: boolean }>(
+      `SELECT has_column_privilege('w360_app', 'app.webhook_endpoints',
+                'cart_reminder_skip_reasons', 'UPDATE') AS can_update`,
     );
     expect(grant?.can_update).toBe(true);
   });

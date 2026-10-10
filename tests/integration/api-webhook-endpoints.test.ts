@@ -1702,6 +1702,84 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     });
   });
 
+  it('choose the skip reasons of skipped cart reminders, kept by changes that leave them out and cleared with the event (ADR-356)', async () => {
+    const c = await fx.company();
+    const key = await apiKey(c, ['webhooks.manage']);
+    const issueOf = async (promise: Promise<unknown>) => {
+      const error = await expectAppError(promise, 'validation_failed');
+      return isAppError(error) ? error.issues?.[0] : undefined;
+    };
+    // Reasons need the event, at least one, each from the list (named by place).
+    const skipped = ['store_checkout.reminder_skipped'];
+    const refusals = [
+      [
+        ['store_checkout.reminder_sent'],
+        { cartReminderSkipReasons: ['no_phone'] },
+        'cartReminderSkipReasons',
+      ],
+      [skipped, { cartReminderSkipReasons: [] }, 'cartReminderSkipReasons'],
+      [
+        skipped,
+        { cartReminderSkipReasons: ['no_phone', 'test_order'] },
+        'cartReminderSkipReasons.1',
+      ],
+    ] as const;
+    for (const [index, [events, filters, path]] of refusals.entries()) {
+      expect(
+        await issueOf(
+          api().create(
+            key.ctx,
+            { url: receiverUrl(), events, ...filters },
+            idem(`cart-reasons-bad-${index}`, JSON.stringify(filters)),
+          ),
+        ),
+        JSON.stringify(filters),
+      ).toMatchObject({ path });
+    }
+    expect((await api().list(key.ctx)).data).toEqual([]);
+
+    const created = await addThroughApi(key.ctx, 'cart-reasons-1', {
+      url: receiverUrl(),
+      events: ['store_checkout.reminder_skipped', 'store_checkout.reminder_sent'],
+      cartReminderSkipReasons: ['opted_out', 'no_phone', 'opted_out'],
+    });
+    const id = created.body.data.id;
+    expect(created.body.data).toMatchObject({ cartReminderSkipReasons: ['no_phone', 'opted_out'] });
+    expect(await api().get(key.ctx, id)).toMatchObject({
+      cartReminderSkipReasons: ['no_phone', 'opted_out'],
+    });
+    const audits = async (action: string) =>
+      (
+        await fx.query<{ metadata: { cartReminderSkipReasons?: unknown } }>(
+          `SELECT metadata FROM app.audit_events
+            WHERE tenant_id = $1 AND subject_id = $2 AND action = $3 ORDER BY occurred_at, id`,
+          [c.tenant.id, id, action],
+        )
+      ).map((a) => a.metadata.cartReminderSkipReasons);
+    expect(await audits('webhook.endpoint_created')).toEqual([['no_phone', 'opted_out']]);
+    expect(await api().update(key.ctx, id, { description: 'Cart recovery' })).toMatchObject({
+      cartReminderSkipReasons: ['no_phone', 'opted_out'],
+    });
+    // A list alone is a change.
+    expect(
+      await api().update(key.ctx, id, { cartReminderSkipReasons: ['cart_too_old'] }),
+    ).toMatchObject({ cartReminderSkipReasons: ['cart_too_old'] });
+    expect((await audits('webhook.endpoint_updated')).at(-1)).toEqual(['cart_too_old']);
+    // Sent reminders alone clear the reasons and refuse them.
+    expect(
+      await api().update(key.ctx, id, { events: ['store_checkout.reminder_sent'] }),
+    ).toMatchObject({ cartReminderSkipReasons: null });
+    expect(
+      await issueOf(api().update(key.ctx, id, { cartReminderSkipReasons: ['no_phone'] })),
+    ).toMatchObject({ path: 'cartReminderSkipReasons' });
+    expect(
+      await api().update(key.ctx, id, { events: skipped, cartReminderSkipReasons: ['opted_out'] }),
+    ).toMatchObject({ cartReminderSkipReasons: ['opted_out'] });
+    expect(await api().update(key.ctx, id, { cartReminderSkipReasons: null })).toMatchObject({
+      cartReminderSkipReasons: null,
+    });
+  });
+
   it('choose the numbers of sent cart reminders and the stores of either cart reminder event, never order messages or reasons (ADR-355)', async () => {
     const c = await fx.company();
     const key = await apiKey(c, ['webhooks.manage']);
