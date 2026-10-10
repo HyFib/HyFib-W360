@@ -968,13 +968,14 @@ verification, app review, Embedded Signup configuration).
   Remaining: call-to-action messages through the API, taking
   reactions back,
   changing a field's type,
-  resuming what members or HyFib paused, campaign
-  recipients through webhooks, limits per endpoint, availability per single endpoint (plans choose
-  per scope since ADR-092), a bound on a pipeline's archived stages (kept without one and each in
+  resuming what members or HyFib paused, limits per endpoint, availability per single endpoint
+  (plans choose per scope since ADR-092), a bound on a pipeline's archived stages (kept without one
+  and each in
   the pipeline's answer: past about 1,000 with long names in a script of three-byte letters, a
   `PATCH /pipelines/{id}` with a key is refused, ADR-339). The one-argument key lookup kept for
   rolling deploys (0051) is dropped (0074). Replaying many deliveries in one call is built with
-  P5-09 (ADR-095).
+  P5-09 (ADR-095), and so are a campaign's recipients through webhooks (ADR-358: the skipped ones;
+  those a message went to send `message.status`).
 - **P5-09 Outgoing webhooks** **[built, locally verified; delivered to local test receivers only]**
   (ADR-053): up to 10 endpoints per company (`developer.manage`) for `message.received`,
   `message.status`, `consent.changed` and `template.status_changed`, captured by database triggers
@@ -1306,10 +1307,15 @@ verification, app review, Embedded Signup configuration).
   token request body built; their database tests run only in CI]** (ADR-357, migration 0279: an
   endpoint's OAuth client sends its ID and secret as `client_id` and `client_secret` in the token
   request's form when it chooses `client_secret_post`, in an HTTP Basic header otherwise).
+  **[Skipped campaign recipients as webhook events built; their database tests run only in CI]**
+  (ADR-358, migrations 0280 and 0281: `campaign.recipient_skipped` once per recipient a campaign
+  skips, with the reason, the campaign, the contact and the number; those skipped when the
+  audience was taken when the campaign starts; narrowed by campaigns and numbers).
   Remaining: filters for other event types and on a message's values other than its type and words,
   field value comparisons beyond
   values, words and ranges, other authentication (headers computed per delivery, other OAuth
-  grants, JWT client assertions), mutual TLS, fixed egress addresses, other store events (a
+  grants, JWT client assertions), mutual TLS, fixed egress addresses, a filter by campaign skip
+  reason, other store events (a
   filter by cart reminder, first or second; the store's orders and checkouts themselves are
   reported by the store, ADR-085),
   a sequence number across events, load tests.

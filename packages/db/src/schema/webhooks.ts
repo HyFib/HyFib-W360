@@ -38,6 +38,7 @@ export const WEBHOOK_EVENT_TYPES = [
   'store_checkout.reminder_skipped',
   'store_checkout.reminder_sent',
   'campaign.status_changed',
+  'campaign.recipient_skipped',
   'deal.created',
   'deal.updated',
   'deal.stage_changed',

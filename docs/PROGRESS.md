@@ -1,5 +1,48 @@
 # Progress
 
+## 2026-10-10 — Webhook events for a campaign's skipped recipients (P5-09, H-014, ADR-358)
+
+Status: **Implemented; its database tests run in CI only.** `message.status` reported the
+recipients a campaign's message went to, but the ones it skipped (no number, suppressed, opted out,
+no marketing opt-in, a missing variable, an erased contact, the frequency cap, no price under a
+spending cap, the end of the sending period) reached no receiver, so a system reaching contacts
+another way could not tell whom a campaign left out. The local PostgreSQL is unavailable, so
+migrations 0280 and 0281 and the integration tests below were written but not run here; the
+migrations passed the pglast parse check (syntax only), their PL/pgSQL bodies included.
+
+### Completed
+
+- **Database:** migration 0280: the endpoints' event, number and campaign checks with
+  `campaign.recipient_skipped`; the events' type check (NOT VALID, validated by 0281); a trigger on
+  `app.campaigns` capturing the recipients skipped when the audience was taken once the campaign
+  starts (scheduled to running), and one on `app.campaign_recipients` capturing each skip by the
+  runner, both returning at once unless an endpoint of the company takes the event and executable
+  by no role; the capture replaced with the same signature, matching the campaign and number lists
+  and keeping only the recipient in the event's detail.
+- **Domain:** the event's key, label and description; the payload (`campaignRecipientSkippedPayloadSchema`:
+  the recipient and its reason, the campaign, the contact as erasure left it, the number) and its
+  builder, a recipient gone ending as `event_gone`; the event among a campaign's and a number's
+  events; the API's and the OpenAPI document's descriptions of the campaign and number lists and
+  of the event.
+- **Web:** Settings → Webhooks offers the event; the campaign list says it holds the campaigns whose
+  statuses, changes and skipped recipients are sent.
+- **Tests:** unit (2 new: the payload schema with every reason, an erased contact and a campaign
+  without a number, and the texts with the OpenAPI entry; the event lists, the OpenAPI webhooks and
+  the API's campaign list descriptions updated); integration (`webhook-events.test.ts`: the skips
+  taken at submission captured when the campaign starts, after its change to running, a runtime
+  skip, the expired ones at the end of the sending period, nothing again on resume, the campaign
+  and number lists, the detail kept, the bodies, a recipient gone ending as `event_gone`;
+  `webhooks.test.ts`: the campaign list kept with only this event; `tenant-isolation.test.ts`: the
+  trigger functions executable by no runtime role); the endpoints list text in the e2e test.
+  Written for CI; the integration tests were not run here.
+- **Docs:** ADR-358; ARCHITECTURE; SECURITY; THREAT-MODEL T317; DEPLOYMENT (0280, 0281); RUNBOOKS;
+  BACKLOG P5-08 and P5-09; feature matrix W-138, W-139 and H-014.
+- **Mutation checks:** 13 deliberate regressions, all caught by the unit tests (the event left out
+  of a campaign's or a number's events, the description silent on when, any reason taken, a
+  campaign without a number refused, the campaign without its id, the API's and the OpenAPI
+  document's texts, the component schema missing). The triggers, the capture and the payload
+  builder run against the database and are covered by the integration tests, which run in CI only.
+
 ## 2026-10-10 — OAuth client credentials in the token request body (P5-09, H-014, ADR-357)
 
 Status: **Implemented; its database and browser tests run in CI only.** An endpoint's OAuth client

@@ -1962,6 +1962,17 @@ state` for one that becomes skipped from another state, each only for a message 
   cart reminders' reasons and to endpoints that take the event. `app.capture_webhook_event`
   (replaced with the same signature) matches it with the reason the cart reminder's trigger keeps
   in `detail` (0276), as it matches order messages' with theirs.
+- **Skipped campaign recipients as webhook events** (migrations 0280–0281, ADR-358): two triggers
+  capture `campaign.recipient_skipped` with the skip reason as status, the recipient in `detail`
+  and its contact, its campaign and the campaign's number passing for the filters only. On
+  `app.campaigns` (`AFTER UPDATE OF status`, scheduled to running, which happens once),
+  `app.webhook_capture_campaign_start_skips` captures the recipients skipped when the audience was
+  taken, by the runner's index; on `app.campaign_recipients` (`AFTER UPDATE OF state`, to skipped),
+  `app.webhook_capture_campaign_recipient_skipped` captures each one the runner skips. Both return
+  at once unless an active endpoint of the company takes the event (`app.webhook_subscribed`).
+  `app.capture_webhook_event` (replaced with the same signature) matches the campaign and number
+  lists. `buildWebhookPayload` reads the recipient with `campaignRecipientOf` and its campaign with
+  `campaignOf`, giving the reason as captured and the rest as it is now.
 - **Step outcome filters** (migration 0249, ADR-327): `run_step_outcomes` on an endpoint lists the
   outcomes of the run steps it takes as `automation.run_step`, null for every step; a check keeps it
   to 1 to 21 known outcomes and to endpoints that take `automation.run_step`.

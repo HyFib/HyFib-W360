@@ -11,6 +11,7 @@ import {
   CAMPAIGN_COMPLETION_REASONS,
   CAMPAIGN_PAUSE_REASONS,
   CAMPAIGN_STATUSES,
+  campaignRecipients,
   campaigns,
   channelAccounts,
   commerceOrderItems,
@@ -37,6 +38,7 @@ import {
   ORDER_STATUSES,
   ORDER_STATUS_CHANGERS,
   PAYMENT_LINK_STATUSES,
+  SKIP_REASONS,
   sql,
   STORE_MESSAGE_ANSWERS,
   STORE_PLATFORMS,
@@ -694,6 +696,41 @@ export const campaignStatusChangedPayloadSchema = envelope(
   z.object({
     campaign: webhookCampaignSchema,
     channel: channelSchema.nullable().describe('The number it sends from; null if none is set.'),
+  }),
+);
+
+/** A recipient a campaign skipped, as `campaign.recipient_skipped` gives it (ADR-358). */
+export const campaignRecipientSkippedPayloadSchema = envelope(
+  'campaign.recipient_skipped',
+  z.object({
+    recipient: z.object({
+      id: z
+        .uuid()
+        .describe(
+          'The recipient, as GET /campaigns/{id}/recipients lists it while its contact is not erased.',
+        ),
+      skipReason: z
+        .enum(SKIP_REASONS)
+        .describe(
+          'Why the campaign did not send it its message, as the campaign’s page explains it: contact_erased, no_phone (no WhatsApp number), suppressed (on the suppression list), opted_out, no_marketing_opt_in, missing_variable (no value for a variable without a fallback), frequency_capped (the marketing frequency cap), cost_unknown (no price for the number’s market under a spending cap) or expired (the sending period ended first).',
+        ),
+    }),
+    campaign: z.object({
+      id: z.uuid(),
+      name: z.string().describe('The campaign’s name when the event is delivered.'),
+      status: campaignStatusSchema.describe('Its status when the event is delivered.'),
+      templateId: z.uuid().nullable(),
+      templateName: z
+        .string()
+        .nullable()
+        .describe('The template’s name when the event is delivered.'),
+    }),
+    contact: contactSchema.describe(
+      'The recipient’s contact as it is when the event is delivered (a contact merged into another is the one it was merged into), as erasure left it.',
+    ),
+    channel: channelSchema
+      .nullable()
+      .describe('The number the campaign sends from; null if none is set.'),
   }),
 );
 
@@ -2082,6 +2119,26 @@ async function campaignOf(tx: Tx, tenantId: string, campaignId: string | null) {
   return row ?? null;
 }
 
+/**
+ * A campaign's recipient, in the company (ADR-358): kept with its campaign until the company is
+ * deleted, unless a contact merge removed it (both contacts were in the campaign's audience).
+ */
+async function campaignRecipientOf(tx: Tx, tenantId: string, recipientId: string | null) {
+  if (!recipientId || !z.uuid().safeParse(recipientId).success) return null;
+  const [row] = await tx
+    .select({
+      id: campaignRecipients.id,
+      campaignId: campaignRecipients.campaignId,
+      contactId: campaignRecipients.contactId,
+    })
+    .from(campaignRecipients)
+    .where(and(eq(campaignRecipients.tenantId, tenantId), eq(campaignRecipients.id, recipientId)));
+  return row ?? null;
+}
+
+const isCampaignSkipReason = (reason: string): reason is (typeof SKIP_REASONS)[number] =>
+  (SKIP_REASONS as readonly string[]).includes(reason);
+
 const sentBy = (senderType: string | undefined) =>
   senderType === 'agent' ||
   senderType === 'bot' ||
@@ -2665,6 +2722,37 @@ export async function buildWebhookPayload(
             skippedCount: campaign.skippedCount,
             results,
           },
+          channel: campaign.channelId
+            ? { id: campaign.channelId, phone: campaign.channelPhone ?? null }
+            : null,
+        },
+      };
+    }
+    case 'campaign.recipient_skipped': {
+      // The recipient and its reason as captured (a skipped recipient never changes again); its
+      // campaign, its contact and the campaign's number as they are now. A recipient a contact
+      // merge removed can no longer be described.
+      const skipReason = event.status;
+      // Every such event is captured with its reason (0280): one without cannot be described.
+      if (skipReason === null || !isCampaignSkipReason(skipReason)) {
+        throw new Error('The skipped campaign recipient was captured without its reason');
+      }
+      const recipient = await campaignRecipientOf(tx, tenantId, str(event.detail.recipientId));
+      if (!recipient) throw new WebhookEventGoneError();
+      const campaign = await campaignOf(tx, tenantId, recipient.campaignId);
+      if (!campaign) throw new WebhookEventGoneError();
+      return {
+        ...base,
+        data: {
+          recipient: { id: recipient.id, skipReason },
+          campaign: {
+            id: campaign.id,
+            name: campaign.name,
+            status: campaign.status,
+            templateId: campaign.templateId,
+            templateName: campaign.templateName ?? null,
+          },
+          contact: await contactOf(tx, tenantId, recipient.contactId),
           channel: campaign.channelId
             ? { id: campaign.channelId, phone: campaign.channelPhone ?? null }
             : null,

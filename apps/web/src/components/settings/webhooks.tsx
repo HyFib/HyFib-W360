@@ -1941,8 +1941,8 @@ function TemplateChoices({
 }
 
 /**
- * The campaigns whose messages' statuses and changes an endpoint takes (ADR-185): every campaign's,
- * or those of the campaigns ticked. The company's newest campaigns are offered; one the endpoint
+ * The campaigns whose messages' statuses, changes and skipped recipients (ADR-358) an endpoint takes
+ * (ADR-185): every campaign's, or those of the campaigns ticked. The company's newest campaigns are offered; one the endpoint
  * already names stays listed, ticked, until it is unticked.
  */
 function CampaignChoices({
@@ -1974,8 +1974,9 @@ function CampaignChoices({
     <fieldset className="grid gap-2">
       <legend className="mb-1 text-sm font-medium">Campaigns</legend>
       <p className="text-xs text-muted-foreground">
-        Message statuses and campaign changes belong to a campaign; a message no campaign sent, such
-        as a member’s reply, belongs to none. Other events are sent whichever campaigns are chosen.
+        Message statuses, campaign changes and skipped recipients belong to a campaign; a message no
+        campaign sent, such as a member’s reply, belongs to none. Other events are sent whichever
+        campaigns are chosen.
       </p>
       <label className="flex items-start gap-2 text-sm">
         <input
@@ -1986,7 +1987,7 @@ function CampaignChoices({
           onChange={() => onEveryChange(true)}
         />
         <span>
-          Every message’s statuses and every campaign’s changes
+          Every message’s statuses and every campaign’s changes and skipped recipients
           <span className="block text-xs text-muted-foreground">
             Including campaigns added later.
           </span>

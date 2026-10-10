@@ -1986,7 +1986,29 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       Object.keys((schemas.CreateWebhookEndpoint as { properties: object }).properties),
     ).toContain('campaignIds');
     expect(doc.info.description).toContain(
-      'or campaigns (its `campaignIds`): then the statuses of the messages they sent and their changes only.',
+      'or campaigns (its `campaignIds`): then the statuses of the messages they sent, their changes and the recipients they skipped only.',
+    );
+    // A campaign's skipped recipients keep the list as its other events do (ADR-358).
+    expect(
+      apiCreateWebhookEndpointSchema.parse({
+        url: 'https://hooks.example.com/w360',
+        events: ['campaign.recipient_skipped'],
+        campaignIds: [a],
+      }).campaignIds,
+    ).toEqual([a]);
+    const describedAs = (name: string) =>
+      JSON.stringify(
+        (schemas[name] as { properties: Record<string, unknown> }).properties.campaignIds,
+      );
+    expect(describedAs('CreateWebhookEndpoint')).toContain('only with one of those three events.');
+    expect(describedAs('CreateWebhookEndpoint')).toContain(
+      'and campaign.recipient_skipped only for their recipients.',
+    );
+    expect(describedAs('UpdateWebhookEndpoint')).toContain(
+      'message.status, campaign.status_changed or campaign.recipient_skipped, which clears them.',
+    );
+    expect(describedAs('WebhookEndpoint')).toContain(
+      'and skipped recipients (campaign.recipient_skipped) the endpoint receives',
     );
   });
 
