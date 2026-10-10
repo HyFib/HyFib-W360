@@ -11,9 +11,7 @@ export default async function PlatformLayout({ children }: { children: ReactNode
   return (
     <div className="min-h-dvh">
       <header className="flex flex-wrap items-center justify-between gap-3 border-b border-border bg-sidebar px-6 py-4">
-        {/* Wraps, so on a phone the badge goes under the brand rather than past the page's edge
-            when its text stays on one line. */}
-        <div className="flex flex-wrap items-center gap-3">
+        <div className="flex items-center gap-3">
           <Link
             href="/platform"
             className="rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"

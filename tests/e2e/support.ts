@@ -114,15 +114,27 @@ export function totp(secretBase32: string, now = Date.now()): string {
 
 /**
  * WCAG reflow: the page must not scroll sideways at the current viewport (wide tables scroll
- * inside their own container instead). A failure names the elements that stick out of a parent
- * inside the viewport, which no ancestor clips: where the overflow starts.
+ * inside their own container instead). A failure says where the overflow starts: the elements that
+ * stick out of a parent inside the viewport, which no ancestor clips, or else the element whose
+ * hiding alone brings the page back inside the viewport (overflowing text or a pseudo-element has
+ * no box of its own that sticks out), found by hiding one branch at a time and restored at once.
  */
 export async function expectNoHorizontalOverflow(page: Page) {
-  const { scrollWidth, viewportWidth, outside } = await page.evaluate(() => {
+  const { scrollWidth, viewportWidth, outside, hiding } = await page.evaluate(() => {
     const viewportWidth = document.documentElement.clientWidth;
     const scrollWidth = document.documentElement.scrollWidth;
     const outside: string[] = [];
+    let hiding: string | null = null;
     if (scrollWidth > viewportWidth) {
+      const describe = (el: Element) => {
+        const classes = el.getAttribute('class')?.trim().split(/\s+/).slice(0, 6).join('.') ?? '';
+        const box = el.getBoundingClientRect();
+        const text = (el.textContent ?? '').replace(/\s+/g, ' ').trim().slice(0, 60);
+        return (
+          `${el.tagName.toLowerCase()}${classes ? `.${classes}` : ''} ` +
+          `(${Math.round(box.left)} to ${Math.round(box.right)}) "${text}"`
+        );
+      };
       const fits = (el: Element) => el.getBoundingClientRect().right <= viewportWidth + 0.5;
       const clipped = (el: Element) => {
         for (let p = el.parentElement; p && p !== document.body; p = p.parentElement) {
@@ -132,21 +144,37 @@ export async function expectNoHorizontalOverflow(page: Page) {
       };
       for (const el of document.body.querySelectorAll('*')) {
         if (fits(el) || (el.parentElement && !fits(el.parentElement)) || clipped(el)) continue;
-        const classes = el.getAttribute('class')?.trim().split(/\s+/).slice(0, 6).join('.') ?? '';
-        const box = el.getBoundingClientRect();
-        const text = (el.textContent ?? '').replace(/\s+/g, ' ').trim().slice(0, 60);
-        outside.push(
-          `${el.tagName.toLowerCase()}${classes ? `.${classes}` : ''} ` +
-            `(${Math.round(box.left)} to ${Math.round(box.right)}) "${text}"`,
-        );
+        outside.push(describe(el));
         if (outside.length === 5) break;
       }
+      // Hidden one at a time (its style attribute put back at once): of the children whose hiding
+      // brings the page inside the viewport, the one whose content reaches furthest right, then the
+      // same among its children, as deep as one alone does it.
+      const overflows = () => document.documentElement.scrollWidth > viewportWidth;
+      const hidden = (el: HTMLElement) => {
+        const style = el.getAttribute('style');
+        el.style.setProperty('display', 'none', 'important');
+        const fixed = !overflows();
+        if (style === null) el.removeAttribute('style');
+        else el.setAttribute('style', style);
+        return fixed;
+      };
+      const reach = (el: Element) =>
+        el.getBoundingClientRect().right + Math.max(0, el.scrollWidth - el.clientWidth);
+      let branch: Element = document.body;
+      for (let depth = 0; depth < 40; depth += 1) {
+        const fixing = [...branch.children].filter((c) => c instanceof HTMLElement && hidden(c));
+        if (fixing.length === 0) break;
+        branch = fixing.reduce((a, b) => (reach(b) > reach(a) ? b : a));
+      }
+      if (branch !== document.body) hiding = describe(branch);
     }
-    return { scrollWidth, viewportWidth, outside };
+    return { scrollWidth, viewportWidth, outside, hiding };
   });
   expect(
     scrollWidth,
-    `page is wider than the viewport; sticking out: ${outside.join('; ') || 'none found'}`,
+    `page is wider than the viewport; sticking out: ${outside.join('; ') || 'none found'}; ` +
+      `inside again without: ${hiding ?? 'no single element'}`,
   ).toBeLessThanOrEqual(viewportWidth);
 }
 

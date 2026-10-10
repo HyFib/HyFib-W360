@@ -59,15 +59,16 @@ migration passed the pglast parse check (syntax only), its PL/pgSQL body include
   HTTP status, any other Meta's; the migration's header is wrapped again; the threat model, runbook
   and comments say a ninth code is listed and where codes come from; and the e2e fixture ties the
   number to the conversation and gives the failed send its rank.
-- **CI fix:** the new e2e test failed on WebKit alone, on every try: a company's platform page 360
-  pixels wide measured 409, the first check of a whole platform page at that width. Not the reasons
-  table: inline-size containment of its box (f12c51a) left the width at 409 and is taken out again.
-  The platform header's brand and its "Platform administration" badge sat in a row that does not
-  wrap. Chromium and Firefox wrap the badge's text; WebKit's 409 matches the row with the badge on
-  one line: with a wide font and the badge kept on one line, Chromium measures the row at 360
-  pixels, 408 with the header's padding. The row now wraps, so the badge goes under the brand on a
-  phone (no overflow at 320, 360 or 393 pixels in that local check). A failed overflow check now names the elements that stick out of a
-  parent inside the viewport. WebKit is not installed here, so the fix is checked in CI only.
+- **CI fix (in progress):** the new e2e test fails on WebKit alone, on every try: a company's
+  platform page 360 pixels wide measures 409, the first check of a whole platform page at that
+  width. Two changes left it at 409 and are taken out again, so neither was the cause: inline-size
+  containment of the reasons table's box (f12c51a) and a wrapping row for the platform header's
+  brand and badge (94c8739). The overflow check (`expectNoHorizontalOverflow`) now says where an
+  overflow starts: the elements that stick out of a parent inside the viewport, and, when none does
+  (WebKit's run found none: text overflowing its box has no box of its own), the element whose
+  hiding alone brings the page back inside the viewport, which a Chromium check here finds for a
+  header kept on one line and for a word too long for its box. WebKit is not installed here and
+  CI's traces cannot be downloaded from here, so the cause is read from CI's next run.
 
 ### Test commands and results (local, 2026-10-10)
 
