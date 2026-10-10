@@ -13270,6 +13270,182 @@ Decision:
   required. Its reasons name it too.
 - **Kept as before:** keys, their 24 hours, the replay and the refusal of a reused key.
 
-Not built: a bound on a pipeline's archived stages (kept since ADR-240 so closed deals keep their
+Not built: a bound on a pipeline's archived stages (kept since ADR-040 so closed deals keep their
 stage; the answer gives each), and a bound on answers that are not kept (they are not limited by
 this check).
+
+## ADR-340 The alerts a chat channel gets, the owners' financial alerts among them (P5-10) (2026-10-09)
+
+Context: since ADR-338 the chat channel got every operations alert (failures, late queues and
+failing integrations), emailed to every platform administrator, and nothing else. The owners'
+financial alerts, the settlement reconciliation's findings (ADR-066) and the payments no settlement
+showed (ADR-071), are emailed to platform owners only, so an owner on call heard of a failed
+reconciliation in the mailbox alone; and owners could not keep an alert out of the channel. ADR-338
+left both, with several channels, unbuilt.
+
+Decision:
+
+- **The channel names the alerts it gets:** `ops.platform_alert_channel.kinds` (migration 0261), in
+  the console's order: Failures, Late queues, Failing integrations, Reconciliation findings and
+  Payments not seen in a settlement. A new channel gets the three operations alerts, as before; a
+  new address keeps the kinds of the one it replaces, which the replace field says when they include
+  the owners' alerts and the audit entry of the new address (`platform.alert_channel_set`) records.
+  `ops.queue_platform_alert_post` queues a post only while the channel gets the alert's kind. The
+  column's check takes one to five known kinds, and the posts' kind check takes the two new ones.
+- **Owners choose:** a platform owner ticks the alerts on Operations → Alerts and saves them
+  together (at least one), through `ops.platform_set_alert_channel_kinds` (definer, owners only,
+  the kinds given once each in any order and kept in the console's order). A change is audited
+  (`platform.alert_channel_kinds_set`, with the host and the kinds before and after); the same kinds
+  change nothing and are not audited. Operators see the alerts posted.
+- **Unticking stops the posts waiting:** the posts of an alert no longer ticked that wait, or are
+  retrying, fail as unticked ("Its alert was unticked before it was sent"), as removing the channel
+  fails them, so neither this address nor a replacement gets them: the replace field advises
+  unticking an alert before replacing the address, and a new address takes the posts waiting (found
+  by Codex's review). The claim (`ops.claim_platform_alert_posts`, replaced in 0261) fails them too
+  and claims only the posts of the alerts the channel gets, so a post queued while its alert was
+  being unticked, which the unticking could not see, is never sent. A post on its way when its alert
+  is unticked is never tried again; if the address accepted it, it is recorded as sent
+  (`ops.finish_platform_alert_post`, replaced in 0261), as when the channel is removed. The claim
+  holds the channel's row until the worker has read the address in its transaction, so the posts
+  claimed go to the address they were claimed for, never to one that replaced it since; the claim,
+  an attempt's outcome and the functions that change the channel lock its row before the posts', so
+  none waits on another in a deadlock.
+- **The financial alerts are posted only once an owner adds them:** their posts reach whoever reads
+  the channel, not only platform owners. The form marks them "platform owners' alert" and says so.
+  Each is posted in the transaction that queues its emails, as the operations alerts are: the
+  unsettled payments' with the email's text (how many, the days they were paid, what to check and
+  where the list is); the reconciliation's without a failed check's error (`settlementReconPost`),
+  which can quote Razorpay's answer, such as a refusal of HyFib's keys. Neither names a company, an
+  amount, a payment id or a transaction, as the emails do not.
+- **The test post** says the alerts chosen under Operations → Alerts are posted there, not which.
+
+Consequences: an owner who adds the financial alerts tells whoever reads the channel that a day's
+reconciliation needs a person or failed, and how many top-ups were not settled, by day; amounts and
+companies stay on Platform → Reconciliation. Old web servers keep working during the rollout: the
+console's state function returns the kinds as one more column, which they do not read. Workers of
+this release need the migration: while a channel is set, their financial alerts queue posts of the
+new kinds, which the posts' old check refuses, failing the minute billing sweep at that alert, its
+emails rolled back, until it is applied (migrations run before workers roll out).
+
+Not built: several channels, a channel per alert, formats other than a JSON `text` member, and the
+owners' other notices (refund requests, ADR-073; personal notices, ADR-314) in the channel.
+
+## ADR-341 Messages a day kept as days pass, for a year on the Usage tab (P5-10) (2026-10-09)
+
+Context: the Usage tab and a company's platform page count messages a day live from
+`app.messages` (ADR-333, ADR-334), which is why they reach back 93 days at most: each read scans
+the window's messages. Trends further back needed daily counts kept as days pass, as ADR-333 left
+unbuilt.
+
+Decision:
+
+- **Kept counts:** `ops.platform_message_days` (migration 0262) holds each company's messages on
+  each UTC day it had any (sent, those of them that failed, received), counted as the live function
+  counts them; `ops.platform_message_days_counted` records which days were counted and when, since a
+  day without messages has no row. The counts table follows the tenant-table rules (`tenant_id` not
+  null, unique with `id`, forced row level security with the definer role's policy, grants to the
+  definer role only); company deletion deletes a company's rows (step 35, with the deletion's two
+  policies), and the export leaves them out, the messages themselves being exported. Counts older
+  than 400 days are deleted, and so are those of a company deleted in the last 30 days, at every
+  run, first and in a transaction of its own (`ops.purge_platform_message_days()`), so a count that
+  fails never holds it back: a count that raced the company's deletion as it finished could leave
+  some behind.
+- **Counting:** a worker job (queue `ops.message-days`, every minute, one queued and one running)
+  counts up to 3 days due, newest first, each whole for every company not deleted under an advisory
+  lock and in a transaction of its own (`ops.count_platform_message_days(1)`), leaving out a company
+  whose deletion has started (the deletion deletes its counts), so a day's count has
+  the whole statement timeout and the days counted before it stay counted. A day is due when it is
+  one of the 365 before today never counted, or one of the 7 before today last counted more than a
+  day ago, so statuses Meta reports late reach the counts; older days keep theirs. A new deployment
+  counts its year in about two hours.
+- **Reading:** `ops.platform_ops_message_days(p_days, p_tenant_id)`, for platform administrators
+  only (`W3403`) and 1 to 365 days (`W3412`), returns each day before today with every company's
+  counts not deleted (or one company's) and whether the day was counted.
+- **The Usage tab** draws "The last 12 months" under the window's chart, with the same component:
+  the run of counted days that ends at the latest one counted, leaving out the latest days not
+  counted yet and everything before an earlier gap, and says how many of the 365 are not counted
+  yet. Its legend, table and summary have names of their own, so a name matched in part never
+  finds both charts.
+
+Consequences: a failure reported more than 7 days after its message's day is not in the kept
+counts, as the tab says; today's messages are in the window's chart only. Each day's messages are
+read once when it is first counted and once a day for a week after, through the
+`(tenant_id, created_at)` index the live counts use.
+
+Not built: the year on a company's page, failures or other measures as charts of their own, the
+year in a CSV, and days in a time zone other than UTC.
+
+## ADR-342 A company's year on its platform page (P5-10) (2026-10-09)
+
+Context: ADR-341 drew the platform's year of messages a day on the Usage tab from the counts the
+worker keeps per company and UTC day, and left a company's own year unbuilt. Staff opening a
+company's platform page saw its 30 days only (ADR-334).
+
+Decision:
+
+- **The health card's "The last 12 months":** `companyHealth()` reads the company's kept days for
+  the 365 days before today through `ops.platform_ops_message_days(365, tenant)` (0262, unchanged)
+  in the snapshot it reads the company's health and 30 days in, and the page draws the run of
+  counted days that ends at the latest one counted (`messageYear`), under the 30 days' chart, with
+  the Usage tab year's names for its legend, table and summary, the days not counted yet and the
+  empty state.
+- **While its deletion runs:** the deletion deletes the company's counts (step 35) and the worker no
+  longer counts it, so `companyHealth()` reads no year for it, in the snapshot of its health, and
+  the page says its counts are deleted with it rather than draw a year of days without messages.
+- **No migration:** the counts, their deletion with the company and the read's refusals are
+  ADR-341's.
+
+Not built: failures or other measures as charts of their own, the year in a CSV, and days in a time
+zone other than UTC.
+
+## ADR-343 Each browser project's end-to-end tests in a CI job of its own (2026-10-09)
+
+Context: CI ran the four Playwright projects (Chromium, Firefox, WebKit and mobile Chromium) one
+after another in one job, one test at a time, against one database, Mailpit, web server and worker.
+Each slice adds about 4 tests, one a project, and the job's limit was raised again and again (from
+30 minutes to 240, PROGRESS). On a248d4d its 464 tests took 168.3 of the suite step's 230 minutes:
+every pull request waited almost three hours for its last check, and a slow runner with a few
+retries could come close to the limit.
+
+Decision:
+
+- **A job per project:** `e2e-project` is a matrix of the four projects. Each job has its own
+  PostgreSQL, Mailpit, build, web server and worker, installs its browser only and runs
+  `pnpm test:e2e --project=<project>`, one test at a time as before. `fail-fast` is off, so one
+  project failing still leaves the others' evidence. A project's suite stops at 110 minutes and its
+  job at 120: its 116 tests are a quarter of the 464.
+- **The required check keeps its name:** main's branch protection requires "End-to-end (Chromium,
+  Firefox, WebKit, mobile)". A job of that name needs the four and passes only when their result is
+  `success`. It runs whatever they did (`if: always()`): a skipped job would count as passed.
+- **Evidence:** each project's report, traces and server logs are uploaded under names with the
+  project and the attempt.
+- **Tests unchanged:** run together, as `pnpm test:e2e` runs them locally, the projects still share
+  one database, which the settlement and usage tests' days and currencies a project allow for; their
+  comments now say CI gives each project its own.
+- **Images without Docker Hub's anonymous limit:** the first run of the split, on bb80f93, failed
+  every job that pulled from Docker Hub, the integration jobs and the image scans too, with Docker
+  Hub's `429 Too Many Requests`, and the re-run failed the same way; the secret scan, which pulls
+  gitleaks from GitHub's registry, passed. CI now pulls Docker's official images through the
+  Amazon ECR Public mirror (`public.ecr.aws/docker/library/`: PostgreSQL for the integration and
+  end-to-end jobs, and the Dockerfiles' own Node image for the image scans, as a build argument
+  read from each Dockerfile so its updates carry over) and Mailpit and Trivy from their publishers'
+  GitHub registries (`ghcr.io/axllent/mailpit`, `ghcr.io/aquasecurity/trivy`). Each has the same
+  digest as on Docker Hub (postgres 17-alpine and 18-alpine, node 24.21.0-bookworm-slim, mailpit
+  latest and trivy 0.74.0, compared on 2026-10-09 through each registry and Docker Hub's tag API).
+  The tags stay tags, as before. Builds outside CI keep the Dockerfiles' default, Docker Hub's.
+
+Consequences: four runners work at once instead of one, each building the app (about 1.5 minutes)
+and installing a browser, and the end-to-end checks end in under an hour instead of three: on the
+first complete run, on b1a8b3e, the check of the four ended 52 minutes after the run started, each
+job spending about 3 minutes on its setup and its suite 36.8 minutes (mobile Chromium), 38.2
+(Chromium), 40.8 (Firefox) and 48.5 (WebKit, one failing test tried twice). Re-running a failed
+project's job re-runs that project only, then the check of the four. The setup runs four times, so a
+run takes more runner minutes and meets a failing package mirror or image pull four times as often,
+and a run now takes ten jobs of this workflow (two more in the containers workflow), which can wait
+for runners if the plan's limit on jobs at once is reached. CI no longer runs the four projects'
+data in one database (several currencies' rate cards side by side, the settlement runs of four days,
+a platform owner per project); running the suite locally still does. A run cancelled by a newer push
+to the same branch, or by hand, now shows the check of the four as failed rather than cancelled:
+expected, since a skipped required check would pass.
+
+Not built: splitting a project's tests across jobs, and tests run in parallel within a job.

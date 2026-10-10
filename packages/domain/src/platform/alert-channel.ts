@@ -23,6 +23,8 @@ import type { PlatformActor } from './service';
  * platform owner can also set one chat channel, an incoming webhook address that takes a JSON
  * `POST` with a `text` member (Slack's incoming webhooks' format), and each alert is then also
  * queued as a post with its email's counts-only text, in the transaction that queues the emails.
+ * The channel gets the alerts an owner chose (ADR-340): those three until an owner chooses
+ * otherwise, and the owners' financial alerts (ADR-066, ADR-071) only once an owner adds them.
  * The worker sends the posts (queue `ops.alert-posts`) through the egress guard, each up to 5
  * times. The address holds the channel's secret: it is sealed with the keyring, only the runtime
  * role reads it (to send), and the console and the audit name its host only.
@@ -40,18 +42,48 @@ export const ALERT_CHANNEL_URL_MAX = 2048;
 export const ALERT_POSTS_JOB_KEY = 'alert-posts';
 export const ALERT_POST_USER_AGENT = 'HyFib-W360-Alerts/1';
 
-export const ALERT_POST_KINDS = ['failures', 'queues', 'integrations', 'test'] as const;
+/** The alerts a channel can get, in the console's order (`ops.platform_alert_channel.kinds`). */
+export const ALERT_CHANNEL_KINDS = [
+  'failures',
+  'queues',
+  'integrations',
+  'reconciliation',
+  'unsettled',
+] as const;
+export type AlertChannelKind = (typeof ALERT_CHANNEL_KINDS)[number];
+
+/** What a new channel gets: the operations alerts, which every platform administrator is emailed. */
+export const ALERT_CHANNEL_DEFAULT_KINDS: readonly AlertChannelKind[] = [
+  'failures',
+  'queues',
+  'integrations',
+];
+
+/**
+ * The owners' financial alerts (ADR-066, ADR-071), which platform owners alone are emailed: a
+ * channel gets them only once an owner adds them, since their posts reach whoever reads it.
+ */
+export const ALERT_CHANNEL_FINANCIAL_KINDS: readonly AlertChannelKind[] = [
+  'reconciliation',
+  'unsettled',
+];
+
+export const ALERT_POST_KINDS = [...ALERT_CHANNEL_KINDS, 'test'] as const;
 export type AlertPostKind = (typeof ALERT_POST_KINDS)[number];
 
 export const ALERT_POST_KIND_LABELS: Record<AlertPostKind, string> = {
   failures: 'Failures',
   queues: 'Late queues',
   integrations: 'Failing integrations',
+  reconciliation: 'Reconciliation findings',
+  unsettled: 'Payments not seen in a settlement',
   test: 'Test post',
 };
 
 const isAlertPostKind = (value: string): value is AlertPostKind =>
   (ALERT_POST_KINDS as readonly string[]).includes(value);
+const isAlertChannelKind = (value: string): value is AlertChannelKind =>
+  (ALERT_CHANNEL_KINDS as readonly string[]).includes(value);
 
 /** The associated data a channel's address is sealed with: its row's id. */
 export const alertChannelAad = (channelId: string) => `platform-alert-channel:${channelId}`;
@@ -64,7 +96,10 @@ export function chatEscape(text: string): string {
   return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-/** An alert as its email gives it (`failureAlert`, `lateQueueAlert`, `integrationAlert`). */
+/**
+ * An alert as its email gives it (`failureAlert`, `lateQueueAlert`, `integrationAlert`,
+ * `unsettledPaymentsAlert`), or as its post does (`settlementReconPost`).
+ */
 export interface AlertText {
   subject: string;
   lines: readonly string[];
@@ -93,7 +128,7 @@ export function alertChannelTestBody(appBaseUrl: string): string {
   return alertPostBody({
     subject: 'HyFib W360: a test post from the operations console',
     lines: [
-      'The operations alerts (failures, late queues and failing integrations) are posted here when they are emailed to platform administrators, with counts only.',
+      'The alerts chosen under Operations → Alerts are posted here when they are emailed, with counts only.',
     ],
     url: new URL('/platform/ops/alerts', appBaseUrl).toString(),
     actionLabel: 'Open the alerts',
@@ -134,12 +169,14 @@ export function checkedAlertChannelUrl(
 
 /**
  * What a post's or the channel's last failure says: an HTTP status, an egress error code, or one
- * the database or the worker writes (`no_channel`, `interrupted`, `unopenable`).
+ * the database or the worker writes (`no_channel`, `unticked`, `interrupted`, `unopenable`).
  */
 export function alertPostFailureLabel(error: string | null, status: number | null): string | null {
   switch (error) {
     case 'no_channel':
       return 'No chat channel was set';
+    case 'unticked':
+      return 'Its alert was unticked before it was sent';
     case 'unopenable':
       return 'The address does not open with the configured keys';
     default:
@@ -224,13 +261,14 @@ async function signalAlertPosts(
 }
 
 /**
- * Queues an alert's post, in the transaction that queues its emails, while a channel is set, and
- * signals the posting job in the same transaction; whether it was queued.
+ * Queues an alert's post, in the transaction that queues its emails, while a channel is set that
+ * gets the alert's kind, and signals the posting job in the same transaction; whether it was
+ * queued.
  */
 export async function queueAlertPost(
   outbox: OutboxDeps,
   tx: Tx,
-  kind: Exclude<AlertPostKind, 'test'>,
+  kind: AlertChannelKind,
   alert: AlertText,
 ): Promise<boolean> {
   const res = await tx.execute<{ queued: boolean }>(
@@ -262,9 +300,9 @@ export interface AlertPostsResult {
 /**
  * The posting job (every minute, and when an alert or a test post is queued): deletes the posts
  * kept 7 days, claims up to `limit` posts due and sends them one after another, oldest first, to
- * the channel's address, recording each attempt's answer. Never logs nor returns the address or a
- * post's body. Posting is at least once: a post whose answer did not come is tried again, so the
- * channel may show it twice.
+ * the channel's address when they were claimed, recording each attempt's answer. Never logs nor
+ * returns the address or a post's body. Posting is at least once: a post whose answer did not come
+ * is tried again, so the channel may show it twice.
  */
 export async function sendAlertPosts(
   deps: AlertPostsDeps,
@@ -273,8 +311,10 @@ export async function sendAlertPosts(
   const purge = await deps.db.run(systemScope, (tx) =>
     tx.execute<{ purged: number }>(sql`select ops.purge_platform_alert_posts() as purged`),
   );
-  const claimed = await deps.db.run(systemScope, (tx) =>
-    tx.execute<{
+  // The address is read in the claim's transaction, which holds the channel's row (0261): the posts
+  // claimed go to the address they were claimed for, never to one that replaced it since.
+  const { claimed, channel } = await deps.db.run(systemScope, async (tx) => {
+    const due = await tx.execute<{
       id: string;
       kind: string;
       body: string;
@@ -282,26 +322,22 @@ export async function sendAlertPosts(
       created_at: Date | string;
     }>(
       sql`select id, kind, body, attempts, created_at from ops.claim_platform_alert_posts(${limit})`,
-    ),
-  );
+    );
+    if (due.rows.length === 0) return { claimed: due.rows, channel: null };
+    const channels = await tx.execute<{ id: string; url_ciphertext: string }>(
+      sql`select id, url_ciphertext from ops.platform_alert_channel`,
+    );
+    return { claimed: due.rows, channel: channels.rows[0] ?? null };
+  });
   const result: AlertPostsResult = {
-    claimed: claimed.rows.length,
+    claimed: claimed.length,
     sent: 0,
     retrying: 0,
     failed: [],
     unopenable: null,
     purged: Number(purge.rows[0]?.purged ?? 0),
   };
-  if (claimed.rows.length === 0) return result;
-  const channels = await deps.db.run(
-    systemScope,
-    (tx) =>
-      tx.execute<{ id: string; url_ciphertext: string }>(
-        sql`select id, url_ciphertext from ops.platform_alert_channel`,
-      ),
-    { accessMode: 'read only' },
-  );
-  const channel = channels.rows[0] ?? null;
+  if (claimed.length === 0) return result;
   let url: string | null = null;
   if (channel) {
     try {
@@ -311,12 +347,13 @@ export async function sendAlertPosts(
       result.unopenable = toError(error).message;
     }
   }
-  const posts = [...claimed.rows].sort(
+  const posts = [...claimed].sort(
     (a, b) =>
       new Date(a.created_at).getTime() - new Date(b.created_at).getTime() || (a.id < b.id ? -1 : 1),
   );
   for (const post of posts) {
-    // Removed after the claim: its removal failed the post already, and this changes nothing.
+    // No channel cannot follow a claim that returned posts, which holds the channel's row until the
+    // address is read; should it, the posts fail rather than go anywhere.
     const outcome: AlertPostOutcome = !channel
       ? { status: null, error: 'no_channel', retry: false }
       : url === null
@@ -340,7 +377,8 @@ export async function sendAlertPosts(
         error: outcome.error,
       });
     }
-    // 'stale': another attempt claimed the post after this one's lease ran out.
+    // 'stale': another attempt claimed the post after this one's lease ran out, or the channel's
+    // removal or its alert's unticking failed it on its way and the answer was no 2xx.
   }
   return result;
 }
@@ -348,6 +386,8 @@ export async function sendAlertPosts(
 /** The channel as the console shows it: never its address. */
 export interface AlertChannelView {
   host: string;
+  /** The alerts it gets, in the console's order. */
+  kinds: AlertChannelKind[];
   setByName: string | null;
   setAt: Date;
   lastSentAt: Date | null;
@@ -386,6 +426,13 @@ const setChannelSchema = z.object({
     .max(ALERT_CHANNEL_URL_MAX, 'The address is too long.'),
 });
 
+const CHOOSE_KINDS = 'Choose at least one of the alerts listed.';
+const setKindsSchema = z.object({
+  kinds: z
+    .array(z.enum(ALERT_CHANNEL_KINDS, { error: CHOOSE_KINDS }), { error: CHOOSE_KINDS })
+    .min(1, CHOOSE_KINDS),
+});
+
 const date = (value: Date | string) => new Date(value);
 const dateOrNull = (value: Date | string | null) => (value === null ? null : new Date(value));
 
@@ -393,7 +440,7 @@ const dateOrNull = (value: Date | string | null) => (value === null ? null : new
 export function createAlertChannelService(deps: AlertChannelDeps) {
   const ownersOnly = (actor: PlatformActor, what: string) => {
     if (actor.role !== 'platform_owner') {
-      throw forbidden(`Only platform owners can ${what} the chat channel.`);
+      throw forbidden(`Only platform owners can ${what}.`);
     }
   };
   return {
@@ -414,8 +461,9 @@ export function createAlertChannelService(deps: AlertChannelDeps) {
             last_error: string | null;
             posts_waiting: number;
             posts_failed: number;
+            kinds: string[] | null;
           }>(sql`select host, set_by_name, set_at, last_sent_at, last_failed_at, last_status,
-                        last_error, posts_waiting, posts_failed
+                        last_error, posts_waiting, posts_failed, kinds
                    from ops.platform_alert_channel_state()`);
           const posts = await tx.execute<{
             id: string;
@@ -435,6 +483,7 @@ export function createAlertChannelService(deps: AlertChannelDeps) {
             channel: c
               ? {
                   host: c.host,
+                  kinds: ALERT_CHANNEL_KINDS.filter((k) => (c.kinds ?? []).includes(k)),
                   setByName: c.set_by_name,
                   setAt: date(c.set_at),
                   lastSentAt: dateOrNull(c.last_sent_at),
@@ -474,7 +523,7 @@ export function createAlertChannelService(deps: AlertChannelDeps) {
      * under a new row's id and stored; the audit names its host.
      */
     async setChannel(actor: PlatformActor, input: unknown): Promise<{ host: string }> {
-      ownersOnly(actor, 'set');
+      ownersOnly(actor, 'set the chat channel');
       const data = parseInput(setChannelSchema, input);
       const { url, host } = checkedAlertChannelUrl(data.url, deps.egressPolicy);
       const id = uuidv7();
@@ -487,9 +536,28 @@ export function createAlertChannelService(deps: AlertChannelDeps) {
       return { host };
     },
 
+    /**
+     * Chooses the alerts the channel gets (platform owners, ADR-340), at least one, kept in the
+     * console's order; the change is audited with the kinds before and after. Not found when no
+     * channel is set.
+     */
+    async setKinds(actor: PlatformActor, input: unknown): Promise<{ kinds: AlertChannelKind[] }> {
+      ownersOnly(actor, 'choose the chat channel’s alerts');
+      const data = parseInput(setKindsSchema, input);
+      const chosen = ALERT_CHANNEL_KINDS.filter((k) => data.kinds.includes(k));
+      const res = await deps.platformDb.run(actor.userId, (tx) =>
+        tx.execute<{ kinds: string[] }>(
+          sql`select ops.platform_set_alert_channel_kinds(${sql.param(chosen)}::text[], ${actor.correlationId}) as kinds`,
+        ),
+      );
+      const kinds = res.rows[0]?.kinds;
+      if (!kinds) throw new Error('ops.platform_set_alert_channel_kinds returned no kinds');
+      return { kinds: kinds.filter(isAlertChannelKind) };
+    },
+
     /** Removes the channel (platform owners); the posts waiting fail. False when none was set. */
     async removeChannel(actor: PlatformActor): Promise<{ removed: boolean }> {
-      ownersOnly(actor, 'remove');
+      ownersOnly(actor, 'remove the chat channel');
       const res = await deps.platformDb.run(actor.userId, (tx) =>
         tx.execute<{ removed: boolean }>(
           sql`select ops.platform_remove_alert_channel(${actor.correlationId}) as removed`,
@@ -505,7 +573,7 @@ export function createAlertChannelService(deps: AlertChannelDeps) {
      * back for the caller to log and say so.
      */
     async sendTest(actor: PlatformActor): Promise<{ postId: string; wakeError: Error | null }> {
-      ownersOnly(actor, 'test');
+      ownersOnly(actor, 'test the chat channel');
       const res = await deps.platformDb.run(actor.userId, (tx) =>
         tx.execute<{ id: string }>(
           sql`select ops.platform_test_alert_channel(${alertChannelTestBody(deps.appBaseUrl)}, ${actor.correlationId}) as id`,

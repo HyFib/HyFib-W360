@@ -26,14 +26,25 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      # The Dockerfile's own Node image, pulled through the Amazon ECR Public mirror of Docker's
+      # official images (the same digests as Docker Hub's, checked 2026-10-09): Docker Hub's
+      # anonymous pull limit failed these builds on bb80f93 (ADR-343). Builds outside CI keep the
+      # Dockerfile's default.
+      - name: Base image through the mirror
+        id: base
+        run: |
+          image=$(sed -n 's/^ARG NODE_IMAGE=//p' infra/docker/${{ matrix.image }}.Dockerfile)
+          test -n "$image"
+          echo "node=public.ecr.aws/docker/library/$image" >> "$GITHUB_OUTPUT"
       - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: infra/docker/${{ matrix.image }}.Dockerfile
+          build-args: NODE_IMAGE=${{ steps.base.outputs.node }}
           tags: w360-${{ matrix.image }}:ci
           load: true
           push: false
       - name: Vulnerability scan (Trivy)
         run: |
-          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:0.74.0 image \
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock ghcr.io/aquasecurity/trivy:0.74.0 image \
             --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 w360-${{ matrix.image }}:ci

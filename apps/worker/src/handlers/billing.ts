@@ -314,7 +314,7 @@ export function billingSweepHandler(rt: WorkerRuntime) {
     });
     if (alerts.alerted > 0) {
       rt.logger.info(
-        { days: alerts.alerted, recipients: alerts.recipients },
+        { days: alerts.alerted, recipients: alerts.recipients, posted: alerts.posted },
         'settlement reconciliation alert emailed',
       );
     }
@@ -331,7 +331,7 @@ export function billingSweepHandler(rt: WorkerRuntime) {
     });
     if (unsettled.alerted > 0) {
       rt.logger.info(
-        { payments: unsettled.alerted, recipients: unsettled.recipients },
+        { payments: unsettled.alerted, recipients: unsettled.recipients, posted: unsettled.posted },
         'unsettled payments alert emailed',
       );
     }

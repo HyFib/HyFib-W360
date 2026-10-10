@@ -1,7 +1,16 @@
+import { randomBytes } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
+import { PgDialect } from 'drizzle-orm/pg-core';
+import { Keyring } from '@w360/core';
+import type { Database, SQL } from '@w360/db';
+import { outboxAad } from '../email/outbox';
 import { renderEmail } from '../email/templates';
+import { alertPostBody } from '../platform/alert-channel';
 import {
+  alertSettlementReconFindings,
+  alertUnsettledPayments,
   settlementReconAlert,
+  settlementReconPost,
   unsettledPaymentsAlert,
   type SettlementReconAlertDay,
 } from './settlement-alerts';
@@ -97,6 +106,27 @@ describe('the reconciliation alert (ADR-066)', () => {
     });
   });
 
+  it('posts the email’s text to the chat channel without a failed check’s error (ADR-340)', () => {
+    const days: SettlementReconAlertDay[] = [
+      {
+        ...waiting('2026-09-25', {}),
+        status: 'failed',
+        lastError: "Razorpay refused HyFib's API keys (HTTP 401)",
+      },
+      waiting('2026-09-26', { openReview: 1 }),
+    ];
+    expect(settlementReconPost(days, BASE)).toEqual({
+      ...settlementReconAlert(days, BASE),
+      lines: [
+        '25 Sept 2026: the check failed and waits for a platform owner to run the day again.',
+        '26 Sept 2026: 1 transaction waits for a person (1 needs a look).',
+        CLOSING,
+      ],
+    });
+    // The days are left as they were, for the email.
+    expect(days[0]?.lastError).toContain('HTTP 401');
+  });
+
   it('renders as a platform notice with the link in the text and a button', () => {
     const alert = settlementReconAlert([waiting('2026-09-27', { openReview: 1 })], BASE);
     const email = renderEmail({ kind: 'platform.notice', ...alert });
@@ -160,5 +190,139 @@ describe('the unsettled payments alert (ADR-071)', () => {
     expect(email.subject).toBe('A paid top-up was not settled within 7 days · HyFib W360 platform');
     expect(email.text).toBe(`${alert.lines.join('\n\n')}\n\n${BASE}/platform/reconciliation`);
     expect(email.text).not.toMatch(/pay_|₹|INR/);
+  });
+});
+
+/**
+ * A database for the minute sweeps: each statement recorded and answered in turn, the emails'
+ * inserts and the jobs they queue recorded too.
+ */
+function sweeping(answers: { rows: unknown[] }[]) {
+  const statements: { sql: string; params: unknown[] }[] = [];
+  const emails: { toAddress: string; id: string; payloadCiphertext: string }[] = [];
+  const jobs: unknown[][] = [];
+  const keyring = new Keyring({ primaryKeyId: 'k1', keys: { k1: randomBytes(32) } });
+  const tx = {
+    execute: async (q: SQL) => {
+      const built = new PgDialect().sqlToQuery(q);
+      statements.push({ sql: built.sql.replace(/\s+/g, ' ').trim(), params: built.params });
+      const next = answers.shift();
+      if (!next) throw new Error(`unexpected statement: ${built.sql}`);
+      return next;
+    },
+    insert: () => ({
+      values: async (values: { toAddress: string; id: string; payloadCiphertext: string }) => {
+        emails.push(values);
+      },
+    }),
+  };
+  const db = {
+    run: async (_scope: unknown, fn: (t: typeof tx) => Promise<unknown>) => fn(tx),
+  } as unknown as Database;
+  const outbox = {
+    keyring,
+    jobs: {
+      enqueue: async (...args: unknown[]) => {
+        jobs.push(args);
+        return 'job-1';
+      },
+    },
+    signer: { sign: (envelope: unknown) => envelope },
+  } as never;
+  const payload = (email: { id: string; payloadCiphertext: string }) =>
+    JSON.parse(keyring.decryptString(email.payloadCiphertext, outboxAad(email.id))) as {
+      lines: string[];
+    };
+  return { db, outbox, statements, emails, jobs, payload };
+}
+
+const RECIPIENTS = {
+  rows: [
+    { user_id: 'u-1', email: 'owner-1@example.test' },
+    { user_id: 'u-2', email: 'owner-2@example.test' },
+  ],
+};
+
+describe('the financial alerts’ posts (ADR-340)', () => {
+  it('posts the reconciliation alert after its emails, as the chat channel’s kind and without the error', async () => {
+    const failed = {
+      settlement_date: '2026-09-25',
+      status: 'failed',
+      last_error: "Razorpay refused HyFib's API keys (HTTP 401)",
+      open_mismatch: 0,
+      open_review: 0,
+      open_not_hyfib: 0,
+    };
+    const { db, outbox, statements, emails, payload } = sweeping([
+      { rows: [{ run_id: 'run-1', attempt: 2 }] },
+      RECIPIENTS,
+      { rows: [failed] },
+      { rows: [{ queued: true }] },
+    ]);
+    expect(await alertSettlementReconFindings({ db, outbox, appBaseUrl: BASE })).toEqual({
+      alerted: 1,
+      unsent: 0,
+      recipients: 2,
+      posted: true,
+    });
+    expect(emails.map((e) => e.toAddress)).toEqual([
+      'owner-1@example.test',
+      'owner-2@example.test',
+    ]);
+    // The email keeps the error; the post leaves it out.
+    expect(payload(emails[0]!).lines[0]).toContain('The last error: Razorpay refused');
+    const day: SettlementReconAlertDay = {
+      date: '2026-09-25',
+      status: 'failed',
+      lastError: failed.last_error,
+      openMismatch: 0,
+      openReview: 0,
+      openNotHyfib: 0,
+    };
+    expect(statements.at(-1)).toEqual({
+      sql: 'select ops.queue_platform_alert_post($1, $2) as queued',
+      params: ['reconciliation', alertPostBody(settlementReconPost([day], BASE))],
+    });
+    expect(String(statements.at(-1)?.params[1])).not.toContain('Razorpay refused');
+  });
+
+  it('posts the unsettled payments alert after its emails with the emails’ text', async () => {
+    const paidAt = '2026-09-20T05:00:00Z';
+    const { db, outbox, statements, emails, payload } = sweeping([
+      { rows: [{ payment_id: 'pay_1' }] },
+      RECIPIENTS,
+      { rows: [{ payment_id: 'pay_1', paid_at: paidAt }] },
+      { rows: [{ queued: false }] },
+    ]);
+    expect(await alertUnsettledPayments({ db, outbox, appBaseUrl: BASE })).toEqual({
+      alerted: 1,
+      unsent: 0,
+      recipients: 2,
+      posted: false,
+    });
+    expect(emails).toHaveLength(2);
+    const alert = unsettledPaymentsAlert([new Date(paidAt)], BASE);
+    expect(payload(emails[1]!).lines).toEqual(alert.lines);
+    expect(statements.at(-1)).toEqual({
+      sql: 'select ops.queue_platform_alert_post($1, $2) as queued',
+      params: ['unsettled', alertPostBody(alert)],
+    });
+  });
+
+  it('posts nothing while there is no platform owner to email', async () => {
+    const recon = sweeping([{ rows: [{ run_id: 'run-1', attempt: 1 }] }, { rows: [] }]);
+    expect(
+      await alertSettlementReconFindings({ db: recon.db, outbox: recon.outbox, appBaseUrl: BASE }),
+    ).toEqual({ alerted: 0, unsent: 1, recipients: 0, posted: false });
+    expect(recon.statements).toHaveLength(2);
+    const unsettled = sweeping([{ rows: [{ payment_id: 'pay_1' }] }, { rows: [] }]);
+    expect(
+      await alertUnsettledPayments({
+        db: unsettled.db,
+        outbox: unsettled.outbox,
+        appBaseUrl: BASE,
+      }),
+    ).toEqual({ alerted: 0, unsent: 1, recipients: 0, posted: false });
+    expect(unsettled.statements).toHaveLength(2);
   });
 });

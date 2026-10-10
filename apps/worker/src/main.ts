@@ -1,8 +1,9 @@
 import { QUEUES } from '@w360/contracts';
 import { toError } from '@w360/core';
-import { ALERT_POSTS_JOB_KEY } from '@w360/domain';
+import { ALERT_POSTS_JOB_KEY, MESSAGE_DAYS_JOB_KEY } from '@w360/domain';
 import { startHealthServer } from './health';
 import { alertPostsHandler } from './handlers/alert-posts';
+import { messageDaysHandler } from './handlers/message-days';
 import {
   autoRechargeHandler,
   billingEventProcessHandler,
@@ -109,6 +110,16 @@ async function main(): Promise<void> {
   );
   await rt.boss.schedule(QUEUES.alertPosts.name, '* * * * *', null, {
     singletonKey: ALERT_POSTS_JOB_KEY,
+  });
+  // The platform's messages a day kept for the Usage tab's year (ADR-341): every minute, a few
+  // days a run.
+  await rt.boss.work(
+    QUEUES.messageDays.name,
+    { localConcurrency: 1, batchSize: 1 },
+    logFailures(rt, QUEUES.messageDays.name, messageDaysHandler(rt)),
+  );
+  await rt.boss.schedule(QUEUES.messageDays.name, '* * * * *', null, {
+    singletonKey: MESSAGE_DAYS_JOB_KEY,
   });
   await rt.boss.work(
     QUEUES.templateSubmit.name,

@@ -3794,6 +3794,41 @@ posts; those waiting fail as "No chat channel was set". Posts are kept 7 days af
 fail. A post waiting for more than a few minutes without an attempt means the posting job does not
 run: look for failures of `ops.alert-posts` in the worker's logs.
 
+**The alerts a chat channel gets (ADR-340).** A new channel gets the three operations alerts. Under
+"Alerts posted" a platform owner ticks the alerts the channel gets and presses "Save the alerts
+posted" (at least one); the change is audited, and a replaced address keeps the alerts chosen: the
+replace field names the platform owners' alerts among them, to untick first if the new channel's
+readers should not see them, and the audit entry of the new address names its alerts. Unticking an
+alert fails its posts still waiting or retrying ("Its alert was unticked before it was sent" under
+the latest posts), and the posting job fails any queued as it was unticked, so the new address never
+gets them; ticking it again sends none of them. A post already on its way finishes its attempt, to
+the address it was claimed for. "Reconciliation findings" and "Payments not seen in a settlement"
+are the platform owners' alerts (ADR-066, ADR-071), emailed to platform owners only: add them only
+when whoever reads the channel may know that a day's reconciliation needs a person or failed, and
+how many top-ups were not settled, by day. Their posts give days and counts, never a company, an
+amount, a payment id or a failed check's error: the email to owners has the error, and Platform →
+Reconciliation the rest. The worker logs whether each financial alert was posted (`posted` on
+`settlement reconciliation alert emailed` and `unsettled payments alert emailed`).
+
+**The last 12 months (ADR-341).** The Usage tab's year comes from counts the worker keeps: each UTC
+day is counted once it has ended, for every company not deleted, and again once a day for a week
+while statuses arrive; after a deployment the 365 days before it are counted 3 a minute, newest
+first, so the card says how many days are not counted yet for about two hours. The worker logs
+`messages a day counted` with how many days a run counted and how many company days it deleted
+(`purged`), when it counted or deleted any; a run that fails logs the failure, and the days it
+counted before stay counted. Days staying uncounted, or "No
+day is counted yet" long after a deployment, mean the counting job does not run or fails: look for
+failures of `ops.message-days` in the worker's logs. Each day is counted in a transaction of its
+own, so a failed day is tried again the next minute and the days counted before it stay counted; a
+day whose count takes longer than the worker's statement timeout (`DATABASE_STATEMENT_TIMEOUT_MS`)
+fails every minute and holds back the older days, so the failure names the timeout: raise the
+timeout for the worker. A failure Meta reports more than 7 days after its message's day is not in
+the year; the window's chart above it counts live. A company's counts are deleted when its deletion
+starts, and it is no longer counted: its platform page says so in place of its year. Each run
+first deletes, in a transaction of its own that a failing count never holds back, every count older
+than 400 days and those of companies deleted in the last 30 days, which a count racing a deletion
+as it finishes could leave.
+
 **Acknowledging failures (ADR-141).** On Current failures, the administrator who takes a failure
 opens Acknowledge on its row and writes a note of 10 to 500 characters: what was done or found
 ("Called the owner: they will reconnect the number today", "Meta's status page reports an outage").

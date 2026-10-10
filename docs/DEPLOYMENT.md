@@ -1304,6 +1304,35 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    before it now keep answers between 64 and 256 KiB that their requests failed on (an internal
    error). A rollback of the web keeps the new check, which old servers satisfy.
 
+   Migration 0261 (ADR-340) adds `ops.platform_alert_channel.kinds` (the three operations alerts for
+   a channel already set), replaces the posts' kind check, `ops.queue_platform_alert_post`,
+   `ops.platform_set_alert_channel`, `ops.platform_alert_channel_state` (one more column),
+   `ops.finish_platform_alert_post` (a post failed as unticked while on its way is recorded as sent
+   when the address accepted it, and the channel's row is locked before the post's) and
+   `ops.claim_platform_alert_posts` (the posts waiting of an alert no longer ticked fail as
+   unticked, and the channel's row is held until the claim's transaction ends) and adds
+   `ops.platform_set_alert_channel_kinds`. Apply it before workers of this release roll out: while a
+   channel is set, their financial alerts queue posts of the new kinds, which the posts' old check
+   refuses, so the minute billing sweep fails at that alert, its emails rolled back, every minute
+   until it is applied. Workers from before it keep posting the operations alerts, now only those
+   the channel gets, and read the address in a transaction of their own after the claim, as before;
+   those of this release read it in the claim's. Web servers of this release need it for the Alerts
+   tab, whose state reads the kinds; those from before it show and change the channel without them,
+   and a channel they replace keeps its kinds. After a rollback the kinds stay in the database: old
+   workers post the operations alerts the channel gets and no financial one.
+
+   Migration 0262 (ADR-341) adds `ops.platform_message_days` (each company's messages a UTC day,
+   with forced row level security and the definer role's grants only),
+   `ops.platform_message_days_counted`, the counts' step in company deletion and the functions that
+   count, delete and read them; `pnpm db:migrate` also creates the queue `ops.message-days`. Workers
+   of this release schedule the counting every minute: after the deployment they count the 365 days
+   before today, 3 a minute, newest first (about two hours), reading each day's messages once
+   through the `(tenant_id, created_at)` index, and then each day once it ends and once a day for a
+   week after. Web servers of this release need the migration for the Usage tab's year; those from
+   before it do not read it. After a rollback the counts stay in the database unused (company
+   deletion still deletes a company's), and those older than 400 days are deleted once a worker of
+   this release counts again.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

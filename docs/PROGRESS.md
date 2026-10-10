@@ -1,5 +1,264 @@
 # Progress
 
+## 2026-10-09 — Each browser project's end-to-end tests in a CI job of its own (ADR-343)
+
+Status: **Implemented and measured in CI: its first complete run ended the check of the four in 52
+minutes, failing one WebKit test, which this pull request fixes.** The four browser projects' 464
+end-to-end tests ran one after another in one CI job and took 168.3 of its suite step's 230 minutes
+on a248d4d (PR #55), almost three hours before a pull request's last check ended.
+
+### Completed
+
+- **CI:** `e2e-project`, a job per Playwright project (Chromium, Firefox, WebKit and mobile
+  Chromium), each with its own PostgreSQL, Mailpit, build, web server and worker, its browser only
+  and `--project`; 110 minutes for a project's suite and 120 for its job; reports, traces and server
+  logs uploaded per project and attempt. "End-to-end (Chromium, Firefox, WebKit, mobile)", the check
+  main requires, is now a job that needs the four, runs whatever they did and passes only when they
+  all passed.
+- **Tests:** the usage and settlement specs' comments say the projects share one database when they
+  run together, as locally, and that CI gives each its own. No test changed.
+- **CI images:** the first run on bb80f93 failed every job that pulled from Docker Hub with its
+  `429 Too Many Requests`, and so did its one re-run (the secret scan, pulling from GitHub's
+  registry, passed). CI now pulls PostgreSQL and the image scans' Node base through the Amazon ECR
+  Public mirror of Docker's official images, and Mailpit and Trivy from their publishers' GitHub
+  registries, each with the same digest as on Docker Hub. A review found the image scans still
+  pulling from Docker Hub and the Mailpit digest comparable through Docker Hub's tag API; both are
+  done.
+- **First complete run (b1a8b3e, PR #56; bb80f93's stopped at the image pulls):** the check of the
+  four ended 52 minutes after the run started. Each job spent about 3 minutes on its setup (the
+  build about 1.5, its browser under a minute) and its suite 36.8 minutes on mobile Chromium, 38.2
+  on Chromium, 40.8 on Firefox and 48.5 on WebKit. WebKit failed one test twice: the team endpoint
+  test in `webhook-events.spec.ts` loaded the webhooks page with `page.goto` from the live inbox,
+  and a refresh in flight interrupted the load ("interrupted by another navigation"), as
+  `openFromNav` describes; it passed in the combined job on a248d4d. The test now leaves the inbox
+  through the navigation. A review found four other tests loading a page from the live inbox while
+  its events could still refresh it (`automations.spec.ts`, `api.spec.ts` and `webhooks.spec.ts`,
+  which load a filtered list or an endpoint's page, and another in `webhook-events.spec.ts`): the
+  first three now load the page again when a refresh interrupts the load, as `inbox.spec.ts` does,
+  and the last leaves through the navigation. The api spec's reloads of a live page just after a
+  key's change are unchanged: they have passed in every browser so far.
+- **Docs:** ADR-343.
+- **Review fixes:** an independent review found nothing that would fail CI and four small things,
+  fixed: ADR-343 now says a run cancelled by a newer push shows the check of the four as failed
+  (expected: a skipped required check would pass), that the setup runs four times and a run takes
+  ten jobs, and that CI no longer runs the four projects' data in one database; "came close to the
+  limit" became "could come close", since no recorded run did; and the operations console test's
+  comment on earlier projects' posts says they share a database only when run together.
+
+### Test commands and results (local, 2026-10-09)
+
+| Command                                | Result                                                            |
+| -------------------------------------- | ----------------------------------------------------------------- |
+| `pnpm format:check`                    | clean, the workflow file included                                 |
+| The workflow parsed as YAML            | jobs `e2e-project` (the four projects) and `e2e` (`if: always()`) |
+| `playwright test --list`, each project | 116 tests each, 464 in all                                        |
+| The new jobs on GitHub Actions         | ran on b1a8b3e (run 37995636791): one WebKit test failed, fixed   |
+| Image digests, 2026-10-09              | the mirrors' equal Docker Hub's for the five images CI pulls      |
+| The mirrored images on GitHub Actions  | pulled on b1a8b3e (run 37995636791)                               |
+
+## 2026-10-09 — A company's year on its platform page (P5-10, H-034, ADR-342)
+
+Status: **Implemented; its database and browser tests run in CI only.** ADR-341 drew the
+platform's year of messages a day on the Usage tab and left a company's own year unbuilt.
+
+### Completed
+
+- **Domain:** `companyHealth()` reads the company's kept days for the 365 days before today with
+  its health and 30 days, as `year` (`messageYear` of ADR-341). No migration.
+- **Web:** the company's platform page draws "The last 12 months" under its 30 days, with the days
+  not counted yet and the empty state, under names of its own.
+- **Tests:** integration (`platform-ops.test.ts`: the company's year read with its health, every day
+  counted and its days with messages those of the counts table); e2e (the company page test checks
+  the year). No unit-tested logic changed. Written for CI; the integration and e2e tests were not
+  run here.
+- **Docs:** ADR-342; ARCHITECTURE; BACKLOG P5-10; feature matrix H-034.
+- **Mutation checks:** none new: no unit-tested logic changed.
+- **Review fixes:** an independent review of ADR-342 and of ADR-341's second fixes found four small
+  ones, fixed. While a company's deletion ran, its year showed counted days without messages: the
+  deletion deletes the counts first, so the page now says they went with the company, and the
+  worker no longer counts a company once its deletion has started, so its counts do not come back
+  between the deletion's batches. The purge ran in the count's transaction, so a day failing every
+  minute held it back: it is now `ops.purge_platform_message_days()` (0262), which the job calls
+  first in a transaction of its own, and the run logs what it deleted (`purged`). A comment still
+  said "deleted companies", and the runbook said every run logs, though one that counts and deletes
+  nothing logs nothing. 4/4 deliberate regressions of the purge's call caught; the count leaving out
+  a company being deleted, the purge and its grants are left to the integration tests (updated),
+  which run in CI. 0262 passed the pglast parse check again (syntax only), its three PL/pgSQL bodies
+  included. A review of these fixes found three more small ones, fixed: the page decided from a
+  separate read that the counts "were deleted first", which the deletion does only at its fourth
+  step, so `companyHealth()` now reads whether the deletion has started in the snapshot of its
+  health and gives no year, and the page says the counts "are deleted with it"; two comments said
+  "being deleted", which here means a deletion that can still be cancelled; and the integration test
+  had no company with a cancelled deletion, which is still counted (it has one now). 3/3 deliberate
+  regressions of the new read caught. A review of these found the wording still saying the counts
+  go "first" and "being deleted" in a few places, now corrected. 0261 and 0262 were changed in place
+  while this pull request was open, before any database outside CI applied them: one that applied an
+  earlier draft would refuse them by checksum.
+
+### Test commands and results (local, 2026-10-09)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 144 files, 1455 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
+## 2026-10-09 — A year of messages a day on the Usage tab (P5-10, H-034, ADR-341)
+
+Status: **Implemented; its database and browser tests run in CI only.** The Usage tab and a
+company's platform page counted messages a day live, 93 days back at most (ADR-333, ADR-334), and
+trends further back needed counts kept as days pass. The local PostgreSQL is unavailable, so
+migration 0262 and the integration tests below were written but not run here; the migration passed
+the pglast parse check (syntax only), its two PL/pgSQL bodies included.
+
+### Completed
+
+- **Database:** migration 0262 (`ops.platform_message_days`, each company's messages on each UTC
+  day it had any, with the tenant-table rules, forced row level security and the definer role's
+  grants only; `ops.platform_message_days_counted`, the days counted; the counts' step 35 in
+  company deletion; `ops.count_platform_message_days` for the worker, which counts up to 31 days due
+  a run, newest first, under an advisory lock, and deletes counts older than 400 days;
+  `ops.platform_ops_message_days` for platform administrators, 1 to 365 days, with each day's
+  counted flag).
+- **Domain:** `platform/message-days.ts` (`countMessageDays`, `keptMessageDays` and `messageYear`,
+  the run of counted days ending at the latest one); the operations service's `messageYear`; the
+  queue `ops.message-days`; the export leaves the counts out, the messages themselves exported.
+- **Worker:** the counting job, every minute, 3 days a run; it logs how many days it counted.
+- **Web:** the Usage tab's "The last 12 months" under the window's chart, with the same component
+  under names of its own, how many days are not counted yet and the empty states.
+- **Tests:** unit (6 new in `platform/message-days.test.ts`); integration (2 new in
+  `platform-ops.test.ts`: each day counted once for every company not deleted, newest first and a
+  few a run, the 7 days counted again once a day and older days kept, the purge, the year's sums
+  against the table, one company's days and the days not counted left out; the refusals, grants and
+  row level security; the functions' grants in `tenant-isolation.test.ts`; the company deletion and
+  export tests now cover the table); e2e (the Usage tab test checks the year card). Written for CI;
+  the integration and e2e tests were not run here.
+- **Docs:** ADR-341; ARCHITECTURE; SECURITY (the console's nine read functions); THREAT-MODEL T75
+  and T305; DEPLOYMENT; RUNBOOKS; DATA-RETENTION; BACKLOG P5-10; feature matrix H-034.
+- **Mutation checks:** 9/9 deliberate regressions caught on the unit-tested parts (the latest days
+  not counted drawn, days before a gap drawn, the days not counted miscounted, the flag drawn; every
+  day read as counted, the counts read as given; 31 days a run, 366 days, the count's result as
+  given). The definer functions need the database, so their regressions are left to the integration
+  tests, which run in CI.
+- **Review fixes:** an independent review found one test that would have failed in CI: the company
+  deletion's policies test requires every table the deletion deletes to have its two deletion
+  policies, which the counts' table lacked (it now has them). Also fixed: a count that raced a
+  company's deletion could leave its counts behind (each run now deletes the counts of deleted
+  companies, without locking the companies' rows, which plan changes lock); one slow day held three
+  days in one statement under the worker's statement timeout (a run now counts a day a transaction,
+  and the runbook says what a day longer than the timeout means); the integration test read today
+  from the test's clock rather than the database's; "1 of the 365 days are" and the alert names
+  mid-sentence in ADR-340's warning. 4/4 deliberate regressions of the counting loop caught; the
+  policies and the purge are left to the integration tests, which run in CI. The full check passed
+  again (144 files, 1454 tests). A second review of these fixes found three small ones, fixed: the
+  purge read every company ever deleted at every call (it now reads those deleted in the last 30
+  days, the 400 days catching any older), "untick those" for one alert, and the runbook's account
+  of what a run that fails logs.
+
+### Test commands and results (local, 2026-10-09)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 144 files, 1454 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
+## 2026-10-09 — The alerts a chat channel gets, the owners' financial alerts among them (P5-10, H-034, ADR-340)
+
+Status: **Implemented; its database and browser tests run in CI only.** Since ADR-338 the chat
+channel got every operations alert and nothing else: owners could not keep an alert out of it, and
+the owners' financial alerts (the reconciliation's findings, ADR-066, and the payments no settlement
+showed, ADR-071) reached the mailbox alone. The local PostgreSQL is unavailable, so migration 0261
+and the integration tests below were written but not run here; the migration passed the pglast
+parse check (syntax only), its four PL/pgSQL bodies included.
+
+### Completed
+
+- **Database:** migration 0261 (`ops.platform_alert_channel.kinds`, one to five known kinds in the
+  console's order, the three operations alerts by default, with its update grant to the definer;
+  the posts' kind check with the two new kinds; `ops.queue_platform_alert_post` queueing only the
+  kinds the channel gets; `ops.platform_set_alert_channel` keeping the kinds of the channel it
+  replaces; `ops.platform_set_alert_channel_kinds` for owners, audited with the kinds before and
+  after; `ops.platform_alert_channel_state` with the kinds).
+- **Domain:** `ALERT_CHANNEL_KINDS`, the defaults, the financial kinds and their labels; the
+  service's `setKinds` (owners only, at least one, kept once each in order) and the state's kinds;
+  `settlementReconPost` (the reconciliation email's text without a failed check's error); both
+  financial sweeps queue their posts after their emails, in their transaction, and say whether they
+  posted; the test post no longer names the alerts.
+- **Worker:** the financial alerts' logs say whether they were posted.
+- **Web:** Operations → Alerts lists the alerts posted, and owners tick them ("Save the alerts
+  posted"), the financial ones marked as platform owners' alerts with a note on who reads them.
+- **Tests:** unit (3 new in `platform/alert-channel.test.ts`, 3 changed; 4 new in
+  `billing/settlement-alerts.test.ts`); integration (1 new in `alert-channel.test.ts`: the default
+  kinds, owners only and the definer function's refusals, queueing by kind, the kinds kept on a new
+  address, the audit, the checks, and the grants in the file's privileges test; 1 new in
+  `settlement-recon.test.ts`: both financial alerts posted from real reconciliation runs, the
+  reconciliation's error left out, and not posted when the channel does not get them, with the
+  strict results of the file's other alert tests gaining `posted`; the function's grants in
+  `tenant-isolation.test.ts`); e2e (the alerts test checks the default kinds and adds a financial
+  one). Written for CI; the integration and e2e tests were not run here.
+- **Docs:** ADR-340; ARCHITECTURE; SECURITY; THREAT-MODEL T304; DEPLOYMENT; RUNBOOKS;
+  DATA-RETENTION; BACKLOG P5-10; feature matrix H-034.
+- **Mutation checks:** 16/16 deliberate regressions caught on the unit-tested parts (a financial
+  kind by default, a financial kind left out, a label; the kinds chosen by an operator, sent as
+  given, given back unknown or empty; the state's kinds in the database's order or not read; the
+  reconciliation post keeping the error, posting the email's text or under another kind, its result
+  not saying it posted, or saying so without an owner; the unsettled post under another kind or not
+  queued). The definer functions, the checks and the posting from real runs need the database, so
+  their regressions are left to the integration tests, which run in CI.
+- **Review fixes:** an independent review found nothing that would fail CI and three small defects,
+  fixed: replacing the address carried the chosen alerts, the owners' among them, to the new
+  address without a word on the form or in the audit (the replace field now names the platform
+  owners' alerts it would take over, and `platform.alert_channel_set` records the kinds the channel
+  gets); the removal dialog said every alert stays emailed to every platform administrator (the
+  owners' alerts go to platform owners); and SECURITY still said the financial alerts reach platform
+  owners only. No unit-tested logic changed; the audit's kinds are checked by the integration tests,
+  which run in CI. The full check passed again (143 files, 1448 tests).
+- **Codex's review (PR #56):** unticking an alert left its posts waiting or retrying claimable, and
+  a replaced address takes the posts waiting, so an owners' alert unticked, as the replace field
+  advises, could still reach the new channel. 0261 (not yet applied anywhere) now fails those posts
+  as unticked when the kinds are saved, and its replaced `ops.finish_platform_alert_post` records
+  as sent a post on its way that the address accepted, as when the channel is removed; the console
+  labels them "Its alert was unticked before it was sent", and the form's confirmation says posts
+  waiting of the others are not sent. Tests: a unit test of the label; an integration test (two
+  posts of the unticked alert failed, one of them on its way and recorded as sent on a 2xx but
+  never retried, the ticked alert's post the only one the new address gets, and none sent when the
+  alert is ticked again); the e2e test's confirmation. 1/1 deliberate regression of the label
+  caught; the definer functions are left to the integration test, which runs in CI.
+- **The fix's review:** an independent review of the fix found two gaps, fixed in 0261 (still not
+  applied anywhere). A post queued while its alert was being unticked, which the unticking could not
+  see yet, stayed claimable: `ops.claim_platform_alert_posts`, now replaced, fails the posts waiting
+  of an alert the channel no longer gets before it claims. And an attempt's outcome locked the post
+  before the channel's row, which choosing the alerts and removing the channel lock first, so the
+  two could deadlock: `ops.finish_platform_alert_post` now locks the channel's row first. The claim
+  now locks it too, and the worker reads the address in the claim's transaction, which holds the row
+  until it ends, so the posts claimed go to the address they were claimed for, never to one that
+  replaced it since (before, a replacement between the claim and the reading of the address could
+  take them). Tests: the posting job's unit test checks that the address is read in the claim's
+  transaction; two integration tests (a post queued while an owner's unticking had not committed,
+  failed as unticked rather than sent; the channel's row held against an update but not against an
+  attempt's outcome while posts are claimed). 2/2 deliberate regressions of the worker caught (the
+  address read in a transaction of its own, or read when nothing was claimed); the functions are
+  left to the integration tests, which run in CI. A review of these fixes found the claiming
+  statement did not filter by the kinds read under the lock, so a post committed between the claim's
+  statements could still be claimed: the claim now takes only the posts of the alerts the channel
+  gets, and the next run fails such a post as unticked. That window lies between two statements of
+  one function, so no test reproduces it. The full check passed again (144 files, 1455 tests).
+
+### Test commands and results (local, 2026-10-09)
+
+| Command                                            | Result                                                        |
+| -------------------------------------------------- | ------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                         |
+| `pnpm test` (unit)                                 | 143 files, 1448 tests passed                                  |
+| `pnpm test:integration`                            | not run here: the local PostgreSQL is unavailable; CI runs it |
+| `pnpm build`                                       | passed                                                        |
+| gitleaks 8.30.1 on the staged changes              | no leaks found                                                |
+
 ## 2026-10-09 — Answers kept with an Idempotency-Key up to 256 KiB (P5-08, P5-09, H-033, ADR-339)
 
 Status: **Fixed; its database test runs in CI only.** A successful answer to a request sent with an

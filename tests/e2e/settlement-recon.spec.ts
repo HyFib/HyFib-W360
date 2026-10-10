@@ -80,11 +80,13 @@ async function payLongAgo(paymentId: string): Promise<string> {
 }
 
 /**
- * Each browser project reconciles its own day, and a retry another one: they share one database and
- * one stand-in, which keeps what an earlier attempt settled. The offsets are odd and two apart, so
- * the days stay apart when a run crosses India's midnight (18:30 UTC) between two projects: days
- * picked before it lie an odd number of days before the day the run started, days picked after it
- * an even number. (With offsets one apart, a CI run once gave chromium and mobile-chromium one day.)
+ * Each browser project reconciles its own day, and a retry another one: a retry shares the database
+ * and the stand-in with the attempt before it, which keeps what that attempt settled, and so do the
+ * projects when they run together, as `pnpm test:e2e` runs them locally (CI gives each project its
+ * own, ADR-343). The offsets are odd and two apart, so the days stay apart when a run crosses
+ * India's midnight (18:30 UTC) between two projects: days picked before it lie an odd number of
+ * days before the day the run started, days picked after it an even number. (With offsets one
+ * apart, a CI run once gave chromium and mobile-chromium one day.)
  */
 const DAY_OFFSETS: Record<string, number> = {
   chromium: -5,

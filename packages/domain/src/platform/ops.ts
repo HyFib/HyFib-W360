@@ -41,6 +41,13 @@ import { MAX_RECEIPT_ATTEMPTS } from '../messaging/receipts';
 import type { QueueInspector, QueueSnapshot } from '../jobs/queue';
 import { QUEUE_CHECK_FRESH_MINUTES } from './queue-waits';
 import { deadLetterRetryBlock, deadLetterRetryableUntil } from './dead-letter-retries';
+import {
+  MESSAGE_DAYS_KEPT,
+  deletionStarted,
+  keptMessageDays,
+  messageYear,
+  type MessageYear,
+} from './message-days';
 import { parseInput } from '../validation';
 import {
   OPS_SIGNAL_RULES,
@@ -1000,7 +1007,24 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
       };
     },
 
-    /** One company's health and its activity over the last 30 days (null when unknown). */
+    /**
+     * Every company's messages a day over the 365 days before today, from the counts the worker
+     * keeps as days pass (ADR-341): the run of counted days ending at the latest one, and how many
+     * of the 365 are not counted yet.
+     */
+    async messageYear(actor: PlatformActor): Promise<MessageYear> {
+      const days = await platformDb.run(
+        actor.userId,
+        (tx) => keptMessageDays(tx, MESSAGE_DAYS_KEPT, null),
+        { accessMode: 'read only' },
+      );
+      return messageYear(days);
+    },
+
+    /**
+     * One company's health, its activity over the last 30 days and its year of kept days, none
+     * while its deletion runs (ADR-342); null when unknown.
+     */
     async companyHealth(actor: PlatformActor, tenantId: string) {
       if (!z.uuid().safeParse(tenantId).success) return null;
       const now = clock.now();
@@ -1013,7 +1037,12 @@ export function createPlatformOpsService(deps: PlatformOpsDeps) {
           if (!facts) return null;
           const [activity] = await activitySince(tx, since, tenantId);
           const daily = await dailyActivity(tx, since, tenantId);
-          return { health: assess(facts), activity: activity ?? null, daily };
+          // None while its deletion runs: the deletion deletes its kept counts, and the worker no
+          // longer counts it (ADR-342).
+          const year = (await deletionStarted(tx, tenantId))
+            ? null
+            : messageYear(await keptMessageDays(tx, MESSAGE_DAYS_KEPT, tenantId));
+          return { health: assess(facts), activity: activity ?? null, daily, year };
         },
         { isolationLevel: 'repeatable read', accessMode: 'read only' },
       );

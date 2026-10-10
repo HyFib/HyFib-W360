@@ -10,23 +10,26 @@ export function DailyMessages({
   days,
   label,
   empty,
+  names = { legend: 'Lines', summary: 'Table of the days', table: 'Messages a day' },
 }: {
   days: OpsDailyActivity[];
   /** The chart's accessible name: whose messages and over how many days. */
   label: string;
   /** What the empty state says when nothing was sent or received. */
   empty: string;
+  /** The legend's, the folded table's and its summary's names, told apart on a page with two. */
+  names?: { legend: string; summary: string; table: string };
 }) {
   if (days.every((d) => d.outbound === 0 && d.inbound === 0)) {
     return <EmptyState title="No messages in these days" description={empty} />;
   }
   return (
     <>
-      <DailyMessagesChart days={days} label={label} />
+      <DailyMessagesChart days={days} label={label} legendLabel={names.legend} />
       {/* min-w-0: the table scrolls in its box rather than widening the card on a phone. */}
       <details className="min-w-0 rounded-md border border-border p-3">
-        <summary className="cursor-pointer text-sm font-medium">Table of the days</summary>
-        <Table aria-label="Messages a day" className="mt-3">
+        <summary className="cursor-pointer text-sm font-medium">{names.summary}</summary>
+        <Table aria-label={names.table} className="mt-3">
           <THead>
             <TR>
               <TH>Day (UTC)</TH>

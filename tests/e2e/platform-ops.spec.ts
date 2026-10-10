@@ -574,6 +574,20 @@ test('staff read the platform’s messages a day on the Usage tab (ADR-333)', as
   ).toBeVisible();
   await expectNoHorizontalOverflow(page);
 
+  // The last 12 months (ADR-341), from the days the worker counts once they end: drawn, or none
+  // counted yet, or none of those counted with a message.
+  await expect(page.getByText('The last 12 months', { exact: true })).toBeVisible();
+  await expect(
+    page
+      .getByRole('slider', { name: 'Messages sent and received each UTC day, the last 12 months' })
+      .or(page.getByText('No day is counted yet', { exact: true }))
+      .or(
+        page.getByText('No company sent or received a message in the days counted.', {
+          exact: true,
+        }),
+      ),
+  ).toBeVisible();
+
   // The company's own days on its platform page (ADR-334): the customer's one message, and none of
   // the other companies'.
   await page.goto(`/platform?q=${slug}`);
@@ -593,6 +607,21 @@ test('staff read the platform’s messages a day on the Usage tab (ADR-333)', as
   expect(received.length).toBeGreaterThanOrEqual(31);
   expect(received.reduce((total, n) => total + Number(n), 0)).toBe(1);
   await expectNoHorizontalOverflow(page);
+  // Its last 12 months (ADR-342), from the days the worker counts once they end: drawn, or none
+  // counted yet, or none of those counted with a message.
+  await expect(page.getByRole('heading', { name: 'The last 12 months' })).toBeVisible();
+  await expect(
+    page
+      .getByRole('slider', {
+        name: "This company's messages sent and received each UTC day, the last 12 months",
+      })
+      .or(page.getByText('No day is counted yet', { exact: true }))
+      .or(
+        page.getByText('The company sent and received no message in the days counted.', {
+          exact: true,
+        }),
+      ),
+  ).toBeVisible();
   // As on the Usage tab, the chart and the open table stay inside a page 360 pixels wide.
   const shown = page.viewportSize();
   await page.setViewportSize({ width: 360, height: shown?.height ?? 800 });
@@ -690,6 +719,23 @@ test('an owner posts the operations alerts to a chat channel and sends it a test
     await expect(page.getByText(token)).toHaveCount(0);
     await expect(page.getByLabel('Replace the channel’s address')).toHaveValue('');
 
+    // A new channel gets the operations alerts; an owner adds a financial one (ADR-340).
+    const kinds = page.getByRole('group', { name: 'Alerts posted' });
+    await expect(kinds.getByLabel('Failures')).toBeChecked();
+    await expect(kinds.getByLabel('Reconciliation findings')).not.toBeChecked();
+    await kinds.getByLabel('Reconciliation findings').check();
+    await page.getByRole('button', { name: 'Save the alerts posted' }).click();
+    await expect(
+      page.getByText(
+        'Saved: the alerts ticked are posted from now on, and posts waiting of the others are not sent.',
+      ),
+    ).toBeVisible();
+    await expect(
+      page.getByText('Failures, Late queues, Failing integrations, Reconciliation findings', {
+        exact: true,
+      }),
+    ).toBeVisible();
+
     await page.getByRole('button', { name: 'Send a test post' }).click();
     await expect(page.getByText(/^Test post queued/)).toBeVisible();
     // The alerts other tests cause while the channel is set are posted too: only the test post is
@@ -704,8 +750,9 @@ test('an owner posts the operations alerts to a chat channel and sends it a test
       );
     await expect.poll(() => tests().length, { timeout: 30_000 }).toBe(1);
     expect(tests()[0]!.type).toBe('application/json');
-    // Posts are kept 7 days and listed newest first: earlier projects' test posts are below this
-    // one.
+    // Posts are kept 7 days and listed newest first: run together, as locally, the projects share
+    // one database, and earlier projects' test posts are below this one (CI gives each project its
+    // own, ADR-343).
     const testRow = page
       .getByRole('table', { name: 'Latest posts' })
       .getByRole('row')

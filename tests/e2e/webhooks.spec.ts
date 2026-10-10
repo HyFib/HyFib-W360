@@ -905,9 +905,13 @@ test('an endpoint receives only the message statuses it takes: chosen in setting
       d.status,
     ]),
   ).toEqual([['message.status', 'succeeded']]);
-  await page.goto(endpointPage);
+  // The reply's statuses refresh the live inbox, so the endpoint's page is loaded again if a
+  // refresh interrupts the load (see openFromNav).
   const deliveries = page.getByRole('list', { name: 'Deliveries' }).getByRole('listitem');
-  await expect(deliveries).toHaveCount(1);
+  await expect(async () => {
+    await page.goto(endpointPage);
+    await expect(deliveries).toHaveCount(1, { timeout: 5_000 });
+  }).toPass({ timeout: 30_000 });
   await expect(deliveries.filter({ hasText: 'message.status' })).toHaveCount(1);
 
   // Settings show what the key chose; the key then takes every status again.

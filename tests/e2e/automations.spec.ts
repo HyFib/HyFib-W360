@@ -201,8 +201,12 @@ test('an automation tags the conversation it answers, and the inbox shows the ta
   await page.goto(`/c/${slug}/inbox`);
   const item = page.getByRole('link', { name: /Priya Customer/ });
   await expect(item).toContainText('refund', { timeout: 30_000 });
-  await page.goto(`/c/${slug}/inbox?view=all&status=open&tag=refund`);
-  await expect(item).toHaveCount(1);
+  // The run's reply and tag refresh the live inbox, so the list filtered by the tag is loaded by
+  // its address again if a refresh interrupts the load (see openFromNav).
+  await expect(async () => {
+    await page.goto(`/c/${slug}/inbox?view=all&status=open&tag=refund`);
+    await expect(item).toHaveCount(1, { timeout: 5_000 });
+  }).toPass({ timeout: 30_000 });
 });
 
 test('an automation creates a CRM task and a deal about the customer, and moves the deal (ADR-244, ADR-245, ADR-250)', async ({

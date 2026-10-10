@@ -21,12 +21,12 @@ import { startWhatsAppFixture, type WhatsAppFixture } from './whatsapp-fixture';
 
 /**
  * A chat channel for the operations alerts (P5-10, ADR-338) against real PostgreSQL: only platform
- * owners set, test and remove it, through definer functions that audit its host and never its
- * address, which only the runtime role can read, sealed; the alerts queue their posts in the
- * transaction of their emails, and the posting job sends them to a local receiver as JSON text,
- * records each answer, tries a post again after a 5xx, a 429 or no answer (1, 2, 4 and 8 minutes
- * later) and gives up after a 4xx or its fifth attempt. The channel is one row for the whole
- * platform, so each test starts without one.
+ * owners set, test and remove it and choose the alerts it gets (ADR-340), through definer functions
+ * that audit its host and never its address, which only the runtime role can read, sealed; the
+ * alerts queue their posts in the transaction of their emails, and the posting job sends them to a
+ * local receiver as JSON text, records each answer, tries a post again after a 5xx, a 429 or no
+ * answer (1, 2, 4 and 8 minutes later) and gives up after a 4xx or its fifth attempt. The channel
+ * is one row for the whole platform, so each test starts without one.
  */
 let fx: WhatsAppFixture;
 let owner: PlatformActor;
@@ -39,6 +39,8 @@ const received: { method: string; path: string; headers: IncomingHttpHeaders; bo
 
 const BASE = 'https://app.w360.test';
 const LOOPBACK = { allowLoopbackForTests: true };
+/** The alerts a new channel gets (ADR-340). */
+const OPERATIONS = ['failures', 'queues', 'integrations'];
 
 const service = () =>
   createAlertChannelService({
@@ -188,8 +190,11 @@ describe('the chat channel (ADR-338)', () => {
 
     const audit = (await auditOf(owner)).slice(before);
     expect(audit.map((a) => [a.action, a.metadata])).toEqual([
-      ['platform.alert_channel_set', { host: '127.0.0.1' }],
-      ['platform.alert_channel_set', { host: '127.0.0.1', previousHost: '127.0.0.1' }],
+      ['platform.alert_channel_set', { host: '127.0.0.1', kinds: OPERATIONS }],
+      [
+        'platform.alert_channel_set',
+        { host: '127.0.0.1', previousHost: '127.0.0.1', kinds: OPERATIONS },
+      ],
     ]);
     expect(audit[0]!.correlation_id).toBe(owner.correlationId);
     expect(JSON.stringify(audit)).not.toContain('hook-secret');
@@ -216,14 +221,16 @@ describe('the chat channel (ADR-338)', () => {
         )
       )[0]!.ok;
     for (const role of ['w360_platform', 'w360_auth']) {
-      for (const column of ['url_ciphertext', 'host', 'set_by']) {
+      for (const column of ['url_ciphertext', 'host', 'set_by', 'kinds']) {
         expect(await can(role, column, 'SELECT'), `${role} ${column}`).toBe(false);
       }
     }
     expect(await can('w360_app', 'url_ciphertext', 'SELECT')).toBe(true);
     expect(await can('w360_app', 'url_ciphertext', 'UPDATE')).toBe(false);
-    expect(await can('w360_app', 'host', 'SELECT')).toBe(false);
-    expect(await can('w360_app', 'host', 'UPDATE')).toBe(false);
+    for (const column of ['host', 'kinds']) {
+      expect(await can('w360_app', column, 'SELECT'), column).toBe(false);
+      expect(await can('w360_app', column, 'UPDATE'), column).toBe(false);
+    }
     const [table] = await fx.query<{ insert: boolean; delete: boolean; posts: boolean }>(
       `SELECT has_table_privilege('w360_app', 'ops.platform_alert_channel', 'INSERT') AS insert,
               has_table_privilege('w360_app', 'ops.platform_alert_channel', 'DELETE') AS delete,
@@ -293,7 +300,7 @@ describe('the chat channel (ADR-338)', () => {
     expect(state.channel?.lastSentAt).toBeInstanceOf(Date);
     expect(state.posts).toMatchObject([{ id: postId, kind: 'test', lastStatus: 200 }]);
     expect((await auditOf(owner)).slice(before).map((a) => [a.action, a.metadata])).toEqual([
-      ['platform.alert_channel_set', { host: '127.0.0.1' }],
+      ['platform.alert_channel_set', { host: '127.0.0.1', kinds: OPERATIONS }],
       ['platform.alert_channel_tested', { host: '127.0.0.1' }],
     ]);
     // Nothing more is due.
@@ -464,6 +471,199 @@ describe('the chat channel (ADR-338)', () => {
 
     expect(await send()).toMatchObject({ claimed: 1, sent: 1 });
     expect(JSON.parse(received.at(-1)!.body)).toEqual({ text: post!.body });
+  });
+
+  it('lets platform owners choose the alerts it gets, audited, and queues only those (ADR-340)', async () => {
+    const before = (await auditOf(owner)).length;
+    const queue = async (kind: string) =>
+      (
+        await fx.dbs.app.run(systemScope, (tx) =>
+          tx.execute<{ queued: boolean }>(
+            sql`select ops.queue_platform_alert_post(${kind}, ${'A post.'}) as queued`,
+          ),
+        )
+      ).rows[0]?.queued;
+    // Without a channel nothing is chosen, and nothing is queued.
+    await expectCode(
+      service().setKinds(owner, { kinds: ['failures'] }),
+      'not_found',
+      /No chat channel is set/,
+    );
+    expect(await queue('failures')).toBe(false);
+
+    // A new channel gets the operations alerts, not the owners' financial ones.
+    await service().setChannel(owner, { url: hookUrl });
+    expect((await service().state(operator)).channel?.kinds).toEqual(OPERATIONS);
+    expect(await queue('reconciliation')).toBe(false);
+    expect(await queue('unsettled')).toBe(false);
+    expect(await queue('test')).toBe(false);
+    expect(await queue('queues')).toBe(true);
+
+    await expectCode(service().setKinds(operator, { kinds: ['failures'] }), 'forbidden');
+    // The definer function holds the same rules for a caller that skips the service.
+    const direct = (actor: PlatformActor, kinds: string[]) =>
+      fx.dbs.platform.run(actor.userId, (tx) =>
+        tx.execute(
+          sql`select ops.platform_set_alert_channel_kinds(${sql.param(kinds)}::text[], null)`,
+        ),
+      );
+    await expectCode(direct(operator, ['failures']), 'forbidden', /Only a platform owner can/);
+    await expectCode(direct(owner, []), 'precondition_failed', /Choose at least one/);
+    await expectCode(direct(owner, ['failures', 'payments']), 'precondition_failed');
+
+    const financial = ['failures', 'reconciliation', 'unsettled'];
+    expect(
+      await service().setKinds(owner, { kinds: ['unsettled', 'failures', 'reconciliation'] }),
+    ).toEqual({ kinds: financial });
+    // The same kinds again, given twice and in another order, change nothing and are not audited.
+    expect(
+      (await direct(owner, ['reconciliation', 'unsettled', 'failures', 'unsettled'])).rows,
+    ).toEqual([{ platform_set_alert_channel_kinds: financial }]);
+    expect(await queue('reconciliation')).toBe(true);
+    expect(await queue('unsettled')).toBe(true);
+    expect(await queue('queues')).toBe(false);
+    expect((await posts()).map((p) => p.kind)).toEqual(['queues', 'reconciliation', 'unsettled']);
+
+    // A new address keeps the kinds chosen.
+    await service().setChannel(owner, { url: `${hookUrl}-2` });
+    expect((await service().state(operator)).channel?.kinds).toEqual(financial);
+
+    const audit = (await auditOf(owner)).slice(before);
+    expect(audit.map((a) => [a.action, a.metadata])).toEqual([
+      ['platform.alert_channel_set', { host: '127.0.0.1', kinds: OPERATIONS }],
+      [
+        'platform.alert_channel_kinds_set',
+        { host: '127.0.0.1', kinds: financial, previousKinds: OPERATIONS },
+      ],
+      // The new address's entry names the owners' alerts it took over.
+      [
+        'platform.alert_channel_set',
+        { host: '127.0.0.1', previousHost: '127.0.0.1', kinds: financial },
+      ],
+    ]);
+    expect(audit[1]!.correlation_id).toBe(owner.correlationId);
+
+    // The column holds one to five known kinds, and the posts a known kind, whoever writes them.
+    for (const kinds of [
+      `'{}'`,
+      `ARRAY['payments']`,
+      `ARRAY[NULL]::text[]`,
+      `ARRAY[['failures']]`,
+    ]) {
+      await expect(
+        fx.query(`UPDATE ops.platform_alert_channel SET kinds = ${kinds}`),
+        kinds,
+      ).rejects.toThrow(/platform_alert_channel_kinds_check/);
+    }
+    await expect(
+      fx.query(
+        `INSERT INTO ops.platform_alert_posts (id, kind, body) VALUES ($1, 'payments', 'x')`,
+        [uuidv7()],
+      ),
+    ).rejects.toThrow(/platform_alert_posts_kind_check/);
+  });
+
+  it('fails the posts waiting of an alert no longer ticked, so no address gets them (ADR-340)', async () => {
+    await service().setChannel(owner, { url: hookUrl });
+    const [channel] = await fx.query<{ id: string }>(`SELECT id FROM ops.platform_alert_channel`);
+    await service().setKinds(owner, { kinds: ['failures', 'reconciliation'] });
+    const worker = <T extends Record<string, unknown>>(statement: ReturnType<typeof sql>) =>
+      fx.dbs.app.run(systemScope, (tx) => tx.execute<T>(statement)).then((r) => r.rows);
+    const queue = (kind: string, body: string) =>
+      worker(sql`select ops.queue_platform_alert_post(${kind}, ${body})`);
+    await queue('reconciliation', 'Reconciliation on its way');
+    await queue('reconciliation', 'Reconciliation waiting');
+    await queue('failures', 'Failures waiting');
+    // The oldest is on its way when an owner unticks its alert, before replacing the address as
+    // the console advises.
+    const [onItsWay] = await worker<{ id: string; attempts: number }>(
+      sql`select id, attempts from ops.claim_platform_alert_posts(1)`,
+    );
+    expect(onItsWay).toMatchObject({ attempts: 1 });
+    expect(await service().setKinds(owner, { kinds: ['failures'] })).toEqual({
+      kinds: ['failures'],
+    });
+    expect((await posts()).map((p) => [p.body, p.failed, p.last_error])).toEqual([
+      ['Reconciliation on its way', true, 'unticked'],
+      ['Reconciliation waiting', true, 'unticked'],
+      ['Failures waiting', false, null],
+    ]);
+    // The attempt on its way: a failure leaves it failed, never tried again; a 2xx records it sent,
+    // as it reached the address it was claimed for.
+    const finish = (status: number) =>
+      worker<{ state: string }>(
+        sql`select ops.finish_platform_alert_post(${onItsWay!.id}::uuid, 1, ${channel!.id}::uuid,
+              ${status}::integer, null::text, true) as state`,
+      );
+    expect(await finish(503)).toEqual([{ state: 'stale' }]);
+    expect(await finish(200)).toEqual([{ state: 'sent' }]);
+
+    // The new address gets the ticked alert's post only, and ticking the alert again sends none of
+    // the posts that failed.
+    await service().setChannel(owner, { url: `${hookUrl}-2` });
+    await service().setKinds(owner, { kinds: ['failures', 'reconciliation'] });
+    const before = received.length;
+    expect(await send()).toMatchObject({ claimed: 1, sent: 1 });
+    expect(received.slice(before).map((r) => JSON.parse(r.body))).toEqual([
+      { text: 'Failures waiting' },
+    ]);
+    expect((await posts()).map((p) => [p.body, p.sent, p.failed])).toEqual([
+      ['Reconciliation on its way', true, false],
+      ['Reconciliation waiting', false, true],
+      ['Failures waiting', true, false],
+    ]);
+  });
+
+  it('fails a post queued while its alert was being unticked, before any address gets it (ADR-340)', async () => {
+    await service().setChannel(owner, { url: hookUrl });
+    await service().setKinds(owner, { kinds: ['failures', 'reconciliation'] });
+    // An alert sweep queues its post while an owner's unticking of its alert has not committed: the
+    // queueing still sees the alert ticked, and the unticking cannot see the post to fail it.
+    await fx.dbs.platform.run(owner.userId, async (tx) => {
+      await tx.execute(
+        sql`select ops.platform_set_alert_channel_kinds(${sql.param(['failures'])}::text[], null)`,
+      );
+      const queued = await fx.dbs.app.run(systemScope, (app) =>
+        app.execute<{ queued: boolean }>(
+          sql`select ops.queue_platform_alert_post('reconciliation', 'Reconciliation late') as queued`,
+        ),
+      );
+      expect(queued.rows[0]?.queued).toBe(true);
+    });
+    expect(await posts()).toMatchObject([
+      { body: 'Reconciliation late', sent: false, failed: false },
+    ]);
+    // The posting job fails it as unticked rather than claiming it: the address never gets it.
+    expect(await send()).toMatchObject({ claimed: 0, sent: 0 });
+    expect(received).toEqual([]);
+    expect(await posts()).toMatchObject([
+      { body: 'Reconciliation late', sent: false, failed: true, last_error: 'unticked' },
+    ]);
+  });
+
+  it('holds the channel while posts are claimed, so they go to the address they were claimed for', async () => {
+    await service().setChannel(owner, { url: hookUrl });
+    await service().sendTest(owner);
+    const free = (strength: 'UPDATE' | 'NO KEY UPDATE') =>
+      fx.query(`SELECT 1 FROM ops.platform_alert_channel FOR ${strength} NOWAIT`).then(
+        () => true,
+        (error: unknown) => {
+          expect(String(error)).toMatch(/could not obtain lock/);
+          return false;
+        },
+      );
+    // Until the claim's transaction, in which the worker reads the address, ends: replacing the
+    // address, removing the channel and choosing its alerts, which lock its row for update, wait
+    // for it; an attempt's outcome, which locks it for no key update, does not.
+    const held = await fx.dbs.app.run(systemScope, async (tx) => {
+      const claimed = await tx.execute<{ id: string }>(
+        sql`select id from ops.claim_platform_alert_posts(5)`,
+      );
+      expect(claimed.rows).toHaveLength(1);
+      return { forUpdate: await free('UPDATE'), forNoKeyUpdate: await free('NO KEY UPDATE') };
+    });
+    expect(held).toEqual({ forUpdate: false, forNoKeyUpdate: true });
+    expect(await free('UPDATE')).toBe(true);
   });
 
   it('deletes posts 7 days after they were sent or failed, and only those', async () => {

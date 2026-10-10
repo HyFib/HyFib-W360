@@ -2,6 +2,7 @@ import { sql } from 'drizzle-orm';
 import {
   bigint,
   boolean,
+  date,
   inet,
   integer,
   pgSchema,
@@ -215,13 +216,19 @@ export const tenantDeletions = opsSchema.table('tenant_deletions', {
 /**
  * The chat channel the operations alerts are posted to (ADR-338): one row at most, its address
  * sealed with the keyring under its id. Set, removed and read for the console only through the
- * definer functions of migration 0258; the runtime role reads the sealed address, to send the
- * posts, and re-encrypts it (the keyring sweep).
+ * definer functions of migrations 0258 and 0261; the runtime role reads the sealed address, to send
+ * the posts, and re-encrypts it (the keyring sweep).
  */
 export const platformAlertChannel = opsSchema.table('platform_alert_channel', {
   id: uuid('id').primaryKey(),
   urlCiphertext: text('url_ciphertext').notNull(),
   host: text('host').notNull(),
+  /** The alerts it gets, in the console's order (ADR-340). */
+  kinds: text('kinds')
+    .array()
+    .notNull()
+    .default(sql`ARRAY['failures', 'queues', 'integrations']::text[]`)
+    .$type<('failures' | 'queues' | 'integrations' | 'reconciliation' | 'unsettled')[]>(),
   setBy: text('set_by'),
   setAt: tz('set_at').notNull().defaultNow(),
   lastSentAt: tz('last_sent_at'),
@@ -237,7 +244,9 @@ export const platformAlertChannel = opsSchema.table('platform_alert_channel', {
  */
 export const platformAlertPosts = opsSchema.table('platform_alert_posts', {
   id: uuid('id').primaryKey(),
-  kind: text('kind', { enum: ['failures', 'queues', 'integrations', 'test'] }).notNull(),
+  kind: text('kind', {
+    enum: ['failures', 'queues', 'integrations', 'reconciliation', 'unsettled', 'test'],
+  }).notNull(),
   body: text('body').notNull(),
   createdAt: tz('created_at').notNull().defaultNow(),
   attempts: smallint('attempts').notNull().default(0),
@@ -247,4 +256,24 @@ export const platformAlertPosts = opsSchema.table('platform_alert_posts', {
   failedAt: tz('failed_at'),
   lastStatus: integer('last_status'),
   lastError: text('last_error'),
+});
+
+/**
+ * Each company's messages on each UTC day it had any (ADR-341): sent, those of them failed and
+ * received, counted by the worker once the day ended. Written and read only through the definer
+ * functions of migration 0262; a company's rows are deleted with the company.
+ */
+export const platformMessageDays = opsSchema.table('platform_message_days', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  tenantId: uuid('tenant_id').notNull(),
+  utcDay: date('utc_day', { mode: 'string' }).notNull(),
+  outbound: integer('outbound').notNull(),
+  failed: integer('failed').notNull(),
+  inbound: integer('inbound').notNull(),
+});
+
+/** The days `platformMessageDays` holds counts of, and when each was last counted (ADR-341). */
+export const platformMessageDaysCounted = opsSchema.table('platform_message_days_counted', {
+  utcDay: date('utc_day', { mode: 'string' }).primaryKey(),
+  countedAt: tz('counted_at').notNull().defaultNow(),
 });

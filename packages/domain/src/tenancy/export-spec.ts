@@ -35,6 +35,8 @@ export const EXPORT_EXCLUDED_TABLES: Readonly<Record<string, string>> = {
   'app.webhook_events': 'Outgoing webhook events, kept 30 days.',
   'ops.dead_letters': "Records of HyFib's job system.",
   'ops.email_outbox': 'The encrypted queue of emails.',
+  'ops.platform_message_days':
+    "HyFib's counts of the company's messages each day for the operations console (ADR-341); the messages themselves are exported.",
   'ops.provider_asset_bindings': 'Internal routing of WhatsApp account and number ids.',
   'ops.security_events': "HyFib's security records.",
   'ops.settlement_recon_items':
