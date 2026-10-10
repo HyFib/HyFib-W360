@@ -2513,7 +2513,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'And it can name the pipelines, stages or owners of the deals whose notes it takes (its `notePipelineIds`, `noteStageIds` and `noteDealOwnerIds`): then it receives the events of the notes about deals in those pipelines or stages, or owned by those members, when the note is added only',
     );
     expect(doc.info.description).toContain(
-      'and still every consent, contact, template, skipped order message, deal, task and note event it takes',
+      'and still every consent, contact, template, skipped order message, skipped cart reminder, deal, task and note event it takes',
     );
     const noteEvent = (doc.webhooks as Record<string, { post?: { description?: string } }>)[
       'note.created'
@@ -3256,8 +3256,8 @@ describe('webhook endpoints through the API (ADR-081)', () => {
         event,
       ).toEqual([b, a]);
     }
-    // Consent, contact, template, skipped order message, deal, task and note events happen on no
-    // number.
+    // Consent, contact, template, skipped order message, skipped cart reminder, deal, task and note
+    // events happen on no number.
     expect(WEBHOOK_EVENT_KEYS.filter((e) => !WEBHOOK_CHANNEL_EVENTS.some((c) => c === e))).toEqual([
       'consent.changed',
       'template.status_changed',
@@ -3266,6 +3266,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'contact.erased',
       'contact.merged',
       'store_order.message_skipped',
+      'store_checkout.reminder_skipped',
       'deal.created',
       'deal.updated',
       'deal.stage_changed',
@@ -3614,7 +3615,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'unless the events no longer include store_order.cod_answered, which clears them',
     );
     expect(JSON.stringify(changed.storeIds)).toContain(
-      'unless the events include none of store_order.cod_answered, store_order.message_skipped and store_order.message_sent any more, which clears them',
+      'unless the events include none of store_order.cod_answered, store_order.message_skipped, store_order.message_sent, store_checkout.reminder_skipped and store_checkout.reminder_sent any more, which clears them',
     );
     expect(doc.webhooks['store_order.cod_answered'].post.description).toContain(
       'An endpoint receives both answers unless it names the answers it takes (its `codAnswers`',
@@ -3675,7 +3676,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'as store_order.message_skipped and store_order.message_sent (order_placed, cod_confirmation, order_shipped, order_delivered, order_cancelled), as orderMessage.event names them, only with one of those events',
     );
     expect(JSON.stringify(given.storeIds)).toContain(
-      'whose cash on delivery answers and skipped and sent order messages the endpoint receives',
+      'whose cash on delivery answers, skipped and sent order messages and skipped and sent cart reminders the endpoint receives',
     );
     const changed = (schemas.UpdateWebhookEndpoint as { properties: Record<string, unknown> })
       .properties;
@@ -3768,7 +3769,66 @@ describe('webhook endpoints through the API (ADR-081)', () => {
         .error?.issues.map((i) => [i.path.join('.'), i.message]),
     ).toEqual([['channelIds', WEBHOOK_CHANNELS_NEED_THE_EVENTS]]);
     expect(WEBHOOK_CHANNELS_NEED_THE_EVENTS).toContain(
-      'cash on delivery answer, sent order message or campaign events',
+      'cash on delivery answer, sent order message, sent cart reminder or campaign events',
+    );
+  });
+
+  it('take numbers with store_checkout.reminder_sent and stores with either cart reminder event, but no order messages or reasons (ADR-355)', () => {
+    const [shop, number] = [
+      '0192f4d1-a5b2-7c83-9d4e-c1d2e3f4a501',
+      '0192f4d1-a5b2-7c83-9d4e-c1d2e3f4a502',
+    ];
+    const base = { url: 'https://hooks.example.com/w360' };
+    expect(
+      apiCreateWebhookEndpointSchema.parse({
+        ...base,
+        events: ['store_checkout.reminder_sent'],
+        channelIds: [number],
+        storeIds: [shop],
+      }),
+    ).toMatchObject({ channelIds: [number], storeIds: [shop] });
+    expect(
+      apiCreateWebhookEndpointSchema.parse({
+        ...base,
+        events: ['store_checkout.reminder_skipped'],
+        storeIds: [shop],
+      }).storeIds,
+    ).toEqual([shop]);
+    // A skipped reminder happens on no number; neither reminder has an order message or a reason.
+    expect(
+      apiCreateWebhookEndpointSchema
+        .safeParse({ ...base, events: ['store_checkout.reminder_skipped'], channelIds: [number] })
+        .error?.issues.map((i) => [i.path.join('.'), i.message]),
+    ).toEqual([['channelIds', WEBHOOK_CHANNELS_NEED_THE_EVENTS]]);
+    expect(
+      apiCreateWebhookEndpointSchema
+        .safeParse({
+          ...base,
+          events: ['store_checkout.reminder_sent', 'store_checkout.reminder_skipped'],
+          orderMessageEvents: ['order_placed'],
+          orderMessageSkipReasons: ['no_phone'],
+        })
+        .error?.issues.map((i) => [i.path.join('.'), i.message]),
+    ).toEqual([
+      ['orderMessageEvents', WEBHOOK_ORDER_MESSAGES_NEED_THE_EVENT],
+      ['orderMessageSkipReasons', WEBHOOK_ORDER_MESSAGE_SKIP_REASONS_NEED_THE_EVENT],
+    ]);
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas;
+    const given = (schemas.CreateWebhookEndpoint as { properties: Record<string, unknown> })
+      .properties;
+    expect(JSON.stringify(given.storeIds)).toContain(
+      'and a cart reminder to the store of its checkout',
+    );
+    expect(JSON.stringify(given.channelIds)).toContain(
+      "or cart reminder's (store_checkout.reminder_sent) the number it went from",
+    );
+    expect(JSON.stringify(given.channelIds)).toContain(
+      'skipped cart reminder (store_checkout.reminder_skipped), deal, task and note events belong to no number',
+    );
+    expect(JSON.stringify(given.orderMessageSkipReasons)).toContain(
+      'a skipped cart reminder sends store_checkout.reminder_skipped, which the list does not narrow',
     );
   });
 

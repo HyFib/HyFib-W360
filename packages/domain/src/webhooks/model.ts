@@ -30,6 +30,7 @@ import type {
   WebhookTemplateStatus,
 } from '@w360/db';
 import { coerceFieldValue, validDate, type AttributeValue } from '../contacts/fields';
+import type { CartEvent, StoreMessageSkipReason } from '../stores/messages-model';
 
 export type {
   AutomationEndReason,
@@ -89,6 +90,8 @@ export const WEBHOOK_EVENT_KEYS = [
   'store_order.cod_answered',
   'store_order.message_skipped',
   'store_order.message_sent',
+  'store_checkout.reminder_skipped',
+  'store_checkout.reminder_sent',
   'campaign.status_changed',
   'deal.created',
   'deal.updated',
@@ -205,6 +208,16 @@ export const WEBHOOK_EVENT_INFO: Record<WebhookEventType, { label: string; descr
       label: 'Order message sent',
       description:
         'A connected store’s message about an order (placed, cash on delivery confirmation, shipped, delivered or cancelled) went out: its template message was queued for WhatsApp, whose statuses follow as message status events, or the automation its rule chose started.',
+    },
+    'store_checkout.reminder_skipped': {
+      label: 'Cart reminder skipped',
+      description:
+        'A connected Shopify store’s cart reminder (the first or the second) about a checkout a customer left was not sent when it was due: the checkout was completed or too old, an order was placed since, the first reminder was not sent, or a check failed, such as a customer without a number or marketing opt-in, or the frequency cap.',
+    },
+    'store_checkout.reminder_sent': {
+      label: 'Cart reminder sent',
+      description:
+        'A connected Shopify store’s cart reminder (the first or the second) about a checkout a customer left went out: its template message was queued for WhatsApp, whose statuses follow as message status events.',
     },
     'campaign.status_changed': {
       label: 'Campaign status',
@@ -674,7 +687,8 @@ export const WEBHOOK_ORDER_MESSAGE_EVENT_LABELS: Record<WebhookOrderMessageEvent
 /**
  * The reasons a `store_order.message_skipped` event gives, which an endpoint can choose (ADR-354),
  * in the order a store's Messages page explains them: every reason a store's message can be
- * skipped for but the six that concern cart reminders only, which send no event.
+ * skipped for but the six that concern cart reminders only, which only
+ * `store_checkout.reminder_skipped` gives (ADR-355).
  */
 export const WEBHOOK_ORDER_MESSAGE_SKIP_REASONS = [
   'test_order',
@@ -703,6 +717,46 @@ export const WEBHOOK_ORDER_MESSAGE_SKIP_REASONS = [
   'not_in_plan',
   'automation_quota',
 ] as const satisfies readonly WebhookOrderMessageSkipReason[];
+
+/**
+ * The cart reminders a `store_checkout.reminder_skipped` or `store_checkout.reminder_sent` event is
+ * about (ADR-355): a Shopify store's first reminder about a checkout a customer left, and the second.
+ */
+export const WEBHOOK_CART_REMINDERS = [
+  'cart_reminder',
+  'cart_second_reminder',
+] as const satisfies readonly CartEvent[];
+export type WebhookCartReminder = (typeof WEBHOOK_CART_REMINDERS)[number];
+
+/**
+ * The reasons a `store_checkout.reminder_skipped` event gives (ADR-355), in the order a store's
+ * Messages page explains them: the checks a cart reminder goes through when it is due. Never the
+ * reasons only order messages are skipped for (a test order, a late or replaced event, the order
+ * deleted or cancelled, an automation's): reminders are recorded waiting and send no automation.
+ * Nor `checkout_deleted`: a reminder is deleted with its checkout, so none is ever skipped for it.
+ */
+export const WEBHOOK_CART_REMINDER_SKIP_REASONS = [
+  'rule_disabled',
+  'store_disconnected',
+  'no_opt_in',
+  'customer_erased',
+  'no_phone',
+  'contact_erased',
+  'suppressed',
+  'opted_out',
+  'no_marketing_opt_in',
+  'template_unavailable',
+  'channel_unavailable',
+  'missing_variable',
+  'template_changed',
+  'checkout_completed',
+  'order_placed',
+  'first_reminder_not_sent',
+  'cart_too_old',
+  'not_marketing_template',
+  'frequency_capped',
+  'not_in_plan',
+] as const satisfies readonly StoreMessageSkipReason[];
 
 /**
  * The statuses a `deal.status_changed` event reports, which an endpoint can choose (ADR-309), in
@@ -1245,9 +1299,9 @@ export const WEBHOOK_LIMITS = {
   /** The campaigns an endpoint can choose to take the statuses and changes of (ADR-185). */
   campaigns: 50,
   /**
-   * The stores an endpoint can choose to take the cash on delivery answers (ADR-349) and skipped
-   * (ADR-352) and sent (ADR-353) order messages of: a company has at most 5 at once, and a store
-   * removed since it was chosen stays on the list.
+   * The stores an endpoint can choose to take the cash on delivery answers (ADR-349), the skipped
+   * (ADR-352) and sent (ADR-353) order messages and the cart reminders (ADR-355) of: a company has at
+   * most 5 at once, and a store removed since it was chosen stays on the list.
    */
   stores: 20,
   /** The newest campaigns Settings offers to choose from (ADR-185); the API takes any of them. */
@@ -1387,9 +1441,9 @@ export const webhookApiKeyText = (key: WebhookEndpointApiKey): string => {
  * The events that happen on a WhatsApp number, which an endpoint can take for chosen numbers
  * (ADR-170): a campaign's are on the number it sends from, a Payment Link's on its order's (ADR-285),
  * a survey's answer on its conversation's (ADR-293), a run's step on its run's (ADR-326), a cash on
- * delivery answer on its confirmation's (ADR-348), a sent order message on the number it went from
- * (ADR-353). Consent, contact, template, skipped order message (ADR-351), deal, task and note events
- * belong to no number.
+ * delivery answer on its confirmation's (ADR-348), a sent order message (ADR-353) or cart reminder
+ * (ADR-355) on the number it went from. Consent, contact, template, skipped order message (ADR-351),
+ * skipped cart reminder (ADR-355), deal, task and note events belong to no number.
  */
 export const WEBHOOK_CHANNEL_EVENTS = [
   'message.received',
@@ -1406,6 +1460,7 @@ export const WEBHOOK_CHANNEL_EVENTS = [
   'payment_link.status_changed',
   'store_order.cod_answered',
   'store_order.message_sent',
+  'store_checkout.reminder_sent',
   'campaign.status_changed',
 ] as const satisfies readonly WebhookEventType[];
 
@@ -1564,7 +1619,7 @@ export interface WebhookStoreChoice {
   label: string;
 }
 
-/** A store an endpoint takes the cash on delivery answers and order messages of, as stored. */
+/** A store an endpoint takes the answers, order messages and cart reminders of, as stored. */
 export interface WebhookEndpointStore {
   id: string;
   /** Its name or address; null for a store removed since it was chosen, which matches nothing. */
@@ -1580,16 +1635,19 @@ export const webhookStoreText = (store: WebhookEndpointStore): string =>
   store.label ?? 'A removed store';
 
 /**
- * The events of a store's orders, which the stores an endpoint names narrow: cash on delivery
- * answers (ADR-349) and skipped (ADR-352) and sent (ADR-353) order messages.
+ * The events of a store's orders and checkouts, which the stores an endpoint names narrow: cash on
+ * delivery answers (ADR-349), skipped (ADR-352) and sent (ADR-353) order messages, and skipped and
+ * sent cart reminders (ADR-355).
  */
 export const WEBHOOK_STORE_EVENTS = [
   'store_order.cod_answered',
   'store_order.message_skipped',
   'store_order.message_sent',
+  'store_checkout.reminder_skipped',
+  'store_checkout.reminder_sent',
 ] as const satisfies readonly WebhookEventType[];
 
-/** Whether an endpoint with these events takes events of stores' orders, and can choose stores. */
+/** Whether an endpoint with these events takes events of stores, and can choose stores. */
 export function webhookTakesStoreEvents(eventTypes: readonly WebhookEventType[]): boolean {
   return WEBHOOK_STORE_EVENTS.some((type) => eventTypes.includes(type));
 }

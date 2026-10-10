@@ -2650,7 +2650,7 @@ describe('cash on delivery answer, store and order message filters (ADR-349, ADR
     await expectAppError(
       change(skipped, { channelIds: [c.channelAccountId] }),
       'validation_failed',
-      /sent order message or campaign events/,
+      /sent order message, sent cart reminder or campaign events/,
     );
     // The database takes the three lists for an endpoint taking sent messages alone…
     await change(sent);
@@ -2772,6 +2772,104 @@ describe('cash on delivery answer, store and order message filters (ADR-349, ADR
                 'order_message_skip_reasons', 'UPDATE') AS can_update`,
     );
     expect(grant?.can_update).toBe(true);
+  });
+
+  it('take numbers with store_checkout.reminder_sent and stores with either cart reminder event, never order messages or reasons; the database keeps them so (ADR-355)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const url = 'https://hooks.example.com/carts';
+    const tea = await storeOf(c, 'Tara Tea');
+    const sent = ['store_checkout.reminder_sent'];
+    const skipped = ['store_checkout.reminder_skipped'];
+    // A reminder is no order message and has no order message skip reason to choose.
+    for (const [filters, message] of [
+      [{ orderMessageEvents: ['order_placed'] }, /Choose order messages only/],
+      [{ orderMessageSkipReasons: ['no_phone'] }, /Choose skip reasons only/],
+    ] as const) {
+      await expectAppError(
+        webhooks().create(owner, { url, eventTypes: [...sent, ...skipped], ...filters }),
+        'validation_failed',
+        message,
+      );
+    }
+    await expectAppError(
+      webhooks().create(owner, { url, eventTypes: skipped, channelIds: [c.channelAccountId] }),
+      'validation_failed',
+      /sent cart reminder or campaign events/,
+    );
+    expect(await webhooks().list(owner)).toEqual([]);
+
+    const created = await webhooks().create(owner, {
+      url,
+      eventTypes: sent,
+      channelIds: [c.channelAccountId],
+      storeIds: [tea.id],
+    });
+    const current = async () => {
+      const endpoint = (await webhooks().list(owner)).find((e) => e.id === created.id);
+      return {
+        eventTypes: endpoint?.eventTypes,
+        channels: endpoint?.channels?.map((n) => n.id) ?? null,
+        stores: endpoint?.stores?.map((s) => s.id) ?? null,
+      };
+    };
+    expect(await current()).toEqual({
+      eventTypes: sent,
+      channels: [c.channelAccountId],
+      stores: [tea.id],
+    });
+    const change = (eventTypes: string[], fields: Record<string, unknown> = {}) =>
+      webhooks().update(owner, {
+        endpointId: created.id,
+        url,
+        description: '',
+        eventTypes,
+        ...fields,
+      });
+    // Skipped reminders keep the stores; they happen on no number, so the numbers go.
+    await change(skipped);
+    expect(await current()).toEqual({ eventTypes: skipped, channels: null, stores: [tea.id] });
+    // An event of no store clears the stores.
+    await change(['order.received']);
+    expect(await current()).toEqual({
+      eventTypes: ['order.received'],
+      channels: null,
+      stores: null,
+    });
+
+    // The database takes both events, the numbers with the sent one and the stores with either…
+    await change(sent);
+    const setInDatabase = (column: string, value: string) =>
+      fx.query(`UPDATE app.webhook_endpoints SET ${column} = ${value} WHERE id = $1`, [created.id]);
+    await setInDatabase('channel_account_ids', `ARRAY['${c.channelAccountId}']::uuid[]`);
+    await setInDatabase('store_ids', `ARRAY['${tea.id}']::uuid[]`);
+    expect(await current()).toEqual({
+      eventTypes: sent,
+      channels: [c.channelAccountId],
+      stores: [tea.id],
+    });
+    await setInDatabase('channel_account_ids', 'NULL');
+    await setInDatabase('event_types', `'{store_checkout.reminder_skipped}'`);
+    await setInDatabase('store_ids', `ARRAY['${tea.id}']::uuid[]`);
+    // …but not the numbers without the sent one, nor the order messages or reasons with either.
+    await expect(
+      setInDatabase('channel_account_ids', `ARRAY['${c.channelAccountId}']::uuid[]`),
+    ).rejects.toThrow(/webhook_endpoints_channel_account_ids/);
+    await setInDatabase(
+      'event_types',
+      `'{store_checkout.reminder_skipped,store_checkout.reminder_sent}'`,
+    );
+    await expect(setInDatabase('order_message_events', `'{order_placed}'`)).rejects.toThrow(
+      /webhook_endpoints_order_message_events/,
+    );
+    await expect(setInDatabase('order_message_skip_reasons', `'{no_phone}'`)).rejects.toThrow(
+      /webhook_endpoints_order_message_skip_reasons/,
+    );
+    // An unknown type, with no store list for its own check to trip over.
+    await setInDatabase('store_ids', 'NULL');
+    await expect(setInDatabase('event_types', `'{store_checkout.reminder_left}'`)).rejects.toThrow(
+      /webhook_endpoints_event_types_check/,
+    );
   });
 });
 
@@ -4025,7 +4123,7 @@ describe('number filters (ADR-170)', () => {
       expect(isAppError(error) && error.issues?.[0]?.path, JSON.stringify(channelIds)).toBe(path);
     };
     const needsTheEvents =
-      /only for an endpoint that receives message, conversation, survey answer, automation, order, Payment Link, cash on delivery answer, sent order message or campaign events/;
+      /only for an endpoint that receives message, conversation, survey answer, automation, order, Payment Link, cash on delivery answer, sent order message, sent cart reminder or campaign events/;
     await refused(
       ['consent.changed', 'contact.updated', 'template.status_changed'],
       [main],

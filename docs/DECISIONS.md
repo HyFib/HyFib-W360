@@ -13934,3 +13934,59 @@ change at its largest (every event type, the 59 lists and the longest hosts) is 
 within the test's bound of 6,500.
 
 Not built: events for cart reminders, and a filter by reason for anything else.
+
+## ADR-355 Webhook events when a store's cart reminder is skipped or sent (P5-09) (2026-10-10)
+
+Context: a connected Shopify store's cart reminders (ADR-049) message the customers who left a
+checkout with a phone number, from a marketing template, once and again later. Order messages send
+events when they are skipped (ADR-351) or sent (ADR-353), but cart reminders, about checkouts rather
+than orders, sent none (ADR-351, ADR-353 and ADR-354 left them out): a system recovering carts
+could not tell which checkouts HyFib reminded, tie a reminder's message statuses to its checkout, or
+learn which reminders never went out and why, for example to remind those customers another way.
+
+Decision:
+
+- **Two events:** `store_checkout.reminder_skipped` and `store_checkout.reminder_sent`, captured by
+  one trigger on `app.commerce_store_messages` when a cart reminder (a store message with a
+  checkout) becomes skipped, or leaves pending for queued (its template message created and put on
+  the send queue, with the message in the same update). Cart reminders are always recorded pending
+  (ADR-049) and leave pending once, so each sends one of the two. The message's job writes the
+  state, as the runtime role in the company's scope. They are events of their own rather than the
+  order message events with a checkout: their subject is a checkout, which has none of an order's
+  fields, and their reasons and filters differ (no automation, no order message list).
+- **What they keep:** the reminder (`cart_reminder`, the first, or `cart_second_reminder`) as the
+  status; the store message, a skipped one's reason and when the checkout was last left in
+  `detail`; a sent one's chat message, conversation and contact as the event's. The body gives the
+  checkout (HyFib's copy: its id, the store's id and name for it, currency, total in minor units,
+  item count, when it began and was completed) and its store as they are when the event is
+  delivered, and for a sent reminder the conversation's contact as erasure left it and its number;
+  never the customer's name, number or consent from the store, the items' titles or the link back
+  to the checkout.
+- **Reasons:** `reminder.skipReason` lists the 20 reasons a cart reminder can be skipped for
+  (`WEBHOOK_CART_REMINDER_SKIP_REASONS`): the reasons a store's Messages page explains without the
+  ten that concern order messages only (a test order, a late or replaced event, the order deleted or
+  cancelled, an automation's) and `checkout_deleted`, which no reminder gets: a reminder is deleted
+  with its checkout, and the message's job holds the reminder's row, so a checkout deleted meanwhile
+  waits for it.
+- **Filters:** a sent reminder happens on the number it went from, so an endpoint that names numbers
+  receives it for those numbers only; a skipped one belongs to no number. The stores an endpoint
+  names (ADR-349) narrow both, in `app.capture_webhook_event`, replaced with the same signature (the
+  store and the number travel in `detail` for the filters only). The order messages (ADR-352) and
+  the skip reasons (ADR-354) an endpoint names are order messages' own: they do not narrow cart
+  reminders and cannot be chosen for an endpoint that takes only cart reminder events.
+- **Settings and the API:** the two events are listed with the others; the stores, shown for any of
+  the five store events, and the numbers, shown for the sent one, say that they apply to cart
+  reminders. The OpenAPI document describes both events and their bodies.
+- **Gone:** a reminder is deleted with its checkout (HyFib deletes a checkout 30 days after the store
+  last updated it, ADR-049) or its store, so a delivery not yet made then fails as `event_gone`.
+
+Consequences: a cart recovery system can follow each reminder's delivery through `message.status`
+with `reminder.messageId` and account for every reminder that was due. A busy store's reminders
+can send many events (every reminder due sends one), and only endpoints that choose them get them.
+The audit of an endpoint's change at its largest (every event type, now 34, the 59 lists and the
+longest hosts) is now 6,433 bytes, within the test's bound of 6,500; more event types will need that
+bound raised, still within the 7,000 bytes the audit keeps.
+
+Not built: a filter by reminder (first or second) or by a cart reminder's skip reason, events when a
+checkout is left or completed (the store's own webhooks report checkouts), and an event when
+WhatsApp accepts or delivers a reminder (that is `message.status` of `reminder.messageId`).

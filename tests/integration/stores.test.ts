@@ -36,6 +36,8 @@ import {
   storeOrderCodAnsweredPayloadSchema,
   storeOrderMessageSentPayloadSchema,
   storeOrderMessageSkippedPayloadSchema,
+  storeCheckoutReminderSentPayloadSchema,
+  storeCheckoutReminderSkippedPayloadSchema,
   syncTemplates,
   WebhookOAuthTokenCache,
   type StoreMessageEvent,
@@ -202,7 +204,11 @@ const HOOK_HOST = 'hooks.receiver.test';
 async function addHook(
   owner: TenantContext,
   eventTypes: (
-    'store_order.cod_answered' | 'store_order.message_skipped' | 'store_order.message_sent'
+    | 'store_order.cod_answered'
+    | 'store_order.message_skipped'
+    | 'store_order.message_sent'
+    | 'store_checkout.reminder_skipped'
+    | 'store_checkout.reminder_sent'
   )[],
   filters: {
     channelIds?: string[];
@@ -3368,6 +3374,23 @@ describe('Cart reminders', () => {
     await optIn(owner, storeId);
     await marketingOptIn(owner, '+919822200001');
     await addHook(owner, ['store_order.message_skipped', 'store_order.message_sent']);
+    // The cart reminders' own events (ADR-355): every one of them, those of this store on its
+    // number, those of another store, and the skipped ones whichever number an endpoint names.
+    const bothReminders = [
+      'store_checkout.reminder_skipped',
+      'store_checkout.reminder_sent',
+    ] satisfies Parameters<typeof addHook>[1];
+    const outlet = await fx.addNumber(c, { phone: '+91 90000 54331' });
+    const otherStore = await anotherStore(c);
+    const reminders = await addHook(owner, bothReminders);
+    const thisStoreHere = await addHook(owner, bothReminders, {
+      storeIds: [storeId],
+      channelIds: [c.channelAccountId],
+    });
+    const thatStore = await addHook(owner, bothReminders, { storeIds: [otherStore.id] });
+    const otherNumber = await addHook(owner, bothReminders, {
+      channelIds: [outlet.channelAccountId],
+    });
 
     // The second reminder needs the first, and comes later.
     await expectAppError(
@@ -3506,11 +3529,11 @@ describe('Cart reminders', () => {
       secondReminderSwitchedOff: true,
     });
 
-    // Cart reminders are about checkouts, not orders: the five skipped (ADR-351) and the two sent
-    // (ADR-353) send nothing.
-    const cartStates = (await cartRows(storeId)).map((r) => r.state);
-    expect(cartStates.filter((state) => state === 'skipped')).toHaveLength(5);
-    expect(cartStates.filter((state) => state === 'queued')).toHaveLength(2);
+    // Cart reminders are about checkouts, not orders: the five skipped and the two sent send no
+    // order message event (ADR-351, ADR-353), but each one of its own (ADR-355).
+    const reminded = await cartRows(storeId);
+    expect(reminded.filter((r) => r.state === 'skipped')).toHaveLength(5);
+    expect(reminded.filter((r) => r.state === 'queued')).toHaveLength(2);
     expect(
       await fx.query(
         `SELECT count(*)::int AS events FROM app.webhook_events
@@ -3519,6 +3542,168 @@ describe('Cart reminders', () => {
         [c.tenant.id],
       ),
     ).toEqual([{ events: 0 }]);
+    // Each captured once with the reminder and when the checkout was left, a skipped one with its
+    // reason and no number, a sent one with its message, conversation and contact; the store and
+    // the number only steer the deliveries.
+    const reminderEvents = await fx.query<{
+      id: string;
+      type: string;
+      status: string;
+      message_id: string | null;
+      conversation_id: string | null;
+      contact_id: string | null;
+      detail: Record<string, unknown>;
+      deliveries: number;
+    }>(
+      `SELECT e.id, e.type, e.status, e.message_id, e.conversation_id, e.contact_id, e.detail,
+              (SELECT count(*)::int FROM app.webhook_deliveries d
+                WHERE d.tenant_id = e.tenant_id AND d.event_id = e.id) AS deliveries
+         FROM app.webhook_events e
+        WHERE e.tenant_id = $1
+          AND e.type IN ('store_checkout.reminder_skipped', 'store_checkout.reminder_sent')
+        ORDER BY e.occurred_at, e.id`,
+      [c.tenant.id],
+    );
+    const reminderOf = (e: (typeof reminderEvents)[number]) => {
+      const row = reminded.find((r) => r.id === e.detail.storeMessageId);
+      if (!row) throw new Error('an event of no reminder');
+      return row;
+    };
+    expect(
+      reminderEvents.map((e) => [
+        reminderOf(e).external_id,
+        e.type,
+        e.status,
+        e.detail.skipReason ?? null,
+        e.deliveries,
+      ]),
+    ).toEqual([
+      ['10', 'store_checkout.reminder_sent', 'cart_reminder', null, 2],
+      ['11', 'store_checkout.reminder_skipped', 'cart_reminder', 'no_marketing_opt_in', 3],
+      ['10', 'store_checkout.reminder_sent', 'cart_second_reminder', null, 2],
+      [
+        '11',
+        'store_checkout.reminder_skipped',
+        'cart_second_reminder',
+        'first_reminder_not_sent',
+        3,
+      ],
+      ['12', 'store_checkout.reminder_skipped', 'cart_reminder', 'frequency_capped', 3],
+      ['13', 'store_checkout.reminder_skipped', 'cart_reminder', 'cart_too_old', 3],
+      ['14', 'store_checkout.reminder_skipped', 'cart_reminder', 'not_marketing_template', 3],
+    ]);
+    for (const e of reminderEvents) {
+      const row = reminderOf(e);
+      expect(e.status).toBe(row.event);
+      expect(new Date(String(e.detail.occurredAt)).getTime()).toBe(row.occurred_at.getTime());
+      if (e.type === 'store_checkout.reminder_sent') {
+        const [message] = await fx.query<{ conversation_id: string }>(
+          'SELECT conversation_id FROM app.messages WHERE id = $1',
+          [row.message_id],
+        );
+        expect([e.message_id, e.conversation_id, e.contact_id]).toEqual([
+          row.message_id,
+          message?.conversation_id,
+          row.contact_id,
+        ]);
+        expect(Object.keys(e.detail).sort()).toEqual(['occurredAt', 'storeMessageId']);
+      } else {
+        expect([e.message_id, e.conversation_id, e.contact_id]).toEqual([null, null, null]);
+        expect(Object.keys(e.detail).sort()).toEqual([
+          'occurredAt',
+          'skipReason',
+          'storeMessageId',
+        ]);
+      }
+    }
+
+    // Built when delivered: the reminder as captured; the checkout, the store, the contact and the
+    // number as they are now, never the customer's details from the store.
+    await deliverHooks(c);
+    const checkouts = new Map((await checkoutRows(storeId)).map((k) => [String(k.id), k]));
+    const [storeNow] = await fx.query<{ name: string | null; store_url: string }>(
+      'SELECT name, store_url FROM app.commerce_stores WHERE id = $1',
+      [storeId],
+    );
+    const [number] = await fx.query<{ display_phone_number: string | null }>(
+      'SELECT display_phone_number FROM app.channel_accounts WHERE id = $1',
+      [c.channelAccountId],
+    );
+    const [customer] = await fx.query<{ id: string; phone_e164: string; display_name: string }>(
+      `SELECT id, phone_e164, display_name FROM app.contacts
+        WHERE tenant_id = $1 AND phone_e164 = '+919822200001'`,
+      [c.tenant.id],
+    );
+    const bodies = hookBodiesAt(reminders.path);
+    expect(bodies).toHaveLength(7);
+    for (const body of bodies) {
+      const parsed =
+        (body as { type: string }).type === 'store_checkout.reminder_sent'
+          ? storeCheckoutReminderSentPayloadSchema.safeParse(body)
+          : storeCheckoutReminderSkippedPayloadSchema.safeParse(body);
+      expect(parsed.success, JSON.stringify(body)).toBe(true);
+    }
+    expect(bodies).toEqual(
+      expect.arrayContaining(
+        reminderEvents.map((e) => {
+          const row = reminderOf(e);
+          const checkout = checkouts.get(String(row.checkout_id));
+          if (!checkout) throw new Error('a checkout gone');
+          const storeCheckout = {
+            id: checkout.id,
+            externalId: checkout.external_id,
+            name: checkout.name,
+            currency: checkout.currency,
+            totalMinor: checkout.total_minor === null ? null : Number(checkout.total_minor),
+            itemCount: checkout.item_count,
+            startedAt: (checkout.remote_created_at as Date).toISOString(),
+            completedAt: null,
+          };
+          const store = {
+            id: storeId,
+            platform: 'shopify',
+            name: storeNow!.name,
+            url: storeNow!.store_url,
+          };
+          return expect.objectContaining({
+            id: e.id,
+            type: e.type,
+            data:
+              e.type === 'store_checkout.reminder_sent'
+                ? {
+                    reminder: {
+                      event: row.event,
+                      occurredAt: row.occurred_at.toISOString(),
+                      messageId: row.message_id,
+                    },
+                    storeCheckout,
+                    store,
+                    conversation: { id: e.conversation_id },
+                    contact: {
+                      id: customer!.id,
+                      phone: customer!.phone_e164,
+                      name: customer!.display_name,
+                    },
+                    channel: { id: c.channelAccountId, phone: number!.display_phone_number },
+                  }
+                : {
+                    reminder: {
+                      event: row.event,
+                      skipReason: row.skip_reason,
+                      occurredAt: row.occurred_at.toISOString(),
+                    },
+                    storeCheckout,
+                    store,
+                  },
+          });
+        }),
+      ),
+    );
+    expect(hookBodiesAt(thisStoreHere.path)).toHaveLength(7);
+    expect(hookBodiesAt(thatStore.path)).toEqual([]);
+    expect(hookBodiesAt(otherNumber.path).map((body) => (body as { type: string }).type)).toEqual(
+      Array(5).fill('store_checkout.reminder_skipped'),
+    );
   });
 
   it('asks Shopify for customer access only when a manager allows it, and uses the consent the store records', async () => {

@@ -1283,7 +1283,7 @@ verification, app review, Embedded Signup configuration).
   **[Skipped order message events built; their database tests run only in CI]** (ADR-351,
   migrations 0270 and 0271: `store_order.message_skipped` when a store's order message is recorded
   skipped or skipped when due, with the event it was for, the reason, the store's order and the
-  store; no contact or number; cart reminders send nothing).
+  store; no contact or number; cart reminders send events of their own, ADR-355).
   **[Store and order message filters for skipped messages built; their database tests run only in
   CI]** (ADR-352, migration 0272: an endpoint takes `store_order.message_skipped` only for chosen
   order messages and for the orders of chosen stores, the stores shared with cash on delivery
@@ -1292,16 +1292,20 @@ verification, app review, Embedded Signup configuration).
   0273 and 0274: `store_order.message_sent` when a store's order message is queued for WhatsApp or
   starts its automation, with the message or the run, the conversation, the store's order, the
   store, the contact and the number; narrowed by numbers, stores and order messages; cart
-  reminders send nothing).
+  reminders send events of their own, ADR-355).
   **[Skip reason filter for skipped messages built; its database tests run only in CI]** (ADR-354,
   migration 0275: an endpoint takes `store_order.message_skipped` only for chosen reasons, 1 to 25
   of those an order message can be skipped for).
+  **[Cart reminder events built; their database tests run only in CI]** (ADR-355, migrations 0276
+  and 0277: `store_checkout.reminder_skipped` with the reason and `store_checkout.reminder_sent`
+  with the message, the conversation, the contact and the number, each with the checkout, never
+  its customer's details, and the store; narrowed by stores, and the sent one by numbers).
   Remaining: filters for other event types and on a message's values other than its type and words,
   field value comparisons beyond
   values, words and ranges, other authentication (headers computed per delivery, other OAuth
-  grants), mutual TLS, fixed egress addresses, other store events (cart reminder events; the
-  store's orders themselves are reported by the store, ADR-085), a sequence number across events,
-  load tests.
+  grants), mutual TLS, fixed egress addresses, other store events (filters by cart reminder or its
+  skip reason; the store's orders and checkouts themselves are reported by the store, ADR-085), a
+  sequence number across events, load tests.
 - **P5-10 Platform ops screens** **[built, locally verified with test data only]** (ADR-054):
   `/platform/ops` with Overview, Onboarding (failed and abandoned signups, failed or stuck number
   setups, new companies without a number), Integrations (current failures with host-only labels,

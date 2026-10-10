@@ -1886,14 +1886,14 @@ Phase 5 rules (outgoing webhooks, P5-09):
 - An endpoint can take the cash on delivery answers of chosen answers and stores only (ADR-349). The
   answers are checked against the two a confirmation offers; a list may add only stores of the
   endpoint's company (checked in its scope); the answers are kept only while the endpoint takes
-  `store_order.cod_answered`, and the stores while it takes an event of a store's orders (answers,
-  skipped or sent order messages, ADR-352, ADR-353; database checks too, which also refuse a null
-  entry), and applied in `app.capture_webhook_event` to the answer and to the store the
-  confirmation's trigger passes in the same transaction, which is not stored with the event. They
-  only narrow what one endpoint receives and never add an event or a delivery for another endpoint
-  or company; the payload is unchanged. A store removed later stays on the list and matches nothing,
-  so a list never widens by itself. Audited with the lists and in the company data export (unit
-  tests; integration tests, run in CI only).
+  `store_order.cod_answered`, and the stores while it takes an event of a store (answers, skipped or
+  sent order messages, ADR-352, ADR-353, and cart reminders, ADR-355; database checks too, which
+  also refuse a null entry), and applied in `app.capture_webhook_event` to the answer and to the
+  store the confirmation's trigger passes in the same transaction, which is not stored with the
+  event. They only narrow what one endpoint receives and never add an event or a delivery for
+  another endpoint or company; the payload is unchanged. A store removed later stays on the list and
+  matches nothing, so a list never widens by itself. Audited with the lists and in the company data
+  export (unit tests; integration tests, run in CI only).
 - Skipped order message events (ADR-351): `store_order.message_skipped` is captured by triggers in
   the transaction that records an order message skipped or skips it, as the runtime role in the
   company's scope (the store's read and the message's job, the only writers of the state), only for
@@ -1931,6 +1931,21 @@ Phase 5 rules (outgoing webhooks, P5-09):
   The list only narrows what one endpoint receives and never adds an event or a delivery for
   another endpoint or company; the payload is unchanged. Audited with the list and in the company
   data export (unit tests; integration tests, run in CI only).
+- Cart reminder events (ADR-355): `store_checkout.reminder_skipped` and
+  `store_checkout.reminder_sent` are captured by a trigger in the transaction of the message's job
+  that skips or queues a store's cart reminder, as the runtime role in the company's scope (no
+  runtime role can call its function directly), once per reminder: it fires only when a reminder
+  with a checkout becomes skipped or leaves `pending` for `queued`, which happens once. The events
+  keep ids, the reminder, a skipped one's reason and the time; the store and a sent one's number,
+  passed for the filters, are taken out before they are stored. The body, built when delivered in
+  the company's scope, gives the checkout's ids, name, currency, total, item count and times, the
+  store's platform, name and address, and for a sent reminder the conversation's contact as HyFib
+  keeps it (null phone and name once erased) and its number; never the customer's name, phone,
+  email, address or consent from the store's checkout, the items' titles or the link back to the
+  checkout. The store list of an endpoint narrows both, its number list the sent one, in
+  `app.capture_webhook_event`. A reminder deleted with its checkout (30 days after the store last
+  updated it) or its store fails its pending deliveries as `event_gone` (unit tests; integration
+  tests, run in CI only).
 - An endpoint can take the run steps of chosen outcomes only (ADR-327). The list holds only the
   outcomes a run's log records (checked by the services and the database), is kept only while the
   endpoint takes `automation.run_step` (a database check too), and is applied in

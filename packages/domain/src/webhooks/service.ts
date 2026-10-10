@@ -1317,7 +1317,7 @@ export const webhookChannelIdsSchema = z
   .nullable();
 
 export const WEBHOOK_CHANNELS_NEED_THE_EVENTS =
-  'Choose numbers only for an endpoint that receives message, conversation, survey answer, automation, order, Payment Link, cash on delivery answer, sent order message or campaign events.';
+  'Choose numbers only for an endpoint that receives message, conversation, survey answer, automation, order, Payment Link, cash on delivery answer, sent order message, sent cart reminder or campaign events.';
 
 export const WEBHOOK_CHANNELS_NOT_FOUND = 'Choose WhatsApp numbers of this company.';
 
@@ -1530,9 +1530,9 @@ export function webhookCodAnswersFor(
 }
 
 /**
- * The connected stores whose cash on delivery answers (ADR-349) and skipped (ADR-352) and sent
- * (ADR-353) order messages an endpoint takes, each once; null takes every store's, including stores
- * connected later.
+ * The connected stores whose cash on delivery answers (ADR-349), skipped (ADR-352) and sent
+ * (ADR-353) order messages and cart reminders (ADR-355) an endpoint takes, each once; null takes
+ * every store's, including stores connected later.
  */
 export const webhookStoreIdsSchema = z
   .array(z.uuid({ error: 'Choose stores from the list.' }))
@@ -1542,14 +1542,13 @@ export const webhookStoreIdsSchema = z
   .nullable();
 
 export const WEBHOOK_STORES_NEED_THE_EVENT =
-  'Choose stores only for an endpoint that receives Cash on delivery answered, Order message skipped or Order message sent.';
+  'Choose stores only for an endpoint that receives Cash on delivery answered, Order message skipped, Order message sent, Cart reminder skipped or Cart reminder sent.';
 
 export const WEBHOOK_STORES_NOT_FOUND = 'Choose stores of this company.';
 
 /**
- * The stores an endpoint keeps after it is added or changed: every store (null) unless it takes
- * `store_order.cod_answered`, `store_order.message_skipped` or `store_order.message_sent`; then
- * those given, or else the ones it had.
+ * The stores an endpoint keeps after it is added or changed: every store (null) unless it takes an
+ * event of a store (`WEBHOOK_STORE_EVENTS`); then those given, or else the ones it had.
  */
 export function webhookStoreIdsFor(
   eventTypes: readonly WebhookEventType[],
@@ -3068,8 +3067,8 @@ const endpointFields = z.object({
    */
   codAnswers: webhookCodAnswersSchema.optional(),
   /**
-   * Given, the stores whose cash on delivery answers and skipped and sent order messages it takes
-   * (null: every store's, ADR-349, ADR-352, ADR-353); left out, they stay.
+   * Given, the stores whose cash on delivery answers, order messages and cart reminders it takes
+   * (null: every store's, ADR-349, ADR-352, ADR-353, ADR-355); left out, they stay.
    */
   storeIds: webhookStoreIdsSchema.optional(),
   /**
@@ -3336,8 +3335,8 @@ const codAnswersNeedTheEvent = {
   options: { path: ['codAnswers'], message: WEBHOOK_COD_ANSWERS_NEED_THE_EVENT },
 };
 /**
- * Stores are chosen only for an endpoint that takes cash on delivery answers (ADR-349) or skipped
- * (ADR-352) or sent (ADR-353) order messages.
+ * Stores are chosen only for an endpoint that takes an event of a store: cash on delivery answers
+ * (ADR-349), skipped (ADR-352) or sent (ADR-353) order messages, or cart reminders (ADR-355).
  */
 const storesNeedTheEvent = {
   check: (data: { eventTypes: WebhookEventType[]; storeIds?: unknown }) =>
@@ -3824,8 +3823,8 @@ export interface WebhookEndpointView {
   /** The cash on delivery answers it takes (ADR-349); null takes every answer. */
   codAnswers: WebhookCodAnswer[] | null;
   /**
-   * The stores whose cash on delivery answers (ADR-349) and skipped (ADR-352) and sent (ADR-353)
-   * order messages it takes, as stored, named; null takes every store's.
+   * The stores whose cash on delivery answers (ADR-349), order messages (ADR-352, ADR-353) and cart
+   * reminders (ADR-355) it takes, as stored, named; null takes every store's.
    */
   stores: WebhookEndpointStore[] | null;
   /** The order messages whose skips and sends it takes (ADR-352, ADR-353); null: every one's. */
@@ -4999,8 +4998,8 @@ export function createWebhooksService(deps: {
                     and(eq(campaigns.tenantId, ctx.tenant.id), inArray(campaigns.id, campaignIds)),
                   );
           const campaignById = new Map(namedCampaigns.map((c) => [c.id, c]));
-          // The stores endpoints chose for cash on delivery answers and order messages (ADR-349,
-          // ADR-352, ADR-353), named; a store removed since it was chosen has no row.
+          // The stores endpoints chose for their events (ADR-349, ADR-352, ADR-353, ADR-355),
+          // named; a store removed since it was chosen has no row.
           const listedStoreIds = [...new Set(rows.flatMap((r) => r.storeIds ?? []))];
           const namedStores =
             listedStoreIds.length === 0
@@ -5520,9 +5519,10 @@ export function createWebhooksService(deps: {
     },
 
     /**
-     * The connected stores an endpoint can choose to take the cash on delivery answers (ADR-349) and
-     * the skipped and sent order messages (ADR-352, ADR-353) of: the company's stores, at most 5 at
-     * once, in the order they were added, each named as the store gives it, else by its address.
+     * The connected stores an endpoint can choose to take the cash on delivery answers (ADR-349),
+     * the order messages (ADR-352, ADR-353) and the cart reminders (ADR-355) of: the company's
+     * stores, at most 5 at once, in the order they were added, each named as the store gives it,
+     * else by its address.
      */
     async storeChoices(ctx: TenantContext): Promise<WebhookStoreChoice[]> {
       assertCan(ctx, 'developer.manage');

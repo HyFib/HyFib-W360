@@ -16,6 +16,7 @@ import {
   commerceOrderItems,
   commerceOrders,
   commercePaymentLinks,
+  commerceStoreCheckouts,
   commerceStoreMessages,
   commerceStoreOrders,
   commerceStores,
@@ -62,6 +63,8 @@ import { crmCreatedBy, noteWriter } from '../crm/common';
 import { findAnsweredMessageId } from '../messaging/reply-context';
 import { ORDER_MESSAGE_EVENTS } from '../stores/messages-model';
 import {
+  WEBHOOK_CART_REMINDER_SKIP_REASONS,
+  WEBHOOK_CART_REMINDERS,
   WEBHOOK_MESSAGE_STATUSES,
   WEBHOOK_ORDER_MESSAGE_SKIP_REASONS,
   WEBHOOK_RUN_TRIGGERS,
@@ -1093,6 +1096,81 @@ export const storeOrderMessageSentPayloadSchema = envelope(
   }),
 );
 
+/**
+ * A checkout a customer left in a connected Shopify store, as the cart reminder events give it
+ * (ADR-355): HyFib's copy, read when the event is delivered. Never the customer's name, number or
+ * consent, the items' titles or the link back to the checkout.
+ */
+const webhookStoreCheckoutSchema = z.object({
+  id: z.uuid().describe('HyFib’s copy of the checkout.'),
+  externalId: z.string().describe('The checkout’s id at the store, to find it there.'),
+  name: z.string().nullable().describe('The checkout’s name at the store, if it gave one.'),
+  currency: z.string().nullable().describe('ISO 4217 code; null when the store gave none.'),
+  totalMinor: z
+    .number()
+    .int()
+    .nullable()
+    .describe(
+      'The checkout’s total as an integer in the currency’s minor units; null without a currency.',
+    ),
+  itemCount: z.number().int().nullable().describe('How many items the checkout holds.'),
+  startedAt: z.iso
+    .datetime()
+    .describe('When the customer began the checkout, as the store dated it.'),
+  completedAt: z.iso
+    .datetime()
+    .nullable()
+    .describe('When the customer completed it; null while they have not.'),
+});
+const webhookCartReminderEventSchema = z
+  .enum(WEBHOOK_CART_REMINDERS)
+  .describe(
+    'Which reminder it was: cart_reminder, the first, or cart_second_reminder, the second.',
+  );
+export const storeCheckoutReminderSkippedPayloadSchema = envelope(
+  'store_checkout.reminder_skipped',
+  z.object({
+    reminder: z.object({
+      event: webhookCartReminderEventSchema,
+      skipReason: z
+        .enum(WEBHOOK_CART_REMINDER_SKIP_REASONS)
+        .describe(
+          'Why HyFib did not send it, as the store’s Messages page (Commerce → Stores) explains it: for example checkout_completed, cart_too_old, order_placed (an order with the same number since the checkout began), first_reminder_not_sent, no_phone, no_marketing_opt_in or frequency_capped.',
+        ),
+      occurredAt: z.iso
+        .datetime()
+        .describe(
+          'When the checkout was last left, as the store dated it, from which the reminder counted.',
+        ),
+    }),
+    storeCheckout: webhookStoreCheckoutSchema,
+    store: webhookStoreSchema,
+  }),
+);
+export const storeCheckoutReminderSentPayloadSchema = envelope(
+  'store_checkout.reminder_sent',
+  z.object({
+    reminder: z.object({
+      event: webhookCartReminderEventSchema,
+      occurredAt: z.iso
+        .datetime()
+        .describe(
+          'When the checkout was last left, as the store dated it, from which the reminder counted.',
+        ),
+      messageId: z
+        .uuid()
+        .describe(
+          'The template message HyFib sent, among the conversation’s messages: its delivery follows as message.status events with this message.id.',
+        ),
+    }),
+    storeCheckout: webhookStoreCheckoutSchema,
+    store: webhookStoreSchema,
+    conversation: z.object({ id: z.uuid() }),
+    contact: contactSchema,
+    channel: channelSchema,
+  }),
+);
+
 export const pingPayloadSchema = envelope(
   'ping',
   z.object({ endpointId: z.uuid(), message: z.string() }),
@@ -1642,6 +1720,25 @@ const storeOrderColumns = {
   cancelledAt: commerceStoreOrders.cancelledAt,
   deletedAt: commerceStoreOrders.deletedAt,
 };
+/** A store's checkout as the cart reminder events give it (ADR-355): no customer details. */
+const storeCheckoutColumns = {
+  id: commerceStoreCheckouts.id,
+  externalId: commerceStoreCheckouts.externalId,
+  name: commerceStoreCheckouts.name,
+  currency: commerceStoreCheckouts.currency,
+  totalMinor: commerceStoreCheckouts.totalMinor,
+  itemCount: commerceStoreCheckouts.itemCount,
+  startedAt: commerceStoreCheckouts.remoteCreatedAt,
+  completedAt: commerceStoreCheckouts.completedAt,
+};
+/** A store's checkout as read with `storeCheckoutColumns`, its times written out. */
+const toWebhookStoreCheckout = <T extends { startedAt: Date; completedAt: Date | null }>(
+  checkout: T,
+) => ({
+  ...checkout,
+  startedAt: checkout.startedAt.toISOString(),
+  completedAt: checkout.completedAt?.toISOString() ?? null,
+});
 /** A store as the store order events give it. */
 const storeColumns = {
   id: commerceStores.id,
@@ -1744,6 +1841,95 @@ async function storeOrderMessageOf(tx: Tx, tenantId: string, storeMessageId: str
       and(
         eq(commerceStores.tenantId, commerceStoreMessages.tenantId),
         eq(commerceStores.id, commerceStoreMessages.storeId),
+      ),
+    )
+    .where(
+      and(
+        eq(commerceStoreMessages.tenantId, tenantId),
+        eq(commerceStoreMessages.id, storeMessageId),
+      ),
+    );
+  return row ?? null;
+}
+
+/**
+ * A store's cart reminder (ADR-355) with its checkout and the store, in the company; null if there
+ * is none (an order message has an order, not a checkout).
+ */
+async function storeCartReminderOf(tx: Tx, tenantId: string, storeMessageId: string | null) {
+  if (!storeMessageId || !z.uuid().safeParse(storeMessageId).success) return null;
+  const [row] = await tx
+    .select({ checkout: storeCheckoutColumns, store: storeColumns })
+    .from(commerceStoreMessages)
+    .innerJoin(
+      commerceStoreCheckouts,
+      and(
+        eq(commerceStoreCheckouts.tenantId, commerceStoreMessages.tenantId),
+        eq(commerceStoreCheckouts.id, commerceStoreMessages.checkoutId),
+      ),
+    )
+    .innerJoin(
+      commerceStores,
+      and(
+        eq(commerceStores.tenantId, commerceStoreMessages.tenantId),
+        eq(commerceStores.id, commerceStoreMessages.storeId),
+      ),
+    )
+    .where(
+      and(
+        eq(commerceStoreMessages.tenantId, tenantId),
+        eq(commerceStoreMessages.id, storeMessageId),
+      ),
+    );
+  return row ?? null;
+}
+
+/**
+ * A store's sent cart reminder (ADR-355) with its checkout, the store, and the conversation it went
+ * out in with that conversation's contact and number, in the company; null if there is none.
+ */
+async function sentStoreCartReminderOf(
+  tx: Tx,
+  tenantId: string,
+  storeMessageId: string | null,
+  conversationId: string,
+) {
+  if (!storeMessageId || !z.uuid().safeParse(storeMessageId).success) return null;
+  const [row] = await tx
+    .select({
+      checkout: storeCheckoutColumns,
+      store: storeColumns,
+      contactId: conversations.contactId,
+      channelId: conversations.channelAccountId,
+      channelPhone: channelAccounts.displayPhoneNumber,
+    })
+    .from(commerceStoreMessages)
+    .innerJoin(
+      commerceStoreCheckouts,
+      and(
+        eq(commerceStoreCheckouts.tenantId, commerceStoreMessages.tenantId),
+        eq(commerceStoreCheckouts.id, commerceStoreMessages.checkoutId),
+      ),
+    )
+    .innerJoin(
+      commerceStores,
+      and(
+        eq(commerceStores.tenantId, commerceStoreMessages.tenantId),
+        eq(commerceStores.id, commerceStoreMessages.storeId),
+      ),
+    )
+    .innerJoin(
+      conversations,
+      and(
+        eq(conversations.tenantId, commerceStoreMessages.tenantId),
+        eq(conversations.id, conversationId),
+      ),
+    )
+    .leftJoin(
+      channelAccounts,
+      and(
+        eq(channelAccounts.tenantId, conversations.tenantId),
+        eq(channelAccounts.id, conversations.channelAccountId),
       ),
     )
     .where(
@@ -2252,6 +2438,73 @@ export async function buildWebhookPayload(
             automationRunId,
           },
           storeOrder: toWebhookStoreOrder(sent.order),
+          store: sent.store,
+          conversation: { id: event.conversationId },
+          contact: await contactOf(tx, tenantId, sent.contactId),
+          channel: { id: sent.channelId, phone: sent.channelPhone ?? null },
+        },
+      };
+    }
+    case 'store_checkout.reminder_skipped': {
+      // The reminder, the reason and when the checkout was left as captured (a skipped reminder
+      // keeps them); the checkout and its store as they are now. A reminder goes with its checkout
+      // (deleted 30 days after its last update in the store) or its store, so one that is gone can
+      // no longer be described.
+      const skipReason = str(event.detail.skipReason);
+      const occurredAt = str(event.detail.occurredAt);
+      // Every such event is captured with them (0276): one without cannot be described.
+      if (event.status === null || skipReason === null || occurredAt === null) {
+        throw new Error(
+          'The skipped cart reminder was captured without its reminder, reason or time',
+        );
+      }
+      const skipped = await storeCartReminderOf(tx, tenantId, str(event.detail.storeMessageId));
+      if (!skipped) throw new WebhookEventGoneError();
+      return {
+        ...base,
+        data: {
+          reminder: {
+            event: event.status,
+            skipReason,
+            occurredAt: new Date(occurredAt).toISOString(),
+          },
+          storeCheckout: toWebhookStoreCheckout(skipped.checkout),
+          store: skipped.store,
+        },
+      };
+    }
+    case 'store_checkout.reminder_sent': {
+      // The reminder, when the checkout was left, the message and the conversation as captured;
+      // the checkout, its store, the conversation's contact and its number as they are now. A
+      // reminder goes with its checkout or its store, so one that is gone can no longer be described.
+      const occurredAt = str(event.detail.occurredAt);
+      // Every such event is captured with them (0276): one without cannot be described.
+      if (
+        event.status === null ||
+        occurredAt === null ||
+        event.messageId === null ||
+        event.conversationId === null
+      ) {
+        throw new Error(
+          'The sent cart reminder was captured without its reminder, time, message or conversation',
+        );
+      }
+      const sent = await sentStoreCartReminderOf(
+        tx,
+        tenantId,
+        str(event.detail.storeMessageId),
+        event.conversationId,
+      );
+      if (!sent) throw new WebhookEventGoneError();
+      return {
+        ...base,
+        data: {
+          reminder: {
+            event: event.status,
+            occurredAt: new Date(occurredAt).toISOString(),
+            messageId: event.messageId,
+          },
+          storeCheckout: toWebhookStoreCheckout(sent.checkout),
           store: sent.store,
           conversation: { id: event.conversationId },
           contact: await contactOf(tx, tenantId, sent.contactId),
