@@ -1956,6 +1956,12 @@ state` for one that becomes skipped from another state, each only for a message 
   `buildWebhookPayload` reads the reminder with `storeCartReminderOf` (its checkout and store) or
   `sentStoreCartReminderOf` (with the captured conversation's contact and number) and gives the
   reminder as captured, the rest as it is now, never the checkout's customer, items or link.
+- **Skip reason filters for skipped cart reminders** (migration 0278, ADR-356):
+  `cart_reminder_skip_reasons` on an endpoint lists the reasons whose cart reminder skips it takes
+  as `store_checkout.reminder_skipped`, null for every reason; a check keeps it to 1 to 20 of the
+  cart reminders' reasons and to endpoints that take the event. `app.capture_webhook_event`
+  (replaced with the same signature) matches it with the reason the cart reminder's trigger keeps
+  in `detail` (0276), as it matches order messages' with theirs.
 - **Step outcome filters** (migration 0249, ADR-327): `run_step_outcomes` on an endpoint lists the
   outcomes of the run steps it takes as `automation.run_step`, null for every step; a check keeps it
   to 1 to 21 known outcomes and to endpoints that take `automation.run_step`.

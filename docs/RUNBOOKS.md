@@ -3431,13 +3431,13 @@ endpoint still takes Order message sent, and the stores unless it still takes an
 store.
 
 **A receiver misses some skipped order messages of one reason (ADR-354).** An endpoint can take the
-skips of chosen reasons only. The endpoints list shows them ("Skip reasons sent: …"), and the API
-answers `orderMessageSkipReasons` (null takes every reason). A skipped message is sent only when its
-reason is on the list, as well as its order message and its store on theirs; when no endpoint takes
-it, it is not recorded at all, so there is nothing to replay. A store's Messages page (Commerce →
-Stores) shows each message's reason. To take more, tick the reasons under Order message skipped on
-the endpoint's page, or `PATCH /webhook-endpoints/{id}` with `orderMessageSkipReasons` (null for
-every reason). Removing Order message skipped clears the list.
+skips of chosen reasons only. The endpoints list shows them ("Order message skip reasons sent: …"),
+and the API answers `orderMessageSkipReasons` (null takes every reason). A skipped message is sent
+only when its reason is on the list, as well as its order message and its store on theirs; when no
+endpoint takes it, it is not recorded at all, so there is nothing to replay. A store's Messages page
+(Commerce → Stores) shows each message's reason. To take more, tick the reasons under Order message
+skipped on the endpoint's page, or `PATCH /webhook-endpoints/{id}` with `orderMessageSkipReasons`
+(null for every reason). Removing Order message skipped clears the list.
 
 **A receiver misses a sent order message, or gets `event_gone` for one (ADR-353).**
 `store_order.message_sent` is sent once for each of a store's order messages (order placed, cash on
@@ -3467,7 +3467,8 @@ each reminder's state and reason. A reminder still waiting (its delay, the store
 the first reminder) sends nothing yet, and a checkout that calls for no reminder (completed, or
 without a number, when HyFib reads it) sends nothing at all. A sent reminder happens on the number
 it went from, so an endpoint that names numbers gets it only for those; a skipped one belongs to no
-number. The stores an endpoint names narrow both; its order messages and skip reasons do not apply.
+number. The stores an endpoint names narrow both, and its cart reminder skip reasons the skipped
+one (ADR-356); its order messages and order message skip reasons do not apply.
 Events no endpoint takes are not recorded, so there is nothing to replay for reminders due before
 the endpoint took the events. HyFib deletes a checkout 30 days after the store last updated it, and
 removing the store deletes its checkouts, each with its reminders: a delivery not yet made then
@@ -3475,6 +3476,16 @@ fails as `event_gone`, and a replay fails the same way. The body never holds the
 the items or the link back to the checkout; `storeCheckout.externalId` finds the checkout in the
 store, and a sent reminder's `contact` is the conversation's contact as it is when the event is
 delivered.
+
+**A receiver misses some skipped cart reminders of one reason (ADR-356).** An endpoint can take the
+skips of chosen cart reminder reasons only, a list apart from the order messages' reasons (ADR-354).
+The endpoints list shows them ("Cart reminder skip reasons sent: …"), and the API answers
+`cartReminderSkipReasons` (null takes every reason). A skipped reminder is sent only when its reason
+is on the list, as well as its store on the store list; when no endpoint takes it, it is not
+recorded at all, so there is nothing to replay. A store's Messages page (Commerce → Stores) shows
+each reminder's reason. To take more, tick the reasons under Cart reminder skipped on the endpoint's
+page, or `PATCH /webhook-endpoints/{id}` with `cartReminderSkipReasons` (null for every reason).
+Removing Cart reminder skipped clears the list.
 
 **A receiver misses the events of a member's conversations (ADR-181).** An endpoint can take the
 message and conversation events of the conversations assigned to chosen members only. The endpoints

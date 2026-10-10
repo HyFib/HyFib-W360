@@ -191,6 +191,7 @@ import {
   WEBHOOK_STORES_NEED_THE_EVENT,
   WEBHOOK_ORDER_MESSAGES_NEED_THE_EVENT,
   WEBHOOK_ORDER_MESSAGE_SKIP_REASONS_NEED_THE_EVENT,
+  WEBHOOK_CART_REMINDER_SKIP_REASONS_NEED_THE_EVENT,
   WEBHOOK_RUN_STEP_NODE_TYPES_NEED_THE_EVENT,
   WEBHOOK_ORDER_CHANGE_MAKERS_NEED_THE_EVENT,
   WEBHOOK_ORDER_EXCLUDED_API_KEYS_NEED_THE_EVENT,
@@ -220,6 +221,7 @@ import {
   WEBHOOK_COD_ANSWERS,
   WEBHOOK_ORDER_MESSAGE_EVENTS,
   WEBHOOK_ORDER_MESSAGE_SKIP_REASONS,
+  WEBHOOK_CART_REMINDER_SKIP_REASONS,
   WEBHOOK_RUN_STEP_NODE_TYPES,
   WEBHOOK_ORDER_CHANGE_MAKERS,
   WEBHOOK_DEAL_STATUSES,
@@ -1490,6 +1492,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'automationIds',
       'campaignIds',
       'campaignStatuses',
+      'cartReminderSkipReasons',
       'channelIds',
       'codAnswers',
       'consentChanges',
@@ -3589,7 +3592,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       storeIds: [shop],
     });
     expect(apiUpdateWebhookEndpointSchema.safeParse({}).error?.issues[0]?.message).toContain(
-      'the templates, the cash on delivery answers, the stores of store orders’ events, the order messages whose skips and sends are sent, the skip reasons of skipped order messages, the campaigns,',
+      'the templates, the cash on delivery answers, the stores of store events, the order messages whose skips and sends are sent, the skip reasons of skipped order messages, the skip reasons of skipped cart reminders, the campaigns,',
     );
     const doc = buildOpenApiDocument('https://app.example.com/api/v1');
     const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
@@ -3740,6 +3743,62 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     );
   });
 
+  it('take cart reminder skip reasons only with store_checkout.reminder_skipped, and a list of them alone is a change (ADR-356)', () => {
+    const base = {
+      url: 'https://hooks.example.com/w360',
+      events: ['store_checkout.reminder_skipped'],
+    };
+    expect(
+      apiCreateWebhookEndpointSchema.parse({
+        ...base,
+        cartReminderSkipReasons: ['opted_out', 'no_phone', 'opted_out'],
+      }).cartReminderSkipReasons,
+    ).toEqual(['no_phone', 'opted_out']);
+    // A sent reminder or a skipped order message has no cart reminder reason.
+    for (const events of [['store_checkout.reminder_sent'], ['store_order.message_skipped']]) {
+      expect(
+        apiCreateWebhookEndpointSchema
+          .safeParse({ ...base, events, cartReminderSkipReasons: ['no_phone'] })
+          .error?.issues.map((i) => [i.path.join('.'), i.message]),
+        events.join(),
+      ).toEqual([['cartReminderSkipReasons', WEBHOOK_CART_REMINDER_SKIP_REASONS_NEED_THE_EVENT]]);
+    }
+    for (const body of [
+      { ...base, cartReminderSkipReasons: [] },
+      { ...base, cartReminderSkipReasons: ['test_order'] },
+      { ...base, cartReminderSkipReasons: ['checkout_deleted'] },
+    ]) {
+      expect(apiCreateWebhookEndpointSchema.safeParse(body).success, JSON.stringify(body)).toBe(
+        false,
+      );
+    }
+    expect(
+      apiUpdateWebhookEndpointSchema.parse({ cartReminderSkipReasons: ['cart_too_old'] }),
+    ).toEqual({ cartReminderSkipReasons: ['cart_too_old'] });
+    expect(apiUpdateWebhookEndpointSchema.parse({ cartReminderSkipReasons: null })).toEqual({
+      cartReminderSkipReasons: null,
+    });
+    const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+    const schemas = (doc.components as { schemas: Record<string, Record<string, unknown>> })
+      .schemas;
+    const answered = schemas.WebhookEndpoint as {
+      properties: Record<string, { anyOf?: { items?: { enum?: string[] } }[] }>;
+    };
+    expect(answered.properties.cartReminderSkipReasons?.anyOf?.[0]?.items?.enum).toEqual([
+      ...WEBHOOK_CART_REMINDER_SKIP_REASONS,
+    ]);
+    const given = (schemas.CreateWebhookEndpoint as { properties: Record<string, unknown> })
+      .properties;
+    expect(JSON.stringify(given.cartReminderSkipReasons)).toContain(
+      'as reminder.skipReason names them, only with that event',
+    );
+    const changed = (schemas.UpdateWebhookEndpoint as { properties: Record<string, unknown> })
+      .properties;
+    expect(JSON.stringify(changed.cartReminderSkipReasons)).toContain(
+      'unless the events no longer include store_checkout.reminder_skipped, which clears them',
+    );
+  });
+
   it('take numbers, stores and order messages with store_order.message_sent alone (ADR-353)', () => {
     const [shop, number] = [
       '0192f4ca-e481-7c73-9a9e-b1c2d3e4f701',
@@ -3828,7 +3887,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'skipped cart reminder (store_checkout.reminder_skipped), deal, task and note events belong to no number',
     );
     expect(JSON.stringify(given.orderMessageSkipReasons)).toContain(
-      'a skipped cart reminder sends store_checkout.reminder_skipped, which the list does not narrow',
+      'a skipped cart reminder sends store_checkout.reminder_skipped, which this list does not narrow (cartReminderSkipReasons does)',
     );
   });
 

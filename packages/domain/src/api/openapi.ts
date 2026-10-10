@@ -35,6 +35,7 @@ import {
   WEBHOOK_COD_ANSWERS,
   WEBHOOK_ORDER_MESSAGE_EVENTS,
   WEBHOOK_ORDER_MESSAGE_SKIP_REASONS,
+  WEBHOOK_CART_REMINDER_SKIP_REASONS,
   WEBHOOK_RUN_STEP_OUTCOMES,
   WEBHOOK_RUN_STEP_NODE_TYPES,
   WEBHOOK_ORDER_CHANGE_MAKERS,
@@ -1254,6 +1255,12 @@ export const apiWebhookEndpointSchema = z.object({
     .nullable()
     .describe(
       'The reasons whose order message skips the endpoint receives as store_order.message_skipped, as orderMessage.skipReason names them; null receives every reason’s.',
+    ),
+  cartReminderSkipReasons: z
+    .array(z.enum(WEBHOOK_CART_REMINDER_SKIP_REASONS))
+    .nullable()
+    .describe(
+      'The reasons whose cart reminder skips the endpoint receives as store_checkout.reminder_skipped, as reminder.skipReason names them; null receives every reason’s.',
     ),
   runStepOutcomes: z
     .array(z.enum(WEBHOOK_RUN_STEP_OUTCOMES))
@@ -4379,7 +4386,7 @@ export function buildOpenApiDocument(serverUrl: string) {
       'store_checkout.reminder_skipped': webhook(
         'webhookStoreCheckoutReminderSkipped',
         WEBHOOK_EVENT_INFO['store_checkout.reminder_skipped'].label,
-        `${WEBHOOK_EVENT_INFO['store_checkout.reminder_skipped'].description} A Shopify store’s cart reminders go out from the marketing template each reminder’s rule chose, to customers who left a checkout with a phone number: this event is how a store system learns that one did not, and why, for example to remind the customer another way. reminder gives which reminder it was, the reason and when the checkout was last left, as captured; the checkout is HyFib’s copy of the store’s checkout and the store the one it came from, as they are when the event is delivered, with the store’s own checkout id (storeCheckout.externalId) to find it there. Never the customer’s details from the store, the items or the link back to the checkout, and no contact or number: the reminder was never sent, so an endpoint that names numbers receives it whichever numbers it names. An endpoint receives every store’s skipped reminders unless it names the stores (its \`storeIds\`, or the stores ticked in Settings → Webhooks, as for cash on delivery answers). The event is sent once for each cart reminder HyFib skips when it is due; a reminder sent, or waiting for its delay, the store’s sending hours or the first reminder, sends nothing, and so does a checkout that calls for no reminder (completed, or without a number, when HyFib reads it). A reminder is deleted with its checkout (HyFib deletes a checkout ${STORE_MESSAGE_LIMITS.checkoutRetentionDays} days after the store last updated it) or its store, after which a delivery not yet made fails as event_gone.`,
+        `${WEBHOOK_EVENT_INFO['store_checkout.reminder_skipped'].description} A Shopify store’s cart reminders go out from the marketing template each reminder’s rule chose, to customers who left a checkout with a phone number: this event is how a store system learns that one did not, and why, for example to remind the customer another way. reminder gives which reminder it was, the reason and when the checkout was last left, as captured; the checkout is HyFib’s copy of the store’s checkout and the store the one it came from, as they are when the event is delivered, with the store’s own checkout id (storeCheckout.externalId) to find it there. Never the customer’s details from the store, the items or the link back to the checkout, and no contact or number: the reminder was never sent, so an endpoint that names numbers receives it whichever numbers it names. An endpoint receives every store’s skipped reminders unless it names the stores (its \`storeIds\`, or the stores ticked in Settings → Webhooks, as for cash on delivery answers), and every reason’s unless it names the reasons (its \`cartReminderSkipReasons\`, or the reasons ticked under Cart reminder skipped); with both lists, a skipped reminder must pass them both. The event is sent once for each cart reminder HyFib skips when it is due; a reminder sent, or waiting for its delay, the store’s sending hours or the first reminder, sends nothing, and so does a checkout that calls for no reminder (completed, or without a number, when HyFib reads it). A reminder is deleted with its checkout (HyFib deletes a checkout ${STORE_MESSAGE_LIMITS.checkoutRetentionDays} days after the store last updated it) or its store, after which a delivery not yet made fails as event_gone.`,
         'WebhookStoreCheckoutReminderSkipped',
       ),
       'store_checkout.reminder_sent': webhook(

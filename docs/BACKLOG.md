@@ -1300,12 +1300,15 @@ verification, app review, Embedded Signup configuration).
   and 0277: `store_checkout.reminder_skipped` with the reason and `store_checkout.reminder_sent`
   with the message, the conversation, the contact and the number, each with the checkout, never
   its customer's details, and the store; narrowed by stores, and the sent one by numbers).
+  **[Skip reason filter for skipped cart reminders built; its database tests run only in CI]**
+  (ADR-356, migration 0278: an endpoint takes `store_checkout.reminder_skipped` only for chosen
+  reasons, 1 to 20 of those a cart reminder can be skipped for).
   Remaining: filters for other event types and on a message's values other than its type and words,
   field value comparisons beyond
   values, words and ranges, other authentication (headers computed per delivery, other OAuth
-  grants), mutual TLS, fixed egress addresses, other store events (filters by cart reminder or its
-  skip reason; the store's orders and checkouts themselves are reported by the store, ADR-085), a
-  sequence number across events, load tests.
+  grants), mutual TLS, fixed egress addresses, other store events (a filter by cart reminder,
+  first or second; the store's orders and checkouts themselves are reported by the store, ADR-085),
+  a sequence number across events, load tests.
 - **P5-10 Platform ops screens** **[built, locally verified with test data only]** (ADR-054):
   `/platform/ops` with Overview, Onboarding (failed and abandoned signups, failed or stuck number
   setups, new companies without a number), Integrations (current failures with host-only labels,

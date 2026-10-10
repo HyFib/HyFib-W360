@@ -13990,3 +13990,39 @@ bound raised, still within the 7,000 bytes the audit keeps.
 Not built: a filter by reminder (first or second) or by a cart reminder's skip reason, events when a
 checkout is left or completed (the store's own webhooks report checkouts), and an event when
 WhatsApp accepts or delivers a reminder (that is `message.status` of `reminder.messageId`).
+
+## ADR-356 Choosing the skip reasons of the skipped cart reminders a webhook endpoint receives (P5-09) (2026-10-10)
+
+Context: `store_checkout.reminder_skipped` (ADR-355) is sent for every cart reminder a store's rules
+did not send, whatever the reason, narrowed by store only. A receiver that acts on one kind of skip,
+for example reminding customers another way when WhatsApp could not reach them (no number, no
+marketing opt-in, the frequency cap), was sent the reminders of checkouts already completed or
+ordered as well, and had to leave them alone itself. The order message skip reasons (ADR-354) are
+order messages' own and do not apply to reminders.
+
+Decision:
+
+- **A list of reasons:** `cartReminderSkipReasons`, 1 to 20 of the reasons a cart reminder can be
+  skipped for (`WEBHOOK_CART_REMINDER_SKIP_REASONS`, ADR-355), each once, kept in the order a
+  store's Messages page explains them, as `reminder.skipReason` names them. A skipped reminder is
+  sent when its reason is on the list and its store on the store list; null receives every reason,
+  as before. Only while the endpoint takes `store_checkout.reminder_skipped` (migration 0278's
+  check), so the list never outlives its event.
+- **A list of its own:** not the order messages' `orderMessageSkipReasons`, whose reasons and event
+  differ (a reason both have, such as `no_phone`, is chosen for each event apart), so neither list
+  widens or narrows the other's event.
+- **Where it applies:** in `app.capture_webhook_event`, replaced with the same signature, from the
+  reason the cart reminder's trigger keeps in `detail` (0276). A skip no endpoint takes is not
+  recorded. Sent reminders have no reason and are not narrowed by it.
+- **Who sets it:** owners and administrators in Settings → Webhooks (ticked under Cart reminder
+  skipped, each reason in the words of a store's Messages page) and keys with `webhooks.manage`
+  through the API, audited with the endpoint and in the company data export. Refusals name the
+  field: a list without its event, an empty list, an unknown or order message reason.
+
+Consequences: a receiver can take only what it acts on. A reason added to cart reminders later is
+not on an existing list until it is ticked. The audit of an endpoint's change at its largest (every
+event type, the 60 lists and the longest hosts) is now 6,535 bytes, over ADR-353's test bound of
+6,500, which rises to 6,800, still within the 7,000 bytes the audit keeps; the next lists will need
+the entry named more compactly.
+
+Not built: a filter by reminder (first or second).

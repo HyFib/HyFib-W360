@@ -7,6 +7,7 @@ import type {
   WebhookCodAnswer,
   WebhookOrderMessageEvent,
   WebhookOrderMessageSkipReason,
+  WebhookCartReminderSkipReason,
   WebhookConsentChange,
   WebhookContactPart,
   WebhookConversationStatus,
@@ -39,6 +40,7 @@ export type {
   WebhookCodAnswer,
   WebhookOrderMessageEvent,
   WebhookOrderMessageSkipReason,
+  WebhookCartReminderSkipReason,
   WebhookConsentChange,
   WebhookContactPart,
   WebhookConversationStatus,
@@ -756,7 +758,7 @@ export const WEBHOOK_CART_REMINDER_SKIP_REASONS = [
   'not_marketing_template',
   'frequency_capped',
   'not_in_plan',
-] as const satisfies readonly StoreMessageSkipReason[];
+] as const satisfies readonly (WebhookCartReminderSkipReason & StoreMessageSkipReason)[];
 
 /**
  * The statuses a `deal.status_changed` event reports, which an endpoint can choose (ADR-309), in
