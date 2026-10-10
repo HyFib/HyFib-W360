@@ -13543,9 +13543,11 @@ Decision:
   sends (status `canceled`, campaigns/service.ts), and a paused campaign sends its recipients again
   as new messages when it resumes. Counted among the sends, a pause would read as deliveries falling
   and failures thinning, so every share, the failed one of ADR-344 too, is of the sends not
-  cancelled (`shareBase`), as the company reports' rates are. The cancelled are counted each day and
-  shown in the table; the messages chart's sent line still counts every outbound message, as the
-  Usage tab's totals do.
+  cancelled (`shareBase`), the base of the company reports' failure rate (their delivered and read
+  rates are of the sends Meta reported sent and of those delivered, so their figures differ from
+  these). A day whose sends were all cancelled says so rather than "none sent". The cancelled are
+  counted each day and shown in the table; the messages chart's sent line still counts every
+  outbound message, as the Usage tab's totals do.
 - **The live days and the kept ones:** `ops.platform_ops_daily_activity` counts the cancelled,
   delivered and read for the window (0264, replacing 0255's function with three more columns, read
   by name). The kept counts gain `canceled`, `delivered` and `read` (all null on a row counted
@@ -13553,25 +13555,28 @@ Decision:
   cancelled, failed and delivered), and `ops.platform_message_days_counted.outcomes` says whether a
   day was counted with them: the counting job counts again, newest first, every day counted without
   them, as it counts the days never counted, so after a deployment the year has them within about
-  two hours. `ops.platform_ops_message_days` gives null for a day counted without them; until then
-  its failed share is of every send, as ADR-344 took it.
+  two hours. `ops.platform_ops_message_days` gives null for a day counted without them, and such a
+  day has no share at all, its failed share too, until it is counted again: the table says "Not
+  counted".
 - **A chart of their own:** under the failed sends' chart, "Sends delivered and read, as shares of
   those not cancelled", its caption ending with the days drawn, draws two lines on an axis from 0%
   to 100% with a legend: Delivered solid, Read dashed, so the two differ without their colours. A
   day without sends, or whose deliveries are not counted yet, breaks the lines; a lone day is a dot;
   the last day's shares are written at the lines' ends where they fit and do not meet. The
   crosshair, slider and tooltip are the shared frame (`DayChartFrame`), on the plot's edges all
-  three charts share. A note replaces the chart when nothing was sent, when every send was
-  cancelled, or when no day drawn has its deliveries counted yet.
+  three charts share. A note replaces both share charts when nothing was sent, when every send was
+  cancelled, or when no day drawn with sends is counted again yet. The slider and the tooltip give a
+  day's shares "of 97 sends not cancelled", told apart from the messages chart's sent, which still
+  counts every outbound message, and say why a day has none.
 - **Colour:** the fourth and fifth categorical slots (`--chart-4` yellow, `--chart-5` magenta),
   checked with the palette validator against the card: their colour-vision separation passes light
   and dark, but both are under 3:1 on the light card, so the lines' last shares are written at their
   ends, the read line is dashed and the table gives every share: its new "Cancelled", "Delivered"
   and "Read" columns give the cancelled, and each count with its share of the sends not cancelled
-  ("970 (97%)"), or "None sent", or "Not counted". The five slots are told apart within each chart,
-  not across all three: the validator's all-pairs check fails (in dark mode, magenta and aqua are
-  closest for deuteranopia), so no chart relies on another's colours: each has its caption, and this
-  one its legend.
+  ("970 (97%)"), or "None sent", "All cancelled" or "Not counted". The five slots are told apart
+  within each chart, not across all three: the validator's all-pairs check fails (in dark mode,
+  magenta and aqua are closest for deuteranopia), so no chart relies on another's colours: each has
+  its caption, and this one its legend.
 
 Consequences: staff see a day whose sends stopped reaching the customers, platform-wide or a
 company's, beside the day's failures, and a paused campaign no longer reads as either. The latest

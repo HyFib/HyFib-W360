@@ -2753,10 +2753,12 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   `canceled`), those whose status got to delivered (delivered, read or played) and those that got to
   read (read or played). The counting job counts again, newest first, the days counted without them,
   and `ops.platform_ops_message_days` gives null for those until it has. The shares are of the sends
-  not cancelled (`shareBase`), the failed one of ADR-344 too, as the company reports count them.
-  `deliveredShare`, `readShare` and `deliveryShareLayout` (`platform/ops-chart.ts`) lay out
-  `DailyDeliveryShareChart` under the failed sends' chart, on the edges all three charts share
-  (`sharedPlotEdges`), and the table of the days gives the cancelled and each count with its share.
+  not cancelled (`shareBase`, null on a kept day counted without them), the failed one of ADR-344
+  too, as the company reports' failure rate is; `shareGap` says why a day has none (none sent, all
+  cancelled, not counted yet). `deliveredShare`, `readShare` and `deliveryShareLayout`
+  (`platform/ops-chart.ts`) lay out `DailyDeliveryShareChart` under the failed sends' chart, on the
+  edges all three charts share (`sharedPlotEdges`), and the table of the days gives the cancelled
+  and each count with its share.
 - **Exports (ADR-154, ADR-155, ADR-158):** `/platform/ops/export/[list]` (a route handler behind the
   pages' platform actor check; a name of `OPS_EXPORT_LISTS`, any other not found) calls
   `exportList`, which checks in its transaction that the actor is a platform administrator, reads

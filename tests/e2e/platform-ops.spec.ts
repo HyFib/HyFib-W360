@@ -585,11 +585,13 @@ test('staff read the platform’s messages a day on the Usage tab (ADR-333)', as
     await expect(noneSent).toHaveCount(0);
     await expect(failedChart).toHaveAttribute(
       'aria-valuetext',
-      shared.at(-1) === 0
+      sent.at(-1) === 0
         ? `${chartDay(days.at(-1)!)}: none sent`
-        : new RegExp(
-            `^${chartDay(days.at(-1)!)}: [<>]?[\\d.]+% of [\\d,]+ sent failed \\([\\d,]+\\)$`,
-          ),
+        : shared.at(-1) === 0
+          ? new RegExp(`^${chartDay(days.at(-1)!)}: all [\\d,]+ sent were cancelled$`)
+          : new RegExp(
+              `^${chartDay(days.at(-1)!)}: [<>]?[\\d.]+% of [\\d,]+ sends not cancelled failed \\([\\d,]+\\)$`,
+            ),
     );
   } else {
     await expect(sent.some((n) => n > 0) ? allCancelled.first() : noneSent).toBeVisible();
@@ -611,11 +613,13 @@ test('staff read the platform’s messages a day on the Usage tab (ADR-333)', as
     ).toHaveText(['Delivered', 'Read']);
     await expect(deliveryChart).toHaveAttribute(
       'aria-valuetext',
-      shared.at(-1) === 0
+      sent.at(-1) === 0
         ? `${chartDay(days.at(-1)!)}: none sent`
-        : new RegExp(
-            `^${chartDay(days.at(-1)!)}: [<>]?[\\d.]+% of [\\d,]+ sent delivered \\([\\d,]+\\), [<>]?[\\d.]+% read \\([\\d,]+\\)$`,
-          ),
+        : shared.at(-1) === 0
+          ? new RegExp(`^${chartDay(days.at(-1)!)}: all [\\d,]+ sent were cancelled$`)
+          : new RegExp(
+              `^${chartDay(days.at(-1)!)}: [<>]?[\\d.]+% of [\\d,]+ sends not cancelled delivered \\([\\d,]+\\), [<>]?[\\d.]+% read \\([\\d,]+\\)$`,
+            ),
     );
   } else {
     await expect(sent.some((n) => n > 0) ? allCancelled.first() : noneDelivered).toBeVisible();

@@ -14,11 +14,12 @@ import {
   nearestDayIndex,
   readShare,
   shareBase,
+  shareGap,
   sharedPlotEdges,
   type DailyChartDay,
 } from './ops-chart';
 
-// A day with its deliveries counts none cancelled unless told: a kept day without them, none known.
+// None cancelled unless told; a kept day counted before 0264 has null for the three (ADR-346).
 const day = (
   date: string,
   outbound: number,
@@ -26,7 +27,7 @@ const day = (
   failed = 0,
   delivered: number | null = null,
   read: number | null = null,
-  canceled: number | null = delivered === null ? null : 0,
+  canceled: number | null = 0,
 ): DailyChartDay => ({ day: date, outbound, failed, inbound, canceled, delivered, read });
 
 describe('the messages a day chart (ADR-333)', () => {
@@ -213,15 +214,23 @@ describe('the failed sends a day chart (ADR-344)', () => {
     expect(failedShare(paused)).toBe(0.5);
     expect(deliveredShare(paused)).toBe(0.25);
     expect(readShare(paused)).toBe(0.25);
-    // Every send cancelled: no share, as on a day that sent nothing.
+    expect(shareGap(paused)).toBeNull();
+    // Every send cancelled: no share, as on a day that sent nothing, and the reason told apart.
     const cancelled = day('2026-10-09', 3, 1, 0, 0, 0, 3);
     expect(shareBase(cancelled)).toBe(0);
     expect(failedShare(cancelled)).toBeNull();
     expect(deliveredShare(cancelled)).toBeNull();
     expect(readShare(cancelled)).toBeNull();
-    // A kept day counted before the cancellations were: of every send, as ADR-344 took them.
-    expect(shareBase(day('2026-10-09', 40, 3, 1))).toBe(40);
-    expect(failedShare(day('2026-10-09', 40, 3, 1))).toBe(0.025);
+    expect(shareGap(cancelled)).toBe('all_cancelled');
+    expect(shareGap(day('2026-10-09', 0, 4))).toBe('none_sent');
+    // A kept day counted before the cancellations were: no share until it is counted again.
+    const before = day('2026-10-09', 40, 3, 1, null, null, null);
+    expect(shareBase(before)).toBeNull();
+    expect(failedShare(before)).toBeNull();
+    expect(deliveredShare(before)).toBeNull();
+    expect(shareGap(before)).toBe('not_counted');
+    // Nothing sent says so, counted or not.
+    expect(shareGap(day('2026-10-09', 0, 4, 0, null, null, null))).toBe('none_sent');
     // The failed share's scale reaches the share of those not cancelled: 1 of 5 is 20%, not 10%.
     expect(
       failedShareLayout([day('2026-10-09', 10, 0, 1, 4, 2, 5)], 720, 240).yTicks.at(-1)?.label,
@@ -405,7 +414,7 @@ describe('the sends delivered and read a day chart (ADR-346)', () => {
       // Nothing sent, then a day counted before its deliveries were.
       day('2026-10-06', 0, 3),
       day('2026-10-07', 8, 0, 2, 6, 2),
-      day('2026-10-08', 8, 2),
+      day('2026-10-08', 8, 2, 0, null, null, null),
       day('2026-10-09', 5, 0, 0, 4, 1),
     ];
     const layout = deliveryShareLayout(days, 720, 240);

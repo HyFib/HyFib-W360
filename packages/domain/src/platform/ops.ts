@@ -301,9 +301,10 @@ async function dailyActivity(
     outbound: num(r.outbound),
     failed: num(r.failed),
     inbound: num(r.inbound),
-    canceled: num(r.canceled),
-    delivered: num(r.delivered),
-    read: num(r.read),
+    // As returned: the function always counts them on the live days, and a null would show.
+    canceled: r.canceled === null ? null : num(r.canceled),
+    delivered: r.delivered === null ? null : num(r.delivered),
+    read: r.read === null ? null : num(r.read),
   }));
 }
 

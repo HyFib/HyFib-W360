@@ -20,6 +20,7 @@ import {
   failedShareLayout,
   nearestDayIndex,
   shareBase,
+  shareGap,
   sharedPlotEdges,
   type DailyChartDay,
   type DailyChartLayout,
@@ -380,12 +381,34 @@ export function DailyMessagesChart({
   );
 }
 
-// Of the sends not cancelled before they left (`shareBase`, ADR-346), as the shares are.
+/**
+ * Why a day has no share, as the slider's value says it (ADR-346), or null when it has one: the
+ * shares are of the sends not cancelled before they left (`shareBase`).
+ */
+const gapText = (d: DailyChartDay) => {
+  const gap = shareGap(d);
+  return gap === 'none_sent'
+    ? 'none sent'
+    : gap === 'all_cancelled'
+      ? `all ${chartCount(d.outbound)} sent were cancelled`
+      : gap === 'not_counted'
+        ? 'not counted yet'
+        : null;
+};
+
+/** The same in a tooltip, a sentence of its own. */
+const gapTip = (d: DailyChartDay) => {
+  const text = gapText(d);
+  return text === 'none sent'
+    ? 'No message sent'
+    : text && text.charAt(0).toUpperCase() + text.slice(1);
+};
+
 const describeShare = (d: DailyChartDay) => {
   const share = failedShare(d);
   return share === null
-    ? `${chartDayLabel(d.day)}: none sent`
-    : `${chartDayLabel(d.day)}: ${chartShare(share)} of ${chartCount(shareBase(d))} sent failed (${chartCount(d.failed)})`;
+    ? `${chartDayLabel(d.day)}: ${gapText(d) ?? 'none sent'}`
+    : `${chartDayLabel(d.day)}: ${chartShare(share)} of ${chartCount(shareBase(d) ?? 0)} sends not cancelled failed (${chartCount(d.failed)})`;
 };
 
 /**
@@ -465,7 +488,7 @@ export function DailyFailedShareChart({ days, label }: { days: DailyChartDay[]; 
                 {chartDayLabel(shown.day)} (UTC)
               </span>
               {shownShare === null ? (
-                <span className="text-muted-foreground">No message sent</span>
+                <span className="text-muted-foreground">{gapTip(shown) ?? 'No message sent'}</span>
               ) : (
                 <>
                   <span className="flex items-center gap-2">
@@ -478,9 +501,9 @@ export function DailyFailedShareChart({ days, label }: { days: DailyChartDay[]; 
                     <span className="tabular-nums">
                       <strong>{chartCount(shown.failed)}</strong>
                       <span className="text-muted-foreground"> of </span>
-                      <strong>{chartCount(shareBase(shown))}</strong>
+                      <strong>{chartCount(shareBase(shown) ?? 0)}</strong>
                     </span>
-                    <span className="text-muted-foreground">sent</span>
+                    <span className="text-muted-foreground">not cancelled</span>
                   </span>
                 </>
               )}
@@ -494,11 +517,12 @@ export function DailyFailedShareChart({ days, label }: { days: DailyChartDay[]; 
 
 const describeDelivery = (d: DailyChartDay) => {
   const base = shareBase(d);
-  if (base <= 0) return `${chartDayLabel(d.day)}: none sent`;
-  if (d.delivered === null || d.read === null) {
-    return `${chartDayLabel(d.day)}: deliveries not counted yet`;
+  const gap = gapText(d);
+  if (gap !== null) return `${chartDayLabel(d.day)}: ${gap}`;
+  if (base === null || d.delivered === null || d.read === null) {
+    return `${chartDayLabel(d.day)}: not counted yet`;
   }
-  return `${chartDayLabel(d.day)}: ${chartShare(d.delivered / base)} of ${chartCount(base)} sent delivered (${chartCount(d.delivered)}), ${chartShare(d.read / base)} read (${chartCount(d.read)})`;
+  return `${chartDayLabel(d.day)}: ${chartShare(d.delivered / base)} of ${chartCount(base)} sends not cancelled delivered (${chartCount(d.delivered)}), ${chartShare(d.read / base)} read (${chartCount(d.read)})`;
 };
 
 /**
@@ -614,10 +638,10 @@ export function DailyDeliveryShareChart({
                 <span className="text-xs text-muted-foreground">
                   {chartDayLabel(shown.day)} (UTC)
                 </span>
-                {shareBase(shown) <= 0 ? (
-                  <span className="text-muted-foreground">No message sent</span>
+                {gapTip(shown) !== null ? (
+                  <span className="text-muted-foreground">{gapTip(shown)}</span>
                 ) : shown.delivered === null || shown.read === null ? (
-                  <span className="text-muted-foreground">Deliveries not counted yet</span>
+                  <span className="text-muted-foreground">Not counted yet</span>
                 ) : (
                   <>
                     {DELIVERY_CHART_SERIES.map((s) => {
@@ -639,8 +663,8 @@ export function DailyDeliveryShareChart({
                     })}
                     <span className="flex items-center gap-2">
                       <span className="w-4 shrink-0" />
-                      <strong className="tabular-nums">{chartCount(shareBase(shown))}</strong>
-                      <span className="text-muted-foreground">sent</span>
+                      <strong className="tabular-nums">{chartCount(shareBase(shown) ?? 0)}</strong>
+                      <span className="text-muted-foreground">not cancelled</span>
                     </span>
                   </>
                 )}

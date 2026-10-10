@@ -10,7 +10,7 @@
 -- 0255) and the kept counts (0262) now count both, outbound messages only, as they count the
 -- failed ones, and the sends cancelled before they left (status canceled: a paused or cancelled
 -- campaign's queued sends, sent again as new messages when it resumes), which the shares leave
--- out, as the company reports do. Counts a day only, never a contact or a message.
+-- out, as the company reports' failure rate does. Counts a day only, never a contact or a message.
 
 -- The kept counts gain the day's sends cancelled, delivered and read: all null on a row counted
 -- before this migration, which the counting job counts again (below), all set on every row it
