@@ -28,7 +28,11 @@ import { credentialAad } from '../messaging/credentials';
 import { registrationPinAad } from '../messaging/onboarding';
 import { receiptAad } from '../messaging/receipts';
 import { storeAccessCodeAad, storeCredentialsAad, storeWebhookSecretAad } from '../stores/model';
-import { webhookOAuthKeyAad, webhookOAuthSecretAad } from '../webhooks/oauth';
+import {
+  webhookOAuthKeyAad,
+  webhookOAuthNextKeyAad,
+  webhookOAuthSecretAad,
+} from '../webhooks/oauth';
 import { webhookHeadersAad, webhookSecretAad } from '../webhooks/service';
 
 /**
@@ -37,7 +41,8 @@ import { webhookHeadersAad, webhookSecretAad } from '../webhooks/service';
  * with (the same functions, so the two cannot drift). While more than one key is configured, the
  * minute sweep re-encrypts the values sealed with a configured key other than the primary, so that
  * key can be removed once nothing is sealed with it. The latest migration that defines
- * `ops.sealed_value_keys` (0101, then 0121, 0258 and 0287) lists the same columns, in the same order.
+ * `ops.sealed_value_keys` (0101, then 0121, 0258, 0287 and 0288) lists the same columns, in the same
+ * order.
  */
 export const SEALED_VALUE_KINDS = [
   'whatsapp_token',
@@ -55,6 +60,7 @@ export const SEALED_VALUE_KINDS = [
   'webhook_headers',
   'webhook_oauth_secret',
   'webhook_oauth_private_key',
+  'webhook_oauth_next_private_key',
   'provider_receipt',
   'queued_email',
   'alert_channel',
@@ -77,6 +83,7 @@ export const SEALED_VALUE_LABELS: Record<SealedValueKind, string> = {
   webhook_headers: 'Webhook endpoint headers',
   webhook_oauth_secret: 'Webhook endpoint OAuth client secrets',
   webhook_oauth_private_key: 'Webhook endpoint OAuth client private keys',
+  webhook_oauth_next_private_key: 'Webhook endpoint OAuth client next private keys',
   provider_receipt: 'Provider webhook bodies (kept 7 days)',
   queued_email: 'Emails waiting to be sent',
   alert_channel: 'The operations alerts’ chat channel address',
@@ -265,6 +272,13 @@ const SEALED_VALUES: Record<SealedValueKind, SealedValueSpec> = {
     tenantId: webhookEndpoints.tenantId,
     sealed: webhookEndpoints.oauthPrivateKeyCiphertext,
     aad: (r) => webhookOAuthKeyAad(r.tenantId, r.id),
+  }),
+  webhook_oauth_next_private_key: sealedColumn({
+    table: webhookEndpoints,
+    id: webhookEndpoints.id,
+    tenantId: webhookEndpoints.tenantId,
+    sealed: webhookEndpoints.oauthNextPrivateKeyCiphertext,
+    aad: (r) => webhookOAuthNextKeyAad(r.tenantId, r.id),
   }),
   provider_receipt: sealedColumn({
     table: webhookReceipts,

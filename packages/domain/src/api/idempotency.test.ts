@@ -186,13 +186,15 @@ describe('answers kept with an Idempotency-Key (ADR-339)', () => {
       assigneeIds: ids(WEBHOOK_LIMITS.assignees),
       contactTags: tags(WEBHOOK_LIMITS.contactTags),
       conversationTags: tags(WEBHOOK_LIMITS.conversationTags),
-      // A client that signs with a key pair answers its public key, the larger answer (ADR-367).
+      // A client that signs with a key pair answers its public key and its next one, the larger
+      // answer (ADR-367, ADR-368).
       oauth: {
         tokenUrl: `https://${'o'.repeat(WEBHOOK_LIMITS.urlLength - 8)}`,
         clientId: text(WEBHOOK_LIMITS.oauthClientIdLength),
         scope: text(WEBHOOK_LIMITS.oauthScopeLength),
         clientAuthentication: 'private_key_jwt',
         publicKey: webhookOAuthPublicKey(generateWebhookOAuthKeyPair().publicKey),
+        nextPublicKey: webhookOAuthPublicKey(generateWebhookOAuthKeyPair().publicKey),
       },
       apiKeyId: ids(1)[0]!,
       createdAt: at,

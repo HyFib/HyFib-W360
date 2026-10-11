@@ -2703,7 +2703,8 @@ ADR-367): its secret or private key sealed with a key missing from `W360_ENCRYPT
 onto another endpoint, or a private key that is not RSA. Restore the key; if it cannot come back,
 the company gives the client secret again or, for a client that signs with a key pair, makes a new
 key pair ("Make a new key pair", `replaceKey`, then registers its public key): a change that keeps
-the key pair does not open it, so it keeps an unreadable one.
+the key pair does not open it, so it keeps an unreadable one. A next key pair (ADR-368) is never
+opened by the worker, so it fails no delivery.
 Restore the key; if it cannot come back, the company gives the headers again ("Replace the headers"
 on the endpoint's page, or `PATCH /webhook-endpoints/{id}` with `headers`). `errorCode` `55P03` or
 `57014` is a lock or statement timeout. Once the cause is fixed, the company replays: "Replay failed
@@ -2872,7 +2873,16 @@ a client set to "A JWT signed with a key pair HyFib keeps" (`private_key_jwt`, A
 (400 or 401) until its public key is registered for the client with the server: copy it from the
 endpoint ("Public key to register", as a JWK set or PEM, or `oauth.publicKey` in the API) and
 check the server takes RS256 and the key id named in the JWT's `kid`; after "Make a new key pair"
-(`replaceKey`) the old key stops at once, so register the new one; `oauth_token_refused_404` or a
+(`replaceKey`) the old key stops at once, so register the new one. To change keys without a gap
+(ADR-368), choose "Make a next key pair to register first" (`nextKey: "make"`), register its public
+key ("Next public key", whose JWK set holds both keys, or `oauth.nextPublicKey`) beside the one in
+use, then "Sign with the next key pair from now on" (`nextKey: "use"` with `nextKeyId`, the next
+key's id as answered); if the server refuses the next token, register the key HyFib now names in
+`kid` (the next key) or fix the server's set, since the old pair is gone. "There is no next key
+pair" means it was used or dropped already; "The next key pair changed since it was shown" means
+another one was made meanwhile (another tab, member or connector): reload, register the next public
+key shown, then switch; "The next key pair can no longer be read" (its key missing from
+`W360_ENCRYPTION_KEYS`) means drop it and make another; `oauth_token_refused_404` or a
 3xx: the token URL is wrong (redirects are not followed);
 `oauth_token_invalid`: it answered 200 without a bearer token (an HTML page, or a token type other
 than Bearer); `oauth_token_timeout`, `_dns_failed`, `_connect_failed` or `_address_blocked`: the

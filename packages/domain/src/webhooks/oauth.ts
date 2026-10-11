@@ -17,8 +17,9 @@ import { WEBHOOK_LIMITS, type WebhookOAuthPublicKey } from './model';
  * token request of RFC 6749 section 4.4 (`grant_type=client_credentials`, the client authenticated
  * as section 2.3.1 says, with HTTP Basic or, for a server that wants them there, its credentials in
  * the request body, ADR-357, or with a JWT signed with its secret, RFC 7523, ADR-366, or with a
- * private key HyFib keeps, ADR-367) and the bearer usage of RFC 6750 section 2.1. Only what a client needs is here: the request, reading the answer
- * of section 5.1 or the refusal of 5.2, and the tokens a worker keeps in memory.
+ * private key HyFib keeps, ADR-367) and the bearer usage of RFC 6750 section 2.1. Only what a client
+ * needs is here: the request, reading the answer of section 5.1 or the refusal of 5.2, and the
+ * tokens a worker keeps in memory.
  */
 
 /** Binds an endpoint's OAuth client secret to its company and the endpoint. */
@@ -28,6 +29,13 @@ export const webhookOAuthSecretAad = (tenantId: string, endpointId: string) =>
 /** Binds an endpoint's OAuth client private key to its company and the endpoint (ADR-367). */
 export const webhookOAuthKeyAad = (tenantId: string, endpointId: string) =>
   `webhook-oauth-key:${tenantId}:${endpointId}`;
+
+/**
+ * Binds an endpoint's OAuth client's next private key to its company and the endpoint (ADR-368):
+ * another binding than the key in use's, so neither ciphertext opens as the other.
+ */
+export const webhookOAuthNextKeyAad = (tenantId: string, endpointId: string) =>
+  `webhook-oauth-next-key:${tenantId}:${endpointId}`;
 
 /** The ways a client authenticates with a secret it shares with its server. */
 export type WebhookOAuthSecretAuthentication = Exclude<WebhookOAuthClientAuth, 'private_key_jwt'>;

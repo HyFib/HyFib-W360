@@ -129,6 +129,7 @@ import {
   type WebhookEndpointField,
   type WebhookEndpointOAuth,
   type WebhookOAuthClientAuth,
+  type WebhookOAuthNextKeyAction,
   type WebhookEndpointOwner,
   type WebhookEndpointPipeline,
   type WebhookEndpointApiKey,
@@ -3499,8 +3500,43 @@ interface OAuthFields {
   scope: string;
   /** How the client proves itself to the token URL (ADR-357, ADR-366, ADR-367). */
   clientAuthentication: WebhookOAuthClientAuth;
-  /** Whether a client that signs with HyFib's key pair gets a new one (ADR-367). */
-  replaceKey: boolean;
+  /** What becomes of the key pair of a client that signs with HyFib's (ADR-367, ADR-368). */
+  keyAction: OAuthKeyAction;
+}
+
+/**
+ * What a change does with the key pair of a client that signs with one: keeps it, replaces it at
+ * once (ADR-367), or makes, uses or drops its next one (ADR-368).
+ */
+type OAuthKeyAction = 'keep' | 'replace' | WebhookOAuthNextKeyAction;
+
+/** The key pair choices a client that signs with HyFib's key pair offers, and how they read. */
+function oauthKeyActions(hasNext: boolean): (readonly [OAuthKeyAction, string])[] {
+  return hasNext
+    ? [
+        ['keep', 'Keep the key pair and its next one'],
+        [
+          'use',
+          'Sign with the next key pair from now on (register its public key first); the current one goes',
+        ],
+        ['drop', 'Drop the next key pair, unused'],
+        ['make', 'Make another next key pair in place of the one not used yet'],
+        [
+          'replace',
+          'Make a new key pair, used at once: the current one stops working, so register the new public key with the authorization server',
+        ],
+      ]
+    : [
+        ['keep', 'Keep the key pair'],
+        [
+          'make',
+          'Make a next key pair to register first; HyFib goes on signing with the current one until you switch',
+        ],
+        [
+          'replace',
+          'Make a new key pair, used at once: the current one stops working, so register the new public key with the authorization server',
+        ],
+      ];
 }
 
 /**
@@ -3544,6 +3580,12 @@ function OAuthClientFields({
         <>
           <p className="text-sm break-all">{webhookOAuthText(stored)}.</p>
           {stored.publicKey ? <WebhookOAuthPublicKeyDetails publicKey={stored.publicKey} /> : null}
+          {stored.publicKey && stored.nextPublicKey ? (
+            <WebhookOAuthPublicKeyDetails
+              publicKey={stored.nextPublicKey}
+              inUse={stored.publicKey}
+            />
+          ) : null}
           {(
             [
               ['keep', 'Keep the OAuth client'],
@@ -3606,19 +3648,24 @@ function OAuthClientFields({
             )}
           </Field>
           {fields.clientAuthentication === 'private_key_jwt' ? (
-            // A client that signs with HyFib's key pair has no secret (ADR-367).
+            // A client that signs with HyFib's key pair has no secret (ADR-367); it keeps its key
+            // pair, replaces it at once, or changes keys through a next pair (ADR-368).
             stored?.clientAuthentication === 'private_key_jwt' ? (
-              <div className="flex items-start gap-2 sm:col-span-2">
-                <Checkbox
-                  id={`${prefix}-oauth-replace-key`}
-                  checked={fields.replaceKey}
-                  onChange={(e) => set({ replaceKey: e.target.checked })}
-                />
-                <Label htmlFor={`${prefix}-oauth-replace-key`} className="font-normal">
-                  Make a new key pair: the current one stops working at once, so register the new
-                  public key with the authorization server
-                </Label>
-              </div>
+              <fieldset className="grid gap-1 sm:col-span-2">
+                <legend className="mb-1 text-sm font-medium">Key pair</legend>
+                {oauthKeyActions(stored.nextPublicKey !== null).map(([value, label]) => (
+                  <label key={value} className="flex items-start gap-2 text-sm">
+                    <input
+                      type="radio"
+                      className="mt-1"
+                      name={`${prefix}-oauth-key`}
+                      checked={fields.keyAction === value}
+                      onChange={() => set({ keyAction: value })}
+                    />
+                    {label}
+                  </label>
+                ))}
+              </fieldset>
             ) : (
               <p className="text-xs text-muted-foreground sm:col-span-2">
                 HyFib makes an RSA key pair when you save, keeps its private key and signs each JWT
@@ -3696,7 +3743,7 @@ const oauthFieldsOf = (stored: WebhookEndpointOAuth | null | undefined): OAuthFi
   clientSecret: '',
   scope: stored?.scope ?? '',
   clientAuthentication: stored?.clientAuthentication ?? 'client_secret_basic',
-  replaceKey: false,
+  keyAction: 'keep',
 });
 
 /**
@@ -4609,8 +4656,12 @@ export function WebhookEndpointForm({
           if (!r.ok) setError(r);
         };
         // The OAuth client to set (ADR-173); an empty secret keeps the stored one, and a client that
-        // signs with HyFib's key pair sends none, only whether to make a new key pair (ADR-367).
+        // signs with HyFib's key pair sends none, only what becomes of its key pair (ADR-367,
+        // ADR-368): using or dropping the next pair names the next key shown here, so the change is
+        // refused if another one has been made since.
         const signsWithKey = oauthFields.clientAuthentication === 'private_key_jwt';
+        const keyAction = signsWithKey ? oauthFields.keyAction : 'keep';
+        const shownNextKeyId = endpoint?.oauth?.nextPublicKey?.keyId;
         const oauth = {
           tokenUrl: oauthFields.tokenUrl,
           clientId: oauthFields.clientId,
@@ -4619,7 +4670,11 @@ export function WebhookEndpointForm({
           ...(oauthFields.clientSecret && !signsWithKey
             ? { clientSecret: oauthFields.clientSecret }
             : {}),
-          ...(oauthFields.replaceKey && signsWithKey ? { replaceKey: true } : {}),
+          ...(keyAction === 'replace' ? { replaceKey: true } : {}),
+          ...(keyAction === 'make' ? { nextKey: keyAction } : {}),
+          ...((keyAction === 'use' || keyAction === 'drop') && shownNextKeyId
+            ? { nextKey: keyAction, nextKeyId: shownNextKeyId }
+            : {}),
         };
         if (endpoint) {
           void updateWebhookEndpointAction(slug, {
@@ -4638,7 +4693,7 @@ export function WebhookEndpointForm({
               setHeaders([]);
               setReplaceHeaders(false);
               setOAuthChange('keep');
-              setOAuthFields((fields) => ({ ...fields, clientSecret: '', replaceKey: false }));
+              setOAuthFields((fields) => ({ ...fields, clientSecret: '', keyAction: 'keep' }));
             }
           });
         } else {

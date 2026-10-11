@@ -4,6 +4,7 @@ import {
   webhookHost,
   type WebhookContactFieldValue,
   type WebhookOAuthClientAuth,
+  type WebhookOAuthNextKeyAction,
   type WebhookReplayPeriod,
 } from '@w360/domain/webhook-model';
 import { getRuntime } from '@/server/runtime';
@@ -16,7 +17,7 @@ import { tenantForAction } from '@/server/tenant-action';
  * here, when an endpoint is created or its secret rotated.
  */
 
-/** An endpoint's OAuth client as the form gives it (ADR-173, ADR-357, ADR-367). */
+/** An endpoint's OAuth client as the form gives it (ADR-173, ADR-357, ADR-367, ADR-368). */
 interface WebhookOAuthActionInput {
   tokenUrl: string;
   clientId: string;
@@ -26,6 +27,10 @@ interface WebhookOAuthActionInput {
   clientAuthentication: WebhookOAuthClientAuth;
   /** A client that signs with HyFib's key pair gets a new one (ADR-367). */
   replaceKey?: boolean;
+  /** What becomes of that client's next key pair (ADR-368). */
+  nextKey?: WebhookOAuthNextKeyAction;
+  /** The next key shown, which using or dropping it names (ADR-368). */
+  nextKeyId?: string;
 }
 export async function createWebhookEndpointAction(
   slug: string,

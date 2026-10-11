@@ -728,6 +728,13 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
   oauthPrivateKeyCiphertext: text('oauth_private_key_ciphertext'),
   oauthPublicKey: text('oauth_public_key'),
   /**
+   * The next key pair of a `private_key_jwt` client (migration 0288, ADR-368), made beside the one
+   * in use for the company to register before HyFib switches to it: the same two forms. Both null
+   * without one; never used to sign until it replaces the pair in use.
+   */
+  oauthNextPrivateKeyCiphertext: text('oauth_next_private_key_ciphertext'),
+  oauthNextPublicKey: text('oauth_next_public_key'),
+  /**
    * How the OAuth client authenticates to its authorization server (migration 0279, ADR-357): HTTP
    * Basic (the default, kept unused without a client), its identifier and secret in the request
    * body, or a JWT signed with its secret (0286, ADR-366) or with its private key (0287, ADR-367).

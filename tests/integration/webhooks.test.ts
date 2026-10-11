@@ -51,6 +51,7 @@ import {
   webhookHeadersAad,
   WebhookOAuthTokenCache,
   webhookOAuthKeyAad,
+  webhookOAuthNextKeyAad,
   webhookOAuthSecretAad,
   webhookSecretAad,
   type TenantContext,
@@ -771,6 +772,7 @@ describe('OAuth clients (ADR-173)', () => {
       scope: 'events.write read',
       clientAuthentication: 'client_secret_post',
       publicKey: null,
+      nextPublicKey: null,
     });
     expect(await auditsOf(c, 'webhook.endpoint_created')).toEqual([
       {
@@ -967,6 +969,7 @@ describe('OAuth clients (ADR-173)', () => {
       scope: null,
       clientAuthentication: 'client_secret_jwt',
       publicKey: null,
+      nextPublicKey: null,
     });
   });
 
@@ -1209,6 +1212,250 @@ describe('OAuth clients (ADR-173)', () => {
     );
   });
 
+  it('make a next key pair, shown and not used, then sign with it once asked to, or drop it (ADR-368)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const id = randomBytes(6).toString('hex');
+    const bearer = `/bearer/${id}`;
+    const token = `/token/${id}`;
+    const tokenUrl = `http://${HOST}:${port}${token}`;
+    const url = `http://${HOST}:${port}${bearer}`;
+    const signer = {
+      tokenUrl,
+      clientId: 'hyfib-next',
+      clientAuthentication: 'private_key_jwt' as const,
+    };
+    const created = await webhooks().create(owner, {
+      url,
+      eventTypes: ['consent.changed'],
+      oauth: signer,
+    });
+    const change = (oauth: Record<string, unknown>) =>
+      webhooks().update(owner, {
+        endpointId: created.id,
+        url,
+        description: '',
+        eventTypes: ['consent.changed'],
+        oauth,
+      });
+    const shown = async () => (await webhooks().list(owner))[0]?.oauth;
+    const first = (await shown())?.publicKey;
+    expect(first?.keyId).toBeDefined();
+    expect((await shown())?.nextPublicKey).toBeNull();
+    // There is none to use or drop yet.
+    for (const nextKey of ['use', 'drop']) {
+      await expectAppError(
+        change({ ...signer, nextKey }),
+        'validation_failed',
+        /There is no next key pair/,
+      );
+    }
+    // Made: shown beside the pair in use, which stays; its private key sealed under a binding of
+    // its own and never answered.
+    await change({ ...signer, nextKey: 'make' });
+    const next = (await shown())?.nextPublicKey;
+    expect((await shown())?.publicKey).toEqual(first);
+    expect(next?.keyId).toBeDefined();
+    expect(next?.keyId).not.toBe(first?.keyId);
+    expect(next?.jwk).toMatchObject({ kty: 'RSA', kid: next?.keyId, use: 'sig', alg: 'RS256' });
+    const stored = async () =>
+      (
+        await fx.query<{
+          oauth_private_key_ciphertext: string | null;
+          oauth_public_key: string | null;
+          oauth_next_private_key_ciphertext: string | null;
+          oauth_next_public_key: string | null;
+        }>(
+          `SELECT oauth_private_key_ciphertext, oauth_public_key, oauth_next_private_key_ciphertext,
+                  oauth_next_public_key
+             FROM app.webhook_endpoints WHERE id = $1`,
+          [created.id],
+        )
+      )[0];
+    const row = await stored();
+    expect(row?.oauth_public_key).toBe(first?.pem);
+    expect(row?.oauth_next_public_key).toBe(next?.pem);
+    const nextSealed = row!.oauth_next_private_key_ciphertext!;
+    const nextPrivateKey = fx.keyring.decryptString(
+      nextSealed,
+      webhookOAuthNextKeyAad(c.tenant.id, created.id),
+    );
+    expect(() =>
+      fx.keyring.decryptString(nextSealed, webhookOAuthKeyAad(c.tenant.id, created.id)),
+    ).toThrow();
+    expect(createPublicKey(nextPrivateKey).export({ type: 'spki', format: 'pem' })).toBe(next?.pem);
+    expect(JSON.stringify(await webhooks().list(owner))).not.toContain(
+      nextPrivateKey.split('\n')[1]!,
+    );
+    // Each delivery's token request: the assertion's header, and whether a public key checks it.
+    const assertionOf = (n: number) => {
+      const form = new URLSearchParams(requestsTo(token)[n - 1]?.body);
+      const [header, payload, signature] = (form.get('client_assertion') ?? '').split('.');
+      return {
+        header: JSON.parse(Buffer.from(header!, 'base64url').toString('utf8')) as unknown,
+        checks: (key: NonNullable<typeof first>) =>
+          verify(
+            'sha256',
+            Buffer.from(`${header}.${payload}`, 'utf8'),
+            createPublicKey({ key: { ...key.jwk }, format: 'jwk' }),
+            Buffer.from(signature!, 'base64url'),
+          ),
+      };
+    };
+    const deliverWith = async (accessToken: string) => {
+      issue(token, accessToken);
+      acceptedTokens.set(bearer, accessToken);
+      await webhooks().sendTest(owner, { endpointId: created.id });
+      expect(
+        await deliverDue(c, systemClock, egress(), failOnLog, new WebhookOAuthTokenCache()),
+      ).toMatchObject({ attempted: 1, succeeded: 1 });
+    };
+    // Until it is used, the pair in use signs.
+    await deliverWith('tok-next-1');
+    expect(assertionOf(1).header).toEqual({ alg: 'RS256', kid: first?.keyId, typ: 'JWT' });
+    expect(assertionOf(1).checks(first!)).toBe(true);
+    expect(assertionOf(1).checks(next!)).toBe(false);
+    // Used, naming the key shown (another is refused): it signs from then on, sealed again under
+    // the binding of the key in use; the old pair goes, and no next pair is left.
+    await expectAppError(
+      change({ ...signer, nextKey: 'use', nextKeyId: first!.keyId }),
+      'validation_failed',
+      /changed since it was shown/,
+    );
+    await change({ ...signer, nextKey: 'use', nextKeyId: next!.keyId });
+    expect(await shown()).toMatchObject({ publicKey: next, nextPublicKey: null });
+    const used = await stored();
+    expect(used).toMatchObject({
+      oauth_public_key: next?.pem,
+      oauth_next_private_key_ciphertext: null,
+      oauth_next_public_key: null,
+    });
+    expect(
+      fx.keyring.decryptString(
+        used!.oauth_private_key_ciphertext!,
+        webhookOAuthKeyAad(c.tenant.id, created.id),
+      ),
+    ).toBe(nextPrivateKey);
+    await deliverWith('tok-next-2');
+    expect(assertionOf(2).header).toEqual({ alg: 'RS256', kid: next?.keyId, typ: 'JWT' });
+    expect(assertionOf(2).checks(next!)).toBe(true);
+    expect(assertionOf(2).checks(first!)).toBe(false);
+    expect(authorizations(bearer)).toEqual(['Bearer tok-next-1', 'Bearer tok-next-2']);
+    // Made again and dropped unused, the pair in use stays; a change takes a new key pair or a
+    // next one, not both.
+    await change({ ...signer, nextKey: 'make' });
+    const remade = (await shown())?.nextPublicKey;
+    expect(remade?.keyId).toBeDefined();
+    expect(remade?.keyId).not.toBe(next?.keyId);
+    await change({ ...signer, nextKey: 'drop', nextKeyId: remade!.keyId });
+    expect(await shown()).toMatchObject({ publicKey: next, nextPublicKey: null });
+    await expectAppError(
+      change({ ...signer, replaceKey: true, nextKey: 'make' }),
+      'validation_failed',
+      /not both at once/,
+    );
+    // Audit entries say what became of it and whether the pair in use changed, never a key.
+    expect(
+      (await auditsOf(c, 'webhook.endpoint_updated')).map((a) => [
+        a.oauthKeyReplaced,
+        a.oauthNextKey,
+      ]),
+    ).toEqual([
+      [false, 'made'],
+      [true, 'used'],
+      [false, 'made'],
+      [false, 'dropped'],
+    ]);
+    const audits = JSON.stringify(await auditsOf(c, 'webhook.endpoint_updated'));
+    expect(audits).not.toContain(next!.keyId);
+    expect(audits).not.toContain(nextPrivateKey.split('\n')[1]!);
+    // Another way drops both pairs; it takes no next pair.
+    await change({ ...signer, nextKey: 'make' });
+    await expectAppError(
+      change({
+        tokenUrl,
+        clientId: 'hyfib-next',
+        clientSecret: 'a-secret-now',
+        clientAuthentication: 'client_secret_basic',
+        nextKey: 'make',
+      }),
+      'validation_failed',
+      /Only a client that signs with HyFib’s key pair has a next key pair/,
+    );
+    await change({
+      tokenUrl,
+      clientId: 'hyfib-next',
+      clientSecret: 'a-secret-now',
+      clientAuthentication: 'client_secret_basic',
+    });
+    expect(await stored()).toEqual({
+      oauth_private_key_ciphertext: null,
+      oauth_public_key: null,
+      oauth_next_private_key_ciphertext: null,
+      oauth_next_public_key: null,
+    });
+    expect(await shown()).toMatchObject({ publicKey: null, nextPublicKey: null });
+    // Its entry says the next pair was dropped with the way.
+    expect((await auditsOf(c, 'webhook.endpoint_updated')).at(-1)).toMatchObject({
+      oauthSecretReplaced: true,
+      oauthNextKey: 'dropped',
+      oauthClientAuthentication: 'client_secret_basic',
+    });
+    // The database keeps a next key pair only beside a pair in use with this way, its two columns
+    // together.
+    await fx.query(
+      `UPDATE app.webhook_endpoints SET oauth_client_auth = 'private_key_jwt',
+         oauth_client_secret_ciphertext = NULL, oauth_private_key_ciphertext = 'sealed',
+         oauth_public_key = 'pem' WHERE id = $1`,
+      [created.id],
+    );
+    for (const set of [
+      "oauth_next_private_key_ciphertext = 'sealed'",
+      "oauth_next_public_key = 'pem'",
+      "oauth_next_private_key_ciphertext = 'sealed', oauth_next_public_key = ''",
+      "oauth_next_private_key_ciphertext = 'sealed', oauth_next_public_key = repeat('k', 4001)",
+    ]) {
+      await expect(
+        fx.query(`UPDATE app.webhook_endpoints SET ${set} WHERE id = $1`, [created.id]),
+        set,
+      ).rejects.toThrow(/webhook_endpoints_oauth_next_key/);
+    }
+    await fx.query(
+      `UPDATE app.webhook_endpoints SET oauth_next_private_key_ciphertext = 'sealed',
+         oauth_next_public_key = 'pem' WHERE id = $1`,
+      [created.id],
+    );
+    for (const set of [
+      // Another way, the next pair left behind.
+      `oauth_client_auth = 'client_secret_basic', oauth_client_secret_ciphertext = 'sealed',
+       oauth_private_key_ciphertext = NULL, oauth_public_key = NULL`,
+      // No client, the next pair left behind.
+      `oauth_token_url = NULL, oauth_client_id = NULL, oauth_private_key_ciphertext = NULL,
+       oauth_public_key = NULL`,
+    ]) {
+      await expect(
+        fx.query(`UPDATE app.webhook_endpoints SET ${set} WHERE id = $1`, [created.id]),
+        set,
+      ).rejects.toThrow(/webhook_endpoints_oauth_next_key/);
+    }
+    // The company role changes it only through its column grants.
+    const [grant] = await fx.query<{ private_key: boolean; public_key: boolean }>(
+      `SELECT has_column_privilege('w360_app', 'app.webhook_endpoints',
+                'oauth_next_private_key_ciphertext', 'UPDATE') AS private_key,
+              has_column_privilege('w360_app', 'app.webhook_endpoints', 'oauth_next_public_key',
+                'UPDATE') AS public_key`,
+    );
+    expect(grant).toEqual({ private_key: true, public_key: true });
+    // The client goes, so no row is left with the stand-in key pairs above.
+    await fx.query(
+      `UPDATE app.webhook_endpoints SET oauth_token_url = NULL, oauth_client_id = NULL,
+         oauth_client_secret_ciphertext = NULL, oauth_scope = NULL, oauth_private_key_ciphertext = NULL,
+         oauth_public_key = NULL, oauth_next_private_key_ciphertext = NULL,
+         oauth_next_public_key = NULL, oauth_client_auth = 'client_secret_basic' WHERE id = $1`,
+      [created.id],
+    );
+  });
+
   it('fail an attempt without calling the endpoint when no token comes, and ask again at the next one', async () => {
     const c = await fx.company();
     const e = await addOAuthEndpoint(c, null);
@@ -1344,6 +1591,7 @@ describe('OAuth clients (ADR-173)', () => {
       scope: 'events.write read',
       clientAuthentication: 'client_secret_basic',
       publicKey: null,
+      nextPublicKey: null,
     });
     expect(JSON.stringify(await webhooks().list(e.owner))).not.toContain(SECRET);
     expect(await auditsOf(c, 'webhook.endpoint_created')).toEqual([

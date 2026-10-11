@@ -1,5 +1,86 @@
 # Progress
 
+## 2026-10-11 — A next key pair for webhook OAuth clients that sign with a key pair (P5-09, H-014, ADR-368)
+
+Status: **Implemented; its database and browser tests run in CI only.** A client that signs with a
+key pair HyFib keeps (ADR-367) could change keys only at once: until the company registered the new
+public key, every token request was refused. Now a next key pair is shown first, registered beside
+the one in use, then switched to, so tokens never stop.
+
+### Completed
+
+- **Database:** migration 0288 adds `oauth_next_private_key_ciphertext` and `oauth_next_public_key`
+  to `app.webhook_endpoints` with their update grant and a check that keeps a next key pair only
+  beside a `private_key_jwt` client's pair in use, its two columns together. `ops.sealed_value_keys`
+  lists the next private keys, so the keyring sweep re-encrypts them (kind
+  `webhook_oauth_next_private_key`).
+- **Domain:** a change's `nextKey` makes a next key pair (sealed with `webhookOAuthNextKeyAad`, a
+  binding of its own), uses it (its private key opened and sealed again with `webhookOAuthKeyAad`,
+  the old pair dropped) or drops it. The services refuse `nextKey` for another way, beside
+  `replaceKey`, and `use` or `drop` without a next pair, and refuse a next pair the keyring can no
+  longer open when it is used. Changes keep it otherwise; another way or a removed client drops both
+  pairs. Audit entries say `oauthNextKey` (`made`, `used`, `dropped`) and count a use as replacing
+  the pair in use. The worker opens only the pair in use's columns. The export omits the next
+  private key and exports its public key. The API takes `nextKey` and answers
+  `oauth.nextPublicKey`; the OpenAPI document describes both.
+- **Web:** Settings → Webhooks offers a "Key pair" choice for such a client (keep it; make a next
+  key pair to register first; sign with the next key pair from now on; drop it; or make a new key
+  pair used at once), and shows "Next public key, to register before HyFib signs with it", whose
+  JWK set holds both keys, on the list and the endpoint's page.
+- **Tests:** unit (1 new: the next pair made beside the pair in use and sealed apart, the worker
+  signing with the pair in use, the pair kept by changes and by a new pair in use, made again,
+  used (its private key opening as the key in use, the next key signing) and dropped, both pairs
+  dropped with another way and with the client, a new client taking one with its first pair, the
+  refusals, a next key that no longer opens refused, the audit; plus the schema, the API's schemas
+  and OpenAPI entries, the text, the keyring kinds and the audit size bound updated); integration
+  (`webhooks.test.ts`: a delivery signed with the pair in use while a next pair waits, then with the
+  next key once used, the old key no longer checking it, the stored columns and binding, the refusals,
+  the audits, the database check and grants; `api-webhook-endpoints.test.ts`: the answers, refusals
+  and audits, a new client with both pairs, no private key answered or kept; `keyring-reseal`: the
+  next key re-encrypted; `company-data`: the next private key omitted); e2e (`webhooks.spec.ts`: a
+  next key pair made and shown, the key in use still signing, then switched to and named in the next
+  token request's `kid`). Written for CI; the integration and e2e tests were not run here.
+- **Docs:** ADR-368 (and ADR-367's "not built" note); SECURITY; THREAT-MODEL T325; ARCHITECTURE;
+  DEPLOYMENT (0288; the 0285 to 0287 notes put in order); RUNBOOKS; BACKLOG P5-09; DATA-RETENTION;
+  the feature matrix (status unchanged). The feature matrix's and DATA-RETENTION's tables are
+  re-padded because a row grew.
+- **Rendering:** the next public key's panel was rendered with React's server renderer beside the
+  key in use's and checked by eye in Chromium, wide and at phone width (nothing overflows).
+- **Review fixes:** an independent review found no correctness or security bug; it traced the
+  integration and end-to-end tests without running them. Its four LOW findings are fixed:
+  - `use` and `drop` now name the next key they act on (`nextKeyId`, its key id as shown), compared
+    under the endpoint's lock, so a page, tab or connector that has not seen a next pair made since
+    cannot switch to a key nobody registered. Settings sends the key it shows.
+  - The docs no longer say the worker never reads the next private key: deliveries never open it,
+    and the keyring sweep re-encrypts it.
+  - A next pair dropped because the client takes another way, or is removed, is audited
+    (`oauthNextKey: "dropped"`).
+  - A test comment names 0288. The backlog's "Remaining" list no longer names the overlap ADR-368
+    builds.
+  - Mutation checks for the fixes: 5 deliberate regressions (a missing or stale key id taken, a key
+    id taken without `use` or `drop`, a drop with another way or with the client not audited), all
+    caught by the unit tests.
+- **Mutation checks:** 22 deliberate regressions, 20 caught by the unit tests (the next binding the
+  key in use's, the next key sealed under the key in use's binding, a used next key left under its
+  own binding or moved without sealing it again, `use` leaving the next pair, `drop` or `make`
+  ignored, `use` never taking the next pair, a change that keeps the way dropping it, another way
+  keeping it, `nextKey` taken by another way or beside `replaceKey`, `use` or `drop` without a next
+  pair, a next key that no longer opens not refused, the audit not counting a use as a replacement,
+  saying nothing or naming a use as made, another action taken, the text naming no next key, the
+  keyring kinds out of the migration's order). The two left, the keyring sweep opening the next key
+  under the key in use's binding and the settings list showing no next public key, are database
+  paths the integration tests check, in CI only.
+
+### Test commands and results (local, 2026-10-11)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 146 files, 1563 tests passed                                    |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+| migration 0288                                     | pglast parse check passed (syntax only)                         |
+
 ## 2026-10-11 — Webhook OAuth clients that sign with a key pair HyFib keeps (P5-09, H-014, ADR-367)
 
 Status: **Implemented; its database and browser tests run in CI only.** An endpoint's OAuth client

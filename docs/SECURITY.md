@@ -1443,9 +1443,16 @@ Phase 5 rules (outgoing webhooks, P5-09):
   shown, logged, audited or exported, opened only by the worker, which refuses a key that is not
   RSA) and shows only the public key, which signs nothing; the assertion is signed RS256 and names
   the key by its RFC 7638 thumbprint; a database check keeps a key pair only with this way and no
-  secret then, and `replaceKey` makes a new pair. The way
-  a client authenticates is audited, the secret never. Access tokens live only in the worker's memory, keyed by the company, the
-  endpoint and a hash of the client (its way of authenticating included): never stored, logged or
+  secret then, and `replaceKey` makes a new pair. Such a client can have a next key pair (ADR-368),
+  made with `nextKey: "make"` and sealed apart (`webhook-oauth-next-key:<company>:<endpoint>`,
+  re-encrypted by the sweep, never shown, logged, audited or exported): deliveries never open it,
+  so it signs nothing until a change says `nextKey: "use"`, naming it by its key id (`nextKeyId`,
+  so a page that has not seen a next pair made since cannot switch to it), which seals it again as
+  the key in use and drops the old pair; a database check keeps it only beside a pair in use of this
+  way. The way
+  a client authenticates is audited, the secret never. Access tokens live only in the worker's
+  memory, keyed by the company, the endpoint and a hash of the client (its way of authenticating
+  and its private key included): never stored, logged or
   shown, a day at most, replaced after a 401 or a change of the client. A token's characters are
   checked (RFC 6750) before it goes in the `Authorization` header, and an endpoint with a client
   cannot send an `Authorization` header of its own. A token request that fails is recorded by its

@@ -1522,6 +1522,20 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    changes keep the list, and its API refuses `cartReminders` (422) and leaves it out of the
    endpoints it answers.
 
+   Migration 0285 (ADR-362, ADR-364) creates `ops.platform_ops_failure_company_months` for the
+   platform role (owned by the definer role, granted before it is handed over), each row with its
+   companies' sends; no table changes. Web servers of this release need it; web servers from before
+   it never call it, and workers do not.
+
+   Migration 0286 (ADR-366) lets `app.webhook_endpoints.oauth_client_auth` hold
+   `client_secret_jwt`, its check replaced and validated by reading the table. Workers roll out
+   before web servers, and only web servers of this release can choose it, so every worker signs
+   JWTs once a client asks for it; a worker from before it sends such a client's secret in an HTTP
+   Basic header, which its server may take or refuse (a refusal is retried as usual), so set those
+   clients back to another way before rolling workers back to such an image. Until the web rollout ends, an old web server that
+   rotates such a client's secret keeps the method without the 32-byte check; a worker then asks
+   nothing for it and records `oauth_token_secret_too_short` until the secret is set again.
+
    Migration 0287 (ADR-367) adds `oauth_private_key_ciphertext` and `oauth_public_key` to
    `app.webhook_endpoints` (nullable, no rewrite) with their update grant, lets `oauth_client_auth`
    hold `private_key_jwt`, replaces the OAuth check so a key pair goes only with that way and a
@@ -1535,19 +1549,18 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    change or remove it: a change asks for a secret and writes it beside the key pair, and a removal
    leaves the key pair, and the check refuses both (a server error), so nothing is stored.
 
-   Migration 0286 (ADR-366) lets `app.webhook_endpoints.oauth_client_auth` hold
-   `client_secret_jwt`, its check replaced and validated by reading the table. Workers roll out
-   before web servers, and only web servers of this release can choose it, so every worker signs
-   JWTs once a client asks for it; a worker from before it sends such a client's secret in an HTTP
-   Basic header, which its server may take or refuse (a refusal is retried as usual), so set those
-   clients back to another way before rolling workers back to such an image. Until the web rollout ends, an old web server that
-   rotates such a client's secret keeps the method without the 32-byte check; a worker then asks
-   nothing for it and records `oauth_token_secret_too_short` until the secret is set again.
-
-   Migration 0285 (ADR-362, ADR-364) creates `ops.platform_ops_failure_company_months` for the
-   platform role (owned by the definer role, granted before it is handed over), each row with its
-   companies' sends; no table changes. Web servers of this release need it; web servers from before
-   it never call it, and workers do not.
+   Migration 0288 (ADR-368) adds `oauth_next_private_key_ciphertext` and `oauth_next_public_key`
+   to `app.webhook_endpoints` (nullable, no rewrite) with their update grant and a check that keeps
+   a next key pair only beside a `private_key_jwt` client's pair in use, its two columns together
+   (validated by reading the table, at most 10 endpoints a company), and replaces
+   `ops.sealed_value_keys` so the keyring sweep re-encrypts the next private keys. Deliveries never
+   read the columns; a worker from before it leaves the next private keys out of its keyring sweep
+   (it does not know the kind) until workers of this release run. Web servers of this release need them, as their reads of endpoints name them.
+   Until the web rollout ends, an old web server neither shows nor changes a next key pair, and its
+   API refuses `nextKey` (422): its changes that keep the way keep the next pair, but moving such a
+   client to another way or removing its OAuth client leaves the next pair behind, which the check
+   refuses (a server error), so nothing is stored. Drop next key pairs (`nextKey: "drop"`) before
+   rolling web servers back to an image from before it, or such changes keep failing there.
 
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.

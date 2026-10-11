@@ -1315,6 +1315,10 @@ verification, app review, Embedded Signup configuration).
   in CI]** (ADR-367, migration 0287: `private_key_jwt` has no secret; HyFib makes an RSA key pair of
   2048 bits, keeps the private key sealed and shows the public key, as a JWK and PEM, to register;
   RS256 assertions name the key by its RFC 7638 thumbprint; `replaceKey` makes a new pair).
+  **[A next key pair for those clients built; its database tests run only in CI]** (ADR-368,
+  migration 0288: `nextKey` makes a next key pair beside the one in use, shown to register first and
+  never used until `nextKey: "use"` switches to it, naming it by its key id, the old pair dropped;
+  or drops it unused).
   **[Skipped campaign recipients as webhook events built; their database tests run only in CI]**
   (ADR-358, migrations 0280 and 0281: `campaign.recipient_skipped` once per recipient a campaign
   skips, with the reason, the campaign, the contact and the number; those skipped when the
@@ -1328,8 +1332,8 @@ verification, app review, Embedded Signup configuration).
   Remaining: filters for other event types and on a message's values other than its type and words,
   field value comparisons beyond
   values, words and ranges, other authentication (headers computed per delivery, other OAuth
-  grants, an overlap when a client's key pair is replaced, a JWKS URL, keys a company uploads, and
-  other audiences for client assertions), mutual TLS, fixed egress addresses, other store events (the
+  grants, a JWKS URL, keys a company uploads, and other audiences for client assertions), mutual
+  TLS, fixed egress addresses, other store events (the
   store's orders and checkouts themselves are reported by the store, ADR-085),
   a sequence number across events, load tests.
 - **P5-10 Platform ops screens** **[built, locally verified with test data only]** (ADR-054):

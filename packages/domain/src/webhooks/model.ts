@@ -1936,7 +1936,7 @@ export interface WebhookOAuthPublicKey {
 
 /**
  * Where an endpoint gets OAuth access tokens and as which client (ADR-173); its secret or private
- * key is never shown.
+ * keys are never shown.
  */
 export interface WebhookEndpointOAuth {
   tokenUrl: string;
@@ -1947,7 +1947,20 @@ export interface WebhookEndpointOAuth {
   clientAuthentication: WebhookOAuthClientAuth;
   /** The public key of a client that signs with a key pair (ADR-367); null for any other. */
   publicKey: WebhookOAuthPublicKey | null;
+  /**
+   * The public key of that client's next key pair, to register before it is used (ADR-368); null
+   * without one.
+   */
+  nextPublicKey: WebhookOAuthPublicKey | null;
 }
+
+/**
+ * What a change does with the next key pair of a client that signs with a key pair (ADR-368): make
+ * one (another replaces one not yet used), use it in place of the pair in use, which goes, or drop
+ * it unused.
+ */
+export const WEBHOOK_OAUTH_NEXT_KEY_ACTIONS = ['make', 'use', 'drop'] as const;
+export type WebhookOAuthNextKeyAction = (typeof WEBHOOK_OAUTH_NEXT_KEY_ACTIONS)[number];
 
 /**
  * How an endpoint's OAuth client can authenticate to its authorization server (ADR-357), the
@@ -1977,18 +1990,22 @@ export const WEBHOOK_OAUTH_CLIENT_AUTHENTICATION_LABELS: Record<WebhookOAuthClie
 
 /**
  * How Settings → Webhooks describes an endpoint's OAuth client (ADR-173, ADR-357, ADR-366,
- * ADR-367).
+ * ADR-367), and the next key pair it has not used yet (ADR-368).
  */
 export function webhookOAuthText(oauth: WebhookEndpointOAuth): string {
   const host = webhookHost(oauth.tokenUrl) ?? oauth.tokenUrl;
   const scope = oauth.scope ? `, scope ${oauth.scope}` : '';
+  const keys = [
+    ...(oauth.publicKey ? [`key ${oauth.publicKey.keyId}`] : []),
+    ...(oauth.nextPublicKey ? [`next key ${oauth.nextPublicKey.keyId}, not used yet`] : []),
+  ];
   const how =
     oauth.clientAuthentication === 'client_secret_post'
       ? ', its ID and secret sent in the request body'
       : oauth.clientAuthentication === 'client_secret_jwt'
         ? ', proving it holds the secret with a signed JWT'
         : oauth.clientAuthentication === 'private_key_jwt'
-          ? `, signing JWTs with HyFib’s private key${oauth.publicKey ? ` (key ${oauth.publicKey.keyId})` : ''}`
+          ? `, signing JWTs with HyFib’s private key${keys.length ? ` (${keys.join('; ')})` : ''}`
           : '';
   return `OAuth access tokens from ${host}, as client ${oauth.clientId}${scope}${how}`;
 }
