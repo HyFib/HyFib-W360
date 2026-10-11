@@ -1952,6 +1952,11 @@ export interface WebhookEndpointOAuth {
    * without one.
    */
   nextPublicKey: WebhookOAuthPublicKey | null;
+  /**
+   * The audience a client that signs JWTs names in them instead of its token URL (ADR-369); null
+   * for the token URL, and for any other client.
+   */
+  assertionAudience: string | null;
 }
 
 /**
@@ -1990,7 +1995,8 @@ export const WEBHOOK_OAUTH_CLIENT_AUTHENTICATION_LABELS: Record<WebhookOAuthClie
 
 /**
  * How Settings → Webhooks describes an endpoint's OAuth client (ADR-173, ADR-357, ADR-366,
- * ADR-367), and the next key pair it has not used yet (ADR-368).
+ * ADR-367), the next key pair it has not used yet (ADR-368) and the audience its JWTs name
+ * (ADR-369).
  */
 export function webhookOAuthText(oauth: WebhookEndpointOAuth): string {
   const host = webhookHost(oauth.tokenUrl) ?? oauth.tokenUrl;
@@ -1999,13 +2005,14 @@ export function webhookOAuthText(oauth: WebhookEndpointOAuth): string {
     ...(oauth.publicKey ? [`key ${oauth.publicKey.keyId}`] : []),
     ...(oauth.nextPublicKey ? [`next key ${oauth.nextPublicKey.keyId}, not used yet`] : []),
   ];
+  const audience = oauth.assertionAudience ? ` addressed to ${oauth.assertionAudience}` : '';
   const how =
     oauth.clientAuthentication === 'client_secret_post'
       ? ', its ID and secret sent in the request body'
       : oauth.clientAuthentication === 'client_secret_jwt'
-        ? ', proving it holds the secret with a signed JWT'
+        ? `, proving it holds the secret with a signed JWT${audience}`
         : oauth.clientAuthentication === 'private_key_jwt'
-          ? `, signing JWTs with HyFib’s private key${keys.length ? ` (${keys.join('; ')})` : ''}`
+          ? `, signing JWTs${audience} with HyFib’s private key${keys.length ? ` (${keys.join('; ')})` : ''}`
           : '';
   return `OAuth access tokens from ${host}, as client ${oauth.clientId}${scope}${how}`;
 }

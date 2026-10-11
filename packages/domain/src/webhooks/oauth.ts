@@ -53,6 +53,11 @@ export type WebhookOAuthClient = {
   clientId: string;
   /** The scope to ask for (space-separated scope tokens), or none. */
   scope: string | null;
+  /**
+   * The audience a client that signs JWTs names in them instead of its token URL (ADR-369), such as
+   * its server's issuer identifier; null names the token URL, and any other client has none.
+   */
+  assertionAudience: string | null;
 } & (
   | { clientAuthentication: WebhookOAuthSecretAuthentication; clientSecret: string }
   | {
@@ -110,6 +115,20 @@ export const WEBHOOK_OAUTH_JWT_SECRET_BYTES = 32;
 export const webhookOAuthSecretSignsJwt = (secret: string) =>
   Buffer.byteLength(secret, 'utf8') >= WEBHOOK_OAUTH_JWT_SECRET_BYTES;
 
+/**
+ * Whether a value can be the audience a client's JWTs name (ADR-369): an https URL, such as an
+ * authorization server's issuer identifier, of visible ASCII, without credentials or a fragment. It
+ * is kept as given, never fetched, since a server compares it as a string.
+ */
+export function webhookOAuthAudienceValid(value: string): boolean {
+  if (!/^[\x21-\x7e]+$/.test(value) || !value.startsWith('https://') || value.includes('#')) {
+    return false;
+  }
+  if (!URL.canParse(value)) return false;
+  const url = new URL(value);
+  return url.hostname !== '' && url.username === '' && url.password === '';
+}
+
 /** The size of the RSA keys HyFib makes for clients that sign with a key pair (ADR-367). */
 export const WEBHOOK_OAUTH_KEY_BITS = 2048;
 
@@ -163,8 +182,8 @@ export function checkedWebhookOAuthPrivateKey(pem: string): string {
 
 /**
  * A client assertion (RFC 7523 section 3): a JWT whose issuer and subject are the client's
- * identifier and whose audience is the token URL, with a unique id, the time it was made and an
- * expiry five minutes later. For `client_secret_jwt` (ADR-366) signed with HMAC SHA-256 keyed by
+ * identifier and whose audience is the token URL, or the audience the client names (ADR-369), with
+ * a unique id, the time it was made and an expiry five minutes later. For `client_secret_jwt` (ADR-366) signed with HMAC SHA-256 keyed by
  * the client's secret (`HS256`), so the server checks the secret without receiving it; for
  * `private_key_jwt` (ADR-367) signed with the client's RSA private key (`RS256`, RSASSA-PKCS1-v1_5
  * with SHA-256), its header naming the key, so the server checks it with the public key registered.
@@ -183,7 +202,7 @@ export function webhookOAuthClientAssertion(
   const signed = `${part(header)}.${part({
     iss: client.clientId,
     sub: client.clientId,
-    aud: client.tokenUrl,
+    aud: client.assertionAudience ?? client.tokenUrl,
     jti,
     iat: issuedAt,
     exp: issuedAt + WEBHOOK_OAUTH_ASSERTION_SECONDS,
@@ -360,6 +379,7 @@ const clientFingerprint = (client: WebhookOAuthClient) =>
         client.clientAuthentication === 'private_key_jwt' ? client.privateKey : client.clientSecret,
         client.scope,
         client.clientAuthentication,
+        client.assertionAudience,
       ]),
     )
     .digest('base64url');
@@ -367,8 +387,8 @@ const clientFingerprint = (client: WebhookOAuthClient) =>
 /**
  * The access tokens a worker keeps for webhook endpoints (ADR-173), in its memory only: never
  * stored, logged or shown. A token is kept for its endpoint and client, so a changed token URL,
- * identifier, secret or key, scope or way of authenticating gets a new one, and until a minute
- * before it expires (at most a day).
+ * identifier, secret or key, scope, way of authenticating or audience gets a new one, and until a
+ * minute before it expires (at most a day).
  * The deliveries of an endpoint that need a token at the same time share one request; a token
  * without a lifetime serves only them, and a failure is never kept: the next attempt asks again.
  */

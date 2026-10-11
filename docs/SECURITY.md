@@ -1449,10 +1449,13 @@ Phase 5 rules (outgoing webhooks, P5-09):
   so it signs nothing until a change says `nextKey: "use"`, naming it by its key id (`nextKeyId`,
   so a page that has not seen a next pair made since cannot switch to it), which seals it again as
   the key in use and drops the old pair; a database check keeps it only beside a pair in use of this
-  way. The way
-  a client authenticates is audited, the secret never. Access tokens live only in the worker's
-  memory, keyed by the company, the endpoint and a hash of the client (its way of authenticating
-  and its private key included): never stored, logged or
+  way. A client that signs JWTs may name another audience in them than its token URL (ADR-369): an
+  https URL of visible ASCII without credentials or a fragment, kept as given and never fetched,
+  kept only with such a way (a database check) and dropped at another token URL unless given; the
+  assertion still goes only to the token URL. The way a client authenticates and the audience's host
+  are audited, the secret never. Access tokens live only in the worker's memory, keyed by the
+  company, the endpoint and a hash of the client (its way of authenticating, its private key and its
+  audience included): never stored, logged or
   shown, a day at most, replaced after a 401 or a change of the client. A token's characters are
   checked (RFC 6750) before it goes in the `Authorization` header, and an endpoint with a client
   cannot send an `Authorization` header of its own. A token request that fails is recorded by its

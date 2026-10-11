@@ -2865,9 +2865,10 @@ the request body" under "How the client authenticates" (`clientAuthentication`:
 `client_secret_post`; a change through the API that leaves it out keeps it while the token URL
 stays the same), and HTTP Basic for one that refuses the body; a server that wants a client
 assertion signed with the secret takes "A JWT signed with the secret" (`client_secret_jwt`,
-ADR-366), which needs a secret of at least 32 bytes and audiences the token URL: a server that
-wants another audience, such as its issuer identifier, refuses it (400 or 401), so use another
-way with it; `oauth_token_secret_too_short`: a client set to sign JWTs keeps a secret under 32
+ADR-366), which needs a secret of at least 32 bytes and names the token URL as its audience: a
+server that wants another audience, such as its issuer identifier, refuses it (400 or 401), so
+enter the value it wants under "JWT audience" (`assertionAudience`, ADR-369; an https URL kept
+exactly as entered, so a missing or extra trailing slash matters); `oauth_token_secret_too_short`: a client set to sign JWTs keeps a secret under 32
 bytes (set during a rollout by a web server from before ADR-366): enter one of 32 bytes or more;
 a client set to "A JWT signed with a key pair HyFib keeps" (`private_key_jwt`, ADR-367) is refused
 (400 or 401) until its public key is registered for the client with the server: copy it from the

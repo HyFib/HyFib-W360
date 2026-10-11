@@ -773,6 +773,7 @@ describe('OAuth clients (ADR-173)', () => {
       clientAuthentication: 'client_secret_post',
       publicKey: null,
       nextPublicKey: null,
+      assertionAudience: null,
     });
     expect(await auditsOf(c, 'webhook.endpoint_created')).toEqual([
       {
@@ -970,6 +971,7 @@ describe('OAuth clients (ADR-173)', () => {
       clientAuthentication: 'client_secret_jwt',
       publicKey: null,
       nextPublicKey: null,
+      assertionAudience: null,
     });
   });
 
@@ -1456,6 +1458,124 @@ describe('OAuth clients (ADR-173)', () => {
     );
   });
 
+  it('name the audience a client chooses in its assertion instead of the token URL, kept while the token URL stays (ADR-369)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const id = randomBytes(6).toString('hex');
+    const bearer = `/bearer/${id}`;
+    const token = `/token/${id}`;
+    const tokenUrl = `http://${HOST}:${port}${token}`;
+    const url = `http://${HOST}:${port}${bearer}`;
+    const secret = 'jwt-signing-secret:of/forty+bytes-long!!';
+    const issuer = 'https://issuer.example.com/tenant/';
+    const client = {
+      tokenUrl,
+      clientId: 'hyfib-audience',
+      clientAuthentication: 'client_secret_jwt' as const,
+    };
+    // Only a client that signs JWTs names one, and only an https URL.
+    await expectAppError(
+      webhooks().create(owner, {
+        url,
+        eventTypes: ['consent.changed'],
+        oauth: {
+          ...client,
+          clientSecret: secret,
+          clientAuthentication: 'client_secret_basic',
+          assertionAudience: issuer,
+        },
+      }),
+      'validation_failed',
+      /names an audience/,
+    );
+    await expectAppError(
+      webhooks().create(owner, {
+        url,
+        eventTypes: ['consent.changed'],
+        oauth: { ...client, clientSecret: secret, assertionAudience: 'http://issuer.example.com/' },
+      }),
+      'validation_failed',
+      /https:\/\/ URL/,
+    );
+    expect(await webhooks().list(owner)).toEqual([]);
+    const created = await webhooks().create(owner, {
+      url,
+      eventTypes: ['consent.changed'],
+      oauth: { ...client, clientSecret: secret, assertionAudience: issuer },
+    });
+    expect((await webhooks().list(owner))[0]?.oauth).toMatchObject({
+      clientAuthentication: 'client_secret_jwt',
+      assertionAudience: issuer,
+    });
+    expect(await auditsOf(c, 'webhook.endpoint_created')).toEqual([
+      {
+        host: HOST,
+        eventTypes: ['consent.changed'],
+        oauthTokenHost: HOST,
+        oauthAudienceHost: 'issuer.example.com',
+        oauthClientAuthentication: 'client_secret_jwt',
+      },
+    ]);
+    // Each delivery's token request: its assertion's audience, and whether the secret signed it.
+    const assertionOf = (n: number) => {
+      const form = new URLSearchParams(requestsTo(token)[n - 1]?.body);
+      const [header, payload, signature] = (form.get('client_assertion') ?? '').split('.');
+      return {
+        audience: (
+          JSON.parse(Buffer.from(payload!, 'base64url').toString('utf8')) as { aud?: unknown }
+        ).aud,
+        signed:
+          signature ===
+          createHmac('sha256', secret).update(`${header}.${payload}`).digest('base64url'),
+      };
+    };
+    const deliverWith = async (accessToken: string) => {
+      issue(token, accessToken);
+      acceptedTokens.set(bearer, accessToken);
+      await webhooks().sendTest(owner, { endpointId: created.id });
+      expect(
+        await deliverDue(c, systemClock, egress(), failOnLog, new WebhookOAuthTokenCache()),
+      ).toMatchObject({ attempted: 1, succeeded: 1 });
+    };
+    await deliverWith('tok-aud-1');
+    expect(assertionOf(1)).toEqual({ audience: issuer, signed: true });
+    // A change that leaves it out keeps it while the token URL stays; null names the token URL.
+    const change = (oauth: Record<string, unknown>) =>
+      webhooks().update(owner, {
+        endpointId: created.id,
+        url,
+        description: '',
+        eventTypes: ['consent.changed'],
+        oauth,
+      });
+    await change({ ...client, scope: 'events.write' });
+    expect((await webhooks().list(owner))[0]?.oauth?.assertionAudience).toBe(issuer);
+    await change({ ...client, assertionAudience: null });
+    expect((await webhooks().list(owner))[0]?.oauth?.assertionAudience).toBeNull();
+    await deliverWith('tok-aud-2');
+    expect(assertionOf(2)).toEqual({ audience: tokenUrl, signed: true });
+    expect(authorizations(bearer)).toEqual(['Bearer tok-aud-1', 'Bearer tok-aud-2']);
+    expect((await auditsOf(c, 'webhook.endpoint_updated')).map((a) => a.oauthAudienceHost)).toEqual(
+      ['issuer.example.com', undefined],
+    );
+    // The database keeps one only with a client that signs JWTs, as an https URL.
+    for (const set of [
+      "oauth_assertion_audience = 'http://issuer.example.com/'",
+      `oauth_assertion_audience = 'https://' || repeat('a', 2041)`,
+      `oauth_client_auth = 'client_secret_basic', oauth_assertion_audience = 'https://issuer.example.com/'`,
+    ]) {
+      await expect(
+        fx.query(`UPDATE app.webhook_endpoints SET ${set} WHERE id = $1`, [created.id]),
+        set,
+      ).rejects.toThrow(/webhook_endpoints_oauth_assertion_audience/);
+    }
+    const [grant] = await fx.query<{ audience: boolean }>(
+      `SELECT has_column_privilege('w360_app', 'app.webhook_endpoints',
+                'oauth_assertion_audience', 'UPDATE') AS audience`,
+    );
+    expect(grant).toEqual({ audience: true });
+  });
+
   it('fail an attempt without calling the endpoint when no token comes, and ask again at the next one', async () => {
     const c = await fx.company();
     const e = await addOAuthEndpoint(c, null);
@@ -1592,6 +1712,7 @@ describe('OAuth clients (ADR-173)', () => {
       clientAuthentication: 'client_secret_basic',
       publicKey: null,
       nextPublicKey: null,
+      assertionAudience: null,
     });
     expect(JSON.stringify(await webhooks().list(e.owner))).not.toContain(SECRET);
     expect(await auditsOf(c, 'webhook.endpoint_created')).toEqual([

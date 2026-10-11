@@ -1618,6 +1618,12 @@ export const apiWebhookEndpointSchema = z.object({
         .describe(
           'For a `private_key_jwt` client given a next key pair (`nextKey: "make"`), its public key: not used yet, to register with the authorization server before `nextKey: "use"` signs with it; null without one. Its private key is never shown.',
         ),
+      assertionAudience: z
+        .string()
+        .nullable()
+        .describe(
+          'For a `client_secret_jwt` or `private_key_jwt` client, the audience its JWTs name instead of the token URL (an https URL, such as the authorization server’s issuer identifier); null: the token URL, and for any other client.',
+        ),
     })
     .nullable()
     .describe(

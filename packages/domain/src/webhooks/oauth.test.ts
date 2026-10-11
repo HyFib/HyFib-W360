@@ -13,6 +13,7 @@ import {
   fetchWebhookOAuthToken,
   generateWebhookOAuthKeyPair,
   readWebhookOAuthTokenAnswer,
+  webhookOAuthAudienceValid,
   webhookOAuthClientAssertion,
   webhookOAuthEgressError,
   webhookOAuthKeyAad,
@@ -35,6 +36,7 @@ const client = {
   clientId: 'hyfib-webhooks',
   clientSecret: 's3cret',
   scope: null,
+  assertionAudience: null,
   clientAuthentication: 'client_secret_basic' as const,
 };
 const at = new Date('2026-10-05T10:00:00Z');
@@ -43,6 +45,7 @@ const signerOf = (pair: WebhookOAuthKeyPair, scope: string | null = null) => ({
   tokenUrl: client.tokenUrl,
   clientId: client.clientId,
   scope,
+  assertionAudience: null,
   clientAuthentication: 'private_key_jwt' as const,
   privateKey: pair.privateKey,
   keyId: webhookOAuthPublicKey(pair.publicKey).keyId,
@@ -250,6 +253,57 @@ describe('OAuth client credentials for webhook endpoints (ADR-173)', () => {
       'client_assertion',
     );
     expect(fresh).not.toBe(assertion);
+  });
+
+  it('name the audience a client chooses in its JWTs instead of the token URL, kept as given (ADR-369)', () => {
+    const claimsOf = (assertion: string) =>
+      JSON.parse(Buffer.from(assertion.split('.')[1]!, 'base64url').toString('utf8')) as Record<
+        string,
+        unknown
+      >;
+    const jwt = {
+      ...client,
+      clientSecret: 'jwt-signing-secret:of/forty+bytes-long!!',
+      clientAuthentication: 'client_secret_jwt' as const,
+    };
+    expect(claimsOf(webhookOAuthClientAssertion(jwt, at, 'j')).aud).toBe(client.tokenUrl);
+    expect(
+      claimsOf(
+        webhookOAuthClientAssertion(
+          { ...jwt, assertionAudience: 'https://issuer.example.com/' },
+          at,
+          'j',
+        ),
+      ).aud,
+    ).toBe('https://issuer.example.com/');
+    // Signed with a key pair too, and with no slash added: a server compares the string.
+    const signer = {
+      ...signerOf(generateWebhookOAuthKeyPair()),
+      assertionAudience: 'https://issuer.example.com',
+    };
+    expect(claimsOf(webhookOAuthClientAssertion(signer, at, 'j')).aud).toBe(
+      'https://issuer.example.com',
+    );
+    for (const audience of [
+      'https://issuer.example.com',
+      'https://issuer.example.com/',
+      'https://login.example.com/tenant-id/v2.0',
+      'https://auth.example.com/oauth2/token?tenant=7',
+    ]) {
+      expect(webhookOAuthAudienceValid(audience), audience).toBe(true);
+    }
+    for (const audience of [
+      'http://issuer.example.com',
+      'HTTPS://issuer.example.com',
+      'issuer.example.com',
+      'https://',
+      'https://user:pw@issuer.example.com',
+      'https://issuer.example.com/#part',
+      'https://issuer.example.com/a path',
+      'https://issuer.example.com/\u00e9',
+    ]) {
+      expect(webhookOAuthAudienceValid(audience), audience).toBe(false);
+    }
   });
 
   it('name a key by its RFC 7638 thumbprint, show it as a JWK and as PEM, and sign with RSA keys only (ADR-367)', () => {
@@ -512,6 +566,19 @@ describe('the access tokens a worker keeps (ADR-173)', () => {
     expect(asked.count).toBe(1);
     const replaced = signerOf(generateWebhookOAuthKeyPair());
     expect(await tokens.token(owner, replaced, minutes(2), ask)).toEqual(
+      issued('two', minutes(10)),
+    );
+    expect(asked.count).toBe(2);
+  });
+
+  it('ask again for a client whose JWTs name another audience (ADR-369)', async () => {
+    const tokens = new WebhookOAuthTokenCache();
+    const { asked, ask } = server([issued('one', minutes(10)), issued('two', minutes(10))]);
+    const signer = signerOf(generateWebhookOAuthKeyPair());
+    expect(await tokens.token(owner, signer, at, ask)).toEqual(issued('one', minutes(10)));
+    expect(await tokens.token(owner, signer, minutes(1), ask)).toEqual(issued('one', minutes(10)));
+    const elsewhere = { ...signer, assertionAudience: 'https://issuer.example.com/' };
+    expect(await tokens.token(owner, elsewhere, minutes(2), ask)).toEqual(
       issued('two', minutes(10)),
     );
     expect(asked.count).toBe(2);

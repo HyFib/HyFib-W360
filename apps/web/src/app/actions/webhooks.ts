@@ -17,7 +17,7 @@ import { tenantForAction } from '@/server/tenant-action';
  * here, when an endpoint is created or its secret rotated.
  */
 
-/** An endpoint's OAuth client as the form gives it (ADR-173, ADR-357, ADR-367, ADR-368). */
+/** An endpoint's OAuth client as the form gives it (ADR-173, ADR-357, ADR-367 to ADR-369). */
 interface WebhookOAuthActionInput {
   tokenUrl: string;
   clientId: string;
@@ -31,6 +31,8 @@ interface WebhookOAuthActionInput {
   nextKey?: WebhookOAuthNextKeyAction;
   /** The next key shown, which using or dropping it names (ADR-368). */
   nextKeyId?: string;
+  /** The audience a client that signs JWTs names in them; empty: its token URL (ADR-369). */
+  assertionAudience?: string;
 }
 export async function createWebhookEndpointAction(
   slug: string,

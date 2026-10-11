@@ -84,6 +84,7 @@ import {
   webhookFieldValueText,
   webhookFieldWordsFromLines,
   webhookMessageWordsFromLines,
+  webhookOAuthSignsJwts,
   webhookOAuthText,
   webhookOwnerText,
   webhookPipelineText,
@@ -3502,6 +3503,8 @@ interface OAuthFields {
   clientAuthentication: WebhookOAuthClientAuth;
   /** What becomes of the key pair of a client that signs with HyFib's (ADR-367, ADR-368). */
   keyAction: OAuthKeyAction;
+  /** The audience a client that signs JWTs names in them; empty: its token URL (ADR-369). */
+  assertionAudience: string;
 }
 
 /**
@@ -3730,6 +3733,28 @@ function OAuthClientFields({
               </Select>
             )}
           </Field>
+          {webhookOAuthSignsJwts(fields.clientAuthentication) ? (
+            // The audience the JWTs name, for a server that wants another than its token URL
+            // (ADR-369).
+            <Field
+              id={`${prefix}-oauth-assertion-audience`}
+              label="JWT audience"
+              description="Optional: the value the server expects as each JWT’s audience, such as its issuer identifier. Left empty, the token URL."
+            >
+              {(aria) => (
+                <Input
+                  {...aria}
+                  type="url"
+                  inputMode="url"
+                  maxLength={WEBHOOK_LIMITS.urlLength}
+                  autoComplete="off"
+                  placeholder="https://auth.example.com/"
+                  value={fields.assertionAudience}
+                  onChange={(e) => set({ assertionAudience: e.target.value })}
+                />
+              )}
+            </Field>
+          ) : null}
         </div>
       ) : null}
     </fieldset>
@@ -3744,6 +3769,7 @@ const oauthFieldsOf = (stored: WebhookEndpointOAuth | null | undefined): OAuthFi
   scope: stored?.scope ?? '',
   clientAuthentication: stored?.clientAuthentication ?? 'client_secret_basic',
   keyAction: 'keep',
+  assertionAudience: stored?.assertionAudience ?? '',
 });
 
 /**
@@ -4669,6 +4695,9 @@ export function WebhookEndpointForm({
           clientAuthentication: oauthFields.clientAuthentication,
           ...(oauthFields.clientSecret && !signsWithKey
             ? { clientSecret: oauthFields.clientSecret }
+            : {}),
+          ...(webhookOAuthSignsJwts(oauthFields.clientAuthentication)
+            ? { assertionAudience: oauthFields.assertionAudience }
             : {}),
           ...(keyAction === 'replace' ? { replaceKey: true } : {}),
           ...(keyAction === 'make' ? { nextKey: keyAction } : {}),

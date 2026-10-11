@@ -14438,7 +14438,7 @@ revising RFC 7523 moves to the server's issuer identifier, as recalled here and 
 refuses these assertions; such a receiver keeps HTTP Basic or the request body.
 
 Not built: assertions signed with a key pair (`private_key_jwt`, built since ADR-367), another
-audience chosen per endpoint, and a JWKS.
+audience chosen per endpoint (built since ADR-369), and a JWKS.
 
 ## ADR-367 Webhook OAuth clients that sign their assertions with a key pair HyFib keeps (P5-09) (2026-10-11)
 
@@ -14494,7 +14494,8 @@ no overlap, as there is for signing secrets.
 
 Not built: an overlap for a replaced key pair (a next key shown before it is used, built since
 ADR-368), a JWKS URL HyFib serves for its clients' keys, keys a company uploads, other algorithms
-(PS256, ES256), certificates (`x5t`, `x5c`), and another audience chosen per endpoint.
+(PS256, ES256), certificates (`x5t`, `x5c`), and another audience chosen per endpoint (built since
+ADR-369).
 
 ## ADR-368 A next key pair for webhook OAuth clients that sign with a key pair (P5-09) (2026-10-11)
 
@@ -14547,4 +14548,42 @@ field at once, is 4,126 bytes, within the 4,200 ADR-363's test holds it to.
 Not built: switching on its own (after a delay, or once the server takes the new key), keeping the
 old pair after a switch (a server that holds it gains nothing from HyFib keeping it), more than one
 next pair, a JWKS URL HyFib serves, keys a company uploads, other algorithms (PS256, ES256),
-certificates (`x5t`, `x5c`), and another audience chosen per endpoint.
+certificates (`x5t`, `x5c`), and another audience chosen per endpoint (built since ADR-369).
+
+## ADR-369 The audience a webhook OAuth client's JWTs name, chosen per endpoint (P5-09) (2026-10-11)
+
+Context: since ADR-366 and ADR-367 a client that signs JWTs names its token URL as their audience.
+RFC 7523 section 3 asks for a value that identifies the authorization server and allows the token
+endpoint's URL as one, so servers differ: some want their issuer identifier instead, and a 2025
+draft revising RFC 7523 moves to it (as recalled here and not confirmed; the RFC and the draft could
+not be opened from here). A receiver whose server wants another value refused every assertion, and
+could only fall back to sending its secret (listed as not built in ADR-366 to ADR-368).
+
+Decision:
+
+- **An audience per client:** a client that signs JWTs, with its secret or a key pair, may name an
+  audience (`assertionAudience`; Settings → Webhooks: "JWT audience") that its assertions carry as
+  `aud` instead of the token URL. It is an https URL of visible ASCII, without credentials or a
+  fragment, kept exactly as given, since a server compares it as a string (no slash is added), and
+  never fetched, so it reaches nothing. Empty or null names the token URL, as before. Migration 0289
+  adds the column and a check: an https URL of 9 to 2,048 characters, only with a token URL and a way
+  that signs JWTs.
+- **Kept like the way:** a change that leaves it out keeps the one the client has while the token
+  URL stays the same and the client goes on signing JWTs, as ADR-357 keeps the way, so a connector
+  written before it that rotates a secret keeps the audience. At another token URL it goes unless
+  given, since it names a server; another way drops it, and the services refuse one for a way that
+  does not sign JWTs (`oauth.assertionAudience`).
+- **Everywhere the client is:** the worker names it in each assertion, and a changed audience asks
+  for a new token (the token cache's fingerprint includes it). The API takes and answers it, the
+  OpenAPI document describes it, the export exports it, and the settings list and the endpoint's page
+  show it ("signing JWTs addressed to …"). Audit entries name its host (`oauthAudienceHost`), as
+  they name the token URL's.
+
+Consequences: a receiver whose server wants its issuer identifier, or any other https audience,
+can use either way that signs JWTs. A change's audit entry gains at most 278 bytes; its compacted
+worst case, with every OAuth field at once, is 4,404 bytes, so the unit test's bound, kept close as
+ADR-363 asks, rises from 4,200 to 4,500, within the 7,000 bytes kept.
+
+Not built: an audience that is not an https URL (RFC 7519 allows any string), several audiences in
+one assertion (an array), and finding the issuer from the server's metadata (RFC 8414), which HyFib
+would have to fetch.

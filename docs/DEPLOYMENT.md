@@ -1555,12 +1555,26 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    (validated by reading the table, at most 10 endpoints a company), and replaces
    `ops.sealed_value_keys` so the keyring sweep re-encrypts the next private keys. Deliveries never
    read the columns; a worker from before it leaves the next private keys out of its keyring sweep
-   (it does not know the kind) until workers of this release run. Web servers of this release need them, as their reads of endpoints name them.
-   Until the web rollout ends, an old web server neither shows nor changes a next key pair, and its
-   API refuses `nextKey` (422): its changes that keep the way keep the next pair, but moving such a
-   client to another way or removing its OAuth client leaves the next pair behind, which the check
-   refuses (a server error), so nothing is stored. Drop next key pairs (`nextKey: "drop"`) before
-   rolling web servers back to an image from before it, or such changes keep failing there.
+   (it does not know the kind) until workers of this release run. Web servers of this release need
+   them, as their reads of endpoints name them. Until the web rollout ends, an old web server
+   neither shows nor changes a next key pair, and its API refuses `nextKey` and `nextKeyId` (422):
+   its changes that keep the way keep the next pair, but moving such a client to another way or
+   removing its OAuth client leaves the next pair behind, which the check refuses (a server error),
+   so nothing is stored. Drop next key pairs (`nextKey: "drop"`) before rolling web servers back to
+   an image from before it, or such changes keep failing there.
+
+   Migration 0289 (ADR-369) adds `oauth_assertion_audience` to `app.webhook_endpoints` (nullable,
+   no rewrite) with its update grant and a check that keeps it an https URL of 9 to 2,048
+   characters, only with a token URL and a way that signs JWTs (validated by reading the table, at
+   most 10 endpoints a company). Workers of this release read it to name it in each assertion, and
+   web servers of this release, which alone can set it, read and write it. Workers roll out first;
+   a worker from before it names the token URL instead, which a server wanting another audience
+   refuses (retried as usual), so clear audiences before rolling workers back to such an image.
+   Until the web rollout ends, an old web server neither shows nor changes an audience, and its API
+   refuses `assertionAudience` (422): its changes that keep a way that signs JWTs keep the audience,
+   but moving such a client to another way or removing its OAuth client leaves the audience behind,
+   which the check refuses (a server error), so nothing is stored. Clear audiences before rolling web
+   servers back to an image from before it, or such changes keep failing there.
 
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.

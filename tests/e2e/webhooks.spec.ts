@@ -623,7 +623,7 @@ test('an endpoint sends its own headers with every delivery: set in settings and
   expect(viaApi()[1]!.headers['x-gateway-token']).toBeUndefined();
 });
 
-test('an endpoint gets OAuth access tokens as its client and sends them as a bearer token: set in settings with the secret never shown again, changed on its page to send it in the request body, then to sign with a key pair, moved to its next key pair, removed, and given by an API key (ADR-173, ADR-357, ADR-367, ADR-368)', async ({
+test('an endpoint gets OAuth access tokens as its client and sends them as a bearer token: set in settings with the secret never shown again, changed on its page to send it in the request body, then to sign with a key pair, moved to its next key pair, its JWTs addressed to another audience, removed, and given by an API key (ADR-173, ADR-357, ADR-367 to ADR-369)', async ({
   page,
   request,
 }) => {
@@ -796,6 +796,32 @@ test('an endpoint gets OAuth access tokens as its client and sends them as a bea
   expect(asked(secondTokenPath).length).toBeGreaterThan(askedBefore);
   expect(kidOf(asked(secondTokenPath).at(-1)!.body)).toBe(nextKeyId);
 
+  // The audience its JWTs name (ADR-369): the token URL, or another, such as the server's issuer.
+  const audienceOf = (body: string) => {
+    const [, payload] = (new URLSearchParams(body).get('client_assertion') ?? '').split('.');
+    return (JSON.parse(Buffer.from(payload!, 'base64url').toString('utf8')) as { aud?: string })
+      .aud;
+  };
+  expect(audienceOf(asked(secondTokenPath).at(-1)!.body)).toBe(
+    `http://${HOST}:${port}${secondTokenPath}`,
+  );
+  await page.getByRole('link', { name: `Deliveries and settings for ${HOST}` }).click();
+  await page.getByRole('radio', { name: 'Change the OAuth client' }).check();
+  await page.getByLabel('JWT audience', { exact: true }).fill('https://issuer.example.com/');
+  await page.getByRole('button', { name: 'Save endpoint' }).click();
+  await expect(page.getByText('Endpoint saved.')).toBeVisible();
+  await page.goto(`/c/${slug}/settings/webhooks`);
+  await expect(
+    page.getByText(
+      /signing JWTs addressed to https:\/\/issuer\.example\.com\/ with HyFib’s private key/,
+    ),
+  ).toBeVisible();
+  const askedBeforeAudience = asked(secondTokenPath).length;
+  await page.getByRole('button', { name: `Send test event to ${HOST}` }).click();
+  await expect(async () => expect(forUs()).toHaveLength(6)).toPass({ timeout: 30_000 });
+  expect(asked(secondTokenPath).length).toBeGreaterThan(askedBeforeAudience);
+  expect(audienceOf(asked(secondTokenPath).at(-1)!.body)).toBe('https://issuer.example.com/');
+
   // Removed: deliveries go without a token.
   await page.getByRole('link', { name: `Deliveries and settings for ${HOST}` }).click();
   await page.getByRole('radio', { name: /Remove the OAuth client/ }).check();
@@ -808,8 +834,8 @@ test('an endpoint gets OAuth access tokens as its client and sends them as a bea
   await page.goto(`/c/${slug}/settings/webhooks`);
   await expect(page.getByText(/OAuth access tokens from/)).toHaveCount(0);
   await page.getByRole('button', { name: `Send test event to ${HOST}` }).click();
-  await expect(async () => expect(forUs()).toHaveLength(6)).toPass({ timeout: 30_000 });
-  expect(forUs()[5]!.headers.authorization).toBeUndefined();
+  await expect(async () => expect(forUs()).toHaveLength(7)).toPass({ timeout: 30_000 });
+  expect(forUs()[6]!.headers.authorization).toBeUndefined();
 
   // An API key gives its own endpoint a client, answered without the secret.
   await page.goto(`/c/${slug}/settings/api-keys`);
@@ -843,6 +869,7 @@ test('an endpoint gets OAuth access tokens as its client and sends them as a bea
     clientAuthentication: 'client_secret_basic',
     publicKey: null,
     nextPublicKey: null,
+    assertionAudience: null,
   });
   expect(JSON.stringify(endpoint)).not.toContain(clientSecret);
   const testEvent = await request.post(`/api/v1/webhook-endpoints/${endpoint.id}/test`, {

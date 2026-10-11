@@ -1841,6 +1841,20 @@ describe('webhook endpoints through the API (ADR-081)', () => {
         oauth: { ...kept, clientAuthentication: 'private_key_jwt', nextKey: 'use', nextKeyId: 'x' },
       }).success,
     ).toBe(false);
+    // A client that signs JWTs may name another audience in them, an https URL (ADR-369).
+    const addressed = {
+      ...kept,
+      clientAuthentication: 'client_secret_jwt',
+      assertionAudience: 'https://issuer.example.com/',
+    };
+    expect(apiUpdateWebhookEndpointSchema.parse({ oauth: addressed })).toEqual({
+      oauth: { ...addressed, scope: null },
+    });
+    expect(
+      apiUpdateWebhookEndpointSchema.safeParse({
+        oauth: { ...addressed, assertionAudience: 'ftp://issuer.example.com/' },
+      }).success,
+    ).toBe(false);
     expect(
       apiUpdateWebhookEndpointSchema.safeParse({
         oauth: { ...kept, clientAuthentication: 'private_key_jwt', nextKey: 'rotate' },
@@ -1864,6 +1878,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     const keys = (client: Client | undefined) =>
       Object.keys(client?.anyOf?.find((s) => s.properties)?.properties ?? {}).sort();
     expect(keys(given)).toEqual([
+      'assertionAudience',
       'clientAuthentication',
       'clientId',
       'clientSecret',
@@ -1876,6 +1891,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     // The secret is never answered; the way the client authenticates always is (ADR-357), and a
     // client's public key (ADR-367) and its next one (ADR-368).
     expect(keys(answered.properties.oauth)).toEqual([
+      'assertionAudience',
       'clientAuthentication',
       'clientId',
       'nextPublicKey',
@@ -1906,6 +1922,11 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     expect(given?.anyOf?.find((s) => s.properties)).toMatchObject({
       description: expect.stringContaining(
         "or as `client_id` and `client_secret` in the request body when `clientAuthentication` is `client_secret_post`, or, when it is `client_secret_jwt`, as `client_id` and a JWT signed with the secret (HS256: issuer and subject the client ID, audience the token URL, a unique `jti`, five minutes' lifetime) in `client_assertion` (RFC 7523), the secret itself never sent, which takes a secret of at least 32 bytes; left out, a change keeps the client's while the token URL stays the same, and a client using `client_secret_jwt` or `private_key_jwt` keeps it at a new token URL; otherwise a new client or token URL uses `client_secret_basic`)",
+      ),
+    });
+    expect(given?.anyOf?.find((s) => s.properties)).toMatchObject({
+      description: expect.stringContaining(
+        "names the token URL as its JWTs' audience, or the https URL given in `assertionAudience`",
       ),
     });
     // A change says it keeps the way the client authenticates as it keeps the secret.

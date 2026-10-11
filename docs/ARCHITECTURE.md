@@ -2304,7 +2304,10 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   sealing it again with `webhookOAuthKeyAad`) or drops as a change's `nextKey` says, `use` and
   `drop` naming it by its key id (`nextKeyId`), checked under the endpoint's lock;
   `openWebhookOAuthClient` takes only the pair in use's columns, so deliveries never read it (the
-  keyring sweep re-encrypts it).
+  keyring sweep re-encrypts it). A client that signs JWTs names `oauth_assertion_audience` (migration
+  0289, ADR-369) as their `aud` instead of the token URL when it has one; `checkedWebhookOAuth` keeps
+  it across changes that leave it out while the token URL stays, and the token cache's fingerprint
+  includes it.
 - **Team filters** (migration 0122, ADR-174): `team_ids` on an endpoint lists the teams whose
   conversations' message and conversation events it takes, null for every conversation's; a check
   keeps it to 1 to 50 ids and to endpoints that take such an event. `app.capture_webhook_event`
