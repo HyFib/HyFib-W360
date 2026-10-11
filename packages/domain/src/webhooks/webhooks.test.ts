@@ -5293,6 +5293,10 @@ describe('endpoint OAuth clients (ADR-173)', () => {
         sign('sha256', Buffer.from('x'), privateKey),
       ),
     ).toBe(true);
+    // A client set to sign with a key pair that has none fails rather than asking without one.
+    expect(() =>
+      openWebhookOAuthClient(ring, tenant, endpoint, { ...made, oauthPublicKey: null }),
+    ).toThrow(/has none stored/);
     // Opened for the worker: the private key and its public key's id.
     expect(openWebhookOAuthClient(ring, tenant, endpoint, made)).toEqual({
       tokenUrl: base.tokenUrl,

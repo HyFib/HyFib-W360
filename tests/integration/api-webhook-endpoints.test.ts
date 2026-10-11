@@ -956,9 +956,21 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       alg: 'RS256',
     });
     expect(createPublicKey(oauth.publicKey.pem).asymmetricKeyDetails?.modulusLength).toBe(2048);
+    const id = created.body.data.id;
+    // Each private key the client has had, opened from the row, to look for it where it must not be.
+    const privateKeyNow = async () => {
+      const [row] = await fx.query<{ oauth_private_key_ciphertext: string }>(
+        'SELECT oauth_private_key_ciphertext FROM app.webhook_endpoints WHERE id = $1',
+        [id],
+      );
+      return fx.keyring.decryptString(
+        row!.oauth_private_key_ciphertext,
+        webhookOAuthKeyAad(c.tenant.id, id),
+      );
+    };
+    const firstPrivateKey = await privateKeyNow();
     // The kept answer is the same key pair; a change keeps it, one asking for another replaces it.
     expect((await addThroughApi(key.ctx, 'key-1', body)).body.data.oauth).toEqual(oauth);
-    const id = created.body.data.id;
     expect(
       (await api().update(key.ctx, id, { oauth: { tokenUrl, clientId: 'key-client' } })).oauth,
     ).toEqual({ ...oauth, publicKey: oauth.publicKey });
@@ -1016,22 +1028,17 @@ describe('webhook endpoints through the API (ADR-081)', () => {
         source: 'api',
       },
     ]);
-    // The private key is never answered, kept for a replay, or audited.
-    const [row] = await fx.query<{ oauth_private_key_ciphertext: string }>(
-      'SELECT oauth_private_key_ciphertext FROM app.webhook_endpoints WHERE id = $1',
-      [id],
-    );
-    const privateKey = fx.keyring.decryptString(
-      row!.oauth_private_key_ciphertext,
-      webhookOAuthKeyAad(c.tenant.id, id),
-    );
+    // Neither private key, the first or the one that replaced it, is ever answered, kept for a
+    // replay, or audited.
     const kept = await fx.query(
       `SELECT response FROM app.api_idempotency_keys WHERE tenant_id = $1 AND api_key_id = $2`,
       [c.tenant.id, key.id],
     );
-    expect(JSON.stringify([created.body, kept, await api().list(key.ctx), audits])).not.toContain(
-      privateKey.split('\n')[1]!,
-    );
+    const shown = JSON.stringify([created.body, kept, await api().list(key.ctx), audits]);
+    for (const privateKey of [firstPrivateKey, await privateKeyNow()]) {
+      expect(shown).not.toContain(privateKey.split('\n')[1]!);
+    }
+    expect(await privateKeyNow()).not.toBe(firstPrivateKey);
   });
 
   it('choose the message statuses an endpoint receives, kept by changes that leave them out and cleared with the event (ADR-119)', async () => {

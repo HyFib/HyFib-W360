@@ -4422,8 +4422,9 @@ function keptWebhookOAuthSecret(
 
 /**
  * An endpoint's OAuth client, opened for its token requests, or null without one. Throws when the
- * keyring cannot open the secret or the private key (a key the platform no longer holds), or when
- * the private key is not an RSA key (ADR-367).
+ * keyring cannot open the secret or the private key (a key the platform no longer holds), when the
+ * private key is not an RSA key, or when a client set to sign with a key pair has none (ADR-367):
+ * its deliveries then end unprepared rather than go without a token.
  */
 export function openWebhookOAuthClient(
   keyring: Keyring,
@@ -4436,7 +4437,9 @@ export function openWebhookOAuthClient(
   const client = { tokenUrl: oauthTokenUrl, clientId: oauthClientId, scope: columns.oauthScope };
   if (columns.oauthClientAuth === 'private_key_jwt') {
     const { oauthPrivateKeyCiphertext, oauthPublicKey } = columns;
-    if (!oauthPrivateKeyCiphertext || !oauthPublicKey) return null;
+    if (!oauthPrivateKeyCiphertext || !oauthPublicKey) {
+      throw new Error('A webhook OAuth client set to sign with a key pair has none stored');
+    }
     return {
       ...client,
       clientAuthentication: 'private_key_jwt',

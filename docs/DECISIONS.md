@@ -14456,8 +14456,8 @@ Decision:
   column's check). Such a client has no secret: the services refuse one given for it
   (`oauth.clientSecret`), and the database keeps a key pair only with this way, and then no secret,
   while every other way keeps a secret and no key pair.
-- **HyFib makes the key pair:** an RSA key of 2048 bits (exponent 65537, the least RFC 7518 section
-  3.3 allows for RS256) is made when a client first takes the method, on adding or changing an
+- **HyFib makes the key pair:** an RSA key of 2048 bits, the smallest RFC 7518 section 3.3 allows
+  for RS256 (exponent 65537), is made when a client first takes the method, on adding or changing an
   endpoint. The private key (PKCS#8 PEM) never leaves HyFib: it is sealed with the keyring, bound to
   the company and the endpoint (`webhook-oauth-key:<company>:<endpoint>`), opened only by the worker
   to sign, re-encrypted by the keyring sweep (kind `webhook_oauth_private_key`) and never exported.
@@ -14483,8 +14483,10 @@ Decision:
   client as before, the private key part of the client's fingerprint, so a new key asks for a new
   token.
 - **Opened with care:** the worker opens the private key once per endpoint and batch and refuses one
-  that is not RSA (the delivery then ends `payload_failed`, stage `oauth`), so a key of another kind
-  never signs an assertion labelled RS256.
+  that is not RSA, and a client set to the way with no key pair (the database check rules it out),
+  so a key of another kind never signs an assertion labelled RS256 and no delivery goes without its
+  token: the delivery ends `payload_failed`, stage `oauth`, and is replayed once the key pair is
+  replaced.
 
 Consequences: a receiver whose server checks client assertions with registered public keys shares no
 secret with HyFib. Replacing a key pair stops tokens until the new public key is registered: there is

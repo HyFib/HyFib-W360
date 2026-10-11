@@ -50,6 +50,22 @@ could not be used.
   showing no public key, is a database read the integration test checks, in CI only.
 - **Rendering:** the public key's panel was rendered with React's server renderer and checked by
   eye in Chromium, wide and at phone width (the key's lines wrap, nothing overflows).
+- **CI fix (04ceda5):** the new integration test failed on PostgreSQL 17 and 18. Its helper expected
+  every token request's form without a scope, but the second request follows a change that sets
+  one, and the scope is always sent when set. The helper now takes the scope it expects; the test's
+  later steps, which had not run, were read again, and the test now removes its client at the end.
+- **Review fixes:** an independent review found that HIGH test failure (fixed above, the fix checked
+  by the review) and no other correctness or security bug. Its LOW findings are fixed:
+  - A client set to the way with no key pair now fails its deliveries (`payload_failed`, stage
+    `oauth`) instead of sending them without a token; the database check already rules it out.
+  - The API's integration test looks for the first private key too, not only the one that
+    replaced it, since the kept replay holds the first answer.
+  - DEPLOYMENT says what an old web server does when removing such a client; ADR-367 no longer
+    reads as if 65537 were a minimum; RUNBOOKS names stage `oauth` and what fixes it; DATA-RETENTION
+    lists the key pair.
+  - Not changed: the feature matrix's status convention ("locally verified" while database tests
+    run in CI), and making the key pair synchronously in the change's transaction (14 to 94 ms, as
+    the Flow keys are made).
 
 ### Test commands and results (local, 2026-10-11)
 

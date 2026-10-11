@@ -2688,7 +2688,7 @@ made: the delivery used no attempt, the endpoint's health is unchanged and the c
 deliveries went on. A backlog of them is ended 200 deliveries per job, each job queueing the next
 (`handedOver` in `webhooks delivered`). The worker logs
 `webhook delivery could not be prepared; failed as payload_failed` with `tenantId`, `deliveryId`,
-`endpointId`, `eventType`, `stage` (`payload`, `signature` or `headers`), `errorClass` and
+`endpointId`, `eventType`, `stage` (`payload`, `signature`, `headers` or `oauth`), `errorClass` and
 `errorCode` (a SQLSTATE for a database error), never the payload or the error's message. One
 `eventType` failing across deliveries is a builder bug: reproduce it from the event row
 (`app.webhook_events`, by the delivery's `event_id`) on a copy, not from the log. `stage`
@@ -2698,6 +2698,12 @@ come back, the company deletes the endpoint and adds it again (rotating keeps th
 previous secret signing for 24 hours, so those deliveries keep failing). `stage` `headers` on every
 delivery of one endpoint means its own headers cannot be opened: a key missing from
 `W360_ENCRYPTION_KEYS`, or headers restored onto another endpoint (they are bound to theirs).
+`stage` `oauth` on every delivery of one endpoint means its OAuth client cannot be opened (ADR-173,
+ADR-367): its secret or private key sealed with a key missing from `W360_ENCRYPTION_KEYS` or restored
+onto another endpoint, or a private key that is not RSA. Restore the key; if it cannot come back,
+the company gives the client secret again or, for a client that signs with a key pair, makes a new
+key pair ("Make a new key pair", `replaceKey`, then registers its public key): a change that keeps
+the key pair does not open it, so it keeps an unreadable one.
 Restore the key; if it cannot come back, the company gives the headers again ("Replace the headers"
 on the endpoint's page, or `PATCH /webhook-endpoints/{id}` with `headers`). `errorCode` `55P03` or
 `57014` is a lock or statement timeout. Once the cause is fixed, the company replays: "Replay failed

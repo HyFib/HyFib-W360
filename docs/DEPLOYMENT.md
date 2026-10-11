@@ -1531,8 +1531,9 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    every worker signs with the key once a client has one. A worker from before it sees no secret for
    such a client and sends its deliveries without a token, which the receiver refuses (retried as
    usual), so set those clients to another way before rolling workers back to such an image. Until
-   the web rollout ends, an old web server cannot change or remove such a client: it asks for a
-   secret, and the check refuses what it then writes (a server error), so nothing is stored.
+   the web rollout ends, an old web server shows such a client as if it used HTTP Basic and cannot
+   change or remove it: a change asks for a secret and writes it beside the key pair, and a removal
+   leaves the key pair, and the check refuses both (a server error), so nothing is stored.
 
    Migration 0286 (ADR-366) lets `app.webhook_endpoints.oauth_client_auth` hold
    `client_secret_jwt`, its check replaced and validated by reading the table. Workers roll out
