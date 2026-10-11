@@ -16,14 +16,16 @@ import { tenantForAction } from '@/server/tenant-action';
  * here, when an endpoint is created or its secret rotated.
  */
 
-/** An endpoint's OAuth client as the form gives it (ADR-173, ADR-357). */
+/** An endpoint's OAuth client as the form gives it (ADR-173, ADR-357, ADR-367). */
 interface WebhookOAuthActionInput {
   tokenUrl: string;
   clientId: string;
-  /** Left out, a change keeps the stored secret. */
+  /** Left out, a change keeps the stored secret; a client signing with a key pair has none. */
   clientSecret?: string;
   scope: string;
   clientAuthentication: WebhookOAuthClientAuth;
+  /** A client that signs with HyFib's key pair gets a new one (ADR-367). */
+  replaceKey?: boolean;
 }
 export async function createWebhookEndpointAction(
   slug: string,

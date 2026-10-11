@@ -2,6 +2,7 @@
 import { useId, useState } from 'react';
 import { Alert, Button, Checkbox, Field, Input, Label, Select, Textarea } from '@w360/ui';
 import { ConfirmDialog } from '@w360/ui/client';
+import { WebhookOAuthPublicKeyDetails } from './webhook-oauth-public-key';
 import {
   WEBHOOK_CAMPAIGN_STATUS_LABELS,
   WEBHOOK_CAMPAIGN_STATUSES,
@@ -3496,8 +3497,10 @@ interface OAuthFields {
   clientId: string;
   clientSecret: string;
   scope: string;
-  /** How the client proves itself to the token URL (ADR-357, ADR-366). */
+  /** How the client proves itself to the token URL (ADR-357, ADR-366, ADR-367). */
   clientAuthentication: WebhookOAuthClientAuth;
+  /** Whether a client that signs with HyFib's key pair gets a new one (ADR-367). */
+  replaceKey: boolean;
 }
 
 /**
@@ -3540,6 +3543,7 @@ function OAuthClientFields({
       {stored ? (
         <>
           <p className="text-sm break-all">{webhookOAuthText(stored)}.</p>
+          {stored.publicKey ? <WebhookOAuthPublicKeyDetails publicKey={stored.publicKey} /> : null}
           {(
             [
               ['keep', 'Keep the OAuth client'],
@@ -3601,26 +3605,48 @@ function OAuthClientFields({
               />
             )}
           </Field>
-          <Field
-            id={`${prefix}-oauth-client-secret`}
-            label="Client secret"
-            description={
-              stored
-                ? 'Leave empty to keep the stored secret, unless the token URL changes.'
-                : undefined
-            }
-          >
-            {(aria) => (
-              <Input
-                {...aria}
-                type="password"
-                maxLength={WEBHOOK_LIMITS.oauthClientSecretLength}
-                autoComplete="new-password"
-                value={fields.clientSecret}
-                onChange={(e) => set({ clientSecret: e.target.value })}
-              />
-            )}
-          </Field>
+          {fields.clientAuthentication === 'private_key_jwt' ? (
+            // A client that signs with HyFib's key pair has no secret (ADR-367).
+            stored?.clientAuthentication === 'private_key_jwt' ? (
+              <div className="flex items-start gap-2 sm:col-span-2">
+                <Checkbox
+                  id={`${prefix}-oauth-replace-key`}
+                  checked={fields.replaceKey}
+                  onChange={(e) => set({ replaceKey: e.target.checked })}
+                />
+                <Label htmlFor={`${prefix}-oauth-replace-key`} className="font-normal">
+                  Make a new key pair: the current one stops working at once, so register the new
+                  public key with the authorization server
+                </Label>
+              </div>
+            ) : (
+              <p className="text-xs text-muted-foreground sm:col-span-2">
+                HyFib makes an RSA key pair when you save, keeps its private key and signs each JWT
+                with it; register the public key shown then with the authorization server.
+              </p>
+            )
+          ) : (
+            <Field
+              id={`${prefix}-oauth-client-secret`}
+              label="Client secret"
+              description={
+                stored?.clientAuthentication !== 'private_key_jwt' && stored
+                  ? 'Leave empty to keep the stored secret, unless the token URL changes.'
+                  : undefined
+              }
+            >
+              {(aria) => (
+                <Input
+                  {...aria}
+                  type="password"
+                  maxLength={WEBHOOK_LIMITS.oauthClientSecretLength}
+                  autoComplete="new-password"
+                  value={fields.clientSecret}
+                  onChange={(e) => set({ clientSecret: e.target.value })}
+                />
+              )}
+            </Field>
+          )}
           <Field
             id={`${prefix}-oauth-scope`}
             label="Scope"
@@ -3639,7 +3665,7 @@ function OAuthClientFields({
           <Field
             id={`${prefix}-oauth-client-authentication`}
             label="How the client authenticates"
-            description="HTTP Basic is the standard way; choose the request body, or a JWT signed with a secret of at least 32 bytes, only for an authorization server that asks for it."
+            description="HTTP Basic is the standard way; choose the request body, a JWT signed with a secret of at least 32 bytes, or a JWT signed with a key pair HyFib keeps, only for an authorization server that asks for it."
           >
             {(aria) => (
               <Select
@@ -3670,6 +3696,7 @@ const oauthFieldsOf = (stored: WebhookEndpointOAuth | null | undefined): OAuthFi
   clientSecret: '',
   scope: stored?.scope ?? '',
   clientAuthentication: stored?.clientAuthentication ?? 'client_secret_basic',
+  replaceKey: false,
 });
 
 /**
@@ -4581,13 +4608,18 @@ export function WebhookEndpointForm({
           setBusy(false);
           if (!r.ok) setError(r);
         };
-        // The OAuth client to set (ADR-173); an empty secret keeps the stored one.
+        // The OAuth client to set (ADR-173); an empty secret keeps the stored one, and a client that
+        // signs with HyFib's key pair sends none, only whether to make a new key pair (ADR-367).
+        const signsWithKey = oauthFields.clientAuthentication === 'private_key_jwt';
         const oauth = {
           tokenUrl: oauthFields.tokenUrl,
           clientId: oauthFields.clientId,
           scope: oauthFields.scope,
           clientAuthentication: oauthFields.clientAuthentication,
-          ...(oauthFields.clientSecret ? { clientSecret: oauthFields.clientSecret } : {}),
+          ...(oauthFields.clientSecret && !signsWithKey
+            ? { clientSecret: oauthFields.clientSecret }
+            : {}),
+          ...(oauthFields.replaceKey && signsWithKey ? { replaceKey: true } : {}),
         };
         if (endpoint) {
           void updateWebhookEndpointAction(slug, {
@@ -4606,7 +4638,7 @@ export function WebhookEndpointForm({
               setHeaders([]);
               setReplaceHeaders(false);
               setOAuthChange('keep');
-              setOAuthFields((fields) => ({ ...fields, clientSecret: '' }));
+              setOAuthFields((fields) => ({ ...fields, clientSecret: '', replaceKey: false }));
             }
           });
         } else {

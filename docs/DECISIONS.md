@@ -14437,5 +14437,59 @@ to accept the secret itself. A server that wants an audience other than its toke
 revising RFC 7523 moves to the server's issuer identifier, as recalled here and not confirmed)
 refuses these assertions; such a receiver keeps HTTP Basic or the request body.
 
-Not built: assertions signed with a key pair (`private_key_jwt`, which needs a key HyFib generates
-and a public key the receiver registers), another audience chosen per endpoint, and a JWKS.
+Not built: assertions signed with a key pair (`private_key_jwt`, built since ADR-367), another
+audience chosen per endpoint, and a JWKS.
+
+## ADR-367 Webhook OAuth clients that sign their assertions with a key pair HyFib keeps (P5-09) (2026-10-11)
+
+Context: since ADR-366 an endpoint's OAuth client can prove it holds its secret with a JWT signed
+with it, the secret never sent. The authorization server still holds the same secret, so a company
+that wants no shared secret at all, or a server that takes only public keys for its clients, could
+not be used. RFC 7523 (sections 2.2 and 3) lets a client sign its assertion with a private key that
+the server checks with the public key registered for the client; OpenID Connect Core 1.0 section 9
+names the method `private_key_jwt`. As for ADR-366, the RFC and OpenID texts could not be opened
+from here (blocked hosts); what follows relies on them as known.
+
+Decision:
+
+- **A fourth way, with no secret:** `private_key_jwt` joins the three ways (migration 0287 widens the
+  column's check). Such a client has no secret: the services refuse one given for it
+  (`oauth.clientSecret`), and the database keeps a key pair only with this way, and then no secret,
+  while every other way keeps a secret and no key pair.
+- **HyFib makes the key pair:** an RSA key of 2048 bits (exponent 65537, the least RFC 7518 section
+  3.3 allows for RS256) is made when a client first takes the method, on adding or changing an
+  endpoint. The private key (PKCS#8 PEM) never leaves HyFib: it is sealed with the keyring, bound to
+  the company and the endpoint (`webhook-oauth-key:<company>:<endpoint>`), opened only by the worker
+  to sign, re-encrypted by the keyring sweep (kind `webhook_oauth_private_key`) and never exported.
+  The public key (SPKI PEM) is kept as it is and shown, in Settings → Webhooks and as the API's
+  `oauth.publicKey`, as a JWK (with its key id, `use` `sig` and `alg` `RS256`) and as PEM, for the
+  company to register with its authorization server. Making the key here, rather than taking one a
+  company uploads, keeps private keys out of forms, requests and logs, and every key of the right
+  kind and size.
+- **Named by its thumbprint:** the key id is the key's JWK thumbprint (RFC 7638: SHA-256 of its
+  required members, base64url), named in each assertion's `kid` header, so a server holding several
+  keys for the client picks the right one.
+- **The assertion:** as ADR-366's (issuer and subject the client ID, audience the token URL, a random
+  `jti`, five minutes' lifetime), with the header `{"alg":"RS256","kid":…,"typ":"JWT"}`, signed with
+  RSASSA-PKCS1-v1_5 and SHA-256 (RS256, RFC 7518 section 3.3), the algorithm servers most widely take
+  for client assertions (OpenID Connect Discovery asks servers to support it, as recalled here); the
+  form is the same as for `client_secret_jwt`.
+- **Kept until replaced:** a change keeps the key pair, the token URL included: a new server gets
+  assertions only the registered public key checks, so moving the client sends nothing secret, and
+  the way stays, as ADR-366's review settled for `client_secret_jwt`. `replaceKey: true` (Settings:
+  "Make a new key pair") makes a new key pair, used at once, which the company registers anew.
+  Another way drops the key pair and takes a secret, and coming back makes a new pair. Audit entries
+  say whether a key pair was made (`oauthKeyReplaced`), never the key; the worker keeps tokens per
+  client as before, the private key part of the client's fingerprint, so a new key asks for a new
+  token.
+- **Opened with care:** the worker opens the private key once per endpoint and batch and refuses one
+  that is not RSA (the delivery then ends `payload_failed`, stage `oauth`), so a key of another kind
+  never signs an assertion labelled RS256.
+
+Consequences: a receiver whose server checks client assertions with registered public keys shares no
+secret with HyFib. Replacing a key pair stops tokens until the new public key is registered: there is
+no overlap, as there is for signing secrets.
+
+Not built: an overlap for a replaced key pair (a next key shown before it is used), a JWKS URL HyFib
+serves for its clients' keys, keys a company uploads, other algorithms (PS256, ES256), certificates
+(`x5t`, `x5c`), and another audience chosen per endpoint.

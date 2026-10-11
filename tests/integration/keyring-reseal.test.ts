@@ -16,6 +16,7 @@ import {
   createWebRequestService,
   credentialAad,
   flowKeyAad,
+  generateWebhookOAuthKeyPair,
   httpRequestAad,
   httpSecretAad,
   newResealState,
@@ -33,6 +34,7 @@ import {
   storeWebhookReceipt,
   storeWebhookSecretAad,
   webhookHeadersAad,
+  webhookOAuthKeyAad,
   webhookOAuthSecretAad,
   webhookSecretAad,
   type PlatformActor,
@@ -350,6 +352,38 @@ async function sealEverything(c: Company, ring: Keyring): Promise<Seeded[]> {
       c.owner.id,
     ],
   );
+  // An endpoint whose OAuth client signs with a key pair HyFib keeps (ADR-367).
+  const keyEndpointId = uuidv7();
+  const pair = generateWebhookOAuthKeyPair();
+  await fx.query(
+    `INSERT INTO app.webhook_endpoints (id, tenant_id, url, event_types, secret_ciphertext,
+       oauth_token_url, oauth_client_id, oauth_client_auth, oauth_private_key_ciphertext,
+       oauth_public_key, created_by_user_id)
+     VALUES ($1, $2, 'https://hooks.reseal.test/w360-key', ARRAY['message.received'], $3,
+       'https://auth.reseal.test/token', 'reseal-key-client', 'private_key_jwt', $4, $5, $6)`,
+    [
+      keyEndpointId,
+      t,
+      seal({
+        kind: 'webhook_secret',
+        table: 'app.webhook_endpoints',
+        column: 'secret_ciphertext',
+        id: keyEndpointId,
+        plain: 'whsec_key_client',
+        aad: webhookSecretAad(t, keyEndpointId, 1),
+      }),
+      seal({
+        kind: 'webhook_oauth_private_key',
+        table: 'app.webhook_endpoints',
+        column: 'oauth_private_key_ciphertext',
+        id: keyEndpointId,
+        plain: pair.privateKey,
+        aad: webhookOAuthKeyAad(t, keyEndpointId),
+      }),
+      pair.publicKey,
+      c.owner.id,
+    ],
+  );
   // Waits a day, so no other file's email run sends it.
   const emailId = uuidv7();
   await fx.query(
@@ -587,7 +621,7 @@ describe('re-encrypting under the primary key', () => {
       aad: alertChannelAad(channelId),
     });
     const kinds = new Set(seeded.map((s) => s.kind));
-    expect(kinds.size).toBe(17);
+    expect(kinds.size).toBe(18);
     for (const s of seeded) expect(keyOf(await storedValue(s)), s.kind).toBe(r.ids.old);
 
     const console = await ops(r.during).keyring(staff);

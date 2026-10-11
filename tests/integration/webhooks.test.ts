@@ -1,4 +1,4 @@
-import { createHmac, randomBytes, randomInt } from 'node:crypto';
+import { createHmac, createPublicKey, randomBytes, randomInt, verify } from 'node:crypto';
 import { once } from 'node:events';
 import { createServer, type IncomingHttpHeaders, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -50,6 +50,7 @@ import {
   WEBHOOK_USER_AGENT,
   webhookHeadersAad,
   WebhookOAuthTokenCache,
+  webhookOAuthKeyAad,
   webhookOAuthSecretAad,
   webhookSecretAad,
   type TenantContext,
@@ -769,6 +770,7 @@ describe('OAuth clients (ADR-173)', () => {
       clientId: 'hyfib-test',
       scope: 'events.write read',
       clientAuthentication: 'client_secret_post',
+      publicKey: null,
     });
     expect(await auditsOf(c, 'webhook.endpoint_created')).toEqual([
       {
@@ -943,7 +945,7 @@ describe('OAuth clients (ADR-173)', () => {
     ]);
     await expect(
       fx.query(
-        `UPDATE app.webhook_endpoints SET oauth_client_auth = 'private_key_jwt' WHERE id = $1`,
+        `UPDATE app.webhook_endpoints SET oauth_client_auth = 'tls_client_auth' WHERE id = $1`,
         [created.id],
       ),
     ).rejects.toThrow(/webhook_endpoints_oauth_client_auth/);
@@ -964,7 +966,237 @@ describe('OAuth clients (ADR-173)', () => {
       clientId: 'hyfib-test',
       scope: null,
       clientAuthentication: 'client_secret_jwt',
+      publicKey: null,
     });
+  });
+
+  it('sign the client assertion with a key pair HyFib makes, which the public key shown checks, kept until replaced and dropped with the way (ADR-367)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const id = randomBytes(6).toString('hex');
+    const bearer = `/bearer/${id}`;
+    const token = `/token/${id}`;
+    const tokenUrl = `http://${HOST}:${port}${token}`;
+    const url = `http://${HOST}:${port}${bearer}`;
+    const signer = {
+      tokenUrl,
+      clientId: 'hyfib-test',
+      clientAuthentication: 'private_key_jwt' as const,
+    };
+    // It takes no secret: one given is refused, and nothing is added.
+    await expectAppError(
+      webhooks().create(owner, {
+        url,
+        eventTypes: ['consent.changed'],
+        oauth: { ...signer, clientSecret: 'a-secret' },
+      }),
+      'validation_failed',
+      /has no secret/,
+    );
+    expect(await webhooks().list(owner)).toEqual([]);
+    const created = await webhooks().create(owner, {
+      url,
+      eventTypes: ['consent.changed'],
+      oauth: signer,
+    });
+    const shown = (await webhooks().list(owner))[0]?.oauth;
+    const publicKey = shown?.publicKey;
+    expect(shown).toMatchObject({
+      tokenUrl,
+      clientId: 'hyfib-test',
+      scope: null,
+      clientAuthentication: 'private_key_jwt',
+    });
+    expect(publicKey?.jwk).toMatchObject({
+      kty: 'RSA',
+      e: 'AQAB',
+      kid: publicKey?.keyId,
+      use: 'sig',
+      alg: 'RS256',
+    });
+    // Stored: the private key sealed for this endpoint, the public key shown, and no secret.
+    const stored = async () =>
+      (
+        await fx.query<{
+          oauth_client_secret_ciphertext: string | null;
+          oauth_private_key_ciphertext: string | null;
+          oauth_public_key: string | null;
+        }>(
+          `SELECT oauth_client_secret_ciphertext, oauth_private_key_ciphertext, oauth_public_key
+             FROM app.webhook_endpoints WHERE id = $1`,
+          [created.id],
+        )
+      )[0];
+    const row = await stored();
+    expect(row?.oauth_client_secret_ciphertext).toBeNull();
+    expect(row?.oauth_public_key).toBe(publicKey?.pem);
+    const privateKey = fx.keyring.decryptString(
+      row!.oauth_private_key_ciphertext!,
+      webhookOAuthKeyAad(c.tenant.id, created.id),
+    );
+    expect(createPublicKey(privateKey).export({ type: 'spki', format: 'pem' })).toBe(
+      publicKey?.pem,
+    );
+    expect(JSON.stringify(await webhooks().list(owner))).not.toContain(privateKey.split('\n')[1]!);
+    // A delivery's token request carries an assertion the registered public key checks: RS256,
+    // naming the key, issued by the client to the token URL; no Authorization header.
+    const assertionOf = async (testCount: number) => {
+      const asked = requestsTo(token)[testCount - 1];
+      expect(asked?.headers.authorization).toBeUndefined();
+      const form = new URLSearchParams(asked?.body);
+      expect([...form.keys()]).toEqual([
+        'grant_type',
+        'client_id',
+        'client_assertion_type',
+        'client_assertion',
+      ]);
+      expect(form.get('client_assertion_type')).toBe(
+        'urn:ietf:params:oauth:client-assertion-type:jwt-bearer',
+      );
+      const [header, payload, signature] = (form.get('client_assertion') ?? '').split('.');
+      return {
+        header: JSON.parse(Buffer.from(header!, 'base64url').toString('utf8')) as unknown,
+        claims: JSON.parse(Buffer.from(payload!, 'base64url').toString('utf8')) as Record<
+          string,
+          unknown
+        >,
+        checks: (key: NonNullable<typeof publicKey>) =>
+          verify(
+            'sha256',
+            Buffer.from(`${header}.${payload}`, 'utf8'),
+            createPublicKey({ key: { ...key.jwk }, format: 'jwk' }),
+            Buffer.from(signature!, 'base64url'),
+          ),
+      };
+    };
+    issue(token, 'tok-key');
+    acceptedTokens.set(bearer, 'tok-key');
+    const before = Math.floor(Date.now() / 1000);
+    await webhooks().sendTest(owner, { endpointId: created.id });
+    expect(
+      await deliverDue(c, systemClock, egress(), failOnLog, new WebhookOAuthTokenCache()),
+    ).toMatchObject({ attempted: 1, succeeded: 1 });
+    const first = await assertionOf(1);
+    expect(first.header).toEqual({ alg: 'RS256', kid: publicKey?.keyId, typ: 'JWT' });
+    expect(first.checks(publicKey!)).toBe(true);
+    expect(first.claims).toMatchObject({ iss: 'hyfib-test', sub: 'hyfib-test', aud: tokenUrl });
+    expect(first.claims.iat).toBeGreaterThanOrEqual(before);
+    expect(first.claims.exp).toBe((first.claims.iat as number) + 300);
+    expect(authorizations(bearer)).toEqual(['Bearer tok-key']);
+    expect(await auditsOf(c, 'webhook.endpoint_created')).toEqual([
+      {
+        host: HOST,
+        eventTypes: ['consent.changed'],
+        oauthTokenHost: HOST,
+        oauthClientAuthentication: 'private_key_jwt',
+      },
+    ]);
+    // A change keeps the key pair; one asking for a new key pair replaces it, and the next token
+    // is asked with the new key, which the old public key no longer checks.
+    const change = (oauth: Record<string, unknown>) =>
+      webhooks().update(owner, {
+        endpointId: created.id,
+        url,
+        description: '',
+        eventTypes: ['consent.changed'],
+        oauth,
+      });
+    await change({ tokenUrl, clientId: 'hyfib-test', scope: 'events.write' });
+    expect((await webhooks().list(owner))[0]?.oauth).toMatchObject({
+      scope: 'events.write',
+      clientAuthentication: 'private_key_jwt',
+      publicKey,
+    });
+    await change({ tokenUrl, clientId: 'hyfib-test', scope: 'events.write', replaceKey: true });
+    const replaced = (await webhooks().list(owner))[0]?.oauth?.publicKey;
+    expect(replaced?.keyId).toBeDefined();
+    expect(replaced?.keyId).not.toBe(publicKey?.keyId);
+    expect(
+      (await auditsOf(c, 'webhook.endpoint_updated')).map((a) => [
+        a.oauthKeyReplaced,
+        a.oauthClientAuthentication,
+        a.oauthSecretReplaced,
+      ]),
+    ).toEqual([
+      [false, 'private_key_jwt', undefined],
+      [true, 'private_key_jwt', undefined],
+    ]);
+    issue(token, 'tok-key-2');
+    acceptedTokens.set(bearer, 'tok-key-2');
+    await webhooks().sendTest(owner, { endpointId: created.id });
+    expect(
+      await deliverDue(c, systemClock, egress(), failOnLog, new WebhookOAuthTokenCache()),
+    ).toMatchObject({ attempted: 1, succeeded: 1 });
+    const second = await assertionOf(2);
+    expect(second.header).toEqual({ alg: 'RS256', kid: replaced?.keyId, typ: 'JWT' });
+    expect(second.checks(replaced!)).toBe(true);
+    expect(second.checks(publicKey!)).toBe(false);
+    // Asking a new key pair of another way is refused; that way needs a secret and drops the pair.
+    await expectAppError(
+      change({
+        tokenUrl,
+        clientId: 'hyfib-test',
+        clientSecret: 's',
+        replaceKey: true,
+        clientAuthentication: 'client_secret_basic',
+      }),
+      'validation_failed',
+      /key pair to replace/,
+    );
+    await expectAppError(
+      change({ tokenUrl, clientId: 'hyfib-test', clientAuthentication: 'client_secret_basic' }),
+      'validation_failed',
+      /Enter the client secret\./,
+    );
+    await change({
+      tokenUrl,
+      clientId: 'hyfib-test',
+      clientSecret: 'a-secret-now',
+      clientAuthentication: 'client_secret_basic',
+    });
+    expect(await stored()).toMatchObject({
+      oauth_private_key_ciphertext: null,
+      oauth_public_key: null,
+    });
+    expect((await stored())?.oauth_client_secret_ciphertext).not.toBeNull();
+    expect((await webhooks().list(owner))[0]?.oauth?.publicKey).toBeNull();
+    // The database keeps a key pair only with this way, and then no secret.
+    for (const set of [
+      "oauth_private_key_ciphertext = 'sealed'",
+      "oauth_public_key = 'pem'",
+      "oauth_client_auth = 'private_key_jwt'",
+    ]) {
+      await expect(
+        fx.query(`UPDATE app.webhook_endpoints SET ${set} WHERE id = $1`, [created.id]),
+        set,
+      ).rejects.toThrow(/webhook_endpoints_oauth/);
+    }
+    await fx.query(
+      `UPDATE app.webhook_endpoints SET oauth_client_auth = 'private_key_jwt',
+         oauth_client_secret_ciphertext = NULL, oauth_private_key_ciphertext = 'sealed',
+         oauth_public_key = 'pem' WHERE id = $1`,
+      [created.id],
+    );
+    for (const set of [
+      'oauth_public_key = NULL',
+      'oauth_private_key_ciphertext = NULL',
+      "oauth_client_secret_ciphertext = 'sealed'",
+      "oauth_public_key = ''",
+      "oauth_public_key = repeat('k', 4001)",
+    ]) {
+      await expect(
+        fx.query(`UPDATE app.webhook_endpoints SET ${set} WHERE id = $1`, [created.id]),
+        set,
+      ).rejects.toThrow(/webhook_endpoints_oauth/);
+    }
+    // The company role changes the key pair only through its column grants.
+    const [grant] = await fx.query<{ private_key: boolean; public_key: boolean }>(
+      `SELECT has_column_privilege('w360_app', 'app.webhook_endpoints',
+                'oauth_private_key_ciphertext', 'UPDATE') AS private_key,
+              has_column_privilege('w360_app', 'app.webhook_endpoints', 'oauth_public_key',
+                'UPDATE') AS public_key`,
+    );
+    expect(grant).toEqual({ private_key: true, public_key: true });
   });
 
   it('fail an attempt without calling the endpoint when no token comes, and ask again at the next one', async () => {
@@ -1101,6 +1333,7 @@ describe('OAuth clients (ADR-173)', () => {
       clientId: 'hyfib-test',
       scope: 'events.write read',
       clientAuthentication: 'client_secret_basic',
+      publicKey: null,
     });
     expect(JSON.stringify(await webhooks().list(e.owner))).not.toContain(SECRET);
     expect(await auditsOf(c, 'webhook.endpoint_created')).toEqual([
@@ -1163,13 +1396,13 @@ describe('OAuth clients (ADR-173)', () => {
     expect(JSON.stringify(audits)).not.toContain('s3cr');
   });
 
-  it('are kept by the database together or not at all, with the scope alone optional, authenticating one of three ways', async () => {
+  it('are kept by the database together or not at all, with the scope alone optional, authenticating one of four ways', async () => {
     const c = await fx.company();
     const e = await addOAuthEndpoint(c);
-    // The way a client authenticates is one of the three names (RFC 7591's two and OpenID Connect's
-    // client_secret_jwt), never none (ADR-357, ADR-366).
+    // The way a client authenticates is one of the four names (RFC 7591's two and OpenID Connect's
+    // client_secret_jwt and private_key_jwt), never none (ADR-357, ADR-366, ADR-367).
     for (const set of [
-      "oauth_client_auth = 'private_key_jwt'",
+      "oauth_client_auth = 'tls_client_auth'",
       "oauth_client_auth = 'none'",
       "oauth_client_auth = 'CLIENT_SECRET_POST'",
     ]) {

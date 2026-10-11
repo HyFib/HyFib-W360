@@ -163,8 +163,13 @@ import {
   type WebhookTeamChoice,
   type WebhookTemplateChoice,
   type WebhookTemplateStatus,
+  webhookOAuthSignsJwts,
 } from './model';
 import {
+  checkedWebhookOAuthPrivateKey,
+  generateWebhookOAuthKeyPair,
+  webhookOAuthKeyAad,
+  webhookOAuthPublicKey,
   webhookOAuthSecretAad,
   webhookOAuthSecretSignsJwt,
   WEBHOOK_OAUTH_CLIENT_RE,
@@ -255,7 +260,8 @@ export const webhookHeadersSchema = z
  * out: none), and how the client authenticates (ADR-357). A change may leave the secret, and the
  * way the client authenticates, out to keep the stored ones while the token URL stays the same; a
  * new client left without a way uses HTTP Basic, and so does a new token URL, unless the client
- * signs JWTs with its secret (ADR-366), which it goes on doing.
+ * signs JWTs (ADR-366, ADR-367), which it goes on doing. A client that signs with a key pair HyFib
+ * keeps has no secret, and `replaceKey` gives it a new key pair (ADR-367).
  */
 export const webhookOAuthSchema = z
   .object({
@@ -300,9 +306,10 @@ export const webhookOAuthSchema = z
     clientAuthentication: z
       .enum(WEBHOOK_OAUTH_CLIENT_AUTHENTICATIONS, {
         error:
-          'Choose how the client authenticates: client_secret_basic, client_secret_post or client_secret_jwt.',
+          'Choose how the client authenticates: client_secret_basic, client_secret_post, client_secret_jwt or private_key_jwt.',
       })
       .optional(),
+    replaceKey: z.boolean({ error: 'Say true to replace the key pair.' }).optional(),
   })
   .strict();
 export type WebhookOAuthInput = z.output<typeof webhookOAuthSchema>;
@@ -313,6 +320,10 @@ export const WEBHOOK_OAUTH_SECRET_FOR_NEW_URL =
   'Enter the client secret again: it is used with the token URL, which changed.';
 export const WEBHOOK_OAUTH_SECRET_UNREADABLE =
   'Enter the client secret again: the one kept can no longer be read.';
+export const WEBHOOK_OAUTH_KEY_TAKES_NO_SECRET =
+  'A client that signs with HyFib’s key pair has no secret: leave the client secret out.';
+export const WEBHOOK_OAUTH_NO_KEY_TO_REPLACE =
+  'Only a client that signs with HyFib’s key pair has a key pair to replace.';
 export const WEBHOOK_OAUTH_AUTHORIZATION =
   'An endpoint that gets OAuth tokens sends them as its Authorization header: remove that header, or the OAuth client.';
 
@@ -4238,7 +4249,8 @@ export function checkedWebhookUrl(
 
 /**
  * An endpoint's OAuth columns (ADR-173): all null without an OAuth client, but the way a client
- * authenticates (ADR-357), which then stays at its default, HTTP Basic.
+ * authenticates (ADR-357), which then stays at its default, HTTP Basic. A client has a secret, or,
+ * signing with a key pair, the key pair and no secret (ADR-367).
  */
 export interface WebhookOAuthColumns {
   oauthTokenUrl: string | null;
@@ -4246,6 +4258,8 @@ export interface WebhookOAuthColumns {
   oauthClientSecretCiphertext: string | null;
   oauthScope: string | null;
   oauthClientAuth: WebhookOAuthClientAuth;
+  oauthPrivateKeyCiphertext: string | null;
+  oauthPublicKey: string | null;
 }
 
 export const NO_WEBHOOK_OAUTH: WebhookOAuthColumns = {
@@ -4254,13 +4268,20 @@ export const NO_WEBHOOK_OAUTH: WebhookOAuthColumns = {
   oauthClientSecretCiphertext: null,
   oauthScope: null,
   oauthClientAuth: 'client_secret_basic',
+  oauthPrivateKeyCiphertext: null,
+  oauthPublicKey: null,
 };
 
-/**
- * An OAuth client given for an endpoint, its token URL checked; a null secret keeps the stored one.
- */
-export interface CheckedWebhookOAuth extends Omit<WebhookOAuthClient, 'clientSecret'> {
+/** An OAuth client given for an endpoint, its token URL checked. */
+export interface CheckedWebhookOAuth {
+  tokenUrl: string;
+  clientId: string;
+  scope: string | null;
+  clientAuthentication: WebhookOAuthClientAuth;
+  /** The secret given; null keeps the stored one, and a client signing with a key pair has none. */
   clientSecret: string | null;
+  /** Whether a client signing with a key pair gets a new one (ADR-367). */
+  replaceKey: boolean;
   /** The token URL's host, the only part of it audit entries name. */
   host: string;
 }
@@ -4272,7 +4293,8 @@ export interface CheckedWebhookOAuth extends Omit<WebhookOAuthClient, 'clientSec
  * is likewise kept while the token URL stays the same, so a connector written before ADR-357 that
  * rotates the secret keeps a client set to send it in the request body; a new client uses HTTP
  * Basic, and so does a new token URL, unless the client signs JWTs: moving it to another server
- * never starts sending a secret it kept unsent (ADR-366).
+ * never starts sending a secret it kept unsent (ADR-366, ADR-367). A client that signs with a key
+ * pair takes no secret, and only it a new key pair (ADR-367).
  */
 export function checkedWebhookOAuth(
   given: WebhookOAuthInput,
@@ -4280,17 +4302,29 @@ export function checkedWebhookOAuth(
   policy: Pick<EgressPolicy, 'allowLoopbackForTests'>,
 ): CheckedWebhookOAuth {
   const { url, host } = checkedWebhookUrl(given.tokenUrl, policy, 'oauth.tokenUrl');
-  const keeps = current.oauthClientSecretCiphertext !== null && current.oauthTokenUrl === url;
+  const sameUrl = current.oauthTokenUrl !== null && current.oauthTokenUrl === url;
   const keepsMethod =
-    current.oauthTokenUrl !== null &&
-    (current.oauthTokenUrl === url || current.oauthClientAuth === 'client_secret_jwt');
-  if (given.clientSecret === undefined && !keeps) {
-    const message = current.oauthTokenUrl
-      ? WEBHOOK_OAUTH_SECRET_FOR_NEW_URL
-      : WEBHOOK_OAUTH_SECRET_NEEDED;
-    throw new AppError('validation_failed', message, {
-      issues: [{ path: 'oauth.clientSecret', message }],
-    });
+    current.oauthTokenUrl !== null && (sameUrl || webhookOAuthSignsJwts(current.oauthClientAuth));
+  const clientAuthentication =
+    given.clientAuthentication ?? (keepsMethod ? current.oauthClientAuth : 'client_secret_basic');
+  const refuse = (path: string, message: string) =>
+    new AppError('validation_failed', message, { issues: [{ path, message }] });
+  if (clientAuthentication === 'private_key_jwt') {
+    if (given.clientSecret !== undefined) {
+      throw refuse('oauth.clientSecret', WEBHOOK_OAUTH_KEY_TAKES_NO_SECRET);
+    }
+  } else {
+    if (given.replaceKey) throw refuse('oauth.replaceKey', WEBHOOK_OAUTH_NO_KEY_TO_REPLACE);
+    // The stored secret is kept only while it stays with the same token URL.
+    const keeps = current.oauthClientSecretCiphertext !== null && sameUrl;
+    if (given.clientSecret === undefined && !keeps) {
+      throw refuse(
+        'oauth.clientSecret',
+        current.oauthClientSecretCiphertext !== null
+          ? WEBHOOK_OAUTH_SECRET_FOR_NEW_URL
+          : WEBHOOK_OAUTH_SECRET_NEEDED,
+      );
+    }
   }
   return {
     tokenUrl: url,
@@ -4298,8 +4332,8 @@ export function checkedWebhookOAuth(
     clientId: given.clientId,
     clientSecret: given.clientSecret ?? null,
     scope: given.scope ?? null,
-    clientAuthentication:
-      given.clientAuthentication ?? (keepsMethod ? current.oauthClientAuth : 'client_secret_basic'),
+    clientAuthentication,
+    replaceKey: given.replaceKey === true,
   };
 }
 
@@ -4308,7 +4342,9 @@ export function checkedWebhookOAuth(
  * sealed with the keyring, bound to the company and the endpoint, or the one it has kept. A client
  * that signs JWTs (ADR-366) needs a secret of at least 32 bytes, the one given or the one kept,
  * which is opened to measure it: one the keyring can no longer open (a key the platform no longer
- * holds) is asked for again.
+ * holds) is asked for again. A client that signs with a key pair (ADR-367) keeps the one it has,
+ * unless it asks for another; else it gets a new one, the private key sealed with the keyring,
+ * bound to the company and the endpoint; any other client keeps no key pair.
  */
 export function webhookOAuthColumns(
   keyring: Keyring,
@@ -4318,6 +4354,32 @@ export function webhookOAuthColumns(
   current: WebhookOAuthColumns,
 ): WebhookOAuthColumns {
   if (!oauth) return NO_WEBHOOK_OAUTH;
+  const client = {
+    oauthTokenUrl: oauth.tokenUrl,
+    oauthClientId: oauth.clientId,
+    oauthScope: oauth.scope,
+    oauthClientAuth: oauth.clientAuthentication,
+  };
+  if (oauth.clientAuthentication === 'private_key_jwt') {
+    if (current.oauthPrivateKeyCiphertext && current.oauthPublicKey && !oauth.replaceKey) {
+      return {
+        ...client,
+        oauthClientSecretCiphertext: null,
+        oauthPrivateKeyCiphertext: current.oauthPrivateKeyCiphertext,
+        oauthPublicKey: current.oauthPublicKey,
+      };
+    }
+    const pair = generateWebhookOAuthKeyPair();
+    return {
+      ...client,
+      oauthClientSecretCiphertext: null,
+      oauthPrivateKeyCiphertext: keyring.encrypt(
+        pair.privateKey,
+        webhookOAuthKeyAad(tenantId, endpointId),
+      ),
+      oauthPublicKey: pair.publicKey,
+    };
+  }
   let sealed = current.oauthClientSecretCiphertext;
   if (oauth.clientSecret !== null) {
     sealed = keyring.encrypt(oauth.clientSecret, webhookOAuthSecretAad(tenantId, endpointId));
@@ -4334,11 +4396,10 @@ export function webhookOAuthColumns(
     });
   }
   return {
-    oauthTokenUrl: oauth.tokenUrl,
-    oauthClientId: oauth.clientId,
+    ...client,
     oauthClientSecretCiphertext: sealed,
-    oauthScope: oauth.scope,
-    oauthClientAuth: oauth.clientAuthentication,
+    oauthPrivateKeyCiphertext: null,
+    oauthPublicKey: null,
   };
 }
 
@@ -4361,7 +4422,8 @@ function keptWebhookOAuthSecret(
 
 /**
  * An endpoint's OAuth client, opened for its token requests, or null without one. Throws when the
- * keyring cannot open the secret (a key the platform no longer holds).
+ * keyring cannot open the secret or the private key (a key the platform no longer holds), or when
+ * the private key is not an RSA key (ADR-367).
  */
 export function openWebhookOAuthClient(
   keyring: Keyring,
@@ -4370,16 +4432,28 @@ export function openWebhookOAuthClient(
   columns: WebhookOAuthColumns,
 ): WebhookOAuthClient | null {
   const { oauthTokenUrl, oauthClientId, oauthClientSecretCiphertext } = columns;
-  if (!oauthTokenUrl || !oauthClientId || !oauthClientSecretCiphertext) return null;
+  if (!oauthTokenUrl || !oauthClientId) return null;
+  const client = { tokenUrl: oauthTokenUrl, clientId: oauthClientId, scope: columns.oauthScope };
+  if (columns.oauthClientAuth === 'private_key_jwt') {
+    const { oauthPrivateKeyCiphertext, oauthPublicKey } = columns;
+    if (!oauthPrivateKeyCiphertext || !oauthPublicKey) return null;
+    return {
+      ...client,
+      clientAuthentication: 'private_key_jwt',
+      privateKey: checkedWebhookOAuthPrivateKey(
+        keyring.decryptString(oauthPrivateKeyCiphertext, webhookOAuthKeyAad(tenantId, endpointId)),
+      ),
+      keyId: webhookOAuthPublicKey(oauthPublicKey).keyId,
+    };
+  }
+  if (!oauthClientSecretCiphertext) return null;
   return {
-    tokenUrl: oauthTokenUrl,
-    clientId: oauthClientId,
+    ...client,
+    clientAuthentication: columns.oauthClientAuth,
     clientSecret: keyring.decryptString(
       oauthClientSecretCiphertext,
       webhookOAuthSecretAad(tenantId, endpointId),
     ),
-    scope: columns.oauthScope,
-    clientAuthentication: columns.oauthClientAuth,
   };
 }
 
@@ -4404,7 +4478,8 @@ export function assertWebhookAuthorization(
 
 /**
  * What a change's audit entry says of the endpoint's OAuth client (ADR-173): the token URL's host
- * and whether a new secret was given, or that the client was removed; nothing when it was left out.
+ * and whether a new secret was given, or, for a client that signs with a key pair, whether it got a
+ * new one (ADR-367); or that the client was removed; nothing when it was left out.
  */
 export function webhookOAuthAudit(
   oauth: CheckedWebhookOAuth | null | undefined,
@@ -4414,7 +4489,9 @@ export function webhookOAuthAudit(
   if (oauth === null) return current.oauthTokenUrl ? { oauthRemoved: true } : {};
   return {
     oauthTokenHost: oauth.host,
-    oauthSecretReplaced: oauth.clientSecret !== null,
+    ...(oauth.clientAuthentication === 'private_key_jwt'
+      ? { oauthKeyReplaced: oauth.replaceKey || current.oauthPrivateKeyCiphertext === null }
+      : { oauthSecretReplaced: oauth.clientSecret !== null }),
     ...webhookOAuthClientAuthAudit(oauth, current),
   };
 }
@@ -4529,6 +4606,8 @@ export async function lockWebhookEndpoint(
       oauthClientSecretCiphertext: webhookEndpoints.oauthClientSecretCiphertext,
       oauthScope: webhookEndpoints.oauthScope,
       oauthClientAuth: webhookEndpoints.oauthClientAuth,
+      oauthPrivateKeyCiphertext: webhookEndpoints.oauthPrivateKeyCiphertext,
+      oauthPublicKey: webhookEndpoints.oauthPublicKey,
     })
     .from(webhookEndpoints)
     .where(
@@ -5149,6 +5228,7 @@ export function createWebhooksService(deps: {
               oauthClientId: webhookEndpoints.oauthClientId,
               oauthScope: webhookEndpoints.oauthScope,
               oauthClientAuth: webhookEndpoints.oauthClientAuth,
+              oauthPublicKey: webhookEndpoints.oauthPublicKey,
               createdAt: webhookEndpoints.createdAt,
               createdBy: users.name,
               keyName: apiKeys.name,
@@ -5490,6 +5570,7 @@ export function createWebhooksService(deps: {
               oauthClientId,
               oauthScope,
               oauthClientAuth,
+              oauthPublicKey,
               ...endpoint
             } = r;
             return {
@@ -5501,6 +5582,7 @@ export function createWebhooksService(deps: {
                       clientId: oauthClientId,
                       scope: oauthScope,
                       clientAuthentication: oauthClientAuth,
+                      publicKey: oauthPublicKey ? webhookOAuthPublicKey(oauthPublicKey) : null,
                     }
                   : null,
               channels: channelAccountIds

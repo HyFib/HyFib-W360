@@ -1,5 +1,66 @@
 # Progress
 
+## 2026-10-11 — Webhook OAuth clients that sign with a key pair HyFib keeps (P5-09, H-014, ADR-367)
+
+Status: **Implemented; its database and browser tests run in CI only.** An endpoint's OAuth client
+proved itself with its secret, sent or used to sign a JWT (ADR-357, ADR-366): the authorization
+server always held the same secret. A company that wants no shared secret, or a server that takes
+only public keys for its clients (`private_key_jwt`, RFC 7523, OpenID Connect Core 1.0 section 9),
+could not be used.
+
+### Completed
+
+- **Database:** migration 0287 adds `oauth_private_key_ciphertext` and `oauth_public_key` to
+  `app.webhook_endpoints` with their update grant, lets `oauth_client_auth` hold `private_key_jwt`,
+  and replaces the OAuth check: a key pair only with that way, and then no secret; a secret and no
+  key pair with any other. `ops.sealed_value_keys` lists the private keys, so the keyring sweep
+  re-encrypts them (kind `webhook_oauth_private_key`).
+- **Domain:** `generateWebhookOAuthKeyPair` makes an RSA key pair of 2048 bits when a client takes
+  the way; the private key is sealed with `webhookOAuthKeyAad`, and the public key kept as PEM.
+  `webhookOAuthPublicKey` shows it as a JWK and PEM, its key id the RFC 7638 thumbprint.
+  `webhookOAuthClientAssertion` signs RS256, naming the key in `kid`. The services refuse a secret
+  for the way, keep the key pair across changes (the token URL included), make a new one for
+  `replaceKey` and drop it with another way; audit entries say whether a pair was made. The worker
+  opens the key once per endpoint and batch and refuses one that is not RSA. The export omits the
+  private key and exports the public key. The API takes the way and `replaceKey` and answers
+  `oauth.publicKey`.
+- **Web:** Settings → Webhooks offers "A JWT signed with a key pair HyFib keeps", asks no secret for
+  it, offers "Make a new key pair", and shows "Public key to register with the authorization
+  server" (a JWK set and PEM) on the list and the endpoint's page.
+- **Tests:** unit (4 new: the assertion checked with the public key alone and refused by another,
+  the header, the form and determinism; the RFC 7638 thumbprint vector, the key's kind and size, a
+  key of another kind refused; a new key asking a new token; the columns made, kept, replaced and
+  dropped, the refusals, the opened client and the audit; plus the schema, the API's schemas and
+  OpenAPI entries, the text, the keyring kinds and the export spec updated); integration
+  (`webhooks.test.ts`: a delivery whose assertion the shown public key checks, the key kept,
+  replaced and dropped, the database checks and grants; `api-webhook-endpoints.test.ts`: the API's
+  answers, replay, refusals and audit, the private key never answered or kept; `keyring-reseal`:
+  the key re-encrypted; `company-data`: the key omitted); e2e (`webhooks.spec.ts`: choosing the way,
+  no secret asked, the public key shown at phone width too, the token request's JWT naming it).
+  Written for CI; the integration and e2e tests were not run here.
+- **Docs:** ADR-367 (and ADR-366's "not built" note); SECURITY; THREAT-MODEL T324; ARCHITECTURE;
+  DEPLOYMENT (0287); RUNBOOKS; BACKLOG P5-09; the feature matrix (status unchanged).
+- **Mutation checks:** 20 deliberate regressions, 19 caught by the unit tests (no `kid`, SHA-512,
+  the thumbprint's members out of order, 1024-bit keys, a private or public key of another kind
+  taken, the token fingerprint ignoring the key, the client sent as HTTP Basic, `replaceKey`
+  ignored, a secret taken for the way, `replaceKey` taken by another way, the key pair kept by
+  another way, the key sealed with the secret's AAD, the way dropped at a new token URL, the audit
+  never saying a pair was made, the opened client naming no key, a secret asked again for an
+  unchanged URL, the text naming no key, the way mislabelled). The one left, the settings list
+  showing no public key, is a database read the integration test checks, in CI only.
+- **Rendering:** the public key's panel was rendered with React's server renderer and checked by
+  eye in Chromium, wide and at phone width (the key's lines wrap, nothing overflows).
+
+### Test commands and results (local, 2026-10-11)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 146 files, 1562 tests passed                                    |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+| migration 0287                                     | pglast parse check passed (syntax only)                         |
+
 ## 2026-10-10 — Webhook OAuth clients that prove their secret with a signed JWT (P5-09, H-014, ADR-366)
 
 Status: **Implemented; its database tests run in CI only.** An endpoint's OAuth client sent its

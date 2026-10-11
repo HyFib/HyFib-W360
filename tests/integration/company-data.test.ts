@@ -94,6 +94,7 @@ const SECRET_COLUMNS = [
   'app.webhook_endpoints.previous_secret_ciphertext',
   'app.webhook_endpoints.headers_ciphertext',
   'app.webhook_endpoints.oauth_client_secret_ciphertext',
+  'app.webhook_endpoints.oauth_private_key_ciphertext',
   'app.whatsapp_accounts.credential_ciphertext',
 ];
 

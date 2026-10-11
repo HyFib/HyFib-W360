@@ -1586,7 +1586,30 @@ export const apiWebhookEndpointSchema = z.object({
       clientAuthentication: z
         .enum(WEBHOOK_OAUTH_CLIENT_AUTHENTICATIONS)
         .describe(
-          'How the client authenticates to the token URL: `client_secret_basic` with its ID and secret in an HTTP Basic Authorization header, `client_secret_post` with them as `client_id` and `client_secret` in the request body, `client_secret_jwt` with `client_id` and a JWT signed with the secret as `client_assertion`, the secret never sent.',
+          'How the client authenticates to the token URL: `client_secret_basic` with its ID and secret in an HTTP Basic Authorization header, `client_secret_post` with them as `client_id` and `client_secret` in the request body, `client_secret_jwt` with `client_id` and a JWT signed with the secret as `client_assertion`, the secret never sent, `private_key_jwt` with `client_id` and a JWT signed with the private key of a key pair HyFib keeps (RS256), no secret at all.',
+        ),
+      publicKey: z
+        .object({
+          keyId: z
+            .string()
+            .describe(
+              'The key’s id: its RFC 7638 JWK thumbprint (SHA-256), which each JWT names in its `kid` header.',
+            ),
+          jwk: z
+            .object({
+              kty: z.literal('RSA'),
+              n: z.string().describe('The modulus, base64url.'),
+              e: z.string().describe('The public exponent, base64url.'),
+              kid: z.string().describe('The key’s id, as `keyId`.'),
+              use: z.literal('sig'),
+              alg: z.literal('RS256'),
+            })
+            .describe('The public key as a JWK (RFC 7517), as a JWK Set holds it.'),
+          pem: z.string().describe('The public key as PEM (SPKI).'),
+        })
+        .nullable()
+        .describe(
+          'For a `private_key_jwt` client, the public key its JWTs are checked with, to register with the authorization server; null for any other client. The private key is never shown.',
         ),
     })
     .nullable()

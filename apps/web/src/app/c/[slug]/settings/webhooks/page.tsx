@@ -50,6 +50,7 @@ import {
   type WebhookEndpointView,
 } from '@w360/domain';
 import { Badge, Card, CardContent, CardDescription, CardHeader, CardTitle } from '@w360/ui';
+import { WebhookOAuthPublicKeyDetails } from '@/components/settings/webhook-oauth-public-key';
 import {
   ReplayFailedDeliveriesForm,
   WebhookEndpointActions,
@@ -586,6 +587,9 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
                       <p className="text-xs break-all text-muted-foreground">
                         {webhookOAuthText(e.oauth)}
                       </p>
+                    ) : null}
+                    {e.oauth?.publicKey ? (
+                      <WebhookOAuthPublicKeyDetails publicKey={e.oauth.publicKey} />
                     ) : null}
                     <p className="flex flex-wrap gap-1">
                       {e.eventTypes.map((t) => (

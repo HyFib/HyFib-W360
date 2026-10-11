@@ -1910,8 +1910,33 @@ export function webhookTakesCrmChanges(eventTypes: readonly WebhookEventType[]):
 }
 
 /**
- * Where an endpoint gets OAuth access tokens and as which client (ADR-173); its secret is never
- * shown.
+ * The public key of a client that signs with a key pair, as a JWK (RFC 7517, RFC 7518 section
+ * 6.3): the RSA modulus and exponent, its key id, and what it is for (ADR-367).
+ */
+export interface WebhookOAuthPublicJwk {
+  kty: 'RSA';
+  n: string;
+  e: string;
+  kid: string;
+  use: 'sig';
+  alg: 'RS256';
+}
+
+/**
+ * The public key a `private_key_jwt` client's assertions are checked with (ADR-367), which the
+ * company registers with its authorization server: its key id (the JWK thumbprint of RFC 7638,
+ * named in each assertion's `kid` header), the key as a JWK and as SPKI PEM. Public: shown, never
+ * the private key.
+ */
+export interface WebhookOAuthPublicKey {
+  keyId: string;
+  jwk: WebhookOAuthPublicJwk;
+  pem: string;
+}
+
+/**
+ * Where an endpoint gets OAuth access tokens and as which client (ADR-173); its secret or private
+ * key is never shown.
  */
 export interface WebhookEndpointOAuth {
   tokenUrl: string;
@@ -1920,29 +1945,40 @@ export interface WebhookEndpointOAuth {
   scope: string | null;
   /** How the client authenticates to the authorization server (ADR-357). */
   clientAuthentication: WebhookOAuthClientAuth;
+  /** The public key of a client that signs with a key pair (ADR-367); null for any other. */
+  publicKey: WebhookOAuthPublicKey | null;
 }
 
 /**
  * How an endpoint's OAuth client can authenticate to its authorization server (ADR-357), the
  * default first: its identifier and secret in an HTTP Basic header, or as form parameters in the
- * request body (RFC 6749 section 2.3.1, as RFC 7591 names the two); or, the secret never sent, a
- * JWT signed with it as a client assertion (RFC 7523, as OpenID Connect Core 1.0 section 9 names
- * it, ADR-366).
+ * request body (RFC 6749 section 2.3.1, as RFC 7591 names the two); or, no secret sent, a JWT as a
+ * client assertion (RFC 7523), signed with the secret (ADR-366) or with a private key HyFib keeps
+ * (ADR-367), as OpenID Connect Core 1.0 section 9 names the two.
  */
 export const WEBHOOK_OAUTH_CLIENT_AUTHENTICATIONS = [
   'client_secret_basic',
   'client_secret_post',
   'client_secret_jwt',
+  'private_key_jwt',
 ] as const satisfies readonly WebhookOAuthClientAuth[];
 
-/** How Settings → Webhooks names each way a client authenticates (ADR-357, ADR-366). */
+/** Whether a client proves itself with a signed JWT, sending no secret (ADR-366, ADR-367). */
+export const webhookOAuthSignsJwts = (method: WebhookOAuthClientAuth) =>
+  method === 'client_secret_jwt' || method === 'private_key_jwt';
+
+/** How Settings → Webhooks names each way a client authenticates (ADR-357, ADR-366, ADR-367). */
 export const WEBHOOK_OAUTH_CLIENT_AUTHENTICATION_LABELS: Record<WebhookOAuthClientAuth, string> = {
   client_secret_basic: 'Its ID and secret in an Authorization header (HTTP Basic)',
   client_secret_post: 'Its ID and secret in the request body (client_id and client_secret)',
   client_secret_jwt: 'A JWT signed with the secret, which is never sent (client_secret_jwt)',
+  private_key_jwt: 'A JWT signed with a key pair HyFib keeps, no secret (private_key_jwt)',
 };
 
-/** How Settings → Webhooks describes an endpoint's OAuth client (ADR-173, ADR-357, ADR-366). */
+/**
+ * How Settings → Webhooks describes an endpoint's OAuth client (ADR-173, ADR-357, ADR-366,
+ * ADR-367).
+ */
 export function webhookOAuthText(oauth: WebhookEndpointOAuth): string {
   const host = webhookHost(oauth.tokenUrl) ?? oauth.tokenUrl;
   const scope = oauth.scope ? `, scope ${oauth.scope}` : '';
@@ -1951,7 +1987,9 @@ export function webhookOAuthText(oauth: WebhookEndpointOAuth): string {
       ? ', its ID and secret sent in the request body'
       : oauth.clientAuthentication === 'client_secret_jwt'
         ? ', proving it holds the secret with a signed JWT'
-        : '';
+        : oauth.clientAuthentication === 'private_key_jwt'
+          ? `, signing JWTs with HyFib’s private key${oauth.publicKey ? ` (key ${oauth.publicKey.keyId})` : ''}`
+          : '';
   return `OAuth access tokens from ${host}, as client ${oauth.clientId}${scope}${how}`;
 }
 

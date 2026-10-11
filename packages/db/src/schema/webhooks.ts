@@ -151,13 +151,15 @@ export type WebhookOrderMessageSkipReason =
 /**
  * How a webhook endpoint's OAuth client authenticates to its authorization server (ADR-357): its
  * identifier and secret in an HTTP Basic header, or as form parameters in the request body (RFC
- * 6749 section 2.3.1, as RFC 7591 names the two); or a JWT signed with its secret, sent as a client
- * assertion (RFC 7523, as OpenID Connect Core 1.0 section 9 names it, ADR-366).
+ * 6749 section 2.3.1, as RFC 7591 names the two); or a JWT sent as a client assertion (RFC 7523),
+ * signed with its secret (ADR-366) or with a private key HyFib keeps (ADR-367), as OpenID Connect
+ * Core 1.0 section 9 names the two.
  */
 export const WEBHOOK_OAUTH_CLIENT_AUTHS = [
   'client_secret_basic',
   'client_secret_post',
   'client_secret_jwt',
+  'private_key_jwt',
 ] as const;
 export type WebhookOAuthClientAuth = (typeof WEBHOOK_OAUTH_CLIENT_AUTHS)[number];
 
@@ -711,16 +713,24 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
   /**
    * The endpoint's OAuth client (ADR-173): its authorization server's token endpoint, the client
    * identifier, the secret encrypted by the keyring and the scope to ask for (null: none). All
-   * null without OAuth; the scope alone is optional.
+   * null without OAuth; the scope alone is optional. A client that signs with a key pair has no
+   * secret (migration 0287, ADR-367).
    */
   oauthTokenUrl: text('oauth_token_url'),
   oauthClientId: text('oauth_client_id'),
   oauthClientSecretCiphertext: text('oauth_client_secret_ciphertext'),
   oauthScope: text('oauth_scope'),
   /**
-   * How the OAuth client authenticates to its authorization server (migration 0279, ADR-357), as
-   * RFC 7591 names the methods: HTTP Basic (the default, kept unused without a client) or its
-   * identifier and secret in the request body.
+   * The key pair a `private_key_jwt` client signs its assertions with (migration 0287, ADR-367):
+   * the private key (PKCS#8 PEM) encrypted by the keyring, and the public key (SPKI PEM) the
+   * company registers with its authorization server. Both null for any other client.
+   */
+  oauthPrivateKeyCiphertext: text('oauth_private_key_ciphertext'),
+  oauthPublicKey: text('oauth_public_key'),
+  /**
+   * How the OAuth client authenticates to its authorization server (migration 0279, ADR-357): HTTP
+   * Basic (the default, kept unused without a client), its identifier and secret in the request
+   * body, or a JWT signed with its secret (0286, ADR-366) or with its private key (0287, ADR-367).
    */
   oauthClientAuth: text('oauth_client_auth', { enum: WEBHOOK_OAUTH_CLIENT_AUTHS })
     .notNull()

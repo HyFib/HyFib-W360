@@ -1311,6 +1311,10 @@ verification, app review, Embedded Signup configuration).
   **[OAuth clients that sign a JWT with their secret built; their database tests run only in CI]**
   (ADR-366, migration 0286: `client_secret_jwt` sends `client_id` and a client assertion signed
   with the secret, HS256, RFC 7523, never the secret, which must be at least 32 bytes).
+  **[OAuth clients that sign a JWT with a key pair HyFib keeps built; their database tests run only
+  in CI]** (ADR-367, migration 0287: `private_key_jwt` has no secret; HyFib makes an RSA key pair of
+  2048 bits, keeps the private key sealed and shows the public key, as a JWK and PEM, to register;
+  RS256 assertions name the key by its RFC 7638 thumbprint; `replaceKey` makes a new pair).
   **[Skipped campaign recipients as webhook events built; their database tests run only in CI]**
   (ADR-358, migrations 0280 and 0281: `campaign.recipient_skipped` once per recipient a campaign
   skips, with the reason, the campaign, the contact and the number; those skipped when the
@@ -1324,8 +1328,8 @@ verification, app review, Embedded Signup configuration).
   Remaining: filters for other event types and on a message's values other than its type and words,
   field value comparisons beyond
   values, words and ranges, other authentication (headers computed per delivery, other OAuth
-  grants, client assertions signed with a key pair, `private_key_jwt`, and other audiences for
-  them), mutual TLS, fixed egress addresses, other store events (the
+  grants, an overlap when a client's key pair is replaced, a JWKS URL, keys a company uploads, and
+  other audiences for client assertions), mutual TLS, fixed egress addresses, other store events (the
   store's orders and checkouts themselves are reported by the store, ADR-085),
   a sequence number across events, load tests.
 - **P5-10 Platform ops screens** **[built, locally verified with test data only]** (ADR-054):
