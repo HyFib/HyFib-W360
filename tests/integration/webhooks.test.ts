@@ -1040,16 +1040,18 @@ describe('OAuth clients (ADR-173)', () => {
     expect(JSON.stringify(await webhooks().list(owner))).not.toContain(privateKey.split('\n')[1]!);
     // A delivery's token request carries an assertion the registered public key checks: RS256,
     // naming the key, issued by the client to the token URL; no Authorization header.
-    const assertionOf = async (testCount: number) => {
+    const assertionOf = async (testCount: number, scope: string | null) => {
       const asked = requestsTo(token)[testCount - 1];
       expect(asked?.headers.authorization).toBeUndefined();
       const form = new URLSearchParams(asked?.body);
       expect([...form.keys()]).toEqual([
         'grant_type',
+        ...(scope ? ['scope'] : []),
         'client_id',
         'client_assertion_type',
         'client_assertion',
       ]);
+      expect(form.get('scope')).toBe(scope);
       expect(form.get('client_assertion_type')).toBe(
         'urn:ietf:params:oauth:client-assertion-type:jwt-bearer',
       );
@@ -1076,7 +1078,7 @@ describe('OAuth clients (ADR-173)', () => {
     expect(
       await deliverDue(c, systemClock, egress(), failOnLog, new WebhookOAuthTokenCache()),
     ).toMatchObject({ attempted: 1, succeeded: 1 });
-    const first = await assertionOf(1);
+    const first = await assertionOf(1, null);
     expect(first.header).toEqual({ alg: 'RS256', kid: publicKey?.keyId, typ: 'JWT' });
     expect(first.checks(publicKey!)).toBe(true);
     expect(first.claims).toMatchObject({ iss: 'hyfib-test', sub: 'hyfib-test', aud: tokenUrl });
@@ -1127,7 +1129,8 @@ describe('OAuth clients (ADR-173)', () => {
     expect(
       await deliverDue(c, systemClock, egress(), failOnLog, new WebhookOAuthTokenCache()),
     ).toMatchObject({ attempted: 1, succeeded: 1 });
-    const second = await assertionOf(2);
+    // The scope the change set is asked for too.
+    const second = await assertionOf(2, 'events.write');
     expect(second.header).toEqual({ alg: 'RS256', kid: replaced?.keyId, typ: 'JWT' });
     expect(second.checks(replaced!)).toBe(true);
     expect(second.checks(publicKey!)).toBe(false);
@@ -1197,6 +1200,13 @@ describe('OAuth clients (ADR-173)', () => {
                 'UPDATE') AS public_key`,
     );
     expect(grant).toEqual({ private_key: true, public_key: true });
+    // The client goes, so no row is left with the stand-in key pair above.
+    await fx.query(
+      `UPDATE app.webhook_endpoints SET oauth_token_url = NULL, oauth_client_id = NULL,
+         oauth_client_secret_ciphertext = NULL, oauth_scope = NULL, oauth_private_key_ciphertext = NULL,
+         oauth_public_key = NULL, oauth_client_auth = 'client_secret_basic' WHERE id = $1`,
+      [created.id],
+    );
   });
 
   it('fail an attempt without calling the endpoint when no token comes, and ask again at the next one', async () => {
