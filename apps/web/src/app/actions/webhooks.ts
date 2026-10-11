@@ -29,6 +29,8 @@ interface WebhookOAuthActionInput {
   replaceKey?: boolean;
   /** What becomes of that client's next key pair (ADR-368). */
   nextKey?: WebhookOAuthNextKeyAction;
+  /** The next key shown, which using or dropping it names (ADR-368). */
+  nextKeyId?: string;
 }
 export async function createWebhookEndpointAction(
   slug: string,

@@ -20,8 +20,8 @@ ALTER TABLE app.webhook_endpoints
         AND oauth_private_key_ciphertext IS NOT NULL));
 
 -- The runtime role sets them when it changes the client (0025 grants updates column by column); both
--- roles read them through their table grants. The worker never opens the next private key: it signs
--- with the pair in use.
+-- roles read them through their table grants. Deliveries never open the next private key: they sign
+-- with the pair in use; only the keyring sweep opens it, to seal it again.
 GRANT UPDATE (oauth_next_private_key_ciphertext, oauth_next_public_key)
   ON app.webhook_endpoints TO w360_app;
 

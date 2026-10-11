@@ -1553,8 +1553,9 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    to `app.webhook_endpoints` (nullable, no rewrite) with their update grant and a check that keeps
    a next key pair only beside a `private_key_jwt` client's pair in use, its two columns together
    (validated by reading the table, at most 10 endpoints a company), and replaces
-   `ops.sealed_value_keys` so the keyring sweep re-encrypts the next private keys. Workers never
-   read the columns. Web servers of this release need them, as their reads of endpoints name them.
+   `ops.sealed_value_keys` so the keyring sweep re-encrypts the next private keys. Deliveries never
+   read the columns; a worker from before it leaves the next private keys out of its keyring sweep
+   (it does not know the kind) until workers of this release run. Web servers of this release need them, as their reads of endpoints name them.
    Until the web rollout ends, an old web server neither shows nor changes a next key pair, and its
    API refuses `nextKey` (422): its changes that keep the way keep the next pair, but moving such a
    client to another way or removing its OAuth client leaves the next pair behind, which the check

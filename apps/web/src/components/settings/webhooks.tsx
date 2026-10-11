@@ -4657,9 +4657,11 @@ export function WebhookEndpointForm({
         };
         // The OAuth client to set (ADR-173); an empty secret keeps the stored one, and a client that
         // signs with HyFib's key pair sends none, only what becomes of its key pair (ADR-367,
-        // ADR-368).
+        // ADR-368): using or dropping the next pair names the next key shown here, so the change is
+        // refused if another one has been made since.
         const signsWithKey = oauthFields.clientAuthentication === 'private_key_jwt';
         const keyAction = signsWithKey ? oauthFields.keyAction : 'keep';
+        const shownNextKeyId = endpoint?.oauth?.nextPublicKey?.keyId;
         const oauth = {
           tokenUrl: oauthFields.tokenUrl,
           clientId: oauthFields.clientId,
@@ -4669,8 +4671,9 @@ export function WebhookEndpointForm({
             ? { clientSecret: oauthFields.clientSecret }
             : {}),
           ...(keyAction === 'replace' ? { replaceKey: true } : {}),
-          ...(keyAction === 'make' || keyAction === 'use' || keyAction === 'drop'
-            ? { nextKey: keyAction }
+          ...(keyAction === 'make' ? { nextKey: keyAction } : {}),
+          ...((keyAction === 'use' || keyAction === 'drop') && shownNextKeyId
+            ? { nextKey: keyAction, nextKeyId: shownNextKeyId }
             : {}),
         };
         if (endpoint) {

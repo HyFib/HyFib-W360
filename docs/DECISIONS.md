@@ -14518,21 +14518,26 @@ Decision:
   its private key is opened and sealed again under the binding of the key in use, the old pair goes,
   and the next token is asked for with the new key (the private key is part of the worker's token
   fingerprint). HyFib never switches on its own: it cannot know when the server holds the new key,
-  and no standard way to ask was found. `nextKey: "drop"` drops the next pair unused.
+  and no standard way to ask was found. `nextKey: "drop"` drops the next pair unused. Both name the
+  next key they act on (`nextKeyId`, its key id as shown and answered), compared under the
+  endpoint's lock, so a page, tab or connector that has not seen a next pair made since cannot
+  switch to a key nobody registered (found by the review).
 - **Sealed apart:** the next private key is sealed with the keyring under a binding of its own
   (`webhook-oauth-next-key:<company>:<endpoint>`), so neither private key's ciphertext opens as the
   other's; the keyring sweep re-encrypts it (kind `webhook_oauth_next_private_key`, migration 0288's
   `ops.sealed_value_keys`). It is never shown, answered, logged, audited or exported (its public key
-  is exported), and the worker never opens it: the client it signs with is opened from the columns of
-  the pair in use only.
+  is exported), and deliveries never open it: the client a delivery signs with is opened from the
+  columns of the pair in use only; only the keyring sweep, run by the worker, opens it to seal it
+  again under the primary key.
 - **Rules:** a next pair goes only with a client set to `private_key_jwt` that has a pair in use
   (migration 0288's check names each column; the services refuse `nextKey` for another way,
   `oauth.nextKey`); `use` and `drop` need one; a change takes `replaceKey` or `nextKey`, not both.
   A change keeps the next pair otherwise, the token URL and a new pair in use included; another way,
   or removing the client, drops both pairs. A next pair the keyring can no longer open (a key the
   platform no longer holds) is refused when used: it is dropped and another made.
-- **Audited:** entries say what became of the next pair (`oauthNextKey`: `made`, `used`, `dropped`),
-  and using it counts as replacing the pair in use (`oauthKeyReplaced: true`); never a key.
+- **Audited:** entries say what became of the next pair (`oauthNextKey`: `made`, `used`, `dropped`,
+  dropped too when the client takes another way or is removed), and using it counts as replacing the
+  pair in use (`oauthKeyReplaced: true`); never a key.
 
 Consequences: a company changes keys without a gap: it makes the next pair, registers its public key
 beside the one in use, then switches, and tokens never stop. A client holds at most two key pairs.

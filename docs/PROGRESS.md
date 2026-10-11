@@ -46,6 +46,20 @@ the one in use, then switched to, so tokens never stop.
   re-padded because a row grew.
 - **Rendering:** the next public key's panel was rendered with React's server renderer beside the
   key in use's and checked by eye in Chromium, wide and at phone width (nothing overflows).
+- **Review fixes:** an independent review found no correctness or security bug; it traced the
+  integration and end-to-end tests without running them. Its four LOW findings are fixed:
+  - `use` and `drop` now name the next key they act on (`nextKeyId`, its key id as shown), compared
+    under the endpoint's lock, so a page, tab or connector that has not seen a next pair made since
+    cannot switch to a key nobody registered. Settings sends the key it shows.
+  - The docs no longer say the worker never reads the next private key: deliveries never open it,
+    and the keyring sweep re-encrypts it.
+  - A next pair dropped because the client takes another way, or is removed, is audited
+    (`oauthNextKey: "dropped"`).
+  - A test comment names 0288. The backlog's "Remaining" list no longer names the overlap ADR-368
+    builds.
+  - Mutation checks for the fixes: 5 deliberate regressions (a missing or stale key id taken, a key
+    id taken without `use` or `drop`, a drop with another way or with the client not audited), all
+    caught by the unit tests.
 - **Mutation checks:** 22 deliberate regressions, 20 caught by the unit tests (the next binding the
   key in use's, the next key sealed under the key in use's binding, a used next key left under its
   own binding or moved without sealing it again, `use` leaving the next pair, `drop` or `make`

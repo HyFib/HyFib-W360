@@ -265,7 +265,8 @@ export const webhookHeadersSchema = z
  * new client left without a way uses HTTP Basic, and so does a new token URL, unless the client
  * signs JWTs (ADR-366, ADR-367), which it goes on doing. A client that signs with a key pair HyFib
  * keeps has no secret, and `replaceKey` gives it a new key pair (ADR-367); `nextKey` makes, uses or
- * drops its next key pair, registered before it is used (ADR-368).
+ * drops its next key pair, registered before it is used, using or dropping the one `nextKeyId`
+ * names (ADR-368).
  */
 export const webhookOAuthSchema = z
   .object({
@@ -319,6 +320,10 @@ export const webhookOAuthSchema = z
         error: 'Choose what to do with the next key pair: make, use or drop.',
       })
       .optional(),
+    nextKeyId: z
+      .string({ error: 'Give the next key’s id as shown.' })
+      .regex(/^[A-Za-z0-9_-]{43}$/, 'Give the next key’s id as shown (43 characters).')
+      .optional(),
   })
   .strict();
 export type WebhookOAuthInput = z.output<typeof webhookOAuthSchema>;
@@ -338,6 +343,11 @@ export const WEBHOOK_OAUTH_NEXT_KEY_WAY =
 export const WEBHOOK_OAUTH_REPLACE_OR_NEXT =
   'Replace the key pair or change its next one, not both at once.';
 export const WEBHOOK_OAUTH_NO_NEXT_KEY = 'There is no next key pair: make one first.';
+export const WEBHOOK_OAUTH_NEXT_KEY_ID_NEEDED =
+  'Name the next key to use or drop (nextKeyId), as its public key shows it.';
+export const WEBHOOK_OAUTH_NEXT_KEY_CHANGED =
+  'The next key pair changed since it was shown: check its public key again.';
+export const WEBHOOK_OAUTH_NEXT_KEY_ID_UNUSED = 'Name a next key only to use or drop it.';
 export const WEBHOOK_OAUTH_NEXT_KEY_UNREADABLE =
   'The next key pair can no longer be read: drop it and make another.';
 export const WEBHOOK_OAUTH_AUTHORIZATION =
@@ -4324,7 +4334,8 @@ export interface CheckedWebhookOAuth {
  * Basic, and so does a new token URL, unless the client signs JWTs: moving it to another server
  * never starts sending a secret it kept unsent (ADR-366, ADR-367). A client that signs with a key
  * pair takes no secret, and only it a new key pair (ADR-367) or a next one (ADR-368), one or the
- * other in a change; using or dropping the next key pair needs one.
+ * other in a change; using or dropping the next key pair needs one, named by its key id as the
+ * request saw it.
  */
 export function checkedWebhookOAuth(
   given: WebhookOAuthInput,
@@ -4346,15 +4357,27 @@ export function checkedWebhookOAuth(
     if (given.nextKey && given.replaceKey) {
       throw refuse('oauth.nextKey', WEBHOOK_OAUTH_REPLACE_OR_NEXT);
     }
-    if (
-      (given.nextKey === 'use' || given.nextKey === 'drop') &&
-      current.oauthNextPrivateKeyCiphertext === null
-    ) {
-      throw refuse('oauth.nextKey', WEBHOOK_OAUTH_NO_NEXT_KEY);
+    if (given.nextKey === 'use' || given.nextKey === 'drop') {
+      if (current.oauthNextPrivateKeyCiphertext === null || current.oauthNextPublicKey === null) {
+        throw refuse('oauth.nextKey', WEBHOOK_OAUTH_NO_NEXT_KEY);
+      }
+      // The next key the request was made from, so a page or connector that has not seen a next
+      // pair made since cannot use or drop it (the endpoint is locked).
+      if (given.nextKeyId === undefined) {
+        throw refuse('oauth.nextKeyId', WEBHOOK_OAUTH_NEXT_KEY_ID_NEEDED);
+      }
+      if (given.nextKeyId !== webhookOAuthPublicKey(current.oauthNextPublicKey).keyId) {
+        throw refuse('oauth.nextKeyId', WEBHOOK_OAUTH_NEXT_KEY_CHANGED);
+      }
+    } else if (given.nextKeyId !== undefined) {
+      throw refuse('oauth.nextKeyId', WEBHOOK_OAUTH_NEXT_KEY_ID_UNUSED);
     }
   } else {
     if (given.replaceKey) throw refuse('oauth.replaceKey', WEBHOOK_OAUTH_NO_KEY_TO_REPLACE);
     if (given.nextKey) throw refuse('oauth.nextKey', WEBHOOK_OAUTH_NEXT_KEY_WAY);
+    if (given.nextKeyId !== undefined) {
+      throw refuse('oauth.nextKeyId', WEBHOOK_OAUTH_NEXT_KEY_ID_UNUSED);
+    }
     // The stored secret is kept only while it stays with the same token URL.
     const keeps = current.oauthClientSecretCiphertext !== null && sameUrl;
     if (given.clientSecret === undefined && !keeps) {
@@ -4579,15 +4602,18 @@ export function assertWebhookAuthorization(
 /**
  * What a change's audit entry says of the endpoint's OAuth client (ADR-173): the token URL's host
  * and whether a new secret was given, or, for a client that signs with a key pair, whether the pair
- * in use changed (ADR-367), a new one or the next one (ADR-368), and what became of its next pair;
- * or that the client was removed; nothing when it was left out.
+ * in use changed (ADR-367), a new one or the next one (ADR-368), and what became of its next pair,
+ * dropped too when the client takes another way; or that the client was removed, with its next
+ * pair; nothing when it was left out.
  */
 export function webhookOAuthAudit(
   oauth: CheckedWebhookOAuth | null | undefined,
   current: WebhookOAuthColumns,
 ): Record<string, unknown> {
   if (oauth === undefined) return {};
-  if (oauth === null) return current.oauthTokenUrl ? { oauthRemoved: true } : {};
+  const nextDropped =
+    current.oauthNextPrivateKeyCiphertext !== null ? { oauthNextKey: 'dropped' } : {};
+  if (oauth === null) return current.oauthTokenUrl ? { oauthRemoved: true, ...nextDropped } : {};
   return {
     oauthTokenHost: oauth.host,
     ...(oauth.clientAuthentication === 'private_key_jwt'
@@ -4596,9 +4622,9 @@ export function webhookOAuthAudit(
             oauth.replaceKey ||
             oauth.nextKey === 'use' ||
             current.oauthPrivateKeyCiphertext === null,
+          ...webhookOAuthNextKeyAudit(oauth),
         }
-      : { oauthSecretReplaced: oauth.clientSecret !== null }),
-    ...webhookOAuthNextKeyAudit(oauth),
+      : { oauthSecretReplaced: oauth.clientSecret !== null, ...nextDropped }),
     ...webhookOAuthClientAuthAudit(oauth, current),
   };
 }

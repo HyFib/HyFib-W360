@@ -5496,9 +5496,44 @@ describe('endpoint OAuth clients (ADR-173)', () => {
     const remade = webhookOAuthColumns(ring, tenant, endpoint, make, withNext);
     expect(remade.oauthNextPublicKey).not.toBe(withNext.oauthNextPublicKey);
     expect(remade.oauthPublicKey).toBe(made.oauthPublicKey);
+    // Using or dropping it names the next key the request saw, so one made since is not taken.
+    const nextKeyId = webhookOAuthPublicKey(withNext.oauthNextPublicKey!).keyId;
+    for (const nextKey of ['use', 'drop'] as const) {
+      expect(refusal(() => checkedWebhookOAuth({ ...signer, nextKey }, withNext, policy))).toEqual([
+        {
+          path: 'oauth.nextKeyId',
+          message: 'Name the next key to use or drop (nextKeyId), as its public key shows it.',
+        },
+      ]);
+      expect(
+        refusal(() => checkedWebhookOAuth({ ...signer, nextKey, nextKeyId }, remade, policy)),
+      ).toEqual([
+        {
+          path: 'oauth.nextKeyId',
+          message: 'The next key pair changed since it was shown: check its public key again.',
+        },
+      ]);
+    }
+    for (const given of [
+      { ...signer, nextKey: 'make' as const, nextKeyId },
+      { ...signer, nextKeyId },
+      {
+        ...base,
+        clientSecret: 's',
+        clientAuthentication: 'client_secret_basic' as const,
+        nextKeyId,
+      },
+    ]) {
+      expect(refusal(() => checkedWebhookOAuth(given, withNext, policy))).toEqual([
+        { path: 'oauth.nextKeyId', message: 'Name a next key only to use or drop it.' },
+      ]);
+    }
+    expect(problems({ ...signer, nextKey: 'use', nextKeyId: 'short' })).toEqual([
+      ['nextKeyId', 'Give the next key’s id as shown (43 characters).'],
+    ]);
     // Used, it signs from then on, sealed again under the binding of the key in use; the old pair
     // goes.
-    const use = checkedWebhookOAuth({ ...signer, nextKey: 'use' }, withNext, policy);
+    const use = checkedWebhookOAuth({ ...signer, nextKey: 'use', nextKeyId }, withNext, policy);
     const used = webhookOAuthColumns(ring, tenant, endpoint, use, withNext);
     expect(used).toMatchObject({
       oauthClientAuth: 'private_key_jwt',
@@ -5525,7 +5560,7 @@ describe('endpoint OAuth clients (ADR-173)', () => {
           ring,
           tenant,
           endpoint,
-          checkedWebhookOAuth({ ...signer, nextKey: 'use' }, unreadable, policy),
+          checkedWebhookOAuth({ ...signer, nextKey: 'use', nextKeyId }, unreadable, policy),
           unreadable,
         ),
       ),
@@ -5536,7 +5571,7 @@ describe('endpoint OAuth clients (ADR-173)', () => {
       },
     ]);
     // Dropped, the pair in use stays.
-    const drop = checkedWebhookOAuth({ ...signer, nextKey: 'drop' }, withNext, policy);
+    const drop = checkedWebhookOAuth({ ...signer, nextKey: 'drop', nextKeyId }, withNext, policy);
     expect(webhookOAuthColumns(ring, tenant, endpoint, drop, withNext)).toMatchObject({
       oauthPrivateKeyCiphertext: made.oauthPrivateKeyCiphertext,
       oauthPublicKey: made.oauthPublicKey,
@@ -5544,17 +5579,12 @@ describe('endpoint OAuth clients (ADR-173)', () => {
       oauthNextPublicKey: null,
     });
     // Another way drops both pairs, and so does removing the client.
-    const toPost = webhookOAuthColumns(
-      ring,
-      tenant,
-      endpoint,
-      checkedWebhookOAuth(
-        { ...base, clientSecret: 's', clientAuthentication: 'client_secret_post' },
-        withNext,
-        policy,
-      ),
+    const post = checkedWebhookOAuth(
+      { ...base, clientSecret: 's', clientAuthentication: 'client_secret_post' },
       withNext,
+      policy,
     );
+    const toPost = webhookOAuthColumns(ring, tenant, endpoint, post, withNext);
     expect(toPost).toMatchObject({
       oauthPrivateKeyCiphertext: null,
       oauthPublicKey: null,
@@ -5593,6 +5623,18 @@ describe('endpoint OAuth clients (ADR-173)', () => {
       ...audited,
       oauthKeyReplaced: false,
     });
+    // Dropped with another way or with the client, it is named too.
+    expect(webhookOAuthAudit(post, withNext)).toEqual({
+      oauthTokenHost: 'auth.example.com',
+      oauthSecretReplaced: true,
+      oauthNextKey: 'dropped',
+      oauthClientAuthentication: 'client_secret_post',
+    });
+    expect(webhookOAuthAudit(null, withNext)).toEqual({
+      oauthRemoved: true,
+      oauthNextKey: 'dropped',
+    });
+    expect(webhookOAuthAudit(null, made)).toEqual({ oauthRemoved: true });
   });
 
   it('refuse an Authorization header of the endpoint’s own beside a client, naming what was given', () => {

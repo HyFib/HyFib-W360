@@ -1315,9 +1315,14 @@ describe('OAuth clients (ADR-173)', () => {
     expect(assertionOf(1).header).toEqual({ alg: 'RS256', kid: first?.keyId, typ: 'JWT' });
     expect(assertionOf(1).checks(first!)).toBe(true);
     expect(assertionOf(1).checks(next!)).toBe(false);
-    // Used: it signs from then on, sealed again under the binding of the key in use; the old pair
-    // goes, and no next pair is left.
-    await change({ ...signer, nextKey: 'use' });
+    // Used, naming the key shown (another is refused): it signs from then on, sealed again under
+    // the binding of the key in use; the old pair goes, and no next pair is left.
+    await expectAppError(
+      change({ ...signer, nextKey: 'use', nextKeyId: first!.keyId }),
+      'validation_failed',
+      /changed since it was shown/,
+    );
+    await change({ ...signer, nextKey: 'use', nextKeyId: next!.keyId });
     expect(await shown()).toMatchObject({ publicKey: next, nextPublicKey: null });
     const used = await stored();
     expect(used).toMatchObject({
@@ -1339,8 +1344,10 @@ describe('OAuth clients (ADR-173)', () => {
     // Made again and dropped unused, the pair in use stays; a change takes a new key pair or a
     // next one, not both.
     await change({ ...signer, nextKey: 'make' });
-    expect((await shown())?.nextPublicKey?.keyId).not.toBe(next?.keyId);
-    await change({ ...signer, nextKey: 'drop' });
+    const remade = (await shown())?.nextPublicKey;
+    expect(remade?.keyId).toBeDefined();
+    expect(remade?.keyId).not.toBe(next?.keyId);
+    await change({ ...signer, nextKey: 'drop', nextKeyId: remade!.keyId });
     expect(await shown()).toMatchObject({ publicKey: next, nextPublicKey: null });
     await expectAppError(
       change({ ...signer, replaceKey: true, nextKey: 'make' }),
@@ -1388,6 +1395,12 @@ describe('OAuth clients (ADR-173)', () => {
       oauth_next_public_key: null,
     });
     expect(await shown()).toMatchObject({ publicKey: null, nextPublicKey: null });
+    // Its entry says the next pair was dropped with the way.
+    expect((await auditsOf(c, 'webhook.endpoint_updated')).at(-1)).toMatchObject({
+      oauthSecretReplaced: true,
+      oauthNextKey: 'dropped',
+      oauthClientAuthentication: 'client_secret_basic',
+    });
     // The database keeps a next key pair only beside a pair in use with this way, its two columns
     // together.
     await fx.query(

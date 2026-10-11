@@ -1118,8 +1118,20 @@ describe('webhook endpoints through the API (ADR-081)', () => {
         }),
       ),
     ).toMatchObject({ path: 'oauth.nextKey' });
-    // Used: it is the key in use, and none is next; the key in use opens as the next one did.
-    const used = (await change({ ...signer, nextKey: 'use' })).oauth;
+    // Used, naming the key answered (another is refused): it is the key in use, and none is next;
+    // the key in use opens as the next one did.
+    expect(
+      await issue(change({ ...signer, nextKey: 'use', nextKeyId: first.publicKey.keyId })),
+    ).toEqual({
+      path: 'oauth.nextKeyId',
+      message: 'The next key pair changed since it was shown: check its public key again.',
+    });
+    expect(await issue(change({ ...signer, nextKey: 'use' }))).toMatchObject({
+      path: 'oauth.nextKeyId',
+    });
+    const used = (
+      await change({ ...signer, nextKey: 'use', nextKeyId: made!.nextPublicKey!.keyId })
+    ).oauth;
     expect(used).toMatchObject({ publicKey: made?.nextPublicKey, nextPublicKey: null });
     const [row] = await fx.query<{ oauth_private_key_ciphertext: string }>(
       'SELECT oauth_private_key_ciphertext FROM app.webhook_endpoints WHERE id = $1',
@@ -1132,9 +1144,11 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       ),
     ).toBe(madePrivateKey);
     // Made again, then dropped unused.
-    await change({ ...signer, nextKey: 'make' });
+    const remade = (await change({ ...signer, nextKey: 'make' })).oauth;
     const droppedPrivateKey = await nextPrivateKey();
-    expect((await change({ ...signer, nextKey: 'drop' })).oauth).toMatchObject({
+    expect(
+      (await change({ ...signer, nextKey: 'drop', nextKeyId: remade!.nextPublicKey!.keyId })).oauth,
+    ).toMatchObject({
       publicKey: made?.nextPublicKey,
       nextPublicKey: null,
     });
