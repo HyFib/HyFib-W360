@@ -1,4 +1,5 @@
 import {
+  constants,
   createHmac,
   createPrivateKey,
   createPublicKey,
@@ -7,6 +8,7 @@ import {
 } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { EgressError, type EgressClient, type EgressRequest } from '@w360/core/egress';
+import type { WebhookOAuthKeyAlgorithm } from '@w360/db';
 import { WEBHOOK_LIMITS } from './model';
 import {
   checkedWebhookOAuthPrivateKey,
@@ -40,15 +42,20 @@ const client = {
   clientAuthentication: 'client_secret_basic' as const,
 };
 const at = new Date('2026-10-05T10:00:00Z');
-/** A client that signs with the key pair given (ADR-367). */
-const signerOf = (pair: WebhookOAuthKeyPair, scope: string | null = null) => ({
+/** A client that signs with the key pair given (ADR-367), RS256 unless another is named (ADR-371). */
+const signerOf = (
+  pair: WebhookOAuthKeyPair,
+  scope: string | null = null,
+  keyAlgorithm: WebhookOAuthKeyAlgorithm = 'RS256',
+) => ({
   tokenUrl: client.tokenUrl,
   clientId: client.clientId,
   scope,
   assertionAudience: null,
   clientAuthentication: 'private_key_jwt' as const,
   privateKey: pair.privateKey,
-  keyId: webhookOAuthPublicKey(pair.publicKey).keyId,
+  keyId: webhookOAuthPublicKey(pair.publicKey, keyAlgorithm).keyId,
+  keyAlgorithm,
 });
 const answer = (status: number, body: unknown) => ({
   status,
@@ -349,6 +356,108 @@ describe('OAuth client credentials for webhook endpoints (ADR-173)', () => {
     expect(webhookOAuthKeyAad('t1', 'e1')).not.toBe(webhookOAuthSecretAad('t1', 'e1'));
   });
 
+  it('sign with PS256 or ES256 when the pair was made for it, each key of the kind its algorithm takes (ADR-371)', () => {
+    const jti = '0192f0e4-7a3b-7c1d-9e2f-3a4b5c6d7e8f';
+    const partsOf = (assertion: string) => {
+      const [header, payload, signature] = assertion.split('.');
+      return {
+        signed: Buffer.from(`${header}.${payload}`, 'utf8'),
+        header: JSON.parse(Buffer.from(header!, 'base64url').toString('utf8')) as unknown,
+        signature: Buffer.from(signature!, 'base64url'),
+      };
+    };
+    // PS256: an RSA key of 2048 bits, RSASSA-PSS with SHA-256, MGF1 with SHA-256 and a 32-byte
+    // salt; checked so with the JWK registered, and not as RS256's PKCS #1 v1.5 padding.
+    const rsa = generateWebhookOAuthKeyPair('PS256');
+    expect(createPublicKey(rsa.publicKey).asymmetricKeyDetails?.modulusLength).toBe(2048);
+    const pss = webhookOAuthPublicKey(rsa.publicKey, 'PS256');
+    expect(pss.jwk).toMatchObject({ kty: 'RSA', kid: pss.keyId, use: 'sig', alg: 'PS256' });
+    // The same RSA key names the same thumbprint, whatever it signs with.
+    expect(pss.keyId).toBe(webhookOAuthPublicKey(rsa.publicKey).keyId);
+    const ps = partsOf(webhookOAuthClientAssertion(signerOf(rsa, null, 'PS256'), at, jti));
+    expect(ps.header).toEqual({ alg: 'PS256', kid: pss.keyId, typ: 'JWT' });
+    const pssKey = createPublicKey({ key: { ...pss.jwk }, format: 'jwk' });
+    expect(
+      verify(
+        'sha256',
+        ps.signed,
+        { key: pssKey, padding: constants.RSA_PKCS1_PSS_PADDING, saltLength: 32 },
+        ps.signature,
+      ),
+    ).toBe(true);
+    expect(verify('sha256', ps.signed, pssKey, ps.signature)).toBe(false);
+    // ES256: an EC key on P-256, ECDSA with SHA-256, the signature the 64 bytes of R and S (not
+    // DER), checked with the JWK of its curve and point.
+    const ec = generateWebhookOAuthKeyPair('ES256');
+    expect(createPublicKey(ec.publicKey).asymmetricKeyDetails).toEqual({
+      namedCurve: 'prime256v1',
+    });
+    const es = webhookOAuthPublicKey(ec.publicKey, 'ES256');
+    expect(es.jwk).toEqual({
+      kty: 'EC',
+      crv: 'P-256',
+      x: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/),
+      y: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/),
+      kid: es.keyId,
+      use: 'sig',
+      alg: 'ES256',
+    });
+    const signed = partsOf(webhookOAuthClientAssertion(signerOf(ec, null, 'ES256'), at, jti));
+    expect(signed.header).toEqual({ alg: 'ES256', kid: es.keyId, typ: 'JWT' });
+    expect(signed.signature).toHaveLength(64);
+    const ecKey = createPublicKey({ key: { ...es.jwk }, format: 'jwk' });
+    expect(
+      verify('sha256', signed.signed, { key: ecKey, dsaEncoding: 'ieee-p1363' }, signed.signature),
+    ).toBe(true);
+    expect(
+      verify(
+        'sha256',
+        Buffer.concat([signed.signed, Buffer.from('x')]),
+        { key: ecKey, dsaEncoding: 'ieee-p1363' },
+        signed.signature,
+      ),
+    ).toBe(false);
+    // An EC key's thumbprint (RFC 7638 section 3.2: crv, kty, x and y): the P-256 key of RFC 7517
+    // appendix A.1, its thumbprint computed apart in Python and in Node.
+    const appendix = createPublicKey({
+      key: {
+        kty: 'EC',
+        crv: 'P-256',
+        x: 'MKBCTNIcKUSDii11ySs3526iDZ8AiTo7Tu6KPAqv7D4',
+        y: '4Etl6SRW2YiLUrN5vfvVHuhp7x8PxltmWWlbbM4IFyM',
+      },
+      format: 'jwk',
+    })
+      .export({ type: 'spki', format: 'pem' })
+      .toString();
+    expect(webhookOAuthPublicKey(appendix, 'ES256').keyId).toBe(
+      'cn-I_WNMClehiVp51i_0VpOENW1upEerA8sEam5hn-s',
+    );
+    // A key of another kind than the algorithm takes is never shown or opened for it: an RSA key
+    // for ES256, an EC key for RS256 or PS256, or an EC key on another curve.
+    expect(() => webhookOAuthPublicKey(rsa.publicKey, 'ES256')).toThrow(/not an EC key on P-256/);
+    expect(() => webhookOAuthPublicKey(ec.publicKey, 'PS256')).toThrow(/not an RSA key/);
+    expect(() => checkedWebhookOAuthPrivateKey(rsa.privateKey, 'ES256')).toThrow(
+      /not an EC key on P-256/,
+    );
+    expect(() => checkedWebhookOAuthPrivateKey(ec.privateKey, 'RS256')).toThrow(/not an RSA key/);
+    const p384 = generateKeyPairSync('ec', { namedCurve: 'P-384' });
+    expect(() =>
+      checkedWebhookOAuthPrivateKey(
+        p384.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString(),
+        'ES256',
+      ),
+    ).toThrow(/not an EC key on P-256/);
+    expect(() =>
+      webhookOAuthPublicKey(
+        p384.publicKey.export({ type: 'spki', format: 'pem' }).toString(),
+        'ES256',
+      ),
+    ).toThrow(/not an EC key on P-256/);
+    expect(checkedWebhookOAuthPrivateKey(ec.privateKey, 'ES256')).toBe(ec.privateKey);
+    expect(checkedWebhookOAuthPrivateKey(rsa.privateKey, 'PS256')).toBe(rsa.privateKey);
+  });
+
   it('take a 200 with a bearer token, kept until a minute before it expires and at most a day', () => {
     expect(
       readWebhookOAuthTokenAnswer(
@@ -579,6 +688,19 @@ describe('the access tokens a worker keeps (ADR-173)', () => {
     expect(await tokens.token(owner, signer, minutes(1), ask)).toEqual(issued('one', minutes(10)));
     const elsewhere = { ...signer, assertionAudience: 'https://issuer.example.com/' };
     expect(await tokens.token(owner, elsewhere, minutes(2), ask)).toEqual(
+      issued('two', minutes(10)),
+    );
+    expect(asked.count).toBe(2);
+  });
+
+  it('ask again for a client whose key pair signs with another algorithm (ADR-371)', async () => {
+    const tokens = new WebhookOAuthTokenCache();
+    const { asked, ask } = server([issued('one', minutes(10)), issued('two', minutes(10))]);
+    const pair = generateWebhookOAuthKeyPair();
+    const rs = signerOf(pair);
+    expect(await tokens.token(owner, rs, at, ask)).toEqual(issued('one', minutes(10)));
+    expect(await tokens.token(owner, rs, minutes(1), ask)).toEqual(issued('one', minutes(10)));
+    expect(await tokens.token(owner, signerOf(pair, null, 'PS256'), minutes(2), ask)).toEqual(
       issued('two', minutes(10)),
     );
     expect(asked.count).toBe(2);

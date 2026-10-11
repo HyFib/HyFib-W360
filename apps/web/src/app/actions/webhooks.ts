@@ -4,6 +4,7 @@ import {
   webhookHost,
   type WebhookContactFieldValue,
   type WebhookOAuthClientAuth,
+  type WebhookOAuthKeyAlgorithm,
   type WebhookOAuthNextKeyAction,
   type WebhookReplayPeriod,
 } from '@w360/domain/webhook-model';
@@ -17,7 +18,9 @@ import { tenantForAction } from '@/server/tenant-action';
  * here, when an endpoint is created or its secret rotated.
  */
 
-/** An endpoint's OAuth client as the form gives it (ADR-173, ADR-357, ADR-367 to ADR-369). */
+/**
+ * An endpoint's OAuth client as the form gives it (ADR-173, ADR-357, ADR-367 to ADR-369, ADR-371).
+ */
 interface WebhookOAuthActionInput {
   tokenUrl: string;
   clientId: string;
@@ -33,6 +36,8 @@ interface WebhookOAuthActionInput {
   nextKeyId?: string;
   /** The audience a client that signs JWTs names in them; empty: its token URL (ADR-369). */
   assertionAudience?: string;
+  /** The algorithm of the key pairs the change makes (ADR-371). */
+  keyAlgorithm?: WebhookOAuthKeyAlgorithm;
 }
 export async function createWebhookEndpointAction(
   slug: string,

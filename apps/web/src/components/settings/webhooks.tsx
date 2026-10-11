@@ -25,6 +25,8 @@ import {
   WEBHOOK_MESSAGE_STATUSES,
   WEBHOOK_OAUTH_CLIENT_AUTHENTICATION_LABELS,
   WEBHOOK_OAUTH_CLIENT_AUTHENTICATIONS,
+  WEBHOOK_OAUTH_KEY_ALGORITHM_CHOICES,
+  WEBHOOK_OAUTH_KEY_ALGORITHM_LABELS,
   WEBHOOK_ORDER_STATUS_LABELS,
   WEBHOOK_ORDER_STATUSES,
   WEBHOOK_PAYMENT_LINK_STATUS_LABELS,
@@ -131,6 +133,7 @@ import {
   type WebhookEndpointField,
   type WebhookEndpointOAuth,
   type WebhookOAuthClientAuth,
+  type WebhookOAuthKeyAlgorithm,
   type WebhookOAuthNextKeyAction,
   type WebhookEndpointOwner,
   type WebhookEndpointPipeline,
@@ -3506,6 +3509,8 @@ interface OAuthFields {
   keyAction: OAuthKeyAction;
   /** The audience a client that signs JWTs names in them; empty: its token URL (ADR-369). */
   assertionAudience: string;
+  /** The algorithm of the key pairs the change makes (ADR-371); the pair in use's, or RS256. */
+  keyAlgorithm: WebhookOAuthKeyAlgorithm;
 }
 
 /**
@@ -3678,11 +3683,40 @@ function OAuthClientFields({
               </fieldset>
             ) : (
               <p className="text-xs text-muted-foreground sm:col-span-2">
-                HyFib makes an RSA key pair when you save, keeps its private key and signs each JWT
-                with it; register the public key shown then with the authorization server.
+                HyFib makes a key pair when you save, keeps its private key and signs each JWT with
+                it; register the public key shown then with the authorization server.
               </p>
             )
-          ) : (
+          ) : null}
+          {fields.clientAuthentication === 'private_key_jwt' &&
+          (stored?.clientAuthentication !== 'private_key_jwt' ||
+            fields.keyAction === 'replace' ||
+            fields.keyAction === 'make') ? (
+            // The algorithm of the key pair made now: RS256 unless the server wants another
+            // (ADR-371).
+            <Field
+              id={`${prefix}-oauth-key-algorithm`}
+              label="Key algorithm"
+              description="The algorithm the new key pair signs with: RS256 unless the authorization server asks for PS256 or ES256."
+            >
+              {(aria) => (
+                <Select
+                  {...aria}
+                  value={fields.keyAlgorithm}
+                  onChange={(e) =>
+                    set({ keyAlgorithm: e.target.value as WebhookOAuthKeyAlgorithm })
+                  }
+                >
+                  {WEBHOOK_OAUTH_KEY_ALGORITHM_CHOICES.map((algorithm) => (
+                    <option key={algorithm} value={algorithm}>
+                      {WEBHOOK_OAUTH_KEY_ALGORITHM_LABELS[algorithm]}
+                    </option>
+                  ))}
+                </Select>
+              )}
+            </Field>
+          ) : null}
+          {fields.clientAuthentication !== 'private_key_jwt' ? (
             <Field
               id={`${prefix}-oauth-client-secret`}
               label="Client secret"
@@ -3703,7 +3737,7 @@ function OAuthClientFields({
                 />
               )}
             </Field>
-          )}
+          ) : null}
           <Field
             id={`${prefix}-oauth-scope`}
             label="Scope"
@@ -3777,6 +3811,7 @@ const oauthFieldsOf = (stored: WebhookEndpointOAuth | null | undefined): OAuthFi
   clientAuthentication: stored?.clientAuthentication ?? 'client_secret_basic',
   keyAction: 'keep',
   assertionAudience: stored?.assertionAudience ?? '',
+  keyAlgorithm: stored?.publicKey?.jwk.alg ?? 'RS256',
 });
 
 /**
@@ -4698,6 +4733,13 @@ export function WebhookEndpointForm({
         const signsWithKey = oauthFields.clientAuthentication === 'private_key_jwt';
         const keyAction = signsWithKey ? oauthFields.keyAction : 'keep';
         const shownNextKeyId = endpoint?.oauth?.nextPublicKey?.keyId;
+        // A key pair is made for a client that had none of its own, to replace it or as the next
+        // pair, with the algorithm chosen (ADR-371).
+        const makesPair =
+          signsWithKey &&
+          (endpoint?.oauth?.clientAuthentication !== 'private_key_jwt' ||
+            keyAction === 'replace' ||
+            keyAction === 'make');
         const oauth = {
           tokenUrl: oauthFields.tokenUrl,
           clientId: oauthFields.clientId,
@@ -4714,6 +4756,7 @@ export function WebhookEndpointForm({
           ...((keyAction === 'use' || keyAction === 'drop') && shownNextKeyId
             ? { nextKey: keyAction, nextKeyId: shownNextKeyId }
             : {}),
+          ...(makesPair ? { keyAlgorithm: oauthFields.keyAlgorithm } : {}),
         };
         if (endpoint) {
           void updateWebhookEndpointAction(slug, {

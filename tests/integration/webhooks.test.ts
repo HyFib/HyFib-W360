@@ -1,4 +1,11 @@
-import { createHmac, createPublicKey, randomBytes, randomInt, verify } from 'node:crypto';
+import {
+  constants,
+  createHmac,
+  createPublicKey,
+  randomBytes,
+  randomInt,
+  verify,
+} from 'node:crypto';
 import { once } from 'node:events';
 import { createServer, type IncomingHttpHeaders, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -1099,6 +1106,7 @@ describe('OAuth clients (ADR-173)', () => {
         host: HOST,
         eventTypes: ['consent.changed'],
         oauthTokenHost: HOST,
+        oauthKeyAlgorithm: 'RS256',
         oauthClientAuthentication: 'private_key_jwt',
       },
     ]);
@@ -1620,8 +1628,19 @@ describe('OAuth clients (ADR-173)', () => {
       'SELECT * FROM ops.webhook_oauth_jwks($1)',
       [jwksId],
     );
-    expect(Object.keys(row!).sort()).toEqual(['next_public_key', 'public_key']);
-    expect(row).toEqual({ public_key: first!.publicKey!.pem, next_public_key: null });
+    // Each key's algorithm too, since 0291 (ADR-371).
+    expect(Object.keys(row!).sort()).toEqual([
+      'key_algorithm',
+      'next_key_algorithm',
+      'next_public_key',
+      'public_key',
+    ]);
+    expect(row).toEqual({
+      public_key: first!.publicKey!.pem,
+      key_algorithm: 'RS256',
+      next_public_key: null,
+      next_key_algorithm: null,
+    });
     expect(await fx.query('SELECT * FROM ops.webhook_oauth_jwks($1)', ["' OR true --"])).toEqual(
       [],
     );
@@ -1727,6 +1746,218 @@ describe('OAuth clients (ADR-173)', () => {
     expect(await jwks(lastId)).toBeNull();
     await webhooks().remove(owner, { endpointId: other.id });
     expect(await webhooks().list(owner)).toHaveLength(1);
+  });
+
+  it('sign with the algorithm each key pair was made for, ES256 or PS256, checked with the key shown and served (ADR-371)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const id = randomBytes(6).toString('hex');
+    const bearer = `/bearer/${id}`;
+    const token = `/token/${id}`;
+    const tokenUrl = `http://${HOST}:${port}${token}`;
+    const url = `http://${HOST}:${port}${bearer}`;
+    const signer = {
+      tokenUrl,
+      clientId: 'hyfib-algorithms',
+      clientAuthentication: 'private_key_jwt' as const,
+    };
+    // Refused for another way, and by a change that makes no key pair.
+    await expectAppError(
+      webhooks().create(owner, {
+        url,
+        eventTypes: ['consent.changed'],
+        oauth: { tokenUrl, clientId: 'x', clientSecret: 'a-secret', keyAlgorithm: 'ES256' },
+      }),
+      'validation_failed',
+      /Only a client that signs with HyFib’s key pair has a key algorithm/,
+    );
+    const created = await webhooks().create(owner, {
+      url,
+      eventTypes: ['consent.changed'],
+      oauth: { ...signer, keyAlgorithm: 'ES256' },
+    });
+    const change = (oauth: Record<string, unknown>) =>
+      webhooks().update(owner, {
+        endpointId: created.id,
+        url,
+        description: '',
+        eventTypes: ['consent.changed'],
+        oauth,
+      });
+    await expectAppError(
+      change({ ...signer, keyAlgorithm: 'PS256' }),
+      'validation_failed',
+      /Choose an algorithm only when a key pair is made/,
+    );
+    const shown = async () => (await webhooks().list(owner))[0]?.oauth;
+    const first = await shown();
+    expect(first?.publicKey?.jwk).toMatchObject({
+      kty: 'EC',
+      crv: 'P-256',
+      kid: first?.publicKey?.keyId,
+      use: 'sig',
+      alg: 'ES256',
+    });
+    const stored = async () =>
+      (
+        await fx.query<{
+          oauth_key_algorithm: string | null;
+          oauth_next_key_algorithm: string | null;
+        }>(
+          `SELECT oauth_key_algorithm, oauth_next_key_algorithm FROM app.webhook_endpoints
+            WHERE id = $1`,
+          [created.id],
+        )
+      )[0];
+    expect(await stored()).toEqual({
+      oauth_key_algorithm: 'ES256',
+      oauth_next_key_algorithm: null,
+    });
+    // A delivery's token request: an ES256 assertion naming the key, its signature the 64 bytes of
+    // R and S, which the key shown checks.
+    const assertionOf = (n: number) => {
+      const form = new URLSearchParams(requestsTo(token)[n - 1]?.body);
+      const [header, payload, signature] = (form.get('client_assertion') ?? '').split('.');
+      const signed = Buffer.from(`${header}.${payload}`, 'utf8');
+      const sig = Buffer.from(signature!, 'base64url');
+      return {
+        header: JSON.parse(Buffer.from(header!, 'base64url').toString('utf8')) as unknown,
+        signature: sig,
+        checksEs256: (key: NonNullable<typeof first>['publicKey'] | undefined) =>
+          verify(
+            'sha256',
+            signed,
+            {
+              key: createPublicKey({ key: { ...key!.jwk }, format: 'jwk' }),
+              dsaEncoding: 'ieee-p1363',
+            },
+            sig,
+          ),
+        checksPs256: (key: NonNullable<typeof first>['publicKey'] | undefined) =>
+          verify(
+            'sha256',
+            signed,
+            {
+              key: createPublicKey({ key: { ...key!.jwk }, format: 'jwk' }),
+              padding: constants.RSA_PKCS1_PSS_PADDING,
+              saltLength: 32,
+            },
+            sig,
+          ),
+      };
+    };
+    const deliverWith = async (accessToken: string) => {
+      issue(token, accessToken);
+      acceptedTokens.set(bearer, accessToken);
+      await webhooks().sendTest(owner, { endpointId: created.id });
+      expect(
+        await deliverDue(c, systemClock, egress(), failOnLog, new WebhookOAuthTokenCache()),
+      ).toMatchObject({ attempted: 1, succeeded: 1 });
+    };
+    await deliverWith('tok-es256');
+    expect(assertionOf(1).header).toEqual({
+      alg: 'ES256',
+      kid: first?.publicKey?.keyId,
+      typ: 'JWT',
+    });
+    expect(assertionOf(1).signature).toHaveLength(64);
+    expect(assertionOf(1).checksEs256(first?.publicKey)).toBe(true);
+    // A next key pair for PS256, beside the ES256 pair, which signs until it is used; the JWKS URL
+    // serves both, each with its algorithm.
+    await change({ ...signer, nextKey: 'make', keyAlgorithm: 'PS256' });
+    const withNext = await shown();
+    expect(withNext?.publicKey).toEqual(first?.publicKey);
+    expect(withNext?.nextPublicKey?.jwk).toMatchObject({ kty: 'RSA', alg: 'PS256' });
+    expect(await stored()).toEqual({
+      oauth_key_algorithm: 'ES256',
+      oauth_next_key_algorithm: 'PS256',
+    });
+    expect(await webhookOAuthPublicJwks(fx.dbs.app, withNext!.jwksId!)).toEqual({
+      keys: [withNext!.publicKey!.jwk, withNext!.nextPublicKey!.jwk],
+    });
+    await deliverWith('tok-es256-again');
+    expect(assertionOf(2).header).toMatchObject({ alg: 'ES256' });
+    expect(assertionOf(2).checksEs256(first?.publicKey)).toBe(true);
+    // Used: the next token request is PS256, checked with RSA-PSS by the key shown, and not by the
+    // ES256 key.
+    await change({ ...signer, nextKey: 'use', nextKeyId: withNext!.nextPublicKey!.keyId });
+    const used = await shown();
+    expect(used?.publicKey).toEqual(withNext?.nextPublicKey);
+    expect(used?.nextPublicKey).toBeNull();
+    expect(await stored()).toEqual({
+      oauth_key_algorithm: 'PS256',
+      oauth_next_key_algorithm: null,
+    });
+    await deliverWith('tok-ps256');
+    expect(assertionOf(3).header).toEqual({
+      alg: 'PS256',
+      kid: withNext?.nextPublicKey?.keyId,
+      typ: 'JWT',
+    });
+    expect(assertionOf(3).checksPs256(used?.publicKey)).toBe(true);
+    expect(assertionOf(3).checksEs256(first?.publicKey)).toBe(false);
+    // A key pair replaced without an algorithm signs as the pair in use did.
+    await change({ ...signer, replaceKey: true });
+    expect((await shown())?.publicKey?.jwk).toMatchObject({ kty: 'RSA', alg: 'PS256' });
+    // Audit entries name the algorithm of each pair made.
+    expect((await auditsOf(c, 'webhook.endpoint_created'))[0]).toMatchObject({
+      oauthKeyAlgorithm: 'ES256',
+    });
+    expect(
+      (await auditsOf(c, 'webhook.endpoint_updated')).map((a) => a.oauthKeyAlgorithm ?? null),
+    ).toEqual(['PS256', null, 'PS256']);
+    // Another way drops both algorithms.
+    await change({
+      tokenUrl,
+      clientId: 'hyfib-algorithms',
+      clientSecret: 'a-secret-now',
+      clientAuthentication: 'client_secret_basic',
+    });
+    expect(await stored()).toEqual({ oauth_key_algorithm: null, oauth_next_key_algorithm: null });
+    // The database keeps an algorithm only beside its public key, and only one of the three.
+    await fx.query(
+      `UPDATE app.webhook_endpoints SET oauth_client_auth = 'private_key_jwt',
+         oauth_client_secret_ciphertext = NULL, oauth_private_key_ciphertext = 'sealed',
+         oauth_public_key = 'pem' WHERE id = $1`,
+      [created.id],
+    );
+    for (const set of [
+      "oauth_key_algorithm = 'RS512'",
+      "oauth_key_algorithm = 'es256'",
+      "oauth_next_key_algorithm = 'ES256'",
+    ]) {
+      await expect(
+        fx.query(`UPDATE app.webhook_endpoints SET ${set} WHERE id = $1`, [created.id]),
+        set,
+      ).rejects.toThrow(/webhook_endpoints_oauth_key_algorithm/);
+    }
+    await fx.query(`UPDATE app.webhook_endpoints SET oauth_key_algorithm = 'ES256' WHERE id = $1`, [
+      created.id,
+    ]);
+    await expect(
+      fx.query(
+        `UPDATE app.webhook_endpoints SET oauth_key_algorithm = 'ES256', oauth_public_key = NULL,
+           oauth_private_key_ciphertext = NULL, oauth_client_auth = 'client_secret_basic',
+           oauth_client_secret_ciphertext = 'sealed' WHERE id = $1`,
+        [created.id],
+      ),
+    ).rejects.toThrow(/webhook_endpoints_oauth_key_algorithm/);
+    // The company role sets them only through its column grants.
+    const [grant] = await fx.query<{ inUse: boolean; next: boolean }>(
+      `SELECT has_column_privilege('w360_app', 'app.webhook_endpoints', 'oauth_key_algorithm',
+                'UPDATE') AS "inUse",
+              has_column_privilege('w360_app', 'app.webhook_endpoints',
+                'oauth_next_key_algorithm', 'UPDATE') AS next`,
+    );
+    expect(grant).toEqual({ inUse: true, next: true });
+    // The client goes, so no row is left with the stand-in key pair above.
+    await fx.query(
+      `UPDATE app.webhook_endpoints SET oauth_token_url = NULL, oauth_client_id = NULL,
+         oauth_client_secret_ciphertext = NULL, oauth_scope = NULL, oauth_private_key_ciphertext = NULL,
+         oauth_public_key = NULL, oauth_key_algorithm = NULL, oauth_jwks_id = NULL,
+         oauth_client_auth = 'client_secret_basic' WHERE id = $1`,
+      [created.id],
+    );
   });
 
   it('fail an attempt without calling the endpoint when no token comes, and ask again at the next one', async () => {

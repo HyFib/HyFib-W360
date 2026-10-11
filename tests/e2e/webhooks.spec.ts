@@ -623,7 +623,7 @@ test('an endpoint sends its own headers with every delivery: set in settings and
   expect(viaApi()[1]!.headers['x-gateway-token']).toBeUndefined();
 });
 
-test('an endpoint gets OAuth access tokens as its client and sends them as a bearer token: set in settings with the secret never shown again, changed on its page to send it in the request body, then to sign with a key pair, moved to its next key pair, its JWTs addressed to another audience, removed, and given by an API key (ADR-173, ADR-357, ADR-367 to ADR-369)', async ({
+test('an endpoint gets OAuth access tokens as its client and sends them as a bearer token: set in settings with the secret never shown again, changed on its page to send it in the request body, then to sign with a key pair, its keys served at a JWKS URL, moved to a next key pair made for ES256, its JWTs addressed to another audience, removed, and given by an API key (ADR-173, ADR-357, ADR-367 to ADR-371)', async ({
   page,
   request,
 }) => {
@@ -750,15 +750,21 @@ test('an endpoint gets OAuth access tokens as its client and sends them as a bea
     typ: 'JWT',
   });
 
-  // A next key pair (ADR-368): made beside the key in use and shown to register first, while the
-  // key in use goes on signing; once switched to, the next token request's JWT names it.
-  const kidOf = (body: string) => {
+  // A next key pair (ADR-368), made for ES256 (ADR-371): made beside the key in use and shown to
+  // register first, while the key in use goes on signing; once switched to, the next token
+  // request's JWT names it and its algorithm.
+  const headerOf = (body: string) => {
     const [header] = (new URLSearchParams(body).get('client_assertion') ?? '').split('.');
-    return (JSON.parse(Buffer.from(header!, 'base64url').toString('utf8')) as { kid?: string }).kid;
+    return JSON.parse(Buffer.from(header!, 'base64url').toString('utf8')) as {
+      alg?: string;
+      kid?: string;
+    };
   };
+  const kidOf = (body: string) => headerOf(body).kid;
   await page.getByRole('link', { name: `Deliveries and settings for ${HOST}` }).click();
   await page.getByRole('radio', { name: 'Change the OAuth client' }).check();
   await page.getByRole('radio', { name: /^Make a next key pair to register first/ }).check();
+  await page.getByLabel('Key algorithm', { exact: true }).selectOption('ES256');
   await page.getByRole('button', { name: 'Save endpoint' }).click();
   await expect(page.getByText('Endpoint saved.')).toBeVisible();
   await page.goto(`/c/${slug}/settings/webhooks`);
@@ -786,15 +792,15 @@ test('an endpoint gets OAuth access tokens as its client and sends them as a bea
     expect(response.headers()['cache-control']).toBe('public, max-age=300');
     expect(response.headers()['content-type']).toMatch(/^application\/json/);
     const { keys } = (await response.json()) as {
-      keys: { kid: string; kty: string; d?: string }[];
+      keys: { kid: string; kty: string; alg: string; d?: string }[];
     };
     for (const key of keys) {
-      expect(key.kty).toBe('RSA');
+      expect(key.kty).toBe(key.alg === 'ES256' ? 'EC' : 'RSA');
       expect(key.d).toBeUndefined();
     }
-    return keys.map((key) => key.kid);
+    return keys.map((key) => `${key.kid} ${key.alg}`);
   };
-  expect(await servedKids()).toEqual([keyId, nextKeyId]);
+  expect(await servedKids()).toEqual([`${keyId} RS256`, `${nextKeyId} ES256`]);
   expect(await servedKids('/api/webhook-oauth/jwks/aaaaaaaaaaaaaaaa')).toBeNull();
   await page.getByRole('button', { name: `Send test event to ${HOST}` }).click();
   await expect(async () => expect(forUs()).toHaveLength(4)).toPass({ timeout: 30_000 });
@@ -815,11 +821,15 @@ test('an endpoint gets OAuth access tokens as its client and sends them as a bea
   await expect(page.getByText(/^Next public key/)).toHaveCount(0);
   // The same URL now serves the key switched to alone.
   await expect(page.getByLabel('JWKS URL', { exact: true })).toHaveValue(jwksUrl);
-  expect(await servedKids()).toEqual([nextKeyId]);
+  expect(await servedKids()).toEqual([`${nextKeyId} ES256`]);
   await page.getByRole('button', { name: `Send test event to ${HOST}` }).click();
   await expect(async () => expect(forUs()).toHaveLength(5)).toPass({ timeout: 30_000 });
   expect(asked(secondTokenPath).length).toBeGreaterThan(askedBefore);
-  expect(kidOf(asked(secondTokenPath).at(-1)!.body)).toBe(nextKeyId);
+  expect(headerOf(asked(secondTokenPath).at(-1)!.body)).toEqual({
+    alg: 'ES256',
+    kid: nextKeyId,
+    typ: 'JWT',
+  });
 
   // The audience its JWTs name (ADR-369): the token URL, or another, such as the server's issuer.
   const audienceOf = (body: string) => {

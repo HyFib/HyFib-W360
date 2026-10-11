@@ -2890,8 +2890,15 @@ five minutes; the server's documentation says how often it fetches), then switch
 404 when the client does not sign with a key pair, was removed, or its company is being deleted; a
 client set up before the URL existed shows none until its next change ("Change the OAuth client"
 and save it keeping its key pair, or `PATCH` its `oauth`). The URL keeps working as keys change,
-but another way, then this one again, gives a new URL; `oauth_token_refused_404` or a 3xx: the
-token URL is wrong (redirects are not followed);
+but another way, then this one again, gives a new URL. A server that takes only PS256 or ES256
+(refusing RS256 with 400 or 401, or its documentation saying so; ADR-371) needs a key pair made for
+that algorithm: choose it under "Key algorithm" while making a next key pair (`nextKey: "make"`
+with `keyAlgorithm`), register its public key (its JWK's `alg` names the algorithm), then switch;
+a pair made without one signs as the pair in use does. A delivery that ends `payload_failed` at
+stage `oauth` for a client whose key is not of the kind its algorithm takes (a pair made by a web
+server from before ADR-371 during a rollout) needs a new pair: "Make a new key pair" with the
+algorithm wanted; `oauth_token_refused_404` or a 3xx: the token URL is wrong (redirects are not
+followed);
 `oauth_token_invalid`: it answered 200 without a bearer token (an HTML page, or a token type other
 than Bearer); `oauth_token_timeout`, `_dns_failed`, `_connect_failed` or `_address_blocked`: the
 token URL cannot be reached, or is not a public https address. Check the client with the receiver's

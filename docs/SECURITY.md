@@ -1459,15 +1459,18 @@ Phase 5 rules (outgoing webhooks, P5-09):
   or the client; the route reads through `ops.webhook_oauth_jwks`, a SECURITY DEFINER function
   owned by the definer, its search path pinned, executable by the runtime role only, which refuses
   a malformed id unread and returns the two public key columns of companies active, suspended or
-  restricted only, and responses may be cached five minutes. The way a client authenticates and the
-  audience's host are audited, the secret never. Access tokens live only in the worker's memory,
-  keyed by the company, the endpoint and a hash of the client (its way of authenticating, its
-  private key and its audience included): never stored, logged or shown, a day at most, replaced
-  after a 401 or a change of the client. A token's characters are checked (RFC 6750) before it goes
-  in the `Authorization` header, and an endpoint with a client
-  cannot send an `Authorization` header of its own. A token request that fails is recorded by its
-  code only; a secret that does not open fails that delivery alone as `payload_failed` (stage
-  `oauth`). Tested (unit; integration and e2e tests run in CI only).
+  restricted only, and responses may be cached five minutes. A key pair signs with the algorithm
+  chosen when it is made (ADR-371): RS256 or PS256 with an RSA key of 2048 bits, or ES256 with an
+  EC key on P-256; the services and the worker open a private key only if it is of the kind its
+  algorithm takes, and a database check keeps each algorithm beside its public key. The way a
+  client authenticates and the audience's host are audited, the secret never. Access tokens live
+  only in the worker's memory, keyed by the company, the endpoint and a hash of the client (its way
+  of authenticating, its private key and its algorithm, and its audience included): never stored,
+  logged or shown, a day at most, replaced after a 401 or a change of the client. A token's
+  characters are checked (RFC 6750) before it goes in the `Authorization` header, and an endpoint
+  with a client cannot send an `Authorization` header of its own. A token request that fails is
+  recorded by its code only; a secret that does not open fails that delivery alone as
+  `payload_failed` (stage `oauth`). Tested (unit; integration and e2e tests run in CI only).
 - An endpoint can take only some `message.status` statuses (ADR-119), chosen by whoever may change
   it (members with `developer.manage`, or the key that manages it). The list is checked against
   the statuses the message trigger captures, kept only while the endpoint takes `message.status`

@@ -1882,6 +1882,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'clientAuthentication',
       'clientId',
       'clientSecret',
+      'keyAlgorithm',
       'nextKey',
       'nextKeyId',
       'replaceKey',
@@ -1918,13 +1919,24 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       client?.anyOf?.find((s) => s.properties)?.properties?.[key] as Client | undefined;
     for (const key of ['publicKey', 'nextPublicKey'] as const) {
       expect(keys(publicKeyOf(answered.properties.oauth, key))).toEqual(['jwk', 'keyId', 'pem']);
+      // An RSA key for RS256 or PS256, an EC key on P-256 for ES256 (ADR-371).
+      const jwk = JSON.stringify(
+        publicKeyOf(answered.properties.oauth, key)?.anyOf?.find((s) => s.properties)?.properties
+          ?.jwk,
+      );
+      for (const part of ['"RSA"', '"PS256"', '"EC"', '"P-256"', '"ES256"']) {
+        expect(jwk).toContain(part);
+      }
     }
+    expect(given?.anyOf?.find((s) => s.properties)?.properties?.keyAlgorithm).toMatchObject({
+      enum: ['RS256', 'PS256', 'ES256'],
+    });
     const nextKeyOf = (client: Client | undefined) =>
       client?.anyOf?.find((s) => s.properties)?.properties?.nextKey;
     expect(nextKeyOf(given)).toMatchObject({ enum: ['make', 'use', 'drop'] });
     expect(given?.anyOf?.find((s) => s.properties)).toMatchObject({
       description: expect.stringContaining(
-        'With `clientAuthentication` `private_key_jwt` the client has no secret (leave `clientSecret` out): HyFib makes an RSA key pair of 2048 bits for it, keeps the private key encrypted and signs the JWT with it instead (RS256, its `kid` the public key\'s RFC 7638 thumbprint); register the public key the endpoint answers in `oauth.publicKey` with the authorization server. The key pair stays while the client signs with it; `replaceKey: true` makes a new one, used at once, and the old one is no longer used. To change keys without a gap, `nextKey: "make"` makes a next key pair beside it, answered in `oauth.nextPublicKey` and not used: register its public key too, then `nextKey: "use"` signs with it from then on, the old pair dropped, or `nextKey: "drop"` drops it unused; another `"make"` replaces a next pair not yet used. `use` and `drop` name the next key they act on in `nextKeyId` (its `keyId`), and are refused if another next pair has been made since. A change takes `replaceKey` or `nextKey`, not both.',
+        'With `clientAuthentication` `private_key_jwt` the client has no secret (leave `clientSecret` out): HyFib makes a key pair for it, keeps the private key encrypted and signs the JWT with it instead, its `kid` the public key\'s RFC 7638 thumbprint: RS256 with an RSA key of 2048 bits, unless `keyAlgorithm` asks for PS256 (RSA with PSS padding) or ES256 (ECDSA on P-256) when a key pair is made (the client\'s first, `replaceKey` or `nextKey: "make"`; a pair made without it signs as the pair in use does); register the public key the endpoint answers in `oauth.publicKey`, whose JWK\'s `alg` names the algorithm, with the authorization server. The key pair stays while the client signs with it; `replaceKey: true` makes a new one, used at once, and the old one is no longer used. To change keys without a gap, `nextKey: "make"` makes a next key pair beside it, answered in `oauth.nextPublicKey` and not used: register its public key too, then `nextKey: "use"` signs with it from then on, the old pair dropped, or `nextKey: "drop"` drops it unused; another `"make"` replaces a next pair not yet used. `use` and `drop` name the next key they act on in `nextKeyId` (its `keyId`), and are refused if another next pair has been made since. A change takes `replaceKey` or `nextKey`, not both.',
       ),
     });
     expect(given?.anyOf?.find((s) => s.properties)).toMatchObject({
@@ -1944,7 +1956,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'Its `clientAuthentication` may be left out to keep the one it has while the token URL stays the same (for a new token URL, `client_secret_basic`, unless it is `client_secret_jwt` or `private_key_jwt`, which stays).',
     );
     expect(JSON.stringify(changed)).toContain(
-      'A client that signs with HyFib’s key pair keeps it unless `replaceKey` is true or `nextKey` is `use`, and keeps its next key pair unless `nextKey` makes, uses or drops it.',
+      'A client that signs with HyFib’s key pair keeps it unless `replaceKey` is true or `nextKey` is `use`, and keeps its next key pair unless `nextKey` makes, uses or drops it; `keyAlgorithm` is given only with a key pair made.',
     );
     expect(answered.required).toContain('oauth');
     expect(doc.info.description).toContain('send it as `Authorization: Bearer <token>`');

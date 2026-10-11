@@ -1160,15 +1160,30 @@ const webhookOAuthPublicKeySchema = z.object({
       'The key’s id: its RFC 7638 JWK thumbprint (SHA-256), which each JWT names in its `kid` header.',
     ),
   jwk: z
-    .object({
-      kty: z.literal('RSA'),
-      n: z.string().describe('The modulus, base64url.'),
-      e: z.string().describe('The public exponent, base64url.'),
-      kid: z.string().describe('The key’s id, as `keyId`.'),
-      use: z.literal('sig'),
-      alg: z.literal('RS256'),
-    })
-    .describe('The public key as a JWK (RFC 7517), as a JWK Set holds it.'),
+    .union([
+      z.object({
+        kty: z.literal('RSA'),
+        n: z.string().describe('The modulus, base64url.'),
+        e: z.string().describe('The public exponent, base64url.'),
+        kid: z.string().describe('The key’s id, as `keyId`.'),
+        use: z.literal('sig'),
+        alg: z
+          .enum(['RS256', 'PS256'])
+          .describe('The algorithm the key signs with, chosen when the pair was made.'),
+      }),
+      z.object({
+        kty: z.literal('EC'),
+        crv: z.literal('P-256'),
+        x: z.string().describe('The point’s x coordinate, base64url.'),
+        y: z.string().describe('The point’s y coordinate, base64url.'),
+        kid: z.string().describe('The key’s id, as `keyId`.'),
+        use: z.literal('sig'),
+        alg: z.literal('ES256'),
+      }),
+    ])
+    .describe(
+      'The public key as a JWK (RFC 7517), as a JWK Set holds it: an RSA key for RS256 or PS256, an elliptic-curve key on P-256 for ES256.',
+    ),
   pem: z.string().describe('The public key as PEM (SPKI).'),
 });
 

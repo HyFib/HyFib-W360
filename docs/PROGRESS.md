@@ -1,5 +1,64 @@
 # Progress
 
+## 2026-10-11 — ES256 and PS256 key pairs for webhook OAuth clients that sign with a key pair (P5-09, H-014, ADR-371)
+
+Status: **Implemented; its database and browser tests run in CI only.** A client that signs with a
+key pair HyFib keeps (ADR-367) signed RS256 only; a server that takes PS256 or ES256 only (a FAPI
+profile, as recalled) refused it.
+
+### Completed
+
+- **Database:** migration 0291 adds `oauth_key_algorithm` and `oauth_next_key_algorithm` to
+  `app.webhook_endpoints` with their update grant and a check (RS256, PS256 or ES256, each only
+  beside its public key; null for a pair made before, which signs RS256), and replaces
+  `ops.webhook_oauth_jwks` to return each key's algorithm.
+- **Domain:** `keyAlgorithm` on a change that makes a key pair (the client's first, `replaceKey` or
+  `nextKey: "make"`), refused otherwise and for another way; a pair made without one signs as the
+  pair in use does, a first pair RS256. RS256 and PS256 take an RSA key of 2048 bits, ES256 an EC
+  key on P-256 (JWK of its curve and point, RFC 7638 thumbprint of `crv`, `kty`, `x`, `y`). The
+  assertion is signed as the algorithm says (PSS with a 32-byte salt; ECDSA as the 64 bytes of R
+  and S). The worker and the next pair's use open a key only if it is of the kind its algorithm
+  takes; the token fingerprint includes the algorithm; audit entries name the algorithm of each
+  pair made (`oauthKeyAlgorithm`); the export exports both columns; the API takes `keyAlgorithm`,
+  answers each key's JWK with its `alg`, and the OpenAPI document describes RSA and EC keys.
+- **Web:** Settings → Webhooks shows "Key algorithm" whenever a save makes a key pair, and the
+  client's description names each key's algorithm.
+- **Tests:** unit (3 new: PS256 and ES256 assertions checked with the JWK alone and refused under the
+  other padding or signature form, the EC thumbprint against RFC 7517's example key computed apart
+  in Python and Node, keys of the wrong kind or curve refused; a new token for a new algorithm; the
+  schema, the refusals, the columns made, kept, moved with a next pair and dropped, a pair made
+  before 0291 read as RS256, the JWK Set, the audit and the text; plus the API's schemas, the
+  OpenAPI entries and the audit size bound, measured at 4,434 bytes); integration (`webhooks.test.ts`:
+  deliveries signed ES256, then PS256 after a next pair made for it and used, each checked with the
+  key shown, the JWK Set naming both algorithms, the refusals, the audits, the database check and the
+  grants, and the JWKS function's new columns; `api-webhook-endpoints.test.ts`: the answers, the
+  kept replay, the refusals and the audits; existing audit expectations name the algorithm of each
+  pair made); e2e (`webhooks.spec.ts`: the next key pair made for ES256, served by the JWKS URL with
+  its algorithm, and named with ES256 in the next token request's header). Written for CI; the
+  integration and e2e tests were not run here.
+- **Docs:** ADR-371 (and the "not built" notes of ADR-367, ADR-368 and ADR-370); SECURITY;
+  THREAT-MODEL T328; ARCHITECTURE; DEPLOYMENT (0291); RUNBOOKS; BACKLOG P5-09; DATA-RETENTION; the
+  feature matrix (status unchanged). The feature matrix's and DATA-RETENTION's tables are re-padded
+  because a row grew.
+- **Mutation checks:** 19 deliberate regressions, 17 caught by the unit tests (ES256 signing in DER,
+  PS256 with a 20-byte salt or with PKCS #1 v1.5 padding, the header always saying RS256, the EC
+  thumbprint's members out of order, ES256 making an RSA key, any curve opened for ES256, the token
+  fingerprint ignoring the algorithm, a pair made ignoring the pair in use's, a kept pair losing its
+  algorithm, a used next pair keeping the old one, an algorithm taken without a pair made or for
+  another way, the worker opening every key as RS256, the JWK Set ignoring the algorithm, the audit
+  and the text naming none). The two left, the API and the settings list showing every key as
+  RS256, are database reads the integration tests check, in CI only.
+
+### Test commands and results (local, 2026-10-11)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 146 files, 1570 tests passed                                    |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+| migration 0291                                     | pglast parse check passed (syntax only)                         |
+
 ## 2026-10-11 — A public JWKS URL for webhook OAuth clients that sign with a key pair (P5-09, H-014, ADR-370)
 
 Status: **Implemented; its database and browser tests run in CI only.** A client that signs with a

@@ -2313,7 +2313,13 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   the first key pair and keeps it while the client signs with one, and `webhookOAuthPublicJwks`
   reads the keys in the system scope, read only, through `ops.webhook_oauth_jwks`, a definer
   function returning only `oauth_public_key` and `oauth_next_public_key`, as a JWK Set. Settings and
-  the API (`oauth.jwksUrl`) build the URL from `APP_BASE_URL` with `webhookOAuthJwksUrl`.
+  the API (`oauth.jwksUrl`) build the URL from `APP_BASE_URL` with `webhookOAuthJwksUrl`. Each
+  key pair keeps the algorithm it was made for, `oauth_key_algorithm` and
+  `oauth_next_key_algorithm` (migration 0291, ADR-371; null for a pair made before, read as RS256):
+  `generateWebhookOAuthKeyPair` makes an RSA key for RS256 and PS256 and an EC key on P-256 for
+  ES256, `webhookOAuthPublicKey` builds the JWK of either kind with its `alg`, and
+  `webhookOAuthClientAssertion` signs as the algorithm says (PSS with a 32-byte salt, ECDSA as the
+  64 bytes of R and S); 0291 replaces `ops.webhook_oauth_jwks` to return each key's algorithm.
 - **Team filters** (migration 0122, ADR-174): `team_ids` on an endpoint lists the teams whose
   conversations' message and conversation events it takes, null for every conversation's; a check
   keeps it to 1 to 50 ids and to endpoints that take such an event. `app.capture_webhook_event`
