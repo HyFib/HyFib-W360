@@ -1618,6 +1618,18 @@ export const apiWebhookEndpointSchema = z.object({
         .describe(
           'For a `private_key_jwt` client given a next key pair (`nextKey: "make"`), its public key: not used yet, to register with the authorization server before `nextKey: "use"` signs with it; null without one. Its private key is never shown.',
         ),
+      assertionAudience: z
+        .string()
+        .nullable()
+        .describe(
+          'For a `client_secret_jwt` or `private_key_jwt` client, the audience its JWTs name instead of the token URL (an https URL, such as the authorization server’s issuer identifier); null: the token URL, and for any other client.',
+        ),
+      jwksUrl: z
+        .string()
+        .nullable()
+        .describe(
+          'For a `private_key_jwt` client, a public URL where HyFib serves its public keys as a JWK Set (the key in use and the next one, if any), for an authorization server that fetches a client’s keys instead of having them registered; it stays the same as the keys change, and goes with the way. null for any other client, and for one set up before JWKS URLs existed until its next change.',
+        ),
     })
     .nullable()
     .describe(

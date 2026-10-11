@@ -2865,9 +2865,10 @@ the request body" under "How the client authenticates" (`clientAuthentication`:
 `client_secret_post`; a change through the API that leaves it out keeps it while the token URL
 stays the same), and HTTP Basic for one that refuses the body; a server that wants a client
 assertion signed with the secret takes "A JWT signed with the secret" (`client_secret_jwt`,
-ADR-366), which needs a secret of at least 32 bytes and audiences the token URL: a server that
-wants another audience, such as its issuer identifier, refuses it (400 or 401), so use another
-way with it; `oauth_token_secret_too_short`: a client set to sign JWTs keeps a secret under 32
+ADR-366), which needs a secret of at least 32 bytes and names the token URL as its audience: a
+server that wants another audience, such as its issuer identifier, refuses it (400 or 401), so
+enter the value it wants under "JWT audience" (`assertionAudience`, ADR-369; an https URL kept
+exactly as entered, so a missing or extra trailing slash matters); `oauth_token_secret_too_short`: a client set to sign JWTs keeps a secret under 32
 bytes (set during a rollout by a web server from before ADR-366): enter one of 32 bytes or more;
 a client set to "A JWT signed with a key pair HyFib keeps" (`private_key_jwt`, ADR-367) is refused
 (400 or 401) until its public key is registered for the client with the server: copy it from the
@@ -2882,8 +2883,15 @@ key's id as answered); if the server refuses the next token, register the key Hy
 pair" means it was used or dropped already; "The next key pair changed since it was shown" means
 another one was made meanwhile (another tab, member or connector): reload, register the next public
 key shown, then switch; "The next key pair can no longer be read" (its key missing from
-`W360_ENCRYPTION_KEYS`) means drop it and make another; `oauth_token_refused_404` or a
-3xx: the token URL is wrong (redirects are not followed);
+`W360_ENCRYPTION_KEYS`) means drop it and make another. A server can fetch the keys instead from
+the client's "JWKS URL" (ADR-370; `oauth.jwksUrl`), given to it once as the client's `jwks_uri`:
+make the next key pair, wait until the server has fetched the set holding it (the URL may be cached
+five minutes; the server's documentation says how often it fetches), then switch. The URL answers
+404 when the client does not sign with a key pair, was removed, or its company is being deleted; a
+client set up before the URL existed shows none until its next change ("Change the OAuth client"
+and save it keeping its key pair, or `PATCH` its `oauth`). The URL keeps working as keys change,
+but another way, then this one again, gives a new URL; `oauth_token_refused_404` or a 3xx: the
+token URL is wrong (redirects are not followed);
 `oauth_token_invalid`: it answered 200 without a bearer token (an HTML page, or a token type other
 than Bearer); `oauth_token_timeout`, `_dns_failed`, `_connect_failed` or `_address_blocked`: the
 token URL cannot be reached, or is not a public https address. Check the client with the receiver's

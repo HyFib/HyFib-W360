@@ -50,8 +50,10 @@ import {
   WEBHOOK_USER_AGENT,
   webhookHeadersAad,
   WebhookOAuthTokenCache,
+  newWebhookOAuthJwksId,
   webhookOAuthKeyAad,
   webhookOAuthNextKeyAad,
+  webhookOAuthPublicJwks,
   webhookOAuthSecretAad,
   webhookSecretAad,
   type TenantContext,
@@ -773,6 +775,8 @@ describe('OAuth clients (ADR-173)', () => {
       clientAuthentication: 'client_secret_post',
       publicKey: null,
       nextPublicKey: null,
+      assertionAudience: null,
+      jwksId: null,
     });
     expect(await auditsOf(c, 'webhook.endpoint_created')).toEqual([
       {
@@ -970,6 +974,8 @@ describe('OAuth clients (ADR-173)', () => {
       clientAuthentication: 'client_secret_jwt',
       publicKey: null,
       nextPublicKey: null,
+      assertionAudience: null,
+      jwksId: null,
     });
   });
 
@@ -1456,6 +1462,273 @@ describe('OAuth clients (ADR-173)', () => {
     );
   });
 
+  it('name the audience a client chooses in its assertion instead of the token URL, kept while the token URL stays (ADR-369)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const id = randomBytes(6).toString('hex');
+    const bearer = `/bearer/${id}`;
+    const token = `/token/${id}`;
+    const tokenUrl = `http://${HOST}:${port}${token}`;
+    const url = `http://${HOST}:${port}${bearer}`;
+    const secret = 'jwt-signing-secret:of/forty+bytes-long!!';
+    const issuer = 'https://issuer.example.com/tenant/';
+    const client = {
+      tokenUrl,
+      clientId: 'hyfib-audience',
+      clientAuthentication: 'client_secret_jwt' as const,
+    };
+    // Only a client that signs JWTs names one, and only an https URL.
+    await expectAppError(
+      webhooks().create(owner, {
+        url,
+        eventTypes: ['consent.changed'],
+        oauth: {
+          ...client,
+          clientSecret: secret,
+          clientAuthentication: 'client_secret_basic',
+          assertionAudience: issuer,
+        },
+      }),
+      'validation_failed',
+      /names an audience/,
+    );
+    await expectAppError(
+      webhooks().create(owner, {
+        url,
+        eventTypes: ['consent.changed'],
+        oauth: { ...client, clientSecret: secret, assertionAudience: 'http://issuer.example.com/' },
+      }),
+      'validation_failed',
+      /https:\/\/ URL/,
+    );
+    expect(await webhooks().list(owner)).toEqual([]);
+    const created = await webhooks().create(owner, {
+      url,
+      eventTypes: ['consent.changed'],
+      oauth: { ...client, clientSecret: secret, assertionAudience: issuer },
+    });
+    expect((await webhooks().list(owner))[0]?.oauth).toMatchObject({
+      clientAuthentication: 'client_secret_jwt',
+      assertionAudience: issuer,
+    });
+    expect(await auditsOf(c, 'webhook.endpoint_created')).toEqual([
+      {
+        host: HOST,
+        eventTypes: ['consent.changed'],
+        oauthTokenHost: HOST,
+        oauthAudienceHost: 'issuer.example.com',
+        oauthClientAuthentication: 'client_secret_jwt',
+      },
+    ]);
+    // Each delivery's token request: its assertion's audience, and whether the secret signed it.
+    const assertionOf = (n: number) => {
+      const form = new URLSearchParams(requestsTo(token)[n - 1]?.body);
+      const [header, payload, signature] = (form.get('client_assertion') ?? '').split('.');
+      return {
+        audience: (
+          JSON.parse(Buffer.from(payload!, 'base64url').toString('utf8')) as { aud?: unknown }
+        ).aud,
+        signed:
+          signature ===
+          createHmac('sha256', secret).update(`${header}.${payload}`).digest('base64url'),
+      };
+    };
+    const deliverWith = async (accessToken: string) => {
+      issue(token, accessToken);
+      acceptedTokens.set(bearer, accessToken);
+      await webhooks().sendTest(owner, { endpointId: created.id });
+      expect(
+        await deliverDue(c, systemClock, egress(), failOnLog, new WebhookOAuthTokenCache()),
+      ).toMatchObject({ attempted: 1, succeeded: 1 });
+    };
+    await deliverWith('tok-aud-1');
+    expect(assertionOf(1)).toEqual({ audience: issuer, signed: true });
+    // A change that leaves it out keeps it while the token URL stays; null names the token URL.
+    const change = (oauth: Record<string, unknown>) =>
+      webhooks().update(owner, {
+        endpointId: created.id,
+        url,
+        description: '',
+        eventTypes: ['consent.changed'],
+        oauth,
+      });
+    await change({ ...client, scope: 'events.write' });
+    expect((await webhooks().list(owner))[0]?.oauth?.assertionAudience).toBe(issuer);
+    await change({ ...client, assertionAudience: null });
+    expect((await webhooks().list(owner))[0]?.oauth?.assertionAudience).toBeNull();
+    await deliverWith('tok-aud-2');
+    expect(assertionOf(2)).toEqual({ audience: tokenUrl, signed: true });
+    expect(authorizations(bearer)).toEqual(['Bearer tok-aud-1', 'Bearer tok-aud-2']);
+    expect((await auditsOf(c, 'webhook.endpoint_updated')).map((a) => a.oauthAudienceHost)).toEqual(
+      ['issuer.example.com', undefined],
+    );
+    // The database keeps one only with a client that signs JWTs, as an https URL.
+    for (const set of [
+      "oauth_assertion_audience = 'http://issuer.example.com/'",
+      `oauth_assertion_audience = 'https://' || repeat('a', 2041)`,
+      `oauth_client_auth = 'client_secret_basic', oauth_assertion_audience = 'https://issuer.example.com/'`,
+    ]) {
+      await expect(
+        fx.query(`UPDATE app.webhook_endpoints SET ${set} WHERE id = $1`, [created.id]),
+        set,
+      ).rejects.toThrow(/webhook_endpoints_oauth_assertion_audience/);
+    }
+    const [grant] = await fx.query<{ audience: boolean }>(
+      `SELECT has_column_privilege('w360_app', 'app.webhook_endpoints',
+                'oauth_assertion_audience', 'UPDATE') AS audience`,
+    );
+    expect(grant).toEqual({ audience: true });
+  });
+
+  it('serve a client that signs with a key pair at a public JWKS URL: its keys only, under an id kept while it does (ADR-370)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const id = randomBytes(6).toString('hex');
+    const tokenUrl = `http://${HOST}:${port}/token/${id}`;
+    const url = `http://${HOST}:${port}/bearer/${id}`;
+    const signer = {
+      tokenUrl,
+      clientId: 'hyfib-jwks',
+      clientAuthentication: 'private_key_jwt' as const,
+    };
+    const created = await webhooks().create(owner, {
+      url,
+      eventTypes: ['consent.changed'],
+      oauth: signer,
+    });
+    const change = (oauth: Record<string, unknown> | null) =>
+      webhooks().update(owner, {
+        endpointId: created.id,
+        url,
+        description: '',
+        eventTypes: ['consent.changed'],
+        oauth,
+      });
+    const shown = async () => (await webhooks().list(owner))[0]?.oauth;
+    const jwks = (jwksId: string) => webhookOAuthPublicJwks(fx.dbs.app, jwksId);
+    // Made with the client: its id, of 16 base32 letters, serves the public key in use, and nothing
+    // else is looked up under an unknown or malformed id.
+    const first = await shown();
+    const jwksId = first!.jwksId!;
+    expect(jwksId).toMatch(/^[a-z2-7]{16}$/);
+    expect(await jwks(jwksId)).toEqual({ keys: [first!.publicKey!.jwk] });
+    for (const unknown of [newWebhookOAuthJwksId(), jwksId.toUpperCase(), `${jwksId}a`, '']) {
+      expect(await jwks(unknown)).toBeNull();
+    }
+    // The definer function itself: public keys only, refusing a malformed id unread.
+    const [row] = await fx.query<Record<string, unknown>>(
+      'SELECT * FROM ops.webhook_oauth_jwks($1)',
+      [jwksId],
+    );
+    expect(Object.keys(row!).sort()).toEqual(['next_public_key', 'public_key']);
+    expect(row).toEqual({ public_key: first!.publicKey!.pem, next_public_key: null });
+    expect(await fx.query('SELECT * FROM ops.webhook_oauth_jwks($1)', ["' OR true --"])).toEqual(
+      [],
+    );
+    // A next key pair joins it, after the key in use; used, it is served alone, under the same id.
+    await change({ ...signer, nextKey: 'make' });
+    const withNext = await shown();
+    expect(withNext?.jwksId).toBe(jwksId);
+    expect(await jwks(jwksId)).toEqual({
+      keys: [withNext!.publicKey!.jwk, withNext!.nextPublicKey!.jwk],
+    });
+    await change({ ...signer, nextKey: 'use', nextKeyId: withNext!.nextPublicKey!.keyId });
+    const used = await shown();
+    expect(used?.jwksId).toBe(jwksId);
+    expect(used?.publicKey).toEqual(withNext?.nextPublicKey);
+    expect(await jwks(jwksId)).toEqual({ keys: [withNext!.nextPublicKey!.jwk] });
+    // A new key pair in use is served at once, still under the same id.
+    await change({ ...signer, replaceKey: true });
+    const replaced = await shown();
+    expect(replaced?.jwksId).toBe(jwksId);
+    expect(await jwks(jwksId)).toEqual({ keys: [replaced!.publicKey!.jwk] });
+    // A company being deleted, or deleted, serves nothing; back to active, its keys again.
+    for (const status of ['pending_deletion', 'deleted']) {
+      await fx.query('UPDATE app.tenants SET status = $2 WHERE id = $1', [c.tenant.id, status]);
+      expect(await jwks(jwksId), status).toBeNull();
+    }
+    await fx.query(`UPDATE app.tenants SET status = 'active' WHERE id = $1`, [c.tenant.id]);
+    expect(await jwks(jwksId)).toEqual({ keys: [replaced!.publicKey!.jwk] });
+    // Another way drops the id, so the URL serves nothing; back to this way, another id.
+    await change({
+      tokenUrl,
+      clientId: 'hyfib-jwks',
+      clientSecret: 'a-secret-now',
+      clientAuthentication: 'client_secret_basic',
+    });
+    expect((await shown())?.jwksId).toBeNull();
+    expect(await jwks(jwksId)).toBeNull();
+    await change(signer);
+    const back = await shown();
+    expect(back?.jwksId).toMatch(/^[a-z2-7]{16}$/);
+    expect(back?.jwksId).not.toBe(jwksId);
+    expect(await jwks(back!.jwksId!)).toEqual({ keys: [back!.publicKey!.jwk] });
+    // A client from before 0290, its key pair kept and no id, gets one at its next change.
+    await fx.query('UPDATE app.webhook_endpoints SET oauth_jwks_id = NULL WHERE id = $1', [
+      created.id,
+    ]);
+    expect((await shown())?.jwksId).toBeNull();
+    await change(signer);
+    const given = await shown();
+    expect(given?.jwksId).toMatch(/^[a-z2-7]{16}$/);
+    expect(given?.publicKey).toEqual(back?.publicKey);
+    // The database keeps an id only for a client with this way and a key pair, of 16 base32
+    // letters, and never the same for two endpoints.
+    const other = await webhooks().create(owner, {
+      url: `${url}/other`,
+      eventTypes: ['consent.changed'],
+      oauth: { ...signer, clientId: 'hyfib-jwks-other' },
+    });
+    for (const [set, args] of [
+      ['oauth_jwks_id = $2', [created.id, 'A'.repeat(16)]],
+      ['oauth_jwks_id = $2', [created.id, 'a'.repeat(15)]],
+      ['oauth_jwks_id = $2', [created.id, 'a'.repeat(17)]],
+      [
+        `oauth_client_auth = 'client_secret_basic', oauth_client_secret_ciphertext = 'sealed',
+         oauth_private_key_ciphertext = NULL, oauth_public_key = NULL`,
+        [created.id],
+      ],
+    ] as const) {
+      await expect(
+        fx.query(`UPDATE app.webhook_endpoints SET ${set} WHERE id = $1`, [...args]),
+        set,
+      ).rejects.toThrow(/webhook_endpoints_oauth_jwks_id/);
+    }
+    await expect(
+      fx.query(
+        `UPDATE app.webhook_endpoints SET oauth_jwks_id = (
+           SELECT oauth_jwks_id FROM app.webhook_endpoints WHERE id = $2) WHERE id = $1`,
+        [other.id, created.id],
+      ),
+    ).rejects.toThrow(/webhook_endpoints_oauth_jwks_id_uq/);
+    // The company role sets it only through its column grant, and runs the lookup; the lookup runs
+    // as its owner, the definer, and nobody else may run it.
+    const [grant] = await fx.query<{ column: boolean; lookup: boolean; anyone: boolean }>(
+      `SELECT has_column_privilege('w360_app', 'app.webhook_endpoints', 'oauth_jwks_id',
+                'UPDATE') AS column,
+              has_function_privilege('w360_app', 'ops.webhook_oauth_jwks(text)', 'EXECUTE')
+                AS lookup,
+              has_function_privilege('public', 'ops.webhook_oauth_jwks(text)', 'EXECUTE')
+                AS anyone`,
+    );
+    expect(grant).toEqual({ column: true, lookup: true, anyone: false });
+    const [fn] = await fx.query<{ owner: string; definer: boolean; config: string[] }>(
+      `SELECT pg_get_userbyid(p.proowner) AS owner, p.prosecdef AS definer, p.proconfig AS config
+         FROM pg_proc p WHERE p.oid = 'ops.webhook_oauth_jwks(text)'::regprocedure`,
+    );
+    expect(fn).toEqual({
+      owner: 'w360_definer',
+      definer: true,
+      config: ['search_path=pg_catalog, pg_temp'],
+    });
+    // Removing the client, then the endpoint, leaves nothing served.
+    const lastId = given!.jwksId!;
+    await change(null);
+    expect(await jwks(lastId)).toBeNull();
+    await webhooks().remove(owner, { endpointId: other.id });
+    expect(await webhooks().list(owner)).toHaveLength(1);
+  });
+
   it('fail an attempt without calling the endpoint when no token comes, and ask again at the next one', async () => {
     const c = await fx.company();
     const e = await addOAuthEndpoint(c, null);
@@ -1592,6 +1865,8 @@ describe('OAuth clients (ADR-173)', () => {
       clientAuthentication: 'client_secret_basic',
       publicKey: null,
       nextPublicKey: null,
+      assertionAudience: null,
+      jwksId: null,
     });
     expect(JSON.stringify(await webhooks().list(e.owner))).not.toContain(SECRET);
     expect(await auditsOf(c, 'webhook.endpoint_created')).toEqual([

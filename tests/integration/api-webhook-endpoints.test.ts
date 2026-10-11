@@ -19,6 +19,7 @@ import {
   WebhookOAuthTokenCache,
   verifyWebhookSignature,
   webhookOAuthKeyAad,
+  webhookOAuthPublicJwks,
   webhookOAuthNextKeyAad,
   webhookOAuthSecretAad,
   type ApiContext,
@@ -684,6 +685,8 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       clientAuthentication: 'client_secret_basic',
       publicKey: null,
       nextPublicKey: null,
+      assertionAudience: null,
+      jwksUrl: null,
     });
     expect((await addThroughApi(key.ctx, 'oauth-1', body)).body.data.oauth).toEqual(endpoint.oauth);
     expect(await api().get(key.ctx, endpoint.id)).toEqual(endpoint);
@@ -839,6 +842,8 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       clientAuthentication: 'client_secret_post',
       publicKey: null,
       nextPublicKey: null,
+      assertionAudience: null,
+      jwksUrl: null,
     });
     const [added] = await fx.query<{ metadata: Record<string, unknown> }>(
       'SELECT metadata FROM app.audit_events WHERE tenant_id = $1 AND subject_id = $2',
@@ -892,6 +897,8 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       clientAuthentication: 'client_secret_jwt',
       publicKey: null,
       nextPublicKey: null,
+      assertionAudience: null,
+      jwksUrl: null,
     });
     // Moved to another token URL with its secret but no way named, it goes on signing JWTs.
     const elsewhere = `http://${HOST}:${port}/token/${randomBytes(6).toString('hex')}`;
@@ -912,6 +919,8 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       clientAuthentication: 'client_secret_jwt',
       publicKey: null,
       nextPublicKey: null,
+      assertionAudience: null,
+      jwksUrl: null,
     });
     expect(JSON.stringify([created.body, await api().list(key.ctx)])).not.toContain(SECRET);
   });
@@ -946,12 +955,21 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     const oauth = created.body.data.oauth as {
       clientAuthentication: string;
       publicKey: { keyId: string; jwk: Record<string, string>; pem: string };
+      jwksUrl: string;
     };
     expect(oauth).toMatchObject({
       tokenUrl,
       clientId: 'key-client',
       scope: null,
       clientAuthentication: 'private_key_jwt',
+    });
+    // Its JWKS URL (ADR-370), under the app's base URL, serves the public key answered.
+    expect(oauth.jwksUrl).toMatch(
+      /^https:\/\/app\.w360\.test\/api\/webhook-oauth\/jwks\/[a-z2-7]{16}$/,
+    );
+    const jwksId = oauth.jwksUrl.split('/').at(-1)!;
+    expect(await webhookOAuthPublicJwks(fx.dbs.app, jwksId)).toEqual({
+      keys: [oauth.publicKey.jwk],
     });
     expect(oauth.publicKey.jwk).toMatchObject({
       kty: 'RSA',
@@ -986,6 +1004,11 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     ).oauth;
     expect(replaced?.clientAuthentication).toBe('private_key_jwt');
     expect(replaced?.publicKey?.keyId).not.toBe(oauth.publicKey.keyId);
+    // The URL stays as the keys change, and serves the new key at once.
+    expect(replaced?.jwksUrl).toBe(oauth.jwksUrl);
+    expect(await webhookOAuthPublicJwks(fx.dbs.app, jwksId)).toEqual({
+      keys: [replaced?.publicKey?.jwk],
+    });
     // Only such a client has a key pair to replace.
     expect(
       await issue(
@@ -1197,6 +1220,62 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       oauthNextKey: 'made',
       oauthClientAuthentication: 'private_key_jwt',
     });
+  });
+
+  it('take the audience a client names in its JWTs, answer it, keep it when left out and clear it when empty (ADR-369)', async () => {
+    const c = await fx.company();
+    const key = await apiKey(c, ['webhooks.manage']);
+    const tokenUrl = `http://${HOST}:${port}/token/${randomBytes(6).toString('hex')}`;
+    const issuer = 'https://issuer.example.com';
+    const signer = { tokenUrl, clientId: 'aud-client', clientAuthentication: 'private_key_jwt' };
+    const created = await addThroughApi(key.ctx, 'aud-1', {
+      url: receiverUrl(),
+      events: ['contact.created'],
+      oauth: { ...signer, assertionAudience: issuer },
+    });
+    expect(created.status).toBe(201);
+    const id = created.body.data.id;
+    expect(created.body.data.oauth).toMatchObject({
+      clientAuthentication: 'private_key_jwt',
+      assertionAudience: issuer,
+    });
+    // Left out, it stays; empty, the token URL is named again.
+    expect((await api().update(key.ctx, id, { oauth: signer })).oauth).toMatchObject({
+      assertionAudience: issuer,
+    });
+    expect(
+      (await api().update(key.ctx, id, { oauth: { ...signer, assertionAudience: '' } })).oauth,
+    ).toMatchObject({ assertionAudience: null });
+    // Refused for a client that does not sign JWTs.
+    const error = await expectAppError(
+      api().update(key.ctx, id, {
+        oauth: {
+          tokenUrl,
+          clientId: 'aud-client',
+          clientSecret: 's',
+          clientAuthentication: 'client_secret_basic',
+          assertionAudience: issuer,
+        },
+      }),
+      'validation_failed',
+    );
+    expect(isAppError(error) ? error.issues?.[0] : undefined).toEqual({
+      path: 'oauth.assertionAudience',
+      message: 'Only a client that signs JWTs names an audience in them.',
+    });
+    // Audited by its host.
+    const audits = (
+      await fx.query<{ metadata: Record<string, unknown> }>(
+        `SELECT metadata FROM app.audit_events
+          WHERE tenant_id = $1 AND subject_id = $2 ORDER BY occurred_at, id`,
+        [c.tenant.id, id],
+      )
+    ).map((r) => [r.metadata.oauthAudienceHost, r.metadata.source]);
+    expect(audits).toEqual([
+      ['issuer.example.com', 'api'],
+      ['issuer.example.com', 'api'],
+      [undefined, 'api'],
+    ]);
   });
 
   it('choose the message statuses an endpoint receives, kept by changes that leave them out and cleared with the event (ADR-119)', async () => {

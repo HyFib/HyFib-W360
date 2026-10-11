@@ -1,7 +1,13 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
-import { can, webhookErrorLabel, webhookHost, type WebhookDeliveryView } from '@w360/domain';
+import {
+  can,
+  webhookErrorLabel,
+  webhookHost,
+  webhookOAuthJwksUrl,
+  type WebhookDeliveryView,
+} from '@w360/domain';
 import { Badge, Card, CardContent, CardDescription, CardHeader, CardTitle } from '@w360/ui';
 import {
   ReplayDeliveryButton,
@@ -38,7 +44,7 @@ export default async function WebhookEndpointPage({
   const { failed } = await searchParams;
   const ctx = await requireTenant(slug);
   if (!can(ctx, 'developer.manage') || !UUID_RE.test(endpointId)) notFound();
-  const { webhooks } = await getRuntime();
+  const { webhooks, config } = await getRuntime();
   const endpoint = (await webhooks.list(ctx)).find((e) => e.id === endpointId);
   if (!endpoint) notFound();
   const failedOnly = failed === '1';
@@ -208,6 +214,11 @@ export default async function WebhookEndpointPage({
         <CardContent>
           <WebhookEndpointForm
             slug={ctx.tenant.slug}
+            oauthJwksUrl={
+              endpoint.oauth?.jwksId
+                ? webhookOAuthJwksUrl(config.APP_BASE_URL, endpoint.oauth.jwksId)
+                : null
+            }
             endpoint={{
               id: endpoint.id,
               url: endpoint.url,

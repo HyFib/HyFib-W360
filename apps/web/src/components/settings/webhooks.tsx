@@ -84,7 +84,9 @@ import {
   webhookFieldValueText,
   webhookFieldWordsFromLines,
   webhookMessageWordsFromLines,
+  webhookOAuthSignsJwts,
   webhookOAuthText,
+  WEBHOOK_OAUTH_JWKS_HINT,
   webhookOwnerText,
   webhookPipelineText,
   webhookReplayAllSummary,
@@ -3502,6 +3504,8 @@ interface OAuthFields {
   clientAuthentication: WebhookOAuthClientAuth;
   /** What becomes of the key pair of a client that signs with HyFib's (ADR-367, ADR-368). */
   keyAction: OAuthKeyAction;
+  /** The audience a client that signs JWTs names in them; empty: its token URL (ADR-369). */
+  assertionAudience: string;
 }
 
 /**
@@ -3553,6 +3557,7 @@ type OAuthChange = 'keep' | 'set' | 'remove';
 function OAuthClientFields({
   prefix,
   stored,
+  jwksUrl,
   change,
   onChangeChange,
   fields,
@@ -3561,6 +3566,8 @@ function OAuthClientFields({
   prefix: string;
   /** The endpoint's client; null for a new endpoint or one without a client. */
   stored: WebhookEndpointOAuth | null;
+  /** The JWKS URL serving a client's public keys, when it signs with a key pair (ADR-370). */
+  jwksUrl: string | null;
   change: OAuthChange;
   onChangeChange: (next: OAuthChange) => void;
   fields: OAuthFields;
@@ -3585,6 +3592,9 @@ function OAuthClientFields({
               publicKey={stored.nextPublicKey}
               inUse={stored.publicKey}
             />
+          ) : null}
+          {stored.publicKey && jwksUrl ? (
+            <CopyField label="JWKS URL" value={jwksUrl} description={WEBHOOK_OAUTH_JWKS_HINT} />
           ) : null}
           {(
             [
@@ -3730,6 +3740,28 @@ function OAuthClientFields({
               </Select>
             )}
           </Field>
+          {webhookOAuthSignsJwts(fields.clientAuthentication) ? (
+            // The audience the JWTs name, for a server that wants another than its token URL
+            // (ADR-369).
+            <Field
+              id={`${prefix}-oauth-assertion-audience`}
+              label="JWT audience"
+              description="Optional: the value the server expects as each JWT’s audience, such as its issuer identifier. Left empty, the token URL."
+            >
+              {(aria) => (
+                <Input
+                  {...aria}
+                  type="url"
+                  inputMode="url"
+                  maxLength={WEBHOOK_LIMITS.urlLength}
+                  autoComplete="off"
+                  placeholder="https://auth.example.com/"
+                  value={fields.assertionAudience}
+                  onChange={(e) => set({ assertionAudience: e.target.value })}
+                />
+              )}
+            </Field>
+          ) : null}
         </div>
       ) : null}
     </fieldset>
@@ -3744,6 +3776,7 @@ const oauthFieldsOf = (stored: WebhookEndpointOAuth | null | undefined): OAuthFi
   scope: stored?.scope ?? '',
   clientAuthentication: stored?.clientAuthentication ?? 'client_secret_basic',
   keyAction: 'keep',
+  assertionAudience: stored?.assertionAudience ?? '',
 });
 
 /**
@@ -3753,6 +3786,7 @@ const oauthFieldsOf = (stored: WebhookEndpointOAuth | null | undefined): OAuthFi
 export function WebhookEndpointForm({
   slug,
   endpoint,
+  oauthJwksUrl,
   automationChoices,
   runApiKeyChoices,
   messageApiKeyChoices,
@@ -3772,6 +3806,8 @@ export function WebhookEndpointForm({
   atLimit = false,
 }: {
   slug: string;
+  /** The JWKS URL of the endpoint's OAuth client, when it signs with a key pair (ADR-370). */
+  oauthJwksUrl?: string | null;
   endpoint?: {
     id: string;
     url: string;
@@ -4670,6 +4706,9 @@ export function WebhookEndpointForm({
           ...(oauthFields.clientSecret && !signsWithKey
             ? { clientSecret: oauthFields.clientSecret }
             : {}),
+          ...(webhookOAuthSignsJwts(oauthFields.clientAuthentication)
+            ? { assertionAudience: oauthFields.assertionAudience }
+            : {}),
           ...(keyAction === 'replace' ? { replaceKey: true } : {}),
           ...(keyAction === 'make' ? { nextKey: keyAction } : {}),
           ...((keyAction === 'use' || keyAction === 'drop') && shownNextKeyId
@@ -5326,6 +5365,7 @@ export function WebhookEndpointForm({
       <OAuthClientFields
         prefix={prefix}
         stored={endpoint?.oauth ?? null}
+        jwksUrl={oauthJwksUrl ?? null}
         change={oauthChange}
         onChangeChange={setOAuthChange}
         fields={oauthFields}

@@ -1,5 +1,109 @@
 # Progress
 
+## 2026-10-11 — A public JWKS URL for webhook OAuth clients that sign with a key pair (P5-09, H-014, ADR-370)
+
+Status: **Implemented; its database and browser tests run in CI only.** A client that signs with a
+key pair HyFib keeps (ADR-367, ADR-368) showed its public keys for the company to copy into its
+authorization server by hand, a next key pair included. Many servers can instead fetch a client's
+keys from its `jwks_uri`; HyFib now serves one per client.
+
+### Completed
+
+- **Database:** migration 0290 adds `oauth_jwks_id` to `app.webhook_endpoints`, unique, with its
+  update grant and a check (16 base32 letters, only with `private_key_jwt` and a key pair in use),
+  and `ops.webhook_oauth_jwks`, a SECURITY DEFINER function owned by the definer, executable by the
+  runtime role only, returning a client's two public keys and nothing else, for companies active,
+  suspended or restricted. No backfill: a client set up before it gets its id at its next change.
+- **Domain:** `webhookOAuthColumns` makes the id with the client's first key pair and keeps it while
+  the client signs with one (new key pairs and next key pairs included), dropping it with another
+  way or the client; `webhookOAuthPublicJwks` reads the keys in the system scope, read only, and
+  answers them as a JWK Set, the key in use first; `webhookOAuthJwksUrl` builds the URL from
+  `APP_BASE_URL`. The API answers `oauth.jwksUrl`, the OpenAPI document describes it, and the
+  export exports the id.
+- **Web:** `GET /api/webhook-oauth/jwks/<id>` serves the set (404 for any other id), cacheable five
+  minutes (`next.config.ts`); Settings → Webhooks shows "JWKS URL", with a copy button, on the list
+  and the endpoint's page.
+- **Tests:** unit (1 new: the id's form and spread, the URL, the id kept by changes, made for a
+  client set up before, dropped and made anew, the set's order and contents, public parts only, no
+  lookup for a malformed id; plus the API's schemas, the OpenAPI entry and the kept answer's size);
+  integration (`webhooks.test.ts`: the set served as keys are made, used and replaced, nothing for
+  unknown ids, other ways, removed clients or companies being deleted, the function's columns,
+  owner, search path and grants, the database check and uniqueness; `api-webhook-endpoints.test.ts`:
+  the URL answered, kept as the key is replaced, serving the key answered); e2e (`webhooks.spec.ts`:
+  the URL shown, fetched with both keys and its cache header, then with the key switched to alone,
+  and 404 once the client goes). Written for CI; the integration and e2e tests were not run here.
+- **Docs:** ADR-370 (and the "not built" notes of ADR-366 to ADR-368); SECURITY; THREAT-MODEL T327;
+  ARCHITECTURE; DEPLOYMENT (0290, and the public route's caching, limits and origin); RUNBOOKS;
+  BACKLOG P5-09; DATA-RETENTION; the feature matrix (status unchanged). The feature matrix's and
+  DATA-RETENTION's tables are re-padded because a row grew.
+- **Mutation checks:** 15 deliberate regressions, 13 caught by the unit tests (the id not kept by
+  changes, never made, kept with another way or after the client's removal, its form not anchored,
+  shorter or drawing on half the alphabet, the URL keeping the base URL's trailing slash, the set
+  serving the next key first or leaving it out, a malformed id looked up, the lookup not read only,
+  the OpenAPI document leaving the URL out). The two left, the API answering no URL and the settings
+  list showing no id, are database reads the integration tests check, in CI only.
+
+### Test commands and results (local, 2026-10-11)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 146 files, 1567 tests passed                                    |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+| migration 0290                                     | pglast parse check passed (syntax only)                         |
+
+## 2026-10-11 — The audience a webhook OAuth client's JWTs name, chosen per endpoint (P5-09, H-014, ADR-369)
+
+Status: **Implemented; its database and browser tests run in CI only.** A client that signs JWTs
+(ADR-366, ADR-367) named its token URL as their audience, which RFC 7523 allows but not every
+server takes: one that wants its issuer identifier refused every assertion.
+
+### Completed
+
+- **Database:** migration 0289 adds `oauth_assertion_audience` to `app.webhook_endpoints` with its
+  update grant and a check: an https URL of 9 to 2,048 characters, only with a token URL and a way
+  that signs JWTs.
+- **Domain:** `assertionAudience` on a change: an https URL of visible ASCII without credentials
+  or a fragment (`webhookOAuthAudienceValid`), kept exactly as given and never fetched; empty or
+  null names the token URL. Left out, it stays while the token URL stays and the client signs JWTs;
+  it goes at another token URL unless given, and with another way; the services refuse it for a way
+  that does not sign JWTs. The worker names it as each assertion's `aud`, and a changed audience
+  asks for a new token. Audit entries name its host (`oauthAudienceHost`). The export exports it;
+  the API takes and answers it, and the OpenAPI document describes it.
+- **Web:** Settings → Webhooks shows "JWT audience" for a way that signs JWTs, filled with the
+  stored one, and the client's description says where its JWTs are addressed.
+- **Tests:** unit (3 new: the assertion's audience with a secret and with a key pair, kept as
+  given, and the values taken and refused; a new token for a new audience; the schema, the refusal
+  for another way, kept, cleared and dropped by changes, the columns, the opened client, the audit
+  and the text; plus the API's schemas and OpenAPI entries and the audit size bound, raised from
+  4,200 to 4,500 bytes for the audience's host as ADR-363 asks); integration (`webhooks.test.ts`: a
+  delivery whose assertion names it and the secret signs, then the token URL once cleared, the
+  refusals, the audits, the database check and the grant; `api-webhook-endpoints.test.ts`: the
+  answers, kept and cleared, the refusal and the audits); e2e (`webhooks.spec.ts`: the audience
+  entered for a client signing with a key pair, shown, and named in the next token request's JWT).
+  Written for CI; the integration and e2e tests were not run here.
+- **Docs:** ADR-369 (and the "not built" notes of ADR-366 to ADR-368); SECURITY; THREAT-MODEL T326;
+  ARCHITECTURE; DEPLOYMENT (0289); RUNBOOKS; BACKLOG P5-09; DATA-RETENTION; the feature matrix
+  (status unchanged). The feature matrix's and DATA-RETENTION's tables are re-padded because a row
+  grew.
+- **Mutation checks:** 13 deliberate regressions, 12 caught by the unit tests (the assertion naming
+  the token URL whatever the audience, the token fingerprint ignoring it, an http audience, one with
+  a fragment or credentials taken, one taken for a way that sends the secret, one left out not kept
+  or kept at another token URL, the opened client naming none, the audit naming no host, an empty
+  one kept as empty, the text naming none). The one left, the settings list showing no audience, is
+  a database read the integration test checks, in CI only.
+
+### Test commands and results (local, 2026-10-11)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 146 files, 1566 tests passed                                    |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+| migration 0289                                     | pglast parse check passed (syntax only)                         |
+
 ## 2026-10-11 — A next key pair for webhook OAuth clients that sign with a key pair (P5-09, H-014, ADR-368)
 
 Status: **Implemented; its database and browser tests run in CI only.** A client that signs with a

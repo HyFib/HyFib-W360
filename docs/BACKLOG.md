@@ -1318,7 +1318,13 @@ verification, app review, Embedded Signup configuration).
   **[A next key pair for those clients built; its database tests run only in CI]** (ADR-368,
   migration 0288: `nextKey` makes a next key pair beside the one in use, shown to register first and
   never used until `nextKey: "use"` switches to it, naming it by its key id, the old pair dropped;
-  or drops it unused).
+  or drops it unused). **[The audience those clients' JWTs name, chosen per endpoint, built; its
+  database tests run only in CI]** (ADR-369, migration 0289: `assertionAudience`, an https URL such
+  as the server's issuer identifier, named instead of the token URL; kept by changes that leave it
+  out while the token URL stays). **[A public JWKS URL for clients that sign with a key pair built;
+  its database tests run only in CI]** (ADR-370, migration 0290: `/api/webhook-oauth/jwks/<id>`
+  serves the public keys in use and next as a JWK Set, under a random id kept while the keys
+  change; answered as `oauth.jwksUrl`).
   **[Skipped campaign recipients as webhook events built; their database tests run only in CI]**
   (ADR-358, migrations 0280 and 0281: `campaign.recipient_skipped` once per recipient a campaign
   skips, with the reason, the campaign, the contact and the number; those skipped when the
@@ -1332,8 +1338,8 @@ verification, app review, Embedded Signup configuration).
   Remaining: filters for other event types and on a message's values other than its type and words,
   field value comparisons beyond
   values, words and ranges, other authentication (headers computed per delivery, other OAuth
-  grants, a JWKS URL, keys a company uploads, and other audiences for client assertions), mutual
-  TLS, fixed egress addresses, other store events (the
+  grants, keys a company uploads), mutual TLS, fixed egress addresses, other store
+  events (the
   store's orders and checkouts themselves are reported by the store, ADR-085),
   a sequence number across events, load tests.
 - **P5-10 Platform ops screens** **[built, locally verified with test data only]** (ADR-054):

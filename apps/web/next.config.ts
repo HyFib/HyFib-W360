@@ -58,6 +58,12 @@ const config: NextConfig = {
         headers: [{ key: 'Cache-Control', value: 'public, max-age=300' }],
       },
       {
+        // A webhook OAuth client's JWKS URL holds public keys only; authorization servers fetch it
+        // and may cache it briefly, so a next key pair reaches them within minutes (ADR-370).
+        source: '/api/webhook-oauth/jwks/:id',
+        headers: [{ key: 'Cache-Control', value: 'public, max-age=300' }],
+      },
+      {
         // Meta Embedded Signup's popup must be able to message this page back (later rules win).
         source: '/c/:slug/settings/channels',
         headers: [{ key: 'Cross-Origin-Opener-Policy', value: 'same-origin-allow-popups' }],

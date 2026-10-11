@@ -23,7 +23,9 @@ import {
   STORE_MESSAGE_ANSWERS,
   TASK_STATUSES,
   TEMPLATE_STATUSES,
+  systemScope,
   WEBHOOK_EVENT_TYPES,
+  type Database,
   type Tx,
 } from '@w360/db';
 import { apiCampaignResultsSchema } from '../api/campaigns';
@@ -217,6 +219,9 @@ import {
 } from './payloads';
 import { webhookSignature, webhookSignatureHeader, verifyWebhookSignature } from './signing';
 import {
+  newWebhookOAuthJwksId,
+  WEBHOOK_OAUTH_JWKS_ID_RE,
+  webhookOAuthJwksUrl,
   webhookOAuthKeyAad,
   webhookOAuthNextKeyAad,
   webhookOAuthPublicKey,
@@ -234,9 +239,11 @@ import {
   WEBHOOK_OAUTH_SECRET_FOR_NEW_URL,
   WEBHOOK_OAUTH_SECRET_NEEDED,
   webhookOAuthAudit,
+  webhookOAuthAudienceAudit,
   webhookOAuthClientAuthAudit,
   webhookOAuthNextKeyAudit,
   webhookOAuthColumns,
+  webhookOAuthPublicJwks,
   webhookOAuthSchema,
   webhookAssigneeIdsFor,
   webhookAssigneeIdsSchema,
@@ -4491,16 +4498,18 @@ describe('endpoint audit entries within an audit entry’s 8 KiB (ADR-336, ADR-3
       host: 'h'.repeat(253),
       eventTypes: [...WEBHOOK_EVENT_TYPES],
       ...Object.fromEntries(keys.map((key) => [key, tags(30)])),
-      // Every OAuth field at once, more than an entry holds: a secret's or a key pair's, and what
-      // became of a next key pair (ADR-368).
+      // Every OAuth field at once, more than an entry holds: a secret's or a key pair's, what
+      // became of a next key pair (ADR-368) and the audience's host (ADR-369).
       oauthTokenHost: 'o'.repeat(253),
       oauthSecretReplaced: true,
       oauthKeyReplaced: true,
       oauthNextKey: 'dropped',
+      oauthAudienceHost: 'a'.repeat(253),
       oauthClientAuthentication: 'client_secret_basic',
     });
     expect(Object.keys(whole.lists as object)).toHaveLength(62);
-    expect(jsonbSize(whole)).toBeLessThan(4200);
+    // 4,404 bytes since the audience's host (ADR-369, at most 278 bytes); the bound stays close.
+    expect(jsonbSize(whole)).toBeLessThan(4500);
   });
 });
 
@@ -4960,6 +4969,7 @@ describe('endpoint OAuth clients (ADR-173)', () => {
       clientAuthentication: 'client_secret_basic',
       replaceKey: false,
       nextKey: null,
+      assertionAudience: null,
     });
     for (const [tokenUrl, message] of [
       ['http://auth.example.com/t', 'Only https:// addresses can be called.'],
@@ -5002,6 +5012,8 @@ describe('endpoint OAuth clients (ADR-173)', () => {
       oauthPublicKey: null,
       oauthNextPrivateKeyCiphertext: null,
       oauthNextPublicKey: null,
+      oauthAssertionAudience: null,
+      oauthJwksId: null,
     });
     // Another token URL would receive the secret, or what it signs: it is needed again.
     expect(
@@ -5043,6 +5055,7 @@ describe('endpoint OAuth clients (ADR-173)', () => {
       clientId: 'hyfib',
       clientSecret: 's3cret',
       scope: 'read',
+      assertionAudience: null,
       clientAuthentication: 'client_secret_basic',
     });
     expect(() => openWebhookOAuthClient(ring, other, endpoint, columns)).toThrow();
@@ -5315,6 +5328,7 @@ describe('endpoint OAuth clients (ADR-173)', () => {
       tokenUrl: base.tokenUrl,
       clientId: 'hyfib',
       scope: null,
+      assertionAudience: null,
       clientAuthentication: 'private_key_jwt',
       privateKey,
       keyId: webhookOAuthPublicKey(made.oauthPublicKey!).keyId,
@@ -5637,6 +5651,218 @@ describe('endpoint OAuth clients (ADR-173)', () => {
     expect(webhookOAuthAudit(null, made)).toEqual({ oauthRemoved: true });
   });
 
+  it('name another audience than the token URL in the JWTs of a client that signs them, kept while the token URL stays (ADR-369)', () => {
+    const issuer = 'https://issuer.example.com/';
+    const jwt = {
+      ...base,
+      clientSecret: 'a'.repeat(32),
+      clientAuthentication: 'client_secret_jwt' as const,
+    };
+    // Trimmed, empty for none, an https URL else refused.
+    expect(webhookOAuthSchema.parse({ ...jwt, assertionAudience: ` ${issuer} ` })).toEqual({
+      ...jwt,
+      assertionAudience: issuer,
+    });
+    expect(webhookOAuthSchema.parse({ ...jwt, assertionAudience: '' })).toEqual({
+      ...jwt,
+      assertionAudience: null,
+    });
+    expect(problems({ ...jwt, assertionAudience: 'http://issuer.example.com/' })).toEqual([
+      [
+        'assertionAudience',
+        'Enter the audience as an https:// URL, such as the authorization server’s issuer identifier.',
+      ],
+    ]);
+    // Only a client that signs JWTs names one.
+    expect(
+      refusal(() =>
+        checkedWebhookOAuth(
+          { ...base, clientSecret: 's', assertionAudience: issuer },
+          NO_WEBHOOK_OAUTH,
+          policy,
+        ),
+      ),
+    ).toEqual([
+      {
+        path: 'oauth.assertionAudience',
+        message: 'Only a client that signs JWTs names an audience in them.',
+      },
+    ]);
+    // Kept with the client, and named by the client the worker opens.
+    const named = checkedWebhookOAuth(
+      { ...jwt, assertionAudience: issuer },
+      NO_WEBHOOK_OAUTH,
+      policy,
+    );
+    const stored = webhookOAuthColumns(ring, tenant, endpoint, named, NO_WEBHOOK_OAUTH);
+    expect(stored.oauthAssertionAudience).toBe(issuer);
+    expect(openWebhookOAuthClient(ring, tenant, endpoint, stored)).toMatchObject({
+      clientAuthentication: 'client_secret_jwt',
+      assertionAudience: issuer,
+    });
+    // Left out, it stays while the token URL stays and the client signs JWTs, with its secret or a
+    // key pair; null clears it.
+    for (const clientAuthentication of ['client_secret_jwt', 'private_key_jwt'] as const) {
+      expect(
+        checkedWebhookOAuth({ ...base, clientAuthentication }, stored, policy).assertionAudience,
+      ).toBe(issuer);
+    }
+    expect(
+      checkedWebhookOAuth(
+        { ...base, clientAuthentication: 'client_secret_jwt', assertionAudience: null },
+        stored,
+        policy,
+      ).assertionAudience,
+    ).toBeNull();
+    // At another token URL it goes unless given, since it names the server.
+    expect(
+      checkedWebhookOAuth(
+        { ...base, tokenUrl: 'https://elsewhere.example.com/t', clientSecret: 'b'.repeat(32) },
+        stored,
+        policy,
+      ).assertionAudience,
+    ).toBeNull();
+    // Another way drops it.
+    const toBasic = checkedWebhookOAuth(
+      { ...base, clientSecret: 's', clientAuthentication: 'client_secret_basic' },
+      stored,
+      policy,
+    );
+    expect(toBasic.assertionAudience).toBeNull();
+    expect(
+      webhookOAuthColumns(ring, tenant, endpoint, toBasic, stored).oauthAssertionAudience,
+    ).toBeNull();
+    // Audit entries name its host; the text names it.
+    expect(webhookOAuthAudit(named, NO_WEBHOOK_OAUTH)).toEqual({
+      oauthTokenHost: 'auth.example.com',
+      oauthSecretReplaced: true,
+      oauthAudienceHost: 'issuer.example.com',
+      oauthClientAuthentication: 'client_secret_jwt',
+    });
+    expect(webhookOAuthAudienceAudit(toBasic)).toEqual({});
+    const shown = {
+      ...base,
+      scope: null,
+      publicKey: null,
+      nextPublicKey: null,
+      assertionAudience: issuer,
+      jwksId: null,
+    };
+    expect(webhookOAuthText({ ...shown, clientAuthentication: 'client_secret_jwt' })).toBe(
+      'OAuth access tokens from auth.example.com, as client hyfib, proving it holds the secret with a signed JWT addressed to https://issuer.example.com/',
+    );
+    expect(webhookOAuthText({ ...shown, clientAuthentication: 'private_key_jwt' })).toBe(
+      'OAuth access tokens from auth.example.com, as client hyfib, signing JWTs addressed to https://issuer.example.com/ with HyFib’s private key',
+    );
+  });
+
+  it('serve a client that signs with a key pair at a JWKS URL of its own, kept while it does (ADR-370)', async () => {
+    // The id: 16 letters of the base32 alphabet, each one of 32 evenly, never the same twice.
+    const ids = Array.from({ length: 200 }, () => newWebhookOAuthJwksId());
+    for (const id of ids) expect(id).toMatch(WEBHOOK_OAUTH_JWKS_ID_RE);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(new Set(ids.join(''))).toEqual(new Set('abcdefghijklmnopqrstuvwxyz234567'));
+    for (const bad of ['', 'a'.repeat(15), 'a'.repeat(17), 'A'.repeat(16), '1'.repeat(16)]) {
+      expect(WEBHOOK_OAUTH_JWKS_ID_RE.test(bad)).toBe(false);
+    }
+    // The URL, under the app's base URL however it ends.
+    const id = ids[0]!;
+    for (const appBaseUrl of ['https://app.example.com', 'https://app.example.com/']) {
+      expect(webhookOAuthJwksUrl(appBaseUrl, id)).toBe(
+        `https://app.example.com/api/webhook-oauth/jwks/${id}`,
+      );
+    }
+    // Made with the client's first key pair; kept by changes, the token URL, a new key pair and
+    // the next key pair's making and use included.
+    const signer = { ...base, clientAuthentication: 'private_key_jwt' as const };
+    const made = webhookOAuthColumns(
+      ring,
+      tenant,
+      endpoint,
+      checkedWebhookOAuth(signer, NO_WEBHOOK_OAUTH, policy),
+      NO_WEBHOOK_OAUTH,
+    );
+    expect(made.oauthJwksId).toMatch(WEBHOOK_OAUTH_JWKS_ID_RE);
+    const change = (given: Parameters<typeof checkedWebhookOAuth>[0], current: typeof made) =>
+      webhookOAuthColumns(
+        ring,
+        tenant,
+        endpoint,
+        checkedWebhookOAuth(given, current, policy),
+        current,
+      );
+    const moved = change({ ...signer, tokenUrl: 'https://elsewhere.example.com/t' }, made);
+    const replaced = change({ ...signer, replaceKey: true }, moved);
+    expect(replaced.oauthPublicKey).not.toBe(made.oauthPublicKey);
+    const withNext = change({ ...signer, nextKey: 'make' }, replaced);
+    const nextKeyId = webhookOAuthPublicKey(withNext.oauthNextPublicKey!).keyId;
+    const used = change({ ...signer, nextKey: 'use', nextKeyId }, withNext);
+    expect(used.oauthPublicKey).toBe(withNext.oauthNextPublicKey);
+    for (const kept of [moved, replaced, withNext, used]) {
+      expect(kept.oauthJwksId).toBe(made.oauthJwksId);
+    }
+    // A client set up before 0290, with a key pair and no id, gets one at its next change and
+    // keeps its key pair.
+    const before = { ...made, oauthJwksId: null };
+    const given = change(signer, before);
+    expect(given.oauthJwksId).toMatch(WEBHOOK_OAUTH_JWKS_ID_RE);
+    expect(given.oauthJwksId).not.toBe(made.oauthJwksId);
+    expect(given.oauthPublicKey).toBe(made.oauthPublicKey);
+    // Another way drops it, so the old URL serves nothing; back to this way, another id.
+    const toBasic = change(
+      { ...base, clientSecret: 's', clientAuthentication: 'client_secret_basic' },
+      used,
+    );
+    expect(toBasic.oauthJwksId).toBeNull();
+    const back = change(signer, toBasic);
+    expect(back.oauthJwksId).toMatch(WEBHOOK_OAUTH_JWKS_ID_RE);
+    expect(back.oauthJwksId).not.toBe(made.oauthJwksId);
+    // Removing the client drops it.
+    expect(webhookOAuthColumns(ring, tenant, endpoint, null, used).oauthJwksId).toBeNull();
+    // The worker's client is opened without it.
+    expect(openWebhookOAuthClient(ring, tenant, endpoint, used)).not.toHaveProperty('jwksId');
+
+    // The JWK Set the URL serves: the key in use, then the next one, read in the system scope,
+    // read only, through the definer function; an id of another form is not looked up.
+    const lookups: { scope: unknown; accessMode: unknown }[] = [];
+    let rows: { public_key: string; next_public_key: string | null }[] = [];
+    const db = {
+      run: async (
+        scope: unknown,
+        fn: (tx: { execute: () => Promise<{ rows: typeof rows }> }) => unknown,
+        options: { accessMode?: string },
+      ) => {
+        lookups.push({ scope, accessMode: options.accessMode });
+        return fn({ execute: async () => ({ rows }) });
+      },
+    } as unknown as Database;
+    for (const bad of ['', 'A'.repeat(16), `${id}x`, '../../etc']) {
+      expect(await webhookOAuthPublicJwks(db, bad)).toBeNull();
+    }
+    expect(lookups).toEqual([]);
+    expect(await webhookOAuthPublicJwks(db, id)).toBeNull();
+    rows = [{ public_key: withNext.oauthPublicKey!, next_public_key: null }];
+    expect(await webhookOAuthPublicJwks(db, id)).toEqual({
+      keys: [webhookOAuthPublicKey(withNext.oauthPublicKey!).jwk],
+    });
+    rows = [{ public_key: withNext.oauthPublicKey!, next_public_key: withNext.oauthNextPublicKey }];
+    const set = await webhookOAuthPublicJwks(db, id);
+    expect(set).toEqual({
+      keys: [
+        webhookOAuthPublicKey(withNext.oauthPublicKey!).jwk,
+        webhookOAuthPublicKey(withNext.oauthNextPublicKey!).jwk,
+      ],
+    });
+    expect(lookups).toEqual(
+      Array.from({ length: 3 }, () => ({ scope: systemScope, accessMode: 'read only' })),
+    );
+    // Public keys only: each JWK has the RSA public parts, never a private one.
+    for (const jwk of set!.keys) {
+      expect(Object.keys(jwk).sort()).toEqual(['alg', 'e', 'kid', 'kty', 'n', 'use']);
+    }
+    expect(JSON.stringify(set)).not.toContain('PRIVATE');
+  });
+
   it('refuse an Authorization header of the endpoint’s own beside a client, naming what was given', () => {
     const headers = [
       { name: 'X-Api-Key', value: 'k' },
@@ -5738,6 +5964,8 @@ describe('endpoint OAuth clients (ADR-173)', () => {
       clientAuthentication: 'client_secret_basic' as const,
       publicKey: null,
       nextPublicKey: null,
+      assertionAudience: null,
+      jwksId: null,
     };
     expect(webhookOAuthText({ ...basic, scope: null })).toBe(
       'OAuth access tokens from auth.example.com, as client hyfib',
