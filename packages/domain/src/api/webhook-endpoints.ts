@@ -329,7 +329,11 @@ import {
   webhookTemplateStatusesSchema,
   type WebhookDeliveryView,
 } from '../webhooks/service';
-import { WEBHOOK_OAUTH_JWT_SECRET_BYTES } from '../webhooks/oauth';
+import {
+  WEBHOOK_OAUTH_JWT_SECRET_BYTES,
+  WEBHOOK_OAUTH_KEY_BITS,
+  webhookOAuthPublicKey,
+} from '../webhooks/oauth';
 import { apiActor, assertScope, type ApiContext } from './context';
 import type { ApiResponse, IdempotencyInput } from './idempotency';
 import { API_LIMITS } from './model';
@@ -993,7 +997,7 @@ const invalidConversationTags = () =>
   });
 
 const oauthField = webhookOAuthSchema.describe(
-  `An OAuth 2.0 client of the receiver's authorization server (the client credentials grant): before delivering, HyFib asks the token URL (an https address on the public internet, held to the endpoint URL's rules) for an access token, authenticating with the client ID and secret (in an HTTP Basic header, or as \`client_id\` and \`client_secret\` in the request body when \`clientAuthentication\` is \`client_secret_post\`, or, when it is \`client_secret_jwt\`, as \`client_id\` and a JWT signed with the secret (HS256: issuer and subject the client ID, audience the token URL, a unique \`jti\`, five minutes' lifetime) in \`client_assertion\` (RFC 7523), the secret itself never sent, which takes a secret of at least ${WEBHOOK_OAUTH_JWT_SECRET_BYTES} bytes; left out, a change keeps the client's while the token URL stays the same, and a client using \`client_secret_jwt\` keeps it at a new token URL; otherwise a new client or token URL uses \`client_secret_basic\`) and asking for the scope if one is given, and sends the token as \`Authorization: Bearer <token>\`. A token is used until a minute before it expires, for at most a day; one without a lifetime of more than two minutes serves only the deliveries sent with it, and one the endpoint answers 401 to is replaced at the next attempt. A delivery that gets no token fails its attempt (\`lastError\` \`oauth_token_…\`) and is retried. The client ID and secret use printable ASCII characters (up to ${WEBHOOK_LIMITS.oauthClientIdLength} and ${WEBHOOK_LIMITS.oauthClientSecretLength}); the secret is stored encrypted and never shown again. An endpoint with an OAuth client cannot send an Authorization header of its own.`,
+  `An OAuth 2.0 client of the receiver's authorization server (the client credentials grant): before delivering, HyFib asks the token URL (an https address on the public internet, held to the endpoint URL's rules) for an access token, authenticating with the client ID and secret (in an HTTP Basic header, or as \`client_id\` and \`client_secret\` in the request body when \`clientAuthentication\` is \`client_secret_post\`, or, when it is \`client_secret_jwt\`, as \`client_id\` and a JWT signed with the secret (HS256: issuer and subject the client ID, audience the token URL, a unique \`jti\`, five minutes' lifetime) in \`client_assertion\` (RFC 7523), the secret itself never sent, which takes a secret of at least ${WEBHOOK_OAUTH_JWT_SECRET_BYTES} bytes; left out, a change keeps the client's while the token URL stays the same, and a client using \`client_secret_jwt\` or \`private_key_jwt\` keeps it at a new token URL; otherwise a new client or token URL uses \`client_secret_basic\`) and asking for the scope if one is given, and sends the token as \`Authorization: Bearer <token>\`. With \`clientAuthentication\` \`private_key_jwt\` the client has no secret (leave \`clientSecret\` out): HyFib makes an RSA key pair of ${WEBHOOK_OAUTH_KEY_BITS} bits for it, keeps the private key encrypted and signs the JWT with it instead (RS256, its \`kid\` the public key's RFC 7638 thumbprint); register the public key the endpoint answers in \`oauth.publicKey\` with the authorization server. The key pair stays while the client signs with it; \`replaceKey: true\` makes a new one, and the old one is no longer used. A token is used until a minute before it expires, for at most a day; one without a lifetime of more than two minutes serves only the deliveries sent with it, and one the endpoint answers 401 to is replaced at the next attempt. A delivery that gets no token fails its attempt (\`lastError\` \`oauth_token_…\`) and is retried. The client ID and secret use printable ASCII characters (up to ${WEBHOOK_LIMITS.oauthClientIdLength} and ${WEBHOOK_LIMITS.oauthClientSecretLength}); the secret is stored encrypted and never shown again. An endpoint with an OAuth client cannot send an Authorization header of its own.`,
 );
 
 export const apiCreateWebhookEndpointSchema = z
@@ -1672,7 +1676,7 @@ export const apiUpdateWebhookEndpointSchema = z
       .nullable()
       .optional()
       .describe(
-        'Replaces the endpoint’s OAuth client: its token URL, client ID and scope (left out: none). The secret may be left out to keep the stored one, unless the token URL changes: the secret is used there. Its `clientAuthentication` may be left out to keep the one it has while the token URL stays the same (for a new token URL, `client_secret_basic`, unless it is `client_secret_jwt`, which stays). null removes the client. Left out, it stays.',
+        'Replaces the endpoint’s OAuth client: its token URL, client ID and scope (left out: none). The secret may be left out to keep the stored one, unless the token URL changes: the secret is used there. Its `clientAuthentication` may be left out to keep the one it has while the token URL stays the same (for a new token URL, `client_secret_basic`, unless it is `client_secret_jwt` or `private_key_jwt`, which stays). A client that signs with HyFib’s key pair keeps it unless `replaceKey` is true. null removes the client. Left out, it stays.',
       ),
   })
   .strict()
@@ -2046,6 +2050,7 @@ const columns = {
   oauthClientId: webhookEndpoints.oauthClientId,
   oauthScope: webhookEndpoints.oauthScope,
   oauthClientAuth: webhookEndpoints.oauthClientAuth,
+  oauthPublicKey: webhookEndpoints.oauthPublicKey,
   apiKeyId: webhookEndpoints.createdByApiKeyId,
   createdAt: webhookEndpoints.createdAt,
   updatedAt: webhookEndpoints.updatedAt,
@@ -2130,6 +2135,7 @@ type EndpointRow = Pick<
   | 'oauthClientId'
   | 'oauthScope'
   | 'oauthClientAuth'
+  | 'oauthPublicKey'
   | 'createdAt'
   | 'updatedAt'
 > & { apiKeyId: string | null };
@@ -2222,6 +2228,7 @@ function toApiEndpoint(row: EndpointRow, now: Date): ApiWebhookEndpoint {
             clientId: row.oauthClientId,
             scope: row.oauthScope,
             clientAuthentication: row.oauthClientAuth,
+            publicKey: row.oauthPublicKey ? webhookOAuthPublicKey(row.oauthPublicKey) : null,
           }
         : null,
     apiKeyId: row.apiKeyId,

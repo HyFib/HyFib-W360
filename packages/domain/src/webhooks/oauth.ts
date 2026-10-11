@@ -1,15 +1,23 @@
-import { createHash, createHmac, randomUUID } from 'node:crypto';
+import {
+  createHash,
+  createHmac,
+  createPrivateKey,
+  createPublicKey,
+  generateKeyPairSync,
+  randomUUID,
+  sign,
+} from 'node:crypto';
 import { EgressError, type EgressClient, type EgressRequest } from '@w360/core/egress';
 import type { WebhookOAuthClientAuth } from '@w360/db';
-import { WEBHOOK_LIMITS } from './model';
+import { WEBHOOK_LIMITS, type WebhookOAuthPublicKey } from './model';
 
 /**
  * OAuth 2.0 client credentials for webhook endpoints (ADR-173). An endpoint may get an access token
  * from its receiver's authorization server and send it as a bearer token with every delivery: the
  * token request of RFC 6749 section 4.4 (`grant_type=client_credentials`, the client authenticated
  * as section 2.3.1 says, with HTTP Basic or, for a server that wants them there, its credentials in
- * the request body, ADR-357, or with a JWT signed with its secret, RFC 7523, ADR-366) and the bearer
- * usage of RFC 6750 section 2.1. Only what a client needs is here: the request, reading the answer
+ * the request body, ADR-357, or with a JWT signed with its secret, RFC 7523, ADR-366, or with a
+ * private key HyFib keeps, ADR-367) and the bearer usage of RFC 6750 section 2.1. Only what a client needs is here: the request, reading the answer
  * of section 5.1 or the refusal of 5.2, and the tokens a worker keeps in memory.
  */
 
@@ -17,22 +25,36 @@ import { WEBHOOK_LIMITS } from './model';
 export const webhookOAuthSecretAad = (tenantId: string, endpointId: string) =>
   `webhook-oauth-secret:${tenantId}:${endpointId}`;
 
-/** An endpoint's OAuth client, its secret opened. */
-export interface WebhookOAuthClient {
+/** Binds an endpoint's OAuth client private key to its company and the endpoint (ADR-367). */
+export const webhookOAuthKeyAad = (tenantId: string, endpointId: string) =>
+  `webhook-oauth-key:${tenantId}:${endpointId}`;
+
+/** The ways a client authenticates with a secret it shares with its server. */
+export type WebhookOAuthSecretAuthentication = Exclude<WebhookOAuthClientAuth, 'private_key_jwt'>;
+
+/**
+ * An endpoint's OAuth client, its secret or private key opened. How it authenticates (ADR-357): its
+ * identifier and secret in an HTTP Basic header (`client_secret_basic`, the default) or as form
+ * parameters in the request body (`client_secret_post`), as RFC 7591 names them; or a JWT signed
+ * with its secret (`client_secret_jwt`, ADR-366) or with a private key HyFib keeps
+ * (`private_key_jwt`, ADR-367), as OpenID Connect Core 1.0 section 9 names them, nothing secret
+ * sent. A client signing with a key pair has no secret, and the others have no key.
+ */
+export type WebhookOAuthClient = {
   tokenUrl: string;
   clientId: string;
-  clientSecret: string;
   /** The scope to ask for (space-separated scope tokens), or none. */
   scope: string | null;
-  /**
-   * How the client authenticates (ADR-357): its identifier and secret in an HTTP Basic header
-   * (`client_secret_basic`, the default) or as form parameters in the request body
-   * (`client_secret_post`), as RFC 7591 names them; or a JWT signed with its secret
-   * (`client_secret_jwt`, as OpenID Connect Core 1.0 section 9 names it, ADR-366), the secret never
-   * sent.
-   */
-  clientAuthentication: WebhookOAuthClientAuth;
-}
+} & (
+  | { clientAuthentication: WebhookOAuthSecretAuthentication; clientSecret: string }
+  | {
+      clientAuthentication: 'private_key_jwt';
+      /** The RSA private key, PKCS#8 PEM. */
+      privateKey: string;
+      /** Its public key's id (RFC 7638 thumbprint), named in each assertion's `kid` header. */
+      keyId: string;
+    }
+);
 
 /** An access token from the authorization server. */
 export interface WebhookOAuthToken {
@@ -80,11 +102,64 @@ export const WEBHOOK_OAUTH_JWT_SECRET_BYTES = 32;
 export const webhookOAuthSecretSignsJwt = (secret: string) =>
   Buffer.byteLength(secret, 'utf8') >= WEBHOOK_OAUTH_JWT_SECRET_BYTES;
 
+/** The size of the RSA keys HyFib makes for clients that sign with a key pair (ADR-367). */
+export const WEBHOOK_OAUTH_KEY_BITS = 2048;
+
+/** A key pair HyFib made for a `private_key_jwt` client (ADR-367), both halves as PEM. */
+export interface WebhookOAuthKeyPair {
+  /** PKCS#8; stored only sealed with the keyring, never shown or sent. */
+  privateKey: string;
+  /** SPKI; shown, for the company to register with its authorization server. */
+  publicKey: string;
+}
+
+/** A new RSA key pair of 2048 bits, exponent 65537, for a client that signs with one (ADR-367). */
+export function generateWebhookOAuthKeyPair(): WebhookOAuthKeyPair {
+  const { privateKey, publicKey } = generateKeyPairSync('rsa', {
+    modulusLength: WEBHOOK_OAUTH_KEY_BITS,
+    publicExponent: 0x10001,
+    publicKeyEncoding: { type: 'spki', format: 'pem' },
+    privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+  });
+  return { privateKey, publicKey };
+}
+
 /**
- * A client assertion for `client_secret_jwt` (RFC 7523 section 3, ADR-366): a JWT whose issuer and
- * subject are the client's identifier and whose audience is the token URL, with a unique id, the
- * time it was made and an expiry five minutes later, signed with HMAC SHA-256 keyed by the client's
- * secret (`HS256`), so the server checks the secret without receiving it.
+ * A client's public key as shown and registered (ADR-367): the JWK of its modulus and exponent
+ * (RFC 7518 section 6.3.1) with its key id, the JWK thumbprint of RFC 7638 (SHA-256 of the required
+ * members in lexicographic order without whitespace, base64url), for RS256 signatures; and the PEM
+ * it was read from. Throws for a key that is not RSA.
+ */
+export function webhookOAuthPublicKey(pem: string): WebhookOAuthPublicKey {
+  const jwk = createPublicKey(pem).export({ format: 'jwk' });
+  if (jwk.kty !== 'RSA' || typeof jwk.n !== 'string' || typeof jwk.e !== 'string') {
+    throw new Error('A webhook OAuth client public key is not an RSA key');
+  }
+  const { n, e } = jwk;
+  const keyId = createHash('sha256')
+    .update(JSON.stringify({ e, kty: 'RSA', n }))
+    .digest('base64url');
+  return { keyId, jwk: { kty: 'RSA', n, e, kid: keyId, use: 'sig', alg: 'RS256' }, pem };
+}
+
+/**
+ * A private key opened for signing (ADR-367): an RSA key, as HyFib makes them, else an error, so
+ * that a key of another kind never signs an assertion labelled RS256.
+ */
+export function checkedWebhookOAuthPrivateKey(pem: string): string {
+  if (createPrivateKey(pem).asymmetricKeyType !== 'rsa') {
+    throw new Error('A webhook OAuth client private key is not an RSA key');
+  }
+  return pem;
+}
+
+/**
+ * A client assertion (RFC 7523 section 3): a JWT whose issuer and subject are the client's
+ * identifier and whose audience is the token URL, with a unique id, the time it was made and an
+ * expiry five minutes later. For `client_secret_jwt` (ADR-366) signed with HMAC SHA-256 keyed by
+ * the client's secret (`HS256`), so the server checks the secret without receiving it; for
+ * `private_key_jwt` (ADR-367) signed with the client's RSA private key (`RS256`, RSASSA-PKCS1-v1_5
+ * with SHA-256), its header naming the key, so the server checks it with the public key registered.
  */
 export function webhookOAuthClientAssertion(
   client: WebhookOAuthClient,
@@ -93,7 +168,11 @@ export function webhookOAuthClientAssertion(
 ): string {
   const part = (value: object) => Buffer.from(JSON.stringify(value), 'utf8').toString('base64url');
   const issuedAt = Math.floor(at.getTime() / 1000);
-  const signed = `${part({ alg: 'HS256', typ: 'JWT' })}.${part({
+  const header =
+    client.clientAuthentication === 'private_key_jwt'
+      ? { alg: 'RS256', kid: client.keyId, typ: 'JWT' }
+      : { alg: 'HS256', typ: 'JWT' };
+  const signed = `${part(header)}.${part({
     iss: client.clientId,
     sub: client.clientId,
     aud: client.tokenUrl,
@@ -101,9 +180,12 @@ export function webhookOAuthClientAssertion(
     iat: issuedAt,
     exp: issuedAt + WEBHOOK_OAUTH_ASSERTION_SECONDS,
   })}`;
-  const signature = createHmac('sha256', Buffer.from(client.clientSecret, 'utf8'))
-    .update(signed)
-    .digest('base64url');
+  const signature =
+    client.clientAuthentication === 'private_key_jwt'
+      ? sign('sha256', Buffer.from(signed, 'utf8'), client.privateKey).toString('base64url')
+      : createHmac('sha256', Buffer.from(client.clientSecret, 'utf8'))
+          .update(signed)
+          .digest('base64url');
   return `${signed}.${signature}`;
 }
 
@@ -112,10 +194,10 @@ export function webhookOAuthClientAssertion(
  * one is set, the client authenticated as section 2.3.1 says: with HTTP Basic (its identifier and
  * secret each form-encoded, joined by a colon, base64-encoded) or, for `client_secret_post`, with
  * `client_id` and `client_secret` among the form's parameters and no Authorization header (ADR-357);
- * or, for `client_secret_jwt`, with `client_id` and a client assertion made `at`, with the unique
- * `jti` (RFC 7521 section 4.2, RFC 7523 section 2.2), and no Authorization header (ADR-366). Sent
- * through the egress client, like deliveries, so the authorization server is held to the same
- * address rules.
+ * or, for `client_secret_jwt` and `private_key_jwt`, with `client_id` and a client assertion made
+ * `at`, with the unique `jti` (RFC 7521 section 4.2, RFC 7523 section 2.2), and no Authorization
+ * header (ADR-366, ADR-367). Sent through the egress client, like deliveries, so the authorization
+ * server is held to the same address rules.
  */
 export function webhookOAuthTokenRequest(
   client: WebhookOAuthClient,
@@ -130,7 +212,10 @@ export function webhookOAuthTokenRequest(
     accept: 'application/json',
     'user-agent': userAgent,
   };
-  if (client.clientAuthentication === 'client_secret_jwt') {
+  if (
+    client.clientAuthentication === 'client_secret_jwt' ||
+    client.clientAuthentication === 'private_key_jwt'
+  ) {
     form.append('client_id', client.clientId);
     form.append('client_assertion_type', WEBHOOK_OAUTH_ASSERTION_TYPE);
     form.append('client_assertion', webhookOAuthClientAssertion(client, at, jti));
@@ -254,14 +339,17 @@ export interface WebhookOAuthTokenOwner {
 /** The endpoints whose tokens a process keeps at most; the least recently used goes first. */
 const MAX_KEPT_TOKENS = 1_000;
 
-/** Tells clients apart without keeping their secrets: a hash of everything a token request sends. */
+/**
+ * Tells clients apart without keeping their secrets or keys: a hash of everything a token request
+ * is made from.
+ */
 const clientFingerprint = (client: WebhookOAuthClient) =>
   createHash('sha256')
     .update(
       JSON.stringify([
         client.tokenUrl,
         client.clientId,
-        client.clientSecret,
+        client.clientAuthentication === 'private_key_jwt' ? client.privateKey : client.clientSecret,
         client.scope,
         client.clientAuthentication,
       ]),
@@ -271,8 +359,8 @@ const clientFingerprint = (client: WebhookOAuthClient) =>
 /**
  * The access tokens a worker keeps for webhook endpoints (ADR-173), in its memory only: never
  * stored, logged or shown. A token is kept for its endpoint and client, so a changed token URL,
- * identifier, secret, scope or way of authenticating gets a new one, and until a minute before it
- * expires (at most a day).
+ * identifier, secret or key, scope or way of authenticating gets a new one, and until a minute
+ * before it expires (at most a day).
  * The deliveries of an endpoint that need a token at the same time share one request; a token
  * without a lifetime serves only them, and a failure is never kept: the next attempt asks again.
  */

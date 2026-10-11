@@ -1522,6 +1522,19 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    changes keep the list, and its API refuses `cartReminders` (422) and leaves it out of the
    endpoints it answers.
 
+   Migration 0287 (ADR-367) adds `oauth_private_key_ciphertext` and `oauth_public_key` to
+   `app.webhook_endpoints` (nullable, no rewrite) with their update grant, lets `oauth_client_auth`
+   hold `private_key_jwt`, replaces the OAuth check so a key pair goes only with that way and a
+   secret with the others (both checks validated by reading the table, at most 10 endpoints a
+   company), and replaces `ops.sealed_value_keys` so the keyring sweep re-encrypts the private keys.
+   Workers roll out before web servers and only web servers of this release can choose the way, so
+   every worker signs with the key once a client has one. A worker from before it sees no secret for
+   such a client and sends its deliveries without a token, which the receiver refuses (retried as
+   usual), so set those clients to another way before rolling workers back to such an image. Until
+   the web rollout ends, an old web server shows such a client as if it used HTTP Basic and cannot
+   change or remove it: a change asks for a secret and writes it beside the key pair, and a removal
+   leaves the key pair, and the check refuses both (a server error), so nothing is stored.
+
    Migration 0286 (ADR-366) lets `app.webhook_endpoints.oauth_client_auth` hold
    `client_secret_jwt`, its check replaced and validated by reading the table. Workers roll out
    before web servers, and only web servers of this release can choose it, so every worker signs

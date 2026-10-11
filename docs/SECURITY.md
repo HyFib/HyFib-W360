@@ -1437,7 +1437,13 @@ Phase 5 rules (outgoing webhooks, P5-09):
   audience the token URL, a random `jti`, five minutes' lifetime) as a client assertion, and the
   services take for it only a secret of at least 32 bytes, opening a kept one to measure it (one that
   no longer opens is asked for again); moved to another token URL by a change that names no way, it
-  goes on signing, so a move never starts sending its secret. The way
+  goes on signing, so a move never starts sending its secret. A client set to `private_key_jwt`
+  (ADR-367) has no secret: HyFib makes it an RSA key pair of 2048 bits, keeps the private key sealed
+  with the AAD `webhook-oauth-key:<company>:<endpoint>` (re-encrypted by the keyring sweep, never
+  shown, logged, audited or exported, opened only by the worker, which refuses a key that is not
+  RSA) and shows only the public key, which signs nothing; the assertion is signed RS256 and names
+  the key by its RFC 7638 thumbprint; a database check keeps a key pair only with this way and no
+  secret then, and `replaceKey` makes a new pair. The way
   a client authenticates is audited, the secret never. Access tokens live only in the worker's memory, keyed by the company, the
   endpoint and a hash of the client (its way of authenticating included): never stored, logged or
   shown, a day at most, replaced after a 401 or a change of the client. A token's characters are

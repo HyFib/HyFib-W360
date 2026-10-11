@@ -1,12 +1,22 @@
-import { createHmac } from 'node:crypto';
+import {
+  createHmac,
+  createPrivateKey,
+  createPublicKey,
+  generateKeyPairSync,
+  verify,
+} from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { EgressError, type EgressClient, type EgressRequest } from '@w360/core/egress';
 import { WEBHOOK_LIMITS } from './model';
 import {
+  checkedWebhookOAuthPrivateKey,
   fetchWebhookOAuthToken,
+  generateWebhookOAuthKeyPair,
   readWebhookOAuthTokenAnswer,
   webhookOAuthClientAssertion,
   webhookOAuthEgressError,
+  webhookOAuthKeyAad,
+  webhookOAuthPublicKey,
   webhookOAuthSecretAad,
   webhookOAuthSecretSignsJwt,
   webhookOAuthTokenRequest,
@@ -14,7 +24,9 @@ import {
   WEBHOOK_OAUTH_ASSERTION_TYPE,
   WEBHOOK_OAUTH_CLIENT_RE,
   WEBHOOK_OAUTH_JWT_SECRET_BYTES,
+  WEBHOOK_OAUTH_KEY_BITS,
   WEBHOOK_OAUTH_SCOPE_RE,
+  type WebhookOAuthKeyPair,
   type WebhookOAuthTokenResult,
 } from './oauth';
 
@@ -26,6 +38,15 @@ const client = {
   clientAuthentication: 'client_secret_basic' as const,
 };
 const at = new Date('2026-10-05T10:00:00Z');
+/** A client that signs with the key pair given (ADR-367). */
+const signerOf = (pair: WebhookOAuthKeyPair, scope: string | null = null) => ({
+  tokenUrl: client.tokenUrl,
+  clientId: client.clientId,
+  scope,
+  clientAuthentication: 'private_key_jwt' as const,
+  privateKey: pair.privateKey,
+  keyId: webhookOAuthPublicKey(pair.publicKey).keyId,
+});
 const answer = (status: number, body: unknown) => ({
   status,
   body: Buffer.from(typeof body === 'string' ? body : JSON.stringify(body), 'utf8'),
@@ -176,6 +197,102 @@ describe('OAuth client credentials for webhook endpoints (ADR-173)', () => {
     // Bytes, not characters: 16 letters of two bytes each.
     expect(webhookOAuthSecretSignsJwt('é'.repeat(16))).toBe(true);
     expect(webhookOAuthSecretSignsJwt('é'.repeat(15))).toBe(false);
+  });
+
+  it('sign the assertion with a key pair HyFib keeps, naming the key, nothing secret sent, for private_key_jwt (ADR-367)', () => {
+    const pair = generateWebhookOAuthKeyPair();
+    const publicKey = webhookOAuthPublicKey(pair.publicKey);
+    const signer = signerOf(pair, 'events.write');
+    const jti = '0192f0e4-7a3b-7c1d-9e2f-3a4b5c6d7e8f';
+    const assertion = webhookOAuthClientAssertion(signer, at, jti);
+    const [header, payload, signature] = assertion.split('.');
+    expect(JSON.parse(Buffer.from(header!, 'base64url').toString('utf8'))).toEqual({
+      alg: 'RS256',
+      kid: publicKey.keyId,
+      typ: 'JWT',
+    });
+    expect(JSON.parse(Buffer.from(payload!, 'base64url').toString('utf8'))).toEqual({
+      iss: 'hyfib-webhooks',
+      sub: 'hyfib-webhooks',
+      aud: 'https://auth.example.com/oauth2/token',
+      jti,
+      iat: 1791194400,
+      exp: 1791194700,
+    });
+    // Checked as the server checks it, RSASSA-PKCS1-v1_5 with SHA-256, with the public key alone,
+    // as the JWK registered; anything else signed, or another key, does not check.
+    const registered = createPublicKey({ key: { ...publicKey.jwk }, format: 'jwk' });
+    const checks = (signed: string, key = registered) =>
+      verify('sha256', Buffer.from(signed, 'utf8'), key, Buffer.from(signature!, 'base64url'));
+    expect(checks(`${header}.${payload}`)).toBe(true);
+    expect(checks(`${header}.${payload}x`)).toBe(false);
+    expect(
+      checks(`${header}.${payload}`, createPublicKey(generateWebhookOAuthKeyPair().publicKey)),
+    ).toBe(false);
+    // RSASSA-PKCS1-v1_5 takes no randomness: the same claims sign alike.
+    expect(webhookOAuthClientAssertion(signer, at, jti)).toBe(assertion);
+    // The form: the client ID and the assertion, no Authorization header, no key.
+    const request = webhookOAuthTokenRequest(signer, 'HyFib-W360-Webhooks/1', at, jti);
+    expect(request.headers.authorization).toBeUndefined();
+    expect(request.body).toBe(
+      new URLSearchParams([
+        ['grant_type', 'client_credentials'],
+        ['scope', 'events.write'],
+        ['client_id', 'hyfib-webhooks'],
+        ['client_assertion_type', WEBHOOK_OAUTH_ASSERTION_TYPE],
+        ['client_assertion', assertion],
+      ]).toString(),
+    );
+    const sent = [...new URLSearchParams(request.body ?? '').values()].join('\n');
+    expect(sent).not.toContain(pair.privateKey.split('\n')[1]!);
+    // Each request makes its own.
+    const fresh = new URLSearchParams(webhookOAuthTokenRequest(signer, 'ua').body ?? '').get(
+      'client_assertion',
+    );
+    expect(fresh).not.toBe(assertion);
+  });
+
+  it('name a key by its RFC 7638 thumbprint, show it as a JWK and as PEM, and sign with RSA keys only (ADR-367)', () => {
+    // RFC 7638 section 3.1's example key and its thumbprint.
+    const n =
+      '0vx7agoebGcQSuuPiLJXZptN9nndrQmbXEps2aiAFbWhM78LhWx4cbbfAAtVT86zwu1RK7aPFFxuhDR1L6tSoc_BJECPebWKRXjBZCiFV4n3oknjhMstn64tZ_2W-5JsGY4Hc5n9yBXArwl93lqt7_RN5w6Cf0h4QyQ5v-65YGjQR0_FDW2QvzqY368QQMicAtaSqzs8KJZgnYb9c7d0zgdAZHzu6qMQvRL5hajrn1n91CbOpbISD08qNLyrdkt-bFTWhAI4vMQFh6WeZu0fM4lFd2NcRwr3XPksINHaQ-G_xBniIqbw0Ls1jF44-csFCur-kEgU8awapJzKnqDKgw';
+    const pem = createPublicKey({ key: { kty: 'RSA', n, e: 'AQAB' }, format: 'jwk' })
+      .export({ type: 'spki', format: 'pem' })
+      .toString();
+    const keyId = 'NzbLsXh8uDCcd-6MNwXF4W_7noWXFZAfHkxZsRGC9Xs';
+    expect(webhookOAuthPublicKey(pem)).toEqual({
+      keyId,
+      jwk: { kty: 'RSA', n, e: 'AQAB', kid: keyId, use: 'sig', alg: 'RS256' },
+      pem,
+    });
+    // The pairs HyFib makes: RSA of 2048 bits, exponent 65537, PKCS#8 and SPKI PEM, each new.
+    const made = generateWebhookOAuthKeyPair();
+    expect(WEBHOOK_OAUTH_KEY_BITS).toBe(2048);
+    expect(createPublicKey(made.publicKey).asymmetricKeyDetails).toEqual({
+      modulusLength: 2048,
+      publicExponent: 65537n,
+    });
+    expect(createPrivateKey(made.privateKey).export({ type: 'pkcs8', format: 'pem' })).toBe(
+      made.privateKey,
+    );
+    expect(createPublicKey(made.publicKey).export({ type: 'spki', format: 'pem' })).toBe(
+      made.publicKey,
+    );
+    expect(generateWebhookOAuthKeyPair().publicKey).not.toBe(made.publicKey);
+    // A key of another kind never signs, nor is it shown as RS256's.
+    const ec = generateKeyPairSync('ec', { namedCurve: 'P-256' });
+    expect(() =>
+      webhookOAuthPublicKey(ec.publicKey.export({ type: 'spki', format: 'pem' }).toString()),
+    ).toThrow(/not an RSA key/);
+    expect(() =>
+      checkedWebhookOAuthPrivateKey(
+        ec.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString(),
+      ),
+    ).toThrow(/not an RSA key/);
+    expect(checkedWebhookOAuthPrivateKey(made.privateKey)).toBe(made.privateKey);
+    // The private key is sealed bound to its company and endpoint, apart from the secret.
+    expect(webhookOAuthKeyAad('t1', 'e1')).toBe('webhook-oauth-key:t1:e1');
+    expect(webhookOAuthKeyAad('t1', 'e1')).not.toBe(webhookOAuthSecretAad('t1', 'e1'));
   });
 
   it('take a 200 with a bearer token, kept until a minute before it expires and at most a day', () => {
@@ -384,6 +501,20 @@ describe('the access tokens a worker keeps (ADR-173)', () => {
       await tokens.token(owner, changed, minutes(11), ask);
       expect(asked.count, JSON.stringify(changed)).toBe(before + 1);
     }
+  });
+
+  it('ask again for a client that signs with another key pair (ADR-367)', async () => {
+    const tokens = new WebhookOAuthTokenCache();
+    const { asked, ask } = server([issued('one', minutes(10)), issued('two', minutes(10))]);
+    const first = signerOf(generateWebhookOAuthKeyPair());
+    expect(await tokens.token(owner, first, at, ask)).toEqual(issued('one', minutes(10)));
+    expect(await tokens.token(owner, first, minutes(1), ask)).toEqual(issued('one', minutes(10)));
+    expect(asked.count).toBe(1);
+    const replaced = signerOf(generateWebhookOAuthKeyPair());
+    expect(await tokens.token(owner, replaced, minutes(2), ask)).toEqual(
+      issued('two', minutes(10)),
+    );
+    expect(asked.count).toBe(2);
   });
 
   it('share one request among the deliveries that need a token at once, keeping no failure', async () => {

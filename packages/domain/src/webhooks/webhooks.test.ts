@@ -1,4 +1,4 @@
-import { createHmac, randomBytes } from 'node:crypto';
+import { createHmac, randomBytes, sign, verify } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import { isAppError, jsonbSize, Keyring, sha256Hex } from '@w360/core';
@@ -127,6 +127,7 @@ import {
   webhookReplaySummary,
   webhookChannelText,
   webhookOAuthText,
+  WEBHOOK_OAUTH_CLIENT_AUTHENTICATION_LABELS,
   webhookOwnerText,
   webhookPipelineText,
   webhookRetryDelaySeconds,
@@ -215,7 +216,7 @@ import {
   templateStatusPayloadSchema,
 } from './payloads';
 import { webhookSignature, webhookSignatureHeader, verifyWebhookSignature } from './signing';
-import { webhookOAuthSecretAad } from './oauth';
+import { webhookOAuthKeyAad, webhookOAuthPublicKey, webhookOAuthSecretAad } from './oauth';
 import {
   assertWebhookAuthorization,
   checkedWebhookOAuth,
@@ -4947,6 +4948,7 @@ describe('endpoint OAuth clients (ADR-173)', () => {
       clientSecret: 's',
       scope: null,
       clientAuthentication: 'client_secret_basic',
+      replaceKey: false,
     });
     for (const [tokenUrl, message] of [
       ['http://auth.example.com/t', 'Only https:// addresses can be called.'],
@@ -4985,6 +4987,8 @@ describe('endpoint OAuth clients (ADR-173)', () => {
       oauthClientSecretCiphertext: stored.oauthClientSecretCiphertext,
       oauthScope: 'read',
       oauthClientAuth: 'client_secret_basic',
+      oauthPrivateKeyCiphertext: null,
+      oauthPublicKey: null,
     });
     // Another token URL would receive the secret, or what it signs: it is needed again.
     expect(
@@ -5043,11 +5047,11 @@ describe('endpoint OAuth clients (ADR-173)', () => {
     ).toEqual({ ...base, clientAuthentication: 'client_secret_basic' });
     // Left out: the schema adds nothing, and the client uses HTTP Basic.
     expect(webhookOAuthSchema.parse(base)).not.toHaveProperty('clientAuthentication');
-    for (const bad of ['private_key_jwt', 'none', 'CLIENT_SECRET_POST', '', null]) {
+    for (const bad of ['tls_client_auth', 'none', 'CLIENT_SECRET_POST', '', null]) {
       expect(problems({ ...base, clientAuthentication: bad }), String(bad)).toEqual([
         [
           'clientAuthentication',
-          'Choose how the client authenticates: client_secret_basic, client_secret_post or client_secret_jwt.',
+          'Choose how the client authenticates: client_secret_basic, client_secret_post, client_secret_jwt or private_key_jwt.',
         ],
       ]);
     }
@@ -5225,6 +5229,157 @@ describe('endpoint OAuth clients (ADR-173)', () => {
     expect(basicShort.oauthClientAuth).toBe('client_secret_basic');
   });
 
+  it('sign with a key pair HyFib makes, kept until replaced and dropped with the way, taking no secret (ADR-367)', () => {
+    const signer = { ...base, clientAuthentication: 'private_key_jwt' as const };
+    expect(webhookOAuthSchema.parse(signer)).toEqual(signer);
+    expect(webhookOAuthSchema.parse({ ...signer, replaceKey: true })).toEqual({
+      ...signer,
+      replaceKey: true,
+    });
+    expect(problems({ ...signer, replaceKey: 'yes' })).toEqual([
+      ['replaceKey', 'Say true to replace the key pair.'],
+    ]);
+    // A secret is refused for it, and a new key pair for any other way.
+    expect(
+      refusal(() =>
+        checkedWebhookOAuth({ ...signer, clientSecret: 's' }, NO_WEBHOOK_OAUTH, policy),
+      ),
+    ).toEqual([
+      {
+        path: 'oauth.clientSecret',
+        message:
+          'A client that signs with HyFib’s key pair has no secret: leave the client secret out.',
+      },
+    ]);
+    expect(
+      refusal(() =>
+        checkedWebhookOAuth(
+          { ...base, clientSecret: 's', replaceKey: true },
+          NO_WEBHOOK_OAUTH,
+          policy,
+        ),
+      ),
+    ).toEqual([
+      {
+        path: 'oauth.replaceKey',
+        message: 'Only a client that signs with HyFib’s key pair has a key pair to replace.',
+      },
+    ]);
+    // A new client gets a key pair, the private key sealed bound to the endpoint, and no secret.
+    const made = webhookOAuthColumns(
+      ring,
+      tenant,
+      endpoint,
+      checkedWebhookOAuth(signer, NO_WEBHOOK_OAUTH, policy),
+      NO_WEBHOOK_OAUTH,
+    );
+    expect(made).toMatchObject({
+      oauthTokenUrl: base.tokenUrl,
+      oauthClientId: 'hyfib',
+      oauthClientSecretCiphertext: null,
+      oauthScope: null,
+      oauthClientAuth: 'private_key_jwt',
+    });
+    const sealed = made.oauthPrivateKeyCiphertext!;
+    const privateKey = ring.decryptString(sealed, webhookOAuthKeyAad(tenant, endpoint));
+    expect(() => ring.decryptString(sealed, webhookOAuthKeyAad(tenant, other))).toThrow();
+    expect(() => ring.decryptString(sealed, webhookOAuthSecretAad(tenant, endpoint))).toThrow();
+    // The halves belong together.
+    expect(
+      verify(
+        'sha256',
+        Buffer.from('x'),
+        made.oauthPublicKey!,
+        sign('sha256', Buffer.from('x'), privateKey),
+      ),
+    ).toBe(true);
+    // A client set to sign with a key pair that has none fails rather than asking without one.
+    expect(() =>
+      openWebhookOAuthClient(ring, tenant, endpoint, { ...made, oauthPublicKey: null }),
+    ).toThrow(/has none stored/);
+    // Opened for the worker: the private key and its public key's id.
+    expect(openWebhookOAuthClient(ring, tenant, endpoint, made)).toEqual({
+      tokenUrl: base.tokenUrl,
+      clientId: 'hyfib',
+      scope: null,
+      clientAuthentication: 'private_key_jwt',
+      privateKey,
+      keyId: webhookOAuthPublicKey(made.oauthPublicKey!).keyId,
+    });
+    // A change keeps it, the way too, whatever else changes, the token URL included; one asking for
+    // a new key pair gets one.
+    const elsewhere = checkedWebhookOAuth(
+      { ...base, tokenUrl: 'https://elsewhere.example.com/t', scope: 'read' },
+      made,
+      policy,
+    );
+    expect(webhookOAuthColumns(ring, tenant, endpoint, elsewhere, made)).toMatchObject({
+      oauthTokenUrl: 'https://elsewhere.example.com/t',
+      oauthScope: 'read',
+      oauthClientAuth: 'private_key_jwt',
+      oauthPrivateKeyCiphertext: sealed,
+      oauthPublicKey: made.oauthPublicKey,
+    });
+    const replace = checkedWebhookOAuth({ ...signer, replaceKey: true }, made, policy);
+    const replaced = webhookOAuthColumns(ring, tenant, endpoint, replace, made);
+    expect(replaced.oauthPublicKey).not.toBe(made.oauthPublicKey);
+    expect(replaced.oauthPrivateKeyCiphertext).not.toBe(sealed);
+    // Another way needs a secret and drops the key pair; back to this way, a new key pair.
+    expect(
+      refusal(() =>
+        checkedWebhookOAuth({ ...base, clientAuthentication: 'client_secret_post' }, made, policy),
+      ),
+    ).toEqual([{ path: 'oauth.clientSecret', message: 'Enter the client secret.' }]);
+    const toPost = webhookOAuthColumns(
+      ring,
+      tenant,
+      endpoint,
+      checkedWebhookOAuth(
+        { ...base, clientSecret: 's', clientAuthentication: 'client_secret_post' },
+        made,
+        policy,
+      ),
+      made,
+    );
+    expect(toPost).toMatchObject({
+      oauthClientAuth: 'client_secret_post',
+      oauthPrivateKeyCiphertext: null,
+      oauthPublicKey: null,
+    });
+    expect(toPost.oauthClientSecretCiphertext).not.toBeNull();
+    const back = webhookOAuthColumns(
+      ring,
+      tenant,
+      endpoint,
+      checkedWebhookOAuth(signer, toPost, policy),
+      toPost,
+    );
+    expect(back).toMatchObject({
+      oauthClientAuth: 'private_key_jwt',
+      oauthClientSecretCiphertext: null,
+    });
+    expect(back.oauthPublicKey).not.toBeNull();
+    expect(back.oauthPublicKey).not.toBe(made.oauthPublicKey);
+    // Removing the client removes its key pair.
+    expect(webhookOAuthColumns(ring, tenant, endpoint, null, made)).toEqual(NO_WEBHOOK_OAUTH);
+    // Audit entries say whether a key pair was made, never the key.
+    expect(webhookOAuthAudit(checkedWebhookOAuth(signer, made, policy), made)).toEqual({
+      oauthTokenHost: 'auth.example.com',
+      oauthKeyReplaced: false,
+      oauthClientAuthentication: 'private_key_jwt',
+    });
+    expect(webhookOAuthAudit(replace, made)).toEqual({
+      oauthTokenHost: 'auth.example.com',
+      oauthKeyReplaced: true,
+      oauthClientAuthentication: 'private_key_jwt',
+    });
+    expect(webhookOAuthAudit(checkedWebhookOAuth(signer, toPost, policy), toPost)).toEqual({
+      oauthTokenHost: 'auth.example.com',
+      oauthKeyReplaced: true,
+      oauthClientAuthentication: 'private_key_jwt',
+    });
+  });
+
   it('refuse an Authorization header of the endpoint’s own beside a client, naming what was given', () => {
     const headers = [
       { name: 'X-Api-Key', value: 'k' },
@@ -5321,7 +5476,11 @@ describe('endpoint OAuth clients (ADR-173)', () => {
   });
 
   it('are described by the token URL’s host, and their failures named for members', () => {
-    const basic = { ...base, clientAuthentication: 'client_secret_basic' as const };
+    const basic = {
+      ...base,
+      clientAuthentication: 'client_secret_basic' as const,
+      publicKey: null,
+    };
     expect(webhookOAuthText({ ...basic, scope: null })).toBe(
       'OAuth access tokens from auth.example.com, as client hyfib',
     );
@@ -5338,6 +5497,35 @@ describe('endpoint OAuth clients (ADR-173)', () => {
     ).toBe(
       'OAuth access tokens from auth.example.com, as client hyfib, proving it holds the secret with a signed JWT',
     );
+    const publicKey = {
+      keyId: 'NzbLsXh8uDCcd-6MNwXF4W_7noWXFZAfHkxZsRGC9Xs',
+      jwk: {
+        kty: 'RSA' as const,
+        n: 'n',
+        e: 'AQAB',
+        kid: 'NzbLsXh8uDCcd-6MNwXF4W_7noWXFZAfHkxZsRGC9Xs',
+        use: 'sig' as const,
+        alg: 'RS256' as const,
+      },
+      pem: 'pem',
+    };
+    expect(
+      webhookOAuthText({
+        ...basic,
+        scope: null,
+        clientAuthentication: 'private_key_jwt',
+        publicKey,
+      }),
+    ).toBe(
+      'OAuth access tokens from auth.example.com, as client hyfib, signing JWTs with HyFib’s private key (key NzbLsXh8uDCcd-6MNwXF4W_7noWXFZAfHkxZsRGC9Xs)',
+    );
+    // Each way named for members as Settings → Webhooks offers it (ADR-357, ADR-366, ADR-367).
+    expect(WEBHOOK_OAUTH_CLIENT_AUTHENTICATION_LABELS).toEqual({
+      client_secret_basic: 'Its ID and secret in an Authorization header (HTTP Basic)',
+      client_secret_post: 'Its ID and secret in the request body (client_id and client_secret)',
+      client_secret_jwt: 'A JWT signed with the secret, which is never sent (client_secret_jwt)',
+      private_key_jwt: 'A JWT signed with a key pair HyFib keeps, no secret (private_key_jwt)',
+    });
     expect(webhookErrorLabel('oauth_token_secret_too_short', null)).toBe(
       'No access token: the client secret is too short to sign a JWT (at least 32 bytes)',
     );

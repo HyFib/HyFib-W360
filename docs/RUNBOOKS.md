@@ -2688,7 +2688,7 @@ made: the delivery used no attempt, the endpoint's health is unchanged and the c
 deliveries went on. A backlog of them is ended 200 deliveries per job, each job queueing the next
 (`handedOver` in `webhooks delivered`). The worker logs
 `webhook delivery could not be prepared; failed as payload_failed` with `tenantId`, `deliveryId`,
-`endpointId`, `eventType`, `stage` (`payload`, `signature` or `headers`), `errorClass` and
+`endpointId`, `eventType`, `stage` (`payload`, `signature`, `headers` or `oauth`), `errorClass` and
 `errorCode` (a SQLSTATE for a database error), never the payload or the error's message. One
 `eventType` failing across deliveries is a builder bug: reproduce it from the event row
 (`app.webhook_events`, by the delivery's `event_id`) on a copy, not from the log. `stage`
@@ -2698,6 +2698,12 @@ come back, the company deletes the endpoint and adds it again (rotating keeps th
 previous secret signing for 24 hours, so those deliveries keep failing). `stage` `headers` on every
 delivery of one endpoint means its own headers cannot be opened: a key missing from
 `W360_ENCRYPTION_KEYS`, or headers restored onto another endpoint (they are bound to theirs).
+`stage` `oauth` on every delivery of one endpoint means its OAuth client cannot be opened (ADR-173,
+ADR-367): its secret or private key sealed with a key missing from `W360_ENCRYPTION_KEYS` or restored
+onto another endpoint, or a private key that is not RSA. Restore the key; if it cannot come back,
+the company gives the client secret again or, for a client that signs with a key pair, makes a new
+key pair ("Make a new key pair", `replaceKey`, then registers its public key): a change that keeps
+the key pair does not open it, so it keeps an unreadable one.
 Restore the key; if it cannot come back, the company gives the headers again ("Replace the headers"
 on the endpoint's page, or `PATCH /webhook-endpoints/{id}` with `headers`). `errorCode` `55P03` or
 `57014` is a lock or statement timeout. Once the cause is fixed, the company replays: "Replay failed
@@ -2861,8 +2867,13 @@ assertion signed with the secret takes "A JWT signed with the secret" (`client_s
 ADR-366), which needs a secret of at least 32 bytes and audiences the token URL: a server that
 wants another audience, such as its issuer identifier, refuses it (400 or 401), so use another
 way with it; `oauth_token_secret_too_short`: a client set to sign JWTs keeps a secret under 32
-bytes (set during a rollout by a web server from before ADR-366): enter one of 32 bytes or more; `oauth_token_refused_404` or a 3xx: the token URL is wrong (redirects
-are not followed);
+bytes (set during a rollout by a web server from before ADR-366): enter one of 32 bytes or more;
+a client set to "A JWT signed with a key pair HyFib keeps" (`private_key_jwt`, ADR-367) is refused
+(400 or 401) until its public key is registered for the client with the server: copy it from the
+endpoint ("Public key to register", as a JWK set or PEM, or `oauth.publicKey` in the API) and
+check the server takes RS256 and the key id named in the JWT's `kid`; after "Make a new key pair"
+(`replaceKey`) the old key stops at once, so register the new one; `oauth_token_refused_404` or a
+3xx: the token URL is wrong (redirects are not followed);
 `oauth_token_invalid`: it answered 200 without a bearer token (an HTML page, or a token type other
 than Bearer); `oauth_token_timeout`, `_dns_failed`, `_connect_failed` or `_address_blocked`: the
 token URL cannot be reached, or is not a public https address. Check the client with the receiver's

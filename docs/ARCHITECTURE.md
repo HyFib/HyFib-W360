@@ -2293,7 +2293,10 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   HTTP Basic header or, when its `oauth_client_auth` is `client_secret_post`, as `client_id` and
   `client_secret` in the form, migration 0279, ADR-357, or, when it is `client_secret_jwt`, as
   `client_id` and a client assertion signed with the secret, `webhookOAuthClientAssertion`, RFC
-  7523, migration 0286, ADR-366), sends it as a bearer token, and drops it
+  7523, migration 0286, ADR-366, or, when it is `private_key_jwt`, signed RS256 with the private key
+  of the key pair HyFib made for the client, `oauth_private_key_ciphertext` sealed with
+  `webhookOAuthKeyAad` and `oauth_public_key` shown, its key id the RFC 7638 thumbprint, migration
+  0287, ADR-367), sends it as a bearer token, and drops it
   when the endpoint answers 401. A delivery that gets no token fails its attempt with an
   `oauth_token_…` code and no status. The lease of such a delivery covers both requests.
 - **Team filters** (migration 0122, ADR-174): `team_ids` on an endpoint lists the teams whose

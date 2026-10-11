@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto';
+import { createPublicKey, randomBytes } from 'node:crypto';
 import { once } from 'node:events';
 import { createServer, type IncomingHttpHeaders, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -18,6 +18,7 @@ import {
   WEBHOOK_LIMITS,
   WebhookOAuthTokenCache,
   verifyWebhookSignature,
+  webhookOAuthKeyAad,
   webhookOAuthSecretAad,
   type ApiContext,
   type ApiKeysService,
@@ -680,6 +681,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       clientId: 'crm-client',
       scope: 'hooks.write',
       clientAuthentication: 'client_secret_basic',
+      publicKey: null,
     });
     expect((await addThroughApi(key.ctx, 'oauth-1', body)).body.data.oauth).toEqual(endpoint.oauth);
     expect(await api().get(key.ctx, endpoint.id)).toEqual(endpoint);
@@ -738,7 +740,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     expect(
       await issue(
         api().update(key.ctx, endpoint.id, {
-          oauth: { tokenUrl, clientId: 'renamed-client', clientAuthentication: 'private_key_jwt' },
+          oauth: { tokenUrl, clientId: 'renamed-client', clientAuthentication: 'tls_client_auth' },
         }),
       ),
     ).toMatchObject({ path: 'oauth.clientAuthentication' });
@@ -833,6 +835,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       clientId: 'crm-client',
       scope: 'hooks.write',
       clientAuthentication: 'client_secret_post',
+      publicKey: null,
     });
     const [added] = await fx.query<{ metadata: Record<string, unknown> }>(
       'SELECT metadata FROM app.audit_events WHERE tenant_id = $1 AND subject_id = $2',
@@ -884,6 +887,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       clientId: 'jwt-client',
       scope: null,
       clientAuthentication: 'client_secret_jwt',
+      publicKey: null,
     });
     // Moved to another token URL with its secret but no way named, it goes on signing JWTs.
     const elsewhere = `http://${HOST}:${port}/token/${randomBytes(6).toString('hex')}`;
@@ -902,8 +906,139 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       clientId: 'jwt-client',
       scope: null,
       clientAuthentication: 'client_secret_jwt',
+      publicKey: null,
     });
     expect(JSON.stringify([created.body, await api().list(key.ctx)])).not.toContain(SECRET);
+  });
+
+  it('take a client that signs with a key pair HyFib makes, answering its public key, a new one when asked (ADR-367)', async () => {
+    const c = await fx.company();
+    const key = await apiKey(c, ['webhooks.manage']);
+    const tokenUrl = `http://${HOST}:${port}/token/${randomBytes(6).toString('hex')}`;
+    const issue = async (promise: Promise<unknown>) => {
+      const error = await expectAppError(promise, 'validation_failed');
+      return isAppError(error) ? error.issues?.[0] : undefined;
+    };
+    const signer = { tokenUrl, clientId: 'key-client', clientAuthentication: 'private_key_jwt' };
+    // A secret given with it is refused, and nothing is added.
+    expect(
+      await issue(
+        api().create(
+          key.ctx,
+          {
+            url: receiverUrl(),
+            events: ['contact.created'],
+            oauth: { ...signer, clientSecret: 'a-secret' },
+          },
+          idem('key-secret', 'x'),
+        ),
+      ),
+    ).toMatchObject({ path: 'oauth.clientSecret', message: expect.stringMatching(/no secret/) });
+    expect((await api().list(key.ctx)).data).toEqual([]);
+    const body = { url: receiverUrl(), events: ['contact.created'], oauth: signer };
+    const created = await addThroughApi(key.ctx, 'key-1', body);
+    expect(created.status).toBe(201);
+    const oauth = created.body.data.oauth as {
+      clientAuthentication: string;
+      publicKey: { keyId: string; jwk: Record<string, string>; pem: string };
+    };
+    expect(oauth).toMatchObject({
+      tokenUrl,
+      clientId: 'key-client',
+      scope: null,
+      clientAuthentication: 'private_key_jwt',
+    });
+    expect(oauth.publicKey.jwk).toMatchObject({
+      kty: 'RSA',
+      e: 'AQAB',
+      kid: oauth.publicKey.keyId,
+      use: 'sig',
+      alg: 'RS256',
+    });
+    expect(createPublicKey(oauth.publicKey.pem).asymmetricKeyDetails?.modulusLength).toBe(2048);
+    const id = created.body.data.id;
+    // Each private key the client has had, opened from the row, to look for it where it must not be.
+    const privateKeyNow = async () => {
+      const [row] = await fx.query<{ oauth_private_key_ciphertext: string }>(
+        'SELECT oauth_private_key_ciphertext FROM app.webhook_endpoints WHERE id = $1',
+        [id],
+      );
+      return fx.keyring.decryptString(
+        row!.oauth_private_key_ciphertext,
+        webhookOAuthKeyAad(c.tenant.id, id),
+      );
+    };
+    const firstPrivateKey = await privateKeyNow();
+    // The kept answer is the same key pair; a change keeps it, one asking for another replaces it.
+    expect((await addThroughApi(key.ctx, 'key-1', body)).body.data.oauth).toEqual(oauth);
+    expect(
+      (await api().update(key.ctx, id, { oauth: { tokenUrl, clientId: 'key-client' } })).oauth,
+    ).toEqual({ ...oauth, publicKey: oauth.publicKey });
+    const replaced = (
+      await api().update(key.ctx, id, {
+        oauth: { tokenUrl, clientId: 'key-client', replaceKey: true },
+      })
+    ).oauth;
+    expect(replaced?.clientAuthentication).toBe('private_key_jwt');
+    expect(replaced?.publicKey?.keyId).not.toBe(oauth.publicKey.keyId);
+    // Only such a client has a key pair to replace.
+    expect(
+      await issue(
+        api().update(key.ctx, id, {
+          oauth: {
+            tokenUrl,
+            clientId: 'key-client',
+            clientSecret: 's',
+            clientAuthentication: 'client_secret_basic',
+            replaceKey: true,
+          },
+        }),
+      ),
+    ).toMatchObject({ path: 'oauth.replaceKey' });
+    // Audited with the way and whether a key pair was made, never the key itself.
+    const audits = (
+      await fx.query<{ metadata: Record<string, unknown> }>(
+        `SELECT metadata FROM app.audit_events
+          WHERE tenant_id = $1 AND subject_id = $2 ORDER BY occurred_at, id`,
+        [c.tenant.id, id],
+      )
+    ).map((row) => row.metadata);
+    expect(audits).toEqual([
+      {
+        host: HOST,
+        eventTypes: ['contact.created'],
+        oauthTokenHost: HOST,
+        oauthClientAuthentication: 'private_key_jwt',
+        source: 'api',
+      },
+      {
+        host: HOST,
+        eventTypes: ['contact.created'],
+        oauthTokenHost: HOST,
+        oauthKeyReplaced: false,
+        oauthClientAuthentication: 'private_key_jwt',
+        source: 'api',
+      },
+      {
+        host: HOST,
+        eventTypes: ['contact.created'],
+        oauthTokenHost: HOST,
+        oauthKeyReplaced: true,
+        oauthClientAuthentication: 'private_key_jwt',
+        source: 'api',
+      },
+    ]);
+    // Neither private key, the first or the one that replaced it, is ever answered, kept for a
+    // replay, or audited.
+    const kept = await fx.query(
+      `SELECT response FROM app.api_idempotency_keys WHERE tenant_id = $1 AND api_key_id = $2`,
+      [c.tenant.id, key.id],
+    );
+    const shown = JSON.stringify([created.body, kept, await api().list(key.ctx), audits]);
+    for (const privateKey of [firstPrivateKey, await privateKeyNow()]) {
+      expect(shown).not.toContain(privateKey.split('\n')[1]!);
+    }
+    expect(await privateKeyNow()).not.toBe(firstPrivateKey);
   });
 
   it('choose the message statuses an endpoint receives, kept by changes that leave them out and cleared with the event (ADR-119)', async () => {

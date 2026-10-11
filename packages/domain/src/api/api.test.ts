@@ -1820,9 +1820,14 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       ...jwt,
       scope: null,
     });
+    // Or sign one with a key pair HyFib keeps, no secret given, a new key pair when asked (ADR-367).
+    const signer = { ...kept, clientAuthentication: 'private_key_jwt', replaceKey: true };
+    expect(apiUpdateWebhookEndpointSchema.parse({ oauth: signer })).toEqual({
+      oauth: { ...signer, scope: null },
+    });
     expect(
       apiUpdateWebhookEndpointSchema.safeParse({
-        oauth: { ...kept, clientAuthentication: 'private_key_jwt' },
+        oauth: { ...kept, clientAuthentication: 'tls_client_auth' },
       }).success,
     ).toBe(false);
     const doc = buildOpenApiDocument('https://app.example.com/api/v1');
@@ -1841,13 +1846,16 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'clientAuthentication',
       'clientId',
       'clientSecret',
+      'replaceKey',
       'scope',
       'tokenUrl',
     ]);
-    // The secret is never answered; the way the client authenticates always is (ADR-357).
+    // The secret is never answered; the way the client authenticates always is (ADR-357), and a
+    // client's public key (ADR-367).
     expect(keys(answered.properties.oauth)).toEqual([
       'clientAuthentication',
       'clientId',
+      'publicKey',
       'scope',
       'tokenUrl',
     ]);
@@ -1855,19 +1863,27 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       client?.anyOf?.find((s) => s.properties)?.properties?.clientAuthentication;
     for (const client of [given, answered.properties.oauth]) {
       expect(methodOf(client)).toMatchObject({
-        enum: ['client_secret_basic', 'client_secret_post', 'client_secret_jwt'],
+        enum: ['client_secret_basic', 'client_secret_post', 'client_secret_jwt', 'private_key_jwt'],
       });
     }
+    const publicKeyOf = (client: Client | undefined) =>
+      client?.anyOf?.find((s) => s.properties)?.properties?.publicKey as Client | undefined;
+    expect(keys(publicKeyOf(answered.properties.oauth))).toEqual(['jwk', 'keyId', 'pem']);
     expect(given?.anyOf?.find((s) => s.properties)).toMatchObject({
       description: expect.stringContaining(
-        "or as `client_id` and `client_secret` in the request body when `clientAuthentication` is `client_secret_post`, or, when it is `client_secret_jwt`, as `client_id` and a JWT signed with the secret (HS256: issuer and subject the client ID, audience the token URL, a unique `jti`, five minutes' lifetime) in `client_assertion` (RFC 7523), the secret itself never sent, which takes a secret of at least 32 bytes; left out, a change keeps the client's while the token URL stays the same, and a client using `client_secret_jwt` keeps it at a new token URL; otherwise a new client or token URL uses `client_secret_basic`)",
+        "With `clientAuthentication` `private_key_jwt` the client has no secret (leave `clientSecret` out): HyFib makes an RSA key pair of 2048 bits for it, keeps the private key encrypted and signs the JWT with it instead (RS256, its `kid` the public key's RFC 7638 thumbprint); register the public key the endpoint answers in `oauth.publicKey` with the authorization server. The key pair stays while the client signs with it; `replaceKey: true` makes a new one, and the old one is no longer used.",
+      ),
+    });
+    expect(given?.anyOf?.find((s) => s.properties)).toMatchObject({
+      description: expect.stringContaining(
+        "or as `client_id` and `client_secret` in the request body when `clientAuthentication` is `client_secret_post`, or, when it is `client_secret_jwt`, as `client_id` and a JWT signed with the secret (HS256: issuer and subject the client ID, audience the token URL, a unique `jti`, five minutes' lifetime) in `client_assertion` (RFC 7523), the secret itself never sent, which takes a secret of at least 32 bytes; left out, a change keeps the client's while the token URL stays the same, and a client using `client_secret_jwt` or `private_key_jwt` keeps it at a new token URL; otherwise a new client or token URL uses `client_secret_basic`)",
       ),
     });
     // A change says it keeps the way the client authenticates as it keeps the secret.
     const changed = (schemas.UpdateWebhookEndpoint as { properties: { oauth?: unknown } })
       .properties.oauth;
     expect(JSON.stringify(changed)).toContain(
-      'Its `clientAuthentication` may be left out to keep the one it has while the token URL stays the same (for a new token URL, `client_secret_basic`, unless it is `client_secret_jwt`, which stays).',
+      'Its `clientAuthentication` may be left out to keep the one it has while the token URL stays the same (for a new token URL, `client_secret_basic`, unless it is `client_secret_jwt` or `private_key_jwt`, which stays).',
     );
     expect(answered.required).toContain('oauth');
     expect(doc.info.description).toContain('send it as `Authorization: Bearer <token>`');

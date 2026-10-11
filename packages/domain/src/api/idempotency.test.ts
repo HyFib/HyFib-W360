@@ -32,6 +32,7 @@ import {
   WEBHOOK_TASK_STATUSES,
   WEBHOOK_TEMPLATE_STATUSES,
 } from '../webhooks/model';
+import { generateWebhookOAuthKeyPair, webhookOAuthPublicKey } from '../webhooks/oauth';
 import { storeIdempotentResponse } from './idempotency';
 import { API_LIMITS } from './model';
 import { buildOpenApiDocument } from './openapi';
@@ -185,11 +186,13 @@ describe('answers kept with an Idempotency-Key (ADR-339)', () => {
       assigneeIds: ids(WEBHOOK_LIMITS.assignees),
       contactTags: tags(WEBHOOK_LIMITS.contactTags),
       conversationTags: tags(WEBHOOK_LIMITS.conversationTags),
+      // A client that signs with a key pair answers its public key, the larger answer (ADR-367).
       oauth: {
         tokenUrl: `https://${'o'.repeat(WEBHOOK_LIMITS.urlLength - 8)}`,
         clientId: text(WEBHOOK_LIMITS.oauthClientIdLength),
         scope: text(WEBHOOK_LIMITS.oauthScopeLength),
-        clientAuthentication: 'client_secret_basic',
+        clientAuthentication: 'private_key_jwt',
+        publicKey: webhookOAuthPublicKey(generateWebhookOAuthKeyPair().publicKey),
       },
       apiKeyId: ids(1)[0]!,
       createdAt: at,
