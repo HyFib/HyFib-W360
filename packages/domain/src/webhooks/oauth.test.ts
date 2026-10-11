@@ -1,14 +1,19 @@
+import { createHmac } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { EgressError, type EgressClient, type EgressRequest } from '@w360/core/egress';
 import { WEBHOOK_LIMITS } from './model';
 import {
   fetchWebhookOAuthToken,
   readWebhookOAuthTokenAnswer,
+  webhookOAuthClientAssertion,
   webhookOAuthEgressError,
   webhookOAuthSecretAad,
+  webhookOAuthSecretSignsJwt,
   webhookOAuthTokenRequest,
   WebhookOAuthTokenCache,
+  WEBHOOK_OAUTH_ASSERTION_TYPE,
   WEBHOOK_OAUTH_CLIENT_RE,
+  WEBHOOK_OAUTH_JWT_SECRET_BYTES,
   WEBHOOK_OAUTH_SCOPE_RE,
   type WebhookOAuthTokenResult,
 } from './oauth';
@@ -94,6 +99,83 @@ describe('OAuth client credentials for webhook endpoints (ADR-173)', () => {
     ).toBe(
       'grant_type=client_credentials&scope=events.write+read&client_id=id+with%3Acolon&client_secret=p%40ss%2Bw%2Frd',
     );
+  });
+
+  it('prove the client holds its secret with a JWT signed with it, the secret never sent, for client_secret_jwt (ADR-366)', () => {
+    const secret = 'jwt-signing-secret:of/forty+bytes-long!!';
+    const jwt = {
+      ...client,
+      clientSecret: secret,
+      scope: 'events.write',
+      clientAuthentication: 'client_secret_jwt' as const,
+    };
+    const jti = '0192f0e4-7a3b-7c1d-9e2f-3a4b5c6d7e8f';
+    // The assertion as RFC 7523 section 3 has it, computed apart from this code (Python's hmac).
+    const expected =
+      'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.' +
+      'eyJpc3MiOiJoeWZpYi13ZWJob29rcyIsInN1YiI6Imh5ZmliLXdlYmhvb2tzIiwiYXVkIjoiaHR0cHM6Ly9hdXRoLmV4YW1wbGUuY29tL29hdXRoMi90b2tlbiIsImp0aSI6IjAxOTJmMGU0LTdhM2ItN2MxZC05ZTJmLTNhNGI1YzZkN2U4ZiIsImlhdCI6MTc5MTE5NDQwMCwiZXhwIjoxNzkxMTk0NzAwfQ.' +
+      'qWD98MfudC2gpm00IDcRnGd5VruaSapM41yFFkkclrc';
+    expect(webhookOAuthClientAssertion(jwt, at, jti)).toBe(expected);
+    const [header, payload, signature] = expected.split('.');
+    expect(JSON.parse(Buffer.from(header!, 'base64url').toString('utf8'))).toEqual({
+      alg: 'HS256',
+      typ: 'JWT',
+    });
+    expect(JSON.parse(Buffer.from(payload!, 'base64url').toString('utf8'))).toEqual({
+      iss: 'hyfib-webhooks',
+      sub: 'hyfib-webhooks',
+      aud: 'https://auth.example.com/oauth2/token',
+      jti,
+      iat: at.getTime() / 1000,
+      exp: at.getTime() / 1000 + 300,
+    });
+    expect(signature).toBe(
+      createHmac('sha256', secret).update(`${header}.${payload}`).digest('base64url'),
+    );
+    // The request: the client ID and the assertion in the form, no Authorization header.
+    const request = webhookOAuthTokenRequest(jwt, 'HyFib-W360-Webhooks/1', at, jti);
+    expect(request).toEqual({
+      method: 'POST',
+      url: 'https://auth.example.com/oauth2/token',
+      headers: {
+        'content-type': 'application/x-www-form-urlencoded',
+        accept: 'application/json',
+        'user-agent': 'HyFib-W360-Webhooks/1',
+      },
+      body: new URLSearchParams([
+        ['grant_type', 'client_credentials'],
+        ['scope', 'events.write'],
+        ['client_id', 'hyfib-webhooks'],
+        ['client_assertion_type', WEBHOOK_OAUTH_ASSERTION_TYPE],
+        ['client_assertion', expected],
+      ]).toString(),
+    });
+    expect(WEBHOOK_OAUTH_ASSERTION_TYPE).toBe(
+      'urn:ietf:params:oauth:client-assertion-type:jwt-bearer',
+    );
+    // The secret is nowhere in the form, read as the server reads it.
+    expect([...new URLSearchParams(request.body ?? '').values()].join('\n')).not.toContain(secret);
+    // Each request makes its own: a new id, and the time it is made.
+    const fresh = new URLSearchParams(webhookOAuthTokenRequest(jwt, 'ua').body ?? '').get(
+      'client_assertion',
+    );
+    const claims = JSON.parse(
+      Buffer.from(fresh!.split('.')[1]!, 'base64url').toString('utf8'),
+    ) as Record<string, unknown>;
+    expect(claims.jti).not.toBe(jti);
+    expect(claims.jti).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    );
+    expect(claims.exp).toBe((claims.iat as number) + 300);
+  });
+
+  it('sign JWTs only with a secret of at least 32 bytes, as HMAC SHA-256 takes (ADR-366)', () => {
+    expect(WEBHOOK_OAUTH_JWT_SECRET_BYTES).toBe(32);
+    expect(webhookOAuthSecretSignsJwt('a'.repeat(31))).toBe(false);
+    expect(webhookOAuthSecretSignsJwt('a'.repeat(32))).toBe(true);
+    // Bytes, not characters: 16 letters of two bytes each.
+    expect(webhookOAuthSecretSignsJwt('é'.repeat(16))).toBe(true);
+    expect(webhookOAuthSecretSignsJwt('é'.repeat(15))).toBe(false);
   });
 
   it('take a 200 with a bearer token, kept until a minute before it expires and at most a day', () => {
@@ -223,6 +305,36 @@ describe('OAuth client credentials for webhook endpoints (ADR-173)', () => {
     await expect(
       fetchWebhookOAuthToken(failing(new TypeError('bug')), client, 'ua', now),
     ).rejects.toThrow('bug');
+    // A client that signs JWTs with a secret too short to sign them asks nothing (ADR-366).
+    sent.length = 0;
+    expect(
+      await fetchWebhookOAuthToken(
+        egress(async () => answer(200, token)),
+        { ...client, clientAuthentication: 'client_secret_jwt' },
+        'ua',
+        now,
+      ),
+    ).toEqual({ ok: false, error: 'oauth_token_secret_too_short' });
+    expect(sent).toEqual([]);
+    // One with a long enough secret signs its assertion at the time it asks.
+    const signing = {
+      ...client,
+      clientSecret: 'x'.repeat(40),
+      clientAuthentication: 'client_secret_jwt' as const,
+    };
+    const askedAt = time;
+    expect(
+      await fetchWebhookOAuthToken(
+        egress(async () => answer(200, token)),
+        signing,
+        'ua',
+        now,
+      ),
+    ).toMatchObject({ ok: true });
+    const assertion = new URLSearchParams(sent[0]?.body ?? '').get('client_assertion');
+    expect(
+      JSON.parse(Buffer.from(assertion!.split('.')[1]!, 'base64url').toString('utf8')),
+    ).toMatchObject({ iat: askedAt / 1000, exp: askedAt / 1000 + 300 });
   });
 });
 

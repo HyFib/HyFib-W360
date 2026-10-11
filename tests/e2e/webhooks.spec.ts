@@ -689,15 +689,15 @@ test('an endpoint gets OAuth access tokens as its client and sends them as a bea
   await page
     .getByLabel('Token URL', { exact: true })
     .fill(`http://${HOST}:${port}${secondTokenPath}`);
-  await expect(page.getByLabel('Send the client ID and secret', { exact: true })).toHaveValue(
+  await expect(page.getByLabel('How the client authenticates', { exact: true })).toHaveValue(
     'client_secret_basic',
   );
   await page
-    .getByLabel('Send the client ID and secret', { exact: true })
+    .getByLabel('How the client authenticates', { exact: true })
     .selectOption('client_secret_post');
   await page.getByRole('button', { name: 'Save endpoint' }).click();
   await expect(
-    page.getByText('Enter the client secret again: it is sent to the token URL, which changed.'),
+    page.getByText('Enter the client secret again: it is used with the token URL, which changed.'),
   ).toBeVisible();
   await page.getByLabel('Client secret', { exact: true }).fill(`${clientSecret}-2`);
   await expectNoHorizontalOverflow(page);

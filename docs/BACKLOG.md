@@ -1308,6 +1308,9 @@ verification, app review, Embedded Signup configuration).
   token request body built; their database tests run only in CI]** (ADR-357, migration 0279: an
   endpoint's OAuth client sends its ID and secret as `client_id` and `client_secret` in the token
   request's form when it chooses `client_secret_post`, in an HTTP Basic header otherwise).
+  **[OAuth clients that sign a JWT with their secret built; their database tests run only in CI]**
+  (ADR-366, migration 0286: `client_secret_jwt` sends `client_id` and a client assertion signed
+  with the secret, HS256, RFC 7523, never the secret, which must be at least 32 bytes).
   **[Skipped campaign recipients as webhook events built; their database tests run only in CI]**
   (ADR-358, migrations 0280 and 0281: `campaign.recipient_skipped` once per recipient a campaign
   skips, with the reason, the campaign, the contact and the number; those skipped when the
@@ -1321,7 +1324,8 @@ verification, app review, Embedded Signup configuration).
   Remaining: filters for other event types and on a message's values other than its type and words,
   field value comparisons beyond
   values, words and ranges, other authentication (headers computed per delivery, other OAuth
-  grants, JWT client assertions), mutual TLS, fixed egress addresses, other store events (the
+  grants, client assertions signed with a key pair, `private_key_jwt`, and other audiences for
+  them), mutual TLS, fixed egress addresses, other store events (the
   store's orders and checkouts themselves are reported by the store, ADR-085),
   a sequence number across events, load tests.
 - **P5-10 Platform ops screens** **[built, locally verified with test data only]** (ADR-054):
@@ -1447,6 +1451,9 @@ verification, app review, Embedded Signup configuration).
   **[Each company's failed sends as a share of its sends built; its database tests run only in
   CI]** (ADR-364, migration 0285 changed before release: each listed company's sends of the same
   days, those cancelled left out, and the share of them failed, over the year and month by month).
+  **[The year's failed sends by reason and by company as CSV built; their database and browser
+  tests run only in CI]** (ADR-365, no migration: "Download CSV" on both cards, audited and
+  formula-safe as the console's other exports, a line per reason or company with its months).
   Remaining:
   other alert channels (several channels, a channel per alert, formats other than a JSON `text`
   member, such as Microsoft Teams' or PagerDuty's, and the owners' other notices, such as personal

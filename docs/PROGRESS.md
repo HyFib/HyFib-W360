@@ -1,5 +1,122 @@
 # Progress
 
+## 2026-10-10 — Webhook OAuth clients that prove their secret with a signed JWT (P5-09, H-014, ADR-366)
+
+Status: **Implemented; its database tests run in CI only.** An endpoint's OAuth client sent its
+secret to the authorization server, in an HTTP Basic header or the request body (ADR-357); servers
+that want the secret never sent, taking a client assertion signed with it instead (RFC 7523,
+`client_secret_jwt`), could not be used.
+
+### Completed
+
+- **Database:** migration 0286 widens `app.webhook_endpoints.oauth_client_auth`'s check to
+  `client_secret_jwt`, validated by reading the table.
+- **Domain:** `webhookOAuthClientAssertion` signs the assertion (HS256: issuer and subject the
+  client ID, audience the token URL, a random `jti`, five minutes' lifetime); the token request
+  sends `client_id`, `client_assertion_type` and `client_assertion`, no Authorization header and
+  never the secret; the services refuse the method with a secret under 32 bytes, given or kept
+  (opened to measure it), and the worker asks nothing for one (`oauth_token_secret_too_short`,
+  labelled for members). The API and its OpenAPI document take and answer the method.
+- **Web:** Settings → Webhooks offers "A JWT signed with the secret" under "How the client
+  authenticates"; the endpoint's text says so.
+- **Tests:** unit (3 new: the assertion against a vector computed apart with Python's hmac, its
+  claims, signature and a fresh `jti` each time, the form; the length rule in bytes; the refusals
+  of a short secret given or kept; plus a short secret asking nothing, the labels, text, error
+  label, the API schemas and OpenAPI entries updated); integration (`webhooks.test.ts`: a delivery
+  whose token request carries an assertion the test verifies with the secret, no Authorization
+  header and no secret, the column, the audit, the refusals on adding and changing, the database
+  check); e2e (`webhooks.spec.ts`: the field's new label). Written for CI; the integration and e2e
+  tests were not run here.
+- **Docs:** ADR-366 (the RFC and OpenID texts could not be opened from here: blocked hosts; the
+  audience follows RFC 7523 and OpenID Connect as known, and a draft that moves it is recorded as
+  unconfirmed); SECURITY; THREAT-MODEL T323; ARCHITECTURE; DEPLOYMENT (0286); RUNBOOKS; BACKLOG
+  P5-09; the feature matrix (status unchanged).
+- **Mutation checks:** 14 deliberate regressions, all caught by the unit tests (the client ID as the
+  audience, a minute-long assertion, an unsigned algorithm named, keyed by the client ID, no
+  `client_id` with the assertion, the secret sent too, 32 bytes refused, characters counted rather
+  than bytes, a short secret still asking, the assertion made at another time than asked, the same
+  `jti` every time, the kept secret not measured, the length rule on the wrong method, the short
+  secret's error unlabelled).
+- **Review fixes:** an independent review found nothing that would fail CI and no correctness or
+  security bug; it read the integration tests and migration without running them (no PostgreSQL
+  here). Its nine LOW findings are fixed:
+  - A client that signs JWTs keeps its way when a change moves it to another token URL without
+    naming one; it fell back to HTTP Basic, which sends the secret.
+  - A kept secret the keyring can no longer open is asked for again (422 on `oauth.clientSecret`)
+    instead of a server error.
+  - The message for a changed token URL says the secret is used with it, not sent to it (the e2e
+    test follows), and the API's docs say the same; `lastError` names
+    `oauth_token_secret_too_short`.
+  - The method names are credited to RFC 7591 and OpenID Connect Core; the rollout note says what an
+    old worker sends; T316 names the third method, and T323 is in order.
+  - Two checks that the secret is not sent could never fail (they compared another encoding); they
+    now read the form as a server does. A new API integration test sends `client_secret_jwt`: a
+    short secret refused, the way kept at another token URL. A test title says three ways.
+  - Mutation checks: 6 deliberate regressions, all caught by the unit tests (the old wording only
+    after the unit test checked the message's text). The full check passed again (146 files, 1558
+    unit tests, the build).
+
+### Test commands and results (local, 2026-10-10)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 146 files, 1558 tests passed                                    |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+| migration 0286                                     | pglast parse check passed (syntax only)                         |
+
+## 2026-10-10 — The year's failed sends by reason and by company as CSV (P5-10, H-034, ADR-365)
+
+Status: **Implemented; its database and browser tests run in CI only.** The Usage tab's year of
+failed sends by reason (ADR-350, ADR-360) and by company (ADR-362, ADR-364) could be read on the
+page only; ADR-360 and ADR-362 left a CSV unbuilt.
+
+### Completed
+
+- **Domain:** `failure-reasons` and `failure-companies` join the console's export lists:
+  `exportList` refuses anyone but a platform administrator before any read, reads the year with the
+  cards' own reads in a repeatable-read transaction, writes `platform.ops_failure_reasons_exported`
+  or `platform.ops_failure_companies_exported` with the rows given, and returns the file.
+  `failureReasonsCsv` and `failureCompaniesCsv` write a line per reason or company in the card's
+  order: its name, code or address, counts and shares (numbers from 0 to 1 to six places), each
+  month's failed sends (and a company's sends), a partial month headed with its days, and the
+  year's days counted. The failure codes' words move to `@w360/domain/failure-codes`, which the web
+  re-exports, so the file names a reason as the card does.
+- **Web:** "Download CSV" on both cards, each named after its card (`ListTitle`).
+- **Tests:** unit (2 new: each file's lines, months, codes, shares, the rest, a company without a
+  share, formula safety, a one-day month; the list names, audit actions and file names updated);
+  integration (`platform-ops.test.ts`: both files from the seeded year, their lines, months and days
+  counted, an audit entry each with its rows, a non-administrator refused without an entry); e2e
+  (`platform-ops.spec.ts`: both links download their files). Written for CI; the integration and
+  e2e tests were not run here.
+- **Docs:** ADR-365 (and the "not built" notes of ADR-360, ADR-362 and ADR-364); ARCHITECTURE;
+  SECURITY; THREAT-MODEL T75; RUNBOOKS; BACKLOG P5-10; the feature matrix (H-034, status
+  unchanged).
+- **Mutation checks:** 13 deliberate regressions, all caught by the unit tests (a partial month
+  headed as a whole one, one day said as days, shares to two places, no share written as 0, the
+  days not counted counted, failures without a code given no code, a reason named by its code, one
+  other company said as companies, a month's failed sends for its sends, the share of the failed
+  for the share of its sends, its failed sends for its sends, the companies list left out, an
+  unknown code named by itself). The reads, the audit entries and the refusal run in the database
+  and are covered by the integration tests, which run in CI only.
+- **Review fixes:** an independent review found nothing that would fail CI and no correctness or
+  security bug. Its LOW findings are fixed: the lists read in one snapshot are named once
+  (`OPS_SNAPSHOT_EXPORT_LISTS`); the card and its file name the rest with one function
+  (`otherCompaniesText`); the export's docs (`exportFile`, `OPS_EXPORT_LISTS`, the route) name the
+  new lists and what their lines count as; ADR-360's note says failures by company are built; the
+  integration test checks the line of the company whose deletion has started (its failed sends, no
+  sends, no share).
+
+### Test commands and results (local, 2026-10-10)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 146 files, 1555 tests passed                                    |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+
 ## 2026-10-10 — Each company's failed sends as a share of its sends (P5-10, H-034, ADR-364)
 
 Status: **Implemented; its database tests run in CI only.** The Usage tab's failed sends by company

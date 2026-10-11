@@ -14223,7 +14223,8 @@ Consequences: platform staff see when a reason began, grew or faded without quer
 Rows scaled to their own height compare a reason's months, not one reason's months with another's
 (the counts and shares do that). The months cover the counted days only, as the year does.
 
-Not built: failures by company over time, a CSV of the months, and weeks or days instead of months.
+Not built: failures by company over time (built since ADR-362), a CSV of the months (built since
+ADR-365), and weeks or days instead of months.
 
 ## ADR-361 Choosing the cart reminders, first or second, whose events a webhook endpoint receives (P5-09) (2026-10-10)
 
@@ -14292,7 +14293,7 @@ counts a day the two cards can differ by that day's failures. A company's page a
 year, so this table is the Usage tab's only.
 
 Not built: a company's rank changes over time, failures as a share of each company's sends (built
-since ADR-364), and a CSV of the table.
+since ADR-364), and a CSV of the table (built since ADR-365).
 
 ## ADR-363 Endpoint audit entries name a long list once, by its length and digest (P5-09) (2026-10-10)
 
@@ -14357,4 +14358,84 @@ says how few. The ranking stays by count, so a company with a high share and few
 the rest. A company whose deletion has started shows its failed sends but no sends and no share.
 
 Not built: a ranking by share (it needs a floor of sends below which a share means little, a product
-decision), the share of each of the rest's companies, and a CSV of the table.
+decision), the share of each of the rest's companies, and a CSV of the table (built since ADR-365).
+
+## ADR-365 The year's failed sends by reason and by company as CSV (P5-10) (2026-10-10)
+
+Context: the Usage tab's year of failed sends by reason (ADR-350, ADR-360) and by company (ADR-362,
+ADR-364) could be read on the page only: staff who wanted to keep a month's figures, compare them
+in a spreadsheet or hand them on had to copy the folded tables cell by cell, and ADR-360 and ADR-362
+left a CSV unbuilt. The console already exports its other lists as audited, formula-safe CSV
+(ADR-154, ADR-155, ADR-158).
+
+Decision:
+
+- **Two more lists:** `failure-reasons` and `failure-companies` join `OPS_EXPORT_LISTS`, so
+  `/platform/ops/export/<list>` serves them through `exportList` like the others: refused to anyone
+  but a platform administrator before any read, written to the platform audit log
+  (`platform.ops_failure_reasons_exported`, `platform.ops_failure_companies_exported`, with the rows
+  given) in the transaction that reads the rows, and formula-safe. They read the year with the
+  cards' own reads (`readFailureReasonYear` for every company, `readFailureCompanyYear`), in a
+  repeatable-read transaction, so the file's months add up to its years as the cards' do.
+- **What a line says:** a reason's name as the card gives it (the failure codes' words move into
+  the domain, `@w360/domain/failure-codes`, so the page and the file say the same), its code
+  ("None" for failures without one, empty for the rest), how many codes it holds, its failed sends
+  and share of the year's, then its failed sends in each month; a company's name and address (the
+  rest named by how many companies it holds), how many companies it holds, its failed sends and
+  share, its sends and the share of them failed (empty without one, ADR-364), then its failed sends
+  in each month and its sends in each month. Months are headed `2026-03`, a partial one with its
+  days (`2025-10 (22 days)`); shares are numbers from 0 to 1 to six places; every line ends with the
+  year's days counted, so a line read alone says what it covers.
+- **On the page:** each card's title gets "Download CSV", named after its card (`ListTitle`), so the
+  tab's three links are told apart.
+
+Consequences: the year's figures leave the console as a file the platform audit log accounts for;
+a company's name and address are in it, as in the Usage tab's CSV. The rest stays one line, as on
+the card.
+
+Not built: a company's own year as CSV from its page, and the days of the year one by one.
+
+## ADR-366 Webhook OAuth clients that prove their secret with a signed JWT (P5-09) (2026-10-10)
+
+Context: an endpoint's OAuth client authenticates to its authorization server with its identifier
+and secret in an HTTP Basic header or, since ADR-357, in the token request's body (RFC 6749
+section 2.3.1). Some servers, and companies' security policies, want the secret never to travel:
+the client proves it holds it with a short-lived JWT signed with it, sent as a client assertion
+(RFC 7523 sections 2.2 and 3; RFC 7521 section 4.2), the method RFC 7591's registry and OpenID
+Connect Core 1.0 section 9 name `client_secret_jwt`. The RFC and OpenID texts could not be opened
+from here (rfc-editor.org, datatracker.ietf.org and openid.net are blocked); the decision follows
+them as known, and the uncertainty is recorded below.
+
+Decision:
+
+- **A third way:** `client_secret_jwt` joins `client_secret_basic` and `client_secret_post`
+  (migration 0286 widens the column's check). The token request carries `grant_type`, the scope,
+  `client_id`, `client_assertion_type` (`urn:ietf:params:oauth:client-assertion-type:jwt-bearer`)
+  and `client_assertion`, and no Authorization header; the secret is never sent.
+- **The assertion:** a JWT with the header `{"alg":"HS256","typ":"JWT"}`; its issuer and subject
+  the client ID, its audience the token URL (which RFC 7523 allows and OpenID Connect recommends),
+  a random UUID as `jti`, `iat` the time it is made and `exp` five minutes later; signed with HMAC
+  SHA-256 keyed by the secret's UTF-8 bytes (`webhookOAuthClientAssertion`). A new one is made for
+  every token request; tokens are kept as before, the method part of the client's fingerprint.
+- **A secret long enough to sign:** HMAC SHA-256 takes a key at least as long as its hash (RFC 7518
+  section 3.2), so the services refuse the method with a secret under 32 bytes, the one given or
+  the one kept, which they open to measure (Settings and the API alike, `oauth.clientSecret`). A
+  worker meeting one anyway (an old web server rotating the secret during a rollout) asks nothing
+  and records `oauth_token_secret_too_short`. A kept secret the keyring can no longer open is asked
+  for again (`oauth.clientSecret`), as one left out would be, rather than failing the change.
+- **Never back to sending the secret:** a change that moves a client signing JWTs to another token
+  URL without naming a way keeps it signing; any other client moved so uses HTTP Basic, as since
+  ADR-357. A connector that moves its receiver to a new server, written before the method existed,
+  thus never starts sending a secret the member chose never to send.
+- **Shown and audited as the others:** Settings → Webhooks offers it under "How the client
+  authenticates" (the field was "Send the client ID and secret"), the endpoint's text says the
+  client proves its secret with a signed JWT, audit entries name the method, and the API and its
+  OpenAPI document take and answer it.
+
+Consequences: a receiver whose server takes client assertions signed with the secret no longer has
+to accept the secret itself. A server that wants an audience other than its token URL (a 2025 draft
+revising RFC 7523 moves to the server's issuer identifier, as recalled here and not confirmed)
+refuses these assertions; such a receiver keeps HTTP Basic or the request body.
+
+Not built: assertions signed with a key pair (`private_key_jwt`, which needs a key HyFib generates
+and a public key the receiver registers), another audience chosen per endpoint, and a JWKS.

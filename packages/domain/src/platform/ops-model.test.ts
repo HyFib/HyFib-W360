@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import {
   DEAD_LETTERS_CSV_COLUMNS,
   EMAILS_CSV_COLUMNS,
+  FAILURE_COMPANIES_CSV_COLUMNS,
+  FAILURE_REASONS_CSV_COLUMNS,
   FAILURES_CSV_COLUMNS,
   HEALTH_CSV_COLUMNS,
   NEW_COMPANIES_CSV_COLUMNS,
@@ -20,6 +22,8 @@ import {
   byHealth,
   deadLettersCsv,
   emailsCsv,
+  failureCompaniesCsv,
+  failureReasonsCsv,
   failuresCsv,
   healthCsv,
   healthIssues,
@@ -47,6 +51,11 @@ import {
   type DeadLetterLine,
   type QueueRow,
 } from './ops-model';
+import {
+  failureCompanyYear,
+  failureReasonYearMonths,
+  type FailureReasonYear,
+} from './failure-reasons';
 
 const healthy: CompanyHealthFacts = {
   tenantId: '0192a1b2-0000-7000-8000-000000000001',
@@ -887,6 +896,8 @@ describe('the onboarding, integrations and queues lists as CSV (ADR-158)', () =>
       'platform.ops_emails_exported',
       'platform.ops_queues_exported',
       'platform.ops_dead_letters_exported',
+      'platform.ops_failure_reasons_exported',
+      'platform.ops_failure_companies_exported',
     ]);
     // ops.platform_audit_events checks every action against this pattern.
     for (const list of OPS_EXPORT_LISTS) {
@@ -898,6 +909,152 @@ describe('the onboarding, integrations and queues lists as CSV (ADR-158)', () =>
     expect(opsCsvFilename('signups', at('2026-10-05T00:00:00Z'), 30)).toBe(
       'hyfib-signups-30-days-2026-10-05.csv',
     );
+    // The year's lists have no window: their file says the day only (ADR-365).
+    expect(opsCsvFilename('failure-companies', at('2026-10-10T08:00:00Z'))).toBe(
+      'hyfib-failure-companies-2026-10-10.csv',
+    );
+  });
+});
+
+describe('the year’s failed sends by reason and by company as CSV (ADR-365)', () => {
+  const lines = (csv: string) => {
+    expect(csv.startsWith('\uFEFF')).toBe(true);
+    return csv.slice(1).split('\r\n');
+  };
+  // 2025-10-10 to 2026-10-09: 22 days of the first month, 9 of the last, 365 in all.
+  const months = failureReasonYearMonths('2026-10-10');
+  const monthHeads = [
+    '2025-10 (22 days)',
+    '2025-11',
+    '2025-12',
+    '2026-01',
+    '2026-02',
+    '2026-03',
+    '2026-04',
+    '2026-05',
+    '2026-06',
+    '2026-07',
+    '2026-08',
+    '2026-09',
+    '2026-10 (9 days)',
+  ];
+  /** Thirteen months' counts, all 0 but those given by index. */
+  const year = (counts: Record<number, number>) =>
+    Array.from({ length: 13 }, (_, at) => counts[at] ?? 0);
+
+  it('writes a line per reason as the card names it, its code, share and months, and the days counted', () => {
+    const reasons: FailureReasonYear = {
+      reasons: {
+        reasons: [
+          { code: '131049', failed: 6, codes: 1, share: 0.5 },
+          { code: '', failed: 3, codes: 1, share: 1 / 4 },
+          { code: '131999', failed: 1, codes: 1, share: 1 / 12 },
+          { code: null, failed: 2, codes: 2, share: 1 / 6 },
+        ],
+        failed: 12,
+      },
+      uncounted: 4,
+      months,
+      byMonth: [year({ 0: 1, 5: 5 }), year({ 12: 3 }), year({ 6: 1 }), year({ 0: 1, 12: 1 })],
+    };
+    expect(FAILURE_REASONS_CSV_COLUMNS).toEqual([
+      'Reason',
+      'Code',
+      'Codes',
+      'Failed',
+      'Share of the failed',
+    ]);
+    expect(lines(failureReasonsCsv(reasons))).toEqual([
+      ['Reason,Code,Codes,Failed,Share of the failed', ...monthHeads, 'Days counted'].join(','),
+      'Meta limited marketing messages to this customer. Wait at least 24 hours before trying again.,131049,1,6,0.5,1,0,0,0,0,5,0,0,0,0,0,0,0,361',
+      // Failures without a code, a code HyFib does not describe and the rest: as the card says.
+      'Failed without a code,None,1,3,0.25,0,0,0,0,0,0,0,0,0,0,0,0,3,361',
+      'Not described here,131999,1,1,0.083333,0,0,0,0,0,0,1,0,0,0,0,0,0,361',
+      '2 other codes,,2,2,0.166667,1,0,0,0,0,0,0,0,0,0,0,0,1,361',
+      '',
+    ]);
+    // Nothing failed: the columns alone.
+    expect(
+      lines(failureReasonsCsv({ ...reasons, reasons: { reasons: [], failed: 0 }, byMonth: [] })),
+    ).toEqual([
+      ['Reason,Code,Codes,Failed,Share of the failed', ...monthHeads, 'Days counted'].join(','),
+      '',
+    ]);
+    // A month of which the year holds one day says so: the year ending on the 1st.
+    const ending = failureReasonsCsv({
+      reasons: { reasons: [], failed: 0 },
+      uncounted: 0,
+      months: failureReasonYearMonths('2026-10-02'),
+      byMonth: [],
+    });
+    expect(lines(ending)[0]).toMatch(
+      /,2025-10 \(30 days\),.*,2026-09,2026-10 \(1 day\),Days counted$/,
+    );
+  });
+
+  it('writes a line per company with its sends and their share failed, its months failed then sent, the rest last, formula-safe', () => {
+    const row = (
+      place: number,
+      month: string,
+      failed: number,
+      sent: number,
+      company: { name: string; slug: string } | null,
+    ) => ({
+      place,
+      tenantId: company ? `tenant-${place}` : null,
+      name: company?.name ?? null,
+      slug: company?.slug ?? null,
+      companies: company ? 1 : 3,
+      month,
+      failed,
+      sent,
+    });
+    const formula = { name: '=HYPERLINK("https://example.com")', slug: 'acme' };
+    const quiet = { name: 'Quiet, Ltd', slug: 'quiet' };
+    const companies = failureCompanyYear(
+      [
+        row(1, '2025-10', 1, 50, formula),
+        row(1, '2026-03', 5, 100, formula),
+        // A company whose sends are gone, as when its deletion has removed them: no share.
+        row(2, '2026-03', 2, 0, quiet),
+        row(9, '2026-10', 1, 10, null),
+      ],
+      '2026-10-10',
+      4,
+    );
+    expect(FAILURE_COMPANIES_CSV_COLUMNS).toEqual([
+      'Company',
+      'Address',
+      'Companies',
+      'Failed',
+      'Share of the failed',
+      'Sent',
+      'Share of its sends failed',
+    ]);
+    expect(lines(failureCompaniesCsv(companies))).toEqual([
+      [
+        'Company,Address,Companies,Failed,Share of the failed,Sent,Share of its sends failed',
+        ...monthHeads.map((head) => `${head} failed`),
+        ...monthHeads.map((head) => `${head} sent`),
+        'Days counted',
+      ].join(','),
+      `"'=HYPERLINK(""https://example.com"")",acme,1,6,0.666667,150,0.04,1,0,0,0,0,5,0,0,0,0,0,0,0,50,0,0,0,0,100,0,0,0,0,0,0,0,361`,
+      '"Quiet, Ltd",quiet,1,2,0.222222,0,,0,0,0,0,0,2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,361',
+      '3 other companies,,3,1,0.111111,10,0.1,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,10,361',
+      '',
+    ]);
+    // A rest of one company says so.
+    expect(
+      lines(
+        failureCompaniesCsv(
+          failureCompanyYear(
+            [{ ...row(9, '2026-10', 1, 10, null), companies: 1 }],
+            '2026-10-10',
+            0,
+          ),
+        ),
+      )[1],
+    ).toMatch(/^1 other company,,1,1,1,10,0\.1,/);
   });
 });
 

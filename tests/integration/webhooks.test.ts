@@ -1,4 +1,4 @@
-import { randomBytes, randomInt } from 'node:crypto';
+import { createHmac, randomBytes, randomInt } from 'node:crypto';
 import { once } from 'node:events';
 import { createServer, type IncomingHttpHeaders, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -849,6 +849,124 @@ describe('OAuth clients (ADR-173)', () => {
     expect(JSON.stringify(audits)).not.toContain('r0t');
   });
 
+  it('prove the client holds its secret with a JWT signed with it, never sending it, and refuse a secret too short to sign (ADR-366)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const id = randomBytes(6).toString('hex');
+    const bearer = `/bearer/${id}`;
+    const token = `/token/${id}`;
+    const tokenUrl = `http://${HOST}:${port}${token}`;
+    const url = `http://${HOST}:${port}${bearer}`;
+    // 40 bytes: HMAC SHA-256 takes at least 32.
+    const secret = 'jwt-signing-secret:of/forty+bytes-long!!';
+    const client = (clientSecret: string) => ({
+      tokenUrl,
+      clientId: 'hyfib-test',
+      clientSecret,
+      clientAuthentication: 'client_secret_jwt' as const,
+    });
+    await expectAppError(
+      webhooks().create(owner, {
+        url,
+        eventTypes: ['consent.changed'],
+        oauth: client('a-secret-of-31-bytes-is-short!!'),
+      }),
+      'validation_failed',
+      /at least 32 bytes/,
+    );
+    expect(await webhooks().list(owner)).toEqual([]);
+    const created = await webhooks().create(owner, {
+      url,
+      eventTypes: ['consent.changed'],
+      oauth: client(secret),
+    });
+    issue(token, 'tok-jwt');
+    acceptedTokens.set(bearer, 'tok-jwt');
+    const before = Math.floor(Date.now() / 1000);
+    await webhooks().sendTest(owner, { endpointId: created.id });
+    expect(
+      await deliverDue(c, systemClock, egress(), failOnLog, new WebhookOAuthTokenCache()),
+    ).toMatchObject({ attempted: 1, succeeded: 1 });
+    // RFC 7523 section 2.2: the client ID and a client assertion in the form, no Authorization
+    // header, and the secret nowhere in the request.
+    const [asked] = requestsTo(token);
+    expect(asked?.headers.authorization).toBeUndefined();
+    expect(asked?.headers['content-type']).toBe('application/x-www-form-urlencoded');
+    const form = new URLSearchParams(asked?.body);
+    expect([...form.keys()]).toEqual([
+      'grant_type',
+      'client_id',
+      'client_assertion_type',
+      'client_assertion',
+    ]);
+    expect(form.get('grant_type')).toBe('client_credentials');
+    expect(form.get('client_id')).toBe('hyfib-test');
+    expect(form.get('client_assertion_type')).toBe(
+      'urn:ietf:params:oauth:client-assertion-type:jwt-bearer',
+    );
+    // Nowhere in the form, read as the server reads it, nor in its raw text.
+    expect([...form.values()].join('\n')).not.toContain(secret);
+    expect(asked?.body).not.toContain('forty');
+    // The assertion, checked as the server checks it: signed with the secret, issued by the client
+    // to the token URL, good for five minutes from now.
+    const [header, payload, signature] = (form.get('client_assertion') ?? '').split('.');
+    expect(JSON.parse(Buffer.from(header!, 'base64url').toString('utf8'))).toEqual({
+      alg: 'HS256',
+      typ: 'JWT',
+    });
+    expect(signature).toBe(
+      createHmac('sha256', secret).update(`${header}.${payload}`).digest('base64url'),
+    );
+    const claims = JSON.parse(Buffer.from(payload!, 'base64url').toString('utf8')) as Record<
+      string,
+      unknown
+    >;
+    expect(claims).toMatchObject({ iss: 'hyfib-test', sub: 'hyfib-test', aud: tokenUrl });
+    expect(claims.jti).toMatch(/^[0-9a-f-]{36}$/);
+    expect(claims.iat).toBeGreaterThanOrEqual(before);
+    expect(claims.iat).toBeLessThanOrEqual(Math.ceil(Date.now() / 1000));
+    expect(claims.exp).toBe((claims.iat as number) + 300);
+    expect(authorizations(bearer)).toEqual(['Bearer tok-jwt']);
+    // Stored as the third way, named in the audit entry; the database refuses any other.
+    const [row] = await fx.query<{ oauth_client_auth: string }>(
+      'SELECT oauth_client_auth FROM app.webhook_endpoints WHERE id = $1',
+      [created.id],
+    );
+    expect(row?.oauth_client_auth).toBe('client_secret_jwt');
+    expect(await auditsOf(c, 'webhook.endpoint_created')).toEqual([
+      {
+        host: HOST,
+        eventTypes: ['consent.changed'],
+        oauthTokenHost: HOST,
+        oauthClientAuthentication: 'client_secret_jwt',
+      },
+    ]);
+    await expect(
+      fx.query(
+        `UPDATE app.webhook_endpoints SET oauth_client_auth = 'private_key_jwt' WHERE id = $1`,
+        [created.id],
+      ),
+    ).rejects.toThrow(/webhook_endpoints_oauth_client_auth/);
+    // A change to a short secret is refused as well, and the endpoint keeps the one it has.
+    await expectAppError(
+      webhooks().update(owner, {
+        endpointId: created.id,
+        url,
+        description: '',
+        eventTypes: ['consent.changed'],
+        oauth: client('short'),
+      }),
+      'validation_failed',
+      /at least 32 bytes/,
+    );
+    expect((await webhooks().list(owner))[0]?.oauth).toEqual({
+      tokenUrl,
+      clientId: 'hyfib-test',
+      scope: null,
+      clientAuthentication: 'client_secret_jwt',
+    });
+  });
+
   it('fail an attempt without calling the endpoint when no token comes, and ask again at the next one', async () => {
     const c = await fx.company();
     const e = await addOAuthEndpoint(c, null);
@@ -1045,10 +1163,11 @@ describe('OAuth clients (ADR-173)', () => {
     expect(JSON.stringify(audits)).not.toContain('s3cr');
   });
 
-  it('are kept by the database together or not at all, with the scope alone optional, authenticating one of two ways', async () => {
+  it('are kept by the database together or not at all, with the scope alone optional, authenticating one of three ways', async () => {
     const c = await fx.company();
     const e = await addOAuthEndpoint(c);
-    // The way a client authenticates is one of the two RFC 7591 names, never none (ADR-357).
+    // The way a client authenticates is one of the three names (RFC 7591's two and OpenID Connect's
+    // client_secret_jwt), never none (ADR-357, ADR-366).
     for (const set of [
       "oauth_client_auth = 'private_key_jwt'",
       "oauth_client_auth = 'none'",

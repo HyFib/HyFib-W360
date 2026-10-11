@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, createHmac, randomUUID } from 'node:crypto';
 import { EgressError, type EgressClient, type EgressRequest } from '@w360/core/egress';
 import type { WebhookOAuthClientAuth } from '@w360/db';
 import { WEBHOOK_LIMITS } from './model';
@@ -8,9 +8,9 @@ import { WEBHOOK_LIMITS } from './model';
  * from its receiver's authorization server and send it as a bearer token with every delivery: the
  * token request of RFC 6749 section 4.4 (`grant_type=client_credentials`, the client authenticated
  * as section 2.3.1 says, with HTTP Basic or, for a server that wants them there, its credentials in
- * the request body, ADR-357) and the bearer usage of RFC 6750 section 2.1. Only what a client needs
- * is here: the request, reading the answer of section 5.1 or the refusal of 5.2, and the tokens a
- * worker keeps in memory.
+ * the request body, ADR-357, or with a JWT signed with its secret, RFC 7523, ADR-366) and the bearer
+ * usage of RFC 6750 section 2.1. Only what a client needs is here: the request, reading the answer
+ * of section 5.1 or the refusal of 5.2, and the tokens a worker keeps in memory.
  */
 
 /** Binds an endpoint's OAuth client secret to its company and the endpoint. */
@@ -25,9 +25,11 @@ export interface WebhookOAuthClient {
   /** The scope to ask for (space-separated scope tokens), or none. */
   scope: string | null;
   /**
-   * How the client authenticates (ADR-357), as RFC 7591 names the methods: its identifier and secret
-   * in an HTTP Basic header (`client_secret_basic`, the default) or as form parameters in the
-   * request body (`client_secret_post`).
+   * How the client authenticates (ADR-357): its identifier and secret in an HTTP Basic header
+   * (`client_secret_basic`, the default) or as form parameters in the request body
+   * (`client_secret_post`), as RFC 7591 names them; or a JWT signed with its secret
+   * (`client_secret_jwt`, as OpenID Connect Core 1.0 section 9 names it, ADR-366), the secret never
+   * sent.
    */
   clientAuthentication: WebhookOAuthClientAuth;
 }
@@ -63,17 +65,63 @@ const EXPIRY_MARGIN_SECONDS = 60;
 /** `application/x-www-form-urlencoded`, as RFC 6749 Appendix B encodes a name or a value. */
 const formEncode = (value: string) => new URLSearchParams([['', value]]).toString().slice(1);
 
+/** A client assertion's type: a JWT that authenticates the client (RFC 7523 section 2.2). */
+export const WEBHOOK_OAUTH_ASSERTION_TYPE =
+  'urn:ietf:params:oauth:client-assertion-type:jwt-bearer';
+/** How long a client assertion is good for, from when it is made (ADR-366). */
+export const WEBHOOK_OAUTH_ASSERTION_SECONDS = 300;
+/**
+ * The fewest bytes of a secret that signs client assertions: HMAC SHA-256 takes a key at least as
+ * long as its hash (RFC 7518 section 3.2).
+ */
+export const WEBHOOK_OAUTH_JWT_SECRET_BYTES = 32;
+
+/** Whether a client's secret can sign its client assertions (ADR-366). */
+export const webhookOAuthSecretSignsJwt = (secret: string) =>
+  Buffer.byteLength(secret, 'utf8') >= WEBHOOK_OAUTH_JWT_SECRET_BYTES;
+
+/**
+ * A client assertion for `client_secret_jwt` (RFC 7523 section 3, ADR-366): a JWT whose issuer and
+ * subject are the client's identifier and whose audience is the token URL, with a unique id, the
+ * time it was made and an expiry five minutes later, signed with HMAC SHA-256 keyed by the client's
+ * secret (`HS256`), so the server checks the secret without receiving it.
+ */
+export function webhookOAuthClientAssertion(
+  client: WebhookOAuthClient,
+  at: Date,
+  jti: string,
+): string {
+  const part = (value: object) => Buffer.from(JSON.stringify(value), 'utf8').toString('base64url');
+  const issuedAt = Math.floor(at.getTime() / 1000);
+  const signed = `${part({ alg: 'HS256', typ: 'JWT' })}.${part({
+    iss: client.clientId,
+    sub: client.clientId,
+    aud: client.tokenUrl,
+    jti,
+    iat: issuedAt,
+    exp: issuedAt + WEBHOOK_OAUTH_ASSERTION_SECONDS,
+  })}`;
+  const signature = createHmac('sha256', Buffer.from(client.clientSecret, 'utf8'))
+    .update(signed)
+    .digest('base64url');
+  return `${signed}.${signature}`;
+}
+
 /**
  * The token request (RFC 6749 section 4.4.2): `grant_type=client_credentials`, with the scope when
  * one is set, the client authenticated as section 2.3.1 says: with HTTP Basic (its identifier and
  * secret each form-encoded, joined by a colon, base64-encoded) or, for `client_secret_post`, with
- * `client_id` and `client_secret` among the form's parameters and no Authorization header (ADR-357).
- * Sent through the egress client, like deliveries, so the authorization server is held to the same
+ * `client_id` and `client_secret` among the form's parameters and no Authorization header (ADR-357);
+ * or, for `client_secret_jwt`, with `client_id` and a client assertion made `at`, with the unique
+ * `jti` (RFC 7521 section 4.2, RFC 7523 section 2.2), and no Authorization header (ADR-366). Sent
+ * through the egress client, like deliveries, so the authorization server is held to the same
  * address rules.
  */
 export function webhookOAuthTokenRequest(
   client: WebhookOAuthClient,
   userAgent: string,
+  at: Date = new Date(),
+  jti: string = randomUUID(),
 ): EgressRequest {
   const form = new URLSearchParams([['grant_type', 'client_credentials']]);
   if (client.scope) form.append('scope', client.scope);
@@ -82,7 +130,11 @@ export function webhookOAuthTokenRequest(
     accept: 'application/json',
     'user-agent': userAgent,
   };
-  if (client.clientAuthentication === 'client_secret_post') {
+  if (client.clientAuthentication === 'client_secret_jwt') {
+    form.append('client_id', client.clientId);
+    form.append('client_assertion_type', WEBHOOK_OAUTH_ASSERTION_TYPE);
+    form.append('client_assertion', webhookOAuthClientAssertion(client, at, jti));
+  } else if (client.clientAuthentication === 'client_secret_post') {
     form.append('client_id', client.clientId);
     form.append('client_secret', client.clientSecret);
   } else {
@@ -158,10 +210,16 @@ export function readWebhookOAuthTokenAnswer(
 /** The error a token request that failed in the egress client records (`oauth_token_timeout`). */
 export const webhookOAuthEgressError = (code: string) => `oauth_token_${code}`;
 
+/** The error of a client whose secret is too short to sign its client assertions (ADR-366). */
+export const WEBHOOK_OAUTH_SECRET_TOO_SHORT = 'oauth_token_secret_too_short';
+
 /**
  * Asks the endpoint's authorization server for a token through the egress client, which holds it to
  * the same address rules as deliveries; the token's lifetime counts from when it was asked for. A
- * request the egress client refused, or that failed, is `oauth_token_<its code>`.
+ * request the egress client refused, or that failed, is `oauth_token_<its code>`. A secret too short
+ * to sign a client assertion asks nothing: `oauth_token_secret_too_short`. The services refuse one
+ * (ADR-366), but a web server from before it, still serving during a rollout, can rotate the
+ * secret of a client that signs JWTs without that check.
  */
 export async function fetchWebhookOAuthToken(
   egress: EgressClient,
@@ -169,10 +227,16 @@ export async function fetchWebhookOAuthToken(
   userAgent: string,
   now: () => Date,
 ): Promise<WebhookOAuthTokenResult> {
+  if (
+    client.clientAuthentication === 'client_secret_jwt' &&
+    !webhookOAuthSecretSignsJwt(client.clientSecret)
+  ) {
+    return { ok: false, error: WEBHOOK_OAUTH_SECRET_TOO_SHORT };
+  }
   const askedAt = now();
   try {
     return readWebhookOAuthTokenAnswer(
-      await egress.request(webhookOAuthTokenRequest(client, userAgent)),
+      await egress.request(webhookOAuthTokenRequest(client, userAgent, askedAt)),
       askedAt,
     );
   } catch (error) {

@@ -847,6 +847,65 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     });
   });
 
+  it('take a client that signs JWTs only with a secret of at least 32 bytes, keeping its way at a new token URL (ADR-366)', async () => {
+    const c = await fx.company();
+    const key = await apiKey(c, ['webhooks.manage']);
+    const SECRET = `jwt-${randomBytes(16).toString('hex')}`;
+    const tokenUrl = `http://${HOST}:${port}/token/${randomBytes(6).toString('hex')}`;
+    const issue = async (promise: Promise<unknown>) => {
+      const error = await expectAppError(promise, 'validation_failed');
+      return isAppError(error) ? error.issues?.[0] : undefined;
+    };
+    const client = (clientSecret: string, url = tokenUrl) => ({
+      tokenUrl: url,
+      clientId: 'jwt-client',
+      clientSecret,
+      clientAuthentication: 'client_secret_jwt',
+    });
+    // 31 bytes cannot key HMAC SHA-256: refused, and nothing is added.
+    expect(
+      await issue(
+        api().create(
+          key.ctx,
+          { url: receiverUrl(), events: ['contact.created'], oauth: client('k'.repeat(31)) },
+          idem('jwt-short', 'x'),
+        ),
+      ),
+    ).toMatchObject({ path: 'oauth.clientSecret', message: expect.stringMatching(/32 bytes/) });
+    expect((await api().list(key.ctx)).data).toEqual([]);
+    const created = await addThroughApi(key.ctx, 'jwt-1', {
+      url: receiverUrl(),
+      events: ['contact.created'],
+      oauth: client(SECRET),
+    });
+    expect(created.status).toBe(201);
+    expect(created.body.data.oauth).toEqual({
+      tokenUrl,
+      clientId: 'jwt-client',
+      scope: null,
+      clientAuthentication: 'client_secret_jwt',
+    });
+    // Moved to another token URL with its secret but no way named, it goes on signing JWTs.
+    const elsewhere = `http://${HOST}:${port}/token/${randomBytes(6).toString('hex')}`;
+    const { clientAuthentication: _way, ...moved } = client(SECRET, elsewhere);
+    expect(await api().update(key.ctx, created.body.data.id, { oauth: moved })).toMatchObject({
+      oauth: { tokenUrl: elsewhere, clientAuthentication: 'client_secret_jwt' },
+    });
+    // A change to a short secret is refused, and the endpoint keeps the client it has.
+    expect(
+      await issue(
+        api().update(key.ctx, created.body.data.id, { oauth: client('short', elsewhere) }),
+      ),
+    ).toMatchObject({ path: 'oauth.clientSecret' });
+    expect((await api().get(key.ctx, created.body.data.id)).oauth).toEqual({
+      tokenUrl: elsewhere,
+      clientId: 'jwt-client',
+      scope: null,
+      clientAuthentication: 'client_secret_jwt',
+    });
+    expect(JSON.stringify([created.body, await api().list(key.ctx)])).not.toContain(SECRET);
+  });
+
   it('choose the message statuses an endpoint receives, kept by changes that leave them out and cleared with the event (ADR-119)', async () => {
     const c = await fx.company();
     const key = await apiKey(c, ['webhooks.manage']);

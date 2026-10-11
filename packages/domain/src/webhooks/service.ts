@@ -166,7 +166,9 @@ import {
 } from './model';
 import {
   webhookOAuthSecretAad,
+  webhookOAuthSecretSignsJwt,
   WEBHOOK_OAUTH_CLIENT_RE,
+  WEBHOOK_OAUTH_JWT_SECRET_BYTES,
   WEBHOOK_OAUTH_SCOPE_RE,
   type WebhookOAuthClient,
 } from './oauth';
@@ -252,7 +254,8 @@ export const webhookHeadersSchema = z
  * the client identifier and secret that server issued, the scope to ask for, if any (empty or left
  * out: none), and how the client authenticates (ADR-357). A change may leave the secret, and the
  * way the client authenticates, out to keep the stored ones while the token URL stays the same; a
- * new client or token URL left without a way uses HTTP Basic.
+ * new client left without a way uses HTTP Basic, and so does a new token URL, unless the client
+ * signs JWTs with its secret (ADR-366), which it goes on doing.
  */
 export const webhookOAuthSchema = z
   .object({
@@ -297,7 +300,7 @@ export const webhookOAuthSchema = z
     clientAuthentication: z
       .enum(WEBHOOK_OAUTH_CLIENT_AUTHENTICATIONS, {
         error:
-          'Choose how the client ID and secret are sent: client_secret_basic or client_secret_post.',
+          'Choose how the client authenticates: client_secret_basic, client_secret_post or client_secret_jwt.',
       })
       .optional(),
   })
@@ -305,8 +308,11 @@ export const webhookOAuthSchema = z
 export type WebhookOAuthInput = z.output<typeof webhookOAuthSchema>;
 
 export const WEBHOOK_OAUTH_SECRET_NEEDED = 'Enter the client secret.';
+export const WEBHOOK_OAUTH_JWT_SECRET_SHORT = `A client that signs JWTs needs a secret of at least ${WEBHOOK_OAUTH_JWT_SECRET_BYTES} bytes (HMAC SHA-256).`;
 export const WEBHOOK_OAUTH_SECRET_FOR_NEW_URL =
-  'Enter the client secret again: it is sent to the token URL, which changed.';
+  'Enter the client secret again: it is used with the token URL, which changed.';
+export const WEBHOOK_OAUTH_SECRET_UNREADABLE =
+  'Enter the client secret again: the one kept can no longer be read.';
 export const WEBHOOK_OAUTH_AUTHORIZATION =
   'An endpoint that gets OAuth tokens sends them as its Authorization header: remove that header, or the OAuth client.';
 
@@ -4262,10 +4268,11 @@ export interface CheckedWebhookOAuth extends Omit<WebhookOAuthClient, 'clientSec
 /**
  * Checks an OAuth client given for an endpoint (ADR-173): its token URL like an endpoint's URL, and
  * that a secret is given unless the endpoint keeps the one it has, which it can only while the token
- * URL stays the same, since the secret is sent there. The way the client authenticates, left out,
+ * URL stays the same, since the secret is used there. The way the client authenticates, left out,
  * is likewise kept while the token URL stays the same, so a connector written before ADR-357 that
- * rotates the secret keeps a client set to send it in the request body; a new client or token URL
- * uses HTTP Basic.
+ * rotates the secret keeps a client set to send it in the request body; a new client uses HTTP
+ * Basic, and so does a new token URL, unless the client signs JWTs: moving it to another server
+ * never starts sending a secret it kept unsent (ADR-366).
  */
 export function checkedWebhookOAuth(
   given: WebhookOAuthInput,
@@ -4274,7 +4281,9 @@ export function checkedWebhookOAuth(
 ): CheckedWebhookOAuth {
   const { url, host } = checkedWebhookUrl(given.tokenUrl, policy, 'oauth.tokenUrl');
   const keeps = current.oauthClientSecretCiphertext !== null && current.oauthTokenUrl === url;
-  const keepsMethod = current.oauthTokenUrl !== null && current.oauthTokenUrl === url;
+  const keepsMethod =
+    current.oauthTokenUrl !== null &&
+    (current.oauthTokenUrl === url || current.oauthClientAuth === 'client_secret_jwt');
   if (given.clientSecret === undefined && !keeps) {
     const message = current.oauthTokenUrl
       ? WEBHOOK_OAUTH_SECRET_FOR_NEW_URL
@@ -4296,7 +4305,10 @@ export function checkedWebhookOAuth(
 
 /**
  * The OAuth columns an endpoint keeps (ADR-173): none without a client; else the client, its secret
- * sealed with the keyring, bound to the company and the endpoint, or the one it has kept.
+ * sealed with the keyring, bound to the company and the endpoint, or the one it has kept. A client
+ * that signs JWTs (ADR-366) needs a secret of at least 32 bytes, the one given or the one kept,
+ * which is opened to measure it: one the keyring can no longer open (a key the platform no longer
+ * holds) is asked for again.
  */
 export function webhookOAuthColumns(
   keyring: Keyring,
@@ -4311,6 +4323,16 @@ export function webhookOAuthColumns(
     sealed = keyring.encrypt(oauth.clientSecret, webhookOAuthSecretAad(tenantId, endpointId));
   }
   if (!sealed) throw new Error('An OAuth client kept its secret without one stored');
+  if (
+    oauth.clientAuthentication === 'client_secret_jwt' &&
+    !webhookOAuthSecretSignsJwt(
+      oauth.clientSecret ?? keptWebhookOAuthSecret(keyring, sealed, tenantId, endpointId),
+    )
+  ) {
+    throw new AppError('validation_failed', WEBHOOK_OAUTH_JWT_SECRET_SHORT, {
+      issues: [{ path: 'oauth.clientSecret', message: WEBHOOK_OAUTH_JWT_SECRET_SHORT }],
+    });
+  }
   return {
     oauthTokenUrl: oauth.tokenUrl,
     oauthClientId: oauth.clientId,
@@ -4318,6 +4340,23 @@ export function webhookOAuthColumns(
     oauthScope: oauth.scope,
     oauthClientAuth: oauth.clientAuthentication,
   };
+}
+
+/** The secret an endpoint keeps, opened to measure it; asked for again when it cannot be opened. */
+function keptWebhookOAuthSecret(
+  keyring: Keyring,
+  sealed: string,
+  tenantId: string,
+  endpointId: string,
+): string {
+  try {
+    return keyring.decryptString(sealed, webhookOAuthSecretAad(tenantId, endpointId));
+  } catch (error) {
+    throw new AppError('validation_failed', WEBHOOK_OAUTH_SECRET_UNREADABLE, {
+      cause: error,
+      issues: [{ path: 'oauth.clientSecret', message: WEBHOOK_OAUTH_SECRET_UNREADABLE }],
+    });
+  }
 }
 
 /**

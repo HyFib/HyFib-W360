@@ -280,6 +280,15 @@ test('staff read the operations console and repair a quarantined webhook event',
       `\\r\\n${companyName},ops-${suffix},[a-z_]+,(?:\\d+,){10}(?:\\d{4}-\\d{2}-\\d{2})?,2,\\d{4}-\\d{2}-\\d{2},\\d+,\\d+,0,0\\r\\n`,
     ),
   );
+  // The year by reason and by company as CSV, each link named after its card (ADR-365).
+  const reasonsCsv = await downloadCsv(page, 'Download CSV: Failed sends by reason (12 months)');
+  expect(reasonsCsv.name).toMatch(/^hyfib-failure-reasons-\d{4}-\d{2}-\d{2}\.csv$/);
+  expect(reasonsCsv.text).toContain('Reason,Code,Codes,Failed,Share of the failed,');
+  const companiesCsv = await downloadCsv(page, 'Download CSV: Failed sends by company (12 months)');
+  expect(companiesCsv.name).toMatch(/^hyfib-failure-companies-\d{4}-\d{2}-\d{2}\.csv$/);
+  expect(companiesCsv.text).toContain(
+    'Company,Address,Companies,Failed,Share of the failed,Sent,Share of its sends failed,',
+  );
   // Compared with the window before (ADR-157): 30 and 7 days are, 90 days are not.
   await expect(
     page.getByText('Under Sent and Received, the 30 days before and the change.'),

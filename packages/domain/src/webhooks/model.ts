@@ -1923,30 +1923,36 @@ export interface WebhookEndpointOAuth {
 }
 
 /**
- * How an endpoint's OAuth client can authenticate to its authorization server (ADR-357), as RFC
- * 7591 names the methods of RFC 6749 section 2.3.1, the default first: its identifier and secret
- * in an HTTP Basic header, or as form parameters in the request body.
+ * How an endpoint's OAuth client can authenticate to its authorization server (ADR-357), the
+ * default first: its identifier and secret in an HTTP Basic header, or as form parameters in the
+ * request body (RFC 6749 section 2.3.1, as RFC 7591 names the two); or, the secret never sent, a
+ * JWT signed with it as a client assertion (RFC 7523, as OpenID Connect Core 1.0 section 9 names
+ * it, ADR-366).
  */
 export const WEBHOOK_OAUTH_CLIENT_AUTHENTICATIONS = [
   'client_secret_basic',
   'client_secret_post',
+  'client_secret_jwt',
 ] as const satisfies readonly WebhookOAuthClientAuth[];
 
-/** How Settings → Webhooks names each way a client authenticates (ADR-357). */
+/** How Settings → Webhooks names each way a client authenticates (ADR-357, ADR-366). */
 export const WEBHOOK_OAUTH_CLIENT_AUTHENTICATION_LABELS: Record<WebhookOAuthClientAuth, string> = {
-  client_secret_basic: 'In an Authorization header (HTTP Basic)',
-  client_secret_post: 'In the request body (client_id and client_secret)',
+  client_secret_basic: 'Its ID and secret in an Authorization header (HTTP Basic)',
+  client_secret_post: 'Its ID and secret in the request body (client_id and client_secret)',
+  client_secret_jwt: 'A JWT signed with the secret, which is never sent (client_secret_jwt)',
 };
 
-/** How Settings → Webhooks describes an endpoint's OAuth client (ADR-173, ADR-357). */
+/** How Settings → Webhooks describes an endpoint's OAuth client (ADR-173, ADR-357, ADR-366). */
 export function webhookOAuthText(oauth: WebhookEndpointOAuth): string {
   const host = webhookHost(oauth.tokenUrl) ?? oauth.tokenUrl;
   const scope = oauth.scope ? `, scope ${oauth.scope}` : '';
-  const body =
+  const how =
     oauth.clientAuthentication === 'client_secret_post'
       ? ', its ID and secret sent in the request body'
-      : '';
-  return `OAuth access tokens from ${host}, as client ${oauth.clientId}${scope}${body}`;
+      : oauth.clientAuthentication === 'client_secret_jwt'
+        ? ', proving it holds the secret with a signed JWT'
+        : '';
+  return `OAuth access tokens from ${host}, as client ${oauth.clientId}${scope}${how}`;
 }
 
 /** How Settings → Webhooks notes a number that is not active, as Settings → Channels names it. */
@@ -2103,6 +2109,9 @@ function webhookOAuthErrorLabel(code: string): string | null {
   if (!code.startsWith('oauth_token_')) return null;
   const rest = code.slice('oauth_token_'.length);
   if (rest === 'invalid') return 'The authorization server gave no usable access token';
+  if (rest === 'secret_too_short') {
+    return 'No access token: the client secret is too short to sign a JWT (at least 32 bytes)';
+  }
   const refused = /^refused(?:_(\d{3}))?$/.exec(rest);
   if (refused) {
     const status = refused[1] ? ` (HTTP ${refused[1]})` : '';

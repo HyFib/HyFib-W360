@@ -1586,7 +1586,7 @@ export const apiWebhookEndpointSchema = z.object({
       clientAuthentication: z
         .enum(WEBHOOK_OAUTH_CLIENT_AUTHENTICATIONS)
         .describe(
-          'How the client ID and secret reach the token URL: `client_secret_basic` in an HTTP Basic Authorization header, `client_secret_post` as `client_id` and `client_secret` in the request body.',
+          'How the client authenticates to the token URL: `client_secret_basic` with its ID and secret in an HTTP Basic Authorization header, `client_secret_post` with them as `client_id` and `client_secret` in the request body, `client_secret_jwt` with `client_id` and a JWT signed with the secret as `client_assertion`, the secret never sent.',
         ),
     })
     .nullable()
@@ -1621,7 +1621,7 @@ export const apiWebhookDeliverySchema = z.object({
     .string()
     .nullable()
     .describe(
-      'Why the last attempt failed, or why the delivery ended without one, as a code (for example `invalid_status`, `timeout`, `endpoint_disabled`, `event_gone`, or `payload_failed`: HyFib could not prepare the request (build or sign it, or open the endpoint’s headers or OAuth client), which a replay sends once the cause is fixed). An endpoint with an OAuth client that got no access token fails the attempt without sending it: `oauth_token_refused_<status>` (the authorization server answered with that status), `oauth_token_invalid` (it answered 200 without a usable bearer token), or `oauth_token_` and the code of the request that failed (such as `oauth_token_timeout`).',
+      'Why the last attempt failed, or why the delivery ended without one, as a code (for example `invalid_status`, `timeout`, `endpoint_disabled`, `event_gone`, or `payload_failed`: HyFib could not prepare the request (build or sign it, or open the endpoint’s headers or OAuth client), which a replay sends once the cause is fixed). An endpoint with an OAuth client that got no access token fails the attempt without sending it: `oauth_token_refused_<status>` (the authorization server answered with that status), `oauth_token_invalid` (it answered 200 without a usable bearer token), `oauth_token_secret_too_short` (the client signs JWTs with a secret under 32 bytes, so nothing was asked), or `oauth_token_` and the code of the request that failed (such as `oauth_token_timeout`).',
     ),
   lastDurationMs: z.number().int().nullable(),
   deliveredAt: z.iso.datetime().nullable(),
