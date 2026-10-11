@@ -14492,6 +14492,54 @@ Consequences: a receiver whose server checks client assertions with registered p
 secret with HyFib. Replacing a key pair stops tokens until the new public key is registered: there is
 no overlap, as there is for signing secrets.
 
-Not built: an overlap for a replaced key pair (a next key shown before it is used), a JWKS URL HyFib
-serves for its clients' keys, keys a company uploads, other algorithms (PS256, ES256), certificates
-(`x5t`, `x5c`), and another audience chosen per endpoint.
+Not built: an overlap for a replaced key pair (a next key shown before it is used, built since
+ADR-368), a JWKS URL HyFib serves for its clients' keys, keys a company uploads, other algorithms
+(PS256, ES256), certificates (`x5t`, `x5c`), and another audience chosen per endpoint.
+
+## ADR-368 A next key pair for webhook OAuth clients that sign with a key pair (P5-09) (2026-10-11)
+
+Context: since ADR-367 an endpoint's OAuth client can sign its assertions with a key pair HyFib
+makes, and a new key pair replaces the one in use at once: until the company registers the new
+public key with its authorization server, every token request is refused and deliveries wait
+(listed as not built in ADR-367). Signing secrets have an overlap (ADR-053: both secrets sign for
+24 hours); key pairs had none. An authorization server can hold several keys for a client and pick
+the one each assertion names in its `kid` header (RFC 7517 key sets, RFC 7523; as known, the texts
+could not be opened from here), so a new public key can be registered before it is used.
+
+Decision:
+
+- **A next key pair, made beside the one in use:** `nextKey: "make"` (Settings → Webhooks: "Make a
+  next key pair to register first") makes an RSA key pair as ADR-367's and keeps it beside the pair
+  in use, unused: HyFib goes on signing with the pair in use. Its public key is shown ("Next public
+  key, to register before HyFib signs with it", as a JWK set holding both keys, for a server that
+  keeps one set for the client, and as PEM) and answered as the API's `oauth.nextPublicKey`. Another
+  `make` replaces a next pair not yet used.
+- **Switched to when the company says so:** `nextKey: "use"` makes the next pair the pair in use:
+  its private key is opened and sealed again under the binding of the key in use, the old pair goes,
+  and the next token is asked for with the new key (the private key is part of the worker's token
+  fingerprint). HyFib never switches on its own: it cannot know when the server holds the new key,
+  and no standard way to ask was found. `nextKey: "drop"` drops the next pair unused.
+- **Sealed apart:** the next private key is sealed with the keyring under a binding of its own
+  (`webhook-oauth-next-key:<company>:<endpoint>`), so neither private key's ciphertext opens as the
+  other's; the keyring sweep re-encrypts it (kind `webhook_oauth_next_private_key`, migration 0288's
+  `ops.sealed_value_keys`). It is never shown, answered, logged, audited or exported (its public key
+  is exported), and the worker never opens it: the client it signs with is opened from the columns of
+  the pair in use only.
+- **Rules:** a next pair goes only with a client set to `private_key_jwt` that has a pair in use
+  (migration 0288's check names each column; the services refuse `nextKey` for another way,
+  `oauth.nextKey`); `use` and `drop` need one; a change takes `replaceKey` or `nextKey`, not both.
+  A change keeps the next pair otherwise, the token URL and a new pair in use included; another way,
+  or removing the client, drops both pairs. A next pair the keyring can no longer open (a key the
+  platform no longer holds) is refused when used: it is dropped and another made.
+- **Audited:** entries say what became of the next pair (`oauthNextKey`: `made`, `used`, `dropped`),
+  and using it counts as replacing the pair in use (`oauthKeyReplaced: true`); never a key.
+
+Consequences: a company changes keys without a gap: it makes the next pair, registers its public key
+beside the one in use, then switches, and tokens never stop. A client holds at most two key pairs.
+A change's audit entry gains `oauthNextKey`; the compacted worst case, measured with every OAuth
+field at once, is 4,126 bytes, within the 4,200 ADR-363's test holds it to.
+
+Not built: switching on its own (after a delay, or once the server takes the new key), keeping the
+old pair after a switch (a server that holds it gains nothing from HyFib keeping it), more than one
+next pair, a JWKS URL HyFib serves, keys a company uploads, other algorithms (PS256, ES256),
+certificates (`x5t`, `x5c`), and another audience chosen per endpoint.

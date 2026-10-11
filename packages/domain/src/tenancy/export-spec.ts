@@ -1672,6 +1672,7 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
       'oauth_scope',
       'oauth_client_auth',
       'oauth_public_key',
+      'oauth_next_public_key',
       'state',
       'disabled_reason',
       'disabled_at',
@@ -1689,6 +1690,8 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
       headers_ciphertext: 'The endpoint’s own headers, whose values are secrets (ADR-118).',
       oauth_client_secret_ciphertext: 'The endpoint’s OAuth client secret (ADR-173).',
       oauth_private_key_ciphertext: 'The endpoint’s OAuth client private key (ADR-367).',
+      oauth_next_private_key_ciphertext:
+        'The endpoint’s OAuth client next private key, not used yet (ADR-368).',
     },
   },
   {

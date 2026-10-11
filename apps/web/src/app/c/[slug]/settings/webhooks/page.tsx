@@ -591,6 +591,12 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
                     {e.oauth?.publicKey ? (
                       <WebhookOAuthPublicKeyDetails publicKey={e.oauth.publicKey} />
                     ) : null}
+                    {e.oauth?.publicKey && e.oauth.nextPublicKey ? (
+                      <WebhookOAuthPublicKeyDetails
+                        publicKey={e.oauth.nextPublicKey}
+                        inUse={e.oauth.publicKey}
+                      />
+                    ) : null}
                     <p className="flex flex-wrap gap-1">
                       {e.eventTypes.map((t) => (
                         <Badge key={t} tone="neutral">

@@ -35,6 +35,7 @@ import {
   storeWebhookSecretAad,
   webhookHeadersAad,
   webhookOAuthKeyAad,
+  webhookOAuthNextKeyAad,
   webhookOAuthSecretAad,
   webhookSecretAad,
   type PlatformActor,
@@ -352,15 +353,19 @@ async function sealEverything(c: Company, ring: Keyring): Promise<Seeded[]> {
       c.owner.id,
     ],
   );
-  // An endpoint whose OAuth client signs with a key pair HyFib keeps (ADR-367).
+  // An endpoint whose OAuth client signs with a key pair HyFib keeps (ADR-367), with a next key
+  // pair not used yet (ADR-368).
   const keyEndpointId = uuidv7();
   const pair = generateWebhookOAuthKeyPair();
+  const nextPair = generateWebhookOAuthKeyPair();
   await fx.query(
     `INSERT INTO app.webhook_endpoints (id, tenant_id, url, event_types, secret_ciphertext,
        oauth_token_url, oauth_client_id, oauth_client_auth, oauth_private_key_ciphertext,
-       oauth_public_key, created_by_user_id)
+       oauth_public_key, created_by_user_id, oauth_next_private_key_ciphertext,
+       oauth_next_public_key)
      VALUES ($1, $2, 'https://hooks.reseal.test/w360-key', ARRAY['message.received'], $3,
-       'https://auth.reseal.test/token', 'reseal-key-client', 'private_key_jwt', $4, $5, $6)`,
+       'https://auth.reseal.test/token', 'reseal-key-client', 'private_key_jwt', $4, $5, $6, $7,
+       $8)`,
     [
       keyEndpointId,
       t,
@@ -382,6 +387,15 @@ async function sealEverything(c: Company, ring: Keyring): Promise<Seeded[]> {
       }),
       pair.publicKey,
       c.owner.id,
+      seal({
+        kind: 'webhook_oauth_next_private_key',
+        table: 'app.webhook_endpoints',
+        column: 'oauth_next_private_key_ciphertext',
+        id: keyEndpointId,
+        plain: nextPair.privateKey,
+        aad: webhookOAuthNextKeyAad(t, keyEndpointId),
+      }),
+      nextPair.publicKey,
     ],
   );
   // Waits a day, so no other file's email run sends it.
@@ -621,7 +635,7 @@ describe('re-encrypting under the primary key', () => {
       aad: alertChannelAad(channelId),
     });
     const kinds = new Set(seeded.map((s) => s.kind));
-    expect(kinds.size).toBe(18);
+    expect(kinds.size).toBe(19);
     for (const s of seeded) expect(keyOf(await storedValue(s)), s.kind).toBe(r.ids.old);
 
     const console = await ops(r.during).keyring(staff);

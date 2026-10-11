@@ -2296,9 +2296,13 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   7523, migration 0286, ADR-366, or, when it is `private_key_jwt`, signed RS256 with the private key
   of the key pair HyFib made for the client, `oauth_private_key_ciphertext` sealed with
   `webhookOAuthKeyAad` and `oauth_public_key` shown, its key id the RFC 7638 thumbprint, migration
-  0287, ADR-367), sends it as a bearer token, and drops it
-  when the endpoint answers 401. A delivery that gets no token fails its attempt with an
-  `oauth_token_…` code and no status. The lease of such a delivery covers both requests.
+  0287, ADR-367), sends it as a bearer token, and drops it when the endpoint answers 401. A delivery
+  that gets no token fails its attempt with an `oauth_token_…` code and no status. The lease of such
+  a delivery covers both requests. A `private_key_jwt` client may hold a next key pair (migration
+  0288, ADR-368): `oauth_next_private_key_ciphertext`, sealed with `webhookOAuthNextKeyAad`, and
+  `oauth_next_public_key`, which `webhookOAuthColumns` makes, uses (opening the private key and
+  sealing it again with `webhookOAuthKeyAad`) or drops as a change's `nextKey` says;
+  `openWebhookOAuthClient` takes only the pair in use's columns, so the worker never reads it.
 - **Team filters** (migration 0122, ADR-174): `team_ids` on an endpoint lists the teams whose
   conversations' message and conversation events it takes, null for every conversation's; a check
   keeps it to 1 to 50 ids and to endpoints that take such an event. `app.capture_webhook_event`
