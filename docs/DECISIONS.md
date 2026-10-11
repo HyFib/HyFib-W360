@@ -14438,7 +14438,7 @@ revising RFC 7523 moves to the server's issuer identifier, as recalled here and 
 refuses these assertions; such a receiver keeps HTTP Basic or the request body.
 
 Not built: assertions signed with a key pair (`private_key_jwt`, built since ADR-367), another
-audience chosen per endpoint (built since ADR-369), and a JWKS.
+audience chosen per endpoint (built since ADR-369), and a JWKS (built since ADR-370).
 
 ## ADR-367 Webhook OAuth clients that sign their assertions with a key pair HyFib keeps (P5-09) (2026-10-11)
 
@@ -14493,9 +14493,9 @@ secret with HyFib. Replacing a key pair stops tokens until the new public key is
 no overlap, as there is for signing secrets.
 
 Not built: an overlap for a replaced key pair (a next key shown before it is used, built since
-ADR-368), a JWKS URL HyFib serves for its clients' keys, keys a company uploads, other algorithms
-(PS256, ES256), certificates (`x5t`, `x5c`), and another audience chosen per endpoint (built since
-ADR-369).
+ADR-368), a JWKS URL HyFib serves for its clients' keys (built since ADR-370), keys a company
+uploads, other algorithms (PS256, ES256), certificates (`x5t`, `x5c`), and another audience chosen
+per endpoint (built since ADR-369).
 
 ## ADR-368 A next key pair for webhook OAuth clients that sign with a key pair (P5-09) (2026-10-11)
 
@@ -14547,8 +14547,9 @@ field at once, is 4,126 bytes, within the 4,200 ADR-363's test holds it to.
 
 Not built: switching on its own (after a delay, or once the server takes the new key), keeping the
 old pair after a switch (a server that holds it gains nothing from HyFib keeping it), more than one
-next pair, a JWKS URL HyFib serves, keys a company uploads, other algorithms (PS256, ES256),
-certificates (`x5t`, `x5c`), and another audience chosen per endpoint (built since ADR-369).
+next pair, a JWKS URL HyFib serves (built since ADR-370), keys a company uploads, other
+algorithms (PS256, ES256), certificates (`x5t`, `x5c`), and another audience chosen per endpoint
+(built since ADR-369).
 
 ## ADR-369 The audience a webhook OAuth client's JWTs name, chosen per endpoint (P5-09) (2026-10-11)
 
@@ -14587,3 +14588,52 @@ ADR-363 asks, rises from 4,200 to 4,500, within the 7,000 bytes kept.
 Not built: an audience that is not an https URL (RFC 7519 allows any string), several audiences in
 one assertion (an array), and finding the issuer from the server's metadata (RFC 8414), which HyFib
 would have to fetch.
+
+## ADR-370 A public JWKS URL for webhook OAuth clients that sign with a key pair (P5-09) (2026-10-11)
+
+Context: since ADR-367 and ADR-368 a client that signs with a key pair HyFib keeps shows its public
+key, and its next one, for the company to copy into its authorization server by hand, and a next
+key pair has to be registered there before HyFib switches to it. Many servers can instead fetch a
+client's keys from a URL: the client's `jwks_uri` (RFC 7591 section 2), serving a JWK Set document
+(RFC 7517 section 5) (as known; the RFCs could not be opened from here). Listed as not built in
+ADR-366 to ADR-368.
+
+Decision:
+
+- **A URL per client:** `<APP_BASE_URL>/api/webhook-oauth/jwks/<id>` answers a JWK Set,
+  `{"keys": [...]}`, holding the client's public key in use and then its next one, if any: the same
+  JWKs Settings shows (`kty`, `n`, `e`, `kid` the RFC 7638 thumbprint, `use` `sig`, `alg` `RS256`).
+  Nothing else: no company, endpoint, client ID or token URL. Any other id answers 404.
+- **An id that stays while the keys change:** 16 random base32 letters (80 bits, as widget and flow
+  ids), naming neither the company nor the endpoint, so the URL reveals neither and cannot be
+  guessed. It is made with the client's first key pair and kept while the client signs with a key
+  pair, so a URL registered once serves each new pair (`replaceKey`, `nextKey`) without another
+  registration. Another way or removing the client drops it, so the URL serves nothing; coming back
+  makes another id. Migration 0290 adds the column, unique, with a check: 16 base32 letters, only
+  with `private_key_jwt` and a pair in use. A client set up before 0290 gets its id at its next
+  change: there is no backfill, since the role running migrations has no policy on the table under
+  forced row security, so its update would change no row.
+- **Read without a company:** the route has no company to scope a read to, so it calls
+  `ops.webhook_oauth_jwks(id)`, a SECURITY DEFINER function owned by `w360_definer`, its search path
+  pinned, executable by the runtime role only, in the system scope and read only. It refuses a
+  malformed id unread and returns only the two public key columns, of a client that signs with a
+  key pair, of a company active, suspended or restricted, as the website button's lookup does.
+- **Cacheable briefly:** the route answers `Cache-Control: public, max-age=300`, as the button
+  script and the OpenAPI document, so a server or a shared cache may keep the set five minutes.
+  HyFib still switches only when the company says so (ADR-368): with a server that fetches the URL,
+  the company makes the next key pair, waits until the server has fetched the set holding it, as the
+  server's documentation says, then switches.
+- **Shown where the keys are:** Settings → Webhooks shows "JWKS URL", with a copy button, on the
+  list and the endpoint's page; the API answers `oauth.jwksUrl`, built from `APP_BASE_URL`, and the
+  OpenAPI document describes it; the export exports the id. No audit entry names it: it follows the
+  key pair, whose entries say when one was made.
+
+Consequences: a server that takes a client's `jwks_uri` is given the URL once; afterwards the
+company changes keys with ADR-368's next key pair and registers nothing by hand. The URL publishes
+public keys only, which reveal no secret; the random id keeps others from listing which endpoints
+sign with a key pair. `APP_BASE_URL` is now registered at authorization servers too, so DEPLOYMENT
+asks to keep the origin, as for chat links.
+
+Not built: one URL for all of a company's clients, keys a company uploads, other algorithms (PS256,
+ES256), certificates (`x5t`, `x5c`), a rate limit of the app's own on the route (the edge limits it,
+as the other public routes), and signed client metadata (RFC 7591 software statements).

@@ -774,6 +774,28 @@ test('an endpoint gets OAuth access tokens as its client and sends them as a bea
   await nextSummary.click();
   await expect(page.getByText('JWK set, with the key in use', { exact: true })).toBeVisible();
   await expectNoHorizontalOverflow(page);
+  // Its JWKS URL (ADR-370) serves both public keys, the key in use first, to anyone, briefly
+  // cacheable; an id it never gave serves nothing.
+  const jwksUrl = await page.getByLabel('JWKS URL', { exact: true }).inputValue();
+  expect(jwksUrl).toMatch(/\/api\/webhook-oauth\/jwks\/[a-z2-7]{16}$/);
+  const jwksPath = new URL(jwksUrl).pathname;
+  const servedKids = async (at = jwksPath) => {
+    const response = await request.get(at);
+    if (response.status() === 404) return null;
+    expect(response.status()).toBe(200);
+    expect(response.headers()['cache-control']).toBe('public, max-age=300');
+    expect(response.headers()['content-type']).toMatch(/^application\/json/);
+    const { keys } = (await response.json()) as {
+      keys: { kid: string; kty: string; d?: string }[];
+    };
+    for (const key of keys) {
+      expect(key.kty).toBe('RSA');
+      expect(key.d).toBeUndefined();
+    }
+    return keys.map((key) => key.kid);
+  };
+  expect(await servedKids()).toEqual([keyId, nextKeyId]);
+  expect(await servedKids('/api/webhook-oauth/jwks/aaaaaaaaaaaaaaaa')).toBeNull();
   await page.getByRole('button', { name: `Send test event to ${HOST}` }).click();
   await expect(async () => expect(forUs()).toHaveLength(4)).toPass({ timeout: 30_000 });
   // A token asked for meanwhile, if any, was asked with the key in use.
@@ -791,6 +813,9 @@ test('an endpoint gets OAuth access tokens as its client and sends them as a bea
     page.getByText(`Public key to register with the authorization server (key ${nextKeyId})`),
   ).toBeVisible();
   await expect(page.getByText(/^Next public key/)).toHaveCount(0);
+  // The same URL now serves the key switched to alone.
+  await expect(page.getByLabel('JWKS URL', { exact: true })).toHaveValue(jwksUrl);
+  expect(await servedKids()).toEqual([nextKeyId]);
   await page.getByRole('button', { name: `Send test event to ${HOST}` }).click();
   await expect(async () => expect(forUs()).toHaveLength(5)).toPass({ timeout: 30_000 });
   expect(asked(secondTokenPath).length).toBeGreaterThan(askedBefore);
@@ -833,6 +858,8 @@ test('an endpoint gets OAuth access tokens as its client and sends them as a bea
   ).not.toBeChecked();
   await page.goto(`/c/${slug}/settings/webhooks`);
   await expect(page.getByText(/OAuth access tokens from/)).toHaveCount(0);
+  await expect(page.getByLabel('JWKS URL', { exact: true })).toHaveCount(0);
+  expect(await servedKids()).toBeNull();
   await page.getByRole('button', { name: `Send test event to ${HOST}` }).click();
   await expect(async () => expect(forUs()).toHaveLength(7)).toPass({ timeout: 30_000 });
   expect(forUs()[6]!.headers.authorization).toBeUndefined();
@@ -870,6 +897,7 @@ test('an endpoint gets OAuth access tokens as its client and sends them as a bea
     publicKey: null,
     nextPublicKey: null,
     assertionAudience: null,
+    jwksUrl: null,
   });
   expect(JSON.stringify(endpoint)).not.toContain(clientSecret);
   const testEvent = await request.post(`/api/v1/webhook-endpoints/${endpoint.id}/test`, {

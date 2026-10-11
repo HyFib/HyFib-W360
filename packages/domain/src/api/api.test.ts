@@ -1889,16 +1889,24 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'tokenUrl',
     ]);
     // The secret is never answered; the way the client authenticates always is (ADR-357), and a
-    // client's public key (ADR-367) and its next one (ADR-368).
+    // client's public key (ADR-367), its next one (ADR-368) and its JWKS URL (ADR-370).
     expect(keys(answered.properties.oauth)).toEqual([
       'assertionAudience',
       'clientAuthentication',
       'clientId',
+      'jwksUrl',
       'nextPublicKey',
       'publicKey',
       'scope',
       'tokenUrl',
     ]);
+    expect(
+      answered.properties.oauth?.anyOf?.find((s) => s.properties)?.properties?.jwksUrl,
+    ).toMatchObject({
+      description: expect.stringContaining(
+        'a public URL where HyFib serves its public keys as a JWK Set (the key in use and the next one, if any)',
+      ),
+    });
     const methodOf = (client: Client | undefined) =>
       client?.anyOf?.find((s) => s.properties)?.properties?.clientAuthentication;
     for (const client of [given, answered.properties.oauth]) {

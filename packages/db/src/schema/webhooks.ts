@@ -741,6 +741,12 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
    */
   oauthAssertionAudience: text('oauth_assertion_audience'),
   /**
+   * The public id of a `private_key_jwt` client's JWKS URL (migration 0290, ADR-370): 16 base32
+   * characters, naming neither the company nor the endpoint, under which HyFib serves the client's
+   * public keys. Null for any other client, and for one set up before 0290 until its next change.
+   */
+  oauthJwksId: text('oauth_jwks_id'),
+  /**
    * How the OAuth client authenticates to its authorization server (migration 0279, ADR-357): HTTP
    * Basic (the default, kept unused without a client), its identifier and secret in the request
    * body, or a JWT signed with its secret (0286, ADR-366) or with its private key (0287, ADR-367).

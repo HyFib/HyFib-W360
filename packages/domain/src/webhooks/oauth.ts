@@ -9,6 +9,7 @@ import {
 } from 'node:crypto';
 import { EgressError, type EgressClient, type EgressRequest } from '@w360/core/egress';
 import type { WebhookOAuthClientAuth } from '@w360/db';
+import { randomToken, TOKEN_ALPHABET } from '../growth/model';
 import { WEBHOOK_LIMITS, type WebhookOAuthPublicKey } from './model';
 
 /**
@@ -128,6 +129,14 @@ export function webhookOAuthAudienceValid(value: string): boolean {
   const url = new URL(value);
   return url.hostname !== '' && url.username === '' && url.password === '';
 }
+
+/** A JWKS URL's public id (ADR-370): 16 base32 characters (80 random bits), like widget ids. */
+export const WEBHOOK_OAUTH_JWKS_ID_RE = /^[a-z2-7]{16}$/;
+export const newWebhookOAuthJwksId = () => randomToken(TOKEN_ALPHABET, 16);
+
+/** Where HyFib serves a client's public keys as a JWK Set (ADR-370), under the app's base URL. */
+export const webhookOAuthJwksUrl = (appBaseUrl: string, jwksId: string) =>
+  `${appBaseUrl.replace(/\/$/, '')}/api/webhook-oauth/jwks/${jwksId}`;
 
 /** The size of the RSA keys HyFib makes for clients that sign with a key pair (ADR-367). */
 export const WEBHOOK_OAUTH_KEY_BITS = 2048;

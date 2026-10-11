@@ -1674,6 +1674,7 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
       'oauth_public_key',
       'oauth_next_public_key',
       'oauth_assertion_audience',
+      'oauth_jwks_id',
       'state',
       'disabled_reason',
       'disabled_at',

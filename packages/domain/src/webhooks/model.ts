@@ -1957,7 +1957,16 @@ export interface WebhookEndpointOAuth {
    * for the token URL, and for any other client.
    */
   assertionAudience: string | null;
+  /**
+   * The public id of the JWKS URL serving a client's public keys (ADR-370), for the page to build
+   * the URL from; null for a client that does not sign with a key pair.
+   */
+  jwksId: string | null;
 }
+
+/** What a client's JWKS URL is for, as Settings → Webhooks says (ADR-370). */
+export const WEBHOOK_OAUTH_JWKS_HINT =
+  'Or give the authorization server this URL: it serves the public key in use and the next one, so the server picks up a next key pair by itself.';
 
 /**
  * What a change does with the next key pair of a client that signs with a key pair (ADR-368): make

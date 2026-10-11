@@ -2307,7 +2307,13 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   keyring sweep re-encrypts it). A client that signs JWTs names `oauth_assertion_audience` (migration
   0289, ADR-369) as their `aud` instead of the token URL when it has one; `checkedWebhookOAuth` keeps
   it across changes that leave it out while the token URL stays, and the token cache's fingerprint
-  includes it.
+  includes it. A `private_key_jwt` client's `oauth_jwks_id` (migration 0290, ADR-370; 16 base32
+  letters, unique) names its public JWKS URL, `GET /api/webhook-oauth/jwks/<id>` (a route handler,
+  `Cache-Control: public, max-age=300` from `next.config.ts`): `webhookOAuthColumns` makes it with
+  the first key pair and keeps it while the client signs with one, and `webhookOAuthPublicJwks`
+  reads the keys in the system scope, read only, through `ops.webhook_oauth_jwks`, a definer
+  function returning only `oauth_public_key` and `oauth_next_public_key`, as a JWK Set. Settings and
+  the API (`oauth.jwksUrl`) build the URL from `APP_BASE_URL` with `webhookOAuthJwksUrl`.
 - **Team filters** (migration 0122, ADR-174): `team_ids` on an endpoint lists the teams whose
   conversations' message and conversation events it takes, null for every conversation's; a check
   keeps it to 1 to 50 ids and to endpoints that take such an event. `app.capture_webhook_event`

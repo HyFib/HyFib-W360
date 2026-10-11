@@ -86,6 +86,7 @@ import {
   webhookMessageWordsFromLines,
   webhookOAuthSignsJwts,
   webhookOAuthText,
+  WEBHOOK_OAUTH_JWKS_HINT,
   webhookOwnerText,
   webhookPipelineText,
   webhookReplayAllSummary,
@@ -3556,6 +3557,7 @@ type OAuthChange = 'keep' | 'set' | 'remove';
 function OAuthClientFields({
   prefix,
   stored,
+  jwksUrl,
   change,
   onChangeChange,
   fields,
@@ -3564,6 +3566,8 @@ function OAuthClientFields({
   prefix: string;
   /** The endpoint's client; null for a new endpoint or one without a client. */
   stored: WebhookEndpointOAuth | null;
+  /** The JWKS URL serving a client's public keys, when it signs with a key pair (ADR-370). */
+  jwksUrl: string | null;
   change: OAuthChange;
   onChangeChange: (next: OAuthChange) => void;
   fields: OAuthFields;
@@ -3588,6 +3592,9 @@ function OAuthClientFields({
               publicKey={stored.nextPublicKey}
               inUse={stored.publicKey}
             />
+          ) : null}
+          {stored.publicKey && jwksUrl ? (
+            <CopyField label="JWKS URL" value={jwksUrl} description={WEBHOOK_OAUTH_JWKS_HINT} />
           ) : null}
           {(
             [
@@ -3779,6 +3786,7 @@ const oauthFieldsOf = (stored: WebhookEndpointOAuth | null | undefined): OAuthFi
 export function WebhookEndpointForm({
   slug,
   endpoint,
+  oauthJwksUrl,
   automationChoices,
   runApiKeyChoices,
   messageApiKeyChoices,
@@ -3798,6 +3806,8 @@ export function WebhookEndpointForm({
   atLimit = false,
 }: {
   slug: string;
+  /** The JWKS URL of the endpoint's OAuth client, when it signs with a key pair (ADR-370). */
+  oauthJwksUrl?: string | null;
   endpoint?: {
     id: string;
     url: string;
@@ -5355,6 +5365,7 @@ export function WebhookEndpointForm({
       <OAuthClientFields
         prefix={prefix}
         stored={endpoint?.oauth ?? null}
+        jwksUrl={oauthJwksUrl ?? null}
         change={oauthChange}
         onChangeChange={setOAuthChange}
         fields={oauthFields}

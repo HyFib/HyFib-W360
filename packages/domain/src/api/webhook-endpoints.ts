@@ -334,6 +334,7 @@ import {
 import {
   WEBHOOK_OAUTH_JWT_SECRET_BYTES,
   WEBHOOK_OAUTH_KEY_BITS,
+  webhookOAuthJwksUrl,
   webhookOAuthPublicKey,
 } from '../webhooks/oauth';
 import { apiActor, assertScope, type ApiContext } from './context';
@@ -1753,6 +1754,15 @@ export const apiUpdateWebhookEndpointSchema = z
     'Give the events, the description, the headers, the message statuses, who sent the messages, the API keys that sent them, the contact parts, the deal and task details, the custom fields, the automations, the campaign statuses, the order statuses, who made the order changes, the API keys whose order changes are left out, the Payment Link statuses, the API keys that asked for the Payment Links, the template statuses, the conversation statuses, the deal statuses, the task statuses, the run end statuses, the step outcomes, the kinds of step, what started the runs, the API keys that started them, the consent changes, where contacts came from, the received message types, the run end reasons, the numbers, the teams, the templates, the cash on delivery answers, the stores of store events, the order messages whose skips and sends are sent, the skip reasons of skipped order messages, the cart reminders whose skips and sends are sent, the skip reasons of skipped cart reminders, the skip reasons of skipped campaign recipients, the campaigns, the pipelines, the stages, the deal owners, the task assignees, the pipelines, stages and owners of tasks’ deals and of notes’ deals, who made the CRM changes, the API keys whose CRM changes are left out, the survey scores, the members credited with survey answers and the teams of their conversations, the contact and conversation tags of survey answers, the tags and field values of added and changed contacts, the members, the contact tags, the conversation tags, the OAuth client or whether the endpoint is enabled',
   );
 
+/**
+ * An endpoint's OAuth client as the API answers it: its JWKS URL in full rather than the id it is
+ * built from (ADR-370).
+ */
+export type ApiWebhookEndpointOAuth = Omit<WebhookEndpointOAuth, 'jwksId'> & {
+  /** Where HyFib serves a client's public keys as a JWK Set; null for any other client. */
+  jwksUrl: string | null;
+};
+
 export interface ApiWebhookEndpoint {
   id: string;
   url: string;
@@ -1895,7 +1905,7 @@ export interface ApiWebhookEndpoint {
   /** The conversation tags whose events it receives (ADR-273); null: every conversation's. */
   conversationTags: string[] | null;
   /** Where it gets OAuth tokens and as which client (ADR-173); the secret is never shown. */
-  oauth: WebhookEndpointOAuth | null;
+  oauth: ApiWebhookEndpointOAuth | null;
   /** The key that added the endpoint. */
   apiKeyId: string;
   createdAt: string;
@@ -2055,6 +2065,7 @@ const columns = {
   oauthPublicKey: webhookEndpoints.oauthPublicKey,
   oauthNextPublicKey: webhookEndpoints.oauthNextPublicKey,
   oauthAssertionAudience: webhookEndpoints.oauthAssertionAudience,
+  oauthJwksId: webhookEndpoints.oauthJwksId,
   apiKeyId: webhookEndpoints.createdByApiKeyId,
   createdAt: webhookEndpoints.createdAt,
   updatedAt: webhookEndpoints.updatedAt,
@@ -2142,13 +2153,14 @@ type EndpointRow = Pick<
   | 'oauthPublicKey'
   | 'oauthNextPublicKey'
   | 'oauthAssertionAudience'
+  | 'oauthJwksId'
   | 'createdAt'
   | 'updatedAt'
 > & { apiKeyId: string | null };
 
 const iso = (at: Date | null) => at?.toISOString() ?? null;
 
-function toApiEndpoint(row: EndpointRow, now: Date): ApiWebhookEndpoint {
+function toApiEndpoint(row: EndpointRow, now: Date, appBaseUrl: string): ApiWebhookEndpoint {
   if (!row.apiKeyId) throw new Error('An endpoint a key added has no key');
   return {
     id: row.id,
@@ -2239,6 +2251,7 @@ function toApiEndpoint(row: EndpointRow, now: Date): ApiWebhookEndpoint {
               ? webhookOAuthPublicKey(row.oauthNextPublicKey)
               : null,
             assertionAudience: row.oauthAssertionAudience,
+            jwksUrl: row.oauthJwksId ? webhookOAuthJwksUrl(appBaseUrl, row.oauthJwksId) : null,
           }
         : null,
     apiKeyId: row.apiKeyId,
@@ -2250,13 +2263,13 @@ function toApiEndpoint(row: EndpointRow, now: Date): ApiWebhookEndpoint {
 const addedByKey = (tenantId: string) =>
   and(eq(webhookEndpoints.tenantId, tenantId), isNotNull(webhookEndpoints.createdByApiKeyId));
 
-async function readEndpoint(tx: Tx, ctx: ApiContext, id: string, now: Date) {
+async function readEndpoint(tx: Tx, ctx: ApiContext, id: string, now: Date, appBaseUrl: string) {
   const [row] = await tx
     .select(columns)
     .from(webhookEndpoints)
     .where(and(addedByKey(ctx.tenant.id), eq(webhookEndpoints.id, id)));
   if (!row) throw notFound('Webhook endpoint');
-  return toApiEndpoint(row, now);
+  return toApiEndpoint(row, now, appBaseUrl);
 }
 
 const endpointId = (id: string) => {
@@ -2398,7 +2411,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
             .from(webhookEndpoints)
             .where(addedByKey(ctx.tenant.id))
             .orderBy(asc(webhookEndpoints.createdAt), asc(webhookEndpoints.id));
-          return { data: rows.map((row) => toApiEndpoint(row, now)) };
+          return { data: rows.map((row) => toApiEndpoint(row, now, deps.appBaseUrl)) };
         },
         { accessMode: 'read only' },
       );
@@ -2408,7 +2421,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
     async get(ctx: ApiContext, id: string): Promise<ApiWebhookEndpoint> {
       assertScope(ctx, 'webhooks.manage');
       endpointId(id);
-      return db.run(ctx.scope, (tx) => readEndpoint(tx, ctx, id, clock.now()), {
+      return db.run(ctx.scope, (tx) => readEndpoint(tx, ctx, id, clock.now(), deps.appBaseUrl), {
         accessMode: 'read only',
       });
     },
@@ -2796,7 +2809,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
                 : {}),
             });
             await announce(tx, ctx, { host, events: data.events, at: now });
-            const endpoint = await readEndpoint(tx, ctx, id, now);
+            const endpoint = await readEndpoint(tx, ctx, id, now, deps.appBaseUrl);
             return { status: 201, body: { data: { ...endpoint, secret } } };
           },
           withoutSecret,
@@ -3612,7 +3625,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
             );
           }
         }
-        return readEndpoint(tx, ctx, id, now);
+        return readEndpoint(tx, ctx, id, now, deps.appBaseUrl);
       });
     },
 
@@ -3666,7 +3679,9 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
             });
             return {
               status: 200,
-              body: { data: { ...(await readEndpoint(tx, ctx, id, now)), secret } },
+              body: {
+                data: { ...(await readEndpoint(tx, ctx, id, now, deps.appBaseUrl)), secret },
+              },
             };
           },
           withoutSecret,
@@ -3691,7 +3706,7 @@ export function createApiWebhookEndpoints(deps: ApiWebhookEndpointsDeps) {
       return db.run(
         ctx.scope,
         async (tx) => {
-          await readEndpoint(tx, ctx, id, now);
+          await readEndpoint(tx, ctx, id, now, deps.appBaseUrl);
           const rows = await tx
             .select({
               ...webhookDeliveryColumns,

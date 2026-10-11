@@ -1452,12 +1452,19 @@ Phase 5 rules (outgoing webhooks, P5-09):
   way. A client that signs JWTs may name another audience in them than its token URL (ADR-369): an
   https URL of visible ASCII without credentials or a fragment, kept as given and never fetched,
   kept only with such a way (a database check) and dropped at another token URL unless given; the
-  assertion still goes only to the token URL. The way a client authenticates and the audience's host
-  are audited, the secret never. Access tokens live only in the worker's memory, keyed by the
-  company, the endpoint and a hash of the client (its way of authenticating, its private key and its
-  audience included): never stored, logged or
-  shown, a day at most, replaced after a 401 or a change of the client. A token's characters are
-  checked (RFC 6750) before it goes in the `Authorization` header, and an endpoint with a client
+  assertion still goes only to the token URL. A client that signs with a key pair has a public JWKS
+  URL (ADR-370), `/api/webhook-oauth/jwks/<id>`, serving only its public keys in use and next as a
+  JWK Set: the id is 16 random base32 letters naming neither the company nor the endpoint, unique
+  and checked by the database, kept while the client signs with a key pair and dropped with the way
+  or the client; the route reads through `ops.webhook_oauth_jwks`, a SECURITY DEFINER function
+  owned by the definer, its search path pinned, executable by the runtime role only, which refuses
+  a malformed id unread and returns the two public key columns of companies active, suspended or
+  restricted only, and responses may be cached five minutes. The way a client authenticates and the
+  audience's host are audited, the secret never. Access tokens live only in the worker's memory,
+  keyed by the company, the endpoint and a hash of the client (its way of authenticating, its
+  private key and its audience included): never stored, logged or shown, a day at most, replaced
+  after a 401 or a change of the client. A token's characters are checked (RFC 6750) before it goes
+  in the `Authorization` header, and an endpoint with a client
   cannot send an `Authorization` header of its own. A token request that fails is recorded by its
   code only; a secret that does not open fails that delivery alone as `payload_failed` (stage
   `oauth`). Tested (unit; integration and e2e tests run in CI only).

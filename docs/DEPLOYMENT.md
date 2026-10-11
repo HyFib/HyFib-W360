@@ -29,7 +29,7 @@ PostgreSQL 18; CI workflow authored).
 ## Production topology (target)
 
 - Load balancer with TLS 1.2+ and HTTP/2 (SSE), WAF/rate limiting at the edge (including the public
-  chat-link, widget and price list routes, see below).
+  chat-link, widget, price list and webhook OAuth JWKS routes, see below).
 - `web` ≥ 2 replicas (stateless); `worker` ≥ 2 replicas (jobs are claim-safe; schedules are
   deduplicated by pg-boss).
 - Managed PostgreSQL 17 or 18 with high availability, encryption at rest, automated backups and
@@ -1576,6 +1576,19 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    which the check refuses (a server error), so nothing is stored. Clear audiences before rolling web
    servers back to an image from before it, or such changes keep failing there.
 
+   Migration 0290 (ADR-370) adds `oauth_jwks_id` to `app.webhook_endpoints` (nullable, no rewrite)
+   with its update grant, a unique constraint (its index is built under the table's lock, quickly:
+   at most 10 endpoints a company) and a check that keeps it 16 base32 letters, only with
+   `private_key_jwt` and a key pair in use (validated by reading the table), and creates
+   `ops.webhook_oauth_jwks`, owned by the definer. There is no backfill: a client set to the way
+   before it gets its JWKS URL at its next change. Workers never read the column. Web servers of
+   this release read it (their reads of endpoints name it) and serve the URLs. Until the web
+   rollout ends, an old web server neither shows nor serves them (it answers 404); its changes that
+   keep the way keep the id, but moving such a client to another way or removing its OAuth client
+   leaves the id behind, which the check refuses (a server error), so nothing is stored. Rolled back
+   to an image from before it, the URLs answer 404 and such changes keep failing there; companies
+   whose servers fetch the URLs register the public keys by hand meanwhile.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back
@@ -1631,6 +1644,21 @@ queries) and renders per request with the page's CSP nonce.
   has hidden or changed, and would reuse a CSP nonce.
 - **Indexing.** The app asks search engines not to index any page, this one included; HyFib's own
   site links to it.
+
+## Webhook OAuth JWKS URLs
+
+`GET /api/webhook-oauth/jwks/<id>` (ADR-370) is public by design: authorization servers fetch a
+webhook OAuth client's public keys from it, without a session. It answers public keys only.
+
+- **`APP_BASE_URL` is registered at authorization servers.** Companies give the URL to their
+  servers as a client's `jwks_uri`. Choose the production origin before the first company copies
+  one; if it must change, keep redirecting `/api/webhook-oauth/jwks/*` from the old origin.
+- **Caching.** The app sends `Cache-Control: public, max-age=300`, so the edge or a CDN may keep a
+  set five minutes; purge it if a changed key must reach servers sooner. Do not keep it longer.
+- **Rate limits.** Apply the per-address limits of the public routes above at the edge (the app does
+  not limit it). Each request reads one row through a unique index.
+- **Logs.** The app logs nothing per request. Access logs record the id and the server's address;
+  the id names neither the company nor the endpoint.
 
 ## WhatsApp Flows data endpoint
 

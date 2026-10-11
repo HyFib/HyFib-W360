@@ -8,6 +8,7 @@ import {
   WEBHOOK_CONVERSATION_STATUS_LABELS,
   WEBHOOK_EVENT_INFO,
   WEBHOOK_EVENT_KEYS,
+  WEBHOOK_OAUTH_JWKS_HINT,
   WEBHOOK_LIMITS,
   WEBHOOK_ORDER_STATUS_LABELS,
   WEBHOOK_ORDER_CHANGE_MAKER_LABELS,
@@ -37,6 +38,7 @@ import {
   webhookChannelText,
   webhookContactEventFieldValuesText,
   webhookFieldText,
+  webhookOAuthJwksUrl,
   webhookOAuthText,
   webhookHost,
   webhookMessageWordsText,
@@ -50,6 +52,7 @@ import {
   type WebhookEndpointView,
 } from '@w360/domain';
 import { Badge, Card, CardContent, CardDescription, CardHeader, CardTitle } from '@w360/ui';
+import { CopyField } from '@/components/growth/copy-field';
 import { WebhookOAuthPublicKeyDetails } from '@/components/settings/webhook-oauth-public-key';
 import {
   ReplayFailedDeliveriesForm,
@@ -76,7 +79,7 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
   const { slug } = await params;
   const ctx = await requireTenant(slug);
   if (!can(ctx, 'developer.manage')) notFound();
-  const { webhooks } = await getRuntime();
+  const { webhooks, config } = await getRuntime();
   const [
     endpoints,
     automationChoices,
@@ -595,6 +598,13 @@ export default async function WebhooksPage({ params }: { params: Promise<{ slug:
                       <WebhookOAuthPublicKeyDetails
                         publicKey={e.oauth.nextPublicKey}
                         inUse={e.oauth.publicKey}
+                      />
+                    ) : null}
+                    {e.oauth?.publicKey && e.oauth.jwksId ? (
+                      <CopyField
+                        label="JWKS URL"
+                        value={webhookOAuthJwksUrl(config.APP_BASE_URL, e.oauth.jwksId)}
+                        description={WEBHOOK_OAUTH_JWKS_HINT}
                       />
                     ) : null}
                     <p className="flex flex-wrap gap-1">

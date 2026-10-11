@@ -37,6 +37,7 @@ import {
   webhookDeliveries,
   webhookEndpoints,
   webhookEvents,
+  systemScope,
   type ApiScope,
   type ContactFieldType,
   type ContactSource,
@@ -165,6 +166,7 @@ import {
   type WebhookTemplateChoice,
   type WebhookTemplateStatus,
   type WebhookOAuthNextKeyAction,
+  type WebhookOAuthPublicJwk,
   webhookOAuthSignsJwts,
 } from './model';
 import {
@@ -176,7 +178,9 @@ import {
   webhookOAuthSecretAad,
   webhookOAuthSecretSignsJwt,
   webhookOAuthAudienceValid,
+  newWebhookOAuthJwksId,
   WEBHOOK_OAUTH_CLIENT_RE,
+  WEBHOOK_OAUTH_JWKS_ID_RE,
   WEBHOOK_OAUTH_JWT_SECRET_BYTES,
   WEBHOOK_OAUTH_SCOPE_RE,
   type WebhookOAuthClient,
@@ -4309,12 +4313,17 @@ export interface WebhookOAuthColumns {
   oauthNextPublicKey: string | null;
   /** The audience a client that signs JWTs names in them, or null: its token URL (ADR-369). */
   oauthAssertionAudience: string | null;
+  /** The public id of a client's JWKS URL, kept while it signs with a key pair (ADR-370). */
+  oauthJwksId: string | null;
 }
 
-/** The columns a client's token requests are made from: never the next key pair (ADR-368). */
+/**
+ * The columns a client's token requests are made from: never the next key pair (ADR-368), nor the
+ * JWKS URL's id (ADR-370).
+ */
 export type WebhookOAuthClientColumns = Omit<
   WebhookOAuthColumns,
-  'oauthNextPrivateKeyCiphertext' | 'oauthNextPublicKey'
+  'oauthNextPrivateKeyCiphertext' | 'oauthNextPublicKey' | 'oauthJwksId'
 >;
 
 export const NO_WEBHOOK_OAUTH: WebhookOAuthColumns = {
@@ -4328,6 +4337,7 @@ export const NO_WEBHOOK_OAUTH: WebhookOAuthColumns = {
   oauthNextPrivateKeyCiphertext: null,
   oauthNextPublicKey: null,
   oauthAssertionAudience: null,
+  oauthJwksId: null,
 };
 
 /** An OAuth client given for an endpoint, its token URL checked. */
@@ -4444,8 +4454,9 @@ export function checkedWebhookOAuth(
  * unless it asks for another; else it gets a new one, the private key sealed with the keyring,
  * bound to the company and the endpoint. Its next key pair (ADR-368) stays as it is unless the
  * change makes one (another binding: `webhook-oauth-next-key:`), uses it in place of the pair in
- * use, its private key sealed again under the binding of the key in use, or drops it. Any other
- * client keeps no key pair.
+ * use, its private key sealed again under the binding of the key in use, or drops it. Its JWKS
+ * URL's public id (ADR-370) is made with its first key pair and kept, the key pairs it serves
+ * changing behind it. Any other client keeps no key pair and no JWKS URL.
  */
 export function webhookOAuthColumns(
   keyring: Keyring,
@@ -4499,7 +4510,13 @@ export function webhookOAuthColumns(
     } else if (oauth.nextKey === 'use' || oauth.nextKey === 'drop') {
       next = { oauthNextPrivateKeyCiphertext: null, oauthNextPublicKey: null };
     }
-    return { ...client, oauthClientSecretCiphertext: null, ...inUse, ...next };
+    return {
+      ...client,
+      oauthClientSecretCiphertext: null,
+      ...inUse,
+      ...next,
+      oauthJwksId: current.oauthJwksId ?? newWebhookOAuthJwksId(),
+    };
   }
   let sealed = current.oauthClientSecretCiphertext;
   if (oauth.clientSecret !== null) {
@@ -4523,6 +4540,7 @@ export function webhookOAuthColumns(
     oauthPublicKey: null,
     oauthNextPrivateKeyCiphertext: null,
     oauthNextPublicKey: null,
+    oauthJwksId: null,
   };
 }
 
@@ -4620,6 +4638,34 @@ export function openWebhookOAuthClient(
     clientSecret: keyring.decryptString(
       oauthClientSecretCiphertext,
       webhookOAuthSecretAad(tenantId, endpointId),
+    ),
+  };
+}
+
+/**
+ * The JWK Set a client's JWKS URL serves (ADR-370): the public key in use and the next one, of the
+ * client signing with a key pair whose JWKS id is given, of a company not deleted; null for any
+ * other id. Read through `ops.webhook_oauth_jwks`, since the public route has no company to scope a
+ * read to; nothing but public keys comes back.
+ */
+export async function webhookOAuthPublicJwks(
+  db: Database,
+  jwksId: string,
+): Promise<{ keys: WebhookOAuthPublicJwk[] } | null> {
+  if (!WEBHOOK_OAUTH_JWKS_ID_RE.test(jwksId)) return null;
+  const res = await db.run(
+    systemScope,
+    (tx) =>
+      tx.execute<{ public_key: string; next_public_key: string | null }>(
+        sql`select public_key, next_public_key from ops.webhook_oauth_jwks(${jwksId})`,
+      ),
+    { accessMode: 'read only' },
+  );
+  const row = res.rows[0];
+  if (!row) return null;
+  return {
+    keys: [row.public_key, row.next_public_key].flatMap((pem) =>
+      pem ? [webhookOAuthPublicKey(pem).jwk] : [],
     ),
   };
 }
@@ -4806,6 +4852,7 @@ export async function lockWebhookEndpoint(
       oauthNextPrivateKeyCiphertext: webhookEndpoints.oauthNextPrivateKeyCiphertext,
       oauthNextPublicKey: webhookEndpoints.oauthNextPublicKey,
       oauthAssertionAudience: webhookEndpoints.oauthAssertionAudience,
+      oauthJwksId: webhookEndpoints.oauthJwksId,
     })
     .from(webhookEndpoints)
     .where(
@@ -5429,6 +5476,7 @@ export function createWebhooksService(deps: {
               oauthPublicKey: webhookEndpoints.oauthPublicKey,
               oauthNextPublicKey: webhookEndpoints.oauthNextPublicKey,
               oauthAssertionAudience: webhookEndpoints.oauthAssertionAudience,
+              oauthJwksId: webhookEndpoints.oauthJwksId,
               createdAt: webhookEndpoints.createdAt,
               createdBy: users.name,
               keyName: apiKeys.name,
@@ -5773,6 +5821,7 @@ export function createWebhooksService(deps: {
               oauthPublicKey,
               oauthNextPublicKey,
               oauthAssertionAudience,
+              oauthJwksId,
               ...endpoint
             } = r;
             return {
@@ -5789,6 +5838,7 @@ export function createWebhooksService(deps: {
                         ? webhookOAuthPublicKey(oauthNextPublicKey)
                         : null,
                       assertionAudience: oauthAssertionAudience,
+                      jwksId: oauthJwksId,
                     }
                   : null,
               channels: channelAccountIds

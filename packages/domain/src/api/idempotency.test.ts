@@ -196,6 +196,7 @@ describe('answers kept with an Idempotency-Key (ADR-339)', () => {
         publicKey: webhookOAuthPublicKey(generateWebhookOAuthKeyPair().publicKey),
         nextPublicKey: webhookOAuthPublicKey(generateWebhookOAuthKeyPair().publicKey),
         assertionAudience: `https://${'a'.repeat(WEBHOOK_LIMITS.urlLength - 8)}`,
+        jwksUrl: `https://app.example.com/api/webhook-oauth/jwks/${'a'.repeat(16)}`,
       },
       apiKeyId: ids(1)[0]!,
       createdAt: at,

@@ -19,6 +19,7 @@ import {
   WebhookOAuthTokenCache,
   verifyWebhookSignature,
   webhookOAuthKeyAad,
+  webhookOAuthPublicJwks,
   webhookOAuthNextKeyAad,
   webhookOAuthSecretAad,
   type ApiContext,
@@ -685,6 +686,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       publicKey: null,
       nextPublicKey: null,
       assertionAudience: null,
+      jwksUrl: null,
     });
     expect((await addThroughApi(key.ctx, 'oauth-1', body)).body.data.oauth).toEqual(endpoint.oauth);
     expect(await api().get(key.ctx, endpoint.id)).toEqual(endpoint);
@@ -841,6 +843,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       publicKey: null,
       nextPublicKey: null,
       assertionAudience: null,
+      jwksUrl: null,
     });
     const [added] = await fx.query<{ metadata: Record<string, unknown> }>(
       'SELECT metadata FROM app.audit_events WHERE tenant_id = $1 AND subject_id = $2',
@@ -895,6 +898,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       publicKey: null,
       nextPublicKey: null,
       assertionAudience: null,
+      jwksUrl: null,
     });
     // Moved to another token URL with its secret but no way named, it goes on signing JWTs.
     const elsewhere = `http://${HOST}:${port}/token/${randomBytes(6).toString('hex')}`;
@@ -916,6 +920,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       publicKey: null,
       nextPublicKey: null,
       assertionAudience: null,
+      jwksUrl: null,
     });
     expect(JSON.stringify([created.body, await api().list(key.ctx)])).not.toContain(SECRET);
   });
@@ -950,12 +955,21 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     const oauth = created.body.data.oauth as {
       clientAuthentication: string;
       publicKey: { keyId: string; jwk: Record<string, string>; pem: string };
+      jwksUrl: string;
     };
     expect(oauth).toMatchObject({
       tokenUrl,
       clientId: 'key-client',
       scope: null,
       clientAuthentication: 'private_key_jwt',
+    });
+    // Its JWKS URL (ADR-370), under the app's base URL, serves the public key answered.
+    expect(oauth.jwksUrl).toMatch(
+      /^https:\/\/app\.w360\.test\/api\/webhook-oauth\/jwks\/[a-z2-7]{16}$/,
+    );
+    const jwksId = oauth.jwksUrl.split('/').at(-1)!;
+    expect(await webhookOAuthPublicJwks(fx.dbs.app, jwksId)).toEqual({
+      keys: [oauth.publicKey.jwk],
     });
     expect(oauth.publicKey.jwk).toMatchObject({
       kty: 'RSA',
@@ -990,6 +1004,11 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     ).oauth;
     expect(replaced?.clientAuthentication).toBe('private_key_jwt');
     expect(replaced?.publicKey?.keyId).not.toBe(oauth.publicKey.keyId);
+    // The URL stays as the keys change, and serves the new key at once.
+    expect(replaced?.jwksUrl).toBe(oauth.jwksUrl);
+    expect(await webhookOAuthPublicJwks(fx.dbs.app, jwksId)).toEqual({
+      keys: [replaced?.publicKey?.jwk],
+    });
     // Only such a client has a key pair to replace.
     expect(
       await issue(
