@@ -517,6 +517,16 @@ export const apiPipelineSchema = z.object({
 });
 
 /** A CRM deal (ADR-253). */
+/** A custom deal field (ADR-373). */
+export const apiDealFieldSchema = z.object({
+  key: z.string().describe('What a deal’s `fields` holds its value under; never changes.'),
+  label: z.string().describe('The name members see.'),
+  type: z
+    .enum(['text', 'number', 'date', 'boolean'])
+    .describe('The type its values take; never changes.'),
+  createdAt: z.iso.datetime(),
+});
+
 export const apiDealSchema = z.object({
   id: z.uuid(),
   title: z.string().describe('“Deal (contact erased)” once its contact is erased.'),
@@ -547,6 +557,11 @@ export const apiDealSchema = z.object({
       'The member who owns the deal, by the id GET /members gives them (it lists the members still active); null when it has no owner.',
     ),
   expectedCloseOn: z.iso.date().nullable().describe('The day the deal is expected to close.'),
+  fields: z
+    .record(z.string(), z.union([z.string(), z.number(), z.boolean()]))
+    .describe(
+      'Its custom field values by field key (GET /deal-fields), only of fields the company still has: text, a number, a date as YYYY-MM-DD, or true/false. Emptied once its contact is erased.',
+    ),
   stageEnteredAt: z.iso.datetime().describe('When the deal entered its stage.'),
   lostReason: z
     .string()
@@ -3784,6 +3799,20 @@ export function buildOpenApiDocument(serverUrl: string) {
           },
         },
       },
+      '/deal-fields': {
+        get: {
+          operationId: 'listDealFields',
+          summary: 'The company’s custom deal fields',
+          description: `${scopeNote('deals.read')} The keys and types of the values deals’ \`fields\` hold, oldest first. Owners and administrators define them in Settings → Pipelines. Needs the CRM in the company’s plan (403, reason not_in_plan).`,
+          responses: {
+            '200': {
+              description: 'The fields (at most 50).',
+              content: json(dataOf({ type: 'array', items: ref('DealField') })),
+            },
+            ...errors(401, 403, 429, 500),
+          },
+        },
+      },
       '/deals': {
         get: {
           operationId: 'listDeals',
@@ -4831,6 +4860,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         CreatePipeline: jsonSchema(apiCreatePipelineSchema, 'input'),
         UpdatePipeline: jsonSchema(apiUpdatePipelineSchema, 'input'),
         Deal: jsonSchema(apiDealSchema),
+        DealField: jsonSchema(apiDealFieldSchema),
         DealHistoryEntry: jsonSchema(apiDealHistoryEntrySchema),
         CreateDeal: jsonSchema(apiCreateDealSchema, 'input'),
         UpdateDeal: jsonSchema(apiUpdateDealSchema, 'input'),
@@ -5004,6 +5034,7 @@ export const API_ROUTES = [
   ['post', '/pipelines'],
   ['patch', '/pipelines/{id}'],
   ['get', '/pipelines/{id}/forecast'],
+  ['get', '/deal-fields'],
   ['get', '/deals'],
   ['post', '/deals'],
   ['get', '/deals/{id}'],

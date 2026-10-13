@@ -1,5 +1,80 @@
 # Progress
 
+## 2026-10-13 — Importing deals from CSV (P4-04, H-012, ADR-374)
+
+Status: **Implemented; its database and browser tests run in CI only.** Companies moving from a
+spreadsheet or another CRM had to add every deal by hand.
+
+### Completed
+
+- **Domain:** `crm/deal-import.ts` previews a CSV (columns, first rows, suggested mapping) and
+  imports it into one pipeline in one transaction, for members with `crm.write` and
+  `contacts.import`: each row a deal for an existing live contact found by number, with a title, a
+  stage by name (or the first), an exact value, an owner by email, an expected close date and custom
+  field values; rows with errors are listed by number and skipped. Contacts, the pipeline and the
+  deal fields are locked in the order a member's new deal takes them; each deal gets a
+  `deal_created` timeline entry marked imported (and `deal.created` webhook events through the
+  existing trigger); the import is audited. No migration.
+- **Web:** CRM → Import CSV (`/c/<company>/crm/import`): file, preview, mapping, result with the
+  rows not imported.
+- **Tests:** unit (the request, every row check, national numbers, formula guards, the phones
+  looked up); integration (`crm.test.ts`: roles, contacts found and refused, erased contacts, the
+  audit, archived and foreign pipelines, unknown fields, isolation); e2e (an import with one refused
+  row, the deal on the board in its stage). Written for CI; the integration and e2e tests were not
+  run here.
+- **Docs:** ADR-374 (and ADR-373's "not built" note); SECURITY; THREAT-MODEL T331; ARCHITECTURE;
+  BACKLOG P4-04; the feature matrix (status unchanged).
+- **Mutation checks:** 16 deliberate regressions, all caught by the unit tests.
+
+### Test commands and results (local, 2026-10-13)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 149 files, 1587 tests passed                                    |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+
+## 2026-10-13 — Custom deal fields (P4-04, H-012, ADR-373)
+
+Status: **Implemented; its database and browser tests run in CI only.** Deals held only a title,
+a value, an owner and an expected close date; anything else a company tracked had to go in the
+title or a note.
+
+### Completed
+
+- **Database:** migration 0293 creates `app.crm_deal_fields` (key, label, type; row security,
+  `UPDATE (label)` only, tenant deletion step 305), adds `crm_deals.attributes` (jsonb object of at
+  most 16 KiB) and replaces `app.erase_contact` to clear an erased contact's deals' values.
+- **Domain:** `crm/deal-fields.ts` defines fields (owners and administrators, at most 50, audited by
+  key) and checks values by type, refusing unknown keys and over 12 KiB in all; deal writes with
+  values take the company's field lock shared before the deal, a deletion takes it exclusively and
+  strips the key from every deal. Deal pages, the timeline ("custom fields"), the deals CSV (a column
+  per field), the company export, the API (`fields` on `POST`/`PATCH /deals`, `Deal.fields`,
+  `GET /deal-fields`) and the OpenAPI document follow; the API's deal history leaves out changes of
+  values alone, which send no webhook event.
+- **Web:** Settings → Pipelines lists, adds, renames and deletes deal fields; the deal page edits
+  values beside the deal's details and shows them read-only to members who cannot edit.
+- **Tests:** unit (type checks, the size bound, kept and shown values, the CSV columns, the API
+  schemas); integration (`crm.test.ts`: definitions, roles, the limit, the audit, values, deletion,
+  erasure, isolation; `api.test.ts`: values through the API and the history); e2e (a field defined in
+  Settings → Pipelines and set on the deal page). Written for CI; the integration and e2e tests were
+  not run here.
+- **Docs:** ADR-373; SECURITY; THREAT-MODEL T330; ARCHITECTURE; DEPLOYMENT (0293); BACKLOG P4-04;
+  DATA-RETENTION; the feature matrix (status unchanged).
+- **Mutation checks:** 16 deliberate regressions, all caught by the unit tests (one after a test was
+  added).
+
+### Test commands and results (local, 2026-10-13)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 148 files, 1583 tests passed                                    |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+| migration 0293                                     | pglast parse check passed (syntax only)                         |
+
 ## 2026-10-13 — Self-signed certificates for webhook OAuth key pairs (P5-09, H-014, ADR-372)
 
 Status: **Implemented; its database and browser tests run in CI only.** Authorization servers

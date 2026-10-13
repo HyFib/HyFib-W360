@@ -1260,6 +1260,24 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   calls `app.merge_contacts` in the key's scope, audits as the key and answers the kept contact with
   the counts moved; with an `Idempotency-Key` the claim and the stored response share the merge's
   transaction.
+- **Custom deal fields (0293, ADR-373):** `crm/deal-fields.ts` adds, renames and deletes a
+  company's deal fields (`app.crm_deal_fields`: key, label, type; `UPDATE (label)` only) for
+  Settings → Pipelines, and checks values against them: `mergedDealAttributes` for the app's typed
+  strings, `apiMergedDealAttributes` for the API's JSON, both refusing unknown keys and over 12 KiB in
+  all, stored in `crm_deals.attributes` (jsonb object, at most 16 KiB). Additions and deletions take
+  `pg_advisory_xact_lock(hashtextextended('deal-fields:<company>', 0))`; deal writes with values
+  take it shared (`lockedDealFields`) before locking the deal, so a deletion's `attributes - key`
+  never misses a value written meanwhile. `GET /deal-fields` lists them, `Deal.fields` gives values,
+  the deals CSV adds a column per field, and the API's deal history leaves out changes of values
+  alone. 0293 also replaces `app.erase_contact` to clear the erased contact's deals' values.
+- **Deal import (ADR-374, no migration):** `crm/deal-import.ts` previews a CSV (columns, first
+  rows, suggested mapping) and imports it into one pipeline: `planDealRows` checks each row against
+  the company's records (contacts by E.164 number, active stages by name, CRM members by email,
+  deal fields by key) without the database, so its rules are unit-tested; `importDeals` locks the
+  named contacts (`FOR KEY SHARE`, id order), the pipeline (`FOR SHARE`) and the deal fields
+  (shared), then inserts deals and `deal_created` activities (`imported: true`) in batches of 200
+  and audits `crm.deals_imported`. Web: `app/c/[slug]/crm/import`, `DealImportWizard`, actions
+  `previewDealImportAction` and `importDealsAction`.
 - **Defining contact fields (0092, ADR-115):** `contacts/field-definitions.ts` adds, renames and
   deletes a company's custom fields for both Settings (`contacts/service.ts`, by id) and the API
   (`api/contact-fields.ts`, by key, scope `contact_fields.manage`); callers check who may and audit

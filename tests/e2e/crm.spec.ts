@@ -59,6 +59,48 @@ async function createPipeline(
   await expect(page.getByText('2. Qualified')).toBeVisible();
 }
 
+test('deals are imported from a CSV file into a pipeline, rows with errors listed (ADR-374)', async ({
+  page,
+}) => {
+  const { slug } = await createCompany(page, 'crmimport', 'Ishaan');
+  await createPipeline(page, slug);
+  await page.goto(`/c/${slug}/contacts/new`);
+  await page.getByLabel('Name').fill('Nisha Rao');
+  await page.getByLabel('Phone number').fill('+91 98765 43211');
+  await page.getByRole('button', { name: 'Add contact' }).click();
+  await expect(page.getByRole('heading', { name: 'Nisha Rao', level: 1 })).toBeVisible();
+
+  await page.goto(`/c/${slug}/crm`);
+  await page.getByRole('link', { name: 'Import CSV' }).click();
+  await expect(page.getByRole('heading', { name: 'Import deals' })).toBeVisible();
+  await page.getByLabel('CSV file').setInputFiles({
+    name: 'deals.csv',
+    mimeType: 'text/csv',
+    buffer: Buffer.from(
+      'Phone,Title,Stage,Value\n+919876543211,Imported plan,Qualified,1500\n+919876543211,Lost one,Lost,\n',
+    ),
+  });
+  await page.getByRole('button', { name: 'Preview' }).click();
+  // The columns are suggested from their names.
+  await expect(page.getByLabel("Contact's phone number")).toHaveValue('0');
+  await expect(page.getByLabel('Deal title')).toHaveValue('1');
+  await expect(page.getByLabel('Stage', { exact: true })).toHaveValue('2');
+  await expectNoHorizontalOverflow(page);
+  await page.getByRole('button', { name: 'Import 2 rows' }).click();
+  await expect(page.getByText('1 deals added, 1 rows with errors (of 2).')).toBeVisible();
+  await expect(
+    page.getByText('Not imported: The pipeline has no stage named “Lost”.'),
+  ).toBeVisible();
+
+  // The deal is on the board, in its stage, with its value.
+  await page.goto(`/c/${slug}/crm`);
+  await expect(page.getByRole('link', { name: 'Imported plan' })).toBeVisible();
+  await expect(page.getByLabel('Stage of Imported plan').locator('option:checked')).toHaveText(
+    'Qualified',
+  );
+  await expect(page.getByText('Nisha Rao · ₹1,500.00')).toBeVisible();
+});
+
 test('a deal moves through a pipeline with tasks, an emailed reminder, notes and reports', async ({
   page,
   request,
@@ -100,6 +142,29 @@ test('a deal moves through a pipeline with tasks, an emailed reminder, notes and
   await expect(page.getByLabel('Value (INR)')).toHaveValue('26000.00');
   await expect(timeline.getByText(/₹25,000.50 → ₹26,000.00/)).toBeVisible();
   await expect(page.getByText('Deal saved.')).toBeVisible();
+
+  // Custom deal fields (ADR-373): defined in Settings → Pipelines, filled in on the deal.
+  const fieldsUrl = page.url();
+  await page.goto(`/c/${slug}/settings/pipelines`);
+  await page.getByLabel('New deal field').fill('Seats');
+  await page.locator('#deal-field-type').selectOption('number');
+  await page.getByRole('button', { name: 'Add deal field' }).click();
+  await expect(page.getByRole('cell', { name: 'seats', exact: true })).toBeVisible();
+  await page.getByLabel('New deal field').fill('Signed');
+  await page.locator('#deal-field-type').selectOption('boolean');
+  await page.getByRole('button', { name: 'Add deal field' }).click();
+  await expect(page.getByRole('cell', { name: 'signed', exact: true })).toBeVisible();
+  await page.goto(fieldsUrl);
+  await page.getByLabel('Seats', { exact: true }).fill('many');
+  await page.getByRole('button', { name: 'Save deal' }).click();
+  await expect(page.getByText('Seats must be a number.')).toBeVisible();
+  await page.getByLabel('Seats', { exact: true }).fill('25');
+  await page.getByLabel('Signed', { exact: true }).selectOption('true');
+  await page.getByRole('button', { name: 'Save deal' }).click();
+  await expect(page.getByText('Deal saved.')).toBeVisible();
+  await expect(page.getByLabel('Seats', { exact: true })).toHaveValue('25');
+  await expect(page.getByLabel('Signed', { exact: true })).toHaveValue('true');
+  await expect(timeline.getByText('custom fields')).toBeVisible();
 
   // The board weighs it by its stage's chance of winning (ADR-242).
   const editedUrl = page.url();

@@ -956,6 +956,10 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
     ],
   },
   {
+    table: 'app.crm_deal_fields',
+    columns: ['id', 'key', 'label', 'type', 'created_at'],
+  },
+  {
     table: 'app.crm_deals',
     columns: [
       'id',
@@ -969,6 +973,7 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
       'status',
       'lost_reason',
       'expected_close_on',
+      'attributes',
       'stage_entered_at',
       'closed_at',
       'closed_by_membership_id',

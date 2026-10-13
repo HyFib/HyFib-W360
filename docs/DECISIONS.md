@@ -14749,3 +14749,94 @@ without a new key pair, a warning before a certificate expires, a chain in `x5c`
 Uncertain, as none of it could be tried against Entra from here: whether Entra minds a `kid`
 beside `x5t` (its examples send none), whether it needs `nbf` or only lists it, and whether it
 refuses EC certificates outright.
+
+## ADR-373 Custom deal fields (P4-04) (2026-10-13)
+
+Context: contacts take custom fields a company defines (ADR-115), but deals hold only a title, a
+value, an owner and an expected close date. Companies tracking anything else about a deal (seats,
+a renewal date, whether a contract is signed) had nowhere to put it but the title or a note.
+
+Decision:
+
+- **Defined per company, as contact fields are:** `app.crm_deal_fields` (migration 0293) holds a
+  key (`^[a-z][a-z0-9_]{0,39}$`, made from the label unless given), a label of 1 to 80 characters
+  and a type: text, number, date or yes/no. Keys are unique per company; keys and types never
+  change, so values already stored keep their meaning; a rename changes only the label (the table
+  grants `UPDATE (label)` only). At most 50 per company: additions take
+  `pg_advisory_xact_lock(hashtextextended('deal-fields:<company>', 0))` before counting.
+- **Who may:** owners and administrators (`tenant.settings.manage`) add, rename and delete them in
+  Settings → Pipelines; anyone who reads the CRM sees them. Every change is audited
+  (`crm.deal_field_created`, `crm.deal_field_renamed`, `crm.deal_field_deleted`) with the field's
+  key, never values; a rename to the same label changes nothing and leaves no trace.
+- **Values on the deal:** `crm_deals.attributes` (jsonb object, at most 16,384 bytes, default `{}`)
+  holds values by key, checked against the field's type as contact values are: text of up to 500
+  characters, a number of at most 15 digits before the point and 6 after, a date as YYYY-MM-DD,
+  yes/no as a boolean. Members fill them on the deal page with the deal's other details (empty
+  removes one); the API takes them as `fields` on `POST /deals` and `PATCH /deals/{id}`, each as
+  JSON of its type, `null` removing one, keys left out keeping theirs; a key no field has is refused,
+  naming it, and values over 12 KiB of JSON in all are refused by name before the database's
+  bound is reached. `GET /deal-fields` (scope `deals.read`) lists the definitions; `Deal.fields` gives the
+  values of fields that still exist. A change of values alone is a `deal_updated` timeline entry
+  naming "custom fields" and bumps the deal's version; the same values again change nothing.
+- **Deletion and races:** deleting a field takes the company's field lock exclusively, deletes the
+  row, then strips the key from every deal (`attributes - key`). Deal writes that carry values take
+  the same lock shared before locking the deal, so a write either finishes first and its value is
+  stripped, or waits and no longer finds the field (refused as "This deal field no longer exists.").
+  The lock order (fields, then deal) matches the deletion's, so the two cannot deadlock.
+- **Erasure and deletion of the company:** `app.erase_contact` (replaced in 0293 from 0145) also
+  clears the erased contact's deals' values (`attributes = '{}'`), as it blanks their title and lost
+  reason, since values may name the customer. Deal fields are a tenant deletion step (305).
+- **Export:** the deals CSV adds one column per field after the fixed ones, headed by its key, as
+  the contacts CSV does (a key equal to a fixed column's name gives two columns of that name, as
+  for contacts); values are formula-safe like every cell. The company data export includes
+  `app.crm_deal_fields` and `crm_deals.attributes`.
+
+Not built: deal webhook events for a change of values (deal.updated names title, valueMinor and
+expectedCloseOn only, so a change of values alone sends no event, and the API's deal history does
+not list it), choice or select types, an order of fields other than when they were added, defining
+fields through the API, values on the new-deal form in the app (a deal is created, then its values
+set on its page; the API takes them on creation), values set by automation steps, filtering or
+reporting by a value, and CSV import of deals (since built: ADR-374, with values mapped by key).
+
+## ADR-374 Importing deals from CSV (P4-04) (2026-10-13)
+
+Context: companies moving to HyFib from a spreadsheet or another CRM had to add each deal by hand
+(or write an integration against `POST /deals`). Contacts could be imported (Contacts → Import),
+deals could not; "deal import" was listed as remaining under P4-04.
+
+Decision:
+
+- **Who may:** members who both change deals and import contacts (`crm.write` and
+  `contacts.import`): owners, administrators and supervisors. Agents (no import) and marketers (no
+  CRM) cannot. CRM → Import CSV, at `/c/<company>/crm/import`.
+- **Two steps, as contacts are imported:** a preview of the file's columns and first five rows,
+  with columns suggested from their names, then the import with an explicit mapping into one active
+  pipeline. The file is sent again for the import; nothing is stored between the steps, and the
+  file is never kept. Files of at most 1,000 rows and just under 1 MB (the server action body
+  limit), read by the contact importer's RFC 4180 reader with its formula guards undone.
+- **Each row a deal for an existing contact:** the contact is the company's live (not erased)
+  contact with the row's number, normalized as the contact import does (international digits, or
+  national ones for a calling code). A row whose number no contact has is refused: deal import never
+  creates contacts, so no number enters the company without the contact import's consent handling.
+  The title is required (1 to 120 characters). The stage is a stage name of the pipeline (any case),
+  or its first active stage when the column is left out or empty. The value is an amount in the
+  pipeline's currency, exact in minor units as members type it. The owner is the email of an active
+  member who can use the CRM. The expected close date is YYYY-MM-DD. Custom deal fields (ADR-373)
+  map by key and are checked by type, as on the deal page.
+- **One transaction, rows with errors skipped:** each row with a problem is listed by its row
+  number and the problem and not imported; the others are added. The contacts named are locked
+  against erasure (`FOR KEY SHARE`, in id order) before the pipeline (`FOR SHARE`, against archiving)
+  and the deal fields (shared, ADR-373), the order a member's new deal takes them. An archived
+  pipeline, a pipeline of another company, a mapping past the file's columns or naming a field the
+  company does not have is refused before anything is added.
+- **Added as members add deals:** each deal is recorded as created by the importing member, with a
+  `deal_created` timeline entry marked `imported`, and sends `deal.created` to webhook endpoints
+  that take it, as any new deal does (the existing trigger). The import is audited once
+  (`crm.deals_imported`, subject the pipeline): the file name, rows, deals added and rows with
+  errors, never the rows' contents.
+- **Not idempotent:** every row adds a deal, even when the contact already has one in the pipeline,
+  so importing a file again adds its deals again; the page says so before the import. No migration.
+
+Not built: creating contacts from a deal file, matching contacts by email or WhatsApp user id,
+updating existing deals from a file, importing closed (won or lost) deals, a record of past deal
+imports beside the audit log, importing through the public API, and products on deals.

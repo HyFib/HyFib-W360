@@ -1614,6 +1614,14 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    certificate of another key. Remove certificates (a new key pair without one) before rolling web
    servers back to an image from before it.
 
+   Migration 0293 (ADR-373) creates `app.crm_deal_fields` (row security, its tenant deletion step
+   and definer policies), adds `attributes` to `app.crm_deals` (jsonb, default `{}`, no rewrite)
+   with a check of an object of at most 16 KiB and its update grant, and replaces
+   `app.erase_contact` (as 0145 left it) to clear the erased contact's deals' values, whichever
+   image calls it. It is additive: old web servers neither show nor write values, and their deal
+   updates leave `attributes` as it is. Rolling an image back leaves the table and column in place,
+   unused.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back
