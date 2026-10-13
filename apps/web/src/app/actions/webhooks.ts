@@ -38,6 +38,8 @@ interface WebhookOAuthActionInput {
   assertionAudience?: string;
   /** The algorithm of the key pairs the change makes (ADR-371). */
   keyAlgorithm?: WebhookOAuthKeyAlgorithm;
+  /** Whether the key pairs the change makes get a self-signed certificate (ADR-372). */
+  keyCertificate?: boolean;
 }
 export async function createWebhookEndpointAction(
   slug: string,

@@ -1912,24 +1912,53 @@ export function webhookTakesCrmChanges(eventTypes: readonly WebhookEventType[]):
 }
 
 /**
+ * The members that name a key pair's certificate in its JWK when it has one (ADR-372): the
+ * certificate's DER as base64 (RFC 7517 section 4.7) and its SHA-1 and SHA-256 thumbprints,
+ * base64url (sections 4.8 and 4.9).
+ */
+export interface WebhookOAuthJwkCertificate {
+  x5c?: [string];
+  x5t?: string;
+  'x5t#S256'?: string;
+}
+
+/**
  * The public key of a client that signs with a key pair, as a JWK (RFC 7517): the RSA modulus and
  * exponent (RFC 7518 section 6.3, ADR-367) or, for ES256, the curve and the point (section 6.2,
- * ADR-371); its key id, what it is for, and the algorithm it signs with.
+ * ADR-371); its key id, what it is for, the algorithm it signs with, and its certificate, if it has
+ * one (ADR-372).
  */
-export type WebhookOAuthPublicJwk =
+export type WebhookOAuthPublicJwk = (
   | { kty: 'RSA'; n: string; e: string; kid: string; use: 'sig'; alg: 'RS256' | 'PS256' }
-  | { kty: 'EC'; crv: 'P-256'; x: string; y: string; kid: string; use: 'sig'; alg: 'ES256' };
+  | { kty: 'EC'; crv: 'P-256'; x: string; y: string; kid: string; use: 'sig'; alg: 'ES256' }
+) &
+  WebhookOAuthJwkCertificate;
+
+/**
+ * The self-signed certificate HyFib made for a key pair (ADR-372), for authorization servers that
+ * register a certificate rather than a bare key: as PEM, its thumbprints as assertions name them
+ * (`x5t`, SHA-1, and `x5t#S256`, SHA-256, of its DER, base64url) and when it is valid (ISO 8601).
+ * Public, like the key it holds.
+ */
+export interface WebhookOAuthCertificate {
+  pem: string;
+  x5t: string;
+  x5tS256: string;
+  validFrom: string;
+  validTo: string;
+}
 
 /**
  * The public key a `private_key_jwt` client's assertions are checked with (ADR-367), which the
  * company registers with its authorization server: its key id (the JWK thumbprint of RFC 7638,
- * named in each assertion's `kid` header), the key as a JWK and as SPKI PEM. Public: shown, never
- * the private key.
+ * named in each assertion's `kid` header), the key as a JWK and as SPKI PEM, and the certificate
+ * made for it, or null: none was asked for (ADR-372). Public: shown, never the private key.
  */
 export interface WebhookOAuthPublicKey {
   keyId: string;
   jwk: WebhookOAuthPublicJwk;
   pem: string;
+  certificate: WebhookOAuthCertificate | null;
 }
 
 /**
@@ -1965,6 +1994,10 @@ export interface WebhookEndpointOAuth {
 /** What a client's JWKS URL is for, as Settings → Webhooks says (ADR-370). */
 export const WEBHOOK_OAUTH_JWKS_HINT =
   'Or give the authorization server this URL: it serves the public key in use and the next one, so the server picks up a next key pair by itself.';
+
+/** What a key pair's certificate is for, as Settings → Webhooks says where one is asked for (ADR-372). */
+export const WEBHOOK_OAUTH_CERTIFICATE_HINT =
+  'For an authorization server that registers a certificate rather than a key, such as Microsoft Entra ID (which takes RSA keys: choose PS256 or RS256). HyFib makes a self-signed certificate holding the new public key, valid for a year, and names it in each JWT’s x5t and x5t#S256 headers. Register it before HyFib signs with the key pair, and switch to a next one before it expires.';
 
 /**
  * What a change does with the next key pair of a client that signs with a key pair (ADR-368): make
@@ -2019,17 +2052,17 @@ export const WEBHOOK_OAUTH_CLIENT_AUTHENTICATION_LABELS: Record<WebhookOAuthClie
 
 /**
  * How Settings → Webhooks describes an endpoint's OAuth client (ADR-173, ADR-357, ADR-366,
- * ADR-367), the next key pair it has not used yet (ADR-368), each key's algorithm (ADR-371) and the
- * audience its JWTs name (ADR-369).
+ * ADR-367), the next key pair it has not used yet (ADR-368), each key's algorithm (ADR-371) and
+ * certificate (ADR-372), and the audience its JWTs name (ADR-369).
  */
 export function webhookOAuthText(oauth: WebhookEndpointOAuth): string {
   const host = webhookHost(oauth.tokenUrl) ?? oauth.tokenUrl;
   const scope = oauth.scope ? `, scope ${oauth.scope}` : '';
+  const key = ({ keyId, jwk, certificate }: WebhookOAuthPublicKey) =>
+    `key ${keyId}, ${jwk.alg}${certificate ? `, certificate valid until ${certificate.validTo.slice(0, 10)}` : ''}`;
   const keys = [
-    ...(oauth.publicKey ? [`key ${oauth.publicKey.keyId}, ${oauth.publicKey.jwk.alg}`] : []),
-    ...(oauth.nextPublicKey
-      ? [`next key ${oauth.nextPublicKey.keyId}, ${oauth.nextPublicKey.jwk.alg}, not used yet`]
-      : []),
+    ...(oauth.publicKey ? [key(oauth.publicKey)] : []),
+    ...(oauth.nextPublicKey ? [`next ${key(oauth.nextPublicKey)}, not used yet`] : []),
   ];
   const audience = oauth.assertionAudience ? ` addressed to ${oauth.assertionAudience}` : '';
   const how =

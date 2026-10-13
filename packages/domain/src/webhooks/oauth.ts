@@ -11,7 +11,8 @@ import {
 import { EgressError, type EgressClient, type EgressRequest } from '@w360/core/egress';
 import type { WebhookOAuthClientAuth, WebhookOAuthKeyAlgorithm } from '@w360/db';
 import { randomToken, TOKEN_ALPHABET } from '../growth/model';
-import { WEBHOOK_LIMITS, type WebhookOAuthPublicKey } from './model';
+import { WEBHOOK_LIMITS, type WebhookOAuthCertificate, type WebhookOAuthPublicKey } from './model';
+import { readWebhookOAuthCertificate } from './x509';
 
 /**
  * OAuth 2.0 client credentials for webhook endpoints (ADR-173). An endpoint may get an access token
@@ -70,6 +71,11 @@ export type WebhookOAuthClient = {
       keyId: string;
       /** The algorithm it signs with, chosen when the pair was made (ADR-371). */
       keyAlgorithm: WebhookOAuthKeyAlgorithm;
+      /**
+       * The thumbprints of the certificate made for the pair, named in each assertion's `x5t` and
+       * `x5t#S256` headers, or null: the pair has none (ADR-372).
+       */
+      certificate: Pick<WebhookOAuthCertificate, 'x5t' | 'x5tS256'> | null;
     }
 );
 
@@ -188,15 +194,28 @@ export function generateWebhookOAuthKeyPair(
  * (RFC 7518 section 6.3.1) or, for ES256, of its curve and point (section 6.2.1, ADR-371), with its
  * key id, the JWK thumbprint of RFC 7638 (SHA-256 of the required members in lexicographic order
  * without whitespace, base64url), and the algorithm it signs with; and the PEM it was read from.
- * Throws for a key of another kind than the algorithm takes.
+ * With the certificate made for the pair (ADR-372), the JWK names it too (`x5c`, `x5t`,
+ * `x5t#S256`), and it is shown beside the key. Throws for a key of another kind than the algorithm
+ * takes, and for a certificate of another key.
  */
 export function webhookOAuthPublicKey(
   pem: string,
   algorithm: WebhookOAuthKeyAlgorithm = WEBHOOK_OAUTH_DEFAULT_KEY_ALGORITHM,
+  certificatePem: string | null = null,
 ): WebhookOAuthPublicKey {
-  const jwk = createPublicKey(pem).export({ format: 'jwk' });
+  const key = createPublicKey(pem);
+  const jwk = key.export({ format: 'jwk' });
   const thumbprint = (members: object) =>
     createHash('sha256').update(JSON.stringify(members)).digest('base64url');
+  const read = certificatePem === null ? null : readWebhookOAuthCertificate(certificatePem, key);
+  const named = read
+    ? {
+        x5c: [read.x5c] as [string],
+        x5t: read.certificate.x5t,
+        'x5t#S256': read.certificate.x5tS256,
+      }
+    : {};
+  const certificate = read?.certificate ?? null;
   if (algorithm === 'ES256') {
     if (
       jwk.kty !== 'EC' ||
@@ -210,8 +229,9 @@ export function webhookOAuthPublicKey(
     const keyId = thumbprint({ crv: 'P-256', kty: 'EC', x, y });
     return {
       keyId,
-      jwk: { kty: 'EC', crv: 'P-256', x, y, kid: keyId, use: 'sig', alg: algorithm },
+      jwk: { kty: 'EC', crv: 'P-256', x, y, kid: keyId, use: 'sig', alg: algorithm, ...named },
       pem,
+      certificate,
     };
   }
   if (jwk.kty !== 'RSA' || typeof jwk.n !== 'string' || typeof jwk.e !== 'string') {
@@ -219,7 +239,12 @@ export function webhookOAuthPublicKey(
   }
   const { n, e } = jwk;
   const keyId = thumbprint({ e, kty: 'RSA', n });
-  return { keyId, jwk: { kty: 'RSA', n, e, kid: keyId, use: 'sig', alg: algorithm }, pem };
+  return {
+    keyId,
+    jwk: { kty: 'RSA', n, e, kid: keyId, use: 'sig', alg: algorithm, ...named },
+    pem,
+    certificate,
+  };
 }
 
 /**
@@ -268,11 +293,13 @@ function keySignature(
 /**
  * A client assertion (RFC 7523 section 3): a JWT whose issuer and subject are the client's
  * identifier and whose audience is the token URL, or the audience the client names (ADR-369), with
- * a unique id, the time it was made and an expiry five minutes later. For `client_secret_jwt`
- * (ADR-366) signed with HMAC SHA-256 keyed by the client's secret (`HS256`), so the server checks
- * the secret without receiving it; for `private_key_jwt` (ADR-367) signed with the client's private
- * key with the algorithm its pair was made for (RS256 unless another was chosen, ADR-371), its
- * header naming the key and the algorithm, so the server checks it with the public key registered.
+ * a unique id, the time it was made, which is also when it starts being valid (`nbf`, ADR-372), and
+ * an expiry five minutes later. For `client_secret_jwt` (ADR-366) signed with HMAC SHA-256 keyed by
+ * the client's secret (`HS256`), so the server checks the secret without receiving it; for
+ * `private_key_jwt` (ADR-367) signed with the client's private key with the algorithm its pair was
+ * made for (RS256 unless another was chosen, ADR-371), its header naming the key and the algorithm,
+ * and the certificate made for the pair by its thumbprints when it has one (ADR-372), so the server
+ * checks it with the public key or certificate registered.
  */
 export function webhookOAuthClientAssertion(
   client: WebhookOAuthClient,
@@ -283,7 +310,14 @@ export function webhookOAuthClientAssertion(
   const issuedAt = Math.floor(at.getTime() / 1000);
   const header =
     client.clientAuthentication === 'private_key_jwt'
-      ? { alg: client.keyAlgorithm, kid: client.keyId, typ: 'JWT' }
+      ? {
+          alg: client.keyAlgorithm,
+          kid: client.keyId,
+          typ: 'JWT',
+          ...(client.certificate
+            ? { x5t: client.certificate.x5t, 'x5t#S256': client.certificate.x5tS256 }
+            : {}),
+        }
       : { alg: 'HS256', typ: 'JWT' };
   const signed = `${part(header)}.${part({
     iss: client.clientId,
@@ -291,6 +325,7 @@ export function webhookOAuthClientAssertion(
     aud: client.assertionAudience ?? client.tokenUrl,
     jti,
     iat: issuedAt,
+    nbf: issuedAt,
     exp: issuedAt + WEBHOOK_OAUTH_ASSERTION_SECONDS,
   })}`;
   const signature =
@@ -467,6 +502,9 @@ const clientFingerprint = (client: WebhookOAuthClient) =>
         client.clientAuthentication,
         client.assertionAudience,
         client.clientAuthentication === 'private_key_jwt' ? client.keyAlgorithm : null,
+        client.clientAuthentication === 'private_key_jwt'
+          ? (client.certificate?.x5tS256 ?? null)
+          : null,
       ]),
     )
     .digest('base64url');
@@ -474,8 +512,8 @@ const clientFingerprint = (client: WebhookOAuthClient) =>
 /**
  * The access tokens a worker keeps for webhook endpoints (ADR-173), in its memory only: never
  * stored, logged or shown. A token is kept for its endpoint and client, so a changed token URL,
- * identifier, secret or key, scope, way of authenticating, audience or key algorithm gets a new
- * one, and until a minute before it expires (at most a day).
+ * identifier, secret or key, scope, way of authenticating, audience, key algorithm or certificate
+ * gets a new one, and until a minute before it expires (at most a day).
  * The deliveries of an endpoint that need a token at the same time share one request; a token
  * without a lifetime serves only them, and a failure is never kept: the next attempt asks again.
  */

@@ -1,4 +1,12 @@
-import { createHmac, createPublicKey, randomBytes, sign, verify } from 'node:crypto';
+import {
+  createHash,
+  createHmac,
+  createPublicKey,
+  randomBytes,
+  sign,
+  verify,
+  X509Certificate,
+} from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import { isAppError, jsonbSize, Keyring, sha256Hex } from '@w360/core';
@@ -243,8 +251,11 @@ import {
   webhookOAuthClientAuthAudit,
   webhookOAuthNextKeyAudit,
   webhookOAuthKeyAlgorithmAudit,
+  webhookOAuthKeyCertificateAudit,
   WEBHOOK_OAUTH_KEY_ALGORITHM_UNUSED,
   WEBHOOK_OAUTH_KEY_ALGORITHM_WAY,
+  WEBHOOK_OAUTH_KEY_CERTIFICATE_UNUSED,
+  WEBHOOK_OAUTH_KEY_CERTIFICATE_WAY,
   webhookOAuthColumns,
   webhookOAuthPublicJwks,
   webhookOAuthSchema,
@@ -430,6 +441,8 @@ import {
 const SECRET = 'whsec_test-secret-one';
 const OTHER = 'whsec_test-secret-two';
 const BODY = '{"id":"0192a1b2-0000-7000-8000-000000000001","type":"ping"}';
+/** When these tests make key pairs, and the certificates made with them (ADR-372). */
+const madeAt = new Date('2026-10-11T04:00:00Z');
 
 describe('webhook signatures', () => {
   it('signs "<timestamp>.<body>" with HMAC-SHA256 as hex', () => {
@@ -4502,19 +4515,20 @@ describe('endpoint audit entries within an audit entry’s 8 KiB (ADR-336, ADR-3
       eventTypes: [...WEBHOOK_EVENT_TYPES],
       ...Object.fromEntries(keys.map((key) => [key, tags(30)])),
       // Every OAuth field at once, more than an entry holds: a secret's or a key pair's, what
-      // became of a next key pair (ADR-368), the algorithm of a pair made (ADR-371) and the
-      // audience's host (ADR-369).
+      // became of a next key pair (ADR-368), the algorithm of a pair made (ADR-371) and its
+      // certificate (ADR-372), and the audience's host (ADR-369).
       oauthTokenHost: 'o'.repeat(253),
       oauthSecretReplaced: true,
       oauthKeyReplaced: true,
       oauthNextKey: 'dropped',
       oauthKeyAlgorithm: 'ES256',
+      oauthKeyCertificate: true,
       oauthAudienceHost: 'a'.repeat(253),
       oauthClientAuthentication: 'client_secret_basic',
     });
     expect(Object.keys(whole.lists as object)).toHaveLength(62);
-    // 4,434 bytes since the audience's host (ADR-369, at most 278 bytes) and the algorithm of a
-    // key pair made (ADR-371, 30 bytes); the bound stays close.
+    // 4,461 bytes since the audience's host (ADR-369, at most 278 bytes), the algorithm of a key
+    // pair made (ADR-371, 30 bytes) and its certificate (ADR-372, 27 bytes); the bound stays close.
     expect(jsonbSize(whole)).toBeLessThan(4500);
   });
 });
@@ -4977,6 +4991,7 @@ describe('endpoint OAuth clients (ADR-173)', () => {
       nextKey: null,
       assertionAudience: null,
       keyAlgorithm: null,
+      keyCertificate: null,
     });
     for (const [tokenUrl, message] of [
       ['http://auth.example.com/t', 'Only https:// addresses can be called.'],
@@ -5001,6 +5016,7 @@ describe('endpoint OAuth clients (ADR-173)', () => {
       endpoint,
       checkedWebhookOAuth({ ...base, clientSecret: 's' }, NO_WEBHOOK_OAUTH, policy),
       NO_WEBHOOK_OAUTH,
+      madeAt,
     );
     // The same token URL keeps the stored secret, with a new identifier and scope.
     const kept = checkedWebhookOAuth(
@@ -5009,7 +5025,7 @@ describe('endpoint OAuth clients (ADR-173)', () => {
       policy,
     );
     expect(kept.clientSecret).toBeNull();
-    expect(webhookOAuthColumns(ring, tenant, endpoint, kept, stored)).toEqual({
+    expect(webhookOAuthColumns(ring, tenant, endpoint, kept, stored, madeAt)).toEqual({
       oauthTokenUrl: base.tokenUrl,
       oauthClientId: 'renamed',
       oauthClientSecretCiphertext: stored.oauthClientSecretCiphertext,
@@ -5023,6 +5039,8 @@ describe('endpoint OAuth clients (ADR-173)', () => {
       oauthJwksId: null,
       oauthKeyAlgorithm: null,
       oauthNextKeyAlgorithm: null,
+      oauthCertificate: null,
+      oauthNextCertificate: null,
     });
     // Another token URL would receive the secret, or what it signs: it is needed again.
     expect(
@@ -5051,6 +5069,7 @@ describe('endpoint OAuth clients (ADR-173)', () => {
         policy,
       ),
       NO_WEBHOOK_OAUTH,
+      madeAt,
     );
     expect(columns.oauthClientSecretCiphertext).not.toContain('s3cret');
     expect(
@@ -5070,7 +5089,9 @@ describe('endpoint OAuth clients (ADR-173)', () => {
     expect(() => openWebhookOAuthClient(ring, other, endpoint, columns)).toThrow();
     expect(() => openWebhookOAuthClient(ring, tenant, other, columns)).toThrow();
     // No client keeps nothing, and opens as none.
-    expect(webhookOAuthColumns(ring, tenant, endpoint, null, columns)).toEqual(NO_WEBHOOK_OAUTH);
+    expect(webhookOAuthColumns(ring, tenant, endpoint, null, columns, madeAt)).toEqual(
+      NO_WEBHOOK_OAUTH,
+    );
     expect(openWebhookOAuthClient(ring, tenant, endpoint, NO_WEBHOOK_OAUTH)).toBeNull();
   });
 
@@ -5100,6 +5121,7 @@ describe('endpoint OAuth clients (ADR-173)', () => {
       endpoint,
       checkedWebhookOAuth(webhookOAuthSchema.parse(post), NO_WEBHOOK_OAUTH, policy),
       NO_WEBHOOK_OAUTH,
+      madeAt,
     );
     expect(columns.oauthClientAuth).toBe('client_secret_post');
     expect(openWebhookOAuthClient(ring, tenant, endpoint, columns)?.clientAuthentication).toBe(
@@ -5109,9 +5131,9 @@ describe('endpoint OAuth clients (ADR-173)', () => {
     // connector written before ADR-357 rotating the secret does; one naming it changes it.
     const rotated = checkedWebhookOAuth({ ...base, clientSecret: 'rotated' }, columns, policy);
     expect(rotated.clientAuthentication).toBe('client_secret_post');
-    expect(webhookOAuthColumns(ring, tenant, endpoint, rotated, columns).oauthClientAuth).toBe(
-      'client_secret_post',
-    );
+    expect(
+      webhookOAuthColumns(ring, tenant, endpoint, rotated, columns, madeAt).oauthClientAuth,
+    ).toBe('client_secret_post');
     expect(
       checkedWebhookOAuth({ ...base, clientAuthentication: 'client_secret_basic' }, columns, policy)
         .clientAuthentication,
@@ -5133,7 +5155,7 @@ describe('endpoint OAuth clients (ADR-173)', () => {
       ).clientAuthentication,
     ).toBe('client_secret_basic');
     // Removing the client puts the default back.
-    expect(webhookOAuthColumns(ring, tenant, endpoint, null, columns).oauthClientAuth).toBe(
+    expect(webhookOAuthColumns(ring, tenant, endpoint, null, columns, madeAt).oauthClientAuth).toBe(
       'client_secret_basic',
     );
     expect(NO_WEBHOOK_OAUTH.oauthClientAuth).toBe('client_secret_basic');
@@ -5149,6 +5171,7 @@ describe('endpoint OAuth clients (ADR-173)', () => {
       endpoint,
       checkedWebhookOAuth(webhookOAuthSchema.parse(jwt), NO_WEBHOOK_OAUTH, policy),
       NO_WEBHOOK_OAUTH,
+      madeAt,
     );
     expect(signing.oauthClientAuth).toBe('client_secret_jwt');
     expect(openWebhookOAuthClient(ring, tenant, endpoint, signing)).toMatchObject({
@@ -5170,6 +5193,7 @@ describe('endpoint OAuth clients (ADR-173)', () => {
           endpoint,
           checkedWebhookOAuth({ ...jwt, clientSecret: 'k'.repeat(31) }, NO_WEBHOOK_OAUTH, policy),
           NO_WEBHOOK_OAUTH,
+          madeAt,
         ),
       ),
     ).toEqual(shortRefusal);
@@ -5181,6 +5205,7 @@ describe('endpoint OAuth clients (ADR-173)', () => {
       endpoint,
       checkedWebhookOAuth({ ...base, clientSecret: 'short' }, NO_WEBHOOK_OAUTH, policy),
       NO_WEBHOOK_OAUTH,
+      madeAt,
     );
     const toJwt = { ...base, clientAuthentication: 'client_secret_jwt' as const };
     expect(
@@ -5191,6 +5216,7 @@ describe('endpoint OAuth clients (ADR-173)', () => {
           endpoint,
           checkedWebhookOAuth(toJwt, basicShort, policy),
           basicShort,
+          madeAt,
         ),
       ),
     ).toEqual(shortRefusal);
@@ -5200,6 +5226,7 @@ describe('endpoint OAuth clients (ADR-173)', () => {
       endpoint,
       checkedWebhookOAuth({ ...base, clientSecret: long }, NO_WEBHOOK_OAUTH, policy),
       NO_WEBHOOK_OAUTH,
+      madeAt,
     );
     expect(
       webhookOAuthColumns(
@@ -5208,6 +5235,7 @@ describe('endpoint OAuth clients (ADR-173)', () => {
         endpoint,
         checkedWebhookOAuth(toJwt, basicLong, policy),
         basicLong,
+        madeAt,
       ).oauthClientAuth,
     ).toBe('client_secret_jwt');
     expect(
@@ -5243,6 +5271,7 @@ describe('endpoint OAuth clients (ADR-173)', () => {
       endpoint,
       checkedWebhookOAuth({ ...base, clientSecret: long }, NO_WEBHOOK_OAUTH, policy),
       NO_WEBHOOK_OAUTH,
+      madeAt,
     );
     expect(
       refusal(() =>
@@ -5252,6 +5281,7 @@ describe('endpoint OAuth clients (ADR-173)', () => {
           endpoint,
           checkedWebhookOAuth(toJwt, unreadable, policy),
           unreadable,
+          madeAt,
         ),
       ),
     ).toEqual([
@@ -5307,6 +5337,7 @@ describe('endpoint OAuth clients (ADR-173)', () => {
       endpoint,
       checkedWebhookOAuth(signer, NO_WEBHOOK_OAUTH, policy),
       NO_WEBHOOK_OAUTH,
+      madeAt,
     );
     expect(made).toMatchObject({
       oauthTokenUrl: base.tokenUrl,
@@ -5342,6 +5373,7 @@ describe('endpoint OAuth clients (ADR-173)', () => {
       privateKey,
       keyId: webhookOAuthPublicKey(made.oauthPublicKey!).keyId,
       keyAlgorithm: 'RS256',
+      certificate: null,
     });
     // A change keeps it, the way too, whatever else changes, the token URL included; one asking for
     // a new key pair gets one.
@@ -5350,7 +5382,7 @@ describe('endpoint OAuth clients (ADR-173)', () => {
       made,
       policy,
     );
-    expect(webhookOAuthColumns(ring, tenant, endpoint, elsewhere, made)).toMatchObject({
+    expect(webhookOAuthColumns(ring, tenant, endpoint, elsewhere, made, madeAt)).toMatchObject({
       oauthTokenUrl: 'https://elsewhere.example.com/t',
       oauthScope: 'read',
       oauthClientAuth: 'private_key_jwt',
@@ -5358,7 +5390,7 @@ describe('endpoint OAuth clients (ADR-173)', () => {
       oauthPublicKey: made.oauthPublicKey,
     });
     const replace = checkedWebhookOAuth({ ...signer, replaceKey: true }, made, policy);
-    const replaced = webhookOAuthColumns(ring, tenant, endpoint, replace, made);
+    const replaced = webhookOAuthColumns(ring, tenant, endpoint, replace, made, madeAt);
     expect(replaced.oauthPublicKey).not.toBe(made.oauthPublicKey);
     expect(replaced.oauthPrivateKeyCiphertext).not.toBe(sealed);
     // Another way needs a secret and drops the key pair; back to this way, a new key pair.
@@ -5377,6 +5409,7 @@ describe('endpoint OAuth clients (ADR-173)', () => {
         policy,
       ),
       made,
+      madeAt,
     );
     expect(toPost).toMatchObject({
       oauthClientAuth: 'client_secret_post',
@@ -5390,6 +5423,7 @@ describe('endpoint OAuth clients (ADR-173)', () => {
       endpoint,
       checkedWebhookOAuth(signer, toPost, policy),
       toPost,
+      madeAt,
     );
     expect(back).toMatchObject({
       oauthClientAuth: 'private_key_jwt',
@@ -5398,7 +5432,9 @@ describe('endpoint OAuth clients (ADR-173)', () => {
     expect(back.oauthPublicKey).not.toBeNull();
     expect(back.oauthPublicKey).not.toBe(made.oauthPublicKey);
     // Removing the client removes its key pair.
-    expect(webhookOAuthColumns(ring, tenant, endpoint, null, made)).toEqual(NO_WEBHOOK_OAUTH);
+    expect(webhookOAuthColumns(ring, tenant, endpoint, null, made, madeAt)).toEqual(
+      NO_WEBHOOK_OAUTH,
+    );
     // Audit entries say whether a key pair was made, never the key.
     expect(webhookOAuthAudit(checkedWebhookOAuth(signer, made, policy), made)).toEqual({
       oauthTokenHost: 'auth.example.com',
@@ -5434,6 +5470,7 @@ describe('endpoint OAuth clients (ADR-173)', () => {
       endpoint,
       checkedWebhookOAuth(signer, NO_WEBHOOK_OAUTH, policy),
       NO_WEBHOOK_OAUTH,
+      madeAt,
     );
     expect(made).toMatchObject({ oauthNextPrivateKeyCiphertext: null, oauthNextPublicKey: null });
     // Refused for another way, beside a new key pair, and to use or drop one there is not.
@@ -5468,7 +5505,7 @@ describe('endpoint OAuth clients (ADR-173)', () => {
     }
     // Made beside the pair in use, which stays and signs; sealed under a binding of its own.
     const make = checkedWebhookOAuth({ ...signer, nextKey: 'make' }, made, policy);
-    const withNext = webhookOAuthColumns(ring, tenant, endpoint, make, made);
+    const withNext = webhookOAuthColumns(ring, tenant, endpoint, make, made, madeAt);
     expect(withNext).toMatchObject({
       oauthClientAuth: 'private_key_jwt',
       oauthClientSecretCiphertext: null,
@@ -5506,7 +5543,7 @@ describe('endpoint OAuth clients (ADR-173)', () => {
       oauthNextPrivateKeyCiphertext: nextSealed,
       oauthNextPublicKey: withNext.oauthNextPublicKey,
     };
-    expect(webhookOAuthColumns(ring, tenant, endpoint, elsewhere, withNext)).toMatchObject(
+    expect(webhookOAuthColumns(ring, tenant, endpoint, elsewhere, withNext, madeAt)).toMatchObject(
       nextKept,
     );
     const replaced = webhookOAuthColumns(
@@ -5515,11 +5552,12 @@ describe('endpoint OAuth clients (ADR-173)', () => {
       endpoint,
       checkedWebhookOAuth({ ...signer, replaceKey: true }, withNext, policy),
       withNext,
+      madeAt,
     );
     expect(replaced.oauthPublicKey).not.toBe(made.oauthPublicKey);
     expect(replaced).toMatchObject(nextKept);
     // Made again, another takes its place.
-    const remade = webhookOAuthColumns(ring, tenant, endpoint, make, withNext);
+    const remade = webhookOAuthColumns(ring, tenant, endpoint, make, withNext, madeAt);
     expect(remade.oauthNextPublicKey).not.toBe(withNext.oauthNextPublicKey);
     expect(remade.oauthPublicKey).toBe(made.oauthPublicKey);
     // Using or dropping it names the next key the request saw, so one made since is not taken.
@@ -5560,7 +5598,7 @@ describe('endpoint OAuth clients (ADR-173)', () => {
     // Used, it signs from then on, sealed again under the binding of the key in use; the old pair
     // goes.
     const use = checkedWebhookOAuth({ ...signer, nextKey: 'use', nextKeyId }, withNext, policy);
-    const used = webhookOAuthColumns(ring, tenant, endpoint, use, withNext);
+    const used = webhookOAuthColumns(ring, tenant, endpoint, use, withNext, madeAt);
     expect(used).toMatchObject({
       oauthClientAuth: 'private_key_jwt',
       oauthClientSecretCiphertext: null,
@@ -5588,6 +5626,7 @@ describe('endpoint OAuth clients (ADR-173)', () => {
           endpoint,
           checkedWebhookOAuth({ ...signer, nextKey: 'use', nextKeyId }, unreadable, policy),
           unreadable,
+          madeAt,
         ),
       ),
     ).toEqual([
@@ -5598,7 +5637,7 @@ describe('endpoint OAuth clients (ADR-173)', () => {
     ]);
     // Dropped, the pair in use stays.
     const drop = checkedWebhookOAuth({ ...signer, nextKey: 'drop', nextKeyId }, withNext, policy);
-    expect(webhookOAuthColumns(ring, tenant, endpoint, drop, withNext)).toMatchObject({
+    expect(webhookOAuthColumns(ring, tenant, endpoint, drop, withNext, madeAt)).toMatchObject({
       oauthPrivateKeyCiphertext: made.oauthPrivateKeyCiphertext,
       oauthPublicKey: made.oauthPublicKey,
       oauthNextPrivateKeyCiphertext: null,
@@ -5610,17 +5649,19 @@ describe('endpoint OAuth clients (ADR-173)', () => {
       withNext,
       policy,
     );
-    const toPost = webhookOAuthColumns(ring, tenant, endpoint, post, withNext);
+    const toPost = webhookOAuthColumns(ring, tenant, endpoint, post, withNext, madeAt);
     expect(toPost).toMatchObject({
       oauthPrivateKeyCiphertext: null,
       oauthPublicKey: null,
       oauthNextPrivateKeyCiphertext: null,
       oauthNextPublicKey: null,
     });
-    expect(webhookOAuthColumns(ring, tenant, endpoint, null, withNext)).toEqual(NO_WEBHOOK_OAUTH);
+    expect(webhookOAuthColumns(ring, tenant, endpoint, null, withNext, madeAt)).toEqual(
+      NO_WEBHOOK_OAUTH,
+    );
     // A new client may get one with its first pair.
     const first = checkedWebhookOAuth({ ...signer, nextKey: 'make' }, NO_WEBHOOK_OAUTH, policy);
-    const both = webhookOAuthColumns(ring, tenant, endpoint, first, NO_WEBHOOK_OAUTH);
+    const both = webhookOAuthColumns(ring, tenant, endpoint, first, NO_WEBHOOK_OAUTH, madeAt);
     expect(both.oauthPublicKey).not.toBeNull();
     expect(both.oauthNextPublicKey).not.toBeNull();
     expect(both.oauthNextPublicKey).not.toBe(both.oauthPublicKey);
@@ -5707,7 +5748,7 @@ describe('endpoint OAuth clients (ADR-173)', () => {
       NO_WEBHOOK_OAUTH,
       policy,
     );
-    const stored = webhookOAuthColumns(ring, tenant, endpoint, named, NO_WEBHOOK_OAUTH);
+    const stored = webhookOAuthColumns(ring, tenant, endpoint, named, NO_WEBHOOK_OAUTH, madeAt);
     expect(stored.oauthAssertionAudience).toBe(issuer);
     expect(openWebhookOAuthClient(ring, tenant, endpoint, stored)).toMatchObject({
       clientAuthentication: 'client_secret_jwt',
@@ -5743,7 +5784,7 @@ describe('endpoint OAuth clients (ADR-173)', () => {
     );
     expect(toBasic.assertionAudience).toBeNull();
     expect(
-      webhookOAuthColumns(ring, tenant, endpoint, toBasic, stored).oauthAssertionAudience,
+      webhookOAuthColumns(ring, tenant, endpoint, toBasic, stored, madeAt).oauthAssertionAudience,
     ).toBeNull();
     // Audit entries name its host; the text names it.
     expect(webhookOAuthAudit(named, NO_WEBHOOK_OAUTH)).toEqual({
@@ -5794,6 +5835,7 @@ describe('endpoint OAuth clients (ADR-173)', () => {
       endpoint,
       checkedWebhookOAuth(signer, NO_WEBHOOK_OAUTH, policy),
       NO_WEBHOOK_OAUTH,
+      madeAt,
     );
     expect(made.oauthJwksId).toMatch(WEBHOOK_OAUTH_JWKS_ID_RE);
     const change = (given: Parameters<typeof checkedWebhookOAuth>[0], current: typeof made) =>
@@ -5803,6 +5845,7 @@ describe('endpoint OAuth clients (ADR-173)', () => {
         endpoint,
         checkedWebhookOAuth(given, current, policy),
         current,
+        madeAt,
       );
     const moved = change({ ...signer, tokenUrl: 'https://elsewhere.example.com/t' }, made);
     const replaced = change({ ...signer, replaceKey: true }, moved);
@@ -5831,7 +5874,7 @@ describe('endpoint OAuth clients (ADR-173)', () => {
     expect(back.oauthJwksId).toMatch(WEBHOOK_OAUTH_JWKS_ID_RE);
     expect(back.oauthJwksId).not.toBe(made.oauthJwksId);
     // Removing the client drops it.
-    expect(webhookOAuthColumns(ring, tenant, endpoint, null, used).oauthJwksId).toBeNull();
+    expect(webhookOAuthColumns(ring, tenant, endpoint, null, used, madeAt).oauthJwksId).toBeNull();
     // The worker's client is opened without it.
     expect(openWebhookOAuthClient(ring, tenant, endpoint, used)).not.toHaveProperty('jwksId');
 
@@ -5897,6 +5940,7 @@ describe('endpoint OAuth clients (ADR-173)', () => {
         endpoint,
         checkedWebhookOAuth(given, current, policy),
         current,
+        madeAt,
       );
     const kindOf = (pem: string | null) => createPublicKey(pem!).asymmetricKeyType;
     // A new client's first pair: the algorithm chosen, else RS256.
@@ -6038,6 +6082,183 @@ describe('endpoint OAuth clients (ADR-173)', () => {
     ).toMatch(/\(key [A-Za-z0-9_-]{43}, ES256; next key [A-Za-z0-9_-]{43}, RS256, not used yet\)$/);
   });
 
+  it('make a certificate with each key pair when asked, keep it with the pair, and name it (ADR-372)', async () => {
+    const signer = { ...base, clientAuthentication: 'private_key_jwt' as const };
+    expect(webhookOAuthSchema.parse({ ...signer, keyCertificate: true })).toEqual({
+      ...signer,
+      keyCertificate: true,
+    });
+    expect(problems({ ...signer, keyCertificate: 'yes' })).toEqual([
+      ['keyCertificate', 'Say true to make a certificate for the key pair, or false not to.'],
+    ]);
+    const change = (
+      given: Parameters<typeof checkedWebhookOAuth>[0],
+      current: Parameters<typeof webhookOAuthColumns>[4],
+    ) =>
+      webhookOAuthColumns(
+        ring,
+        tenant,
+        endpoint,
+        checkedWebhookOAuth(given, current, policy),
+        current,
+        madeAt,
+      );
+    /** Whether a certificate holds the public key given. */
+    const holds = (certificate: string | null, publicKey: string | null) =>
+      new X509Certificate(certificate!).publicKey.equals(createPublicKey(publicKey!));
+    // A client's first pair has none unless one is asked for.
+    const plain = change(signer, NO_WEBHOOK_OAUTH);
+    expect(plain).toMatchObject({ oauthCertificate: null, oauthNextCertificate: null });
+    const made = change(
+      { ...signer, keyAlgorithm: 'PS256', keyCertificate: true },
+      NO_WEBHOOK_OAUTH,
+    );
+    expect(holds(made.oauthCertificate, made.oauthPublicKey)).toBe(true);
+    const read = new X509Certificate(made.oauthCertificate!);
+    expect(read.validFromDate.toISOString()).toBe('2026-10-11T03:55:00.000Z');
+    expect(read.validToDate.toISOString()).toBe('2027-10-11T04:00:00.000Z');
+    expect(
+      change({ ...signer, keyCertificate: false }, NO_WEBHOOK_OAUTH).oauthCertificate,
+    ).toBeNull();
+    // Refused for another way, and by a change that makes no pair.
+    expect(
+      refusal(() =>
+        checkedWebhookOAuth(
+          { ...base, clientSecret: 's', keyCertificate: true },
+          NO_WEBHOOK_OAUTH,
+          policy,
+        ),
+      ),
+    ).toEqual([{ path: 'oauth.keyCertificate', message: WEBHOOK_OAUTH_KEY_CERTIFICATE_WAY }]);
+    expect(
+      refusal(() => checkedWebhookOAuth({ ...signer, keyCertificate: false }, made, policy)),
+    ).toEqual([{ path: 'oauth.keyCertificate', message: WEBHOOK_OAUTH_KEY_CERTIFICATE_UNUSED }]);
+    // Kept with the pair; a pair made in its place has one of its own when the pair in use has
+    // one, unless asked otherwise, and none after a pair without one, unless asked.
+    expect(change(signer, made).oauthCertificate).toBe(made.oauthCertificate);
+    const replaced = change({ ...signer, replaceKey: true }, made);
+    expect(holds(replaced.oauthCertificate, replaced.oauthPublicKey)).toBe(true);
+    expect(replaced.oauthCertificate).not.toBe(made.oauthCertificate);
+    expect(
+      change({ ...signer, replaceKey: true, keyCertificate: false }, made).oauthCertificate,
+    ).toBeNull();
+    expect(change({ ...signer, replaceKey: true }, plain).oauthCertificate).toBeNull();
+    const certifiedLater = change({ ...signer, replaceKey: true, keyCertificate: true }, plain);
+    expect(holds(certifiedLater.oauthCertificate, certifiedLater.oauthPublicKey)).toBe(true);
+    // A next pair gets its own, the pair in use keeping its; used, it moves; dropped, it goes.
+    const withNext = change({ ...signer, nextKey: 'make' }, made);
+    expect(withNext.oauthCertificate).toBe(made.oauthCertificate);
+    expect(holds(withNext.oauthNextCertificate, withNext.oauthNextPublicKey)).toBe(true);
+    expect(
+      change({ ...signer, nextKey: 'make', keyCertificate: false }, made).oauthNextCertificate,
+    ).toBeNull();
+    const nextKeyId = webhookOAuthPublicKey(withNext.oauthNextPublicKey!, 'PS256').keyId;
+    expect(change({ ...signer, nextKey: 'use', nextKeyId }, withNext)).toMatchObject({
+      oauthPublicKey: withNext.oauthNextPublicKey,
+      oauthCertificate: withNext.oauthNextCertificate,
+      oauthNextCertificate: null,
+    });
+    expect(change({ ...signer, nextKey: 'drop', nextKeyId }, withNext)).toMatchObject({
+      oauthCertificate: made.oauthCertificate,
+      oauthNextCertificate: null,
+    });
+    // A next pair whose certificate holds another key is never used.
+    expect(() =>
+      change(
+        { ...signer, nextKey: 'use', nextKeyId },
+        { ...withNext, oauthNextCertificate: made.oauthCertificate },
+      ),
+    ).toThrow(/does not hold its public key/);
+    // Opened for the worker with the certificate's thumbprints, SHA-1 and SHA-256 of its DER; a
+    // certificate of another key is refused, so no assertion names it.
+    expect(openWebhookOAuthClient(ring, tenant, endpoint, made)).toMatchObject({
+      keyAlgorithm: 'PS256',
+      certificate: {
+        x5t: createHash('sha1').update(read.raw).digest('base64url'),
+        x5tS256: createHash('sha256').update(read.raw).digest('base64url'),
+      },
+    });
+    expect(openWebhookOAuthClient(ring, tenant, endpoint, plain)).toMatchObject({
+      certificate: null,
+    });
+    expect(() =>
+      openWebhookOAuthClient(ring, tenant, endpoint, {
+        ...made,
+        oauthCertificate: replaced.oauthCertificate,
+      }),
+    ).toThrow(/does not hold its public key/);
+    // Another way drops both.
+    expect(
+      change({ ...base, clientSecret: 's', clientAuthentication: 'client_secret_basic' }, withNext),
+    ).toMatchObject({ oauthCertificate: null, oauthNextCertificate: null });
+    // Audit entries say a pair made has a certificate, and nothing otherwise.
+    const audit = (
+      given: Parameters<typeof checkedWebhookOAuth>[0],
+      current: Parameters<typeof webhookOAuthColumns>[4],
+    ) => webhookOAuthKeyCertificateAudit(checkedWebhookOAuth(given, current, policy), current);
+    expect(audit({ ...signer, keyCertificate: true }, NO_WEBHOOK_OAUTH)).toEqual({
+      oauthKeyCertificate: true,
+    });
+    expect(audit(signer, NO_WEBHOOK_OAUTH)).toEqual({});
+    expect(audit({ ...signer, replaceKey: true }, made)).toEqual({ oauthKeyCertificate: true });
+    expect(audit({ ...signer, nextKey: 'make', keyCertificate: false }, made)).toEqual({});
+    expect(audit({ ...signer, replaceKey: true }, plain)).toEqual({});
+    expect(audit(signer, made)).toEqual({});
+    expect(audit({ ...signer, nextKey: 'use', nextKeyId }, withNext)).toEqual({});
+    expect(
+      audit({ ...base, clientSecret: 's', clientAuthentication: 'client_secret_basic' }, made),
+    ).toEqual({});
+    expect(
+      webhookOAuthAudit(checkedWebhookOAuth({ ...signer, nextKey: 'make' }, made, policy), made),
+    ).toMatchObject({ oauthNextKey: 'made', oauthKeyCertificate: true });
+    // The JWKS URL serves each key naming its certificate, and a key without one as before.
+    let rows: Record<string, string | null>[] = [];
+    const db = {
+      run: async (
+        _scope: unknown,
+        fn: (tx: { execute: () => Promise<{ rows: typeof rows }> }) => unknown,
+      ) => fn({ execute: async () => ({ rows }) }),
+    } as unknown as Database;
+    rows = [
+      {
+        public_key: withNext.oauthPublicKey,
+        key_algorithm: 'PS256',
+        certificate: withNext.oauthCertificate,
+        next_public_key: plain.oauthPublicKey,
+        next_key_algorithm: null,
+        next_certificate: null,
+      },
+    ];
+    const served = await webhookOAuthPublicJwks(db, 'aaaaaaaaaaaaaaaa');
+    expect(served).toEqual({
+      keys: [
+        webhookOAuthPublicKey(withNext.oauthPublicKey!, 'PS256', withNext.oauthCertificate).jwk,
+        webhookOAuthPublicKey(plain.oauthPublicKey!, 'RS256').jwk,
+      ],
+    });
+    expect(served?.keys[0]).toMatchObject({
+      x5c: [read.raw.toString('base64')],
+      x5t: createHash('sha1').update(read.raw).digest('base64url'),
+      'x5t#S256': createHash('sha256').update(read.raw).digest('base64url'),
+    });
+    expect(served?.keys[1]).not.toHaveProperty('x5c');
+    // A certificate of another key is never served.
+    rows = [{ ...rows[0]!, certificate: replaced.oauthCertificate }];
+    await expect(webhookOAuthPublicJwks(db, 'aaaaaaaaaaaaaaaa')).rejects.toThrow(
+      /does not hold its public key/,
+    );
+    // The settings list shows it beside the key.
+    expect(
+      webhookOAuthPublicKey(made.oauthPublicKey!, 'PS256', made.oauthCertificate).certificate,
+    ).toEqual({
+      pem: made.oauthCertificate,
+      x5t: createHash('sha1').update(read.raw).digest('base64url'),
+      x5tS256: createHash('sha256').update(read.raw).digest('base64url'),
+      validFrom: '2026-10-11T03:55:00.000Z',
+      validTo: '2027-10-11T04:00:00.000Z',
+    });
+  });
+
   it('refuse an Authorization header of the endpoint’s own beside a client, naming what was given', () => {
     const headers = [
       { name: 'X-Api-Key', value: 'k' },
@@ -6062,6 +6283,7 @@ describe('endpoint OAuth clients (ADR-173)', () => {
       endpoint,
       checkedWebhookOAuth({ ...base, clientSecret: 's' }, NO_WEBHOOK_OAUTH, policy),
       NO_WEBHOOK_OAUTH,
+      madeAt,
     );
     expect(webhookOAuthAudit(undefined, stored)).toEqual({});
     expect(webhookOAuthAudit(checkedWebhookOAuth(base, stored, policy), stored)).toEqual({
@@ -6086,6 +6308,7 @@ describe('endpoint OAuth clients (ADR-173)', () => {
       endpoint,
       checkedWebhookOAuth({ ...base, clientSecret: 's' }, NO_WEBHOOK_OAUTH, policy),
       NO_WEBHOOK_OAUTH,
+      madeAt,
     );
     const toPost = checkedWebhookOAuth(
       { ...base, clientAuthentication: 'client_secret_post' },
@@ -6097,7 +6320,7 @@ describe('endpoint OAuth clients (ADR-173)', () => {
       oauthSecretReplaced: false,
       oauthClientAuthentication: 'client_secret_post',
     });
-    const post = webhookOAuthColumns(ring, tenant, endpoint, toPost, basic);
+    const post = webhookOAuthColumns(ring, tenant, endpoint, toPost, basic, madeAt);
     // Kept in the body, named or left out: named again, since it is not the default.
     expect(webhookOAuthClientAuthAudit(toPost, post)).toEqual({
       oauthClientAuthentication: 'client_secret_post',
@@ -6169,6 +6392,7 @@ describe('endpoint OAuth clients (ADR-173)', () => {
         alg: 'RS256' as const,
       },
       pem: 'pem',
+      certificate: null,
     };
     expect(
       webhookOAuthText({
@@ -6191,6 +6415,29 @@ describe('endpoint OAuth clients (ADR-173)', () => {
       }),
     ).toBe(
       'OAuth access tokens from auth.example.com, as client hyfib, signing JWTs with HyFib’s private key (key NzbLsXh8uDCcd-6MNwXF4W_7noWXFZAfHkxZsRGC9Xs, RS256; next key next-key-id, RS256, not used yet)',
+    );
+    // And the day each key's certificate expires, when it has one (ADR-372).
+    const certificate = {
+      pem: 'certificate pem',
+      x5t: 'sha1',
+      x5tS256: 'sha256',
+      validFrom: '2026-10-11T03:55:00.000Z',
+      validTo: '2027-10-11T04:00:00.000Z',
+    };
+    expect(
+      webhookOAuthText({
+        ...basic,
+        scope: null,
+        clientAuthentication: 'private_key_jwt',
+        publicKey: { ...publicKey, certificate },
+        nextPublicKey: {
+          ...publicKey,
+          keyId: 'next-key-id',
+          certificate: { ...certificate, validTo: '2028-01-02T00:00:00.000Z' },
+        },
+      }),
+    ).toBe(
+      'OAuth access tokens from auth.example.com, as client hyfib, signing JWTs with HyFib’s private key (key NzbLsXh8uDCcd-6MNwXF4W_7noWXFZAfHkxZsRGC9Xs, RS256, certificate valid until 2027-10-11; next key next-key-id, RS256, certificate valid until 2028-01-02, not used yet)',
     );
     // Each way named for members as Settings → Webhooks offers it (ADR-357, ADR-366, ADR-367).
     expect(WEBHOOK_OAUTH_CLIENT_AUTHENTICATION_LABELS).toEqual({

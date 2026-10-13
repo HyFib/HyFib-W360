@@ -1462,7 +1462,11 @@ Phase 5 rules (outgoing webhooks, P5-09):
   restricted only, and responses may be cached five minutes. A key pair signs with the algorithm
   chosen when it is made (ADR-371): RS256 or PS256 with an RSA key of 2048 bits, or ES256 with an
   EC key on P-256; the services and the worker open a private key only if it is of the kind its
-  algorithm takes, and a database check keeps each algorithm beside its public key. The way a
+  algorithm takes, and a database check keeps each algorithm beside its public key. A pair made
+  with a certificate (ADR-372) keeps a self-signed one, subject "HyFib W360 webhook OAuth client"
+  (naming neither company nor endpoint), no CA and digital signatures only, signed with the pair's
+  own key and valid for a year; it is public, used only if it holds the pair's public key, and
+  named in assertions by its thumbprints. The way a
   client authenticates and the audience's host are audited, the secret never. Access tokens live
   only in the worker's memory, keyed by the company, the endpoint and a hash of the client (its way
   of authenticating, its private key and its algorithm, and its audience included): never stored,

@@ -1327,6 +1327,10 @@ verification, app review, Embedded Signup configuration).
   change; answered as `oauth.jwksUrl`). **[ES256 and PS256 key pairs for those clients built;
   their database tests run only in CI]** (ADR-371, migration 0291: `keyAlgorithm` chooses RS256,
   PS256 or ES256 when a key pair is made, kept with the pair; an EC key on P-256 for ES256).
+  **[Self-signed certificates for those key pairs built; their database tests run only in CI]**
+  (ADR-372, migration 0292: `keyCertificate` makes one with a pair, valid a year, named in the JWK
+  and in each assertion by `x5t` and `x5t#S256`, for servers such as Microsoft Entra ID; every
+  assertion carries `nbf`).
   **[Skipped campaign recipients as webhook events built; their database tests run only in CI]**
   (ADR-358, migrations 0280 and 0281: `campaign.recipient_skipped` once per recipient a campaign
   skips, with the reason, the campaign, the contact and the number; those skipped when the

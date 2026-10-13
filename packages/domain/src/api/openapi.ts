@@ -1152,7 +1152,27 @@ export const apiAutomationRunStartSchema = z.object({
     ),
 });
 
-/** The public key of a webhook OAuth client that signs with a key pair (ADR-367, ADR-368). */
+/** The members of a key pair's JWK that name the certificate made for it, if any (ADR-372). */
+const webhookOAuthJwkCertificateMembers = {
+  x5c: z
+    .array(z.string())
+    .length(1)
+    .optional()
+    .describe('The certificate made for the pair, its DER as base64; left out without one.'),
+  x5t: z
+    .string()
+    .optional()
+    .describe('The certificate’s SHA-1 thumbprint, base64url; left out without one.'),
+  'x5t#S256': z
+    .string()
+    .optional()
+    .describe('The certificate’s SHA-256 thumbprint, base64url; left out without one.'),
+};
+
+/**
+ * The public key of a webhook OAuth client that signs with a key pair (ADR-367, ADR-368), and the
+ * certificate made for it (ADR-372).
+ */
 const webhookOAuthPublicKeySchema = z.object({
   keyId: z
     .string()
@@ -1170,6 +1190,7 @@ const webhookOAuthPublicKeySchema = z.object({
         alg: z
           .enum(['RS256', 'PS256'])
           .describe('The algorithm the key signs with, chosen when the pair was made.'),
+        ...webhookOAuthJwkCertificateMembers,
       }),
       z.object({
         kty: z.literal('EC'),
@@ -1179,12 +1200,33 @@ const webhookOAuthPublicKeySchema = z.object({
         kid: z.string().describe('The key’s id, as `keyId`.'),
         use: z.literal('sig'),
         alg: z.literal('ES256'),
+        ...webhookOAuthJwkCertificateMembers,
       }),
     ])
     .describe(
-      'The public key as a JWK (RFC 7517), as a JWK Set holds it: an RSA key for RS256 or PS256, an elliptic-curve key on P-256 for ES256.',
+      'The public key as a JWK (RFC 7517), as a JWK Set holds it: an RSA key for RS256 or PS256, an elliptic-curve key on P-256 for ES256, naming its certificate when the pair has one.',
     ),
   pem: z.string().describe('The public key as PEM (SPKI).'),
+  certificate: z
+    .object({
+      pem: z.string().describe('The certificate as PEM.'),
+      x5t: z
+        .string()
+        .describe('Its SHA-1 thumbprint, base64url, which each JWT names in its `x5t` header.'),
+      x5tS256: z
+        .string()
+        .describe(
+          'Its SHA-256 thumbprint, base64url, which each JWT names in its `x5t#S256` header.',
+        ),
+      validFrom: z.iso
+        .datetime()
+        .describe('When it starts being valid: five minutes before the pair was made.'),
+      validTo: z.iso.datetime().describe('When it expires: a year after the pair was made.'),
+    })
+    .nullable()
+    .describe(
+      'The self-signed X.509 certificate made for the pair when one was asked for (`keyCertificate`), for an authorization server that registers a certificate rather than a key, such as Microsoft Entra ID; null: none.',
+    ),
 });
 
 export const apiWebhookEndpointSchema = z.object({
@@ -1621,7 +1663,7 @@ export const apiWebhookEndpointSchema = z.object({
       clientAuthentication: z
         .enum(WEBHOOK_OAUTH_CLIENT_AUTHENTICATIONS)
         .describe(
-          'How the client authenticates to the token URL: `client_secret_basic` with its ID and secret in an HTTP Basic Authorization header, `client_secret_post` with them as `client_id` and `client_secret` in the request body, `client_secret_jwt` with `client_id` and a JWT signed with the secret as `client_assertion`, the secret never sent, `private_key_jwt` with `client_id` and a JWT signed with the private key of a key pair HyFib keeps (RS256), no secret at all.',
+          'How the client authenticates to the token URL: `client_secret_basic` with its ID and secret in an HTTP Basic Authorization header, `client_secret_post` with them as `client_id` and `client_secret` in the request body, `client_secret_jwt` with `client_id` and a JWT signed with the secret as `client_assertion`, the secret never sent, `private_key_jwt` with `client_id` and a JWT signed with the private key of a key pair HyFib keeps (RS256, unless the pair was made for PS256 or ES256), no secret at all.',
         ),
       publicKey: webhookOAuthPublicKeySchema
         .nullable()
