@@ -460,7 +460,7 @@ test('catalog products are listed on a deal with quantities and prices, and thei
   await page.getByLabel('Quantity').fill('2');
   await page.getByLabel('Unit price (INR)').fill('120.50');
   await page.getByRole('button', { name: 'Add product' }).click();
-  await expect(page.getByRole('cell', { name: 'Masala chai' })).toBeVisible();
+  await expect(page.getByRole('cell', { name: 'Masala chai', exact: true })).toBeVisible();
   await expect(page.getByText('Products total: ₹241.00')).toBeVisible();
   const timeline = page.getByRole('list', { name: 'Timeline' });
   await expect(timeline.getByText('products: added Masala chai')).toBeVisible();
