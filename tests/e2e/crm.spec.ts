@@ -101,6 +101,29 @@ test('a deal moves through a pipeline with tasks, an emailed reminder, notes and
   await expect(timeline.getByText(/₹25,000.50 → ₹26,000.00/)).toBeVisible();
   await expect(page.getByText('Deal saved.')).toBeVisible();
 
+  // Custom deal fields (ADR-373): defined in Settings → Pipelines, filled in on the deal.
+  const fieldsUrl = page.url();
+  await page.goto(`/c/${slug}/settings/pipelines`);
+  await page.getByLabel('New deal field').fill('Seats');
+  await page.locator('#deal-field-type').selectOption('number');
+  await page.getByRole('button', { name: 'Add deal field' }).click();
+  await expect(page.getByRole('cell', { name: 'seats', exact: true })).toBeVisible();
+  await page.getByLabel('New deal field').fill('Signed');
+  await page.locator('#deal-field-type').selectOption('boolean');
+  await page.getByRole('button', { name: 'Add deal field' }).click();
+  await expect(page.getByRole('cell', { name: 'signed', exact: true })).toBeVisible();
+  await page.goto(fieldsUrl);
+  await page.getByLabel('Seats', { exact: true }).fill('many');
+  await page.getByRole('button', { name: 'Save deal' }).click();
+  await expect(page.getByText('Seats must be a number.')).toBeVisible();
+  await page.getByLabel('Seats', { exact: true }).fill('25');
+  await page.getByLabel('Signed', { exact: true }).selectOption('true');
+  await page.getByRole('button', { name: 'Save deal' }).click();
+  await expect(page.getByText('Deal saved.')).toBeVisible();
+  await expect(page.getByLabel('Seats', { exact: true })).toHaveValue('25');
+  await expect(page.getByLabel('Signed', { exact: true })).toHaveValue('true');
+  await expect(timeline.getByText('custom fields')).toBeVisible();
+
   // The board weighs it by its stage's chance of winning (ADR-242).
   const editedUrl = page.url();
   await page.goto(`/c/${slug}/crm`);

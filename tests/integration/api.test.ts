@@ -55,6 +55,7 @@ import {
   apiListConversationMessages,
   apiListConversationNotes,
   apiListConversations,
+  apiListDealFields,
   apiListDealHistory,
   apiListDeals,
   apiListMembers,
@@ -6699,6 +6700,70 @@ describe('CRM pipelines and deals (ADR-253)', () => {
       definition: 'CHECK ((pg_column_size(response) <= 262144))',
       validated: true,
     });
+  });
+
+  it('give and take custom deal field values by key, each of its type (ADR-373)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const writer = await apiKey(c, ['deals.write']);
+    const reader = await apiKey(c, ['deals.read']);
+    const sales = await pipelineOf(owner, 'Sales', 'INR', ['New']);
+    const asha = await contactOf(owner, 'Asha');
+    await crm().createDealField(owner, { label: 'Seats', type: 'number' });
+    await crm().createDealField(owner, { label: 'Signed', type: 'boolean' });
+    expect(
+      (await apiListDealFields(deps(), reader.ctx)).map((f) => [f.key, f.label, f.type]),
+    ).toEqual([
+      ['seats', 'Seats', 'number'],
+      ['signed', 'Signed', 'boolean'],
+    ]);
+    await expectAppError(apiListDealFields(deps(), writer.ctx), 'forbidden');
+    const created = await apiCreateDeal(
+      deps(),
+      writer.ctx,
+      { contactId: asha, pipelineId: sales.id, title: 'Seats', fields: { seats: 12 } },
+      null,
+    );
+    const deal = (created.body as { data: ApiDeal }).data;
+    expect(deal.fields).toEqual({ seats: 12 });
+    // A wrong type or a key no field has is refused, naming the field.
+    await expectAppError(
+      apiUpdateDeal(deps(), writer.ctx, deal.id, { fields: { seats: '12' } }),
+      'validation_failed',
+      /Seats takes a number/,
+    );
+    await expectAppError(
+      apiUpdateDeal(deps(), writer.ctx, deal.id, { fields: { region: 'South' } }),
+      'validation_failed',
+      /no deal field with this key/,
+    );
+    // null removes a value; keys left out keep theirs.
+    const updated = await apiUpdateDeal(deps(), writer.ctx, deal.id, {
+      fields: { seats: null, signed: true },
+    });
+    expect([updated.fields, updated.version]).toEqual([{ signed: true }, 2]);
+    expect((await apiGetDeal(deps(), reader.ctx, deal.id)).fields).toEqual({ signed: true });
+    // The same values again change nothing.
+    expect(
+      (await apiUpdateDeal(deps(), writer.ctx, deal.id, { fields: { signed: true } })).version,
+    ).toBe(2);
+    // History names the details deal events report; a change of custom fields alone is not one.
+    expect(
+      (await apiListDealHistory(deps(), reader.ctx, deal.id, {})).data.map((e) => e.type),
+    ).toEqual(['created']);
+    await apiUpdateDeal(deps(), writer.ctx, deal.id, {
+      title: 'Seats plan',
+      fields: { signed: false },
+    });
+    expect(
+      (await apiListDealHistory(deps(), reader.ctx, deal.id, {})).data.map((e) => [
+        e.type,
+        e.changes,
+      ]),
+    ).toEqual([
+      ['updated', ['title']],
+      ['created', null],
+    ]);
   });
 });
 

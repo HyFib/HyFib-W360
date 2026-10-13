@@ -4,7 +4,8 @@ import { minorToInput } from './money';
 /**
  * Deals as CSV (ADR-239): one line per deal, formula-safe (`csvLine`), times in UTC (ISO 8601),
  * values exact in the pipeline currency's major unit. A contact that was erased is named as such,
- * without a number.
+ * without a number. Custom deal fields (ADR-373) follow the fixed columns, one per field, headed by
+ * its key.
  */
 export const DEAL_CSV_COLUMNS = [
   'deal_id',
@@ -44,6 +45,8 @@ export interface DealCsvRow {
   closedAt: Date | null;
   lostReason: string | null;
   openTasks: number;
+  /** Its custom field values (ADR-373), one cell per field in the header's order; empty without. */
+  fieldValues?: readonly string[];
 }
 
 /** One deal's CSV line. */
@@ -65,5 +68,6 @@ export function dealCsvLine(row: DealCsvRow): string {
     row.closedAt?.toISOString() ?? '',
     row.lostReason,
     row.openTasks,
+    ...(row.fieldValues ?? []),
   ]);
 }

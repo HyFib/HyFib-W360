@@ -8,7 +8,9 @@ import {
   timestamp,
   uuid,
 } from 'drizzle-orm/pg-core';
+import { sql } from 'drizzle-orm';
 import { jsonb } from './columns';
+import { CONTACT_FIELD_TYPES } from './contacts';
 import { appSchema } from './tenancy';
 
 /**
@@ -90,8 +92,29 @@ export const crmDeals = appSchema.table('crm_deals', {
   changedBy: text('changed_by', { enum: CRM_CHANGERS }),
   changedByApiKeyId: uuid('changed_by_api_key_id'),
   changedXact: xid8('changed_xact'),
+  /**
+   * The deal's custom field values, keyed by field key (migration 0293, ADR-373), each checked
+   * against its field's type by the service (dates as YYYY-MM-DD).
+   */
+  attributes: jsonb('attributes')
+    .notNull()
+    .default(sql`'{}'::jsonb`)
+    .$type<Record<string, string | number | boolean>>(),
   createdAt: tz('created_at').notNull().defaultNow(),
   updatedAt: tz('updated_at').notNull().defaultNow(),
+});
+
+/**
+ * A company's custom deal fields (migration 0293, ADR-373), of the types contact fields take; a
+ * field's key and type never change.
+ */
+export const crmDealFields = appSchema.table('crm_deal_fields', {
+  id: uuid('id').primaryKey(),
+  tenantId: uuid('tenant_id').notNull(),
+  key: text('key').notNull(),
+  label: text('label').notNull(),
+  type: text('type', { enum: CONTACT_FIELD_TYPES }).notNull(),
+  createdAt: tz('created_at').notNull().defaultNow(),
 });
 
 export const TASK_STATUSES = ['open', 'done', 'cancelled'] as const;

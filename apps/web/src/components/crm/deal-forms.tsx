@@ -281,6 +281,52 @@ interface DealEditProps {
     expectedCloseOn: string | null;
   };
   members: MemberOption[];
+  /** The company's custom deal fields (ADR-373), with the deal's value of each as typed. */
+  fields: DealFieldInput[];
+}
+
+export interface DealFieldInput {
+  key: string;
+  label: string;
+  type: 'text' | 'number' | 'date' | 'boolean';
+  /** The deal's value as a form shows it; empty when it has none. */
+  value: string;
+}
+
+/** One custom field's input: text, a number, a date, or yes/no (empty for none). */
+function DealFieldControl({
+  id,
+  field,
+  value,
+  onChange,
+}: {
+  id: string;
+  field: DealFieldInput;
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <Field id={id} label={field.label}>
+      {(aria) =>
+        field.type === 'boolean' ? (
+          <Select {...aria} value={value} onChange={(e) => onChange(e.target.value)}>
+            <option value="">Not set</option>
+            <option value="true">Yes</option>
+            <option value="false">No</option>
+          </Select>
+        ) : (
+          <Input
+            {...aria}
+            type={field.type === 'date' ? 'date' : 'text'}
+            inputMode={field.type === 'number' ? 'decimal' : undefined}
+            value={value}
+            maxLength={1000}
+            onChange={(e) => onChange(e.target.value)}
+          />
+        )
+      }
+    </Field>
+  );
 }
 
 /**
@@ -306,11 +352,15 @@ function DealEditFields({
   slug,
   deal,
   members,
+  fields,
   onSubmitting,
   onSaved,
 }: DealEditProps & { onSubmitting: () => void; onSaved: () => void }) {
   const prefix = useId();
   const [title, setTitle] = useState(deal.title);
+  const [values, setValues] = useState<Record<string, string>>(() =>
+    Object.fromEntries(fields.map((field) => [field.key, field.value])),
+  );
   const [value, setValue] = useState(deal.value);
   const [owner, setOwner] = useState(deal.ownerMembershipId ?? '');
   const [closeOn, setCloseOn] = useState(deal.expectedCloseOn ?? '');
@@ -331,6 +381,7 @@ function DealEditFields({
           value,
           ownerMembershipId: owner || null,
           expectedCloseOn: closeOn || null,
+          fields: values,
         }).then((r) => {
           setBusy(false);
           if (!r.ok) setError(r.message);
@@ -385,6 +436,19 @@ function DealEditFields({
           )}
         </Field>
       </div>
+      {fields.length > 0 ? (
+        <div className="grid gap-4 sm:grid-cols-3">
+          {fields.map((field) => (
+            <DealFieldControl
+              key={field.key}
+              id={`${prefix}-field-${field.key}`}
+              field={field}
+              value={values[field.key] ?? ''}
+              onChange={(value) => setValues((current) => ({ ...current, [field.key]: value }))}
+            />
+          ))}
+        </div>
+      ) : null}
       <div>
         <Button type="submit" disabled={busy || !title.trim()}>
           {busy ? 'Saving…' : 'Save deal'}

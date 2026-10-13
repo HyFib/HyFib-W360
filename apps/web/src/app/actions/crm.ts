@@ -206,3 +206,42 @@ export async function searchContactsAction(
     return page.items.map((c) => ({ id: c.id, name: c.displayName, phone: c.phoneE164 }));
   });
 }
+
+/** Custom deal fields (ADR-373): company settings, as pipelines are. */
+export async function createDealFieldAction(
+  slug: string,
+  input: unknown,
+): Promise<ActionResult<{ id: string; key: string }>> {
+  return runAction(async () => {
+    const ctx = await tenantForAction(slug);
+    const { crm } = await getRuntime();
+    const result = await crm.createDealField(ctx, input, await requestMeta());
+    refresh();
+    return result;
+  });
+}
+
+export async function renameDealFieldAction(
+  slug: string,
+  fieldId: string,
+  label: string,
+): Promise<ActionResult<void>> {
+  return runAction(async () => {
+    const ctx = await tenantForAction(slug);
+    const { crm } = await getRuntime();
+    await crm.renameDealField(ctx, fieldId, label, await requestMeta());
+    refresh();
+  });
+}
+
+export async function deleteDealFieldAction(
+  slug: string,
+  fieldId: string,
+): Promise<ActionResult<void>> {
+  return runAction(async () => {
+    const ctx = await tenantForAction(slug);
+    const { crm } = await getRuntime();
+    await crm.deleteDealField(ctx, fieldId, await requestMeta());
+    refresh();
+  });
+}

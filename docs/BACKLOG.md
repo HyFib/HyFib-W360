@@ -311,7 +311,13 @@ verification, app review, Embedded Signup configuration).
   (ADR-310, migration 0233; recorded under P5-09).
   **[Deal owner webhook events built; their database tests run only in CI]** (ADR-269, migrations
   0185 and 0186; recorded under P5-09).
-  **Remaining:** custom deal fields, products on deals, deal import, CRM connectors (HubSpot,
+  **[Custom deal fields built; their database and browser tests run only in CI]** (ADR-373,
+  migration 0293: owners and administrators define up to 50 text, number, date or yes/no fields in
+  Settings → Pipelines, audited; members set values on the deal page and keys through `fields` on
+  `POST`/`PATCH /deals`, checked by type; `GET /deal-fields`; a CSV column per field; deletion
+  strips values from every deal; erasure clears them. Not built: webhook events for changes of
+  values, choice types, values on the new-deal form, automation steps that set values).
+  **Remaining:** products on deals, deal import, CRM connectors (HubSpot,
   Salesforce, Zoho: integrations), reminder emails through the production SMTP provider (release
   checklist).
 - **P4-05 Growth tools** — _implemented and locally verified (2026-09-27); no live WhatsApp or ad

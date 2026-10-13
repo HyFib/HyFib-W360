@@ -3,7 +3,7 @@ import type pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { isAppError, systemClock, type Clock } from '@w360/core';
 import { QUEUES } from '@w360/contracts';
-import { authorizedTenantScope } from '@w360/db';
+import { authorizedTenantScope, crmDealFields, eq } from '@w360/db';
 import {
   CRM_LIMITS,
   DEAL_CSV_COLUMNS,
@@ -1336,5 +1336,180 @@ describe('crm erasure, reports and isolation', () => {
       taskId,
     );
     await expectAppError(crm().contactCrm(b.owner, contactId), 'not_found');
+  });
+});
+
+describe('custom deal fields (ADR-373)', () => {
+  it('are defined by owners and administrators, at most 50, keys unique, each change audited', async () => {
+    const { c, owner, agent } = await setup();
+    const svc = crm();
+    await expectAppError(
+      svc.createDealField(agent, { label: 'Region', type: 'text' }),
+      'forbidden',
+    );
+    const region = await svc.createDealField(owner, { label: 'Region (sales)', type: 'text' });
+    expect(region.key).toBe('region_sales');
+    await expectAppError(
+      svc.createDealField(owner, { label: 'Other', key: 'region_sales', type: 'number' }),
+      'conflict',
+      /already exists/,
+    );
+    await expectAppError(
+      svc.createDealField(owner, { label: 'Kind', type: 'select' }),
+      'validation_failed',
+    );
+    // Anyone who reads the CRM lists them, oldest first.
+    expect((await svc.listDealFields(agent)).map((f) => [f.key, f.type])).toEqual([
+      ['region_sales', 'text'],
+    ]);
+    await svc.renameDealField(owner, region.id, 'Region');
+    await svc.renameDealField(owner, region.id, 'Region');
+    await expectAppError(svc.renameDealField(agent, region.id, 'Area'), 'forbidden');
+    expect((await svc.listDealFields(owner))[0]).toMatchObject({
+      key: 'region_sales',
+      label: 'Region',
+    });
+    for (let n = 1; n < 50; n += 1) {
+      await svc.createDealField(owner, { label: `Field ${n}`, type: 'text' });
+    }
+    await expectAppError(
+      svc.createDealField(owner, { label: 'One too many', type: 'text' }),
+      'validation_failed',
+      /at most 50 deal fields/,
+    );
+    const actions = await fx.query<{ action: string; n: number }>(
+      `SELECT action, count(*)::int AS n FROM app.audit_events
+        WHERE tenant_id = $1 AND action LIKE 'crm.deal_field_%' GROUP BY action ORDER BY action`,
+      [c.tenant.id],
+    );
+    // The same label again changed nothing and left no trace.
+    expect(actions).toEqual([
+      { action: 'crm.deal_field_created', n: 50 },
+      { action: 'crm.deal_field_renamed', n: 1 },
+    ]);
+  });
+
+  it('hold typed values on deals, shown and exported in the fields order; deletion strips them', async () => {
+    const { owner, agent, pipeline, newStage } = await setup();
+    const svc = crm();
+    const seats = await svc.createDealField(owner, { label: 'Seats', type: 'number' });
+    await svc.createDealField(owner, { label: 'Renewal', type: 'date' });
+    await svc.createDealField(owner, { label: 'Signed', type: 'boolean' });
+    const contactId = await newContact(owner, 'Neha');
+    const { id } = await svc.createDeal(agent, {
+      contactId,
+      pipelineId: pipeline.id,
+      stageId: newStage.id,
+      title: 'Seats deal',
+      fields: { seats: '25', signed: 'yes' },
+    });
+    expect((await svc.getDeal(agent, id)).fields).toEqual([
+      { key: 'seats', label: 'Seats', type: 'number', value: 25 },
+      { key: 'signed', label: 'Signed', type: 'boolean', value: true },
+    ]);
+    await expectAppError(
+      svc.createDeal(agent, {
+        contactId,
+        pipelineId: pipeline.id,
+        stageId: newStage.id,
+        title: 'Bad',
+        fields: { seats: 'many' },
+      }),
+      'validation_failed',
+      /Seats must be a number/,
+    );
+    const update = (version: number, fields: Record<string, string> | undefined) =>
+      svc.updateDeal(agent, {
+        id,
+        expectedVersion: version,
+        title: 'Seats deal',
+        value: '',
+        ownerMembershipId: null,
+        expectedCloseOn: null,
+        ...(fields ? { fields } : {}),
+      });
+    // Empty removes a value; values left out stay; the same values change nothing.
+    const changed = await update(1, { seats: '', renewal: '2027-03-31' });
+    expect(changed.version).toBe(2);
+    expect((await update(2, { renewal: '2027-03-31' })).version).toBe(2);
+    expect((await update(2, undefined)).version).toBe(2);
+    expect((await svc.getDeal(agent, id)).fields.map((f) => [f.key, f.value])).toEqual([
+      ['renewal', '2027-03-31'],
+      ['signed', true],
+    ]);
+    const deal = await svc.getDeal(owner, id);
+    expect(
+      deal.timeline.filter((a) => a.kind === 'deal_updated').map((a) => a.data.fields),
+    ).toEqual([['custom_fields']]);
+
+    let csv = '';
+    for await (const chunk of svc.exportDeals(owner, {})) csv += chunk;
+    const lines = csv.slice(1).split('\r\n');
+    expect(lines[0]).toBe([...DEAL_CSV_COLUMNS, 'seats', 'renewal', 'signed'].join(','));
+    expect(lines.find((l) => l.startsWith(id))?.endsWith(',,2027-03-31,true')).toBe(true);
+
+    // Deleting a field removes it and its value on every deal, in the audit log.
+    await svc.updateDeal(agent, {
+      id,
+      expectedVersion: 2,
+      title: 'Seats deal',
+      value: '',
+      ownerMembershipId: null,
+      expectedCloseOn: null,
+      fields: { seats: '30' },
+    });
+    await expectAppError(svc.deleteDealField(agent, seats.id), 'forbidden');
+    await svc.deleteDealField(owner, seats.id);
+    await expectAppError(svc.deleteDealField(owner, seats.id), 'not_found');
+    const [row] = await fx.query<{ attributes: Record<string, unknown> }>(
+      'SELECT attributes FROM app.crm_deals WHERE id = $1',
+      [id],
+    );
+    expect(row!.attributes).toEqual({ renewal: '2027-03-31', signed: true });
+    await expectAppError(update(3, { seats: '1' }), 'validation_failed', /no longer exists/);
+  });
+
+  it('are cleared by erasure and stay inside their company', async () => {
+    const a = await setup();
+    const b = await setup();
+    const svc = crm();
+    const field = await svc.createDealField(a.owner, { label: 'Notes', type: 'text' });
+    const contactId = await newContact(a.owner, 'Kiran');
+    const { id } = await svc.createDeal(a.owner, {
+      contactId,
+      pipelineId: a.pipeline.id,
+      stageId: a.newStage.id,
+      title: 'Kiran’s order',
+      fields: { notes: 'Kiran prefers mornings' },
+    });
+    expect(await svc.listDealFields(b.owner)).toEqual([]);
+    await expectAppError(svc.renameDealField(b.owner, field.id, 'Mine'), 'not_found');
+    await expectAppError(svc.deleteDealField(b.owner, field.id), 'not_found');
+    await expectAppError(
+      svc.createDeal(b.owner, {
+        contactId: await newContact(b.owner, 'Other'),
+        pipelineId: b.pipeline.id,
+        stageId: b.newStage.id,
+        title: 'Theirs',
+        fields: { notes: 'x' },
+      }),
+      'validation_failed',
+      /no longer exists/,
+    );
+    // Row security: another company's scope sees none of the definitions.
+    const seen = await fx.dbs.app.run(authorizedTenantScope(b.c.tenant.id, null), (tx) =>
+      tx.select({ id: crmDealFields.id }).from(crmDealFields).where(eq(crmDealFields.id, field.id)),
+    );
+    expect(seen).toEqual([]);
+
+    await createContactsService({ db: fx.dbs.app, clock: systemClock }).eraseContact(a.owner, {
+      contactId,
+      suppress: false,
+    });
+    const [row] = await fx.query<{ attributes: Record<string, unknown> }>(
+      'SELECT attributes FROM app.crm_deals WHERE id = $1',
+      [id],
+    );
+    expect(row!.attributes).toEqual({});
   });
 });

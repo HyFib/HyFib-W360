@@ -42,6 +42,14 @@ import {
   type ContactRef,
   type MemberRef,
 } from './common';
+import {
+  loadDealFields,
+  lockedDealFields,
+  type DealFieldDefinition,
+  mergedDealAttributes,
+  sameAttributes,
+  shownDealAttributes,
+} from './deal-fields';
 import { DEAL_CSV_COLUMNS, dealCsvLine } from './deals-csv';
 import { forecast, weigh, type Forecast } from './forecast';
 import { currencyDigits, parseAmountToMinor } from './money';
@@ -110,6 +118,8 @@ export interface DealDetail extends DealCard {
   createdThroughApi: boolean;
   /** Only for members who can see the conversation. */
   conversationId: string | null;
+  /** Its custom field values (ADR-373), in the fields' order, only of fields that still exist. */
+  fields: ReturnType<typeof shownDealAttributes>;
   tasks: { open: TaskItem[]; done: TaskItem[] };
   timeline: ActivityItem[];
 }
@@ -132,6 +142,12 @@ const dateSchema = z
 
 const valueSchema = z.string().trim().max(40, 'Enter a shorter amount.');
 
+/** Custom field values as typed, by field key (ADR-373); empty removes a value. */
+const dealFieldsSchema = z.record(
+  z.string().max(40),
+  z.string().max(1000, 'Enter a shorter value.'),
+);
+
 const createSchema = z.object({
   contactId: uuidSchema,
   conversationId: uuidSchema.nullable().default(null),
@@ -141,6 +157,7 @@ const createSchema = z.object({
   value: valueSchema.default(''),
   ownerMembershipId: uuidSchema.nullable().default(null),
   expectedCloseOn: dateSchema.nullable().default(null),
+  fields: dealFieldsSchema.default({}),
 });
 
 const updateSchema = z.object({
@@ -150,6 +167,8 @@ const updateSchema = z.object({
   value: valueSchema,
   ownerMembershipId: uuidSchema.nullable(),
   expectedCloseOn: dateSchema.nullable(),
+  /** Left out, the deal's values stay as they are. */
+  fields: dealFieldsSchema.optional(),
 });
 
 const moveSchema = z.object({
@@ -578,6 +597,8 @@ export function dealOperations(deps: { db: Database; clock: Clock }) {
       assertCan(ctx, 'crm.read');
       assertCan(ctx, 'contacts.export');
       const data = parseInput(dealExportSchema, input ?? {});
+      // The fields as the export starts: one column each, by key (ADR-373).
+      let dealFields: DealFieldDefinition[] = [];
       await db.run(ctx.scope, async (tx) => {
         if (data.pipelineId) {
           const [pipeline] = await tx
@@ -588,6 +609,7 @@ export function dealOperations(deps: { db: Database; clock: Clock }) {
             );
           if (!pipeline) throw notFound('Pipeline');
         }
+        dealFields = await loadDealFields(tx, ctx.tenant.id);
         await recordAudit(
           tx,
           ctx,
@@ -604,7 +626,7 @@ export function dealOperations(deps: { db: Database; clock: Clock }) {
           meta,
         );
       });
-      yield CSV_BOM + csvLine(DEAL_CSV_COLUMNS);
+      yield CSV_BOM + csvLine([...DEAL_CSV_COLUMNS, ...dealFields.map((field) => field.key)]);
       let before: { at: string; id: string } | null = null;
       for (;;) {
         const cursor: { at: string; id: string } | null = before;
@@ -664,6 +686,10 @@ export function dealOperations(deps: { db: Database; clock: Clock }) {
                   closedAt: deal.closedAt,
                   lostReason: deal.lostReason,
                   openTasks: card?.openTasks ?? 0,
+                  fieldValues: dealFields.map((field) => {
+                    const value = deal.attributes[field.key];
+                    return value === undefined ? '' : String(value);
+                  }),
                 });
               }),
               // The next batch starts after this one's last deal, unless this one was the last.
@@ -746,6 +772,10 @@ export function dealOperations(deps: { db: Database; clock: Clock }) {
             createdByAutomation: row.deal.createdByAutomationId !== null,
             createdThroughApi: row.deal.createdByApiKeyId !== null,
             conversationId: visible ? row.deal.conversationId : null,
+            fields: shownDealAttributes(
+              await loadDealFields(tx, ctx.tenant.id),
+              row.deal.attributes,
+            ),
             tasks: {
               open: await tasksWhere(tx, ctx.tenant.id, { dealId: id, status: 'open' }, ctx),
               done: await tasksWhere(tx, ctx.tenant.id, { dealId: id, status: 'done' }, ctx),
@@ -820,6 +850,11 @@ export function dealOperations(deps: { db: Database; clock: Clock }) {
         if (data.ownerMembershipId)
           await assertCrmMember(tx, ctx.tenant.id, data.ownerMembershipId);
         const valueMinor = parseValue(data.value, currency);
+        const attributes = mergedDealAttributes(
+          await lockedDealFields(tx, ctx.tenant.id),
+          {},
+          data.fields,
+        );
         const now = clock.now();
         const id = uuidv7();
         await tx.insert(crmDeals).values({
@@ -833,6 +868,7 @@ export function dealOperations(deps: { db: Database; clock: Clock }) {
           valueMinor,
           ownerMembershipId: data.ownerMembershipId,
           expectedCloseOn: data.expectedCloseOn,
+          attributes,
           stageEnteredAt: now,
           createdByMembershipId: ctx.membership.id,
         });
@@ -854,6 +890,8 @@ export function dealOperations(deps: { db: Database; clock: Clock }) {
       assertCan(ctx, 'crm.write');
       const data = parseInput(updateSchema, input);
       return db.run(ctx.scope, async (tx) => {
+        // The fields first, then the deal, as a field's deletion takes them (ADR-373).
+        const dealFields = data.fields ? await lockedDealFields(tx, ctx.tenant.id) : [];
         const { deal, erased } = await lockDealForChange(
           tx,
           ctx.tenant.id,
@@ -877,6 +915,10 @@ export function dealOperations(deps: { db: Database; clock: Clock }) {
         if (data.title !== deal.title) fields.push('title');
         if (valueMinor !== deal.valueMinor) fields.push('value');
         if (data.expectedCloseOn !== deal.expectedCloseOn) fields.push('expected_close_on');
+        const attributes = data.fields
+          ? mergedDealAttributes(dealFields, deal.attributes, data.fields)
+          : deal.attributes;
+        if (!sameAttributes(attributes, deal.attributes)) fields.push('custom_fields');
         const ownerChanged = data.ownerMembershipId !== deal.ownerMembershipId;
         if (fields.length === 0 && !ownerChanged) return { version: deal.version };
         if (ownerChanged && data.ownerMembershipId) {
@@ -891,6 +933,7 @@ export function dealOperations(deps: { db: Database; clock: Clock }) {
             valueMinor,
             expectedCloseOn: data.expectedCloseOn,
             ownerMembershipId: data.ownerMembershipId,
+            attributes,
             version,
             ...crmChangedBy('member'),
           })

@@ -1317,6 +1317,13 @@ Phase 5 rules (Public API, P5-08):
   field, as in Settings. Additions of one company take turns under a lock, so the 50-field limit
   holds for members and keys at once. Every change is audited as the key or the member with the
   field's key, never values; renames are audited now, in Settings too.
+- Custom deal fields (ADR-373): adding, renaming and deleting the company's deal fields needs
+  `tenant.settings.manage` (owners and administrators, in Settings → Pipelines); anyone who reads
+  the CRM sees them, and members who change deals (and keys with `deals.write`) set values. Values
+  are checked against their field's type, refused by key when no field has it and over 12 KiB in
+  all; keys and types never change. A deletion removes every deal's value under the company's field
+  lock, which deal writes with values take first. Erasure clears the erased contact's deals' values.
+  Every definition change is audited with the field's key, never values.
 - Following message changes (ADR-116): `GET /message-changes` reads the key's company's messages
   only (`conversations.read`, which only members who read every conversation grant; RLS and an
   explicit company filter). Its cursor is sealed as the contact feed's is, with the feed's name and

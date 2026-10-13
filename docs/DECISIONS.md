@@ -14749,3 +14749,51 @@ without a new key pair, a warning before a certificate expires, a chain in `x5c`
 Uncertain, as none of it could be tried against Entra from here: whether Entra minds a `kid`
 beside `x5t` (its examples send none), whether it needs `nbf` or only lists it, and whether it
 refuses EC certificates outright.
+
+## ADR-373 Custom deal fields (P4-04) (2026-10-13)
+
+Context: contacts take custom fields a company defines (ADR-115), but deals hold only a title, a
+value, an owner and an expected close date. Companies tracking anything else about a deal (seats,
+a renewal date, whether a contract is signed) had nowhere to put it but the title or a note.
+
+Decision:
+
+- **Defined per company, as contact fields are:** `app.crm_deal_fields` (migration 0293) holds a
+  key (`^[a-z][a-z0-9_]{0,39}$`, made from the label unless given), a label of 1 to 80 characters
+  and a type: text, number, date or yes/no. Keys are unique per company; keys and types never
+  change, so values already stored keep their meaning; a rename changes only the label (the table
+  grants `UPDATE (label)` only). At most 50 per company: additions take
+  `pg_advisory_xact_lock(hashtextextended('deal-fields:<company>', 0))` before counting.
+- **Who may:** owners and administrators (`tenant.settings.manage`) add, rename and delete them in
+  Settings → Pipelines; anyone who reads the CRM sees them. Every change is audited
+  (`crm.deal_field_created`, `crm.deal_field_renamed`, `crm.deal_field_deleted`) with the field's
+  key, never values; a rename to the same label changes nothing and leaves no trace.
+- **Values on the deal:** `crm_deals.attributes` (jsonb object, at most 16,384 bytes, default `{}`)
+  holds values by key, checked against the field's type as contact values are: text of up to 500
+  characters, a number of at most 15 digits before the point and 6 after, a date as YYYY-MM-DD,
+  yes/no as a boolean. Members fill them on the deal page with the deal's other details (empty
+  removes one); the API takes them as `fields` on `POST /deals` and `PATCH /deals/{id}`, each as
+  JSON of its type, `null` removing one, keys left out keeping theirs; a key no field has is refused,
+  naming it, and values over 12 KiB of JSON in all are refused by name before the database's
+  bound is reached. `GET /deal-fields` (scope `deals.read`) lists the definitions; `Deal.fields` gives the
+  values of fields that still exist. A change of values alone is a `deal_updated` timeline entry
+  naming "custom fields" and bumps the deal's version; the same values again change nothing.
+- **Deletion and races:** deleting a field takes the company's field lock exclusively, deletes the
+  row, then strips the key from every deal (`attributes - key`). Deal writes that carry values take
+  the same lock shared before locking the deal, so a write either finishes first and its value is
+  stripped, or waits and no longer finds the field (refused as "This deal field no longer exists.").
+  The lock order (fields, then deal) matches the deletion's, so the two cannot deadlock.
+- **Erasure and deletion of the company:** `app.erase_contact` (replaced in 0293 from 0145) also
+  clears the erased contact's deals' values (`attributes = '{}'`), as it blanks their title and lost
+  reason, since values may name the customer. Deal fields are a tenant deletion step (305).
+- **Export:** the deals CSV adds one column per field after the fixed ones, headed by its key, as
+  the contacts CSV does (a key equal to a fixed column's name gives two columns of that name, as
+  for contacts); values are formula-safe like every cell. The company data export includes
+  `app.crm_deal_fields` and `crm_deals.attributes`.
+
+Not built: deal webhook events for a change of values (deal.updated names title, valueMinor and
+expectedCloseOn only, so a change of values alone sends no event, and the API's deal history does
+not list it), choice or select types, an order of fields other than when they were added, defining
+fields through the API, values on the new-deal form in the app (a deal is created, then its values
+set on its page; the API takes them on creation), values set by automation steps, filtering or
+reporting by a value, and CSV import of deals.

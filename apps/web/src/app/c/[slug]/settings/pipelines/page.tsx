@@ -3,6 +3,7 @@ import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { can, CRM_LIMITS } from '@w360/domain';
 import { Badge, Card, CardContent, CardDescription, CardHeader, CardTitle } from '@w360/ui';
+import { DealFieldsManager } from '@/components/crm/deal-fields-manager';
 import { PipelineArchiveButton, PipelineForm } from '@/components/crm/pipeline-editor';
 import { getRuntime } from '@/server/runtime';
 import { requireTenant } from '@/server/session';
@@ -24,6 +25,7 @@ export default async function PipelinesSettingsPage({
   const manage = can(ctx, 'tenant.settings.manage');
   const { crm } = await getRuntime();
   const pipelines = await crm.listPipelines(ctx, { includeArchived: true });
+  const dealFields = await crm.listDealFields(ctx);
   const active = pipelines.filter((p) => !p.archived);
   const archived = pipelines.filter((p) => p.archived);
   const currencies = Intl.supportedValuesOf('currency');
@@ -173,6 +175,28 @@ export default async function PipelinesSettingsPage({
           </CardContent>
         </Card>
       ) : null}
+      <Card>
+        <CardHeader>
+          <CardTitle>Deal fields</CardTitle>
+          <CardDescription>
+            Fields of your own on every deal, filled in on the deal’s page: text, a number, a date
+            or yes/no. A field’s key names its column in deal exports and its value in the API; the
+            key and the type never change. Changes are recorded in the audit log.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <DealFieldsManager
+            slug={ctx.tenant.slug}
+            fields={dealFields.map((field) => ({
+              id: field.id,
+              key: field.key,
+              label: field.label,
+              type: field.type,
+            }))}
+            canEdit={manage}
+          />
+        </CardContent>
+      </Card>
     </div>
   );
 }

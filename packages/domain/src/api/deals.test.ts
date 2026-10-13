@@ -294,6 +294,7 @@ describe('CRM pipelines and deals through the API (ADR-253)', () => {
       'conversationId',
       'ownerId',
       'expectedCloseOn',
+      'fields',
       'stageEnteredAt',
       'lostReason',
       'closedAt',
@@ -365,10 +366,15 @@ describe('creating CRM deals through the API (ADR-254)', () => {
       { ...deal, valueMinor: 0, expectedCloseOn: '2026-12-31' },
       { ...deal, valueMinor: MAX_DEAL_MINOR, ownerId: null, expectedCloseOn: null },
       { ...deal, title: 'x'.repeat(120) },
+      // Custom field values (ADR-373), checked against their fields when the deal is written.
+      { ...deal, fields: { region: 'South', seats: 3, signed: true, renewal: null } },
     ]) {
       expect(parse(input).success, JSON.stringify(input)).toBe(true);
     }
     for (const input of [
+      { ...deal, fields: { region: ['South'] } },
+      { ...deal, fields: { seats: { value: 3 } } },
+      { ...deal, fields: 'region=South' },
       { pipelineId: OTHER, title: 'Annual plan' },
       { contactId: TENANT, title: 'Annual plan' },
       { contactId: TENANT, pipelineId: OTHER },
@@ -463,6 +469,7 @@ describe('creating CRM deals through the API (ADR-254)', () => {
       'valueMinor',
       'ownerId',
       'expectedCloseOn',
+      'fields',
     ]);
     expect(body.required).toEqual(['contactId', 'pipelineId', 'title']);
     expect(body.additionalProperties).toBe(false);
@@ -587,6 +594,7 @@ describe('changing CRM deals through the API (ADR-255)', () => {
       'valueMinor',
       'ownerId',
       'expectedCloseOn',
+      'fields',
       'pipelineId',
       'stageId',
       'status',

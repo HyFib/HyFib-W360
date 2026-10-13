@@ -39,7 +39,7 @@ export default async function DealPage({
     if (isAppError(error) && error.code === 'not_found') notFound();
     throw error;
   }
-  const lookups = await crmLookups(ctx);
+  const [lookups, dealFields] = await Promise.all([crmLookups(ctx), crm.listDealFields(ctx)]);
   const tz = ctx.tenant.timezone;
   const canWrite = can(ctx, 'crm.write');
   const editable = canWrite && !deal.contact.erased;
@@ -139,7 +139,38 @@ export default async function DealPage({
                     expectedCloseOn: deal.expectedCloseOn,
                   }}
                   members={memberOptionsWith(lookups.memberOptions, deal.owner)}
+                  fields={dealFields.map((field) => {
+                    const value = deal.fields.find((shown) => shown.key === field.key)?.value;
+                    return {
+                      key: field.key,
+                      label: field.label,
+                      type: field.type,
+                      value: value === undefined ? '' : String(value),
+                    };
+                  })}
                 />
+              </CardContent>
+            </Card>
+          ) : deal.fields.length > 0 ? (
+            <Card>
+              <CardHeader>
+                <CardTitle>Details</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <dl className="grid gap-2 text-sm sm:grid-cols-[max-content_1fr]">
+                  {deal.fields.map((field) => (
+                    <div key={field.key} className="contents">
+                      <dt className="text-muted-foreground">{field.label}</dt>
+                      <dd>
+                        {field.type === 'boolean'
+                          ? field.value
+                            ? 'Yes'
+                            : 'No'
+                          : String(field.value)}
+                      </dd>
+                    </div>
+                  ))}
+                </dl>
               </CardContent>
             </Card>
           ) : null}

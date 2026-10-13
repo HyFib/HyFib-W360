@@ -22,6 +22,13 @@ import {
 } from '@w360/db';
 import { recordSystemAudit } from '../audit';
 import { addActivity, crmChangedBy, crmCreatedBy, memberRefs } from '../crm/common';
+import {
+  apiMergedDealAttributes,
+  keptDealAttributes,
+  loadDealFields,
+  lockedDealFields,
+  sameAttributes,
+} from '../crm/deal-fields';
 import { MAX_DEAL_MINOR } from '../crm/money';
 import type { OutboundDeps } from '../messaging/outbound';
 import { loadEntitlements } from '../plans/entitlements';
@@ -96,6 +103,12 @@ const expectedCloseOnSchema = z.iso
   .nullable()
   .describe('The day the deal is expected to close.');
 
+const dealFieldValuesSchema = z
+  .record(z.string(), z.union([z.string(), z.number(), z.boolean(), z.null()]))
+  .describe(
+    'Custom deal field values by field key (GET /deal-fields), each of its field’s type: text, a number, a date as YYYY-MM-DD, or true/false; null removes a value. Keys left out keep their values.',
+  );
+
 /** What `POST /deals` takes: the contact, the pipeline and the deal, as members create one. */
 export const apiCreateDealSchema = z
   .object({
@@ -109,6 +122,7 @@ export const apiCreateDealSchema = z
     valueMinor: valueMinorSchema.optional(),
     ownerId: ownerIdSchema.optional(),
     expectedCloseOn: expectedCloseOnSchema.optional(),
+    fields: dealFieldValuesSchema.optional(),
   })
   .strict();
 
@@ -122,6 +136,7 @@ export const apiUpdateDealSchema = z
     valueMinor: valueMinorSchema.optional(),
     ownerId: ownerIdSchema.optional(),
     expectedCloseOn: expectedCloseOnSchema.optional(),
+    fields: dealFieldValuesSchema.optional(),
     pipelineId: z
       .uuid()
       .optional()
@@ -204,6 +219,8 @@ export interface ApiDeal {
   ownerId: string | null;
   /** The day the deal is expected to close, YYYY-MM-DD. */
   expectedCloseOn: string | null;
+  /** Its custom field values by field key (ADR-373), only of fields the company still has. */
+  fields: Record<string, string | number | boolean>;
   stageEnteredAt: string;
   lostReason: string | null;
   closedAt: string | null;
@@ -391,6 +408,7 @@ const dealColumns = {
   changedByApiKeyId: crmDeals.changedByApiKeyId,
   createdByAutomationId: crmDeals.createdByAutomationId,
   createdByApiKeyId: crmDeals.createdByApiKeyId,
+  attributes: crmDeals.attributes,
   cursorAt: exactTimestamp(crmDeals.createdAt),
 };
 
@@ -416,9 +434,10 @@ interface DealRow {
   changedByApiKeyId: string | null;
   createdByAutomationId: string | null;
   createdByApiKeyId: string | null;
+  attributes: Record<string, string | number | boolean>;
 }
 
-const toApiDeal = (row: DealRow): ApiDeal => ({
+const toApiDeal = (row: DealRow, dealFields: readonly { key: string }[]): ApiDeal => ({
   id: row.id,
   title: row.title,
   pipelineId: row.pipelineId,
@@ -430,6 +449,7 @@ const toApiDeal = (row: DealRow): ApiDeal => ({
   conversationId: row.conversationId,
   ownerId: row.ownerId,
   expectedCloseOn: row.expectedCloseOn,
+  fields: keptDealAttributes(dealFields, row.attributes),
   stageEnteredAt: row.stageEnteredAt.toISOString(),
   lostReason: row.lostReason,
   closedAt: row.closedAt?.toISOString() ?? null,
@@ -491,11 +511,44 @@ export async function apiListDeals(
         .limit(q.limit + 1);
       const shown = rows.slice(0, q.limit);
       const last = shown.at(-1);
+      const dealFields = await loadDealFields(tx, ctx.tenant.id);
       return {
-        data: shown.map(toApiDeal),
+        data: shown.map((row) => toApiDeal(row, dealFields)),
         nextCursor:
           rows.length > q.limit && last ? encodeKeysetCursor(last.cursorAt, last.id) : null,
       };
+    },
+    { accessMode: 'read only' },
+  );
+}
+
+/** A custom deal field as the API answers it (ADR-373). */
+export interface ApiDealField {
+  key: string;
+  label: string;
+  type: 'text' | 'number' | 'date' | 'boolean';
+  createdAt: string;
+}
+
+/**
+ * The company's custom deal fields (ADR-373), oldest first: the keys deals' `fields` take. Defined in
+ * Settings → Pipelines; only reads, so it records nothing.
+ */
+export async function apiListDealFields(
+  deps: Pick<OutboundDeps, 'db'>,
+  ctx: ApiContext,
+): Promise<ApiDealField[]> {
+  assertScope(ctx, 'deals.read');
+  return deps.db.run(
+    ctx.scope,
+    async (tx) => {
+      await assertCrmInPlan(tx, ctx.tenant.id);
+      return (await loadDealFields(tx, ctx.tenant.id)).map((field) => ({
+        key: field.key,
+        label: field.label,
+        type: field.type,
+        createdAt: field.createdAt.toISOString(),
+      }));
     },
     { accessMode: 'read only' },
   );
@@ -508,7 +561,7 @@ async function readApiDeal(tx: Tx, tenantId: string, dealId: string): Promise<Ap
     .from(crmDeals)
     .innerJoin(crmPipelines, pipelineOfDeal)
     .where(and(eq(crmDeals.tenantId, tenantId), eq(crmDeals.id, dealId)));
-  return found ? toApiDeal(found) : null;
+  return found ? toApiDeal(found, await loadDealFields(tx, tenantId)) : null;
 }
 
 /** One of the company's deals. */
@@ -664,7 +717,8 @@ export function toApiDealHistoryEntry(
 /**
  * A deal's history (ADR-281): the changes its events report, by members, automations and keys,
  * newest first on exact keyset pages, a page never skipping or repeating one. Erasing a contact
- * deletes its timeline, so an erased contact's deal has no history. Only reads.
+ * deletes its timeline, so an erased contact's deal has no history. A change of a deal's custom
+ * fields alone (ADR-373) is not given, as deal events do not report it. Only reads.
  */
 export async function apiListDealHistory(
   deps: Pick<OutboundDeps, 'db'>,
@@ -704,6 +758,8 @@ export async function apiListDealHistory(
               crmActivities.kind,
               Object.keys(API_DEAL_HISTORY_TYPES) as (keyof typeof API_DEAL_HISTORY_TYPES)[],
             ),
+            // A change of custom fields alone (ADR-373) names none of the details history gives.
+            sql`(${crmActivities.data} -> 'fields') is distinct from '["custom_fields"]'::jsonb`,
             cursor
               ? sql`(${crmActivities.createdAt}, ${crmActivities.id}) < (${cursor.at}::timestamptz, ${cursor.id}::uuid)`
               : undefined,
@@ -838,6 +894,9 @@ export async function apiCreateDeal(
         'Give the id of an active member who can use the CRM (GET /members).',
       );
     }
+    const attributes = data.fields
+      ? apiMergedDealAttributes(await lockedDealFields(tx, ctx.tenant.id), {}, data.fields)
+      : {};
     const id = uuidv7();
     const valueMinor = data.valueMinor ?? null;
     await tx.insert(crmDeals).values({
@@ -850,6 +909,7 @@ export async function apiCreateDeal(
       valueMinor,
       ownerMembershipId: ownerId,
       expectedCloseOn: data.expectedCloseOn ?? null,
+      attributes,
       stageEnteredAt: now,
       createdByApiKeyId: ctx.key.id,
     });
@@ -926,6 +986,8 @@ export async function apiUpdateDeal(
   const now = deps.clock.now();
   const deal = await deps.db.run(ctx.scope, async (tx) => {
     await assertCrmInPlan(tx, ctx.tenant.id);
+    // The fields before the deal, as a field's deletion takes them (ADR-373).
+    const dealFields = data.fields ? await lockedDealFields(tx, ctx.tenant.id) : [];
     const [ref] = await tx
       .select({ contactId: crmDeals.contactId })
       .from(crmDeals)
@@ -957,7 +1019,8 @@ export async function apiUpdateDeal(
       data.title !== undefined ||
       data.valueMinor !== undefined ||
       data.ownerId !== undefined ||
-      data.expectedCloseOn !== undefined;
+      data.expectedCloseOn !== undefined ||
+      data.fields !== undefined;
     if (erased && detailsGiven) {
       throw new AppError(
         'conflict',
@@ -1068,6 +1131,13 @@ export async function apiUpdateDeal(
       fields.push('expected_close_on');
       next.expectedCloseOn = data.expectedCloseOn;
     }
+    if (data.fields) {
+      const attributes = apiMergedDealAttributes(dealFields, next.attributes, data.fields);
+      if (!sameAttributes(attributes, next.attributes)) {
+        fields.push('custom_fields');
+        next.attributes = attributes;
+      }
+    }
     if (fields.length > 0) {
       activities.push({
         kind: 'deal_updated',
@@ -1131,6 +1201,7 @@ export async function apiUpdateDeal(
           valueMinor: next.valueMinor,
           ownerMembershipId: next.ownerMembershipId,
           expectedCloseOn: next.expectedCloseOn,
+          attributes: next.attributes,
           lostReason: next.lostReason,
           closedAt: next.closedAt,
           closedByMembershipId: next.closedByMembershipId,
