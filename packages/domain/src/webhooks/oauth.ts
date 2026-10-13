@@ -1,4 +1,5 @@
 import {
+  constants,
   createHash,
   createHmac,
   createPrivateKey,
@@ -8,7 +9,7 @@ import {
   sign,
 } from 'node:crypto';
 import { EgressError, type EgressClient, type EgressRequest } from '@w360/core/egress';
-import type { WebhookOAuthClientAuth } from '@w360/db';
+import type { WebhookOAuthClientAuth, WebhookOAuthKeyAlgorithm } from '@w360/db';
 import { randomToken, TOKEN_ALPHABET } from '../growth/model';
 import { WEBHOOK_LIMITS, type WebhookOAuthPublicKey } from './model';
 
@@ -63,10 +64,12 @@ export type WebhookOAuthClient = {
   | { clientAuthentication: WebhookOAuthSecretAuthentication; clientSecret: string }
   | {
       clientAuthentication: 'private_key_jwt';
-      /** The RSA private key, PKCS#8 PEM. */
+      /** The private key, PKCS#8 PEM: RSA, or EC on P-256 for ES256 (ADR-371). */
       privateKey: string;
       /** Its public key's id (RFC 7638 thumbprint), named in each assertion's `kid` header. */
       keyId: string;
+      /** The algorithm it signs with, chosen when the pair was made (ADR-371). */
+      keyAlgorithm: WebhookOAuthKeyAlgorithm;
     }
 );
 
@@ -141,6 +144,15 @@ export const webhookOAuthJwksUrl = (appBaseUrl: string, jwksId: string) =>
 /** The size of the RSA keys HyFib makes for clients that sign with a key pair (ADR-367). */
 export const WEBHOOK_OAUTH_KEY_BITS = 2048;
 
+/**
+ * The algorithm a key pair made before migration 0291 signs with, which stores none (ADR-371), and
+ * that of a client's first key pair when none is chosen.
+ */
+export const WEBHOOK_OAUTH_DEFAULT_KEY_ALGORITHM: WebhookOAuthKeyAlgorithm = 'RS256';
+
+/** Whether an algorithm signs with an elliptic-curve key on P-256 rather than an RSA key. */
+const signsWithEc = (algorithm: WebhookOAuthKeyAlgorithm) => algorithm === 'ES256';
+
 /** A key pair HyFib made for a `private_key_jwt` client (ADR-367), both halves as PEM. */
 export interface WebhookOAuthKeyPair {
   /** PKCS#8; stored only sealed with the keyring, never shown or sent. */
@@ -149,53 +161,118 @@ export interface WebhookOAuthKeyPair {
   publicKey: string;
 }
 
-/** A new RSA key pair of 2048 bits, exponent 65537, for a client that signs with one (ADR-367). */
-export function generateWebhookOAuthKeyPair(): WebhookOAuthKeyPair {
-  const { privateKey, publicKey } = generateKeyPairSync('rsa', {
-    modulusLength: WEBHOOK_OAUTH_KEY_BITS,
-    publicExponent: 0x10001,
-    publicKeyEncoding: { type: 'spki', format: 'pem' },
-    privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
-  });
+/**
+ * A new key pair for a client that signs with one: an RSA key of 2048 bits, exponent 65537, for
+ * RS256 (ADR-367) or PS256, or an elliptic-curve key on P-256 for ES256 (ADR-371).
+ */
+export function generateWebhookOAuthKeyPair(
+  algorithm: WebhookOAuthKeyAlgorithm = WEBHOOK_OAUTH_DEFAULT_KEY_ALGORITHM,
+): WebhookOAuthKeyPair {
+  const { privateKey, publicKey } = signsWithEc(algorithm)
+    ? generateKeyPairSync('ec', {
+        namedCurve: 'P-256',
+        publicKeyEncoding: { type: 'spki', format: 'pem' },
+        privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+      })
+    : generateKeyPairSync('rsa', {
+        modulusLength: WEBHOOK_OAUTH_KEY_BITS,
+        publicExponent: 0x10001,
+        publicKeyEncoding: { type: 'spki', format: 'pem' },
+        privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+      });
   return { privateKey, publicKey };
 }
 
 /**
  * A client's public key as shown and registered (ADR-367): the JWK of its modulus and exponent
- * (RFC 7518 section 6.3.1) with its key id, the JWK thumbprint of RFC 7638 (SHA-256 of the required
- * members in lexicographic order without whitespace, base64url), for RS256 signatures; and the PEM
- * it was read from. Throws for a key that is not RSA.
+ * (RFC 7518 section 6.3.1) or, for ES256, of its curve and point (section 6.2.1, ADR-371), with its
+ * key id, the JWK thumbprint of RFC 7638 (SHA-256 of the required members in lexicographic order
+ * without whitespace, base64url), and the algorithm it signs with; and the PEM it was read from.
+ * Throws for a key of another kind than the algorithm takes.
  */
-export function webhookOAuthPublicKey(pem: string): WebhookOAuthPublicKey {
+export function webhookOAuthPublicKey(
+  pem: string,
+  algorithm: WebhookOAuthKeyAlgorithm = WEBHOOK_OAUTH_DEFAULT_KEY_ALGORITHM,
+): WebhookOAuthPublicKey {
   const jwk = createPublicKey(pem).export({ format: 'jwk' });
+  const thumbprint = (members: object) =>
+    createHash('sha256').update(JSON.stringify(members)).digest('base64url');
+  if (algorithm === 'ES256') {
+    if (
+      jwk.kty !== 'EC' ||
+      jwk.crv !== 'P-256' ||
+      typeof jwk.x !== 'string' ||
+      typeof jwk.y !== 'string'
+    ) {
+      throw new Error('A webhook OAuth client public key for ES256 is not an EC key on P-256');
+    }
+    const { x, y } = jwk;
+    const keyId = thumbprint({ crv: 'P-256', kty: 'EC', x, y });
+    return {
+      keyId,
+      jwk: { kty: 'EC', crv: 'P-256', x, y, kid: keyId, use: 'sig', alg: algorithm },
+      pem,
+    };
+  }
   if (jwk.kty !== 'RSA' || typeof jwk.n !== 'string' || typeof jwk.e !== 'string') {
-    throw new Error('A webhook OAuth client public key is not an RSA key');
+    throw new Error(`A webhook OAuth client public key for ${algorithm} is not an RSA key`);
   }
   const { n, e } = jwk;
-  const keyId = createHash('sha256')
-    .update(JSON.stringify({ e, kty: 'RSA', n }))
-    .digest('base64url');
-  return { keyId, jwk: { kty: 'RSA', n, e, kid: keyId, use: 'sig', alg: 'RS256' }, pem };
+  const keyId = thumbprint({ e, kty: 'RSA', n });
+  return { keyId, jwk: { kty: 'RSA', n, e, kid: keyId, use: 'sig', alg: algorithm }, pem };
 }
 
 /**
- * A private key opened for signing (ADR-367): an RSA key, as HyFib makes them, else an error, so
- * that a key of another kind never signs an assertion labelled RS256.
+ * A private key opened for signing (ADR-367): of the kind its algorithm takes, as HyFib makes them
+ * (an RSA key, or an EC key on P-256 for ES256, ADR-371), else an error, so that a key of another
+ * kind never signs an assertion labelled with that algorithm.
  */
-export function checkedWebhookOAuthPrivateKey(pem: string): string {
-  if (createPrivateKey(pem).asymmetricKeyType !== 'rsa') {
-    throw new Error('A webhook OAuth client private key is not an RSA key');
+export function checkedWebhookOAuthPrivateKey(
+  pem: string,
+  algorithm: WebhookOAuthKeyAlgorithm = WEBHOOK_OAUTH_DEFAULT_KEY_ALGORITHM,
+): string {
+  const key = createPrivateKey(pem);
+  if (signsWithEc(algorithm)) {
+    if (key.asymmetricKeyType !== 'ec' || key.asymmetricKeyDetails?.namedCurve !== 'prime256v1') {
+      throw new Error('A webhook OAuth client private key for ES256 is not an EC key on P-256');
+    }
+  } else if (key.asymmetricKeyType !== 'rsa') {
+    throw new Error(`A webhook OAuth client private key for ${algorithm} is not an RSA key`);
   }
   return pem;
 }
 
 /**
+ * A signature with a client's private key (RFC 7518 section 3): RS256 is RSASSA-PKCS1-v1_5 with
+ * SHA-256; PS256 is RSASSA-PSS with SHA-256, MGF1 with SHA-256 and a salt as long as the hash (32
+ * bytes); ES256 is ECDSA on P-256 with SHA-256, the signature the 64 bytes of R and S, not DER.
+ */
+function keySignature(
+  client: Extract<WebhookOAuthClient, { clientAuthentication: 'private_key_jwt' }>,
+  data: Buffer,
+): Buffer {
+  switch (client.keyAlgorithm) {
+    case 'RS256':
+      return sign('sha256', data, client.privateKey);
+    case 'PS256':
+      return sign('sha256', data, {
+        key: client.privateKey,
+        padding: constants.RSA_PKCS1_PSS_PADDING,
+        saltLength: 32,
+      });
+    case 'ES256':
+      return sign('sha256', data, { key: client.privateKey, dsaEncoding: 'ieee-p1363' });
+  }
+}
+
+/**
  * A client assertion (RFC 7523 section 3): a JWT whose issuer and subject are the client's
  * identifier and whose audience is the token URL, or the audience the client names (ADR-369), with
- * a unique id, the time it was made and an expiry five minutes later. For `client_secret_jwt` (ADR-366) signed with HMAC SHA-256 keyed by
- * the client's secret (`HS256`), so the server checks the secret without receiving it; for
- * `private_key_jwt` (ADR-367) signed with the client's RSA private key (`RS256`, RSASSA-PKCS1-v1_5
- * with SHA-256), its header naming the key, so the server checks it with the public key registered.
+ * a unique id, the time it was made and an expiry five minutes later. For `client_secret_jwt`
+ * (ADR-366) signed with HMAC SHA-256 keyed by the client's secret (`HS256`), so the server checks
+ * the secret without receiving it; for `private_key_jwt` (ADR-367) signed with the client's private
+ * key with the algorithm its pair was made for (RS256 unless another was chosen, ADR-371), its
+ * header naming the key and the algorithm, so the server checks it with the public key registered.
  */
 export function webhookOAuthClientAssertion(
   client: WebhookOAuthClient,
@@ -206,7 +283,7 @@ export function webhookOAuthClientAssertion(
   const issuedAt = Math.floor(at.getTime() / 1000);
   const header =
     client.clientAuthentication === 'private_key_jwt'
-      ? { alg: 'RS256', kid: client.keyId, typ: 'JWT' }
+      ? { alg: client.keyAlgorithm, kid: client.keyId, typ: 'JWT' }
       : { alg: 'HS256', typ: 'JWT' };
   const signed = `${part(header)}.${part({
     iss: client.clientId,
@@ -218,7 +295,7 @@ export function webhookOAuthClientAssertion(
   })}`;
   const signature =
     client.clientAuthentication === 'private_key_jwt'
-      ? sign('sha256', Buffer.from(signed, 'utf8'), client.privateKey).toString('base64url')
+      ? keySignature(client, Buffer.from(signed, 'utf8')).toString('base64url')
       : createHmac('sha256', Buffer.from(client.clientSecret, 'utf8'))
           .update(signed)
           .digest('base64url');
@@ -389,6 +466,7 @@ const clientFingerprint = (client: WebhookOAuthClient) =>
         client.scope,
         client.clientAuthentication,
         client.assertionAudience,
+        client.clientAuthentication === 'private_key_jwt' ? client.keyAlgorithm : null,
       ]),
     )
     .digest('base64url');
@@ -396,8 +474,8 @@ const clientFingerprint = (client: WebhookOAuthClient) =>
 /**
  * The access tokens a worker keeps for webhook endpoints (ADR-173), in its memory only: never
  * stored, logged or shown. A token is kept for its endpoint and client, so a changed token URL,
- * identifier, secret or key, scope, way of authenticating or audience gets a new one, and until a
- * minute before it expires (at most a day).
+ * identifier, secret or key, scope, way of authenticating, audience or key algorithm gets a new
+ * one, and until a minute before it expires (at most a day).
  * The deliveries of an endpoint that need a token at the same time share one request; a token
  * without a lifetime serves only them, and a failure is never kept: the next attempt asks again.
  */

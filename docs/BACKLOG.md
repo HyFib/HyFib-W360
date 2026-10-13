@@ -1324,7 +1324,9 @@ verification, app review, Embedded Signup configuration).
   out while the token URL stays). **[A public JWKS URL for clients that sign with a key pair built;
   its database tests run only in CI]** (ADR-370, migration 0290: `/api/webhook-oauth/jwks/<id>`
   serves the public keys in use and next as a JWK Set, under a random id kept while the keys
-  change; answered as `oauth.jwksUrl`).
+  change; answered as `oauth.jwksUrl`). **[ES256 and PS256 key pairs for those clients built;
+  their database tests run only in CI]** (ADR-371, migration 0291: `keyAlgorithm` chooses RS256,
+  PS256 or ES256 when a key pair is made, kept with the pair; an EC key on P-256 for ES256).
   **[Skipped campaign recipients as webhook events built; their database tests run only in CI]**
   (ADR-358, migrations 0280 and 0281: `campaign.recipient_skipped` once per recipient a campaign
   skips, with the reason, the campaign, the contact and the number; those skipped when the

@@ -164,6 +164,15 @@ export const WEBHOOK_OAUTH_CLIENT_AUTHS = [
 export type WebhookOAuthClientAuth = (typeof WEBHOOK_OAUTH_CLIENT_AUTHS)[number];
 
 /**
+ * The algorithms a webhook OAuth client that signs with a key pair HyFib keeps signs its assertions
+ * with (ADR-371, RFC 7518 section 3): RS256 (RSASSA-PKCS1-v1_5 with SHA-256, the default) or PS256
+ * (RSASSA-PSS with SHA-256) with an RSA key, or ES256 (ECDSA on P-256 with SHA-256) with an
+ * elliptic-curve key.
+ */
+export const WEBHOOK_OAUTH_KEY_ALGORITHMS = ['RS256', 'PS256', 'ES256'] as const;
+export type WebhookOAuthKeyAlgorithm = (typeof WEBHOOK_OAUTH_KEY_ALGORITHMS)[number];
+
+/**
  * The cart reminders, first and second, whose `store_checkout.reminder_skipped` and
  * `store_checkout.reminder_sent` events an endpoint can choose to take (ADR-361): a Shopify store's
  * first reminder about a checkout a customer left, and the second (0021).
@@ -734,6 +743,13 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
    */
   oauthNextPrivateKeyCiphertext: text('oauth_next_private_key_ciphertext'),
   oauthNextPublicKey: text('oauth_next_public_key'),
+  /**
+   * The algorithm the key pair in use signs with, chosen when it was made (migration 0291, ADR-371);
+   * null without a pair, and for a pair made before 0291, which signs RS256.
+   */
+  oauthKeyAlgorithm: text('oauth_key_algorithm', { enum: WEBHOOK_OAUTH_KEY_ALGORITHMS }),
+  /** The algorithm the next key pair signs with once used (0291, ADR-371); null as above. */
+  oauthNextKeyAlgorithm: text('oauth_next_key_algorithm', { enum: WEBHOOK_OAUTH_KEY_ALGORITHMS }),
   /**
    * The audience a client that signs JWTs names in them instead of its token URL (migration 0289,
    * ADR-369): an https URL, such as its server's issuer identifier, never fetched; null names the

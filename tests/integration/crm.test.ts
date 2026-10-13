@@ -799,10 +799,13 @@ describe('crm races and edge cases', () => {
     const first = await newContact(owner, 'Farah');
     const erasure = await holdLock('select 1 from app.contacts where id = $1 for update', [first]);
     const note = svc.addNote(agent, { contactId: first, body: 'Lives at 12 Park Street' });
+    // Its refusal is expected from the start: once the lock goes it can come before the commit's
+    // answer, and a rejection with no handler yet fails the run.
+    const noteRefused = expectAppError(note, 'conflict', /erased/);
     await erasure.blocking();
     await erasure.client.query('update app.contacts set erased_at = now() where id = $1', [first]);
     await erasure.commit();
-    await expectAppError(note, 'conflict', /erased/);
+    await noteRefused;
     expect(await notesOf(first)).toBe(0);
 
     // An erasure started while a CRM change holds the contact waits, then removes what it wrote.
@@ -838,12 +841,14 @@ describe('crm races and edge cases', () => {
       stageId: proposal.id,
       title: 'Late arrival',
     });
+    // Expected from the start, as the note's refusal above.
+    const refused = expectAppError(creating, 'conflict', /removed/);
     await settings.blocking();
     await settings.client.query('update app.crm_stages set archived_at = now() where id = $1', [
       proposal.id,
     ]);
     await settings.commit();
-    await expectAppError(creating, 'conflict', /removed/);
+    await refused;
   });
 
   it('reopens a deal whose stage was removed in the first stage, but not in an archived pipeline', async () => {

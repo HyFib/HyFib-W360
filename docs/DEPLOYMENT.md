@@ -1589,6 +1589,20 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    to an image from before it, the URLs answer 404 and such changes keep failing there; companies
    whose servers fetch the URLs register the public keys by hand meanwhile.
 
+   Migration 0291 (ADR-371) adds `oauth_key_algorithm` and `oauth_next_key_algorithm` to
+   `app.webhook_endpoints` (nullable, no rewrite) with their update grant and a check that keeps
+   each one of RS256, PS256 or ES256, only beside its public key (validated by reading the table, at
+   most 10 endpoints a company), and replaces `ops.webhook_oauth_jwks` (dropped as the definer and
+   created again, its two public key columns kept) to return each key's algorithm too. Null reads as
+   RS256, so pairs made before it sign as they did. Workers roll out first: a worker from before it
+   opens only RSA keys and signs RS256, so an ES256 pair fails its deliveries (`payload_failed`,
+   stage `oauth`) and a PS256 pair's tokens are refused by its server (retried as usual). Only web
+   servers of this release offer the algorithm; until the web rollout ends, make no PS256 or ES256
+   pair: an old web server shows a PS256 key as RS256's and fails to show an EC key (a server error,
+   on its settings list, its API answers and its JWKS route), and a pair it makes leaves the
+   algorithm column as it was, which a new worker then refuses for a key of another kind. Move
+   clients to RS256 pairs before rolling web servers back to an image from before it.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

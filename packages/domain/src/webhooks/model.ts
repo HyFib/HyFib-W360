@@ -11,6 +11,7 @@ import type {
   WebhookCartReminderSkipReason,
   WebhookCampaignSkipReason,
   WebhookOAuthClientAuth,
+  WebhookOAuthKeyAlgorithm,
   SkipReason,
   WebhookConsentChange,
   WebhookContactPart,
@@ -48,6 +49,7 @@ export type {
   WebhookCartReminderSkipReason,
   WebhookCampaignSkipReason,
   WebhookOAuthClientAuth,
+  WebhookOAuthKeyAlgorithm,
   WebhookConsentChange,
   WebhookContactPart,
   WebhookConversationStatus,
@@ -1910,17 +1912,13 @@ export function webhookTakesCrmChanges(eventTypes: readonly WebhookEventType[]):
 }
 
 /**
- * The public key of a client that signs with a key pair, as a JWK (RFC 7517, RFC 7518 section
- * 6.3): the RSA modulus and exponent, its key id, and what it is for (ADR-367).
+ * The public key of a client that signs with a key pair, as a JWK (RFC 7517): the RSA modulus and
+ * exponent (RFC 7518 section 6.3, ADR-367) or, for ES256, the curve and the point (section 6.2,
+ * ADR-371); its key id, what it is for, and the algorithm it signs with.
  */
-export interface WebhookOAuthPublicJwk {
-  kty: 'RSA';
-  n: string;
-  e: string;
-  kid: string;
-  use: 'sig';
-  alg: 'RS256';
-}
+export type WebhookOAuthPublicJwk =
+  | { kty: 'RSA'; n: string; e: string; kid: string; use: 'sig'; alg: 'RS256' | 'PS256' }
+  | { kty: 'EC'; crv: 'P-256'; x: string; y: string; kid: string; use: 'sig'; alg: 'ES256' };
 
 /**
  * The public key a `private_key_jwt` client's assertions are checked with (ADR-367), which the
@@ -1977,6 +1975,23 @@ export const WEBHOOK_OAUTH_NEXT_KEY_ACTIONS = ['make', 'use', 'drop'] as const;
 export type WebhookOAuthNextKeyAction = (typeof WEBHOOK_OAUTH_NEXT_KEY_ACTIONS)[number];
 
 /**
+ * The algorithms a key pair can be made to sign with (ADR-371, RFC 7518 section 3), the default
+ * first: RS256 and PS256 with an RSA key, ES256 with an elliptic-curve key on P-256.
+ */
+export const WEBHOOK_OAUTH_KEY_ALGORITHM_CHOICES = [
+  'RS256',
+  'PS256',
+  'ES256',
+] as const satisfies readonly WebhookOAuthKeyAlgorithm[];
+
+/** How Settings → Webhooks names each algorithm a key pair can sign with (ADR-371). */
+export const WEBHOOK_OAUTH_KEY_ALGORITHM_LABELS: Record<WebhookOAuthKeyAlgorithm, string> = {
+  RS256: 'RS256: RSA with PKCS #1 v1.5 padding (the default)',
+  PS256: 'PS256: RSA with PSS padding',
+  ES256: 'ES256: ECDSA on the P-256 curve',
+};
+
+/**
  * How an endpoint's OAuth client can authenticate to its authorization server (ADR-357), the
  * default first: its identifier and secret in an HTTP Basic header, or as form parameters in the
  * request body (RFC 6749 section 2.3.1, as RFC 7591 names the two); or, no secret sent, a JWT as a
@@ -2004,15 +2019,17 @@ export const WEBHOOK_OAUTH_CLIENT_AUTHENTICATION_LABELS: Record<WebhookOAuthClie
 
 /**
  * How Settings → Webhooks describes an endpoint's OAuth client (ADR-173, ADR-357, ADR-366,
- * ADR-367), the next key pair it has not used yet (ADR-368) and the audience its JWTs name
- * (ADR-369).
+ * ADR-367), the next key pair it has not used yet (ADR-368), each key's algorithm (ADR-371) and the
+ * audience its JWTs name (ADR-369).
  */
 export function webhookOAuthText(oauth: WebhookEndpointOAuth): string {
   const host = webhookHost(oauth.tokenUrl) ?? oauth.tokenUrl;
   const scope = oauth.scope ? `, scope ${oauth.scope}` : '';
   const keys = [
-    ...(oauth.publicKey ? [`key ${oauth.publicKey.keyId}`] : []),
-    ...(oauth.nextPublicKey ? [`next key ${oauth.nextPublicKey.keyId}, not used yet`] : []),
+    ...(oauth.publicKey ? [`key ${oauth.publicKey.keyId}, ${oauth.publicKey.jwk.alg}`] : []),
+    ...(oauth.nextPublicKey
+      ? [`next key ${oauth.nextPublicKey.keyId}, ${oauth.nextPublicKey.jwk.alg}, not used yet`]
+      : []),
   ];
   const audience = oauth.assertionAudience ? ` addressed to ${oauth.assertionAudience}` : '';
   const how =

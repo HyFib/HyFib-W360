@@ -14494,8 +14494,8 @@ no overlap, as there is for signing secrets.
 
 Not built: an overlap for a replaced key pair (a next key shown before it is used, built since
 ADR-368), a JWKS URL HyFib serves for its clients' keys (built since ADR-370), keys a company
-uploads, other algorithms (PS256, ES256), certificates (`x5t`, `x5c`), and another audience chosen
-per endpoint (built since ADR-369).
+uploads, other algorithms (PS256, ES256, built since ADR-371), certificates (`x5t`, `x5c`), and
+another audience chosen per endpoint (built since ADR-369).
 
 ## ADR-368 A next key pair for webhook OAuth clients that sign with a key pair (P5-09) (2026-10-11)
 
@@ -14548,8 +14548,8 @@ field at once, is 4,126 bytes, within the 4,200 ADR-363's test holds it to.
 Not built: switching on its own (after a delay, or once the server takes the new key), keeping the
 old pair after a switch (a server that holds it gains nothing from HyFib keeping it), more than one
 next pair, a JWKS URL HyFib serves (built since ADR-370), keys a company uploads, other
-algorithms (PS256, ES256), certificates (`x5t`, `x5c`), and another audience chosen per endpoint
-(built since ADR-369).
+algorithms (PS256, ES256, built since ADR-371), certificates (`x5t`, `x5c`), and another audience
+chosen per endpoint (built since ADR-369).
 
 ## ADR-369 The audience a webhook OAuth client's JWTs name, chosen per endpoint (P5-09) (2026-10-11)
 
@@ -14635,5 +14635,50 @@ sign with a key pair. `APP_BASE_URL` is now registered at authorization servers 
 asks to keep the origin, as for chat links.
 
 Not built: one URL for all of a company's clients, keys a company uploads, other algorithms (PS256,
-ES256), certificates (`x5t`, `x5c`), a rate limit of the app's own on the route (the edge limits it,
-as the other public routes), and signed client metadata (RFC 7591 software statements).
+ES256, built since ADR-371), certificates (`x5t`, `x5c`), a rate limit of the app's own on the
+route (the edge limits it, as the other public routes), and signed client metadata (RFC 7591
+software statements).
+
+## ADR-371 ES256 and PS256 key pairs for webhook OAuth clients that sign with a key pair (P5-09) (2026-10-11)
+
+Context: since ADR-367 a client that signs with a key pair HyFib keeps signs RS256 with an RSA key
+of 2048 bits. Some authorization servers take other algorithms only: a FAPI profile, for one,
+refuses RS256 and takes PS256 or ES256 (as recalled; the texts could not be opened from here). Such
+a receiver could only fall back to a secret. Listed as not built in ADR-367, ADR-368 and ADR-370.
+
+Decision:
+
+- **An algorithm per key pair, chosen when it is made:** `keyAlgorithm` (Settings → Webhooks: "Key
+  algorithm") is RS256 (RSASSA-PKCS1-v1_5 with SHA-256, the default), PS256 (RSASSA-PSS with
+  SHA-256, MGF1 with SHA-256 and a 32-byte salt, as long as the hash) or ES256 (ECDSA on P-256 with
+  SHA-256, the signature the 64 bytes of R and S, not DER), as RFC 7518 section 3 defines them (as
+  known). RS256 and PS256 take an RSA key of 2048 bits, ES256 an elliptic-curve key on P-256.
+  The algorithm goes with the change that makes a pair: the client's first, `replaceKey` or
+  `nextKey: "make"`. Without one, a pair made signs as the pair in use does, and a first pair
+  RS256. Given with a change that makes no pair, or for another way, it is refused
+  (`oauth.keyAlgorithm`). The pair keeps its algorithm until it goes, so a company moves to another
+  algorithm without a gap through a next pair made for it (ADR-368).
+- **Stored with each pair:** migration 0291 adds `oauth_key_algorithm` and
+  `oauth_next_key_algorithm`. Each holds one of the three, only beside its public key. Null means a
+  pair made before 0291, which signs RS256 as it did; there is no backfill, as for ADR-370's ids.
+  Using the next pair moves its algorithm to the pair in use. Another way drops both.
+- **Shown and served as the key signs:** each JWK carries its algorithm (`alg`). An EC key's JWK
+  holds its curve and point (RFC 7518 section 6.2), and its key id is the RFC 7638 thumbprint of
+  `crv`, `kty`, `x` and `y` (section 3.2). The settings text names each key's algorithm. The API
+  answers it in the JWKs and takes `keyAlgorithm`, and the OpenAPI document describes both kinds of
+  key. Migration 0291 replaces `ops.webhook_oauth_jwks` to return each key's algorithm, so the JWKS
+  URL (ADR-370) serves the set with the right `alg`.
+- **Checked where keys are opened:** the worker opens a private key only if it is of the kind its
+  algorithm takes (an RSA key for RS256 or PS256, an EC key on P-256 for ES256). Otherwise the
+  delivery ends `payload_failed` at stage `oauth`, so a key never signs an assertion labelled with
+  another algorithm. Using a next pair checks it the same way. The token cache's fingerprint
+  includes the algorithm, so a new one asks for a new token. Audit entries name the algorithm of
+  each pair a change makes (`oauthKeyAlgorithm`), never a key.
+
+Consequences: a receiver whose server takes PS256 or ES256 only can use a key pair HyFib keeps.
+A change's audit entry gains at most 30 bytes; the compacted worst case, with every OAuth field at
+once, is 4,434 bytes, within the unit test's bound of 4,500.
+
+Not built: other algorithms (RS384, ES384, EdDSA and the rest of RFC 7518 and RFC 8037), RSA keys
+of other sizes, keys a company uploads, and changing a pair's algorithm without a new pair (a
+server registered the JWK with its `alg`).

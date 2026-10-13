@@ -1031,11 +1031,13 @@ describe('webhook endpoints through the API (ADR-081)', () => {
         [c.tenant.id, id],
       )
     ).map((row) => row.metadata);
+    // Entries name the algorithm of each key pair made (ADR-371).
     expect(audits).toEqual([
       {
         host: HOST,
         eventTypes: ['contact.created'],
         oauthTokenHost: HOST,
+        oauthKeyAlgorithm: 'RS256',
         oauthClientAuthentication: 'private_key_jwt',
         source: 'api',
       },
@@ -1052,6 +1054,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
         eventTypes: ['contact.created'],
         oauthTokenHost: HOST,
         oauthKeyReplaced: true,
+        oauthKeyAlgorithm: 'RS256',
         oauthClientAuthentication: 'private_key_jwt',
         source: 'api',
       },
@@ -1275,6 +1278,83 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       ['issuer.example.com', 'api'],
       ['issuer.example.com', 'api'],
       [undefined, 'api'],
+    ]);
+  });
+
+  it('take the algorithm of the key pairs a change makes, answer it in each JWK, and refuse it otherwise (ADR-371)', async () => {
+    const c = await fx.company();
+    const key = await apiKey(c, ['webhooks.manage']);
+    const tokenUrl = `http://${HOST}:${port}/token/${randomBytes(6).toString('hex')}`;
+    const signer = { tokenUrl, clientId: 'alg-client', clientAuthentication: 'private_key_jwt' };
+    const body = {
+      url: receiverUrl(),
+      events: ['contact.created'],
+      oauth: { ...signer, keyAlgorithm: 'ES256' },
+    };
+    const created = await addThroughApi(key.ctx, 'alg-1', body);
+    expect(created.status).toBe(201);
+    const id = created.body.data.id;
+    const oauth = created.body.data.oauth as {
+      publicKey: { keyId: string; jwk: Record<string, string>; pem: string };
+      jwksUrl: string;
+    };
+    expect(oauth.publicKey.jwk).toMatchObject({
+      kty: 'EC',
+      crv: 'P-256',
+      kid: oauth.publicKey.keyId,
+      alg: 'ES256',
+    });
+    expect(createPublicKey(oauth.publicKey.pem).asymmetricKeyType).toBe('ec');
+    // The kept answer is the same pair, and its JWKS URL serves it as ES256.
+    expect((await addThroughApi(key.ctx, 'alg-1', body)).body.data.oauth).toEqual(oauth);
+    const jwksId = oauth.jwksUrl.split('/').at(-1)!;
+    expect(await webhookOAuthPublicJwks(fx.dbs.app, jwksId)).toEqual({
+      keys: [oauth.publicKey.jwk],
+    });
+    // Refused by a change that makes no key pair, and for another way.
+    const issue = async (promise: Promise<unknown>) => {
+      const error = await expectAppError(promise, 'validation_failed');
+      return isAppError(error) ? error.issues?.[0] : undefined;
+    };
+    expect(
+      await issue(api().update(key.ctx, id, { oauth: { ...signer, keyAlgorithm: 'PS256' } })),
+    ).toEqual({
+      path: 'oauth.keyAlgorithm',
+      message:
+        'Choose an algorithm only when a key pair is made: for a new key pair, a replaced one or a next one.',
+    });
+    expect(
+      await issue(
+        api().update(key.ctx, id, {
+          oauth: {
+            tokenUrl,
+            clientId: 'alg-client',
+            clientSecret: 's',
+            clientAuthentication: 'client_secret_basic',
+            keyAlgorithm: 'RS256',
+          },
+        }),
+      ),
+    ).toMatchObject({ path: 'oauth.keyAlgorithm' });
+    // A next pair for PS256 is answered with its own algorithm; the pair in use stays ES256.
+    const next = (
+      await api().update(key.ctx, id, {
+        oauth: { ...signer, nextKey: 'make', keyAlgorithm: 'PS256' },
+      })
+    ).oauth;
+    expect(next?.publicKey).toEqual(oauth.publicKey);
+    expect(next?.nextPublicKey?.jwk).toMatchObject({ kty: 'RSA', alg: 'PS256' });
+    // Audited with the algorithm of each pair made.
+    const audits = (
+      await fx.query<{ metadata: Record<string, unknown> }>(
+        `SELECT metadata FROM app.audit_events
+          WHERE tenant_id = $1 AND subject_id = $2 ORDER BY occurred_at, id`,
+        [c.tenant.id, id],
+      )
+    ).map((r) => [r.metadata.oauthKeyAlgorithm, r.metadata.source]);
+    expect(audits).toEqual([
+      ['ES256', 'api'],
+      ['PS256', 'api'],
     ]);
   });
 

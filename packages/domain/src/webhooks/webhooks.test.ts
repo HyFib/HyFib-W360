@@ -1,4 +1,4 @@
-import { createHmac, randomBytes, sign, verify } from 'node:crypto';
+import { createHmac, createPublicKey, randomBytes, sign, verify } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import { isAppError, jsonbSize, Keyring, sha256Hex } from '@w360/core';
@@ -242,6 +242,9 @@ import {
   webhookOAuthAudienceAudit,
   webhookOAuthClientAuthAudit,
   webhookOAuthNextKeyAudit,
+  webhookOAuthKeyAlgorithmAudit,
+  WEBHOOK_OAUTH_KEY_ALGORITHM_UNUSED,
+  WEBHOOK_OAUTH_KEY_ALGORITHM_WAY,
   webhookOAuthColumns,
   webhookOAuthPublicJwks,
   webhookOAuthSchema,
@@ -4499,16 +4502,19 @@ describe('endpoint audit entries within an audit entry’s 8 KiB (ADR-336, ADR-3
       eventTypes: [...WEBHOOK_EVENT_TYPES],
       ...Object.fromEntries(keys.map((key) => [key, tags(30)])),
       // Every OAuth field at once, more than an entry holds: a secret's or a key pair's, what
-      // became of a next key pair (ADR-368) and the audience's host (ADR-369).
+      // became of a next key pair (ADR-368), the algorithm of a pair made (ADR-371) and the
+      // audience's host (ADR-369).
       oauthTokenHost: 'o'.repeat(253),
       oauthSecretReplaced: true,
       oauthKeyReplaced: true,
       oauthNextKey: 'dropped',
+      oauthKeyAlgorithm: 'ES256',
       oauthAudienceHost: 'a'.repeat(253),
       oauthClientAuthentication: 'client_secret_basic',
     });
     expect(Object.keys(whole.lists as object)).toHaveLength(62);
-    // 4,404 bytes since the audience's host (ADR-369, at most 278 bytes); the bound stays close.
+    // 4,434 bytes since the audience's host (ADR-369, at most 278 bytes) and the algorithm of a
+    // key pair made (ADR-371, 30 bytes); the bound stays close.
     expect(jsonbSize(whole)).toBeLessThan(4500);
   });
 });
@@ -4970,6 +4976,7 @@ describe('endpoint OAuth clients (ADR-173)', () => {
       replaceKey: false,
       nextKey: null,
       assertionAudience: null,
+      keyAlgorithm: null,
     });
     for (const [tokenUrl, message] of [
       ['http://auth.example.com/t', 'Only https:// addresses can be called.'],
@@ -5014,6 +5021,8 @@ describe('endpoint OAuth clients (ADR-173)', () => {
       oauthNextPublicKey: null,
       oauthAssertionAudience: null,
       oauthJwksId: null,
+      oauthKeyAlgorithm: null,
+      oauthNextKeyAlgorithm: null,
     });
     // Another token URL would receive the secret, or what it signs: it is needed again.
     expect(
@@ -5332,6 +5341,7 @@ describe('endpoint OAuth clients (ADR-173)', () => {
       clientAuthentication: 'private_key_jwt',
       privateKey,
       keyId: webhookOAuthPublicKey(made.oauthPublicKey!).keyId,
+      keyAlgorithm: 'RS256',
     });
     // A change keeps it, the way too, whatever else changes, the token URL included; one asking for
     // a new key pair gets one.
@@ -5398,11 +5408,13 @@ describe('endpoint OAuth clients (ADR-173)', () => {
     expect(webhookOAuthAudit(replace, made)).toEqual({
       oauthTokenHost: 'auth.example.com',
       oauthKeyReplaced: true,
+      oauthKeyAlgorithm: 'RS256',
       oauthClientAuthentication: 'private_key_jwt',
     });
     expect(webhookOAuthAudit(checkedWebhookOAuth(signer, toPost, policy), toPost)).toEqual({
       oauthTokenHost: 'auth.example.com',
       oauthKeyReplaced: true,
+      oauthKeyAlgorithm: 'RS256',
       oauthClientAuthentication: 'private_key_jwt',
     });
   });
@@ -5622,6 +5634,7 @@ describe('endpoint OAuth clients (ADR-173)', () => {
       ...audited,
       oauthKeyReplaced: false,
       oauthNextKey: 'made',
+      oauthKeyAlgorithm: 'RS256',
     });
     expect(webhookOAuthAudit(use, withNext)).toEqual({
       ...audited,
@@ -5863,6 +5876,168 @@ describe('endpoint OAuth clients (ADR-173)', () => {
     expect(JSON.stringify(set)).not.toContain('PRIVATE');
   });
 
+  it('make each key pair for the algorithm chosen, keeping it with the pair, RS256 unless another (ADR-371)', async () => {
+    const signer = { ...base, clientAuthentication: 'private_key_jwt' as const };
+    expect(webhookOAuthSchema.parse({ ...signer, keyAlgorithm: 'ES256' })).toEqual({
+      ...signer,
+      keyAlgorithm: 'ES256',
+    });
+    for (const keyAlgorithm of ['HS256', 'RS512', 'es256']) {
+      expect(problems({ ...signer, keyAlgorithm })).toEqual([
+        ['keyAlgorithm', 'Choose the key pair’s algorithm: RS256, PS256 or ES256.'],
+      ]);
+    }
+    const change = (
+      given: Parameters<typeof checkedWebhookOAuth>[0],
+      current: Parameters<typeof webhookOAuthColumns>[4],
+    ) =>
+      webhookOAuthColumns(
+        ring,
+        tenant,
+        endpoint,
+        checkedWebhookOAuth(given, current, policy),
+        current,
+      );
+    const kindOf = (pem: string | null) => createPublicKey(pem!).asymmetricKeyType;
+    // A new client's first pair: the algorithm chosen, else RS256.
+    const made = change({ ...signer, keyAlgorithm: 'ES256' }, NO_WEBHOOK_OAUTH);
+    expect(made).toMatchObject({ oauthKeyAlgorithm: 'ES256', oauthNextKeyAlgorithm: null });
+    expect(kindOf(made.oauthPublicKey)).toBe('ec');
+    expect(change(signer, NO_WEBHOOK_OAUTH).oauthKeyAlgorithm).toBe('RS256');
+    // Refused for another way, and by a change that makes no pair.
+    expect(
+      refusal(() =>
+        checkedWebhookOAuth(
+          { ...base, clientSecret: 's', keyAlgorithm: 'PS256' },
+          NO_WEBHOOK_OAUTH,
+          policy,
+        ),
+      ),
+    ).toEqual([{ path: 'oauth.keyAlgorithm', message: WEBHOOK_OAUTH_KEY_ALGORITHM_WAY }]);
+    expect(
+      refusal(() => checkedWebhookOAuth({ ...signer, keyAlgorithm: 'PS256' }, made, policy)),
+    ).toEqual([{ path: 'oauth.keyAlgorithm', message: WEBHOOK_OAUTH_KEY_ALGORITHM_UNUSED }]);
+    // Kept with the pair; a pair made without one signs as the pair in use does.
+    const kept = change(signer, made);
+    expect(kept).toMatchObject({
+      oauthPublicKey: made.oauthPublicKey,
+      oauthKeyAlgorithm: 'ES256',
+    });
+    const replaced = change({ ...signer, replaceKey: true }, made);
+    expect(replaced.oauthKeyAlgorithm).toBe('ES256');
+    expect(kindOf(replaced.oauthPublicKey)).toBe('ec');
+    expect(replaced.oauthPublicKey).not.toBe(made.oauthPublicKey);
+    const toPss = change({ ...signer, replaceKey: true, keyAlgorithm: 'PS256' }, made);
+    expect(toPss.oauthKeyAlgorithm).toBe('PS256');
+    expect(kindOf(toPss.oauthPublicKey)).toBe('rsa');
+    // A next pair for another algorithm, the pair in use signing as before until it is used.
+    const withNext = change({ ...signer, nextKey: 'make', keyAlgorithm: 'RS256' }, made);
+    expect(withNext).toMatchObject({
+      oauthPublicKey: made.oauthPublicKey,
+      oauthKeyAlgorithm: 'ES256',
+      oauthNextKeyAlgorithm: 'RS256',
+    });
+    expect(kindOf(withNext.oauthNextPublicKey)).toBe('rsa');
+    expect(change({ ...signer, nextKey: 'make' }, made).oauthNextKeyAlgorithm).toBe('ES256');
+    expect(openWebhookOAuthClient(ring, tenant, endpoint, withNext)).toMatchObject({
+      keyAlgorithm: 'ES256',
+      keyId: webhookOAuthPublicKey(made.oauthPublicKey!, 'ES256').keyId,
+    });
+    const nextKeyId = webhookOAuthPublicKey(withNext.oauthNextPublicKey!, 'RS256').keyId;
+    const used = change({ ...signer, nextKey: 'use', nextKeyId }, withNext);
+    expect(used).toMatchObject({
+      oauthPublicKey: withNext.oauthNextPublicKey,
+      oauthKeyAlgorithm: 'RS256',
+      oauthNextPublicKey: null,
+      oauthNextKeyAlgorithm: null,
+    });
+    expect(openWebhookOAuthClient(ring, tenant, endpoint, used)).toMatchObject({
+      keyAlgorithm: 'RS256',
+      keyId: nextKeyId,
+    });
+    expect(
+      change({ ...signer, nextKey: 'drop', nextKeyId }, withNext).oauthNextKeyAlgorithm,
+    ).toBeNull();
+    // A next pair whose key is not of the kind its algorithm takes is never used.
+    expect(() =>
+      change(
+        { ...signer, nextKey: 'use', nextKeyId },
+        { ...withNext, oauthNextKeyAlgorithm: 'ES256' },
+      ),
+    ).toThrow();
+    // A pair made before 0291 signs RS256 and is shown so; one made in its place signs alike.
+    const before = { ...change(signer, NO_WEBHOOK_OAUTH), oauthKeyAlgorithm: null };
+    expect(openWebhookOAuthClient(ring, tenant, endpoint, before)).toMatchObject({
+      keyAlgorithm: 'RS256',
+    });
+    expect(change({ ...signer, replaceKey: true }, before).oauthKeyAlgorithm).toBe('RS256');
+    // The worker refuses a key of another kind than its algorithm.
+    expect(() =>
+      openWebhookOAuthClient(ring, tenant, endpoint, { ...made, oauthKeyAlgorithm: 'RS256' }),
+    ).toThrow(/not an RSA key/);
+    // Another way drops both.
+    const toBasic = change(
+      { ...base, clientSecret: 's', clientAuthentication: 'client_secret_basic' },
+      withNext,
+    );
+    expect(toBasic).toMatchObject({ oauthKeyAlgorithm: null, oauthNextKeyAlgorithm: null });
+    // Audit entries name the algorithm of each pair a change makes, and nothing otherwise.
+    const audit = (
+      given: Parameters<typeof checkedWebhookOAuth>[0],
+      current: Parameters<typeof webhookOAuthColumns>[4],
+    ) => webhookOAuthKeyAlgorithmAudit(checkedWebhookOAuth(given, current, policy), current);
+    expect(audit(signer, NO_WEBHOOK_OAUTH)).toEqual({ oauthKeyAlgorithm: 'RS256' });
+    expect(audit({ ...signer, keyAlgorithm: 'ES256' }, NO_WEBHOOK_OAUTH)).toEqual({
+      oauthKeyAlgorithm: 'ES256',
+    });
+    expect(audit({ ...signer, replaceKey: true }, made)).toEqual({ oauthKeyAlgorithm: 'ES256' });
+    expect(audit({ ...signer, nextKey: 'make', keyAlgorithm: 'PS256' }, made)).toEqual({
+      oauthKeyAlgorithm: 'PS256',
+    });
+    expect(audit(signer, made)).toEqual({});
+    expect(audit({ ...signer, nextKey: 'use', nextKeyId }, withNext)).toEqual({});
+    expect(audit({ ...base, clientSecret: 's' }, NO_WEBHOOK_OAUTH)).toEqual({});
+    expect(
+      webhookOAuthAudit(checkedWebhookOAuth({ ...signer, replaceKey: true }, made, policy), made),
+    ).toMatchObject({ oauthKeyReplaced: true, oauthKeyAlgorithm: 'ES256' });
+    // The JWKS URL serves each key with its algorithm, RS256 for a pair made before 0291.
+    let rows: Record<string, string | null>[] = [];
+    const db = {
+      run: async (
+        _scope: unknown,
+        fn: (tx: { execute: () => Promise<{ rows: typeof rows }> }) => unknown,
+      ) => fn({ execute: async () => ({ rows }) }),
+    } as unknown as Database;
+    rows = [
+      {
+        public_key: withNext.oauthPublicKey,
+        key_algorithm: 'ES256',
+        next_public_key: withNext.oauthNextPublicKey,
+        next_key_algorithm: null,
+      },
+    ];
+    expect(await webhookOAuthPublicJwks(db, 'aaaaaaaaaaaaaaaa')).toEqual({
+      keys: [
+        webhookOAuthPublicKey(withNext.oauthPublicKey!, 'ES256').jwk,
+        webhookOAuthPublicKey(withNext.oauthNextPublicKey!, 'RS256').jwk,
+      ],
+    });
+    expect(
+      (await webhookOAuthPublicJwks(db, 'aaaaaaaaaaaaaaaa'))?.keys.map((key) => key.alg),
+    ).toEqual(['ES256', 'RS256']);
+    // The client's text names each key's algorithm.
+    expect(
+      webhookOAuthText({
+        ...signer,
+        scope: null,
+        publicKey: webhookOAuthPublicKey(withNext.oauthPublicKey!, 'ES256'),
+        nextPublicKey: webhookOAuthPublicKey(withNext.oauthNextPublicKey!, 'RS256'),
+        assertionAudience: null,
+        jwksId: null,
+      }),
+    ).toMatch(/\(key [A-Za-z0-9_-]{43}, ES256; next key [A-Za-z0-9_-]{43}, RS256, not used yet\)$/);
+  });
+
   it('refuse an Authorization header of the endpoint’s own beside a client, naming what was given', () => {
     const headers = [
       { name: 'X-Api-Key', value: 'k' },
@@ -6003,7 +6178,7 @@ describe('endpoint OAuth clients (ADR-173)', () => {
         publicKey,
       }),
     ).toBe(
-      'OAuth access tokens from auth.example.com, as client hyfib, signing JWTs with HyFib’s private key (key NzbLsXh8uDCcd-6MNwXF4W_7noWXFZAfHkxZsRGC9Xs)',
+      'OAuth access tokens from auth.example.com, as client hyfib, signing JWTs with HyFib’s private key (key NzbLsXh8uDCcd-6MNwXF4W_7noWXFZAfHkxZsRGC9Xs, RS256)',
     );
     // And the next key pair it has not used yet (ADR-368).
     expect(
@@ -6015,7 +6190,7 @@ describe('endpoint OAuth clients (ADR-173)', () => {
         nextPublicKey: { ...publicKey, keyId: 'next-key-id' },
       }),
     ).toBe(
-      'OAuth access tokens from auth.example.com, as client hyfib, signing JWTs with HyFib’s private key (key NzbLsXh8uDCcd-6MNwXF4W_7noWXFZAfHkxZsRGC9Xs; next key next-key-id, not used yet)',
+      'OAuth access tokens from auth.example.com, as client hyfib, signing JWTs with HyFib’s private key (key NzbLsXh8uDCcd-6MNwXF4W_7noWXFZAfHkxZsRGC9Xs, RS256; next key next-key-id, RS256, not used yet)',
     );
     // Each way named for members as Settings → Webhooks offers it (ADR-357, ADR-366, ADR-367).
     expect(WEBHOOK_OAUTH_CLIENT_AUTHENTICATION_LABELS).toEqual({
