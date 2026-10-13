@@ -623,9 +623,10 @@ test('a key answers a customer who wrote, reads the conversation and resolves it
       }),
     ]);
   }).toPass({ timeout: 20_000 });
-  await page.reload();
+  // The open conversation shows it as it updates live; a reload here races that refresh, which
+  // aborts it in Firefox (NS_BINDING_ABORTED, see openFromNav).
   const card = thread.getByRole('listitem').filter({ hasText: 'Shared a contact card' });
-  await expect(card).toContainText('Lucía Gómez');
+  await expect(card).toContainText('Lucía Gómez', { timeout: 20_000 });
   await expect(card).toContainText('+91 98765 43210');
 });
 
