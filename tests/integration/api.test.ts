@@ -4268,6 +4268,8 @@ describe('CRM pipelines and deals (ADR-253)', () => {
       changedByApiKeyId: null,
       createdBy: 'member',
       createdByApiKeyId: null,
+      // No custom deal fields defined (ADR-373).
+      fields: {},
     });
     expect(await apiGetDeal(deps(), reader.ctx, first.id)).toEqual(last.data[0]);
     expect((await apiGetDeal(deps(), reader.ctx, third.id)).currency).toBe('USD');
