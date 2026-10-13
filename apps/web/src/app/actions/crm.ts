@@ -295,3 +295,51 @@ export async function importDealsAction(
     return result;
   });
 }
+
+/** Products on deals (ADR-375): catalog products to list on a deal, and its items. */
+export async function searchDealProductsAction(
+  slug: string,
+  query: string,
+): Promise<
+  ActionResult<
+    {
+      id: string;
+      name: string;
+      retailerId: string;
+      priceText: string | null;
+      catalogName: string | null;
+    }[]
+  >
+> {
+  return runAction(async () => {
+    const ctx = await tenantForAction(slug);
+    const { crm } = await getRuntime();
+    return crm.dealProductOptions(ctx, String(query ?? ''));
+  });
+}
+
+export async function addDealItemAction(
+  slug: string,
+  input: unknown,
+): Promise<ActionResult<{ id: string; version: number }>> {
+  return runAction(async () => {
+    const ctx = await tenantForAction(slug);
+    const { crm } = await getRuntime();
+    const result = await crm.addDealItem(ctx, input);
+    refresh();
+    return result;
+  });
+}
+
+export async function removeDealItemAction(
+  slug: string,
+  input: unknown,
+): Promise<ActionResult<{ version: number }>> {
+  return runAction(async () => {
+    const ctx = await tenantForAction(slug);
+    const { crm } = await getRuntime();
+    const result = await crm.removeDealItem(ctx, input);
+    refresh();
+    return result;
+  });
+}

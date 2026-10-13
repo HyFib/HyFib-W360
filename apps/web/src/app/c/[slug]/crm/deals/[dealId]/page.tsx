@@ -11,6 +11,7 @@ import {
   PipelineMoveForm,
   StageSelect,
 } from '@/components/crm/deal-forms';
+import { DealProducts } from '@/components/crm/deal-products';
 import { NoteForm, TaskForm, TaskStatusActions } from '@/components/crm/task-forms';
 import { Timeline } from '@/components/crm/timeline';
 import { PageHeader } from '@/components/page-header';
@@ -43,6 +44,8 @@ export default async function DealPage({
   const tz = ctx.tenant.timezone;
   const canWrite = can(ctx, 'crm.write');
   const editable = canWrite && !deal.contact.erased;
+  // Products come from the company's catalogs (ADR-375): adding one needs to see them.
+  const productsEditable = editable && can(ctx, 'commerce.read');
   const status = DEAL_STATUS[deal.status] ?? { label: deal.status, tone: 'neutral' as const };
   const pipeline = lookups.options.find((p) => p.id === deal.pipelineId);
   const otherPipelines = lookups.options.filter(
@@ -171,6 +174,31 @@ export default async function DealPage({
                     </div>
                   ))}
                 </dl>
+              </CardContent>
+            </Card>
+          ) : null}
+          {deal.items.length > 0 || productsEditable ? (
+            <Card>
+              <CardHeader>
+                <CardTitle>Products</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <DealProducts
+                  slug={ctx.tenant.slug}
+                  deal={{
+                    id: deal.id,
+                    version: deal.version,
+                    title: deal.title,
+                    currency: deal.currency,
+                    valueMinor: deal.valueMinor,
+                    ownerMembershipId: deal.owner?.membershipId ?? null,
+                    expectedCloseOn: deal.expectedCloseOn,
+                  }}
+                  items={deal.items}
+                  totalMinor={deal.itemsTotal.totalMinor}
+                  otherCurrency={deal.itemsTotal.otherCurrency}
+                  canEdit={productsEditable}
+                />
               </CardContent>
             </Card>
           ) : null}

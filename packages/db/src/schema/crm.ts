@@ -117,6 +117,24 @@ export const crmDealFields = appSchema.table('crm_deal_fields', {
   createdAt: tz('created_at').notNull().defaultNow(),
 });
 
+/**
+ * Products from the company's catalogs listed on a deal (ADR-375): the product's name as it was
+ * when added, a quantity and a unit price in the deal's currency then. Added and removed, never
+ * changed.
+ */
+export const crmDealItems = appSchema.table('crm_deal_items', {
+  id: uuid('id').primaryKey(),
+  tenantId: uuid('tenant_id').notNull(),
+  dealId: uuid('deal_id').notNull(),
+  productId: uuid('product_id').notNull(),
+  name: text('name').notNull(),
+  quantity: integer('quantity').notNull(),
+  unitPriceMinor: bigint('unit_price_minor', { mode: 'number' }).notNull(),
+  currency: text('currency').notNull(),
+  createdByMembershipId: uuid('created_by_membership_id').notNull(),
+  createdAt: tz('created_at').notNull().defaultNow(),
+});
+
 export const TASK_STATUSES = ['open', 'done', 'cancelled'] as const;
 export type TaskStatus = (typeof TASK_STATUSES)[number];
 export const REMINDER_STATES = ['none', 'pending', 'sent', 'skipped'] as const;

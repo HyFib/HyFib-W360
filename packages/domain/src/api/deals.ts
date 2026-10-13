@@ -718,7 +718,8 @@ export function toApiDealHistoryEntry(
  * A deal's history (ADR-281): the changes its events report, by members, automations and keys,
  * newest first on exact keyset pages, a page never skipping or repeating one. Erasing a contact
  * deletes its timeline, so an erased contact's deal has no history. A change of a deal's custom
- * fields alone (ADR-373) is not given, as deal events do not report it. Only reads.
+ * fields (ADR-373) or products (ADR-375) alone is not given, as deal events do not report it.
+ * Only reads.
  */
 export async function apiListDealHistory(
   deps: Pick<OutboundDeps, 'db'>,
@@ -758,8 +759,9 @@ export async function apiListDealHistory(
               crmActivities.kind,
               Object.keys(API_DEAL_HISTORY_TYPES) as (keyof typeof API_DEAL_HISTORY_TYPES)[],
             ),
-            // A change of custom fields alone (ADR-373) names none of the details history gives.
-            sql`(${crmActivities.data} -> 'fields') is distinct from '["custom_fields"]'::jsonb`,
+            // A change of custom fields (ADR-373) or products (ADR-375) alone names none of the
+            // details history gives.
+            sql`(${crmActivities.kind} <> 'deal_updated' or coalesce(${crmActivities.data} -> 'fields', '[]'::jsonb) ?| array['title', 'value', 'expected_close_on'])`,
             cursor
               ? sql`(${crmActivities.createdAt}, ${crmActivities.id}) < (${cursor.at}::timestamptz, ${cursor.id}::uuid)`
               : undefined,

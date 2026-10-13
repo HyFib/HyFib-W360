@@ -42,6 +42,12 @@ export function Timeline({
           : '';
         const money = (v: unknown) =>
           typeof v === 'number' && currency ? formatMinor(v, currency) : 'no value';
+        // Products added or removed (ADR-375), named as they were on the deal.
+        if (typeof a.data.productAdded === 'string')
+          return `${fields}: added ${a.data.productAdded}`;
+        if (typeof a.data.productRemoved === 'string') {
+          return `${fields}: removed ${a.data.productRemoved}`;
+        }
         return currency && 'valueTo' in a.data
           ? `${fields} (value ${money(a.data.valueFrom)} → ${money(a.data.valueTo)})`
           : fields;
