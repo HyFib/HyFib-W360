@@ -1,5 +1,7 @@
 'use server';
 import { refresh } from 'next/cache';
+import { AppError } from '@w360/core';
+import { DEAL_IMPORT_LIMITS, type DealImportResult } from '@w360/domain';
 import { getRuntime } from '@/server/runtime';
 import { runAction, type ActionResult } from '@/server/action';
 import { localToIso } from '@/server/crm-time';
@@ -243,5 +245,53 @@ export async function deleteDealFieldAction(
     const { crm } = await getRuntime();
     await crm.deleteDealField(ctx, fieldId, await requestMeta());
     refresh();
+  });
+}
+
+/** Reads an uploaded deals CSV from form data, its size checked before it is read (ADR-374). */
+async function readDealCsv(form: FormData): Promise<{ fileName: string; text: string }> {
+  const file = form.get('file');
+  if (!(file instanceof File) || file.size === 0) {
+    throw new AppError('validation_failed', 'Choose a CSV file to import.');
+  }
+  if (file.size > DEAL_IMPORT_LIMITS.maxBytes) {
+    throw new AppError(
+      'validation_failed',
+      `The file is larger than the ${Math.floor(DEAL_IMPORT_LIMITS.maxBytes / 1000)} KB import limit. Split it into smaller files.`,
+    );
+  }
+  const name = file.name.replace(/[^\w.\- ]/g, '_').slice(0, 200) || 'deals.csv';
+  return { fileName: name, text: await file.text() };
+}
+
+export async function previewDealImportAction(slug: string, form: FormData) {
+  return runAction(async () => {
+    const ctx = await tenantForAction(slug);
+    const { crm } = await getRuntime();
+    return crm.previewDealImport(ctx, await readDealCsv(form));
+  });
+}
+
+export async function importDealsAction(
+  slug: string,
+  form: FormData,
+): Promise<ActionResult<DealImportResult>> {
+  return runAction(async () => {
+    const ctx = await tenantForAction(slug);
+    const { crm } = await getRuntime();
+    const csv = await readDealCsv(form);
+    let options: unknown;
+    try {
+      options = JSON.parse(String(form.get('options') ?? '{}'));
+    } catch {
+      throw new AppError('validation_failed', 'The import settings could not be read.');
+    }
+    const result = await crm.importDeals(
+      ctx,
+      { ...(options as Record<string, unknown>), fileName: csv.fileName, text: csv.text },
+      await requestMeta(),
+    );
+    refresh();
+    return result;
   });
 }

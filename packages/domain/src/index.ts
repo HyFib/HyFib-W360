@@ -122,6 +122,11 @@ export * from './crm/pipelines';
 export * from './crm/deals';
 export * from './crm/deals-csv';
 export { MAX_DEAL_FIELDS, type DealFieldDefinition } from './crm/deal-fields';
+export {
+  DEAL_IMPORT_LIMITS,
+  type DealImportOptions,
+  type DealImportResult,
+} from './crm/deal-import';
 export * from './crm/tasks';
 export * from './crm/time';
 export * from './crm/forecast';

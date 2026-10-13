@@ -1513,3 +1513,131 @@ describe('custom deal fields (ADR-373)', () => {
     expect(row!.attributes).toEqual({});
   });
 });
+
+describe('deal import (ADR-374)', () => {
+  const importInput = (
+    pipelineId: string,
+    rows: string[][],
+    extra: Record<string, unknown> = {},
+  ) => ({
+    fileName: 'deals.csv',
+    text: [['Phone', 'Title', 'Stage', 'Value', 'Owner', 'Seats'], ...rows]
+      .map((r) => r.join(','))
+      .join('\n'),
+    pipelineId,
+    phoneFormat: 'international',
+    mapping: { phone: 0, title: 1, stage: 2, value: 3, owner: 4, fields: { seats: 5 } },
+    ...extra,
+  });
+  const phoneOf = async (contactId: string) =>
+    (
+      await fx.query<{ phone_e164: string }>('SELECT phone_e164 FROM app.contacts WHERE id = $1', [
+        contactId,
+      ])
+    )[0]!.phone_e164;
+
+  it('adds a deal per valid row for owners, administrators and supervisors, audited, rows with errors skipped', async () => {
+    const { c, owner, agent, marketer, pipeline, newStage, proposal } = await setup();
+    const svc = crm();
+    await svc.createDealField(owner, { label: 'Seats', type: 'number' });
+    const asha = await newContact(owner, 'Asha');
+    const ravi = await newContact(owner, 'Ravi');
+    const erased = await newContact(owner, 'Gone');
+    const erasedPhone = await phoneOf(erased);
+    await createContactsService({ db: fx.dbs.app, clock: systemClock }).eraseContact(owner, {
+      contactId: erased,
+      suppress: false,
+    });
+    const rows = [
+      [
+        await phoneOf(asha),
+        'Annual plan',
+        'Proposal',
+        '25000.50',
+        c.agent.email.toUpperCase(),
+        '12',
+      ],
+      [await phoneOf(ravi), 'Renewal', '', '', '', ''],
+      [erasedPhone, 'For the erased', '', '', '', ''],
+      [await phoneOf(ravi), 'Bad stage', 'Lost', '', '', ''],
+      [await phoneOf(ravi), 'Bad owner', '', '', c.marketer.email, ''],
+    ];
+    // Agents change deals but do not import; marketers import contacts but do not change deals.
+    await expectAppError(svc.importDeals(agent, importInput(pipeline.id, rows)), 'forbidden');
+    await expectAppError(svc.importDeals(marketer, importInput(pipeline.id, rows)), 'forbidden');
+    const result = await svc.importDeals(owner, importInput(pipeline.id, rows), {
+      ipAddress: '203.0.113.9',
+    });
+    expect(result).toMatchObject({ totalRows: 5, created: 2, errorCount: 3 });
+    expect(result.messages.map((m) => m.row)).toEqual([4, 5, 6]);
+    const created = await fx.query<{
+      id: string;
+      contact_id: string;
+      stage_id: string;
+      value_minor: string | null;
+      owner_membership_id: string | null;
+      attributes: Record<string, unknown>;
+      created_by_membership_id: string;
+    }>(
+      `SELECT id, contact_id, stage_id, value_minor, owner_membership_id, attributes,
+              created_by_membership_id
+         FROM app.crm_deals WHERE tenant_id = $1 ORDER BY title`,
+      [c.tenant.id],
+    );
+    expect(
+      created.map((d) => [d.contact_id, d.stage_id, d.value_minor && Number(d.value_minor)]),
+    ).toEqual([
+      [asha, proposal.id, 2_500_050],
+      [ravi, newStage.id, null],
+    ]);
+    expect(created[0]!.owner_membership_id).toBe(agent.membership.id);
+    expect(created[0]!.attributes).toEqual({ seats: 12 });
+    expect(created.every((d) => d.created_by_membership_id === owner.membership.id)).toBe(true);
+    // Each on its timeline as added, marked as imported, and the import in the audit log.
+    const deal = await svc.getDeal(owner, created[0]!.id);
+    expect(deal.timeline.map((a) => [a.kind, a.data.imported])).toEqual([['deal_created', true]]);
+    const [audit] = await fx.query<{ subject_id: string; metadata: Record<string, unknown> }>(
+      `SELECT subject_id, metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND action = 'crm.deals_imported'`,
+      [c.tenant.id],
+    );
+    expect(audit).toMatchObject({
+      subject_id: pipeline.id,
+      metadata: { fileName: 'deals.csv', totalRows: 5, created: 2, errorCount: 3 },
+    });
+  });
+
+  it('refuses an archived pipeline, an unknown field and another company’s contacts', async () => {
+    const a = await setup();
+    const b = await setup();
+    const svc = crm();
+    const theirs = await newContact(b.owner, 'Theirs');
+    const result = await svc.importDeals(
+      a.owner,
+      importInput(a.pipeline.id, [[await phoneOf(theirs), 'Cross-company', '', '', '', '']], {
+        mapping: { phone: 0, title: 1 },
+      }),
+    );
+    expect(result).toMatchObject({ created: 0, errorCount: 1 });
+    await expectAppError(
+      svc.importDeals(a.owner, importInput(a.pipeline.id, [['+911', 'x', '', '', '', '1']])),
+      'validation_failed',
+      /deal field the company does not have/,
+    );
+    await expectAppError(
+      svc.importDeals(a.owner, importInput(b.pipeline.id, [['+911', 'x', '', '', '', '']]), {}),
+      'validation_failed',
+    );
+    await svc.archivePipeline(a.owner, { id: a.pipeline.id, expectedVersion: a.pipeline.version });
+    await expectAppError(
+      svc.importDeals(
+        a.owner,
+        importInput(a.pipeline.id, [['+911', 'x', '', '', '', '']], {
+          mapping: { phone: 0, title: 1 },
+        }),
+      ),
+      'conflict',
+      /archived/,
+    );
+  });
+});

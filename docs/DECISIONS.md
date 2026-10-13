@@ -14796,4 +14796,47 @@ expectedCloseOn only, so a change of values alone sends no event, and the API's 
 not list it), choice or select types, an order of fields other than when they were added, defining
 fields through the API, values on the new-deal form in the app (a deal is created, then its values
 set on its page; the API takes them on creation), values set by automation steps, filtering or
-reporting by a value, and CSV import of deals.
+reporting by a value, and CSV import of deals (since built: ADR-374, with values mapped by key).
+
+## ADR-374 Importing deals from CSV (P4-04) (2026-10-13)
+
+Context: companies moving to HyFib from a spreadsheet or another CRM had to add each deal by hand
+(or write an integration against `POST /deals`). Contacts could be imported (Contacts → Import),
+deals could not; "deal import" was listed as remaining under P4-04.
+
+Decision:
+
+- **Who may:** members who both change deals and import contacts (`crm.write` and
+  `contacts.import`): owners, administrators and supervisors. Agents (no import) and marketers (no
+  CRM) cannot. CRM → Import CSV, at `/c/<company>/crm/import`.
+- **Two steps, as contacts are imported:** a preview of the file's columns and first five rows,
+  with columns suggested from their names, then the import with an explicit mapping into one active
+  pipeline. The file is sent again for the import; nothing is stored between the steps, and the
+  file is never kept. Files of at most 1,000 rows and just under 1 MB (the server action body
+  limit), read by the contact importer's RFC 4180 reader with its formula guards undone.
+- **Each row a deal for an existing contact:** the contact is the company's live (not erased)
+  contact with the row's number, normalized as the contact import does (international digits, or
+  national ones for a calling code). A row whose number no contact has is refused: deal import never
+  creates contacts, so no number enters the company without the contact import's consent handling.
+  The title is required (1 to 120 characters). The stage is a stage name of the pipeline (any case),
+  or its first active stage when the column is left out or empty. The value is an amount in the
+  pipeline's currency, exact in minor units as members type it. The owner is the email of an active
+  member who can use the CRM. The expected close date is YYYY-MM-DD. Custom deal fields (ADR-373)
+  map by key and are checked by type, as on the deal page.
+- **One transaction, rows with errors skipped:** each row with a problem is listed by its row
+  number and the problem and not imported; the others are added. The contacts named are locked
+  against erasure (`FOR KEY SHARE`, in id order) before the pipeline (`FOR SHARE`, against archiving)
+  and the deal fields (shared, ADR-373), the order a member's new deal takes them. An archived
+  pipeline, a pipeline of another company, a mapping past the file's columns or naming a field the
+  company does not have is refused before anything is added.
+- **Added as members add deals:** each deal is recorded as created by the importing member, with a
+  `deal_created` timeline entry marked `imported`, and sends `deal.created` to webhook endpoints
+  that take it, as any new deal does (the existing trigger). The import is audited once
+  (`crm.deals_imported`, subject the pipeline): the file name, rows, deals added and rows with
+  errors, never the rows' contents.
+- **Not idempotent:** every row adds a deal, even when the contact already has one in the pipeline,
+  so importing a file again adds its deals again; the page says so before the import. No migration.
+
+Not built: creating contacts from a deal file, matching contacts by email or WhatsApp user id,
+updating existing deals from a file, importing closed (won or lost) deals, a record of past deal
+imports beside the audit log, importing through the public API, and products on deals.

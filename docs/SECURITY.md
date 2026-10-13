@@ -1324,6 +1324,12 @@ Phase 5 rules (Public API, P5-08):
   all; keys and types never change. A deletion removes every deal's value under the company's field
   lock, which deal writes with values take first. Erasure clears the erased contact's deals' values.
   Every definition change is audited with the field's key, never values.
+- Importing deals (ADR-374): needs `crm.write` and `contacts.import` (owners, administrators,
+  supervisors). Each row's contact is found only among the company's live contacts by number;
+  a number no contact has is refused, so deal import never adds a number to the company. Owners are
+  active members with CRM access, by email. One transaction; rows with errors are listed and not
+  imported. Each deal is the importing member's, with an `imported` timeline entry and a
+  `deal.created` event; the import is audited with its counts, never the rows.
 - Following message changes (ADR-116): `GET /message-changes` reads the key's company's messages
   only (`conversations.read`, which only members who read every conversation grant; RLS and an
   explicit company filter). Its cursor is sealed as the contact feed's is, with the feed's name and

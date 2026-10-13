@@ -79,14 +79,24 @@ export default async function CrmPage({
         ).toString()}`
       : null;
   const settings = can(ctx, 'tenant.settings.manage');
+  // Deal import (ADR-374): for members who change deals and import contacts.
+  const importable = can(ctx, 'crm.write') && can(ctx, 'contacts.import');
   return (
     <>
       <PageHeader
         title="CRM"
         description="Deals by stage, and the tasks that move them forward."
         actions={
-          exportHref || settings ? (
+          exportHref || settings || importable ? (
             <>
+              {importable ? (
+                <Link
+                  href={`/c/${ctx.tenant.slug}/crm/import`}
+                  className="self-center text-sm text-primary underline-offset-4 hover:underline"
+                >
+                  Import CSV
+                </Link>
+              ) : null}
               {exportHref ? (
                 <Button asChild variant="outline">
                   <a href={exportHref} download>

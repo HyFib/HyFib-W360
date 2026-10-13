@@ -5,6 +5,7 @@ import type { JobSigner } from '../jobs/envelope';
 import type { JobQueue } from '../jobs/queue';
 import { crmMembers } from './common';
 import { dealFieldOperations } from './deal-fields';
+import { dealImportOperations } from './deal-import';
 import { dealOperations } from './deals';
 import { pipelineOperations } from './pipelines';
 import { taskOperations } from './tasks';
@@ -20,7 +21,7 @@ export interface CrmServiceDeps {
 /**
  * CRM for the web tier: pipelines and stages (company settings, `tenant.settings.manage`), deals,
  * notes and tasks (`crm.write` to change, `crm.read` to see), and deal fields (ADR-373, defined as
- * company settings). Deal and task changes are recorded on
+ * company settings), and deal import (ADR-374). Deal and task changes are recorded on
  * the contact's timeline; pipeline changes in the audit log.
  */
 export function createCrmService(deps: CrmServiceDeps) {
@@ -28,6 +29,7 @@ export function createCrmService(deps: CrmServiceDeps) {
     ...pipelineOperations(deps),
     ...dealOperations(deps),
     ...dealFieldOperations(deps),
+    ...dealImportOperations(deps),
     ...taskOperations(deps),
 
     /** Members who can own deals and be assigned tasks. */

@@ -1270,6 +1270,14 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   never misses a value written meanwhile. `GET /deal-fields` lists them, `Deal.fields` gives values,
   the deals CSV adds a column per field, and the API's deal history leaves out changes of values
   alone. 0293 also replaces `app.erase_contact` to clear the erased contact's deals' values.
+- **Deal import (ADR-374, no migration):** `crm/deal-import.ts` previews a CSV (columns, first
+  rows, suggested mapping) and imports it into one pipeline: `planDealRows` checks each row against
+  the company's records (contacts by E.164 number, active stages by name, CRM members by email,
+  deal fields by key) without the database, so its rules are unit-tested; `importDeals` locks the
+  named contacts (`FOR KEY SHARE`, id order), the pipeline (`FOR SHARE`) and the deal fields
+  (shared), then inserts deals and `deal_created` activities (`imported: true`) in batches of 200
+  and audits `crm.deals_imported`. Web: `app/c/[slug]/crm/import`, `DealImportWizard`, actions
+  `previewDealImportAction` and `importDealsAction`.
 - **Defining contact fields (0092, ADR-115):** `contacts/field-definitions.ts` adds, renames and
   deletes a company's custom fields for both Settings (`contacts/service.ts`, by id) and the API
   (`api/contact-fields.ts`, by key, scope `contact_fields.manage`); callers check who may and audit

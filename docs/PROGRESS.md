@@ -1,5 +1,40 @@
 # Progress
 
+## 2026-10-13 — Importing deals from CSV (P4-04, H-012, ADR-374)
+
+Status: **Implemented; its database and browser tests run in CI only.** Companies moving from a
+spreadsheet or another CRM had to add every deal by hand.
+
+### Completed
+
+- **Domain:** `crm/deal-import.ts` previews a CSV (columns, first rows, suggested mapping) and
+  imports it into one pipeline in one transaction, for members with `crm.write` and
+  `contacts.import`: each row a deal for an existing live contact found by number, with a title, a
+  stage by name (or the first), an exact value, an owner by email, an expected close date and custom
+  field values; rows with errors are listed by number and skipped. Contacts, the pipeline and the
+  deal fields are locked in the order a member's new deal takes them; each deal gets a
+  `deal_created` timeline entry marked imported (and `deal.created` webhook events through the
+  existing trigger); the import is audited. No migration.
+- **Web:** CRM → Import CSV (`/c/<company>/crm/import`): file, preview, mapping, result with the
+  rows not imported.
+- **Tests:** unit (the request, every row check, national numbers, formula guards, the phones
+  looked up); integration (`crm.test.ts`: roles, contacts found and refused, erased contacts, the
+  audit, archived and foreign pipelines, unknown fields, isolation); e2e (an import with one refused
+  row, the deal on the board in its stage). Written for CI; the integration and e2e tests were not
+  run here.
+- **Docs:** ADR-374 (and ADR-373's "not built" note); SECURITY; THREAT-MODEL T331; ARCHITECTURE;
+  BACKLOG P4-04; the feature matrix (status unchanged).
+- **Mutation checks:** 16 deliberate regressions, all caught by the unit tests.
+
+### Test commands and results (local, 2026-10-13)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 149 files, 1587 tests passed                                    |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+
 ## 2026-10-13 — Custom deal fields (P4-04, H-012, ADR-373)
 
 Status: **Implemented; its database and browser tests run in CI only.** Deals held only a title,
