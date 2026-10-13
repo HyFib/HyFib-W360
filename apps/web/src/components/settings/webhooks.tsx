@@ -89,6 +89,7 @@ import {
   webhookOAuthSignsJwts,
   webhookOAuthText,
   WEBHOOK_OAUTH_JWKS_HINT,
+  WEBHOOK_OAUTH_CERTIFICATE_HINT,
   webhookOwnerText,
   webhookPipelineText,
   webhookReplayAllSummary,
@@ -3511,6 +3512,11 @@ interface OAuthFields {
   assertionAudience: string;
   /** The algorithm of the key pairs the change makes (ADR-371); the pair in use's, or RS256. */
   keyAlgorithm: WebhookOAuthKeyAlgorithm;
+  /**
+   * Whether the key pairs the change makes get a self-signed certificate (ADR-372): as the pair in
+   * use has one, else not.
+   */
+  keyCertificate: boolean;
 }
 
 /**
@@ -3716,6 +3722,26 @@ function OAuthClientFields({
               )}
             </Field>
           ) : null}
+          {fields.clientAuthentication === 'private_key_jwt' &&
+          (stored?.clientAuthentication !== 'private_key_jwt' ||
+            fields.keyAction === 'replace' ||
+            fields.keyAction === 'make') ? (
+            // A self-signed certificate for the key pair made now, for a server that registers
+            // certificates (ADR-372).
+            <div className="grid gap-1 sm:col-span-2">
+              <div className="flex items-center gap-2">
+                <Checkbox
+                  id={`${prefix}-oauth-key-certificate`}
+                  checked={fields.keyCertificate}
+                  onChange={(e) => set({ keyCertificate: e.target.checked })}
+                />
+                <Label htmlFor={`${prefix}-oauth-key-certificate`} className="font-normal">
+                  Make a certificate for the new key pair
+                </Label>
+              </div>
+              <p className="text-xs text-muted-foreground">{WEBHOOK_OAUTH_CERTIFICATE_HINT}</p>
+            </div>
+          ) : null}
           {fields.clientAuthentication !== 'private_key_jwt' ? (
             <Field
               id={`${prefix}-oauth-client-secret`}
@@ -3812,6 +3838,7 @@ const oauthFieldsOf = (stored: WebhookEndpointOAuth | null | undefined): OAuthFi
   keyAction: 'keep',
   assertionAudience: stored?.assertionAudience ?? '',
   keyAlgorithm: stored?.publicKey?.jwk.alg ?? 'RS256',
+  keyCertificate: (stored?.publicKey?.certificate ?? null) !== null,
 });
 
 /**
@@ -4756,7 +4783,12 @@ export function WebhookEndpointForm({
           ...((keyAction === 'use' || keyAction === 'drop') && shownNextKeyId
             ? { nextKey: keyAction, nextKeyId: shownNextKeyId }
             : {}),
-          ...(makesPair ? { keyAlgorithm: oauthFields.keyAlgorithm } : {}),
+          ...(makesPair
+            ? {
+                keyAlgorithm: oauthFields.keyAlgorithm,
+                keyCertificate: oauthFields.keyCertificate,
+              }
+            : {}),
         };
         if (endpoint) {
           void updateWebhookEndpointAction(slug, {

@@ -4,3 +4,4 @@ export * from './oauth';
 export * from './payloads';
 export * from './service';
 export * from './delivery';
+export * from './x509';

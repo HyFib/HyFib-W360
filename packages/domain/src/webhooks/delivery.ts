@@ -317,6 +317,7 @@ async function claimDeliveries(
             oauthPublicKey: webhookEndpoints.oauthPublicKey,
             oauthAssertionAudience: webhookEndpoints.oauthAssertionAudience,
             oauthKeyAlgorithm: webhookEndpoints.oauthKeyAlgorithm,
+            oauthCertificate: webhookEndpoints.oauthCertificate,
           })
           .from(webhookEndpoints)
           .where(

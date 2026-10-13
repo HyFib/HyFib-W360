@@ -2897,7 +2897,14 @@ with `keyAlgorithm`), register its public key (its JWK's `alg` names the algorit
 a pair made without one signs as the pair in use does. A delivery that ends `payload_failed` at
 stage `oauth` for a client whose key is not of the kind its algorithm takes (a pair made by a web
 server from before ADR-371 during a rollout) needs a new pair: "Make a new key pair" with the
-algorithm wanted; `oauth_token_refused_404` or a 3xx: the token URL is wrong (redirects are not
+algorithm wanted. A server that registers a certificate rather than a key, such as Microsoft Entra
+ID (RSA keys only: PS256 or RS256; ADR-372), needs a pair made with "Make a certificate for the new
+key pair" (`keyCertificate: true`): upload the certificate PEM shown beside the public key (as a
+.pem or .crt file), then switch. A certificate expires a year after its pair was made, and nothing
+warns before: from about eleven months, make a next key pair with a certificate, register it and
+switch; once expired, the server's refusal (Entra: AADSTS700027, "key used is expired", as
+reported in Microsoft Q&A) ends attempts with `oauth_token_refused_400` or `_401` until then;
+`oauth_token_refused_404` or a 3xx: the token URL is wrong (redirects are not
 followed);
 `oauth_token_invalid`: it answered 200 without a bearer token (an HTML page, or a token type other
 than Bearer); `oauth_token_timeout`, `_dns_failed`, `_connect_failed` or `_address_blocked`: the

@@ -1,4 +1,4 @@
-import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomUUID, timingSafeEqual, X509Certificate } from 'node:crypto';
 import { once } from 'node:events';
 import { createServer, type IncomingHttpHeaders, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -623,7 +623,7 @@ test('an endpoint sends its own headers with every delivery: set in settings and
   expect(viaApi()[1]!.headers['x-gateway-token']).toBeUndefined();
 });
 
-test('an endpoint gets OAuth access tokens as its client and sends them as a bearer token: set in settings with the secret never shown again, changed on its page to send it in the request body, then to sign with a key pair, its keys served at a JWKS URL, moved to a next key pair made for ES256, its JWTs addressed to another audience, removed, and given by an API key (ADR-173, ADR-357, ADR-367 to ADR-371)', async ({
+test('an endpoint gets OAuth access tokens as its client and sends them as a bearer token: set in settings with the secret never shown again, changed on its page to send it in the request body, then to sign with a key pair, its keys served at a JWKS URL, moved to a next key pair made for ES256 with a certificate, its JWTs addressed to another audience, removed, and given by an API key (ADR-173, ADR-357, ADR-367 to ADR-372)', async ({
   page,
   request,
 }) => {
@@ -750,9 +750,9 @@ test('an endpoint gets OAuth access tokens as its client and sends them as a bea
     typ: 'JWT',
   });
 
-  // A next key pair (ADR-368), made for ES256 (ADR-371): made beside the key in use and shown to
-  // register first, while the key in use goes on signing; once switched to, the next token
-  // request's JWT names it and its algorithm.
+  // A next key pair (ADR-368), made for ES256 (ADR-371) with a certificate (ADR-372): made beside
+  // the key in use and shown to register first, while the key in use goes on signing; once
+  // switched to, the next token request's JWT names it, its algorithm and its certificate.
   const headerOf = (body: string) => {
     const [header] = (new URLSearchParams(body).get('client_assertion') ?? '').split('.');
     return JSON.parse(Buffer.from(header!, 'base64url').toString('utf8')) as {
@@ -765,6 +765,7 @@ test('an endpoint gets OAuth access tokens as its client and sends them as a bea
   await page.getByRole('radio', { name: 'Change the OAuth client' }).check();
   await page.getByRole('radio', { name: /^Make a next key pair to register first/ }).check();
   await page.getByLabel('Key algorithm', { exact: true }).selectOption('ES256');
+  await page.getByLabel('Make a certificate for the new key pair', { exact: true }).check();
   await page.getByRole('button', { name: 'Save endpoint' }).click();
   await expect(page.getByText('Endpoint saved.')).toBeVisible();
   await page.goto(`/c/${slug}/settings/webhooks`);
@@ -779,6 +780,17 @@ test('an endpoint gets OAuth access tokens as its client and sends them as a bea
   expect(nextKeyId).not.toBe(keyId);
   await nextSummary.click();
   await expect(page.getByText('JWK set, with the key in use', { exact: true })).toBeVisible();
+  // Its certificate, shown as PEM to upload: self-signed, holding the next key, named by the
+  // thumbprints of its DER.
+  await expect(page.getByText('Certificate', { exact: true })).toBeVisible();
+  const certificatePem =
+    (await page.locator('pre').filter({ hasText: 'BEGIN CERTIFICATE' }).textContent()) ?? '';
+  const certificate = new X509Certificate(certificatePem);
+  expect(certificate.verify(certificate.publicKey)).toBe(true);
+  expect(certificate.subject).toBe('CN=HyFib W360 webhook OAuth client');
+  const x5t = createHash('sha1').update(certificate.raw).digest('base64url');
+  const x5tS256 = createHash('sha256').update(certificate.raw).digest('base64url');
+  await expect(page.getByText(x5tS256, { exact: true })).toBeVisible();
   await expectNoHorizontalOverflow(page);
   // Its JWKS URL (ADR-370) serves both public keys, the key in use first, to anyone, briefly
   // cacheable; an id it never gave serves nothing.
@@ -802,6 +814,12 @@ test('an endpoint gets OAuth access tokens as its client and sends them as a bea
   };
   expect(await servedKids()).toEqual([`${keyId} RS256`, `${nextKeyId} ES256`]);
   expect(await servedKids('/api/webhook-oauth/jwks/aaaaaaaaaaaaaaaa')).toBeNull();
+  // The next key's JWK names its certificate; the key in use has none.
+  const served = (await (await request.get(jwksPath)).json()) as {
+    keys: { x5c?: string[]; 'x5t#S256'?: string }[];
+  };
+  expect(served.keys.map((key) => key['x5t#S256'] ?? null)).toEqual([null, x5tS256]);
+  expect(served.keys[1]?.x5c).toEqual([certificate.raw.toString('base64')]);
   await page.getByRole('button', { name: `Send test event to ${HOST}` }).click();
   await expect(async () => expect(forUs()).toHaveLength(4)).toPass({ timeout: 30_000 });
   // A token asked for meanwhile, if any, was asked with the key in use.
@@ -829,6 +847,8 @@ test('an endpoint gets OAuth access tokens as its client and sends them as a bea
     alg: 'ES256',
     kid: nextKeyId,
     typ: 'JWT',
+    x5t,
+    'x5t#S256': x5tS256,
   });
 
   // The audience its JWTs name (ADR-369): the token URL, or another, such as the server's issuer.

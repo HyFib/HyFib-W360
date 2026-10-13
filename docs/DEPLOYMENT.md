@@ -1603,6 +1603,17 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    algorithm column as it was, which a new worker then refuses for a key of another kind. Move
    clients to RS256 pairs before rolling web servers back to an image from before it.
 
+   Migration 0292 (ADR-372) adds `oauth_certificate` and `oauth_next_certificate` to
+   `app.webhook_endpoints` (nullable, no rewrite) with their update grant and a check keeping each
+   one, of 1 to 4,000 characters, only beside its public key (validated by reading the table), and
+   replaces `ops.webhook_oauth_jwks` (dropped as the definer and created again) to return them too.
+   Workers roll out first: a worker from before it names no certificate and sends no `nbf`, so a
+   server that finds certificates by thumbprint refuses its assertions (retried as usual). Until the
+   web rollout ends, ask for no certificate: an old web server neither shows nor serves one, and a
+   pair it makes leaves the certificate column as it was, which the new worker then refuses as a
+   certificate of another key. Remove certificates (a new key pair without one) before rolling web
+   servers back to an image from before it.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

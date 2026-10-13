@@ -187,7 +187,9 @@ import {
   WEBHOOK_OAUTH_JWT_SECRET_BYTES,
   WEBHOOK_OAUTH_SCOPE_RE,
   type WebhookOAuthClient,
+  type WebhookOAuthKeyPair,
 } from './oauth';
+import { selfSignedWebhookOAuthCertificate } from './x509';
 
 /** Binds an endpoint's secret to its company, the endpoint and the secret's version. */
 export const webhookSecretAad = (tenantId: string, endpointId: string, version: number) =>
@@ -280,7 +282,8 @@ export const WEBHOOK_OAUTH_AUDIENCE_INVALID =
  * drops its next key pair, registered before it is used, using or dropping the one `nextKeyId`
  * names (ADR-368). A client that signs JWTs may name another audience for them than its token URL
  * (`assertionAudience`, ADR-369), kept when left out while the token URL stays the same. The key
- * pairs a change makes sign with `keyAlgorithm` (ADR-371).
+ * pairs a change makes sign with `keyAlgorithm` (ADR-371), and get a self-signed certificate when
+ * `keyCertificate` asks for one (ADR-372).
  */
 export const webhookOAuthSchema = z
   .object({
@@ -343,6 +346,9 @@ export const webhookOAuthSchema = z
         error: 'Choose the key pair’s algorithm: RS256, PS256 or ES256.',
       })
       .optional(),
+    keyCertificate: z
+      .boolean({ error: 'Say true to make a certificate for the key pair, or false not to.' })
+      .optional(),
     assertionAudience: z
       .string({ error: WEBHOOK_OAUTH_AUDIENCE_INVALID })
       .trim()
@@ -383,6 +389,10 @@ export const WEBHOOK_OAUTH_KEY_ALGORITHM_WAY =
   'Only a client that signs with HyFib’s key pair has a key algorithm.';
 export const WEBHOOK_OAUTH_KEY_ALGORITHM_UNUSED =
   'Choose an algorithm only when a key pair is made: for a new key pair, a replaced one or a next one.';
+export const WEBHOOK_OAUTH_KEY_CERTIFICATE_WAY =
+  'Only a client that signs with HyFib’s key pair has a certificate.';
+export const WEBHOOK_OAUTH_KEY_CERTIFICATE_UNUSED =
+  'Ask for a certificate only when a key pair is made: for a new key pair, a replaced one or a next one.';
 export const WEBHOOK_OAUTH_NEXT_KEY_UNREADABLE =
   'The next key pair can no longer be read: drop it and make another.';
 export const WEBHOOK_OAUTH_AUTHORIZATION =
@@ -4312,7 +4322,7 @@ export function checkedWebhookUrl(
  * An endpoint's OAuth columns (ADR-173): all null without an OAuth client, but the way a client
  * authenticates (ADR-357), which then stays at its default, HTTP Basic. A client has a secret, or,
  * signing with a key pair, the key pair and no secret (ADR-367), and perhaps a next key pair
- * (ADR-368).
+ * (ADR-368), each perhaps with a certificate (ADR-372).
  */
 export interface WebhookOAuthColumns {
   oauthTokenUrl: string | null;
@@ -4335,6 +4345,10 @@ export interface WebhookOAuthColumns {
   oauthKeyAlgorithm: WebhookOAuthKeyAlgorithm | null;
   /** The algorithm the next key pair signs with once used (ADR-371); null as above. */
   oauthNextKeyAlgorithm: WebhookOAuthKeyAlgorithm | null;
+  /** The certificate made for the key pair in use, as PEM, or null: none (ADR-372). */
+  oauthCertificate: string | null;
+  /** The certificate made for the next key pair, as PEM, or null: none (ADR-372). */
+  oauthNextCertificate: string | null;
 }
 
 /**
@@ -4343,7 +4357,11 @@ export interface WebhookOAuthColumns {
  */
 export type WebhookOAuthClientColumns = Omit<
   WebhookOAuthColumns,
-  'oauthNextPrivateKeyCiphertext' | 'oauthNextPublicKey' | 'oauthJwksId' | 'oauthNextKeyAlgorithm'
+  | 'oauthNextPrivateKeyCiphertext'
+  | 'oauthNextPublicKey'
+  | 'oauthJwksId'
+  | 'oauthNextKeyAlgorithm'
+  | 'oauthNextCertificate'
 >;
 
 export const NO_WEBHOOK_OAUTH: WebhookOAuthColumns = {
@@ -4360,6 +4378,8 @@ export const NO_WEBHOOK_OAUTH: WebhookOAuthColumns = {
   oauthJwksId: null,
   oauthKeyAlgorithm: null,
   oauthNextKeyAlgorithm: null,
+  oauthCertificate: null,
+  oauthNextCertificate: null,
 };
 
 /** An OAuth client given for an endpoint, its token URL checked. */
@@ -4381,6 +4401,11 @@ export interface CheckedWebhookOAuth {
    * signs as the pair in use does, and a client's first pair RS256 (ADR-371).
    */
   keyAlgorithm: WebhookOAuthKeyAlgorithm | null;
+  /**
+   * Whether the key pairs the change makes get a certificate, or null: not said, so a new pair has
+   * one when the pair in use has one, and a client's first pair none (ADR-372).
+   */
+  keyCertificate: boolean | null;
   /** The token URL's host, the only part of it audit entries name. */
   host: string;
 }
@@ -4397,8 +4422,8 @@ export interface CheckedWebhookOAuth {
  * other in a change; using or dropping the next key pair needs one, named by its key id as the
  * request saw it. Only a client that signs JWTs names an audience in them (ADR-369); left out, the
  * one it has stays while the token URL stays the same and the client goes on signing JWTs. An
- * algorithm is chosen only by a change that makes a key pair: the client's first, a replacement or
- * a next pair (ADR-371).
+ * algorithm is chosen, and a certificate asked for or not, only by a change that makes a key pair:
+ * the client's first, a replacement or a next pair (ADR-371, ADR-372).
  */
 export function checkedWebhookOAuth(
   given: WebhookOAuthInput,
@@ -4448,6 +4473,9 @@ export function checkedWebhookOAuth(
     if (given.keyAlgorithm !== undefined && !makesPair) {
       throw refuse('oauth.keyAlgorithm', WEBHOOK_OAUTH_KEY_ALGORITHM_UNUSED);
     }
+    if (given.keyCertificate !== undefined && !makesPair) {
+      throw refuse('oauth.keyCertificate', WEBHOOK_OAUTH_KEY_CERTIFICATE_UNUSED);
+    }
   } else {
     if (given.replaceKey) throw refuse('oauth.replaceKey', WEBHOOK_OAUTH_NO_KEY_TO_REPLACE);
     if (given.nextKey) throw refuse('oauth.nextKey', WEBHOOK_OAUTH_NEXT_KEY_WAY);
@@ -4456,6 +4484,9 @@ export function checkedWebhookOAuth(
     }
     if (given.keyAlgorithm !== undefined) {
       throw refuse('oauth.keyAlgorithm', WEBHOOK_OAUTH_KEY_ALGORITHM_WAY);
+    }
+    if (given.keyCertificate !== undefined) {
+      throw refuse('oauth.keyCertificate', WEBHOOK_OAUTH_KEY_CERTIFICATE_WAY);
     }
     // The stored secret is kept only while it stays with the same token URL.
     const keeps = current.oauthClientSecretCiphertext !== null && sameUrl;
@@ -4488,6 +4519,7 @@ export function checkedWebhookOAuth(
     nextKey: given.nextKey ?? null,
     assertionAudience,
     keyAlgorithm: given.keyAlgorithm ?? null,
+    keyCertificate: given.keyCertificate ?? null,
   };
 }
 
@@ -4502,8 +4534,10 @@ export function checkedWebhookOAuth(
  * change makes one (another binding: `webhook-oauth-next-key:`), uses it in place of the pair in
  * use, its private key sealed again under the binding of the key in use, or drops it. Each pair
  * keeps the algorithm it was made for (ADR-371): the one the change chose, else the pair in use's,
- * else RS256. Its JWKS URL's public id (ADR-370) is made with its first key pair and kept, the key
- * pairs it serves changing behind it. Any other client keeps no key pair and no JWKS URL.
+ * else RS256; and the certificate made with it, valid from `at` (ADR-372), when the change asked
+ * for one or, not saying, the pair in use has one. Its JWKS URL's public id (ADR-370) is made with
+ * its first key pair and kept, the key pairs it serves changing behind it. Any other client keeps
+ * no key pair, certificate or JWKS URL.
  */
 export function webhookOAuthColumns(
   keyring: Keyring,
@@ -4511,6 +4545,7 @@ export function webhookOAuthColumns(
   endpointId: string,
   oauth: CheckedWebhookOAuth | null,
   current: WebhookOAuthColumns,
+  at: Date,
 ): WebhookOAuthColumns {
   if (!oauth) return NO_WEBHOOK_OAUTH;
   const client = {
@@ -4523,15 +4558,20 @@ export function webhookOAuthColumns(
       : null,
   };
   if (oauth.clientAuthentication === 'private_key_jwt') {
-    // A pair made now signs with the algorithm chosen, else as the pair in use does, else RS256.
+    // A pair made now signs with the algorithm chosen, else as the pair in use does, else RS256,
+    // and has a certificate when one is asked for, else when the pair in use has one.
+    const first = current.oauthPrivateKeyCiphertext === null;
     const made =
       oauth.keyAlgorithm ??
-      (current.oauthPrivateKeyCiphertext
-        ? (current.oauthKeyAlgorithm ?? WEBHOOK_OAUTH_DEFAULT_KEY_ALGORITHM)
-        : WEBHOOK_OAUTH_DEFAULT_KEY_ALGORITHM);
+      (first
+        ? WEBHOOK_OAUTH_DEFAULT_KEY_ALGORITHM
+        : (current.oauthKeyAlgorithm ?? WEBHOOK_OAUTH_DEFAULT_KEY_ALGORITHM));
+    const certified = oauth.keyCertificate ?? (!first && current.oauthCertificate !== null);
+    const certificateFor = (pair: WebhookOAuthKeyPair) =>
+      certified ? selfSignedWebhookOAuthCertificate(pair.privateKey, pair.publicKey, at) : null;
     let inUse: Pick<
       WebhookOAuthColumns,
-      'oauthPrivateKeyCiphertext' | 'oauthPublicKey' | 'oauthKeyAlgorithm'
+      'oauthPrivateKeyCiphertext' | 'oauthPublicKey' | 'oauthKeyAlgorithm' | 'oauthCertificate'
     >;
     if (oauth.nextKey === 'use') {
       inUse = usedWebhookOAuthNextKey(keyring, current, tenantId, endpointId);
@@ -4540,6 +4580,7 @@ export function webhookOAuthColumns(
         oauthPrivateKeyCiphertext: current.oauthPrivateKeyCiphertext,
         oauthPublicKey: current.oauthPublicKey,
         oauthKeyAlgorithm: current.oauthKeyAlgorithm,
+        oauthCertificate: current.oauthCertificate,
       };
     } else {
       const pair = generateWebhookOAuthKeyPair(made);
@@ -4550,15 +4591,20 @@ export function webhookOAuthColumns(
         ),
         oauthPublicKey: pair.publicKey,
         oauthKeyAlgorithm: made,
+        oauthCertificate: certificateFor(pair),
       };
     }
     let next: Pick<
       WebhookOAuthColumns,
-      'oauthNextPrivateKeyCiphertext' | 'oauthNextPublicKey' | 'oauthNextKeyAlgorithm'
+      | 'oauthNextPrivateKeyCiphertext'
+      | 'oauthNextPublicKey'
+      | 'oauthNextKeyAlgorithm'
+      | 'oauthNextCertificate'
     > = {
       oauthNextPrivateKeyCiphertext: current.oauthNextPrivateKeyCiphertext,
       oauthNextPublicKey: current.oauthNextPublicKey,
       oauthNextKeyAlgorithm: current.oauthNextKeyAlgorithm,
+      oauthNextCertificate: current.oauthNextCertificate,
     };
     if (oauth.nextKey === 'make') {
       const pair = generateWebhookOAuthKeyPair(made);
@@ -4569,12 +4615,14 @@ export function webhookOAuthColumns(
         ),
         oauthNextPublicKey: pair.publicKey,
         oauthNextKeyAlgorithm: made,
+        oauthNextCertificate: certificateFor(pair),
       };
     } else if (oauth.nextKey === 'use' || oauth.nextKey === 'drop') {
       next = {
         oauthNextPrivateKeyCiphertext: null,
         oauthNextPublicKey: null,
         oauthNextKeyAlgorithm: null,
+        oauthNextCertificate: null,
       };
     }
     return {
@@ -4610,13 +4658,16 @@ export function webhookOAuthColumns(
     oauthJwksId: null,
     oauthKeyAlgorithm: null,
     oauthNextKeyAlgorithm: null,
+    oauthCertificate: null,
+    oauthNextCertificate: null,
   };
 }
 
 /**
- * The next key pair, taking the place of the pair in use (ADR-368) with its algorithm (ADR-371):
- * its private key opened, checked to be of the kind the algorithm takes, and sealed again under the
- * binding of the key in use. One the keyring can no longer open (a key the platform no longer
+ * The next key pair, taking the place of the pair in use (ADR-368) with its algorithm (ADR-371)
+ * and its certificate, if it has one (ADR-372): its private key opened, checked to be of the kind
+ * the algorithm takes, and sealed again under the binding of the key in use; its certificate
+ * checked to hold its public key. One the keyring can no longer open (a key the platform no longer
  * holds) is refused: it is dropped and another made.
  */
 function usedWebhookOAuthNextKey(
@@ -4624,7 +4675,10 @@ function usedWebhookOAuthNextKey(
   current: WebhookOAuthColumns,
   tenantId: string,
   endpointId: string,
-): Pick<WebhookOAuthColumns, 'oauthPrivateKeyCiphertext' | 'oauthPublicKey' | 'oauthKeyAlgorithm'> {
+): Pick<
+  WebhookOAuthColumns,
+  'oauthPrivateKeyCiphertext' | 'oauthPublicKey' | 'oauthKeyAlgorithm' | 'oauthCertificate'
+> {
   const { oauthNextPrivateKeyCiphertext: sealed, oauthNextPublicKey: publicKey } = current;
   if (!sealed || !publicKey) {
     throw new Error('A webhook OAuth client used a next key pair without one stored');
@@ -4639,6 +4693,8 @@ function usedWebhookOAuthNextKey(
     });
   }
   const algorithm = current.oauthNextKeyAlgorithm ?? WEBHOOK_OAUTH_DEFAULT_KEY_ALGORITHM;
+  // Throws for a certificate that does not hold the key: none is moved that the pair cannot use.
+  webhookOAuthPublicKey(publicKey, algorithm, current.oauthNextCertificate);
   return {
     oauthPrivateKeyCiphertext: keyring.encrypt(
       checkedWebhookOAuthPrivateKey(privateKey, algorithm),
@@ -4646,6 +4702,7 @@ function usedWebhookOAuthNextKey(
     ),
     oauthPublicKey: publicKey,
     oauthKeyAlgorithm: current.oauthNextKeyAlgorithm,
+    oauthCertificate: current.oauthNextCertificate,
   };
 }
 
@@ -4669,10 +4726,10 @@ function keptWebhookOAuthSecret(
 /**
  * An endpoint's OAuth client, opened for its token requests, or null without one. Throws when the
  * keyring cannot open the secret or the private key (a key the platform no longer holds), when the
- * private key is not of the kind its algorithm takes (ADR-371), or when a client set to sign with a
- * key pair has none (ADR-367): its deliveries then end unprepared rather than go without a token.
- * A next key pair (ADR-368) is never opened: it signs nothing until it takes the place of the pair
- * in use.
+ * private key is not of the kind its algorithm takes (ADR-371), when the pair's certificate does
+ * not hold its public key (ADR-372), or when a client set to sign with a key pair has none
+ * (ADR-367): its deliveries then end unprepared rather than go without a token. A next key pair
+ * (ADR-368) is never opened: it signs nothing until it takes the place of the pair in use.
  */
 export function openWebhookOAuthClient(
   keyring: Keyring,
@@ -4696,6 +4753,11 @@ export function openWebhookOAuthClient(
       throw new Error('A webhook OAuth client set to sign with a key pair has none stored');
     }
     const keyAlgorithm = columns.oauthKeyAlgorithm ?? WEBHOOK_OAUTH_DEFAULT_KEY_ALGORITHM;
+    const { keyId, certificate } = webhookOAuthPublicKey(
+      oauthPublicKey,
+      keyAlgorithm,
+      columns.oauthCertificate,
+    );
     return {
       ...client,
       clientAuthentication: 'private_key_jwt',
@@ -4703,8 +4765,9 @@ export function openWebhookOAuthClient(
         keyring.decryptString(oauthPrivateKeyCiphertext, webhookOAuthKeyAad(tenantId, endpointId)),
         keyAlgorithm,
       ),
-      keyId: webhookOAuthPublicKey(oauthPublicKey, keyAlgorithm).keyId,
+      keyId,
       keyAlgorithm,
+      certificate: certificate ? { x5t: certificate.x5t, x5tS256: certificate.x5tS256 } : null,
     };
   }
   if (!oauthClientSecretCiphertext) return null;
@@ -4720,9 +4783,10 @@ export function openWebhookOAuthClient(
 
 /**
  * The JWK Set a client's JWKS URL serves (ADR-370): the public key in use and the next one, each
- * with the algorithm it signs with (ADR-371), of the client signing with a key pair whose JWKS id
- * is given, of a company not deleted; null for any other id. Read through `ops.webhook_oauth_jwks`,
- * since the public route has no company to scope a read to; nothing but public keys comes back.
+ * with the algorithm it signs with (ADR-371) and its certificate, if it has one (ADR-372), of the
+ * client signing with a key pair whose JWKS id is given, of a company not deleted; null for any
+ * other id. Read through `ops.webhook_oauth_jwks`, since the public route has no company to scope a
+ * read to; nothing but public keys and certificates comes back.
  */
 export async function webhookOAuthPublicJwks(
   db: Database,
@@ -4735,22 +4799,31 @@ export async function webhookOAuthPublicJwks(
       tx.execute<{
         public_key: string;
         key_algorithm: WebhookOAuthKeyAlgorithm | null;
+        certificate: string | null;
         next_public_key: string | null;
         next_key_algorithm: WebhookOAuthKeyAlgorithm | null;
+        next_certificate: string | null;
       }>(
-        sql`select public_key, key_algorithm, next_public_key, next_key_algorithm
+        sql`select public_key, key_algorithm, certificate, next_public_key, next_key_algorithm,
+                   next_certificate
               from ops.webhook_oauth_jwks(${jwksId})`,
       ),
     { accessMode: 'read only' },
   );
   const row = res.rows[0];
   if (!row) return null;
-  const jwk = (pem: string, algorithm: WebhookOAuthKeyAlgorithm | null) =>
-    webhookOAuthPublicKey(pem, algorithm ?? WEBHOOK_OAUTH_DEFAULT_KEY_ALGORITHM).jwk;
+  const jwk = (
+    pem: string,
+    algorithm: WebhookOAuthKeyAlgorithm | null,
+    certificate: string | null,
+  ) =>
+    webhookOAuthPublicKey(pem, algorithm ?? WEBHOOK_OAUTH_DEFAULT_KEY_ALGORITHM, certificate).jwk;
   return {
     keys: [
-      jwk(row.public_key, row.key_algorithm),
-      ...(row.next_public_key ? [jwk(row.next_public_key, row.next_key_algorithm)] : []),
+      jwk(row.public_key, row.key_algorithm, row.certificate),
+      ...(row.next_public_key
+        ? [jwk(row.next_public_key, row.next_key_algorithm, row.next_certificate)]
+        : []),
     ],
   };
 }
@@ -4799,6 +4872,7 @@ export function webhookOAuthAudit(
             current.oauthPrivateKeyCiphertext === null,
           ...webhookOAuthNextKeyAudit(oauth),
           ...webhookOAuthKeyAlgorithmAudit(oauth, current),
+          ...webhookOAuthKeyCertificateAudit(oauth, current),
         }
       : { oauthSecretReplaced: oauth.clientSecret !== null, ...nextDropped }),
     ...webhookOAuthAudienceAudit(oauth),
@@ -4832,6 +4906,22 @@ export function webhookOAuthKeyAlgorithmAudit(
         ? WEBHOOK_OAUTH_DEFAULT_KEY_ALGORITHM
         : (current.oauthKeyAlgorithm ?? WEBHOOK_OAUTH_DEFAULT_KEY_ALGORITHM)),
   };
+}
+
+/**
+ * That the key pairs a change makes for a client that signs with a key pair get a certificate
+ * (ADR-372), as asked or as the pair in use has one; nothing when they get none, or none is made.
+ */
+export function webhookOAuthKeyCertificateAudit(
+  oauth: CheckedWebhookOAuth,
+  current: WebhookOAuthColumns,
+): { oauthKeyCertificate?: true } {
+  if (oauth.clientAuthentication !== 'private_key_jwt') return {};
+  const first = current.oauthPrivateKeyCiphertext === null;
+  if (!first && !oauth.replaceKey && oauth.nextKey !== 'make') return {};
+  return (oauth.keyCertificate ?? (!first && current.oauthCertificate !== null))
+    ? { oauthKeyCertificate: true }
+    : {};
 }
 
 /** What an audit entry says a change did with the client's next key pair, if anything (ADR-368). */
@@ -4961,6 +5051,8 @@ export async function lockWebhookEndpoint(
       oauthJwksId: webhookEndpoints.oauthJwksId,
       oauthKeyAlgorithm: webhookEndpoints.oauthKeyAlgorithm,
       oauthNextKeyAlgorithm: webhookEndpoints.oauthNextKeyAlgorithm,
+      oauthCertificate: webhookEndpoints.oauthCertificate,
+      oauthNextCertificate: webhookEndpoints.oauthNextCertificate,
     })
     .from(webhookEndpoints)
     .where(
@@ -5057,6 +5149,8 @@ export async function insertWebhookEndpoint(
     /** Its OAuth client (ADR-173), checked by `checkedWebhookOAuth` with nothing stored. */
     oauth: CheckedWebhookOAuth | null;
     creator: WebhookEndpointCreator;
+    /** When it is added: the certificate made for its key pair is valid from then (ADR-372). */
+    now: Date;
   },
 ): Promise<{ id: string; secret: string }> {
   await lockEndpoints(tx, tenantId);
@@ -5141,7 +5235,7 @@ export async function insertWebhookEndpoint(
     assigneeIds: input.assigneeIds,
     contactTags: input.contactTags,
     conversationTags: input.conversationTags,
-    ...webhookOAuthColumns(keyring, tenantId, id, input.oauth, NO_WEBHOOK_OAUTH),
+    ...webhookOAuthColumns(keyring, tenantId, id, input.oauth, NO_WEBHOOK_OAUTH, input.now),
     createdByUserId: 'userId' in input.creator ? input.creator.userId : null,
     createdByApiKeyId: 'apiKeyId' in input.creator ? input.creator.apiKeyId : null,
   });
@@ -5587,6 +5681,8 @@ export function createWebhooksService(deps: {
               oauthJwksId: webhookEndpoints.oauthJwksId,
               oauthKeyAlgorithm: webhookEndpoints.oauthKeyAlgorithm,
               oauthNextKeyAlgorithm: webhookEndpoints.oauthNextKeyAlgorithm,
+              oauthCertificate: webhookEndpoints.oauthCertificate,
+              oauthNextCertificate: webhookEndpoints.oauthNextCertificate,
               createdAt: webhookEndpoints.createdAt,
               createdBy: users.name,
               keyName: apiKeys.name,
@@ -5934,6 +6030,8 @@ export function createWebhooksService(deps: {
               oauthJwksId,
               oauthKeyAlgorithm,
               oauthNextKeyAlgorithm,
+              oauthCertificate,
+              oauthNextCertificate,
               ...endpoint
             } = r;
             return {
@@ -5949,12 +6047,14 @@ export function createWebhooksService(deps: {
                         ? webhookOAuthPublicKey(
                             oauthPublicKey,
                             oauthKeyAlgorithm ?? WEBHOOK_OAUTH_DEFAULT_KEY_ALGORITHM,
+                            oauthCertificate,
                           )
                         : null,
                       nextPublicKey: oauthNextPublicKey
                         ? webhookOAuthPublicKey(
                             oauthNextPublicKey,
                             oauthNextKeyAlgorithm ?? WEBHOOK_OAUTH_DEFAULT_KEY_ALGORITHM,
+                            oauthNextCertificate,
                           )
                         : null,
                       assertionAudience: oauthAssertionAudience,
@@ -6704,6 +6804,7 @@ export function createWebhooksService(deps: {
           conversationTags,
           oauth,
           creator: { userId: ctx.user.id },
+          now: clock.now(),
         });
         await recordAudit(
           tx,
@@ -6783,6 +6884,7 @@ export function createWebhooksService(deps: {
                     oauthTokenHost: oauth.host,
                     ...webhookOAuthNextKeyAudit(oauth),
                     ...webhookOAuthKeyAlgorithmAudit(oauth, NO_WEBHOOK_OAUTH),
+                    ...webhookOAuthKeyCertificateAudit(oauth, NO_WEBHOOK_OAUTH),
                     ...webhookOAuthAudienceAudit(oauth),
                     ...webhookOAuthClientAuthAudit(oauth, NO_WEBHOOK_OAUTH),
                   }
@@ -7314,7 +7416,14 @@ export function createWebhooksService(deps: {
               ? sealWebhookHeaders(keyring, ctx.tenant.id, data.endpointId, data.headers)
               : {}),
             ...(oauth !== undefined
-              ? webhookOAuthColumns(keyring, ctx.tenant.id, data.endpointId, oauth, endpoint)
+              ? webhookOAuthColumns(
+                  keyring,
+                  ctx.tenant.id,
+                  data.endpointId,
+                  oauth,
+                  endpoint,
+                  clock.now(),
+                )
               : {}),
             updatedAt: clock.now(),
           })

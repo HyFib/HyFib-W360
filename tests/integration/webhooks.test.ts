@@ -1,10 +1,12 @@
 import {
   constants,
+  createHash,
   createHmac,
   createPublicKey,
   randomBytes,
   randomInt,
   verify,
+  X509Certificate,
 } from 'node:crypto';
 import { once } from 'node:events';
 import { createServer, type IncomingHttpHeaders, type Server } from 'node:http';
@@ -1628,9 +1630,11 @@ describe('OAuth clients (ADR-173)', () => {
       'SELECT * FROM ops.webhook_oauth_jwks($1)',
       [jwksId],
     );
-    // Each key's algorithm too, since 0291 (ADR-371).
+    // Each key's algorithm too, since 0291 (ADR-371), and its certificate, since 0292 (ADR-372).
     expect(Object.keys(row!).sort()).toEqual([
+      'certificate',
       'key_algorithm',
+      'next_certificate',
       'next_key_algorithm',
       'next_public_key',
       'public_key',
@@ -1638,8 +1642,10 @@ describe('OAuth clients (ADR-173)', () => {
     expect(row).toEqual({
       public_key: first!.publicKey!.pem,
       key_algorithm: 'RS256',
+      certificate: null,
       next_public_key: null,
       next_key_algorithm: null,
+      next_certificate: null,
     });
     expect(await fx.query('SELECT * FROM ops.webhook_oauth_jwks($1)', ["' OR true --"])).toEqual(
       [],
@@ -1956,6 +1962,239 @@ describe('OAuth clients (ADR-173)', () => {
          oauth_client_secret_ciphertext = NULL, oauth_scope = NULL, oauth_private_key_ciphertext = NULL,
          oauth_public_key = NULL, oauth_key_algorithm = NULL, oauth_jwks_id = NULL,
          oauth_client_auth = 'client_secret_basic' WHERE id = $1`,
+      [created.id],
+    );
+  });
+
+  it('make a certificate with a key pair when asked, name it in each assertion and serve it in the JWK Set (ADR-372)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const id = randomBytes(6).toString('hex');
+    const bearer = `/bearer/${id}`;
+    const token = `/token/${id}`;
+    const tokenUrl = `http://${HOST}:${port}${token}`;
+    const url = `http://${HOST}:${port}${bearer}`;
+    const signer = {
+      tokenUrl,
+      clientId: 'hyfib-certificates',
+      clientAuthentication: 'private_key_jwt' as const,
+    };
+    // Refused for another way, and by a change that makes no key pair.
+    await expectAppError(
+      webhooks().create(owner, {
+        url,
+        eventTypes: ['consent.changed'],
+        oauth: { tokenUrl, clientId: 'x', clientSecret: 'a-secret', keyCertificate: true },
+      }),
+      'validation_failed',
+      /Only a client that signs with HyFib’s key pair has a certificate/,
+    );
+    const created = await webhooks().create(owner, {
+      url,
+      eventTypes: ['consent.changed'],
+      oauth: { ...signer, keyAlgorithm: 'PS256', keyCertificate: true },
+    });
+    const change = (oauth: Record<string, unknown>) =>
+      webhooks().update(owner, {
+        endpointId: created.id,
+        url,
+        description: '',
+        eventTypes: ['consent.changed'],
+        oauth,
+      });
+    await expectAppError(
+      change({ ...signer, keyCertificate: false }),
+      'validation_failed',
+      /Ask for a certificate only when a key pair is made/,
+    );
+    const shown = async () => (await webhooks().list(owner))[0]?.oauth;
+    const first = await shown();
+    // Self-signed, holding the key shown, valid from five minutes before it was made for a year,
+    // and named by the SHA-1 and SHA-256 thumbprints of its DER.
+    const certificate = first?.publicKey?.certificate;
+    const read = new X509Certificate(certificate!.pem);
+    expect(read.publicKey.equals(createPublicKey(first!.publicKey!.pem))).toBe(true);
+    expect(read.verify(read.publicKey)).toBe(true);
+    expect(read.subject).toBe('CN=HyFib W360 webhook OAuth client');
+    expect(read.ca).toBe(false);
+    const sha1 = createHash('sha1').update(read.raw).digest('base64url');
+    const sha256 = createHash('sha256').update(read.raw).digest('base64url');
+    expect(certificate).toEqual({
+      pem: certificate!.pem,
+      x5t: sha1,
+      x5tS256: sha256,
+      validFrom: read.validFromDate.toISOString(),
+      validTo: read.validToDate.toISOString(),
+    });
+    expect(Date.parse(certificate!.validTo) - Date.parse(certificate!.validFrom)).toBe(
+      (365 * 86_400 + 300) * 1000,
+    );
+    expect(first?.publicKey?.jwk).toMatchObject({
+      kty: 'RSA',
+      alg: 'PS256',
+      kid: first?.publicKey?.keyId,
+      x5c: [read.raw.toString('base64')],
+      x5t: sha1,
+      'x5t#S256': sha256,
+    });
+    const stored = async () =>
+      (
+        await fx.query<{ oauth_certificate: string | null; oauth_next_certificate: string | null }>(
+          `SELECT oauth_certificate, oauth_next_certificate FROM app.webhook_endpoints
+            WHERE id = $1`,
+          [created.id],
+        )
+      )[0];
+    expect(await stored()).toEqual({
+      oauth_certificate: certificate!.pem,
+      oauth_next_certificate: null,
+    });
+    // A delivery's token request: a PS256 assertion naming the certificate by its thumbprints
+    // beside the key, valid from when it is made (nbf), which the certificate's key checks.
+    const assertionOf = (n: number) => {
+      const form = new URLSearchParams(requestsTo(token)[n - 1]?.body);
+      const [header, payload, signature] = (form.get('client_assertion') ?? '').split('.');
+      return {
+        header: JSON.parse(Buffer.from(header!, 'base64url').toString('utf8')) as unknown,
+        claims: JSON.parse(Buffer.from(payload!, 'base64url').toString('utf8')) as Record<
+          string,
+          unknown
+        >,
+        checkedBy: (pem: string) =>
+          verify(
+            'sha256',
+            Buffer.from(`${header}.${payload}`, 'utf8'),
+            {
+              key: new X509Certificate(pem).publicKey,
+              padding: constants.RSA_PKCS1_PSS_PADDING,
+              saltLength: 32,
+            },
+            Buffer.from(signature!, 'base64url'),
+          ),
+      };
+    };
+    const deliverWith = async (accessToken: string) => {
+      issue(token, accessToken);
+      acceptedTokens.set(bearer, accessToken);
+      await webhooks().sendTest(owner, { endpointId: created.id });
+      expect(
+        await deliverDue(c, systemClock, egress(), failOnLog, new WebhookOAuthTokenCache()),
+      ).toMatchObject({ attempted: 1, succeeded: 1 });
+    };
+    await deliverWith('tok-certificate');
+    expect(assertionOf(1).header).toEqual({
+      alg: 'PS256',
+      kid: first?.publicKey?.keyId,
+      typ: 'JWT',
+      x5t: sha1,
+      'x5t#S256': sha256,
+    });
+    expect(assertionOf(1).claims.nbf).toBe(assertionOf(1).claims.iat);
+    expect(assertionOf(1).checkedBy(certificate!.pem)).toBe(true);
+    // A next key pair gets a certificate of its own, as the pair in use has one; the JWK Set
+    // serves both keys, each naming its certificate.
+    await change({ ...signer, nextKey: 'make' });
+    const withNext = await shown();
+    expect(withNext?.publicKey).toEqual(first?.publicKey);
+    const nextCertificate = withNext?.nextPublicKey?.certificate;
+    expect(
+      new X509Certificate(nextCertificate!.pem).publicKey.equals(
+        createPublicKey(withNext!.nextPublicKey!.pem),
+      ),
+    ).toBe(true);
+    expect(nextCertificate!.x5tS256).not.toBe(sha256);
+    expect(await stored()).toEqual({
+      oauth_certificate: certificate!.pem,
+      oauth_next_certificate: nextCertificate!.pem,
+    });
+    const served = await webhookOAuthPublicJwks(fx.dbs.app, withNext!.jwksId!);
+    expect(served).toEqual({ keys: [withNext!.publicKey!.jwk, withNext!.nextPublicKey!.jwk] });
+    expect(served?.keys.map((key) => key['x5t#S256'])).toEqual([sha256, nextCertificate!.x5tS256]);
+    // Used: the next token request names the next pair's certificate.
+    await change({ ...signer, nextKey: 'use', nextKeyId: withNext!.nextPublicKey!.keyId });
+    expect(await stored()).toEqual({
+      oauth_certificate: nextCertificate!.pem,
+      oauth_next_certificate: null,
+    });
+    await deliverWith('tok-next-certificate');
+    expect(assertionOf(2).header).toMatchObject({
+      kid: withNext?.nextPublicKey?.keyId,
+      x5t: nextCertificate!.x5t,
+      'x5t#S256': nextCertificate!.x5tS256,
+    });
+    expect(assertionOf(2).checkedBy(nextCertificate!.pem)).toBe(true);
+    // A pair made without one names none, as before.
+    await change({ ...signer, replaceKey: true, keyCertificate: false });
+    const plain = await shown();
+    expect(plain?.publicKey?.certificate).toBeNull();
+    expect(plain?.publicKey?.jwk).not.toHaveProperty('x5c');
+    expect(await stored()).toEqual({ oauth_certificate: null, oauth_next_certificate: null });
+    await deliverWith('tok-no-certificate');
+    expect(assertionOf(3).header).toEqual({
+      alg: 'PS256',
+      kid: plain?.publicKey?.keyId,
+      typ: 'JWT',
+    });
+    // Audit entries say which pairs made have a certificate.
+    expect((await auditsOf(c, 'webhook.endpoint_created'))[0]).toMatchObject({
+      oauthKeyCertificate: true,
+    });
+    expect(
+      (await auditsOf(c, 'webhook.endpoint_updated')).map((a) => a.oauthKeyCertificate ?? null),
+    ).toEqual([true, null, null]);
+    // Another way drops both.
+    await change({ ...signer, nextKey: 'make', keyCertificate: true });
+    expect((await stored())?.oauth_next_certificate).not.toBeNull();
+    await change({
+      tokenUrl,
+      clientId: 'hyfib-certificates',
+      clientSecret: 'a-secret-now',
+      clientAuthentication: 'client_secret_basic',
+    });
+    expect(await stored()).toEqual({ oauth_certificate: null, oauth_next_certificate: null });
+    // The database keeps a certificate only beside its public key, of 1 to 4,000 characters.
+    await fx.query(
+      `UPDATE app.webhook_endpoints SET oauth_client_auth = 'private_key_jwt',
+         oauth_client_secret_ciphertext = NULL, oauth_private_key_ciphertext = 'sealed',
+         oauth_public_key = 'pem' WHERE id = $1`,
+      [created.id],
+    );
+    for (const set of [
+      `oauth_certificate = '${'c'.repeat(4001)}'`,
+      "oauth_certificate = ''",
+      "oauth_next_certificate = 'certificate'",
+    ]) {
+      await expect(
+        fx.query(`UPDATE app.webhook_endpoints SET ${set} WHERE id = $1`, [created.id]),
+        set,
+      ).rejects.toThrow(/webhook_endpoints_oauth_certificate/);
+    }
+    await fx.query(
+      `UPDATE app.webhook_endpoints SET oauth_certificate = 'certificate' WHERE id = $1`,
+      [created.id],
+    );
+    await expect(
+      fx.query(
+        `UPDATE app.webhook_endpoints SET oauth_public_key = NULL,
+           oauth_private_key_ciphertext = NULL, oauth_client_auth = 'client_secret_basic',
+           oauth_client_secret_ciphertext = 'sealed' WHERE id = $1`,
+        [created.id],
+      ),
+    ).rejects.toThrow(/webhook_endpoints_oauth_certificate/);
+    // The company role sets them only through its column grants.
+    const [grant] = await fx.query<{ inUse: boolean; next: boolean }>(
+      `SELECT has_column_privilege('w360_app', 'app.webhook_endpoints', 'oauth_certificate',
+                'UPDATE') AS "inUse",
+              has_column_privilege('w360_app', 'app.webhook_endpoints',
+                'oauth_next_certificate', 'UPDATE') AS next`,
+    );
+    expect(grant).toEqual({ inUse: true, next: true });
+    // The client goes, so no row is left with the stand-in key pair above.
+    await fx.query(
+      `UPDATE app.webhook_endpoints SET oauth_token_url = NULL, oauth_client_id = NULL,
+         oauth_client_secret_ciphertext = NULL, oauth_scope = NULL, oauth_private_key_ciphertext = NULL,
+         oauth_public_key = NULL, oauth_key_algorithm = NULL, oauth_certificate = NULL,
+         oauth_jwks_id = NULL, oauth_client_auth = 'client_secret_basic' WHERE id = $1`,
       [created.id],
     );
   });

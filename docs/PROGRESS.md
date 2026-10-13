@@ -1,5 +1,48 @@
 # Progress
 
+## 2026-10-13 — Self-signed certificates for webhook OAuth key pairs (P5-09, H-014, ADR-372)
+
+Status: **Implemented; its database and browser tests run in CI only.** Authorization servers
+that register a client's certificate rather than its key, such as Microsoft Entra ID (its
+certificate-credentials page, read through the Microsoft Learn tool, asks for `x5t#S256` and lists
+`nbf`), could not use a key pair HyFib keeps.
+
+### Completed
+
+- **Database:** migration 0292 adds `oauth_certificate` and `oauth_next_certificate` (PEM, 1 to
+  4,000 characters, each only beside its public key) with their update grant, and replaces
+  `ops.webhook_oauth_jwks` to return them.
+- **Domain:** `x509.ts` writes a self-signed X.509 v3 certificate for a pair (random serial, generic
+  subject, valid from five minutes before for a year, no CA and digital signatures only, both
+  critical, SHA-256 with RSA or ECDSA), checked against the pair, and reads one back only if it
+  holds the pair's key. `keyCertificate` on a change that makes a pair (default: as the pair in use);
+  certificates move with a next pair and go with the way. JWKs name it (`x5c`, `x5t`, `x5t#S256`),
+  assertions name it by both thumbprints, every assertion carries `nbf`; the token fingerprint, the
+  audit (`oauthKeyCertificate`), the export, the API (`keyCertificate`, `certificate`) and the
+  OpenAPI document follow.
+- **Web:** Settings → Webhooks offers "Make a certificate for the new key pair" whenever a save makes
+  a pair, and shows the certificate's PEM, validity and thumbprints beside the key.
+- **Tests:** unit (the DER checked byte by byte, serials, GeneralizedTime, refusals, thumbprints,
+  JWK members, the assertion header and `nbf` against a vector computed apart in Python, the token
+  cache, the service rules, the JWK Set, the audit size bound now 4,461 bytes); integration
+  (`webhooks.test.ts`, `api-webhook-endpoints.test.ts`); e2e (the next key pair made with a
+  certificate, shown, served and named in the next token request). Written for CI; the integration
+  and e2e tests were not run here. OpenSSL decoded made certificates and verified them by hand.
+- **Docs:** ADR-372 (and the "not built" notes of ADR-367, ADR-368 and ADR-370); SECURITY;
+  THREAT-MODEL T329; ARCHITECTURE; DEPLOYMENT (0292); RUNBOOKS; BACKLOG P5-09; DATA-RETENTION; the
+  feature matrix (status unchanged).
+- **Mutation checks:** 16 deliberate regressions, all caught by the unit tests.
+
+### Test commands and results (local, 2026-10-13)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 147 files, 1577 tests passed                                    |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+| migration 0292                                     | pglast parse check passed (syntax only)                         |
+
 ## 2026-10-11 — ES256 and PS256 key pairs for webhook OAuth clients that sign with a key pair (P5-09, H-014, ADR-371)
 
 Status: **Implemented; its database and browser tests run in CI only.** A client that signs with a

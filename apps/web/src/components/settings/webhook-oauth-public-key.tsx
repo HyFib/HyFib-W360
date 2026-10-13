@@ -1,11 +1,15 @@
 import type { WebhookOAuthPublicKey } from '@w360/domain/webhook-model';
 
+/** A certificate's validity bound as shown: its UTC date and time to the minute (ADR-372). */
+const certificateTime = (iso: string) => `${iso.slice(0, 10)} ${iso.slice(11, 16)} UTC`;
+
 /**
  * The public key of an endpoint's OAuth client that signs with a key pair HyFib keeps (ADR-367),
  * for the company to register with its authorization server: as a JWK set, which most servers take
- * as the client's keys, and as PEM. For a next key pair (ADR-368, `inUse` given), its JWK set holds
- * the key in use too, for a server that keeps one set for the client. Public material only; the
- * private keys are never shown.
+ * as the client's keys, and as PEM, with the certificate made for the pair when it has one
+ * (ADR-372). For a next key pair (ADR-368, `inUse` given), its JWK set holds the key in use too,
+ * for a server that keeps one set for the client. Public material only; the private keys are never
+ * shown.
  */
 export function WebhookOAuthPublicKeyDetails({
   publicKey,
@@ -39,6 +43,21 @@ export function WebhookOAuthPublicKeyDetails({
           <p className="font-medium">PEM</p>
           <pre className={block}>{publicKey.pem}</pre>
         </div>
+        {publicKey.certificate ? (
+          <div>
+            <p className="font-medium">Certificate</p>
+            <p className="text-muted-foreground">
+              Self-signed, holding this public key, for a server that registers a certificate: save
+              it as a .pem or .crt file to upload. Valid from{' '}
+              {certificateTime(publicKey.certificate.validFrom)} until{' '}
+              {certificateTime(publicKey.certificate.validTo)}; switch to a next key pair with a
+              certificate before then. Each JWT names it by its thumbprints: x5t#S256{' '}
+              <span className="break-all font-mono">{publicKey.certificate.x5tS256}</span> and x5t{' '}
+              <span className="break-all font-mono">{publicKey.certificate.x5t}</span>.
+            </p>
+            <pre className={block}>{publicKey.certificate.pem}</pre>
+          </div>
+        ) : null}
       </div>
     </details>
   );

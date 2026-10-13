@@ -751,6 +751,13 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
   /** The algorithm the next key pair signs with once used (0291, ADR-371); null as above. */
   oauthNextKeyAlgorithm: text('oauth_next_key_algorithm', { enum: WEBHOOK_OAUTH_KEY_ALGORITHMS }),
   /**
+   * The self-signed certificate made for the key pair in use when it was made, if asked for
+   * (migration 0292, ADR-372), as PEM, for servers that register a certificate; null without one.
+   */
+  oauthCertificate: text('oauth_certificate'),
+  /** The certificate made for the next key pair, if asked for (0292, ADR-372); null without one. */
+  oauthNextCertificate: text('oauth_next_certificate'),
+  /**
    * The audience a client that signs JWTs names in them instead of its token URL (migration 0289,
    * ADR-369): an https URL, such as its server's issuer identifier, never fetched; null names the
    * token URL, and any other client has none.

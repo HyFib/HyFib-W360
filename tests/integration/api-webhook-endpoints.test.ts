@@ -1,4 +1,4 @@
-import { createPublicKey, randomBytes } from 'node:crypto';
+import { createHash, createPublicKey, randomBytes, X509Certificate } from 'node:crypto';
 import { once } from 'node:events';
 import { createServer, type IncomingHttpHeaders, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -1355,6 +1355,111 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     expect(audits).toEqual([
       ['ES256', 'api'],
       ['PS256', 'api'],
+    ]);
+  });
+
+  it('make a certificate with a key pair when asked, answer it with the key and in its JWK, and refuse it otherwise (ADR-372)', async () => {
+    const c = await fx.company();
+    const key = await apiKey(c, ['webhooks.manage']);
+    const tokenUrl = `http://${HOST}:${port}/token/${randomBytes(6).toString('hex')}`;
+    const signer = { tokenUrl, clientId: 'cert-client', clientAuthentication: 'private_key_jwt' };
+    const body = {
+      url: receiverUrl(),
+      events: ['contact.created'],
+      oauth: { ...signer, keyAlgorithm: 'PS256', keyCertificate: true },
+    };
+    const created = await addThroughApi(key.ctx, 'cert-1', body);
+    expect(created.status).toBe(201);
+    const id = created.body.data.id;
+    type Answered = {
+      keyId: string;
+      jwk: Record<string, unknown>;
+      pem: string;
+      certificate: {
+        pem: string;
+        x5t: string;
+        x5tS256: string;
+        validFrom: string;
+        validTo: string;
+      } | null;
+    };
+    const oauth = created.body.data.oauth as { publicKey: Answered; jwksUrl: string };
+    const read = new X509Certificate(oauth.publicKey.certificate!.pem);
+    expect(read.publicKey.equals(createPublicKey(oauth.publicKey.pem))).toBe(true);
+    expect(oauth.publicKey.certificate).toEqual({
+      pem: oauth.publicKey.certificate!.pem,
+      x5t: createHash('sha1').update(read.raw).digest('base64url'),
+      x5tS256: createHash('sha256').update(read.raw).digest('base64url'),
+      validFrom: read.validFromDate.toISOString(),
+      validTo: read.validToDate.toISOString(),
+    });
+    expect(oauth.publicKey.jwk).toMatchObject({
+      kty: 'RSA',
+      alg: 'PS256',
+      x5c: [read.raw.toString('base64')],
+      x5t: oauth.publicKey.certificate!.x5t,
+      'x5t#S256': oauth.publicKey.certificate!.x5tS256,
+    });
+    // The kept answer is the same pair and certificate, and its JWKS URL serves the JWK naming it.
+    expect((await addThroughApi(key.ctx, 'cert-1', body)).body.data.oauth).toEqual(oauth);
+    expect(await webhookOAuthPublicJwks(fx.dbs.app, oauth.jwksUrl.split('/').at(-1)!)).toEqual({
+      keys: [oauth.publicKey.jwk],
+    });
+    // Refused by a change that makes no key pair, and for another way.
+    const issue = async (promise: Promise<unknown>) => {
+      const error = await expectAppError(promise, 'validation_failed');
+      return isAppError(error) ? error.issues?.[0] : undefined;
+    };
+    expect(
+      await issue(api().update(key.ctx, id, { oauth: { ...signer, keyCertificate: true } })),
+    ).toEqual({
+      path: 'oauth.keyCertificate',
+      message:
+        'Ask for a certificate only when a key pair is made: for a new key pair, a replaced one or a next one.',
+    });
+    expect(
+      await issue(
+        api().update(key.ctx, id, {
+          oauth: {
+            tokenUrl,
+            clientId: 'cert-client',
+            clientSecret: 's',
+            clientAuthentication: 'client_secret_basic',
+            keyCertificate: false,
+          },
+        }),
+      ),
+    ).toEqual({
+      path: 'oauth.keyCertificate',
+      message: 'Only a client that signs with HyFib’s key pair has a certificate.',
+    });
+    // A next pair has its own, as the pair in use has one; one asked without has none.
+    const next = (await api().update(key.ctx, id, { oauth: { ...signer, nextKey: 'make' } })).oauth;
+    expect(next?.publicKey).toEqual(oauth.publicKey);
+    expect(
+      new X509Certificate(next!.nextPublicKey!.certificate!.pem).publicKey.equals(
+        createPublicKey(next!.nextPublicKey!.pem),
+      ),
+    ).toBe(true);
+    const without = (
+      await api().update(key.ctx, id, {
+        oauth: { ...signer, nextKey: 'make', keyCertificate: false },
+      })
+    ).oauth;
+    expect(without?.nextPublicKey?.certificate).toBeNull();
+    expect(without?.nextPublicKey?.jwk).not.toHaveProperty('x5c');
+    // Audited when a pair made has one.
+    const audits = (
+      await fx.query<{ metadata: Record<string, unknown> }>(
+        `SELECT metadata FROM app.audit_events
+          WHERE tenant_id = $1 AND subject_id = $2 ORDER BY occurred_at, id`,
+        [c.tenant.id, id],
+      )
+    ).map((r) => [r.metadata.oauthKeyCertificate ?? null, r.metadata.source]);
+    expect(audits).toEqual([
+      [true, 'api'],
+      [true, 'api'],
+      [null, 'api'],
     ]);
   });
 

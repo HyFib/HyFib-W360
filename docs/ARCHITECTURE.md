@@ -2320,6 +2320,13 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   ES256, `webhookOAuthPublicKey` builds the JWK of either kind with its `alg`, and
   `webhookOAuthClientAssertion` signs as the algorithm says (PSS with a 32-byte salt, ECDSA as the
   64 bytes of R and S); 0291 replaces `ops.webhook_oauth_jwks` to return each key's algorithm.
+  A pair made with `keyCertificate` keeps a self-signed X.509 certificate, `oauth_certificate` and
+  `oauth_next_certificate` (migration 0292, ADR-372; PEM, null without one): `x509.ts` writes the
+  DER (`selfSignedWebhookOAuthCertificate`, checked against the pair with Node's `X509Certificate`)
+  and reads it back checked to hold the pair's public key (`readWebhookOAuthCertificate`); the JWK
+  names it (`x5c`, `x5t`, `x5t#S256`), each assertion's header names it by both thumbprints, and
+  0292 replaces `ops.webhook_oauth_jwks` to return the certificates too. Every assertion carries
+  `nbf`.
 - **Team filters** (migration 0122, ADR-174): `team_ids` on an endpoint lists the teams whose
   conversations' message and conversation events it takes, null for every conversation's; a check
   keeps it to 1 to 50 ids and to endpoints that take such an event. `app.capture_webhook_event`

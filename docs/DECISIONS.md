@@ -14494,8 +14494,9 @@ no overlap, as there is for signing secrets.
 
 Not built: an overlap for a replaced key pair (a next key shown before it is used, built since
 ADR-368), a JWKS URL HyFib serves for its clients' keys (built since ADR-370), keys a company
-uploads, other algorithms (PS256, ES256, built since ADR-371), certificates (`x5t`, `x5c`), and
-another audience chosen per endpoint (built since ADR-369).
+uploads, other algorithms (PS256, ES256, built since ADR-371), certificates (`x5t`, `x5c`;
+self-signed ones built since ADR-372), and another audience chosen per endpoint (built since
+ADR-369).
 
 ## ADR-368 A next key pair for webhook OAuth clients that sign with a key pair (P5-09) (2026-10-11)
 
@@ -14548,8 +14549,8 @@ field at once, is 4,126 bytes, within the 4,200 ADR-363's test holds it to.
 Not built: switching on its own (after a delay, or once the server takes the new key), keeping the
 old pair after a switch (a server that holds it gains nothing from HyFib keeping it), more than one
 next pair, a JWKS URL HyFib serves (built since ADR-370), keys a company uploads, other
-algorithms (PS256, ES256, built since ADR-371), certificates (`x5t`, `x5c`), and another audience
-chosen per endpoint (built since ADR-369).
+algorithms (PS256, ES256, built since ADR-371), certificates (`x5t`, `x5c`; self-signed ones
+built since ADR-372), and another audience chosen per endpoint (built since ADR-369).
 
 ## ADR-369 The audience a webhook OAuth client's JWTs name, chosen per endpoint (P5-09) (2026-10-11)
 
@@ -14635,9 +14636,9 @@ sign with a key pair. `APP_BASE_URL` is now registered at authorization servers 
 asks to keep the origin, as for chat links.
 
 Not built: one URL for all of a company's clients, keys a company uploads, other algorithms (PS256,
-ES256, built since ADR-371), certificates (`x5t`, `x5c`), a rate limit of the app's own on the
-route (the edge limits it, as the other public routes), and signed client metadata (RFC 7591
-software statements).
+ES256, built since ADR-371), certificates (`x5t`, `x5c`; self-signed ones built since ADR-372), a
+rate limit of the app's own on the route (the edge limits it, as the other public routes), and
+signed client metadata (RFC 7591 software statements).
 
 ## ADR-371 ES256 and PS256 key pairs for webhook OAuth clients that sign with a key pair (P5-09) (2026-10-11)
 
@@ -14682,3 +14683,69 @@ once, is 4,434 bytes, within the unit test's bound of 4,500.
 Not built: other algorithms (RS384, ES384, EdDSA and the rest of RFC 7518 and RFC 8037), RSA keys
 of other sizes, keys a company uploads, and changing a pair's algorithm without a new pair (a
 server registered the JWK with its `alg`).
+
+## ADR-372 Self-signed certificates for webhook OAuth key pairs (P5-09) (2026-10-11)
+
+Context: since ADR-367 a client that signs with a key pair HyFib keeps shows its public key as a
+JWK and as PEM, and since ADR-370 serves it at a JWKS URL. Some authorization servers register a
+client's X.509 certificate instead, and find it by the thumbprint each assertion names. Microsoft
+Entra ID is one. Its certificate-credentials page (read through the Microsoft Learn tool) takes a
+certificate file (.cer, .pem or .crt) and asks for an assertion header with `alg` PS256, `typ` JWT
+and `x5t#S256`, the base64url SHA-256 thumbprint of the certificate's DER, and lists `nbf` among
+the claims; its page on self-signed certificates says it supports RSA keys only. A company with such
+a server could only fall back to a secret. Listed as not built in ADR-367, ADR-368 and ADR-370.
+
+Decision:
+
+- **A certificate per key pair, when asked for:** `keyCertificate` (Settings → Webhooks: "Make a
+  certificate for the new key pair") goes with a change that makes a pair: the client's first,
+  `replaceKey` or `nextKey: "make"`. Without it, a new pair has a certificate when the pair in use
+  has one, and a first pair none. Given with a change that makes no pair, or for another way, it is
+  refused (`oauth.keyCertificate`). A pair keeps its certificate until it goes; a company renews one
+  by making a next pair with a certificate (ADR-368).
+- **Self-signed, made by HyFib:** Node's crypto reads certificates but does not make them, so HyFib
+  writes the DER itself (RFC 5280 section 4.1 and X.690, as known): X.509 v3; a random positive
+  serial of up to 128 bits; subject and issuer "CN=HyFib W360 webhook OAuth client", naming neither
+  the company nor the endpoint; valid from five minutes before the pair is made, for a year
+  (Microsoft's own example of a self-signed certificate for Entra ID is valid for a year);
+  basicConstraints with no CA and keyUsage digitalSignature only, both critical; signed with the
+  pair's own private key: SHA-256 with RSA (PKCS #1 v1.5) for an RSA key, whichever algorithm its
+  assertions use, or ECDSA with SHA-256 for an EC key. Node checks each certificate against its
+  pair before it is kept. Dates from 2050 are written as GeneralizedTime. OpenSSL decodes the
+  certificates made and verifies their signatures (checked by hand once, not in CI).
+- **Stored beside each pair:** migration 0292 adds `oauth_certificate` and `oauth_next_certificate`,
+  PEM of 1 to 4,000 characters, each only beside its public key, with their update grant, and
+  replaces `ops.webhook_oauth_jwks` to return them. Null means none, as for every pair made before 0292. Using the next pair moves its certificate to the pair in use; another way drops both. A
+  certificate is public, like the key it holds.
+- **Named wherever the key is:** each JWK names it (`x5c`, its DER as base64; `x5t` and
+  `x5t#S256`, the SHA-1 and SHA-256 thumbprints of its DER, base64url; RFC 7517 sections 4.7 to
+  4.9) in Settings, the API and the JWKS URL. Settings and the API show it beside the key
+  (`certificate`: its PEM, both thumbprints and when it is valid), and the client's description says
+  until when it is valid. Each assertion's header names it by both thumbprints (`x5t`, `x5t#S256`;
+  RFC 7515 sections 4.1.7 and 4.1.8) beside `kid`. Entra's page asks for `x5t#S256`, and a Microsoft
+  Q&A answer says Entra still finds the certificate by `x5t`, so both go.
+- **Checked where it is read:** a certificate is used only if it holds its pair's public key: when
+  the worker opens the client, when a next pair is used, and wherever a JWK names it. A mismatch
+  ends the delivery `payload_failed` at stage `oauth`, as a key of the wrong kind does (ADR-371), and
+  is a server error elsewhere, never a wrong JWK. The token cache's fingerprint includes its SHA-256
+  thumbprint. Audit entries say that a pair made has one (`oauthKeyCertificate: true`).
+- **`nbf` in every assertion:** each client assertion, signed with a secret or with a key pair, now
+  carries `nbf`, the time it was made, as Microsoft lists among the claims Entra expects. RFC 7523
+  section 3 allows it (as known).
+
+Consequences: a receiver whose server registers certificates, such as Entra ID with a PS256 or RS256
+pair, can use a key pair HyFib keeps. A certificate expires a year after its pair was made. Entra
+then refuses the assertions, and delivery attempts fail with the server's error until the company
+switches to a next pair with a certificate; RUNBOOKS describes this. Nothing warns before. Servers
+that find keys by `kid` are not affected; one that matches `x5t#S256` against the keys it holds
+finds it in the JWK. Every client's assertions gain the `nbf` claim. A change's audit entry gains at
+most 27 bytes; the compacted worst case, with every OAuth field at once, is 4,461 bytes, within the
+unit test's bound of 4,500.
+
+Not built: certificates signed by a certificate authority (Microsoft recommends one in production;
+Entra takes self-signed ones), certificates or keys a company uploads, renewing a certificate
+without a new key pair, a warning before a certificate expires, a chain in `x5c`, and `x5u`.
+
+Uncertain, as none of it could be tried against Entra from here: whether Entra minds a `kid`
+beside `x5t` (its examples send none), whether it needs `nbf` or only lists it, and whether it
+refuses EC certificates outright.

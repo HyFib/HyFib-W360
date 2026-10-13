@@ -1883,6 +1883,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'clientId',
       'clientSecret',
       'keyAlgorithm',
+      'keyCertificate',
       'nextKey',
       'nextKeyId',
       'replaceKey',
@@ -1918,30 +1919,65 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     const publicKeyOf = (client: Client | undefined, key: 'publicKey' | 'nextPublicKey') =>
       client?.anyOf?.find((s) => s.properties)?.properties?.[key] as Client | undefined;
     for (const key of ['publicKey', 'nextPublicKey'] as const) {
-      expect(keys(publicKeyOf(answered.properties.oauth, key))).toEqual(['jwk', 'keyId', 'pem']);
-      // An RSA key for RS256 or PS256, an EC key on P-256 for ES256 (ADR-371).
-      const jwk = JSON.stringify(
-        publicKeyOf(answered.properties.oauth, key)?.anyOf?.find((s) => s.properties)?.properties
-          ?.jwk,
-      );
-      for (const part of ['"RSA"', '"PS256"', '"EC"', '"P-256"', '"ES256"']) {
+      expect(keys(publicKeyOf(answered.properties.oauth, key))).toEqual([
+        'certificate',
+        'jwk',
+        'keyId',
+        'pem',
+      ]);
+      // An RSA key for RS256 or PS256, an EC key on P-256 for ES256 (ADR-371), naming its
+      // certificate when the pair has one (ADR-372).
+      const properties = publicKeyOf(answered.properties.oauth, key)?.anyOf?.find(
+        (s) => s.properties,
+      )?.properties;
+      const jwk = JSON.stringify(properties?.jwk);
+      for (const part of [
+        '"RSA"',
+        '"PS256"',
+        '"EC"',
+        '"P-256"',
+        '"ES256"',
+        '"x5c"',
+        '"x5t"',
+        '"x5t#S256"',
+      ]) {
         expect(jwk).toContain(part);
       }
+      expect(keys(properties?.certificate as Client | undefined)).toEqual([
+        'pem',
+        'validFrom',
+        'validTo',
+        'x5t',
+        'x5tS256',
+      ]);
     }
     expect(given?.anyOf?.find((s) => s.properties)?.properties?.keyAlgorithm).toMatchObject({
       enum: ['RS256', 'PS256', 'ES256'],
+    });
+    expect(given?.anyOf?.find((s) => s.properties)?.properties?.keyCertificate).toMatchObject({
+      type: 'boolean',
+    });
+    expect(given?.anyOf?.find((s) => s.properties)).toMatchObject({
+      description: expect.stringContaining(
+        "For a server that registers a certificate rather than a key, such as Microsoft Entra ID (which takes RSA keys only), `keyCertificate: true` with a key pair made also makes a self-signed X.509 certificate for the pair, valid for a year (a pair made without it has one when the pair in use has one): answered in the public key's `certificate` (its PEM, its `x5t` and `x5tS256` thumbprints and when it is valid), named in its JWK (`x5c`, `x5t`, `x5t#S256`) and, by its thumbprints, in each JWT's header (`x5t`, `x5t#S256`); before it expires, make a next key pair with a certificate, register it and use it.",
+      ),
     });
     const nextKeyOf = (client: Client | undefined) =>
       client?.anyOf?.find((s) => s.properties)?.properties?.nextKey;
     expect(nextKeyOf(given)).toMatchObject({ enum: ['make', 'use', 'drop'] });
     expect(given?.anyOf?.find((s) => s.properties)).toMatchObject({
       description: expect.stringContaining(
-        'With `clientAuthentication` `private_key_jwt` the client has no secret (leave `clientSecret` out): HyFib makes a key pair for it, keeps the private key encrypted and signs the JWT with it instead, its `kid` the public key\'s RFC 7638 thumbprint: RS256 with an RSA key of 2048 bits, unless `keyAlgorithm` asks for PS256 (RSA with PSS padding) or ES256 (ECDSA on P-256) when a key pair is made (the client\'s first, `replaceKey` or `nextKey: "make"`; a pair made without it signs as the pair in use does); register the public key the endpoint answers in `oauth.publicKey`, whose JWK\'s `alg` names the algorithm, with the authorization server. The key pair stays while the client signs with it; `replaceKey: true` makes a new one, used at once, and the old one is no longer used. To change keys without a gap, `nextKey: "make"` makes a next key pair beside it, answered in `oauth.nextPublicKey` and not used: register its public key too, then `nextKey: "use"` signs with it from then on, the old pair dropped, or `nextKey: "drop"` drops it unused; another `"make"` replaces a next pair not yet used. `use` and `drop` name the next key they act on in `nextKeyId` (its `keyId`), and are refused if another next pair has been made since. A change takes `replaceKey` or `nextKey`, not both.',
+        "With `clientAuthentication` `private_key_jwt` the client has no secret (leave `clientSecret` out): HyFib makes a key pair for it, keeps the private key encrypted and signs the JWT with it instead, its `kid` the public key's RFC 7638 thumbprint: RS256 with an RSA key of 2048 bits, unless `keyAlgorithm` asks for PS256 (RSA with PSS padding) or ES256 (ECDSA on P-256) when a key pair is made (the client's first, `replaceKey` or `nextKey: \"make\"`; a pair made without it signs as the pair in use does); register the public key the endpoint answers in `oauth.publicKey`, whose JWK's `alg` names the algorithm, with the authorization server.",
       ),
     });
     expect(given?.anyOf?.find((s) => s.properties)).toMatchObject({
       description: expect.stringContaining(
-        "or as `client_id` and `client_secret` in the request body when `clientAuthentication` is `client_secret_post`, or, when it is `client_secret_jwt`, as `client_id` and a JWT signed with the secret (HS256: issuer and subject the client ID, audience the token URL, a unique `jti`, five minutes' lifetime) in `client_assertion` (RFC 7523), the secret itself never sent, which takes a secret of at least 32 bytes; left out, a change keeps the client's while the token URL stays the same, and a client using `client_secret_jwt` or `private_key_jwt` keeps it at a new token URL; otherwise a new client or token URL uses `client_secret_basic`)",
+        'The key pair stays while the client signs with it; `replaceKey: true` makes a new one, used at once, and the old one is no longer used. To change keys without a gap, `nextKey: "make"` makes a next key pair beside it, answered in `oauth.nextPublicKey` and not used: register its public key too, then `nextKey: "use"` signs with it from then on, the old pair dropped, or `nextKey: "drop"` drops it unused; another `"make"` replaces a next pair not yet used. `use` and `drop` name the next key they act on in `nextKeyId` (its `keyId`), and are refused if another next pair has been made since. A change takes `replaceKey` or `nextKey`, not both.',
+      ),
+    });
+    expect(given?.anyOf?.find((s) => s.properties)).toMatchObject({
+      description: expect.stringContaining(
+        "or as `client_id` and `client_secret` in the request body when `clientAuthentication` is `client_secret_post`, or, when it is `client_secret_jwt`, as `client_id` and a JWT signed with the secret (HS256: issuer and subject the client ID, audience the token URL, a unique `jti`, valid from when it is made (`nbf`) for five minutes) in `client_assertion` (RFC 7523), the secret itself never sent, which takes a secret of at least 32 bytes; left out, a change keeps the client's while the token URL stays the same, and a client using `client_secret_jwt` or `private_key_jwt` keeps it at a new token URL; otherwise a new client or token URL uses `client_secret_basic`)",
       ),
     });
     expect(given?.anyOf?.find((s) => s.properties)).toMatchObject({
@@ -1956,7 +1992,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
       'Its `clientAuthentication` may be left out to keep the one it has while the token URL stays the same (for a new token URL, `client_secret_basic`, unless it is `client_secret_jwt` or `private_key_jwt`, which stays).',
     );
     expect(JSON.stringify(changed)).toContain(
-      'A client that signs with HyFib’s key pair keeps it unless `replaceKey` is true or `nextKey` is `use`, and keeps its next key pair unless `nextKey` makes, uses or drops it; `keyAlgorithm` is given only with a key pair made.',
+      'A client that signs with HyFib’s key pair keeps it unless `replaceKey` is true or `nextKey` is `use`, and keeps its next key pair unless `nextKey` makes, uses or drops it; `keyAlgorithm` and `keyCertificate` are given only with a key pair made.',
     );
     expect(answered.required).toContain('oauth');
     expect(doc.info.description).toContain('send it as `Authorization: Bearer <token>`');
