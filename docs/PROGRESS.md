@@ -1,5 +1,47 @@
 # Progress
 
+## 2026-10-16 — Automation steps that send products (P4-01, ADR-383)
+
+Status: **Implemented; its database and browser tests run in CI only.** Automations could not send
+products from the company's catalogs, which members send from the inbox.
+
+### Completed
+
+- **Domain:** a `send_products` step (`automations/graph.ts`: one product, a list or the catalog,
+  checked by kind and against the products of connected catalogs); the interpreter's
+  `send_products` effect; `queueBotProducts` in the runner (the plan, the products in one connected
+  catalog of the number's account, sent by retailer ids through `queueBotRequest`, which text and
+  button messages now share); the service loads the steps' products for the checks and up to 500
+  for the builder, and refuses publishing or testing without commerce or `commerce.read`. The
+  product message limits moved to the browser-safe `commerce/product-message.ts`.
+- **Migration 0299:** webhook endpoints can choose `send_products` steps (1 to 19 kinds).
+- **Web:** the builder's "Send products" step (kind, catalog, products with a filter, heading,
+  section title, message, footer), the simulator's preview and the run log's reasons.
+- **Tests:** unit (`products-step.test.ts`: kinds, limits, checks, the catalog and account rules,
+  placeholders, the effect; the webhook kinds); integration (`automations.test.ts`: the list sent
+  by retailer ids, a removed product, a disconnected catalog, the plan; `api-webhook-endpoints`:
+  every kind accepted); e2e (`commerce.spec.ts`: a catalog read, the step built, simulated and
+  published, and the list sent to a customer). Written for CI; the integration and e2e tests were
+  not run here.
+- **Docs:** ADR-383; SECURITY; THREAT-MODEL T336 (and the status column of T329 to T335, which was
+  missing); ARCHITECTURE; DEPLOYMENT (0299); BACKLOG P4-01; the feature matrix (W-077, status
+  unchanged).
+- **Mutation checks:** 20 deliberate regressions in the step's checks, its effect, the webhook
+  kinds and the product message limits, all caught by the unit tests, three only after tests were
+  added (a missing product list, the message cut to its limit, products named once across steps).
+  The runner's and the service's changes are covered by the integration and e2e tests, which run
+  in CI only.
+
+### Test commands and results (local, 2026-10-16)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 157 files, 1630 tests passed                                    |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+| Migration 0299                                     | parses (pglast); not applied here                               |
+
 ## 2026-10-16 — Byte ranges for the inbox's recordings and videos (P2-09, ADR-382)
 
 Status: **Implemented; its database and browser tests run in CI only.** The inbox answered every

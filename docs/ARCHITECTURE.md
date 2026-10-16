@@ -516,6 +516,15 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   `send_flow` effect counted as a message; `queueBotMessage` runs a text's checks and `queueBotFlow`
   checks the plan and the form again, then inserts the message, its send intent
   (`buildFlowMessageRequest`) and a `flow_sends` row with a new token, as a member's send does.
+- **Automations that send products** (ADR-383): `send_products` steps (one product, a list in one
+  section, or the catalog; checked against `products`, the steps' products in connected catalogs
+  with their catalog and WhatsApp account); the interpreter gives a `send_products` effect counted
+  as a message; `queueBotProducts` checks the plan and reads the products again in one connected
+  catalog of the number's account, then queues the message and its send intent
+  (`buildProductMessageRequest`, retailer ids) through `queueBotRequest`, which text and button
+  messages share. The limits live in the browser-safe `commerce/product-message.ts`; the builder
+  lists up to `PRODUCT_PICKER_LIMIT` products by name, plus those the draft sends, to members with
+  `commerce.read`.
 - **Automations that move CRM deals** (ADR-250): `move_deal` steps (checked against `crmPipelines`);
   the interpreter gives a `move_deal` effect logged as `moved`; `applyMoveDealEffect` in the runner
   checks the plan, locks the contact (key share) and shares the pipeline, reads the stage, locks the
@@ -2059,8 +2068,8 @@ state` for one that becomes skipped from another state, each only for a message 
   `automation.run_step` clears it.
 - **Step kind filters** (migration 0250, ADR-328): `run_step_node_types` on an endpoint lists the
   kinds of node whose run steps it takes as `automation.run_step`, null for every step; a check
-  keeps it to 1 to 18 known kinds (`outside_node` naming the steps outside a node) and to endpoints
-  that take `automation.run_step`. The step trigger passes the step's `nodeType` in the detail, and
+  keeps it to 1 to 19 known kinds (`outside_node` naming the steps outside a node; migration 0299
+  adds `send_products`, ADR-383) and to endpoints that take `automation.run_step`. The step trigger passes the step's `nodeType` in the detail, and
   `app.capture_webhook_event` (replaced with the same signature) creates a step's delivery only for
   endpoints whose list is null or holds it (`outside_node` for a step outside a node), taking the
   kind out of the detail before the event is stored. Settings ("Kinds of step sent" under Automation

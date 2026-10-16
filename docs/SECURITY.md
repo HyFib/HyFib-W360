@@ -352,6 +352,13 @@ Phase 4 rules (automations, P4-01):
   company's plan includes WhatsApp Flows, as for a member's form. The send is the bot's (no member),
   with a flow token HyFib issues for the conversation and contact, so the Flows endpoint and the
   completion accept the answers exactly as for a member's form.
+- Products steps (ADR-383): publishing or testing one needs commerce in the company's plan and
+  `commerce.read`, as sending products in the inbox does; the builder lists the catalogs' products
+  only to members with `commerce.read`. When the step runs, the plan is checked again and the
+  products must still be in one connected catalog of the number's WhatsApp account (removed
+  products and disconnected catalogs fail the step, which passes the conversation to people). The
+  message carries product names, retailer ids and the step's texts, nothing of the contact but what
+  its placeholders fill in.
 - Task and deal steps need the CRM in the company's plan (ADR-249), as members' CRM writes do:
   publishing or testing such an automation is refused without it, and a run skips the step
   (`crm_not_in_plan`) and goes on.

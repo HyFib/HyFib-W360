@@ -20,7 +20,9 @@ import {
   type HttpMethod,
   type NodeOf,
   type OrderPlaceholderValues,
+  type ProductStepKind,
 } from './graph';
+import { PRODUCT_MESSAGE_LIMITS } from '../commerce/product-message';
 import { FLOW_LIMITS } from '../flows/flow-json';
 import { normalizeRoutingText } from '../inbox/keywords';
 
@@ -126,6 +128,20 @@ export type RunEffect =
       body: string;
       footer: string | null;
       cta: string;
+    }
+  /**
+   * Products of one catalog (ADR-383), by HyFib's ids (the runner sends their retailer ids), with
+   * the message as rendered (empty only for a single product); the heading, section title and
+   * footer as written.
+   */
+  | {
+      kind: 'send_products';
+      productKind: ProductStepKind;
+      productIds: string[];
+      sectionTitle: string | null;
+      header: string | null;
+      body: string;
+      footer: string | null;
     }
   | { kind: 'add_tag'; tag: string }
   | { kind: 'remove_tag'; tag: string }
@@ -553,6 +569,30 @@ export function advance(input: AdvanceInput): StepResult {
                 body,
                 footer: current.footer,
                 cta: current.cta,
+              }
+            : null;
+        });
+        if (isResult(built)) return built;
+        return moveTo(current.next, built.state, [built.effect], 'sent', null);
+      }
+      case 'send_products': {
+        const built = message(base, () => {
+          const body = truncate(
+            renderText(current.body, values(base.variables)),
+            PRODUCT_MESSAGE_LIMITS.bodyLength,
+          );
+          // A single product may go without a message; a list or the catalog may not, and a list
+          // needs its heading.
+          return (body || current.kind === 'product') &&
+            (current.kind !== 'product_list' || current.header)
+            ? {
+                kind: 'send_products',
+                productKind: current.kind,
+                productIds: current.productIds,
+                sectionTitle: current.sectionTitle,
+                header: current.header,
+                body,
+                footer: current.footer,
               }
             : null;
         });

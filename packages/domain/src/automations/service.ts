@@ -11,6 +11,8 @@ import {
   automationVersions,
   automations,
   channelAccounts,
+  commerceCatalogs,
+  commerceProducts,
   commerceStoreMessageRules,
   commerceStoreOrders,
   commerceStores,
@@ -57,6 +59,7 @@ import {
   describeTrigger,
   parseGraph,
   parseTrigger,
+  productsOf,
   starterGraph,
   starterTrigger,
   templatesOf,
@@ -188,6 +191,12 @@ export interface AutomationDetail {
     crmPipelines: AutomationPipelineOption[];
     /** The company's forms that are not archived, for form steps (ADR-248). */
     flows: AutomationFlowOption[];
+    /**
+     * Products of the company's connected catalogs, for products steps (ADR-383): the first
+     * `PRODUCT_PICKER_LIMIT` by name and those the draft's steps send. Null for a member who cannot
+     * see the catalogs (`commerce.read`).
+     */
+    products: AutomationProductOption[] | null;
     fields: { key: string; label: string; type: string }[];
     /** Domains HTTP steps may call, and the secrets they may use (never their values). */
     allowedDomains: string[];
@@ -210,6 +219,20 @@ export interface AutomationFlowOption {
   name: string;
   whatsappAccountId: string;
   sendable: boolean;
+}
+
+/** Products the automation builder lists for products steps (as many as the inbox lists). */
+export const PRODUCT_PICKER_LIMIT = 500;
+
+/** A product of a connected catalog a products step may send (ADR-383). */
+export interface AutomationProductOption {
+  id: string;
+  name: string;
+  retailerId: string;
+  priceText: string | null;
+  catalogId: string;
+  catalogName: string | null;
+  whatsappAccountId: string;
 }
 
 /** An active pipeline a deal step may create deals in, with its active stages (ADR-245). */
@@ -425,7 +448,59 @@ export function createAutomationService(deps: AutomationServiceDeps) {
     return row;
   }
 
-  async function references(tx: Tx, tenantId: string) {
+  /**
+   * Products of connected catalogs (not removed): those `ids` names and, for the builder's
+   * picker, the first `PRODUCT_PICKER_LIMIT` by name (ADR-383).
+   */
+  async function productOptions(
+    tx: Tx,
+    tenantId: string,
+    ids: readonly string[],
+    picker: boolean,
+  ): Promise<AutomationProductOption[]> {
+    const select = () =>
+      tx
+        .select({
+          id: commerceProducts.id,
+          name: commerceProducts.name,
+          retailerId: commerceProducts.retailerId,
+          priceText: commerceProducts.priceText,
+          catalogId: commerceCatalogs.id,
+          catalogName: commerceCatalogs.name,
+          whatsappAccountId: commerceCatalogs.whatsappAccountId,
+        })
+        .from(commerceProducts)
+        .innerJoin(
+          commerceCatalogs,
+          and(
+            eq(commerceCatalogs.tenantId, commerceProducts.tenantId),
+            eq(commerceCatalogs.id, commerceProducts.catalogId),
+          ),
+        );
+    const live = and(
+      eq(commerceProducts.tenantId, tenantId),
+      isNull(commerceProducts.removedAt),
+      isNull(commerceCatalogs.disconnectedAt),
+    );
+    const listed = picker
+      ? await select()
+          .where(live)
+          .orderBy(asc(commerceProducts.name), asc(commerceProducts.id))
+          .limit(PRODUCT_PICKER_LIMIT)
+      : [];
+    const missing = ids.filter((id) => !listed.some((p) => p.id === id));
+    const named =
+      missing.length > 0
+        ? await select().where(and(live, inArray(commerceProducts.id, missing)))
+        : [];
+    return [...listed, ...named];
+  }
+
+  async function references(
+    tx: Tx,
+    tenantId: string,
+    products: { ids: readonly string[]; picker: boolean } = { ids: [], picker: false },
+  ) {
     const teamRows = await tx
       .select({ id: teams.id, name: teams.name })
       .from(teams)
@@ -498,6 +573,7 @@ export function createAutomationService(deps: AutomationServiceDeps) {
       domains: domainRows.map((d) => d.domain),
       secrets: secretRows,
       templates: templateRows.map(templateOption),
+      products: await productOptions(tx, tenantId, products.ids, products.picker),
     };
   }
 
@@ -524,6 +600,12 @@ export function createAutomationService(deps: AutomationServiceDeps) {
         refs.crmPipelines.map((p) => [
           p.id,
           { currency: p.currency, stageIds: new Set(p.stages.map((st) => st.id)) },
+        ]),
+      ),
+      products: new Map(
+        refs.products.map((p) => [
+          p.id,
+          { catalogId: p.catalogId, whatsappAccountId: p.whatsappAccountId },
         ]),
       ),
       fieldKeys: new Set(refs.fieldRows.map((f) => f.key)),
@@ -603,6 +685,23 @@ export function createAutomationService(deps: AutomationServiceDeps) {
     if (graph.nodes.some((n) => n.type === 'send_flow')) assertModule(ctx.plan, 'flows');
   }
 
+  /**
+   * Publishing or testing a graph that sends products needs commerce in the company's plan and
+   * `commerce.read`, as sending products in the inbox does (ADR-383).
+   */
+  function assertMaySendProducts(
+    ctx: TenantContext,
+    graph: AutomationGraph,
+    action: 'publish' | 'test',
+  ) {
+    if (!graph.nodes.some((n) => n.type === 'send_products')) return;
+    assertModule(ctx.plan, 'commerce');
+    if (can(ctx, 'commerce.read')) return;
+    throw forbidden(
+      `${action === 'publish' ? 'Publishing' : 'Testing'} an automation that sends products needs the permission to see the catalogs.`,
+    );
+  }
+
   /** Parses and checks a draft; throws when it cannot be run. */
   async function runnableDraft(tx: Tx, row: typeof automations.$inferSelect) {
     const trigger = parseTrigger(row.draftTrigger);
@@ -622,10 +721,13 @@ export function createAutomationService(deps: AutomationServiceDeps) {
       ...triggerIssues(trigger.trigger, row.draftChannelAccountId),
       ...checkGraph(
         graph.graph,
-        graphRefs(await references(tx, row.tenantId), {
-          trigger: trigger.trigger,
-          channelWhatsappAccountId: channel?.whatsappAccountId ?? null,
-        }),
+        graphRefs(
+          await references(tx, row.tenantId, { ids: productsOf(graph.graph), picker: false }),
+          {
+            trigger: trigger.trigger,
+            channelWhatsappAccountId: channel?.whatsappAccountId ?? null,
+          },
+        ),
       ),
     ].filter((i) => i.level === 'error');
     if (errors.length > 0) {
@@ -827,10 +929,14 @@ export function createAutomationService(deps: AutomationServiceDeps) {
             .from(channelAccounts)
             .where(eq(channelAccounts.tenantId, ctx.tenant.id))
             .orderBy(asc(channelAccounts.createdAt));
-          const refs = await references(tx, ctx.tenant.id);
-          const { teamRows, fieldRows } = refs;
           const trigger = parseTrigger(a.draftTrigger);
           const graph = parseGraph(a.draftGraph);
+          const seesCatalogs = can(ctx, 'commerce.read');
+          const refs = await references(tx, ctx.tenant.id, {
+            ids: graph.ok ? productsOf(graph.graph) : [],
+            picker: seesCatalogs,
+          });
+          const { teamRows, fieldRows } = refs;
           const issues: GraphIssue[] = [];
           if (!trigger.ok) issues.push({ level: 'error', nodeId: null, message: trigger.message });
           else issues.push(...triggerIssues(trigger.trigger, a.draftChannelAccountId));
@@ -925,6 +1031,7 @@ export function createAutomationService(deps: AutomationServiceDeps) {
               crmMembers: refs.crmMembers,
               crmPipelines: refs.crmPipelines,
               flows: refs.flows,
+              products: seesCatalogs ? refs.products : null,
               fields: fieldRows,
               allowedDomains: refs.domains,
               secrets: refs.secrets,
@@ -1080,10 +1187,16 @@ export function createAutomationService(deps: AutomationServiceDeps) {
             ...triggerIssues(trigger.trigger, data.channelAccountId),
             ...checkGraph(
               graph.graph,
-              graphRefs(await references(tx, ctx.tenant.id), {
-                trigger: trigger.trigger,
-                channelWhatsappAccountId: channel?.whatsappAccountId ?? null,
-              }),
+              graphRefs(
+                await references(tx, ctx.tenant.id, {
+                  ids: productsOf(graph.graph),
+                  picker: false,
+                }),
+                {
+                  trigger: trigger.trigger,
+                  channelWhatsappAccountId: channel?.whatsappAccountId ?? null,
+                },
+              ),
             ),
           ],
         };
@@ -1103,6 +1216,7 @@ export function createAutomationService(deps: AutomationServiceDeps) {
         await assertMayUseTemplates(tx, ctx, graph, 'publish');
         assertMayChangeCrm(ctx, graph, 'publish');
         assertMaySendForms(ctx, graph);
+        assertMaySendProducts(ctx, graph, 'publish');
         const sha = definitionSha({ trigger, graph, channelAccountId: row.draftChannelAccountId });
         if (row.activeVersionId) {
           const [current] = await tx
@@ -1306,6 +1420,7 @@ export function createAutomationService(deps: AutomationServiceDeps) {
         await assertMayUseTemplates(tx, ctx, graph, 'test');
         assertMayChangeCrm(ctx, graph, 'test');
         assertMaySendForms(ctx, graph);
+        assertMaySendProducts(ctx, graph, 'test');
         let storeOrderId: string | null = null;
         if (trigger.type === 'store_event') {
           // The steps send the order's customer details: seeing store orders needs both.

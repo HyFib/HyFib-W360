@@ -2985,6 +2985,176 @@ describe('automations that send a form (ADR-248)', () => {
   });
 });
 
+describe('automations that send products (ADR-383)', () => {
+  /** A connected catalog of the company's WhatsApp account with products, as a sync leaves it. */
+  async function catalog(c: Company, products: [string, string][]) {
+    const catalogId = uuidv7();
+    const metaCatalogId = nextExternalId();
+    await fx.query(
+      `INSERT INTO app.commerce_catalogs (id, tenant_id, whatsapp_account_id, meta_catalog_id, name)
+       VALUES ($1, $2, $3, $4, 'Mugs')`,
+      [catalogId, c.tenant.id, c.whatsappAccountId, metaCatalogId],
+    );
+    const ids: string[] = [];
+    for (const [retailerId, name] of products) {
+      const id = uuidv7();
+      ids.push(id);
+      await fx.query(
+        `INSERT INTO app.commerce_products (id, tenant_id, catalog_id, retailer_id, name, synced_at)
+         VALUES ($1, $2, $3, $4, $5, now())`,
+        [id, c.tenant.id, catalogId, retailerId, name],
+      );
+    }
+    return { catalogId, metaCatalogId, ids };
+  }
+
+  const offer = (productIds: string[]) => ({
+    version: 1,
+    start: 'offer',
+    nodes: [
+      {
+        id: 'offer',
+        type: 'send_products',
+        kind: 'product_list',
+        productIds,
+        sectionTitle: 'Mugs',
+        header: 'Back in stock',
+        body: 'Hi {{name}}, these are back.',
+        footer: null,
+        next: null,
+      },
+    ],
+  });
+
+  it('sends the products by their retailer ids in their catalog, as the automation', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const mugs = await catalog(c, [
+      ['MUG-1', 'Blue mug'],
+      ['MUG-2', 'Red mug'],
+    ]);
+    await publish(owner, 'Mugs', keyword('mugs'), offer(mugs.ids));
+    const conversationId = await inbound(c, waId(), 'any mugs?');
+    const run = await onlyRun(conversationId);
+    expect((await drive(c, conversationId, run.id)).outcome).toBe('ended');
+    const [sent] = await fx.query<{
+      id: string;
+      type: string;
+      content: Record<string, unknown>;
+      sender_type: string;
+    }>(
+      `SELECT id, type, content, sender_type FROM app.messages
+        WHERE conversation_id = $1 AND direction = 'outbound'`,
+      [conversationId],
+    );
+    expect(sent).toMatchObject({
+      type: 'interactive',
+      sender_type: 'bot',
+      content: {
+        products: {
+          kind: 'product_list',
+          names: ['Blue mug', 'Red mug'],
+          header: 'Back in stock',
+          body: 'Hi Priya Customer, these are back.',
+          footer: '',
+        },
+        automationRunId: run.id,
+      },
+    });
+    const [intent] = await fx.query<{ request: Record<string, unknown> }>(
+      'SELECT request FROM app.send_intents WHERE message_id = $1',
+      [sent!.id],
+    );
+    expect(intent!.request).toMatchObject({
+      type: 'interactive',
+      interactive: {
+        type: 'product_list',
+        header: { type: 'text', text: 'Back in stock' },
+        body: { text: 'Hi Priya Customer, these are back.' },
+        action: {
+          catalog_id: mugs.metaCatalogId,
+          sections: [
+            {
+              title: 'Mugs',
+              product_items: [{ product_retailer_id: 'MUG-1' }, { product_retailer_id: 'MUG-2' }],
+            },
+          ],
+        },
+      },
+    });
+    expect((await stepLog(run.id)).map((st) => [st.node_id, st.outcome])).toEqual(
+      expect.arrayContaining([['offer', 'sent']]),
+    );
+  });
+
+  it('does not send a product that was removed: the run passes the conversation to people', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const mugs = await catalog(c, [['MUG-1', 'Blue mug']]);
+    await publish(owner, 'Mugs', keyword('mugs'), offer(mugs.ids));
+    await fx.query('UPDATE app.commerce_products SET removed_at = now() WHERE id = $1', [
+      mugs.ids[0],
+    ]);
+    const conversationId = await inbound(c, waId(), 'mugs please');
+    const run = await onlyRun(conversationId);
+    expect((await drive(c, conversationId, run.id)).outcome).toBe('ended');
+    expect(await onlyRun(conversationId)).toMatchObject({
+      status: 'failed',
+      end_reason: 'send_blocked',
+    });
+    expect((await stepLog(run.id)).find((st) => st.node_id === 'offer')).toMatchObject({
+      outcome: 'failed',
+      detail: 'products_unavailable',
+    });
+    expect(
+      await fx.query(
+        `SELECT id FROM app.messages WHERE conversation_id = $1 AND direction = 'outbound'`,
+        [conversationId],
+      ),
+    ).toEqual([]);
+  });
+
+  it('is published only with products of a connected catalog, and by members who see the catalogs', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const mugs = await catalog(c, [['MUG-1', 'Blue mug']]);
+    await fx.query('UPDATE app.commerce_catalogs SET disconnected_at = now() WHERE id = $1', [
+      mugs.catalogId,
+    ]);
+    await expectAppError(
+      publish(owner, 'Mugs', keyword('mugs'), offer(mugs.ids)),
+      'precondition_failed',
+      /no longer in a connected catalog/,
+    );
+    // The builder lists products of connected catalogs only.
+    const svc = automations();
+    const { id } = await svc.createAutomation(owner, { name: 'More mugs' });
+    const detail = await svc.getAutomation(owner, id);
+    expect(detail.options.products).toEqual([]);
+  });
+
+  it('sends no products, and publishes no products step, when the plan leaves out commerce', async () => {
+    const c = await fx.company();
+    const mugs = await catalog(c, [['MUG-1', 'Blue mug']]);
+    await publish(await fx.ctx(c, c.owner), 'Mugs', keyword('mugs'), offer(mugs.ids));
+    // Platform staff move the company to a plan with automations but without commerce.
+    await onPlan(c, ['automations']);
+
+    const conversationId = await inbound(c, waId(), 'mugs today');
+    const run = await onlyRun(conversationId);
+    expect((await drive(c, conversationId, run.id)).outcome).toBe('ended');
+    expect((await stepLog(run.id)).find((st) => st.node_id === 'offer')).toMatchObject({
+      outcome: 'failed',
+      detail: 'commerce_not_in_plan',
+    });
+    await expectAppError(
+      publish(await fx.ctx(c, c.owner), 'More mugs', keyword('cups'), offer(mugs.ids)),
+      'forbidden',
+      /does not include Commerce and stores/,
+    );
+  });
+});
+
 /** Polls a condition (every 100 ms, up to 20 s); jobs run asynchronously in pg-boss. */
 async function waitFor(condition: () => Promise<boolean>) {
   const deadline = Date.now() + 20_000;

@@ -1655,6 +1655,14 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    headers and 206 answers through. Until the web rollout ends, an old web server answers a range
    request with the whole file, as before.
 
+   Migration 0299 (ADR-383) replaces the check on `app.webhook_endpoints.run_step_node_types` with
+   one that also accepts `send_products` (1 to 19 kinds): every list it allowed is still allowed,
+   and the table is small, so the check is validated at once. A worker of the previous release
+   cannot read a published version with a products step and would fail its runs as unreadable, so
+   roll the workers out first; an old web server opens such a draft with the starter steps, so do
+   not edit automations with products steps until the web rollout ends. Rolling an image back
+   leaves the wider check in place.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

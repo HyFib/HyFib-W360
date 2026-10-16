@@ -131,6 +131,7 @@ export function AutomationSimulator({
   crmMembers,
   crmPipelines,
   flows,
+  products,
   templates,
   storeEvent,
   apiInputs,
@@ -145,6 +146,8 @@ export function AutomationSimulator({
   crmPipelines: EditorPipeline[];
   /** Forms form steps may send, to name them. */
   flows: { id: string; name: string }[];
+  /** Products products steps may send, to name them. */
+  products: { id: string; name: string }[];
   templates: EditorTemplate[];
   /** Started by order messages: the run reads a sample order. */
   storeEvent: boolean;
@@ -252,6 +255,22 @@ export function AutomationSimulator({
           out.push({
             who: 'bot',
             text: `${effect.header ? `${effect.header}\n` : ''}${effect.body}${effect.footer ? `\n${effect.footer}` : ''}\n[${effect.cta}] opens the form “${flow?.name ?? 'Form'}”`,
+          });
+          break;
+        }
+        case 'send_products': {
+          const names = effect.productIds.map(
+            (id) => products.find((x) => x.id === id)?.name ?? 'a product',
+          );
+          const what =
+            effect.productKind === 'catalog'
+              ? `[View catalog] opens the catalog, shown with ${names[0] ?? 'a product'}`
+              : effect.productKind === 'product'
+                ? `[Product] ${names[0] ?? 'a product'}`
+                : `[${names.length} products${effect.sectionTitle ? ` · ${effect.sectionTitle}` : ''}] ${names.join(', ')}`;
+          out.push({
+            who: 'bot',
+            text: [effect.header, effect.body, effect.footer, what].filter(Boolean).join('\n'),
           });
           break;
         }

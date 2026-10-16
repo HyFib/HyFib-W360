@@ -15111,3 +15111,39 @@ Not built: ranges through the public API, several ranges in one answer (multipar
 If-Range, keeping a file's Graph address between a player's requests (each request asks Graph and
 downloads from the start), and checking playback in Safari itself (no Safari here; the end-to-end
 test checks the answers a player gets).
+
+## ADR-383 Automation steps that send products (P4-01) (2026-10-16)
+
+Context: members send products from the company's catalogs in the inbox (P4-06a: one product, a
+list or the catalog, research M-169), and automations send texts, questions, templates and forms,
+but an automation could not show products: a bot answering "do you have mugs?" handed the
+conversation to a person. "Catalog steps (sending products from a run)" remained under P4-01.
+
+Decision:
+
+- **A `send_products` step** (`automations/graph.ts`): one product, several products of one catalog
+  in one section (with a heading and an optional section title, as the inbox sends them), or the
+  catalog shown with one of its products; an optional footer, and a message that may hold
+  placeholders (required for a list and the catalog, optional for one product). Products are named
+  by HyFib's ids. It is a session message, so it follows the window rules of texts and forms (after
+  order messages or an API start, only after a customer reply).
+- **Checked with the graph:** what each kind needs (one product, the products of a list each once
+  and at most 30, a heading, a message), and, with the company's products, that they are all in one
+  connected catalog, of the account of the automation's number when it is limited to one. The
+  builder lists the first 500 products by name plus those the draft sends, to members with
+  `commerce.read`; for others it lists none and the server's checks cover the step.
+- **Who may publish:** publishing or testing an automation with a products step needs commerce in
+  the company's plan and `commerce.read`, as sending products in the inbox does.
+- **When it runs** (`queueBotProducts`): after a bot message's checks (active number, open window, a
+  WhatsApp number on the line), the plan is checked again and the products are read in one connected
+  catalog of the number's WhatsApp account; they are sent by their retailer ids (the inbox's
+  `buildProductMessageRequest`) and shown in the thread with their names. A product removed since,
+  a disconnected catalog or another account's catalog fails the step (`products_unavailable`), as a
+  plan without commerce does (`commerce_not_in_plan`); the run passes the conversation to people.
+- **The limits of product messages** moved to `commerce/product-message.ts`, which has no server
+  dependencies, so the builder in the browser checks with the inbox's numbers.
+- **Webhook endpoints** can choose the new kind of step, as every kind the builder defines
+  (ADR-328): migration 0299 widens the check on `run_step_node_types` to 1 to 19 kinds.
+
+Not built: several sections in one list, products chosen by a search beyond the first 500, steps
+that send the products of an order or a deal, and catalog messages with a product picked per run.

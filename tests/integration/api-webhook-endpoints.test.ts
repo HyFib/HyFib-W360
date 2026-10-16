@@ -16,6 +16,7 @@ import {
   outboxAad,
   processWebhookDeliveries,
   WEBHOOK_LIMITS,
+  WEBHOOK_RUN_STEP_NODE_TYPES,
   WebhookOAuthTokenCache,
   verifyWebhookSignature,
   webhookOAuthKeyAad,
@@ -1841,6 +1842,13 @@ describe('webhook endpoints through the API (ADR-081)', () => {
         runStepNodeTypes: ['create_deal'],
       }),
     ).toMatchObject({ runStepNodeTypes: ['create_deal'] });
+    // Every kind the builder defines, products steps included (ADR-383), as the database allows.
+    expect(
+      await api().update(key.ctx, id, { runStepNodeTypes: [...WEBHOOK_RUN_STEP_NODE_TYPES] }),
+    ).toMatchObject({ runStepNodeTypes: [...WEBHOOK_RUN_STEP_NODE_TYPES] });
+    expect(await api().update(key.ctx, id, { runStepNodeTypes: ['send_products'] })).toMatchObject({
+      runStepNodeTypes: ['send_products'],
+    });
     expect(await api().update(key.ctx, id, { runStepNodeTypes: null })).toMatchObject({
       runStepNodeTypes: null,
     });

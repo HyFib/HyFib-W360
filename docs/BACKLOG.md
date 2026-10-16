@@ -210,8 +210,10 @@ verification, app review, Embedded Signup configuration).
   conversation with a token of its own, as a member sends it, while the plan includes WhatsApp
   Flows; no migration). Steps that create, move and close CRM tasks and deals are recorded under
   P4-04 (ADR-244 to ADR-247, ADR-249 to ADR-251), and runs started through the public API under
-  P5-08 (ADR-077). **Remaining:** catalog steps (sending products from a run), starting runs from
-  campaigns, enrolling contacts or segments in a sequence without a customer message or order event,
+  P5-08 (ADR-077). **[Products steps built; their database and browser tests run only in CI]**
+  (ADR-383, migration 0299: a step sends one product, a list of products or the catalog of a
+  connected catalog, as the inbox sends them, while the plan includes commerce; webhook endpoints
+  can choose its steps). **Remaining:** starting runs from campaigns, enrolling contacts or segments in a sequence without a customer message or order event,
   a drag-and-drop canvas (ADR-034), usage billing for automation steps, a real sandbox run (release
   checklist).
 - **P4-02 HTTP node + egress guard** — _implemented and locally verified (2026-09-27) against a

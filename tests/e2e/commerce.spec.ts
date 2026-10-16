@@ -471,3 +471,85 @@ test('catalog products are listed on a deal with quantities and prices, and thei
   await expect(page.getByText('Sales · ₹241.00')).toBeVisible();
   await expect(page.getByText('(the deal’s value)')).toBeVisible();
 });
+
+test('an automation sends products from the catalog to a customer who asks (ADR-383)', async ({
+  page,
+  request,
+}) => {
+  test.setTimeout(180_000);
+  const { wabaId, phoneNumberId } = await newCompany(page, 'autoproducts', 'Ari Automations');
+  const catalogId = String(randomInt(100_000_000, 999_999_999));
+  const catalogRes = await request.post(`${GRAPH}/__stand-in/catalog`, {
+    data: {
+      wabaId,
+      catalog: { id: catalogId, name: 'Tea house', product_count: 2 },
+      products: [
+        ['chai-1', 'Masala chai', '₹120.00'],
+        ['chai-2', 'Ginger biscuits', '₹80.50'],
+      ].map(([retailerId, name, price], i) => ({
+        id: String(720_000 + i),
+        retailer_id: retailerId,
+        name,
+        price,
+        currency: 'INR',
+        availability: 'in stock',
+        review_status: 'approved',
+      })),
+    },
+  });
+  expect(catalogRes.ok()).toBe(true);
+  await openFromNav(page, 'Commerce');
+  await openTab(page, 'Catalogs');
+  await page.getByRole('button', { name: 'Read from Meta' }).click();
+  await reloadUntil(page, () => page.getByText('2 of 2 at Meta'));
+
+  // A keyword starts an automation whose step sends both products as a list.
+  await openFromNav(page, 'Automations');
+  await page.getByLabel('Name', { exact: true }).fill('Tea offer');
+  await page.getByRole('button', { name: 'Create draft' }).click();
+  await expect(page.getByRole('heading', { name: 'Tea offer' })).toBeVisible();
+  await page.getByLabel('Start when').selectOption('keyword');
+  await page.getByLabel('Keywords').fill('tea');
+  await page.getByLabel('Add a step').selectOption('send_products');
+  await page.getByRole('button', { name: 'Add step' }).click();
+  await page.locator('#step-send-products-1-kind').selectOption('product_list');
+  await page.getByRole('checkbox', { name: 'Masala chai · ₹120.00 (chai-1)' }).check();
+  await page.getByRole('checkbox', { name: 'Ginger biscuits · ₹80.50 (chai-2)' }).check();
+  await page.locator('#step-send-products-1-header').fill('Fresh today');
+  await page.locator('#step-send-products-1-body').fill('Hi {{name}}, these just arrived.');
+  await page.locator('#step-welcome-next').selectOption('send-products-1');
+  await expect(page.getByText(/to fix before publishing/)).toBeHidden();
+  await page.getByRole('button', { name: 'Start', exact: true }).click();
+  await expect(page.getByText('[2 products] Masala chai, Ginger biscuits')).toBeVisible();
+  await page.getByRole('button', { name: 'Save draft' }).click();
+  await expect(page.getByText('Draft saved.')).toBeVisible();
+  await page.getByRole('button', { name: 'Publish' }).click();
+  await page.getByRole('alertdialog').getByRole('button', { name: 'Publish' }).click();
+  await expect(page.getByText('Published.')).toBeVisible();
+  await expectNoHorizontalOverflow(page);
+
+  // A customer writes "tea": the run sends the list by the products' retailer ids.
+  const customer = randomWaId();
+  await sendSignedWebhook(request, inboundMessage(wabaId, phoneNumberId, customer, 'tea please'));
+  await expect
+    .poll(
+      async () =>
+        (await standInRequests(request))
+          .filter((r) => r.path === `/v26.0/${phoneNumberId}/messages`)
+          .map((r) => r.body as { to?: string; interactive?: Record<string, unknown> })
+          .find((b) => b.to === customer && b.interactive?.type === 'product_list')?.interactive,
+      { timeout: 30_000 },
+    )
+    .toMatchObject({
+      header: { type: 'text', text: 'Fresh today' },
+      body: { text: 'Hi Priya Customer, these just arrived.' },
+      action: {
+        catalog_id: catalogId,
+        sections: [
+          {
+            product_items: [{ product_retailer_id: 'chai-1' }, { product_retailer_id: 'chai-2' }],
+          },
+        ],
+      },
+    });
+});

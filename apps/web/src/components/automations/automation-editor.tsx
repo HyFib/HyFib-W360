@@ -43,6 +43,7 @@ import { AutomationSimulator } from './automation-simulator';
 import {
   NodeFields,
   type EditorPipeline,
+  type EditorProduct,
   type EditorTemplate,
   type NodeFieldOptions,
 } from './node-fields';
@@ -143,6 +144,7 @@ function defaultNode(
   crmMember: string | undefined,
   pipeline: EditorPipeline | undefined,
   flow: { id: string } | undefined,
+  product: { id: string } | undefined,
 ): AutomationNode {
   const id = newNodeId(graph, type);
   switch (type) {
@@ -255,6 +257,19 @@ function defaultNode(
         cta: 'Open the form',
         next: null,
       };
+    case 'send_products':
+      return {
+        id,
+        type,
+        label: '',
+        kind: 'product',
+        productIds: product ? [product.id] : [],
+        sectionTitle: null,
+        header: null,
+        body: '',
+        footer: null,
+        next: null,
+      };
     case 'create_deal':
       return {
         id,
@@ -301,6 +316,7 @@ function retarget(node: AutomationNode, target: string, value: string | null): A
     case 'send_text':
     case 'send_template':
     case 'send_flow':
+    case 'send_products':
     case 'update_contact':
     case 'update_conversation':
     case 'create_task':
@@ -360,6 +376,7 @@ export function AutomationEditor({
   crmMembers,
   crmPipelines,
   flows,
+  products,
   fields,
   web,
 }: {
@@ -377,6 +394,11 @@ export function AutomationEditor({
   crmPipelines: EditorPipeline[];
   /** The company's forms that are not archived, for form steps. */
   flows: { id: string; name: string; whatsappAccountId: string; sendable: boolean }[];
+  /**
+   * Products of connected catalogs for products steps (the first 500 by name and those the steps
+   * send); null for a member who cannot see the catalogs.
+   */
+  products: EditorProduct[] | null;
   fields: { key: string; label: string; type: string }[];
   /** What web request steps may use: allowed domains and secrets (names and domains only). */
   web: {
@@ -434,6 +456,15 @@ export function AutomationEditor({
       ),
     [flows, channelWhatsappAccountId],
   );
+  // Products a step can send: of the number's WhatsApp account when it is limited to one.
+  const usableProducts = useMemo(
+    () =>
+      products &&
+      products.filter(
+        (x) => !channelWhatsappAccountId || x.whatsappAccountId === channelWhatsappAccountId,
+      ),
+    [products, channelWhatsappAccountId],
+  );
   const parsedTrigger = useMemo(() => parseTrigger(triggerInput(trigger)), [trigger]);
   const apiInputs = useMemo(
     () =>
@@ -455,6 +486,15 @@ export function AutomationEditor({
           { currency: pl.currency, stageIds: new Set(pl.stages.map((st) => st.id)) },
         ]),
       ),
+      // Without the catalogs (no permission to see them), the server's checks cover products.
+      products: products
+        ? new Map(
+            products.map((x) => [
+              x.id,
+              { catalogId: x.catalogId, whatsappAccountId: x.whatsappAccountId },
+            ]),
+          )
+        : undefined,
       fieldKeys: new Set(fields.map((f) => f.key)),
       allowedDomains: web.allowedDomains,
       secrets: new Map(web.secrets.map((s) => [s.name, s.domain])),
@@ -469,6 +509,7 @@ export function AutomationEditor({
       crmMembers,
       crmPipelines,
       flows,
+      products,
       fields,
       web,
       templates,
@@ -529,6 +570,7 @@ export function AutomationEditor({
     crmMembers,
     crmPipelines,
     flows: usableFlows,
+    products: usableProducts,
     fields,
     answers,
     allowedDomains: web.allowedDomains,
@@ -987,6 +1029,7 @@ export function AutomationEditor({
                             crmMembers[0]?.id,
                             crmPipelines[0],
                             usableFlows[0],
+                            usableProducts?.[0],
                           ),
                         ],
                       })),
@@ -1037,6 +1080,7 @@ export function AutomationEditor({
             crmMembers={crmMembers}
             crmPipelines={crmPipelines}
             flows={flows}
+            products={products ?? []}
             templates={templates}
             storeEvent={storeEvent}
             apiInputs={apiInputs}
