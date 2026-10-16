@@ -41,7 +41,10 @@ deferring job>` (`pausedJobKey`), and a deferral that was not queued fails the j
   that defers records on its row when its deferred job runs (`management_deferred_until`, 0310), and
   the sync's 10-minute confirmation window, the 8-hour deletion keep and the sweep's 30-minute
   give-ups count from the later of the request and that time (`requestClockStart`); the flow and
-  commerce due lists wait for it too. Members still see the request's own time.
+  commerce due lists wait for it too. Members still see the request's own time. Each new request
+  on the row clears the deferral, so it never hides or extends a later request. A deferred job is
+  queued with a delay in seconds from the database's now (at least 30), never an absolute time, so
+  a worker whose clock lags the database's does not re-defer in a loop.
 - **Dead letters:** `ops.dead_letter_work_live` (0089) is recreated in 0310 to see a waiting
   deferral of a setup or a deletion, so the dead-letter sweep does not settle work a deferred job
   will still do.
@@ -62,19 +65,22 @@ deferring job>` (`pausedJobKey`), and a deferral that was not queued fails the j
 ### Verification
 
 - Ran here: `eslint . --max-warnings=0`, `prettier --check .`, `pnpm typecheck` (every package,
-  the integration and e2e suites included), `pnpm test` (the unit project: 174 files, 1,868 tests) and
+  the integration and e2e suites included), `pnpm test` (the unit project: 174 files, 1,870 tests) and
   `pnpm build`, all passing; the pglast parse of migration 0310. Not run here: the integration and
   e2e suites (no PostgreSQL or browsers in this environment; CI runs them).
 - New unit tests: 15 in `usage-header.test.ts` (parser and Graph client, the length bound through a
-  fake `fetch`), 21 in `management-pace.test.ts` (pacing decision, paced calls and refusals that
-  pause, the deferral's key and its failure to queue, the request clock, the Channels view), 4 in
+  fake `fetch`), 23 in `management-pace.test.ts` (pacing decision, paced calls and refusals that
+  pause, the deferral's key, its delay in seconds and its failure to queue, the request clock, the
+  Channels view), 4 in
   `apps/worker/src/handlers/management-deferral.test.ts` (each kind's queue, the template sync that
   is not queued, a deferral not queued, kinds that are not paced), and one more in
   `api/message-template-drafts.test.ts` (the API's 503 and nothing written); an existing API test
   now expects the account read.
-- Manual mutation testing: 15/15 for the parser, pacing decision, client and view; 10/12 for the
-  review fixes, the two survivors being the sync's request clock and the flow give-up's deferral
-  condition, which only the integration tests (CI) exercise.
+- Manual mutation testing: 15/15 for the parser, pacing decision, client and view; 9/11 for the
+  first review's fixes; 6/8 for the second review's (the deferral delay and the clearing of the
+  deferral by a new request). 30/34 in all: the four survivors (the sync's request clock, the flow
+  give-up's deferral condition, and the clearing in a flow operation and a catalog read request) are
+  exercised only by the integration tests, in CI.
 - `tests/integration/management-usage.test.ts` (stand-in extended with `usageHeader` and
   `usageHeaderValue`): readings stored for the right account and company only, a header naming
   another WABA ignored, malformed headers harmless, a refused call's reading stored, a paused sync

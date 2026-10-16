@@ -493,6 +493,8 @@ export function createCommerceService(deps: CommerceDeps) {
               state: 'queued',
               error: null,
               requestedAt: now,
+              // A new request: an earlier deferral for a pause no longer applies (ADR-399).
+              managementDeferredUntil: null,
               version: sql`${commerceSyncs.version} + 1`,
             },
             // A read already waiting or running is not requested twice.

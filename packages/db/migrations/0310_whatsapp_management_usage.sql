@@ -17,6 +17,9 @@
 -- (`management_deferred_until`), and the windows that give up on such a request (the sync's
 -- 10-minute confirmation window and 8-hour deletion keep, the sweep's 30-minute give-up) count from
 -- the later of the request and that time. The request's own time, which members see, is unchanged.
+-- The column describes the row's current request only: recording a new request on the row (a
+-- submission, a deletion, a flow operation, a catalog read) clears it, so a deferral never hides
+-- or extends a request made after it, in the windows and in the due lists below alike.
 ALTER TABLE app.whatsapp_accounts
   ADD COLUMN management_usage_read_at timestamptz,
   ADD COLUMN management_usage_percent smallint

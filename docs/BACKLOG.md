@@ -25,7 +25,7 @@ verification, app review, Embedded Signup configuration).
   management reading is stored; while Meta reports minutes to regain access, background management
   work waits and runs just after, members' management actions answer that Meta is limiting
   requests until then, and Channels shows the reading. T: unit tests of the parser, the client and
-  the pacing decision (25/27 manual mutations caught; the 2 survivors are integration-only); integration tests against the Graph stand-in
+  the pacing decision (30/34 manual mutations caught; the 4 survivors are integration-only); integration tests against the Graph stand-in
   run in CI only. Not verified against live Meta traffic; the 100-percent threshold and the header's
   WhatsApp semantics are only partly confirmed (research M-200).
 - **P2-03 Embedded Signup** — done except payment-method check and Meta-side deregistration. T:

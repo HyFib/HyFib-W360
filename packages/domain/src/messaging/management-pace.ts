@@ -73,6 +73,18 @@ export function managementResumeAt(pausedUntil: Date): Date {
   return new Date(pausedUntil.getTime() + MANAGEMENT_RESUME_MARGIN_MS);
 }
 
+/** The shortest delay a deferred job is queued with, whatever the clocks say. */
+export const MIN_DEFERRAL_SECONDS = 30;
+
+/**
+ * The delay, in whole seconds from now, a job deferred by a pause is queued with: until just after
+ * the pause as this worker's clock sees it, and never less than `MIN_DEFERRAL_SECONDS`.
+ */
+export function deferralDelaySeconds(pausedUntil: Date, now: Date): number {
+  const wait = Math.ceil((managementResumeAt(pausedUntil).getTime() - now.getTime()) / 1000);
+  return Math.max(MIN_DEFERRAL_SECONDS, wait);
+}
+
 /** A job outcome: the account's management calls are paused until `paused`; nothing was called. */
 export interface ManagementPaused {
   paused: Date;
@@ -160,27 +172,30 @@ export function pausedJobKey(currentJobId: string): string {
 }
 
 /**
- * Queues a job again to run just after the pause ends, signed as before, and gives when it starts,
- * or null when nothing was queued (the caller then fails the job, so pg-boss retries it rather
- * than the deferral being lost). Its singleton key is derived from the deferring job's id
- * (`pausedJobKey`): stable across retries of that job, so one deferral is queued for it, and never
- * the key the running job holds, whatever the clocks of the worker and the database say. pg-boss
- * compares `startAfter` with the database's clock; a worker whose clock is behind sees the pause as
- * still running when the job starts and defers again without calling Graph (ADR-399).
+ * Queues a job again to run just after the pause ends, signed as before, and gives when it should
+ * start by this worker's clock, or null when nothing was queued (the caller then fails the job, so
+ * pg-boss retries it rather than the deferral being lost). Its singleton key is derived from the
+ * deferring job's id (`pausedJobKey`): stable across retries of that job, so one deferral is queued
+ * for it, and never the key the running job holds. The start is given to pg-boss as a delay in
+ * seconds, which it adds to the database's own now, and is at least `MIN_DEFERRAL_SECONDS`: the
+ * pause is judged on the worker's clock, so a worker behind the database that still sees the pause
+ * when the deferred job starts defers it once more, by the time left on its own clock and at least
+ * 30 seconds, never to a time the database already considers past (ADR-399).
  */
 export async function deferPausedJob(
-  deps: { jobs: JobQueue; signer: JobSigner },
+  deps: { jobs: JobQueue; signer: JobSigner; clock: Clock },
   queue: QueueName,
   job: { kind: string; tenantId: string; actorUserId: string | null; ref: string },
   pausedUntil: Date,
   currentJobId: string,
 ): Promise<Date | null> {
-  const startAfter = managementResumeAt(pausedUntil);
+  const now = deps.clock.now();
+  const delay = deferralDelaySeconds(pausedUntil, now);
   const queued = await deps.jobs.enqueue(null, queue, deps.signer.sign(job), {
     singletonKey: pausedJobKey(currentJobId),
-    startAfter,
+    startAfter: delay,
   });
-  return queued === null ? null : startAfter;
+  return queued === null ? null : new Date(now.getTime() + delay * 1000);
 }
 
 /**

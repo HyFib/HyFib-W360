@@ -16553,10 +16553,15 @@ Decision:
   is never lost while the log says "deferred" (`deferPausedWork` in the worker, which also picks
   each kind's own queue). `ops.flow_work_due` and `ops.commerce_work_due` leave their paused accounts
   out too. The job completes, so no retry is spent, no dead letter is written and nothing alerts.
-  Clocks: a pause is computed and compared on the worker's clock; pg-boss's `startAfter` and the
-  due lists compare with the database's. A worker whose clock is behind the database's sees the
-  pause as still running when the deferred job starts and defers again without calling Graph; one
-  ahead calls up to its skew early, and Meta's own throttling then answers as below. Within one job,
+  Clocks: a pause is computed and compared on the worker's clock, while pg-boss starts jobs and
+  the due lists compare on the database's. So the deferred job is queued with a delay in seconds
+  (`deferralDelaySeconds`: until 30 seconds after the pause by the worker's clock, never less than
+  30), which pg-boss adds to the database's own now (pg-boss 12.34 casts a positive number to an
+  interval on `job_now()`), never an absolute time. A worker whose clock is behind the database's
+  by more than 30 seconds still sees the pause when the deferred job starts and defers it once more,
+  by the time left on its own clock and at least 30 seconds, so it waits until its clock has passed
+  the pause instead of re-deferring at once in a loop; a worker ahead calls up to its skew early,
+  and Meta's own throttling then answers as below. Within one job,
   once a response pauses the account the job's next call is not made (`pacedManagementCalls`), and
   a call Meta refused for now (`retryable`, such as rate limit 80007) whose own response set the
   pause defers the job at once (`refusedForPause`): no retry, no `delete_failed`, no failed key
@@ -16582,7 +16587,10 @@ Decision:
   flow page shows "requested <time>" and the catalog read its request time, which must stay true,
   and the alternative of recording when a request was first sent to Meta would have needed a
   sending mark on every step of every job. Rows never deferred keep a null and their windows as
-  before. A deferral older than a later request is ignored, since the later time wins.
+  before. The column belongs to the row's current request: recording a new request on the row (a
+  submission, a deletion at Meta, a flow operation, a catalog read, the daily read) clears it in the
+  same statement, so a deferral never extends a later request's window nor hides it from the due
+  lists, even when Meta ended a pause early and members asked again before the old resume time.
 - **No pause on a high percentage alone:** background work does not defer when usage is merely
   high (for example 90 percent). The percentages cover a rolling hour whose make-up HyFib does not
   know, so a fixed deferral would be a guess about when it frees up; these jobs already run at low
@@ -16636,4 +16644,9 @@ bound with a fake `fetch`, and the transport limit is described above); that a d
 queued was logged as deferred and its key could equal the running job's under clock skew (fixed by
 `pausedJobKey` and the failing job); that the code-100 fallback was tried after a pausing response;
 that the dead-letter sweep could not see a deferral; and that the commerce handler deferred every
-kind to the catalog queue. All were fixed.
+kind to the catalog queue. All were fixed. A second review found that a worker whose clock lags
+the database's re-deferred at once in a loop, because the deferral's absolute start was already
+past for pg-boss (fixed by the delay in seconds above), that a deferral could hide a newer request
+from the due lists (fixed by clearing it with each new request), and gaps in the integration tests
+(the due lists while a deferral is ahead and after a newer request, the catalog give-up at the late
+time, the deferral columns' grants). All were fixed.

@@ -5,7 +5,9 @@ import {
   MANAGEMENT_RESUME_MARGIN_MS,
   activeManagementPause,
   assertManagementOpen,
+  MIN_DEFERRAL_SECONDS,
   deferPausedJob,
+  deferralDelaySeconds,
   isManagementPaused,
   managementReading,
   managementResumeAt,
@@ -233,7 +235,7 @@ describe('deferPausedJob', () => {
   };
   const signer = { sign: (input: unknown) => ({ signed: input }) } as unknown as JobSigner;
 
-  it('queues the job for just after the pause under a key of the deferring job’s id', async () => {
+  const recording = () => {
     const sent: unknown[][] = [];
     const jobs = {
       enqueue: async (...args: unknown[]) => {
@@ -241,22 +243,77 @@ describe('deferPausedJob', () => {
         return 'new-job';
       },
     } as unknown as JobQueue;
-    const resumeAt = await deferPausedJob({ jobs, signer }, 'template.submit', job, NOW, 'job-1');
-    expect(resumeAt).toEqual(new Date(NOW.getTime() + MANAGEMENT_RESUME_MARGIN_MS));
+    return { jobs, sent };
+  };
+  const clockAt = (time: Date) => ({ now: () => time });
+
+  it('queues the job for just after the pause, as seconds from the database’s now, under a key of the deferring job’s id', async () => {
+    const { jobs, sent } = recording();
+    const until = new Date(NOW.getTime() + 5 * 60_000);
+    const resumeAt = await deferPausedJob(
+      { jobs, signer, clock: clockAt(NOW) },
+      'template.submit',
+      job,
+      until,
+      'job-1',
+    );
+    expect(resumeAt).toEqual(new Date(until.getTime() + MANAGEMENT_RESUME_MARGIN_MS));
     expect(sent).toEqual([
       [
         null,
         'template.submit',
         { signed: job },
-        { singletonKey: pausedJobKey('job-1'), startAfter: resumeAt },
+        { singletonKey: pausedJobKey('job-1'), startAfter: 330 },
       ],
     ]);
     expect(pausedJobKey('job-1')).toBe('paused:job-1');
   });
 
+  it('never queues it for a time already past: a worker behind the database waits at least 30 seconds', async () => {
+    // The deferred job started (by the database's clock) while this worker's clock, 2 minutes
+    // behind, still sees the pause: it defers once more by the time left on its clock.
+    const until = new Date(NOW.getTime() + 60_000);
+    const behind = recording();
+    await deferPausedJob({ ...behind, signer, clock: clockAt(NOW) }, 'flow.sync', job, until, 'j');
+    expect(behind.sent[0]?.[3]).toEqual({ singletonKey: 'paused:j', startAfter: 90 });
+    // Only seconds before the end, or past it: never less than 30 seconds, never an instant.
+    for (const now of [new Date(until.getTime() + 29_000), new Date(until.getTime() + 600_000)]) {
+      const late = recording();
+      const resumeAt = await deferPausedJob(
+        { ...late, signer, clock: clockAt(now) },
+        'flow.sync',
+        job,
+        until,
+        'j',
+      );
+      expect(late.sent[0]?.[3]).toEqual({
+        singletonKey: 'paused:j',
+        startAfter: MIN_DEFERRAL_SECONDS,
+      });
+      expect(resumeAt).toEqual(new Date(now.getTime() + MIN_DEFERRAL_SECONDS * 1000));
+    }
+  });
+
   it('says when nothing was queued', async () => {
     const jobs = { enqueue: async () => null } as unknown as JobQueue;
-    expect(await deferPausedJob({ jobs, signer }, 'template.submit', job, NOW, 'job-1')).toBeNull();
+    expect(
+      await deferPausedJob(
+        { jobs, signer, clock: clockAt(NOW) },
+        'template.submit',
+        job,
+        NOW,
+        'job-1',
+      ),
+    ).toBeNull();
+  });
+});
+
+describe('deferralDelaySeconds', () => {
+  it('waits until 30 seconds after the pause, rounded up, and at least 30 seconds', () => {
+    expect(deferralDelaySeconds(new Date(NOW.getTime() + 120_000), NOW)).toBe(150);
+    expect(deferralDelaySeconds(new Date(NOW.getTime() + 500), NOW)).toBe(31);
+    expect(deferralDelaySeconds(NOW, NOW)).toBe(30);
+    expect(deferralDelaySeconds(new Date(NOW.getTime() - 3_600_000), NOW)).toBe(30);
   });
 });
 

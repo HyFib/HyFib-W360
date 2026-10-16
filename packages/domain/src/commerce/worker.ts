@@ -401,6 +401,8 @@ export async function queueDailyCommerceSync(
         state: 'queued',
         error: null,
         requestedAt: deps.clock.now(),
+        // A new request: an earlier deferral for a pause no longer applies (ADR-399).
+        managementDeferredUntil: null,
         version: sql`${commerceSyncs.version} + 1`,
       })
       .where(

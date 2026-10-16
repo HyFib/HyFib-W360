@@ -209,6 +209,8 @@ export function createFlowsService(deps: FlowsDeps) {
         syncState: 'queued',
         syncError: null,
         syncRequestedAt: deps.clock.now(),
+        // A new request: an earlier deferral for a pause no longer applies (ADR-399).
+        managementDeferredUntil: null,
         version,
       })
       .where(and(eq(flows.tenantId, ctx.tenant.id), eq(flows.id, row.id)));

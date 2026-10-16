@@ -18,6 +18,8 @@ function fakeRuntime(enqueued: string | null = 'queued-id') {
       },
     },
     signer: { sign: (input: unknown) => ({ signed: input }) },
+    // The pause ends 5 minutes from this worker's now.
+    clock: { now: () => new Date(PAUSED_UNTIL.getTime() - 300_000) },
     logger: {
       info: (facts: Record<string, unknown>, message: string) => logs.push({ facts, message }),
     },
@@ -60,7 +62,8 @@ describe('deferPausedWork', () => {
           },
           options: {
             singletonKey: pausedJobKey('job-7'),
-            startAfter: new Date(PAUSED_UNTIL.getTime() + 30_000),
+            // Seconds from the database's now: until 30 seconds after the pause.
+            startAfter: 330,
           },
         },
       ]);

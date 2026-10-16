@@ -250,28 +250,31 @@ describe('a paused account', () => {
     const deferringJobId = uuidv7();
     const defer = () =>
       deferPausedJob(
-        { jobs: fx.jobs(), signer: fx.signer },
+        { jobs: fx.jobs(), signer: fx.signer, clock: systemClock },
         QUEUES.templateSubmit.name,
         { kind: 'template.submit', tenantId: c.tenant.id, actorUserId: c.owner.id, ref: id },
         until,
         deferringJobId,
       );
     const resumeAt = await defer();
-    expect(resumeAt?.getTime()).toBe(until.getTime() + MANAGEMENT_RESUME_MARGIN_MS);
+    const due = until.getTime() + MANAGEMENT_RESUME_MARGIN_MS;
+    // Whole seconds from now: within a second of 30 seconds after the pause.
+    expect(Math.abs(resumeAt!.getTime() - due)).toBeLessThan(1_000);
     expect(await defer()).toBeNull();
     const jobs = await fx.query<{ start_after: Date; data: { ref: string; tenantId: string } }>(
       `SELECT start_after, data FROM pgboss.job WHERE name = $1 AND singleton_key = $2`,
       [QUEUES.templateSubmit.name, pausedJobKey(deferringJobId)],
     );
     expect(jobs).toHaveLength(1);
-    expect(jobs[0]!.start_after.getTime()).toBe(resumeAt!.getTime());
+    // pg-boss adds the delay to the database's now (same machine here: a few seconds at most).
+    expect(Math.abs(jobs[0]!.start_after.getTime() - due)).toBeLessThan(5_000);
     expect(jobs[0]!.data).toMatchObject({ ref: id, tenantId: c.tenant.id });
     // The row says when its deferred job runs, so the sync's window counts from then.
     const [deferred] = await fx.query<{ management_deferred_until: Date }>(
       'SELECT management_deferred_until FROM app.message_templates WHERE id = $1',
       [id],
     );
-    expect(deferred!.management_deferred_until.getTime()).toBe(resumeAt!.getTime());
+    expect(deferred!.management_deferred_until.getTime()).toBe(due);
   });
 
   it('tells a member Meta is limiting management requests, and queues nothing', async () => {
@@ -542,6 +545,109 @@ describe('time deferred for a pause does not count against a request', () => {
         ])
       )[0]!.sync_state,
     ).toBe('failed');
+    const [lateRead] = await fx.query<{ state: string }>(
+      'SELECT state FROM app.commerce_syncs WHERE whatsapp_account_id = $1',
+      [c.whatsappAccountId],
+    );
+    expect(lateRead!.state).toBe('failed');
+  });
+
+  it('hides deferred work from the due lists until its job runs, and a newer request clears it', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const { id: flowId } = await flowsService().create(owner, {
+      whatsappAccountId: c.whatsappAccountId,
+      name: 'Deferred survey',
+      categories: ['SURVEY'],
+      json: STARTER_FLOW_JSON,
+    });
+    await commerceService().requestSync(owner, { whatsappAccountId: c.whatsappAccountId });
+    await pause(c, 20);
+    expect(await processFlowSync(flowDeps(), scopeOf(c), flowId)).toMatchObject({
+      paused: expect.any(Date),
+    });
+    expect(
+      await processCommerceSync(commerceDeps(), scopeOf(c), c.whatsappAccountId),
+    ).toMatchObject({ paused: expect.any(Date) });
+    // Meta ends the pause early (the account is no longer paused); the deferred jobs are still due
+    // in about 20 minutes, and both requests look lost to the sweep.
+    await fx.query(
+      `UPDATE app.whatsapp_accounts SET management_paused_until = NULL WHERE id = $1`,
+      [c.whatsappAccountId],
+    );
+    await fx.query(
+      `UPDATE app.flows SET sync_requested_at = now() - interval '10 minutes' WHERE id = $1`,
+      [flowId],
+    );
+    await fx.query(
+      `UPDATE app.commerce_syncs SET requested_at = now() - interval '10 minutes'
+        WHERE whatsapp_account_id = $1`,
+      [c.whatsappAccountId],
+    );
+    const listed = async () => ({
+      flows: (await findDueFlowWork(fx.dbs.app, 5000)).map((w) => w.ref),
+      reads: (await findDueCommerceWork(fx.dbs.app, 5000)).map((w) => w.ref),
+    });
+    let due = await listed();
+    expect(due.flows).not.toContain(flowId);
+    expect(due.reads).not.toContain(c.whatsappAccountId);
+
+    // Once the deferred jobs were due, the sweep lists them again.
+    await fx.query(
+      `UPDATE app.flows SET management_deferred_until = now() - interval '1 second' WHERE id = $1`,
+      [flowId],
+    );
+    await fx.query(
+      `UPDATE app.commerce_syncs SET management_deferred_until = now() - interval '1 second'
+        WHERE whatsapp_account_id = $1`,
+      [c.whatsappAccountId],
+    );
+    due = await listed();
+    expect(due.flows).toContain(flowId);
+    expect(due.reads).toContain(c.whatsappAccountId);
+
+    // A newer request clears the deferral it would otherwise wait behind: the pause ends early,
+    // the operation and the read fail, and the member asks again while the old deferral time is
+    // still ahead.
+    await fx.query(
+      `UPDATE app.flows SET management_deferred_until = now() + interval '20 minutes',
+              sync_state = 'failed' WHERE id = $1`,
+      [flowId],
+    );
+    await fx.query(
+      `UPDATE app.commerce_syncs SET management_deferred_until = now() + interval '20 minutes',
+              state = 'failed' WHERE whatsapp_account_id = $1`,
+      [c.whatsappAccountId],
+    );
+    const [failed] = await fx.query<{ version: number }>(
+      'SELECT version FROM app.flows WHERE id = $1',
+      [flowId],
+    );
+    await flowsService().retry(owner, { id: flowId, expectedVersion: failed!.version });
+    await commerceService().requestSync(owner, { whatsappAccountId: c.whatsappAccountId });
+    const [flowRow] = await fx.query<{ management_deferred_until: Date | null }>(
+      'SELECT management_deferred_until FROM app.flows WHERE id = $1',
+      [flowId],
+    );
+    const [readRow] = await fx.query<{ management_deferred_until: Date | null }>(
+      'SELECT management_deferred_until FROM app.commerce_syncs WHERE whatsapp_account_id = $1',
+      [c.whatsappAccountId],
+    );
+    expect(flowRow!.management_deferred_until).toBeNull();
+    expect(readRow!.management_deferred_until).toBeNull();
+    // Should their jobs be lost, the sweep lists them as soon as they look lost, not in 20 minutes.
+    await fx.query(
+      `UPDATE app.flows SET sync_requested_at = now() - interval '10 minutes' WHERE id = $1`,
+      [flowId],
+    );
+    await fx.query(
+      `UPDATE app.commerce_syncs SET requested_at = now() - interval '10 minutes'
+        WHERE whatsapp_account_id = $1`,
+      [c.whatsappAccountId],
+    );
+    due = await listed();
+    expect(due.flows).toContain(flowId);
+    expect(due.reads).toContain(c.whatsappAccountId);
   });
 });
 
@@ -598,7 +704,7 @@ describe('a refusal whose own response pauses the account', () => {
     expect(failures[0]!.n).toBe(0);
     // The deferral is live work for the dead-letter sweep (0089, recreated in 0310).
     await deferPausedJob(
-      { jobs: fx.jobs(), signer: fx.signer },
+      { jobs: fx.jobs(), signer: fx.signer, clock: systemClock },
       QUEUES.templateDelete.name,
       { kind: 'template.delete', tenantId: d.tenant.id, actorUserId: null, ref: tid },
       (await usageRow(d)).management_paused_until!,
@@ -696,6 +802,28 @@ describe('privileges (migration 0310)', () => {
     expect(await privileges('w360_definer', 'SELECT')).toEqual(['management_paused_until']);
     expect(await privileges('w360_definer', 'UPDATE')).toEqual([]);
     expect(await privileges('w360_platform', 'UPDATE')).toEqual([]);
+
+    // Deferral times: written by the application on all three tables, read by the definer's due
+    // lists on flows and catalog reads only.
+    const deferredGrantees = async (type: string) =>
+      (
+        await fx.query<{ grantee: string; table_name: string }>(
+          `SELECT grantee, table_name FROM information_schema.column_privileges
+            WHERE table_schema = 'app' AND column_name = 'management_deferred_until'
+              AND privilege_type = $1 AND grantee IN ('w360_app', 'w360_definer', 'w360_platform')
+            ORDER BY grantee, table_name`,
+          [type],
+        )
+      ).map((r) => `${r.grantee} ${r.table_name}`);
+    expect(await deferredGrantees('UPDATE')).toEqual([
+      'w360_app commerce_syncs',
+      'w360_app flows',
+      'w360_app message_templates',
+    ]);
+    // w360_app reads these tables through its table-level SELECT; the definer only these two.
+    expect((await deferredGrantees('SELECT')).filter((g) => g.startsWith('w360_definer '))).toEqual(
+      ['w360_definer commerce_syncs', 'w360_definer flows'],
+    );
   });
 
   it('keeps the due lists definer functions only the application may run', async () => {

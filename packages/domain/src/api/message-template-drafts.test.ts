@@ -780,7 +780,13 @@ describe('submitting templates and deleting those Meta has, through the API (ADR
         [
           'update',
           'message_templates',
-          { status: 'submitting', submittedAt: NOW, submitError: null, version: VERSION_PLUS_ONE },
+          {
+            status: 'submitting',
+            submittedAt: NOW,
+            managementDeferredUntil: null,
+            submitError: null,
+            version: VERSION_PLUS_ONE,
+          },
           THIS_TEMPLATE,
           'returning',
         ],
@@ -955,7 +961,7 @@ describe('submitting templates and deleting those Meta has, through the API (ADR
         [
           'update',
           'message_templates',
-          { status: 'pending_deletion', version: VERSION_PLUS_ONE },
+          { status: 'pending_deletion', managementDeferredUntil: null, version: VERSION_PLUS_ONE },
           THIS_TEMPLATE,
         ],
         [

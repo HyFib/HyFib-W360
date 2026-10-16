@@ -27,7 +27,7 @@ export type PacedJobKind = keyof typeof PAUSE_DEFERRAL_QUEUES;
  * never silently lost. A kind without pacing that reports a pause is a programming error.
  */
 export async function deferPausedWork(
-  rt: Pick<WorkerRuntime, 'jobs' | 'signer' | 'logger'>,
+  rt: Pick<WorkerRuntime, 'jobs' | 'signer' | 'logger' | 'clock'>,
   work: {
     jobId: string;
     kind: string;

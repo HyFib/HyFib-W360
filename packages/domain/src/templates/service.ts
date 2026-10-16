@@ -402,6 +402,8 @@ export async function writeSubmitTemplate(
     .set({
       status: 'submitting',
       submittedAt: at,
+      // A new request: an earlier deferral for a pause no longer applies (ADR-399).
+      managementDeferredUntil: null,
       submitError: null,
       version: sql`${messageTemplates.version} + 1`,
     })
@@ -461,7 +463,12 @@ export async function writeDeleteTemplateAtMeta(
 ): Promise<void> {
   await tx
     .update(messageTemplates)
-    .set({ status: 'pending_deletion', version: sql`${messageTemplates.version} + 1` })
+    .set({
+      status: 'pending_deletion',
+      // A new request: an earlier deferral for a pause no longer applies (ADR-399).
+      managementDeferredUntil: null,
+      version: sql`${messageTemplates.version} + 1`,
+    })
     .where(and(eq(messageTemplates.tenantId, tenantId), eq(messageTemplates.id, templateId)));
   await insertStatusEvent(tx, tenantId, {
     templateId,
@@ -863,7 +870,10 @@ async function deferTemplateWork(
   return { paused: pausedUntil };
 }
 
-/** The later of a request's time and the time its deferred job runs again (ADR-399). */
+/**
+ * The later of a request's time and the time its deferred job runs again (ADR-399). The deferral
+ * belongs to the row's current request: recording a new request clears it.
+ */
 export function requestClockStart(requestedAt: Date, deferredUntil: Date | null): Date {
   return deferredUntil && deferredUntil > requestedAt ? deferredUntil : requestedAt;
 }
