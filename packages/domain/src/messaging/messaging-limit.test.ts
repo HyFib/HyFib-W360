@@ -14,6 +14,7 @@ import {
   MESSAGING_LIMIT_NOTE,
   MESSAGING_LIMITS,
   isListedMessagingLimit,
+  messagingLimitRefusalMetadata,
   messagingLimitText,
   parseMessagingLimit,
 } from './messaging-limit';
@@ -83,7 +84,8 @@ describe("a number's messaging limit from Meta (ADR-398)", () => {
   });
 
   it('words each tier by the customers it allows, and nothing else as a figure', () => {
-    expect(messagingLimitText('TIER_50')).toBe(`Messaging limit: 50 ${SCOPE}`);
+    // Research gives no figure for TIER_50 (M-058 starts at 250): as Meta reports it.
+    expect(messagingLimitText('TIER_50')).toBe('Messaging limit: TIER_50 (as Meta reports it)');
     expect(messagingLimitText('TIER_250')).toBe(`Messaging limit: 250 ${SCOPE}`);
     expect(messagingLimitText('TIER_2K')).toBe(`Messaging limit: 2,000 ${SCOPE}`);
     expect(messagingLimitText('TIER_10K')).toBe(`Messaging limit: 10,000 ${SCOPE}`);
@@ -106,6 +108,9 @@ describe("a number's messaging limit from Meta (ADR-398)", () => {
     }
     expect(messagingLimitText(null)).toBe('Messaging limit: not reported by Meta');
     // No figure where none is documented.
+    for (const none of ['TIER_50', 'UNTIERED', 'TIER_UNLIMITED', null]) {
+      expect(messagingLimitText(none)).not.toMatch(/customers/);
+    }
     for (const none of ['UNTIERED', 'TIER_UNLIMITED', null]) {
       expect(messagingLimitText(none)).not.toMatch(/[0-9]/);
     }
@@ -274,45 +279,107 @@ describe("onboarding's health read and the messaging limit (ADR-398)", () => {
     return { outcome, reads, updates, audits, events };
   }
 
+  /** The audit entries written, as action, subject and exact metadata. */
+  const audited = (audits: Record<string, unknown>[]) =>
+    audits.map((a) => [a.action, a.subjectId, a.metadata]);
+  const setUp = (messagingLimit: string | null) => [
+    {
+      status: 'active',
+      onboardingStep: 'done',
+      onboardingError: null,
+      ...facts,
+      messagingLimit,
+      messagingLimitCheckedAt: NOW,
+      healthCheckedAt: NOW,
+    },
+  ];
+  const plain: PhoneRead = { ok: true, data: { ...facts, messagingLimit: null } };
+
   it('stores the limit read with the health, at the same time', async () => {
     const run = await healthStep([{ ok: true, data: { ...facts, messagingLimit: 'TIER_2K' } }]);
     expect(run.outcome).toBe('active');
     expect(run.reads).toEqual([undefined]);
-    expect(run.updates).toEqual([
-      {
-        status: 'active',
-        onboardingStep: 'done',
-        onboardingError: null,
-        ...facts,
-        messagingLimit: 'TIER_2K',
-        messagingLimitCheckedAt: NOW,
-        healthCheckedAt: NOW,
-      },
-    ]);
-    expect(run.audits).toMatchObject([
-      { action: 'channel.activated', subjectId: CHANNEL, metadata: {} },
-    ]);
+    expect(run.updates).toEqual(setUp('TIER_2K'));
+    // Exactly no metadata: nothing was refused.
+    expect(audited(run.audits)).toEqual([['channel.activated', CHANNEL, {}]]);
     expect(run.events).toBe(1);
   });
 
-  it('reads once more without the limit when Graph refuses with code 100, and says so', async () => {
-    const run = await healthStep([refused, { ok: true, data: { ...facts, messagingLimit: null } }]);
-    expect(run.outcome).toBe('active');
-    expect(run.reads).toEqual([undefined, { messagingLimit: false }]);
-    expect(run.updates).toEqual([
+  it('reads once more without the limit when Graph refuses it, whatever the code, and audits what Graph answered', async () => {
+    const refusals: Failure[] = [
+      // A field Graph does not have.
+      refused,
+      // A permission, as the description's example for this read (403, code 200, its subcode).
       {
-        status: 'active',
-        onboardingStep: 'done',
-        onboardingError: null,
-        ...facts,
-        messagingLimit: null,
-        messagingLimitCheckedAt: NOW,
-        healthCheckedAt: NOW,
+        ok: false,
+        kind: 'permanent',
+        httpStatus: 403,
+        code: 200,
+        subcode: 1349174,
+        title: 'Permission Denied',
+        detail: "Your app doesn't have permission to access this WhatsApp Account Number",
       },
+      // An app without the capability.
+      {
+        ok: false,
+        kind: 'permanent',
+        httpStatus: 400,
+        code: 3,
+        title: 'OAuthException',
+        detail: '(#3) Application does not have the capability to make this API call.',
+      },
+      // Code 10, which HyFib reads as lost access.
+      {
+        ok: false,
+        kind: 'auth',
+        httpStatus: 403,
+        code: 10,
+        title: 'OAuthException',
+        detail: '(#10) Application does not have permission for this action',
+      },
+    ];
+    for (const refusal of refusals) {
+      const run = await healthStep([refusal, plain]);
+      const label = String(refusal.code);
+      expect(run.outcome, label).toBe('active');
+      expect(run.reads, label).toEqual([undefined, { messagingLimit: false }]);
+      expect(run.updates, label).toEqual(setUp(null));
+      expect(audited(run.audits), label).toEqual([
+        [
+          'channel.activated',
+          CHANNEL,
+          {
+            messagingLimit: 'refused',
+            kind: refusal.kind,
+            httpStatus: refusal.httpStatus,
+            code: refusal.code,
+            subcode: refusal.subcode ?? null,
+            detail: refusal.detail,
+          },
+        ],
+      ]);
+    }
+  });
+
+  it('keeps no link or token of Meta’s message in the audit, and at most 200 of its characters', async () => {
+    const run = await healthStep([
+      {
+        ...refused,
+        detail: `Denied for EAAGm0PX4ZCpsBAKzz1234567890abcdef see https://graph.facebook.com/v26.0/1?access_token=EAAx123 ${'x'.repeat(300)}`,
+      },
+      plain,
     ]);
-    expect(run.audits).toMatchObject([
-      { action: 'channel.activated', metadata: { messagingLimit: 'refused' } },
-    ]);
+    const metadata = run.audits[0]!.metadata as Record<string, unknown>;
+    expect(metadata.detail).toBe(`Denied for [token] see [link] ${'x'.repeat(170)}`);
+    expect(String(metadata.detail)).toHaveLength(200);
+    expect(messagingLimitRefusalMetadata({ kind: 'permanent' })).toEqual({
+      messagingLimit: 'refused',
+      kind: 'permanent',
+      httpStatus: null,
+      code: null,
+      subcode: null,
+      detail: null,
+    });
   });
 
   it('fails with the second read’s reason when that read fails too', async () => {
@@ -325,26 +392,44 @@ describe("onboarding's health read and the messaging limit (ADR-398)", () => {
         onboardingError: 'Setup failed at health_check: OAuthException: Unsupported get request.',
       },
     ]);
-    expect(run.audits).toMatchObject([
-      { action: 'channel.setup_failed', metadata: { step: 'health_check', code: 100 } },
+    expect(audited(run.audits)).toEqual([
+      ['channel.setup_failed', CHANNEL, { step: 'health_check', code: 100 }],
     ]);
   });
 
-  it('reads only once for any other failure, handled as before', async () => {
-    const cases: [Failure, string][] = [
-      [{ ...refused, code: 200, title: 'Permission Denied' }, 'failed'],
-      [{ ...refused, code: undefined }, 'failed'],
-      [{ ...refused, kind: 'retryable', httpStatus: 500 }, 'retry'],
-      [{ ...refused, kind: 'unknown' }, 'retry'],
-      [{ ...refused, kind: 'auth', httpStatus: 401, code: 190 }, 'needs_reconnect'],
+  it('still asks for a reconnect when Meta refuses the token on both reads', async () => {
+    const revoked: Failure = {
+      ok: false,
+      kind: 'auth',
+      httpStatus: 401,
+      code: 190,
+      title: 'OAuthException',
+      detail: 'Error validating access token: The session has been invalidated.',
+    };
+    const run = await healthStep([revoked, revoked]);
+    expect(run.outcome).toBe('needs_reconnect');
+    expect(run.reads).toEqual([undefined, { messagingLimit: false }]);
+    expect(run.updates).toEqual([
+      {
+        status: 'needs_reconnect',
+        onboardingError: 'Meta rejected the stored token. Reconnect WhatsApp.',
+      },
+    ]);
+    expect(run.audits).toEqual([]);
+  });
+
+  it('retries a failure that may pass without a second read, as before', async () => {
+    const cases: Failure[] = [
+      { ...refused, kind: 'retryable', httpStatus: 500 },
+      { ...refused, kind: 'retryable', httpStatus: 429, code: 4 },
+      { ...refused, kind: 'unknown', httpStatus: undefined, code: undefined },
     ];
-    for (const [failure, outcome] of cases) {
+    for (const failure of cases) {
       const run = await healthStep([failure]);
-      expect(run.outcome, JSON.stringify(failure)).toBe(outcome);
+      expect(run.outcome, JSON.stringify(failure)).toBe('retry');
       expect(run.reads, JSON.stringify(failure)).toEqual([undefined]);
-      expect(run.updates.some((u) => 'messagingLimit' in u || 'messagingLimitCheckedAt' in u)).toBe(
-        false,
-      );
+      expect(run.updates, JSON.stringify(failure)).toEqual([]);
+      expect(run.audits, JSON.stringify(failure)).toEqual([]);
     }
   });
 });

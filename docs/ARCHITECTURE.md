@@ -220,9 +220,12 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   from the last completed step. The health read also asks for the number's
   `whatsapp_business_manager_messaging_limit` (ADR-398), kept as Meta gives it in
   `channel_accounts.messaging_limit` with the time of the read (`messaging_limit_checked_at`); when
-  Graph refuses that read with code 100 (its SDK has the field on the WABA), the health is read
-  once more without it, so the field never fails a setup. Facebook's SDK is allowed by CSP (and
-  COOP relaxed to `same-origin-allow-popups`) on the channels settings page only.
+  Graph refuses that read as permanent or as lost access, whatever the code (its SDK has the field
+  on the WABA), the health is read once more without it, and only that read's failure is handled as
+  a failure, so a refusal of the field alone neither fails a setup nor asks for a reconnect; the
+  refusal is audited with Graph's answer. Retryable failures are retried as before. Facebook's SDK
+  is allowed by CSP (and COOP relaxed to `same-origin-allow-popups`) on the channels settings page
+  only.
 - **Live inbox:** `app.tenant_events` (xid8 + id cursor; readers only see transactions below the
   snapshot xmin, so no event is skipped), events record the conversation's assignee so streams only
   carry ids a member may see, `NOTIFY` wakes one `LISTEN` connection per web process, the SSE endpoint
@@ -239,9 +242,9 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   missing (ADR-138): a restoration is audited and emailed; one that fails is emailed once, shown on
   every page of the company and tried again after 30 minutes. `listChannels` gives each number its
   account's stored permissions through `grantedPermissionList` (ADR-381) and its messaging limit
-  worded by `messagingLimitText` (ADR-398: a tier by the unique customers it allows, research M-058,
-  `UNTIERED` as Meta reports it, an unlisted value as unknown, none as not reported, nothing for a
-  number never asked), which Settings → Channels shows.
+  worded by `messagingLimitText` (ADR-398: a tier by the unique customers research M-058 says it
+  allows, `TIER_50` and `UNTIERED` as Meta reports them, an unlisted value as unknown, none as not
+  reported, nothing for a number never asked), which Settings → Channels shows.
 - **Not built yet:** media download to private object storage, message search, Meta-side
   deregistration on disconnect (templates and template sends: section 6A).
 

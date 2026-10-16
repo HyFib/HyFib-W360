@@ -273,7 +273,7 @@ afterAll(async () => {
 beforeEach(() => {
   graphStandIn.state.sendQueue = [];
   graphStandIn.state.registerError = null;
-  graphStandIn.state.rejectMessagingLimit = false;
+  graphStandIn.state.messagingLimitError = null;
 });
 
 describe('webhook signatures', () => {
@@ -1256,6 +1256,7 @@ describe('Embedded Signup onboarding', () => {
     const worded: [string, string][] = [
       ['TIER_250', `Messaging limit: 250 ${SCOPE}`],
       ['TIER_UNLIMITED', 'Messaging limit: unlimited (shared by the business portfolio)'],
+      ['TIER_50', 'Messaging limit: TIER_50 (as Meta reports it)'],
       ['UNTIERED', 'Messaging limit: untiered (as Meta reports it)'],
     ];
     for (const [value, text] of worded) {
@@ -1294,8 +1295,20 @@ describe('Embedded Signup onboarding', () => {
   });
 
   it('reads the health again without the limit when Meta refuses the field, and fails as before otherwise (ADR-398)', async () => {
+    /** The `channel.activated` audit entries of a number, oldest first. */
+    const activations = async (c: { tenant: { id: string }; channelAccountId: string }) =>
+      (
+        await adminQuery<{ metadata: Record<string, unknown> }>(
+          `SELECT metadata FROM app.audit_events
+            WHERE tenant_id = $1 AND action = 'channel.activated' AND subject_id = $2
+            ORDER BY occurred_at, id`,
+          [c.tenant.id, c.channelAccountId],
+        )
+      ).map((a) => a.metadata);
+    const missing = `(#100) Tried accessing nonexisting field (whatsapp_business_manager_messaging_limit)`;
+
     const n = await connected();
-    graphStandIn.state.rejectMessagingLimit = true;
+    graphStandIn.state.messagingLimitError = { status: 400, code: 100, message: missing };
     expect(await n.setup()).toBe('active');
     // The read with the limit was refused with code 100; the same read without it was made once.
     expect(healthReads(n.phoneNumberId)).toEqual([WITH_LIMIT, FIELDS]);
@@ -1319,26 +1332,76 @@ describe('Embedded Signup onboarding', () => {
       read_together: true,
     });
     expect(await n.shown()).toBe('Messaging limit: not reported by Meta');
-    // The audit says why the limit is not reported.
-    const audits = await adminQuery<{ metadata: Record<string, unknown> }>(
-      `SELECT metadata FROM app.audit_events
-        WHERE tenant_id = $1 AND action = 'channel.activated' AND subject_id = $2`,
-      [n.tenant.id, n.channelAccountId],
-    );
-    expect(audits.map((a) => a.metadata)).toEqual([{ messagingLimit: 'refused' }]);
+    // The audit says why the limit is not reported, with what Graph answered.
+    const refusedWith100 = {
+      messagingLimit: 'refused',
+      kind: 'permanent',
+      httpStatus: 400,
+      code: 100,
+      subcode: null,
+      detail: missing,
+    };
+    expect(await activations(n)).toEqual([refusedWith100]);
 
     // Meta accepting the field again: one read, with the limit, and an audit without the note.
-    graphStandIn.state.rejectMessagingLimit = false;
+    graphStandIn.state.messagingLimitError = null;
     expect(await n.readAgain()).toBe('active');
     expect(healthReads(n.phoneNumberId)).toEqual([WITH_LIMIT, FIELDS, WITH_LIMIT]);
     expect(await n.shown()).toBe(`Messaging limit: 2,000 ${SCOPE}`);
-    const later = await adminQuery<{ metadata: Record<string, unknown> }>(
-      `SELECT metadata FROM app.audit_events
-        WHERE tenant_id = $1 AND action = 'channel.activated' AND subject_id = $2
-        ORDER BY occurred_at, id`,
-      [n.tenant.id, n.channelAccountId],
+    expect(await activations(n)).toEqual([refusedWith100, {}]);
+
+    // A refusal as a permission (403, code 200, as the description's own example for this read):
+    // read again without the field, the number set up without a limit.
+    const denied = await connected();
+    graphStandIn.state.messagingLimitError = {
+      status: 403,
+      code: 200,
+      subcode: 1349174,
+      message: "Your app doesn't have permission to access this WhatsApp Account Number",
+    };
+    expect(await denied.setup()).toBe('active');
+    expect(healthReads(denied.phoneNumberId)).toEqual([WITH_LIMIT, FIELDS]);
+    expect(await denied.shown()).toBe('Messaging limit: not reported by Meta');
+    expect(await activations(denied)).toEqual([
+      {
+        messagingLimit: 'refused',
+        kind: 'permanent',
+        httpStatus: 403,
+        code: 200,
+        subcode: 1349174,
+        detail: "Your app doesn't have permission to access this WhatsApp Account Number",
+      },
+    ]);
+
+    // A refusal HyFib reads as lost access (code 10): the read without the field succeeds, so the
+    // number is set up and neither it nor its account is marked for reconnecting.
+    const lost = await connected();
+    graphStandIn.state.messagingLimitError = {
+      status: 403,
+      code: 10,
+      message: '(#10) Application does not have permission for this action',
+    };
+    expect(await lost.setup()).toBe('active');
+    expect(healthReads(lost.phoneNumberId)).toEqual([WITH_LIMIT, FIELDS]);
+    const [states] = await adminQuery<{ number: string; account: string }>(
+      `SELECT c.status AS number, w.status AS account
+         FROM app.channel_accounts c
+         JOIN app.whatsapp_accounts w ON w.tenant_id = c.tenant_id AND w.id = c.whatsapp_account_id
+        WHERE c.id = $1`,
+      [lost.channelAccountId],
     );
-    expect(later.map((a) => a.metadata)).toEqual([{ messagingLimit: 'refused' }, {}]);
+    expect(states).toEqual({ number: 'active', account: 'connected' });
+    expect(await activations(lost)).toEqual([
+      {
+        messagingLimit: 'refused',
+        kind: 'auth',
+        httpStatus: 403,
+        code: 10,
+        subcode: null,
+        detail: '(#10) Application does not have permission for this action',
+      },
+    ]);
+    graphStandIn.state.messagingLimitError = null;
 
     // A number Graph no longer has (code 100 to both reads): the setup fails at the health check
     // with the second read's reason, after the two reads, and the limit read before stays.
@@ -1363,6 +1426,7 @@ describe('Embedded Signup onboarding', () => {
       onboarding_error: 'Setup failed at health_check: OAuthException: Unsupported get request.',
       messaging_limit: 'TIER_2K',
     });
+    expect(await activations(gone)).toEqual([{}]);
   });
 
   it('keeps the limit in two checked columns the runtime role writes and the platform role reads (ADR-398)', async () => {

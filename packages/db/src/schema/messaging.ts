@@ -92,7 +92,8 @@ export const channelAccounts = appSchema.table('channel_accounts', {
   updatedAt: tz('updated_at').notNull().defaultNow(),
   /**
    * The number's messaging limit as Meta gave it (`whatsapp_business_manager_messaging_limit`), and
-   * when a health read that asked for it succeeded: null for a number never asked (ADR-398,
+   * the time of the last health read that asked Meta for it and completed (with the limit, without
+   * one, or by a read without it after Meta refused it): null for a number never asked (ADR-398,
    * migration 0309).
    */
   messagingLimit: text('messaging_limit'),

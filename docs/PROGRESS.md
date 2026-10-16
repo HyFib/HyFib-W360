@@ -16,77 +16,99 @@ setup, but not its messaging limit (ADR-381: "their Graph fields are not read ye
   (`messaging/messaging-limit.ts`) keeps any text as given, clipped to 64 characters; absent,
   empty or not text is null. No new endpoint.
 - **Onboarding (`messaging/onboarding.ts`):** the health step stores the limit and the time of the
-  read (`messaging_limit_checked_at`, the health check's time). Meta's SDK has the field on the
-  WhatsApp Business Account and Graph refuses a field it does not have with code 100, which would
-  fail every number's setup: on a permanent code 100 failure the health is read once more without
-  the field (one request more, as the template sync falls back to default fields), the number is
-  set up without a limit and `channel.activated` records `messagingLimit: refused`. Other
-  failures, and the second read's, are handled as before.
+  read (`messaging_limit_checked_at`, the health check's time). The node that gives the field is
+  unconfirmed (Meta's SDK has it on the WhatsApp Business Account), and Graph may refuse a field
+  with code 100, 200, another code such as 3, or 10 (read as lost access): when the read that asked
+  for it fails as permanent or as lost access, whatever the code, the health is read once more
+  without the field (one request more, as the template sync falls back to default fields). Only
+  when that read succeeds is the number set up without a limit and `channel.activated` audited
+  with `messagingLimit: refused` and Graph's kind, HTTP status, code, subcode and message
+  (`messagingLimitRefusalMetadata`: clipped to 200 characters after any link or access token is
+  replaced). When it fails too, its failure is handled as before (a token Meta no longer accepts
+  still asks for a reconnect); retryable failures are retried as before.
 - **Migration 0309 (`0309_messaging_limit.sql`):** `channel_accounts.messaging_limit` (1 to 64
   characters) and `messaging_limit_checked_at` (a limit only with it), both checked and validated
-  at once; `UPDATE` for the runtime role and `SELECT` for the platform role, as the number's other
-  facts from Meta; nothing for the definer role. Exported with the number (`export-spec.ts`);
-  deleted with its row. Expand only.
+  at once; `UPDATE` for the runtime role and `SELECT` for the platform role (unused for now, as
+  0003 grants the number's other facts from Meta); nothing for the definer role. Exported with the
+  number (`export-spec.ts`); deleted with its row. Expand only.
 - **Channels:** under the quality rating, `messagingLimitText` words M-059's values by research
   M-058: "Messaging limit: 2,000 unique customers outside a customer service window in a moving 24
-  hours (shared by the business portfolio)" for `TIER_2K` (50, 250, 10,000 and 100,000 alike),
-  "Messaging limit: unlimited (shared by the business portfolio)", "Messaging limit: untiered (as
-  Meta reports it)" (no number: `UNTIERED` has no documented meaning), "Messaging limit: unknown
-  tier (…)" for any other text, "Messaging limit: not reported by Meta" when the answer had none,
-  and nothing for a number never asked (health last read before this release, or never). Below the
-  numbers, a note on what a limit counts and that Meta sets it per business portfolio since
+  hours (shared by the business portfolio)" for `TIER_2K` (250, 10,000 and 100,000 alike),
+  "Messaging limit: unlimited (shared by the business portfolio)", "Messaging limit: TIER_50 (as
+  Meta reports it)" and "Messaging limit: untiered (as Meta reports it)" (no number: research
+  explains neither), "Messaging limit: unknown tier (…)" for any other text, "Messaging limit: not
+  reported by Meta" when the answer had none, and nothing for a number never asked. A number
+  already active before this release is read only when its account is reconnected after losing
+  access or the number is connected again (Retry setup does not apply to active numbers). Below
+  the numbers, a note on what a limit counts and that Meta sets it per business portfolio since
   7 October 2025. `listChannels` gives the wording (`messagingLimit`), never the columns; the
   public API does not give it (its channel schema test also refuses `messagingLimit…`).
 - **Graph stand-in (tests only):** the field only when the read asks for it, `TIER_2K` by default,
-  any value a test sets (`messagingLimits`: an unlisted value, not text, or null for none), or the
-  code 100 refusal (`rejectMessagingLimit`).
-- **Tests:** unit (`messaging/messaging-limit.test.ts`, 10 tests: the listed values, parsing of
+  any value a test sets (`messagingLimits`: an unlisted value, not text, or null for none), or a
+  refusal with the Graph error a test gives (`messagingLimitError`: status, code, subcode,
+  message).
+- **Tests:** unit (`messaging/messaging-limit.test.ts`, 12 tests: the listed values, parsing of
   listed, unlisted, absent, empty, non-text and over-long values, each value's wording, prototype
   names never worded as a tier, the note, the read's fields with and without the limit and the
   deprecated field never read, the health step against a fake transaction and Graph: the limit
-  stored with the health time, the second read on a permanent code 100 only, its audit, the second
-  read's failure reported, every other failure read once, and the view worded only for numbers
+  stored with the health time and its audit compared exactly, the second read after refusals with
+  codes 100, 200, 3 and 10 and their exact audits, links and tokens replaced and the message
+  clipped, the second read's failure reported, a token refused on both reads still asking for a
+  reconnect, retryable and unknown failures read once, and the view worded only for numbers
   asked); integration (`messaging.test.ts`: 3 new, the limit stored and worded for the default,
   each listed kind, an unlisted, an over-long, an absent and a non-text answer with the fields
-  asked, Meta refusing the field and accepting it again, a number Graph no longer has failing at
-  the health check after two reads, and the columns' grants and checks; `company-data.test.ts`
-  checks the export's new columns as it checks every column); e2e (`whatsapp-access.spec.ts`: a
-  number with `TIER_250` shows its line and the note, a number never asked shows neither). Written
-  for CI; the integration and e2e tests were not run here.
+  asked, refusals with codes 100, 200 (the description's own example, with its subcode) and 10
+  (the number active, its account still connected) and their audits, Meta accepting the field
+  again, a number Graph no longer has failing at the health check after two reads, and the
+  columns' grants and checks; `company-data.test.ts` checks the export's new columns as it checks
+  every column); e2e (`whatsapp-access.spec.ts`: a number with `TIER_250` shows its line and the
+  note, a number never asked shows neither). Written for CI; the integration and e2e tests were
+  not run here.
 - **Docs:** ADR-398 (and a note in ADR-381); research M-199 (the spec has no
   `whatsapp_business_manager_messaging_limit`; the SDK has it on the WABA), its open question and
   "must not assume"; ARCHITECTURE, SECURITY, THREAT-MODEL T351, META-SETUP (before launch, request
-  the field on a real number and on its WABA and record which gives it; open question 6),
-  DEPLOYMENT (migration 0309, expand only), RUNBOOKS (each wording and the refusal), BACKLOG P2-10,
-  and the matrix's W-030 (implemented).
-- **Mutation checks:** 44 deliberate regressions (parsing: empty text kept, no clip, non-text
+  the field on a real number and on its WABA, record which gives it and Graph's code and subcode
+  if it refuses it; open question 6), DEPLOYMENT (migration 0309, expand only), RUNBOOKS (each
+  wording, the refusal's audit, when a number is read), BACKLOG P2-10, and the matrix's W-030
+  (implemented).
+- **Mutation checks:** 56 deliberate regressions (parsing: empty text kept, no clip, non-text
   stringified, a 63-character bound; the list: case-insensitive, the deprecated `TIER_1K` added,
   `TIER_10K` or `UNTIERED` dropped; the wording: none, unlisted and prototype names worded
-  otherwise, four wrong figures, unlimited given a number, `UNTIERED` given a figure or worded as
-  unknown, the portfolio or the service window left out, the note; the read: the limit not asked
-  by default, always asked, the deprecated field asked instead, both asked, the deprecated field
-  read, parsed when not asked, not parsed, never read, a sibling field dropped; the health step:
-  the second read for any kind with code 100, for any permanent failure, for any failure, never,
-  asking the limit again, the limit or its time not stored, its time only with a limit, the audit
-  missing or inverted, the first failure reported; the view: worded when never asked, nothing when
-  not reported, the stored columns leaking): 44 caught by the unit tests, each file restored
+  otherwise, three wrong figures, `TIER_50` given a figure or left to the figures, unlimited given
+  a number, `UNTIERED` given a figure or worded as unknown, the portfolio or the service window
+  left out, the note; the read: the limit not asked by default, always asked, the deprecated field
+  asked instead, both asked, the deprecated field read, parsed when not asked, not parsed, never
+  read, a sibling field dropped; the health step: the second read for code 100 only, for permanent
+  refusals only, for lost access only, for any failure, never, asking the limit again, the refusal
+  kept when the second read fails, the limit or its time not stored, its time only with a limit,
+  the audit missing, inverted, always written (the review's case) or without Graph's details, the
+  first failure reported; the audit's details: no code, subcode or status, links or tokens kept,
+  the message clipped at 500 or before replacing; the view: worded when never asked, nothing when
+  not reported, the stored columns leaking): 56 caught by the unit tests, each file restored
   exactly. The migration, the stand-in, the export spec and the page are exercised by the
   integration and e2e tests only, which run in CI.
 - **Rework (before merge):** the first commit read the deprecated `messaging_limit_tier` (listed in
   Meta's OpenAPI description) and showed its tier names as given. Research M-059 names
   `whatsapp_business_manager_messaging_limit` as its replacement from v24.0 and HyFib asks v26.0,
-  so the read now asks for the new field (the refusal fallback unchanged), the values are worded by
-  M-058, and 0309 (applied nowhere) names the column `messaging_limit`.
+  so the read now asks for the new field, the values are worded by M-058, and 0309 (applied
+  nowhere) names the column `messaging_limit`.
+- **Review fixes (no High finding):** the fallback covered only code 100, so a refusal with 200 or
+  3 would still have failed every setup and code 10 would have marked numbers for reconnecting in a
+  loop; it now covers any permanent or lost-access refusal, handling only the second read's
+  failure as one. `TIER_50` is no longer given a figure; the refusal's audit entry keeps Graph's
+  answer; the docs say precisely when a number active before this release is read; a unit test that
+  matched any audit metadata now compares it exactly; and `messaging_limit_checked_at` is described
+  as the time of the read that asked, whose completion may be the read without the field.
 - **Not built:** reading the limit from the WABA (the SDK's node) should the phone number not give
   it, a refresh of a number's facts outside its setup, the limit in the public API, webhooks and
   the operations console, and the `phone_number_quality_update` webhook's `current_limit`.
 
-### Test commands and results (local, 2026-10-16, after the rework)
+### Test commands and results (local, 2026-10-16, after the review fixes)
 
 | Command                                            | Result                                                          |
 | -------------------------------------------------- | --------------------------------------------------------------- |
 | `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
-| `pnpm test` (unit)                                 | 170 files, 1,820 tests passed                                   |
+| `pnpm test` (unit)                                 | 170 files, 1,822 tests passed                                   |
 | `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
 | Migration 0309 parsed with pglast 8.6              | 3 statements parsed (not applied to a database)                 |
 | `pnpm build`                                       | passed                                                          |

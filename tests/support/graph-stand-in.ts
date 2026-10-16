@@ -89,10 +89,11 @@ export interface StandInState {
    */
   messagingLimits: Map<string, unknown>;
   /**
-   * When true, a phone number read that asks for `whatsapp_business_manager_messaging_limit` fails
-   * with code 100, as Graph refuses a field it does not have.
+   * When set, a phone number read that asks for `whatsapp_business_manager_messaging_limit` fails
+   * with this Graph error, as Graph refuses a field it does not have (400, code 100) or one the
+   * app may not read (403, code 200, 3 or 10); a read without the field is answered as usual.
    */
-  rejectMessagingLimit: boolean;
+  messagingLimitError: { status: number; code: number; subcode?: number; message: string } | null;
   sendQueue: SendBehaviour[];
   registerError: { status: number; code: number; message: string } | null;
   requests: RecordedRequest[];
@@ -668,7 +669,7 @@ export async function startGraphStandIn(options: {
     wabaNumbers: new Map(),
     numbers: new Map(),
     messagingLimits: new Map(),
-    rejectMessagingLimit: false,
+    messagingLimitError: null,
     sendQueue: [],
     registerError: null,
     requests: [],
@@ -1313,18 +1314,21 @@ export async function startGraphStandIn(options: {
       if (req.method === 'GET' && first && !second) {
         const number = state.numbers.get(first);
         if (!number) return graphError(res, 400, 100, 'Unsupported get request.');
-        // The messaging limit only when the read asks for it (ADR-398), refused with code 100 when
-        // the test says Graph does not have the field on the number.
+        // The messaging limit only when the read asks for it (ADR-398), refused with the test's
+        // Graph error when it says Graph does not give the field on the number.
         const limitAsked = (url.searchParams.get('fields') ?? '')
           .split(',')
           .includes('whatsapp_business_manager_messaging_limit');
-        if (limitAsked && state.rejectMessagingLimit) {
-          return graphError(
-            res,
-            400,
-            100,
-            '(#100) Tried accessing nonexisting field (whatsapp_business_manager_messaging_limit)',
-          );
+        const refusal = state.messagingLimitError;
+        if (limitAsked && refusal) {
+          return json(res, refusal.status, {
+            error: {
+              message: refusal.message,
+              type: 'OAuthException',
+              code: refusal.code,
+              ...(refusal.subcode !== undefined ? { error_subcode: refusal.subcode } : {}),
+            },
+          });
         }
         const limit = state.messagingLimits.has(first)
           ? state.messagingLimits.get(first)

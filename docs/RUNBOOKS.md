@@ -160,24 +160,31 @@ sweep is not running: nobody is emailed about late queues until it does, so star
 
 ### Messaging limit on Channels (ADR-398)
 
-- `Messaging limit: 2,000 unique customers …` (or 50, 250, 10,000, 100,000, or `unlimited`): the
+- `Messaging limit: 2,000 unique customers …` (or 250, 10,000, 100,000, or `unlimited`): the
   `whatsapp_business_manager_messaging_limit` Meta gave at the number's last health read
   ("Checked …"), worded by research M-058. Since 7 October 2025 the limit belongs to the business
   portfolio and is shared by all its numbers; a company with several portfolios sees each one's on
   its numbers.
-- `Messaging limit: untiered (as Meta reports it)`: Meta gave `UNTIERED`, whose meaning research
-  does not give; HyFib shows no number for it.
+- `Messaging limit: TIER_50 (as Meta reports it)` or
+  `Messaging limit: untiered (as Meta reports it)`: Meta gave `TIER_50` or `UNTIERED`, which
+  research does not explain (M-058's levels start at 250); HyFib shows no number for them.
 - `Messaging limit: unknown tier (…)`: Meta gave a value its SDK does not list (for example the
   deprecated field's `TIER_1K`, or a newer tier). Nothing to fix; it is shown as given.
 - `Messaging limit: not reported by Meta`: the read asked for the limit and Meta's answer had none,
-  or Graph refused the field with code 100 and the health was read again without it; the
-  `channel.activated` audit entry of that read then has `messagingLimit: refused`. The number works
-  either way. Refusals for every number mean Graph does not give the field on the phone number on
-  the pinned version (Meta's SDK has it on the WABA, research M-059): setup keeps working without
-  it, and reading the WABA instead needs a decision of its own (not built, ADR-398).
-- No messaging limit line: the number's health was last read before ADR-398 (or never); it is read
-  when the number is connected again, its setup retried or its account reconnected. Do not reconnect
-  a number only for this: connecting again registers it again, which Meta counts.
+  or Graph refused that read (as permanent or as lost access, any code) and the health was read
+  again without the field; the `channel.activated` audit entry of that read then has
+  `messagingLimit: refused` with Graph's `kind`, `httpStatus`, `code`, `subcode` and `detail` (its
+  message, clipped to 200 characters, links and access tokens replaced). Code 100 with "nonexisting
+  field" says Graph does not have the field there; 10 and 200 to 299 are permission codes (research
+  M-063); for any other code, read Graph's message. The number works either way. Refusals for
+  every number mean Graph does not give the field on the phone number on the pinned version (Meta's
+  SDK has it on the WABA, research M-059): setup keeps working without it, and reading the WABA
+  instead needs a decision of its own (not built, ADR-398).
+- No messaging limit line: the number's health was last read before ADR-398 (or never). A number
+  in setup is read when its setup completes (Retry setup for a failed one). A number already active
+  is read only when its account is reconnected after Meta stopped accepting its access, or when the
+  number is connected again; Retry setup does not apply to it. Do not connect a number again only
+  for this: connecting again registers it again, which Meta counts.
 
 ## 8. Data restoration
 

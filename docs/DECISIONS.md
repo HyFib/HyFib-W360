@@ -16397,31 +16397,47 @@ Decision:
 - **What is kept (`messaging/messaging-limit.ts`):** `parseMessagingLimit` keeps any text Meta gives
   as it is, a value Meta's SDK does not list included, clipped to 64 characters (no listed value
   comes near); a field absent, empty or not text is null.
-- **Meta refusing the field:** Graph refuses a field it does not have with code 100 (as the
-  description's example for `GET /{Phone-Number-ID}` shows), which would fail the whole read and so
-  every number's setup at its health check. So when the read fails as permanent with code 100,
-  onboarding reads once more without the field (the read made before ADR-398), as the template sync
-  falls back to Meta's default fields; the number is set up without a limit, which Channels shows
-  as not reported, and the `channel.activated` audit entry records `messagingLimit: refused`. Any
-  other failure, and the second read's, is handled as before.
+- **Meta refusing the field:** the node is unconfirmed, and Graph may refuse a field in more than
+  one way: code 100 for a field it does not have (as the description's example for
+  `GET /{Phone-Number-ID}` shows), 200 for a permission (the description's 403 examples use it) or
+  another code such as 3, or 10, which HyFib reads as lost access (`AUTH_CODES`). Any of these
+  would fail the whole read, so every number's setup at its health check, and code 10 would also
+  mark the number and its account for reconnecting, whose reconnect would make the same read
+  again. So when the read that asked for the field fails as permanent or as lost access, whatever
+  the code, onboarding reads once more without the field (the read made before ADR-398), as the
+  template sync falls back to Meta's default fields. Only when that read succeeds is the number set
+  up without a limit, which Channels shows as not reported, and the `channel.activated` audit entry
+  records `messagingLimit: refused` with the first failure's kind, HTTP status, code, subcode and
+  Meta's message (clipped to 200 characters, any link or access token in it replaced:
+  `messagingLimitRefusalMetadata`). When the second read fails too, its failure is handled as
+  before, so a token Meta no longer accepts still asks for a reconnect. Retryable and unknown
+  failures are retried as before, without a second read.
 - **Where it is kept (migration 0309):** `channel_accounts.messaging_limit` (text of 1 to 64
   characters: bounded by length like `name_status` and `code_verification_status`, never by a list,
-  which Meta may extend) and `messaging_limit_checked_at`, when a read that asked for the limit
-  succeeded (a check allows a limit only with it). The runtime role may update both (column grants,
-  as for the number's other facts from Meta) and the platform role may read them, as it reads those
-  facts (0003); the definer role gets nothing. Exported with the number (`export-spec.ts`) and
+  which Meta may extend) and `messaging_limit_checked_at`, the time of the last health read that
+  asked Meta for the limit and completed, with the limit, without one, or by the read without it
+  after a refusal (a check allows a limit only with it). The runtime role may update both (column
+  grants, as for the number's other facts from Meta) and the platform role may read them, as it
+  reads those facts (0003); that grant is unused for now and kept for 0003's convention for the
+  sibling columns. The definer role gets nothing. Exported with the number (`export-spec.ts`) and
   deleted with it (whole rows, deletion step 790). Expand only: two nullable columns, nothing
   rewritten, both checks validated at once.
-- **When it is read:** whenever onboarding reads a number's health, with its other facts: when the
-  number is connected or connected again, when its setup is retried, and when its account is
-  reconnected (the account's other numbers have their health read again, ADR-137). A number's facts
-  have no periodic refresh, and none is added; the "Checked" time Channels shows is the limit's too.
+- **When it is read:** whenever onboarding reads a number's health, with its other facts: at the
+  end of a number's setup (when it is connected, connected again, or its failed setup retried),
+  and when its account is reconnected after Meta stopped accepting its access (the account's
+  numbers marked for reconnecting that Meta still lists have their health read again, ADR-137).
+  Retry setup does not apply to an active number, so a number already active before this release
+  shows nothing until its account is reconnected after losing access or the number is connected
+  again (which registers it again, which Meta counts; RUNBOOKS advises against doing it only for
+  this). A number's facts have no periodic refresh, and none is added (no one-off read either);
+  the "Checked" time Channels shows is the limit's too.
 - **On Channels (`messagingLimitText`), under the quality rating:** the values M-059 lists, worded
-  by M-058: `TIER_50`, `TIER_250`, `TIER_2K`, `TIER_10K` and `TIER_100K` as "Messaging limit: 2,000
-  unique customers outside a customer service window in a moving 24 hours (shared by the business
-  portfolio)" with 50, 250, 2,000, 10,000 or 100,000; `TIER_UNLIMITED` as "Messaging limit:
-  unlimited (shared by the business portfolio)"; `UNTIERED`, whose meaning research does not give,
-  as "Messaging limit: untiered (as Meta reports it)", without a number. Any other text (the
+  by M-058: `TIER_250`, `TIER_2K`, `TIER_10K` and `TIER_100K` as "Messaging limit: 2,000 unique
+  customers outside a customer service window in a moving 24 hours (shared by the business
+  portfolio)" with 250, 2,000, 10,000 or 100,000; `TIER_UNLIMITED` as "Messaging limit: unlimited
+  (shared by the business portfolio)"; `TIER_50` and `UNTIERED`, which research does not explain
+  (M-058's levels start at 250), as "Messaging limit: TIER_50 (as Meta reports it)" and "Messaging
+  limit: untiered (as Meta reports it)", without a number. Any other text (the
   deprecated field's `TIER_1K` among them) is "Messaging limit: unknown tier (TIER_1K)", and a read
   that asked but got none is "Messaging limit: not reported by Meta". A number never asked (its
   health last read before ADR-398, or never) shows nothing: its limit is not known to be absent.
@@ -16432,7 +16448,8 @@ Decision:
   as they see the quality rating; the public API does not give it.
 - **The Graph stand-in (tests only)** answers the field only to a read that asks for it: `TIER_2K`
   unless a test gives a number another value (one the SDK does not list, a value that is not text)
-  or none, or makes Graph refuse the field with code 100.
+  or none, or makes Graph refuse the field with the error it gives (code 100, 200 with its subcode,
+  or 10).
 
 Uncertainties:
 
@@ -16443,16 +16460,17 @@ Uncertainties:
   none of the SDK sources checked has a spec of the phone number node (research M-199). HyFib asks
   the phone number: the documentation says so for this purpose, it is the read HyFib already makes
   (no new endpoint or request), and a portfolio's limit, shared by its numbers (M-058), would be the
-  same on each. If Graph does not have the field there, it refuses the read with code 100 and setup
-  carries on without it, as above (numbers show "not reported by Meta" and the audit says
-  `refused`). Reading the account instead is not built. To check with a real number before launch
-  (META-SETUP).
+  same on each. How Graph refuses the field there, if it does, is not documented (code 100, 200,
+  another code such as 3, or 10): any refusal as permanent or lost access is followed by
+  the read without it, as above (numbers show "not reported by Meta" and the audit keeps Graph's
+  answer). Reading the account instead is not built. To check with a real number before launch,
+  recording Graph's code and subcode if it refuses the field (META-SETUP).
 - **Whether the snippet's field name is exact.** M-059's name and values come from Meta's SDK
   (fetched directly); the docs page itself was seen only through a search snippet.
-- **What the values mean.** M-058 gives the levels 250, 2,000, 10,000, 100,000 and unlimited; the
-  SDK's `TIER_50` is shown as 50 by its name, and `UNTIERED` has no documented meaning. Whether the
-  phone number's answer is the portfolio's limit or one of its own is not documented beyond M-059;
-  the wording says the limit is shared by the business portfolio, as M-058 says.
+- **What the values mean.** M-058 gives the levels 250, 2,000, 10,000, 100,000 and unlimited;
+  research explains neither the SDK's `TIER_50` (shown without a figure) nor `UNTIERED`. Whether
+  the phone number's answer is the portfolio's limit or one of its own is not documented beyond
+  M-059; the wording says the limit is shared by the business portfolio, as M-058 says.
 
 Not built: reading the limit from the WhatsApp Business Account (the SDK's node), and asking both
 nodes; a periodic or on-demand refresh of a number's facts (quality rating, name status, limit);
@@ -16467,3 +16485,16 @@ replacement from v24.0 and HyFib asks v26.0, the deprecated field would most lik
 out or refused for every number, so the read now asks for the new field, keeps the refusal fallback
 unchanged, and words the values by M-058. Migration 0309 was changed before it was applied
 anywhere (`messaging_limit` instead of `messaging_limit_tier`).
+
+Review (before merge): an independent review found no High issue. It found that the fallback
+covered only code 100, while a refusal with 200 or 3 (both permanent) would still have
+failed every setup and code 10 (read as lost access) would have marked the number and its account
+for reconnecting, in a loop with the reconnect's own read: any permanent or lost-access refusal is
+now followed by the read without the field, and only that read's failure is handled as one. It
+found that `TIER_50` was given a figure research does not give (now shown as Meta reports it), that
+the refusal's audit entry kept nothing of Graph's answer (it now keeps the kind, status, code,
+subcode and the clipped message), that the docs said a number active before this release is read
+when its setup is retried (Retry setup does not apply to active numbers), that a unit test matched
+any audit metadata (now compared exactly), and that `messaging_limit_checked_at` was described as
+the time of a read that asked and succeeded, which a refusal's second read does not do. All were
+fixed.
