@@ -244,6 +244,15 @@ Phase 3 rules on top of the matrix (enforced in domain services and re-checked w
   `ops.overdue_reply_turns` is replaced with the same restrictions (SECURITY DEFINER, pinned search
   path, ids only, executable by the app role only) and reads only the team's target column besides
   what it read before.
+- Business hours per team (ADR-389): a team's own weekly schedule is a team setting, set only by
+  members with `inbox.supervise` (keys with `teams.manage`) and audited with the team's change; it
+  changes due times, overdue counts and emails, report figures and when the automatic reply is
+  sent, never who sees a conversation. `app.team_business_hours` has FORCE row security, a
+  composite foreign key to the company's team and column-free grants (the app role selects,
+  inserts and deletes; it never updates); w360_definer may only read the key columns and delete the
+  rows of a company being deleted. The trigger that plans waiting rows again when a conversation
+  changes team runs as the caller (pinned search path, not executable by PUBLIC). No permission is
+  new.
 - Automatic reply when members are slow (ADR-384): reading the setting needs `tenant.read`,
   changing it `tenant.settings.manage` (audited, `inbox.slow_reply_updated`); no new permission.
   The worker finds turns only through `ops.slow_reply_turns` (SECURITY DEFINER, pinned search path,

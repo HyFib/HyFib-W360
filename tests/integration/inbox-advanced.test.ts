@@ -6,6 +6,7 @@ import { authorizedTenantScope, sql } from '@w360/db';
 import {
   MENTION_EMAIL_DELAY_MS,
   MENTION_EMAIL_LATE_LIMIT_MS,
+  createBusinessHoursService,
   createEmailPreferencesService,
   createInboxService,
   createSavedRepliesService,
@@ -181,6 +182,189 @@ describe('teams', () => {
     );
     expect(channel?.default_team_id).toBeNull();
     await expectAppError(teams.deleteTeam(owner, teamId), 'not_found');
+  });
+});
+
+describe('business hours per team (ADR-389)', () => {
+  const week = ['09:00-13:00, 14:00-18:00', '', '', '', '', '10:00-14:00', ''];
+
+  it('are set with the team by supervisors, checked, audited, and go with the team', async () => {
+    const { c, owner, agents } = await setup(0);
+    const teams = teamsService();
+    await expectAppError(
+      teams.createTeam(agents[0]!.ctx, { name: 'Night', businessHours: week }),
+      'forbidden',
+    );
+    await expectAppError(
+      teams.createTeam(owner, { name: 'Night', businessHours: ['', '', '', '', '', '', ''] }),
+      'validation_failed',
+      /at least one opening time/,
+    );
+    try {
+      await teams.createTeam(owner, {
+        name: 'Night',
+        businessHours: ['', '', '18:00-09:00', '', '', '', ''],
+      });
+      throw new Error('expected a refusal');
+    } catch (error) {
+      expect(isAppError(error) && error.issues?.map((i) => i.path)).toEqual(['businessHours.2']);
+    }
+    const { teamId } = await teams.createTeam(owner, { name: 'Night', businessHours: week });
+    const listed = async () => (await teams.listTeams(agents[0]!.ctx)).find((t) => t.id === teamId);
+    expect((await listed())?.businessHours).toEqual([
+      { weekday: 1, opens: 540, closes: 780 },
+      { weekday: 1, opens: 840, closes: 1080 },
+      { weekday: 6, opens: 600, closes: 840 },
+    ]);
+    // A team without its own uses the company's.
+    const { teamId: salesId } = await teams.createTeam(owner, { name: 'Sales' });
+    expect((await teams.listTeams(owner)).find((t) => t.id === salesId)?.businessHours).toBeNull();
+
+    const base = { name: 'Night' };
+    await teams.updateTeam(owner, teamId, { ...base, businessHours: week });
+    await teams.updateTeam(owner, teamId, {
+      ...base,
+      businessHours: ['', '', '', '', '', '', '00:00-24:00'],
+    });
+    expect((await listed())?.businessHours).toEqual([{ weekday: 7, opens: 0, closes: 1440 }]);
+    await teams.updateTeam(owner, teamId, { ...base, businessHours: null });
+    expect((await listed())?.businessHours).toBeNull();
+    const rows = () =>
+      fx.query<{ team_id: string }>(
+        `SELECT team_id FROM app.team_business_hours WHERE tenant_id = $1`,
+        [c.tenant.id],
+      );
+    expect(await rows()).toEqual([]);
+
+    const audit = await fx.query<{ action: string; metadata: Record<string, unknown> }>(
+      `SELECT action, metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND subject_id = $2 ORDER BY occurred_at, id`,
+      [c.tenant.id, teamId],
+    );
+    expect(
+      audit.map((a) => [
+        a.action,
+        a.metadata.ownBusinessHours,
+        a.metadata.businessHoursRanges,
+        a.metadata.businessHoursChanged,
+      ]),
+    ).toEqual([
+      ['team.created', true, 3, undefined],
+      ['team.updated', true, 3, false],
+      ['team.updated', true, 1, true],
+      ['team.updated', false, 0, true],
+    ]);
+
+    // Deleting the team deletes its hours.
+    await teams.updateTeam(owner, teamId, { ...base, businessHours: week });
+    expect(await rows()).toHaveLength(3);
+    await teams.deleteTeam(owner, teamId);
+    expect(await rows()).toEqual([]);
+  });
+
+  it('are kept apart per company, with least-privilege grants and team keys of the company', async () => {
+    const { c, owner } = await setup(0);
+    const other = await fx.company();
+    const { teamId } = await teamsService().createTeam(owner, {
+      name: 'Night',
+      businessHours: week,
+    });
+    const [table] = await fx.query<{ rls: boolean; forced: boolean }>(
+      `SELECT relrowsecurity AS rls, relforcerowsecurity AS forced FROM pg_class
+        WHERE oid = 'app.team_business_hours'::regclass`,
+    );
+    expect(table).toEqual({ rls: true, forced: true });
+    const [grants] = await fx.query<Record<string, boolean>>(
+      `SELECT has_table_privilege('w360_app', 'app.team_business_hours', 'SELECT') AS app_select,
+              has_table_privilege('w360_app', 'app.team_business_hours', 'INSERT') AS app_insert,
+              has_table_privilege('w360_app', 'app.team_business_hours', 'DELETE') AS app_delete,
+              has_table_privilege('w360_app', 'app.team_business_hours', 'UPDATE') AS app_update,
+              has_table_privilege('public', 'app.team_business_hours', 'SELECT') AS public_select,
+              has_table_privilege('w360_definer', 'app.team_business_hours', 'INSERT') AS definer_insert`,
+    );
+    expect(grants).toEqual({
+      app_select: true,
+      app_insert: true,
+      app_delete: true,
+      app_update: false,
+      public_select: false,
+      definer_insert: false,
+    });
+    const [trigger] = await fx.query<{ public: boolean }>(
+      `SELECT has_function_privilege('public', 'app.replan_waiting_turn_on_team_change()', 'EXECUTE') AS public`,
+    );
+    expect(trigger).toEqual({ public: false });
+    // Another company sees none of them, and cannot give its rows this company's team.
+    const seen = await fx.dbs.app.run(authorizedTenantScope(other.tenant.id, null), (tx) =>
+      tx.execute(sql`SELECT id FROM app.team_business_hours`),
+    );
+    expect(seen.rows).toEqual([]);
+    await expect(
+      fx.query(
+        `INSERT INTO app.team_business_hours (id, tenant_id, team_id, weekday, opens_at, closes_at)
+         VALUES (gen_random_uuid(), $1, $2, 1, '09:00', '17:00')`,
+        [other.tenant.id, teamId],
+      ),
+    ).rejects.toThrow(/team_business_hours_team_fk/);
+    await expect(
+      fx.query(
+        `INSERT INTO app.team_business_hours (id, tenant_id, team_id, weekday, opens_at, closes_at)
+         VALUES (gen_random_uuid(), $1, $2, 1, '17:00', '09:00')`,
+        [c.tenant.id, teamId],
+      ),
+    ).rejects.toThrow(/team_business_hours_order/);
+  });
+
+  it('give the inbox’s timers the team’s hours while business hours are on, and the company’s otherwise', async () => {
+    const { c, owner } = await setup(0);
+    const inbox = inboxService();
+    await inbox.updateResponseTarget(owner, { minutes: 30 });
+    const hours = createBusinessHoursService({ db: fx.dbs.app, clock: systemClock });
+    await hours.updateBusinessHours(owner, { enabled: true, days: Array(7).fill('00:00-24:00') });
+    const [{ timezone }] = (await fx.query<{ timezone: string }>(
+      'SELECT timezone FROM app.tenants WHERE id = $1',
+      [c.tenant.id],
+    )) as [{ timezone: string }];
+    const localDay = (d: Date) =>
+      new Intl.DateTimeFormat('en-CA', {
+        timeZone: timezone,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+      }).format(d);
+    const conv = await inbound(c, waId());
+    const [turn] = await fx.query<{ started_at: Date }>(
+      `SELECT started_at FROM app.conversation_turns WHERE conversation_id = $1 AND ended_at IS NULL`,
+      [conv.id],
+    );
+    // The team opens only the day after tomorrow (the company's dates).
+    const [y, m, d] = localDay(turn!.started_at).split('-').map(Number) as [number, number, number];
+    const inTwoDays = new Date(Date.UTC(y, m - 1, d + 2));
+    const weekdayIndex = (inTwoDays.getUTCDay() + 6) % 7;
+    const teamWeek = Array.from({ length: 7 }, (_, i) => (i === weekdayIndex ? '00:00-24:00' : ''));
+    const { teamId } = await teamsService().createTeam(owner, {
+      name: 'Later',
+      businessHours: teamWeek,
+    });
+    const due = async () =>
+      (await inbox.listConversations(owner, {})).items.find((i) => i.id === conv.id)?.replyDueAt;
+    const companyDue = new Date(turn!.started_at.getTime() + 30 * 60_000).toISOString();
+    expect(await due()).toBe(companyDue);
+    await inbox.setTeam(owner, {
+      conversationId: conv.id,
+      teamId,
+      expectedVersion: (await conversation(conv.id)).version,
+    });
+    const teamDue = await due();
+    expect(teamDue && localDay(new Date(teamDue))).toBe(inTwoDays.toISOString().slice(0, 10));
+    expect((await inbox.getConversation(owner, conv.id)).conversation.replyDueAt).toBe(teamDue);
+    expect(await inbox.waitingReplies(owner)).toEqual({
+      waits: [{ dueAt: teamDue, mine: false }],
+      capped: false,
+    });
+    // Business hours off: absolute time for every conversation, the team's hours unused.
+    await hours.updateBusinessHours(owner, { enabled: false, days: Array(7).fill('00:00-24:00') });
+    expect(await due()).toBe(companyDue);
   });
 });
 

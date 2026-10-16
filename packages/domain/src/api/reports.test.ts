@@ -129,6 +129,7 @@ const report: Report = {
   inbox: {
     targetMinutes: 15,
     teamTargets: [{ teamId: TEAM, name: 'Returns', minutes: 30 }],
+    teamBusinessHours: [{ teamId: TEAM, name: 'Returns' }],
     businessHours: false,
     now: {
       open: 4,
@@ -397,6 +398,8 @@ describe('reports through the API (ADR-297)', () => {
     ]);
     // Teams with their own target, by id, name and minutes (ADR-377).
     expect(api.inbox.teamTargets).toEqual([{ teamId: TEAM, name: 'Returns', targetMinutes: 30 }]);
+    // Teams with their own business hours, by id and name (ADR-389).
+    expect(api.inbox.teamBusinessHours).toEqual([{ teamId: TEAM, name: 'Returns' }]);
     expect(api.inbox.turns).toEqual(report.inbox.turns);
     expect(api.inbox.days).toEqual(report.inbox.days);
     expect(api.csat).toEqual(report.csat);

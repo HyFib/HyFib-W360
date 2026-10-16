@@ -1107,6 +1107,13 @@ export const apiTeamSettingsSchema = z.object({
     .describe(
       'The team’s own first-response target in minutes: customers waiting in its conversations are due a reply within it instead of the company’s target; null uses the company’s.',
     ),
+  businessHours: z
+    .array(z.array(apiTimeRangeSchema))
+    .length(7)
+    .nullable()
+    .describe(
+      'The team’s own weekly schedule: seven days, Monday first, each with its opening ranges in order in the company’s time zone (none: closed all day). While the company’s business hours are on, the team’s conversations count reply targets and the automatic reply’s delay in these hours instead of the company’s, with the company’s closed days; null uses the company’s business hours.',
+    ),
   memberIds: z
     .array(z.uuid())
     .describe(
@@ -3216,7 +3223,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         post: {
           operationId: 'createTeam',
           summary: 'Add a team',
-          description: `${scopeNote('teams.manage')} As members who supervise the inbox add one in Settings → Teams: a name unique among the company’s teams ignoring case (409 otherwise), how it gives out conversations, its routing keywords, members (active members whose role answers conversations; 422 naming \`memberIds\` otherwise) and numbers (the company’s; a number named here leaves the team it was in). A plan may limit how many teams a company has (412 at the limit: delete one first). Waiting conversations are routed again, so some may go to the new team at once. The audit log names the key. With an \`Idempotency-Key\`, a retry answers the first response.`,
+          description: `${scopeNote('teams.manage')} As members who supervise the inbox add one in Settings → Teams: a name unique among the company’s teams ignoring case (409 otherwise), how it gives out conversations, its routing keywords, its own reply target and business hours (each day checked as PUT /business-hours checks it; 422 naming \`businessHours.<n>\` otherwise), members (active members whose role answers conversations; 422 naming \`memberIds\` otherwise) and numbers (the company’s; a number named here leaves the team it was in). A plan may limit how many teams a company has (412 at the limit: delete one first). Waiting conversations are routed again, so some may go to the new team at once. The audit log names the key. With an \`Idempotency-Key\`, a retry answers the first response.`,
           parameters: [{ $ref: '#/components/parameters/IdempotencyKeyOptional' }],
           requestBody: { required: true, content: json(ref('CreateTeam')) },
           responses: {
@@ -3242,7 +3249,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         patch: {
           operationId: 'updateTeam',
           summary: 'Change a team',
-          description: `${scopeNote('teams.manage')} As members save a team in Settings → Teams: the settings given change and the rest stay as they are; \`memberIds\` and \`channelIds\` replace the team’s lists, though members who cannot answer conversations now (suspended, or given another role) are never in \`memberIds\` and keep their place in the team. The same checks as when adding one apply (409 for a name in use, 422 naming \`memberIds\` or \`channelIds\`). Waiting conversations are routed again. A change that leaves the team as it is answers it as it is, with no audit entry, so a retry needs no \`Idempotency-Key\`; otherwise the audit log names the key.`,
+          description: `${scopeNote('teams.manage')} As members save a team in Settings → Teams: the settings given change and the rest stay as they are; \`memberIds\` and \`channelIds\` replace the team’s lists, though members who cannot answer conversations now (suspended, or given another role) are never in \`memberIds\` and keep their place in the team. The same checks as when adding one apply (409 for a name in use, 422 naming \`memberIds\`, \`channelIds\` or \`businessHours\`). \`businessHours\` replaces the team’s week, and null gives it the company’s business hours again; automatic replies waiting for a due time are planned again by the new hours. Waiting conversations are routed again. A change that leaves the team as it is answers it as it is, with no audit entry, so a retry needs no \`Idempotency-Key\`; otherwise the audit log names the key.`,
           parameters: [{ $ref: '#/components/parameters/Id' }],
           requestBody: { required: true, content: json(ref('UpdateTeam')) },
           responses: {

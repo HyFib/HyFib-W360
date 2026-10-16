@@ -1554,6 +1554,10 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
     columns: ['id', 'phone_e164', 'reason', 'note', 'created_by_user_id', 'created_at'],
   },
   {
+    table: 'app.team_business_hours',
+    columns: ['id', 'team_id', 'weekday', 'opens_at', 'closes_at'],
+  },
+  {
     table: 'app.team_members',
     columns: ['id', 'team_id', 'membership_id', 'created_at'],
   },

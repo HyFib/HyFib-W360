@@ -69,10 +69,20 @@ test('teams route conversations, saved replies fill the composer and CSAT answer
   await form.getByLabel(/\+91/).check();
   // Its own reply target, used for its conversations instead of the company's (ADR-377).
   await form.getByLabel('Reply target in minutes (optional)').fill('15');
+  // Its own business hours (ADR-389): open all week like the company's, so the timers below run
+  // whenever this test runs.
+  await expect(form.getByText(/apply only while business hours are on/)).toBeVisible();
+  await form.getByLabel('Its own weekly schedule').check();
+  for (const day of ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'])
+    await form.getByLabel(day, { exact: true }).fill('00:00-24:00');
   await form.getByRole('button', { name: 'Create team' }).click();
   await expect(page.getByText('Team created.')).toBeVisible();
   await expect(page.getByRole('heading', { name: /Support/ })).toBeVisible();
-  await expect(page.getByText(/reply target 15 min/)).toBeVisible();
+  await expect(page.getByText(/reply target 15 min · its own business hours/)).toBeVisible();
+  const teamHours = page.getByRole('list', { name: 'Support business hours' });
+  await expect(teamHours).toContainText('Monday: 00:00–24:00');
+  await expect(teamHours).toContainText('Sunday: 00:00–24:00');
+  await expect(page.getByText(/With the company’s closed days/)).toBeVisible();
   await expectNoHorizontalOverflow(page);
 
   // Settings → Saved replies.

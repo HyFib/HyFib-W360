@@ -13,6 +13,7 @@ import {
   loadBusinessCalendar,
   openPeriods,
   parseTime,
+  sameIntervals,
   scheduleIntervals,
   writeAddClosedDay,
   writeBusinessHours,
@@ -162,16 +163,8 @@ export function apiScheduleIntervals(
   return scheduleIntervals(data.enabled, days);
 }
 
-/** Whether two weeks hold the same intervals, whatever their order. */
-export function sameIntervals(
-  a: readonly BusinessInterval[],
-  b: readonly BusinessInterval[],
-): boolean {
-  const key = (iv: BusinessInterval) => `${iv.weekday}:${iv.opens}:${iv.closes}`;
-  const left = a.map(key).sort();
-  const right = b.map(key).sort();
-  return left.length === right.length && left.every((k, i) => k === right[i]);
-}
+/** Whether two weeks hold the same intervals (shared with team schedules, ADR-389). */
+export { sameIntervals } from '../inbox/business-hours';
 
 /**
  * Whether the company is open at `now`, and when it next opens or this opening ends. Hours that are

@@ -22,6 +22,7 @@ import {
   createPlatformService,
   createRefundRequestsService,
   createStoreService,
+  createTeamsService,
   findDueTenantDeletions,
   notifyStaffDeletions,
   outboxAad,
@@ -632,6 +633,11 @@ describe('what an export contains', () => {
   it('streams the whole company as JSON Lines, from one moment, without secrets or other companies', async () => {
     const { c, owner, customer, apiKey } = await busyCompany();
     const admin = await member(c, 'admin', 'Admin Person');
+    // A team with its own business hours (ADR-389): exported with the team.
+    const { teamId } = await createTeamsService({ db: fx.dbs.app, clock: systemClock }).createTeam(
+      owner,
+      { name: 'Night', businessHours: ['', '', '', '', '', '', '18:00-24:00'] },
+    );
     const other = await busyCompany();
     const text = await exportText(owner);
     expect(text.endsWith('\n')).toBe(true);
@@ -672,6 +678,14 @@ describe('what an export contains', () => {
     expect(of('app.messages').length).toBeGreaterThanOrEqual(3);
     expect(of('app.api_keys')).toHaveLength(1);
     expect(of('app.chat_links')).toHaveLength(1);
+    expect(of('app.team_business_hours')).toEqual([
+      expect.objectContaining({
+        team_id: teamId,
+        weekday: 7,
+        opens_at: '18:00:00',
+        closes_at: '24:00:00',
+      }),
+    ]);
     expect(of('app.whatsapp_accounts')[0]).toMatchObject({ waba_id: c.wabaId });
     expect(of('app.rate_change_notices')).toEqual([
       expect.objectContaining({ rate_card_id: noticedCard, currency: 'NOK' }),

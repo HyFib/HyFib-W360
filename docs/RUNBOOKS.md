@@ -489,6 +489,11 @@ available. The audit log records each decision as `conversation.routed` (rule `k
 **A reply timer or "overdue" looks wrong.** Timers use the company time zone (Settings → General)
 and, when business hours are on, only the opening hours and closed days in Settings → Inbox. A timer
 shown as paused resumes at the next opening. Reports apply the current calendar to past periods.
+A conversation of a team with its own business hours (Settings → Teams, ADR-389) counts that
+team's week instead, with the company's closed days, and only while the company's business hours
+are on; check which team the conversation is in now (`app.team_business_hours` holds each team's
+week). After a team's week or a conversation's team changes, waiting automatic replies and overdue
+notices are planned again by the next minute sweep.
 
 **CSAT surveys are not sent.** Each resolve records a survey with a reason when nothing was sent
 (Reports → CSAT lists the reasons): the 24-hour window had closed, the customer opted out or the

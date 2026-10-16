@@ -15,9 +15,11 @@ import {
   apiDeleteTeam,
   apiGetTeam,
   apiUpdateTeam,
+  apiDaysToTexts,
   apiUpdateTeamSchema,
   sameTeamSettings,
   teamSettingsOf,
+  toApiTeamHours,
   toApiTeamSettings,
 } from './teams';
 
@@ -72,6 +74,7 @@ const settings = {
   maxOpenPerMember: 5,
   routingKeywords: ['refund', 'order status'],
   firstResponseTargetMinutes: 20,
+  businessHours: null,
   memberIds: [AGENT, SUPERVISOR],
   channelIds: [NUMBER],
 };
@@ -117,6 +120,7 @@ describe('managing teams through the API (ADR-287)', () => {
       maxOpenPerMember: null,
       routingKeywords: ['refund', 'order status'],
       firstResponseTargetMinutes: null,
+      businessHours: null,
       memberIds: [AGENT],
       channelIds: [],
     });
@@ -205,6 +209,7 @@ describe('managing teams through the API (ADR-287)', () => {
       { maxOpenPerMember: null },
       { firstResponseTargetMinutes: null },
       { firstResponseTargetMinutes: 21 },
+      { businessHours: [{ weekday: 1, opens: 540, closes: 1020 }] },
       { routingKeywords: ['order status', 'refund'] },
       { routingKeywords: ['refund'] },
       { routingKeywords: ['refund', 'order status', 'returns'] },
@@ -347,6 +352,7 @@ describe('managing teams through the API (ADR-287)', () => {
       'maxOpenPerMember',
       'routingKeywords',
       'firstResponseTargetMinutes',
+      'businessHours',
       'memberIds',
       'channelIds',
       'createdAt',
@@ -381,5 +387,137 @@ describe('managing teams through the API (ADR-287)', () => {
     expect(doc.paths['/teams/{id}']?.patch?.description).toContain(
       'members who cannot answer conversations now (suspended, or given another role) are never in `memberIds` and keep their place in the team',
     );
+  });
+});
+
+describe('a team’s own business hours through the API (ADR-389)', () => {
+  const week = [
+    [
+      { opens: '09:00', closes: '13:00' },
+      { opens: '14:00', closes: '18:00' },
+    ],
+    [],
+    [],
+    [],
+    [{ opens: '22:00', closes: '24:00' }],
+    [],
+    [],
+  ];
+
+  it('takes a week of ranges, checked day by day as Settings checks it, and gives it back', () => {
+    const parsed = teamSettingsOf(
+      apiCreateTeamSchema.parse({ name: 'Night', businessHours: week }),
+    );
+    expect(parsed.businessHours).toEqual([
+      { weekday: 1, opens: 540, closes: 780 },
+      { weekday: 1, opens: 840, closes: 1080 },
+      { weekday: 5, opens: 1320, closes: 1440 },
+    ]);
+    expect(toApiTeamHours(parsed.businessHours)).toEqual(week);
+    expect(toApiTeamHours(null)).toBeNull();
+    expect(apiDaysToTexts(week)).toEqual([
+      '09:00-13:00, 14:00-18:00',
+      '',
+      '',
+      '',
+      '22:00-24:00',
+      '',
+      '',
+    ]);
+    expect(
+      teamSettingsOf(apiCreateTeamSchema.parse({ name: 'Night', businessHours: null }))
+        .businessHours,
+    ).toBeNull();
+    const given = toApiTeamSettings({
+      id: TEAM,
+      ...settings,
+      businessHours: parsed.businessHours,
+      createdAt: new Date('2026-10-01T09:00:00Z'),
+      updatedAt: new Date('2026-10-07T10:00:00Z'),
+    });
+    expect(given.businessHours).toEqual(week);
+    expect(apiTeamSettingsSchema.safeParse(given).success).toBe(true);
+  });
+
+  it('refuses a week Settings would refuse, naming the day', () => {
+    const day = (ranges: { opens: string; closes: string }[], index = 2) =>
+      week.map((d, i) => (i === index ? ranges : d));
+    for (const [businessHours, path] of [
+      [week.slice(0, 6), 'businessHours'],
+      [day([{ opens: '9:00am', closes: '17:00' }]), 'businessHours.2.0.opens'],
+      [day([{ opens: '09:00', closes: '24:01' }]), 'businessHours.2.0.closes'],
+      [
+        day(Array.from({ length: 5 }, () => ({ opens: '09:00', closes: '10:00' }))),
+        'businessHours.2',
+      ],
+      [day([{ opens: '09:00', closes: '10:00', extra: '1' } as never]), 'businessHours.2.0'],
+    ] as const) {
+      const result = apiCreateTeamSchema.safeParse({ name: 'Night', businessHours });
+      expect(result.success, JSON.stringify(businessHours)).toBe(false);
+      expect(result.error?.issues.map((i) => i.path.join('.'))).toContain(path);
+    }
+    // Ranges that end before they start, overlap or close the whole week are refused by the
+    // checks Settings uses, naming the day.
+    const settingsChecks = (businessHours: unknown) => {
+      try {
+        teamSettingsOf(apiCreateTeamSchema.parse({ name: 'Night', businessHours }));
+      } catch (error) {
+        if (!isAppError(error)) throw error;
+        return [error.publicMessage, (error.issues ?? []).map((i) => i.path)];
+      }
+      throw new Error('expected a refusal');
+    };
+    expect(settingsChecks(day([{ opens: '18:00', closes: '09:00' }]))).toEqual([
+      'Wednesday: A range must end after it starts; use 24:00 for midnight (got “18:00-09:00”).',
+      ['businessHours.2'],
+    ]);
+    expect(
+      settingsChecks(
+        day([
+          { opens: '09:00', closes: '12:00' },
+          { opens: '11:00', closes: '13:00' },
+        ]),
+      ),
+    ).toEqual(['Wednesday: Time ranges on the same day must not overlap.', ['businessHours.2']]);
+    expect(settingsChecks(week.map(() => []))).toEqual([
+      'Add at least one opening time for the team, or let it use the company’s business hours.',
+      ['businessHours'],
+    ]);
+  });
+
+  it('changes a team’s hours only when given, and null gives it the company’s again', () => {
+    expect(apiUpdateTeamSchema.safeParse({ businessHours: null }).success).toBe(true);
+    expect(apiUpdateTeamSchema.safeParse({ businessHours: week }).success).toBe(true);
+    const own = teamSettingsOf(apiCreateTeamSchema.parse({ ...settings, businessHours: week }));
+    expect(sameTeamSettings(own, { ...own })).toBe(true);
+    // The same week in another order, or written differently, is no change.
+    expect(
+      sameTeamSettings(own, {
+        ...own,
+        businessHours: [...(own.businessHours ?? [])].reverse(),
+      }),
+    ).toBe(true);
+    expect(sameTeamSettings(own, { ...own, businessHours: null })).toBe(false);
+    expect(sameTeamSettings({ ...own, businessHours: null }, { ...own, businessHours: null })).toBe(
+      true,
+    );
+    expect(
+      sameTeamSettings(own, {
+        ...own,
+        businessHours: [{ weekday: 1, opens: 540, closes: 780 }],
+      }),
+    ).toBe(false);
+  });
+
+  it('are described without naming decisions', () => {
+    const doc = buildOpenApiDocument('https://example.test/api/v1') as unknown as {
+      components: { schemas: Record<string, { properties?: Record<string, unknown> }> };
+    };
+    const schemas = doc.components.schemas;
+    for (const name of ['CreateTeam', 'UpdateTeam', 'TeamSettings']) {
+      const text = JSON.stringify(schemas[name]?.properties?.businessHours ?? null);
+      expect(text, name).toContain('company’s closed days');
+      expect(text, name).not.toMatch(/ADR-\d/);
+    }
   });
 });

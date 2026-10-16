@@ -52,6 +52,21 @@ export const businessHours = appSchema.table('business_hours', {
   closesAt: time('closes_at').notNull(),
 });
 
+/**
+ * A team's own weekly schedule (migration 0303, ADR-389): a team with rows here counts business
+ * time by them instead of the company's schedule; the company's closed days and time zone apply.
+ */
+export const teamBusinessHours = appSchema.table('team_business_hours', {
+  id: uuid('id').primaryKey(),
+  tenantId: uuid('tenant_id').notNull(),
+  teamId: uuid('team_id').notNull(),
+  /** ISO weekday, 1 = Monday. */
+  weekday: smallint('weekday').notNull(),
+  /** 'HH:MM:SS'; closes_at may be '24:00:00'. */
+  opensAt: time('opens_at').notNull(),
+  closesAt: time('closes_at').notNull(),
+});
+
 export const businessHolidays = appSchema.table('business_holidays', {
   id: uuid('id').primaryKey(),
   tenantId: uuid('tenant_id').notNull(),

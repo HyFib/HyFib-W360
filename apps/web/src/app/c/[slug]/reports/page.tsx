@@ -522,6 +522,11 @@ function InboxSection({
   const n = i.now;
   const t = i.turns;
   const inBusinessHours = i.businessHours ? ' of business hours' : '';
+  // Teams with their own business hours (ADR-389) count their conversations by them.
+  const teamHoursText =
+    i.businessHours && i.teamBusinessHours.length > 0
+      ? ` The conversations of ${i.teamBusinessHours.map((team) => team.name).join(', ')} count the team’s own hours (Settings → Teams); closed days are the company’s.`
+      : '';
   // The targets conversations are measured against: their team's own (ADR-377), else the company's.
   const targetsText =
     i.teamTargets.length === 0
@@ -537,7 +542,7 @@ function InboxSection({
     <Card>
       <SectionHeader
         title="Inbox"
-        description={`A reply turn starts with the first customer message that has no reply yet and ends when a member replies or the conversation is resolved. ${i.businessHours ? 'Business hours are on: the target and the business-hours figures count opening hours only; other times are absolute.' : 'Times are absolute; business hours are off.'}`}
+        description={`A reply turn starts with the first customer message that has no reply yet and ends when a member replies or the conversation is resolved. ${i.businessHours ? `Business hours are on: the target and the business-hours figures count opening hours only; other times are absolute.${teamHoursText}` : 'Times are absolute; business hours are off.'}`}
         exportHref={exportHref}
         section="inbox"
       />

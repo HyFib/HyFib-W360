@@ -15565,3 +15565,73 @@ sentence claiming the card was checked by integration and end-to-end tests that 
 claim that posting one at a time stays under Microsoft's throttle (up to 5 posts go out back to
 back; a 429 is tried again), and a format guard in the new claim that a NULL in the list of formats
 would have passed (now `IS NOT TRUE`). All were fixed.
+
+## ADR-389 Business hours per team (P3-06) (2026-10-16)
+
+Context: business hours were the company's only (ADR-030): one weekly schedule decided when every
+reply target, overdue email and automatic reply counted. ADR-377 gave teams their own
+first-response target but left it counted in the company's hours, so a night or weekend team, or
+one that answers around the clock, was held to the office's week. "Business hours per team" was
+listed as not built under P3-06 and in the feature matrix (H-011).
+
+Decision:
+
+- **A team's own week:** a team either uses the company's business hours (the default; every
+  existing team keeps them) or has its own weekly schedule, `app.team_business_hours` (migration
+  0303; weekday, opening and closing time, as `app.business_hours`), with the same shape and checks
+  as the company's: seven days, up to four ranges a day that end after they start and do not
+  overlap, 24:00 for midnight, and at least one opening time in the week (a team never open would
+  never be due a reply). It is set with the team's other settings, in Settings → Teams and through
+  `POST`/`PATCH /teams` (`businessHours`: seven days of `{opens, closes}` ranges, or null for the
+  company's), by those who manage teams (`inbox.supervise`; keys with `teams.manage`), and audited
+  with the team's change (`ownBusinessHours`, `businessHoursRanges`, and on updates
+  `businessHoursChanged`). A save that leaves the week as it is writes nothing to it.
+- **Closed days and time zone stay the company's** and apply to every team: a public holiday closes
+  the night team too, and one time zone keeps every schedule and report day comparable. Teams that
+  work on holidays are not built (below).
+- **Only while the company's business hours are on:** a team's week replaces the company's week,
+  not the switch. While business hours are off (or have no opening time) every conversation counts
+  absolute time and teams' weeks are kept but unused. One switch keeps "are business hours on?"
+  answerable in one place (Settings → Inbox, `GET /business-hours`, Reports' "business hours are
+  on"), and turning them off can never leave some conversations paused. Settings → Teams says so
+  beside the schedule, and when they are off that every conversation counts absolute time.
+- **Which calendar a conversation uses:** its current team's own week when the team has one, else
+  the company's (`calendarFor`), everywhere a business calendar is used for a conversation: the
+  inbox's reply timers (list and conversation) and the notice of overdue replies (ADR-241), which
+  ranks each team with its own target or week apart (one more than the notice takes from each
+  holds the earliest due of all); the overdue-reply emails (ADR-230); Reports' business-time
+  measures; and the automatic reply's delay (ADR-384). A conversation counts by the team it is in
+  now, as targets do (ADR-377). The company's calendar and every team's week are loaded once per
+  request, sweep or report (`loadBusinessCalendars`: one query for all teams' weeks), never per
+  conversation.
+- **Sweeps' SQL is unchanged:** `ops.overdue_reply_turns` and `ops.slow_reply_turns` find turns by
+  the target or delay in absolute time, a lower bound that any calendar only moves later; the
+  worker computes each due time with the conversation's calendar in the company's own scope. No
+  definer function is replaced; w360_definer gets only the deletion grants and policies on the new
+  table.
+- **Waiting rows planned again:** a waiting automatic reply or overdue notice holds the time an old
+  calendar gave. When a team's week (or, since this ADR, its target) changes, and when the
+  company's week or closed days change, every waiting row of the company is planned again by the
+  next sweep (`replanWaitingTurns`: `replanWaitingSlowReplies` plus the overdue notices); when a
+  conversation changes team, by any path (the inbox, the API, routing, automations, a team's
+  deletion), a trigger on `conversations.team_id` (0303, running as the caller, which may update
+  those columns of waiting rows) plans its own open turn's rows again. Lateness then counts from
+  the time a row was put off to, so a replanned row is not counted late for having waited.
+- **Reports:** turns' business seconds are summed over the opening periods of their calendar
+  (`iv(cal, lo, hi)`: '' for the company's, a team's id for its own). New definition versions say so:
+  `inbox.overdue` v4, `inbox.first_response_business_time` v3 and `inbox.within_target` v5; the
+  inbox section and report emails name teams with their own hours ("in their team's or the
+  company's business hours"), and `GET /reports` gives `teamBusinessHours`.
+- **Automations keep the company's calendar:** a trigger's "only while open/closed" and the
+  business-hours condition answer whether the company is open, as `GET /business-hours` does; a new
+  conversation's team is often decided after its trigger is checked, so a team's week there would
+  depend on routing's order. The builder now says "The company's business hours". Behaviour is
+  unchanged for every company.
+- **Deletion, export, erasure:** a team's week is deleted with the team (composite foreign key, on
+  delete cascade) and with the company (step 655, before teams); the company export includes the
+  table; it holds no personal data, so erasure is unaffected.
+
+Not built: closed days or a time zone per team, holiday calendars per team, a team schedule while
+the company's hours are off, per-team hours in automations' conditions and in `GET /business-hours`,
+schedules per WhatsApp number, and measuring a turn by the team (or week) its conversation had when
+the turn started.

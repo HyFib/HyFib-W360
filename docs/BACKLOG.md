@@ -187,7 +187,11 @@ verification, app review, Embedded Signup configuration).
   business hours when they are on, sent once per wait by the worker's minute sweep through the send
   pipeline, inside the service window, never while an automation handles the conversation, never in
   a resolved conversation, never to customers who opted out; it does not end the wait).
-  **Remaining:** per-team calendars, private team queues (would change visibility,
+  **[Business hours per team built; their database and browser tests run only in CI]** (ADR-389,
+  migration 0303: a team's own weekly schedule, in Settings → Teams and the teams API, used while
+  the company's business hours are on for its conversations' timers, notice, overdue emails,
+  reports and automatic reply; closed days and the time zone stay the company's).
+  **Remaining:** closed days per team, private team queues (would change visibility,
   ADR-029), CSAT by template outside the window (needs a consent decision), CSAT with a real WABA
   (phone-number masking: P3-01, ADR-226).
 

@@ -437,11 +437,20 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
 - **Business hours** (`inbox/business-hours.ts`): weekly intervals (ISO weekdays, `24:00` closes at
   midnight) and closed days in the company's time zone, turned into real instants with the same
   daylight-saving rules as campaign schedules; pure functions add business minutes, measure business
-  time and find the next opening.
+  time and find the next opening. Since ADR-389 a team may have its own week
+  (`app.team_business_hours`, 0303; checked by `teamHoursSchema` as the company's week is):
+  `loadBusinessCalendars` reads the company's calendar and, only while its business hours are on,
+  every team's week in one query (`BusinessCalendars`: the company's, and each team's own with the
+  company's closed days and time zone), and `calendarFor(calendars, teamId)` picks a conversation's.
+  `replanWaitingTurns` sets waiting automatic replies and overdue notices due now when the
+  company's week or closed days, or a team's week or target, change; the trigger
+  `conversations_replan_waiting_turn` does the same for one conversation's open turn when its
+  `team_id` changes. Automations' hours stay the company's.
 - **Reply-due timers** (`inbox/sla.ts`): the open reply turn's start plus the first-response target,
   counted in business hours when business hours are on (the timer pauses while closed), else absolute
-  time. Since ADR-377 the target is the conversation's team's own (`teams.first_response_target_minutes`, 0296) when it has one, else the company's: `loadReplyTargets` reads both and `targetFor` picks one;
-  the notice of overdue replies ranks each team with its own target apart (`row_number()` per team)
+  time. Since ADR-377 the target is the conversation's team's own (`teams.first_response_target_minutes`, 0296) when it has one, else the company's: `loadReplyTargets` reads both and `targetFor` picks one,
+  with the team's own calendar since ADR-389 (`ReplyTargets.teamCalendars`);
+  the notice of overdue replies ranks each team with its own target or week apart (`row_number()` per team)
   so its earliest waits stay the earliest due, and reports join each turn's conversation and team. The inbox list and thread show waiting time, due time, overdue and paused states; a
   longest-waiting order pages on `date_trunc('milliseconds', started_at)` so keyset cursors
   round-trip exactly.
@@ -450,7 +459,9 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   (a resolved case never changes). Resolution times are measured on cases.
 - **Reports** (§6C): business-hours reply times are the overlap of each turn with the company's
   opening periods, computed in SQL against an `unnest` of periods generated in TypeScript for the
-  report's range; new versioned definitions (ADR-030).
+  report's range; new versioned definitions (ADR-030). Since ADR-389 the periods are keyed by
+  calendar (`iv(cal, lo, hi)`, `calendarPeriods`: '' for the company's, a team's id for its own) and
+  each turn sums its conversation's team's calendar.
 - **Saved replies** (`inbox/saved-replies.ts`): shared answers with `{{name}}`, `{{agent}}` and
   `{{company}}` placeholders, filled server-side for the conversation; the composer inserts the text
   and the member sends it as an ordinary reply.
@@ -483,7 +494,7 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   without a row or with a due `waiting` row, in conversations not resolved and without an active
   automation run. Per company, in its scope, the conversations and then the turns are locked
   (`FOR UPDATE`); `planSlowReply` ignores, waits (due time from `replyDueAt` with the business
-  calendar) or handles each turn; `slowReplyOutcome`, the WhatsApp id and the consent check
+  calendar of the conversation's team, else the company's, ADR-389) or handles each turn; `slowReplyOutcome`, the WhatsApp id and the consent check
   (`checkTemplateEligibility`, utility) decide between a `skipped` row and the send: a `system` text
   message (`content.slowReply`), its send intent, a `sent` row naming the message and a signed
   `message.send` job, in one transaction. `app.slow_reply_messages` is unique per turn and guarded

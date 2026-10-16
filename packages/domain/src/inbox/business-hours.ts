@@ -6,10 +6,13 @@ import {
   businessHolidays,
   businessHours,
   eq,
+  inArray,
   isUniqueViolation,
   messagingSettings,
   slowReplyMessages,
+  overdueReplyNotices,
   sql,
+  teamBusinessHours,
   type Database,
   type Tx,
 } from '@w360/db';
@@ -275,6 +278,104 @@ export function formatMinutes(minutes: number): string {
   return `${String(Math.floor(minutes / 60)).padStart(2, '0')}:${String(minutes % 60).padStart(2, '0')}`;
 }
 
+/** A week's intervals as seven days of editable text, Monday first ("" = closed). */
+export function intervalsToDayTexts(intervals: readonly BusinessInterval[]): string[] {
+  return WEEKDAY_NAMES.map((_, i) =>
+    intervals
+      .filter((iv) => iv.weekday === i + 1)
+      .sort((a, b) => a.opens - b.opens)
+      .map((iv) => `${formatMinutes(iv.opens)}-${formatMinutes(iv.closes)}`)
+      .join(', '),
+  );
+}
+
+/** Whether two weeks hold the same intervals, whatever their order. */
+export function sameIntervals(
+  a: readonly BusinessInterval[],
+  b: readonly BusinessInterval[],
+): boolean {
+  const key = (iv: BusinessInterval) => `${iv.weekday}:${iv.opens}:${iv.closes}`;
+  const left = a.map(key).sort();
+  const right = b.map(key).sort();
+  return left.length === right.length && left.every((k, i) => k === right[i]);
+}
+
+// Business hours per team (ADR-389) -----------------------------------------------------------------
+
+export const TEAM_HOURS_EMPTY_MESSAGE =
+  'Add at least one opening time for the team, or let it use the company’s business hours.';
+
+/**
+ * A team's own weekly schedule as Settings → Teams and the API take it: seven days of text, Monday
+ * first, each checked as the company's schedule is (`parseDayRanges`), with at least one opening
+ * time (a team that never opens would never be due a reply). Null: the team uses the company's
+ * schedule. Issues name the day (`<n>`, under the caller's field).
+ */
+export const teamHoursSchema = z
+  .array(z.string().max(200, 'Use at most 200 characters a day.'))
+  .length(7, 'Give seven days, Monday first.')
+  .nullable()
+  .transform((days, ctx): BusinessInterval[] | null => {
+    if (days === null) return null;
+    const intervals: BusinessInterval[] = [];
+    for (const [i, text] of days.entries()) {
+      const parsed = parseDayRanges(text);
+      if (!parsed.ok) {
+        ctx.addIssue({
+          code: 'custom',
+          path: [i],
+          message: `${WEEKDAY_NAMES[i] ?? 'Day'}: ${parsed.message}`,
+        });
+        return z.NEVER;
+      }
+      for (const r of parsed.ranges) intervals.push({ weekday: i + 1, ...r });
+    }
+    if (intervals.length === 0) {
+      ctx.addIssue({ code: 'custom', message: TEAM_HOURS_EMPTY_MESSAGE });
+      return z.NEVER;
+    }
+    return intervals;
+  });
+
+/**
+ * The calendars business time is counted by: the company's while its business hours are on, and
+ * the teams with their own weekly schedule (ADR-389), each with the company's closed days and time
+ * zone. While business hours are off (or have no opening time) business time is not used anywhere,
+ * so `company` is null and `teams` is empty: a team's schedule applies only while the company's
+ * hours are on.
+ */
+export interface BusinessCalendars {
+  company: BusinessCalendar | null;
+  teams: ReadonlyMap<string, BusinessCalendar>;
+}
+
+/** The calendar of a conversation in team `teamId` (or none): its team's own, else the company's. */
+export function calendarFor(
+  calendars: BusinessCalendars,
+  teamId: string | null,
+): BusinessCalendar | null {
+  if (!calendars.company) return null;
+  return (teamId === null ? undefined : calendars.teams.get(teamId)) ?? calendars.company;
+}
+
+/** The calendars of a company's business hours and its teams' own weekly schedules. */
+export function businessCalendars(
+  company: BusinessCalendar | null,
+  teamIntervals: ReadonlyMap<string, readonly BusinessInterval[]>,
+): BusinessCalendars {
+  if (!company) return { company: null, teams: new Map() };
+  const teams = new Map<string, BusinessCalendar>();
+  for (const [teamId, intervals] of teamIntervals) {
+    if (intervals.length > 0) teams.set(teamId, { ...company, intervals: [...intervals] });
+  }
+  return { company, teams };
+}
+
+const timeToMinutes = (t: string) => {
+  const [h, m] = t.split(':').map(Number) as [number, number];
+  return h * 60 + m;
+};
+
 export const businessHoursSchema = z.object({
   enabled: z.boolean(),
   /** Seven entries, Monday first; each is a day's ranges as text ("" = closed). */
@@ -327,10 +428,6 @@ export async function loadBusinessCalendar(
     .select({ day: businessHolidays.day })
     .from(businessHolidays)
     .where(eq(businessHolidays.tenantId, tenantId));
-  const toMinutes = (t: string) => {
-    const [h, m] = t.split(':').map(Number) as [number, number];
-    return h * 60 + m;
-  };
   return {
     enabled: settings?.enabled === true && rows.length > 0,
     turnedOn: settings?.enabled === true,
@@ -338,12 +435,96 @@ export async function loadBusinessCalendar(
       timezone,
       intervals: rows.map((r) => ({
         weekday: r.weekday,
-        opens: toMinutes(r.opensAt),
-        closes: toMinutes(r.closesAt),
+        opens: timeToMinutes(r.opensAt),
+        closes: timeToMinutes(r.closesAt),
       })),
       closedDays: new Set(closed.map((c) => c.day)),
     },
   };
+}
+
+/**
+ * The weekly schedules of the company's teams that have their own (ADR-389), by team id, each in
+ * order; with `teamIds`, of those teams only. One query for every team.
+ */
+export async function loadTeamSchedules(
+  tx: Tx,
+  tenantId: string,
+  teamIds?: readonly string[],
+): Promise<Map<string, BusinessInterval[]>> {
+  if (teamIds && teamIds.length === 0) return new Map();
+  const rows = await tx
+    .select({
+      teamId: teamBusinessHours.teamId,
+      weekday: teamBusinessHours.weekday,
+      opensAt: teamBusinessHours.opensAt,
+      closesAt: teamBusinessHours.closesAt,
+    })
+    .from(teamBusinessHours)
+    .where(
+      and(
+        eq(teamBusinessHours.tenantId, tenantId),
+        teamIds ? inArray(teamBusinessHours.teamId, [...teamIds]) : undefined,
+      ),
+    )
+    .orderBy(
+      asc(teamBusinessHours.teamId),
+      asc(teamBusinessHours.weekday),
+      asc(teamBusinessHours.opensAt),
+    );
+  const schedules = new Map<string, BusinessInterval[]>();
+  for (const r of rows) {
+    const list = schedules.get(r.teamId) ?? [];
+    list.push({
+      weekday: r.weekday,
+      opens: timeToMinutes(r.opensAt),
+      closes: timeToMinutes(r.closesAt),
+    });
+    schedules.set(r.teamId, list);
+  }
+  return schedules;
+}
+
+/**
+ * The company's calendar and, while its business hours are on, its teams' own (ADR-389): loaded
+ * once per request or sweep, so a list, a sweep or a report never reads calendars per conversation.
+ */
+export async function loadBusinessCalendars(
+  tx: Tx,
+  tenantId: string,
+  timezone: string,
+): Promise<BusinessCalendars> {
+  const { enabled, calendar } = await loadBusinessCalendar(tx, tenantId, timezone);
+  if (!enabled) return { company: null, teams: new Map() };
+  return businessCalendars(calendar, await loadTeamSchedules(tx, tenantId));
+}
+
+/**
+ * Replaces a team's own weekly schedule (Settings → Teams, and keys), or removes it with null so
+ * the team uses the company's. The caller audits it with the team's change and plans waiting
+ * replies again (`replanWaitingTurns`) when it changed.
+ */
+export async function writeTeamBusinessHours(
+  tx: Tx,
+  tenantId: string,
+  teamId: string,
+  intervals: readonly BusinessInterval[] | null,
+): Promise<void> {
+  await tx
+    .delete(teamBusinessHours)
+    .where(and(eq(teamBusinessHours.tenantId, tenantId), eq(teamBusinessHours.teamId, teamId)));
+  if (intervals && intervals.length > 0) {
+    await tx.insert(teamBusinessHours).values(
+      intervals.map((iv) => ({
+        id: uuidv7(),
+        tenantId,
+        teamId,
+        weekday: iv.weekday,
+        opensAt: formatMinutes(iv.opens),
+        closesAt: formatMinutes(iv.closes),
+      })),
+    );
+  }
 }
 
 /**
@@ -386,7 +567,7 @@ export async function writeBusinessHours(
       })),
     );
   }
-  await replanWaitingSlowReplies(tx, tenantId);
+  await replanWaitingTurns(tx, tenantId);
 }
 
 /**
@@ -400,6 +581,23 @@ export async function replanWaitingSlowReplies(tx: Tx, tenantId: string): Promis
     .update(slowReplyMessages)
     .set({ dueAt: sql`now()`, updatedAt: sql`now()` })
     .where(and(eq(slowReplyMessages.tenantId, tenantId), eq(slowReplyMessages.state, 'waiting')));
+}
+
+/**
+ * Has the next sweeps look again at every reply that waits for a calendar: the automatic replies
+ * (ADR-384) and the overdue-reply notices (ADR-230) put off to a time an old calendar or target
+ * gave. Used when the company's schedule or closed days, or a team's own schedule or target,
+ * change (ADR-389); a conversation that changes team has its own waiting rows planned again by a
+ * database trigger (migration 0303).
+ */
+export async function replanWaitingTurns(tx: Tx, tenantId: string): Promise<void> {
+  await replanWaitingSlowReplies(tx, tenantId);
+  await tx
+    .update(overdueReplyNotices)
+    .set({ dueAt: sql`now()`, updatedAt: sql`now()` })
+    .where(
+      and(eq(overdueReplyNotices.tenantId, tenantId), eq(overdueReplyNotices.state, 'waiting')),
+    );
 }
 
 /** A day already marked closed, as a conflict; any other error as it is. */
@@ -420,7 +618,7 @@ export async function writeAddClosedDay(
 ): Promise<string> {
   const id = uuidv7();
   await tx.insert(businessHolidays).values({ id, tenantId, day: data.day, name: data.name });
-  await replanWaitingSlowReplies(tx, tenantId);
+  await replanWaitingTurns(tx, tenantId);
   return id;
 }
 
@@ -434,7 +632,7 @@ export async function writeRemoveClosedDay(
     .delete(businessHolidays)
     .where(and(eq(businessHolidays.tenantId, tenantId), eq(businessHolidays.id, id)))
     .returning({ day: businessHolidays.day, name: businessHolidays.name });
-  if (deleted) await replanWaitingSlowReplies(tx, tenantId);
+  if (deleted) await replanWaitingTurns(tx, tenantId);
   return deleted ?? null;
 }
 
@@ -465,12 +663,7 @@ export function createBusinessHoursService(deps: { db: Database; clock: Clock })
             .from(businessHolidays)
             .where(eq(businessHolidays.tenantId, ctx.tenant.id))
             .orderBy(asc(businessHolidays.day));
-          const days = WEEKDAY_NAMES.map((_, i) =>
-            calendar.intervals
-              .filter((iv) => iv.weekday === i + 1)
-              .map((iv) => `${formatMinutes(iv.opens)}-${formatMinutes(iv.closes)}`)
-              .join(', '),
-          );
+          const days = intervalsToDayTexts(calendar.intervals);
           return {
             enabled: enabled || settings?.enabled === true,
             timezone: ctx.tenant.timezone,

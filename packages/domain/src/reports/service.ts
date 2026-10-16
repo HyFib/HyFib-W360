@@ -7,6 +7,7 @@ import {
   asc,
   desc,
   eq,
+  inArray,
   isNotNull,
   memberships,
   messagingSettings,
@@ -33,8 +34,8 @@ import {
 } from '../campaigns/costs';
 import { CSV_BOM, csvLine } from '../contacts/csv';
 import { minorToInput } from '../crm/money';
-import { openPeriods, type BusinessCalendar } from '../inbox/business-hours';
-import { hasAnyTarget, loadReplyTargets, type ReplyTargets } from '../inbox/sla';
+import { openPeriods, type BusinessCalendars } from '../inbox/business-hours';
+import { calendarsOf, hasAnyTarget, loadReplyTargets, type ReplyTargets } from '../inbox/sla';
 import { parseInput } from '../validation';
 import { METRIC_DEFINITIONS, type MetricDefinition } from './definitions';
 import {
@@ -129,6 +130,11 @@ export interface InboxReport {
   teamTargets: { teamId: string; name: string; minutes: number }[];
   /** Business hours are on: the target and the business-hours figures count opening hours only. */
   businessHours: boolean;
+  /**
+   * While business hours are on, the teams with their own (ADR-389): their conversations count
+   * business time by the team's weekly schedule instead of the company's. By name.
+   */
+  teamBusinessHours: { teamId: string; name: string }[];
   now: {
     open: number;
     unassigned: number;
@@ -538,21 +544,35 @@ const DURATION = sql`extract(epoch from t.ended_at - t.started_at)`;
 const DELIVERED = sql`('delivered', 'read', 'played')`;
 
 /**
- * Business time of [from, to) in seconds, as the overlap with the company's opening periods held
- * in the `iv(lo, hi)` CTE (see openingPeriodsCte).
+ * Business time of [from, to) in seconds, as the overlap with the opening periods of calendar `cal`
+ * held in the `iv(cal, lo, hi)` CTE (see openingPeriodsCte): '' for the company's, a team's id for
+ * a team's own (ADR-389).
  */
-const businessSeconds = (from: SQL, to: SQL) =>
+const businessSeconds = (from: SQL, to: SQL, cal: SQL) =>
   sql`(select coalesce(sum(extract(epoch from least(${to}, iv.hi) - greatest(${from}, iv.lo))), 0)::float8
-         from iv where iv.lo < ${to} and iv.hi > ${from})`;
+         from iv where iv.cal = ${cal} and iv.lo < ${to} and iv.hi > ${from})`;
+
+/** The opening periods of each calendar between `from` and `to`, keyed as `iv.cal` keys them. */
+export function calendarPeriods(
+  calendars: BusinessCalendars,
+  from: Date,
+  to: Date,
+): { cal: string; start: Date; end: Date }[] {
+  if (!calendars.company) return [];
+  const all = [['', calendars.company] as const, ...calendars.teams];
+  return all.flatMap(([cal, calendar]) =>
+    openPeriods(calendar, from, to).map((p) => ({ cal, start: p.start, end: p.end })),
+  );
+}
 
 async function openingPeriodsCte(
   tx: Tx,
   tenantId: string,
-  calendar: BusinessCalendar | null,
+  calendars: BusinessCalendars,
   period: ReportPeriod,
   now: Date,
 ): Promise<SQL | null> {
-  if (!calendar) return null;
+  if (!calendars.company) return null;
   // From the oldest turn the report measures (the period start, or an older waiting turn) to now.
   const oldest = await tx.execute<{ started_ms: number | null }>(sql`
     select (extract(epoch from min(t.started_at)) * 1000)::float8 as started_ms
@@ -562,8 +582,9 @@ async function openingPeriodsCte(
     oldestMs !== null && oldestMs !== undefined && oldestMs < period.start.getTime()
       ? new Date(oldestMs)
       : period.start;
-  const periods = openPeriods(calendar, from, now);
-  return sql`iv(lo, hi) as (select * from unnest(
+  const periods = calendarPeriods(calendars, from, now);
+  return sql`iv(cal, lo, hi) as (select * from unnest(
+    ${sql.param(periods.map((p) => p.cal))}::text[],
     ${sql.param(periods.map((p) => p.start.toISOString()))}::timestamptz[],
     ${sql.param(periods.map((p) => p.end.toISOString()))}::timestamptz[]))`;
 }
@@ -581,7 +602,11 @@ async function inboxReport(
   const targetSeconds = sql`(coalesce(tm.first_response_target_minutes,
     ${targets.companyMinutes}::int) * 60)::float8`;
   const teamJoin = sql`left join app.teams tm on tm.tenant_id = c.tenant_id and tm.id = c.team_id`;
-  const iv = await openingPeriodsCte(tx, tenantId, targets.calendar, period, now);
+  // Each turn's calendar (ADR-389): its conversation's team's own hours, else the company's ('').
+  const ownHours = [...targets.teamCalendars.keys()];
+  const cal = sql`(case when c.team_id = any(${sql.param(ownHours)}::uuid[])
+    then c.team_id::text else '' end)`;
+  const iv = await openingPeriodsCte(tx, tenantId, calendarsOf(targets), period, now);
   const withIv = iv ? sql`with ${iv}` : sql``;
   const live = await tx.execute<Record<string, number | null>>(sql`
     ${withIv}
@@ -604,7 +629,7 @@ async function inboxReport(
       } as over_target
     from (
       select t.started_at, c.last_inbound_at, ${targetSeconds} as target_s,
-             ${iv ? businessSeconds(sql`t.started_at`, ts(now)) : sql`extract(epoch from ${ts(now)} - t.started_at)::float8`} as waited
+             ${iv ? businessSeconds(sql`t.started_at`, ts(now), cal) : sql`extract(epoch from ${ts(now)} - t.started_at)::float8`} as waited
         from app.conversation_turns t
         join app.conversations c on c.tenant_id = t.tenant_id and c.id = t.conversation_id
         ${teamJoin}
@@ -629,10 +654,10 @@ async function inboxReport(
   const periodTurns = sql`
     select t.started_at, t.ended_at, t.end_reason, ${DURATION}::float8 as dur,
            ${targetSeconds} as target_s,
-           ${iv ? sql`case when t.end_reason = 'replied' then ${businessSeconds(sql`t.started_at`, sql`t.ended_at`)} end` : sql`null::float8`} as biz_dur,
+           ${iv ? sql`case when t.end_reason = 'replied' then ${businessSeconds(sql`t.started_at`, sql`t.ended_at`, cal)} end` : sql`null::float8`} as biz_dur,
            ${
              iv
-               ? sql`case when t.ended_at is null then ${businessSeconds(sql`t.started_at`, ts(now))} end`
+               ? sql`case when t.ended_at is null then ${businessSeconds(sql`t.started_at`, ts(now), cal)} end`
                : sql`case when t.ended_at is null then extract(epoch from ${ts(now)} - t.started_at)::float8 end`
            } as waited
       from app.conversation_turns t
@@ -710,12 +735,22 @@ async function inboxReport(
     .from(teams)
     .where(and(eq(teams.tenantId, tenantId), isNotNull(teams.firstResponseTargetMinutes)))
     .orderBy(asc(teams.name), asc(teams.id));
+  // Teams whose conversations count business time by their own hours (ADR-389), while on.
+  const teamBusinessHours =
+    ownHours.length === 0
+      ? []
+      : await tx
+          .select({ teamId: teams.id, name: teams.name })
+          .from(teams)
+          .where(and(eq(teams.tenantId, tenantId), inArray(teams.id, ownHours)))
+          .orderBy(asc(teams.name), asc(teams.id));
   return {
     targetMinutes: targets.companyMinutes,
     teamTargets: teamTargets.flatMap((r) =>
       r.minutes === null ? [] : [{ ...r, minutes: r.minutes }],
     ),
     businessHours: iv !== null,
+    teamBusinessHours,
     now: {
       open: num(l.open),
       unassigned: num(l.unassigned),

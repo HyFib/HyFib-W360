@@ -28,3 +28,45 @@ describe('a team’s own reply target in its settings (ADR-377)', () => {
     expect(teamSchema.parse({ name: 'Returns', maxOpenPerMember: '' }).maxOpenPerMember).toBeNull();
   });
 });
+
+describe('a team’s own business hours in its settings (ADR-389)', () => {
+  const withHours = (businessHours: unknown) =>
+    teamSchema.safeParse({ name: 'Night', businessHours });
+
+  it('takes seven days of ranges, and nothing as the company’s business hours', () => {
+    expect(teamSchema.parse({ name: 'Night' }).businessHours).toBeNull();
+    expect(withHours(null).data?.businessHours).toBeNull();
+    expect(
+      withHours(['', '', '', '', '', '10:00-14:00', '10:00-14:00']).data?.businessHours,
+    ).toEqual([
+      { weekday: 6, opens: 600, closes: 840 },
+      { weekday: 7, opens: 600, closes: 840 },
+    ]);
+  });
+
+  it('refuses a week the company’s schedule would refuse, naming the day', () => {
+    const refused = (input: unknown) =>
+      withHours(input).error?.issues.map((i) => [i.path.join('.'), i.message]);
+    expect(refused(['', '', '', '', '', '', ''])).toEqual([
+      [
+        'businessHours',
+        'Add at least one opening time for the team, or let it use the company’s business hours.',
+      ],
+    ]);
+    expect(refused(['', 'nine to five', '', '', '', '', ''])).toEqual([
+      ['businessHours.1', 'Tuesday: Write times as ranges like 09:00-17:30 (got “nine to five”).'],
+    ]);
+    expect(
+      refused([
+        '09:00-10:00, 11:00-12:00, 13:00-14:00, 15:00-16:00, 17:00-18:00',
+        '',
+        '',
+        '',
+        '',
+        '',
+        '',
+      ]),
+    ).toEqual([['businessHours.0', 'Monday: Use at most 4 time ranges a day.']]);
+    expect(refused('09:00-17:00')?.[0]?.[0]).toBe('businessHours');
+  });
+});

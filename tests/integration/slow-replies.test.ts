@@ -9,6 +9,7 @@ import {
   createContactsService,
   createInboxService,
   createSlowReplyService,
+  createTeamsService,
   processSendIntent,
   queueTextMessage,
   sendSlowReplies,
@@ -615,6 +616,88 @@ describe('the automatic reply when members are slow to answer (ADR-384)', () => 
     await sweep(later(turn.started_at, 13));
     expect(await row(turn.id)).toMatchObject({ state: 'sent' });
     expect(await automaticReplies(turn.conversation_id)).toHaveLength(1);
+  });
+
+  it('counts the delay in the business hours of the conversation’s team, planned again when its team or the team’s hours change (ADR-389)', async () => {
+    const { c, owner } = await companyWithSlowReply(10);
+    const hours = createBusinessHoursService({ db: fx.dbs.app, clock: systemClock });
+    await hours.updateBusinessHours(owner, { enabled: true, days: Array(7).fill('00:00-24:00') });
+    const [{ timezone }] = (await fx.query<{ timezone: string }>(
+      'SELECT timezone FROM app.tenants WHERE id = $1',
+      [c.tenant.id],
+    )) as [{ timezone: string }];
+    const localDay = (d: Date) =>
+      new Intl.DateTimeFormat('en-CA', {
+        timeZone: timezone,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+      }).format(d);
+    const hhmm = (d: Date) =>
+      new Intl.DateTimeFormat('en-GB', {
+        timeZone: timezone,
+        hour: '2-digit',
+        minute: '2-digit',
+        hourCycle: 'h23',
+      }).format(d);
+    const moved = await waitingCustomer(c, waId());
+    const kept = await waitingCustomer(c, waId());
+    const noTeam = await waitingCustomer(c, waId());
+    // The team opens only the day after tomorrow (the company's dates).
+    const [y, m, d] = localDay(moved.started_at).split('-').map(Number) as [number, number, number];
+    const inTwoDays = new Date(Date.UTC(y, m - 1, d + 2));
+    const weekdayIndex = (inTwoDays.getUTCDay() + 6) % 7;
+    const teams = createTeamsService({ db: fx.dbs.app, clock: systemClock });
+    const teamWeek = Array.from({ length: 7 }, (_, i) => (i === weekdayIndex ? '00:00-24:00' : ''));
+    const { teamId } = await teams.createTeam(owner, { name: 'Later', businessHours: teamWeek });
+    const version = async (conversationId: string) =>
+      (
+        await fx.query<{ version: number }>(`SELECT version FROM app.conversations WHERE id = $1`, [
+          conversationId,
+        ])
+      )[0]!.version;
+    for (const turn of [moved, kept]) {
+      await inboxService().setTeam(owner, {
+        conversationId: turn.conversation_id,
+        teamId,
+        expectedVersion: await version(turn.conversation_id),
+      });
+    }
+
+    await sweep(later(noTeam.started_at, 11));
+    // The company's hours are open all week: the customer without a team gets the text.
+    expect(await row(noTeam.id)).toMatchObject({ state: 'sent' });
+    // The team's customers wait for the team's hours: 10 minutes after it opens.
+    const waiting = await row(moved.id);
+    expect(waiting).toMatchObject({ state: 'waiting', message_id: null });
+    expect(await row(kept.id)).toMatchObject({ state: 'waiting', due_at: waiting!.due_at });
+    expect(localDay(waiting!.due_at)).toBe(inTwoDays.toISOString().slice(0, 10));
+    expect(hhmm(waiting!.due_at)).toBe('00:10');
+
+    // One conversation leaves the team: its row alone is planned again (the database's time), and
+    // the next sweep sends it by the company's hours, not late for having waited.
+    await inboxService().setTeam(owner, {
+      conversationId: moved.conversation_id,
+      teamId: null,
+      expectedVersion: await version(moved.conversation_id),
+    });
+    expect((await row(moved.id))!.due_at.getTime()).toBeLessThan(waiting!.due_at.getTime());
+    expect(await row(kept.id)).toMatchObject({ state: 'waiting', due_at: waiting!.due_at });
+    await sweep(later(moved.started_at, 12));
+    expect(await row(moved.id)).toMatchObject({ state: 'sent' });
+    expect(await automaticReplies(moved.conversation_id)).toHaveLength(1);
+    // Not looked at again before its due time.
+    expect(await row(kept.id)).toMatchObject({ state: 'waiting', due_at: waiting!.due_at });
+
+    // The team's hours change to open all week: the waiting row is planned again and sent.
+    await teams.updateTeam(owner, teamId, {
+      name: 'Later',
+      businessHours: Array(7).fill('00:00-24:00'),
+    });
+    expect((await row(kept.id))!.due_at.getTime()).toBeLessThan(waiting!.due_at.getTime());
+    await sweep(later(kept.started_at, 13));
+    expect(await row(kept.id)).toMatchObject({ state: 'sent' });
+    expect(await automaticReplies(kept.conversation_id)).toHaveLength(1);
   });
 
   it('lets only the runtime role run the sweep query, and keeps sent rows as they are', async () => {

@@ -1,6 +1,6 @@
 import type { Metadata } from 'next';
 import { notFound } from 'next/navigation';
-import { can } from '@w360/domain';
+import { can, formatMinutes, intervalsToDayTexts, WEEKDAY_NAMES } from '@w360/domain';
 import { Badge, Card, CardContent, CardDescription, CardHeader, CardTitle } from '@w360/ui';
 import { PlanLimitHint } from '@/components/plan-limit';
 import { AvailabilityToggle, DeleteTeamButton, TeamForm } from '@/components/settings/team-editor';
@@ -15,15 +15,21 @@ export default async function TeamsSettingsPage({ params }: { params: Promise<{ 
   const { slug } = await params;
   const ctx = await requireTenant(slug);
   if (!canUseInbox(ctx)) notFound();
-  const { teams, plans } = await getRuntime();
+  const { teams, plans, businessHours } = await getRuntime();
   const supervise = can(ctx, 'inbox.supervise');
   const manageOthers = can(ctx, 'inbox.assign') && can(ctx, 'members.read');
-  const [list, members, channels, usage] = await Promise.all([
+  const [list, members, channels, usage, hours] = await Promise.all([
     teams.listTeams(ctx),
     can(ctx, 'members.read') ? teams.teamMemberOptions(ctx) : Promise.resolve([]),
     can(ctx, 'channels.read') ? teams.channelOptions(ctx) : Promise.resolve([]),
     plans.usage(ctx),
+    businessHours.getBusinessHours(ctx),
   ]);
+  // A team's own hours apply only while the company's are on (ADR-389).
+  const companyHours = {
+    on: hours.enabled && hours.days.some((d) => d.trim() !== ''),
+    timeZone: hours.timezone,
+  };
   const channelLabel = new Map(channels.map((c) => [c.id, c.label]));
   return (
     <div className="grid grid-cols-1 gap-6">
@@ -87,6 +93,7 @@ export default async function TeamsSettingsPage({ params }: { params: Promise<{ 
                 {team.firstResponseTargetMinutes
                   ? ` · reply target ${team.firstResponseTargetMinutes} min`
                   : ''}
+                {team.businessHours ? ' · its own business hours' : ''}
               </CardDescription>
             </CardHeader>
             <CardContent className="grid gap-4">
@@ -122,6 +129,42 @@ export default async function TeamsSettingsPage({ params }: { params: Promise<{ 
                   <dt className="text-muted-foreground">Routing keywords</dt>
                   <dd>{team.routingKeywords.length ? team.routingKeywords.join(', ') : 'None'}</dd>
                 </div>
+                <div className="grid gap-1 sm:col-span-3">
+                  <dt className="text-muted-foreground">Business hours</dt>
+                  <dd>
+                    {team.businessHours ? (
+                      <>
+                        <ul className="grid gap-0.5" aria-label={`${team.name} business hours`}>
+                          {WEEKDAY_NAMES.map((day, i) => {
+                            const ranges = (team.businessHours ?? []).filter(
+                              (iv) => iv.weekday === i + 1,
+                            );
+                            return (
+                              <li key={day}>
+                                {day}:{' '}
+                                {ranges.length === 0
+                                  ? 'closed'
+                                  : ranges
+                                      .map(
+                                        (iv) =>
+                                          `${formatMinutes(iv.opens)}–${formatMinutes(iv.closes)}`,
+                                      )
+                                      .join(', ')}
+                              </li>
+                            );
+                          })}
+                        </ul>
+                        <span className="text-muted-foreground">
+                          {companyHours.on
+                            ? `With the company’s closed days, in ${companyHours.timeZone}.`
+                            : 'Not in use: business hours are off (Settings → Inbox).'}
+                        </span>
+                      </>
+                    ) : (
+                      'The company’s'
+                    )}
+                  </dd>
+                </div>
               </dl>
               {supervise ? (
                 <details className="rounded-md border border-border p-3">
@@ -131,6 +174,7 @@ export default async function TeamsSettingsPage({ params }: { params: Promise<{ 
                       slug={ctx.tenant.slug}
                       members={members}
                       channels={channels}
+                      companyHours={companyHours}
                       team={{
                         id: team.id,
                         name: team.name,
@@ -139,6 +183,9 @@ export default async function TeamsSettingsPage({ params }: { params: Promise<{ 
                         maxOpenPerMember: team.maxOpenPerMember,
                         routingKeywords: team.routingKeywords,
                         firstResponseTargetMinutes: team.firstResponseTargetMinutes,
+                        businessHours: team.businessHours
+                          ? intervalsToDayTexts(team.businessHours)
+                          : null,
                         memberIds: team.members.map((m) => m.membershipId),
                         channelIds: team.channelIds,
                       }}
@@ -160,7 +207,12 @@ export default async function TeamsSettingsPage({ params }: { params: Promise<{ 
             </CardDescription>
           </CardHeader>
           <CardContent>
-            <TeamForm slug={ctx.tenant.slug} members={members} channels={channels} />
+            <TeamForm
+              slug={ctx.tenant.slug}
+              members={members}
+              channels={channels}
+              companyHours={companyHours}
+            />
           </CardContent>
         </Card>
       ) : (

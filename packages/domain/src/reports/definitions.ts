@@ -41,6 +41,9 @@ const RUN_DAYS =
   'Counted by the time the run started, in calendar days of the company’s time zone. Test runs started by members are not counted.';
 const TARGET_CLOCK =
   'The target, counted in business hours when business hours are on (Settings → Messaging → Business hours), otherwise in absolute time.';
+/** The target's clock once teams have their own business hours (ADR-389). */
+const TEAM_TARGET_CLOCK =
+  'The target, counted in business hours when business hours are on (Settings → Inbox): those of the conversation’s team when it has its own (Settings → Teams), else the company’s; otherwise in absolute time. Closed days and the time zone are the company’s.';
 const SURVEY_DAYS =
   'Counted by the time the survey was created (when the conversation was resolved), in calendar days of the company’s time zone.';
 const RECORDS = 'Computed when the page loads from HyFib’s records.';
@@ -483,6 +486,23 @@ export const METRIC_DEFINITIONS: readonly MetricDefinition[] = [
     available: true,
   },
   {
+    // Teams have their own business hours (ADR-389).
+    key: 'inbox.overdue',
+    version: 4,
+    label: 'Overdue',
+    unit: 'count',
+    description:
+      'Waiting conversations whose customer has waited longer than the first-response target of the conversation’s team, or the company’s when the team has none or the conversation has no team. After an automation’s hand-off the wait counts from the hand-off.',
+    numerator: 'Open reply turns that have waited longer than their target.',
+    denominator: null,
+    window: TEAM_TARGET_CLOCK,
+    timezoneRule: null,
+    missingData:
+      'Shown only when the company or one of its teams has a target. A conversation counts against the target and business hours of the team it is in now. Reply turns are recorded from the release of reports onwards.',
+    freshness: NOW,
+    available: true,
+  },
+  {
     key: 'inbox.windows_closing',
     version: 1,
     label: 'Reply windows closing',
@@ -598,6 +618,24 @@ export const METRIC_DEFINITIONS: readonly MetricDefinition[] = [
     available: true,
   },
   {
+    // Teams have their own business hours (ADR-389).
+    key: 'inbox.first_response_business_time',
+    version: 3,
+    label: 'First response in business hours',
+    unit: 'duration',
+    description:
+      'Time from the start of a reply turn to the first reply by a member, counting business hours only, reported as the median and the 90th percentile.',
+    numerator: 'Business-hours reply times of answered turns.',
+    denominator: 'Turns that started in the period and were answered.',
+    window:
+      'Only time inside business hours counts: those of the conversation’s team when it has its own (Settings → Teams), else the company’s (Settings → Inbox). The company’s closed days and hours outside the weekly schedule are skipped, in the company’s time zone.',
+    timezoneRule: TURNS_V2,
+    missingData:
+      'Shown only when business hours are on. Each turn uses the business hours of the team its conversation is in now, and the current schedules and closed days are applied to the whole period, including turns from before a change.',
+    freshness: LIVE,
+    available: true,
+  },
+  {
     key: 'inbox.within_target',
     version: 1,
     label: 'Answered within target',
@@ -662,6 +700,24 @@ export const METRIC_DEFINITIONS: readonly MetricDefinition[] = [
     timezoneRule: TURNS_V2,
     missingData:
       'Shown only when the company or one of its teams has a target. Each turn is measured against the target of the team its conversation is in now, and with business hours on, the current schedule and closed days are applied to the whole period.',
+    freshness: LIVE,
+    available: true,
+  },
+  {
+    // Teams have their own business hours (ADR-389).
+    key: 'inbox.within_target',
+    version: 5,
+    label: 'Answered within target',
+    unit: 'rate',
+    description:
+      'Share of reply turns answered within their target: the first-response target of the conversation’s team (Settings → Teams), or the company’s (Settings → Inbox) when the team has none or the conversation has no team.',
+    numerator: 'Turns answered within their target.',
+    denominator:
+      'Turns that started in the period and were answered or have waited longer than their target. Turns resolved without a reply, turns still within their target, turns an automation took over and turns of conversations without any target are left out.',
+    window: TEAM_TARGET_CLOCK,
+    timezoneRule: TURNS_V2,
+    missingData:
+      'Shown only when the company or one of its teams has a target. Each turn is measured against the target and business hours of the team its conversation is in now, and with business hours on, the current schedules and closed days are applied to the whole period.',
     freshness: LIVE,
     available: true,
   },

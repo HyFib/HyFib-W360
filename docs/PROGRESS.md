@@ -1,5 +1,69 @@
 # Progress
 
+## 2026-10-16 — Business hours per team (P3-06, ADR-389)
+
+Status: **Implemented; its database and browser tests run in CI only.** A team's first-response
+target (ADR-377) was counted in the company's business hours, so a night, weekend or round-the-clock
+team was held to the office's week.
+
+### Completed
+
+- **Database (migration 0303):** `app.team_business_hours` (tenant, team, weekday, opening and
+  closing time; composite foreign key to the company's team, on delete cascade; FORCE row security;
+  the app role selects, inserts and deletes; deletion step 655 with the definer's deletion grants and
+  policies only); an `AFTER UPDATE OF team_id` trigger on `app.conversations` that sets the moved
+  conversation's waiting automatic reply and overdue notice due now (pinned search path, not
+  executable by PUBLIC); metric definitions `inbox.overdue` v4,
+  `inbox.first_response_business_time` v3 and `inbox.within_target` v5. No definer function changes:
+  both sweeps' SQL bounds stay valid for any calendar.
+- **Domain:** `teamHoursSchema` (seven days of text, checked as the company's week, at least one
+  opening time), `loadTeamSchedules`, `loadBusinessCalendars` and `calendarFor` (a team's week with
+  the company's closed days and time zone, only while the company's hours are on; one query for every
+  team), `writeTeamBusinessHours`, `replanWaitingTurns` (waiting automatic replies and overdue
+  notices, now also after company calendar changes and team target changes). `ReplyTargets` carries
+  team calendars, so the inbox's timers, the notice (each team with its own target or week ranked
+  apart), the overdue emails and Reports use the conversation's team's calendar; the automatic
+  reply's sweep does too. Reports key opening periods by calendar (`iv(cal, lo, hi)`) and list
+  `teamBusinessHours` (also in `GET /reports`); report emails say "in their team's or the company's
+  business hours". Teams: `businessHours` in the settings, view, audit (`ownBusinessHours`,
+  `businessHoursRanges`, `businessHoursChanged`) and `POST`/`PATCH /teams` (seven days of
+  `{opens, closes}`, null for the company's), documented in the OpenAPI document. Automations keep
+  the company's calendar.
+- **Web:** Settings → Teams shows each team's own hours and edits them ("Use the company's business
+  hours" or "Its own weekly schedule"), saying they apply only while business hours are on and that
+  closed days and the time zone stay the company's; the automation builder says its hours are the
+  company's; Reports names teams with their own hours.
+- **Tests:** unit (`sla.test.ts`: the calendar choice, business time across New York's 25-hour day,
+  validation, comparing and auditing; `slow-reply.test.ts`: the delay by a team's week;
+  `reports/calendars.test.ts`: periods per calendar and the definitions kept equal to 0303;
+  `emails.test.ts`, `api/teams.test.ts`, `inbox/teams.test.ts`, `api/reports.test.ts`); integration
+  (`inbox-advanced.test.ts`: roles, checks, audit, deletion, row security, grants, foreign keys,
+  timers and notice; `overdue-replies.test.ts`, `slow-replies.test.ts`: due times by the team's week,
+  planned again on a team's or its hours' change; `reports.test.ts`: business medians, within target
+  and overdue by a weekend team's week; `api.test.ts`: the teams API; `company-data.test.ts`: the
+  export); e2e (`inbox-teams.spec.ts`: a team given its own hours and seeing them saved).
+- **Docs:** ADR-389; ARCHITECTURE, SECURITY, THREAT-MODEL T342, DEPLOYMENT (migration 0303 rollout
+  note: workers before web), DATA-RETENTION, RUNBOOKS, BACKLOG, and the matrix's H-011 text and
+  evidence (status unchanged).
+- **Mutation checks:** 22 deliberate regressions (team calendars ignored, applied while business
+  hours are off, empty weeks or no closed days for teams, a week of no opening times accepted,
+  weekdays shifted, issues not naming the day, weeks compared by length, the ranking of teams with
+  their own hours, null weeks taken as equal, audit flags inverted, API days reversed, unchanged
+  checks skipped, API hours dropped, report periods for the company only, email wording, the
+  definition version, the sweep's and the notice's calendar): 20 caught by the unit tests, one after
+  a test was added. Two survived the unit tests: the automatic reply's sweep using the company's
+  calendar (caught by the slow-replies integration test, which runs in CI only) and the notice ranking
+  every team together (it changes results only beyond 200 waits; no test catches it).
+
+### Test commands and results (local, 2026-10-16)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 161 files, 1688 tests passed                                    |
+| `pnpm build`                                       | passed                                                          |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+
 ## 2026-10-16 — A Microsoft Teams format for the alert channel (P5-10, ADR-388)
 
 Status: **Implemented; its database and browser tests run in CI only; no post was made to a real

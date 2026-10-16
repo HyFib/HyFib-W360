@@ -1737,6 +1737,18 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    one) to have old workers send them as text. The columns stay in the database unused by older
    releases.
 
+   Migration 0303 (ADR-389) adds `app.team_business_hours` (empty, so every team keeps the
+   company's hours until one is given its own), its row security and grants, deletion step 655, an
+   `AFTER UPDATE OF team_id` trigger on `app.conversations` that plans waiting automatic replies and
+   overdue notices of the moved conversation again, and three metric definition versions. No
+   definer function changes. Roll out workers before web: an old worker's sweeps count every
+   conversation in the company's hours, so a team's own week would be ignored by overdue emails and
+   automatic replies until the worker rollout ends; old web servers neither show nor write team
+   hours, and `PATCH /teams` with `businessHours` is refused as an unknown field there. Give teams
+   their own hours only after both rollouts end. Rolling an image back leaves the table, trigger and
+   definitions in place: an older release ignores team hours (the trigger only moves due times of
+   waiting rows earlier, which an older sweep simply plans again).
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back
