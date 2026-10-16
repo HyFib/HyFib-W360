@@ -167,7 +167,7 @@ describe('WhatsApp numbers through the API (ADR-171)', () => {
     expect(schema.properties.status?.enum).toEqual([...CHANNEL_STATUSES]);
     // Nothing Meta or the connection holds: no Meta id, credential or registration detail.
     expect(JSON.stringify(schema)).not.toMatch(
-      /"(phoneNumberId|wabaId|whatsappAccountId|token|credential\w*|pin|qualityRating)"/,
+      /"(phoneNumberId|wabaId|whatsappAccountId|token|credential\w*|pin|qualityRating|messagingLimit\w*)"/,
     );
     expect(doc.info.description).toContain('list your WhatsApp numbers');
   });

@@ -273,6 +273,7 @@ afterAll(async () => {
 beforeEach(() => {
   graphStandIn.state.sendQueue = [];
   graphStandIn.state.registerError = null;
+  graphStandIn.state.rejectMessagingLimitTier = false;
 });
 
 describe('webhook signatures', () => {
@@ -1176,6 +1177,233 @@ describe('Embedded Signup onboarding', () => {
     );
     expect(channel).toMatchObject({ status: 'failed', step: 'register_number' });
     expect(channel!.error).toMatch(/72 hours/);
+  });
+
+  /** A number's messaging limit tier, when a read asked for it, and when its health was read. */
+  async function tierRow(channelAccountId: string) {
+    const [row] = await adminQuery<{
+      messaging_limit_tier: string | null;
+      messaging_limit_checked_at: Date | null;
+      health_checked_at: Date | null;
+    }>(
+      `SELECT messaging_limit_tier, messaging_limit_checked_at, health_checked_at
+         FROM app.channel_accounts WHERE id = $1`,
+      [channelAccountId],
+    );
+    return row!;
+  }
+
+  /** The health reads of a number the stand-in received, by the fields each asked for. */
+  function healthReads(phoneNumberId: string) {
+    return graphStandIn.state.requests
+      .filter((r) => r.method === 'GET' && r.path === `/v26.0/${phoneNumberId}`)
+      .map((r) => r.query.fields);
+  }
+
+  const FIELDS =
+    'display_phone_number,verified_name,quality_rating,name_status,code_verification_status';
+
+  /** Connects a number through Embedded Signup, without running its setup yet. */
+  async function connected() {
+    const { ctx, tenant } = await ownerContext();
+    const service = onboarding();
+    const wabaId = nextId();
+    const phoneNumberId = nextId();
+    const { code } = grant(wabaId, phoneNumberId);
+    const started = await service.start(ctx);
+    const { channelAccountId } = await service.complete(ctx, {
+      state: started.state,
+      code,
+      wabaId,
+      phoneNumberId,
+    });
+    const setup = () =>
+      processChannelOnboarding(
+        { db: dbs.app, keyring, graph, clock: systemClock },
+        authorizedTenantScope(tenant.id, null),
+        channelAccountId,
+      );
+    /** Reads the active number's health again, as reconnecting its account does (ADR-137). */
+    const readAgain = async () => {
+      await adminQuery(`UPDATE app.channel_accounts SET status = 'onboarding' WHERE id = $1`, [
+        channelAccountId,
+      ]);
+      return setup();
+    };
+    const shown = async () =>
+      (await service.listChannels(ctx)).find((c) => c.id === channelAccountId)!.messagingLimit;
+    return { tenant, phoneNumberId, channelAccountId, setup, readAgain, shown };
+  }
+
+  it('reads the messaging limit tier with the health and words it on Channels (ADR-398)', async () => {
+    const n = await connected();
+    // Connected, its health not read yet: nothing is said of a tier, not even "not reported".
+    expect(await n.shown()).toBeNull();
+
+    expect(await n.setup()).toBe('active');
+    // One health read asked for the tier with the number's other facts.
+    expect(healthReads(n.phoneNumberId)).toEqual([`${FIELDS},messaging_limit_tier`]);
+    const known = await tierRow(n.channelAccountId);
+    expect(known.messaging_limit_tier).toBe('TIER_1K');
+    expect(known.messaging_limit_checked_at).toEqual(known.health_checked_at);
+    expect(known.messaging_limit_checked_at).not.toBeNull();
+    expect(await n.shown()).toBe('Messaging limit: TIER_1K');
+
+    // A tier Meta's description does not list is kept as Meta gives it, never turned into a number.
+    graphStandIn.state.messagingLimitTiers.set(n.phoneNumberId, 'TIER_2K');
+    expect(await n.readAgain()).toBe('active');
+    expect((await tierRow(n.channelAccountId)).messaging_limit_tier).toBe('TIER_2K');
+    expect(await n.shown()).toBe('Messaging limit: unknown tier (TIER_2K)');
+
+    // Text longer than the column holds keeps its first 64 characters.
+    graphStandIn.state.messagingLimitTiers.set(n.phoneNumberId, `TIER_${'9'.repeat(80)}`);
+    expect(await n.readAgain()).toBe('active');
+    expect((await tierRow(n.channelAccountId)).messaging_limit_tier).toBe(`TIER_${'9'.repeat(59)}`);
+
+    // No tier in Meta's answer, or one that is not text, replaces the tier read before: not
+    // reported, with the time of the read that asked.
+    for (const answer of [null, 1000]) {
+      graphStandIn.state.messagingLimitTiers.set(n.phoneNumberId, 'TIER_250');
+      expect(await n.readAgain()).toBe('active');
+      expect(await n.shown()).toBe('Messaging limit: TIER_250');
+      graphStandIn.state.messagingLimitTiers.set(n.phoneNumberId, answer);
+      expect(await n.readAgain()).toBe('active');
+      const row = await tierRow(n.channelAccountId);
+      expect(row.messaging_limit_tier).toBeNull();
+      expect(row.messaging_limit_checked_at).toEqual(row.health_checked_at);
+      expect(await n.shown()).toBe('Messaging limit: not reported by Meta');
+    }
+    expect(healthReads(n.phoneNumberId).every((f) => f === `${FIELDS},messaging_limit_tier`)).toBe(
+      true,
+    );
+  });
+
+  it('reads the health again without the tier when Meta refuses the field, and fails as before otherwise (ADR-398)', async () => {
+    const n = await connected();
+    graphStandIn.state.rejectMessagingLimitTier = true;
+    expect(await n.setup()).toBe('active');
+    // The read with the tier was refused with code 100; the same read without it was made once.
+    expect(healthReads(n.phoneNumberId)).toEqual([`${FIELDS},messaging_limit_tier`, FIELDS]);
+    const [channel] = await adminQuery<{
+      status: string;
+      verified_name: string;
+      quality_rating: string;
+      messaging_limit_tier: string | null;
+      read_together: boolean;
+    }>(
+      `SELECT status, verified_name, quality_rating, messaging_limit_tier,
+              messaging_limit_checked_at = health_checked_at AS read_together
+         FROM app.channel_accounts WHERE id = $1`,
+      [n.channelAccountId],
+    );
+    expect(channel).toEqual({
+      status: 'active',
+      verified_name: 'Signup Traders',
+      quality_rating: 'GREEN',
+      messaging_limit_tier: null,
+      read_together: true,
+    });
+    expect(await n.shown()).toBe('Messaging limit: not reported by Meta');
+    // The audit says why the tier is not reported.
+    const audits = await adminQuery<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND action = 'channel.activated' AND subject_id = $2`,
+      [n.tenant.id, n.channelAccountId],
+    );
+    expect(audits.map((a) => a.metadata)).toEqual([{ messagingLimitTier: 'refused' }]);
+
+    // Meta accepting the field again: one read, with the tier, and an audit without the note.
+    graphStandIn.state.rejectMessagingLimitTier = false;
+    expect(await n.readAgain()).toBe('active');
+    expect(healthReads(n.phoneNumberId)).toEqual([
+      `${FIELDS},messaging_limit_tier`,
+      FIELDS,
+      `${FIELDS},messaging_limit_tier`,
+    ]);
+    expect(await n.shown()).toBe('Messaging limit: TIER_1K');
+    const later = await adminQuery<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND action = 'channel.activated' AND subject_id = $2
+        ORDER BY occurred_at, id`,
+      [n.tenant.id, n.channelAccountId],
+    );
+    expect(later.map((a) => a.metadata)).toEqual([{ messagingLimitTier: 'refused' }, {}]);
+
+    // A number Graph no longer has (code 100 to both reads): the setup fails at the health check
+    // with the second read's reason, after the two reads, and the tier read before stays.
+    const gone = await connected();
+    expect(await gone.setup()).toBe('active');
+    graphStandIn.state.numbers.delete(gone.phoneNumberId);
+    expect(await gone.readAgain()).toBe('failed');
+    expect(healthReads(gone.phoneNumberId)).toEqual([
+      `${FIELDS},messaging_limit_tier`,
+      `${FIELDS},messaging_limit_tier`,
+      FIELDS,
+    ]);
+    const [failed] = await adminQuery<{
+      status: string;
+      onboarding_step: string;
+      onboarding_error: string;
+      messaging_limit_tier: string | null;
+    }>(
+      `SELECT status, onboarding_step, onboarding_error, messaging_limit_tier
+         FROM app.channel_accounts WHERE id = $1`,
+      [gone.channelAccountId],
+    );
+    expect(failed).toEqual({
+      status: 'failed',
+      onboarding_step: 'done',
+      onboarding_error: 'Setup failed at health_check: OAuthException: Unsupported get request.',
+      messaging_limit_tier: 'TIER_1K',
+    });
+  });
+
+  it('keeps the tier in two checked columns the runtime role writes and the platform role reads (ADR-398)', async () => {
+    const privileges = await adminQuery<{
+      c: string;
+      app_update: boolean;
+      platform_select: boolean;
+      definer_select: boolean;
+      public_update: boolean;
+    }>(
+      `SELECT c,
+              has_column_privilege('w360_app', 'app.channel_accounts', c, 'UPDATE') AS app_update,
+              has_column_privilege('w360_platform', 'app.channel_accounts', c, 'SELECT')
+                AS platform_select,
+              has_column_privilege('w360_definer', 'app.channel_accounts', c, 'SELECT')
+                AS definer_select,
+              has_column_privilege('public', 'app.channel_accounts', c, 'UPDATE') AS public_update
+         FROM unnest(ARRAY['messaging_limit_tier', 'messaging_limit_checked_at']) AS c
+        ORDER BY c`,
+    );
+    const granted = {
+      app_update: true,
+      platform_select: true,
+      definer_select: false,
+      public_update: false,
+    };
+    expect(privileges).toEqual([
+      { c: 'messaging_limit_checked_at', ...granted },
+      { c: 'messaging_limit_tier', ...granted },
+    ]);
+    const c = await companyWithChannel();
+    const update = (set: string) =>
+      dbs.adminPool.query(`UPDATE app.channel_accounts SET ${set} WHERE id = $1`, [
+        c.channelAccountId,
+      ]);
+    // A tier only with the time it was read, of 1 to 64 characters; any text Meta may add is kept.
+    await expect(update(`messaging_limit_tier = 'TIER_1K'`)).rejects.toMatchObject({
+      code: '23514',
+    });
+    await expect(
+      update(`messaging_limit_tier = '', messaging_limit_checked_at = now()`),
+    ).rejects.toMatchObject({ code: '23514' });
+    await expect(
+      update(`messaging_limit_tier = repeat('X', 65), messaging_limit_checked_at = now()`),
+    ).rejects.toMatchObject({ code: '23514' });
+    await update(`messaging_limit_tier = repeat('X', 64), messaging_limit_checked_at = now()`);
+    await update(`messaging_limit_tier = 'TIER_SOMETHING_NEW', messaging_limit_checked_at = now()`);
+    await update(`messaging_limit_tier = NULL, messaging_limit_checked_at = now()`);
   });
 });
 

@@ -217,8 +217,12 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   server-side code exchange, `debug_token` checks and an independent WABA/number ownership check with
   the new token; encrypted token; definer-function bindings; then `channel.onboard` jobs subscribe
   the app, register the number (generated six-digit PIN, encrypted) and read its health, resuming
-  from the last completed step. Facebook's SDK is allowed by CSP (and COOP relaxed to
-  `same-origin-allow-popups`) on the channels settings page only.
+  from the last completed step. The health read also asks for the number's `messaging_limit_tier`
+  (ADR-398), kept as Meta gives it in `channel_accounts.messaging_limit_tier` with the time of the
+  read (`messaging_limit_checked_at`); when Graph refuses that read with code 100, the health is
+  read once more without the tier, so a deprecated field never fails a setup. Facebook's SDK is
+  allowed by CSP (and COOP relaxed to `same-origin-allow-popups`) on the channels settings page
+  only.
 - **Live inbox:** `app.tenant_events` (xid8 + id cursor; readers only see transactions below the
   snapshot xmin, so no event is skipped), events record the conversation's assignee so streams only
   carry ids a member may see, `NOTIFY` wakes one `LISTEN` connection per web process, the SSE endpoint
@@ -234,8 +238,9 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   the same job lists the account's subscribed apps and subscribes HyFib's app again when it is
   missing (ADR-138): a restoration is audited and emailed; one that fails is emailed once, shown on
   every page of the company and tried again after 30 minutes. `listChannels` gives each number its
-  account's stored permissions through `grantedPermissionList` (ADR-381), which Settings → Channels
-  shows.
+  account's stored permissions through `grantedPermissionList` (ADR-381) and its messaging limit
+  tier worded by `messagingLimitText` (ADR-398: as Meta names it, an unlisted one as unknown, none
+  as not reported, nothing for a number never asked), which Settings → Channels shows.
 - **Not built yet:** media download to private object storage, message search, Meta-side
   deregistration on disconnect (templates and template sends: section 6A).
 

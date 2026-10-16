@@ -15070,8 +15070,9 @@ Decision:
   same row; permission names are not secrets, and no token, id or other data of Meta's answer is
   shown.
 
-Not built: the messaging limits of each number (their Graph fields are not read yet), and which
-assets each permission covers (`granular_scopes` target ids).
+Not built: the messaging limits of each number (their Graph fields are not read yet; since built:
+the tier Meta reports for each number, ADR-398), and which assets each permission covers
+(`granular_scopes` target ids).
 
 ## ADR-382 Byte ranges for the inbox's recordings and videos (P2-09) (2026-10-16)
 
@@ -16373,3 +16374,87 @@ Decision (part two, release N+1, migration 0308):
 Not built: the product, its price, quantity or line id in the event (a receiver reads `deal.items`),
 an event type of its own for products, several products added or removed in one request sending one
 event, the history naming the product, and an end-to-end test of its own.
+
+## ADR-398 Each WhatsApp number's messaging limit tier on Settings → Channels (P2-10) (2026-10-16)
+
+Context: Settings → Channels shows each number's quality rating, read with its health in the last
+step of its setup (`GET /{phone-number-id}`), but not its messaging limit: "messaging limits
+display" remained under P2-10, and ADR-381 listed it as not built ("their Graph fields are not read
+yet"). Meta's OpenAPI description lists `messaging_limit_tier` among the fields of that same read
+(research M-199).
+
+Decision:
+
+- **The same read, one more field (`messaging/graph.ts`, `getPhoneNumber`):** the health read asks
+  for `messaging_limit_tier` after the five fields it asked before. No new endpoint and, when the
+  read succeeds, no new request. The description's operation `getWhatsAppAccountNumberDetails`
+  (`GET /{Version}/{WhatsApp-Account-Number-ID}`, the id "obtained from your WhatsApp Business
+  Account phone numbers list") lists the field for its `fields` parameter, beside the five, and
+  describes it as "Current messaging limit tier for the account number": `TIER_50`, `TIER_250`,
+  `TIER_1K`, `TIER_10K`, `TIER_100K` or `TIER_UNLIMITED`.
+- **What is kept (`messaging/messaging-limit.ts`):** `parseMessagingLimitTier` keeps any text Meta
+  gives as it is, a tier the description does not list included, clipped to 64 characters (no
+  listed tier comes near); a field absent, empty or not text is null. A tier is never turned into a
+  number of conversations or customers.
+- **Meta refusing the field:** research M-059 and M-137 call `messaging_limit_tier` deprecated in
+  favour of `whatsapp_business_manager_messaging_limit` (v24.0 and later), and HyFib asks v26.0;
+  Graph refuses a field it does not have with code 100 (as the description's example for
+  `GET /{Phone-Number-ID}` shows), which would fail the whole read and so every number's setup at
+  its health check. So when the read fails as permanent with code 100, onboarding reads once more
+  without the tier (the read made before ADR-398), as the template sync falls back to Meta's
+  default fields; the number is set up without a tier, which Channels shows as not reported, and
+  the `channel.activated` audit entry records `messagingLimitTier: refused`. Any other failure, and
+  the second read's, is handled as before.
+- **Where it is kept (migration 0309):** `channel_accounts.messaging_limit_tier` (text of 1 to 64
+  characters: bounded by length like `name_status` and `code_verification_status`, never by a list,
+  which Meta may extend) and `messaging_limit_checked_at`, when a read that asked for the tier
+  succeeded (a check allows a tier only with it). The runtime role may update both (column grants,
+  as for the number's other facts from Meta) and the platform role may read them, as it reads those
+  facts (0003); the definer role gets nothing. Exported with the number (`export-spec.ts`) and
+  deleted with it (whole rows, deletion step 790). Expand only: two nullable columns, nothing
+  rewritten, both checks validated at once.
+- **When it is read:** whenever onboarding reads a number's health, with its other facts: when the
+  number is connected or connected again, when its setup is retried, and when its account is
+  reconnected (the account's other numbers have their health read again, ADR-137). A number's facts
+  have no periodic refresh, and none is added; the "Checked" time Channels shows is the tier's too.
+- **On Channels:** under the quality rating, `messagingLimitText`: "Messaging limit: TIER_1K" for a
+  listed tier, "Messaging limit: unknown tier (TIER_2K)" for any other text, and "Messaging limit:
+  not reported by Meta" when the answer of a read that asked had none. A number never asked (its
+  health last read before ADR-398, or never) shows nothing: its tier is not known to be absent. The
+  description says nothing of what a tier allows, so no figure is shown; below the numbers, when
+  one shows a tier: "A number’s messaging limit is the tier Meta reports for it, named as Meta
+  names it. Since 7 October 2025 Meta sets messaging limits per business portfolio, shared by all
+  its numbers." (research M-058). Members who can read channels (`channels.read`) see it, as they
+  see the quality rating; the public API does not give it.
+- **The Graph stand-in (tests only)** answers the tier only to a read that asks for it: `TIER_1K`
+  (the description's example) unless a test gives a number another value (an unlisted tier, a
+  value that is not text) or none, or makes Graph refuse the field with code 100.
+
+Uncertainties:
+
+- **Whether v26.0 still gives the field.** The description is named v23.0 (the copy read is the same
+  as the file on GitHub on 2026-10-16) and says nothing of deprecation; research M-059 and M-137
+  call the field deprecated. If v26.0 leaves it out, numbers show "not reported by Meta"; if it
+  refuses it, setup carries on without it, as above. To check with a real number before launch
+  (META-SETUP).
+- **The same path is described twice.** `getPhoneNumberById` (`GET /{Version}/{Phone-Number-ID}`)
+  lists only `name_status` and `code_verification_status` beyond its defaults, its answer has no
+  tier, and its example refuses another field with code 100; `getWhatsAppAccountNumberDetails`
+  lists the tier for an id "obtained from your WhatsApp Business Account phone numbers list", as
+  HyFib's is (onboarding checks that the number is in that list). Both describe a GET of a number by
+  its id, which is the read HyFib makes; which description Graph v26.0 follows for the tier is the
+  first uncertainty.
+- **What the values mean now.** The description's values include `TIER_1K`, while since 2025-10-07
+  a messaging limit (the unique users a business can reach outside a customer service window in a
+  moving 24 hours) is set per business portfolio, at 250, 2,000, 10,000, 100,000 or unlimited
+  (research M-058), and Meta's SDK lists `TIER_2K` and `UNTIERED`, and no `TIER_1K`, for the
+  portfolio's field. How a number's tier relates to its portfolio's limit is not documented in what
+  HyFib could read, so the tier is shown as Meta names it, an unlisted one as unknown.
+
+Not built: the portfolio's limit (`whatsapp_business_manager_messaging_limit`: Meta's SDK has it on
+the WhatsApp Business Account and a docs snippet on the phone number; it is not in the description,
+research M-059); a periodic or on-demand refresh of a number's facts (quality rating, name status,
+tier); the tier in the public API, in webhooks and in the operations console (which shows one
+quality rating per company, through a definer function); the `current_limit` of the
+`phone_number_quality_update` webhook (research M-056) and the `MESSAGING_LIMIT_TIER_0` to `_4`
+values of the description's `WhatsAppBusinessAccountToNumberStatus`, whose meaning it does not give.

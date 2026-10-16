@@ -90,6 +90,12 @@ export const channelAccounts = appSchema.table('channel_accounts', {
   defaultTeamId: uuid('default_team_id'),
   createdAt: tz('created_at').notNull().defaultNow(),
   updatedAt: tz('updated_at').notNull().defaultNow(),
+  /**
+   * The number's messaging limit tier as Meta gave it, and when a health read that asked for it
+   * succeeded: null for a number never asked (ADR-398, migration 0309).
+   */
+  messagingLimitTier: text('messaging_limit_tier'),
+  messagingLimitCheckedAt: tz('messaging_limit_checked_at'),
 });
 
 export const channelOnboardingSessions = appSchema.table('channel_onboarding_sessions', {

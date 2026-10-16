@@ -13,6 +13,7 @@
  */
 import { clipText, parseExternalJson } from '@w360/core';
 import type { FlowValidationError } from '@w360/db';
+import { parseMessagingLimitTier } from './messaging-limit';
 
 export type GraphFailureKind = 'retryable' | 'permanent' | 'auth' | 'unknown';
 
@@ -150,6 +151,10 @@ export interface RemoteProduct {
 const str = (value: unknown): string | null => (typeof value === 'string' ? value : null);
 const num = (value: unknown): number | null =>
   typeof value === 'number' && Number.isFinite(value) ? value : null;
+
+/** The fields of a phone number its health read asks for, besides its messaging limit tier. */
+const PHONE_NUMBER_FIELDS =
+  'display_phone_number,verified_name,quality_rating,name_status,code_verification_status';
 
 /** Meta's Flow JSON validation errors (research M-162), bounded. */
 export function mapFlowValidationErrors(value: unknown): FlowValidationError[] {
@@ -726,16 +731,26 @@ export class GraphClient {
     );
   }
 
-  /** GET /{phone-number-id}?fields=... */
-  getPhoneNumber(phoneNumberId: string, token: string) {
+  /**
+   * GET /{phone-number-id}?fields=... Meta's description lists every field asked here for this read
+   * (operation `getWhatsAppAccountNumberDetails`, research M-137). `messaging_limit_tier` (ADR-398)
+   * is asked unless `messagingLimitTier` is false: research M-059 calls it deprecated, and Graph
+   * refuses a field it does not have with code 100, so a caller can read the rest without it. A read
+   * that does not ask for the tier gives none.
+   */
+  getPhoneNumber(
+    phoneNumberId: string,
+    token: string,
+    options: { messagingLimitTier?: boolean } = {},
+  ) {
+    const withTier = options.messagingLimitTier ?? true;
     return this.request(
       'GET',
       `/${encodeURIComponent(phoneNumberId)}`,
       {
         token,
         query: {
-          fields:
-            'display_phone_number,verified_name,quality_rating,name_status,code_verification_status',
+          fields: withTier ? `${PHONE_NUMBER_FIELDS},messaging_limit_tier` : PHONE_NUMBER_FIELDS,
         },
       },
       (json) => ({
@@ -746,6 +761,7 @@ export class GraphClient {
         nameStatus: typeof json.name_status === 'string' ? json.name_status : null,
         codeVerificationStatus:
           typeof json.code_verification_status === 'string' ? json.code_verification_status : null,
+        messagingLimitTier: withTier ? parseMessagingLimitTier(json.messaging_limit_tier) : null,
       }),
     );
   }

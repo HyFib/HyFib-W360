@@ -82,6 +82,17 @@ export interface StandInState {
   >;
   wabaNumbers: Map<string, string[]>;
   numbers: Map<string, { display_phone_number: string; verified_name: string }>;
+  /**
+   * What a phone number read that asks for `messaging_limit_tier` gets (ADR-398): `TIER_1K`, the
+   * example in Meta's description, for a number not in this map; a value in it is given as it is (a
+   * tier the description does not list, or not text at all), and null leaves the field out.
+   */
+  messagingLimitTiers: Map<string, unknown>;
+  /**
+   * When true, a phone number read that asks for `messaging_limit_tier` fails with code 100, as
+   * Graph refuses a field it does not have.
+   */
+  rejectMessagingLimitTier: boolean;
   sendQueue: SendBehaviour[];
   registerError: { status: number; code: number; message: string } | null;
   requests: RecordedRequest[];
@@ -656,6 +667,8 @@ export async function startGraphStandIn(options: {
     tokens: new Map(),
     wabaNumbers: new Map(),
     numbers: new Map(),
+    messagingLimitTiers: new Map(),
+    rejectMessagingLimitTier: false,
     sendQueue: [],
     registerError: null,
     requests: [],
@@ -1300,11 +1313,28 @@ export async function startGraphStandIn(options: {
       if (req.method === 'GET' && first && !second) {
         const number = state.numbers.get(first);
         if (!number) return graphError(res, 400, 100, 'Unsupported get request.');
+        // The tier only when the read asks for it (ADR-398), refused with code 100 when the test
+        // says Graph does not have the field.
+        const tierAsked = (url.searchParams.get('fields') ?? '')
+          .split(',')
+          .includes('messaging_limit_tier');
+        if (tierAsked && state.rejectMessagingLimitTier) {
+          return graphError(
+            res,
+            400,
+            100,
+            '(#100) Tried accessing nonexisting field (messaging_limit_tier)',
+          );
+        }
+        const tier = state.messagingLimitTiers.has(first)
+          ? state.messagingLimitTiers.get(first)
+          : 'TIER_1K';
         return json(res, 200, {
           ...number,
           quality_rating: 'GREEN',
           name_status: 'APPROVED',
           code_verification_status: 'VERIFIED',
+          ...(tierAsked && tier !== null ? { messaging_limit_tier: tier } : {}),
           id: first,
         });
       }

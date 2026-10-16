@@ -158,6 +158,23 @@ sweep is not running: nobody is emailed about late queues until it does, so star
 - Other setup errors show the step and Meta's message; fix the cause (for example the number's
   two-step verification PIN set elsewhere) and **Retry setup**.
 
+### Messaging limit tier on Channels (ADR-398)
+
+- `Messaging limit: TIER_…`: the tier Meta gave at the number's last health read ("Checked …"), as
+  Meta names it. HyFib does not say what a tier allows; since 7 October 2025 Meta sets messaging
+  limits per business portfolio, which HyFib does not read.
+- `Messaging limit: unknown tier (…)`: Meta gave a value its description does not list (for example
+  a newer tier). Nothing to fix; it is shown as given.
+- `Messaging limit: not reported by Meta`: the read asked for the tier and Meta's answer had none,
+  or Graph refused the field with code 100 and the health was read again without it; the
+  `channel.activated` audit entry of that read then has `messagingLimitTier: refused`. The number
+  works either way. Refusals for every number mean Meta no longer has the field on the pinned
+  version (research M-059): setup keeps working without it, and reading the portfolio's limit
+  instead needs a decision of its own (not built, ADR-398).
+- No messaging limit line: the number's health was last read before ADR-398 (or never); it is read
+  when the number is connected again, its setup retried or its account reconnected. Do not reconnect
+  a number only for this: connecting again registers it again, which Meta counts.
+
 ## 8. Data restoration
 
 1. Declare incident; freeze deploys.

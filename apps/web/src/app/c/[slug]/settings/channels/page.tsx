@@ -1,5 +1,5 @@
 import type { Metadata } from 'next';
-import { assertCan, can } from '@w360/domain';
+import { MESSAGING_LIMIT_NOTE, assertCan, can } from '@w360/domain';
 import {
   Alert,
   Badge,
@@ -153,6 +153,11 @@ export default async function ChannelsPage({ params }: { params: Promise<{ slug:
                       </TD>
                       <TD>
                         <div className="text-sm">{ch.qualityRating ?? '—'}</div>
+                        {ch.messagingLimit ? (
+                          <div className="max-w-sm break-words text-xs text-muted-foreground">
+                            {ch.messagingLimit}
+                          </div>
+                        ) : null}
                         {ch.healthCheckedAt ? (
                           <div className="text-xs text-muted-foreground">
                             Checked {formatDateTime(ch.healthCheckedAt, ctx.tenant.timezone)}
@@ -202,6 +207,9 @@ export default async function ChannelsPage({ params }: { params: Promise<{ slug:
               </TBody>
             </Table>
           )}
+          {channels.some((ch) => ch.messagingLimit !== null) ? (
+            <p className="text-xs text-muted-foreground">{MESSAGING_LIMIT_NOTE}</p>
+          ) : null}
         </CardContent>
       </Card>
     </div>

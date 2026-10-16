@@ -82,6 +82,12 @@ App-secret rotation: set the new secret as `META_APP_SECRET` and the old one as
   unknown-outcome handling; default throughput 80 msg/s per number; ~1 message per 6 s per recipient
   (pair rate limit); messaging limits are per **business portfolio** since 2025-10-07
   (`whatsapp_business_manager_messaging_limit`).
+- **Messaging limit tier:** each number's health read (`GET /{PHONE_NUMBER_ID}`) also asks for
+  `messaging_limit_tier`, which Settings → Channels shows as Meta names it (ADR-398). Research
+  calls the field deprecated (M-059): before launch, read a real number on the pinned version and
+  check whether Meta still gives it. If Graph refuses it (code 100), setup reads the health again
+  without it, the number shows "Messaging limit: not reported by Meta", and its `channel.activated`
+  audit entry records `messagingLimitTier: refused`.
 - **Pricing (effective 2026-10-01, verify):** per-message pricing by category and market; service
   messages beyond 1,000 per number per month and utility templates inside the customer service window
   become billable; businesses without a payment method stop receiving delivery of service messages.
@@ -104,6 +110,8 @@ App-secret rotation: set the new secret as `META_APP_SECRET` and the old one as
 3. Whether Tech Providers may re-bill or mark up Meta charges (we assume **not**).
 4. `biz_opaque_callback_data` (or equivalent) support per message type for correlating sends.
 5. BSUID send semantics (`recipient` vs `to`) and go-live dates per message type.
+6. Whether a number's `messaging_limit_tier` is still given on the pinned version, and how it
+   relates to its business portfolio's messaging limit (ADR-398, research M-199).
 
 ## Templates (phase 3)
 

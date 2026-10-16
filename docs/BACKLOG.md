@@ -56,7 +56,13 @@ verification, app review, Embedded Signup configuration).
   first-response target, each shown to members who can read its data; no migration).
   **[The permissions granted to HyFib shown on Channels; its database and browser tests run only in
   CI]** (ADR-381, no migration: the permissions Meta listed for each account's access at its last
-  check, the needed ones first with what each is for). Remaining: messaging limits display.
+  check, the needed ones first with what each is for). **[Messaging limits display built: each
+  number's messaging limit tier on Channels; its database and browser tests run only in CI]**
+  (ADR-398, migration 0309: `messaging_limit_tier` read with the number's health and shown as Meta
+  names it, an unlisted value as unknown and none as not reported, never as a figure; the health
+  read again without it when Graph refuses the field). Remaining: the business portfolio's own
+  messaging limit (`whatsapp_business_manager_messaging_limit`) and a refresh of a number's facts
+  outside its setup.
 - **P2-11 Platform quarantine view** — done with P5-10 (ADR-054): the operations console's
   Integrations page lists quarantined webhooks without their content and platform administrators
   resolve them, or retry their receipts, with a reason in the platform audit log.

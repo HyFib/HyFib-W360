@@ -37,6 +37,11 @@ export async function connectTestChannel(opts: {
   /** How WhatsApp shows the number: `+91 90000 12345` and `E2E Traders` unless given. */
   displayPhoneNumber?: string;
   verifiedName?: string;
+  /**
+   * The tier a health read got from Meta, null for none (ADR-398), stored as read now; without it
+   * the number was never asked, as a number connected before ADR-398.
+   */
+  messagingLimitTier?: string | null;
 }) {
   const auth = new pg.Client({ connectionString: process.env.E2E_DATABASE_URL_AUTH });
   await auth.connect();
@@ -88,8 +93,9 @@ export async function connectTestChannel(opts: {
     ]);
     await app.query(
       `INSERT INTO app.channel_accounts
-         (id, tenant_id, whatsapp_account_id, phone_number_id, status, display_phone_number, verified_name)
-       VALUES ($1, $2, $3, $4, 'active', $5, $6)`,
+         (id, tenant_id, whatsapp_account_id, phone_number_id, status, display_phone_number, verified_name,
+          messaging_limit_tier, messaging_limit_checked_at)
+       VALUES ($1, $2, $3, $4, 'active', $5, $6, $7, CASE WHEN $8 THEN now() END)`,
       [
         channelAccountId,
         tenantId,
@@ -97,6 +103,8 @@ export async function connectTestChannel(opts: {
         phoneNumberId,
         opts.displayPhoneNumber ?? '+91 90000 12345',
         opts.verifiedName ?? 'E2E Traders',
+        opts.messagingLimitTier ?? null,
+        opts.messagingLimitTier !== undefined,
       ],
     );
     await app.query(

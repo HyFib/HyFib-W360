@@ -46,6 +46,7 @@ import {
 } from './access';
 import { emitTenantEvent } from './events';
 import type { GraphClient, GraphResult } from './graph';
+import { messagingLimitText } from './messaging-limit';
 import { credentialAad } from './outbound';
 import { COUNTED_CHANNEL_STATUSES, assertNumberAvailable } from '../plans/entitlements';
 
@@ -105,6 +106,12 @@ export interface ChannelView {
   onboardingError: string | null;
   qualityRating: string | null;
   nameStatus: string | null;
+  /**
+   * The number's messaging limit tier as Channels words it (`messagingLimitText`, ADR-398), or null
+   * when HyFib has not asked Meta for it: a number whose health was last read before ADR-398, or
+   * never.
+   */
+  messagingLimit: string | null;
   healthCheckedAt: string | null;
   /** The access of the number's account (ADR-137). */
   accountStatus: 'connected' | 'needs_reconnect' | 'disconnected';
@@ -675,6 +682,8 @@ export function createOnboardingService(deps: OnboardingDeps) {
               onboardingError: channelAccounts.onboardingError,
               qualityRating: channelAccounts.qualityRating,
               nameStatus: channelAccounts.nameStatus,
+              messagingLimitTier: channelAccounts.messagingLimitTier,
+              messagingLimitCheckedAt: channelAccounts.messagingLimitCheckedAt,
               healthCheckedAt: channelAccounts.healthCheckedAt,
               accountStatus: whatsappAccounts.status,
               accessCheckedAt: whatsappAccounts.tokenCheckedAt,
@@ -695,8 +704,9 @@ export function createOnboardingService(deps: OnboardingDeps) {
         { accessMode: 'read only' },
       );
       const now = clock.now();
-      return rows.map(({ grantedScopes, ...r }) => ({
+      return rows.map(({ grantedScopes, messagingLimitTier, messagingLimitCheckedAt, ...r }) => ({
         ...r,
+        messagingLimit: messagingLimitCheckedAt ? messagingLimitText(messagingLimitTier) : null,
         grantedPermissions: grantedPermissionList(grantedScopes),
         healthCheckedAt: r.healthCheckedAt?.toISOString() ?? null,
         accessCheckedAt: r.accessCheckedAt?.toISOString() ?? null,
@@ -938,8 +948,19 @@ export async function processChannelOnboarding(
     await update({ onboardingStep: step });
   }
   if (step === 'health_check' || step === 'done') {
-    const result = await deps.graph.getPhoneNumber(loaded.phoneNumberId, token);
+    let result = await deps.graph.getPhoneNumber(loaded.phoneNumberId, token);
+    // Graph refuses a field it does not have with code 100, and research M-059 calls
+    // `messaging_limit_tier` deprecated: the health is then read once more without it, so the tier
+    // never fails a number's setup, and Meta has reported no tier (ADR-398). Any other failure, or
+    // the second read's, is handled as before.
+    const tierRefused = !result.ok && result.kind === 'permanent' && result.code === 100;
+    if (tierRefused) {
+      result = await deps.graph.getPhoneNumber(loaded.phoneNumberId, token, {
+        messagingLimitTier: false,
+      });
+    }
     if (!result.ok) return handleFailure(result, 'health_check');
+    const checkedAt = deps.clock.now();
     await update(
       {
         status: 'active',
@@ -950,13 +971,17 @@ export async function processChannelOnboarding(
         qualityRating: result.data.qualityRating,
         nameStatus: result.data.nameStatus,
         codeVerificationStatus: result.data.codeVerificationStatus,
-        healthCheckedAt: deps.clock.now(),
+        messagingLimitTier: result.data.messagingLimitTier,
+        messagingLimitCheckedAt: checkedAt,
+        healthCheckedAt: checkedAt,
       },
       (tx) =>
         recordSystemAudit(tx, scope.tenantId, {
           action: 'channel.activated',
           subjectType: 'channel',
           subjectId: loaded.id,
+          // Channels shows such a number's tier as not reported; the audit says why.
+          ...(tierRefused ? { metadata: { messagingLimitTier: 'refused' } } : {}),
         }),
     );
     return 'active';
