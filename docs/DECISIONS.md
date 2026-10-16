@@ -14884,7 +14884,7 @@ Decision:
 Not built: deal webhook events for item changes, items without a catalog product, discounts and
 taxes, the value kept equal to the items' total automatically, and items set by automation steps or
 the deal import. (Items in the public API: ADR-378; in the deals CSV: ADR-380; in deal webhook
-payloads, since built: ADR-395, though a change of items still sends no event.)
+payloads, since built: ADR-395; deal webhook events for item changes, since built: ADR-397.)
 
 ## ADR-376 Report emails (P3-05) (2026-10-16)
 
@@ -15005,7 +15005,7 @@ Decision:
 Not built: changing an item's quantity or price in place (remove and add it again), adding several
 products in one request, items in the deal object, its webhook events or the deals CSV, and items
 added by automation steps. (Items in the deals CSV since built: ADR-380; in deal webhook payloads:
-ADR-395; a key's change of items in the deal's history: ADR-397.)
+ADR-395; a key's change of items as a deal event, and in the deal's history: ADR-397.)
 
 ## ADR-379 Custom field values when a deal is created (P4-04) (2026-10-16)
 
@@ -16153,9 +16153,10 @@ Decision:
 
 Not built: `deal.updated` naming `items` in `changes` when a deal's products change (it needs a
 capture on `app.crm_deal_items` in a migration, an endpoint detail, the API's deal history and
-their tests, left for a slice of its own), the items' total in the payload (a receiver sums
-`totalMinor`, as the deal page does, when every item is in the deal's currency), items in the API's
-deal object, and an end-to-end test of its own.
+their tests, left for a slice of its own; since ADR-397, built in two releases: migration 0308's
+trigger on the item sends one `deal.updated` naming `items` for each product added or removed),
+the items' total in the payload (a receiver sums `totalMinor`, as the deal page does, when every
+item is in the deal's currency), items in the API's deal object, and an end-to-end test of its own.
 
 ## ADR-396 Filtering the deals section of Reports by a choice field (P4-04, P5-08) (2026-10-16)
 
@@ -16298,5 +16299,77 @@ Decision (part one, release N, no migration):
 - **Deployment:** no migration; this release is deployed everywhere, every worker and web server,
   before the release carrying migration 0308 (`docs/DEPLOYMENT.md`).
 
-Not built in part one: the capture (migration 0308), the endpoint detail, their descriptions and
-their database tests, which part two, the next release, builds.
+Decision (part two, release N+1, migration 0308):
+
+- **The same event, one more detail:** each product a member adds to or removes from a deal (the
+  deal page, ADR-375) or a key adds or removes (`POST /deals/{id}/items`,
+  `DELETE /deals/{id}/items/{itemId}`, ADR-378) sends one `deal.updated` whose `changes` names
+  `items` alone, last in the details' order (`title`, `valueMinor`, `expectedCloseOn`, `fields`,
+  `items`), with an empty `changedFields`. A new event type was not chosen, as for `fields`
+  (ADR-390): products are part of what the deal is (ADR-395), endpoints taking "Deal details"
+  receive the change without being changed, and the pipeline, stage, owner, change-maker and key
+  lists (ADR-263 to ADR-265, ADR-306, ADR-321) apply as they do to every deal event.
+- **One product change, one event:** a trigger on `app.crm_deal_items` (`crm_deal_items_webhook`,
+  after each row inserted or deleted, `app.webhook_capture_deal_item`) captures it in the
+  transaction that adds or removes the product, with the deal's stage, pipeline and status as they
+  are (a change of products moves none of them), its owner as the step's owner (0215) and
+  `clock_timestamp()`. The deal's own capture (0305) sends nothing for it: a change of products
+  moves only the deal's version and changer, columns neither it nor the changer trigger watches, so
+  no change of products is reported twice. Items are never changed in place (no `UPDATE` grant):
+  there is nothing else to capture. A refused change (a stale version, a product already removed, a
+  deal's 51st product, an erased contact's deal) writes no item, so it sends nothing.
+- **What changed, never the product:** the event's detail names `items` and no product, name, price,
+  quantity or line id, as the other details are named without their values (ADR-275, ADR-390); the
+  payload's `deal.items` gives the products as they are when the event is delivered (ADR-395), so a
+  receiver replaces its copy with them, or compares. A `changedItems` list, like `changedFields`,
+  was not added: `changedFields` exists because the payload carries no field values (ADR-390), while
+  the products are in the payload whole, and an event delivered after later changes gives the latest
+  products anyway; the ids of the lines added or removed would tell a receiver nothing the delivered
+  list does not.
+- **Who made it:** an addition's maker is the item's own creator (the member, or the key in
+  `created_by_api_key_id`, 0297), as `deal.created`'s is the deal's (0229); a removal's is the maker
+  the removing transaction recorded on the deal (ADR-277's `changed_xact`), which part one's web
+  servers write before the item, and nobody when it recorded none, never an earlier transaction's.
+  `changedBy` and `apiKeyId` are given as for every deal event, so endpoints naming makers or
+  leaving out keys narrow it; their descriptions (the payload's and the API deal's) name products.
+  Those two filters let a change through when its maker was not recorded (0284), so a removal naming
+  nobody would reach an endpoint that takes only members' changes or leaves out its own key's.
+  Splitting the release removes that case: when the capture starts, every web server already records
+  the maker before the item changes.
+- **Endpoints may choose it:** "Products" (`items`) joins the details an endpoint taking
+  `deal.updated` may list (ADR-310, ADR-390), in Settings → Webhooks and as `dealDetails`. Lists
+  saved before keep their details, so they do not receive a change of products until it is added;
+  null still takes every change. `app.capture_webhook_event` is unchanged: its detail filter already
+  matches `changes`.
+- **Erasure and company deletion:** erasure keeps a deal's products (ADR-375), so its retitling
+  never names `items`. Company deletion deletes the items (step 295) after the endpoints (step 60),
+  and the capture reads nothing while no active endpoint of the company takes `deal.updated`
+  (`app.webhook_subscribed`, before the deal is read), so the deletion's batches, which run as the
+  definer role, read no deal and capture nothing. The definer role gains no read: it still may not
+  read a deal's stage, pipeline, status or changer. No other definer function adds or removes items.
+- **Migration 0308:** replaces the endpoints' `deal_details` check to take 1 to 5 details with
+  `items` (validated at once: at most 10 endpoints per company), and adds the capture function (not
+  SECURITY DEFINER: it runs as the role making the change, so row security keeps the deal read and
+  the event in the item's company; search path pinned; not executable by PUBLIC) and the trigger. No
+  table, column, policy or grant is added, and the event's detail stays far below the 4,096 bytes of
+  0305's check, so no check is widened NOT VALID and no second migration validates one.
+- **Rollout:** 0308 is backward compatible with part one's workers and web servers, so the usual
+  pipeline is safe: the migration first, then workers, then web servers. From the migration on,
+  every product added or removed captures its event, which part one's workers render with `items`
+  and whose removal names the maker part one's web servers record first. Until the web rollout ends,
+  a web server of part one neither offers "Products" nor saves an endpoint whose list holds `items`
+  ("Choose deal details from the list."), and its OpenAPI document still says that no event is sent
+  (`docs/DEPLOYMENT.md`).
+- **Rollback:** rolling back to part one leaves the trigger, which part one's workers and web
+  servers were built for, so that is safe. Rolling back further while 0308 is applied would bring
+  the window back: a worker from before part one sends these events with `changes` empty, and a
+  removal through a web server from before part one names nobody, which the maker and key filters
+  let through. So before redeploying an image from before part one, drop the trigger first
+  (`DROP TRIGGER crm_deal_items_webhook ON app.crm_deal_items`) in a forward-repair migration, as
+  `docs/DEPLOYMENT.md` repairs any database change (none is rolled back); products then change
+  without an event, as before this decision, and a later migration creates the trigger again once
+  part one runs everywhere.
+
+Not built: the product, its price, quantity or line id in the event (a receiver reads `deal.items`),
+an event type of its own for products, several products added or removed in one request sending one
+event, the history naming the product, and an end-to-end test of its own.

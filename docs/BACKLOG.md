@@ -410,7 +410,8 @@ verification, app review, Embedded Signup configuration).
   **[Products on deals built; their database and browser tests run only in CI]** (ADR-375,
   migration 0294: catalog products listed on a deal with a quantity and an exact unit price, at the
   deal's version and on its timeline, their total shown and usable as the deal's value. Not built:
-  discounts and taxes; items in webhooks since built, ADR-395).
+  discounts and taxes; items in webhooks since built, ADR-395, and changes of items as
+  `deal.updated`, ADR-397).
   **[Products in the deals CSV built; its database test runs only in CI]** (ADR-380, no migration:
   a `products` cell with a line per product and a `products_total` column in the deal's currency).
   **[Products on deals through the API built; their database tests run only in CI]** (ADR-378,
@@ -1311,7 +1312,17 @@ verification, app review, Embedded Signup configuration).
   **[Products in deal webhook payloads built; their database tests run only in CI]** (ADR-395, no
   migration: every deal event's deal gives `items`, the deal's products as `GET /deals/{id}/items`
   reads them when the event is delivered, in the order added, at most 50, an erased contact's
-  deal's too. Not built: an event or a `changes` entry for a change of products).
+  deal's too. Not built: an event or a `changes` entry for a change of products, since built,
+  ADR-397).
+  **[Deal product change events built; their database tests run only in CI]** (ADR-397, in two
+  releases, the first without a migration, then migration 0308: a trigger on `app.crm_deal_items`
+  sends one `deal.updated` naming `items` alone for each product a member or an API key adds or
+  removes, with its maker (an addition's from the item, a removal's as its transaction recorded it
+  on the deal, which web servers write first since the first release), never the product, its
+  price or quantity; endpoints may choose `items` ("Products") among their deal details; the API's
+  deal history names it; erasure keeps products and company deletion captures nothing. Not built:
+  the product or its line id in the event, an event type of its own, several products in one
+  event).
   **[Task detail events built; their database tests run only in CI]** (ADR-276, migrations 0194 and
   0195: `task.updated` for every change of a task's title, notes, due time or reminder by members or
   API keys, naming what changed, never the values or the notes; the assignee list narrows it; one

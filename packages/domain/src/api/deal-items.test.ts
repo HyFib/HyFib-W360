@@ -252,7 +252,7 @@ describe('products on deals through the API (ADR-378)', () => {
     expect(apiAddedDealItemSchema.safeParse(byMember).success).toBe(false);
   });
 
-  it('are described: the scopes, the catalogs, the refusals, the version and what is not sent', () => {
+  it('are described: the scopes, the catalogs, the refusals, the version and the event each change sends', () => {
     const doc = buildOpenApiDocument('https://example.test/api/v1') as unknown as {
       paths: Record<string, Record<string, Record<string, unknown>>>;
       components: {
@@ -321,20 +321,20 @@ describe('products on deals through the API (ADR-378)', () => {
       `when the deal already lists ${MAX_DEAL_ITEMS} products`,
       'with 409 on an erased contact’s deal',
       'Needs the CRM and Commerce in the company’s plan',
-      // In the deal's history since ADR-397, as `items`.
-      'no deal event is sent, as when members add one, and the deal’s history gives it (`changes`: `items`)',
+      // Each change of products is a deal event and in the deal's history (ADR-397).
+      'as when members add one, deal.updated is sent naming `items` (deal.changedBy `api`, with the key), and the deal’s history gives it (`changes`: `items`)',
       'PATCH /deals/{id} sets it',
     ]) {
       expect(add.description).toContain(words);
     }
     for (const words of [
       'Scope: `deals.write`.',
-      'no deal event is sent, and the deal’s history gives it',
-      'A product already removed answers 404',
+      'deal.updated is sent naming `items` (deal.changedBy `api`, with the key), and the deal’s history gives it',
+      'A product already removed answers 404 and sends nothing',
     ]) {
       expect(remove.description).toContain(words);
     }
-    expect(`${add.description} ${remove.description}`).not.toMatch(/leaves it out|ADR-\d/);
+    expect(`${add.description} ${remove.description}`).not.toMatch(/no deal event|ADR-\d/);
     const schemas = doc.components.schemas;
     expect(schemas.DealItem?.required.sort()).toEqual(
       [

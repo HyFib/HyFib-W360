@@ -4603,7 +4603,21 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     const given = (schemas.CreateWebhookEndpoint as { properties: Record<string, unknown> })
       .properties;
     expect(JSON.stringify(given.dealDetails)).toContain(
-      "as deal.updated (title, valueMinor, expectedCloseOn, fields, as the event's changes names them): a change is sent when it changed one of them, naming every detail it changed; only with the deal.updated event",
+      "as deal.updated (title, valueMinor, expectedCloseOn, fields, items, as the event's changes names them): a change is sent when it changed one of them, naming every detail it changed; only with the deal.updated event",
+    );
+    // A change of products (ADR-397) is chosen as `items`, last, alone or with other details.
+    expect(
+      apiCreateWebhookEndpointSchema.parse({
+        url,
+        events: ['deal.updated'],
+        dealDetails: ['items', 'title'],
+      }),
+    ).toMatchObject({ dealDetails: ['title', 'items'] });
+    expect(apiUpdateWebhookEndpointSchema.parse({ dealDetails: ['items'] })).toEqual({
+      dealDetails: ['items'],
+    });
+    expect(JSON.stringify(answered.properties.dealDetails)).toContain(
+      'items any product added or removed',
     );
     expect(JSON.stringify(given.taskDetails)).toContain(
       "as task.updated (title, notes, dueAt, remindAt, as the event's changes names them): a change is sent when it changed one of them, naming every detail it changed; only with the task.updated event",

@@ -2407,10 +2407,10 @@ made a change; a member is never named.
 **An integration misses a deal change, or hears two at once (ADR-256).** Endpoints that take
 `deal.created`, `deal.stage_changed` or `deal.status_changed` are sent one event per deal added and
 per change of a deal's stage or status, whoever made it; edits of its title, value, expected date
-or custom field values send `deal.updated` to the endpoints that take it (ADR-275, ADR-390), as does
-erasure's retitling, and merges send nothing; a change of its owner sends `deal.owner_changed` to
-the endpoints that take it (ADR-269). Changes made while no endpoint took the type were not recorded
-and are not sent later. A
+or custom field values, and each product added or removed, send `deal.updated` to the endpoints
+that take it (ADR-275, ADR-390, ADR-397), as does erasure's retitling, and merges send nothing; a
+change of its owner sends `deal.owner_changed` to the endpoints that take it (ADR-269). Changes
+made while no endpoint took the type were not recorded and are not sent later. A
 deal reopened in another stage (its own was removed), or moved and closed by one API request, sends
 two events, in the order the steps happened and possibly with the same `createdAt`, which their
 `createdAtExact`, to the microsecond, tells apart (ADR-330); each gives the stage and status its
@@ -3301,17 +3301,17 @@ reopening first. Who made the change is not sent.
 **A receiver misses a change of a deal's details, or doubts one (ADR-275).** Endpoints that take
 `deal.updated` ("Deal details") are sent one event each time a member editing a deal, a key or a
 deal import (ADR-387) changes its title, value or expected close date, or its custom field values
-(ADR-390, below), and when erasing its contact retitles it "Deal (contact erased)". An edit that
-changes nothing sends nothing, automations change details only on the deals they add
-(`deal.created`) and custom field values through their "Update deal fields" steps (ADR-386), merges
-keep them, and changes made while no endpoint took the type were not recorded and are not sent
-later. `changes` names what changed (`title`, `valueMinor`, `expectedCloseOn`, and `fields` since
-ADR-390); the deal is the deal when the event is delivered, so read it there, not the
-values before, which are never sent (members see a value's change on the deal's timeline). Endpoints
-naming pipelines, stages or owners hear it by the deal's as the change left them. One API request
-that changes details and closes the deal sends the change first, with status `open`, then the close;
-one that also gives the deal to another owner sends the change of details before the change of
-owner.
+(ADR-390, below), each time a member or a key adds or removes one of its products (ADR-397, below),
+and when erasing its contact retitles it "Deal (contact erased)". An edit that changes nothing sends
+nothing, automations change details only on the deals they add (`deal.created`) and custom field
+values through their "Update deal fields" steps (ADR-386), merges keep them, and changes made while
+no endpoint took the type were not recorded and are not sent later. `changes` names what changed
+(`title`, `valueMinor`, `expectedCloseOn`, `fields` since ADR-390, and `items` since ADR-397); the
+deal is the deal when the event is delivered, so read it there, not the values before, which are
+never sent (members see a value's change on the deal's timeline). Endpoints naming pipelines, stages
+or owners hear it by the deal's as the change left them. One API request that changes details and
+closes the deal sends the change first, with status `open`, then the close; one that also gives the
+deal to another owner sends the change of details before the change of owner.
 
 **A receiver misses a change of a deal's custom field values, or asks why a field's values
 vanished without an event (ADR-390).** Since migration 0305, `deal.updated` also names `fields`
@@ -3333,12 +3333,33 @@ a change of products sent nothing (ADR-395).** Every deal event's `deal.items` l
 products as `GET /deals/{id}/items` reads them when the event is delivered (in the order they were
 added, at most 50), like the rest of the deal: an event delivered (or retried, or replayed) after a
 product was added or removed gives the products as they are then, not as they were when the event
-was captured. Adding or removing a product (on the deal page or through the API) sends no event and
-`changes` never names products; a receiver keeping products in step reads them with
-`GET /deals/{id}/items` (`deals.read`) or takes them from the deal's next event. An erased
-contact's deal keeps its products (they name catalog products, not the customer), so they are
-still sent. A body without `deal.items` was delivered by a worker from before ADR-395 (during a
-rollout, or after rolling workers back); replay it once the workers are updated.
+was captured. Until migration 0308 (ADR-397, below), adding or removing a product (on the deal page
+or through the API) sent no event; since, each sends `deal.updated` naming `items`, and a receiver
+keeping products in step takes them from that event's `deal.items` (or reads them with
+`GET /deals/{id}/items`, `deals.read`). An erased contact's deal keeps its products (they name
+catalog products, not the customer), so they are still sent. A body without `deal.items` was
+delivered by a worker from before ADR-395 (during a rollout, or after rolling workers back); replay
+it once the workers are updated.
+
+**A receiver misses a change of a deal's products, gets one naming nobody, or asks why an endpoint
+takes none (ADR-397).** Since migration 0308, each product a member adds or removes on the deal
+page, or a key adds or removes (`POST /deals/{id}/items`, `DELETE /deals/{id}/items/{itemId}`),
+sends one `deal.updated` naming `items` alone (`changedFields` empty), with who made it in
+`deal.changedBy` (`member`, or `api` with `deal.apiKeyId`). The event names no product, price or
+quantity: `deal.items` gives the products when it is delivered, so the receiver replaces its copy
+with them (an event delivered after later changes gives the latest list). A refused change (a stale
+version, a product already removed, a deal's 51st product, an erased contact's deal) sends nothing,
+and so do changes made while no endpoint took the event. An endpoint whose deal details list was
+saved before 0308 takes no change of products until "Products" is ticked under Deal details in
+Settings → Webhooks (`items` in `dealDetails` through the API, or the list set to null); endpoints
+naming pipelines, stages, owners, makers or keys hear it as they hear other deal events. Such an
+event with `changes` empty was sent by a worker from before ADR-397's first release (part one, which
+0308 must follow everywhere: `docs/DEPLOYMENT.md`), so only if workers ran an older image while 0308
+was applied: replay those deliveries once the workers are updated. A removal naming nobody
+(`changedBy` null) was made through a web server from before that release, in the same case: the
+deal's timeline says who removed the product. Erasure keeps products, so its event never names
+`items`, and a company's deletion sends nothing for its products. The API's deal history gives each
+change of products as `updated` with `changes` `["items"]`, entries recorded before 0308 included.
 
 **A receiver misses a change of a task's details, or doubts one (ADR-276).** Endpoints that take
 `task.updated` ("Task details") are sent one event each time a member editing a task or a key

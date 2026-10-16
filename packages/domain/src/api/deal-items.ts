@@ -36,9 +36,9 @@ import { assertCommerceInPlan } from './orders';
  * content id as product messages name products (ADR-086), with a quantity and a unit price in the
  * minor units of the deal's currency; and removes them with `deals.write`. Each addition or removal
  * moves the deal's version on, is on its timeline naming the key, and is audited as the key. Like
- * members' changes of products, it records the key on the deal before the item changes and sends
- * no deal event yet (migration 0308 adds the capture, ADR-397), though every deal event's deal
- * gives its items as these reads do when it is delivered (ADR-395).
+ * members' changes of products, it sends deal.updated naming `items`, captured by the database's
+ * trigger on the item (migration 0308, ADR-397), and every deal event's deal gives its items as
+ * these reads do when it is delivered (ADR-395).
  */
 
 export { toApiDealItem, type ApiDealItem } from './deal-item-view';
@@ -170,8 +170,8 @@ async function catalogProduct(
 
 /**
  * Moves the deal's version on with the key as its changer (ADR-277), before its products change:
- * the capture on the item that migration 0308 adds (ADR-397) names a removal's maker from what this
- * transaction recorded on the deal, so this comes first, from before that migration runs.
+ * the item's capture names the maker this transaction recorded on the deal for a removal (0308,
+ * ADR-397), so this comes first.
  */
 async function markProductChange(
   tx: Tx,
@@ -316,8 +316,8 @@ export async function apiRemoveDealItem(
     if (!locked) return null;
     const { deal, erased } = locked;
     if (erased) throw erasedConflict();
-    // Recorded first, so the removal's event (migration 0308) names the key; a product already
-    // removed rolls it back.
+    // Recorded first, so the removal's event names the key; a product already removed rolls it
+    // back.
     const dealVersion = await markProductChange(tx, ctx, deal);
     const [item] = await tx
       .delete(crmDealItems)

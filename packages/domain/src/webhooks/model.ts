@@ -248,7 +248,7 @@ export const WEBHOOK_EVENT_INFO: Record<WebhookEventType, { label: string; descr
     'deal.updated': {
       label: 'Deal details',
       description:
-        'A CRM deal’s title, value, expected close date or custom field values changed: by a member, a deal import or an API key, its custom field values by an automation too, or by its contact’s erasure, which retitles it and clears its values.',
+        'A CRM deal’s title, value, expected close date, custom field values or products changed: by a member, a deal import or an API key, its custom field values by an automation too, its products when a member or an API key adds or removes one, or by its contact’s erasure, which retitles it and clears its values.',
     },
     'deal.stage_changed': {
       label: 'Deal stage',
@@ -837,17 +837,20 @@ export const WEBHOOK_DEAL_DETAILS = [
   'valueMinor',
   'expectedCloseOn',
   'fields',
+  'items',
 ] as const satisfies readonly WebhookDealDetail[];
 
 /**
  * How Settings names each deal detail an endpoint can choose (ADR-310), as the deal form does;
- * `fields` is any custom field value (ADR-390), as the deal's timeline names it.
+ * `fields` is any custom field value (ADR-390) and `items` any product added or removed (ADR-397),
+ * as the deal's timeline names them.
  */
 export const WEBHOOK_DEAL_DETAIL_LABELS: Record<WebhookDealDetail, string> = {
   title: 'Title',
   valueMinor: 'Value',
   expectedCloseOn: 'Expected close date',
   fields: 'Custom fields',
+  items: 'Products',
 };
 
 /**

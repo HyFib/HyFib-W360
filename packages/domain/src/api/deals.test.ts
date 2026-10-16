@@ -371,6 +371,8 @@ describe('CRM pipelines and deals through the API (ADR-253)', () => {
       'never which member',
       'Null while the deal is as it was added',
       'such as erasure retitling the deal or a custom field’s deletion removing its values; never the maker of an earlier change',
+      // Products are among what deal events report (ADR-397).
+      '(its stage, status, owner, title, value, expected close date, custom field values or products)',
     ]) {
       expect(changer.description).toContain(words);
     }

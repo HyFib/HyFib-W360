@@ -10,6 +10,7 @@ import {
   contacts,
   eq,
   sql,
+  systemScope,
   webhookDeliveries,
   webhookEvents,
   type Tx,
@@ -49,6 +50,7 @@ import {
   createAutomationService,
   createCampaignsService,
   createCommerceService,
+  createCompanyDeletionService,
   createConsentService,
   createContactMergeService,
   createContactsService,
@@ -7753,7 +7755,7 @@ describe('deal events (ADR-256)', () => {
     expect(fn).toEqual({ definer: false, config: ['search_path=pg_catalog, pg_temp'] });
   });
 
-  describe('products on deals in deal events (ADR-395)', () => {
+  describe('products on deals in deal events, and their changes (ADR-395, ADR-397)', () => {
     const commerce = () =>
       createCommerceService({
         db: fx.dbs.app,
@@ -7861,7 +7863,7 @@ describe('deal events (ADR-256)', () => {
       });
 
       // A member adds a deal (deal.created is captured now), then lists a product on it; a key
-      // lists another. Neither listing sends an event.
+      // lists another. Each listing sends deal.updated naming items (ADR-397).
       const jaya = await newContact(owner, 'Jaya');
       const { id: dealId } = await svc.createDeal(owner, {
         contactId: jaya.id,
@@ -7893,9 +7895,19 @@ describe('deal events (ADR-256)', () => {
         stageId: s.sales[0],
         title: 'Empty quote',
       });
-      expect((await dealEventsOf(c)).map((e) => [e.type, e.detail.dealId, e.deliveries])).toEqual([
-        ['deal.created', dealId, 1],
-        ['deal.created', emptyId, 1],
+      expect(
+        (await dealEventsOf(c)).map((e) => [
+          e.type,
+          e.detail.dealId,
+          e.detail.changes ?? null,
+          e.detail.changedBy ?? null,
+          e.deliveries,
+        ]),
+      ).toEqual([
+        ['deal.created', dealId, null, null, 1],
+        ['deal.updated', dealId, ['items'], 'member', 1],
+        ['deal.updated', dealId, ['items'], 'api', 1],
+        ['deal.created', emptyId, null, null, 1],
       ]);
 
       // Delivered after the products were listed, the addition gives them as the API lists them:
@@ -7922,14 +7934,21 @@ describe('deal events (ADR-256)', () => {
       expect(dealCreatedPayloadSchema.safeParse(createdBody).success).toBe(true);
       expect(itemsIn(createdBody)).toEqual(listed);
       expect(itemsIn(createdBody).map((i) => i.currency)).toEqual(['INR', 'INR']);
+      // The two listings' events give the products as they are when delivered, both of them.
+      for (const event of [first[1]!, first[2]!]) {
+        const body = bodies.get(event.id);
+        expect(dealUpdatedPayloadSchema.safeParse(body).success).toBe(true);
+        expect(body?.data.changes).toEqual(['items']);
+        expect(itemsIn(body)).toEqual(listed);
+      }
       // The deal without products gives none.
-      const emptyBody = bodies.get(first[1]!.id);
+      const emptyBody = bodies.get(first[3]!.id);
       expect(dealCreatedPayloadSchema.safeParse(emptyBody).success).toBe(true);
       expect(itemsIn(emptyBody)).toEqual([]);
       expect(await apiListDealItems(apiDeps(), reader.ctx, emptyId)).toEqual([]);
 
-      // Its title changes (deal.updated), then the key removes the mug before the event is
-      // delivered: the event gives the products as they are when it is delivered.
+      // Its title changes (deal.updated), then the key removes the mug (deal.updated naming items)
+      // before the events are delivered: each gives the products as they are when it is delivered.
       await svc.updateDeal(owner, {
         id: dealId,
         expectedVersion: 3,
@@ -7947,28 +7966,39 @@ describe('deal events (ADR-256)', () => {
       const second = await dealEventsOf(c);
       expect(second.map((e) => [e.type, e.detail.dealId, e.detail.changes ?? null])).toEqual([
         ['deal.created', dealId, null],
+        ['deal.updated', dealId, ['items']],
+        ['deal.updated', dealId, ['items']],
         ['deal.created', emptyId, null],
         ['deal.updated', dealId, ['title']],
+        ['deal.updated', dealId, ['items']],
       ]);
-      const updatedBody = bodiesById(every.path).get(second[2]!.id);
+      const updatedBody = bodiesById(every.path).get(second[4]!.id);
       expect(dealUpdatedPayloadSchema.safeParse(updatedBody).success).toBe(true);
       expect(updatedBody?.data.changes).toEqual(['title']);
       const remaining = await apiListDealItems(apiDeps(), reader.ctx, dealId);
       expect(remaining).toEqual([listed[1]]);
       expect(itemsIn(updatedBody)).toEqual(remaining);
+      const removalBody = bodiesById(every.path).get(second[5]!.id);
+      expect(dealUpdatedPayloadSchema.safeParse(removalBody).success).toBe(true);
+      expect([removalBody?.data.changes, dealIn(removalBody).apiKeyId]).toEqual([
+        ['items'],
+        writer.id,
+      ]);
+      expect(itemsIn(removalBody)).toEqual(remaining);
 
       // Erasing Jaya retitles her deal (deal.updated, nobody as its maker) and keeps its products,
-      // which name catalog products, not her: they are sent as the API lists them.
+      // which name catalog products, not her: they are sent as the API lists them, and the change
+      // never names items (ADR-397).
       await contactsService().eraseContact(owner, { contactId: jaya.id, suppress: false });
       await deliverDue(c);
       const third = await dealEventsOf(c);
-      expect(third).toHaveLength(4);
-      expect([third[3]!.type, third[3]!.detail.changes, third[3]!.detail.changedBy]).toEqual([
+      expect(third).toHaveLength(7);
+      expect([third[6]!.type, third[6]!.detail.changes, third[6]!.detail.changedBy]).toEqual([
         'deal.updated',
         ['title'],
         null,
       ]);
-      const erasedBody = bodiesById(every.path).get(third[3]!.id);
+      const erasedBody = bodiesById(every.path).get(third[6]!.id);
       expect(dealUpdatedPayloadSchema.safeParse(erasedBody).success).toBe(true);
       expect(dealIn(erasedBody).title).toBe('Deal (contact erased)');
       expect(erasedBody?.data.contact).toEqual({ id: jaya.id, phone: null, name: null });
@@ -7977,7 +8007,7 @@ describe('deal events (ADR-256)', () => {
 
       // Every body this company received names its own products only; the other company's
       // event gives its own product, as its key would read it.
-      expect(bodiesAt(every.path)).toHaveLength(4);
+      expect(bodiesAt(every.path)).toHaveLength(7);
       for (const body of bodiesAt(every.path)) {
         expect(JSON.stringify(body)).not.toMatch(/THEIRS-01|Their kettle|7795000002/);
       }
@@ -7995,6 +8025,402 @@ describe('deal events (ADR-256)', () => {
       await expect(apiListDealItems(apiDeps(), reader.ctx, theirDeal)).rejects.toMatchObject({
         code: 'not_found',
       });
+    });
+
+    it("sends one deal.updated naming items alone for each product a member or a key adds or removes, with its maker and no product's name or price, to the endpoints whose details, owners, pipelines, makers and keys take it, nothing for a refused change, and another company's to its own endpoints only (ADR-397)", async () => {
+      const s = await crmCompany();
+      const { c, owner } = s;
+      const agent = await fx.ctx(c, c.agent);
+      const svc = crm();
+      await catalog(c, '7797000001', [
+        ['MUG-01', 'Blue mug'],
+        ['PLATE-01', 'Plate'],
+      ]);
+      const writer = await keyOf(owner, 'Quote sync', ['deals.write', 'orders.read']);
+      const reader = await keyOf(owner, 'Quote reader', ['deals.read']);
+      /** An endpoint of the company taking the events given, with the filters given. */
+      const add = async (eventTypes: WebhookEventType[], filters: Record<string, unknown>) => {
+        const path = `/ok/${randomBytes(6).toString('hex')}`;
+        const created = await webhooks().create(owner, {
+          url: `http://${HOST}:${port}${path}`,
+          eventTypes,
+          ...filters,
+        });
+        return { ...created, path };
+      };
+      const everyone = await add(
+        ['deal.updated', 'deal.stage_changed', 'deal.owner_changed', 'deal.status_changed'],
+        {},
+      );
+      const productsOnly = await add(['deal.updated'], { dealDetails: ['items'] });
+      const titlesAndProducts = await add(['deal.updated'], { dealDetails: ['items', 'title'] });
+      // Every detail there was before products: a list saved before keeps its details, so it
+      // takes no change of products until `items` is added.
+      const savedBefore = await add(['deal.updated'], {
+        dealDetails: ['title', 'valueMinor', 'expectedCloseOn', 'fields'],
+      });
+      const agents = await add(['deal.updated'], { ownerIds: [agent.membership.id] });
+      const renewals = await add(['deal.updated'], { pipelineIds: [s.renewalsId] });
+      const members = await add(['deal.updated'], { crmChangeMakers: ['member'] });
+      const notTheKey = await add(['deal.updated'], { crmExcludedApiKeyIds: [writer.id] });
+      const lists = new Map(
+        (await webhooks().list(owner)).map((endpoint) => [endpoint.id, endpoint.dealDetails]),
+      );
+      expect([lists.get(productsOnly.id), lists.get(titlesAndProducts.id)]).toEqual([
+        ['items'],
+        ['title', 'items'],
+      ]);
+
+      // Another company's deal, product and endpoint.
+      const other = await crmCompany();
+      await catalog(other.c, '7797000002', [['THEIRS-01', 'Their kettle']]);
+      const theirHook = await addEndpoint(other.c, ['deal.updated']);
+      const ravi = await newContact(other.owner, 'Ravi');
+      const { id: theirDeal } = await svc.createDeal(other.owner, {
+        contactId: ravi.id,
+        pipelineId: other.salesId,
+        stageId: other.sales[0],
+        title: 'Their order',
+      });
+      const [kettle] = await svc.dealProductOptions(other.owner, 'THEIRS-01');
+      await svc.addDealItem(other.owner, {
+        dealId: theirDeal,
+        expectedVersion: 1,
+        productId: kettle!.id,
+        quantity: 2,
+        unitPrice: '700',
+      });
+
+      // The agent's deal (no endpoint here takes deal.created, so its addition is not captured):
+      // a member lists a mug on it, then the key a plate.
+      const jaya = await newContact(owner, 'Jaya');
+      const { id: dealId } = await svc.createDeal(owner, {
+        contactId: jaya.id,
+        pipelineId: s.salesId,
+        stageId: s.sales[0],
+        title: 'Bulk order',
+        ownerMembershipId: agent.membership.id,
+      });
+      const [mug] = await svc.dealProductOptions(owner, 'MUG-01');
+      const [plate] = await svc.dealProductOptions(owner, 'PLATE-01');
+      const listedByMember = await svc.addDealItem(owner, {
+        dealId,
+        expectedVersion: 1,
+        productId: mug!.id,
+        quantity: 3,
+        unitPrice: '1500.50',
+      });
+      expect(listedByMember.version).toBe(2);
+      const listedByKey = await apiAddDealItem(
+        apiDeps(),
+        writer.ctx,
+        dealId,
+        { retailerId: 'PLATE-01', quantity: 1, unitPriceMinor: 1_000, expectedVersion: 2 },
+        null,
+      );
+      expect(listedByKey.status).toBe(201);
+
+      // Refused changes send nothing and leave the version: a stale version, and a product that is
+      // not on the deal (refused after the deal was marked, which the transaction undoes).
+      await expect(
+        svc.addDealItem(owner, {
+          dealId,
+          expectedVersion: 2,
+          productId: plate!.id,
+          quantity: 1,
+          unitPrice: '10',
+        }),
+      ).rejects.toMatchObject({ code: 'conflict' });
+      await expect(
+        apiRemoveDealItem(apiDeps(), writer.ctx, dealId, uuidv7(), {}),
+      ).rejects.toMatchObject({ code: 'not_found' });
+      await expect(
+        svc.removeDealItem(owner, { dealId, expectedVersion: 3, itemId: uuidv7() }),
+      ).rejects.toMatchObject({ code: 'not_found' });
+      const dealVersion = async () =>
+        (
+          await fx.query<{ version: number }>('SELECT version FROM app.crm_deals WHERE id = $1', [
+            dealId,
+          ])
+        )[0]!.version;
+      expect(await dealVersion()).toBe(3);
+      expect(await dealEventsOf(c)).toHaveLength(2);
+
+      // Delivered now, both events give both products, as the API lists them.
+      await deliverDue(c);
+      const listed = await apiListDealItems(apiDeps(), reader.ctx, dealId);
+      expect(listed.map((i) => [i.retailerId, i.createdBy])).toEqual([
+        ['MUG-01', 'member'],
+        ['PLATE-01', 'api'],
+      ]);
+
+      // A member changes its title (one event of its own); the agent removes the key's plate and
+      // the key removes the member's mug.
+      await svc.updateDeal(owner, {
+        id: dealId,
+        expectedVersion: 3,
+        title: 'Bulk order, revised',
+        value: '',
+        ownerMembershipId: agent.membership.id,
+        expectedCloseOn: null,
+      });
+      expect(
+        await svc.removeDealItem(agent, { dealId, expectedVersion: 4, itemId: listed[1]!.id }),
+      ).toEqual({ version: 5 });
+      expect(
+        await apiRemoveDealItem(apiDeps(), writer.ctx, dealId, listed[0]!.id, {
+          expectedVersion: '5',
+        }),
+      ).toEqual({ id: listed[0]!.id, deleted: true, dealVersion: 6 });
+      expect(await dealVersion()).toBe(6);
+
+      // One event per change, in order, each naming what it changed with its maker as captured, the
+      // deal's stage, pipeline, status and contact, and nothing of the products themselves.
+      const events = await dealEventsOf(c);
+      const [d, s0, sales] = [dealId, s.sales[0], s.salesId];
+      expect(
+        events.map((e) => [
+          e.type,
+          e.detail.dealId,
+          e.detail.stageId,
+          e.detail.pipelineId,
+          e.status,
+          e.contact_id,
+          e.detail.changes,
+          e.detail.changedFields,
+          e.detail.changedBy,
+          e.detail.apiKeyId,
+          e.deliveries,
+        ]),
+      ).toEqual([
+        ['deal.updated', d, s0, sales, 'open', jaya.id, ['items'], [], 'member', null, 6],
+        ['deal.updated', d, s0, sales, 'open', jaya.id, ['items'], [], 'api', writer.id, 4],
+        ['deal.updated', d, s0, sales, 'open', jaya.id, ['title'], [], 'member', null, 6],
+        ['deal.updated', d, s0, sales, 'open', jaya.id, ['items'], [], 'member', null, 6],
+        ['deal.updated', d, s0, sales, 'open', jaya.id, ['items'], [], 'api', writer.id, 4],
+      ]);
+      for (const event of events) {
+        expect(Object.keys(event.detail).sort(), event.id).toEqual([
+          'apiKeyId',
+          'changedBy',
+          'changedFields',
+          'changes',
+          'dealId',
+          'pipelineId',
+          'stageId',
+        ]);
+        expect(JSON.stringify(event.detail)).not.toMatch(/Blue mug|Plate|MUG-01|PLATE-01/);
+      }
+
+      // Delivered, each body names the change as captured and gives the products as they are when
+      // it is delivered: both for the first two, none for the rest.
+      await deliverDue(c);
+      const bodies = bodiesById(everyone.path);
+      expect(bodies.size).toBe(events.length);
+      for (const [index, event] of events.entries()) {
+        const body = bodies.get(event.id);
+        expect(dealUpdatedPayloadSchema.safeParse(body).success, event.id).toBe(true);
+        expect(body?.data.changes, event.id).toEqual(event.detail.changes);
+        expect(body?.data.changedFields, event.id).toEqual([]);
+        expect([dealIn(body).changedBy, dealIn(body).apiKeyId], event.id).toEqual([
+          event.detail.changedBy,
+          event.detail.apiKeyId,
+        ]);
+        expect(itemsIn(body), event.id).toEqual(index < 2 ? listed : []);
+      }
+      // Each endpoint receives the changes its lists take.
+      const seen = (path: string) =>
+        bodiesAt(path)
+          .map((b) => `${(b.data.changes as string[]).join('+')}:${String(dealIn(b).changedBy)}`)
+          .sort();
+      const all = ['items:api', 'items:api', 'items:member', 'items:member', 'title:member'];
+      expect(seen(productsOnly.path)).toEqual(all.slice(0, 4));
+      expect(seen(titlesAndProducts.path)).toEqual(all);
+      expect(seen(savedBefore.path)).toEqual(['title:member']);
+      expect(seen(agents.path)).toEqual(all);
+      expect(bodiesAt(renewals.path)).toEqual([]);
+      expect(seen(members.path)).toEqual(['items:member', 'items:member', 'title:member']);
+      expect(seen(notTheKey.path)).toEqual(['items:member', 'items:member', 'title:member']);
+
+      // The other company's change is its own: one event, to its endpoint, with its product.
+      const theirs = await dealEventsOf(other.c);
+      expect(
+        theirs.map((e) => [
+          e.type,
+          e.detail.dealId,
+          e.detail.changes,
+          e.detail.changedBy,
+          e.deliveries,
+        ]),
+      ).toEqual([['deal.updated', theirDeal, ['items'], 'member', 1]]);
+      await deliverDue(other.c);
+      const [theirBody] = bodiesAt(theirHook.path);
+      expect(itemsIn(theirBody).map((i) => i.retailerId)).toEqual(['THEIRS-01']);
+      expect(JSON.stringify(theirBody)).not.toMatch(/MUG-01|PLATE-01|Blue mug|7797000001/);
+      for (const body of bodiesAt(everyone.path)) {
+        expect(JSON.stringify(body)).not.toMatch(/THEIRS-01|Their kettle|7797000002/);
+      }
+    });
+
+    it("captures nothing when a company with deal products is deleted, its endpoints going first so that the definer role's batches read no deal, and leaves another company's products and events; the capture adds no privilege (ADR-397)", async () => {
+      const s = await crmCompany();
+      const { c, owner } = s;
+      const svc = crm();
+      await catalog(c, '7797000003', [['MUG-01', 'Blue mug']]);
+      await addEndpoint(c, ['deal.updated']);
+      const jaya = await newContact(owner, 'Jaya');
+      const { id: dealId } = await svc.createDeal(owner, {
+        contactId: jaya.id,
+        pipelineId: s.salesId,
+        stageId: s.sales[0],
+        title: 'Bulk order',
+      });
+      const [mug] = await svc.dealProductOptions(owner, 'MUG-01');
+      await svc.addDealItem(owner, {
+        dealId,
+        expectedVersion: 1,
+        productId: mug!.id,
+        quantity: 1,
+        unitPrice: '10',
+      });
+      expect((await dealEventsOf(c)).map((e) => [e.type, e.detail.changes, e.deliveries])).toEqual([
+        ['deal.updated', ['items'], 1],
+      ]);
+      // Another company with a product on a deal and an endpoint taking its changes.
+      const other = await crmCompany();
+      await catalog(other.c, '7797000004', [['THEIRS-01', 'Their kettle']]);
+      await addEndpoint(other.c, ['deal.updated']);
+      const ravi = await newContact(other.owner, 'Ravi');
+      const { id: theirDeal } = await svc.createDeal(other.owner, {
+        contactId: ravi.id,
+        pipelineId: other.salesId,
+        stageId: other.sales[0],
+        title: 'Their order',
+      });
+      const [kettle] = await svc.dealProductOptions(other.owner, 'THEIRS-01');
+      await svc.addDealItem(other.owner, {
+        dealId: theirDeal,
+        expectedVersion: 1,
+        productId: kettle!.id,
+        quantity: 2,
+        unitPrice: '700',
+      });
+      const rowsOf = async (tenantId: string) =>
+        (
+          await fx.query<{ items: number; events: number; deliveries: number }>(
+            `SELECT (SELECT count(*)::int FROM app.crm_deal_items WHERE tenant_id = $1) AS items,
+                    (SELECT count(*)::int FROM app.webhook_events WHERE tenant_id = $1) AS events,
+                    (SELECT count(*)::int FROM app.webhook_deliveries WHERE tenant_id = $1)
+                      AS deliveries`,
+            [tenantId],
+          )
+        )[0]!;
+      const theirsBefore = await rowsOf(other.c.tenant.id);
+      expect(theirsBefore).toEqual({ items: 1, events: 1, deliveries: 1 });
+
+      // The owner asks for the deletion; it falls due and starts, and its batches run in step
+      // order, one per transaction, as the worker runs them (as the definer role).
+      await createCompanyDeletionService({
+        db: fx.dbs.app,
+        clock: systemClock,
+        keyring: fx.keyring,
+        jobs: fx.jobs(),
+        signer: fx.signer,
+        appBaseUrl: 'https://app.w360.test',
+      }).request(owner, { confirm: c.tenant.slug });
+      await fx.query(
+        `UPDATE ops.tenant_deletions SET due_at = now() - interval '1 minute'
+          WHERE tenant_id = $1 AND cancelled_at IS NULL AND completed_at IS NULL`,
+        [c.tenant.id],
+      );
+      await fx.dbs.app.run(systemScope, (tx) =>
+        tx.execute(sql`select * from ops.start_tenant_deletion(${c.tenant.id}::uuid)`),
+      );
+      const steps: number[] = [];
+      for (let batch = 0; batch < 1_000; batch += 1) {
+        const { rows } = await fx.dbs.app.run(systemScope, (tx) =>
+          tx.execute<{ deleted: number; step: number | null }>(
+            sql`select * from ops.delete_tenant_data(${c.tenant.id}::uuid, 1000)`,
+          ),
+        );
+        const step = rows[0]?.step ?? null;
+        if (step === null) break;
+        steps.push(step);
+        if (step === 295) {
+          // Its products went without an event: no endpoint was left to take one.
+          expect(await rowsOf(c.tenant.id)).toEqual({ items: 0, events: 0, deliveries: 0 });
+        }
+      }
+      expect(steps).toContain(295);
+      expect(steps).toContain(60);
+      expect(steps.indexOf(60)).toBeLessThan(steps.indexOf(295));
+      expect(await rowsOf(c.tenant.id)).toEqual({ items: 0, events: 0, deliveries: 0 });
+      // The other company keeps its product, its event and its delivery.
+      expect(await rowsOf(other.c.tenant.id)).toEqual(theirsBefore);
+
+      // The definer role may read none of a deal's stage, pipeline, status or changer (which is
+      // why the capture reads no deal when no endpoint takes the event), nor add or change items;
+      // the runtime role still changes none in place.
+      const columnPrivilege = async (role: string, table: string, column: string) =>
+        (
+          await fx.query<{ ok: boolean }>(
+            `SELECT has_column_privilege($1, $2, $3, 'SELECT') AS ok`,
+            [role, table, column],
+          )
+        )[0]!.ok;
+      for (const column of [
+        'stage_id',
+        'pipeline_id',
+        'status',
+        'changed_by',
+        'changed_by_api_key_id',
+        'changed_xact',
+      ]) {
+        expect(await columnPrivilege('w360_definer', 'app.crm_deals', column), column).toBe(false);
+      }
+      const [privileges] = await fx.query<Record<string, boolean>>(
+        `SELECT has_table_privilege('w360_definer', 'app.crm_deal_items', 'INSERT') AS definer_insert,
+                has_table_privilege('w360_definer', 'app.crm_deal_items', 'UPDATE') AS definer_update,
+                has_table_privilege('w360_app', 'app.crm_deal_items', 'UPDATE') AS app_update`,
+      );
+      expect(privileges).toEqual({
+        definer_insert: false,
+        definer_update: false,
+        app_update: false,
+      });
+      // The capture runs as the role making the change, its search path pinned, callable by
+      // nobody; it fires after each product added or removed, one row at a time.
+      const [fn] = await fx.query<{ definer: boolean; config: string[]; open: boolean }>(
+        `SELECT p.prosecdef AS definer, p.proconfig AS config,
+                has_function_privilege('public', p.oid, 'EXECUTE') AS open
+           FROM pg_proc p WHERE p.oid = 'app.webhook_capture_deal_item()'::regprocedure`,
+      );
+      expect(fn).toEqual({
+        definer: false,
+        config: ['search_path=pg_catalog, pg_temp'],
+        open: false,
+      });
+      const [trigger] = await fx.query<{ definition: string }>(
+        `SELECT pg_get_triggerdef(t.oid) AS definition FROM pg_trigger t
+          WHERE t.tgrelid = 'app.crm_deal_items'::regclass AND t.tgname = 'crm_deal_items_webhook'`,
+      );
+      expect(trigger?.definition).toMatch(
+        /AFTER INSERT OR DELETE ON (app\.)?crm_deal_items FOR EACH ROW EXECUTE FUNCTION (app\.)?webhook_capture_deal_item\(\)/,
+      );
+      // The endpoints' detail check takes `items`, validated; the items keep row security.
+      const [check] = await fx.query<{ definition: string; validated: boolean }>(
+        `SELECT pg_get_constraintdef(oid) AS definition, convalidated AS validated FROM pg_constraint
+          WHERE conrelid = 'app.webhook_endpoints'::regclass
+            AND conname = 'webhook_endpoints_deal_details'`,
+      );
+      expect(check?.validated).toBe(true);
+      expect(check?.definition).toContain(`'items'::text`);
+      expect(check?.definition).toContain('<= 5');
+      const [security] = await fx.query<{ rls: boolean; forced: boolean }>(
+        `SELECT relrowsecurity AS rls, relforcerowsecurity AS forced FROM pg_class
+          WHERE oid = 'app.crm_deal_items'::regclass`,
+      );
+      expect(security).toEqual({ rls: true, forced: true });
     });
   });
 });

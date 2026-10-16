@@ -173,7 +173,17 @@ Phase 3 rules on top of the matrix (enforced in domain services and re-checked w
   per-deal event, and nothing a company, a request or a job payload supplies can turn events off:
   there is no setting or flag to set. Erasure's clearing of values names them, as its retitling
   does; for it the definer role reads a field's key and when it was added, for the company erasure
-  runs for (a column grant and a policy on the company in scope), and nothing else of a field.
+  runs for (a column grant and a policy on the company in scope), and nothing else of a field. A
+  product added to or removed from a deal (ADR-397) is one of those details as well (`items`): a
+  trigger on the item captures one event per product, as whoever makes the change, naming no
+  product, price or quantity (the deal in the payload gives its products when delivered, ADR-395);
+  a removal names the maker its own transaction recorded on the deal, never an earlier one. Web
+  servers record that maker before the item changes since the release before the capture (ADR-397
+  part one, deployed everywhere first), so no removal arrives without its maker at an endpoint that
+  names makers or leaves out keys (those filters let a change with no maker through). The capture
+  reads no deal while no active endpoint of the company takes the event, so company deletion, which
+  deletes endpoints before items and runs as the definer role, captures nothing, and the definer
+  role gains no read.
 - Integrations hear of CRM tasks (ADR-261) through the company's own endpoints only: `task.created`
   and `task.status_changed` give the task's title, statuses, due time, assignee and deal ids, its
   creator and its contact as the API describes it, never its notes (free text members write;
@@ -1455,7 +1465,8 @@ Phase 5 rules (Public API, P5-08):
   stamped with the import's time, never a date from the file.
 - Products on deals (ADR-375): adding needs `crm.write` and `commerce.read`, removing
   `crm.write`; products come only from the company's connected catalogs, deals only from the
-  company, both under row security. Changes are at the deal's version and on its timeline; unit
+  company, both under row security. Changes are at the deal's version and on its timeline (and
+  send `deal.updated` naming `items` since ADR-397, the member recorded on the deal first); unit
   prices are typed by members, exact, never read from Meta's price text; an erased contact's deal
   takes none.
 - Products in deal webhook payloads (ADR-395): every deal event's deal gives its products exactly
@@ -1466,7 +1477,8 @@ Phase 5 rules (Public API, P5-08):
   signed delivery job's tenant, row security and explicit company conditions on the item, product
   and catalog), at most 50 per deal. Items name catalog products, not customers, and erasure keeps
   them, so an erased contact's deal gives them; no endpoint scope gates them, as every other part
-  of the deal is sent to endpoints that take deal events. Nothing new is captured. Delivery bodies
+  of the deal is sent to endpoints that take deal events. Nothing new was captured (a change of
+  products is since ADR-397, as `deal.updated` naming `items`, above). Delivery bodies
   may hold 256 KiB (the largest deal event is 202,667 bytes), only through the webhook client: the
   address checks are the same, and automation HTTP steps, stores and alerts keep 64 KiB.
 - Products on deals through the API (ADR-378): `GET /deals/{id}/items` needs `deals.read`; `POST`
@@ -1478,7 +1490,9 @@ Phase 5 rules (Public API, P5-08):
   the deal as erasure does; an erased contact's deal takes no change; `expectedVersion` stops a key
   overwriting a change it did not see. Each change is on the timeline naming the key, the item
   names the key that added it (a member or a key, enforced by a check), and the audit log records
-  it as the key (unit tests; integration tests, run in CI only).
+  it as the key (unit tests; integration tests, run in CI only); since ADR-397 it sends
+  `deal.updated` naming `items` with the key as its maker, so endpoints leaving out the key's
+  changes (ADR-321) leave it out too.
 - Following message changes (ADR-116): `GET /message-changes` reads the key's company's messages
   only (`conversations.read`, which only members who read every conversation grant; RLS and an
   explicit company filter). Its cursor is sealed as the contact feed's is, with the feed's name and
@@ -1698,8 +1712,8 @@ Phase 5 rules (outgoing webhooks, P5-09):
   against the details the change changed, in the transaction that changes the deal or the task: it
   narrows what one endpoint receives and never adds an event or a delivery for another endpoint or
   company, and the payload is unchanged (never the values before). Detail names are not personal
-  data; `fields` (any custom field value, ADR-390) is one of them. Audited with the lists (unit
-  tests; integration tests, run in CI only).
+  data; `fields` (any custom field value, ADR-390) and `items` (any product added or removed,
+  ADR-397) are among them. Audited with the lists (unit tests; integration tests, run in CI only).
 - An endpoint can take `satisfaction_survey.answered` only for the answers credited to some members
   or of some teams' conversations (ADR-311), chosen with `developer.manage` in Settings or
   `webhooks.manage` through the API. Each id a list adds is checked in the company's scope (members

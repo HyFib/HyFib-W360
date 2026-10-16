@@ -244,9 +244,9 @@ export type WebhookTaskStatus = TaskStatus;
 
 /**
  * The details whose change a `deal.updated` endpoint can choose (ADR-310), as the event's `changes`
- * names them.
+ * names them: `fields` (ADR-390) and `items` (a product added or removed, ADR-397) since.
  */
-export type WebhookDealDetail = 'title' | 'valueMinor' | 'expectedCloseOn' | 'fields';
+export type WebhookDealDetail = 'title' | 'valueMinor' | 'expectedCloseOn' | 'fields' | 'items';
 
 /**
  * The details whose change a `task.updated` endpoint can choose (ADR-310), as the event's `changes`
@@ -479,9 +479,9 @@ export const webhookEndpoints = appSchema.table('webhook_endpoints', {
    */
   taskStatuses: text('task_statuses').array().$type<WebhookTaskStatus[]>(),
   /**
-   * The details whose changes it takes as `deal.updated` (migration 0233, ADR-310): a change that
-   * changed any of them. null takes every change. Set only while `deal.updated` is among its
-   * events.
+   * The details whose changes it takes as `deal.updated` (migration 0233, ADR-310; `items` since
+   * 0308, ADR-397): a change that changed any of them. null takes every change. Set only while
+   * `deal.updated` is among its events.
    */
   dealDetails: text('deal_details').array().$type<WebhookDealDetail[]>(),
   /**

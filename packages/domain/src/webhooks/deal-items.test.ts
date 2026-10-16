@@ -204,7 +204,11 @@ describe('products on deals in deal webhook payloads (ADR-395)', () => {
       expect(deal.items.description, type).toContain('exactly as GET /deals/{id}/items lists them');
       expect(deal.items.description, type).toContain(`at most ${MAX_DEAL_ITEMS}`);
       expect(deal.items.description, type).toContain('An erased contact’s deal keeps its products');
-      expect(deal.items.description, type).toContain('A change of products alone sends no event');
+      // A change of products sends deal.updated since ADR-397.
+      expect(deal.items.description, type).toContain(
+        'Each product added or removed sends deal.updated naming `items` in its changes',
+      );
+      expect(deal.items.description, type).not.toContain('sends no event');
       expect(deal.items.description, type).toContain(
         'Bodies delivered before deal events carried products have no items',
       );
@@ -423,19 +427,23 @@ describe('products on deals in deal webhook payloads (ADR-395)', () => {
     expect(doc.webhooks['deal.created']!.post.description).toContain(
       "Every deal event's deal.items lists the deal's products when the event is delivered, as GET /deals/{id}/items gives them",
     );
-    expect(doc.webhooks['deal.updated']!.post.description).toContain(
-      'A change of the deal’s products alone sends no event',
+    // Since ADR-397 a change of products sends deal.updated naming items.
+    expect(doc.webhooks['deal.created']!.post.description).toContain(
+      "each product added or removed sends deal.updated naming items, so a receiver keeping products in step takes them from that event's deal.items",
     );
+    expect(doc.webhooks['deal.updated']!.post.description).toContain(
+      'Each product a member or an API key adds to or removes from the deal sends an event of its own whose changes names items alone, never the product, its price or its quantity',
+    );
+    for (const type of Object.keys(DEAL_EVENT_SCHEMAS)) {
+      expect(doc.webhooks[type]!.post.description, type).not.toMatch(/products alone sends no/);
+    }
     for (const type of Object.keys(DEAL_EVENT_SCHEMAS)) {
       expect(JSON.stringify(doc.webhooks[type]), type).not.toMatch(/ADR-\d/);
     }
   });
 
   describe('a change of products (ADR-397)', () => {
-    /**
-     * A deal.updated as the trigger on the item captures it once migration 0308 runs; workers
-     * render it from the release before.
-     */
+    /** A deal.updated as the item's trigger captures it (migration 0308). */
     const productChange = (by: Record<string, unknown>) =>
       eventOf('deal.updated', {
         dealId: DEAL,
@@ -487,7 +495,7 @@ describe('products on deals in deal webhook payloads (ADR-395)', () => {
         expect(dealIn(body), String(changedBy)).toMatchObject({ changedBy, apiKeyId, items: [] });
       }
       // A worker that did not know `items` gave no change at all, which the payload's description
-      // refuses: that is why workers learn `items` a release before migration 0308 captures it.
+      // refuses: that is why workers learnt `items` a release before migration 0308 captured it.
       expect(
         dealUpdatedPayloadSchema.safeParse({ ...built, data: { ...data, changes: [] } }).success,
       ).toBe(false);
