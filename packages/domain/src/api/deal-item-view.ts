@@ -141,7 +141,8 @@ export function toApiDealItem(row: {
     quantity: row.quantity,
     unitPriceMinor: row.unitPriceMinor,
     currency: row.currency,
-    // At most 100,000 times a deal's largest value: exact as a number (ADR-375 caps it there).
+    // At most a deal's largest value (MAX_DEAL_MINOR, 10^15), which both paths that add an item
+    // check (ADR-375, ADR-378): below Number.MAX_SAFE_INTEGER, so exact as a number.
     totalMinor: Number(lineTotalMinor(row)),
     createdBy: row.createdByApiKeyId ? 'api' : 'member',
     createdByApiKeyId: row.createdByApiKeyId,
