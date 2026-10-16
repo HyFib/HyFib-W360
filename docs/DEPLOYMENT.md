@@ -1761,7 +1761,8 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    description does not allow) and without `changedFields`: roll workers out promptly after the
    migration, and replay the deliveries an old worker made in between (on the endpoint's page in
    Settings → Webhooks, or `POST /webhook-deliveries/{id}/replay`; a replay is built by the worker
-   that sends it) if a receiver relies on them; rolling workers back does the same. Web servers from before it neither offer nor read `fields`
+   that sends it) if a receiver relies on them; rolling workers back does the same. Web servers from
+   before it neither offer nor read `fields`
    in an endpoint's deal details: until the web rollout ends, an old server shows such a list with
    an empty label and refuses to save that endpoint ("Choose deal details from the list."), and
    gives no `fields` in the API's deal history. Endpoints whose deal details list was saved before

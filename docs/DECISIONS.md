@@ -14793,10 +14793,10 @@ Decision:
 
 Not built: deal webhook events for a change of values (deal.updated names title, valueMinor and
 expectedCloseOn only, so a change of values alone sends no event, and the API's deal history does
-not list it; since built: ADR-390), choice or select types, an order of fields other than when they were added, defining
-fields through the API, values on the new-deal form in the app (since built: ADR-379), values set
-by automation steps, filtering or reporting by a value, and CSV import of deals (since built:
-ADR-374, with values mapped by key).
+not list it; since built: ADR-390), choice or select types, an order of fields other than when they
+were added, defining fields through the API, values on the new-deal form in the app (since built:
+ADR-379), values set by automation steps, filtering or reporting by a value, and CSV import of deals
+(since built: ADR-374, with values mapped by key).
 
 ## ADR-374 Importing deals from CSV (P4-04) (2026-10-13)
 
@@ -15709,14 +15709,16 @@ Decision:
   company erasure runs for (a policy on `app.current_tenant_id()`), and nothing else of a field.
 - **Its place among one update's steps:** with the other details: reopened, moved, details changed
   (one `deal.updated` naming every detail the update changed), given to another owner, closed, each
-  stamped with `clock_timestamp()`. A key moving a deal and changing a value sends the move, then the
-  change; an import row closing the deal it changes sends the change, then the close.
+  stamped with `clock_timestamp()`. A key moving a deal and changing a value sends the move, then
+  the change; an import row closing the deal it changes sends the change, then the close.
 - **Endpoints may choose it:** "Custom fields" (`fields`) joins the details an endpoint taking
   `deal.updated` may list (ADR-310). Lists saved before keep their details, so they do not receive a
   change of values alone until it is added; null still takes every change.
 - **The API's deal history** (ADR-281) gives the changes the deal events report, so a `deal_updated`
   entry naming custom fields is now given, with `fields` in its `changes` (the timeline does not
-  keep keys, so the history names none); a change of products alone is still not given.
+  keep keys, so the history names none); a change of products alone is still not given. Entries
+  recorded before 0305 for a change of values (members, keys and steps since ADR-373) appear too,
+  though no event was sent for them then.
 - **Who made the change:** the changer trigger (ADR-277) now also fires on values, so a change of
   values written without its maker (erasure, a field's deletion) never names an earlier one.
 - **Migrations 0305 and 0306:** 0305 replaces `app.webhook_capture_deal` in place (not SECURITY
@@ -15730,11 +15732,20 @@ Decision:
   `app.capture_webhook_event` is unchanged: its detail filter already matches `changes`.
 - **Rollout:** the trigger runs in the database, so events name values from the migration on,
   whichever release changed the deal. A worker from before it renders such an event with `changes`
-  leaving out `fields` (empty for a change of values alone) and without `changedFields`; workers roll
-  out right after the migration, as usual, and a delivery an old worker made can be replayed. An old
-  web server neither offers `fields` in Settings nor saves an endpoint whose list holds it, and its
-  history leaves the entries out (`docs/DEPLOYMENT.md`).
+  leaving out `fields` (empty for a change of values alone) and without `changedFields`; workers
+  roll out right after the migration, as usual, and a delivery an old worker made can be replayed.
+  An old web server neither offers `fields` in Settings nor saves an endpoint whose list holds it,
+  and its history leaves the entries out (`docs/DEPLOYMENT.md`).
 
 Not built: the values (or values before) in the payload, keys named in the API's deal history,
 an event of its own for a change of values, a notice to receivers when a field is deleted, and an
 end-to-end test of its own.
+
+Review (before merge): an independent review found no High or Medium issue. It found ADR-275's
+runbook paragraph still saying `deal.updated` names only the fixed details and comes only from
+members and keys; `changedBy`'s description giving only erasure as a change recorded without its
+maker, though deleting a field clears it too; history entries for a change of values recorded before
+0305, when no event was sent, now given by the API's deal history (said above); and the capture
+relying on 0293's `SELECT (tenant_id, id)` grant as well as the new one (now said in 0305). All were
+fixed. The deal detail keeps the label "Custom fields", as the deal's timeline names it: it sits in
+the deal details' own group, apart from the contact event's "Custom fields" group.

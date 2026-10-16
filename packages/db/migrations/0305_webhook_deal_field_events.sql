@@ -49,7 +49,9 @@ ALTER TABLE app.webhook_endpoints
 -- definer role, so the capture below runs as that role and reads which fields the company has: the
 -- key and the order they were added in, of the company erasure runs for (it refuses to run without
 -- one), and nothing else of a field (not its label, type or options). Its other policies on the
--- table read only a company being deleted (0293).
+-- table read only a company being deleted (0293). The capture's filter and order also read
+-- `tenant_id` and `id`, which 0293 granted the role for company deletion: erasure needs that grant
+-- too.
 GRANT SELECT (key, created_at) ON app.crm_deal_fields TO w360_definer;
 CREATE POLICY deal_capture_read ON app.crm_deal_fields FOR SELECT TO w360_definer
   USING (tenant_id = (SELECT app.current_tenant_id()));

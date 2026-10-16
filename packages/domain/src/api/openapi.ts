@@ -593,7 +593,7 @@ export const apiDealSchema = z.object({
     .enum(CRM_CHANGERS)
     .nullable()
     .describe(
-      'Who made the latest change of what deal events report (its stage, status, owner, title, value, expected close date or custom field values): a member (member, never which member), an automation’s run (automation) or an API key (api, named by changedByApiKeyId). Null while the deal is as it was added, and when HyFib did not record who made the latest change, such as erasure retitling the deal; never the maker of an earlier change.',
+      'Who made the latest change of what deal events report (its stage, status, owner, title, value, expected close date or custom field values): a member (member, never which member), an automation’s run (automation) or an API key (api, named by changedByApiKeyId). Null while the deal is as it was added, and when HyFib did not record who made the latest change, such as erasure retitling the deal or a custom field’s deletion removing its values; never the maker of an earlier change.',
     ),
   changedByApiKeyId: z
     .uuid()

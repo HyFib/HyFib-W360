@@ -1338,7 +1338,8 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   take it shared (`lockedDealFields`) before locking the deal, so a deletion's `attributes - key`
   never misses a value written meanwhile. `GET /deal-fields` lists them, `Deal.fields` gives values,
   the deals CSV adds a column per field, and the API's deal history leaves out changes of values
-  alone (since ADR-390 it names them as `fields`, and `deal.updated` reports them). 0293 also replaces `app.erase_contact` to clear the erased contact's deals' values. Since
+  alone (since ADR-390 it names them as `fields`, and `deal.updated` reports them). 0293 also
+  replaces `app.erase_contact` to clear the erased contact's deals' values. Since
   ADR-379 the new-deal forms (the board, the contact page and the inbox) take values too:
   `crmLookups` (`apps/web/src/server/crm.ts`) reads the definitions with the pipelines and members,
   and `NewDealForm` sends the non-empty ones to `createDeal`.
@@ -2347,8 +2348,9 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   list.
 - **Deal and task detail filters** (migration 0233, ADR-310): `deal_details` and `task_details` on
   an endpoint list the details whose changes it takes as `deal.updated` (`title`, `valueMinor`,
-  `expectedCloseOn`, and since 0305 `fields`) or `task.updated` (`title`, `notes`, `dueAt`, `remindAt`), null for every
-  change; checks keep each to its known details and to endpoints that take its event.
+  `expectedCloseOn`, and since 0305 `fields`) or `task.updated` (`title`, `notes`, `dueAt`,
+  `remindAt`), null for every change; checks keep each to its known details and to endpoints that
+  take its event.
   `app.capture_webhook_event` (replaced with the same signature) creates a change's delivery only
   for endpoints whose list is null or holds a detail the change changed, as the deal and task
   triggers pass them in `changes`, and writes no event when none does. Settings and the API

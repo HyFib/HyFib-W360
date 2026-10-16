@@ -2368,8 +2368,9 @@ named.
 `deal.created`, `deal.stage_changed` or `deal.status_changed` are sent one event per deal added and
 per change of a deal's stage or status, whoever made it; edits of its title, value, expected date
 or custom field values send `deal.updated` to the endpoints that take it (ADR-275, ADR-390), as does
-erasure's retitling, and merges send nothing; a change of its owner sends `deal.owner_changed` to the endpoints that take it
-(ADR-269). Changes made while no endpoint took the type were not recorded and are not sent later. A
+erasure's retitling, and merges send nothing; a change of its owner sends `deal.owner_changed` to
+the endpoints that take it (ADR-269). Changes made while no endpoint took the type were not recorded
+and are not sent later. A
 deal reopened in another stage (its own was removed), or moved and closed by one API request, sends
 two events, in the order the steps happened and possibly with the same `createdAt`, which their
 `createdAtExact`, to the microsecond, tells apart (ADR-330); each gives the stage and status its
@@ -3258,12 +3259,14 @@ sends the change first, with status `open`, then the completion; one that reopen
 reopening first. Who made the change is not sent.
 
 **A receiver misses a change of a deal's details, or doubts one (ADR-275).** Endpoints that take
-`deal.updated` ("Deal details") are sent one event each time a member editing a deal or a key
-changes its title, value or expected close date, and when erasing its contact retitles it "Deal
-(contact erased)". An edit that changes nothing sends nothing, automations set details only on the
-deals they add (`deal.created`), merges keep them, and changes made while no endpoint took the type
-were not recorded and are not sent later. `changes` names what changed (`title`, `valueMinor`,
-`expectedCloseOn`); the deal is the deal when the event is delivered, so read it there, not the
+`deal.updated` ("Deal details") are sent one event each time a member editing a deal, a key or a
+deal import (ADR-387) changes its title, value or expected close date, or its custom field values
+(ADR-390, below), and when erasing its contact retitles it "Deal (contact erased)". An edit that
+changes nothing sends nothing, automations change details only on the deals they add
+(`deal.created`) and custom field values through their "Update deal fields" steps (ADR-386), merges
+keep them, and changes made while no endpoint took the type were not recorded and are not sent
+later. `changes` names what changed (`title`, `valueMinor`, `expectedCloseOn`, and `fields` since
+ADR-390); the deal is the deal when the event is delivered, so read it there, not the
 values before, which are never sent (members see a value's change on the deal's timeline). Endpoints
 naming pipelines, stages or owners hear it by the deal's as the change left them. One API request
 that changes details and closes the deal sends the change first, with status `open`, then the close;

@@ -315,7 +315,7 @@ describe('CRM pipelines and deals through the API (ADR-253)', () => {
     for (const words of [
       'never which member',
       'Null while the deal is as it was added',
-      'such as erasure retitling the deal; never the maker of an earlier change',
+      'such as erasure retitling the deal or a custom field’s deletion removing its values; never the maker of an earlier change',
     ]) {
       expect(changer.description).toContain(words);
     }
