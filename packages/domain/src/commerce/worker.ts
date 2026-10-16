@@ -15,6 +15,7 @@ import {
   inArray,
   isNull,
   lt,
+  or,
   messages,
   notInArray,
   sendIntents,
@@ -31,6 +32,14 @@ import type { JobSigner } from '../jobs/envelope';
 import type { JobQueue } from '../jobs/queue';
 import { emitTenantEvent } from '../messaging/events';
 import type { GraphClient, GraphResult, RemoteProduct } from '../messaging/graph';
+import {
+  activeManagementPause,
+  isManagementPaused,
+  managementResumeAt,
+  pacedManagementCalls,
+  untilPaused,
+  type ManagementPaused,
+} from '../messaging/management-pace';
 import { SERVICE_WINDOW_MS } from '../messaging/outbound';
 import { STATUS_RANK } from '../messaging/status';
 import { wabaCredential } from '../templates/service';
@@ -81,12 +90,15 @@ function graphMessage(f: GraphFailure): string {
   return `Meta did not return the catalog: ${(f.detail ?? f.title).slice(0, 600)}`;
 }
 
-/** Reads the account's connected catalogs and their products from Meta (M-172). */
+/**
+ * Reads the account's connected catalogs and their products from Meta (M-172). `paused`: Meta
+ * throttles the account's management calls, and the read waits for the pause (ADR-399).
+ */
 export async function processCommerceSync(
   deps: CatalogSyncDeps,
   scope: TenantScope,
   whatsappAccountId: string,
-): Promise<CommerceJobOutcome> {
+): Promise<CommerceJobOutcome | ManagementPaused> {
   const claimed = await deps.db.run(scope, async (tx) => {
     const [row] = await tx
       .select()
@@ -131,14 +143,57 @@ export async function processCommerceSync(
   };
   if (!credential)
     return fail('The WhatsApp account is not connected. Reconnect it, then try again.');
+  /**
+   * Deferred because Meta throttles the account's management calls (ADR-399): records when the job
+   * runs again, while this read still waits, so the sweep's 30-minute give-up counts from then.
+   */
+  const defer = async (pausedUntil: Date): Promise<ManagementPaused> => {
+    await deps.db.run(scope, (tx) =>
+      tx
+        .update(commerceSyncs)
+        .set({ managementDeferredUntil: managementResumeAt(pausedUntil) })
+        .where(
+          and(
+            eq(commerceSyncs.tenantId, scope.tenantId),
+            eq(commerceSyncs.id, row.id),
+            eq(commerceSyncs.version, row.version),
+            inArray(commerceSyncs.state, ['queued', 'running']),
+          ),
+        ),
+    );
+    return { paused: pausedUntil };
+  };
+  const paused = activeManagementPause(credential.managementPausedUntil, deps.clock.now());
+  if (paused) return defer(paused);
+  const call = pacedManagementCalls(deps, scope, credential);
+  const outcome = await untilPaused(() =>
+    readCatalogs(deps, scope, whatsappAccountId, credential, call, { fail, finish }),
+  );
+  return isManagementPaused(outcome) ? defer(outcome.paused) : outcome;
+}
 
+async function readCatalogs(
+  deps: CatalogSyncDeps,
+  scope: TenantScope,
+  whatsappAccountId: string,
+  credential: { wabaId: string; token: string },
+  call: ReturnType<typeof pacedManagementCalls>,
+  {
+    fail,
+    finish,
+  }: {
+    fail: (message: string) => Promise<'done'>;
+    finish: (set: { state: 'idle' | 'failed'; error: string | null }) => Promise<unknown>;
+  },
+): Promise<CommerceJobOutcome> {
   // Catalogs connected to the account.
   const catalogs: { id: string; name: string | null; productCount: number | null }[] = [];
   let after: string | null = null;
   for (let page = 0; page < 5; page += 1) {
-    const listed = await deps.graph.listProductCatalogs(credential.wabaId, credential.token, {
-      after,
-    });
+    const pageAfter: string | null = after;
+    const listed: Awaited<ReturnType<GraphClient['listProductCatalogs']>> = await call(() =>
+      deps.graph.listProductCatalogs(credential.wabaId, credential.token, { after: pageAfter }),
+    );
     if (!listed.ok) {
       return listed.kind === 'retryable' || listed.kind === 'unknown'
         ? 'retry'
@@ -158,9 +213,10 @@ export async function processCommerceSync(
     let cursor: string | null = null;
     let truncated = false;
     for (;;) {
-      const listed = await deps.graph.listCatalogProducts(catalog.id, credential.token, {
-        after: cursor,
-      });
+      const pageCursor: string | null = cursor;
+      const listed: Awaited<ReturnType<GraphClient['listCatalogProducts']>> = await call(() =>
+        deps.graph.listCatalogProducts(catalog.id, credential.token, { after: pageCursor }),
+      );
       if (!listed.ok) {
         return listed.kind === 'retryable' || listed.kind === 'unknown'
           ? 'retry'
@@ -319,6 +375,14 @@ export async function giveUpCommerceSync(
             commerceSyncs.requestedAt,
             new Date(deps.clock.now().getTime() - COMMERCE_SYNC_GIVE_UP_MS),
           ),
+          // Time deferred for a pause Meta imposed does not count (ADR-399).
+          or(
+            isNull(commerceSyncs.managementDeferredUntil),
+            lt(
+              commerceSyncs.managementDeferredUntil,
+              new Date(deps.clock.now().getTime() - COMMERCE_SYNC_GIVE_UP_MS),
+            ),
+          ),
         ),
       ),
   );
@@ -337,6 +401,8 @@ export async function queueDailyCommerceSync(
         state: 'queued',
         error: null,
         requestedAt: deps.clock.now(),
+        // A new request: an earlier deferral for a pause no longer applies (ADR-399).
+        managementDeferredUntil: null,
         version: sql`${commerceSyncs.version} + 1`,
       })
       .where(

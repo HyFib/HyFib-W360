@@ -44,7 +44,14 @@ export function whatsappAccessCheckHandler(rt: WorkerRuntime) {
     };
     const webhooksError =
       result.webhooks && 'error' in result.webhooks ? result.webhooks.error : undefined;
-    if (result.outcome === 'not_checked') {
+    if (result.outcome === 'paused') {
+      // Meta throttles the account's management calls (ADR-399): the sweep signals the check
+      // again once the pause ends.
+      rt.logger.info(
+        { ...facts, pausedUntil: result.pausedUntil },
+        'WhatsApp access check deferred: Meta is limiting management requests',
+      );
+    } else if (result.outcome === 'not_checked') {
       rt.logger.warn({ ...facts, error: result.error }, 'WhatsApp access could not be checked');
     } else if (result.outcome === 'lost') {
       rt.logger.warn(facts, 'WhatsApp access lost; the company was asked to reconnect');

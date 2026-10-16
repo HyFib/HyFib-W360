@@ -19,9 +19,15 @@ verification, app review, Embedded Signup configuration).
 - **P2-01 Channel schema** — done. `app.whatsapp_accounts` (encrypted token in the row, AAD-bound),
   `app.channel_accounts`, `ops.provider_asset_bindings` (one active binding per external asset),
   definer resolver/bind/release functions. T: cross-company binding refused (integration).
-- **P2-02 Graph API client** — done (without usage-header parsing). Pinned version, timeouts, no
-  redirects, classified results (`retryable`/`permanent`/`auth`/`unknown`), tokens in headers only.
-  Remaining: parse `x-business-use-case-usage` to pace management calls.
+- **P2-02 Graph API client** — done. Pinned version, timeouts, no redirects, classified results
+  (`retryable`/`permanent`/`auth`/`unknown`), tokens in headers only. Management calls are paced by
+  Meta's `x-business-use-case-usage` header (ADR-399, migration 0310): each account's latest
+  management reading is stored; while Meta reports minutes to regain access, background management
+  work waits and runs just after, members' management actions answer that Meta is limiting
+  requests until then, and Channels shows the reading. T: unit tests of the parser, the client and
+  the pacing decision (33/39 manual mutations caught; the 6 survivors are integration-only); integration tests against the Graph stand-in
+  run in CI only. Not verified against live Meta traffic; the 100-percent threshold and the header's
+  WhatsApp semantics are only partly confirmed (research M-200).
 - **P2-03 Embedded Signup** — done except payment-method check and Meta-side deregistration. T:
   integration tests with the stand-in (success and six refusal paths). PR for verification: Meta app,
   config id, app review.

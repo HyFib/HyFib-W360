@@ -2074,7 +2074,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         delete: {
           operationId: 'deleteMessageTemplate',
           summary: 'Delete a template',
-          description: `${scopeNote('templates.write')} Deletes a template as members do on the Templates page. A draft Meta never received is deleted at once: it is then listed with \`status=deleted\`, and its name and language can be used again. One Meta has also needs \`templates.submit\` (403 naming it otherwise): HyFib asks Meta to delete it, and it is \`pending_deletion\` until Meta answers, then \`deleted\`, when it can no longer be sent (messages already sent are not affected), or, when Meta refuses, back to the status Meta reports, with a \`delete_failed\` change in its history. One being submitted answers 412; one already deleted, or being deleted, 409. The audit log names the key.`,
+          description: `${scopeNote('templates.write')} Deletes a template as members do on the Templates page. A draft Meta never received is deleted at once: it is then listed with \`status=deleted\`, and its name and language can be used again. One Meta has also needs \`templates.submit\` (403 naming it otherwise): HyFib asks Meta to delete it, and it is \`pending_deletion\` until Meta answers, then \`deleted\`, when it can no longer be sent (messages already sent are not affected), or, when Meta refuses, back to the status Meta reports, with a \`delete_failed\` change in its history. One being submitted answers 412; one already deleted, or being deleted, 409. While Meta limits management requests for the account, deleting one Meta has answers 503 and nothing is queued. The audit log names the key.`,
           parameters: [{ $ref: '#/components/parameters/Id' }],
           responses: {
             '200': {
@@ -2095,6 +2095,11 @@ export function buildOpenApiDocument(serverUrl: string) {
               ),
             },
             ...errors(401, 403, 404, 409, 412, 423, 429, 500),
+            '503': {
+              description:
+                'Meta is limiting management requests for the template’s WhatsApp Business account: nothing was queued. The message gives the time in UTC and `details.pausedUntil` the instant; retry after it.',
+              content: json(ref('Error')),
+            },
           },
         },
       },
@@ -2103,7 +2108,7 @@ export function buildOpenApiDocument(serverUrl: string) {
           operationId: 'submitMessageTemplate',
           summary: 'Submit a draft to Meta for review',
           description: [
-            `${scopeNote('templates.submit')} Submits a draft as members do on the Templates page: only a draft Meta never received (\`draft\` or \`submit_failed\`; 412 otherwise, as for one submitted already), whose WhatsApp Business account is connected (412 otherwise), its content checked again as the template editor checks it (422). It is \`submitting\` until HyFib has Meta’s answer, then as Meta reports it: \`pending\` while Meta reviews it, then \`approved\` or \`rejected\` with Meta’s reason, which GET /message-templates/{id} gives and template.status_changed webhook events report; or \`submit_failed\`, with \`submitError\` saying why, when Meta did not take it, to be changed and submitted again. Its content no longer changes once Meta has it. The audit log names the key.`,
+            `${scopeNote('templates.submit')} Submits a draft as members do on the Templates page: only a draft Meta never received (\`draft\` or \`submit_failed\`; 412 otherwise, as for one submitted already), whose WhatsApp Business account is connected (412 otherwise), its content checked again as the template editor checks it (422). It is \`submitting\` until HyFib has Meta’s answer, then as Meta reports it: \`pending\` while Meta reviews it, then \`approved\` or \`rejected\` with Meta’s reason, which GET /message-templates/{id} gives and template.status_changed webhook events report; or \`submit_failed\`, with \`submitError\` saying why, when Meta did not take it, to be changed and submitted again. Its content no longer changes once Meta has it. While Meta limits management requests for the account, it answers 503 and nothing changes. The audit log names the key.`,
             'With an `Idempotency-Key`, a retry answers the first response; without one, submitting it again is refused with 412.',
           ].join('\n\n'),
           parameters: [
@@ -2116,6 +2121,11 @@ export function buildOpenApiDocument(serverUrl: string) {
               content: json(dataOf(ref('MessageTemplateDetail'))),
             },
             ...errors(400, 401, 403, 404, 412, 422, 423, 429, 500),
+            '503': {
+              description:
+                'Meta is limiting management requests for the template’s WhatsApp Business account: nothing was queued. The message gives the time in UTC and `details.pausedUntil` the instant; retry after it.',
+              content: json(ref('Error')),
+            },
           },
         },
       },

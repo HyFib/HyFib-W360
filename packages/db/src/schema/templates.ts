@@ -54,6 +54,12 @@ export const messageTemplates = appSchema.table('message_templates', {
   /** The key that added it through the API (ADR-295); neither for a template found at Meta. */
   createdByApiKeyId: uuid('created_by_api_key_id'),
   submittedAt: tz('submitted_at'),
+  /**
+   * When work this row waits for, deferred because Meta throttled the account's management calls,
+   * runs again (ADR-399, migration 0310). Windows that give up on a request count from the later of
+   * the request and this time, so time spent deferred for a pause is never counted against it.
+   */
+  managementDeferredUntil: tz('management_deferred_until'),
   lastSyncedAt: tz('last_synced_at'),
   createdAt: tz('created_at').notNull().defaultNow(),
   updatedAt: tz('updated_at').notNull().defaultNow(),

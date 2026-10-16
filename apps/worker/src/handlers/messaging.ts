@@ -13,6 +13,7 @@ import {
   compactContactChanges,
   findStaleReceipts,
   findStaleSendIntents,
+  isManagementPaused,
   newResealState,
   newResignState,
   noticeApiKeyUsageDue,
@@ -42,6 +43,7 @@ import { sweepTaskReminders } from './crm';
 import { signalDueReportEmails } from './reports';
 import { signalDueCampaigns } from './campaigns';
 import { RetryableJobError } from './email';
+import { deferPausedWork } from './management-deferral';
 import { signalDueTemplateSyncs } from './templates';
 import { signalDueAccessChecks } from './whatsapp-access';
 import { sweepCommerceWork } from './commerce';
@@ -155,6 +157,18 @@ export function channelOnboardHandler(rt: WorkerRuntime) {
       auth.scope,
       auth.envelope.ref,
     );
+    if (isManagementPaused(outcome)) {
+      // Meta throttles the account's management calls (ADR-399): setup resumes after the pause.
+      await deferPausedWork(rt, {
+        jobId: job.id,
+        kind: 'channel.onboard',
+        tenantId: auth.scope.tenantId,
+        actorUserId: auth.envelope.actorUserId,
+        ref: auth.envelope.ref,
+        pausedUntil: outcome.paused,
+      });
+      return;
+    }
     rt.logger.info(
       { jobId: job.id, channelAccountId: auth.envelope.ref, outcome },
       'onboarding step',

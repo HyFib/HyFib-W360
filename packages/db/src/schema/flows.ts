@@ -113,6 +113,12 @@ export const flows = appSchema.table('flows', {
   syncState: text('sync_state', { enum: FLOW_SYNC_STATES }).notNull().default('idle'),
   syncError: text('sync_error'),
   syncRequestedAt: tz('sync_requested_at'),
+  /**
+   * When work this row waits for, deferred because Meta throttled the account's management calls,
+   * runs again (ADR-399, migration 0310). Windows that give up on a request count from the later of
+   * the request and this time, so time spent deferred for a pause is never counted against it.
+   */
+  managementDeferredUntil: tz('management_deferred_until'),
   syncedAt: tz('synced_at'),
   archivedAt: tz('archived_at'),
   version: integer('version').notNull().default(1),

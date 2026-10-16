@@ -145,6 +145,46 @@ export interface StandInState {
   uploadError: { status: number; code: number; message: string } | null;
   /** When set, read receipts and typing indicators fail with this Graph error (ADR-223). */
   readError: { status: number; code: number; message: string } | null;
+  /**
+   * When set, every Graph answer carries this raw `x-business-use-case-usage` value (research
+   * M-027, ADR-399); tests write it with `usageHeaderValue` or as any text, malformed included.
+   */
+  usageHeader: string | null;
+}
+
+/**
+ * A `x-business-use-case-usage` value in the shape of Meta's OpenAPI example: per WABA id, a
+ * `whatsapp_business_management` entry and a `whatsapp` entry.
+ */
+export function usageHeaderValue(
+  byWaba: Record<
+    string,
+    { callCount?: number; totalCputime?: number; totalTime?: number; regainMinutes?: number }
+  >,
+): string {
+  return JSON.stringify(
+    Object.fromEntries(
+      Object.entries(byWaba).map(([wabaId, u]) => [
+        wabaId,
+        [
+          {
+            type: 'whatsapp_business_management',
+            call_count: u.callCount ?? 0,
+            total_cputime: u.totalCputime ?? 0,
+            total_time: u.totalTime ?? 0,
+            estimated_time_to_regain_access: u.regainMinutes ?? 0,
+          },
+          {
+            type: 'whatsapp',
+            call_count: 1,
+            total_cputime: 1,
+            total_time: 1,
+            estimated_time_to_regain_access: 0,
+          },
+        ],
+      ]),
+    ),
+  );
 }
 
 export interface GraphStandIn {
@@ -698,6 +738,7 @@ export async function startGraphStandIn(options: {
     mediaCounter: 0,
     uploadError: null,
     readError: null,
+    usageHeader: null,
   };
   for (const token of options.acceptTokens ?? []) {
     state.tokens.set(token, {
@@ -713,6 +754,10 @@ export async function startGraphStandIn(options: {
       // TEST-ONLY controls answer on a connection of their own: a runner request sent on a kept-alive
       // socket just as the server closes it after its idle timeout hangs up (once in CI).
       if (url.pathname.startsWith('/__stand-in/')) res.setHeader('connection', 'close');
+      // Meta's usage header on every Graph answer, success or error, when a test sets one.
+      else if (state.usageHeader !== null) {
+        res.setHeader('x-business-use-case-usage', state.usageHeader);
+      }
       const body = await readBody(req);
       const authorization = req.headers.authorization ?? null;
       if (req.method === 'GET' && url.pathname === '/__stand-in/requests') {

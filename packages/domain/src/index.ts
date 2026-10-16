@@ -25,6 +25,8 @@ export * from './messaging/signature';
 export * from './messaging/receipts';
 export * from './messaging/events';
 export * from './messaging/graph';
+export * from './messaging/usage-header';
+export * from './messaging/management-pace';
 export * from './messaging/rate-limit';
 export * from './messaging/ingest';
 export * from './messaging/outbound';

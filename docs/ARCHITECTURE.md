@@ -245,6 +245,18 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   worded by `messagingLimitText` (ADR-398: a tier by the unique customers research M-058 says it
   allows, `TIER_50` and `UNTIERED` as Meta reports them, an unlisted value as unknown, none as not
   reported, nothing for a number never asked), which Settings → Channels shows.
+- **Management usage (ADR-399):** the Graph client parses Meta's `x-business-use-case-usage` header
+  on every response (`messaging/usage-header.ts`, bounded, never changing a call's classification)
+  and gives each WABA's `whatsapp_business_management` percentages and minutes to regain access as
+  `usage`. The template, flow, catalog, access-check and number-setup jobs record the reading for
+  their account's own WABA id on `app.whatsapp_accounts` in the company's scope (time, highest
+  percentage, `management_paused_until` while Meta gives minutes), through `pacedManagementCalls`,
+  which also makes no further call once a response pauses the account (`messaging/management-pace.ts`).
+  While paused, those jobs ask Graph nothing: template syncs and access checks stay due and the
+  sweep's due lists leave paused accounts out until the pause ends; the other jobs are queued again
+  for 30 seconds after it (`deferPausedJob`). Members' management actions (refresh, submit, delete,
+  flow changes and keys, catalog reads) answer 503 with the end instead of queuing, and Channels
+  shows the latest reading. A high percentage alone pauses nothing.
 - **Not built yet:** media download to private object storage, message search, Meta-side
   deregistration on disconnect (templates and template sends: section 6A).
 
@@ -859,8 +871,9 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
 - **Worker** (`flows/worker.ts`, queues `flow.sync` and `flow.keys`): performs the written-ahead
   operation against the Graph API (multipart create, asset upload, publish, deprecate, delete, read;
   research M-161 to M-163), adopting its own flow after a lost create response; generates keys,
-  uploads them to every active number and reads them back (M-164), and retires previous keys after
-  24 hours. `ops.flow_work_due` feeds the messaging sweep with operations and uploads waiting for
+  uploads them to every active number and reads them back (M-164), and retires previous keys 24
+  hours after the later of the rotation and the active key's latest successful upload, never while
+  that key's upload is pending (ADR-399). `ops.flow_work_due` feeds the messaging sweep with operations and uploads waiting for
   more than two minutes and keys due to retire.
 - **Endpoint** (`/api/flows/endpoint/<public id>` → `flows/endpoint.ts`): 1 MB request limit;
   signature (432), lookup, decryption with the current or previous key (421), health checks and

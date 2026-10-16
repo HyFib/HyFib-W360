@@ -42,6 +42,7 @@ import { endRunForHuman } from '../automations/runs';
 import type { JobSigner } from '../jobs/envelope';
 import type { JobQueue } from '../jobs/queue';
 import { emitTenantEvent } from '../messaging/events';
+import { assertManagementOpen } from '../messaging/management-pace';
 import { SERVICE_WINDOW_MS, canSeeConversation } from '../messaging/outbound';
 import { STATUS_RANK } from '../messaging/status';
 import { likePattern, parseInput } from '../validation';
@@ -377,16 +378,28 @@ export function createCommerceService(deps: CommerceDeps) {
     return order;
   }
 
-  async function connectedAccount(tx: Tx, tenantId: string, whatsappAccountId: string) {
+  /**
+   * A connected account of the company whose management calls Meta does not throttle: while it
+   * does, the action says so instead of queuing a catalog read (ADR-399).
+   */
+  async function connectedAccount(tx: Tx, ctx: TenantContext, whatsappAccountId: string) {
     const [account] = await tx
-      .select({ id: whatsappAccounts.id, status: whatsappAccounts.status })
+      .select({
+        id: whatsappAccounts.id,
+        status: whatsappAccounts.status,
+        managementPausedUntil: whatsappAccounts.managementPausedUntil,
+      })
       .from(whatsappAccounts)
       .where(
-        and(eq(whatsappAccounts.tenantId, tenantId), eq(whatsappAccounts.id, whatsappAccountId)),
+        and(
+          eq(whatsappAccounts.tenantId, ctx.tenant.id),
+          eq(whatsappAccounts.id, whatsappAccountId),
+        ),
       );
     if (!account || account.status !== 'connected') {
       throw invalid('whatsappAccountId', 'Choose a connected WhatsApp account.');
     }
+    assertManagementOpen(account.managementPausedUntil, deps.clock.now(), ctx.tenant.timezone);
   }
 
   return {
@@ -463,7 +476,7 @@ export function createCommerceService(deps: CommerceDeps) {
       assertCan(ctx, 'commerce.manage');
       const data = parseInput(z.object({ whatsappAccountId: z.uuid() }), input);
       return db.run(ctx.scope, async (tx) => {
-        await connectedAccount(tx, ctx.tenant.id, data.whatsappAccountId);
+        await connectedAccount(tx, ctx, data.whatsappAccountId);
         const now = deps.clock.now();
         await tx
           .insert(commerceSyncs)
@@ -480,6 +493,8 @@ export function createCommerceService(deps: CommerceDeps) {
               state: 'queued',
               error: null,
               requestedAt: now,
+              // A new request: an earlier deferral for a pause no longer applies (ADR-399).
+              managementDeferredUntil: null,
               version: sql`${commerceSyncs.version} + 1`,
             },
             // A read already waiting or running is not requested twice.
