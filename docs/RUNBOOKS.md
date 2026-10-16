@@ -585,7 +585,9 @@ first, an automation was handling it, or the worker's sweep has not run), `waiti
 `due_at`, business hours), `skipped` with `too_late` (due more than an hour before the sweep saw
 it), `channel_inactive`, `window_closed`, `no_phone`, `opted_out`, `suppressed` or
 `contact_erased`, or `sent` with the message, whose own status says whether Meta accepted it (a
-send-time consent refusal fails it with the reason). The worker logs
+send-time consent refusal fails it with the reason; a reply whose wait ended before it could be
+sent, a member having answered meanwhile, is `canceled` with `slow_reply_answered`). A conversation
+another transaction held during a sweep is looked at in the next one. The worker logs
 `automatic replies to waiting customers` with counts, and `automatic replies failed; will retry`
 with the company when a pass failed.
 

@@ -45,7 +45,7 @@ import {
 } from '../consent/service';
 import { phoneFromWaId, waRecipientFromPhone } from '../contacts/phone';
 import { csatSendBlock } from '../inbox/csat';
-import { slowReplySendBlock } from '../inbox/slow-reply';
+import { slowReplySendBlock, slowReplyWaitEnded } from '../inbox/slow-reply';
 import type { JobSigner } from '../jobs/envelope';
 import type { JobQueue } from '../jobs/queue';
 import {
@@ -799,6 +799,42 @@ export async function processSendIntent(
         return { kind: 'campaign_stopped' as const };
       }
     }
+    // The automatic reply when members are slow (ADR-384) is cancelled once its wait ended (a
+    // member answered, the conversation was resolved or an automation took it over), so a send
+    // put off meanwhile (a number reconnecting, a retry) never reaches the customer after the answer.
+    if (
+      ctx.messageType === 'text' &&
+      (await slowReplyWaitEnded(tx, { tenantId: scope.tenantId, messageId: current.messageId }))
+    ) {
+      const code = 'slow_reply_answered';
+      const reason = 'Not sent: the customer was answered, or their wait ended, first.';
+      await tx
+        .update(sendIntents)
+        .set({
+          state: 'canceled',
+          leaseUntil: null,
+          resolvedAt: now,
+          lastErrorCode: code,
+          lastError: reason,
+        })
+        .where(and(eq(sendIntents.tenantId, scope.tenantId), eq(sendIntents.id, intentId)));
+      await tx
+        .update(messages)
+        .set({
+          status: 'canceled',
+          statusRank: STATUS_RANK.canceled,
+          statusAt: now,
+          errorCode: code,
+          errorTitle: reason,
+        })
+        .where(and(eq(messages.tenantId, scope.tenantId), eq(messages.id, current.messageId)));
+      await emitTenantEvent(tx, scope.tenantId, {
+        type: 'message.status',
+        conversationId: ctx.conversationId,
+        payload: { messageId: current.messageId },
+      });
+      return { kind: 'slow_reply_canceled' as const };
+    }
     // Business-initiated templates: re-check the template and the contact's consent now, under
     // the intent's row lock, so an opt-out recorded after queueing still stops the send.
     let blocked: { code: string; message: string } | null = null;
@@ -860,7 +896,9 @@ export async function processSendIntent(
       channelAccountId: outcome.channelAccountId,
     };
   }
-  if (outcome.kind === 'campaign_stopped') return { outcome: 'canceled' };
+  if (outcome.kind === 'campaign_stopped' || outcome.kind === 'slow_reply_canceled') {
+    return { outcome: 'canceled' };
+  }
   if (outcome.kind !== 'claimed') return { outcome: 'not_claimable' };
   const claimed = outcome;
   const { intent } = claimed;

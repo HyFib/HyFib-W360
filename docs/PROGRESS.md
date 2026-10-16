@@ -1,5 +1,40 @@
 # Progress
 
+## 2026-10-16 — Review fixes for ADR-384 and ADR-385 (PR #91)
+
+Status: **Fixed; the database and browser tests run in CI only.** Independent reviews of both
+features found one Medium and nine Low issues, all fixed before merge.
+
+### Completed
+
+- **Automatic reply (ADR-384):** a queued reply whose wait ended before it could be sent (a member
+  answered, the conversation was resolved or an automation took over, e.g. while the number was
+  reconnecting) is now cancelled at send time (`slow_reply_answered`) instead of being delivered
+  after the answer (Medium); a waiting row is not counted late for having waited when the delay was
+  cut or the calendar changed; an erased contact is recorded as `contact_erased`, not `no_phone`;
+  the sweep skips conversations another transaction holds (`SKIP LOCKED`), so it cannot deadlock
+  with the campaign runner's set-based update; turning the reply off needs no valid text or delay.
+- **Choice-type deal fields (ADR-385):** the "Edit options" button's accessible name starts with its
+  visible text; the API's description says spaces around a choice are ignored and an empty string
+  removes a value; migration 0301's check guards `array_position` with a `CASE` (it errors on a
+  multidimensional array, and the order AND's arguments are evaluated in is not defined);
+  `GET /deal-fields` mentions the options; ARCHITECTURE's CRM "Not built yet" line is up to date.
+- **Tests:** unit (lateness from the put-off time); integration (cancellation after an answer and
+  after a resolve, erasure while waiting, a held conversation skipped and handled next time, turning
+  off with an invalid text); e2e (the "Edit options" button's name).
+- **Mutation checks:** the lateness rule's regression is caught by the unit tests; the send-time
+  cancellation, the erased check, `SKIP LOCKED` and the settings rule are covered by integration
+  tests, which run in CI only.
+
+### Test commands and results (local, 2026-10-16)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | UNIT_PLACEHOLDER                                                |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+
 ## 2026-10-16 — Choice-type custom deal fields (P4-04, ADR-385)
 
 Status: **Implemented; its database and browser tests run in CI only.** Custom deal fields took

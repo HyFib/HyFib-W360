@@ -6,6 +6,7 @@ import { authorizedTenantScope } from '@w360/db';
 import {
   SLOW_REPLY_DEFAULTS,
   createBusinessHoursService,
+  createContactsService,
   createInboxService,
   createSlowReplyService,
   processSendIntent,
@@ -191,6 +192,18 @@ describe('the automatic reply’s settings (ADR-384)', () => {
       delayMinutes: 30,
     });
     expect(await since()).toBeNull();
+    // Turning it off needs no valid text or delay: invalid ones keep the stored values.
+    await service().updateSlowReplySettings(owner, { enabled: false, text: ' ', delayMinutes: 0 });
+    expect(await service().getSlowReplySettings(agent)).toEqual({
+      enabled: false,
+      text: TEXT,
+      delayMinutes: 30,
+    });
+    await expectAppError(
+      service().updateSlowReplySettings(owner, { enabled: true, text: ' ', delayMinutes: 30 }),
+      'validation_failed',
+      /Write the automatic reply/,
+    );
     // The database refuses the reply on without a text, a delay or a start.
     await expect(
       fx.query(
@@ -418,6 +431,86 @@ describe('the automatic reply when members are slow to answer (ADR-384)', () => 
       [queued!.message_id],
     );
     expect(message).toEqual({ status: 'failed', error_code: 'opted_out' });
+  });
+
+  it('is cancelled, not sent, when a member answers or resolves the conversation after it was queued', async () => {
+    const { c, owner } = await companyWithSlowReply(10);
+    const phones = [waId(), waId()];
+    const answered = await waitingCustomer(c, phones[0]!);
+    const resolved = await waitingCustomer(c, phones[1]!);
+    await sweep(later(resolved.started_at, 11));
+    const queued = [(await row(answered.id))!, (await row(resolved.id))!];
+    expect(queued).toMatchObject([{ state: 'sent' }, { state: 'sent' }]);
+    // Before the queued replies go out (the number was reconnecting, say), a member answers one
+    // customer and resolves the other's conversation.
+    await queueTextMessage(
+      { db: fx.dbs.app, jobs: fx.jobs(), signer: fx.signer, clock: systemClock },
+      owner,
+      {
+        conversationId: answered.conversation_id,
+        text: 'On its way',
+        clientKey: `late-${answered.id}`,
+      },
+    );
+    const [{ version }] = (await fx.query<{ version: number }>(
+      `SELECT version FROM app.conversations WHERE id = $1`,
+      [resolved.conversation_id],
+    )) as [{ version: number }];
+    await inboxService().setStatus(owner, {
+      conversationId: resolved.conversation_id,
+      status: 'resolved',
+      expectedVersion: version,
+    });
+    for (const { message_id } of queued) {
+      expect((await send(c, message_id!)).outcome).toBe('canceled');
+      const [message] = await fx.query<{ status: string; error_code: string }>(
+        `SELECT status, error_code FROM app.messages WHERE id = $1`,
+        [message_id],
+      );
+      expect(message).toEqual({ status: 'canceled', error_code: 'slow_reply_answered' });
+    }
+    // Neither customer was sent anything.
+    const sentTo = fx.standIn.state.requests
+      .map((r) => (r.body as { to?: unknown } | undefined)?.to)
+      .filter((to) => typeof to === 'string' && phones.includes(to));
+    expect(sentTo).toEqual([]);
+  });
+
+  it('is skipped as erased for a customer erased while waiting', async () => {
+    const { c, owner } = await companyWithSlowReply(10);
+    const turn = await waitingCustomer(c, waId());
+    const [{ contact_id }] = (await fx.query<{ contact_id: string }>(
+      `SELECT contact_id FROM app.conversations WHERE id = $1`,
+      [turn.conversation_id],
+    )) as [{ contact_id: string }];
+    await createContactsService({ db: fx.dbs.app, clock: systemClock }).eraseContact(owner, {
+      contactId: contact_id,
+      suppress: false,
+    });
+    await sweep(later(turn.started_at, 11));
+    expect(await row(turn.id)).toMatchObject({ state: 'skipped', skip_reason: 'contact_erased' });
+    expect(await automaticReplies(turn.conversation_id)).toEqual([]);
+  });
+
+  it('skips a conversation another transaction holds, without waiting, and handles it next time', async () => {
+    const { c } = await companyWithSlowReply(10);
+    const turn = await waitingCustomer(c, waId());
+    const holder = await fx.dbs.adminPool.connect();
+    try {
+      await holder.query('BEGIN');
+      await holder.query('SELECT id FROM app.conversations WHERE id = $1 FOR UPDATE', [
+        turn.conversation_id,
+      ]);
+      // A sweep while the conversation is held neither waits for it nor records anything.
+      await sweep(later(turn.started_at, 11));
+      expect(await row(turn.id)).toBeUndefined();
+    } finally {
+      await holder.query('ROLLBACK');
+      holder.release();
+    }
+    await sweep(later(turn.started_at, 12));
+    expect(await row(turn.id)).toMatchObject({ state: 'sent' });
+    expect(await automaticReplies(turn.conversation_id)).toHaveLength(1);
   });
 
   it('counts the delay in business hours, and waits for the business to open', async () => {

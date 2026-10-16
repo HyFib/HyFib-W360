@@ -180,15 +180,22 @@ export function planSlowReply(input: {
   return dueAt > input.now ? { kind: 'wait', dueAt } : { kind: 'due', dueAt };
 }
 
-/** What the sweep does with a turn whose text is due: why it is not sent, or `send`. */
+/**
+ * What the sweep does with a turn whose text is due: why it is not sent, or `send`. Lateness counts
+ * from the due time, or from the time a waiting row was put off to (`waitedUntil`) when that is
+ * later: a row is only looked at again then, so a delay cut short or a calendar changed meanwhile
+ * does not make it late.
+ */
 export function slowReplyOutcome(input: {
   dueAt: Date;
+  waitedUntil?: Date | null;
   now: Date;
   channelStatus: string | null;
   lastInboundAt: Date | null;
 }): 'send' | Extract<SlowReplySkipReason, 'too_late' | 'channel_inactive' | 'window_closed'> {
   const now = input.now.getTime();
-  if (now - input.dueAt.getTime() > SLOW_REPLY_LATE_LIMIT_MS) return 'too_late';
+  const lateFrom = Math.max(input.dueAt.getTime(), input.waitedUntil?.getTime() ?? 0);
+  if (now - lateFrom > SLOW_REPLY_LATE_LIMIT_MS) return 'too_late';
   if (input.channelStatus !== 'active') return 'channel_inactive';
   if (!input.lastInboundAt || now - input.lastInboundAt.getTime() > SERVICE_WINDOW_MS)
     return 'window_closed';
@@ -297,6 +304,9 @@ async function sendCompanySlowReplies(
 
   // Lock the conversations, then the turns: the order a member's reply, a resolve and the start of
   // an automation run take them (each ends the turn), so each either waits for this or is seen.
+  // Conversations another transaction holds (a member's reply, a campaign batch) are skipped and
+  // looked at in the next sweep: the sweep never waits on a conversation lock, so it cannot deadlock
+  // with updates that take many conversations in another order.
   const candidates = await tx
     .select({ conversationId: conversationTurns.conversationId })
     .from(conversationTurns)
@@ -321,9 +331,10 @@ async function sendCompanySlowReplies(
           and(eq(conversations.tenantId, tenantId), inArray(conversations.id, conversationIds)),
         )
         .orderBy(asc(conversations.id))
-        .for('update')
+        .for('update', { skipLocked: true })
     ).map((c) => [c.id, c]),
   );
+  if (convs.size === 0) return outcome;
   const turns = await tx
     .select({
       id: conversationTurns.id,
@@ -335,16 +346,21 @@ async function sendCompanySlowReplies(
       and(
         eq(conversationTurns.tenantId, tenantId),
         inArray(conversationTurns.id, [...turnIds]),
+        inArray(conversationTurns.conversationId, [...convs.keys()]),
         isNull(conversationTurns.endedAt),
       ),
     )
     .orderBy(asc(conversationTurns.id))
     .for('update');
   if (turns.length === 0) return outcome;
-  const recorded = new Map(
+  const rows = new Map(
     (
       await tx
-        .select({ turnId: slowReplyMessages.turnId, state: slowReplyMessages.state })
+        .select({
+          turnId: slowReplyMessages.turnId,
+          state: slowReplyMessages.state,
+          dueAt: slowReplyMessages.dueAt,
+        })
         .from(slowReplyMessages)
         .where(
           and(
@@ -355,8 +371,9 @@ async function sendCompanySlowReplies(
             ),
           ),
         )
-    ).map((r) => [r.turnId, r.state]),
+    ).map((r) => [r.turnId, r]),
   );
+  const recorded = new Map([...rows].map(([turnId, r]) => [turnId, r.state]));
   const running = new Set(
     (
       await tx
@@ -428,14 +445,25 @@ async function sendCompanySlowReplies(
       .where(
         and(eq(channelAccounts.tenantId, tenantId), eq(channelAccounts.id, conv.channelAccountId)),
       );
+    const waiting = rows.get(turn.id);
     const decision = slowReplyOutcome({
       dueAt,
+      waitedUntil: waiting?.state === 'waiting' ? waiting.dueAt : null,
       now,
       channelStatus: channel?.status ?? null,
       lastInboundAt: conv.lastInboundAt,
     });
     if (decision !== 'send' || !channel) {
       await skip(turn.id, dueAt, decision === 'send' ? 'channel_inactive' : decision);
+      continue;
+    }
+    const [contact] = await tx
+      .select({ name: contacts.displayName, erasedAt: contacts.erasedAt })
+      .from(contacts)
+      .where(and(eq(contacts.tenantId, tenantId), eq(contacts.id, conv.contactId)));
+    // Erasure removes the contact's identities, so it is told apart before they are looked up.
+    if (!contact || contact.erasedAt) {
+      await skip(turn.id, dueAt, 'contact_erased');
       continue;
     }
     const [identity] = await tx
@@ -465,12 +493,8 @@ async function sendCompanySlowReplies(
       await skip(turn.id, dueAt, slowReplyConsentSkip(eligibility.code));
       continue;
     }
-    const [contact] = await tx
-      .select({ name: contacts.displayName })
-      .from(contacts)
-      .where(and(eq(contacts.tenantId, tenantId), eq(contacts.id, conv.contactId)));
     const body = renderSlowReply(settings.text, {
-      contactName: contact?.name ?? null,
+      contactName: contact.name,
       companyName: company.name,
     });
     const messageId = uuidv7();
@@ -516,6 +540,42 @@ async function sendCompanySlowReplies(
     outcome.sent += 1;
   }
   return outcome;
+}
+
+/**
+ * Whether a queued automatic reply's wait ended before it could be sent: a member answered, the
+ * conversation was resolved or an automation took it over (each ends the reply turn). The send
+ * pipeline then cancels it rather than deliver it after the answer, for example once a number that
+ * was reconnecting is active again. False for any other message.
+ */
+export async function slowReplyWaitEnded(
+  tx: Tx,
+  input: { tenantId: string; messageId: string },
+): Promise<boolean> {
+  const [row] = await tx
+    .select({ endedAt: conversationTurns.endedAt, status: conversations.status })
+    .from(slowReplyMessages)
+    .innerJoin(
+      conversationTurns,
+      and(
+        eq(conversationTurns.tenantId, slowReplyMessages.tenantId),
+        eq(conversationTurns.id, slowReplyMessages.turnId),
+      ),
+    )
+    .innerJoin(
+      conversations,
+      and(
+        eq(conversations.tenantId, conversationTurns.tenantId),
+        eq(conversations.id, conversationTurns.conversationId),
+      ),
+    )
+    .where(
+      and(
+        eq(slowReplyMessages.tenantId, input.tenantId),
+        eq(slowReplyMessages.messageId, input.messageId),
+      ),
+    );
+  return row !== undefined && (row.endedAt !== null || row.status === 'resolved');
 }
 
 /**
@@ -574,7 +634,12 @@ export function createSlowReplyService(deps: { db: Database; clock: Clock }) {
 
     async updateSlowReplySettings(ctx: TenantContext, input: unknown, meta: RequestMeta = {}) {
       assertCan(ctx, 'tenant.settings.manage');
-      const data = parseInput(slowReplySettingsSchema, input);
+      // Turning the reply off needs no valid text or delay: invalid ones keep the stored values.
+      const { enabled } = parseInput(z.object({ enabled: z.boolean() }), input);
+      const data =
+        enabled || slowReplySettingsSchema.safeParse(input).success
+          ? parseInput(slowReplySettingsSchema, input)
+          : null;
       await db.run(ctx.scope, async (tx) => {
         const now = clock.now();
         // Locked, so two saves agree on when the reply was turned on.
@@ -582,18 +647,19 @@ export function createSlowReplyService(deps: { db: Database; clock: Clock }) {
           .select({
             enabled: messagingSettings.slowReplyEnabled,
             since: messagingSettings.slowReplySince,
+            text: messagingSettings.slowReplyText,
+            delayMinutes: messagingSettings.slowReplyDelayMinutes,
           })
           .from(messagingSettings)
           .where(eq(messagingSettings.tenantId, ctx.tenant.id))
           .for('update');
-        const change = slowReplySinceChange(
-          current ?? { enabled: false, since: null },
-          data.enabled,
-        );
+        const change = slowReplySinceChange(current ?? { enabled: false, since: null }, enabled);
+        const delayMinutes =
+          data?.delayMinutes ?? current?.delayMinutes ?? SLOW_REPLY_DEFAULTS.delayMinutes;
         const values = {
-          slowReplyEnabled: data.enabled,
-          slowReplyText: data.text,
-          slowReplyDelayMinutes: data.delayMinutes,
+          slowReplyEnabled: enabled,
+          slowReplyText: data?.text ?? current?.text ?? SLOW_REPLY_DEFAULTS.text,
+          slowReplyDelayMinutes: delayMinutes,
           slowReplySince:
             change === 'keep' ? (current?.since ?? null) : change === 'start' ? sql`now()` : null,
           updatedByUserId: ctx.user.id,
@@ -617,7 +683,7 @@ export function createSlowReplyService(deps: { db: Database; clock: Clock }) {
             action: 'inbox.slow_reply_updated',
             subjectType: 'tenant',
             subjectId: ctx.tenant.id,
-            metadata: { enabled: data.enabled, delayMinutes: data.delayMinutes },
+            metadata: { enabled, delayMinutes },
           },
           meta,
         );

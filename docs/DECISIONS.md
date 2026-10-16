@@ -15189,15 +15189,19 @@ Decision:
   only) for open turns of active companies with the reply on that may be due (started at least the
   delay ago; business hours only move a due time later), then works through each company in its own
   scope: it locks the conversations, then the turns (the order a member's reply, a resolve and an
-  automation's start take them), computes the due time with the company's calendar, and queues the
+  automation's start take them), skipping conversations another transaction holds (they are looked
+  at in the next sweep, so the sweep never waits on a conversation lock and cannot deadlock with
+  updates that take many conversations in another order, such as a campaign batch), computes the
+  due time with the company's calendar, and queues the
   text as a `system` message through the ordinary send pipeline (message, send intent and signed
   `message.send` job in one transaction). It is shown in the thread as "Automatic reply" and as the
   conversation's last message.
 - **Once per wait:** `app.slow_reply_messages` holds one row per turn (unique): `waiting` while
-  business hours put the due time later (looked at again then), `sent` with its message or `skipped`
-  with the reason, for good (a guard trigger), written in the transaction that queues the message.
-  A worker restart before commit leaves nothing; concurrent sweeps wait on the locks and then see
-  the row. A customer writing again in the same wait gets nothing more; after a member's reply their
+  business hours put the due time later (looked at again then, and not counted late for having
+  waited even if the delay was cut or the calendar changed meanwhile), `sent` with its message or
+  `skipped` with the reason, for good (a guard trigger), written in the transaction that queues the
+  message. A worker restart before commit leaves nothing; concurrent sweeps skip the conversations
+  one of them holds and then see its row. A customer writing again in the same wait gets nothing more; after a member's reply their
   next message starts a new wait.
 - **When it is not sent:** while an automation run handles the conversation (no turn is open then,
   and the sweep checks again), in a resolved conversation (a resolve ends the turn), after a member
@@ -15205,9 +15209,13 @@ Decision:
   service window closed (`window_closed`), no WhatsApp id on the number's account (`no_phone`), a
   contact who opted out of non-marketing messages, is suppressed or erased (`opted_out`,
   `suppressed`, `contact_erased`, the CSAT questions' check), or due more than an hour before the
-  sweep saw it (`too_late`: the worker was down, the company suspended). The send worker checks the
-  window and the contact's consent again before the request leaves, so an opt-out after queueing
-  stops it. The text names at most the customer's own name and the company, never a number, so
+  sweep saw it (`too_late`: the worker was down, the company suspended). An erased contact is told
+  apart before its WhatsApp id is looked up (erasure removes it). The send worker checks again
+  before the request leaves: a reply whose wait ended meanwhile (a member answered, the conversation
+  was resolved or an automation took it over, for example while the number was reconnecting) is
+  cancelled (`slow_reply_answered`) rather than delivered after the answer, and the window and the
+  contact's consent are checked, so an opt-out after queueing stops it. Turning the reply off needs
+  no valid text or delay; invalid ones keep the stored values. The text names at most the customer's own name and the company, never a number, so
   number masking (ADR-226) is unaffected.
 - **Not a reply:** the message is the company's, not a member's, so the wait goes on: the inbox's
   reply timers, the overdue emails and notice and Reports' first-response figures still wait for a
@@ -15219,7 +15227,15 @@ Decision:
 
 Not built: a reply per team or per number, more than one reply per wait (a second after a longer
 wait), templates outside the window, a reply that names the expected wait, the setting in the public
-API, and replies to waits that began before it was turned on.
+API, replies to waits that began before it was turned on, and re-planning waiting rows when the
+delay or calendar changes (a waiting row is looked at again at the time it was put off to).
+
+Review (before merge): an independent review found a queued reply could still be delivered after a
+member answered, when its send was put off (now cancelled at send time), a waiting row turned
+`too_late` after the delay was cut or the calendar changed, erased contacts recorded as `no_phone`,
+a possible deadlock with the campaign runner's set-based conversation update (the sweep now skips
+held conversations), and that turning the reply off required a valid text. All were fixed with
+tests.
 
 ## ADR-385 Choice-type custom deal fields (P4-04) (2026-10-16)
 

@@ -206,6 +206,26 @@ describe('whether a due automatic reply is sent (ADR-384)', () => {
     expect(SLOW_REPLY_LATE_LIMIT_MS).toBe(HOUR);
   });
 
+  it('counts lateness from the time a waiting row was put off to, when that is later', () => {
+    // The row waited until Monday morning; the delay was cut meanwhile, so the due time computed
+    // now is days earlier. Looked at when it said, it is not late.
+    const putOffTo = new Date(dueAt.getTime() + 60 * HOUR);
+    const seen = new Date(putOffTo.getTime() + 5 * MINUTE);
+    const atLook = { ...ok, now: seen, lastInboundAt: seen };
+    expect(slowReplyOutcome({ ...atLook, waitedUntil: putOffTo })).toBe('send');
+    expect(slowReplyOutcome({ ...atLook, waitedUntil: null })).toBe('too_late');
+    expect(slowReplyOutcome(atLook)).toBe('too_late');
+    // An earlier put-off time does not move lateness back.
+    expect(slowReplyOutcome({ ...atLook, waitedUntil: new Date(dueAt.getTime() - HOUR) })).toBe(
+      'too_late',
+    );
+    // A row put off and then forgotten for more than the limit is still late.
+    const longAfter = new Date(putOffTo.getTime() + SLOW_REPLY_LATE_LIMIT_MS + 1);
+    expect(
+      slowReplyOutcome({ ...ok, now: longAfter, lastInboundAt: longAfter, waitedUntil: putOffTo }),
+    ).toBe('too_late');
+  });
+
   it('skips an inactive number and a closed window', () => {
     expect(slowReplyOutcome({ ...ok, channelStatus: 'disconnected' })).toBe('channel_inactive');
     expect(slowReplyOutcome({ ...ok, channelStatus: null })).toBe('channel_inactive');
