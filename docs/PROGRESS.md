@@ -1,5 +1,25 @@
 # Progress
 
+## 2026-10-16 — Image builds in CI from the first mirror that serves the base image
+
+Status: **Changed; it runs in CI only.** ECR Public's anonymous data limit ("429 Too Many Requests:
+Data limit exceeded") failed the web or worker image build on PR #90 and PR #92, at least once after
+serving the tag, on the platform's manifest.
+
+### Completed
+
+- **`containers.yml`:** the step that picks the Dockerfile's Node image tries Google's mirror of
+  Docker Hub first (as CI's PostgreSQL service does), then Amazon ECR Public, then Docker Hub, and
+  builds from the first whose tag it can read (`docker buildx imagetools inspect`), warning about
+  each one it skips. Builds outside CI keep the Dockerfile's default.
+
+### Test commands and results
+
+| Command                        | Result                           |
+| ------------------------------ | -------------------------------- |
+| `prettier --check`, YAML parse | clean                            |
+| The containers workflow        | not run here; CI runs it on push |
+
 ## 2026-10-16 — Review fixes for ADR-386 and ADR-387
 
 Status: **Fixed; the database and browser tests run in CI only.** Independent reviews of both
