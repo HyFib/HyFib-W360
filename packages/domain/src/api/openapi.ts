@@ -3872,7 +3872,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         get: {
           operationId: 'listDealFields',
           summary: 'The company’s custom deal fields',
-          description: `${scopeNote('deals.read')} The keys and types of the values deals’ \`fields\` hold, oldest first. Owners and administrators define them in Settings → Pipelines. Needs the CRM in the company’s plan (403, reason not_in_plan).`,
+          description: `${scopeNote('deals.read')} The keys and types of the values deals’ \`fields\` hold, with a choice field’s options, oldest first. Owners and administrators define them in Settings → Pipelines. Needs the CRM in the company’s plan (403, reason not_in_plan).`,
           responses: {
             '200': {
               description: 'The fields (at most 50).',

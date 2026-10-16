@@ -15252,8 +15252,8 @@ Decision:
 - **Values:** the deal page and the new-deal forms show a select with "Not set" and the options.
   Forms and CSV import take an option whatever its case and store it as the option is written, so
   "gold" in a file becomes "Gold"; anything else is refused ("Tier must be one of its options.").
-  The API is strict, as for other types: `fields` takes the option exactly as written, as a string
-  (or null, or an empty string, to remove it). The deals CSV writes the chosen option as text, and
+  The API is strict, as for other types: `fields` takes the option as written, as a string (spaces
+  around it are ignored, as for text values; null or an empty string removes it). The deals CSV writes the chosen option as text, and
   `Deal.fields` gives it as a string, as text values are. Deal webhook payloads carry no custom
   field values (ADR-373), so they are unchanged.
 - **API:** `GET /deal-fields` gives each field's `options` (null for other types) and the type

@@ -732,8 +732,11 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   win and the open pipeline, per pipeline currency, with a CSV export of closed deals per day.
 - **Erasure** (`app.erase_contact`): deletes the contact's timeline, notes and tasks and blanks the
   titles and lost reasons of its deals, keeping outcomes and values for reports.
-- **Not built yet:** custom deal fields, products on deals, deal import and export, forecasting,
-  automation steps that create deals or tasks, and syncing with external CRMs (integrations, P4–6).
+- **Not built yet:** syncing with external CRMs (integrations, P4–6), webhook events for changes of
+  custom field values and automation steps that set them, importing closed deals or updating deals
+  from a file, and discounts and taxes on deal products. Custom deal fields (ADR-373, choices
+  ADR-385), deal import (ADR-374), products on deals (ADR-375), forecasting (ADR-252) and automation
+  steps that create tasks and deals (ADR-244, ADR-245) were built after this list was first written.
 
 ## 6G. Growth tools **[built — links and ad sources verified with signed test webhooks only; no live WhatsApp or ad traffic]**
 

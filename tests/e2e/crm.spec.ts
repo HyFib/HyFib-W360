@@ -150,7 +150,7 @@ test('custom deal field values, a choice among them, are given when a deal is cr
 
   // An option a deal has chosen stays: taking it out is refused, adding another is saved.
   await page.goto(`/c/${slug}/settings/pipelines`);
-  await page.getByRole('button', { name: 'Edit the options of the deal field “Tier”' }).click();
+  await page.getByRole('button', { name: 'Edit options of the deal field “Tier”' }).click();
   const options = page.locator('textarea[id^="deal-field-options-"]');
   await expect(options).toHaveValue('Gold\nSilver');
   await options.fill('Gold\nBronze');

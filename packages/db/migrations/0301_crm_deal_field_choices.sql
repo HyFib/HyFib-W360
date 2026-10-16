@@ -17,17 +17,20 @@ ALTER TABLE app.crm_deal_fields
   ADD CONSTRAINT crm_deal_fields_type_check
     CHECK (type IN ('text', 'number', 'date', 'boolean', 'choice')),
   ADD CONSTRAINT crm_deal_fields_options CHECK (
-    CASE WHEN type = 'choice' THEN coalesce(
-      options IS NOT NULL
-      AND array_ndims(options) = 1
-      AND cardinality(options) BETWEEN 1 AND 50
-      AND array_position(options, NULL) IS NULL
-      AND array_to_string(options, E'\n')
-        ~ '^[^\n ]([^\n]{0,78}[^\n ])?(\n[^\n ]([^\n]{0,78}[^\n ])?)*$'
-      AND char_length(array_to_string(options, E'\n'))
-        - char_length(replace(array_to_string(options, E'\n'), E'\n', ''))
-        = cardinality(options) - 1,
-      false)
-    ELSE options IS NULL END);
+    CASE
+      WHEN type <> 'choice' THEN options IS NULL
+      -- CASE, not AND, keeps array_position from ever seeing a multidimensional array (it raises
+      -- an error on one), since the order AND's arguments are evaluated in is not defined.
+      WHEN options IS NULL OR coalesce(array_ndims(options), 0) <> 1 THEN false
+      ELSE coalesce(
+        cardinality(options) BETWEEN 1 AND 50
+        AND array_position(options, NULL) IS NULL
+        AND array_to_string(options, E'\n')
+          ~ '^[^\n ]([^\n]{0,78}[^\n ])?(\n[^\n ]([^\n]{0,78}[^\n ])?)*$'
+        AND char_length(array_to_string(options, E'\n'))
+          - char_length(replace(array_to_string(options, E'\n'), E'\n', ''))
+          = cardinality(options) - 1,
+        false)
+    END);
 -- Owners and administrators add, reorder and remove unused options; the type still never changes.
 GRANT UPDATE (options) ON app.crm_deal_fields TO w360_app;

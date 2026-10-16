@@ -107,7 +107,7 @@ const expectedCloseOnSchema = z.iso
 const dealFieldValuesSchema = z
   .record(z.string(), z.union([z.string(), z.number(), z.boolean(), z.null()]))
   .describe(
-    'Custom deal field values by field key (GET /deal-fields), each of its field’s type: text, a number, a date as YYYY-MM-DD, true/false, or one of a choice field’s options written exactly as listed; null removes a value. Keys left out keep their values.',
+    'Custom deal field values by field key (GET /deal-fields), each of its field’s type: text, a number, a date as YYYY-MM-DD, true/false, or one of a choice field’s options written as listed (spaces around it are ignored); null or an empty string removes a value. Keys left out keep their values.',
   );
 
 /** What `POST /deals` takes: the contact, the pipeline and the deal, as members create one. */

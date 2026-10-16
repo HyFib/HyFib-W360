@@ -203,7 +203,7 @@ export function DealFieldsManager({
                       <ClientButton
                         size="sm"
                         variant="ghost"
-                        aria-label={`Edit the options of the deal field “${f.label}”`}
+                        aria-label={`Edit options of the deal field “${f.label}”`}
                         onClick={() => {
                           setEditingOptions({ id: f.id });
                           setOptionsDraft((f.options ?? []).join('\n'));

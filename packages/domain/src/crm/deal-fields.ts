@@ -180,8 +180,8 @@ export function coerceDealFieldValue(
 
 /**
  * Checks a value sent through the public API against the field's type, strictly, as contact fields
- * are (ADR-112): a choice takes one of its options as text, exactly as written; null or an empty
- * string removes the value.
+ * are (ADR-112): a choice takes one of its options as text, as written (spaces around it are
+ * ignored, as for text values); null or an empty string removes the value.
  */
 export function apiDealFieldValue(
   field: Pick<DealFieldDefinition, 'label' | 'type' | 'options'>,
