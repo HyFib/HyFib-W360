@@ -284,6 +284,48 @@ test('custom deal field values, a choice among them, are given when a deal is cr
   await expect(dealLink('Gold plan')).toBeVisible();
   await expect(filter).toHaveValue('');
   await expectNoHorizontalOverflow(page);
+
+  // The won list takes the same filter (ADR-394): both deals are won, and the filter carries
+  // from the board to the list, its export and back.
+  const timeline = page.getByRole('list', { name: 'Timeline' });
+  for (const title of ['Gold plan', 'Regional plan']) {
+    await page.goto(`/c/${slug}/crm`);
+    await dealLink(title).click();
+    await expect(page.getByRole('heading', { name: title, level: 1 })).toBeVisible();
+    await page.getByRole('button', { name: 'Mark won' }).click();
+    await expect(timeline.getByText('Deal won')).toBeVisible();
+  }
+  await page.goto(`/c/${slug}/crm?field=tier:Gold`);
+  await expect(filter).toHaveValue('tier:Gold');
+  await expect(dealLink('Gold plan')).toHaveCount(0);
+  await page.getByRole('link', { name: 'Won', exact: true }).click();
+  await expect(page).toHaveURL(/[?&]view=won(&|$)/);
+  await expect(page).toHaveURL(/[?&]field=tier%3AGold(&|$)/);
+  await expect(dealLink('Gold plan')).toBeVisible();
+  await expect(dealLink('Regional plan')).toHaveCount(0);
+  await expect(filter).toHaveValue('tier:Gold');
+  await expect(page.getByRole('link', { name: 'Export CSV' })).toHaveAttribute(
+    'href',
+    /[?&]status=won&field=tier%3AGold(&|$)/,
+  );
+  // Another option, chosen on the list, stays on the list.
+  await filter.selectOption({ label: 'Tier: Silver' });
+  await page.getByRole('button', { name: 'Filter deals' }).click();
+  await expect(page).toHaveURL(/[?&]field=tier%3ASilver(&|$)/);
+  await expect(page).toHaveURL(/[?&]view=won(&|$)/);
+  await expect(dealLink('Regional plan')).toBeVisible();
+  await expect(dealLink('Gold plan')).toHaveCount(0);
+  await expectNoHorizontalOverflow(page);
+  await page.getByRole('link', { name: 'Show all deals' }).click();
+  await expect(dealLink('Regional plan')).toBeVisible();
+  await expect(dealLink('Gold plan')).toBeVisible();
+  await expect(filter).toHaveValue('');
+  // A stale link on the list: every won deal, and the notice.
+  await page.goto(`/c/${slug}/crm?view=won&field=tier:Platinum`);
+  await expect(page.getByText('Showing every deal')).toBeVisible();
+  await expect(dealLink('Regional plan')).toBeVisible();
+  await expect(dealLink('Gold plan')).toBeVisible();
+  await expectNoHorizontalOverflow(page);
 });
 
 test('a deal moves through a pipeline with tasks, an emailed reminder, notes and reports', async ({

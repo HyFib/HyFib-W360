@@ -358,7 +358,15 @@ verification, app review, Embedded Signup configuration).
   address as `field=<key>:<option>` and resolved against the company's own fields; a stale link shows
   every deal with a notice; the export of the view follows it, refusing a filter that does not
   resolve, audited with the key, never the option. Not built: Reports by a choice, several filters
-  at once, the API filter).
+  at once, the API filter, since built with the won and lost lists, ADR-394).
+  **[The deal field filter on the won and lost lists and in `GET /deals` built; its database and
+  browser tests run only in CI]** (ADR-394, no migration; the API part recorded under P5-08: the
+  won and lost lists, their pages and their export follow the same filter, a stale link showing
+  every deal with the notice, and switching between the board and the lists keeps it; `GET
+/deals?field=<key>:<value>` combines with the other filters and refuses with 422 naming `field` a
+  filter that does not resolve; cursors stay positions, each page applying the filters it is sent
+  with. Not built: Reports by a choice, several filters at once, text, number or date filters, saved
+  filtered views).
   **[Automation steps that set custom deal fields built; their database and browser tests run only
   in CI]** (ADR-386, migration 0302 for webhook endpoints' kinds of step: an "Update deal fields"
   step sets 1 to 20 values, with placeholders, on the contact's single open deal in a pipeline,
@@ -392,7 +400,7 @@ verification, app review, Embedded Signup configuration).
   **[Products on deals built; their database and browser tests run only in CI]** (ADR-375,
   migration 0294: catalog products listed on a deal with a quantity and an exact unit price, at the
   deal's version and on its timeline, their total shown and usable as the deal's value. Not built:
-  items in webhooks, discounts and taxes).
+  discounts and taxes; items in webhooks since built, ADR-395).
   **[Products in the deals CSV built; its database test runs only in CI]** (ADR-380, no migration:
   a `products` cell with a line per product and a `products_total` column in the deal's currency).
   **[Products on deals through the API built; their database tests run only in CI]** (ADR-378,
@@ -1289,6 +1297,10 @@ verification, app review, Embedded Signup configuration).
   may choose `fields` among their deal details; the API's deal history names it. Not built: the
   values in the payload, which fields of a deal's import or step a receiver asked for, a
   `deal.fields_changed` event of its own).
+  **[Products in deal webhook payloads built; their database tests run only in CI]** (ADR-395, no
+  migration: every deal event's deal gives `items`, the deal's products as `GET /deals/{id}/items`
+  reads them when the event is delivered, in the order added, at most 50, an erased contact's
+  deal's too. Not built: an event or a `changes` entry for a change of products).
   **[Task detail events built; their database tests run only in CI]** (ADR-276, migrations 0194 and
   0195: `task.updated` for every change of a task's title, notes, due time or reminder by members or
   API keys, naming what changed, never the values or the notes; the assignee list narrows it; one

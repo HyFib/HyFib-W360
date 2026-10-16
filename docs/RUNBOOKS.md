@@ -2168,6 +2168,16 @@ erased contact. Archived pipelines are listed with `archived: true`; their deals
 index can remain: run `DROP INDEX CONCURRENTLY app.crm_deals_list_idx;` and run the migrations
 again.
 
+**`GET /api/v1/deals?field=…` answers 422 naming `field` (ADR-394).** The filter is refused, never
+ignored, when it does not resolve: the message says why. The text must be `<key>:<value>` with a
+lower-case key (a key, not a label); the key must be one of the company's deal fields (GET
+/deal-fields: a field deleted since is unknown), of the choice or yes/no type; the value one of a
+choice field's options (any case) or `yes`/`no`, and nothing after the colon for deals without a
+value. Deals on later pages that do not match the filter mean the integration sent `cursor`
+without the filter it used for the first page, or with another one: a cursor is a position only,
+and each page applies the filters sent with it. In the app, the won and lost lists take the same filter and
+show every deal with "Showing every deal" when a link's filter no longer resolves.
+
 **`POST /api/v1/deals` answers 403, 404, 409, 422 or 423 (ADR-254).** 403 `forbidden` names the
 scope the key lacks, `deals.write` (granted by members with `crm.write`), or with reason
 `not_in_plan` the company's plan leaves out the CRM or the scope. 404 means the contact is not one
@@ -3306,6 +3316,18 @@ key). An endpoint whose deal details list was saved before 0305 does not take a 
 alone until "Custom fields" is ticked (or its list set to null). During a rollout, a worker from
 before 0305 sends such an event with `changes` leaving out `fields` (empty for a change of values
 alone) and without `changedFields`; replay those deliveries once the workers are updated.
+
+**A receiver asks why a deal event's products differ from what the deal had at the change, or why
+a change of products sent nothing (ADR-395).** Every deal event's `deal.items` lists the deal's
+products as `GET /deals/{id}/items` reads them when the event is delivered (in the order they were
+added, at most 50), like the rest of the deal: an event delivered (or retried, or replayed) after a
+product was added or removed gives the products as they are then, not as they were when the event
+was captured. Adding or removing a product (on the deal page or through the API) sends no event and
+`changes` never names products; a receiver keeping products in step reads them with
+`GET /deals/{id}/items` (`deals.read`) or takes them from the deal's next event. An erased
+contact's deal keeps its products (they name catalog products, not the customer), so they are
+still sent. A body without `deal.items` was delivered by a worker from before ADR-395 (during a
+rollout, or after rolling workers back); replay it once the workers are updated.
 
 **A receiver misses a change of a task's details, or doubts one (ADR-276).** Endpoints that take
 `task.updated` ("Task details") are sent one event each time a member editing a task or a key

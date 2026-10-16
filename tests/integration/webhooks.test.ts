@@ -13,12 +13,7 @@ import { createServer, type IncomingHttpHeaders, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { isAppError, jsonbSize, sha256Hex, systemClock, uuidv7, type Clock } from '@w360/core';
-import {
-  DEFAULT_EGRESS_POLICY,
-  createEgressClient,
-  type EgressClient,
-  type ResolvedAddress,
-} from '@w360/core/egress';
+import { DEFAULT_EGRESS_POLICY, type ResolvedAddress } from '@w360/core/egress';
 import {
   authorizedTenantScope,
   consentEvents,
@@ -36,6 +31,7 @@ import {
   createContactsService,
   createCrmService,
   createTemplatesService,
+  createWebhookEgressClient,
   createWebhooksService,
   dispatchDueWebhooks,
   findWebhookDispatchDue,
@@ -67,6 +63,7 @@ import {
   webhookSecretAad,
   type TenantContext,
   type WebhookDeliveryLogger,
+  type WebhookEgressClient,
   type WebhookEventType,
   type WebhookFailureKind,
 } from '@w360/domain';
@@ -151,9 +148,12 @@ const waId = () => `91${randomInt(7_000_000_000, 9_999_999_999)}`;
 const HOST = 'hooks.receiver.test';
 const APP_BASE_URL = 'https://app.w360.test';
 
-/** The egress client used by the worker, with names resolving to the local receiver. */
+/**
+ * The worker's webhook egress client (ADR-395: bodies up to WEBHOOK_LIMITS.requestBytes), with
+ * names resolving to the local receiver.
+ */
 const egress = (resolveTo: ResolvedAddress[] = [{ address: '127.0.0.1', family: 4 }]) =>
-  createEgressClient(
+  createWebhookEgressClient(
     { ...DEFAULT_EGRESS_POLICY, allowLoopbackForTests: true, timeoutMs: 1_000 },
     { resolve: async () => resolveTo },
   );
@@ -161,7 +161,7 @@ const egress = (resolveTo: ResolvedAddress[] = [{ address: '127.0.0.1', family: 
 /** The worker's delivery dependencies; each run keeps OAuth tokens of its own unless given some. */
 function deliveryDeps(
   clock: Clock = systemClock,
-  client: EgressClient = egress(),
+  client: WebhookEgressClient = egress(),
   logger: WebhookDeliveryLogger = failOnLog,
   oauthTokens: WebhookOAuthTokenCache = new WebhookOAuthTokenCache(),
 ) {
@@ -183,7 +183,7 @@ function deliveryDeps(
 const deliverDue = (
   c: Company,
   clock?: Clock,
-  client?: EgressClient,
+  client?: WebhookEgressClient,
   logger?: WebhookDeliveryLogger,
   oauthTokens?: WebhookOAuthTokenCache,
 ) =>
@@ -366,8 +366,9 @@ async function captureDirectly(c: Company, endpointId: string, nextAttemptAt?: D
 }
 
 /** An egress client that runs `during` while "the request is in flight", then answers `status`. */
-function egressDuring(during: () => Promise<unknown>, status = 500): EgressClient {
+function egressDuring(during: () => Promise<unknown>, status = 500): WebhookEgressClient {
   return {
+    maxRequestBytes: WEBHOOK_LIMITS.requestBytes,
     async request() {
       await during();
       return { status, headers: {}, body: Buffer.alloc(0), address: '127.0.0.1', durationMs: 3 };
@@ -13053,7 +13054,7 @@ describe('the address guard', () => {
   it('refuses private, loopback and metadata addresses when delivering', async () => {
     const c = await fx.company();
     const owner = await fx.ctx(c, c.owner);
-    const strict = createEgressClient({ ...DEFAULT_EGRESS_POLICY, timeoutMs: 1_000 });
+    const strict = createWebhookEgressClient({ ...DEFAULT_EGRESS_POLICY, timeoutMs: 1_000 });
     const loopback = await webhooks(false).create(owner, {
       url: `https://127.0.0.1:${port}/ok/guard`,
       eventTypes: ['consent.changed'],
@@ -13076,7 +13077,7 @@ describe('the address guard', () => {
       eventTypes: ['consent.changed'],
     });
     await webhooks().sendTest(owner, { endpointId: rebinding.id });
-    const privateAnswer = createEgressClient(
+    const privateAnswer = createWebhookEgressClient(
       { ...DEFAULT_EGRESS_POLICY, timeoutMs: 1_000 },
       { resolve: async () => [{ address: '10.0.0.7', family: 4 }] },
     );

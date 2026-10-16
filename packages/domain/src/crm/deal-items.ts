@@ -19,6 +19,7 @@ import type { Clock } from '@w360/core';
 import { assertCan, type TenantContext } from '../authz/context';
 import { likePattern, parseInput } from '../validation';
 import { addActivity, crmChangedBy, uuidSchema } from './common';
+import { lineTotalMinor, MAX_DEAL_ITEMS, MAX_ITEM_QUANTITY } from './deal-item-limits';
 import { lockDealForChange } from './deals';
 import { currencyDigits, MAX_DEAL_MINOR, parseAmountToMinor } from './money';
 
@@ -29,10 +30,7 @@ import { currencyDigits, MAX_DEAL_MINOR, parseAmountToMinor } from './money';
  * the CRM sees them on the deal.
  */
 
-/** The most products a deal lists. */
-export const MAX_DEAL_ITEMS = 50;
-/** The most of one product an item counts. */
-export const MAX_ITEM_QUANTITY = 100_000;
+export { lineTotalMinor, MAX_DEAL_ITEMS, MAX_ITEM_QUANTITY };
 
 export interface DealItem {
   id: string;
@@ -42,11 +40,6 @@ export interface DealItem {
   unitPriceMinor: number;
   currency: string;
   createdAt: Date;
-}
-
-/** An item's total: its quantity times its unit price, exact. */
-export function lineTotalMinor(item: { quantity: number; unitPriceMinor: number }): bigint {
-  return BigInt(item.quantity) * BigInt(item.unitPriceMinor);
 }
 
 /**

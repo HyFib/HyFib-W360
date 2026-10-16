@@ -155,6 +155,7 @@ import {
 import { API_LIMITS, API_SCOPE_INFO, API_SCOPE_KEYS } from './model';
 import { apiPaymentLinkSchema } from './payment-link-view';
 import {
+  API_DEAL_FIELD_FILTER_DESCRIPTION,
   API_DEAL_HISTORY_DETAILS,
   API_DEAL_HISTORY_TYPES,
   apiCreateDealSchema,
@@ -163,7 +164,9 @@ import {
   type ApiDealHistoryType,
 } from './deals';
 import { apiAddDealItemSchema } from './deal-items';
-import { MAX_DEAL_ITEMS, MAX_ITEM_QUANTITY } from '../crm/deal-items';
+import { apiDealItemSchema } from './deal-item-view';
+import { MAX_DEAL_ITEMS } from '../crm/deal-items';
+import { DEAL_FIELD_FILTER_MAX_LENGTH } from '../crm/deal-field-filter';
 import { API_NOTE_MAX_LENGTH, apiCreateNoteSchema } from './notes';
 import { apiCreatePipelineSchema, apiUpdatePipelineSchema } from './pipelines';
 import { apiPipelineForecastSchema } from './pipeline-forecast';
@@ -610,45 +613,8 @@ export const apiDealSchema = z.object({
     .describe('The API key that added the deal, when createdBy is api; null otherwise.'),
 });
 
-/** One product on a CRM deal, as GET /deals/{id}/items gives it (ADR-378). */
-export const apiDealItemSchema = z.object({
-  id: z
-    .uuid()
-    .describe('The product’s line on the deal, which DELETE /deals/{id}/items/{itemId} takes.'),
-  retailerId: z
-    .string()
-    .describe('The product’s content id (its SKU) in its catalog, as product messages name it.'),
-  catalogId: z.string().describe('The Meta catalog the product is in.'),
-  name: z
-    .string()
-    .describe(
-      'The product’s name when it was added: a later rename or removal in the catalog keeps it.',
-    ),
-  quantity: z.number().int().min(1).max(MAX_ITEM_QUANTITY),
-  unitPriceMinor: z
-    .number()
-    .int()
-    .min(0)
-    .describe('The price of one, in the minor units of `currency` (paise for INR).'),
-  currency: z
-    .string()
-    .describe(
-      'The deal’s pipeline currency when the product was added: one added before the deal moved to a pipeline of another currency keeps its own.',
-    ),
-  totalMinor: z
-    .number()
-    .int()
-    .min(0)
-    .describe('`quantity` times `unitPriceMinor`, exact, in the minor units of `currency`.'),
-  createdBy: z
-    .enum(['member', 'api'])
-    .describe('Who added it: a member (member, never which member) or an API key (api).'),
-  createdByApiKeyId: z
-    .uuid()
-    .nullable()
-    .describe('The API key that added it, when createdBy is api; null otherwise.'),
-  createdAt: z.iso.datetime().describe('When it was added.'),
-});
+/** One product on a CRM deal (ADR-378), shared with the deal webhook payloads (ADR-395). */
+export { apiDealItemSchema };
 
 /** A product just added to a deal, with the deal's version after it (ADR-378). */
 export const apiAddedDealItemSchema = apiDealItemSchema.extend({
@@ -3943,6 +3909,12 @@ export function buildOpenApiDocument(serverUrl: string) {
               description:
                 'Only deals changed at or after this time (created, edited, moved, closed or reopened, moved to another contact by a merge, or renamed when their contact was erased).',
             },
+            {
+              name: 'field',
+              in: 'query',
+              schema: { type: 'string', maxLength: DEAL_FIELD_FILTER_MAX_LENGTH },
+              description: API_DEAL_FIELD_FILTER_DESCRIPTION,
+            },
           ],
           responses: {
             '200': { description: 'A page of deals.', content: pageOf('Deal') },
@@ -4717,13 +4689,13 @@ export function buildOpenApiDocument(serverUrl: string) {
       'deal.created': webhook(
         'webhookDealCreated',
         WEBHOOK_EVENT_INFO['deal.created'].label,
-        `${WEBHOOK_EVENT_INFO['deal.created'].description} deal.stageId, deal.pipelineId and deal.status are those it was added with; the rest is the deal when the event is delivered, so a deal whose contact was erased is sent as erasure left it, without the contact's number or name. Read deals with GET /deals/{id} (\`deals.read\`). Every deal event's deal.changedBy says who made what it reports, as captured: a member, an automation or an API key, which deal.apiKeyId names, so an integration that changes deals through the API can tell its own changes from others'.`,
+        `${WEBHOOK_EVENT_INFO['deal.created'].description} deal.stageId, deal.pipelineId and deal.status are those it was added with; the rest is the deal when the event is delivered, so a deal whose contact was erased is sent as erasure left it, without the contact's number or name. Read deals with GET /deals/{id} (\`deals.read\`). Every deal event's deal.changedBy says who made what it reports, as captured: a member, an automation or an API key, which deal.apiKeyId names, so an integration that changes deals through the API can tell its own changes from others'. Every deal event's deal.items lists the deal's products when the event is delivered, as GET /deals/{id}/items gives them (in the order they were added, at most ${MAX_DEAL_ITEMS}, empty when it lists none), an erased contact's deal's too; a change of products alone sends no event, so a receiver keeping products in step reads them with GET /deals/{id}/items or takes them from the deal's next event. A body delivered before deal events carried products has no deal.items.`,
         'WebhookDealCreated',
       ),
       'deal.updated': webhook(
         'webhookDealUpdated',
         WEBHOOK_EVENT_INFO['deal.updated'].label,
-        `${WEBHOOK_EVENT_INFO['deal.updated'].description} changes names what changed (title, valueMinor, expectedCloseOn, then fields for custom field values, with changedFields naming the keys of the fields whose values were set, changed or removed), never the values before: the deal is the deal when the event is delivered, so a deal changed again since gives its latest details, and a deal whose contact was erased is sent as erasure left it. Custom field values are not sent: read them with GET /deals/{id} (\`deals.read\`, its \`fields\`). Deleting a custom field in Settings removes its values from every deal without sending this event, since the company's fields changed, not its deals; erasing a contact clears its deals' values and names them. One change can also move, reopen, close or give the deal to another owner, and then sends deal.stage_changed, deal.status_changed and deal.owner_changed as well, in the order the steps happen: reopened, moved, details changed, given to another owner, closed; they can have the same createdAt. Pipelines, stages and owners an endpoint names narrow it as the other deal events. An endpoint receives every change unless it names the details it takes (its \`dealDetails\`, or the details ticked in Settings → Webhooks): a change is sent when it changed one of them, and its changes still name every detail it changed. Deliveries are not ordered: the latest change is the one with the latest createdAt.`,
+        `${WEBHOOK_EVENT_INFO['deal.updated'].description} changes names what changed (title, valueMinor, expectedCloseOn, then fields for custom field values, with changedFields naming the keys of the fields whose values were set, changed or removed), never the values before: the deal is the deal when the event is delivered, so a deal changed again since gives its latest details, and a deal whose contact was erased is sent as erasure left it. Custom field values are not sent: read them with GET /deals/{id} (\`deals.read\`, its \`fields\`). Deleting a custom field in Settings removes its values from every deal without sending this event, since the company's fields changed, not its deals; erasing a contact clears its deals' values and names them. A change of the deal’s products alone sends no event, and changes never names them: deal.items gives the products as they are when the event is delivered. One change can also move, reopen, close or give the deal to another owner, and then sends deal.stage_changed, deal.status_changed and deal.owner_changed as well, in the order the steps happen: reopened, moved, details changed, given to another owner, closed; they can have the same createdAt. Pipelines, stages and owners an endpoint names narrow it as the other deal events. An endpoint receives every change unless it names the details it takes (its \`dealDetails\`, or the details ticked in Settings → Webhooks): a change is sent when it changed one of them, and its changes still name every detail it changed. Deliveries are not ordered: the latest change is the one with the latest createdAt.`,
         'WebhookDealUpdated',
       ),
       'deal.stage_changed': webhook(

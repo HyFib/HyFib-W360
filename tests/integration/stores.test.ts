@@ -20,6 +20,7 @@ import {
   createStoreMessagesService,
   createStoreService,
   createTemplatesService,
+  createWebhookEgressClient,
   createWebhooksService,
   findDueStoreMessages,
   findDueStoreWork,
@@ -263,7 +264,7 @@ async function deliverHooks(c: Company) {
       db: fx.dbs.app,
       clock: systemClock,
       keyring: fx.keyring,
-      egress: createEgressClient(
+      egress: createWebhookEgressClient(
         { ...DEFAULT_EGRESS_POLICY, allowLoopbackForTests: true, timeoutMs: 2_000 },
         { resolve: async () => [{ address: '127.0.0.1', family: 4 }] },
       ),

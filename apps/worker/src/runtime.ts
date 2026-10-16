@@ -31,9 +31,11 @@ import {
   RazorpayClient,
   SmtpEmailSender,
   WebhookOAuthTokenCache,
+  createWebhookEgressClient,
   type BillingNoticeDeps,
   type EmailSender,
   type JobQueue,
+  type WebhookEgressClient,
 } from '@w360/domain';
 
 export interface WorkerRuntime {
@@ -56,9 +58,21 @@ export interface WorkerRuntime {
   /** Razorpay's API origin for companies' own accounts (Payment Links), even without HyFib's keys. */
   razorpayBaseUrl: string;
   notices: BillingNoticeDeps;
-  /** The only client for company-chosen addresses (automation HTTP steps): see core/egress. */
+  /**
+   * Egress for automation HTTP steps (company-chosen addresses): see core/egress. Webhook
+   * deliveries, stores and the alerts' channel have clients of their own, with the same address
+   * checks.
+   */
   egress: EgressClient;
   egressPolicy: EgressPolicy;
+  /**
+   * Egress for webhook deliveries (ADR-395): the same policy, with request bodies up to
+   * `WEBHOOK_LIMITS.requestBytes` (`createWebhookEgressClient`), so a deal event listing its
+   * products is sent; every other caller keeps the policy's 64 KiB. Like each client, it looks up
+   * at most `maxConcurrentLookups` (2) names at once, so this process's four clients may have 8
+   * system lookups in progress (6 for company-chosen addresses).
+   */
+  webhookEgress: WebhookEgressClient;
   /**
    * Egress for companies' stores (Shopify shops, WooCommerce sites): the same address checks, with
    * larger responses (order pages) and a longer deadline.
@@ -171,6 +185,7 @@ export async function createWorkerRuntime(): Promise<WorkerRuntime> {
     notices: { outbox: { keyring, jobs, signer }, appBaseUrl: config.APP_BASE_URL },
     egress: createEgressClient(egressPolicy),
     egressPolicy,
+    webhookEgress: createWebhookEgressClient(egressPolicy),
     storeEgress: createEgressClient({
       ...egressPolicy,
       timeoutMs: 30_000,

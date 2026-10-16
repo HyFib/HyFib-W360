@@ -60,6 +60,7 @@ import {
   apiListDealHistory,
   apiListDealItems,
   apiListDeals,
+  apiDealFieldFilterMessage,
   apiListMembers,
   apiListMessages,
   apiListMessageTemplates,
@@ -4320,6 +4321,167 @@ describe('CRM pipelines and deals (ADR-253)', () => {
     // Another company's deal is not found by its id; nor is one that does not exist.
     await expectAppError(apiGetDeal(deps(), reader.ctx, theirDeal.id), 'not_found');
     await expectAppError(apiGetDeal(deps(), reader.ctx, uuidv7()), 'not_found');
+  });
+
+  it('filter deals by a choice or yes/no field, with the other filters and on pages, and refuse one that does not resolve (ADR-394)', async () => {
+    const c = await fx.company();
+    const other = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const agent = await fx.ctx(c, c.agent);
+    const theirOwner = await fx.ctx(other, other.owner);
+    const reader = await apiKey(c, ['deals.read'], 'Deal sync');
+    const sales = await pipelineOf(owner, 'Sales', 'INR', ['New', 'Qualified']);
+    const renewals = await pipelineOf(owner, 'Renewals', 'INR', ['Due']);
+    await crm().createDealField(owner, { label: 'Region', type: 'text' });
+    await crm().createDealField(owner, {
+      label: 'Tier',
+      type: 'choice',
+      options: ['Gold', 'Silver: plus'],
+    });
+    const signed = await crm().createDealField(owner, { label: 'Signed', type: 'boolean' });
+    await crm().createDealField(owner, { label: 'Seats', type: 'number' });
+    // Another company's fields: a key this company does not have, and its own "tier" with
+    // another option.
+    await crm().createDealField(theirOwner, { label: 'Plan', type: 'choice', options: ['Gold'] });
+    await crm().createDealField(theirOwner, {
+      label: 'Tier',
+      type: 'choice',
+      options: ['Gold', 'Bronze'],
+    });
+    const asha = await contactOf(owner, 'Asha');
+    const ravi = await contactOf(owner, 'Ravi');
+    // Created in this order, so listed newest first: renewal, trial, pilot, annual.
+    const annual = await crm().createDeal(owner, {
+      contactId: asha,
+      pipelineId: sales.id,
+      stageId: sales.stages[0],
+      title: 'Annual plan',
+      ownerMembershipId: agent.membership.id,
+      fields: { tier: 'Gold', signed: 'yes' },
+    });
+    const pilot = await crm().createDeal(owner, {
+      contactId: ravi,
+      pipelineId: sales.id,
+      stageId: sales.stages[1],
+      title: 'Pilot',
+      fields: { tier: 'Silver: plus', signed: 'no' },
+    });
+    const trial = await crm().createDeal(owner, {
+      contactId: ravi,
+      pipelineId: sales.id,
+      stageId: sales.stages[0],
+      title: 'Trial',
+    });
+    const renewal = await crm().createDeal(owner, {
+      contactId: asha,
+      pipelineId: renewals.id,
+      stageId: renewals.stages[0],
+      title: 'Renewal',
+      // Stored as the option is written; a text field holding the same word never matches.
+      fields: { tier: 'gold', region: 'Gold' },
+    });
+    // Another company's Gold deal is never listed.
+    const theirs = await pipelineOf(theirOwner, 'Theirs', 'INR', ['Open']);
+    await crm().createDeal(theirOwner, {
+      contactId: await contactOf(theirOwner, 'Mira'),
+      pipelineId: theirs.id,
+      stageId: theirs.stages[0],
+      title: 'Theirs',
+      fields: { tier: 'Gold', plan: 'Gold' },
+    });
+
+    const list = (query: Record<string, string | null | undefined>) =>
+      apiListDeals(deps(), reader.ctx, query);
+    const ids = async (query: Record<string, string>) => (await list(query)).data.map((d) => d.id);
+
+    // Each kind of match: an option in any case, yes, no and not set.
+    expect(await ids({ field: 'tier:Gold' })).toEqual([renewal.id, annual.id]);
+    expect(await ids({ field: 'tier:gOLD' })).toEqual([renewal.id, annual.id]);
+    expect(await ids({ field: 'tier:silver: PLUS' })).toEqual([pilot.id]);
+    expect(await ids({ field: 'tier:' })).toEqual([trial.id]);
+    expect(await ids({ field: 'signed:yes' })).toEqual([annual.id]);
+    expect(await ids({ field: 'signed:NO' })).toEqual([pilot.id]);
+    expect(await ids({ field: 'signed:' })).toEqual([renewal.id, trial.id]);
+    // The deals keep their values as they read without the filter.
+    expect((await list({ field: 'tier:Gold' })).data.map((d) => d.fields.tier)).toEqual([
+      'Gold',
+      'Gold',
+    ]);
+
+    // With the other filters: a deal matches all of them.
+    expect(await ids({ field: 'tier:Gold', pipelineId: sales.id })).toEqual([annual.id]);
+    expect(await ids({ field: 'tier:', stageId: sales.stages[0]! })).toEqual([trial.id]);
+    expect(await ids({ field: 'tier:Gold', stageId: sales.stages[1]! })).toEqual([]);
+    expect(await ids({ field: 'tier:Gold', ownerId: agent.membership.id })).toEqual([annual.id]);
+    expect(await ids({ field: 'tier:Gold', ownerId: 'none' })).toEqual([renewal.id]);
+    expect(await ids({ field: 'signed:', contactId: ravi })).toEqual([trial.id]);
+    await crm().closeDeal(owner, { id: annual.id, expectedVersion: 1, outcome: 'won' });
+    expect(await ids({ field: 'tier:Gold', status: 'won' })).toEqual([annual.id]);
+    expect(await ids({ field: 'tier:Gold', status: 'open' })).toEqual([renewal.id]);
+    expect(await ids({ field: 'tier:Gold', status: 'lost' })).toEqual([]);
+
+    // Pages keep the filter the caller sends with each cursor; a cursor is a position only, so
+    // the same cursor without the filter reads every deal after it.
+    const first = await list({ field: 'tier:Gold', limit: '1' });
+    expect(first.data.map((d) => d.id)).toEqual([renewal.id]);
+    expect(first.nextCursor).toEqual(expect.any(String));
+    const next = await list({ field: 'tier:Gold', limit: '1', cursor: first.nextCursor });
+    expect(next.data.map((d) => d.id)).toEqual([annual.id]);
+    expect(next.nextCursor).toBeNull();
+    expect(await ids({ field: 'signed:', cursor: first.nextCursor! })).toEqual([trial.id]);
+    expect(await ids({ cursor: first.nextCursor! })).toEqual([trial.id, pilot.id, annual.id]);
+
+    // A filter that does not resolve is refused naming `field`, never ignored: another company's
+    // key or option, an unknown option, a field of another type, a value written otherwise.
+    const refused = async (
+      field: string,
+      problem: Parameters<typeof apiDealFieldFilterMessage>[0],
+    ) => {
+      const message = apiDealFieldFilterMessage(problem);
+      const error = await expectAppError(list({ field }), 'validation_failed');
+      expect(isAppError(error) && [error.publicMessage, error.issues], field).toEqual([
+        message,
+        [{ path: 'field', message }],
+      ]);
+    };
+    await refused('plan:Gold', 'no_field');
+    await refused('tier:Bronze', 'no_option');
+    await refused('tier:Platinum', 'no_option');
+    await refused('signed:true', 'no_option');
+    await refused('region:Gold', 'not_filterable');
+    await refused('seats:', 'not_filterable');
+    await refused('tier', 'malformed');
+    await refused('Tier:Gold', 'malformed');
+    await refused('', 'malformed');
+    await refused(`tier:${'x'.repeat(300)}`, 'malformed');
+    // With another filter or a cursor, too.
+    await expectAppError(
+      list({ field: 'tier:Platinum', pipelineId: sales.id }),
+      'validation_failed',
+      /not one of the deal field’s options/,
+    );
+    const withCursor = await expectAppError(
+      list({ field: 'tier:Platinum', cursor: first.nextCursor }),
+      'validation_failed',
+    );
+    expect(isAppError(withCursor) && withCursor.issues).toEqual([
+      { path: 'field', message: apiDealFieldFilterMessage('no_option') },
+    ]);
+    // A field deleted since: refused as unknown.
+    await crm().deleteDealField(owner, signed.id);
+    await refused('signed:yes', 'no_field');
+
+    // The other company finds its own Gold deal by its own field, never this company's.
+    const theirReader = await apiKey(other, ['deals.read']);
+    expect(
+      (await apiListDeals(deps(), theirReader.ctx, { field: 'tier:Gold' })).data.map(
+        (d) => d.title,
+      ),
+    ).toEqual(['Theirs']);
+    await expectAppError(
+      apiListDeals(deps(), theirReader.ctx, { field: 'region:Gold' }),
+      'validation_failed',
+    );
   });
 
   it('keep an erased contact’s deals as erasure leaves them, and need the scope and the CRM in the plan', async () => {

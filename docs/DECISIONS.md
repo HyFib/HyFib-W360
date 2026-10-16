@@ -1159,9 +1159,9 @@ active per company) is enqueued after that lookup, which the worker's LISTEN con
 notified (bursts coalesce) and the minute sweep runs for retries, missed notifications and leases
 that expired. The job claims due deliveries in batches of 10 under row locks (`SKIP LOCKED`) with a
 lease of the request deadline plus 35 s, posts each one through the egress guard (DNS pinned,
-private and metadata addresses refused, no redirects, 10 s timeout, at most 64 KB sent) with no
-transaction open, and records each outcome, locking the endpoint before the delivery: a 2xx answer
-succeeds; anything else, including timeouts and refused addresses, is retried at 1 min, 5 min,
+private and metadata addresses refused, no redirects, 10 s timeout, at most 64 KB sent; 256 KiB
+since ADR-395) with no transaction open, and records each outcome, locking the endpoint before the
+delivery: a 2xx answer succeeds; anything else, including timeouts and refused addresses, is retried at 1 min, 5 min,
 30 min, 2 h, 6 h, 12 h and 24 h (eight attempts over about 45 hours), then the delivery fails. A
 delivery whose lease expired (worker lost) is attempted again (`interrupted` when no attempt is
 left); an outcome recorded after a newer attempt claimed the delivery is dropped. After 200
@@ -14879,7 +14879,8 @@ Decision:
 
 Not built: deal webhook events for item changes, items without a catalog product, discounts and
 taxes, the value kept equal to the items' total automatically, and items set by automation steps or
-the deal import. (Items in the public API: ADR-378; in the deals CSV: ADR-380.)
+the deal import. (Items in the public API: ADR-378; in the deals CSV: ADR-380; in deal webhook
+payloads, since built: ADR-395, though a change of items still sends no event.)
 
 ## ADR-376 Report emails (P3-05) (2026-10-16)
 
@@ -14999,7 +15000,8 @@ Decision:
 
 Not built: changing an item's quantity or price in place (remove and add it again), adding several
 products in one request, items in the deal object, its webhook events or the deals CSV, and items
-added by automation steps.
+added by automation steps. (Items in the deals CSV since built: ADR-380; in deal webhook payloads:
+ADR-395.)
 
 ## ADR-379 Custom field values when a deal is created (P4-04) (2026-10-16)
 
@@ -15778,7 +15780,8 @@ Decision:
   of its options in any case (options never differ by case alone, ADR-385), resolved to the option
   as written; `yes`/`no` in any case. A repeated `field` counts by its first value, on the board as
   in the export. The page keeps the filter in the board's other links and in the export link as the
-  board resolved it, never as the address wrote it; the won and lost lists' links drop it.
+  board resolved it, never as the address wrote it; the won and lost lists' links drop it (since
+  ADR-394 every view applies the filter and its links keep it).
 - **The query:** `dealFieldCondition` adds `(attributes -> key) = <value>::jsonb` (the option as a
   JSON string, or a JSON boolean) or `not (attributes ? key)` for "Not set" to the board's and the
   export's existing conditions (company, pipeline, status, owner). Values are stored as the option is
@@ -15796,7 +15799,8 @@ Decision:
   without echoing the address's text. Another company's key resolves only if this company has a
   field of that key, and then it is this company's field.
 - **The export follows, strictly:** `GET /c/{slug}/crm/export` takes `field` as it takes `owner`;
-  the page sends it only with the board's open deals of a pipeline, the view it filters. An export
+  the page sends it only with the board's open deals of a pipeline, the view it filters (since
+  ADR-394, with the won and lost lists too). An export
   refuses a filter that does not resolve (400, "This deal field no longer exists.", "This option is
   not one of the deal field’s options.", "Deals can be filtered only by a choice or yes/no field.",
   "The deal field filter is not valid.") before anything is audited, so a file is never silently
@@ -15809,14 +15813,15 @@ Decision:
 
 Not built: filtering Reports by a choice, several field filters at once (or several options of one
 field), filters by text, number or date fields, the field filter on the won and lost lists and
-through the public API (`GET /deals`), and saving a filtered view.
+through the public API (`GET /deals`) (since built: ADR-394), and saving a filtered view.
 
 Review (before merge): an independent review found one Medium issue: "Show all deals" navigates in
 the browser, which keeps the page's elements, so the select went on showing the filter it had
 cleared, and "Filter deals" would apply it again; the select is now keyed by the applied filter, and
 the end-to-end test checks it after the link. It also found that a repeated `field` was dropped
 without the notice (it now counts by its first value, as the export reads it), that the won and lost
-lists' links carried a filter nothing applies there (they drop it), a misleading test comment and a
+lists' links carried a filter nothing applies there (they dropped it, until ADR-394 applied the
+filter there), a misleading test comment and a
 slip in this record. All were fixed. A choice option named "Not set" still reads like the field's
 "Not set" in the select, as on the new-deal form.
 
@@ -16002,3 +16007,146 @@ mechanism could read them, but each needs its own comparisons and wording), cond
 deals or deals of any status, comparing two fields (or a field with an answer or a placeholder),
 dates relative to the day the condition runs ("within 7 days"), and a rule that holds when the
 contact has no open deal in a pipeline.
+
+## ADR-394 The deal field filter on the won and lost lists and in the API (P4-04, P5-08) (2026-10-16)
+
+Context: ADR-391 filters the open deals board, and the export of what it shows, by one choice or
+yes/no field's value, but the won and lost lists showed every closed deal and dropped the filter
+from their links, and `GET /deals` had no such filter, so an integration reading the Gold deals
+paged through all of them. ADR-391 listed "the field filter on the won and lost lists and through
+the public API (`GET /deals`)" as not built.
+
+Decision:
+
+- **One mechanism, two readings:** the lists and the API reuse ADR-391's
+  `parseDealFieldFilterParam`, `resolveDealFieldFilter` and `dealFieldCondition` unchanged. Two
+  small pure functions sit on top of them in `crm/deal-field-filter.ts`: `dealFieldFilterView`, the
+  lenient reading of the board and now the lists (an absent or empty text asks for nothing; one that
+  does not resolve is ignored and reported), and `requireDealFieldFilter`, the strict reading of the
+  export and now the API (a refusal, `validation_failed` naming `field`, through
+  `dealFieldFilterRefusal`, in the caller's words). The board and the export are refactored onto
+  them without a change in behaviour.
+- **The won and lost lists:** `listDeals` takes `field` as the board does, resolves it against the
+  company's own fields in its read-only transaction, adds the condition to its keyset query and
+  returns `fieldFilter` (the fields, the filter applied, whether one was ignored). The CRM page shows
+  the same "Deal field" GET form above the list (the view, and the owner when one is chosen, as
+  hidden inputs; one `DealFieldFilter` component for the board and the lists), the same "Showing
+  every deal" notice for a stale, malformed or foreign filter (naming the list rather than the
+  board), "No deals match the deal field filter." for an empty filtered list, and keys the select by
+  the applied filter as ADR-391's fix does. "Older deals" and "Newest" carry the filter as resolved;
+  submitting the form or "Show all deals" starts at the newest page. A cursor from an old link that
+  no longer reads falls back to the newest page with the same filter.
+- **Switching views keeps the filter:** ADR-391 made the won and lost links drop it because nothing
+  applied it there. Every view applies it now, so the Open deals, Won and Lost links all carry it as
+  the current view resolved it (each view resolves it again against the company's fields), and "Show
+  all deals" clears it for whichever view is shown.
+- **The export:** the route already passed `field` for any status and `exportDeals` already
+  resolved it strictly; the lists' export link now sends it with `status=won` or `lost`, so the file
+  holds exactly the list's deals across all its pages. A filter that does not resolve is refused
+  (400) before anything is audited; `crm.deals_exported` records `field: { key, match }` as ADR-391
+  does.
+- **`GET /deals?field=<key>:<value>`:** the same text as the app's address (`<key>:<option>` in any
+  case, `<key>:yes` or `<key>:no`, `<key>:` for deals without a value), at most 200 characters. It
+  combines with `pipelineId`, `stageId`, `status`, `contactId`, `ownerId` and `updatedSince`.
+  **Refused, never ignored:** an API caller must never get a wider list than asked, so a filter that
+  does not resolve answers 422 `validation_failed` naming `field`, as the API's other validation
+  errors do, with words for an integration (`apiDealFieldFilterMessage`: "The company has no deal
+  field with this key (GET /deal-fields).", "Deals can be filtered only by a choice or yes/no
+  field.", "This value is not one of the deal field’s options, or `yes` or `no` for a yes/no
+  field.", and the form of the text when it is malformed). The text's form is checked before the
+  transaction; the key and value are resolved against the company's own fields after the scope and
+  plan checks, so another company's key or option is refused as unknown. A repeated parameter counts
+  by its last value, as every API query parameter does.
+- **Cursors:** the API's cursors are keyset positions (creation time and id) that encode no filter,
+  for `field` as for `pipelineId` or `status`: each page applies the filters it is sent with, so it
+  can never hold a deal those filters do not match, and the caller sends the same `field` with each
+  `cursor`, as the OpenAPI document says. Binding cursors to their filters would change every
+  existing list's cursors for no safety gain. The same holds for the lists' cursors in the app.
+- **No index, no migration:** the condition only filters the rows the lists' and the API's existing
+  queries read in their existing order (the API through `crm_deals_list_idx`), as ADR-391's does on
+  the board; a company's deals are thousands of rows at most, and an expression index per key would
+  add write cost for every company for a rare read.
+  Scopes, plan checks and rate limits are unchanged (`deals.read`; the lists `crm.read`, the export
+  also `contacts.export`). The OpenAPI document describes the parameter, its forms, the refusal and
+  the cursor.
+
+Not built: filtering Reports by a choice, several field filters at once (or several options of one
+field), filters by text, number or date fields, saving a filtered view, and the field filter on
+`GET /tasks` or deal webhooks.
+
+Review (before merge): an independent review found no High or Medium issue. It found ADR-391's own
+text still describing the won and lost lists as unfiltered and their links dropping the filter (it
+now points to this record); the API's message for a malformed `field` not saying the key is the
+lower-case key `GET /deal-fields` gives (it now does); and the OpenAPI text not saying that an empty
+`field` is refused (it now does, so an integration leaves the parameter out). All were fixed.
+Cursors stay positions only, as for every other filter of `GET /deals`, which the review checked.
+
+## ADR-395 Products on deals in deal webhook payloads (P5-09, P4-04) (2026-10-16)
+
+Context: members and keys list catalog products on deals (ADR-375, ADR-378), but deal webhook
+events gave the deal without them, so an integration that keeps quotes or orders in step with deals
+(an ERP, an invoicing tool) heard that a deal was won and then had to call `GET /deals/{id}/items`
+for every event to learn what it was won for. ADR-375 listed "items in webhooks" as not built.
+
+Decision:
+
+- **`deal.items` on every deal event:** `deal.created`, `deal.updated`, `deal.stage_changed`,
+  `deal.owner_changed` and `deal.status_changed` (all five deal events) give the deal's products as
+  `items`, after `createdAt` and before `changedBy` and `apiKeyId`, which stay last. A member added
+  to the deal object rather than beside it: products are part of what the deal is, and receivers
+  already read the deal from `data.deal`.
+- **The API's items, exactly:** each item is what `GET /deals/{id}/items` gives (ADR-378): its id
+  (the line `DELETE /deals/{id}/items/{itemId}` takes), content id and Meta catalog id, its name
+  when it was added, quantity, the price of one, the total in the minor units of its currency, the
+  currency, who added it (`member`, never which, or `api` with the key's id) and when. Nothing in it
+  is unfit for a webhook: no member is named, the key's id is what `changedBy`'s `apiKeyId` already
+  gives, and the catalog's price text is never stored. The read and the description are one:
+  `readApiDealItems` and `apiDealItemSchema` moved, unchanged, to `api/deal-item-view.ts`, used by
+  the API and the payload alike, and the payload's list is that schema's array, so the two cannot
+  drift apart. The view and the item limits (`crm/deal-item-limits.ts`, re-exported where they
+  were) import none of the deal services, so the payloads do not load them.
+- **Read when delivered:** like the rest of the deal ("the deal is the deal when the event is
+  delivered", ADR-256), the items are read at delivery, in the worker's verified company scope,
+  filtered by the event's company and the deal: an event delivered, retried or replayed after a
+  product was added or removed gives the products as they are then. The deal and its items are two
+  reads at read committed in the delivery's transaction, not one snapshot, as the deal and its
+  contact already are: a product changed between the two reads can show in the items of a deal
+  read just before it, and the deal's next event gives both again. A deal without products gives
+  `items: []`; an event whose deal is gone still ends as `event_gone` before anything else is read.
+- **Bounded:** at most 50 items a deal (ADR-375, enforced under the deal's lock when one is added),
+  in the order they were added (added time, then id, as the API orders them); the schema says so
+  (`maxItems`). Item names hold at most 500 characters (product names 200) and content ids 100,
+  and a control character is written as a six-byte escape, so the largest deal event (every text
+  at its column's most, of such characters, 50 items, 50 changed field keys) is 202,667 bytes
+  (112,667 with product names' 200), against a few hundred bytes an item in practice. That is more
+  than the egress guard's 64 KiB, which refused such a delivery (`request_too_large`, retried for
+  about 45 hours, then failed, replays failing alike): deliveries now have an egress client of
+  their own, the worker's policy with request bodies up to 256 KiB (`WEBHOOK_LIMITS.requestBytes`,
+  `webhookEgressPolicy`), its address checks, deadline, response limit, redirects and loopback rule
+  unchanged; every other caller (automation HTTP steps, stores, alerts, the web tier's Flows
+  endpoint) keeps 64 KiB. Deliveries take only a `WebhookEgressClient`, which
+  `createWebhookEgressClient` builds with that policy, so handing them the 64 KiB client is a type
+  error. The client has a lookup budget of its own (two system lookups at once, as each client),
+  so a worker process's four clients may have 8 lookups in progress, 6 for company-chosen
+  addresses. A unit test builds that largest body through the payload code and checks that a
+  client built with `webhookEgressPolicy` accepts it and refuses a byte past the limit; it stops at
+  the name lookup, so nothing is sent, and no test sends a body over 64 KiB over a real
+  connection. The receiver's timeout is unchanged.
+- **Erasure:** a deal's payload is sent as erasure left it (ADR-256): the title replaced, the lost
+  reason and custom field values cleared, the contact without number or name. Erasure keeps a deal's
+  products, which name catalog products, not the customer (ADR-375), and the API still gives them,
+  so the payload gives them too.
+- **No new event:** adding or removing a product still captures nothing (ADR-378), `changes` never
+  names products, and no endpoint setting chooses them; a receiver keeping products in step reads
+  them with `GET /deals/{id}/items` or takes them from the deal's next event. The OpenAPI document
+  describes `items` on each deal event and says this, without decision numbers.
+- **Rollout:** no migration; the worker already reads the three tables as `w360_app`. A worker from
+  before it delivers deal events without `deal.items` and with the 64 KiB limit until the worker
+  rollout ends (a retry or a replay a newer worker sends has them), as does rolling workers back;
+  adding a member is additive for receivers (`docs/DEPLOYMENT.md`).
+
+Not built: `deal.updated` naming `items` in `changes` when a deal's products change (it needs a
+capture on `app.crm_deal_items` in a migration, an endpoint detail, the API's deal history and
+their tests, left for a slice of its own), the items' total in the payload (a receiver sums
+`totalMinor`, as the deal page does, when every item is in the deal's currency), items in the API's
+deal object, and an end-to-end test of its own.

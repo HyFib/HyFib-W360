@@ -1,8 +1,10 @@
+import { validationFailed } from '@w360/core';
 import type { DealFieldType } from '@w360/db';
 import { dealFieldOptionKey } from './deal-field-values';
 
 /**
- * Filtering the deals board, and the export of what it shows, by one custom deal field (ADR-391):
+ * Filtering the deals board, the won and lost lists, the export of what they show (ADR-391,
+ * ADR-394) and `GET /deals` through the API (ADR-394) by one custom deal field:
  * a choice field (ADR-385) by one of its options or by having none, or a yes/no field by yes, no or
  * none. The filter travels in the page's address as `field=<key>:<option>` (`<key>:yes`,
  * `<key>:no` for a yes/no field), and `field=<key>:` for deals without a value: keys never hold a
@@ -12,6 +14,10 @@ import { dealFieldOptionKey } from './deal-field-values';
  * Nothing in the address is trusted: it is resolved against the company's own field definitions,
  * read in the company's scope, and only a field and an option found there reach the query, as the
  * value stored on deals (an option as written, or a boolean). Pure, so it is unit-tested alone.
+ *
+ * The board and the won and lost lists ignore a filter that does not resolve and say so
+ * (`dealFieldFilterView`); the export and the API refuse it (`requireDealFieldFilter`), so neither
+ * is ever wider than asked.
  */
 
 /** The longest filter text taken: a 40-character key, a colon and an 80-character option, with room. */
@@ -185,4 +191,53 @@ export function dealFieldFilterProblemMessage(problem: DealFieldFilterProblem): 
     case 'no_option':
       return 'This option is not one of the deal field’s options.';
   }
+}
+
+/** A view's field filter (ADR-391, ADR-394): the fields to choose from and what was applied. */
+export interface DealFieldFilterView {
+  /** The company's choice and yes/no fields, to choose from. */
+  fields: DealFieldFilterField[];
+  /** The filter applied, found among the company's fields; null for every deal. */
+  applied: ResolvedDealFieldFilter | null;
+  /** A filter was asked for but matches no field or option (a stale or edited link). */
+  ignored: boolean;
+}
+
+/**
+ * The lenient reading of the board and the won and lost lists: an absent or empty text asks for
+ * nothing, and one that does not resolve is ignored and reported, so a stale link shows every deal
+ * instead of an error.
+ */
+export function dealFieldFilterView(
+  fields: readonly FilterableFieldShape[],
+  raw: string | null | undefined,
+): DealFieldFilterView {
+  const asked = raw !== null && raw !== undefined && raw !== '';
+  const resolved = asked ? resolveDealFieldFilter(fields, parseDealFieldFilterParam(raw)) : null;
+  const applied = resolved?.ok ? resolved.filter : null;
+  return { fields: filterableDealFields(fields), applied, ignored: asked && applied === null };
+}
+
+/** The refusal of a filter that cannot be applied, naming `field`, in the caller's words. */
+export function dealFieldFilterRefusal(
+  problem: DealFieldFilterProblem,
+  message: (problem: DealFieldFilterProblem) => string = dealFieldFilterProblemMessage,
+) {
+  const text = message(problem);
+  return validationFailed(text, [{ path: 'field', message: text }]);
+}
+
+/**
+ * The strict reading of the export and `GET /deals` (ADR-394): the filter, or a refusal naming
+ * `field` (400 from the export, 422 through the API). An empty text is malformed here: a filter
+ * asked for must filter.
+ */
+export function requireDealFieldFilter(
+  fields: readonly FilterableFieldShape[],
+  raw: string,
+  message?: (problem: DealFieldFilterProblem) => string,
+): ResolvedDealFieldFilter {
+  const resolved = resolveDealFieldFilter(fields, parseDealFieldFilterParam(raw));
+  if (!resolved.ok) throw dealFieldFilterRefusal(resolved.problem, message);
+  return resolved.filter;
 }

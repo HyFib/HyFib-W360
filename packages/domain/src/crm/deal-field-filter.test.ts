@@ -1,13 +1,18 @@
 import { describe, expect, it } from 'vitest';
 import { PgDialect } from 'drizzle-orm/pg-core';
+import { isAppError } from '@w360/core';
 import {
   DEAL_FIELD_FILTER_MAX_LENGTH,
   dealFieldFilterAudit,
   dealFieldFilterParam,
   dealFieldFilterProblemMessage,
+  dealFieldFilterRefusal,
+  dealFieldFilterView,
   filterableDealFields,
   parseDealFieldFilterParam,
+  requireDealFieldFilter,
   resolveDealFieldFilter,
+  type DealFieldFilterProblem,
   type FilterableFieldShape,
 } from './deal-field-filter';
 import { dealFieldCondition } from './deals';
@@ -209,5 +214,73 @@ describe('the board query’s field condition (ADR-391)', () => {
       sql: 'not ("app"."crm_deals"."attributes" ? $1::text)',
       params: ['tier'],
     });
+  });
+});
+
+describe('the lenient and the strict readings (ADR-394)', () => {
+  it('ignores and reports what does not resolve, for the board and the won and lost lists', () => {
+    const offered = filterableDealFields(fields);
+    for (const raw of [null, undefined, '']) {
+      expect(dealFieldFilterView(fields, raw), String(raw)).toEqual({
+        fields: offered,
+        applied: null,
+        ignored: false,
+      });
+    }
+    const gold = dealFieldFilterView(fields, 'tier:gOLD');
+    expect(gold.ignored).toBe(false);
+    expect(gold.fields).toEqual(offered);
+    expect(gold.applied).toMatchObject({ key: 'tier', stored: 'Gold', param: 'tier:Gold' });
+    expect(dealFieldFilterView(fields, 'signed:').applied).toMatchObject({ stored: null });
+    for (const raw of ['tier', 'tier:Platinum', 'region:North', 'plan:Gold', ' ', 'Tier:Gold']) {
+      expect(dealFieldFilterView(fields, raw), raw).toEqual({
+        fields: offered,
+        applied: null,
+        ignored: true,
+      });
+    }
+  });
+
+  it('refuses what does not resolve, naming field, in the caller’s words', () => {
+    const refusal = (raw: string, message?: (problem: DealFieldFilterProblem) => string) => {
+      try {
+        requireDealFieldFilter(fields, raw, message);
+      } catch (error) {
+        if (!isAppError(error)) throw error;
+        return [error.code, error.publicMessage, error.issues];
+      }
+      throw new Error('expected a refusal');
+    };
+    expect(requireDealFieldFilter(fields, 'signed:No')).toMatchObject({
+      key: 'signed',
+      stored: false,
+      param: 'signed:no',
+    });
+    expect(requireDealFieldFilter(fields, 'tier:')).toMatchObject({ key: 'tier', stored: null });
+    expect(refusal('tier:Platinum')).toEqual([
+      'validation_failed',
+      'This option is not one of the deal field’s options.',
+      [{ path: 'field', message: 'This option is not one of the deal field’s options.' }],
+    ]);
+    for (const [raw, problem] of [
+      ['', 'malformed'],
+      ['tier', 'malformed'],
+      ['plan:Gold', 'no_field'],
+      ['seats:', 'not_filterable'],
+      ['signed:true', 'no_option'],
+    ] as const) {
+      expect(refusal(raw)[1], raw).toBe(dealFieldFilterProblemMessage(problem));
+      expect(
+        refusal(raw, (p) => `api ${p}`),
+        raw,
+      ).toEqual([
+        'validation_failed',
+        `api ${problem}`,
+        [{ path: 'field', message: `api ${problem}` }],
+      ]);
+    }
+    expect(dealFieldFilterRefusal('no_field').issues).toEqual([
+      { path: 'field', message: 'This deal field no longer exists.' },
+    ]);
   });
 });

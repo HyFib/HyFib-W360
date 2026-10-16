@@ -4,7 +4,7 @@ import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { isAppError, sha256Hex, systemClock, uuidv7, type Clock } from '@w360/core';
-import { DEFAULT_EGRESS_POLICY, createEgressClient } from '@w360/core/egress';
+import { DEFAULT_EGRESS_POLICY } from '@w360/core/egress';
 import {
   authorizedTenantScope,
   contacts,
@@ -16,12 +16,15 @@ import {
 } from '@w360/db';
 import {
   advanceAutomationRun,
+  apiAddDealItem,
   apiCreateDeal,
   apiCreateNote,
   apiCreateTask,
   apiGetCampaign,
   apiGetDeal,
   apiGetTask,
+  apiListDealItems,
+  apiRemoveDealItem,
   apiStartAutomationRun,
   apiStopAutomationRun,
   apiUpdateConversation,
@@ -54,6 +57,7 @@ import {
   createInboxService,
   createTeamsService,
   createTemplatesService,
+  createWebhookEgressClient,
   createWebhooksService,
   dealCreatedPayloadSchema,
   dealOwnerChangedPayloadSchema,
@@ -82,6 +86,7 @@ import {
   taskStatusChangedPayloadSchema,
   taskUpdatedPayloadSchema,
   WEBHOOK_EVENT_KEYS,
+  type ApiDealItem,
   type AutomationTrigger,
   type CatalogSyncDeps,
   type TemplateDefinition,
@@ -209,7 +214,8 @@ async function deliverDue(c: Company) {
       db: fx.dbs.app,
       clock: systemClock,
       keyring: fx.keyring,
-      egress: createEgressClient(
+      // The worker's webhook client (ADR-395): bodies up to WEBHOOK_LIMITS.requestBytes.
+      egress: createWebhookEgressClient(
         { ...DEFAULT_EGRESS_POLICY, allowLoopbackForTests: true, timeoutMs: 2_000 },
         { resolve: async () => [{ address: '127.0.0.1', family: 4 }] },
       ),
@@ -6217,6 +6223,7 @@ describe('deal events (ADR-256)', () => {
       lostReason: 'Budget cut',
       createdBy: 'member',
       createdAt: expect.any(String),
+      items: [],
       changedBy: 'member',
       apiKeyId: null,
     });
@@ -7744,6 +7751,251 @@ describe('deal events (ADR-256)', () => {
         WHERE oid = 'app.webhook_capture_deal()'::regprocedure`,
     );
     expect(fn).toEqual({ definer: false, config: ['search_path=pg_catalog, pg_temp'] });
+  });
+
+  describe('products on deals in deal events (ADR-395)', () => {
+    const commerce = () =>
+      createCommerceService({
+        db: fx.dbs.app,
+        clock: systemClock,
+        jobs: fx.jobs(),
+        signer: fx.signer,
+        keyring: fx.keyring,
+        appBaseUrl: 'https://app.w360.test',
+        allowLiveKeys: false,
+      });
+
+    /** The company's catalog at Meta with the products given, read by HyFib (Commerce → Catalogs). */
+    async function catalog(c: Company, catalogId: string, products: [string, string][]) {
+      fx.standIn.state.catalogs.set(c.wabaId, [
+        { id: catalogId, name: `Catalog ${catalogId}`, product_count: products.length },
+      ]);
+      fx.standIn.state.catalogProducts.set(
+        catalogId,
+        products.map(([retailerId, name], i) => ({
+          id: `${catalogId}${i}`,
+          retailer_id: retailerId,
+          name,
+          price: '₹100.00',
+          currency: 'INR',
+          availability: 'in stock',
+          review_status: 'approved',
+        })),
+      );
+      await commerce().requestSync(await fx.ctx(c, c.owner), {
+        whatsappAccountId: c.whatsappAccountId,
+      });
+      expect(
+        await processCommerceSync(
+          {
+            db: fx.dbs.app,
+            keyring: fx.keyring,
+            graph: fx.graph,
+            clock: systemClock,
+            razorpayBaseUrl: 'http://127.0.0.1:9',
+            jobs: fx.jobs(),
+            signer: fx.signer,
+          },
+          authorizedTenantScope(c.tenant.id, null),
+          c.whatsappAccountId,
+        ),
+      ).toBe('done');
+    }
+
+    /** A key of the company with the scopes given, authenticated. */
+    async function keyOf(
+      owner: TenantContext,
+      name: string,
+      scopes: ('deals.read' | 'deals.write' | 'orders.read')[],
+    ) {
+      const created = await createApiKeysService({ db: fx.dbs.app, clock: systemClock }).create(
+        owner,
+        { name, scopes, expiresInDays: 0 },
+      );
+      const key = await authenticateApiToken(fx.dbs.app, created.token, uuidv7());
+      if (!key) throw new Error('a new key does not authenticate');
+      return { id: created.id, ctx: key };
+    }
+
+    // Read when a test runs: `fx` is set in beforeAll, after the describe body is collected.
+    const apiDeps = () => ({ db: fx.dbs.app, clock: systemClock });
+    const itemsIn = (body: { data: Record<string, unknown> } | undefined) =>
+      dealIn(body).items as ApiDealItem[];
+
+    it("gives every deal event's deal its products as GET /deals/{id}/items reads them when the event is delivered, none for a deal without, an erased contact's deal's too, never another company's", async () => {
+      const s = await crmCompany();
+      const { c, owner } = s;
+      const svc = crm();
+      await catalog(c, '7795000001', [
+        ['MUG-01', 'Blue mug'],
+        ['PLATE-01', 'Plate'],
+      ]);
+      const every = await addEndpoint(c, [
+        'deal.created',
+        'deal.updated',
+        'deal.stage_changed',
+        'deal.owner_changed',
+        'deal.status_changed',
+      ]);
+      const writer = await keyOf(owner, 'Quote sync', ['deals.write', 'orders.read']);
+      const reader = await keyOf(owner, 'Quote reader', ['deals.read']);
+
+      // Another company with a deal listing a product of its own catalog, and an endpoint.
+      const other = await crmCompany();
+      await catalog(other.c, '7795000002', [['THEIRS-01', 'Their kettle']]);
+      const theirHook = await addEndpoint(other.c, ['deal.created']);
+      const theirContact = await newContact(other.owner, 'Ravi');
+      const { id: theirDeal } = await svc.createDeal(other.owner, {
+        contactId: theirContact.id,
+        pipelineId: other.salesId,
+        stageId: other.sales[0],
+        title: 'Their order',
+      });
+      const [kettle] = await svc.dealProductOptions(other.owner, 'THEIRS-01');
+      await svc.addDealItem(other.owner, {
+        dealId: theirDeal,
+        expectedVersion: 1,
+        productId: kettle!.id,
+        quantity: 2,
+        unitPrice: '700',
+      });
+
+      // A member adds a deal (deal.created is captured now), then lists a product on it; a key
+      // lists another. Neither listing sends an event.
+      const jaya = await newContact(owner, 'Jaya');
+      const { id: dealId } = await svc.createDeal(owner, {
+        contactId: jaya.id,
+        pipelineId: s.salesId,
+        stageId: s.sales[0],
+        title: 'Bulk order',
+      });
+      const [mugProduct] = await svc.dealProductOptions(owner, 'MUG-01');
+      await svc.addDealItem(owner, {
+        dealId,
+        expectedVersion: 1,
+        productId: mugProduct!.id,
+        quantity: 3,
+        unitPrice: '1500.50',
+      });
+      const added = await apiAddDealItem(
+        apiDeps(),
+        writer.ctx,
+        dealId,
+        { retailerId: 'PLATE-01', quantity: 1, unitPriceMinor: 1_000, expectedVersion: 2 },
+        null,
+      );
+      expect(added.status).toBe(201);
+      // A second deal, without products.
+      const asha = await newContact(owner, 'Asha');
+      const { id: emptyId } = await svc.createDeal(owner, {
+        contactId: asha.id,
+        pipelineId: s.salesId,
+        stageId: s.sales[0],
+        title: 'Empty quote',
+      });
+      expect((await dealEventsOf(c)).map((e) => [e.type, e.detail.dealId, e.deliveries])).toEqual([
+        ['deal.created', dealId, 1],
+        ['deal.created', emptyId, 1],
+      ]);
+
+      // Delivered after the products were listed, the addition gives them as the API lists them:
+      // in the order added, the member's first, each as GET /deals/{id}/items gives it.
+      await deliverDue(c);
+      const listed = await apiListDealItems(apiDeps(), reader.ctx, dealId);
+      expect(
+        listed.map((i) => [
+          i.retailerId,
+          i.name,
+          i.quantity,
+          i.unitPriceMinor,
+          i.totalMinor,
+          i.createdBy,
+          i.createdByApiKeyId,
+        ]),
+      ).toEqual([
+        ['MUG-01', 'Blue mug', 3, 150_050, 450_150, 'member', null],
+        ['PLATE-01', 'Plate', 1, 1_000, 1_000, 'api', writer.id],
+      ]);
+      const first = await dealEventsOf(c);
+      const bodies = bodiesById(every.path);
+      const createdBody = bodies.get(first[0]!.id);
+      expect(dealCreatedPayloadSchema.safeParse(createdBody).success).toBe(true);
+      expect(itemsIn(createdBody)).toEqual(listed);
+      expect(itemsIn(createdBody).map((i) => i.currency)).toEqual(['INR', 'INR']);
+      // The deal without products gives none.
+      const emptyBody = bodies.get(first[1]!.id);
+      expect(dealCreatedPayloadSchema.safeParse(emptyBody).success).toBe(true);
+      expect(itemsIn(emptyBody)).toEqual([]);
+      expect(await apiListDealItems(apiDeps(), reader.ctx, emptyId)).toEqual([]);
+
+      // Its title changes (deal.updated), then the key removes the mug before the event is
+      // delivered: the event gives the products as they are when it is delivered.
+      await svc.updateDeal(owner, {
+        id: dealId,
+        expectedVersion: 3,
+        title: 'Bulk order, revised',
+        value: '',
+        ownerMembershipId: null,
+        expectedCloseOn: null,
+      });
+      expect(
+        await apiRemoveDealItem(apiDeps(), writer.ctx, dealId, listed[0]!.id, {
+          expectedVersion: '4',
+        }),
+      ).toEqual({ id: listed[0]!.id, deleted: true, dealVersion: 5 });
+      await deliverDue(c);
+      const second = await dealEventsOf(c);
+      expect(second.map((e) => [e.type, e.detail.dealId, e.detail.changes ?? null])).toEqual([
+        ['deal.created', dealId, null],
+        ['deal.created', emptyId, null],
+        ['deal.updated', dealId, ['title']],
+      ]);
+      const updatedBody = bodiesById(every.path).get(second[2]!.id);
+      expect(dealUpdatedPayloadSchema.safeParse(updatedBody).success).toBe(true);
+      expect(updatedBody?.data.changes).toEqual(['title']);
+      const remaining = await apiListDealItems(apiDeps(), reader.ctx, dealId);
+      expect(remaining).toEqual([listed[1]]);
+      expect(itemsIn(updatedBody)).toEqual(remaining);
+
+      // Erasing Jaya retitles her deal (deal.updated, nobody as its maker) and keeps its products,
+      // which name catalog products, not her: they are sent as the API lists them.
+      await contactsService().eraseContact(owner, { contactId: jaya.id, suppress: false });
+      await deliverDue(c);
+      const third = await dealEventsOf(c);
+      expect(third).toHaveLength(4);
+      expect([third[3]!.type, third[3]!.detail.changes, third[3]!.detail.changedBy]).toEqual([
+        'deal.updated',
+        ['title'],
+        null,
+      ]);
+      const erasedBody = bodiesById(every.path).get(third[3]!.id);
+      expect(dealUpdatedPayloadSchema.safeParse(erasedBody).success).toBe(true);
+      expect(dealIn(erasedBody).title).toBe('Deal (contact erased)');
+      expect(erasedBody?.data.contact).toEqual({ id: jaya.id, phone: null, name: null });
+      expect(itemsIn(erasedBody)).toEqual(await apiListDealItems(apiDeps(), reader.ctx, dealId));
+      expect(itemsIn(erasedBody)).toEqual(remaining);
+
+      // Every body this company received names its own products only; the other company's
+      // event gives its own product, as its key would read it.
+      expect(bodiesAt(every.path)).toHaveLength(4);
+      for (const body of bodiesAt(every.path)) {
+        expect(JSON.stringify(body)).not.toMatch(/THEIRS-01|Their kettle|7795000002/);
+      }
+      await deliverDue(other.c);
+      const [theirEvent] = await dealEventsOf(other.c);
+      const theirBody = bodiesById(theirHook.path).get(theirEvent!.id);
+      const theirReader = await keyOf(other.owner, 'Their reader', ['deals.read']);
+      const theirs = await apiListDealItems(apiDeps(), theirReader.ctx, theirDeal);
+      expect(theirs.map((i) => [i.retailerId, i.quantity, i.unitPriceMinor, i.totalMinor])).toEqual(
+        [['THEIRS-01', 2, 70_000, 140_000]],
+      );
+      expect(itemsIn(theirBody)).toEqual(theirs);
+      expect(JSON.stringify(theirBody)).not.toMatch(/MUG-01|PLATE-01|Blue mug|7795000001/);
+      // A key of one company reads no deal of the other.
+      await expect(apiListDealItems(apiDeps(), reader.ctx, theirDeal)).rejects.toMatchObject({
+        code: 'not_found',
+      });
+    });
   });
 });
 

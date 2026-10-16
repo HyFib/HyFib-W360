@@ -1379,6 +1379,18 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   filterable fields with their choices, the filter applied, and whether one asked for was ignored);
   `exportDeals` refuses one that does not resolve and audits its key and kind of match. Web: the CRM
   page's "Deal field" GET form and its notice for a stale link; the export route passes `field`.
+- **The field filter on the won and lost lists and in `GET /deals` (ADR-394, no migration):** two
+  readings in `crm/deal-field-filter.ts` share ADR-391's parsing and resolution: `dealFieldFilterView`
+  (lenient: the board and `listDeals` ignore a filter that does not resolve and report it, the
+  `fieldFilter` both return) and `requireDealFieldFilter` (strict: `exportDeals` and `apiListDeals`
+  refuse it with `validation_failed` naming `field`, through `dealFieldFilterRefusal`, the API in
+  its own words, `apiDealFieldFilterMessage`). `listDeals` adds `dealFieldCondition` to its keyset
+  query; `apiListDeals` refuses a malformed text before the transaction, then resolves the key
+  against the company's fields after the plan check and adds the condition to its others. Cursors
+  are positions only, as for every list: each page applies the filters it is asked with. Web: the
+  CRM page's `DealFieldFilter` (the notice and the GET form, the view's other parameters as hidden
+  inputs) on the board and the lists; the view links, "Older deals", "Newest" and the lists' export
+  link carry the filter as resolved.
 - **Deal import (ADR-374, no migration):** `crm/deal-import.ts` previews a CSV (columns, first
   rows, suggested mapping) and imports it into one pipeline: `planDealRows` checks each row against
   the company's records (contacts by E.164 number, active stages by name, CRM members by email,
@@ -1414,6 +1426,8 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   key share, then the deal for update, the expected version checked), move the version on with
   `crmChangedBy({ apiKeyId })`, add a `deal_updated` activity naming `products` and the key, and
   audit `crm.deal_updated` as the key. `crm_deal_items.created_by_api_key_id` names a key's item.
+  The item representation and its read live in `api/deal-item-view.ts`, shared with the deal
+  webhook payloads (ADR-395).
 - **Defining contact fields (0092, ADR-115):** `contacts/field-definitions.ts` adds, renames and
   deletes a company's custom fields for both Settings (`contacts/service.ts`, by id) and the API
   (`api/contact-fields.ts`, by key, scope `contact_fields.manage`); callers check who may and audit
@@ -1639,7 +1653,8 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   cursors (`created_at`, `id`) with the page's stages in a second query, both in one repeatable-read
   snapshot. Deals are read in the company joined to their pipeline (its currency), newest first by
   `created_at` on exact keyset cursors (`crm_deals_list_idx`), the filters as plain equalities
-  (`ownerId` `none` as a null owner) and `updated_at >= updatedSince`; `toApiDeal` gives ids in
+  (`ownerId` `none` as a null owner), `updated_at >= updatedSince` and, since ADR-394, a choice or
+  yes/no field's value (`field`, resolved or refused as the CRM export does); `toApiDeal` gives ids in
   place of the contact, conversation and owner, since ADR-278 who made its latest change
   (`changedBy`, `changedByApiKeyId`, read from the columns of ADR-277), and since ADR-282 who added
   it (`createdBy`, `createdByApiKeyId`: `crmCreatedBy` reads `created_by_api_key_id` and
@@ -2228,6 +2243,21 @@ state` for one that becomes skipped from another state, each only for a message 
   widens `webhook_events.detail` to 4,096 bytes (NOT VALID; 0306 validates) for 50 keys of 40
   characters, and lets `deal_details` hold `fields`. The API's deal history names `fields` for a
   `deal_updated` entry naming `custom_fields`.
+- **Products in deal payloads** (no migration, ADR-395): every deal event's `deal` gives `items`,
+  read at delivery (a read of its own after the deal's, at read committed) by `readApiDealItems`
+  (`api/deal-item-view.ts`), the read behind `GET /deals/{id}/items`, so each item has the API's
+  representation (`apiDealItemSchema`, `toApiDealItem`) and order (added time, then id), at most
+  `MAX_DEAL_ITEMS` (50). The view and the limits (`crm/deal-item-limits.ts`) import none of the
+  deal services, so the payloads do not depend on them. Erasure keeps items, so an erased
+  contact's deal gives them. Adding or removing an item captures nothing (no trigger on
+  `app.crm_deal_items`): `changes` never names products, and an event delivered later gives the
+  items as they are then. The largest deal event body is 202,667 bytes, so deliveries go through
+  the worker's `webhookEgress` (`createWebhookEgressClient`, applying `webhookEgressPolicy`: the
+  worker's policy with request bodies up to `WEBHOOK_LIMITS.requestBytes`, 256 KiB); every other
+  egress caller keeps 64 KiB. `WebhookDeliveryDeps.egress` is a `WebhookEgressClient` (it carries
+  that `maxRequestBytes`), so the 64 KiB client cannot be passed. Each client limits its own
+  system lookups (`maxConcurrentLookups`, 2), so the worker's four clients (automation HTTP steps,
+  webhooks, stores, alerts) may have 8 in progress at once, 6 for company-chosen addresses.
 - **Task events** (migrations 0177–0178, ADR-261): triggers on `app.crm_tasks` capture
   `task.created` when a task is inserted (members, the runner's task steps, keys) and
   `task.status_changed` when an update changes its status (members, keys through `apiUpdateTask`),
@@ -2293,8 +2323,9 @@ LOCKED`; pending ones due now, then `delivering` ones whose lease expired), buil
   `payload_failed` without an attempt, and the rest of the batch goes on; the worker logs its
   company, delivery, endpoint, event type, what failed and the error's class and code, never the
   payload or the error's message. The POSTs go through the egress client (DNS pinned, private,
-  loopback, link-local, metadata and reserved addresses refused, no redirects, 64 KB sent, responses
-  read up to 256 KB and discarded) with no transaction open.
+  loopback, link-local, metadata and reserved addresses refused, no redirects, 256 KiB sent (64 KB
+  before ADR-395; its own client, `webhookEgress`), responses read up to 256 KB and discarded) with
+  no transaction open.
   Each outcome is recorded in its own transaction, locking the endpoint before the delivery; an
   outcome whose attempt no longer owns the delivery (lease expired and re-claimed, or the endpoint
   deleted) is dropped. A 2xx answer succeeds; anything else is retried at 1 min, 5 min, 30 min, 2 h,

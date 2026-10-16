@@ -4,7 +4,7 @@ import { createServer, type IncomingHttpHeaders, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { isAppError, jsonbSize, sha256Hex, systemClock, uuidv7, type Clock } from '@w360/core';
-import { DEFAULT_EGRESS_POLICY, createEgressClient } from '@w360/core/egress';
+import { DEFAULT_EGRESS_POLICY } from '@w360/core/egress';
 import { authorizedTenantScope, sql } from '@w360/db';
 import {
   authenticateApiToken,
@@ -12,6 +12,7 @@ import {
   createApiWebhookEndpoints,
   createAutomationService,
   createCrmService,
+  createWebhookEgressClient,
   createWebhooksService,
   outboxAad,
   processWebhookDeliveries,
@@ -108,7 +109,7 @@ async function deliverDue(c: Company) {
       db: fx.dbs.app,
       clock: systemClock,
       keyring: fx.keyring,
-      egress: createEgressClient(
+      egress: createWebhookEgressClient(
         { ...DEFAULT_EGRESS_POLICY, allowLoopbackForTests: true, timeoutMs: 1_000 },
         { resolve: async () => [{ address: '127.0.0.1', family: 4 }] },
       ),

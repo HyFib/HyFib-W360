@@ -48,6 +48,7 @@ import {
   type WebhookEventType,
 } from '@w360/db';
 import { apiContactColumns, apiContactSchema, toApiContact } from '../api/contact-view';
+import { apiDealItemsSchema, readApiDealItems } from '../api/deal-item-view';
 import { FIELD_KEY_RE, NODE_TYPES } from '../automations/graph';
 import {
   apiPaymentLinkSchema,
@@ -62,6 +63,7 @@ import {
 import { campaignAnalytics, campaignResultsSchema, toCampaignResults } from '../campaigns/results';
 import { COMMERCE_LIMITS } from '../commerce/model';
 import { crmCreatedBy, noteWriter } from '../crm/common';
+import { MAX_DEAL_ITEMS } from '../crm/deal-item-limits';
 import { findAnsweredMessageId } from '../messaging/reply-context';
 import { ORDER_MESSAGE_EVENTS } from '../stores/messages-model';
 import {
@@ -802,6 +804,9 @@ const webhookDealSchema = z.object({
     .enum(['member', 'automation', 'api'])
     .describe('Who added the deal: a member, an automation’s run or an API key.'),
   createdAt: z.iso.datetime(),
+  items: apiDealItemsSchema.describe(
+    `The deal’s products when the event is delivered, exactly as GET /deals/{id}/items lists them (\`deals.read\`): in the order they were added, at most ${MAX_DEAL_ITEMS}, each with its content id, its catalog, its name when it was added, its quantity, the price of one and their total in the minor units of its currency, and who added it; empty when it lists none. An erased contact’s deal keeps its products (they name catalog products, not the customer), so they are sent. A change of products alone sends no event. Bodies delivered before deal events carried products have no items.`,
+  ),
   changedBy: z
     .enum(CRM_CHANGERS)
     .nullable()
@@ -2626,6 +2631,9 @@ export async function buildWebhookPayload(
       // as it is now, so an erased contact's deal is sent as erasure left it.
       const deal = await dealOf(tx, tenantId, str(event.detail.dealId));
       if (!deal) throw new WebhookEventGoneError();
+      // Its products as the API reads them, at delivery (ADR-395): a read of its own after the
+      // deal's, at read committed, so not one snapshot with it.
+      const items = await readApiDealItems(tx, tenantId, deal.id);
       const moved = event.type === 'deal.stage_changed';
       const owned = event.type === 'deal.owner_changed';
       const { createdBy, createdByApiKeyId } = crmCreatedBy(deal.automationId, deal.apiKeyId);
@@ -2654,6 +2662,7 @@ export async function buildWebhookPayload(
             lostReason: deal.lostReason,
             createdBy,
             createdAt: deal.createdAt.toISOString(),
+            items,
             ...changer,
           },
           conversation: deal.conversationId ? { id: deal.conversationId } : null,

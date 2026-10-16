@@ -1503,6 +1503,7 @@ describe('webhook payload schemas', () => {
       lostReason: null,
       createdBy: 'member',
       createdAt: base.createdAt,
+      items: [],
       changedBy: 'member',
       apiKeyId: null,
     };
