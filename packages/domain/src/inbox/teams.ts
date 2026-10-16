@@ -27,11 +27,15 @@ import { recordAudit, type RequestMeta } from '../audit';
 import { emitTenantEvent } from '../messaging/events';
 import { parseInput } from '../validation';
 import {
+  loadTeamClosedDays,
   loadTeamSchedules,
   replanWaitingTurns,
+  sameClosedDays,
   sameIntervals,
+  teamClosedDaysSchema,
   teamHoursSchema,
   writeTeamBusinessHours,
+  writeTeamClosedDays,
   type BusinessInterval,
 } from './business-hours';
 import { INBOX_WORKER_ROLES, normalizeRoutingText, routeWaitingConversations } from './routing';
@@ -100,6 +104,11 @@ export const teamSchema = z.object({
    * checked as the company's; null uses the company's business hours.
    */
   businessHours: teamHoursSchema.default(null),
+  /**
+   * The team's own closed days (ADR-392): days of the company's time zone, YYYY-MM-DD, used instead
+   * of the company's (an empty list: none); null uses the company's closed days.
+   */
+  closedDays: teamClosedDaysSchema.default(null),
   memberIds: z.array(z.uuid()).max(200).default([]),
   channelIds: z.array(z.uuid()).max(50).default([]),
 });
@@ -120,6 +129,8 @@ export interface TeamView {
   firstResponseTargetMinutes: number | null;
   /** The team's own weekly schedule (ADR-389); null uses the company's business hours. */
   businessHours: BusinessInterval[] | null;
+  /** The team's own closed days, in order (ADR-392); null uses the company's closed days. */
+  closedDays: string[] | null;
   members: { membershipId: string; name: string; available: boolean }[];
   channelIds: string[];
   openConversations: number;
@@ -260,24 +271,30 @@ export async function writeCreateTeam(
     routingKeywords: data.routingKeywords,
     firstResponseTargetMinutes: data.firstResponseTargetMinutes,
   });
-  // A new team has no conversations yet: nothing waits for its hours.
+  // A new team has no conversations yet: nothing waits for its hours or closed days.
   await writeTeamBusinessHours(tx, tenantId, teamId, data.businessHours);
+  if (data.closedDays !== null) await writeTeamClosedDays(tx, tenantId, teamId, data.closedDays);
   await syncMembersAndChannels(tx, tenantId, teamId, data);
   return { teamId };
 }
 
 /**
  * Sets a team's settings, members and numbers, its row locked (Settings, and keys since ADR-287).
- * When its target (ADR-377) or business hours (ADR-389) change, the replies waiting for a due time
- * are planned again. The caller audits it, then routes waiting conversations, and maps a name in
- * use with `teamNameError`.
+ * When its target (ADR-377), business hours (ADR-389) or closed days (ADR-392) change, the replies
+ * waiting for a due time are planned again; a week or a list of closed days left as it is is not
+ * written. The caller audits it, then routes waiting conversations, and maps a name in use with
+ * `teamNameError`.
  */
 export async function writeUpdateTeam(
   tx: Tx,
   tenantId: string,
   teamId: string,
   data: TeamSettings,
-): Promise<{ previousAssignment: TeamAssignmentMode; hoursChanged: boolean }> {
+): Promise<{
+  previousAssignment: TeamAssignmentMode;
+  hoursChanged: boolean;
+  closedDaysChanged: boolean;
+}> {
   const [current] = await tx
     .select({
       id: teams.id,
@@ -290,6 +307,8 @@ export async function writeUpdateTeam(
   if (!current) throw notFound('Team');
   const previousHours = (await loadTeamSchedules(tx, tenantId, [teamId])).get(teamId) ?? null;
   const hoursChanged = !sameTeamHours(previousHours, data.businessHours);
+  const previousClosedDays = (await loadTeamClosedDays(tx, tenantId, [teamId])).get(teamId) ?? null;
+  const closedDaysChanged = !sameClosedDays(previousClosedDays, data.closedDays);
   await checkMembers(tx, tenantId, data.memberIds);
   await checkChannels(tx, tenantId, data.channelIds);
   await tx
@@ -304,11 +323,16 @@ export async function writeUpdateTeam(
     })
     .where(and(eq(teams.tenantId, tenantId), eq(teams.id, teamId)));
   if (hoursChanged) await writeTeamBusinessHours(tx, tenantId, teamId, data.businessHours);
-  if (hoursChanged || current.firstResponseTargetMinutes !== data.firstResponseTargetMinutes) {
+  if (closedDaysChanged) await writeTeamClosedDays(tx, tenantId, teamId, data.closedDays);
+  if (
+    hoursChanged ||
+    closedDaysChanged ||
+    current.firstResponseTargetMinutes !== data.firstResponseTargetMinutes
+  ) {
     await replanWaitingTurns(tx, tenantId, { teamId });
   }
   await syncMembersAndChannels(tx, tenantId, teamId, data);
-  return { previousAssignment: current.assignment, hoursChanged };
+  return { previousAssignment: current.assignment, hoursChanged, closedDaysChanged };
 }
 
 /** Whether two teams' own schedules are the same (null: the company's business hours). */
@@ -329,11 +353,22 @@ export function teamHoursAudit(hours: readonly BusinessInterval[] | null): {
 }
 
 /**
+ * A team's own closed days in audit metadata (ADR-392): whether it has its own list, and how many
+ * days it holds (the days themselves are in the team's settings and the company export).
+ */
+export function teamClosedDaysAudit(days: readonly string[] | null): {
+  ownClosedDays: boolean;
+  closedDays: number;
+} {
+  return { ownClosedDays: days !== null, closedDays: days?.length ?? 0 };
+}
+
+/**
  * Deletes a team (Settings, and keys since ADR-287): its conversations leave the team first, their
- * assignees kept, in routing's lock order (conversation, team); its own business hours go with it
- * (ADR-389), and the replies its conversations wait for are planned again by the company's
- * calendar (migration 0303's trigger, as the conversations leave). Null when the company has no
- * such team. The caller audits it.
+ * assignees kept, in routing's lock order (conversation, team); its own business hours (ADR-389)
+ * and closed days (ADR-392) go with it, and the replies its conversations wait for are planned
+ * again by the company's calendar (migration 0303's trigger, as the conversations leave). Null
+ * when the company has no such team. The caller audits it.
  */
 export async function writeDeleteTeam(
   tx: Tx,
@@ -381,6 +416,7 @@ export async function readTeamSettings(
   const [team] = options.lock ? await query.for('update') : await query;
   if (!team) return null;
   const businessHours = (await loadTeamSchedules(tx, tenantId, [teamId])).get(teamId) ?? null;
+  const closedDays = (await loadTeamClosedDays(tx, tenantId, [teamId])).get(teamId) ?? null;
   const members = await tx
     .select({ membershipId: teamMembers.membershipId })
     .from(teamMembers)
@@ -407,6 +443,7 @@ export async function readTeamSettings(
   return {
     ...team,
     businessHours,
+    closedDays,
     memberIds: members.map((m) => m.membershipId),
     channelIds: channels.map((c) => c.id),
   };
@@ -557,11 +594,13 @@ export function createTeamsService(deps: { db: Database; clock: Clock }) {
             )
             .groupBy(conversations.teamId);
           const schedules = await loadTeamSchedules(tx, ctx.tenant.id, ids);
+          const closedDays = await loadTeamClosedDays(tx, ctx.tenant.id, ids);
           return rows.map((t) => {
             const count = counts.find((c) => c.teamId === t.id);
             return {
               ...t,
               businessHours: schedules.get(t.id) ?? null,
+              closedDays: closedDays.get(t.id) ?? null,
               members: members
                 .filter((m) => m.teamId === t.id)
                 .map((m) => ({
@@ -601,6 +640,7 @@ export function createTeamsService(deps: { db: Database; clock: Clock }) {
                 maxOpenPerMember: data.maxOpenPerMember,
                 firstResponseTargetMinutes: data.firstResponseTargetMinutes,
                 ...teamHoursAudit(data.businessHours),
+                ...teamClosedDaysAudit(data.closedDays),
                 members: data.memberIds.length,
                 channels: data.channelIds.length,
                 keywords: data.routingKeywords.length,
@@ -627,7 +667,7 @@ export function createTeamsService(deps: { db: Database; clock: Clock }) {
       const data = parseInput(teamSchema, input);
       try {
         return await db.run(ctx.scope, async (tx) => {
-          const { previousAssignment, hoursChanged } = await writeUpdateTeam(
+          const { previousAssignment, hoursChanged, closedDaysChanged } = await writeUpdateTeam(
             tx,
             ctx.tenant.id,
             teamId,
@@ -646,6 +686,8 @@ export function createTeamsService(deps: { db: Database; clock: Clock }) {
                 firstResponseTargetMinutes: data.firstResponseTargetMinutes,
                 ...teamHoursAudit(data.businessHours),
                 businessHoursChanged: hoursChanged,
+                ...teamClosedDaysAudit(data.closedDays),
+                closedDaysChanged,
                 members: data.memberIds.length,
                 channels: data.channelIds.length,
                 keywords: data.routingKeywords.length,

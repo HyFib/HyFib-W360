@@ -1,8 +1,16 @@
 import type { Metadata } from 'next';
 import { notFound } from 'next/navigation';
-import { can, formatMinutes, intervalsToDayTexts, WEEKDAY_NAMES } from '@w360/domain';
+import {
+  can,
+  formatMinutes,
+  intervalsToDayTexts,
+  localDateAfter,
+  MAX_TEAM_CLOSED_DAYS,
+  WEEKDAY_NAMES,
+} from '@w360/domain';
 import { Badge, Card, CardContent, CardDescription, CardHeader, CardTitle } from '@w360/ui';
 import { PlanLimitHint } from '@/components/plan-limit';
+import { formatClosedDay, startingClosedDays } from '@/lib/closed-days';
 import { AvailabilityToggle, DeleteTeamButton, TeamForm } from '@/components/settings/team-editor';
 import { canUseInbox } from '@/server/inbox';
 import { getRuntime } from '@/server/runtime';
@@ -15,7 +23,7 @@ export default async function TeamsSettingsPage({ params }: { params: Promise<{ 
   const { slug } = await params;
   const ctx = await requireTenant(slug);
   if (!canUseInbox(ctx)) notFound();
-  const { teams, plans, businessHours } = await getRuntime();
+  const { teams, plans, businessHours, clock } = await getRuntime();
   const supervise = can(ctx, 'inbox.supervise');
   const manageOthers = can(ctx, 'inbox.assign') && can(ctx, 'members.read');
   const [list, members, channels, usage, hours] = await Promise.all([
@@ -25,10 +33,18 @@ export default async function TeamsSettingsPage({ params }: { params: Promise<{ 
     plans.usage(ctx),
     businessHours.getBusinessHours(ctx),
   ]);
-  // A team's own hours apply only while the company's are on (ADR-389).
+  // A team's own hours (ADR-389) and closed days (ADR-392) apply only while the company's hours
+  // are on; a team's own list of closed days starts from the company's, past days included (replies
+  // waiting since then and Reports still count them), the upcoming and latest ones when there are
+  // more than a team holds (today in the company's time zone).
   const companyHours = {
     on: hours.enabled && hours.days.some((d) => d.trim() !== ''),
     timeZone: hours.timezone,
+    startingClosedDays: startingClosedDays(
+      hours.holidays.map((h) => h.day),
+      localDateAfter(clock.now(), hours.timezone, 0),
+      MAX_TEAM_CLOSED_DAYS,
+    ),
   };
   const channelLabel = new Map(channels.map((c) => [c.id, c.label]));
   return (
@@ -94,6 +110,7 @@ export default async function TeamsSettingsPage({ params }: { params: Promise<{ 
                   ? ` · reply target ${team.firstResponseTargetMinutes} min`
                   : ''}
                 {team.businessHours ? ' · its own business hours' : ''}
+                {team.closedDays ? ' · its own closed days' : ''}
               </CardDescription>
             </CardHeader>
             <CardContent className="grid gap-4">
@@ -156,12 +173,31 @@ export default async function TeamsSettingsPage({ params }: { params: Promise<{ 
                         </ul>
                         <span className="text-muted-foreground">
                           {companyHours.on
-                            ? `With the company’s closed days, in ${companyHours.timeZone}.`
+                            ? `With ${team.closedDays ? 'the team’s own' : 'the company’s'} closed days, in ${companyHours.timeZone}.`
                             : 'Not in use: business hours are off (Settings → Inbox).'}
                         </span>
                       </>
                     ) : (
                       'The company’s'
+                    )}
+                  </dd>
+                </div>
+                <div className="grid min-w-0 gap-1 sm:col-span-3">
+                  <dt className="text-muted-foreground">Closed days</dt>
+                  <dd className="break-words">
+                    {team.closedDays === null ? (
+                      'The company’s'
+                    ) : (
+                      <>
+                        {team.closedDays.length === 0
+                          ? 'None of its own: the team works on every day its week opens.'
+                          : team.closedDays.map((day) => formatClosedDay(day)).join(', ')}
+                        {companyHours.on ? null : (
+                          <span className="block text-muted-foreground">
+                            Not in use: business hours are off (Settings → Inbox).
+                          </span>
+                        )}
+                      </>
                     )}
                   </dd>
                 </div>
@@ -186,6 +222,7 @@ export default async function TeamsSettingsPage({ params }: { params: Promise<{ 
                         businessHours: team.businessHours
                           ? intervalsToDayTexts(team.businessHours)
                           : null,
+                        closedDays: team.closedDays,
                         memberIds: team.members.map((m) => m.membershipId),
                         channelIds: team.channelIds,
                       }}

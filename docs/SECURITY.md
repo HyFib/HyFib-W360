@@ -261,6 +261,16 @@ Phase 3 rules on top of the matrix (enforced in domain services and re-checked w
   rows of a company being deleted. The trigger that plans waiting rows again when a conversation
   changes team runs as the caller (pinned search path, not executable by PUBLIC). No permission is
   new.
+- Closed days per team (ADR-392): a team's own list of closed days is a team setting, set only by
+  members with `inbox.supervise` (keys with `teams.manage`), each day a real date and at most 366,
+  and audited with the team's change by counts and booleans (`ownClosedDays`, `closedDays`,
+  `closedDaysChanged`); like the team's week it changes due times, overdue counts and emails, report
+  figures and when the automatic reply is sent, never who sees a conversation.
+  `app.team_closed_days` has FORCE row security, a composite foreign key to the company's team (on
+  delete cascade) and table grants to the app role of select, insert and delete only; the app role
+  may update only the new `app.teams.own_closed_days` column besides the columns it already could;
+  w360_definer may only read the key columns and delete the rows of a company being deleted (step
+  656). No function is new or widened, and no permission is new.
 - Automatic reply when members are slow (ADR-384): reading the setting needs `tenant.read`,
   changing it `tenant.settings.manage` (audited, `inbox.slow_reply_updated`); no new permission.
   The worker finds turns only through `ops.slow_reply_turns` (SECURITY DEFINER, pinned search path,
@@ -402,6 +412,13 @@ Phase 4 rules (automations, P4-01):
   choice only among its current options); a field deleted or a value no longer valid changes
   nothing. The deal records the automation as its changer and the timeline the automation and the
   run. Permissions are unchanged.
+- Conditions on custom deal fields (ADR-393): publishing or testing an automation whose conditions
+  check deal fields needs the CRM in the plan and `crm.read` (the branch taken reveals what a deal
+  holds). Pipeline ids and field keys are checked against the company's own definitions; the
+  runner reads only the run's contact's single open deal, in the company's scope, with the deal
+  steps' checks, without row locks (only the shared deal-field lock, so definitions and values are
+  read as one state). Without exactly one open deal, or with a field or option gone, the rule does
+  not hold and, when the condition answers no, the step notes why.
 
 Phase 4 rules (automation web requests, P4-02):
 

@@ -15,6 +15,8 @@ import {
   overdueReplyNotices,
   sql,
   teamBusinessHours,
+  teamClosedDays,
+  teams,
   type Database,
   type Tx,
 } from '@w360/db';
@@ -339,12 +341,50 @@ export const teamHoursSchema = z
     return intervals;
   });
 
+// Closed days per team (ADR-392) ----------------------------------------------------------------
+
+/** The most closed days a team's own list holds: a year of days. */
+export const MAX_TEAM_CLOSED_DAYS = 366;
+
+/** A closed day as Settings and the API take it: a real date written YYYY-MM-DD. */
+export const closedDaySchema = z
+  .string()
+  // A value not written as a date is told that alone, not also that it is no real date.
+  .regex(/^\d{4}-\d{2}-\d{2}$/, { message: 'Enter the date as YYYY-MM-DD.', abort: true })
+  .refine((v) => {
+    const [y, m, d] = v.split('-').map(Number) as [number, number, number];
+    const t = new Date(Date.UTC(y, m - 1, d));
+    return t.getUTCFullYear() === y && t.getUTCMonth() === m - 1 && t.getUTCDate() === d;
+  }, 'Enter a real date.');
+
+/**
+ * A team's own closed days as Settings → Teams and the API take them: days of the company's time
+ * zone, each a real date (issues name the entry, `<n>`, under the caller's field), at most
+ * MAX_TEAM_CLOSED_DAYS, kept once each and in order. An empty list is the team's own (it works on
+ * every day its week opens); null: the team uses the company's closed days. Past days are kept, as
+ * the company's are.
+ */
+export const teamClosedDaysSchema = z
+  .array(closedDaySchema)
+  .max(MAX_TEAM_CLOSED_DAYS, `Use at most ${MAX_TEAM_CLOSED_DAYS} closed days.`)
+  .nullable()
+  .transform((days): string[] | null => (days === null ? null : [...new Set(days)].sort()));
+
+/** Whether two teams' closed days are the same (null: the company's; [] is a list of its own). */
+export function sameClosedDays(a: readonly string[] | null, b: readonly string[] | null): boolean {
+  if (a === null || b === null) return a === b;
+  const left = [...new Set(a)].sort();
+  const right = [...new Set(b)].sort();
+  return left.length === right.length && left.every((day, i) => day === right[i]);
+}
+
 /**
  * The calendars business time is counted by: the company's while its business hours are on, and
- * the teams with their own weekly schedule (ADR-389), each with the company's closed days and time
- * zone. While business hours are off (or have no opening time) business time is not used anywhere,
- * so `company` is null and `teams` is empty: a team's schedule applies only while the company's
- * hours are on.
+ * the teams with their own weekly schedule (ADR-389) or their own closed days (ADR-392), each with
+ * the company's time zone, its own week or else the company's, and its own closed days or else the
+ * company's. While business hours are off (or have no opening time) business time is not used
+ * anywhere, so `company` is null and `teams` is empty: a team's schedule and closed days apply only
+ * while the company's hours are on.
  */
 export interface BusinessCalendars {
   company: BusinessCalendar | null;
@@ -360,15 +400,28 @@ export function calendarFor(
   return (teamId === null ? undefined : calendars.teams.get(teamId)) ?? calendars.company;
 }
 
-/** The calendars of a company's business hours and its teams' own weekly schedules. */
+/**
+ * The calendars of a company's business hours and its teams' own weekly schedules and closed days
+ * (`teamClosedDays`: the teams with a list of their own, possibly empty). A team with neither has
+ * no calendar of its own and uses the company's.
+ */
 export function businessCalendars(
   company: BusinessCalendar | null,
   teamIntervals: ReadonlyMap<string, readonly BusinessInterval[]>,
+  teamClosedDays: ReadonlyMap<string, readonly string[]> = new Map(),
 ): BusinessCalendars {
   if (!company) return { company: null, teams: new Map() };
   const teams = new Map<string, BusinessCalendar>();
-  for (const [teamId, intervals] of teamIntervals) {
-    if (intervals.length > 0) teams.set(teamId, { ...company, intervals: [...intervals] });
+  for (const teamId of new Set([...teamIntervals.keys(), ...teamClosedDays.keys()])) {
+    const intervals = teamIntervals.get(teamId);
+    const ownWeek = intervals !== undefined && intervals.length > 0;
+    const closed = teamClosedDays.get(teamId);
+    if (!ownWeek && closed === undefined) continue;
+    teams.set(teamId, {
+      timezone: company.timezone,
+      intervals: ownWeek ? [...intervals] : company.intervals,
+      closedDays: closed === undefined ? company.closedDays : new Set(closed),
+    });
   }
   return { company, teams };
 }
@@ -385,14 +438,7 @@ export const businessHoursSchema = z.object({
 });
 
 export const holidaySchema = z.object({
-  day: z
-    .string()
-    .regex(/^\d{4}-\d{2}-\d{2}$/, 'Enter the date as YYYY-MM-DD.')
-    .refine((v) => {
-      const [y, m, d] = v.split('-').map(Number) as [number, number, number];
-      const t = new Date(Date.UTC(y, m - 1, d));
-      return t.getUTCFullYear() === y && t.getUTCMonth() === m - 1 && t.getUTCDate() === d;
-    }, 'Enter a real date.'),
+  day: closedDaySchema,
   name: z.string().trim().min(1, 'Name the closed day.').max(80, 'Use at most 80 characters.'),
 });
 
@@ -488,8 +534,44 @@ export async function loadTeamSchedules(
 }
 
 /**
- * The company's calendar and, while its business hours are on, its teams' own (ADR-389): loaded
- * once per request or sweep, so a list, a sweep or a report never reads calendars per conversation.
+ * The closed days of the company's teams that have their own list (ADR-392), by team id, each in
+ * order (an empty list for a team that has its own but no day in it); with `teamIds`, of those
+ * teams only. One query for every team. Days of a team without its own list are never read.
+ */
+export async function loadTeamClosedDays(
+  tx: Tx,
+  tenantId: string,
+  teamIds?: readonly string[],
+): Promise<Map<string, string[]>> {
+  if (teamIds && teamIds.length === 0) return new Map();
+  const rows = await tx
+    .select({ teamId: teams.id, day: teamClosedDays.day })
+    .from(teams)
+    .leftJoin(
+      teamClosedDays,
+      and(eq(teamClosedDays.tenantId, teams.tenantId), eq(teamClosedDays.teamId, teams.id)),
+    )
+    .where(
+      and(
+        eq(teams.tenantId, tenantId),
+        eq(teams.ownClosedDays, true),
+        teamIds ? inArray(teams.id, [...teamIds]) : undefined,
+      ),
+    )
+    .orderBy(asc(teams.id), asc(teamClosedDays.day));
+  const closed = new Map<string, string[]>();
+  for (const r of rows) {
+    const list = closed.get(r.teamId) ?? [];
+    if (r.day !== null) list.push(r.day);
+    closed.set(r.teamId, list);
+  }
+  return closed;
+}
+
+/**
+ * The company's calendar and, while its business hours are on, its teams' own (their weeks,
+ * ADR-389, and closed days, ADR-392): loaded once per request or sweep, so a list, a sweep or a
+ * report never reads calendars per conversation.
  */
 export async function loadBusinessCalendars(
   tx: Tx,
@@ -498,7 +580,36 @@ export async function loadBusinessCalendars(
 ): Promise<BusinessCalendars> {
   const { enabled, calendar } = await loadBusinessCalendar(tx, tenantId, timezone);
   if (!enabled) return { company: null, teams: new Map() };
-  return businessCalendars(calendar, await loadTeamSchedules(tx, tenantId));
+  return businessCalendars(
+    calendar,
+    await loadTeamSchedules(tx, tenantId),
+    await loadTeamClosedDays(tx, tenantId),
+  );
+}
+
+/**
+ * Gives a team its own closed days (a list, possibly empty) or, with null, the company's again
+ * (Settings → Teams, and keys). The caller locks the team's row first, audits it with the team's
+ * change and plans waiting replies again (`replanWaitingTurns`) when it changed.
+ */
+export async function writeTeamClosedDays(
+  tx: Tx,
+  tenantId: string,
+  teamId: string,
+  days: readonly string[] | null,
+): Promise<void> {
+  await tx
+    .update(teams)
+    .set({ ownClosedDays: days !== null })
+    .where(and(eq(teams.tenantId, tenantId), eq(teams.id, teamId)));
+  await tx
+    .delete(teamClosedDays)
+    .where(and(eq(teamClosedDays.tenantId, tenantId), eq(teamClosedDays.teamId, teamId)));
+  if (days && days.length > 0) {
+    await tx
+      .insert(teamClosedDays)
+      .values([...new Set(days)].map((day) => ({ id: uuidv7(), tenantId, teamId, day })));
+  }
 }
 
 /**
@@ -589,9 +700,10 @@ export async function replanWaitingSlowReplies(tx: Tx, tenantId: string): Promis
  * Has the next sweeps look again at every reply that waits for a calendar: the automatic replies
  * (ADR-384) and the overdue-reply notices (ADR-230) put off to a time an old calendar or target
  * gave. Used when the company's schedule or closed days change, and, for the conversations of one
- * team only (`teamId`), when that team's own schedule or target changes (ADR-389), so one team's
- * change does not fill the sweeps' rounds with the whole company's waits; a conversation that
- * changes team has its own waiting rows planned again by a database trigger (migration 0303).
+ * team only (`teamId`), when that team's own schedule or target (ADR-389) or its closed days
+ * (ADR-392) change, so one team's change does not fill the sweeps' rounds with the whole company's
+ * waits; a conversation that changes team has its own waiting rows planned again by a database
+ * trigger (migration 0303).
  */
 export async function replanWaitingTurns(
   tx: Tx,

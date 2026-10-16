@@ -699,8 +699,8 @@ describe('company report', () => {
   it('includes the current version of every definition, with unavailable metrics marked', () => {
     expect(report.definitions).toEqual(currentMetricDefinitions());
     // Automations changed what a reply turn is (migration 0011), and teams got their own targets
-    // (migration 0296): each a new version, not an edit.
-    expect(report.definitions.find((d) => d.key === 'inbox.within_target')?.version).toBe(5);
+    // (migration 0296), hours (0303) and closed days (0307): each a new version, not an edit.
+    expect(report.definitions.find((d) => d.key === 'inbox.within_target')?.version).toBe(6);
     expect(report.definitions.find((d) => d.key === 'automation.outcomes')).toMatchObject({
       version: 2,
       available: true,
@@ -1006,7 +1006,7 @@ describe('business hours, resolution time and CSAT', () => {
     expect(teamOnly.inbox.turns.withinTarget).toEqual({ numerator: 2, denominator: 2 });
     expect(teamOnly.inbox.now.overTarget).toBe(0);
     const latest = teamOnly.definitions.find((d) => d.key === 'inbox.within_target');
-    expect(latest?.version).toBe(5);
+    expect(latest?.version).toBe(6);
   });
 
   it('counts business time in the hours of each conversation’s team when it has its own (ADR-389)', async () => {
@@ -1058,14 +1058,86 @@ describe('business hours, resolution time and CSAT', () => {
     // D since Thursday 09:00, 16 business hours of the company's.
     expect(report.inbox.now.overTarget).toBe(2);
     const version = (key: string) => report.definitions.find((d) => d.key === key)?.version;
-    expect(version('inbox.first_response_business_time')).toBe(3);
-    expect(version('inbox.overdue')).toBe(4);
-    expect(version('inbox.within_target')).toBe(5);
+    expect(version('inbox.first_response_business_time')).toBe(4);
+    expect(version('inbox.overdue')).toBe(5);
+    expect(version('inbox.within_target')).toBe(6);
 
     // Business hours off: absolute time for every team, and none listed with its own hours.
     await hours.updateBusinessHours(owner, { enabled: false, days: weekdays });
     const off = await reports.getReport(owner, period);
     expect(off.inbox.teamBusinessHours).toEqual([]);
+    expect(off.inbox.turns.businessMedianSeconds).toBeNull();
+  });
+  it('skips the closed days of each conversation’s team when it has its own (ADR-392)', async () => {
+    const owner = await fx.ctx(c, c.owner);
+    const hours = createBusinessHoursService({ db: fx.dbs.app, clock });
+    const teamsService = createTeamsService({ db: fx.dbs.app, clock });
+    const weekdays = [
+      '09:00-17:00',
+      '09:00-17:00',
+      '09:00-17:00',
+      '09:00-17:00',
+      '09:00-17:00',
+      '',
+      '',
+    ];
+    // Business hours on again (off since the test above), with Tuesday 2026-09-15 the company's
+    // closed day. A is in the night shift (the company's week, a day-long target), B and C in the
+    // weekend team (its own week), D in none.
+    await hours.updateBusinessHours(owner, { enabled: true, days: weekdays });
+    await hours.addHoliday(owner, { day: '2026-09-15', name: 'Company holiday' });
+    const teamId = async (name: string) =>
+      (
+        await fx.query<{ id: string }>(
+          `SELECT id FROM app.teams WHERE tenant_id = $1 AND name = $2`,
+          [c.tenant.id, name],
+        )
+      )[0]!.id;
+    const night = await teamId('Night shift');
+    const weekends = await teamId('Weekends');
+    const reports = createReportsService({ db: fx.dbs.app, clock });
+    const day = (report: Report, d: string) => report.inbox.days.find((x) => x.day === d);
+
+    // Every team keeps the company's closed days: A's first turn (Monday 16:30 to Tuesday 09:30)
+    // counts Monday's last 30 minutes only, its second (Tuesday 10:00 to 12:30) nothing.
+    const company = await reports.getReport(owner, period);
+    expect(company.inbox.teamClosedDays).toEqual([]);
+    expect(day(company, '2026-09-14')).toMatchObject({ businessMedianSeconds: 1_800 });
+    expect(day(company, '2026-09-15')).toMatchObject({ businessMedianSeconds: 0 });
+    // B, Saturday 10:00 to Monday 09:10: the weekend team's 38 hours, no holiday among them.
+    expect(day(company, '2026-09-19')).toMatchObject({ businessMedianSeconds: 136_800 });
+
+    // The night shift works on the company's holiday (its own list, empty): 1 hour and 2.5 hours.
+    await teamsService.updateTeam(owner, night, {
+      name: 'Night shift',
+      firstResponseTargetMinutes: '1440',
+      closedDays: [],
+    });
+    const working = await reports.getReport(owner, period);
+    expect(working.inbox.teamClosedDays).toEqual([{ teamId: night, name: 'Night shift' }]);
+    expect(working.inbox.teamBusinessHours).toEqual([{ teamId: weekends, name: 'Weekends' }]);
+    expect(day(working, '2026-09-14')).toMatchObject({ businessMedianSeconds: 3_600 });
+    expect(day(working, '2026-09-15')).toMatchObject({ businessMedianSeconds: 9_000 });
+    expect(day(working, '2026-09-19')).toMatchObject({ businessMedianSeconds: 136_800 });
+
+    // The weekend team closes on Sunday 2026-09-20, a day of its own: B counts Saturday's 14 hours.
+    await teamsService.updateTeam(owner, weekends, {
+      name: 'Weekends',
+      businessHours: ['', '', '', '', '', '00:00-24:00', '00:00-24:00'],
+      closedDays: ['2026-09-20'],
+    });
+    const closing = await reports.getReport(owner, period);
+    expect(closing.inbox.teamClosedDays).toEqual([
+      { teamId: night, name: 'Night shift' },
+      { teamId: weekends, name: 'Weekends' },
+    ]);
+    expect(day(closing, '2026-09-19')).toMatchObject({ businessMedianSeconds: 50_400 });
+    expect(day(closing, '2026-09-14')).toMatchObject({ businessMedianSeconds: 3_600 });
+
+    // Business hours off: absolute time, and no team listed with its own closed days.
+    await hours.updateBusinessHours(owner, { enabled: false, days: weekdays });
+    const off = await reports.getReport(owner, period);
+    expect(off.inbox.teamClosedDays).toEqual([]);
     expect(off.inbox.turns.businessMedianSeconds).toBeNull();
   });
 });

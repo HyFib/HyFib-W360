@@ -1,5 +1,187 @@
 # Progress
 
+## 2026-10-16 — CI and review fixes for ADR-392 and ADR-393
+
+Status: **Fixed; the database and browser tests run in CI only.** CI's integration tests failed on
+both PostgreSQL versions (three tests), and a review (Codex) found that a team's own closed days
+left out past days that still count.
+
+### Completed
+
+- **Reports' teams with their own week (ADR-392):** the inbox section's `teamBusinessHours` was
+  always empty. ADR-392 read each team's week through a subquery in a one-table select, whose
+  columns Drizzle writes without their table, so `h.team_id = "id"` compared the week row's own
+  columns. The weeks are now read with `loadTeamSchedules`. Two integration tests in
+  `reports.test.ts` (ADR-389's and ADR-392's) caught it in CI.
+- **Past closed days in a team's own list (ADR-392, Codex):** the list started from the company's
+  closed days from today on, so a team that switched to its own list counted past holidays as open
+  for replies still waiting since then and for Reports over past periods. It now starts from every
+  one of the company's days (`startingClosedDays`). A company with more than 366 starts it from its
+  upcoming days, soonest first, then its latest past ones. The help text and ADR-392 say so.
+- **ADR-393's deal field conditions test:** the test started 15 runs in one conversation within an
+  hour, past the ten the dispatcher starts (`RUN_BUDGETS.maxRunsPerConversationPerHour`). The
+  eleventh message started no run, so the test drove an ended one. Each check now moves the
+  conversation's ended runs back two hours first. The product code is unchanged.
+- **Tests:** unit (`closed-days.test.ts`: the full list, and the upcoming and latest days past the
+  bound), with 7 deliberate regressions of `startingClosedDays` (only upcoming days, the furthest
+  upcoming or oldest past days kept, every past day kept without room, today counted as past, no
+  dedupe, out of order): 7 caught. The two Reports integration tests and the automation test run
+  in CI only.
+
+### Test commands and results (local, 2026-10-16)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 165 files, 1,771 tests passed                                   |
+| `pnpm build`                                       | passed                                                          |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+
+## 2026-10-16 — Automation conditions on custom deal fields (P4-01, P4-04, ADR-393)
+
+Status: **Implemented; its database and browser tests run in CI only.** Automations could set a
+deal's custom fields (ADR-386) but not branch on them; ADR-386 listed "a condition on a deal's field
+values" as not built.
+
+### Completed
+
+- **Domain (`automations/graph.ts`):** a `deal_field` rule of the `condition` node (pipeline, field
+  key, comparison, value; no new node type, migration or API change), `DEAL_FIELD_COMPARISONS` by
+  type, `dealFieldRuleValue` (the deal forms' `coerceDealFieldValue`, a choice resolved to its
+  option as written), `dealFieldRuleIssues` in `checkGraph` (an active pipeline, the company's own
+  field, the comparison, the value) and `usesDealConditions`.
+- **Interpreter:** `RunFacts.deals` and `RunFacts.dealFields`; `evaluateDealFieldRule` compares
+  text ignoring case, numbers as numbers, dates as YYYY-MM-DD days, yes/no and choices as stored,
+  and fails safe (the rule does not hold) without exactly one open deal, with a deleted field or a
+  removed option; the condition's log detail carries the first rule's note.
+- **Runner:** `loadDealFacts` (only for conditions with such rules) reuses `holdForDealChange`,
+  `lockedDealFields` and `onlyOpenDeal` (now taking a shared lock for reads), in pipeline id order,
+  and reads the values of fields that still exist.
+- **Service:** `assertMayCheckDeals`: publishing or testing needs the CRM in the plan and `crm.read`.
+- **Web:** the rule editor ("A field of the contact's deal": pipeline, deal field, comparisons by
+  type, a value control by type, each control named after its rule), comparison labels and the
+  `deal_rule_invalid:<key>` note in `automation-labels.ts`, and the simulator's deal ("Open deals in
+  each pipeline", typed values, values set by earlier steps, the note when a rule cannot read the
+  deal) built by `lib/simulated-deals.ts`.
+- **Tests:** unit (`automations/deal-condition.test.ts`, 21 tests: the schema, the checks for every
+  type and comparison, values by type, evaluation by type and comparison, no deal, several, deleted
+  fields, removed options, inherited keys, the branch and its note; `lib/simulated-deals.test.ts`, 4
+  tests; `lib/automation-labels.test.ts`: the comparison labels and notes); integration
+  (`automations.test.ts`: 2 new, a published condition on all five types with numbers, dates and a
+  choice's case, no deal, a removed option, a deleted field, two open deals, publishing refused;
+  another company's pipeline and key, an archived pipeline, `crm.read`, the plan at run time and
+  when publishing); e2e (`automations.spec.ts`: the ADR-386 test adds the condition in the builder,
+  checks its controls and comparisons by type, simulates it with and without a deal, publishes it
+  and sees the task its "yes" branch creates; no horizontal overflow).
+- **Docs:** ADR-393 (and ADR-386's note); ARCHITECTURE, SECURITY, THREAT-MODEL T346, RUNBOOKS (why a
+  condition took the other branch), BACKLOG, and the matrix's H-012 text and evidence (status
+  unchanged).
+- **Mutation checks:** 23 deliberate regressions in the new TypeScript (a comparison added to
+  yes/no, valueless comparisons needing a value, an invalid value accepted, the pipeline, empty
+  field list and rule checks dropped, `usesDealConditions` reading another kind, a missing deal read
+  as one, a deleted field or a stale option holding, inherited keys read, text compared by case,
+  "is not" false without a value, `>=` for after, numbers compared as text, yes/no compared as
+  text, the last note instead of the first, the note dropped, the result inverted, the simulator's
+  notes swapped or values not read by type, a date label, the simulator's value replacement): 23
+  caught by the unit tests. The runner's reading and locks and the service's plan and permission
+  rule are covered by the integration tests, which run in CI only.
+- **Review fixes (no High or Medium findings):** a condition's read takes no row locks
+  (`holdForDealChange` with `lock: false` and the plan read once, `onlyOpenDeal` with `lock: null`;
+  the deal steps keep their locks exactly), only the shared deal-field lock, so it cannot time out
+  behind an import, an erasure or a merge; the deal rule's note is given only when the condition
+  answers no (the first failing deal rule, in rule order); the simulator lists typed deal values it
+  leaves out ("Deal field values left out: seats (Seats must be a number)") and says that one
+  simulated deal stands for every pipeline's; ADR-393, ARCHITECTURE, SECURITY, T346 and RUNBOOKS
+  follow. 8 more deliberate regressions (the note kept on yes or given only on yes, the last note
+  instead of the first, ignored values not listed or with the wrong message or not at all, an empty
+  value kept, an empty list returned): 8 caught by the unit tests. The lock-free reads are runner
+  code, covered by the integration tests in CI only. Full local check after the fixes: lint, format
+  and typecheck clean, 164 files and 1,751 unit tests passed, build passed.
+
+### Test commands and results (local, 2026-10-16)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 164 files, 1,751 tests passed                                   |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+
+## 2026-10-16 — Closed days per team (P3-06, ADR-392)
+
+Status: **Implemented; its database and browser tests run in CI only.** ADR-389 kept closed days
+the company's: a public holiday closed every team, and a team could not close on a day of its own.
+
+### Completed
+
+- **Migration 0307:** `app.teams.own_closed_days` (boolean, default false, a column grant to
+  `w360_app`) and `app.team_closed_days` (tenant, team, day; unique per team and day, composite key
+  to the team on delete cascade, FORCE row security, select/insert/delete for `w360_app`), deletion
+  step 656 (before teams; the definer may read the key columns and delete, with the two deletion
+  policies), and metric definitions `inbox.overdue` v5, `inbox.first_response_business_time` v4,
+  `inbox.within_target` v6 naming the team's own closed days.
+- **Domain:** `closedDaySchema` (the company's date check, now refusing a malformed value once),
+  `teamClosedDaysSchema` (at most 366 real dates, kept once each and in order; null for the
+  company's, an empty list the team's own), `sameClosedDays`, `loadTeamClosedDays` (one query, only
+  teams with the flag), `writeTeamClosedDays`; `businessCalendars` gives a team with its own week or
+  closed days a calendar of its own, so timers, the notice's ranking, overdue emails, the automatic
+  reply and Reports' periods follow it; `loadBusinessCalendars` adds one query. Teams' settings take
+  and give `closedDays`; an update writes and plans waiting rows again only when the list changed
+  (`replanWaitingTurns` with the team's id) and audits `ownClosedDays`, `closedDays` and
+  `closedDaysChanged`. `POST`/`PATCH /teams` and `GET /teams/{id}` take and give `closedDays` (422
+  naming `closedDays.<n>`; an unchanged change writes and audits nothing), described in the
+  OpenAPI document. Reports give `teamClosedDays` (and `teamBusinessHours` now lists only teams with
+  their own week); the Reports page and report emails name them. The company export includes the
+  table and the flag.
+- **Web:** Settings → Teams: "Closed days" with "Use the company’s closed days" / "Its own closed
+  days" (starting from the company's list), dates added with a date field and removed one by one
+  (inside the `ClientForm`, buttons as `ClientButton`), the team's card listing its days; Settings →
+  Inbox says a team with its own list uses it instead.
+- **Tests:** unit (`sla.test.ts`: calendars, due times across a holiday and a team's own day, the
+  timer while the company is closed, ranking, validation, comparison, audit; `teams.test.ts`;
+  `api/teams.test.ts`: schemas, normalisation, refusals naming the entry, unchanged changes, the
+  OpenAPI wording; `calendars.test.ts`: report periods for a team with only its own closed days and
+  with both, the definitions kept equal to 0307; `emails.test.ts`, `api/reports.test.ts`);
+  integration (`inbox-advanced.test.ts`: roles, checks, audit, unchanged saves, the flag, deletion
+  with the team, row security, grants and the deletion step, the inbox's timers and notice;
+  `overdue-replies.test.ts` and `slow-replies.test.ts`: a team working on the company's holiday and
+  one closed on its own day, re-planning on change and not on unchanged saves; `reports.test.ts`:
+  business time by a team's own closed days, the new versions; `api.test.ts`: the teams API;
+  `company-data.test.ts`: export and deletion with the company); e2e (`inbox-teams.spec.ts`: giving
+  the team its own closed day and seeing it saved, no horizontal overflow).
+- **Docs:** ADR-392 (and "since built" notes in ADR-389); ARCHITECTURE, SECURITY, THREAT-MODEL
+  T345, DEPLOYMENT (0307 rollout: workers before web), DATA-RETENTION, RUNBOOKS, BACKLOG, and the
+  matrix's H-011 text and evidence (status unchanged).
+- **Mutation checks:** 20 deliberate regressions in the new TypeScript (the team's closed days or
+  week not used in its calendar, a team with only closed days given none, null and an empty list
+  compared equal, lengths not compared, the 366 bound, days not deduplicated, the malformed-date
+  abort, the audit's flag and count, the schema's default, the API's comparison, input and output,
+  the API bound, the emails' wording, the OpenAPI text, a definition's text, the reports schema):
+  18 caught by the unit tests; one (the OpenAPI text) was caught after a test was added, and one
+  (dropping the day-of-month comparison in the date check) is equivalent, since a day out of range
+  always changes the month. The database reads and writes, re-planning and Reports' SQL are covered
+  by integration tests, which run in CI only.
+
+- **Review fixes:** day lists in Settings → Teams are written by `formatClosedDay`
+  (`apps/web/src/lib/closed-days.ts`, fixed English month abbreviations, no `Intl`), so the server
+  page and the browser editor give the same text in every engine; a team's own list starts from the
+  company's closed days from today on in its time zone (`upcomingClosedDays`; the help text names
+  this and the 366-day bound); a date picked but not added is saved with the list
+  (`withPendingClosedDay`); the API's date-length message uses the domain's words; ADR-392 notes
+  that switching back to the company's list with the same days plans waiting rows again (harmless).
+  Unit tests (`closed-days.test.ts`: 3) and 10 more deliberate regressions (the month index, the
+  day's leading zero, an unknown month, today left out, unsorted or repeated days, an invalid or a
+  dropped pending date, the API message): 10 caught.
+
+### Test commands and results (local, 2026-10-16)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 163 files, 1,742 tests passed (after the review fixes)          |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+
 ## 2026-10-16 — Review fixes for ADR-390 and ADR-391
 
 Status: **Fixed; the database and browser tests run in CI only.** Independent reviews found no High

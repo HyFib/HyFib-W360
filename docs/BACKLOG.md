@@ -190,8 +190,12 @@ verification, app review, Embedded Signup configuration).
   **[Business hours per team built; their database and browser tests run only in CI]** (ADR-389,
   migration 0303: a team's own weekly schedule, in Settings → Teams and the teams API, used while
   the company's business hours are on for its conversations' timers, notice, overdue emails,
-  reports and automatic reply; closed days and the time zone stay the company's).
-  **Remaining:** closed days per team, private team queues (would change visibility,
+  reports and automatic reply; closed days and the time zone stay the company's). **[Closed days
+  per team built; their database and browser tests run only in CI]** (ADR-392, migration 0307: a
+  team uses the company's closed days or a list of its own, possibly empty, in Settings → Teams and
+  the teams API, so it can work on public holidays or close on its own days; used while the
+  company's business hours are on, wherever the team's calendar is; the time zone stays the
+  company's). **Remaining:** private team queues (would change visibility,
   ADR-029), CSAT by template outside the window (needs a consent decision), CSAT with a real WABA
   (phone-number masking: P3-01, ADR-226).
 
@@ -361,7 +365,16 @@ verification, app review, Embedded Signup configuration).
   read as the deal forms read them; checked when publishing and again when it runs, all or none,
   a skipped step naming the field otherwise; an empty value clears the field. Not built: the deal's
   title, value, owner or close date, values from another deal or a contact field, conditions on
-  deal fields).
+  deal fields, since built, ADR-393).
+  **[Automation conditions on custom deal fields built; their database and browser tests run only
+  in CI]** (ADR-393, no migration: a condition's `deal_field` rule compares a field of the
+  contact's single open deal in a pipeline, found as deal steps find it, with the comparisons its
+  type takes (text ignoring case, numbers as numbers, dates as days, yes/no, a choice's option);
+  without exactly one open deal, with a field deleted or an option removed, it does not hold and
+  the step notes why; checked when publishing (an active pipeline, the company's own field, the
+  comparison and the value) and when it runs; the CRM in the plan and `crm.read` to publish; the
+  simulator reads a simulated deal. Not built: the deal's title, value, owner, stage or close date,
+  won or lost deals, comparing two fields, relative dates).
   **[Custom field values on the new-deal form built; its browser test runs only in CI]** (ADR-379,
   no migration: the board's, the contact page's and the inbox's new-deal forms take a value per
   field, checked by the deal creation's existing rules).

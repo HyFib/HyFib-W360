@@ -712,6 +712,87 @@ describe('the automatic reply when members are slow to answer (ADR-384)', () => 
     expect(await row(otherTeam.id)).toMatchObject({ state: 'waiting', due_at: waiting!.due_at });
   });
 
+  it('counts the delay by the closed days of the conversation’s team when it has its own, planned again when they change (ADR-392)', async () => {
+    const { c, owner } = await companyWithSlowReply(10);
+    const hours = createBusinessHoursService({ db: fx.dbs.app, clock: systemClock });
+    await hours.updateBusinessHours(owner, { enabled: true, days: Array(7).fill('00:00-24:00') });
+    const [{ timezone }] = (await fx.query<{ timezone: string }>(
+      'SELECT timezone FROM app.tenants WHERE id = $1',
+      [c.tenant.id],
+    )) as [{ timezone: string }];
+    const localDay = (d: Date) =>
+      new Intl.DateTimeFormat('en-CA', {
+        timeZone: timezone,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+      }).format(d);
+    const hhmm = (d: Date) =>
+      new Intl.DateTimeFormat('en-GB', {
+        timeZone: timezone,
+        hour: '2-digit',
+        minute: '2-digit',
+        hourCycle: 'h23',
+      }).format(d);
+    const working = await waitingCustomer(c, waId());
+    const noTeam = await waitingCustomer(c, waId());
+    const ownDay = await waitingCustomer(c, waId());
+    // The company is closed the day the customers wrote and the next (its dates).
+    const today = localDay(working.started_at);
+    const [y, m, d] = today.split('-').map(Number) as [number, number, number];
+    const tomorrow = new Date(Date.UTC(y, m - 1, d + 1)).toISOString().slice(0, 10);
+    const inTwoDays = new Date(Date.UTC(y, m - 1, d + 2)).toISOString().slice(0, 10);
+    await hours.addHoliday(owner, { day: today, name: 'Holiday' });
+    await hours.addHoliday(owner, { day: tomorrow, name: 'Holiday' });
+    // One team works on the company's holidays (a list of its own, empty); another is closed on
+    // the day the customers wrote only, a day of its own.
+    const teams = createTeamsService({ db: fx.dbs.app, clock: systemClock });
+    const holidays = await teams.createTeam(owner, { name: 'Holidays', closedDays: [] });
+    const own = await teams.createTeam(owner, { name: 'Own day', closedDays: [today] });
+    for (const [team, conversationId] of [
+      [holidays.teamId, working.conversation_id],
+      [own.teamId, ownDay.conversation_id],
+    ] as const) {
+      await fx.query(`UPDATE app.conversations SET team_id = $1 WHERE tenant_id = $2 AND id = $3`, [
+        team,
+        c.tenant.id,
+        conversationId,
+      ]);
+    }
+
+    await sweep(later(ownDay.started_at, 11));
+    // The team working on the holiday: the text goes after 10 minutes.
+    expect(await row(working.id)).toMatchObject({ state: 'sent' });
+    expect(await automaticReplies(working.conversation_id)).toHaveLength(1);
+    // The company's customer waits for the day after tomorrow, the other team's only for tomorrow.
+    const companyWait = await row(noTeam.id);
+    expect(companyWait).toMatchObject({ state: 'waiting', message_id: null });
+    expect(localDay(companyWait!.due_at)).toBe(inTwoDays);
+    expect(hhmm(companyWait!.due_at)).toBe('00:10');
+    const ownWait = await row(ownDay.id);
+    expect(ownWait).toMatchObject({ state: 'waiting', message_id: null });
+    expect(localDay(ownWait!.due_at)).toBe(tomorrow);
+    expect(hhmm(ownWait!.due_at)).toBe('00:10');
+
+    // Saving the team's days as they are plans nothing again.
+    await teams.updateTeam(owner, own.teamId, { name: 'Own day', closedDays: [today] });
+    expect(await row(ownDay.id)).toMatchObject({ state: 'waiting', due_at: ownWait!.due_at });
+    // The team gives up its own list for the company's: still closed today and tomorrow, its row
+    // alone is planned again, to the company's time; the company's customer's row keeps its time.
+    await teams.updateTeam(owner, own.teamId, { name: 'Own day', closedDays: null });
+    expect((await row(ownDay.id))!.due_at.getTime()).toBeLessThan(ownWait!.due_at.getTime());
+    expect(await row(noTeam.id)).toMatchObject({ state: 'waiting', due_at: companyWait!.due_at });
+    await sweep(later(ownDay.started_at, 12));
+    expect(await row(ownDay.id)).toMatchObject({ state: 'waiting', due_at: companyWait!.due_at });
+    // Then works every day: planned again and sent, not late for having waited.
+    await teams.updateTeam(owner, own.teamId, { name: 'Own day', closedDays: [] });
+    expect((await row(ownDay.id))!.due_at.getTime()).toBeLessThan(companyWait!.due_at.getTime());
+    await sweep(later(ownDay.started_at, 13));
+    expect(await row(ownDay.id)).toMatchObject({ state: 'sent' });
+    expect(await automaticReplies(ownDay.conversation_id)).toHaveLength(1);
+    expect(await row(noTeam.id)).toMatchObject({ state: 'waiting', due_at: companyWait!.due_at });
+  });
+
   it('lets only the runtime role run the sweep query, and keeps sent rows as they are', async () => {
     const [fn] = await fx.query<{ public: boolean; app: boolean; owner: string; definer: boolean }>(
       `SELECT has_function_privilege('public', p.oid, 'EXECUTE') AS public,

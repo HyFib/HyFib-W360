@@ -63,6 +63,7 @@ function emptyReport(): Report {
       targetMinutes: null,
       teamTargets: [],
       teamBusinessHours: [],
+      teamClosedDays: [],
       businessHours: false,
       now: {
         open: 0,
@@ -348,6 +349,13 @@ describe('what a report email says', () => {
     report.inbox.teamTargets = [];
     report.inbox.teamBusinessHours = [];
     report.inbox.businessHours = true;
+    // Teams with their own closed days only (ADR-392) count in their team's calendar too.
+    report.inbox.teamClosedDays = [{ teamId: 'team', name: 'Night shift' }];
+    expect(within()?.value).toBe(
+      '85.5% (94 of 110 within 30 min in their team’s or the company’s business hours)',
+    );
+    report.inbox.teamClosedDays = [];
+    expect(within()?.value).toBe('85.5% (94 of 110 within 30 min of business hours)');
     // Without business hours the target counts absolute time; CSAT surveys sent before CSAT was
     // turned off still count.
     report.inbox.businessHours = false;

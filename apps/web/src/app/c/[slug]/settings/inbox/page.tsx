@@ -83,7 +83,8 @@ export default async function InboxSettingsPage({ params }: { params: Promise<{ 
         <CardHeader>
           <CardTitle>Closed days</CardTitle>
           <CardDescription>
-            Whole days without business hours, such as public holidays.
+            Whole days without business hours, such as public holidays. A team with closed days of
+            its own (Settings → Teams) uses those instead.
           </CardDescription>
         </CardHeader>
         <CardContent>

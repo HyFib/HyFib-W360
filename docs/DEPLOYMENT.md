@@ -1749,6 +1749,18 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    definitions in place: an older release ignores team hours (the trigger only moves due times of
    waiting rows earlier, which an older sweep simply plans again).
 
+   Migration 0307 (ADR-392) adds `app.teams.own_closed_days` (false, so every team keeps the
+   company's closed days until one is given its own list), a column grant on it, the table
+   `app.team_closed_days` (empty) with its row security and grants, deletion step 656 and three
+   metric definition versions. No function changes. Roll out workers before web: an old worker's
+   sweeps count every team's conversations by the company's closed days, so a team's own list would
+   be ignored by overdue emails and automatic replies until the worker rollout ends; old web
+   servers neither show nor write a team's closed days (an old server's save of a team in Settings
+   leaves its list as it is, as it never names the column), and `POST`/`PATCH /teams` with
+   `closedDays` is refused as an unknown field there. Give teams their own closed days only after
+   both rollouts end. Rolling an image back leaves the column, table and definitions in place: an
+   older release ignores them and counts every team by the company's closed days again.
+
    Migration 0305 (ADR-390) replaces the deal capture function in place and widens its trigger and
    the changer trigger to `crm_deals.attributes`, so `deal.updated` names custom field value
    changes (`fields`, with `changedFields`) from the moment it runs, whichever release made the

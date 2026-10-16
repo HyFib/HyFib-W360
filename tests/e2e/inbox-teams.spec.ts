@@ -85,6 +85,25 @@ test('teams route conversations, saved replies fill the composer and CSAT answer
   await expect(page.getByText(/With the company’s closed days/)).toBeVisible();
   await expectNoHorizontalOverflow(page);
 
+  // Its own closed days (ADR-392): a list that starts from the company's (none here), with a day
+  // of its own far ahead, so the timers below still run whenever this test runs.
+  const edit = page.locator('details', { hasText: 'Edit Support' });
+  await edit.getByText('Edit Support').click();
+  await edit.getByLabel('Its own closed days').check();
+  await expect(edit.getByText(/the team works on every day its week opens/)).toBeVisible();
+  await edit.getByLabel('Add a closed day').fill('2030-01-01');
+  await edit.getByRole('button', { name: 'Add day' }).click();
+  await expect(edit.getByRole('list', { name: 'Closed days of Support' })).toContainText(
+    '1 Jan 2030',
+  );
+  await expectNoHorizontalOverflow(page);
+  await edit.getByRole('button', { name: 'Save team' }).click();
+  await expect(page.getByText('Team saved.')).toBeVisible();
+  await expect(page.getByText(/its own business hours · its own closed days/)).toBeVisible();
+  await expect(page.getByText(/With the team’s own closed days/)).toBeVisible();
+  await expect(page.locator('dd').filter({ hasText: /^1 Jan 2030$/ })).toBeVisible();
+  await expectNoHorizontalOverflow(page);
+
   // Settings → Saved replies.
   await page.goto(`/c/${slug}/settings/saved-replies`);
   await page.getByLabel('Shortcut').fill('hours');

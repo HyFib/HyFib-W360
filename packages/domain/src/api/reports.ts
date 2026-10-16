@@ -137,7 +137,17 @@ export const apiReportSchema = z.object({
         }),
       )
       .describe(
-        'While business hours are on, the teams with their own weekly schedule, by name: their conversations count business time by it instead of the company’s schedule (closed days stay the company’s).',
+        'While business hours are on, the teams with their own weekly schedule, by name: their conversations count business time by it instead of the company’s schedule (closed days are the team’s own when it is in `teamClosedDays`, else the company’s).',
+      ),
+    teamClosedDays: z
+      .array(
+        z.object({
+          teamId: z.uuid().describe('The team, as `GET /teams` names it.'),
+          name: z.string(),
+        }),
+      )
+      .describe(
+        'While business hours are on, the teams with their own closed days, by name: their conversations skip the team’s closed days instead of the company’s when counting business time.',
       ),
     now: z
       .object({

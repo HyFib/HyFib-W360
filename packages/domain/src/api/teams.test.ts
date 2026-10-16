@@ -75,6 +75,7 @@ const settings = {
   routingKeywords: ['refund', 'order status'],
   firstResponseTargetMinutes: 20,
   businessHours: null,
+  closedDays: null,
   memberIds: [AGENT, SUPERVISOR],
   channelIds: [NUMBER],
 };
@@ -121,6 +122,7 @@ describe('managing teams through the API (ADR-287)', () => {
       routingKeywords: ['refund', 'order status'],
       firstResponseTargetMinutes: null,
       businessHours: null,
+      closedDays: null,
       memberIds: [AGENT],
       channelIds: [],
     });
@@ -210,6 +212,8 @@ describe('managing teams through the API (ADR-287)', () => {
       { firstResponseTargetMinutes: null },
       { firstResponseTargetMinutes: 21 },
       { businessHours: [{ weekday: 1, opens: 540, closes: 1020 }] },
+      { closedDays: [] },
+      { closedDays: ['2026-11-08'] },
       { routingKeywords: ['order status', 'refund'] },
       { routingKeywords: ['refund'] },
       { routingKeywords: ['refund', 'order status', 'returns'] },
@@ -353,6 +357,7 @@ describe('managing teams through the API (ADR-287)', () => {
       'routingKeywords',
       'firstResponseTargetMinutes',
       'businessHours',
+      'closedDays',
       'memberIds',
       'channelIds',
       'createdAt',
@@ -516,8 +521,105 @@ describe('a team’s own business hours through the API (ADR-389)', () => {
     const schemas = doc.components.schemas;
     for (const name of ['CreateTeam', 'UpdateTeam', 'TeamSettings']) {
       const text = JSON.stringify(schemas[name]?.properties?.businessHours ?? null);
-      expect(text, name).toContain('company’s closed days');
+      expect(text, name).toContain('team’s closed days');
       expect(text, name).not.toMatch(/ADR-\d/);
     }
+  });
+});
+
+describe('a team’s own closed days through the API (ADR-392)', () => {
+  const refusalOf = (closedDays: unknown) => {
+    try {
+      teamSettingsOf(apiCreateTeamSchema.parse({ name: 'Care', closedDays }));
+    } catch (error) {
+      if (!isAppError(error)) throw error;
+      return [error.publicMessage, (error.issues ?? []).map((i) => i.path)];
+    }
+    throw new Error('expected a refusal');
+  };
+
+  it('takes dates, kept once each and in order, an empty list as its own, and null as the company’s', () => {
+    const parsed = (closedDays: unknown) =>
+      teamSettingsOf(apiCreateTeamSchema.parse({ name: 'Care', closedDays })).closedDays;
+    expect(parsed(['2026-12-25', '2026-11-08', '2026-12-25', '2024-02-29'])).toEqual([
+      '2024-02-29',
+      '2026-11-08',
+      '2026-12-25',
+    ]);
+    expect(parsed([])).toEqual([]);
+    expect(parsed(null)).toBeNull();
+    expect(teamSettingsOf(apiCreateTeamSchema.parse({ name: 'Care' })).closedDays).toBeNull();
+    const given = toApiTeamSettings({
+      id: TEAM,
+      ...settings,
+      closedDays: ['2026-11-08'],
+      createdAt: new Date('2026-10-01T09:00:00Z'),
+      updatedAt: new Date('2026-10-07T10:00:00Z'),
+    });
+    expect(given.closedDays).toEqual(['2026-11-08']);
+    expect(apiTeamSettingsSchema.safeParse(given).success).toBe(true);
+    expect(apiTeamSettingsSchema.safeParse({ ...given, closedDays: null }).success).toBe(true);
+    expect(apiTeamSettingsSchema.safeParse({ ...given, closedDays: ['8 Nov'] }).success).toBe(
+      false,
+    );
+  });
+
+  it('refuses what is not a real date, naming the entry, and more than a year of days', () => {
+    expect(refusalOf(['2026-11-08', '2026-02-30'])).toEqual([
+      'Enter a real date.',
+      ['closedDays.1'],
+    ]);
+    expect(refusalOf(['08/11/2026'])).toEqual(['Enter the date as YYYY-MM-DD.', ['closedDays.0']]);
+    for (const [closedDays, path] of [
+      ['2026-11-08', 'closedDays'],
+      [[20261108], 'closedDays.0'],
+      [['2026-11-08T00:00'], 'closedDays.0'],
+      [Array.from({ length: 367 }, () => '2026-11-08'), 'closedDays'],
+    ] as const) {
+      const result = apiCreateTeamSchema.safeParse({ name: 'Care', closedDays });
+      expect(result.success, JSON.stringify(closedDays).slice(0, 40)).toBe(false);
+      expect(result.error?.issues.map((i) => i.path.join('.'))).toContain(path);
+    }
+    // Too long for a date: the same words as the checks Settings uses.
+    expect(
+      apiCreateTeamSchema.safeParse({ name: 'Care', closedDays: ['2026-11-08T00:00'] }).error
+        ?.issues[0]?.message,
+    ).toBe('Enter the date as YYYY-MM-DD.');
+    // 366 days are taken (a leap year's days), however they repeat.
+    expect(
+      apiCreateTeamSchema.safeParse({
+        name: 'Care',
+        closedDays: Array.from({ length: 366 }, () => '2026-11-08'),
+      }).success,
+    ).toBe(true);
+  });
+
+  it('changes a team’s closed days only when given; the same days in another order are no change', () => {
+    expect(apiUpdateTeamSchema.safeParse({ closedDays: null }).success).toBe(true);
+    expect(apiUpdateTeamSchema.safeParse({ closedDays: [] }).success).toBe(true);
+    const own = { ...settings, closedDays: ['2026-11-08', '2026-12-25'] };
+    expect(sameTeamSettings(own, { ...own, closedDays: ['2026-12-25', '2026-11-08'] })).toBe(true);
+    expect(sameTeamSettings(own, { ...own, closedDays: ['2026-11-08'] })).toBe(false);
+    expect(sameTeamSettings(own, { ...own, closedDays: null })).toBe(false);
+    expect(sameTeamSettings({ ...own, closedDays: [] }, { ...own, closedDays: null })).toBe(false);
+    expect(sameTeamSettings({ ...own, closedDays: [] }, { ...own, closedDays: [] })).toBe(true);
+  });
+
+  it('are described without naming decisions, with the field a refusal names', () => {
+    const doc = buildOpenApiDocument('https://example.test/api/v1') as unknown as {
+      components: { schemas: Record<string, { properties?: Record<string, unknown> }> };
+      paths: Record<string, Record<string, { description: string }>>;
+    };
+    for (const name of ['CreateTeam', 'UpdateTeam', 'TeamSettings']) {
+      const text = JSON.stringify(doc.components.schemas[name]?.properties?.closedDays ?? null);
+      expect(text, name).toContain('company’s closed days');
+      // An empty list and null are told apart.
+      expect(text, name).toMatch(/[Aa]n empty list gives the team no(ne| closed days)/);
+      expect(text, name).not.toMatch(/ADR-\d/);
+    }
+    expect(doc.paths['/teams']?.post?.description).toContain('`closedDays.<n>`');
+    expect(doc.paths['/teams/{id}']?.patch?.description).toContain(
+      'null gives it the company’s closed days again',
+    );
   });
 });

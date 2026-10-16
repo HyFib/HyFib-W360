@@ -121,7 +121,10 @@ export interface OverdueItem {
   startedAt: Date;
   /** The target of the conversation's team when it has its own (ADR-377); else the company's. */
   teamTargetMinutes?: number | null;
-  /** Its team keeps its own business hours (ADR-389): the due time was counted in them. */
+  /**
+   * Its team keeps its own business hours (ADR-389) or closed days (ADR-392): the due time was
+   * counted in them.
+   */
   teamOwnHours?: boolean;
 }
 

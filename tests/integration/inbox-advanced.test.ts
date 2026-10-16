@@ -368,6 +368,218 @@ describe('business hours per team (ADR-389)', () => {
   });
 });
 
+describe('closed days per team (ADR-392)', () => {
+  it('are set with the team by supervisors, checked, audited, written only when changed, and go with the team', async () => {
+    const { c, owner, agents } = await setup(0);
+    const teams = teamsService();
+    await expectAppError(
+      teams.createTeam(agents[0]!.ctx, { name: 'Holidays', closedDays: [] }),
+      'forbidden',
+    );
+    try {
+      await teams.createTeam(owner, { name: 'Holidays', closedDays: ['2026-12-25', '2026-02-30'] });
+      throw new Error('expected a refusal');
+    } catch (error) {
+      expect(isAppError(error) && error.issues?.map((i) => i.path)).toEqual(['closedDays.1']);
+    }
+    await expectAppError(
+      teams.createTeam(owner, {
+        name: 'Holidays',
+        closedDays: Array.from({ length: 367 }, () => '2026-12-25'),
+      }),
+      'validation_failed',
+      /at most 366 closed days/,
+    );
+    const { teamId } = await teams.createTeam(owner, {
+      name: 'Holidays',
+      closedDays: ['2026-12-25', '2026-11-08', '2026-12-25'],
+    });
+    const listed = async () => (await teams.listTeams(agents[0]!.ctx)).find((t) => t.id === teamId);
+    expect((await listed())?.closedDays).toEqual(['2026-11-08', '2026-12-25']);
+    // A team without its own list uses the company's.
+    const { teamId: salesId } = await teams.createTeam(owner, { name: 'Sales' });
+    expect((await teams.listTeams(owner)).find((t) => t.id === salesId)?.closedDays).toBeNull();
+    const rows = () =>
+      fx.query<{ id: string; team_id: string; day: string }>(
+        `SELECT id, team_id, day::text AS day FROM app.team_closed_days
+          WHERE tenant_id = $1 ORDER BY day`,
+        [c.tenant.id],
+      );
+    const flag = async () =>
+      (
+        await fx.query<{ own_closed_days: boolean }>(
+          `SELECT own_closed_days FROM app.teams WHERE id = $1`,
+          [teamId],
+        )
+      )[0]?.own_closed_days;
+    const before = await rows();
+    expect(before.map((r) => r.day)).toEqual(['2026-11-08', '2026-12-25']);
+    expect(await flag()).toBe(true);
+
+    const base = { name: 'Holidays' };
+    // The same days in another order: nothing is written (the rows keep their ids).
+    await teams.updateTeam(owner, teamId, { ...base, closedDays: ['2026-12-25', '2026-11-08'] });
+    expect(await rows()).toEqual(before);
+    // An empty list of its own: the team works on every day its week opens.
+    await teams.updateTeam(owner, teamId, { ...base, closedDays: [] });
+    expect(await rows()).toEqual([]);
+    expect((await listed())?.closedDays).toEqual([]);
+    expect(await flag()).toBe(true);
+    // Null: the company's closed days again.
+    await teams.updateTeam(owner, teamId, { ...base, closedDays: null });
+    expect((await listed())?.closedDays).toBeNull();
+    expect(await flag()).toBe(false);
+
+    const audit = await fx.query<{ action: string; metadata: Record<string, unknown> }>(
+      `SELECT action, metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND subject_id = $2 ORDER BY occurred_at, id`,
+      [c.tenant.id, teamId],
+    );
+    expect(
+      audit.map((a) => [
+        a.action,
+        a.metadata.ownClosedDays,
+        a.metadata.closedDays,
+        a.metadata.closedDaysChanged,
+      ]),
+    ).toEqual([
+      ['team.created', true, 2, undefined],
+      ['team.updated', true, 2, false],
+      ['team.updated', true, 0, true],
+      ['team.updated', false, 0, true],
+    ]);
+    // The audit holds counts, never the days.
+    expect(JSON.stringify(audit)).not.toContain('2026-11-08');
+
+    // Deleting the team deletes its days.
+    await teams.updateTeam(owner, teamId, { ...base, closedDays: ['2026-11-08'] });
+    expect(await rows()).toHaveLength(1);
+    await teams.deleteTeam(owner, teamId);
+    expect(await rows()).toEqual([]);
+  });
+
+  it('are kept apart per company, with least-privilege grants and team keys of the company', async () => {
+    const { c, owner } = await setup(0);
+    const other = await fx.company();
+    const { teamId } = await teamsService().createTeam(owner, {
+      name: 'Holidays',
+      closedDays: ['2026-11-08'],
+    });
+    const [table] = await fx.query<{ rls: boolean; forced: boolean }>(
+      `SELECT relrowsecurity AS rls, relforcerowsecurity AS forced FROM pg_class
+        WHERE oid = 'app.team_closed_days'::regclass`,
+    );
+    expect(table).toEqual({ rls: true, forced: true });
+    const [grants] = await fx.query<Record<string, boolean>>(
+      `SELECT has_table_privilege('w360_app', 'app.team_closed_days', 'SELECT') AS app_select,
+              has_table_privilege('w360_app', 'app.team_closed_days', 'INSERT') AS app_insert,
+              has_table_privilege('w360_app', 'app.team_closed_days', 'DELETE') AS app_delete,
+              has_table_privilege('w360_app', 'app.team_closed_days', 'UPDATE') AS app_update,
+              has_table_privilege('public', 'app.team_closed_days', 'SELECT') AS public_select,
+              has_table_privilege('w360_definer', 'app.team_closed_days', 'INSERT') AS definer_insert,
+              has_column_privilege('w360_definer', 'app.team_closed_days', 'day', 'SELECT') AS definer_day,
+              has_column_privilege('w360_app', 'app.teams', 'own_closed_days', 'UPDATE') AS app_flag,
+              has_column_privilege('public', 'app.teams', 'own_closed_days', 'UPDATE') AS public_flag`,
+    );
+    expect(grants).toEqual({
+      app_select: true,
+      app_insert: true,
+      app_delete: true,
+      app_update: false,
+      public_select: false,
+      definer_insert: false,
+      definer_day: false,
+      app_flag: true,
+      public_flag: false,
+    });
+    const [step] = await fx.query<{ ordinal: number }>(
+      `SELECT ordinal FROM ops.tenant_deletion_steps
+        WHERE 'app.team_closed_days'::regclass = ANY (tables)`,
+    );
+    const [teamsStep] = await fx.query<{ ordinal: number }>(
+      `SELECT ordinal FROM ops.tenant_deletion_steps WHERE 'app.teams'::regclass = ANY (tables)`,
+    );
+    expect(step!.ordinal).toBeLessThan(teamsStep!.ordinal);
+    // Another company sees none of them, and cannot give its rows this company's team.
+    const seen = await fx.dbs.app.run(authorizedTenantScope(other.tenant.id, null), (tx) =>
+      tx.execute(sql`SELECT id FROM app.team_closed_days`),
+    );
+    expect(seen.rows).toEqual([]);
+    await expect(
+      fx.query(
+        `INSERT INTO app.team_closed_days (id, tenant_id, team_id, day)
+         VALUES (gen_random_uuid(), $1, $2, '2026-11-09')`,
+        [other.tenant.id, teamId],
+      ),
+    ).rejects.toThrow(/team_closed_days_team_fk/);
+    await expect(
+      fx.query(
+        `INSERT INTO app.team_closed_days (id, tenant_id, team_id, day)
+         VALUES (gen_random_uuid(), $1, $2, '2026-11-08')`,
+        [c.tenant.id, teamId],
+      ),
+    ).rejects.toThrow(/team_closed_days_day_uq/);
+  });
+
+  it('give the inbox’s timers the team’s closed days instead of the company’s, while business hours are on', async () => {
+    const { c, owner } = await setup(0);
+    const inbox = inboxService();
+    await inbox.updateResponseTarget(owner, { minutes: 30 });
+    const hours = createBusinessHoursService({ db: fx.dbs.app, clock: systemClock });
+    await hours.updateBusinessHours(owner, { enabled: true, days: Array(7).fill('00:00-24:00') });
+    const [{ timezone }] = (await fx.query<{ timezone: string }>(
+      'SELECT timezone FROM app.tenants WHERE id = $1',
+      [c.tenant.id],
+    )) as [{ timezone: string }];
+    const localDay = (d: Date) =>
+      new Intl.DateTimeFormat('en-CA', {
+        timeZone: timezone,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+      }).format(d);
+    const conv = await inbound(c, waId());
+    const [turn] = await fx.query<{ started_at: Date }>(
+      `SELECT started_at FROM app.conversation_turns WHERE conversation_id = $1 AND ended_at IS NULL`,
+      [conv.id],
+    );
+    // The company is closed the day the customer wrote and the next (its dates).
+    const today = localDay(turn!.started_at);
+    const [y, m, d] = today.split('-').map(Number) as [number, number, number];
+    const tomorrow = new Date(Date.UTC(y, m - 1, d + 1)).toISOString().slice(0, 10);
+    const inTwoDays = new Date(Date.UTC(y, m - 1, d + 2)).toISOString().slice(0, 10);
+    await hours.addHoliday(owner, { day: today, name: 'Holiday' });
+    await hours.addHoliday(owner, { day: tomorrow, name: 'Holiday' });
+    const due = async () =>
+      (await inbox.listConversations(owner, {})).items.find((i) => i.id === conv.id)?.replyDueAt;
+    const companyDue = await due();
+    expect(companyDue && localDay(new Date(companyDue))).toBe(inTwoDays);
+
+    // A team that works on the company's holidays: due 30 minutes after the customer wrote.
+    const { teamId } = await teamsService().createTeam(owner, { name: 'Holidays', closedDays: [] });
+    await inbox.setTeam(owner, {
+      conversationId: conv.id,
+      teamId,
+      expectedVersion: (await conversation(conv.id)).version,
+    });
+    const absolute = new Date(turn!.started_at.getTime() + 30 * 60_000).toISOString();
+    expect(await due()).toBe(absolute);
+    expect((await inbox.getConversation(owner, conv.id)).conversation.replyDueAt).toBe(absolute);
+    expect(await inbox.waitingReplies(owner)).toEqual({
+      waits: [{ dueAt: absolute, mine: false }],
+      capped: false,
+    });
+    // Closed on the day the customer wrote only, of its own: due the next day, the company's
+    // holiday, when the team works.
+    await teamsService().updateTeam(owner, teamId, { name: 'Holidays', closedDays: [today] });
+    const ownDue = await due();
+    expect(ownDue && localDay(new Date(ownDue))).toBe(tomorrow);
+    // Business hours off: absolute time for every conversation, the team's closed days unused.
+    await hours.updateBusinessHours(owner, { enabled: false, days: Array(7).fill('00:00-24:00') });
+    expect(await due()).toBe(absolute);
+  });
+});
+
 describe('routing', () => {
   it('places conversations in the number’s team and rotates among available members', async () => {
     const { c, owner, agents } = await setup(2);

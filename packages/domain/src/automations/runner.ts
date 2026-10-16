@@ -41,7 +41,12 @@ import { buildProductMessageRequest, type ResolvedProductMessage } from '../comm
 import { checkTemplateEligibility } from '../consent/service';
 import { MAX_TAGS_PER_CONTACT, coerceFieldValue } from '../contacts/fields';
 import { addActivity, crmChangedBy, memberRefs } from '../crm/common';
-import { lockedDealFields, sameAttributes, stepDealAttributes } from '../crm/deal-fields';
+import {
+  keptDealAttributes,
+  lockedDealFields,
+  sameAttributes,
+  stepDealAttributes,
+} from '../crm/deal-fields';
 import { localDateAfter } from '../crm/time';
 import { scheduleTaskReminder } from '../crm/reminders';
 import { FLOW_TOKEN_DAYS, buildFlowMessageRequest, newFlowToken } from '../flows/model';
@@ -66,6 +71,7 @@ import {
   stepRendersPlaceholders,
   type AutomationGraph,
   type AutomationNode,
+  type DealFieldRule,
 } from './graph';
 import {
   FINISHED_HTTP_STATES,
@@ -77,6 +83,7 @@ import {
 import {
   advance,
   parseBotButtonId,
+  type DealFacts,
   type InboundReply,
   type RunEffect,
   type RunEvent,
@@ -237,6 +244,12 @@ async function loadFacts(
     const hours = await loadBusinessCalendar(tx, run.tenantId, tenant?.timezone ?? 'UTC');
     businessOpen = hours.enabled ? businessStatusAt(hours.calendar, now).open : true;
   }
+  // The deals a condition's deal field rules read (ADR-393), only for such conditions.
+  const dealRules =
+    node?.type === 'condition'
+      ? node.rules.flatMap((rule) => (rule.kind === 'deal_field' ? [rule] : []))
+      : [];
+  const dealFacts = dealRules.length > 0 ? await loadDealFacts(tx, run, dealRules) : null;
   // The order of a run started by order messages, as it is now (only for steps with texts).
   const order =
     run.storeOrderId && node && stepRendersPlaceholders(node)
@@ -250,7 +263,46 @@ async function loadFacts(
     fields: contact?.attributes ?? {},
     businessOpen,
     order,
+    ...dealFacts,
   };
+}
+
+/**
+ * What a condition's deal field rules read (ADR-393): for each pipeline they name, the contact's
+ * only open deal there with its values of fields that still exist (as the deal's page shows them),
+ * or the note of a deal step that changes nothing there; and the company's deal fields. The deal is
+ * found with the checks of a step that sets deal fields (`holdForDealChange`, `lockedDealFields`,
+ * `onlyOpenDeal`): the plan's CRM (read once), the contact, the pipeline, the fields, then the deal.
+ * Nothing is written from what is read, so no row is locked: a condition never waits behind an
+ * import, an erasure or a merge holding those rows. Only the company's deal-field lock is taken
+ * (shared), so the definitions and the deal's values are read as one state, never a field that a
+ * deletion is stripping from deals. Pipelines are taken in id order.
+ */
+async function loadDealFacts(
+  tx: Tx,
+  run: AutomationRun,
+  rules: readonly DealFieldRule[],
+): Promise<Pick<RunFacts, 'deals' | 'dealFields'>> {
+  const deals = new Map<string, DealFacts>();
+  const held: string[] = [];
+  const crmInPlan = (await loadEntitlements(tx, run.tenantId)).modules.has('crm');
+  for (const pipelineId of [...new Set(rules.map((rule) => rule.pipelineId))].sort()) {
+    const note = await holdForDealChange(tx, run, pipelineId, { lock: false, crmInPlan });
+    if (note) deals.set(pipelineId, { ok: false, note });
+    else held.push(pipelineId);
+  }
+  if (held.length === 0) return { deals };
+  const fields = await lockedDealFields(tx, run.tenantId);
+  for (const pipelineId of held) {
+    const deal = await onlyOpenDeal(tx, run, pipelineId, null);
+    deals.set(
+      pipelineId,
+      typeof deal === 'string'
+        ? { ok: false, note: deal }
+        : { ok: true, attributes: keptDealAttributes(fields, deal.attributes) },
+    );
+  }
+  return { deals, dealFields: new Map(fields.map((field) => [field.key, field])) };
 }
 
 type SendEffect = Extract<
@@ -1196,35 +1248,46 @@ async function applyMoveDealEffect(
 /**
  * The first checks and locks of a step that changes the contact's deal (ADR-250, ADR-251), in the
  * CRM's order: the plan, the contact (held against erasure), the pipeline (shared against
- * archiving). A string is the note of a step that changes nothing.
+ * archiving). A string is the note of a step that changes nothing. A condition that only reads the
+ * deal (ADR-393) makes the same checks without locks (`lock: false`), with the plan read once for
+ * all its pipelines (`crmInPlan`).
  */
 async function holdForDealChange(
   tx: Tx,
   run: AutomationRun,
   pipelineId: string,
+  options: { lock: boolean; crmInPlan?: boolean } = { lock: true },
 ): Promise<string | null> {
-  if (!(await loadEntitlements(tx, run.tenantId)).modules.has('crm')) return 'crm_not_in_plan';
-  const [contact] = await tx
+  const crmInPlan =
+    options.crmInPlan ?? (await loadEntitlements(tx, run.tenantId)).modules.has('crm');
+  if (!crmInPlan) return 'crm_not_in_plan';
+  const contactQuery = tx
     .select({ erasedAt: contacts.erasedAt })
     .from(contacts)
-    .where(and(eq(contacts.tenantId, run.tenantId), eq(contacts.id, run.contactId)))
-    .for('key share');
+    .where(and(eq(contacts.tenantId, run.tenantId), eq(contacts.id, run.contactId)));
+  const [contact] = options.lock ? await contactQuery.for('key share') : await contactQuery;
   if (!contact || contact.erasedAt) return 'contact_erased';
-  const [pipeline] = await tx
+  const pipelineQuery = tx
     .select({ archivedAt: crmPipelines.archivedAt })
     .from(crmPipelines)
-    .where(and(eq(crmPipelines.tenantId, run.tenantId), eq(crmPipelines.id, pipelineId)))
-    .for('share');
+    .where(and(eq(crmPipelines.tenantId, run.tenantId), eq(crmPipelines.id, pipelineId)));
+  const [pipeline] = options.lock ? await pipelineQuery.for('share') : await pipelineQuery;
   if (!pipeline || pipeline.archivedAt) return 'deal_stage_unavailable';
   return null;
 }
 
 /**
- * The contact's only open deal in the pipeline, locked; a note when it has none or more than one
+ * The contact's only open deal in the pipeline, locked for update (a step that changes it) or not
+ * locked (`null`: a condition that only reads it, ADR-393); a note when it has none or more than one
  * (which one is meant is not known).
  */
-async function onlyOpenDeal(tx: Tx, run: AutomationRun, pipelineId: string) {
-  const open = await tx
+async function onlyOpenDeal(
+  tx: Tx,
+  run: AutomationRun,
+  pipelineId: string,
+  lock: 'update' | null = 'update',
+) {
+  const query = tx
     .select({
       id: crmDeals.id,
       stageId: crmDeals.stageId,
@@ -1242,8 +1305,8 @@ async function onlyOpenDeal(tx: Tx, run: AutomationRun, pipelineId: string) {
       ),
     )
     .orderBy(asc(crmDeals.id))
-    .limit(2)
-    .for('update');
+    .limit(2);
+  const open = lock ? await query.for(lock) : await query;
   const [deal] = open;
   if (!deal) return 'deal_not_open';
   if (open.length > 1) return 'deal_ambiguous';

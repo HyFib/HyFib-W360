@@ -440,12 +440,17 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   time and find the next opening. Since ADR-389 a team may have its own week
   (`app.team_business_hours`, 0303; checked by `teamHoursSchema` as the company's week is):
   `loadBusinessCalendars` reads the company's calendar and, only while its business hours are on,
-  every team's week in one query (`BusinessCalendars`: the company's, and each team's own with the
-  company's closed days and time zone), and `calendarFor(calendars, teamId)` picks a conversation's.
-  `replanWaitingTurns` sets waiting automatic replies and overdue notices due now when the
-  company's week or closed days change, and only those of a team's conversations when that team's
-  week or target changes; the trigger `conversations_replan_waiting_turn` does the same for one
-  conversation's open turn when its `team_id` changes. A row planned again is not counted late for
+  every team's week in one query (`BusinessCalendars`: the company's, and each team's own, in the
+  company's time zone), and `calendarFor(calendars, teamId)` picks a conversation's.
+  Since ADR-392 a team may also have its own closed days (`app.teams.own_closed_days` and
+  `app.team_closed_days`, 0307; a list, possibly empty, checked by `teamClosedDaysSchema`):
+  `loadTeamClosedDays` reads every team's list in one more query, and `businessCalendars` gives a
+  team with its own week or its own closed days a calendar of its own (its week or the company's,
+  its closed days or the company's). `replanWaitingTurns` sets waiting automatic replies and overdue
+  notices due now when the company's week or closed days change, and only those of a team's
+  conversations when that team's week, closed days or target changes; the trigger
+  `conversations_replan_waiting_turn` does the same for one conversation's open turn when its
+  `team_id` changes. A row planned again is not counted late for
   having waited (`overdueNoticeTooLate`, and the automatic reply's rule). Automations' hours stay
   the company's.
 - **Reply-due timers** (`inbox/sla.ts`): the open reply turn's start plus the first-response target,
@@ -463,7 +468,8 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   opening periods, computed in SQL against an `unnest` of periods generated in TypeScript for the
   report's range; new versioned definitions (ADR-030). Since ADR-389 the periods are keyed by
   calendar (`iv(cal, lo, hi)`, `calendarPeriods`: '' for the company's, a team's id for its own) and
-  each turn sums its conversation's team's calendar.
+  each turn sums its conversation's team's calendar; since ADR-392 a team with only its own closed
+  days has its own key too, and the inbox section lists such teams (`teamClosedDays`).
 - **Saved replies** (`inbox/saved-replies.ts`): shared answers with `{{name}}`, `{{agent}}` and
   `{{company}}` placeholders, filled server-side for the conversation; the composer inserts the text
   and the member sends it as an ordinary reply.
@@ -572,6 +578,18 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   `lockedDealFields` (shared) before the deal, reads the values again with `stepDealAttributes`
   (all or none, the note naming the first field it cannot set), writes them with a new version and
   the automation as changer and adds a `deal_updated` activity without an actor.
+- **Automation conditions on custom deal fields** (ADR-393): a `deal_field` rule of the `condition`
+  node (a pipeline, a field key, a comparison from `COMPARISONS` limited by
+  `DEAL_FIELD_COMPARISONS` for the field's type, and a value read by `coerceDealFieldValue`, without
+  placeholders), checked by `dealFieldRuleIssues` against `crmPipelines` and `dealFields`. For a
+  condition with such rules, `loadFacts` adds `RunFacts.deals` (per pipeline, the contact's only
+  open deal's values of existing fields, or the deal steps' note) and `RunFacts.dealFields`, read by
+  `loadDealFacts` with `holdForDealChange` (`lock: false`, the plan read once) and `onlyOpenDeal`
+  (`lock: null`): no row locks, only `lockedDealFields` (the shared deal-field lock).
+  `evaluateDealFieldRule` compares by type and fails safe (the rule does not hold) without exactly
+  one deal, with a deleted field or a value the field no longer takes; when the condition answers
+  no, its log detail carries the first such rule's note, in rule order. Publishing or testing needs the CRM in the plan and `crm.read`
+  (`assertMayCheckDeals`). The simulator's deal is built by `lib/simulated-deals.ts`.
 - **Read receipts and typing indicators** (`inbox/read-receipts.ts`, ADR-223): `markRead` in
   `messaging/inbox.ts` calls `queueReadReceipt` in its transaction; the composer calls
   `showTypingAction` at most every 20 seconds, which `showTyping` checks and queues; both sign a job
@@ -707,8 +725,8 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   (`integrations.manage`); run pages list each call (method, host, path, outcome).
 - **Not built yet:** templates with media headers in template steps, usage billing. Form steps
   (ADR-248), runs started through the public API (ADR-077), template steps' website buttons whose
-  link ends with a value (ADR-229), products steps (ADR-383) and steps that set deal fields
-  (ADR-386) were built after this list was first written.
+  link ends with a value (ADR-229), products steps (ADR-383), steps that set deal fields
+  (ADR-386) and conditions on deal fields (ADR-393) were built after this list was first written.
 
 ## 6F. CRM **[built — reminder emails verified through Mailpit only]**
 

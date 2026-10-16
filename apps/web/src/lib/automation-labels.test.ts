@@ -1,5 +1,36 @@
 import { describe, expect, it } from 'vitest';
-import { describeDetail, STEP_OUTCOMES } from './automation-labels';
+import { dealFieldComparisonLabel, describeDetail, STEP_OUTCOMES } from './automation-labels';
+
+describe('conditions on deal fields (ADR-393)', () => {
+  it('name a comparison for the field’s type: dates as days, the rest as other rules do', () => {
+    expect(dealFieldComparisonLabel('date', 'equals')).toBe('is on');
+    expect(dealFieldComparisonLabel('date', 'not_equals')).toBe('is not on');
+    expect(dealFieldComparisonLabel('date', 'less_than')).toBe('is before');
+    expect(dealFieldComparisonLabel('date', 'greater_than')).toBe('is after');
+    expect(dealFieldComparisonLabel('date', 'is_set')).toBe('has a value');
+    expect(dealFieldComparisonLabel('number', 'greater_than')).toBe('is more than');
+    expect(dealFieldComparisonLabel('number', 'less_than')).toBe('is less than');
+    expect(dealFieldComparisonLabel('text', 'contains')).toBe('contains');
+    expect(dealFieldComparisonLabel('boolean', 'equals')).toBe('is');
+    expect(dealFieldComparisonLabel('choice', 'not_equals')).toBe('is not');
+    expect(dealFieldComparisonLabel('choice', 'is_not_set')).toBe('is empty');
+  });
+
+  it('say why a rule could not read the deal or its field', () => {
+    expect(describeDetail('deal_rule_invalid:tier')).toBe(
+      'the condition’s value for the deal field “tier” is no longer one the field takes',
+    );
+    expect(describeDetail('deal_field_missing:tier')).toBe(
+      'the deal field “tier” no longer exists',
+    );
+    expect(describeDetail('deal_ambiguous')).toBe(
+      'the contact has more than one open deal in the pipeline, so which one is meant is not known',
+    );
+    expect(describeDetail('deal_stage_unavailable')).toBe(
+      'the pipeline or the stage was archived or removed',
+    );
+  });
+});
 
 describe('step log details of steps that set deal fields (ADR-386)', () => {
   it('name the field a step could not set', () => {

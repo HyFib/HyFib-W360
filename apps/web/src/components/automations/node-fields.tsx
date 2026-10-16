@@ -5,6 +5,7 @@ import {
   ANSWER_FORMATS,
   AUTOMATION_LIMITS,
   COMPARISONS,
+  DEAL_FIELD_COMPARISONS,
   FORM_CONTENT_TYPE,
   HTTP_BODY_METHODS,
   HTTP_METHODS,
@@ -13,11 +14,13 @@ import {
   PRODUCT_PICKER_LIMIT,
   type AutomationNode,
   type ConditionRule,
+  type DealFieldRule,
   type HttpMethod,
   type NodeOf,
   type ProductStepKind,
 } from '@w360/domain/automation-model';
 import { FLOW_LIMITS } from '@w360/domain/flow-json';
+import { dealFieldComparisonLabel } from '@/lib/automation-labels';
 
 /**
  * Field editors for each step type. Every control is labelled; "next step" choices list the
@@ -249,14 +252,27 @@ function RetryFields({
   );
 }
 
+/**
+ * A deal field rule's starting comparison and value for a field (ADR-393): "is", with yes for a
+ * yes/no field, the first option for a choice and nothing to type otherwise.
+ */
+function dealRuleStart(field: EditorDealField | undefined): Pick<DealFieldRule, 'op' | 'value'> {
+  if (field?.type === 'boolean') return { op: 'equals', value: 'yes' };
+  if (field?.type === 'choice') return { op: 'equals', value: field.options?.[0] ?? '' };
+  return { op: 'equals', value: '' };
+}
+
 function RuleEditor({
   prefix,
+  number,
   rule,
   options,
   onChange,
   onRemove,
 }: {
   prefix: string;
+  /** The rule's position from 1, which names its controls for assistive technology. */
+  number: number;
   rule: ConditionRule;
   options: NodeFieldOptions;
   onChange: (rule: ConditionRule) => void;
@@ -276,7 +292,15 @@ function RuleEditor({
               onChange({ kind, field: options.fields[0]?.key ?? 'field', op: 'equals', value: '' });
             else if (kind === 'tag' || kind === 'conversation_tag')
               onChange({ kind, op: 'has', tag: '' });
-            else onChange({ kind, op: 'open' });
+            else if (kind === 'deal_field') {
+              const field = options.dealFields[0];
+              onChange({
+                kind,
+                pipelineId: options.crmPipelines[0]?.id ?? '',
+                field: field?.key ?? 'field',
+                ...dealRuleStart(field),
+              });
+            } else onChange({ kind, op: 'open' });
           }}
         >
           <option value="answer">A saved answer</option>
@@ -284,12 +308,23 @@ function RuleEditor({
           <option value="tag">A contact tag</option>
           <option value="conversation_tag">A conversation tag</option>
           <option value="business_hours">The company’s business hours</option>
+          <option value="deal_field">A field of the contact’s deal</option>
         </Select>
       )}
     </Field>
   );
   let rest: ReactNode;
-  if (rule.kind === 'answer' || rule.kind === 'field') {
+  if (rule.kind === 'deal_field') {
+    rest = (
+      <DealFieldRuleFields
+        prefix={prefix}
+        number={number}
+        rule={rule}
+        options={options}
+        onChange={onChange}
+      />
+    );
+  } else if (rule.kind === 'answer' || rule.kind === 'field') {
     const valueless = rule.op === 'is_set' || rule.op === 'is_not_set';
     rest = (
       <>
@@ -413,6 +448,158 @@ function RuleEditor({
         </div>
       ) : null}
     </div>
+  );
+}
+
+/**
+ * A rule that checks a field of the contact's open deal in a pipeline (ADR-393): the pipeline, one
+ * of the company's deal fields, the comparisons its type takes and a value control for the type (a
+ * list for yes/no and choices, a date input for dates, text otherwise). Each control is named after
+ * its rule's number. A value the list does not have (an option since removed) stays listed as it
+ * is, so the checks can name it.
+ */
+function DealFieldRuleFields({
+  prefix,
+  number,
+  rule,
+  options,
+  onChange,
+}: {
+  prefix: string;
+  number: number;
+  rule: DealFieldRule;
+  options: NodeFieldOptions;
+  onChange: (rule: ConditionRule) => void;
+}) {
+  const ofRule = <span className="sr-only"> of rule {number}</span>;
+  const pipeline = options.crmPipelines.find((pl) => pl.id === rule.pipelineId);
+  const field = options.dealFields.find((f) => f.key === rule.field);
+  const comparisons = field ? DEAL_FIELD_COMPARISONS[field.type] : COMPARISONS;
+  const valueless = rule.op === 'is_set' || rule.op === 'is_not_set';
+  const listed =
+    field?.type === 'boolean'
+      ? [
+          { value: 'yes', label: 'Yes' },
+          { value: 'no', label: 'No' },
+        ]
+      : field?.type === 'choice'
+        ? (field.options ?? []).map((option) => ({ value: option, label: option }))
+        : null;
+  const value = rule.value ?? '';
+  // A date not written as YYYY-MM-DD stays text, so it can be seen and changed.
+  const date = field?.type === 'date' && (value === '' || /^\d{4}-\d{2}-\d{2}$/.test(value));
+  return (
+    <>
+      <Field
+        id={`${prefix}-pipeline`}
+        label={<>Pipeline{ofRule}</>}
+        description="The contact’s open deal in it is checked. The rule is not true when the contact has none there, or more than one."
+      >
+        {(aria) => (
+          <Select
+            {...aria}
+            value={rule.pipelineId}
+            onChange={(e) => onChange({ ...rule, pipelineId: e.target.value })}
+          >
+            {pipeline ? null : <option value={rule.pipelineId}>Choose a pipeline</option>}
+            {options.crmPipelines.map((pl) => (
+              <option key={pl.id} value={pl.id}>
+                {pl.name}
+              </option>
+            ))}
+          </Select>
+        )}
+      </Field>
+      <Field id={`${prefix}-deal-field`} label={<>Deal field{ofRule}</>}>
+        {(aria) => (
+          <Select
+            {...aria}
+            value={rule.field}
+            onChange={(e) => {
+              const next = options.dealFields.find((f) => f.key === e.target.value);
+              // Another field may take another type: its comparison and value start again.
+              onChange({ ...rule, field: e.target.value, ...dealRuleStart(next) });
+            }}
+          >
+            {field ? null : <option value={rule.field}>Choose a deal field</option>}
+            {options.dealFields.map((f) => (
+              <option key={f.key} value={f.key}>
+                {f.label}
+              </option>
+            ))}
+          </Select>
+        )}
+      </Field>
+      <Field id={`${prefix}-op`} label={<>Comparison{ofRule}</>}>
+        {(aria) => (
+          <Select
+            {...aria}
+            value={rule.op}
+            onChange={(e) => {
+              const op = e.target.value as DealFieldRule['op'];
+              const none = op === 'is_set' || op === 'is_not_set';
+              onChange({
+                ...rule,
+                op,
+                value: none ? null : valueless ? dealRuleStart(field).value : rule.value,
+              });
+            }}
+          >
+            {comparisons.includes(rule.op) ? null : (
+              <option value={rule.op}>Choose a comparison</option>
+            )}
+            {comparisons.map((c) => (
+              <option key={c} value={c}>
+                {dealFieldComparisonLabel(field?.type ?? 'text', c)}
+              </option>
+            ))}
+          </Select>
+        )}
+      </Field>
+      {valueless ? null : listed ? (
+        <Field id={`${prefix}-value`} label={<>Value{ofRule}</>}>
+          {(aria) => (
+            <Select
+              {...aria}
+              value={value}
+              onChange={(e) => onChange({ ...rule, value: e.target.value })}
+            >
+              {value && listed.some((o) => o.value === value) ? null : (
+                <option value={value}>{value || 'Choose a value'}</option>
+              )}
+              {listed.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
+            </Select>
+          )}
+        </Field>
+      ) : (
+        <Field
+          id={`${prefix}-value`}
+          label={<>Value{ofRule}</>}
+          description={
+            field?.type === 'number'
+              ? 'A number, as members type it in the deal’s form.'
+              : field?.type === 'date'
+                ? 'A day, compared with the deal’s date.'
+                : 'Compared ignoring case; placeholders are not filled in.'
+          }
+        >
+          {(aria) => (
+            <Input
+              {...aria}
+              type={date ? 'date' : 'text'}
+              inputMode={field?.type === 'number' ? 'decimal' : undefined}
+              value={value}
+              maxLength={AUTOMATION_LIMITS.ruleValueLength}
+              onChange={(e) => onChange({ ...rule, value: e.target.value })}
+            />
+          )}
+        </Field>
+      )}
+    </>
   );
 }
 
@@ -650,6 +837,7 @@ export function NodeFields({
               <RuleEditor
                 key={i}
                 prefix={`${p}-rule-${i}`}
+                number={i + 1}
                 rule={rule}
                 options={options}
                 onChange={(r) =>

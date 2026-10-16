@@ -633,10 +633,15 @@ describe('what an export contains', () => {
   it('streams the whole company as JSON Lines, from one moment, without secrets or other companies', async () => {
     const { c, owner, customer, apiKey } = await busyCompany();
     const admin = await member(c, 'admin', 'Admin Person');
-    // A team with its own business hours (ADR-389): exported with the team.
+    // A team with its own business hours (ADR-389) and closed days (ADR-392): exported with the
+    // team.
     const { teamId } = await createTeamsService({ db: fx.dbs.app, clock: systemClock }).createTeam(
       owner,
-      { name: 'Night', businessHours: ['', '', '', '', '', '', '18:00-24:00'] },
+      {
+        name: 'Night',
+        businessHours: ['', '', '', '', '', '', '18:00-24:00'],
+        closedDays: ['2026-12-25'],
+      },
     );
     const other = await busyCompany();
     const text = await exportText(owner);
@@ -686,6 +691,8 @@ describe('what an export contains', () => {
         closes_at: '24:00:00',
       }),
     ]);
+    expect(of('app.team_closed_days')).toEqual([expect.objectContaining({ team_id: teamId })]);
+    expect(of('app.teams').find((t) => t.id === teamId)).toMatchObject({ own_closed_days: true });
     expect(of('app.whatsapp_accounts')[0]).toMatchObject({ waba_id: c.wabaId });
     expect(of('app.rate_change_notices')).toEqual([
       expect.objectContaining({ rate_card_id: noticedCard, currency: 'NOK' }),
@@ -1426,6 +1433,11 @@ describe('running a deletion', () => {
     const { shop } = await connectShopify(c, owner);
     const { tokenId } = await addCardMandate(owner);
     const providerSubscriptionId = await addPlanSubscription(c);
+    // A team with its own closed days (ADR-392), deleted with the company before its team.
+    await createTeamsService({ db: fx.dbs.app, clock: systemClock }).createTeam(owner, {
+      name: 'Holidays',
+      closedDays: ['2026-12-25'],
+    });
     const other = await busyCompany();
     const tables = await companyTables();
     const otherBefore = await rowCounts(other.c.tenant.id, tables);
@@ -1437,6 +1449,7 @@ describe('running a deletion', () => {
     expect(before['app.commerce_stores']).toBe(1);
     expect(before['app.payment_mandates']).toBe(1);
     expect(before['app.rate_change_notices']).toBe(1);
+    expect(before['app.team_closed_days']).toBe(1);
 
     const result = await runTenantDeletion(runDeps(), c.tenant.id);
     expect(result.outcome).toBe('finished');

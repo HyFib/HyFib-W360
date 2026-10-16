@@ -492,9 +492,12 @@ shown as paused resumes at the next opening. Reports apply the current calendar 
 A conversation of a team with its own business hours (Settings → Teams, ADR-389) counts that
 team's week instead, with the company's closed days, and only while the company's business hours
 are on; check which team the conversation is in now (`app.team_business_hours` holds each team's
-week). After a team's week or target, or a conversation's team, changes, the waiting automatic
-replies and overdue notices of its conversations are planned again by the next minute sweep; a
-notice planned again is not skipped as late for having waited.
+week). A team with closed days of its own (ADR-392; `app.teams.own_closed_days` true, its days in
+`app.team_closed_days`, possibly none) skips those days instead of the company's: it works on the
+company's holidays unless they are in its list. After a team's week, closed days or target, or a
+conversation's team, changes, the waiting automatic replies and overdue notices of its
+conversations are planned again by the next minute sweep; a notice planned again is not skipped as
+late for having waited.
 
 **CSAT surveys are not sent.** Each resolve records a survey with a reason when nothing was sent
 (Reports → CSAT lists the reasons): the 24-hour window had closed, the customer opted out or the
@@ -535,6 +538,22 @@ found. Each change is in the audit log as `conversation.tags_changed` with the c
 conversation already has the maximum number of tags" (20), or "the contact was erased". A run that
 failed as `version_unreadable` right after a deploy was read by a worker of the previous release:
 roll the workers out, then start the run again.
+
+**A condition on a deal field took the other branch (ADR-393).** Open the run: the condition's step
+("Checked a condition") shows the branch and, when it answered no and a deal field rule could not
+read the deal or its field, why. The note is the first such rule's, in rule order, and does not name
+the pipeline (open the version's graph to see which rule names which); a condition that answered
+yes has no note. The notes:
+"the contact has no open deal in the pipeline", "the contact has more than one open deal in the
+pipeline" (close or move the extra one), "the pipeline or the stage was archived or removed", "the
+company’s plan does not include the CRM", "the deal field … no longer exists" or "the condition’s
+value for the deal field … is no longer one the field takes" (an option removed since publishing:
+edit the rule and publish again). Such a rule does not hold whatever its comparison, "is empty" and
+"is not" included. A "no" without a note means every deal field rule read its deal: compare the values on the deal page as they
+were when the step ran (the timeline shows later edits); text compares ignoring case, numbers as
+numbers, dates as days, and "is not" holds for a deal without a value. Values in rules take no
+placeholders. A run that failed as `version_unreadable` right after a deploy was read by a worker of
+the previous release: roll the workers out, then start the run again.
 
 **Customers do not see that their messages were read (ADR-223).** Settings → Inbox, "Read receipts
 and typing", must be on. A receipt is queued when a member opens a conversation with unread

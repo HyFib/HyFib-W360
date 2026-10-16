@@ -92,6 +92,8 @@ export interface TeamFormInput {
   firstResponseTargetMinutes: string;
   /** The team's own week, seven days of ranges as text (ADR-389); null: the company's hours. */
   businessHours: string[] | null;
+  /** The team's own closed days, YYYY-MM-DD (ADR-392); null: the company's closed days. */
+  closedDays: string[] | null;
   memberIds: string[];
   channelIds: string[];
 }

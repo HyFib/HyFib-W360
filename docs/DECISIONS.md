@@ -15335,8 +15335,9 @@ Decision:
 
 Not built: setting the deal's title, value, owner or expected close date, fields of a deal the
 contact has in several pipelines at once, values copied from another deal or a contact field, a
-condition on a deal's field values, and a warning when a field or an option that published steps
-use is deleted or removed (those steps then change nothing, with a note on each run).
+condition on a deal's field values (since built: ADR-393), and a warning when a field or an option
+that published steps use is deleted or removed (those steps then change nothing, with a note on
+each run).
 
 Review (before merge): an independent review found no High or Medium issue. It found the progress
 notes claiming the integration test covered the locks (it covers the writes and the re-checks; the
@@ -15589,7 +15590,7 @@ Decision:
   `businessHoursChanged`). A save that leaves the week as it is writes nothing to it.
 - **Closed days and time zone stay the company's** and apply to every team: a public holiday closes
   the night team too, and one time zone keeps every schedule and report day comparable. Teams that
-  work on holidays are not built (below).
+  work on holidays are not built (below; since built: ADR-392, closed days per team).
 - **Only while the company's business hours are on:** a team's week replaces the company's week,
   not the switch. While business hours are off (or have no opening time) every conversation counts
   absolute time and teams' weeks are kept but unused. One switch keeps "are business hours on?"
@@ -15639,10 +15640,10 @@ Decision:
   delete cascade) and with the company (step 655, before teams); the company export includes the
   table; it holds no personal data, so erasure is unaffected.
 
-Not built: closed days or a time zone per team, holiday calendars per team, a team schedule while
-the company's hours are off, per-team hours in automations' conditions and in `GET /business-hours`,
-schedules per WhatsApp number, and measuring a turn by the team (or week) its conversation had when
-the turn started.
+Not built: closed days (since built: ADR-392) or a time zone per team, holiday calendars per team,
+a team schedule while the company's hours are off, per-team hours in automations' conditions and
+in `GET /business-hours`, schedules per WhatsApp number, and measuring a turn by the team (or week)
+its conversation had when the turn started.
 
 Review (before merge): an independent review found one Medium issue: the claim that a replanned
 overdue notice is not counted late for having waited held only for the automatic reply. The overdue
@@ -15818,3 +15819,186 @@ without the notice (it now counts by its first value, as the export reads it), t
 lists' links carried a filter nothing applies there (they drop it), a misleading test comment and a
 slip in this record. All were fixed. A choice option named "Not set" still reads like the field's
 "Not set" in the select, as on the new-deal form.
+
+## ADR-392 Closed days per team (P3-06) (2026-10-16)
+
+Context: ADR-389 gave a team its own weekly schedule but kept closed days the company's: a public
+holiday in Settings → Inbox closed every team, so a support team that works on holidays was held
+to the office's calendar (its customers' reply timers paused, overdue emails and the automatic
+reply waited for the next working day), and a team could not close on a day of its own (a team
+offsite, a regional holiday) without closing the whole company. "Closed days per team" was listed
+as not built under P3-06, in ADR-389 and in the feature matrix (H-011).
+
+Decision:
+
+- **A team's own list, or the company's:** a team either uses the company's closed days (the
+  default; every existing team keeps them) or has its own list, which replaces the company's for
+  it. The list may be empty: the team works on every day its week opens, holidays included. Days
+  are dates in the company's time zone, as the company's closed days are; in Settings → Teams a
+  team's list starts from every one of the company's closed days, past ones included (a reply still
+  waiting since a past closed day, and Reports' business time over past periods, count by the
+  team's calendar once it has its own list, so leaving a past day out would count it as open after
+  the fact), so working on one holiday is removing that day. A list holds at most 366 days (a year
+  of days; the company's list has no limit, but a team's is sent whole with the team's settings, so
+  it is bounded); a company with more closed days starts a team's list from its upcoming ones,
+  soonest first, then its latest past ones (`startingClosedDays`). Each day is a real date
+  (`closedDaySchema`, the company's check), kept once each and in order. Past days are kept, as the
+  company's are: replies still waiting since then and Reports count by them; they are removed by
+  hand. Days have no names: the company's closed days name the holiday, a team's list only says
+  which days it is closed.
+- **For every team, independent of its week:** the choice is available to every team, whether it
+  uses the company's week or its own (ADR-389). A team that keeps office hours but answers on public
+  holidays is the common case, and tying the list to an own week would make it copy the company's
+  week, which would then no longer follow the company's changes. A team's calendar is its week (its
+  own, else the company's) with its closed days (its own, else the company's), always in the
+  company's time zone.
+- **Data model (migration 0307):** `app.teams.own_closed_days` (boolean, default false; `w360_app`
+  may update only that new column of it, beside the columns it could already update) says whether
+  the team has a list of its own, so an empty list is told apart from the company's. The days are
+  rows of `app.team_closed_days` (tenant, team, day; unique per team and day, a composite key to
+  the team with delete cascade, FORCE row security, `w360_app` may select, insert and delete). The
+  application replaces a team's list as a whole, only when it changed, the team's row locked
+  (`writeTeamClosedDays`: the flag, then delete and insert). Rows of a team without the flag are
+  never read (`loadTeamClosedDays` joins the flag), so a list is used only while the team says it
+  has one.
+- **One switch, the company's time zone:** a team's closed days apply only while the company's
+  business hours are on (ADR-389's switch); while they are off every conversation counts absolute
+  time and a team's list is kept but unused, as its week is. Settings → Teams and the team's card
+  say so.
+- **Calendars:** `businessCalendars` builds a calendar for each team with its own week or its own
+  closed days (a team with its own closed days but the company's week now has a calendar of its
+  own, keyed by its id in Reports' periods), and `calendarFor` answers it for the team's
+  conversations, everywhere ADR-389 uses a team's calendar: the inbox's reply timers and the notice
+  of overdue replies (a team with its own closed days is ranked apart, `teamsWithOwnClock`), the
+  overdue-reply emails (which name the team's business hours), the automatic reply's delay and
+  Reports' business-time measures. `loadBusinessCalendars` reads every team's closed days in one
+  more query per request, sweep or report, never per conversation. Automations keep the company's
+  calendar, as ADR-389 decided.
+- **Planned again on change:** a change of a team's closed days plans again the waiting automatic
+  replies and overdue notices of that team's conversations only (`replanWaitingTurns` with the
+  team's id), as a change of its week or target does; a save that leaves the list as it is (the
+  same days in another order or repeated) writes nothing and plans nothing again.
+- **Who and audit:** those who manage teams (`inbox.supervise`; keys with `teams.manage`), with the
+  team's other settings, in Settings → Teams and through `POST`/`PATCH /teams` (`closedDays`: a
+  list of dates, or null for the company's; 422 naming `closedDays` or `closedDays.<n>`) and
+  `GET /teams/{id}`. `team.created` and `team.updated` record `ownClosedDays` and the number of days
+  (`closedDays`), and updates `closedDaysChanged`, as the team's week is audited by counts
+  (ADR-389); the days themselves are in the team's settings and the company export. The company's
+  closed day audit names its one day per entry; a team's list may hold hundreds, so it is not
+  copied into every team change. Through the API a change that leaves the team as it is writes and
+  audits nothing (ADR-287); a member's save in Settings is audited as before, with
+  `closedDaysChanged` false.
+- **Reports and definitions:** turns of a team with its own closed days count business time by the
+  team's calendar. The definitions said "Closed days and the time zone are the company's", so the
+  measures get new versions, as ADR-389 did for the week: `inbox.overdue` v5,
+  `inbox.first_response_business_time` v4 and `inbox.within_target` v6 name the team's own closed
+  days (kept equal to migration 0307 by a unit test). The report's inbox section gives
+  `teamClosedDays` (teams with their own list, while business hours are on) beside
+  `teamBusinessHours`, which now lists only teams with their own week; the Reports page and report
+  emails name them.
+- **Deletion, export, erasure:** a team's days are deleted with the team (on delete cascade) and
+  with the company (step 656, before teams at 800, beside the teams' weeks at 655; `w360_definer`
+  gets only the select of the key columns, the delete and the two deletion policies). The company
+  export includes the table and the team's flag. Rows hold dates only, no personal data, so erasure
+  is unaffected.
+- **Switching back with the same days:** a team that goes from its own list to the company's when
+  both hold the same days plans its waiting rows again although its calendar is unchanged; that is
+  harmless (the next sweep puts them off to the same time) and matches ADR-389's handling of a week.
+
+Not built: holiday calendars imported from a provider (a team's list, like the company's, is
+entered by hand), names for a team's closed days, closed days per WhatsApp number, partial-day
+closures (the company's closed days are whole days too), a time zone per team, automations'
+conditions and `GET /business-hours` by a team's calendar, and pruning past days automatically.
+
+Fixes after CI and review (before merge): the report listed no team with its own week, because it
+read the weeks through a subquery in a one-table select, whose columns Drizzle writes without their
+table (`h.team_id = "id"` compared the week row's own columns); the weeks are now read with
+`loadTeamSchedules`. A review (Codex) found that starting a team's list from the company's days
+from today on left out past closed days that replies still waiting since then, and Reports, count
+by: the list now starts from every one of the company's days, as described above.
+
+## ADR-393 Automation conditions on custom deal fields (P4-01, P4-04) (2026-10-16)
+
+Context: automations create, move and close deals and set their custom fields (ADR-245, ADR-250,
+ADR-251, ADR-386), and their conditions branch on answers, contact fields, tags (ADR-222) and
+business hours, but not on what the contact's deal holds: a bot could not greet a Gold account
+differently or skip questions a member had already answered on the deal. ADR-386 left "a condition
+on a deal's field values" unbuilt.
+
+Decision:
+
+- **A rule kind, not a step** (`automations/graph.ts`): the `condition` node takes a `deal_field`
+  rule with a pipeline (`pipelineId`), one of the company's custom deal fields by key (`field`), a
+  comparison (`op`, from the existing `COMPARISONS`) and a value (up to 200 characters, trimmed,
+  null for "has a value" and "is empty"). No node type, migration or API change follows: webhook
+  endpoints' kinds of step (migration 0302) list node types, so a rule kind changes nothing there,
+  and the public API starts and lists automations without exposing their graphs, so the OpenAPI
+  document is unchanged.
+- **Which deal:** the run's contact's single open deal in the pipeline, found exactly as the steps
+  that move, close and set deal fields find it (`holdForDealChange`, then `lockedDealFields`, then
+  `onlyOpenDeal`, the same helpers in the same order), its values read as the deal's page shows them
+  (values of fields that still exist). Nothing is written from what a condition reads, so it locks
+  no row: the contact, the pipeline and the deal are read without `FOR KEY SHARE`, `FOR SHARE` or
+  `FOR UPDATE` (the steps that change deals keep their locks), so a condition never waits, past the
+  5-second lock timeout, behind an import, an erasure or a merge holding those rows. Only the
+  company's deal-field lock is taken, shared, so the definitions and the deal's values are read as
+  one state and a field being deleted is either seen or waited for. The plan is read once for all
+  the pipelines, which are read in id order. Deals are read only for conditions that have such rules
+  (`loadFacts`).
+- **Comparisons by type** (`DEAL_FIELD_COMPARISONS`): text takes "is", "is not", "contains", "has a
+  value" and "is empty", ignoring case as contact field rules do; numbers "is", "is not", "is more
+  than", "is less than", "has a value" and "is empty", compared as numbers (999 is less than 1000);
+  dates "is on", "is not on", "is before" (`less_than`), "is after" (`greater_than`), "has a value"
+  and "is empty", compared as YYYY-MM-DD calendar days, the way members enter them, with no time
+  zone to convert; yes/no "is" yes or no, "has a value" and "is empty" (not set is neither yes nor
+  no); choices "is" and "is not" one of the field's options, "has a value" and "is empty". The rule's
+  value is read as the deal's form reads a typed value (`coerceDealFieldValue`): a choice in any case
+  resolves to its option as written and is compared exactly with the stored value, which is always
+  an option as written (ADR-385). Values take no placeholders, as contact field rules' values do: a
+  value with braces is compared as written (and a number or date with one is refused). "Is not"
+  holds for a deal without a value, as for contact fields.
+- **No deal, several, or a definition changed: fail safe.** The rule holds only when there is
+  exactly one open deal there, its field still exists and the rule's value still fits it. Otherwise
+  it does not hold, whatever its comparison ("is empty" and "is not" included), so a missing deal
+  never reads as an empty field; a condition that must know the contact has no deal is not built.
+  The condition is still logged `branched`. When it answers no, the step's detail has the note of
+  the first deal field rule, in rule order, that could not read its deal or field (it is then one of
+  the reasons; the note does not name the pipeline); a condition that answers yes, with any rule
+  holding, has none, since that rule did not decide the branch. The notes are those a deal step
+  that changes nothing gives: `deal_not_open`,
+  `deal_ambiguous`, `crm_not_in_plan`, `contact_erased`, `deal_stage_unavailable` (the pipeline was
+  archived), `deal_field_missing:<key>` (the field was deleted) or `deal_rule_invalid:<key>` (the
+  rule's option was removed from the choice since publishing). The run page names it ("the
+  condition's value for the deal field … is no longer one the field takes"). One note at most keeps
+  the detail within its 300 characters.
+- **Checked with the graph** (`dealFieldRuleIssues`, `dealFieldRuleValue`): an active pipeline of
+  the company, a field the company has ("Add deal fields in the settings of pipelines first." when it
+  has none), a comparison the field's type takes ("Tier cannot be compared that way. Choose another
+  comparison."), a value where one is needed and one the field takes (a number, a real date, yes or
+  no, an existing option). Pipeline ids and keys are looked up only among the company's own
+  definitions, so another company's ids and keys are refused like unknown ones. Publishing refuses a
+  broken rule; a draft is saved with its issues. The same reading runs again when the condition runs
+  (`evaluateDealFieldRule`), where options can change; types and keys never change.
+- **Plan and permission:** publishing or testing an automation with such a rule needs the CRM in the
+  plan, as deal steps do (ADR-249: "does not include CRM"), and `crm.read`, since the branch
+  reveals what deals hold ("Publishing an automation that checks deal fields needs the permission to
+  see the CRM."). At run time a plan without the CRM makes the rule not hold, with `crm_not_in_plan`.
+- **Simulator:** the builder's simulator reads a simulated deal: "Open deals in each pipeline" (one,
+  none or more than one) and its values typed one key=value per line, read as the deal's form reads
+  them; typed values it cannot take are listed ("Deal field values left out: seats (Seats must be a
+  number)") rather than dropped. Values an "Update deal fields" step sets are taken into it, so a
+  later condition reads them, and a rule that cannot read the deal says why. It is a
+  simplification: one simulated deal stands for the contact's deal in every pipeline, so values a
+  step sets on one pipeline's deal are seen by a condition on another's, which a run would not; the
+  simulator says so beside the control.
+- **Builder:** "A field of the contact's deal" in a rule's list: a pipeline, a deal field among the
+  company's, the comparisons its type takes, and a value control for the type (a list for yes/no and
+  choices, a date input for dates, text otherwise). Changing the field starts the comparison and the
+  value again. Each control is named after its rule ("Pipeline of rule 1"); the step's fieldset stays
+  disabled until hydration.
+
+Not built: conditions on the deal's title, value, owner, stage or expected close date (the same
+mechanism could read them, but each needs its own comparisons and wording), conditions on won or lost
+deals or deals of any status, comparing two fields (or a field with an answer or a placeholder),
+dates relative to the day the condition runs ("within 7 days"), and a rule that holds when the
+contact has no open deal in a pipeline.
