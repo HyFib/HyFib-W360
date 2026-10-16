@@ -15005,7 +15005,7 @@ Decision:
 Not built: changing an item's quantity or price in place (remove and add it again), adding several
 products in one request, items in the deal object, its webhook events or the deals CSV, and items
 added by automation steps. (Items in the deals CSV since built: ADR-380; in deal webhook payloads:
-ADR-395.)
+ADR-395; a key's change of items in the deal's history: ADR-397.)
 
 ## ADR-379 Custom field values when a deal is created (P4-04) (2026-10-16)
 
@@ -15723,7 +15723,8 @@ Decision:
   change of values alone until it is added; null still takes every change.
 - **The API's deal history** (ADR-281) gives the changes the deal events report, so a `deal_updated`
   entry naming custom fields is now given, with `fields` in its `changes` (the timeline does not
-  keep keys, so the history names none); a change of products alone is still not given. Entries
+  keep keys, so the history names none); a change of products alone is still not given (since
+  ADR-397 it is, as `items`). Entries
   recorded before 0305 for a change of values (members, keys and steps since ADR-373) appear too,
   though no event was sent for them then.
 - **Who made the change:** the changer trigger (ADR-277) now also fires on values, so a change of
@@ -16254,3 +16255,48 @@ refusal every API request gets); that a unit test comparing
 the board's condition with itself could never fail (removed: the exact SQL of the board's and the
 section's conditions is tested); and that the browser test, now running Reports four more times,
 risked the default minute on slower browsers (it now has two). All were fixed.
+
+## ADR-397 A webhook event when a deal's products change (P5-09, P4-04) (2026-10-16)
+
+Context: every deal event's deal gives its products (ADR-395), but adding or removing one sent no
+event: a receiver keeping quotes or orders in step with deals (an ERP, an invoicing tool) learnt of
+a product added or removed only from the deal's next event, if one came, or by reading every deal's
+products again. ADR-395 listed "`deal.updated` naming `items` in `changes`" as not built: it needs
+a capture on `app.crm_deal_items`, an endpoint detail and the API's deal history.
+
+Two releases: the capture (a trigger, migration 0308) records events that a worker must render and
+whose maker a web server must record on the deal before the item changes. Captured while older
+workers and web servers still run, an event naming `items` alone would be sent with `changes` empty
+(an older worker keeps only the details it knows, and nothing checks a body against its
+description before sending it), a replay would not mend it for a receiver that deduplicates on the
+event id, as the OpenAPI document asks, and a removal would name nobody, which endpoints naming
+makers or leaving out keys let through. So the change ships in two releases, each backward
+compatible with the release running when it is deployed: part one, without a migration, prepares
+every process; part two adds the capture once part one runs everywhere.
+
+Decision (part one, release N, no migration):
+
+- **Workers render `items`:** `WEBHOOK_DEAL_DETAIL_CHANGES` ends with `items`, so `deal.updated`'s
+  `changes` may name it, after `fields`, with an empty `changedFields`; the payload's description
+  and the OpenAPI document list it. Nothing captures it in this release, so no event names it yet,
+  and endpoints cannot choose it: Settings, the API and the database's check offer it with part
+  two.
+- **Members and keys record themselves first:** adding or removing a product now writes the deal's
+  version and changer (ADR-277) before the item (`markChanged` in `crm/deal-items.ts`,
+  `markProductChange` in `api/deal-items.ts`), then the timeline entry and the key's audit, as
+  before; a refusal after that point (a product already removed) rolls it back with the
+  transaction. Nothing reads the order in this release: part two's capture names a removal's maker
+  from what the removing transaction recorded on the deal, so every web server writes in that
+  order before the capture starts.
+- **The API's deal history gives product changes:** a timeline entry naming `products` is given as
+  `updated` with `items` last in its `changes` (`API_DEAL_HISTORY_DETAILS`), with who made it,
+  never the product's name, which the timeline keeps for members; the history's filter, which left
+  such entries out (ADR-375, ADR-390), keeps them, every entry since products were added to deals
+  included. The timeline already records each change, so the history needs no capture. The OpenAPI
+  document describes it, and `POST /deals/{id}/items` and `DELETE /deals/{id}/items/{itemId}` say
+  that the history gives the change and that no deal event is sent.
+- **Deployment:** no migration; this release is deployed everywhere, every worker and web server,
+  before the release carrying migration 0308 (`docs/DEPLOYMENT.md`).
+
+Not built in part one: the capture (migration 0308), the endpoint detail, their descriptions and
+their database tests, which part two, the next release, builds.

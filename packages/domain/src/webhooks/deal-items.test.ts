@@ -431,6 +431,69 @@ describe('products on deals in deal webhook payloads (ADR-395)', () => {
     }
   });
 
+  describe('a change of products (ADR-397)', () => {
+    /**
+     * A deal.updated as the trigger on the item captures it once migration 0308 runs; workers
+     * render it from the release before.
+     */
+    const productChange = (by: Record<string, unknown>) =>
+      eventOf('deal.updated', {
+        dealId: DEAL,
+        stageId: STAGE,
+        pipelineId: PIPELINE,
+        changes: ['items'],
+        changedFields: [],
+        ...by,
+      });
+
+    it('give `items` alone with no keys, who made the change as captured and the products as read when delivered', async () => {
+      // A key added the mug: the products are read when the event is delivered, so a plate a
+      // member added meanwhile is in them too.
+      const reads = answering([
+        [dealRow],
+        [plateRow, mugRow],
+        [{ phone: '+919876543210', name: 'Asha', erasedAt: null }],
+      ]);
+      const built = await buildWebhookPayload(
+        reads.tx,
+        productChange({ changedBy: 'api', apiKeyId: KEY }),
+        'endpoint',
+      );
+      expect(dealUpdatedPayloadSchema.safeParse(built).success).toBe(true);
+      const data = built.data as { changes: unknown; changedFields: unknown };
+      expect(data.changes).toEqual(['items']);
+      expect(data.changedFields).toEqual([]);
+      expect(dealIn(built)).toMatchObject({
+        changedBy: 'api',
+        apiKeyId: KEY,
+        items: [plate, mug],
+      });
+      // A member's removal, and one recorded without its maker, as captured.
+      for (const [changedBy, apiKeyId] of [
+        ['member', null],
+        [null, null],
+      ] as const) {
+        const again = answering([
+          [dealRow],
+          [],
+          [{ phone: '+919876543210', name: 'Asha', erasedAt: null }],
+        ]);
+        const body = await buildWebhookPayload(
+          again.tx,
+          productChange({ changedBy, apiKeyId }),
+          'endpoint',
+        );
+        expect(dealUpdatedPayloadSchema.safeParse(body).success, String(changedBy)).toBe(true);
+        expect(dealIn(body), String(changedBy)).toMatchObject({ changedBy, apiKeyId, items: [] });
+      }
+      // A worker that did not know `items` gave no change at all, which the payload's description
+      // refuses: that is why workers learn `items` a release before migration 0308 captures it.
+      expect(
+        dealUpdatedPayloadSchema.safeParse({ ...built, data: { ...data, changes: [] } }).success,
+      ).toBe(false);
+    });
+  });
+
   describe('the largest deal event body', () => {
     // The character that takes the most bytes in a JSON body per character a column counts: a
     // control character, written as a six-byte escape (\u0001). A four-byte emoji takes fewer.

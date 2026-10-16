@@ -833,13 +833,17 @@ export const dealCreatedPayloadSchema = envelope('deal.created', webhookDealData
 
 /**
  * The details of a deal whose change deal.updated reports (ADR-275), as its payload names them:
- * `fields` is a change of its custom field values (ADR-390), after the fixed details.
+ * `fields` is a change of its custom field values (ADR-390), after the fixed details, and `items` a
+ * product added or removed (ADR-397), which the trigger on the deal's items that migration 0308
+ * adds captures alone. Workers render it from the release before that migration, so no worker that
+ * delivers such an event leaves it out.
  */
 export const WEBHOOK_DEAL_DETAIL_CHANGES = [
   'title',
   'valueMinor',
   'expectedCloseOn',
   'fields',
+  'items',
 ] as const;
 export const dealUpdatedPayloadSchema = envelope(
   'deal.updated',
@@ -848,7 +852,7 @@ export const dealUpdatedPayloadSchema = envelope(
       .array(z.enum(WEBHOOK_DEAL_DETAIL_CHANGES))
       .min(1)
       .describe(
-        'What the change changed, once each and in this order: `title`, `valueMinor` (the value, set, changed or cleared), `expectedCloseOn` and `fields` (custom field values, set, changed or removed; changedFields names the fields). Names only: the deal carries the details as they are when the event is delivered, and GET /deals/{id} reads its custom field values (`fields`).',
+        'What the change changed, once each and in this order: `title`, `valueMinor` (the value, set, changed or cleared), `expectedCloseOn`, `fields` (custom field values, set, changed or removed; changedFields names the fields) and `items` (the deal’s products: a change of them names `items` alone). Names only: the deal carries the details as they are when the event is delivered, its products among them (deal.items), and GET /deals/{id} reads its custom field values (`fields`).',
       ),
     changedFields: z
       .array(z.string().regex(FIELD_KEY_RE))
@@ -859,10 +863,10 @@ export const dealUpdatedPayloadSchema = envelope(
 );
 
 /**
- * What a deal.updated event captured as changed (ADR-275, ADR-390), as its payload gives it: the
- * details its payload knows, in the payload's order, and the keys of the custom fields whose values
- * changed (only when the details name `fields`), once each, in the order captured. An event
- * captured before keys were recorded names none.
+ * What a deal.updated event captured as changed (ADR-275, ADR-390, ADR-397), as its payload gives
+ * it: the details its payload knows, in the payload's order, and the keys of the custom fields whose
+ * values changed (only when the details name `fields`), once each, in the order captured. An event
+ * captured before keys were recorded names none; a change of products names `items` and no keys.
  */
 export function dealUpdatedChanges(detail: Record<string, unknown>) {
   const changes = detailChanges(detail, WEBHOOK_DEAL_DETAIL_CHANGES);

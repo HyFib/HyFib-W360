@@ -633,7 +633,7 @@ export const apiDealHistoryEntrySchema = z.object({
   type: z
     .enum(Object.values(API_DEAL_HISTORY_TYPES) as [ApiDealHistoryType, ...ApiDealHistoryType[]])
     .describe(
-      'What changed: the deal was added (created), its title, value, expected close date or custom field values changed (updated), it moved to another stage or pipeline (stage_changed), it was given to another owner or left without one (owner_changed), or it was won, lost or reopened.',
+      'What changed: the deal was added (created), its title, value, expected close date, custom field values or products changed (updated), it moved to another stage or pipeline (stage_changed), it was given to another owner or left without one (owner_changed), or it was won, lost or reopened.',
     ),
   createdAt: z.iso.datetime().describe('When the change was made.'),
   changedBy: z
@@ -686,7 +686,7 @@ export const apiDealHistoryEntrySchema = z.object({
     )
     .nullable()
     .describe(
-      'updated: what changed, in this order: `title`, `valueMinor`, `expectedCloseOn` and `fields` (custom field values, which the history does not name one by one); names only, never the title, date or values before. Null for other changes.',
+      'updated: what changed, in this order: `title`, `valueMinor`, `expectedCloseOn`, `fields` (custom field values, which the history does not name one by one) and `items` (a product added or removed, which it does not name: GET /deals/{id}/items lists the products); names only, never the title, date or values before. Null for other changes.',
     ),
   valueMinor: z
     .number()
@@ -3968,7 +3968,7 @@ export function buildOpenApiDocument(serverUrl: string) {
           operationId: 'listDealHistory',
           summary: 'A CRM deal’s history, newest first',
           description: [
-            `${scopeNote('deals.read')} The changes the deal events report, as the deal’s timeline keeps them: the deal added, its title, value, expected close date or custom field values changed, moved to another stage or pipeline, given to another owner, won, lost or reopened, by members, automations and API keys, newest first; pages never skip or repeat a change. Each says who made it (\`changedBy\`, never which member, with the key for one made through the API), so an integration can rebuild how a deal moved, and skip its own changes. Needs the CRM in the company’s plan (403, reason not_in_plan).`,
+            `${scopeNote('deals.read')} The changes the deal events report, as the deal’s timeline keeps them: the deal added, its title, value, expected close date or custom field values changed, moved to another stage or pipeline, given to another owner, won, lost or reopened, by members, automations and API keys, newest first; pages never skip or repeat a change. A product added to or removed from the deal is given too, as \`updated\` with \`items\` in its \`changes\`, never naming the product (GET /deals/{id}/items lists the products). Each says who made it (\`changedBy\`, never which member, with the key for one made through the API), so an integration can rebuild how a deal moved, and skip its own changes. Needs the CRM in the company’s plan (403, reason not_in_plan).`,
             'Notes and the deal’s tasks are never given here (`GET /notes` and `GET /tasks` read them), nor the title, date or lost reason before a change. Erasing a contact deletes its timeline, so an erased contact’s deal has no history; a merge keeps the deal’s.',
           ].join('\n\n'),
           parameters: [{ $ref: '#/components/parameters/Id' }, ...pageParams],
@@ -4000,7 +4000,7 @@ export function buildOpenApiDocument(serverUrl: string) {
           summary: 'Add a product to a CRM deal',
           description: [
             `Scopes: \`deals.write\` and \`orders.read\`. As members add one on the deal page: a product of one of the company’s WhatsApp catalogs (Commerce → Catalogs), still connected and not removed at Meta, named by its content id (\`catalogId\` picks the catalog when more than one has it), with a quantity and the price of one in the minor units of the deal’s pipeline currency: the catalog’s price is never assumed. The product’s name is kept as it is now. Refused with 422 naming the field for an unknown content id or one more than one catalog has, with 422 when the deal already lists ${MAX_DEAL_ITEMS} products or the quantity times the price is more than a deal can be worth, and with 409 on an erased contact’s deal. Needs the CRM and Commerce in the company’s plan (403, reason not_in_plan). With an \`Idempotency-Key\`, a retry answers the first response.`,
-            'The deal’s version moves on (`dealVersion`), its timeline says the product was added through the API and the audit log names the key; no deal event is sent, as when members add one, and the deal’s history leaves it out. The deal’s value stays as it is: PATCH /deals/{id} sets it.',
+            'The deal’s version moves on (`dealVersion`), its timeline says the product was added through the API and the audit log names the key; no deal event is sent, as when members add one, and the deal’s history gives it (`changes`: `items`). The deal’s value stays as it is: PATCH /deals/{id} sets it.',
           ].join('\n\n'),
           parameters: [
             { $ref: '#/components/parameters/Id' },
@@ -4020,7 +4020,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         delete: {
           operationId: 'removeDealItem',
           summary: 'Remove a product from a CRM deal',
-          description: `${scopeNote('deals.write')} As members remove one on the deal page: the deal’s version moves on (\`dealVersion\`), its timeline says the product was removed through the API and the audit log names the key; no deal event is sent. A product already removed answers 404, and an erased contact’s deal 409. Needs the CRM in the company’s plan (403, reason not_in_plan).`,
+          description: `${scopeNote('deals.write')} As members remove one on the deal page: the deal’s version moves on (\`dealVersion\`), its timeline says the product was removed through the API and the audit log names the key; no deal event is sent, and the deal’s history gives it. A product already removed answers 404, and an erased contact’s deal 409. Needs the CRM in the company’s plan (403, reason not_in_plan).`,
           parameters: [
             { $ref: '#/components/parameters/Id' },
             {
@@ -4702,7 +4702,7 @@ export function buildOpenApiDocument(serverUrl: string) {
       'deal.updated': webhook(
         'webhookDealUpdated',
         WEBHOOK_EVENT_INFO['deal.updated'].label,
-        `${WEBHOOK_EVENT_INFO['deal.updated'].description} changes names what changed (title, valueMinor, expectedCloseOn, then fields for custom field values, with changedFields naming the keys of the fields whose values were set, changed or removed), never the values before: the deal is the deal when the event is delivered, so a deal changed again since gives its latest details, and a deal whose contact was erased is sent as erasure left it. Custom field values are not sent: read them with GET /deals/{id} (\`deals.read\`, its \`fields\`). Deleting a custom field in Settings removes its values from every deal without sending this event, since the company's fields changed, not its deals; erasing a contact clears its deals' values and names them. A change of the deal’s products alone sends no event, and changes never names them: deal.items gives the products as they are when the event is delivered. One change can also move, reopen, close or give the deal to another owner, and then sends deal.stage_changed, deal.status_changed and deal.owner_changed as well, in the order the steps happen: reopened, moved, details changed, given to another owner, closed; they can have the same createdAt. Pipelines, stages and owners an endpoint names narrow it as the other deal events. An endpoint receives every change unless it names the details it takes (its \`dealDetails\`, or the details ticked in Settings → Webhooks): a change is sent when it changed one of them, and its changes still name every detail it changed. Deliveries are not ordered: the latest change is the one with the latest createdAt.`,
+        `${WEBHOOK_EVENT_INFO['deal.updated'].description} changes names what changed (title, valueMinor, expectedCloseOn, then fields for custom field values, with changedFields naming the keys of the fields whose values were set, changed or removed), never the values before: the deal is the deal when the event is delivered, so a deal changed again since gives its latest details, and a deal whose contact was erased is sent as erasure left it. Custom field values are not sent: read them with GET /deals/{id} (\`deals.read\`, its \`fields\`). Deleting a custom field in Settings removes its values from every deal without sending this event, since the company's fields changed, not its deals; erasing a contact clears its deals' values and names them. A change of the deal’s products alone sends no event: deal.items gives the products as they are when the event is delivered. One change can also move, reopen, close or give the deal to another owner, and then sends deal.stage_changed, deal.status_changed and deal.owner_changed as well, in the order the steps happen: reopened, moved, details changed, given to another owner, closed; they can have the same createdAt. Pipelines, stages and owners an endpoint names narrow it as the other deal events. An endpoint receives every change unless it names the details it takes (its \`dealDetails\`, or the details ticked in Settings → Webhooks): a change is sent when it changed one of them, and its changes still name every detail it changed. Deliveries are not ordered: the latest change is the one with the latest createdAt.`,
         'WebhookDealUpdated',
       ),
       'deal.stage_changed': webhook(

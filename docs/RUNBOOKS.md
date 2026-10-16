@@ -2398,10 +2398,11 @@ first one added and adds them again: send one of them.
 `forbidden` names the scope the key lacks, `deals.read`, or with reason `not_in_plan` the company's
 plan leaves out the CRM or the scope. 404 means the id is not one of the company's deals. 422 names
 the parameter: `limit` beyond 1 to 100, or a parameter the history does not take. The history gives
-the changes the deal events report, newest first: notes and the deal's tasks are read with
-`GET /notes` and `GET /tasks`, and a deal of an erased contact has no history, since erasure deletes
-the timeline. `changedBy` null means HyFib did not record who made a change; a member is never
-named.
+the changes the deal events report, newest first, and since ADR-397 each product added or removed
+(`updated` with `items`, never the product: `GET /deals/{id}/items` lists the products): notes and
+the deal's tasks are read with `GET /notes` and `GET /tasks`, and a deal of an erased contact has
+no history, since erasure deletes the timeline. `changedBy` null means HyFib did not record who
+made a change; a member is never named.
 
 **An integration misses a deal change, or hears two at once (ADR-256).** Endpoints that take
 `deal.created`, `deal.stage_changed` or `deal.status_changed` are sent one event per deal added and

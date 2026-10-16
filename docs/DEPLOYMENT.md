@@ -1794,6 +1794,15 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    (two system lookups at once), so a worker process may have 8 in progress across its four
    clients (6 before).
 
+   ADR-397 part one adds no migration. Its workers render `items` among a `deal.updated`'s
+   `changes` (no event names it yet), its web servers record the member or key on the deal before
+   adding or removing a product, and its API's deal history gives changes of products as `items`.
+   Deploy it everywhere, every worker and web server, before the release carrying migration 0308
+   (ADR-397 part two): that migration starts capturing those events, which a worker from before
+   part one would send with `changes` empty and which, for removals made through a web server from
+   before it, would name nobody. While 0308 is not applied, rolling this release back is safe; an
+   old web server's history simply leaves changes of products out again.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

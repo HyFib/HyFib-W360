@@ -30,6 +30,7 @@ import {
   apiDealSchema,
   buildOpenApiDocument,
 } from './openapi';
+import { WEBHOOK_DEAL_DETAIL_CHANGES } from '../webhooks/payloads';
 
 const TENANT = '0192f0c4-8e2b-7c1d-9a3e-5b6c7d8e9f01';
 const OTHER = '0192f0c4-8e2b-7c1d-9a3e-5b6c7d8e9f02';
@@ -734,7 +735,10 @@ describe('a CRM deal’s history through the API (ADR-281)', () => {
       value: 'valueMinor',
       expected_close_on: 'expectedCloseOn',
       custom_fields: 'fields',
+      products: 'items',
     });
+    // In the order deal.updated names them, products last (ADR-397).
+    expect(Object.values(API_DEAL_HISTORY_DETAILS)).toEqual([...WEBHOOK_DEAL_DETAIL_CHANGES]);
     expect(apiDealHistoryEntrySchema.shape.type.options).toEqual(
       Object.values(API_DEAL_HISTORY_TYPES),
     );
@@ -783,8 +787,8 @@ describe('a CRM deal’s history through the API (ADR-281)', () => {
     expect(
       entry('deal_updated', { fields: ['value'], valueFrom: 500, valueTo: null }),
     ).toMatchObject({ changes: ['valueMinor'], valueMinor: null, previousValueMinor: 500 });
-    // Custom field values last, as deal events name them, by an automation's run too (ADR-390);
-    // products are not a detail history gives.
+    // Custom field values after the fixed details, as deal events name them, by an automation's run
+    // too (ADR-390).
     expect(
       entry('deal_updated', { fields: ['custom_fields', 'title'], automationId: 'a', runId: 'r' }),
     ).toMatchObject({ changes: ['title', 'fields'], changedBy: 'automation', valueMinor: null });
@@ -794,8 +798,30 @@ describe('a CRM deal’s history through the API (ADR-281)', () => {
     });
     expect(
       entry('deal_updated', { fields: ['custom_fields', 'expected_close_on', 'products'] }, true),
-    ).toMatchObject({ changes: ['expectedCloseOn', 'fields'] });
-    expect(entry('deal_updated', { fields: ['products'] }, true)).toMatchObject({ changes: [] });
+    ).toMatchObject({ changes: ['expectedCloseOn', 'fields', 'items'] });
+    // A product added or removed is `items` (ADR-397), by a member or a key, never its name.
+    const added = entry('deal_updated', { fields: ['products'], productAdded: 'Blue mug' }, true);
+    expect(added).toEqual({
+      id: OTHER,
+      type: 'updated',
+      createdAt: '2026-10-07T10:00:00.000Z',
+      changedBy: 'member',
+      changedByApiKeyId: null,
+      ...none,
+      changes: ['items'],
+    });
+    expect(JSON.stringify(added)).not.toContain('Blue mug');
+    expect(
+      entry('deal_updated', { fields: ['products'], productRemoved: 'Plate', apiKeyId: writer }),
+    ).toMatchObject({
+      changes: ['items'],
+      changedBy: 'api',
+      changedByApiKeyId: writer,
+      valueMinor: null,
+      previousValueMinor: null,
+    });
+    // A name the history does not know is left out.
+    expect(entry('deal_updated', { fields: ['notes'] }, true)).toMatchObject({ changes: [] });
     // Moved by an automation's run to another pipeline, both stages with their pipelines.
     expect(
       entry('stage_changed', {
@@ -922,6 +948,8 @@ describe('a CRM deal’s history through the API (ADR-281)', () => {
     for (const words of [
       'Scope: `deals.read`.',
       'the deal added, its title, value, expected close date or custom field values changed, moved to another stage or pipeline, given to another owner, won, lost or reopened, by members, automations and API keys, newest first; pages never skip or repeat a change',
+      // Products added or removed (ADR-397), never named.
+      'A product added to or removed from the deal is given too, as `updated` with `items` in its `changes`, never naming the product (GET /deals/{id}/items lists the products).',
       'says who made it (`changedBy`, never which member, with the key for one made through the API)',
       '(403, reason not_in_plan)',
       'Notes and the deal’s tasks are never given here',
@@ -954,5 +982,13 @@ describe('a CRM deal’s history through the API (ADR-281)', () => {
     expect(apiDealHistoryEntrySchema.shape.changes.description).toContain(
       'names only, never the title, date or values before',
     );
+    // A change of products is named, never the product (ADR-397).
+    expect(apiDealHistoryEntrySchema.shape.changes.description).toContain(
+      '`items` (a product added or removed, which it does not name: GET /deals/{id}/items lists the products)',
+    );
+    expect(apiDealHistoryEntrySchema.shape.type.description).toContain(
+      'custom field values or products changed (updated)',
+    );
+    expect(JSON.stringify([history, schema])).not.toMatch(/ADR-\d/);
   });
 });
