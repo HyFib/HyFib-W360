@@ -338,7 +338,9 @@ verification, app review, Embedded Signup configuration).
   **[Products on deals built; their database and browser tests run only in CI]** (ADR-375,
   migration 0294: catalog products listed on a deal with a quantity and an exact unit price, at the
   deal's version and on its timeline, their total shown and usable as the deal's value. Not built:
-  items in webhooks and CSV, discounts and taxes).
+  items in webhooks, discounts and taxes).
+  **[Products in the deals CSV built; its database test runs only in CI]** (ADR-380, no migration:
+  a `products` cell with a line per product and a `products_total` column in the deal's currency).
   **[Products on deals through the API built; their database tests run only in CI]** (ADR-378,
   migrations 0297 and 0298: `GET`/`POST /deals/{id}/items` and `DELETE /deals/{id}/items/{itemId}`;
   products named by content id from the company's connected catalogs, unit prices in minor units,

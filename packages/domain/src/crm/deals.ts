@@ -50,7 +50,7 @@ import {
   sameAttributes,
   shownDealAttributes,
 } from './deal-fields';
-import { dealItemsTotal, loadDealItems, type DealItem } from './deal-items';
+import { dealItemsTotal, loadDealItems, loadItemsOfDeals, type DealItem } from './deal-items';
 import { DEAL_CSV_COLUMNS, dealCsvLine } from './deals-csv';
 import { forecast, weigh, type Forecast } from './forecast';
 import { currencyDigits, parseAmountToMinor } from './money';
@@ -674,9 +674,15 @@ export function dealOperations(deps: { db: Database; clock: Clock }) {
               pipelines.flatMap((p) => p.stages.map((st) => [st.id, st.name])),
             );
             const names = new Map(pipelines.map((p) => [p.id, p.name]));
+            const itemsByDeal = await loadItemsOfDeals(
+              tx,
+              ctx.tenant.id,
+              deals.map((deal) => deal.id),
+            );
             return {
               lines: deals.map((deal, i) => {
                 const card = cards[i];
+                const items = itemsByDeal.get(deal.id) ?? [];
                 return dealCsvLine({
                   id: deal.id,
                   title: deal.title,
@@ -695,6 +701,11 @@ export function dealOperations(deps: { db: Database; clock: Clock }) {
                   closedAt: deal.closedAt,
                   lostReason: deal.lostReason,
                   openTasks: card?.openTasks ?? 0,
+                  items,
+                  itemsTotalMinor:
+                    items.length > 0 && card
+                      ? dealItemsTotal(items, card.currency).totalMinor
+                      : null,
                   fieldValues: dealFields.map((field) => {
                     const value = deal.attributes[field.key];
                     return value === undefined ? '' : String(value);

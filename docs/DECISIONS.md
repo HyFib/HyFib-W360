@@ -14877,9 +14877,9 @@ Decision:
   else. Item names are catalog product names, not customer data, so erasure keeps them. The
   company export includes the table.
 
-Not built: deal webhook events for item changes, items in the deals CSV, items without a catalog
-product, discounts and taxes, the value kept equal to the items' total automatically, and items set
-by automation steps or the deal import. (Items in the public API: ADR-378.)
+Not built: deal webhook events for item changes, items without a catalog product, discounts and
+taxes, the value kept equal to the items' total automatically, and items set by automation steps or
+the deal import. (Items in the public API: ADR-378; in the deals CSV: ADR-380.)
 
 ## ADR-376 Report emails (P3-05) (2026-10-16)
 
@@ -15020,3 +15020,26 @@ Decision:
   need (`crmLookups`), which the deal page now uses too instead of a read of its own.
 
 Not built: required fields, default values, and values chosen from a list.
+
+## ADR-380 Products in the deals CSV (P4-04) (2026-10-16)
+
+Context: the deals CSV (ADR-239) gave a deal's value but not the products listed on it (ADR-375),
+so a spreadsheet of deals could not say what each one quoted. "Items in the deals CSV" was listed
+as not built under ADR-375.
+
+Decision:
+
+- **Two columns after the fixed ones:** `products`, one cell with a line per product in the order
+  they were added, such as "3 × Blue mug at 1500.50 INR" (the quantity, the name kept when it was
+  added, and the price of one, exact in its currency's major unit), and `products_total`, their
+  total in the deal's currency as the deal page gives it (`dealItemsTotal`): empty without products,
+  with a product in another currency, or beyond what a deal's value holds. Custom field columns
+  still follow the fixed columns, so they move two to the right; columns are read by their header.
+- **One read a batch:** the export reads the items of each batch of 500 deals in one query, under
+  the export's own permissions (`crm.read` and `contacts.export`), as anyone who reads the CRM sees
+  products on the deal page.
+- **Formula-safe:** a cell starts with the quantity, so a product's name can never start it; the
+  cell is quoted as CSV needs (it holds line breaks when a deal has several products).
+
+Not built: a line per product (one line stays one deal), retailer ids in the file, and the products
+in the deal import.

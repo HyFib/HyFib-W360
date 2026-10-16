@@ -1,5 +1,35 @@
 # Progress
 
+## 2026-10-16 — Products in the deals CSV (P4-04, ADR-380)
+
+Status: **Implemented; its database test runs in CI only.** The deals CSV gave a deal's value but
+not the products listed on it.
+
+### Completed
+
+- **Domain:** the deals CSV has two more columns after the fixed ones: `products`, a line per
+  product in the order added ("3 × Blue mug at 1500.50 INR", `dealItemsCell`), and
+  `products_total` in the deal's currency (`dealItemsTotal`; empty without products, across
+  currencies or beyond a deal's value). The export reads each batch's items in one query
+  (`loadItemsOfDeals`). Custom field columns still follow the fixed columns.
+- **Tests:** unit (`deals-csv.test.ts`: the cell, quoting, the total, formula safety, the column
+  count); integration (`commerce.test.ts`: an exported deal with its product and total). Written for
+  CI; the integration test was not run here.
+- **Docs:** ADR-380 (and ADR-375's "not built" note); SECURITY; ARCHITECTURE; BACKLOG P4-04; the
+  feature matrix (H-012, status unchanged).
+- **Mutation checks:** 7 of 7 deliberate regressions in the cell's text, its prices and the
+  columns caught by the unit tests; the export's reading of items is covered by the integration
+  test, which runs in CI only.
+
+### Test commands and results (local, 2026-10-16)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 155 files, 1614 tests passed                                    |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+
 ## 2026-10-16 — Custom field values when a deal is created (P4-04, ADR-379)
 
 Status: **Implemented; its browser test runs in CI only.** Members could set a deal's custom field

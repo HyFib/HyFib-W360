@@ -407,7 +407,9 @@ Phase 4 rules (CRM, P4-04):
 - Exporting deals (ADR-239) needs `crm.read` and `contacts.export`: the file holds the deals the
   view shows with customers' names and numbers (masked as for the member, ADR-226),
   formula-neutralised; an erased contact's deals carry no number. Each export is audited
-  (`crm.deals_exported`, with its filters).
+  (`crm.deals_exported`, with its filters). Since ADR-380 it also lists each deal's products with
+  their prices and total, which anyone who reads the CRM sees on the deal page; a product's name
+  never starts a cell.
 - While a company is suspended, `crm.read` stays available and `crm.write` does not; reminder jobs
   wait, and the sweep sends reminders after reactivation unless they are more than a day late.
 

@@ -1302,7 +1302,8 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   `itemsTotal` (`dealItemsTotal`, summed as `bigint`, null across currencies or beyond a deal's
   value). Web: the deal page's Products card (`DealProducts`); its "use as value" goes through
   `updateDeal`. The API's deal history now leaves out every `deal_updated` entry naming none of
-  title, value and expected close date.
+  title, value and expected close date. The deals CSV (ADR-380) reads each batch's items with
+  `loadItemsOfDeals` and writes them in a `products` cell (`dealItemsCell`) with `products_total`.
 - **Products on deals through the API (0297, 0298, ADR-378):** `api/deal-items.ts` lists a
   deal's items with each product's content id and Meta catalog id (`GET /deals/{id}/items`,
   `deals.read`), adds one named by content id from a connected catalog (`POST`, `deals.write` and

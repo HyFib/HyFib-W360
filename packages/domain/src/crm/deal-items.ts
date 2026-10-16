@@ -9,6 +9,7 @@ import {
   crmDeals,
   crmPipelines,
   eq,
+  inArray,
   isNull,
   sql,
   type Database,
@@ -101,6 +102,27 @@ export function loadDealItems(tx: Tx, tenantId: string, dealId: string): Promise
     .from(crmDealItems)
     .where(and(eq(crmDealItems.tenantId, tenantId), eq(crmDealItems.dealId, dealId)))
     .orderBy(asc(crmDealItems.createdAt), asc(crmDealItems.id));
+}
+
+/** The items of the given deals, each deal's in the order they were added (the deals CSV, ADR-380). */
+export async function loadItemsOfDeals(
+  tx: Tx,
+  tenantId: string,
+  dealIds: readonly string[],
+): Promise<Map<string, DealItem[]>> {
+  const byDeal = new Map<string, DealItem[]>();
+  if (dealIds.length === 0) return byDeal;
+  const rows = await tx
+    .select({ dealId: crmDealItems.dealId, ...itemColumns })
+    .from(crmDealItems)
+    .where(and(eq(crmDealItems.tenantId, tenantId), inArray(crmDealItems.dealId, [...dealIds])))
+    .orderBy(asc(crmDealItems.dealId), asc(crmDealItems.createdAt), asc(crmDealItems.id));
+  for (const { dealId, ...item } of rows) {
+    const items = byDeal.get(dealId) ?? [];
+    items.push(item);
+    byDeal.set(dealId, items);
+  }
+  return byDeal;
 }
 
 /** A unit price in the currency as members type it, exact; refused with the currency's rule. */
