@@ -195,7 +195,38 @@ const DEAL_FIELD_DETAILS: Record<string, (key: string) => string> = {
   deal_field_empty: (key) =>
     `the value for the deal field “${key}” was empty after filling in placeholders`,
   deal_field_invalid: (key) => `the value for the deal field “${key}” is not one it takes`,
+  // A condition's deal field rule (ADR-393): an option it compares with was removed since.
+  deal_rule_invalid: (key) =>
+    `the condition’s value for the deal field “${key}” is no longer one the field takes`,
 };
+
+type DealFieldTypeName = 'text' | 'number' | 'date' | 'boolean' | 'choice';
+type ComparisonName =
+  'equals' | 'not_equals' | 'contains' | 'is_set' | 'is_not_set' | 'greater_than' | 'less_than';
+
+const COMPARISON_NAMES: Record<ComparisonName, string> = {
+  equals: 'is',
+  not_equals: 'is not',
+  contains: 'contains',
+  is_set: 'has a value',
+  is_not_set: 'is empty',
+  greater_than: 'is more than',
+  less_than: 'is less than',
+};
+
+/**
+ * A deal field rule's comparison as the builder names it for the field's type (ADR-393): dates
+ * compare as days ("is before", "is after"), and a yes/no field "is" yes or no.
+ */
+export function dealFieldComparisonLabel(type: DealFieldTypeName, op: ComparisonName): string {
+  if (type === 'date') {
+    if (op === 'equals') return 'is on';
+    if (op === 'not_equals') return 'is not on';
+    if (op === 'less_than') return 'is before';
+    if (op === 'greater_than') return 'is after';
+  }
+  return COMPARISON_NAMES[op];
+}
 
 /**
  * Text for a step-log or end detail code, including send failures (`failed:<code>`) and deal fields

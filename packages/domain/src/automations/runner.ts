@@ -41,7 +41,12 @@ import { buildProductMessageRequest, type ResolvedProductMessage } from '../comm
 import { checkTemplateEligibility } from '../consent/service';
 import { MAX_TAGS_PER_CONTACT, coerceFieldValue } from '../contacts/fields';
 import { addActivity, crmChangedBy, memberRefs } from '../crm/common';
-import { lockedDealFields, sameAttributes, stepDealAttributes } from '../crm/deal-fields';
+import {
+  keptDealAttributes,
+  lockedDealFields,
+  sameAttributes,
+  stepDealAttributes,
+} from '../crm/deal-fields';
 import { localDateAfter } from '../crm/time';
 import { scheduleTaskReminder } from '../crm/reminders';
 import { FLOW_TOKEN_DAYS, buildFlowMessageRequest, newFlowToken } from '../flows/model';
@@ -66,6 +71,7 @@ import {
   stepRendersPlaceholders,
   type AutomationGraph,
   type AutomationNode,
+  type DealFieldRule,
 } from './graph';
 import {
   FINISHED_HTTP_STATES,
@@ -77,6 +83,7 @@ import {
 import {
   advance,
   parseBotButtonId,
+  type DealFacts,
   type InboundReply,
   type RunEffect,
   type RunEvent,
@@ -237,6 +244,12 @@ async function loadFacts(
     const hours = await loadBusinessCalendar(tx, run.tenantId, tenant?.timezone ?? 'UTC');
     businessOpen = hours.enabled ? businessStatusAt(hours.calendar, now).open : true;
   }
+  // The deals a condition's deal field rules read (ADR-393), only for such conditions.
+  const dealRules =
+    node?.type === 'condition'
+      ? node.rules.flatMap((rule) => (rule.kind === 'deal_field' ? [rule] : []))
+      : [];
+  const dealFacts = dealRules.length > 0 ? await loadDealFacts(tx, run, dealRules) : null;
   // The order of a run started by order messages, as it is now (only for steps with texts).
   const order =
     run.storeOrderId && node && stepRendersPlaceholders(node)
@@ -250,7 +263,43 @@ async function loadFacts(
     fields: contact?.attributes ?? {},
     businessOpen,
     order,
+    ...dealFacts,
   };
+}
+
+/**
+ * What a condition's deal field rules read (ADR-393): for each pipeline they name, the contact's
+ * only open deal there with its values of fields that still exist (as the deal's page shows them),
+ * or the note of a deal step that changes nothing there; and the company's deal fields. The deal is
+ * found with the checks and in the lock order of a step that sets deal fields (`holdForDealChange`,
+ * `lockedDealFields`, `onlyOpenDeal`): the plan's CRM, the contact against erasure, the pipeline
+ * against archiving, the fields against deletion, then the deal, locked shared since nothing
+ * changes it. Pipelines are taken in id order.
+ */
+async function loadDealFacts(
+  tx: Tx,
+  run: AutomationRun,
+  rules: readonly DealFieldRule[],
+): Promise<Pick<RunFacts, 'deals' | 'dealFields'>> {
+  const deals = new Map<string, DealFacts>();
+  const held: string[] = [];
+  for (const pipelineId of [...new Set(rules.map((rule) => rule.pipelineId))].sort()) {
+    const note = await holdForDealChange(tx, run, pipelineId);
+    if (note) deals.set(pipelineId, { ok: false, note });
+    else held.push(pipelineId);
+  }
+  if (held.length === 0) return { deals };
+  const fields = await lockedDealFields(tx, run.tenantId);
+  for (const pipelineId of held) {
+    const deal = await onlyOpenDeal(tx, run, pipelineId, 'share');
+    deals.set(
+      pipelineId,
+      typeof deal === 'string'
+        ? { ok: false, note: deal }
+        : { ok: true, attributes: keptDealAttributes(fields, deal.attributes) },
+    );
+  }
+  return { deals, dealFields: new Map(fields.map((field) => [field.key, field])) };
 }
 
 type SendEffect = Extract<
@@ -1220,10 +1269,16 @@ async function holdForDealChange(
 }
 
 /**
- * The contact's only open deal in the pipeline, locked; a note when it has none or more than one
- * (which one is meant is not known).
+ * The contact's only open deal in the pipeline, locked for update (a step that changes it) or
+ * shared (a condition that reads it, ADR-393); a note when it has none or more than one (which one
+ * is meant is not known).
  */
-async function onlyOpenDeal(tx: Tx, run: AutomationRun, pipelineId: string) {
+async function onlyOpenDeal(
+  tx: Tx,
+  run: AutomationRun,
+  pipelineId: string,
+  lock: 'update' | 'share' = 'update',
+) {
   const open = await tx
     .select({
       id: crmDeals.id,
@@ -1243,7 +1298,7 @@ async function onlyOpenDeal(tx: Tx, run: AutomationRun, pipelineId: string) {
     )
     .orderBy(asc(crmDeals.id))
     .limit(2)
-    .for('update');
+    .for(lock);
   const [deal] = open;
   if (!deal) return 'deal_not_open';
   if (open.length > 1) return 'deal_ambiguous';

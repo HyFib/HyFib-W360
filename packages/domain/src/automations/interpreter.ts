@@ -1,11 +1,13 @@
 import { clipText } from '@w360/core/text';
-import { EMAIL_RE, normalizeTag } from '../contacts/fields';
+import { EMAIL_RE, normalizeTag, type AttributeValue } from '../contacts/fields';
+import type { DealFieldShape } from '../crm/deal-field-values';
 import { TEMPLATE_LIMITS } from '../templates/definition';
 import {
   AUTOMATION_LIMITS,
   HTTP_BODY_METHODS,
   HTTP_WAIT_MINUTES,
   RUN_BUDGETS,
+  dealFieldRuleValue,
   encodeFormValue,
   encodeJsonString,
   FORM_CONTENT_TYPE,
@@ -16,6 +18,7 @@ import {
   type AutomationGraph,
   type AutomationNode,
   type ConditionRule,
+  type DealFieldRule,
   type HttpHeaderPart,
   type HttpMethod,
   type NodeOf,
@@ -91,7 +94,23 @@ export interface RunFacts {
    * null for other runs, or when the order was deleted or redacted.
    */
   order?: OrderPlaceholderValues | null;
+  /**
+   * For each pipeline a condition's deal field rules name (ADR-393), the run's contact's only open
+   * deal there, or the note saying why there is none to read; a pipeline left out reads as having
+   * no open deal. Read only for conditions with such rules.
+   */
+  deals?: ReadonlyMap<string, DealFacts>;
+  /** The company's custom deal fields by key, as they are when the condition runs (ADR-393). */
+  dealFields?: ReadonlyMap<string, DealFieldShape>;
 }
+
+/**
+ * The contact's only open deal in a pipeline, with its values of fields that still exist, or the
+ * note of a deal step that changes nothing there (`deal_not_open`, `deal_ambiguous`,
+ * `crm_not_in_plan`, `contact_erased`, `deal_stage_unavailable`).
+ */
+export type DealFacts =
+  { ok: true; attributes: Readonly<Record<string, AttributeValue>> } | { ok: false; note: string };
 
 export type RunEffect =
   | { kind: 'send_text'; text: string }
@@ -355,12 +374,75 @@ function compare(
   }
 }
 
+/**
+ * A deal field rule (ADR-393) on the contact's only open deal in its pipeline. It holds only when
+ * there is exactly one such deal, its field still exists, the rule's value still fits the field
+ * and the comparison holds; otherwise it does not hold, whatever the comparison ("is empty" and
+ * "is not" included), and `note` says why, as a deal step that changes nothing says.
+ */
+export function evaluateDealFieldRule(
+  rule: DealFieldRule,
+  facts: Pick<RunFacts, 'deals' | 'dealFields'>,
+): { result: boolean; note: string | null } {
+  const deal = facts.deals?.get(rule.pipelineId) ?? { ok: false, note: 'deal_not_open' };
+  if (!deal.ok) return { result: false, note: deal.note };
+  const field = facts.dealFields?.get(rule.field);
+  if (!field) return { result: false, note: `deal_field_missing:${rule.field}` };
+  const expected = dealFieldRuleValue(rule, field);
+  if (!expected.ok) return { result: false, note: `deal_rule_invalid:${rule.field}` };
+  const actual = Object.hasOwn(deal.attributes, rule.field)
+    ? deal.attributes[rule.field]
+    : undefined;
+  return { result: compareDealValue(field, rule, actual, expected.value), note: null };
+}
+
+/**
+ * Compares a deal's stored value (undefined when it has none) with a rule's value read for the
+ * field's type: text ignoring case, as contact field rules compare; numbers as numbers; dates as
+ * YYYY-MM-DD calendar days (so in text order); yes/no and choices exactly as stored, a choice's
+ * value being resolved to its option as written. "Is not" holds for a deal without a value, as for
+ * contact fields.
+ */
+function compareDealValue(
+  field: DealFieldShape,
+  rule: DealFieldRule,
+  actual: AttributeValue | undefined,
+  expected: AttributeValue | null,
+): boolean {
+  const set = actual !== undefined && actual !== '';
+  if (rule.op === 'is_set') return set;
+  if (rule.op === 'is_not_set') return !set;
+  if (expected === null) return false;
+  switch (field.type) {
+    case 'text':
+      return compare(actual, rule, String(expected));
+    case 'number':
+    case 'date': {
+      const a = typeof actual === typeof expected ? (actual as number | string) : null;
+      const b = expected as number | string;
+      if (rule.op === 'not_equals') return a !== b;
+      if (a === null) return false;
+      if (rule.op === 'equals') return a === b;
+      if (rule.op === 'greater_than') return a > b;
+      if (rule.op === 'less_than') return a < b;
+      return false;
+    }
+    case 'boolean':
+    case 'choice':
+      if (rule.op === 'equals') return actual === expected;
+      if (rule.op === 'not_equals') return actual !== expected;
+      return false;
+  }
+}
+
 export function evaluateRule(
   rule: ConditionRule,
   facts: RunFacts,
   variables: Readonly<Record<string, string>>,
 ): boolean {
   switch (rule.kind) {
+    case 'deal_field':
+      return evaluateDealFieldRule(rule, facts).result;
     case 'answer':
       return compare(variables[rule.variable], rule, rule.value);
     case 'field':
@@ -658,9 +740,27 @@ export function advance(input: AdvanceInput): StepResult {
           : moveTo(current.next, sent, [effect], 'sent', null);
       }
       case 'condition': {
-        const results = current.rules.map((r) => evaluateRule(r, facts, base.variables));
+        // A deal field rule that could not read its deal or field says why (the first such rule).
+        let note: string | null = null;
+        const results: boolean[] = [];
+        for (const rule of current.rules) {
+          if (rule.kind !== 'deal_field') {
+            results.push(evaluateRule(rule, facts, base.variables));
+            continue;
+          }
+          const outcome = evaluateDealFieldRule(rule, facts);
+          note ??= outcome.note;
+          results.push(outcome.result);
+        }
         const yes = current.match === 'all' ? results.every(Boolean) : results.some(Boolean);
-        return moveTo(yes ? current.then : current.else, base, [], 'branched', yes ? 'yes' : 'no');
+        return moveTo(
+          yes ? current.then : current.else,
+          base,
+          [],
+          'branched',
+          yes ? 'yes' : 'no',
+          note,
+        );
       }
       case 'update_contact': {
         const action = current.action;

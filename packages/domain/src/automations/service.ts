@@ -65,6 +65,7 @@ import {
   starterGraph,
   starterTrigger,
   templatesOf,
+  usesDealConditions,
   triggerIssues,
   type AutomationGraph,
   type AutomationTrigger,
@@ -708,6 +709,23 @@ export function createAutomationService(deps: AutomationServiceDeps) {
   }
 
   /**
+   * Publishing or testing a graph whose conditions check deal fields (ADR-393) needs the CRM in the
+   * company's plan, as deal steps do (ADR-249), and `crm.read`, as seeing deals does.
+   */
+  function assertMayCheckDeals(
+    ctx: TenantContext,
+    graph: AutomationGraph,
+    action: 'publish' | 'test',
+  ) {
+    if (!usesDealConditions(graph)) return;
+    assertModule(ctx.plan, 'crm');
+    if (can(ctx, 'crm.read')) return;
+    throw forbidden(
+      `${action === 'publish' ? 'Publishing' : 'Testing'} an automation that checks deal fields needs the permission to see the CRM.`,
+    );
+  }
+
+  /**
    * Publishing or testing a graph that sends forms needs WhatsApp Flows in the company's plan, as
    * sending a form in the inbox does (ADR-248).
    */
@@ -1246,6 +1264,7 @@ export function createAutomationService(deps: AutomationServiceDeps) {
         const { trigger, graph } = await runnableDraft(tx, row);
         await assertMayUseTemplates(tx, ctx, graph, 'publish');
         assertMayChangeCrm(ctx, graph, 'publish');
+        assertMayCheckDeals(ctx, graph, 'publish');
         assertMaySendForms(ctx, graph);
         assertMaySendProducts(ctx, graph, 'publish');
         const sha = definitionSha({ trigger, graph, channelAccountId: row.draftChannelAccountId });
@@ -1450,6 +1469,7 @@ export function createAutomationService(deps: AutomationServiceDeps) {
         const { trigger, graph } = await runnableDraft(tx, row);
         await assertMayUseTemplates(tx, ctx, graph, 'test');
         assertMayChangeCrm(ctx, graph, 'test');
+        assertMayCheckDeals(ctx, graph, 'test');
         assertMaySendForms(ctx, graph);
         assertMaySendProducts(ctx, graph, 'test');
         let storeOrderId: string | null = null;

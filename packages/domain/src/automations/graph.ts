@@ -10,6 +10,8 @@ import {
 } from '../inbox/keywords';
 import { parseAmountToMinor } from '../crm/money';
 import { coerceDealFieldValue, type DealFieldShape } from '../crm/deal-field-values';
+import type { AttributeValue } from '../contacts/fields';
+import type { DealFieldType } from '@w360/db';
 import { PRODUCT_MESSAGE_LIMITS } from '../commerce/product-message';
 import { FLOW_LIMITS } from '../flows/flow-json';
 import { TEMPLATE_LIMITS } from '../templates/definition';
@@ -237,8 +239,67 @@ const ruleSchema = z.discriminatedUnion('kind', [
     tag: tagSchema,
   }),
   z.object({ kind: z.literal('business_hours'), op: z.enum(['open', 'closed']) }),
+  /**
+   * A custom deal field (ADR-373, ADR-385) of the run's contact's single open deal in a pipeline
+   * (ADR-393), found as steps that set deal fields find it. Which comparisons a field takes depends
+   * on its type (`DEAL_FIELD_COMPARISONS`); the value is read as the deal's form reads a typed
+   * value, without placeholders, as contact field rules take theirs.
+   */
+  z.object({
+    kind: z.literal('deal_field'),
+    pipelineId: z.uuid('Choose a pipeline.'),
+    field: z.string().regex(FIELD_KEY_RE, 'Choose a deal field.'),
+    op: z.enum(COMPARISONS),
+    value: ruleValue,
+  }),
 ]);
 export type ConditionRule = z.infer<typeof ruleSchema>;
+export type DealFieldRule = Extract<ConditionRule, { kind: 'deal_field' }>;
+
+/**
+ * The comparisons a deal field rule takes by the field's type (ADR-393). Dates compare as calendar
+ * days: `less_than` is "before" and `greater_than` "after". Yes/no fields take `equals` with yes
+ * or no; choices compare with one of the field's options.
+ */
+export const DEAL_FIELD_COMPARISONS: Readonly<Record<DealFieldType, readonly Comparison[]>> = {
+  text: ['equals', 'not_equals', 'contains', 'is_set', 'is_not_set'],
+  number: ['equals', 'not_equals', 'greater_than', 'less_than', 'is_set', 'is_not_set'],
+  date: ['equals', 'not_equals', 'less_than', 'greater_than', 'is_set', 'is_not_set'],
+  boolean: ['equals', 'is_set', 'is_not_set'],
+  choice: ['equals', 'not_equals', 'is_set', 'is_not_set'],
+};
+
+/**
+ * The value a deal field rule compares with (ADR-393), read as the deal's form reads a typed value
+ * (`coerceDealFieldValue`: a number as members type it, a real YYYY-MM-DD date, yes or no, one of a
+ * choice's options in any case, resolved to the option as written); null for "has a value" and "is
+ * empty". A comparison the field's type does not take, or a value it does not take, is refused.
+ */
+export function dealFieldRuleValue(
+  rule: Pick<DealFieldRule, 'op' | 'value'>,
+  field: DealFieldShape,
+): { ok: true; value: AttributeValue | null } | { ok: false; message: string } {
+  if (!DEAL_FIELD_COMPARISONS[field.type].includes(rule.op)) {
+    return {
+      ok: false,
+      message: `${field.label} cannot be compared that way. Choose another comparison.`,
+    };
+  }
+  if (VALUELESS.has(rule.op)) return { ok: true, value: null };
+  if (!rule.value) return { ok: false, message: 'A rule is missing its value.' };
+  const coerced = coerceDealFieldValue(field, rule.value);
+  if (!coerced.ok) return coerced;
+  return coerced.value === null
+    ? { ok: false, message: 'A rule is missing its value.' }
+    : { ok: true, value: coerced.value };
+}
+
+/** Whether a graph has conditions that check deal fields (ADR-393). */
+export function usesDealConditions(graph: AutomationGraph): boolean {
+  return graph.nodes.some(
+    (node) => node.type === 'condition' && node.rules.some((rule) => rule.kind === 'deal_field'),
+  );
+}
 
 const conditionNode = z.object({
   id: nodeIdSchema,
@@ -1687,6 +1748,11 @@ export function checkGraph(graph: AutomationGraph, refs: GraphReferences = {}): 
         ) {
           issues.push({ level: 'error', nodeId: node.id, message: 'A rule is missing its value.' });
         }
+        if (rule.kind === 'deal_field') {
+          for (const message of dealFieldRuleIssues(rule, refs)) {
+            issues.push({ level: 'error', nodeId: node.id, message });
+          }
+        }
         if (rule.kind === 'field' && refs.fieldKeys && !refs.fieldKeys.has(rule.field)) {
           issues.push({
             level: 'error',
@@ -2002,6 +2068,33 @@ function dealFieldsStepIssues(node: NodeOf<'update_deal_fields'>, refs: GraphRef
       if (!coerced.ok) out.push(coerced.message);
     }
   }
+  return out;
+}
+
+/**
+ * Problems with a rule that checks a deal field (ADR-393): a pipeline that is not active, a field
+ * the company does not have, a comparison its type does not take, or a value it does not take.
+ */
+function dealFieldRuleIssues(rule: DealFieldRule, refs: GraphReferences): string[] {
+  const out: string[] = [];
+  if (refs.crmPipelines && !refs.crmPipelines.has(rule.pipelineId)) {
+    out.push('Choose an active pipeline for the deal the rule checks.');
+  }
+  if (!refs.dealFields) {
+    if (!VALUELESS.has(rule.op) && !rule.value) out.push('A rule is missing its value.');
+    return out;
+  }
+  if (refs.dealFields.size === 0) {
+    out.push('Add deal fields in the settings of pipelines first.');
+    return out;
+  }
+  const definition = refs.dealFields.get(rule.field);
+  if (!definition) {
+    out.push(`The deal field “${rule.field}” does not exist.`);
+    return out;
+  }
+  const value = dealFieldRuleValue(rule, definition);
+  if (!value.ok) out.push(value.message);
   return out;
 }
 

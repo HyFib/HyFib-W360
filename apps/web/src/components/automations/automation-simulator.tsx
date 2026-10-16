@@ -1,6 +1,6 @@
 'use client';
 import { useState } from 'react';
-import { Button, Checkbox, Field, Input, Textarea } from '@w360/ui';
+import { Button, Checkbox, Field, Input, Select, Textarea } from '@w360/ui';
 import { formatMinor } from '@w360/domain/crm-money';
 import {
   HTTP_WAIT_MINUTES,
@@ -19,6 +19,8 @@ import {
   type RunState,
 } from '@w360/domain/automation-model';
 import { ClientButton, ClientForm, useHydrated } from '@/components/client-form';
+import { describeDetail } from '@/lib/automation-labels';
+import { simulatedDeals, withPair, type SimulatedDealCount } from '@/lib/simulated-deals';
 import type { EditorDealField, EditorPipeline, EditorTemplate } from './node-fields';
 
 /**
@@ -88,6 +90,10 @@ interface SimFacts {
   conversationTags: string;
   fields: string;
   businessOpen: boolean;
+  /** How many open deals the simulated contact has in each pipeline (ADR-393). */
+  deals: SimulatedDealCount;
+  /** The values of the simulated contact's open deal, one key=value per line, as typed. */
+  dealValues: string;
 }
 
 /** A typed tag as the inbox stores it, or null when it cannot be one. */
@@ -108,13 +114,19 @@ const withoutTag = (typed: string, tag: string): string =>
     .filter((t) => t && storedTag(t) !== tag)
     .join(', ');
 
-function toFacts(sim: SimFacts, companyName: string, storeEvent: boolean): RunFacts {
+function toFacts(
+  sim: SimFacts,
+  companyName: string,
+  storeEvent: boolean,
+  deal: Pick<RunFacts, 'deals' | 'dealFields'>,
+): RunFacts {
   const fields: Record<string, string> = {};
   for (const line of sim.fields.split('\n')) {
     const i = line.indexOf('=');
     if (i > 0) fields[line.slice(0, i).trim()] = line.slice(i + 1).trim();
   }
   return {
+    ...deal,
     contactName: sim.contactName.trim() || null,
     companyName,
     tags: tagSet(sim.tags),
@@ -166,6 +178,8 @@ export function AutomationSimulator({
     conversationTags: '',
     fields: '',
     businessOpen: true,
+    deals: 'one',
+    dealValues: '',
   });
   const [state, setState] = useState<RunState | null>(null);
   const [status, setStatus] = useState<Status>('idle');
@@ -357,6 +371,12 @@ export function AutomationSimulator({
               ? `The contact’s deal in ${pipeline?.name ?? 'a pipeline'} would not change: ${problem}.`
               : `On the contact’s open deal in ${pipeline?.name ?? 'a pipeline'}, if the contact has exactly one there: ${changes.join(', ')}.`,
           });
+          // The simulated deal takes the values, so later conditions read them (ADR-393).
+          if (!problem && facts.deals === 'one') {
+            for (const { field: key, value } of effect.values) {
+              facts = { ...facts, dealValues: withPair(facts.dealValues, key, value) };
+            }
+          }
           break;
         }
         case 'handoff': {
@@ -377,7 +397,10 @@ export function AutomationSimulator({
         graph,
         state: current,
         event,
-        facts: toFacts(facts, companyName, storeEvent),
+        facts: toFacts(facts, companyName, storeEvent, {
+          deals: simulatedDeals(facts, graph, crmPipelines, dealFields),
+          dealFields: new Map(dealFields.map((f) => [f.key, f])),
+        }),
         runId: SIMULATION_RUN,
         now: new Date(),
       });
@@ -389,6 +412,13 @@ export function AutomationSimulator({
         break;
       }
       current = result.state;
+      // A deal field rule that could not read the deal or its field says why, as the run page does.
+      if (result.log.nodeType === 'condition' && result.log.detail) {
+        out.push({
+          who: 'note',
+          text: `A deal field rule is not true: ${describeDetail(result.log.detail)}.`,
+        });
+      }
       result.effects.forEach(apply);
       if (result.status === 'running') {
         event = { kind: 'continue' };
@@ -758,6 +788,42 @@ export function AutomationSimulator({
           />
           Business is open
         </label>
+        {dealFields.length > 0 ? (
+          <>
+            <Field
+              id="sim-deals"
+              label="Open deals in each pipeline"
+              description="What conditions on deal fields read."
+            >
+              {(aria) => (
+                <Select
+                  {...aria}
+                  value={sim.deals}
+                  onChange={(e) => setSim({ ...sim, deals: e.target.value as SimFacts['deals'] })}
+                >
+                  <option value="one">One</option>
+                  <option value="none">None</option>
+                  <option value="several">More than one</option>
+                </Select>
+              )}
+            </Field>
+            <Field
+              id="sim-deal-values"
+              label="Deal fields"
+              description={`One key=value per line, as typed in the deal’s form (${dealFields.map((f) => f.key).join(', ')}).`}
+            >
+              {(aria) => (
+                <Textarea
+                  {...aria}
+                  rows={3}
+                  value={sim.dealValues}
+                  disabled={sim.deals !== 'one'}
+                  onChange={(e) => setSim({ ...sim, dealValues: e.target.value })}
+                />
+              )}
+            </Field>
+          </>
+        ) : null}
         {apiInputs && apiInputs.length > 0 ? (
           <div className="grid gap-1 text-xs text-muted-foreground">
             <p className="font-medium text-foreground">Sample inputs</p>

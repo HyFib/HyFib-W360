@@ -209,7 +209,7 @@ test('an automation tags the conversation it answers, and the inbox shows the ta
   }).toPass({ timeout: 30_000 });
 });
 
-test('an automation creates a CRM task and a deal about the customer, moves the deal and sets its fields (ADR-244, ADR-245, ADR-250, ADR-386)', async ({
+test('an automation creates a CRM task and a deal about the customer, moves the deal, sets its fields and branches on them (ADR-244, ADR-245, ADR-250, ADR-386, ADR-393)', async ({
   page,
   request,
 }) => {
@@ -288,7 +288,42 @@ test('an automation creates a CRM task and a deal about the customer, moves the 
   await expect(page.getByText('Seats must be a number.').first()).toBeVisible();
   await page.locator('#step-update-deal-fields-1-value-1').fill('3');
   await page.locator('#step-move-deal-1-next').selectOption('update-deal-fields-1');
+  // Then a condition on the deal's tier (ADR-393): a Gold deal gets a welcome task.
+  await page.getByLabel('Add a step').selectOption('condition');
+  await page.getByRole('button', { name: 'Add step' }).click();
+  await page.locator('#step-condition-1-rule-0-kind').selectOption('deal_field');
+  // Each control is named after its rule; the comparisons and values follow the field's type.
+  await expect(page.getByLabel('Pipeline of rule 1')).toHaveValue(/.+/);
+  await expect(page.getByLabel('Deal field of rule 1')).toHaveValue('tier');
+  await expect(page.locator('#step-condition-1-rule-0-op option')).toHaveText([
+    'is',
+    'is not',
+    'has a value',
+    'is empty',
+  ]);
+  await expect(page.getByLabel('Value of rule 1')).toHaveValue('Gold');
+  await page.getByLabel('Deal field of rule 1').selectOption('seats');
+  await expect(page.locator('#step-condition-1-rule-0-op option')).toHaveText([
+    'is',
+    'is not',
+    'is more than',
+    'is less than',
+    'has a value',
+    'is empty',
+  ]);
+  await page.getByLabel('Comparison of rule 1').selectOption('greater_than');
+  await page.getByLabel('Value of rule 1').fill('two');
+  await expect(page.getByText('Seats must be a number.').first()).toBeVisible();
+  await page.getByLabel('Deal field of rule 1').selectOption('tier');
+  await page.getByLabel('Value of rule 1').selectOption('Gold');
+  await page.locator('#step-update-deal-fields-1-next').selectOption('condition-1');
+  await page.getByLabel('Add a step').selectOption('create_task');
+  await page.getByRole('button', { name: 'Add step' }).click();
+  await page.locator('#step-create-task-2-task').fill('Welcome Gold customer {{name}}');
+  await page.locator('#step-condition-1-then').selectOption('create-task-2');
   await expect(page.getByText(/to fix before publishing/)).toBeHidden();
+  // The rule's controls stay inside the page (the mobile project runs this on a phone).
+  await expectNoHorizontalOverflow(page);
 
   // The simulator says what the steps would do, and creates nothing.
   await page.getByRole('button', { name: 'Start', exact: true }).click();
@@ -312,6 +347,19 @@ test('an automation creates a CRM task and a deal about the customer, moves the 
       'On the contact’s open deal in Sales, if the contact has exactly one there: Tier set to Gold, Seats set to 3.',
     ),
   ).toBeVisible();
+  // The simulated deal now has Gold, so the condition goes to “yes”.
+  await expect(
+    page.getByText(
+      'CRM task “Welcome Gold customer Asha” created for Tomas Tasks, due in 24 hours.',
+    ),
+  ).toBeVisible();
+  // Without an open deal the rule does not hold, and the simulator says why.
+  await page.getByLabel('Open deals in each pipeline').selectOption('none');
+  await page.getByRole('button', { name: 'Start again' }).click();
+  await expect(
+    page.getByText('A deal field rule is not true: the contact has no open deal in the pipeline.'),
+  ).toBeVisible();
+  await expect(page.getByText(/Welcome Gold customer Asha/)).toBeHidden();
 
   await page.getByRole('button', { name: 'Save draft' }).click();
   await expect(page.getByText('Draft saved.')).toBeVisible();
@@ -371,4 +419,12 @@ test('an automation creates a CRM task and a deal about the customer, moves the 
   await expect(page.getByLabel('Tier', { exact: true })).toHaveValue('Gold');
   await expect(page.getByLabel('Seats', { exact: true })).toHaveValue('3');
   await expectNoHorizontalOverflow(page);
+  // The condition after that read the Gold tier, so the welcome task followed (ADR-393).
+  const welcome = page
+    .getByRole('listitem')
+    .filter({ hasText: 'Welcome Gold customer Priya Customer' });
+  await expect(async () => {
+    await page.goto(`/c/${slug}/crm/tasks`);
+    await expect(welcome).toBeVisible({ timeout: 2_000 });
+  }).toPass({ timeout: 60_000 });
 });

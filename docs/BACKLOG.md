@@ -361,7 +361,16 @@ verification, app review, Embedded Signup configuration).
   read as the deal forms read them; checked when publishing and again when it runs, all or none,
   a skipped step naming the field otherwise; an empty value clears the field. Not built: the deal's
   title, value, owner or close date, values from another deal or a contact field, conditions on
-  deal fields).
+  deal fields, since built, ADR-393).
+  **[Automation conditions on custom deal fields built; their database and browser tests run only
+  in CI]** (ADR-393, no migration: a condition's `deal_field` rule compares a field of the
+  contact's single open deal in a pipeline, found as deal steps find it, with the comparisons its
+  type takes (text ignoring case, numbers as numbers, dates as days, yes/no, a choice's option);
+  without exactly one open deal, with a field deleted or an option removed, it does not hold and
+  the step notes why; checked when publishing (an active pipeline, the company's own field, the
+  comparison and the value) and when it runs; the CRM in the plan and `crm.read` to publish; the
+  simulator reads a simulated deal. Not built: the deal's title, value, owner, stage or close date,
+  won or lost deals, comparing two fields, relative dates).
   **[Custom field values on the new-deal form built; its browser test runs only in CI]** (ADR-379,
   no migration: the board's, the contact page's and the inbox's new-deal forms take a value per
   field, checked by the deal creation's existing rules).

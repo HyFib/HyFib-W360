@@ -15335,8 +15335,9 @@ Decision:
 
 Not built: setting the deal's title, value, owner or expected close date, fields of a deal the
 contact has in several pipelines at once, values copied from another deal or a contact field, a
-condition on a deal's field values, and a warning when a field or an option that published steps
-use is deleted or removed (those steps then change nothing, with a note on each run).
+condition on a deal's field values (since built: ADR-393), and a warning when a field or an option
+that published steps use is deleted or removed (those steps then change nothing, with a note on
+each run).
 
 Review (before merge): an independent review found no High or Medium issue. It found the progress
 notes claiming the integration test covered the locks (it covers the writes and the re-checks; the
@@ -15818,3 +15819,78 @@ without the notice (it now counts by its first value, as the export reads it), t
 lists' links carried a filter nothing applies there (they drop it), a misleading test comment and a
 slip in this record. All were fixed. A choice option named "Not set" still reads like the field's
 "Not set" in the select, as on the new-deal form.
+
+## ADR-393 Automation conditions on custom deal fields (P4-01, P4-04) (2026-10-16)
+
+Context: automations create, move and close deals and set their custom fields (ADR-245, ADR-250,
+ADR-251, ADR-386), and their conditions branch on answers, contact fields, tags (ADR-222) and
+business hours, but not on what the contact's deal holds: a bot could not greet a Gold account
+differently or skip questions a member had already answered on the deal. ADR-386 left "a condition
+on a deal's field values" unbuilt.
+
+Decision:
+
+- **A rule kind, not a step** (`automations/graph.ts`): the `condition` node takes a `deal_field`
+  rule with a pipeline (`pipelineId`), one of the company's custom deal fields by key (`field`), a
+  comparison (`op`, from the existing `COMPARISONS`) and a value (up to 200 characters, trimmed,
+  null for "has a value" and "is empty"). No node type, migration or API change follows: webhook
+  endpoints' kinds of step (migration 0302) list node types, so a rule kind changes nothing there,
+  and the public API starts and lists automations without exposing their graphs, so the OpenAPI
+  document is unchanged.
+- **Which deal:** the run's contact's single open deal in the pipeline, found exactly as the steps
+  that move, close and set deal fields find it (`holdForDealChange`, then `lockedDealFields`, then
+  `onlyOpenDeal`, the same helpers in the same lock order), its values read as the deal's page shows
+  them (values of fields that still exist). The deal is locked shared rather than for update, since
+  nothing changes it; the company's deal-field lock is taken shared so a field deleted meanwhile is
+  either seen or waits. Several rules on several pipelines are read in pipeline id order. Deals are
+  read only for conditions that have such rules (`loadFacts`).
+- **Comparisons by type** (`DEAL_FIELD_COMPARISONS`): text takes "is", "is not", "contains", "has a
+  value" and "is empty", ignoring case as contact field rules do; numbers "is", "is not", "is more
+  than", "is less than", "has a value" and "is empty", compared as numbers (999 is less than 1000);
+  dates "is on", "is not on", "is before" (`less_than`), "is after" (`greater_than`), "has a value"
+  and "is empty", compared as YYYY-MM-DD calendar days, the way members enter them, with no time
+  zone to convert; yes/no "is" yes or no, "has a value" and "is empty" (not set is neither yes nor
+  no); choices "is" and "is not" one of the field's options, "has a value" and "is empty". The rule's
+  value is read as the deal's form reads a typed value (`coerceDealFieldValue`): a choice in any case
+  resolves to its option as written and is compared exactly with the stored value, which is always
+  an option as written (ADR-385). Values take no placeholders, as contact field rules' values do: a
+  value with braces is compared as written (and a number or date with one is refused). "Is not"
+  holds for a deal without a value, as for contact fields.
+- **No deal, several, or a definition changed: fail safe.** The rule holds only when there is
+  exactly one open deal there, its field still exists and the rule's value still fits it. Otherwise
+  it does not hold, whatever its comparison ("is empty" and "is not" included), so a missing deal
+  never reads as an empty field; a condition that must know the contact has no deal is not built.
+  The condition is still logged `branched`, with the note of the first rule that could not read its
+  deal or field in the step's detail, as a deal step that changes nothing gives it: `deal_not_open`,
+  `deal_ambiguous`, `crm_not_in_plan`, `contact_erased`, `deal_stage_unavailable` (the pipeline was
+  archived), `deal_field_missing:<key>` (the field was deleted) or `deal_rule_invalid:<key>` (the
+  rule's option was removed from the choice since publishing). The run page names it ("the
+  condition's value for the deal field … is no longer one the field takes"). One note at most keeps
+  the detail within its 300 characters.
+- **Checked with the graph** (`dealFieldRuleIssues`, `dealFieldRuleValue`): an active pipeline of
+  the company, a field the company has ("Add deal fields in the settings of pipelines first." when it
+  has none), a comparison the field's type takes ("Tier cannot be compared that way. Choose another
+  comparison."), a value where one is needed and one the field takes (a number, a real date, yes or
+  no, an existing option). Pipeline ids and keys are looked up only among the company's own
+  definitions, so another company's ids and keys are refused like unknown ones. Publishing refuses a
+  broken rule; a draft is saved with its issues. The same reading runs again when the condition runs
+  (`evaluateDealFieldRule`), where options can change; types and keys never change.
+- **Plan and permission:** publishing or testing an automation with such a rule needs the CRM in the
+  plan, as deal steps do (ADR-249: "does not include CRM"), and `crm.read`, since the branch
+  reveals what deals hold ("Publishing an automation that checks deal fields needs the permission to
+  see the CRM."). At run time a plan without the CRM makes the rule not hold, with `crm_not_in_plan`.
+- **Simulator:** the builder's simulator reads a simulated deal: "Open deals in each pipeline" (one,
+  none or more than one, the same in every active pipeline) and its values typed one key=value per
+  line, read as the deal's form reads them; values an "Update deal fields" step sets are taken into
+  it, so a later condition reads them, and a rule that cannot read the deal says why.
+- **Builder:** "A field of the contact's deal" in a rule's list: a pipeline, a deal field among the
+  company's, the comparisons its type takes, and a value control for the type (a list for yes/no and
+  choices, a date input for dates, text otherwise). Changing the field starts the comparison and the
+  value again. Each control is named after its rule ("Pipeline of rule 1"); the step's fieldset stays
+  disabled until hydration.
+
+Not built: conditions on the deal's title, value, owner, stage or expected close date (the same
+mechanism could read them, but each needs its own comparisons and wording), conditions on won or lost
+deals or deals of any status, comparing two fields (or a field with an answer or a placeholder),
+dates relative to the day the condition runs ("within 7 days"), and a rule that holds when the
+contact has no open deal in a pipeline.

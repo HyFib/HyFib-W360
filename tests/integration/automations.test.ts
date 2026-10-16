@@ -2958,6 +2958,320 @@ describe('automations that create CRM deals (ADR-245)', () => {
     expect((await row(deal!.id)).version).toBe(before.version + 2);
   });
 
+  it('branches on a field of the contact’s open deal, read when the condition runs (ADR-393)', async () => {
+    const s = await setup();
+    await crm().createDealField(s.owner, { label: 'Region', key: 'region', type: 'text' });
+    await crm().createDealField(s.owner, { label: 'Budget', key: 'budget', type: 'number' });
+    const tier = await crm().createDealField(s.owner, {
+      label: 'Tier',
+      key: 'tier',
+      type: 'choice',
+      options: ['Gold', 'Silver', 'Bronze'],
+    });
+    const trial = await crm().createDealField(s.owner, {
+      label: 'Trial',
+      key: 'trial',
+      type: 'boolean',
+    });
+    await crm().createDealField(s.owner, { label: 'Visit', key: 'visit', type: 'date' });
+    const rule = (field: string, op: string, value: string | null) => ({
+      kind: 'deal_field',
+      pipelineId: s.pipelineId,
+      field,
+      op,
+      value,
+    });
+    const checker = (rules: unknown[]) => ({
+      version: 1,
+      start: 'check',
+      nodes: [
+        { id: 'check', type: 'condition', match: 'all', rules, then: 'yes', else: 'no' },
+        { id: 'yes', type: 'send_text', text: 'Priority service.', next: null },
+        { id: 'no', type: 'send_text', text: 'Standard service.', next: null },
+      ],
+    });
+    // Publishing refuses a field the company does not have, a comparison its type does not take
+    // and a value it does not take.
+    await expectAppError(
+      publish(s.owner, 'Seats', keyword('seats'), checker([rule('seats', 'equals', '3')])),
+      'precondition_failed',
+      /The deal field “seats” does not exist/,
+    );
+    await expectAppError(
+      publish(s.owner, 'Goldish', keyword('goldish'), checker([rule('tier', 'contains', 'Go')])),
+      'precondition_failed',
+      /Tier cannot be compared that way/,
+    );
+    await expectAppError(
+      publish(s.owner, 'Rich', keyword('rich'), checker([rule('budget', 'greater_than', 'lots')])),
+      'precondition_failed',
+      /Budget must be a number/,
+    );
+    await expectAppError(
+      publish(s.owner, 'Platinum', keyword('platinum'), checker([rule('tier', 'equals', 'Tin')])),
+      'precondition_failed',
+      /Tier must be one of its options/,
+    );
+    await expectAppError(
+      publish(s.owner, 'Later', keyword('later'), checker([rule('visit', 'less_than', '1/12/26')])),
+      'precondition_failed',
+      /Visit must be a date written as YYYY-MM-DD/,
+    );
+    // Every rule must hold: a choice in any case, a number compared as a number, yes, a day
+    // before 1 December 2026 and text that contains "nor" in any case.
+    await publish(
+      s.owner,
+      'Priority',
+      keyword('priority'),
+      checker([
+        rule('tier', 'equals', 'gold'),
+        rule('budget', 'greater_than', '1000'),
+        rule('trial', 'equals', 'yes'),
+        rule('visit', 'less_than', '2026-12-01'),
+        rule('region', 'contains', 'NOR'),
+      ]),
+    );
+    await publish(
+      s.owner,
+      'No budget',
+      keyword('nobudget'),
+      checker([rule('budget', 'is_not_set', null)]),
+    );
+    const runIn = async (conversationId: string) => {
+      const run = (await runsOf(conversationId)).at(-1)!;
+      expect((await drive(s.c, conversationId, run.id)).outcome).toBe('ended');
+      return run;
+    };
+    const from = waId();
+
+    // A customer without a deal: the rule does not hold, even "is empty", and the run says why.
+    const stranger = waId();
+    await inbound(s.c, stranger, 'nobudget please');
+    const strangerRun = await runIn(await conversationOf(s.c, stranger));
+    const strangerLog = await stepLog(strangerRun.id);
+    expect(strangerLog.find((st) => st.node_id === 'check')).toMatchObject({
+      outcome: 'branched',
+      branch: 'no',
+      detail: 'deal_not_open',
+    });
+    expect(strangerLog.find((st) => st.node_id === 'no')?.outcome).toBe('sent');
+
+    // A customer asks the price (their deal is created); a member fills in the deal's fields.
+    const conversationId = await inbound(s.c, from, 'what is the price?');
+    await runIn(conversationId);
+    const [deal] = await dealsOf(s.c.tenant.id);
+    const fill = async (fields: Record<string, string>) => {
+      const [current] = await fx.query<{ title: string; version: number }>(
+        'SELECT title, version FROM app.crm_deals WHERE id = $1',
+        [deal!.id],
+      );
+      await crm().updateDeal(s.owner, {
+        id: deal!.id,
+        expectedVersion: current!.version,
+        title: current!.title,
+        value: '2500.50',
+        ownerMembershipId: null,
+        expectedCloseOn: null,
+        fields,
+      });
+    };
+    const check = async (text: string) => {
+      await inbound(s.c, from, text);
+      const run = await runIn(conversationId);
+      const log = await stepLog(run.id);
+      return {
+        step: log.find((st) => st.node_id === 'check'),
+        yes: log.find((st) => st.node_id === 'yes')?.outcome ?? null,
+        no: log.find((st) => st.node_id === 'no')?.outcome ?? null,
+      };
+    };
+    // Without values: no priority, and no budget.
+    expect(await check('priority please')).toEqual({
+      step: expect.objectContaining({ outcome: 'branched', branch: 'no', detail: null }),
+      yes: null,
+      no: 'sent',
+    });
+    expect((await check('nobudget please')).step).toMatchObject({ branch: 'yes', detail: null });
+
+    await fill({
+      region: 'North',
+      budget: '2500.5',
+      tier: 'gold',
+      trial: 'yes',
+      visit: '2026-11-01',
+    });
+    expect(await check('priority please')).toEqual({
+      step: expect.objectContaining({ outcome: 'branched', branch: 'yes', detail: null }),
+      yes: 'sent',
+      no: null,
+    });
+    expect((await check('nobudget please')).step).toMatchObject({ branch: 'no', detail: null });
+    // 999 is less than 1000 as a number (as text "999" would come after "1000").
+    await fill({ budget: '999' });
+    expect((await check('priority please')).step).toMatchObject({ branch: 'no', detail: null });
+    await fill({ budget: '10000' });
+    expect((await check('priority please')).step).toMatchObject({ branch: 'yes', detail: null });
+    // A day after the rule's day, then no longer yes.
+    await fill({ visit: '2026-12-01' });
+    expect((await check('priority please')).step).toMatchObject({ branch: 'no', detail: null });
+    await fill({ visit: '2026-11-30', trial: 'no' });
+    expect((await check('priority please')).step).toMatchObject({ branch: 'no', detail: null });
+    await fill({ trial: 'yes' });
+    expect((await check('priority please')).step).toMatchObject({ branch: 'yes', detail: null });
+
+    // Gold is removed from the options (the deal has Silver): the rule fails safe, saying why.
+    await fill({ tier: 'Silver' });
+    await crm().setDealFieldOptions(s.owner, tier.id, ['Silver', 'Bronze']);
+    expect((await check('priority please')).step).toMatchObject({
+      branch: 'no',
+      detail: 'deal_rule_invalid:tier',
+    });
+    await crm().setDealFieldOptions(s.owner, tier.id, ['Gold', 'Silver', 'Bronze']);
+    await fill({ tier: 'Gold' });
+    expect((await check('priority please')).step).toMatchObject({ branch: 'yes', detail: null });
+
+    // A field deleted since publishing: the rule does not hold, naming the field.
+    await crm().deleteDealField(s.owner, trial.id);
+    expect((await check('priority please')).step).toMatchObject({
+      branch: 'no',
+      detail: 'deal_field_missing:trial',
+    });
+
+    // A member opens a second deal for the customer in the pipeline: which one is meant is not
+    // known, so neither rule holds ("is empty" included).
+    await fill({ budget: '' });
+    expect((await check('nobudget please')).step).toMatchObject({ branch: 'yes', detail: null });
+    await crm().createDeal(s.owner, {
+      contactId: deal!.contact_id,
+      pipelineId: s.pipelineId,
+      stageId: s.stageId,
+      title: 'Spare kettle',
+    });
+    expect((await check('nobudget please')).step).toMatchObject({
+      branch: 'no',
+      detail: 'deal_ambiguous',
+    });
+  });
+
+  it('checks deal fields only with the CRM in the plan, a member who may see it and the company’s own definitions (ADR-393)', async () => {
+    const s = await setup();
+    await crm().createDealField(s.owner, { label: 'Region', key: 'region', type: 'text' });
+    const graph = (pipelineId: string, field: string) => ({
+      version: 1,
+      start: 'check',
+      nodes: [
+        {
+          id: 'check',
+          type: 'condition',
+          match: 'all',
+          rules: [{ kind: 'deal_field', pipelineId, field, op: 'is_set', value: null }],
+          then: 'yes',
+          else: 'no',
+        },
+        { id: 'yes', type: 'send_text', text: 'We know your region.', next: null },
+        { id: 'no', type: 'send_text', text: 'Where are you?', next: null },
+      ],
+    });
+
+    // Another company's pipeline and field key are not this company's.
+    const other = await fx.company();
+    const otherOwner = await fx.ctx(other, other.owner);
+    const { id: otherPipeline } = await crm().createPipeline(otherOwner, {
+      name: 'Theirs',
+      currency: 'INR',
+      stages: ['New'],
+    });
+    await crm().createDealField(otherOwner, { label: 'Vip', key: 'vip', type: 'boolean' });
+    await expectAppError(
+      publish(s.owner, 'Theirs', keyword('region'), graph(otherPipeline, 'region')),
+      'precondition_failed',
+      /Choose an active pipeline for the deal the rule checks/,
+    );
+    await expectAppError(
+      publish(s.owner, 'Vip', keyword('region'), graph(s.pipelineId, 'vip')),
+      'precondition_failed',
+      /The deal field “vip” does not exist/,
+    );
+    // An archived pipeline is not active.
+    const { id: archivedPipeline } = await crm().createPipeline(s.owner, {
+      name: 'Old',
+      currency: 'INR',
+      stages: ['New'],
+    });
+    await crm().archivePipeline(s.owner, {
+      id: archivedPipeline,
+      expectedVersion: (await crm().listPipelines(s.owner)).find((p) => p.id === archivedPipeline)!
+        .version,
+    });
+    await expectAppError(
+      publish(s.owner, 'Old', keyword('region'), graph(archivedPipeline, 'region')),
+      'precondition_failed',
+      /Choose an active pipeline for the deal the rule checks/,
+    );
+
+    // A member who may publish automations but not see the CRM.
+    const noCrm: TenantContext = {
+      ...s.owner,
+      permissions: new Set([...s.owner.permissions].filter((p) => p !== 'crm.read')),
+    };
+    await expectAppError(
+      publish(noCrm, 'Regions for all', keyword('region'), graph(s.pipelineId, 'region')),
+      'forbidden',
+      /checks deal fields needs the permission to see the CRM/,
+    );
+    await publish(s.owner, 'Regions', keyword('region'), graph(s.pipelineId, 'region'));
+
+    // A customer with a deal and a region: yes.
+    const from = waId();
+    const conversationId = await inbound(s.c, from, 'what is the price?');
+    const runIn = async () => {
+      const run = (await runsOf(conversationId)).at(-1)!;
+      expect((await drive(s.c, conversationId, run.id)).outcome).toBe('ended');
+      return run;
+    };
+    await runIn();
+    const [deal] = await dealsOf(s.c.tenant.id);
+    const [current] = await fx.query<{ title: string; version: number }>(
+      'SELECT title, version FROM app.crm_deals WHERE id = $1',
+      [deal!.id],
+    );
+    await crm().updateDeal(s.owner, {
+      id: deal!.id,
+      expectedVersion: current!.version,
+      title: current!.title,
+      value: '2500.50',
+      ownerMembershipId: null,
+      expectedCloseOn: null,
+      fields: { region: 'North' },
+    });
+    await inbound(s.c, from, 'my region');
+    const known = (await stepLog((await runIn()).id)).find((st) => st.node_id === 'check');
+    expect(known).toMatchObject({ outcome: 'branched', branch: 'yes', detail: null });
+
+    // Platform staff move the company to a plan without the CRM: the rule does not hold, saying
+    // why, and the run goes on.
+    await onPlan(s.c, ['automations', 'flows']);
+    await inbound(s.c, from, 'my region again');
+    const log = await stepLog((await runIn()).id);
+    expect(log.find((st) => st.node_id === 'check')).toMatchObject({
+      outcome: 'branched',
+      branch: 'no',
+      detail: 'crm_not_in_plan',
+    });
+    expect(log.find((st) => st.node_id === 'no')?.outcome).toBe('sent');
+    // Nor can such a condition be published, whatever the member's roles.
+    await expectAppError(
+      publish(
+        await fx.ctx(s.c, s.c.owner),
+        'More regions',
+        keyword('area'),
+        graph(s.pipelineId, 'region'),
+      ),
+      'forbidden',
+      /does not include CRM/,
+    );
+  });
+
   it('is published only with an active stage, by a member who may edit the CRM (ADR-250)', async () => {
     const c = await fx.company();
     const owner = await fx.ctx(c, c.owner);

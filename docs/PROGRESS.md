@@ -1,5 +1,63 @@
 # Progress
 
+## 2026-10-16 — Automation conditions on custom deal fields (P4-01, P4-04, ADR-393)
+
+Status: **Implemented; its database and browser tests run in CI only.** Automations could set a
+deal's custom fields (ADR-386) but not branch on them; ADR-386 listed "a condition on a deal's field
+values" as not built.
+
+### Completed
+
+- **Domain (`automations/graph.ts`):** a `deal_field` rule of the `condition` node (pipeline, field
+  key, comparison, value; no new node type, migration or API change), `DEAL_FIELD_COMPARISONS` by
+  type, `dealFieldRuleValue` (the deal forms' `coerceDealFieldValue`, a choice resolved to its
+  option as written), `dealFieldRuleIssues` in `checkGraph` (an active pipeline, the company's own
+  field, the comparison, the value) and `usesDealConditions`.
+- **Interpreter:** `RunFacts.deals` and `RunFacts.dealFields`; `evaluateDealFieldRule` compares
+  text ignoring case, numbers as numbers, dates as YYYY-MM-DD days, yes/no and choices as stored,
+  and fails safe (the rule does not hold) without exactly one open deal, with a deleted field or a
+  removed option; the condition's log detail carries the first rule's note.
+- **Runner:** `loadDealFacts` (only for conditions with such rules) reuses `holdForDealChange`,
+  `lockedDealFields` and `onlyOpenDeal` (now taking a shared lock for reads), in pipeline id order,
+  and reads the values of fields that still exist.
+- **Service:** `assertMayCheckDeals`: publishing or testing needs the CRM in the plan and `crm.read`.
+- **Web:** the rule editor ("A field of the contact's deal": pipeline, deal field, comparisons by
+  type, a value control by type, each control named after its rule), comparison labels and the
+  `deal_rule_invalid:<key>` note in `automation-labels.ts`, and the simulator's deal ("Open deals in
+  each pipeline", typed values, values set by earlier steps, the note when a rule cannot read the
+  deal) built by `lib/simulated-deals.ts`.
+- **Tests:** unit (`automations/deal-condition.test.ts`, 21 tests: the schema, the checks for every
+  type and comparison, values by type, evaluation by type and comparison, no deal, several, deleted
+  fields, removed options, inherited keys, the branch and its note; `lib/simulated-deals.test.ts`, 4
+  tests; `lib/automation-labels.test.ts`: the comparison labels and notes); integration
+  (`automations.test.ts`: 2 new, a published condition on all five types with numbers, dates and a
+  choice's case, no deal, a removed option, a deleted field, two open deals, publishing refused;
+  another company's pipeline and key, an archived pipeline, `crm.read`, the plan at run time and
+  when publishing); e2e (`automations.spec.ts`: the ADR-386 test adds the condition in the builder,
+  checks its controls and comparisons by type, simulates it with and without a deal, publishes it
+  and sees the task its "yes" branch creates; no horizontal overflow).
+- **Docs:** ADR-393 (and ADR-386's note); ARCHITECTURE, SECURITY, THREAT-MODEL T346, RUNBOOKS (why a
+  condition took the other branch), BACKLOG, and the matrix's H-012 text and evidence (status
+  unchanged).
+- **Mutation checks:** 23 deliberate regressions in the new TypeScript (a comparison added to
+  yes/no, valueless comparisons needing a value, an invalid value accepted, the pipeline, empty
+  field list and rule checks dropped, `usesDealConditions` reading another kind, a missing deal read
+  as one, a deleted field or a stale option holding, inherited keys read, text compared by case,
+  "is not" false without a value, `>=` for after, numbers compared as text, yes/no compared as
+  text, the last note instead of the first, the note dropped, the result inverted, the simulator's
+  notes swapped or values not read by type, a date label, the simulator's value replacement): 23
+  caught by the unit tests. The runner's reading and locks and the service's plan and permission
+  rule are covered by the integration tests, which run in CI only.
+
+### Test commands and results (local, 2026-10-16)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 164 files, 1,751 tests passed                                   |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+
 ## 2026-10-16 — Review fixes for ADR-390 and ADR-391
 
 Status: **Fixed; the database and browser tests run in CI only.** Independent reviews found no High

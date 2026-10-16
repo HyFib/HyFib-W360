@@ -402,6 +402,12 @@ Phase 4 rules (automations, P4-01):
   choice only among its current options); a field deleted or a value no longer valid changes
   nothing. The deal records the automation as its changer and the timeline the automation and the
   run. Permissions are unchanged.
+- Conditions on custom deal fields (ADR-393): publishing or testing an automation whose conditions
+  check deal fields needs the CRM in the plan and `crm.read` (the branch taken reveals what a deal
+  holds). Pipeline ids and field keys are checked against the company's own definitions; the
+  runner reads only the run's contact's single open deal, in the company's scope, with the deal
+  steps' checks and lock order (the deal locked shared). Without exactly one open deal, or with a
+  field or option gone, the rule does not hold and the step notes why.
 
 Phase 4 rules (automation web requests, P4-02):
 

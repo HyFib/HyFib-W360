@@ -536,6 +536,19 @@ conversation already has the maximum number of tags" (20), or "the contact was e
 failed as `version_unreadable` right after a deploy was read by a worker of the previous release:
 roll the workers out, then start the run again.
 
+**A condition on a deal field took the other branch (ADR-393).** Open the run: the condition's step
+("Checked a condition") shows the branch and, when a rule could not read the deal or its field, why:
+"the contact has no open deal in the pipeline", "the contact has more than one open deal in the
+pipeline" (close or move the extra one), "the pipeline or the stage was archived or removed", "the
+company’s plan does not include the CRM", "the deal field … no longer exists" or "the condition’s
+value for the deal field … is no longer one the field takes" (an option removed since publishing:
+edit the rule and publish again). Such a rule does not hold whatever its comparison, "is empty" and
+"is not" included. Without a note the deal was read: compare the values on the deal page as they
+were when the step ran (the timeline shows later edits); text compares ignoring case, numbers as
+numbers, dates as days, and "is not" holds for a deal without a value. Values in rules take no
+placeholders. A run that failed as `version_unreadable` right after a deploy was read by a worker of
+the previous release: roll the workers out, then start the run again.
+
 **Customers do not see that their messages were read (ADR-223).** Settings → Inbox, "Read receipts
 and typing", must be on. A receipt is queued when a member opens a conversation with unread
 messages, for the customer's latest message; the worker logs each job as `read receipt` with its

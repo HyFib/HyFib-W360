@@ -572,6 +572,17 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   `lockedDealFields` (shared) before the deal, reads the values again with `stepDealAttributes`
   (all or none, the note naming the first field it cannot set), writes them with a new version and
   the automation as changer and adds a `deal_updated` activity without an actor.
+- **Automation conditions on custom deal fields** (ADR-393): a `deal_field` rule of the `condition`
+  node (a pipeline, a field key, a comparison from `COMPARISONS` limited by
+  `DEAL_FIELD_COMPARISONS` for the field's type, and a value read by `coerceDealFieldValue`, without
+  placeholders), checked by `dealFieldRuleIssues` against `crmPipelines` and `dealFields`. For a
+  condition with such rules, `loadFacts` adds `RunFacts.deals` (per pipeline, the contact's only
+  open deal's values of existing fields, or the deal steps' note) and `RunFacts.dealFields`, read by
+  `loadDealFacts` with `holdForDealChange`, `lockedDealFields` and `onlyOpenDeal` (locked shared).
+  `evaluateDealFieldRule` compares by type and fails safe (the rule does not hold) without exactly
+  one deal, with a deleted field or a value the field no longer takes; the condition's log detail
+  carries the first such note. Publishing or testing needs the CRM in the plan and `crm.read`
+  (`assertMayCheckDeals`). The simulator's deal is built by `lib/simulated-deals.ts`.
 - **Read receipts and typing indicators** (`inbox/read-receipts.ts`, ADR-223): `markRead` in
   `messaging/inbox.ts` calls `queueReadReceipt` in its transaction; the composer calls
   `showTypingAction` at most every 20 seconds, which `showTyping` checks and queues; both sign a job
@@ -707,8 +718,8 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   (`integrations.manage`); run pages list each call (method, host, path, outcome).
 - **Not built yet:** templates with media headers in template steps, usage billing. Form steps
   (ADR-248), runs started through the public API (ADR-077), template steps' website buttons whose
-  link ends with a value (ADR-229), products steps (ADR-383) and steps that set deal fields
-  (ADR-386) were built after this list was first written.
+  link ends with a value (ADR-229), products steps (ADR-383), steps that set deal fields
+  (ADR-386) and conditions on deal fields (ADR-393) were built after this list was first written.
 
 ## 6F. CRM **[built — reminder emails verified through Mailpit only]**
 
