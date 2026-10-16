@@ -11,8 +11,9 @@ built.
 - **Payload (`webhooks/payloads.ts`):** every deal event's `deal` (`deal.created`, `deal.updated`,
   `deal.stage_changed`, `deal.owner_changed`, `deal.status_changed`) gives `items`, after
   `createdAt` and before `changedBy` and `apiKeyId`: the deal's products read when the event is
-  delivered, in the payload's transaction and the worker's verified company scope, after the deal
-  (a deal that is gone still ends as `event_gone` with nothing more read). No migration.
+  delivered (a read of its own after the deal's, at read committed), in the worker's verified
+  company scope (a deal that is gone still ends as `event_gone` with nothing more read). No
+  migration.
 - **One representation:** `readApiDealItems`, `toApiDealItem` and `apiDealItemSchema` moved
   unchanged to `api/deal-item-view.ts` (re-exported from `api/deal-items.ts` and `api/openapi.ts`),
   so the API and the payload share the read (the company and deal condition, the order: added time,
@@ -24,7 +25,7 @@ built.
   `deal.updated`'s descriptions say every deal event carries the products as `GET /deals/{id}/items`
   gives them, that a change of products alone sends no event, and that bodies delivered before have
   none (no decision numbers).
-- **Tests:** unit (`webhooks/deal-items.test.ts`, 7 tests: the schema's identity with the API's
+- **Tests:** unit (`webhooks/deal-items.test.ts`, 9 tests (2 from the review fixes): the schema's identity with the API's
   item and its place in every deal event, empty and full lists, order, the bound of 50, invalid
   items, the rendering of all five events with the read's condition and order checked as SQL, no
   items, erasure, a deal gone or an id that is not one, the OpenAPI entries and wording;
@@ -43,18 +44,34 @@ built.
   schema's erasure sentence and either OpenAPI sentence removed, `items` optional): 17 caught by the
   unit tests. The worker's real read under row security is covered by the integration test, which
   runs in CI only.
+- **Review fixes (two High findings):** the new integration test read the fixture in its
+  `describe` body (collected before `beforeAll` sets it, so the whole file would have failed); its
+  API deps are now built inside the test. Webhook bodies were capped at the egress guard's 64 KiB,
+  which a deal with 50 products of long names exceeds (refused as `request_too_large`, retried,
+  then failed): deliveries now have their own egress client, `webhookEgress`, built from the
+  worker's policy by `webhookEgressPolicy` with request bodies up to `WEBHOOK_LIMITS.requestBytes`
+  (256 KiB), every other limit and check unchanged; other callers keep 64 KiB. A unit test builds
+  the largest deal event through the payload code (every text at its column's most, of control
+  characters written as six-byte escapes, 50 items with 500-character names and 100-character
+  content ids, 50 changed field keys): 202,667 bytes (112,667 with product names' 200), more than
+  48 KiB under the new limit, and sends it through the client; the integration tests deliver
+  through the same policy. Wording: the deal and its items are two reads at read committed at
+  delivery, not one snapshot. 8 more deliberate regressions (the limit at 64, 200, 220 or 1,024
+  KiB, the policy unchanged, the response limit raised instead, a fixed policy ignoring the
+  worker's, items doubled): 8 caught by the unit tests. The worker wiring (`runtime.ts`, the
+  handler passing `webhookEgress`) has no unit test; typecheck covers that the field exists.
 - **Not built:** `deal.updated` naming `items` in `changes` when products change (a capture on
-  `app.crm_deal_items`, migration 0308, an endpoint detail and history), the items' total in the
+  `app.crm_deal_items` in a migration, an endpoint detail and history), the items' total in the
   payload, items in the API's deal object, and an e2e test of its own.
 
 ### Test commands and results (local, 2026-10-16)
 
-| Command                                            | Result                                                          |
-| -------------------------------------------------- | --------------------------------------------------------------- |
-| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
-| `pnpm test` (unit)                                 | 166 files, 1,777 tests passed                                   |
-| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
-| `pnpm build`                                       | passed                                                          |
+| Command                                            | Result                                                                                                            |
+| -------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                                                                             |
+| `pnpm test` (unit)                                 | 166 files, 1,779 tests passed                                                                                     |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them                                                   |
+| `pnpm build`                                       | passed (after the fixes, in the combined run; before them, in a standalone run after the combined run hit ENOSPC) |
 
 ## 2026-10-16 — The deal field filter on the won and lost lists and in the API (P4-04, P5-08, ADR-394)
 

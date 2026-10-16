@@ -2244,14 +2244,16 @@ state` for one that becomes skipped from another state, each only for a message 
   characters, and lets `deal_details` hold `fields`. The API's deal history names `fields` for a
   `deal_updated` entry naming `custom_fields`.
 - **Products in deal payloads** (no migration, ADR-395): every deal event's `deal` gives `items`,
-  read when the event is delivered in the payload's transaction by `readApiDealItems`
+  read at delivery (a read of its own after the deal's, at read committed) by `readApiDealItems`
   (`api/deal-item-view.ts`), the read behind `GET /deals/{id}/items`, so each item has the API's
   representation (`apiDealItemSchema`, `toApiDealItem`) and order (added time, then id), at most
   `MAX_DEAL_ITEMS` (50). The view and the limits (`crm/deal-item-limits.ts`) import none of the
   deal services, so the payloads do not depend on them. Erasure keeps items, so an erased
   contact's deal gives them. Adding or removing an item captures nothing (no trigger on
   `app.crm_deal_items`): `changes` never names products, and an event delivered later gives the
-  items as they are then.
+  items as they are then. The largest deal event body is 202,667 bytes, so deliveries go through
+  the worker's `webhookEgress` (`webhookEgressPolicy`: the worker's policy with request bodies up
+  to `WEBHOOK_LIMITS.requestBytes`, 256 KiB); every other egress caller keeps 64 KiB.
 - **Task events** (migrations 0177–0178, ADR-261): triggers on `app.crm_tasks` capture
   `task.created` when a task is inserted (members, the runner's task steps, keys) and
   `task.status_changed` when an update changes its status (members, keys through `apiUpdateTask`),
@@ -2317,8 +2319,9 @@ LOCKED`; pending ones due now, then `delivering` ones whose lease expired), buil
   `payload_failed` without an attempt, and the rest of the batch goes on; the worker logs its
   company, delivery, endpoint, event type, what failed and the error's class and code, never the
   payload or the error's message. The POSTs go through the egress client (DNS pinned, private,
-  loopback, link-local, metadata and reserved addresses refused, no redirects, 64 KB sent, responses
-  read up to 256 KB and discarded) with no transaction open.
+  loopback, link-local, metadata and reserved addresses refused, no redirects, 256 KiB sent (64 KB
+  before ADR-395; its own client, `webhookEgress`), responses read up to 256 KB and discarded) with
+  no transaction open.
   Each outcome is recorded in its own transaction, locking the endpoint before the delivery; an
   outcome whose attempt no longer owns the delivery (lease expired and re-claimed, or the endpoint
   deleted) is dropped. A 2xx answer succeeds; anything else is retried at 1 min, 5 min, 30 min, 2 h,

@@ -6,6 +6,9 @@ import { apiDealItemsSchema, toApiDealItem } from '../api/deal-item-view';
 import { apiDealItemSchema, buildOpenApiDocument } from '../api/openapi';
 import { MAX_DEAL_ITEMS, MAX_ITEM_QUANTITY } from '../crm/deal-items';
 import { MAX_DEAL_MINOR } from '../crm/money';
+import { DEFAULT_EGRESS_POLICY, createEgressClient, EgressError } from '@w360/core/egress';
+import { webhookEgressPolicy, WEBHOOK_USER_AGENT } from './delivery';
+import { WEBHOOK_LIMITS } from './model';
 import {
   buildWebhookPayload,
   dealCreatedPayloadSchema,
@@ -426,5 +429,127 @@ describe('products on deals in deal webhook payloads (ADR-395)', () => {
     for (const type of Object.keys(DEAL_EVENT_SCHEMAS)) {
       expect(JSON.stringify(doc.webhooks[type]), type).not.toMatch(/ADR-\d/);
     }
+  });
+
+  describe('the largest deal event body', () => {
+    // The character that takes the most bytes in a JSON body per character a column counts: a
+    // control character, written as a six-byte escape (\u0001). A four-byte emoji takes fewer.
+    const worst = (n: number) => '\u0001'.repeat(n);
+
+    /** A deal.updated of a lost deal, each text at its column's most, with `names`-long names. */
+    async function largestBody(names: number) {
+      const reads = answering([
+        [
+          {
+            ...dealRow,
+            // crm_deals: a title of 120 characters, a lost reason of 200.
+            title: worst(120),
+            status: 'lost',
+            lostReason: worst(200),
+            valueMinor: MAX_DEAL_MINOR,
+            expectedCloseOn: '2026-12-31',
+            conversationId: '0192a1b2-0000-7000-8000-0000000000c9',
+            apiKeyId: KEY,
+          },
+        ],
+        // 50 items (ADR-375), each with the longest name (crm_deal_items: 500; product names hold
+        // 200) and content id (100), the longest Meta catalog id, a key's id and the largest total.
+        Array.from({ length: MAX_DEAL_ITEMS }, (_, n) => ({
+          ...mugRow,
+          id: `0192a1b2-0000-7000-8000-${String(n).padStart(12, '0')}`,
+          retailerId: worst(100),
+          catalogId: '9'.repeat(32),
+          name: worst(names),
+          quantity: MAX_ITEM_QUANTITY,
+          unitPriceMinor: MAX_DEAL_MINOR / MAX_ITEM_QUANTITY,
+          createdByApiKeyId: KEY,
+        })),
+        // contacts: a name of 200 characters, the longest E.164 number.
+        [{ phone: '+123456789012345', name: worst(200), erasedAt: null }],
+      ]);
+      const built = await buildWebhookPayload(
+        reads.tx,
+        eventOf('deal.updated', {
+          ...detailOf('deal.updated'),
+          changedBy: 'api',
+          apiKeyId: KEY,
+          changes: ['title', 'valueMinor', 'expectedCloseOn', 'fields'],
+          // 50 custom fields (ADR-373) with the longest keys.
+          changedFields: Array.from({ length: 50 }, (_, n) =>
+            `k${String(n).padStart(2, '0')}`.padEnd(40, 'x'),
+          ),
+        }),
+        'endpoint',
+      );
+      expect(dealUpdatedPayloadSchema.safeParse(built).success).toBe(true);
+      expect(reads.unread()).toBe(0);
+      // Serialised as the delivery serialises it.
+      return JSON.stringify(built);
+    }
+
+    it('fits the webhook request limit with room to spare, though not the 64 KiB of other requests', async () => {
+      expect(WEBHOOK_LIMITS.requestBytes).toBe(256 * 1024);
+      expect(Buffer.byteLength(JSON.stringify(worst(1)))).toBe(2 + 6);
+      expect(Buffer.byteLength(JSON.stringify('😀'))).toBeLessThan(2 + 6);
+      const largest = Buffer.byteLength(await largestBody(500));
+      // 202,667 bytes: under the limit by more than 48 KiB.
+      expect(largest).toBeGreaterThan(190_000);
+      expect(largest).toBeLessThan(WEBHOOK_LIMITS.requestBytes - 48 * 1024);
+      // With the 200 characters a catalog product's name holds (112,667 bytes), still beyond the
+      // default limit.
+      expect(Buffer.byteLength(await largestBody(200))).toBeGreaterThan(
+        DEFAULT_EGRESS_POLICY.maxRequestBytes,
+      );
+    });
+
+    it('is sent by the webhook egress client, which keeps every other limit of the worker’s', async () => {
+      const policy = { ...DEFAULT_EGRESS_POLICY, allowLoopbackForTests: true, timeoutMs: 2_000 };
+      expect(webhookEgressPolicy(policy)).toEqual({
+        ...policy,
+        maxRequestBytes: WEBHOOK_LIMITS.requestBytes,
+      });
+      // The size is checked before the address is looked up: a body the client takes reaches the
+      // lookup, which fails here on purpose; a larger one is refused as too large.
+      const lookups: string[] = [];
+      const client = createEgressClient(webhookEgressPolicy(policy), {
+        resolve: async (host) => {
+          lookups.push(host);
+          throw new Error('no lookups in unit tests');
+        },
+      });
+      const send = (body: string) =>
+        client
+          .request({
+            method: 'POST',
+            url: 'https://hooks.example.com/w360',
+            headers: { 'content-type': 'application/json', 'user-agent': WEBHOOK_USER_AGENT },
+            body,
+          })
+          .then(
+            () => 'sent',
+            (error: unknown) =>
+              error instanceof EgressError && error.code === 'request_too_large'
+                ? 'too_large'
+                : 'looked_up',
+          );
+      expect(await send(await largestBody(500))).toBe('looked_up');
+      expect(await send('x'.repeat(WEBHOOK_LIMITS.requestBytes))).toBe('looked_up');
+      expect(await send('x'.repeat(WEBHOOK_LIMITS.requestBytes + 1))).toBe('too_large');
+      expect(lookups).toEqual(['hooks.example.com', 'hooks.example.com']);
+      // Other callers keep the default: the same body is too large for them.
+      const other = createEgressClient(policy, {
+        resolve: async () => {
+          throw new Error('no lookups in unit tests');
+        },
+      });
+      await expect(
+        other.request({
+          method: 'POST',
+          url: 'https://hooks.example.com/w360',
+          headers: {},
+          body: await largestBody(500),
+        }),
+      ).rejects.toMatchObject({ code: 'request_too_large' });
+    });
   });
 });

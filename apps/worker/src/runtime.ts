@@ -31,6 +31,7 @@ import {
   RazorpayClient,
   SmtpEmailSender,
   WebhookOAuthTokenCache,
+  webhookEgressPolicy,
   type BillingNoticeDeps,
   type EmailSender,
   type JobQueue,
@@ -59,6 +60,12 @@ export interface WorkerRuntime {
   /** The only client for company-chosen addresses (automation HTTP steps): see core/egress. */
   egress: EgressClient;
   egressPolicy: EgressPolicy;
+  /**
+   * Egress for webhook deliveries (ADR-395): the same policy, with request bodies up to
+   * `WEBHOOK_LIMITS.requestBytes` (`webhookEgressPolicy`), so a deal event listing its products is
+   * sent; every other caller keeps the policy's 64 KiB.
+   */
+  webhookEgress: EgressClient;
   /**
    * Egress for companies' stores (Shopify shops, WooCommerce sites): the same address checks, with
    * larger responses (order pages) and a longer deadline.
@@ -171,6 +178,7 @@ export async function createWorkerRuntime(): Promise<WorkerRuntime> {
     notices: { outbox: { keyring, jobs, signer }, appBaseUrl: config.APP_BASE_URL },
     egress: createEgressClient(egressPolicy),
     egressPolicy,
+    webhookEgress: createEgressClient(webhookEgressPolicy(egressPolicy)),
     storeEgress: createEgressClient({
       ...egressPolicy,
       timeoutMs: 30_000,

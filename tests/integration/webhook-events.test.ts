@@ -78,6 +78,7 @@ import {
   processWebhookDeliveries,
   WEBHOOK_EXACT_TIME_RE,
   WebhookOAuthTokenCache,
+  webhookEgressPolicy,
   runCampaignTick,
   syncTemplates,
   taskAssigneeChangedPayloadSchema,
@@ -214,7 +215,12 @@ async function deliverDue(c: Company) {
       clock: systemClock,
       keyring: fx.keyring,
       egress: createEgressClient(
-        { ...DEFAULT_EGRESS_POLICY, allowLoopbackForTests: true, timeoutMs: 2_000 },
+        // The worker's webhook client (ADR-395): bodies up to WEBHOOK_LIMITS.requestBytes.
+        {
+          ...webhookEgressPolicy(DEFAULT_EGRESS_POLICY),
+          allowLoopbackForTests: true,
+          timeoutMs: 2_000,
+        },
         { resolve: async () => [{ address: '127.0.0.1', family: 4 }] },
       ),
       timeoutMs: 2_000,
@@ -7815,7 +7821,8 @@ describe('deal events (ADR-256)', () => {
       return { id: created.id, ctx: key };
     }
 
-    const apiDeps = { db: fx.dbs.app, clock: systemClock };
+    // Read when a test runs: `fx` is set in beforeAll, after the describe body is collected.
+    const apiDeps = () => ({ db: fx.dbs.app, clock: systemClock });
     const itemsIn = (body: { data: Record<string, unknown> } | undefined) =>
       dealIn(body).items as ApiDealItem[];
 
@@ -7875,7 +7882,7 @@ describe('deal events (ADR-256)', () => {
         unitPrice: '1500.50',
       });
       const added = await apiAddDealItem(
-        apiDeps,
+        apiDeps(),
         writer.ctx,
         dealId,
         { retailerId: 'PLATE-01', quantity: 1, unitPriceMinor: 1_000, expectedVersion: 2 },
@@ -7898,7 +7905,7 @@ describe('deal events (ADR-256)', () => {
       // Delivered after the products were listed, the addition gives them as the API lists them:
       // in the order added, the member's first, each as GET /deals/{id}/items gives it.
       await deliverDue(c);
-      const listed = await apiListDealItems(apiDeps, reader.ctx, dealId);
+      const listed = await apiListDealItems(apiDeps(), reader.ctx, dealId);
       expect(
         listed.map((i) => [
           i.retailerId,
@@ -7923,7 +7930,7 @@ describe('deal events (ADR-256)', () => {
       const emptyBody = bodies.get(first[1]!.id);
       expect(dealCreatedPayloadSchema.safeParse(emptyBody).success).toBe(true);
       expect(itemsIn(emptyBody)).toEqual([]);
-      expect(await apiListDealItems(apiDeps, reader.ctx, emptyId)).toEqual([]);
+      expect(await apiListDealItems(apiDeps(), reader.ctx, emptyId)).toEqual([]);
 
       // Its title changes (deal.updated), then the key removes the mug before the event is
       // delivered: the event gives the products as they are when it is delivered.
@@ -7936,7 +7943,7 @@ describe('deal events (ADR-256)', () => {
         expectedCloseOn: null,
       });
       expect(
-        await apiRemoveDealItem(apiDeps, writer.ctx, dealId, listed[0]!.id, {
+        await apiRemoveDealItem(apiDeps(), writer.ctx, dealId, listed[0]!.id, {
           expectedVersion: '4',
         }),
       ).toEqual({ id: listed[0]!.id, deleted: true, dealVersion: 5 });
@@ -7950,7 +7957,7 @@ describe('deal events (ADR-256)', () => {
       const updatedBody = bodiesById(every.path).get(second[2]!.id);
       expect(dealUpdatedPayloadSchema.safeParse(updatedBody).success).toBe(true);
       expect(updatedBody?.data.changes).toEqual(['title']);
-      const remaining = await apiListDealItems(apiDeps, reader.ctx, dealId);
+      const remaining = await apiListDealItems(apiDeps(), reader.ctx, dealId);
       expect(remaining).toEqual([listed[1]]);
       expect(itemsIn(updatedBody)).toEqual(remaining);
 
@@ -7969,7 +7976,7 @@ describe('deal events (ADR-256)', () => {
       expect(dealUpdatedPayloadSchema.safeParse(erasedBody).success).toBe(true);
       expect(dealIn(erasedBody).title).toBe('Deal (contact erased)');
       expect(erasedBody?.data.contact).toEqual({ id: jaya.id, phone: null, name: null });
-      expect(itemsIn(erasedBody)).toEqual(await apiListDealItems(apiDeps, reader.ctx, dealId));
+      expect(itemsIn(erasedBody)).toEqual(await apiListDealItems(apiDeps(), reader.ctx, dealId));
       expect(itemsIn(erasedBody)).toEqual(remaining);
 
       // Every body this company received names its own products only; the other company's
@@ -7982,14 +7989,14 @@ describe('deal events (ADR-256)', () => {
       const [theirEvent] = await dealEventsOf(other.c);
       const theirBody = bodiesById(theirHook.path).get(theirEvent!.id);
       const theirReader = await keyOf(other.owner, 'Their reader', ['deals.read']);
-      const theirs = await apiListDealItems(apiDeps, theirReader.ctx, theirDeal);
+      const theirs = await apiListDealItems(apiDeps(), theirReader.ctx, theirDeal);
       expect(theirs.map((i) => [i.retailerId, i.quantity, i.unitPriceMinor, i.totalMinor])).toEqual(
         [['THEIRS-01', 2, 70_000, 140_000]],
       );
       expect(itemsIn(theirBody)).toEqual(theirs);
       expect(JSON.stringify(theirBody)).not.toMatch(/MUG-01|PLATE-01|Blue mug|7795000001/);
       // A key of one company reads no deal of the other.
-      await expect(apiListDealItems(apiDeps, reader.ctx, theirDeal)).rejects.toMatchObject({
+      await expect(apiListDealItems(apiDeps(), reader.ctx, theirDeal)).rejects.toMatchObject({
         code: 'not_found',
       });
     });

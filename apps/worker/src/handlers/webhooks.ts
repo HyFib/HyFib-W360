@@ -37,7 +37,7 @@ export function webhookDeliverHandler(rt: WorkerRuntime) {
         keyring: rt.keyring,
         jobs: rt.jobs,
         signer: rt.signer,
-        egress: rt.egress,
+        egress: rt.webhookEgress,
         timeoutMs: rt.egressPolicy.timeoutMs,
         notices: rt.notices,
         logger: rt.logger,

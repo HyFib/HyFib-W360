@@ -1159,7 +1159,8 @@ active per company) is enqueued after that lookup, which the worker's LISTEN con
 notified (bursts coalesce) and the minute sweep runs for retries, missed notifications and leases
 that expired. The job claims due deliveries in batches of 10 under row locks (`SKIP LOCKED`) with a
 lease of the request deadline plus 35 s, posts each one through the egress guard (DNS pinned,
-private and metadata addresses refused, no redirects, 10 s timeout, at most 64 KB sent) with no
+private and metadata addresses refused, no redirects, 10 s timeout, at most 64 KB sent; 256 KiB
+since ADR-395) with no
 transaction open, and records each outcome, locking the endpoint before the delivery: a 2xx answer
 succeeds; anything else, including timeouts and refused addresses, is retried at 1 min, 5 min,
 30 min, 2 h, 6 h, 12 h and 24 h (eight attempts over about 45 hours), then the delivery fails. A
@@ -16106,16 +16107,26 @@ Decision:
   drift apart. The view and the item limits (`crm/deal-item-limits.ts`, re-exported where they
   were) import none of the deal services, so the payloads do not load them.
 - **Read when delivered:** like the rest of the deal ("the deal is the deal when the event is
-  delivered", ADR-256), the items are read in the payload's transaction when the event is
-  delivered, in the worker's verified company scope, filtered by the event's company and the deal:
-  an event delivered, retried or replayed after a product was added or removed gives the products as
-  they are then. A deal without products gives `items: []`; an event whose deal is gone still ends
+  delivered", ADR-256), the items are read at delivery, in the worker's verified company scope,
+  filtered by the event's company and the deal: an event delivered, retried or replayed after a
+  product was added or removed gives the products as they are then. The deal and its items are two
+  reads at read committed in the delivery's transaction, not one snapshot, as the deal and its
+  contact already are: a product changed between the two reads can show in the items of a deal
+  read just before it, and the deal's next event gives both again. A deal without products gives `items: []`; an event whose deal is gone still ends
   as `event_gone` before anything else is read.
 - **Bounded:** at most 50 items a deal (ADR-375, enforced under the deal's lock when one is added),
   in the order they were added (added time, then id, as the API orders them); the schema says so
-  (`maxItems`). With names of at most 500 characters and content ids of at most 100, the list adds
-  at most about 140 KB to a body in the worst case and a few hundred bytes an item in practice;
-  webhook bodies have no size limit of their own, and the receiver's timeout is unchanged.
+  (`maxItems`). Item names hold at most 500 characters (product names 200) and content ids 100,
+  and a control character is written as a six-byte escape, so the largest deal event (every text
+  at its column's most, of such characters, 50 items, 50 changed field keys) is 202,667 bytes
+  (112,667 with product names' 200), against a few hundred bytes an item in practice. That is more
+  than the egress guard's 64 KiB, which refused such a delivery (`request_too_large`, retried for
+  about 45 hours, then failed, replays failing alike): deliveries now have an egress client of
+  their own, the worker's policy with request bodies up to 256 KiB (`WEBHOOK_LIMITS.requestBytes`,
+  `webhookEgressPolicy`), its address checks, deadline, response limit, redirects and loopback rule
+  unchanged; every other caller (automation HTTP steps, stores, alerts, the web tier's Flows
+  endpoint) keeps 64 KiB. A unit test builds that largest body through the payload code and sends
+  it through the client. The receiver's timeout is unchanged.
 - **Erasure:** a deal's payload is sent as erasure left it (ADR-256): the title replaced, the lost
   reason and custom field values cleared, the contact without number or name. Erasure keeps a deal's
   products, which name catalog products, not the customer (ADR-375), and the API still gives them,
@@ -16125,9 +16136,9 @@ Decision:
   them with `GET /deals/{id}/items` or takes them from the deal's next event. The OpenAPI document
   describes `items` on each deal event and says this, without decision numbers.
 - **Rollout:** no migration; the worker already reads the three tables as `w360_app`. A worker from
-  before it delivers deal events without `deal.items` until the worker rollout ends (a retry or a
-  replay a newer worker sends has them), as does rolling workers back; adding a member is additive
-  for receivers (`docs/DEPLOYMENT.md`).
+  before it delivers deal events without `deal.items` and with the 64 KiB limit until the worker
+  rollout ends (a retry or a replay a newer worker sends has them), as does rolling workers back;
+  adding a member is additive for receivers (`docs/DEPLOYMENT.md`).
 
 Not built: `deal.updated` naming `items` in `changes` when a deal's products change (it needs a
 capture on `app.crm_deal_items` in a migration, an endpoint detail, the API's deal history and

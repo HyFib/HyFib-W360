@@ -1,5 +1,5 @@
 import { errorClassAndCode, toError, type Clock, type Keyring } from '@w360/core';
-import { EgressError, type EgressClient } from '@w360/core/egress';
+import { EgressError, type EgressClient, type EgressPolicy } from '@w360/core/egress';
 import { QUEUES } from '@w360/contracts';
 import {
   and,
@@ -54,6 +54,16 @@ import { webhookSignatureHeader } from './signing';
 
 export const WEBHOOK_USER_AGENT = 'HyFib-W360-Webhooks/1';
 
+/**
+ * The egress policy deliveries are sent with (ADR-395): the worker's own, with its address checks,
+ * deadline, response limit and lookups, but bodies up to `WEBHOOK_LIMITS.requestBytes`, so a deal
+ * event listing its products is never refused as too large. Every other caller keeps the policy's
+ * own limit.
+ */
+export function webhookEgressPolicy(policy: EgressPolicy): EgressPolicy {
+  return { ...policy, maxRequestBytes: WEBHOOK_LIMITS.requestBytes };
+}
+
 /** Headroom over the egress deadline before an attempt still in progress counts as interrupted. */
 const LEASE_MARGIN_MS = 35_000;
 /** Deliveries claimed and sent together. */
@@ -83,6 +93,7 @@ export interface WebhookDeliveryLogger {
 export interface WebhookDeliveryDeps extends WebhookDispatchDeps {
   clock: Clock;
   keyring: Keyring;
+  /** Built from `webhookEgressPolicy`, so bodies up to `WEBHOOK_LIMITS.requestBytes` are sent. */
   egress: EgressClient;
   /** The egress deadline; the lease covers it plus a margin. */
   timeoutMs: number;

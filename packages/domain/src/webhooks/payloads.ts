@@ -2631,7 +2631,8 @@ export async function buildWebhookPayload(
       // as it is now, so an erased contact's deal is sent as erasure left it.
       const deal = await dealOf(tx, tenantId, str(event.detail.dealId));
       if (!deal) throw new WebhookEventGoneError();
-      // Its products as the API reads them now (ADR-395), in the same transaction as the deal.
+      // Its products as the API reads them, at delivery (ADR-395): a read of its own after the
+      // deal's, at read committed, so not one snapshot with it.
       const items = await readApiDealItems(tx, tenantId, deal.id);
       const moved = event.type === 'deal.stage_changed';
       const owned = event.type === 'deal.owner_changed';

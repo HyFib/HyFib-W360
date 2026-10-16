@@ -1784,8 +1784,11 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    ADR-395 adds no migration. Workers build each payload when they deliver it: until the worker
    rollout ends, a deal event delivered by a worker from before it has no `deal.items` (a retry or a
    replay a newer worker delivers has them, read when it is sent), and rolling workers back to an
-   image from before it does the same; until the web rollout ends, an old server's OpenAPI document
-   does not describe them. The worker reads `app.crm_deal_items`, `app.commerce_products` and
+   image from before it does the same. The worker rollout also carries webhook deliveries' own
+   egress client, which sends bodies up to 256 KiB (every other caller keeps 64 KiB); an old worker
+   builds deal bodies without items, which its 64 KiB fits, so the two limits never meet one body.
+   Rolling workers back restores both the 64 KiB limit and the bodies it fits. Until the web
+   rollout ends, an old server's OpenAPI document does not describe `deal.items`. The worker reads `app.crm_deal_items`, `app.commerce_products` and
    `app.commerce_catalogs` as `w360_app`, which already holds `SELECT` on them (0018, 0294).
 
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
