@@ -101,6 +101,35 @@ test('deals are imported from a CSV file into a pipeline, rows with errors liste
   await expect(page.getByText('Nisha Rao · ₹1,500.00')).toBeVisible();
 });
 
+test('custom deal field values are given when a deal is created (ADR-379)', async ({ page }) => {
+  const { slug } = await createCompany(page, 'crmfields', 'Farah');
+  await createPipeline(page, slug);
+  // A text field and a yes/no field, defined in Settings → Pipelines (ADR-373).
+  await page.getByLabel('New deal field').fill('Region');
+  await page.locator('#deal-field-type').selectOption('text');
+  await page.getByRole('button', { name: 'Add deal field' }).click();
+  await expect(page.getByRole('cell', { name: 'region', exact: true })).toBeVisible();
+  await page.getByLabel('New deal field').fill('Signed');
+  await page.locator('#deal-field-type').selectOption('boolean');
+  await page.getByRole('button', { name: 'Add deal field' }).click();
+  await expect(page.getByRole('cell', { name: 'signed', exact: true })).toBeVisible();
+
+  await page.goto(`/c/${slug}/contacts/new`);
+  await page.getByLabel('Name').fill('Farah Khan');
+  await page.getByLabel('Phone number').fill('+91 98765 43212');
+  await page.getByRole('button', { name: 'Add contact' }).click();
+  await expect(page.getByRole('heading', { name: 'Farah Khan', level: 1 })).toBeVisible();
+  await page.getByText('New deal', { exact: true }).click();
+  await page.getByLabel('Deal title').fill('Regional plan');
+  await page.getByLabel('Region', { exact: true }).fill('South');
+  // Signed is left “Not set”: the deal gets no value for it.
+  await expectNoHorizontalOverflow(page);
+  await page.getByRole('button', { name: 'Create deal' }).click();
+  await expect(page.getByRole('heading', { name: 'Regional plan', level: 1 })).toBeVisible();
+  await expect(page.getByLabel('Region', { exact: true })).toHaveValue('South');
+  await expect(page.getByLabel('Signed', { exact: true })).toHaveValue('');
+});
+
 test('a deal moves through a pipeline with tasks, an emailed reminder, notes and reports', async ({
   page,
   request,

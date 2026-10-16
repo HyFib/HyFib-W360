@@ -326,7 +326,10 @@ verification, app review, Embedded Signup configuration).
   Settings → Pipelines, audited; members set values on the deal page and keys through `fields` on
   `POST`/`PATCH /deals`, checked by type; `GET /deal-fields`; a CSV column per field; deletion
   strips values from every deal; erasure clears them. Not built: webhook events for changes of
-  values, choice types, values on the new-deal form, automation steps that set values).
+  values, choice types, automation steps that set values).
+  **[Custom field values on the new-deal form built; its browser test runs only in CI]** (ADR-379,
+  no migration: the board's, the contact page's and the inbox's new-deal forms take a value per
+  field, checked by the deal creation's existing rules).
   **[Deal import built; its database and browser tests run only in CI]** (ADR-374, no migration:
   CRM → Import CSV for owners, administrators and supervisors; each row a deal for an existing
   contact found by number, with a title, a stage by name, a value, an owner by email, an expected

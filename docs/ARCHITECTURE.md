@@ -1283,7 +1283,10 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   take it shared (`lockedDealFields`) before locking the deal, so a deletion's `attributes - key`
   never misses a value written meanwhile. `GET /deal-fields` lists them, `Deal.fields` gives values,
   the deals CSV adds a column per field, and the API's deal history leaves out changes of values
-  alone. 0293 also replaces `app.erase_contact` to clear the erased contact's deals' values.
+  alone. 0293 also replaces `app.erase_contact` to clear the erased contact's deals' values. Since
+  ADR-379 the new-deal forms (the board, the contact page and the inbox) take values too:
+  `crmLookups` (`apps/web/src/server/crm.ts`) reads the definitions with the pipelines and members,
+  and `NewDealForm` sends the non-empty ones to `createDeal`.
 - **Deal import (ADR-374, no migration):** `crm/deal-import.ts` previews a CSV (columns, first
   rows, suggested mapping) and imports it into one pipeline: `planDealRows` checks each row against
   the company's records (contacts by E.164 number, active stages by name, CRM members by email,

@@ -1,5 +1,34 @@
 # Progress
 
+## 2026-10-16 — Custom field values when a deal is created (P4-04, ADR-379)
+
+Status: **Implemented; its browser test runs in CI only.** Members could set a deal's custom field
+values only on its page, after creating it.
+
+### Completed
+
+- **Web:** the new-deal forms on the CRM board, the contact page and the inbox show an input per
+  custom field (text, number, date, or yes/no), as the deal page does, and send the values typed
+  (`givenFieldValues`) to the existing `createDeal`, which checks them by type under the fields'
+  lock (ADR-373). `crmLookups` reads the field definitions with the pipelines and members; the deal
+  page uses them instead of a read of its own. No domain or database change.
+- **Tests:** unit (`lib/deal-fields.test.ts`: only typed values are sent); e2e (`crm.spec.ts`: a
+  deal created from a contact's page with a text field given and a yes/no field left unset).
+  Written for CI; the e2e test was not run here.
+- **Docs:** ADR-379 (and ADR-373's "not built" note); ARCHITECTURE; BACKLOG P4-04; the feature
+  matrix (H-012, status unchanged).
+- **Mutation checks:** 3 of 3 deliberate regressions in which values are sent caught by the unit
+  test; that the forms show and send the fields is covered by the e2e test, which runs in CI only.
+
+### Test commands and results (local, 2026-10-16)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 155 files, 1613 tests passed                                    |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+
 ## 2026-10-16 — Products on deals through the public API (P4-04, P5-08, ADR-378)
 
 Status: **Implemented; its database tests run in CI only.** Members listed catalog products on

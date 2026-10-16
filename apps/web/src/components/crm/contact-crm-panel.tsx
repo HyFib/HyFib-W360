@@ -4,7 +4,12 @@ import { formatMinor } from '@w360/domain/crm-money';
 import { Badge } from '@w360/ui';
 import { contactLabel, DEAL_STATUS } from '@/lib/crm-labels';
 import { formatDateTime } from '@/lib/format';
-import { NewDealForm, type MemberOption, type PipelineOption } from './deal-forms';
+import {
+  NewDealForm,
+  type DealFieldOption,
+  type MemberOption,
+  type PipelineOption,
+} from './deal-forms';
 import { NoteForm, TaskForm, TaskStatusActions } from './task-forms';
 import { Timeline } from './timeline';
 
@@ -20,6 +25,7 @@ export function ContactCrmPanel({
   data,
   pipelines,
   members,
+  dealFields = [],
   myMembershipId,
   stageNames,
   memberNames,
@@ -32,6 +38,8 @@ export function ContactCrmPanel({
   data: ContactCrm;
   pipelines: PipelineOption[];
   members: MemberOption[];
+  /** The company's custom deal fields, given when a deal is added (ADR-379). */
+  dealFields?: readonly DealFieldOption[];
   myMembershipId: string;
   stageNames: Record<string, string>;
   memberNames: Record<string, string>;
@@ -82,6 +90,7 @@ export function ContactCrmPanel({
                 slug={slug}
                 pipelines={pipelines}
                 members={members}
+                fields={dealFields}
                 contact={{ id: contact.id, label: contactLabel(contact) }}
                 conversationId={conversationId}
                 defaultOwnerId={canAssign ? myMembershipId : null}

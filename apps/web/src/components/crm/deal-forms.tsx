@@ -13,6 +13,7 @@ import {
 } from '@/app/actions/crm';
 import { ClientButton, ClientForm } from '@/components/client-form';
 import { FormError, FormSuccess } from '@/components/form-status';
+import { givenFieldValues } from '@/lib/deal-fields';
 
 export interface PipelineOption {
   id: string;
@@ -117,11 +118,15 @@ function ContactSearch({
   );
 }
 
-/** Creates a deal for a contact (fixed when opened from a contact or conversation). */
+/**
+ * Creates a deal for a contact (fixed when opened from a contact or conversation), with values for
+ * the company's custom deal fields (ADR-379).
+ */
 export function NewDealForm({
   slug,
   pipelines,
   members,
+  fields = [],
   contact,
   conversationId = null,
   defaultOwnerId = null,
@@ -129,6 +134,7 @@ export function NewDealForm({
   slug: string;
   pipelines: PipelineOption[];
   members: MemberOption[];
+  fields?: readonly DealFieldOption[];
   contact?: ContactChoice | null;
   conversationId?: string | null;
   defaultOwnerId?: string | null;
@@ -143,6 +149,7 @@ export function NewDealForm({
   const [value, setValue] = useState('');
   const [owner, setOwner] = useState(defaultOwnerId ?? '');
   const [closeOn, setCloseOn] = useState('');
+  const [values, setValues] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   if (pipelines.length === 0) {
@@ -172,6 +179,7 @@ export function NewDealForm({
           value,
           ownerMembershipId: owner || null,
           expectedCloseOn: closeOn || null,
+          fields: givenFieldValues(values),
         }).then((r) => {
           setBusy(false);
           if (!r.ok) setError(r.message);
@@ -259,6 +267,15 @@ export function NewDealForm({
             />
           )}
         </Field>
+        {fields.map((field) => (
+          <DealFieldControl
+            key={field.key}
+            id={`${prefix}-field-${field.key}`}
+            field={field}
+            value={values[field.key] ?? ''}
+            onChange={(value) => setValues((current) => ({ ...current, [field.key]: value }))}
+          />
+        ))}
       </div>
       <div>
         <Button type="submit" disabled={busy || !title.trim()}>
@@ -285,10 +302,14 @@ interface DealEditProps {
   fields: DealFieldInput[];
 }
 
-export interface DealFieldInput {
+/** One of the company's custom deal fields (ADR-373), as deal forms show it. */
+export interface DealFieldOption {
   key: string;
   label: string;
   type: 'text' | 'number' | 'date' | 'boolean';
+}
+
+export interface DealFieldInput extends DealFieldOption {
   /** The deal's value as a form shows it; empty when it has none. */
   value: string;
 }
@@ -301,7 +322,7 @@ function DealFieldControl({
   onChange,
 }: {
   id: string;
-  field: DealFieldInput;
+  field: DealFieldOption;
   value: string;
   onChange: (value: string) => void;
 }) {

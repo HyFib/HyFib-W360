@@ -14794,9 +14794,9 @@ Decision:
 Not built: deal webhook events for a change of values (deal.updated names title, valueMinor and
 expectedCloseOn only, so a change of values alone sends no event, and the API's deal history does
 not list it), choice or select types, an order of fields other than when they were added, defining
-fields through the API, values on the new-deal form in the app (a deal is created, then its values
-set on its page; the API takes them on creation), values set by automation steps, filtering or
-reporting by a value, and CSV import of deals (since built: ADR-374, with values mapped by key).
+fields through the API, values on the new-deal form in the app (since built: ADR-379), values set
+by automation steps, filtering or reporting by a value, and CSV import of deals (since built:
+ADR-374, with values mapped by key).
 
 ## ADR-374 Importing deals from CSV (P4-04) (2026-10-13)
 
@@ -15000,3 +15000,23 @@ Decision:
 Not built: changing an item's quantity or price in place (remove and add it again), adding several
 products in one request, items in the deal object, its webhook events or the deals CSV, and items
 added by automation steps.
+
+## ADR-379 Custom field values when a deal is created (P4-04) (2026-10-16)
+
+Context: members could set a deal's custom field values (ADR-373) only on its page, after creating
+it; the API and the deal import took them on creation. "Values on the new-deal form" was listed as
+not built under ADR-373.
+
+Decision:
+
+- **On every new-deal form:** the CRM board's, the contact page's and the inbox's (next to a
+  conversation) show an input per custom field, as the deal page does (text, a number, a date, or
+  yes/no with "Not set"), after the deal's own details.
+- **The same rules:** the values go with the deal to the service's `createDeal`, which already
+  checked them by type against the company's fields under the fields' lock and stored them with the
+  deal (ADR-373). Empty inputs are not sent, so a field deleted while the form was open and left
+  empty is no error; one given a value is refused as no longer existing.
+- **One read:** the field definitions are read with the pipelines and members the forms already
+  need (`crmLookups`), which the deal page now uses too instead of a read of its own.
+
+Not built: required fields, default values, and values chosen from a list.
