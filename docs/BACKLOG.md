@@ -135,9 +135,15 @@ verification, app review, Embedded Signup configuration).
   published rate cards, with unpriced reasons; inbox queue and reply-turn response times against a
   company first-response target (turns recorded by triggers); member activity; campaign funnels;
   unavailable metrics shown with reasons; audited formula-safe exports; business-hours figures,
-  resolution times and CSAT (with P3-06). **Remaining:** reconciliation with Meta's
-  `pricing_analytics` (M-078, verify first), materialised daily aggregates if report queries near
-  the statement timeout, scheduled report emails, retention reports once that module exists
+  resolution times and CSAT (with P3-06). **[Report emails built; their database and browser tests
+  run only in CI]** (ADR-376, migration 0295: each member who reads reports chooses, for
+  themselves, a weekly email (Mondays, for Monday to Sunday) or a monthly one (the 1st), sent at
+  07:00 in the company's time zone by a `report.email` job per company with the period's totals,
+  at most once per period, only to members still active who still read reports, skipped when over
+  72 hours late; verified through the outbox only, no production SMTP yet). **Remaining:**
+  reconciliation with Meta's `pricing_analytics` (M-078, verify first), materialised daily
+  aggregates if report queries near the statement timeout, report emails sent through the
+  production SMTP provider (release checklist), retention reports once that module exists
   (automation outcomes were added with P4-01, deal outcomes with P4-04).
 - **P3-06 Inbox advanced** — _implemented (2026-09-26); CSAT sends verified against the Graph
   stand-in only_: teams with members and numbers, keyword and number routing, round robin with

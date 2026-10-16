@@ -1488,6 +1488,21 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
     columns: ['id', 'rate_card_id', 'currency', 'effective_from', 'sent_at'],
   },
   {
+    table: 'app.report_email_subscriptions',
+    columns: [
+      'id',
+      'membership_id',
+      'frequency',
+      'next_send_at',
+      'last_period_from',
+      'last_period_to',
+      'last_sent_at',
+      'created_at',
+      'updated_at',
+    ],
+    omitted: { attempted_at: 'When the worker last started on it; bookkeeping of retries.' },
+  },
+  {
     table: 'app.saved_replies',
     columns: [
       'id',

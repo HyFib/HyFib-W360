@@ -81,6 +81,24 @@ export const emailPayloadSchema = z.discriminatedUnion('kind', [
     actionLabel: z.string().max(60),
   }),
   z.object({
+    // A member's report email (ADR-376): the company's totals for a period, never a contact's or a
+    // message's details.
+    kind: z.literal('reports.summary'),
+    companyName: z.string().max(120),
+    /** "Weekly report" or "Monthly report". */
+    title: z.string().max(80),
+    /** The period's first and last days, already formatted. */
+    period: z.string().max(120),
+    /** The company's time zone, whose calendar days the period counts. */
+    timezone: z.string().max(64),
+    rows: z
+      .array(z.object({ label: z.string().max(100), value: z.string().max(200) }))
+      .min(1)
+      .max(24),
+    notes: z.array(z.string().max(600)).max(4),
+    url: z.url(),
+  }),
+  z.object({
     kind: z.literal('webhook.endpoint_disabled'),
     companyName: z.string().max(120),
     /** The endpoint's host only, never its full URL. */
@@ -110,8 +128,18 @@ function layout(
   title: string,
   paragraphs: string[],
   action?: { label: string; url: string },
+  table?: { rows: readonly { label: string; value: string }[]; after: readonly string[] },
 ): string {
-  const body = paragraphs.map((p) => `<p style="margin:0 0 16px">${escapeHtml(p)}</p>`).join('');
+  const paragraph = (p: string) => `<p style="margin:0 0 16px">${escapeHtml(p)}</p>`;
+  const rows = table
+    ? `<table role="presentation" style="width:100%;border-collapse:collapse;margin:0 0 16px">${table.rows
+        .map(
+          (r) =>
+            `<tr><td style="padding:6px 12px 6px 0;border-bottom:1px solid #e7e5e4;color:#57534e;vertical-align:top">${escapeHtml(r.label)}</td><td style="padding:6px 0;border-bottom:1px solid #e7e5e4;vertical-align:top">${escapeHtml(r.value)}</td></tr>`,
+        )
+        .join('')}</table>${table.after.map(paragraph).join('')}`
+    : '';
+  const body = paragraphs.map(paragraph).join('') + rows;
   const button = action
     ? `<p style="margin:24px 0"><a href="${escapeHtml(action.url)}" style="background:#0f766e;color:#ffffff;padding:12px 20px;border-radius:6px;text-decoration:none;display:inline-block">${escapeHtml(action.label)}</a></p>
        <p style="margin:0 0 16px;font-size:12px;color:#57534e">If the button does not work, copy this link into your browser:<br>${escapeHtml(action.url)}</p>`
@@ -236,6 +264,20 @@ export function renderEmail(payload: EmailPayload): RenderedEmail {
           label: payload.actionLabel,
           url: payload.url,
         }),
+      };
+    }
+    case 'reports.summary': {
+      const intro = `${payload.title} of ${payload.companyName} for ${payload.period}, in calendar days of ${payload.timezone}.`;
+      const figures = payload.rows.map((r) => `${r.label}: ${r.value}`).join('\n');
+      return {
+        subject: `${payload.title}, ${payload.period} · ${payload.companyName}`,
+        text: `${[intro, figures, ...payload.notes].join('\n\n')}\n\n${payload.url}`,
+        html: layout(
+          payload.title,
+          [intro],
+          { label: 'Open the report', url: payload.url },
+          { rows: payload.rows, after: payload.notes },
+        ),
       };
     }
     case 'webhook.endpoint_disabled': {

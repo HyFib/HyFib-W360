@@ -68,7 +68,4 @@ export const EVENT_LABELS: Record<string, string> = {
   test_sent: 'Test sent',
 };
 
-export function percent(numerator: number, denominator: number): string {
-  if (denominator === 0) return '—';
-  return `${Math.round((numerator / denominator) * 1000) / 10}%`;
-}
+export { formatPercent as percent } from '@w360/domain/report-format';

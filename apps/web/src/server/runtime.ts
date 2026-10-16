@@ -42,6 +42,7 @@ import {
   createCsatService,
   createGrowthService,
   createFlowsService,
+  createReportEmailsService,
   createReportsService,
   createConsentService,
   createSetupChecklistService,
@@ -101,6 +102,7 @@ import {
   type CampaignsService,
   type CsatService,
   type GrowthService,
+  type ReportEmailsService,
   type ReportsService,
   type ConsentService,
   type SetupChecklistService,
@@ -223,6 +225,7 @@ export interface Runtime {
   /** Webhook endpoints API keys add and manage (ADR-081). */
   apiWebhookEndpoints: ApiWebhookEndpoints;
   reports: ReportsService;
+  reportEmails: ReportEmailsService;
   automations: AutomationService;
   /** Domains and secrets for the automation HTTP step. */
   webRequests: WebRequestService;
@@ -425,6 +428,7 @@ async function init(): Promise<Runtime> {
     appBaseUrl: config.APP_BASE_URL,
   });
   const reports = createReportsService({ db, clock: systemClock });
+  const reportEmails = createReportEmailsService({ db, clock: systemClock });
   const automations = createAutomationService({
     db,
     clock: systemClock,
@@ -612,6 +616,7 @@ async function init(): Promise<Runtime> {
     webhooks,
     apiWebhookEndpoints,
     reports,
+    reportEmails,
     automations,
     webRequests,
     growth,
