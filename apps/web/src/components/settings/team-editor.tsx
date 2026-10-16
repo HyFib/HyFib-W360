@@ -43,11 +43,10 @@ export function TeamForm({
   members: { membershipId: string; name: string }[];
   channels: { id: string; label: string }[];
   /**
-   * The company's business hours: whether they are on, and its time zone (ADR-389), and its closed
-   * days from today on (YYYY-MM-DD, today in its time zone), from which a team's own list starts
-   * (ADR-392).
+   * The company's business hours: whether they are on, and its time zone (ADR-389), and the closed
+   * days a team's own list starts from (YYYY-MM-DD): the company's, past ones included (ADR-392).
    */
-  companyHours: { on: boolean; timeZone: string; upcomingClosedDays: string[] };
+  companyHours: { on: boolean; timeZone: string; startingClosedDays: string[] };
 }) {
   const prefix = useId();
   const [name, setName] = useState(team?.name ?? '');
@@ -63,10 +62,10 @@ export function TeamForm({
   const [ownHours, setOwnHours] = useState((team?.businessHours ?? null) !== null);
   const [hours, setHours] = useState<string[]>(team?.businessHours ?? CLOSED_WEEK);
   const [ownClosedDays, setOwnClosedDays] = useState((team?.closedDays ?? null) !== null);
-  // A team's own list starts from the company's closed days from today on: remove the days the
-  // team works.
+  // A team's own list starts from the company's closed days, past ones included: remove the days
+  // the team works.
   const [closedDays, setClosedDays] = useState<string[]>(
-    team?.closedDays ?? companyHours.upcomingClosedDays,
+    team?.closedDays ?? companyHours.startingClosedDays,
   );
   const [newClosedDay, setNewClosedDay] = useState('');
   const [memberIds, setMemberIds] = useState<string[]>(team?.memberIds ?? []);
@@ -136,7 +135,7 @@ export function TeamForm({
               setOwnHours(false);
               setHours(CLOSED_WEEK);
               setOwnClosedDays(false);
-              setClosedDays(companyHours.upcomingClosedDays);
+              setClosedDays(companyHours.startingClosedDays);
               setNewClosedDay('');
               setMemberIds([]);
               setChannelIds([]);
@@ -338,8 +337,9 @@ export function TeamForm({
           <span>
             Its own closed days
             <span className="block text-muted-foreground">
-              Starts from the company’s closed days from today on; remove the days the team works
-              and add its own.
+              Starts from the company’s closed days, past ones included: replies still waiting since
+              then and Reports count them (up to 366, the upcoming and latest ones). Remove the days
+              the team works and add its own.
             </span>
           </span>
         </label>

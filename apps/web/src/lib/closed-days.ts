@@ -14,11 +14,20 @@ export function formatClosedDay(day: string): string {
 }
 
 /**
- * The days a team's own list starts from: the company's closed days from `today` (YYYY-MM-DD in the
- * company's time zone) on, in order. Past days no longer matter to any timer.
+ * The days a team's own list starts from: the company's closed days, once each and in order, past
+ * ones included. A reply still waiting since a past closed day, and Reports' business time over past
+ * periods, count by the team's calendar once it has its own list, so leaving a past day out would
+ * count it as open after the fact. A company with more than `max` closed days (a team's list holds
+ * at most that many) gives its upcoming ones, from `today` (YYYY-MM-DD in its time zone) on, soonest
+ * first, then its latest past ones.
  */
-export function upcomingClosedDays(days: readonly string[], today: string): string[] {
-  return [...new Set(days.filter((day) => day >= today))].sort();
+export function startingClosedDays(days: readonly string[], today: string, max: number): string[] {
+  const all = [...new Set(days)].sort();
+  if (all.length <= max) return all;
+  const upcoming = all.filter((day) => day >= today).slice(0, max);
+  const room = max - upcoming.length;
+  const past = room > 0 ? all.filter((day) => day < today).slice(-room) : [];
+  return [...past, ...upcoming];
 }
 
 /**

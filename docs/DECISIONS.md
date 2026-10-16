@@ -15835,14 +15835,17 @@ Decision:
   default; every existing team keeps them) or has its own list, which replaces the company's for
   it. The list may be empty: the team works on every day its week opens, holidays included. Days
   are dates in the company's time zone, as the company's closed days are; in Settings → Teams a
-  team's list starts from the company's closed days from today on (today in the company's time
-  zone; past days no longer matter to any timer, and a company's history of several years would not
-  fit a team's bound), so working on one holiday is removing that day. A list holds
-  at most 366 days (a year of days; the company's list has no limit, but a team's is sent whole
-  with the team's settings, so it is bounded), each a real date (`closedDaySchema`, the company's
-  check), kept once each and in order. Past days are kept, as the company's are; they no longer
-  matter to any timer and are removed by hand. Days have no names: the company's closed days name
-  the holiday, a team's list only says which days it is closed.
+  team's list starts from every one of the company's closed days, past ones included (a reply still
+  waiting since a past closed day, and Reports' business time over past periods, count by the
+  team's calendar once it has its own list, so leaving a past day out would count it as open after
+  the fact), so working on one holiday is removing that day. A list holds at most 366 days (a year
+  of days; the company's list has no limit, but a team's is sent whole with the team's settings, so
+  it is bounded); a company with more closed days starts a team's list from its upcoming ones,
+  soonest first, then its latest past ones (`startingClosedDays`). Each day is a real date
+  (`closedDaySchema`, the company's check), kept once each and in order. Past days are kept, as the
+  company's are: replies still waiting since then and Reports count by them; they are removed by
+  hand. Days have no names: the company's closed days name the holiday, a team's list only says
+  which days it is closed.
 - **For every team, independent of its week:** the choice is available to every team, whether it
   uses the company's week or its own (ADR-389). A team that keeps office hours but answers on public
   holidays is the common case, and tying the list to an own week would make it copy the company's
@@ -15906,6 +15909,13 @@ Not built: holiday calendars imported from a provider (a team's list, like the c
 entered by hand), names for a team's closed days, closed days per WhatsApp number, partial-day
 closures (the company's closed days are whole days too), a time zone per team, automations'
 conditions and `GET /business-hours` by a team's calendar, and pruning past days automatically.
+
+Fixes after CI and review (before merge): the report listed no team with its own week, because it
+read the weeks through a subquery in a one-table select, whose columns Drizzle writes without their
+table (`h.team_id = "id"` compared the week row's own columns); the weeks are now read with
+`loadTeamSchedules`. A review (Codex) found that starting a team's list from the company's days
+from today on left out past closed days that replies still waiting since then, and Reports, count
+by: the list now starts from every one of the company's days, as described above.
 
 ## ADR-393 Automation conditions on custom deal fields (P4-01, P4-04) (2026-10-16)
 

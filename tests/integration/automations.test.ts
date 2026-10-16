@@ -3075,7 +3075,30 @@ describe('automations that create CRM deals (ADR-245)', () => {
         fields,
       });
     };
+    // Each check starts a run in this conversation, which starts at most ten runs an hour
+    // (RUN_BUDGETS.maxRunsPerConversationPerHour): the ended runs move back two hours first (ended
+    // runs are guarded; the retention setting allows it).
+    const forgetRecentRuns = async () => {
+      const client = await fx.dbs.adminPool.connect();
+      try {
+        await client.query('BEGIN');
+        await client.query(`SELECT set_config('w360.allow_retention_purge', 'on', true)`);
+        await client.query(
+          `UPDATE app.automation_runs SET started_at = started_at - interval '2 hours',
+                  ended_at = ended_at - interval '2 hours'
+            WHERE conversation_id = $1 AND ended_at IS NOT NULL`,
+          [conversationId],
+        );
+        await client.query('COMMIT');
+      } catch (error) {
+        await client.query('ROLLBACK');
+        throw error;
+      } finally {
+        client.release();
+      }
+    };
     const check = async (text: string) => {
+      await forgetRecentRuns();
       await inbound(s.c, from, text);
       const run = await runIn(conversationId);
       const log = await stepLog(run.id);

@@ -5,11 +5,12 @@ import {
   formatMinutes,
   intervalsToDayTexts,
   localDateAfter,
+  MAX_TEAM_CLOSED_DAYS,
   WEEKDAY_NAMES,
 } from '@w360/domain';
 import { Badge, Card, CardContent, CardDescription, CardHeader, CardTitle } from '@w360/ui';
 import { PlanLimitHint } from '@/components/plan-limit';
-import { formatClosedDay, upcomingClosedDays } from '@/lib/closed-days';
+import { formatClosedDay, startingClosedDays } from '@/lib/closed-days';
 import { AvailabilityToggle, DeleteTeamButton, TeamForm } from '@/components/settings/team-editor';
 import { canUseInbox } from '@/server/inbox';
 import { getRuntime } from '@/server/runtime';
@@ -33,14 +34,16 @@ export default async function TeamsSettingsPage({ params }: { params: Promise<{ 
     businessHours.getBusinessHours(ctx),
   ]);
   // A team's own hours (ADR-389) and closed days (ADR-392) apply only while the company's hours
-  // are on; a team's own list of closed days starts from the company's from today on (its time
-  // zone): past days no longer matter, and a long history would not fit a team's 366 days.
+  // are on; a team's own list of closed days starts from the company's, past days included (replies
+  // waiting since then and Reports still count them), the upcoming and latest ones when there are
+  // more than a team holds (today in the company's time zone).
   const companyHours = {
     on: hours.enabled && hours.days.some((d) => d.trim() !== ''),
     timeZone: hours.timezone,
-    upcomingClosedDays: upcomingClosedDays(
+    startingClosedDays: startingClosedDays(
       hours.holidays.map((h) => h.day),
       localDateAfter(clock.now(), hours.timezone, 0),
+      MAX_TEAM_CLOSED_DAYS,
     ),
   };
   const channelLabel = new Map(channels.map((c) => [c.id, c.label]));

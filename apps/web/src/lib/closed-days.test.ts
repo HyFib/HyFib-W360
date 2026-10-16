@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { formatClosedDay, upcomingClosedDays, withPendingClosedDay } from './closed-days';
+import { formatClosedDay, startingClosedDays, withPendingClosedDay } from './closed-days';
 
 describe('closed days in Settings → Teams (ADR-392)', () => {
   it('are written with fixed English month abbreviations, the same on the server and in browsers', () => {
@@ -11,14 +11,42 @@ describe('closed days in Settings → Teams (ADR-392)', () => {
     expect(formatClosedDay('soon')).toBe('soon');
   });
 
-  it('start a team’s own list from the company’s days from today on', () => {
-    expect(
-      upcomingClosedDays(
-        ['2026-12-25', '2025-01-26', '2026-10-16', '2026-10-15', '2026-12-25'],
-        '2026-10-16',
-      ),
-    ).toEqual(['2026-10-16', '2026-12-25']);
-    expect(upcomingClosedDays([], '2026-10-16')).toEqual([]);
+  it('start a team’s own list from every one of the company’s days, past ones included', () => {
+    const company = ['2026-12-25', '2025-01-26', '2026-10-16', '2026-10-15', '2026-12-25'];
+    expect(startingClosedDays(company, '2026-10-16', 366)).toEqual([
+      '2025-01-26',
+      '2026-10-15',
+      '2026-10-16',
+      '2026-12-25',
+    ]);
+    expect(startingClosedDays(company, '2026-10-16', 4)).toEqual([
+      '2025-01-26',
+      '2026-10-15',
+      '2026-10-16',
+      '2026-12-25',
+    ]);
+    expect(startingClosedDays([], '2026-10-16', 366)).toEqual([]);
+  });
+
+  it('keep the upcoming days, then the latest past ones, when the company has more than a team holds', () => {
+    const company = ['2026-12-25', '2025-01-26', '2026-10-16', '2026-10-15', '2027-01-01'];
+    // Three upcoming days and the latest past one.
+    expect(startingClosedDays(company, '2026-10-16', 4)).toEqual([
+      '2026-10-15',
+      '2026-10-16',
+      '2026-12-25',
+      '2027-01-01',
+    ]);
+    // No room for past days.
+    expect(startingClosedDays(company, '2026-10-16', 3)).toEqual([
+      '2026-10-16',
+      '2026-12-25',
+      '2027-01-01',
+    ]);
+    // More upcoming days than room: the soonest.
+    expect(startingClosedDays(company, '2026-10-16', 2)).toEqual(['2026-10-16', '2026-12-25']);
+    // Only past days: the latest.
+    expect(startingClosedDays(company, '2027-06-01', 2)).toEqual(['2026-12-25', '2027-01-01']);
   });
 
   it('keep a date picked but not yet added when the team is saved', () => {

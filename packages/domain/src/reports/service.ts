@@ -13,7 +13,6 @@ import {
   messagingSettings,
   metricDefinitions,
   sql,
-  teamBusinessHours as teamBusinessHoursTable,
   teams,
   users,
   type CsatSkipReason,
@@ -35,7 +34,7 @@ import {
 } from '../campaigns/costs';
 import { CSV_BOM, csvLine } from '../contacts/csv';
 import { minorToInput } from '../crm/money';
-import { openPeriods, type BusinessCalendars } from '../inbox/business-hours';
+import { loadTeamSchedules, openPeriods, type BusinessCalendars } from '../inbox/business-hours';
 import { calendarsOf, hasAnyTarget, loadReplyTargets, type ReplyTargets } from '../inbox/sla';
 import { parseInput } from '../validation';
 import { METRIC_DEFINITIONS, type MetricDefinition } from './definitions';
@@ -764,21 +763,18 @@ async function inboxReport(
     .where(and(eq(teams.tenantId, tenantId), isNotNull(teams.firstResponseTargetMinutes)))
     .orderBy(asc(teams.name), asc(teams.id));
   // Teams whose conversations count business time by their own week (ADR-389) or closed days
-  // (ADR-392), while business hours are on.
+  // (ADR-392), while business hours are on. The weeks are read on their own: Drizzle writes the
+  // columns of a one-table select's SQL fields without their table, so a subquery there would
+  // compare its own columns.
   const ownCalendarTeams =
     ownCalendars.length === 0
       ? []
       : await tx
-          .select({
-            teamId: teams.id,
-            name: teams.name,
-            ownClosedDays: teams.ownClosedDays,
-            ownWeek: sql<boolean>`exists (select 1 from ${teamBusinessHoursTable} h
-              where h.tenant_id = ${teams.tenantId} and h.team_id = ${teams.id})`,
-          })
+          .select({ teamId: teams.id, name: teams.name, ownClosedDays: teams.ownClosedDays })
           .from(teams)
           .where(and(eq(teams.tenantId, tenantId), inArray(teams.id, ownCalendars)))
           .orderBy(asc(teams.name), asc(teams.id));
+  const ownWeeks = await loadTeamSchedules(tx, tenantId, ownCalendars);
   const named = (r: { teamId: string; name: string }) => ({ teamId: r.teamId, name: r.name });
   return {
     targetMinutes: targets.companyMinutes,
@@ -786,7 +782,7 @@ async function inboxReport(
       r.minutes === null ? [] : [{ ...r, minutes: r.minutes }],
     ),
     businessHours: iv !== null,
-    teamBusinessHours: ownCalendarTeams.filter((r) => r.ownWeek).map(named),
+    teamBusinessHours: ownCalendarTeams.filter((r) => ownWeeks.has(r.teamId)).map(named),
     teamClosedDays: ownCalendarTeams.filter((r) => r.ownClosedDays).map(named),
     now: {
       open: num(l.open),

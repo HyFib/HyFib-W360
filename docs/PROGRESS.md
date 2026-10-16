@@ -1,5 +1,42 @@
 # Progress
 
+## 2026-10-16 — CI and review fixes for ADR-392 and ADR-393
+
+Status: **Fixed; the database and browser tests run in CI only.** CI's integration tests failed on
+both PostgreSQL versions (three tests), and a review (Codex) found that a team's own closed days
+left out past days that still count.
+
+### Completed
+
+- **Reports' teams with their own week (ADR-392):** the inbox section's `teamBusinessHours` was
+  always empty. ADR-392 read each team's week through a subquery in a one-table select, whose
+  columns Drizzle writes without their table, so `h.team_id = "id"` compared the week row's own
+  columns. The weeks are now read with `loadTeamSchedules`. Two integration tests in
+  `reports.test.ts` (ADR-389's and ADR-392's) caught it in CI.
+- **Past closed days in a team's own list (ADR-392, Codex):** the list started from the company's
+  closed days from today on, so a team that switched to its own list counted past holidays as open
+  for replies still waiting since then and for Reports over past periods. It now starts from every
+  one of the company's days (`startingClosedDays`). A company with more than 366 starts it from its
+  upcoming days, soonest first, then its latest past ones. The help text and ADR-392 say so.
+- **ADR-393's deal field conditions test:** the test started 15 runs in one conversation within an
+  hour, past the ten the dispatcher starts (`RUN_BUDGETS.maxRunsPerConversationPerHour`). The
+  eleventh message started no run, so the test drove an ended one. Each check now moves the
+  conversation's ended runs back two hours first. The product code is unchanged.
+- **Tests:** unit (`closed-days.test.ts`: the full list, and the upcoming and latest days past the
+  bound), with 7 deliberate regressions of `startingClosedDays` (only upcoming days, the furthest
+  upcoming or oldest past days kept, every past day kept without room, today counted as past, no
+  dedupe, out of order): 7 caught. The two Reports integration tests and the automation test run
+  in CI only.
+
+### Test commands and results (local, 2026-10-16)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 165 files, 1,771 tests passed                                   |
+| `pnpm build`                                       | passed                                                          |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+
 ## 2026-10-16 — Automation conditions on custom deal fields (P4-01, P4-04, ADR-393)
 
 Status: **Implemented; its database and browser tests run in CI only.** Automations could set a
