@@ -1034,7 +1034,9 @@ test('an owner posts the operations alerts to a chat channel and sends it a test
     // (ADR-388); the next test post is a card whose first block is the subject.
     // The channel's details give its format (the selects' options say it too).
     const formatShown = (label: string) =>
-      page.locator('dd').filter({ hasText: new RegExp(`^${label.replace(/[()]/g, '\\$&')}$`) });
+      page.locator('dd').filter({
+        hasText: new RegExp(`^${label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`),
+      });
     await expect(formatShown('JSON text (Slack and similar)')).toBeVisible();
     await page.getByLabel('Format posted').selectOption('teams_card');
     await page.getByRole('button', { name: 'Save the format' }).click();
