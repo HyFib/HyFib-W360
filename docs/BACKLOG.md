@@ -358,7 +358,13 @@ verification, app review, Embedded Signup configuration).
   CRM → Import CSV for owners, administrators and supervisors; each row a deal for an existing
   contact found by number, with a title, a stage by name, a value, an owner by email, an expected
   close date and custom field values; rows with errors listed and skipped; audited. Not built:
-  creating contacts, updating deals or importing closed deals from a file, API import).
+  creating contacts, API import).
+  **[Deal import that changes and closes deals built; its database and browser tests run only in
+  CI]** (ADR-387, no migration: the rows are checked first and each says whether it adds, changes or
+  closes a deal, or why it is skipped; a row with a `deal_id` changes that open deal of the
+  pipeline at the version checked, blank cells keeping values, so a deals export imports back;
+  `won`/`lost` rows close their deal at the import's time. Not built: clearing a value from a file,
+  back-dated close times, changing closed deals or moving deals to another pipeline from a file).
   **[Products on deals built; their database and browser tests run only in CI]** (ADR-375,
   migration 0294: catalog products listed on a deal with a quantity and an exact unit price, at the
   deal's version and on its timeline, their total shown and usable as the deal's value. Not built:

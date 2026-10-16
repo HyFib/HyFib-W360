@@ -11,7 +11,7 @@ import { requireTenant } from '@/server/session';
 export const metadata: Metadata = { title: 'Import deals' };
 export const dynamic = 'force-dynamic';
 
-/** Deals from a CSV file into a pipeline (ADR-374). */
+/** Deals from a CSV file into a pipeline (ADR-374), new or changed and closed (ADR-387). */
 export default async function ImportDealsPage({ params }: { params: Promise<{ slug: string }> }) {
   const { slug } = await params;
   const ctx = await requireTenant(slug);
@@ -27,7 +27,7 @@ export default async function ImportDealsPage({ params }: { params: Promise<{ sl
       </Link>
       <PageHeader
         title="Import deals"
-        description="Each row adds a deal for the contact with its phone number. Rows with errors are skipped and listed by row number."
+        description="Each row adds a deal for the contact with its phone number, or changes the deal its deal id names, as a deals export writes them; a won or lost row also closes its deal. The rows are checked before anything is written; rows with errors are skipped and listed by row number."
       />
       <ModuleNotInPlan ctx={ctx} module="crm" />
       <DealImportWizard

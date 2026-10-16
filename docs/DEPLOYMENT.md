@@ -1702,6 +1702,15 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    an old web server refuses to save an endpoint whose list names these steps ("Choose kinds of step
    from the list.").
 
+   ADR-387 has no migration. Until the web rollout ends, an old web server treats a deals file as
+   before: it ignores the deal id, status and lost reason columns and adds a deal for every row
+   with a phone number and a title, so a deals export imported there would add its deals again.
+   The new import page checks rows and imports through server actions an old server does not have
+   (`checkDealImportAction`, `importCheckedDealsAction`), so its requests fail there with nothing
+   written; an import page opened before the rollout fails on a new server the same way and needs a
+   reload. Import files with deal ids only after the web rollout ends. Deal files are now limited
+   to 928,000 bytes (was 976,000). Rolling an image back restores the earlier import.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

@@ -1378,7 +1378,12 @@ Phase 5 rules (Public API, P5-08):
   a number no contact has is refused, so deal import never adds a number to the company. Owners are
   active members with CRM access, by email. One transaction; rows with errors are listed and not
   imported. Each deal is the importing member's, with an `imported` timeline entry and a
-  `deal.created` event; the import is audited with its counts, never the rows.
+  `deal.created` event; the import is audited with its counts, never the rows. Rows naming a deal
+  by id (ADR-387) change it only when it is the company's (looked up in the company's scope under
+  row security), in the pipeline chosen, open, with a live contact and at the version the rows were
+  checked against; the check is read-only and needs the same permissions. Changes and closes are
+  the importing member's, with the deal page's timeline entries marked `imported`; a close is
+  stamped with the import's time, never a date from the file.
 - Products on deals (ADR-375): adding needs `crm.write` and `commerce.read`, removing
   `crm.write`; products come only from the company's connected catalogs, deals only from the
   company, both under row security. Changes are at the deal's version and on its timeline; unit

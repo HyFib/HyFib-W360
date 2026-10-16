@@ -15336,3 +15336,80 @@ Decision:
 Not built: setting the deal's title, value, owner or expected close date, fields of a deal the
 contact has in several pipelines at once, values copied from another deal or a contact field, and a
 condition on a deal's field values.
+
+## ADR-387 Deal import that changes and closes deals (P4-04) (2026-10-16)
+
+Context: deal import (ADR-374) only added open deals. A company that exported its deals (ADR-239),
+corrected them in a spreadsheet and imported the file got every deal twice, and a company moving
+from another CRM could not bring its won and lost deals. "Updating deals or importing closed deals
+from a file" remained under P4-04.
+
+Decision:
+
+- **A row with a deal id changes that deal** (`crm/deal-import.ts`): an optional deal id column
+  (suggested for `deal_id`, as the deals export writes it). A row whose cell holds an id changes the
+  deal instead of adding one; a row without one adds a deal as before. The deal must be the
+  company's (looked up only in the company's scope, under row security), in the pipeline chosen,
+  open (a closed deal is skipped: "reopen it on its page to change it"; changing outcomes from a
+  file would rewrite reports silently), with a live contact (as the deal page refuses), and named by
+  one row only (a second row naming it is skipped, naming the first). A malformed id is skipped
+  without being looked up.
+- **Cells given change, blank cells keep:** the stage (a stage of the pipeline by name, any case;
+  moving resets the time in stage), the title, the value (major units in the pipeline's currency,
+  parsed exactly as before), the owner, the expected close date and custom field values (checked by
+  type over the deal's values, as the deal page does). A blank cell never clears a value: a
+  spreadsheet cannot tell an emptied cell from one left alone, so clearing stays on the deal page.
+  The phone number is not read for these rows: a deal's contact never changes, and an export may
+  carry masked numbers (ADR-226). A row whose cells hold the deal's values changes nothing and does
+  not move its version ("No change").
+- **The deals export imports back:** its columns are suggested by name; `products` and
+  `products_total` are never suggested and nothing reads them (products are listed on the deal
+  page); `value` is read in major units as written; `owner` holds a name, so an owner is now an
+  active CRM member's email or their name when no other such member has it ("More than one member is
+  named …; give the owner's email."), and a deal whose owner has left keeps them when the cell names
+  them. An optional currency column refuses a row in another currency than the pipeline's (an export
+  of another pipeline). Custom field columns are suggested by key from the last matching header, as
+  the export writes them after its own columns. An export with 33 or more custom fields has more
+  columns than the importer reads (50) and cannot be imported back whole.
+- **Closed deals:** an optional status column takes `open`, `won` or `lost` (any case; blank is
+  open), and an optional lost reason column (lost rows only, at most 200 characters). A won or lost
+  row adds its deal and then closes it, or changes its deal and closes it, as the deal page's close
+  action does: closed by the importing member, at the import's time, with the deal page's `deal_won`
+  (with the value) or `deal_lost` entry, and the `deal.status_changed` webhook event after
+  `deal.created` or the change's events. A new deal closed this way has version 2, as one added and
+  then closed on its page.
+- **No back-dated close times:** the export's `closed_at`, or any date in a file, is never used as
+  the close time. Reports count closed deals by close time and measure time to win from creation, so
+  a back-dated close would change figures of periods already read and shared, and close a deal
+  before it was created (a negative time to win). Imported outcomes therefore count in Reports as
+  any other close on the import's day; a company that needs the original dates keeps them in a date
+  field (ADR-373). The page says so beside the status column.
+- **Checked first, then imported at the versions checked:** a new step between the mapping and the
+  import, `checkDealImport` (same permissions, a read-only transaction, no locks, nothing written or
+  audited), returns for every row whether it adds a deal, changes one, closes it, changes nothing or
+  is skipped and why, with the counts, and the version of every deal the rows change or leave as
+  they are. The page shows them and sends those versions with the import (`expectedVersions`); a
+  deal whose version differs, or that was not among the rows checked, is skipped ("Someone changed
+  this deal after the rows were checked. Check the rows again."), as the deal page refuses a stale
+  edit. The import is still one transaction in which each row is planned before anything is written,
+  so a row with an error skips only that row.
+- **Locks and entries as the deal page's:** the import locks the contacts of new deals and of the
+  changed deals (`FOR KEY SHARE`, in id order), then the pipeline (`FOR SHARE`), then the deal
+  fields (shared), then the named deals (`FOR UPDATE`, in id order): the fields-then-deal order of
+  the deal page's edit, after the contacts erasure locks first. Each change is one update by the
+  member (`changed_by` member), with the version moved on and the entries the API writes for a
+  combined change (ADR-255): `stage_changed`, `deal_updated` (with the fields and the value's
+  change), `owner_changed`, then the close, each marked `imported`.
+- **Counts and audit:** the check and the result give added, changed, closed (new or existing),
+  unchanged and rows with errors; `crm.deals_imported` now records `updated`, `closed`,
+  `unchanged` and `skipped` beside `created` and `errorCount` (kept, equal to `skipped`), never the
+  rows. Permissions are unchanged (`crm.write` and `contacts.import`).
+- **Request size:** the versions travel with the file in the server action, so the file limit is
+  928,000 bytes (was 976,000), leaving room for 1,000 ids and versions under the 1 MB body limit.
+- **Rollout:** the page imports through a new server action (`importCheckedDealsAction`), so a page
+  of this release never reaches an old web server's import, which ignores the new columns and would
+  add every row of an export as a new deal. No migration.
+
+Not built: clearing values from a file, back-dated close times, changing or reopening closed deals
+from a file, moving deals to another pipeline from a file, creating contacts, matching deals by
+anything but their id, and import through the public API.

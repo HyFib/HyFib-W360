@@ -1,7 +1,7 @@
 'use server';
 import { refresh } from 'next/cache';
 import { AppError } from '@w360/core';
-import { DEAL_IMPORT_LIMITS, type DealImportResult } from '@w360/domain';
+import { DEAL_IMPORT_LIMITS, type DealImportCheck, type DealImportResult } from '@w360/domain';
 import { getRuntime } from '@/server/runtime';
 import { runAction, type ActionResult } from '@/server/action';
 import { localToIso } from '@/server/crm-time';
@@ -286,7 +286,42 @@ export async function previewDealImportAction(slug: string, form: FormData) {
   });
 }
 
-export async function importDealsAction(
+/** The import settings sent with the file as JSON; the domain service validates them. */
+function readDealImportOptions(form: FormData): Record<string, unknown> {
+  let options: unknown;
+  try {
+    options = JSON.parse(String(form.get('options') ?? '{}'));
+  } catch {
+    throw new AppError('validation_failed', 'The import settings could not be read.');
+  }
+  if (!options || typeof options !== 'object' || Array.isArray(options)) {
+    throw new AppError('validation_failed', 'The import settings could not be read.');
+  }
+  return options as Record<string, unknown>;
+}
+
+/** What each row would do (ADR-387), before anything is written. */
+export async function checkDealImportAction(
+  slug: string,
+  form: FormData,
+): Promise<ActionResult<DealImportCheck>> {
+  return runAction(async () => {
+    const ctx = await tenantForAction(slug);
+    const { crm } = await getRuntime();
+    const csv = await readDealCsv(form);
+    return crm.checkDealImport(ctx, {
+      ...readDealImportOptions(form),
+      fileName: csv.fileName,
+      text: csv.text,
+    });
+  });
+}
+
+/**
+ * The import of checked rows (ADR-387). A new name, so a page of this release never reaches the
+ * import of a web server of the previous one, which would ignore deal ids and add every row.
+ */
+export async function importCheckedDealsAction(
   slug: string,
   form: FormData,
 ): Promise<ActionResult<DealImportResult>> {
@@ -294,15 +329,9 @@ export async function importDealsAction(
     const ctx = await tenantForAction(slug);
     const { crm } = await getRuntime();
     const csv = await readDealCsv(form);
-    let options: unknown;
-    try {
-      options = JSON.parse(String(form.get('options') ?? '{}'));
-    } catch {
-      throw new AppError('validation_failed', 'The import settings could not be read.');
-    }
     const result = await crm.importDeals(
       ctx,
-      { ...(options as Record<string, unknown>), fileName: csv.fileName, text: csv.text },
+      { ...readDealImportOptions(form), fileName: csv.fileName, text: csv.text },
       await requestMeta(),
     );
     refresh();

@@ -1,5 +1,59 @@
 # Progress
 
+## 2026-10-16 — Deal import that changes and closes deals (P4-04, ADR-387)
+
+Status: **Implemented; its database and browser tests run in CI only.** Deal import only added
+open deals: a deals export imported back added every deal again, and won or lost deals could not be
+brought in.
+
+### Completed
+
+- **Domain (`crm/deal-import.ts`, no migration):** optional deal id, currency, status and lost
+  reason columns; the phone number and title columns are needed only without a deal id column.
+  `planDealRows` plans a `PlannedUpdate` for a row naming a deal (the company's, in the pipeline,
+  open, with a live contact, named once, at the checked version on import; blank cells keep values;
+  "No change" when the cells hold its values) and a close for `won`/`lost` rows, new or changed;
+  owners by email or by a name one active CRM member has, a deal's departed owner kept;
+  `updateActivities` gives the deal page's entries in the API's combined order, marked `imported`;
+  `dealImportCounts`. `planImport` loads the lookups for `checkDealImport` (read-only, no locks:
+  each row's action, the counts and the deals' versions) and for `importDeals` (contacts, pipeline,
+  deal fields, then the named deals `FOR UPDATE`), which closes new deals at the import's time
+  (version 2) and changes deals in one update each, audited with created, updated, closed,
+  unchanged and skipped. The export's products columns are never suggested or read; custom field
+  columns are suggested from the last matching header. Deal files are limited to 928,000 bytes so
+  the versions fit the 1 MB server action body.
+- **Web:** the import page has a third step: "Check N rows" shows every row's action (adds a deal,
+  closed or not; changes the deal, and closes it; no change; not imported, and why) with the counts
+  before anything is written; "Import N rows" sends the versions read. New mapping fields: deal id,
+  currency, status and lost reason; the page explains blank cells, products and close times. The
+  import goes through a new action, `importCheckedDealsAction`, beside `checkDealImportAction`.
+- **Tests:** unit (`deal-import.test.ts`: the schema, a deals export read back unchanged through
+  the CSV reader, changes, moves, owners by name, a departed owner, closes and their entries, every
+  refusal, duplicate rows, versions, closed new deals, counts, the files' limit); integration
+  (`crm.test.ts`: an export read back, edited, checked without writing, imported with a stale deal
+  skipped, the deals, timelines, reports and audit; another company's and another pipeline's deals,
+  missing and stale versions, roles); e2e (`crm.spec.ts`: the check step, then a file with a deal
+  id changing and closing the imported deal).
+- **Docs:** ADR-387; ARCHITECTURE, SECURITY, THREAT-MODEL T340, DEPLOYMENT (rollout note), BACKLOG,
+  and the matrix's H-012 text and evidence (status unchanged).
+- **Mutation checks:** 18 deliberate regressions (blank cells clearing custom fields or titles,
+  closed, other pipelines' or erased contacts' deals changed, missing or stale versions accepted,
+  duplicate rows, a lost reason on a won row, the currency unchecked, a departed owner refused, an
+  ambiguous name taken, closes counted for new deals only, the deal_updated entry dropped, unchanged
+  rows not holding their deal, the won entry without its value, phones read for rows with an id,
+  ids compared case-sensitively), all caught by the unit tests, one after a test was added. The
+  locks, row security and the database writes are covered by integration tests, which run in CI
+  only.
+
+### Test commands and results (local, 2026-10-16)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 158 files, 1659 tests passed                                    |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | not run here (left to the integrating build)                    |
+
 ## 2026-10-16 — Automation steps that set custom deal fields (P4-04, ADR-386)
 
 Status: **Implemented; its database and browser tests run in CI only.** Automations created, moved

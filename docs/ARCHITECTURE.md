@@ -1345,7 +1345,17 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   named contacts (`FOR KEY SHARE`, id order), the pipeline (`FOR SHARE`) and the deal fields
   (shared), then inserts deals and `deal_created` activities (`imported: true`) in batches of 200
   and audits `crm.deals_imported`. Web: `app/c/[slug]/crm/import`, `DealImportWizard`, actions
-  `previewDealImportAction` and `importDealsAction`.
+  `previewDealImportAction`, `checkDealImportAction` and `importCheckedDealsAction`. Changes and
+  closed deals (ADR-387, no migration): a row whose `deal_id` cell names a deal plans a
+  `PlannedUpdate` (blank cells keep values; stage, title, value, owner by email or by a name one
+  member has, expected close date, custom fields), refused unless the deal is the company's, in
+  the pipeline, open, with a live contact, named by one row and, on import, at the version the
+  check returned; a `won`/`lost` status closes the new or changed deal. `planImport` loads the
+  lookups for `checkDealImport` (read-only, no locks; returns each row's action and the deals'
+  versions) and for `importDeals`, which locks contacts (new deals' and changed deals'), the
+  pipeline, the deal fields and then the named deals `FOR UPDATE`, inserts, closes new deals
+  (version 2), and updates changed ones in one statement each with `updateActivities` (stage,
+  details, owner, close, marked `imported`), the webhook trigger capturing their events.
 - **Products on deals (0294, ADR-375):** `crm/deal-items.ts` searches the company's connected
   catalogs (`dealProductOptions`), adds and removes `app.crm_deal_items` (product, its name then,
   quantity, unit price and currency) under `lockDealForChange` at the deal's version, bumping it

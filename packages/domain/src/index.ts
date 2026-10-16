@@ -131,8 +131,11 @@ export {
 } from './crm/deal-fields';
 export {
   DEAL_IMPORT_LIMITS,
+  type DealImportAction,
+  type DealImportCheck,
   type DealImportOptions,
   type DealImportResult,
+  type DealImportRow,
 } from './crm/deal-import';
 export { MAX_DEAL_ITEMS, dealItemsTotal, lineTotalMinor, type DealItem } from './crm/deal-items';
 export * from './crm/tasks';

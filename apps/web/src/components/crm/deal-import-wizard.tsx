@@ -1,6 +1,6 @@
 'use client';
 import { useId, useState } from 'react';
-import type { DealImportResult } from '@w360/domain';
+import type { DealImportCheck, DealImportResult, DealImportRow } from '@w360/domain';
 import {
   Alert,
   Button,
@@ -18,7 +18,11 @@ import {
   TR,
   Table,
 } from '@w360/ui';
-import { importDealsAction, previewDealImportAction } from '@/app/actions/crm';
+import {
+  checkDealImportAction,
+  importCheckedDealsAction,
+  previewDealImportAction,
+} from '@/app/actions/crm';
 import { ClientButton, ClientForm } from '@/components/client-form';
 import { FormError } from '@/components/form-status';
 
@@ -28,18 +32,62 @@ interface Preview {
   sample: string[][];
   totalRows: number;
   fields: { key: string; label: string; type: string }[];
-  suggested: {
-    phone: number | null;
-    title: number | null;
-    stage: number | null;
-    value: number | null;
-    owner: number | null;
-    expectedCloseOn: number | null;
-    fields: Record<string, number>;
-  };
+  suggested: Mapping;
 }
 
 type Column = number | null;
+
+interface Mapping {
+  dealId: Column;
+  phone: Column;
+  title: Column;
+  stage: Column;
+  value: Column;
+  currency: Column;
+  owner: Column;
+  expectedCloseOn: Column;
+  status: Column;
+  lostReason: Column;
+  fields: Record<string, Column>;
+}
+
+const EMPTY_MAPPING: Mapping = {
+  dealId: null,
+  phone: null,
+  title: null,
+  stage: null,
+  value: null,
+  currency: null,
+  owner: null,
+  expectedCloseOn: null,
+  status: null,
+  lostReason: null,
+  fields: {},
+};
+
+/** What a checked row will do, in words (ADR-387). */
+function rowAction(row: DealImportRow): string {
+  switch (row.action) {
+    case 'create':
+      return row.close ? `Adds a deal closed as ${row.close}` : 'Adds a deal';
+    case 'update':
+      return row.close ? `Changes the deal and closes it as ${row.close}` : 'Changes the deal';
+    case 'unchanged':
+      return 'No change';
+    case 'skip':
+      return `Not imported: ${row.message ?? ''}`;
+  }
+}
+
+function countsText(c: {
+  created: number;
+  updated: number;
+  closed: number;
+  unchanged: number;
+  errorCount: number;
+}) {
+  return `${c.created} deals added, ${c.updated} changed, ${c.closed} closed, ${c.unchanged} unchanged, ${c.errorCount} rows with errors`;
+}
 
 function ColumnSelect({
   id,
@@ -80,9 +128,11 @@ function ColumnSelect({
 }
 
 /**
- * Deal import in two steps (ADR-374), as contacts are imported: a preview of the file's columns
- * and first rows, then the import into a pipeline with an explicit column mapping. The file is
- * sent again for the import; nothing is stored between the steps.
+ * Deal import in three steps (ADR-374, ADR-387): a preview of the file's columns and first rows; a
+ * check of every row against the pipeline with an explicit column mapping, saying what each row
+ * will do (add a deal, change one, close it, nothing, or skip it and why) before anything is
+ * written; then the import, with the versions of the deals the check read. The file is sent again
+ * at each step; nothing is stored between them.
  */
 export function DealImportWizard({
   slug,
@@ -94,27 +144,12 @@ export function DealImportWizard({
   const fileId = useId();
   const [file, setFile] = useState<File | null>(null);
   const [preview, setPreview] = useState<Preview | null>(null);
+  const [check, setCheck] = useState<DealImportCheck | null>(null);
   const [result, setResult] = useState<DealImportResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [pipelineId, setPipelineId] = useState(pipelines[0]?.id ?? '');
-  const [mapping, setMapping] = useState<{
-    phone: Column;
-    title: Column;
-    stage: Column;
-    value: Column;
-    owner: Column;
-    expectedCloseOn: Column;
-    fields: Record<string, Column>;
-  }>({
-    phone: null,
-    title: null,
-    stage: null,
-    value: null,
-    owner: null,
-    expectedCloseOn: null,
-    fields: {},
-  });
+  const [mapping, setMapping] = useState<Mapping>(EMPTY_MAPPING);
   const [phoneFormat, setPhoneFormat] = useState<'international' | 'national'>('international');
   const [callingCode, setCallingCode] = useState('91');
   const pipeline = pipelines.find((p) => p.id === pipelineId);
@@ -134,14 +169,16 @@ export function DealImportWizard({
       return;
     }
     setPreview(res.data);
-    setMapping({ ...res.data.suggested, fields: res.data.suggested.fields });
+    setCheck(null);
+    setMapping({ ...EMPTY_MAPPING, ...res.data.suggested });
   }
 
-  async function runImport(event: React.FormEvent) {
-    event.preventDefault();
-    if (!file || !preview || mapping.phone === null || mapping.title === null) return;
-    setBusy(true);
-    setError(null);
+  // Without deal ids, every row adds a deal: its contact's number and a title are needed.
+  const mappingReady =
+    mapping.dealId !== null || (mapping.phone !== null && mapping.title !== null);
+
+  function importForm(extra: Record<string, unknown>): FormData | null {
+    if (!file) return null;
     const form = new FormData();
     form.set('file', file);
     const fields = Object.fromEntries(
@@ -154,15 +191,41 @@ export function DealImportWizard({
         mapping: { ...mapping, fields },
         phoneFormat,
         ...(phoneFormat === 'national' ? { callingCode } : {}),
+        ...extra,
       }),
     );
-    const res = await importDealsAction(slug, form);
+    return form;
+  }
+
+  async function checkRows(event: React.FormEvent) {
+    event.preventDefault();
+    const form = preview && mappingReady ? importForm({}) : null;
+    if (!form) return;
+    setBusy(true);
+    setError(null);
+    const res = await checkDealImportAction(slug, form);
+    setBusy(false);
+    if (!res.ok) {
+      setError(res.message);
+      return;
+    }
+    setCheck(res.data);
+  }
+
+  async function runImport(event: React.FormEvent) {
+    event.preventDefault();
+    const form = check ? importForm({ expectedVersions: check.expectedVersions }) : null;
+    if (!form) return;
+    setBusy(true);
+    setError(null);
+    const res = await importCheckedDealsAction(slug, form);
     setBusy(false);
     if (!res.ok) {
       setError(res.message);
       return;
     }
     setResult(res.data);
+    setCheck(null);
     setPreview(null);
     setFile(null);
   }
@@ -185,8 +248,7 @@ export function DealImportWizard({
           </CardHeader>
           <CardContent className="grid gap-4">
             <Alert tone={result.errorCount > 0 ? 'warning' : 'success'}>
-              {result.created} deals added, {result.errorCount} rows with errors (of{' '}
-              {result.totalRows}).
+              {countsText(result)} (of {result.totalRows}).
             </Alert>
             {result.messages.length > 0 ? (
               <Table>
@@ -238,13 +300,61 @@ export function DealImportWizard({
             </ClientForm>
           </CardContent>
         </Card>
+      ) : check ? (
+        <Card>
+          <CardHeader>
+            <CardTitle>3. Check the rows — {preview.fileName}</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <ClientForm onSubmit={runImport} className="grid gap-4">
+              <Alert tone={check.errorCount > 0 ? 'warning' : 'info'}>
+                Importing will give: {countsText(check)} (of {check.totalRows}). Nothing has been
+                written yet.
+              </Alert>
+              <div className="overflow-x-auto">
+                <Table>
+                  <THead>
+                    <TR>
+                      <TH>Row</TH>
+                      <TH>Deal</TH>
+                      <TH>What importing does</TH>
+                    </TR>
+                  </THead>
+                  <TBody>
+                    {check.rows.map((row) => (
+                      <TR key={row.row}>
+                        <TD className="tabular-nums">{row.row}</TD>
+                        <TD className="max-w-64 truncate text-sm">{row.title ?? ''}</TD>
+                        <TD className={row.action === 'skip' ? 'text-destructive' : undefined}>
+                          {rowAction(row)}
+                        </TD>
+                      </TR>
+                    ))}
+                  </TBody>
+                </Table>
+              </div>
+              <p className="text-sm text-muted-foreground">
+                A deal someone changes after this check is skipped: check the rows again to include
+                it.
+              </p>
+              <div className="flex gap-2">
+                <Button type="submit" disabled={busy || check.created + check.updated === 0}>
+                  {busy ? 'Importing…' : `Import ${check.totalRows} rows`}
+                </Button>
+                <ClientButton type="button" variant="outline" onClick={() => setCheck(null)}>
+                  Change columns
+                </ClientButton>
+              </div>
+            </ClientForm>
+          </CardContent>
+        </Card>
       ) : (
         <Card>
           <CardHeader>
             <CardTitle>2. Map columns — {preview.fileName}</CardTitle>
           </CardHeader>
           <CardContent>
-            <ClientForm onSubmit={runImport} className="grid gap-6">
+            <ClientForm onSubmit={checkRows} className="grid gap-6">
               <p className="text-sm text-muted-foreground">
                 {preview.totalRows} data rows. First rows:
               </p>
@@ -287,10 +397,18 @@ export function DealImportWizard({
               </Field>
               <div className="grid gap-4 sm:grid-cols-2">
                 <ColumnSelect
+                  id="map-deal-id"
+                  label="Deal id"
+                  description="The deal_id column of a deals export: a row with an id changes that open deal of the pipeline, and blank cells keep its values. Rows without one add deals."
+                  headers={preview.headers}
+                  value={mapping.dealId}
+                  onChange={(v) => setMapping({ ...mapping, dealId: v })}
+                />
+                <ColumnSelect
                   id="map-phone"
                   label="Contact's phone number"
-                  description="Each deal is for the contact with this number; add or import contacts first."
-                  required
+                  description="Each new deal is for the contact with this number; add or import contacts first. Not read for rows with a deal id: a deal's contact never changes."
+                  required={mapping.dealId === null}
                   headers={preview.headers}
                   value={mapping.phone}
                   onChange={(v) => setMapping({ ...mapping, phone: v })}
@@ -298,7 +416,7 @@ export function DealImportWizard({
                 <ColumnSelect
                   id="map-title"
                   label="Deal title"
-                  required
+                  required={mapping.dealId === null}
                   headers={preview.headers}
                   value={mapping.title}
                   onChange={(v) => setMapping({ ...mapping, title: v })}
@@ -319,9 +437,17 @@ export function DealImportWizard({
                   onChange={(v) => setMapping({ ...mapping, value: v })}
                 />
                 <ColumnSelect
+                  id="map-currency"
+                  label="Currency"
+                  description="Optional: a row in another currency than the pipeline's is skipped."
+                  headers={preview.headers}
+                  value={mapping.currency}
+                  onChange={(v) => setMapping({ ...mapping, currency: v })}
+                />
+                <ColumnSelect
                   id="map-owner"
                   label="Owner"
-                  description="The email of an active member who can use the CRM."
+                  description="The email of an active member who can use the CRM, or their name when no other member has it."
                   headers={preview.headers}
                   value={mapping.owner}
                   onChange={(v) => setMapping({ ...mapping, owner: v })}
@@ -333,6 +459,22 @@ export function DealImportWizard({
                   headers={preview.headers}
                   value={mapping.expectedCloseOn}
                   onChange={(v) => setMapping({ ...mapping, expectedCloseOn: v })}
+                />
+                <ColumnSelect
+                  id="map-status"
+                  label="Status"
+                  description="open, won or lost. A won or lost row closes its deal now, as Won or Lost on the deal page does: reports count it today, whatever the file's closed_at."
+                  headers={preview.headers}
+                  value={mapping.status}
+                  onChange={(v) => setMapping({ ...mapping, status: v })}
+                />
+                <ColumnSelect
+                  id="map-lost-reason"
+                  label="Lost reason"
+                  description="Only for lost rows; up to 200 characters."
+                  headers={preview.headers}
+                  value={mapping.lostReason}
+                  onChange={(v) => setMapping({ ...mapping, lostReason: v })}
                 />
                 {preview.fields.map((f) => (
                   <ColumnSelect
@@ -381,15 +523,14 @@ export function DealImportWizard({
                 ) : null}
               </fieldset>
               <p className="text-sm text-muted-foreground">
-                Every row adds a new deal, even when the contact already has one: importing the same
-                file again adds its deals again.
+                Every row without a deal id adds a new deal, even when the contact already has one:
+                importing the same file again adds its deals again. The product columns of a deals
+                export are not imported, and a blank cell never clears a value: clear it on the deal
+                page.
               </p>
               <div className="flex gap-2">
-                <Button
-                  type="submit"
-                  disabled={busy || mapping.phone === null || mapping.title === null}
-                >
-                  {busy ? 'Importing…' : `Import ${preview.totalRows} rows`}
+                <Button type="submit" disabled={busy || !mappingReady}>
+                  {busy ? 'Checking…' : `Check ${preview.totalRows} rows`}
                 </Button>
                 <ClientButton type="button" variant="outline" onClick={() => setPreview(null)}>
                   Choose another file

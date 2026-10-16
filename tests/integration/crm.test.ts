@@ -1842,3 +1842,390 @@ describe('deal import (ADR-374)', () => {
     );
   });
 });
+
+describe('deal import that changes and closes deals (ADR-387)', () => {
+  const phoneOf = async (contactId: string) =>
+    (
+      await fx.query<{ phone_e164: string }>('SELECT phone_e164 FROM app.contacts WHERE id = $1', [
+        contactId,
+      ])
+    )[0]!.phone_e164;
+
+  it('reads a deals export back, changes and closes the deals it names, adds closed ones, refuses stale versions', async () => {
+    const { c, owner, agent, marketer, pipeline, newStage, qualified, proposal } = await setup();
+    const svc = crm();
+    await svc.createDealField(owner, { label: 'Seats', type: 'number' });
+    const asha = await newContact(owner, 'Asha');
+    const ravi = await newContact(owner, 'Ravi');
+    const { id: first } = await svc.createDeal(owner, {
+      contactId: asha,
+      pipelineId: pipeline.id,
+      stageId: newStage.id,
+      title: 'Annual plan',
+      value: '25000.50',
+      ownerMembershipId: agent.membership.id,
+      expectedCloseOn: '2026-11-30',
+      fields: { seats: '12' },
+    });
+    const { id: second } = await svc.createDeal(owner, {
+      contactId: ravi,
+      pipelineId: pipeline.id,
+      stageId: newStage.id,
+      title: 'Renewal',
+    });
+    const { id: old } = await svc.createDeal(owner, {
+      contactId: ravi,
+      pipelineId: pipeline.id,
+      stageId: newStage.id,
+      title: 'Old one',
+    });
+    await svc.closeDeal(owner, { id: old, expectedVersion: 1, outcome: 'lost' });
+
+    let csv = '';
+    for await (const chunk of svc.exportDeals(owner, { pipelineId: pipeline.id })) csv += chunk;
+    // The export's columns are suggested, its products columns never.
+    const preview = await svc.previewDealImport(owner, { fileName: 'deals.csv', text: csv });
+    expect(preview.headers).toEqual([...DEAL_CSV_COLUMNS, 'seats']);
+    expect(preview.suggested).toEqual({
+      dealId: 0,
+      phone: 9,
+      title: 1,
+      stage: 3,
+      value: 6,
+      currency: 5,
+      owner: 7,
+      expectedCloseOn: 10,
+      status: 4,
+      lostReason: 14,
+      fields: { seats: 18 },
+    });
+    const options = (text: string, extra: Record<string, unknown> = {}) => ({
+      fileName: 'deals.csv',
+      text,
+      pipelineId: pipeline.id,
+      phoneFormat: 'international',
+      mapping: preview.suggested,
+      ...extra,
+    });
+    await expectAppError(svc.checkDealImport(agent, options(csv)), 'forbidden');
+    await expectAppError(svc.checkDealImport(marketer, options(csv)), 'forbidden');
+
+    // Read back as it was written, newest first: the open deals are unchanged, the lost one skipped.
+    expect(await svc.checkDealImport(owner, options(csv))).toEqual({
+      totalRows: 3,
+      created: 0,
+      updated: 0,
+      closed: 0,
+      unchanged: 2,
+      errorCount: 1,
+      rows: [
+        {
+          row: 2,
+          action: 'skip',
+          close: null,
+          dealId: null,
+          title: null,
+          message: 'This deal is lost: reopen it on its page to change it.',
+        },
+        {
+          row: 3,
+          action: 'unchanged',
+          close: null,
+          dealId: second,
+          title: 'Renewal',
+          message: null,
+        },
+        {
+          row: 4,
+          action: 'unchanged',
+          close: null,
+          dealId: first,
+          title: 'Annual plan',
+          message: null,
+        },
+      ],
+      expectedVersions: { [second]: 1, [first]: 1 },
+    });
+
+    // The file edited: cells changed, a new lost deal added, the lost deal's row kept.
+    const lines = csv.slice(1).split('\r\n').filter(Boolean);
+    const edited = (id: string, cells: Record<number, string>) => {
+      const row = lines.find((l) => l.startsWith(id))!.split(',');
+      for (const [i, v] of Object.entries(cells)) row[Number(i)] = v;
+      return row.join(',');
+    };
+    const fresh = Array.from({ length: 19 }, () => '');
+    Object.assign(fresh, {
+      1: 'Fresh lost',
+      4: 'lost',
+      6: '100',
+      9: await phoneOf(asha),
+      14: 'Too dear',
+    });
+    const text = [
+      lines[0],
+      edited(first, { 1: 'Annual plan v2', 3: 'Proposal', 4: 'won', 6: '30000' }),
+      edited(second, { 3: 'Qualified', 7: c.owner.email, 10: '2026-12-31', 18: '3' }),
+      fresh.join(','),
+      edited(old, {}),
+    ].join('\r\n');
+    const check = await svc.checkDealImport(owner, options(text));
+    expect(check).toMatchObject({
+      totalRows: 4,
+      created: 1,
+      updated: 2,
+      closed: 2,
+      unchanged: 0,
+      errorCount: 1,
+      expectedVersions: { [first]: 1, [second]: 1 },
+    });
+    expect(check.rows.map((r) => [r.row, r.action, r.close, r.dealId, r.title])).toEqual([
+      [2, 'update', 'won', first, 'Annual plan v2'],
+      [3, 'update', null, second, 'Renewal'],
+      [4, 'create', 'lost', null, 'Fresh lost'],
+      [5, 'skip', null, null, null],
+    ]);
+    // Nothing is written by the check.
+    const versions = async () =>
+      fx.query<{ id: string; version: number }>(
+        'SELECT id, version FROM app.crm_deals WHERE tenant_id = $1 ORDER BY id',
+        [c.tenant.id],
+      );
+    expect((await versions()).map((d) => d.version)).toEqual([1, 1, 2]);
+
+    // Someone edits the second deal on its page after the check: its row is skipped.
+    await svc.updateDeal(agent, {
+      id: second,
+      expectedVersion: 1,
+      title: 'Renewal 2',
+      value: '',
+      ownerMembershipId: null,
+      expectedCloseOn: null,
+    });
+    await expectAppError(
+      svc.importDeals(agent, options(text, { expectedVersions: check.expectedVersions })),
+      'forbidden',
+    );
+    const result = await svc.importDeals(
+      owner,
+      options(text, { expectedVersions: check.expectedVersions }),
+      { ipAddress: '203.0.113.9' },
+    );
+    expect(result).toEqual({
+      totalRows: 4,
+      created: 1,
+      updated: 1,
+      closed: 2,
+      unchanged: 0,
+      errorCount: 2,
+      messages: [
+        {
+          row: 3,
+          level: 'error',
+          message: 'Someone changed this deal after the rows were checked. Check the rows again.',
+        },
+        {
+          row: 5,
+          level: 'error',
+          message: 'This deal is lost: reopen it on its page to change it.',
+        },
+      ],
+    });
+
+    const rows = await fx.query<{
+      id: string;
+      title: string;
+      status: string;
+      stage_id: string;
+      value_minor: string | null;
+      owner_membership_id: string | null;
+      lost_reason: string | null;
+      closed_by_membership_id: string | null;
+      closed_at: Date | null;
+      created_by_membership_id: string;
+      version: number;
+    }>(
+      `SELECT id, title, status, stage_id, value_minor, owner_membership_id, lost_reason,
+              closed_by_membership_id, closed_at, created_by_membership_id, version
+         FROM app.crm_deals WHERE tenant_id = $1 ORDER BY title`,
+      [c.tenant.id],
+    );
+    expect(
+      rows.map((d) => [
+        d.title,
+        d.status,
+        d.stage_id,
+        d.value_minor && Number(d.value_minor),
+        d.owner_membership_id,
+        d.lost_reason,
+        d.closed_by_membership_id,
+        d.version,
+      ]),
+    ).toEqual([
+      // Moved, retitled, revalued and won by the member who imported, its owner kept.
+      [
+        'Annual plan v2',
+        'won',
+        proposal.id,
+        3_000_000,
+        agent.membership.id,
+        null,
+        owner.membership.id,
+        2,
+      ],
+      // Added, then closed as lost with its reason.
+      ['Fresh lost', 'lost', newStage.id, 10_000, null, 'Too dear', owner.membership.id, 2],
+      ['Old one', 'lost', newStage.id, null, null, null, owner.membership.id, 2],
+      // The page's edit stands; the import did not change it.
+      ['Renewal 2', 'open', newStage.id, null, null, null, null, 2],
+    ]);
+    expect(rows.find((d) => d.title === 'Renewal 2')!.stage_id).not.toBe(qualified.id);
+    expect(rows.find((d) => d.title === 'Fresh lost')!.created_by_membership_id).toBe(
+      owner.membership.id,
+    );
+
+    // Their timelines, as the deal page writes them, marked as imported.
+    const changed = await svc.getDeal(owner, first);
+    expect(changed.timeline.map((a) => [a.kind, a.data])).toEqual([
+      ['deal_won', { valueMinor: 3_000_000, imported: true }],
+      [
+        'deal_updated',
+        { fields: ['title', 'value'], valueFrom: 2_500_050, valueTo: 3_000_000, imported: true },
+      ],
+      ['stage_changed', { fromStageId: newStage.id, toStageId: proposal.id, imported: true }],
+      ['deal_created', { stageId: newStage.id, valueMinor: 2_500_050 }],
+    ]);
+    expect(changed.fields.map((f) => [f.key, f.value])).toEqual([['seats', 12]]);
+    const added = await svc.getDeal(owner, rows.find((d) => d.title === 'Fresh lost')!.id);
+    expect(added.timeline.map((a) => [a.kind, a.data])).toEqual([
+      ['deal_lost', { imported: true }],
+      ['deal_created', { stageId: newStage.id, valueMinor: 10_000, imported: true }],
+    ]);
+    expect(added.closedAt).not.toBeNull();
+
+    // Reports count the imported outcomes as other closed deals, closed now.
+    const report = await createReportsService({ db: fx.dbs.app, clock: systemClock }).getReport(
+      owner,
+      { preset: 'last_7_days' },
+    );
+    expect(report.deals.won).toEqual([{ currency: 'INR', deals: 1, valueMinor: 3_000_000 }]);
+    expect(report.deals.lost).toEqual([{ currency: 'INR', deals: 2, valueMinor: 10_000 }]);
+    expect(report.deals.winRate).toEqual({ numerator: 1, denominator: 3 });
+    expect(report.deals.medianSecondsToWin).toBeGreaterThanOrEqual(0);
+
+    const audits = await fx.query<{ subject_id: string; metadata: Record<string, unknown> }>(
+      `SELECT subject_id, metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND action = 'crm.deals_imported'`,
+      [c.tenant.id],
+    );
+    expect(audits).toEqual([
+      {
+        subject_id: pipeline.id,
+        metadata: expect.objectContaining({
+          fileName: 'deals.csv',
+          totalRows: 4,
+          created: 1,
+          updated: 1,
+          closed: 2,
+          unchanged: 0,
+          skipped: 2,
+          errorCount: 2,
+        }),
+      },
+    ]);
+  });
+
+  it('changes only the company’s deals of the pipeline chosen, at the versions checked', async () => {
+    const a = await setup();
+    const b = await setup();
+    const svc = crm();
+    const mine = await newContact(a.owner, 'Mine');
+    const theirs = await newContact(b.owner, 'Theirs');
+    const { id: own } = await svc.createDeal(a.owner, {
+      contactId: mine,
+      pipelineId: a.pipeline.id,
+      stageId: a.newStage.id,
+      title: 'Own deal',
+    });
+    const { id: foreign } = await svc.createDeal(b.owner, {
+      contactId: theirs,
+      pipelineId: b.pipeline.id,
+      stageId: b.newStage.id,
+      title: 'Their deal',
+    });
+    const { id: renewals } = await svc.createPipeline(a.owner, {
+      name: 'Renewals',
+      currency: 'INR',
+      stages: ['Open'],
+    });
+    const [renewalStage] = (await svc.listPipelines(a.owner)).find(
+      (p) => p.id === renewals,
+    )!.stages;
+    const { id: elsewhere } = await svc.createDeal(a.owner, {
+      contactId: mine,
+      pipelineId: renewals,
+      stageId: renewalStage!.id,
+      title: 'Renewal deal',
+    });
+    const input = (extra: Record<string, unknown> = {}) => ({
+      fileName: 'changes.csv',
+      text: [
+        'deal_id,title,stage',
+        `${foreign},Taken,`,
+        `${elsewhere},Moved,`,
+        `${own},Retitled,Qualified`,
+      ].join('\n'),
+      pipelineId: a.pipeline.id,
+      phoneFormat: 'international',
+      mapping: { dealId: 0, title: 1, stage: 2 },
+      ...extra,
+    });
+    // A file of deal ids needs no phone number column; one without either is refused.
+    await expectAppError(
+      svc.checkDealImport(a.owner, input({ mapping: { title: 1 } })),
+      'validation_failed',
+    );
+    const check = await svc.checkDealImport(a.owner, input());
+    expect(check.rows.map((r) => [r.row, r.action, r.message])).toEqual([
+      [2, 'skip', 'The company has no deal with this id.'],
+      [3, 'skip', 'This deal is in another pipeline: choose its pipeline to change it.'],
+      [4, 'update', null],
+    ]);
+    expect(check.expectedVersions).toEqual({ [own]: 1 });
+
+    // Without the versions the check read, a deal is not changed.
+    const unchecked = await svc.importDeals(a.owner, input());
+    expect(unchecked).toMatchObject({ updated: 0, errorCount: 3 });
+    expect(unchecked.messages.at(-1)).toEqual({
+      row: 4,
+      level: 'error',
+      message: 'This deal was not among the rows checked. Check the rows again.',
+    });
+    const done = await svc.importDeals(
+      a.owner,
+      input({ expectedVersions: check.expectedVersions }),
+    );
+    expect(done).toMatchObject({ created: 0, updated: 1, closed: 0, errorCount: 2 });
+    const deals = await fx.query<{ id: string; title: string; stage_id: string; version: number }>(
+      'SELECT id, title, stage_id, version FROM app.crm_deals WHERE id = ANY($1) ORDER BY title',
+      [[own, foreign, elsewhere]],
+    );
+    expect(deals.map((d) => [d.id, d.title, d.stage_id, d.version])).toEqual([
+      [elsewhere, 'Renewal deal', renewalStage!.id, 1],
+      [own, 'Retitled', a.qualified.id, 2],
+      [foreign, 'Their deal', b.newStage.id, 1],
+    ]);
+    // The same versions again: the deal has moved on, so its row is skipped.
+    const again = await svc.importDeals(
+      a.owner,
+      input({ expectedVersions: check.expectedVersions }),
+    );
+    expect(again).toMatchObject({ updated: 0, errorCount: 3 });
+    const [audits] = await fx.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM app.audit_events
+        WHERE tenant_id = $1 AND action = 'crm.deals_imported'`,
+      [a.c.tenant.id],
+    );
+    expect(audits!.n).toBe(3);
+  });
+});
