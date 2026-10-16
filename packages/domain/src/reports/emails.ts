@@ -507,6 +507,8 @@ export async function sendDueReportEmails(
       .orderBy(asc(reportEmailSubscriptions.id))
       .for('update');
     if (locked.length === 0) return outcome;
+    // Locked for share until the emails are queued: a member's suspension, removal or change of
+    // role waits for this, or comes first and is seen here.
     const members = new Map(
       (
         await tx
@@ -524,6 +526,8 @@ export async function sendDueReportEmails(
               inArray(memberships.id, [...new Set(locked.map((s) => s.membershipId))]),
             ),
           )
+          .orderBy(asc(memberships.id))
+          .for('share', { of: memberships })
       ).map((m) => [m.id, m]),
     );
     for (const s of locked) {
