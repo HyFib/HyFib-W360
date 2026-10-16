@@ -497,7 +497,8 @@ const asksForField = (query: unknown) =>
  * The company's report for a period (`MAX_PERIOD_DAYS` at most), as the Reports page reads it: in
  * the company's time zone, in one read-only snapshot. With `field`, the deals section counts only
  * the deals a choice or yes/no field's value matches (ADR-396), read as `GET /deals` reads it: it
- * needs `deals.read` (checked before the query is read) and the CRM in the plan, as
+ * needs `deals.read` (checked before this reads the query; the API's request handler refuses a NUL
+ * character in any request first, for every route) and the CRM in the plan, as
  * `GET /deal-fields` does, since it resolves against those fields; a text written otherwise is
  * refused before the transaction, and a key or value the company's fields do not resolve within
  * it, never ignored.
@@ -508,8 +509,9 @@ export async function apiGetReport(
   query: unknown,
 ): Promise<ApiReport> {
   assertScope(ctx, 'reports.read');
-  // A filter needs deals.read, checked before anything in the query is, so a key without it learns
-  // nothing from how its query would be refused.
+  // A filter needs deals.read, checked before this reads anything in the query, so a key without it
+  // learns nothing from how its query would be refused (the request handler's NUL refusal, the same
+  // for every route, comes first and names only the parameter).
   if (asksForField(query)) assertScope(ctx, 'deals.read');
   const input = parseInput(apiReportQuerySchema, query);
   if (input.field !== undefined && parseDealFieldFilterParam(input.field) === null) {

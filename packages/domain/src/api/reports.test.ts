@@ -594,7 +594,7 @@ describe('the deals section filtered by a deal field through the API (ADR-396)',
     expect(apiReportQuerySchema.safeParse({ field: `tier:${'x'.repeat(195)}` }).success).toBe(true);
   });
 
-  it('need deals.read as well, checked before the query and before anything is read', async () => {
+  it('need deals.read as well, checked before the route reads the query and before anything is read', async () => {
     const missing = ['forbidden', 'This API key does not have the deals.read scope.', []];
     // Before the text: over-long, holding NUL, written otherwise or well, and before the period.
     for (const query of [

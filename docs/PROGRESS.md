@@ -25,8 +25,9 @@ ADR-394 listed "filtering Reports by a choice" as not built: the board, the won 
   it strictly (ADR-391's 400s), names a filtered file `deals-filtered-by-<key>-…` (never the option)
   and audits `report.exported` with `field: { key, match }`.
 - **API (`api/reports.ts`, `openapi.ts`):** `GET /reports?field=` needs `deals.read` too (checked
-  before anything in the query) and the CRM in the plan, refuses a malformed text before the transaction and a
-  key or value the company's fields do not resolve within it, with 422 naming `field` in the API's
+  before the route reads the query; the API's request handler refuses a NUL character in any
+  request first, for every route) and the CRM in the plan, refuses a malformed text before the
+  transaction and a key or value the company's fields do not resolve within it, with 422 naming `field` in the API's
   words; `deals.field` echoes the filter as resolved, or null. The OpenAPI document describes the
   parameter, the scope, the refusals and the echo (no decision numbers).
 - **Web:** the board's `DealFieldFilter` moved to `components/crm/deal-field-filter.tsx`, shared by

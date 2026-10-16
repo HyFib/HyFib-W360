@@ -1403,7 +1403,8 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   `exportSection` refuses a filter with another section or without `crm.read`
   (`assertReportDealFilterAllowed`) before resolving it strictly, names a filtered file by the key
   (`reportExportFilename`) and audits `field: { key, match }`. `apiGetReport` checks `deals.read`
-  before reading the query and the text's form before the transaction, then the CRM plan and the
+  before reading the query (after `handleApiRequest`'s NUL refusal, which every route gets) and
+  the text's form before the transaction, then the CRM plan and the
   company's fields within it, and gives `deals.field`. The lenient readings (the board,
   `listDeals`, `getReport`) take the text with `dealFieldFilterText`, apart from their input's
   validation, so text it refuses (NUL) is ignored and reported instead of failing the page. Web: `DealFieldFilter` moved to `components/crm/deal-field-filter.tsx` and is

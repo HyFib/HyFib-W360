@@ -16221,9 +16221,10 @@ Decision:
   key and value are resolved in it against the company's own fields, after the CRM plan check, in
   the integration's words (`apiDealFieldFilterMessage`). Since the filter resolves against the
   fields `GET /deal-fields` gives, it needs what that endpoint needs: the `deals.read` scope (403
-  otherwise, checked before anything in the query: the period, the text's length, a NUL character
-  or its form) and the CRM in the plan (403, reason `not_in_plan`); a key with `reports.read`
-  alone reads the report as before. `deals.field` gives the filter followed, as resolved
+  otherwise, checked before the route reads anything in the query: the period, the text's length
+  or its form; a NUL character anywhere in a request is refused before that, with 422, by the
+  API's request handler for every route, which names only the parameter) and the CRM in the plan
+  (403, reason `not_in_plan`); a key with `reports.read` alone reads the report as before. `deals.field` gives the filter followed, as resolved
   (`tier:Gold` for `tier:gold`), or null, so a stored response says whether it was filtered. The
   OpenAPI document describes the parameter, the scope, the refusals and the echo, without decision
   numbers.
@@ -16248,7 +16249,8 @@ Review (before merge): an independent review found no High or Medium issue; it r
 integration tests' figures. It found that a NUL character in `field` failed the Reports page, the
 board and the lists (fixed as described above); that `GET /reports` checked `deals.read` after the
 query's own checks, so a key without the scope sending a 201-character `field` or a bad period got
-422 instead of 403 (the scope is now checked before the query is read); that a unit test comparing
+422 instead of 403 (the scope is now checked before the route reads the query, after the NUL
+refusal every API request gets); that a unit test comparing
 the board's condition with itself could never fail (removed: the exact SQL of the board's and the
 section's conditions is tested); and that the browser test, now running Reports four more times,
 risked the default minute on slower browsers (it now has two). All were fixed.
