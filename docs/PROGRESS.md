@@ -48,6 +48,18 @@ values" as not built.
   notes swapped or values not read by type, a date label, the simulator's value replacement): 23
   caught by the unit tests. The runner's reading and locks and the service's plan and permission
   rule are covered by the integration tests, which run in CI only.
+- **Review fixes (no High or Medium findings):** a condition's read takes no row locks
+  (`holdForDealChange` with `lock: false` and the plan read once, `onlyOpenDeal` with `lock: null`;
+  the deal steps keep their locks exactly), only the shared deal-field lock, so it cannot time out
+  behind an import, an erasure or a merge; the deal rule's note is given only when the condition
+  answers no (the first failing deal rule, in rule order); the simulator lists typed deal values it
+  leaves out ("Deal field values left out: seats (Seats must be a number)") and says that one
+  simulated deal stands for every pipeline's; ADR-393, ARCHITECTURE, SECURITY, T346 and RUNBOOKS
+  follow. 8 more deliberate regressions (the note kept on yes or given only on yes, the last note
+  instead of the first, ignored values not listed or with the wrong message or not at all, an empty
+  value kept, an empty list returned): 8 caught by the unit tests. The lock-free reads are runner
+  code, covered by the integration tests in CI only. Full local check after the fixes: lint, format
+  and typecheck clean, 164 files and 1,751 unit tests passed, build passed.
 
 ### Test commands and results (local, 2026-10-16)
 

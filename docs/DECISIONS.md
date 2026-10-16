@@ -15839,11 +15839,15 @@ Decision:
   document is unchanged.
 - **Which deal:** the run's contact's single open deal in the pipeline, found exactly as the steps
   that move, close and set deal fields find it (`holdForDealChange`, then `lockedDealFields`, then
-  `onlyOpenDeal`, the same helpers in the same lock order), its values read as the deal's page shows
-  them (values of fields that still exist). The deal is locked shared rather than for update, since
-  nothing changes it; the company's deal-field lock is taken shared so a field deleted meanwhile is
-  either seen or waits. Several rules on several pipelines are read in pipeline id order. Deals are
-  read only for conditions that have such rules (`loadFacts`).
+  `onlyOpenDeal`, the same helpers in the same order), its values read as the deal's page shows them
+  (values of fields that still exist). Nothing is written from what a condition reads, so it locks
+  no row: the contact, the pipeline and the deal are read without `FOR KEY SHARE`, `FOR SHARE` or
+  `FOR UPDATE` (the steps that change deals keep their locks), so a condition never waits, past the
+  5-second lock timeout, behind an import, an erasure or a merge holding those rows. Only the
+  company's deal-field lock is taken, shared, so the definitions and the deal's values are read as
+  one state and a field being deleted is either seen or waited for. The plan is read once for all
+  the pipelines, which are read in id order. Deals are read only for conditions that have such rules
+  (`loadFacts`).
 - **Comparisons by type** (`DEAL_FIELD_COMPARISONS`): text takes "is", "is not", "contains", "has a
   value" and "is empty", ignoring case as contact field rules do; numbers "is", "is not", "is more
   than", "is less than", "has a value" and "is empty", compared as numbers (999 is less than 1000);
@@ -15860,8 +15864,11 @@ Decision:
   exactly one open deal there, its field still exists and the rule's value still fits it. Otherwise
   it does not hold, whatever its comparison ("is empty" and "is not" included), so a missing deal
   never reads as an empty field; a condition that must know the contact has no deal is not built.
-  The condition is still logged `branched`, with the note of the first rule that could not read its
-  deal or field in the step's detail, as a deal step that changes nothing gives it: `deal_not_open`,
+  The condition is still logged `branched`. When it answers no, the step's detail has the note of
+  the first deal field rule, in rule order, that could not read its deal or field (it is then one of
+  the reasons; the note does not name the pipeline); a condition that answers yes, with any rule
+  holding, has none, since that rule did not decide the branch. The notes are those a deal step
+  that changes nothing gives: `deal_not_open`,
   `deal_ambiguous`, `crm_not_in_plan`, `contact_erased`, `deal_stage_unavailable` (the pipeline was
   archived), `deal_field_missing:<key>` (the field was deleted) or `deal_rule_invalid:<key>` (the
   rule's option was removed from the choice since publishing). The run page names it ("the
@@ -15880,9 +15887,13 @@ Decision:
   reveals what deals hold ("Publishing an automation that checks deal fields needs the permission to
   see the CRM."). At run time a plan without the CRM makes the rule not hold, with `crm_not_in_plan`.
 - **Simulator:** the builder's simulator reads a simulated deal: "Open deals in each pipeline" (one,
-  none or more than one, the same in every active pipeline) and its values typed one key=value per
-  line, read as the deal's form reads them; values an "Update deal fields" step sets are taken into
-  it, so a later condition reads them, and a rule that cannot read the deal says why.
+  none or more than one) and its values typed one key=value per line, read as the deal's form reads
+  them; typed values it cannot take are listed ("Deal field values left out: seats (Seats must be a
+  number)") rather than dropped. Values an "Update deal fields" step sets are taken into it, so a
+  later condition reads them, and a rule that cannot read the deal says why. It is a
+  simplification: one simulated deal stands for the contact's deal in every pipeline, so values a
+  step sets on one pipeline's deal are seen by a condition on another's, which a run would not; the
+  simulator says so beside the control.
 - **Builder:** "A field of the contact's deal" in a rule's list: a pipeline, a deal field among the
   company's, the comparisons its type takes, and a value control for the type (a list for yes/no and
   choices, a date input for dates, text otherwise). Changing the field starts the comparison and the

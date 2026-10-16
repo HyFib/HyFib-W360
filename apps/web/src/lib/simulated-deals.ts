@@ -32,23 +32,37 @@ export function withPair(typed: string, key: string, value: string | null): stri
   ].join('\n');
 }
 
+/** A typed value the simulated deal left out, and why. */
+export interface IgnoredDealValue {
+  key: string;
+  message: string;
+}
+
 /**
- * What a simulated run's deal field rules read: the same simulated deal in every active pipeline,
- * with its typed values read as the deal's form reads them (values of no field, or that their field
- * does not take, are left out), or no deal or several there; a pipeline that is not active reads as
- * the runner reads an archived one.
+ * What a simulated run's deal field rules read: the same simulated deal in every active pipeline (a
+ * simplification: a real contact has a deal of its own in each pipeline, so values set on one are
+ * not seen on another), with its typed values read as the deal's form reads them, or no deal or
+ * several there; a pipeline that is not active reads as the runner reads an archived one. Typed
+ * values of no field, or that their field does not take, are left out and listed in `ignored`, so
+ * the simulator can say so; an empty value is no value.
  */
 export function simulatedDeals(
   sim: { deals: SimulatedDealCount; dealValues: string },
   graph: AutomationGraph,
   pipelines: readonly { id: string }[],
   dealFields: readonly (DealFieldShape & { key: string })[],
-): Map<string, DealFacts> {
+): { deals: Map<string, DealFacts>; ignored: IgnoredDealValue[] } {
   const attributes: Record<string, string | number | boolean> = {};
+  const ignored: IgnoredDealValue[] = [];
   for (const [key, typed] of typedPairs(sim.dealValues)) {
     const field = dealFields.find((f) => f.key === key);
-    const coerced = field ? coerceDealFieldValue(field, typed) : null;
-    if (coerced?.ok && coerced.value !== null) attributes[key] = coerced.value;
+    if (!field) {
+      ignored.push({ key, message: 'no deal field has this key' });
+      continue;
+    }
+    const coerced = coerceDealFieldValue(field, typed);
+    if (!coerced.ok) ignored.push({ key, message: coerced.message });
+    else if (coerced.value !== null) attributes[key] = coerced.value;
   }
   const deal: DealFacts =
     sim.deals === 'one'
@@ -62,5 +76,5 @@ export function simulatedDeals(
         deals.set(rule.pipelineId, { ok: false, note: 'deal_stage_unavailable' });
     }
   }
-  return deals;
+  return { deals, ignored };
 }

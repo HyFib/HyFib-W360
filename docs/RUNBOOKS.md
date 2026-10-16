@@ -537,13 +537,16 @@ failed as `version_unreadable` right after a deploy was read by a worker of the 
 roll the workers out, then start the run again.
 
 **A condition on a deal field took the other branch (ADR-393).** Open the run: the condition's step
-("Checked a condition") shows the branch and, when a rule could not read the deal or its field, why:
+("Checked a condition") shows the branch and, when it answered no and a deal field rule could not
+read the deal or its field, why. The note is the first such rule's, in rule order, and does not name
+the pipeline (open the version's graph to see which rule names which); a condition that answered
+yes has no note. The notes:
 "the contact has no open deal in the pipeline", "the contact has more than one open deal in the
 pipeline" (close or move the extra one), "the pipeline or the stage was archived or removed", "the
 company’s plan does not include the CRM", "the deal field … no longer exists" or "the condition’s
 value for the deal field … is no longer one the field takes" (an option removed since publishing:
 edit the rule and publish again). Such a rule does not hold whatever its comparison, "is empty" and
-"is not" included. Without a note the deal was read: compare the values on the deal page as they
+"is not" included. A "no" without a note means every deal field rule read its deal: compare the values on the deal page as they
 were when the step ran (the timeline shows later edits); text compares ignoring case, numbers as
 numbers, dates as days, and "is not" holds for a deal without a value. Values in rules take no
 placeholders. A run that failed as `version_unreadable` right after a deploy was read by a worker of

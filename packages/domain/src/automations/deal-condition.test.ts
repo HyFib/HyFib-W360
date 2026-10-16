@@ -456,15 +456,33 @@ describe('conditions with deal field rules in a run (ADR-393)', () => {
     });
   });
 
-  it('combine with other rules: any rule may still lead to yes, with the note kept', () => {
-    const graph = graphOf(
+  it('combine with other rules: a note only when the condition answers no', () => {
+    const anyOf = graphOf(
       graphInput(
         [rule({ field: 'trial', value: 'yes' }), { kind: 'business_hours', op: 'open' }],
         'any',
       ),
     );
-    const result = runOnce(graph, { ...withDeal({}), dealFields: new Map() });
-    expect(result.log).toMatchObject({ branch: 'yes', detail: 'deal_field_missing:trial' });
-    expect(result.effects).toEqual([]);
+    const noTrial: RunFacts = { ...withDeal({}), dealFields: new Map() };
+    // Open: the business-hours rule decides yes, so the deal rule's problem is no reason.
+    const open = runOnce(anyOf, noTrial);
+    expect(open.log).toMatchObject({ branch: 'yes', detail: null });
+    expect(open.effects).toEqual([]);
+    // Closed: no rule holds, and the deal rule's note is one of the reasons.
+    expect(runOnce(anyOf, { ...noTrial, businessOpen: false }).log).toMatchObject({
+      branch: 'no',
+      detail: 'deal_field_missing:trial',
+    });
+    // All rules: a false business-hours rule first, then the deal rule's note.
+    const allOf = graphOf(
+      graphInput([
+        { kind: 'business_hours', op: 'closed' },
+        rule({ field: 'trial', value: 'yes' }),
+      ]),
+    );
+    expect(runOnce(allOf, noTrial).log).toMatchObject({
+      branch: 'no',
+      detail: 'deal_field_missing:trial',
+    });
   });
 });

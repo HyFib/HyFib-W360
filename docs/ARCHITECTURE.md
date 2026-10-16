@@ -578,10 +578,11 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   placeholders), checked by `dealFieldRuleIssues` against `crmPipelines` and `dealFields`. For a
   condition with such rules, `loadFacts` adds `RunFacts.deals` (per pipeline, the contact's only
   open deal's values of existing fields, or the deal steps' note) and `RunFacts.dealFields`, read by
-  `loadDealFacts` with `holdForDealChange`, `lockedDealFields` and `onlyOpenDeal` (locked shared).
+  `loadDealFacts` with `holdForDealChange` (`lock: false`, the plan read once) and `onlyOpenDeal`
+  (`lock: null`): no row locks, only `lockedDealFields` (the shared deal-field lock).
   `evaluateDealFieldRule` compares by type and fails safe (the rule does not hold) without exactly
-  one deal, with a deleted field or a value the field no longer takes; the condition's log detail
-  carries the first such note. Publishing or testing needs the CRM in the plan and `crm.read`
+  one deal, with a deleted field or a value the field no longer takes; when the condition answers
+  no, its log detail carries the first such rule's note, in rule order. Publishing or testing needs the CRM in the plan and `crm.read`
   (`assertMayCheckDeals`). The simulator's deal is built by `lib/simulated-deals.ts`.
 - **Read receipts and typing indicators** (`inbox/read-receipts.ts`, ADR-223): `markRead` in
   `messaging/inbox.ts` calls `queueReadReceipt` in its transaction; the composer calls

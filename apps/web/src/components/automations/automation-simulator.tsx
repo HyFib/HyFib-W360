@@ -392,13 +392,23 @@ export function AutomationSimulator({
       }
     };
     let next: Status = status;
+    // Typed deal values the simulated deal cannot take are said once, not dropped silently.
+    const { ignored } = simulatedDeals(facts, graph, crmPipelines, dealFields);
+    if (facts.deals === 'one' && ignored.length > 0) {
+      out.push({
+        who: 'note',
+        text: `Deal field values left out: ${ignored
+          .map((v) => `${v.key} (${v.message.replace(/\.$/, '')})`)
+          .join(', ')}.`,
+      });
+    }
     for (let i = 0; i < RUN_BUDGETS.maxSteps + 5; i += 1) {
       const result = advance({
         graph,
         state: current,
         event,
         facts: toFacts(facts, companyName, storeEvent, {
-          deals: simulatedDeals(facts, graph, crmPipelines, dealFields),
+          deals: simulatedDeals(facts, graph, crmPipelines, dealFields).deals,
           dealFields: new Map(dealFields.map((f) => [f.key, f])),
         }),
         runId: SIMULATION_RUN,
@@ -793,7 +803,7 @@ export function AutomationSimulator({
             <Field
               id="sim-deals"
               label="Open deals in each pipeline"
-              description="What conditions on deal fields read."
+              description="What conditions on deal fields read. The same simulated deal stands for the contact’s deal in every pipeline."
             >
               {(aria) => (
                 <Select

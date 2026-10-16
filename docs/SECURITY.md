@@ -406,8 +406,9 @@ Phase 4 rules (automations, P4-01):
   check deal fields needs the CRM in the plan and `crm.read` (the branch taken reveals what a deal
   holds). Pipeline ids and field keys are checked against the company's own definitions; the
   runner reads only the run's contact's single open deal, in the company's scope, with the deal
-  steps' checks and lock order (the deal locked shared). Without exactly one open deal, or with a
-  field or option gone, the rule does not hold and the step notes why.
+  steps' checks, without row locks (only the shared deal-field lock, so definitions and values are
+  read as one state). Without exactly one open deal, or with a field or option gone, the rule does
+  not hold and, when the condition answers no, the step notes why.
 
 Phase 4 rules (automation web requests, P4-02):
 

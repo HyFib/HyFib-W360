@@ -740,7 +740,8 @@ export function advance(input: AdvanceInput): StepResult {
           : moveTo(current.next, sent, [effect], 'sent', null);
       }
       case 'condition': {
-        // A deal field rule that could not read its deal or field says why (the first such rule).
+        // When the condition answers no, the first deal field rule (in rule order) that could not
+        // read its deal or field says why: it is then one of the reasons. A yes needs no reason.
         let note: string | null = null;
         const results: boolean[] = [];
         for (const rule of current.rules) {
@@ -759,7 +760,7 @@ export function advance(input: AdvanceInput): StepResult {
           [],
           'branched',
           yes ? 'yes' : 'no',
-          note,
+          yes ? null : note,
         );
       }
       case 'update_contact': {

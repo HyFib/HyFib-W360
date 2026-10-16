@@ -40,19 +40,37 @@ const tierIsGold = {
 
 describe('the simulated deal (ADR-393)', () => {
   it('reads typed lines as the deal’s form reads values, leaving out what no field takes', () => {
-    const deals = simulatedDeals(
-      { deals: 'one', dealValues: 'tier=gold\nseats = 3\ntrial=maybe\nregion=North\nnot a line' },
+    const { deals, ignored } = simulatedDeals(
+      {
+        deals: 'one',
+        dealValues: 'tier=gold\nseats = 3\ntrial=maybe\nregion=North\nnot a line\ntrial=',
+      },
       graphOf([tierIsGold]),
       [{ id: SALES }],
       FIELDS,
     );
     expect(deals.get(SALES)).toEqual({ ok: true, attributes: { tier: 'Gold', seats: 3 } });
+    // The last line for trial (empty: no value) wins; what is left out is listed with why.
+    expect(ignored).toEqual([{ key: 'region', message: 'no deal field has this key' }]);
+    expect(
+      simulatedDeals(
+        { deals: 'one', dealValues: 'seats=three\ntier=Platinum\ntrial=maybe' },
+        graphOf([tierIsGold]),
+        [{ id: SALES }],
+        FIELDS,
+      ).ignored,
+    ).toEqual([
+      { key: 'seats', message: 'Seats must be a number.' },
+      { key: 'tier', message: 'Tier must be one of its options.' },
+      { key: 'trial', message: 'Trial must be yes or no.' },
+    ]);
   });
 
   it('gives no deal or several in every pipeline, and an inactive pipeline as archived', () => {
     const graph = graphOf([tierIsGold, { ...tierIsGold, pipelineId: ARCHIVED }]);
     expect(
-      simulatedDeals({ deals: 'none', dealValues: 'tier=Gold' }, graph, [{ id: SALES }], FIELDS),
+      simulatedDeals({ deals: 'none', dealValues: 'tier=Gold' }, graph, [{ id: SALES }], FIELDS)
+        .deals,
     ).toEqual(
       new Map([
         [SALES, { ok: false, note: 'deal_not_open' }],
@@ -60,9 +78,12 @@ describe('the simulated deal (ADR-393)', () => {
       ]),
     );
     expect(
-      simulatedDeals({ deals: 'several', dealValues: '' }, graph, [{ id: SALES }], FIELDS).get(
-        SALES,
-      ),
+      simulatedDeals(
+        { deals: 'several', dealValues: '' },
+        graph,
+        [{ id: SALES }],
+        FIELDS,
+      ).deals.get(SALES),
     ).toEqual({ ok: false, note: 'deal_ambiguous' });
   });
 
@@ -80,7 +101,7 @@ describe('the simulated deal (ADR-393)', () => {
           conversationTags: new Set(),
           fields: {},
           businessOpen: true,
-          deals: simulatedDeals({ deals, dealValues }, graph, [{ id: SALES }], FIELDS),
+          deals: simulatedDeals({ deals, dealValues }, graph, [{ id: SALES }], FIELDS).deals,
           dealFields: new Map(FIELDS.map((f) => [f.key, f])),
         },
         runId: '00000000-0000-4000-8000-000000000000',
