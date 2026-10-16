@@ -44,6 +44,7 @@ describe('queue wait limits (ADR-096)', () => {
       ['billing.settlement-recon', 60],
       ['commerce.store', 60],
       ['commerce.sync', 60],
+      ['report.email', 60],
       ['template.sync', 60],
       ['tenant.delete', 60],
     ]);

@@ -238,6 +238,13 @@ Phase 3 rules on top of the matrix (enforced in domain services and re-checked w
   inbox or contact access, such as analysts and marketers, can read them); CSV exports need
   `reports.export` and are audited (`report.exported`). The inbox response target needs
   `tenant.settings.manage`; resolving and reopening conversations is audited.
+- Report emails (ADR-376): a member with `reports.read` turns their own weekly or monthly email on
+  or off (audited); nobody chooses for another member. The worker finds companies with an email
+  due only through `ops.due_report_email_companies` (SECURITY DEFINER, ids only, active companies)
+  and sends from a signed job in the company's scope; at sending time a member who is no longer
+  active or no longer holds `reports.read` gets nothing and their choice is deleted. The email
+  carries the company's totals only (never message content, contacts' details or member names)
+  and links to the Reports page, which checks access itself.
 - Inbox teams (P3-06): creating, editing and deleting teams (members, numbers, routing keywords,
   round robin, limits) and saved replies need `inbox.supervise` (audited); moving a conversation
   between teams needs `inbox.assign` (audited, version-checked); members set their own

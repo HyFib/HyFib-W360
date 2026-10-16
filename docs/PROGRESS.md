@@ -1,5 +1,50 @@
 # Progress
 
+## 2026-10-16 — Report emails (P3-05, ADR-376)
+
+Status: **Implemented; its database and browser tests run in CI only.** Reports were computed only
+when a member opened the page.
+
+### Completed
+
+- **Database:** migration 0295 creates `app.report_email_subscriptions` (one row per member and
+  frequency, next time, last attempt, last period emailed; row security, a composite key to
+  memberships, column-limited updates, tenant deletion step 175) and
+  `ops.due_report_email_companies` (SECURITY DEFINER, ids only, active companies, at most once an
+  hour while an attempt fails). The migration command creates the new `report.email` queue.
+- **Domain:** `reports/emails.ts`: sending times (07:00 in the company's time zone on the Monday
+  or the 1st after the period, through daylight-saving changes), the period an email reports, its
+  figures (as Reports labels them) and payload; each member's own choice (audited); the job that
+  records its attempt, computes each period once with `readReport`, then under row locks emails
+  members who are active and still read reports, deletes the others' choices, skips emails over
+  72 hours late and periods already emailed, and moves each row on. A `reports.summary` email kind
+  renders the figures as a table. Report formatting moved to `@w360/domain/report-format`, shared
+  with the page. The company export includes the table.
+- **Worker:** the messaging sweep signals a signed `report.email` job per company with an email
+  due; `handlers/reports.ts` runs it in the company's scope.
+- **Web:** Reports → Report emails: weekly and monthly boxes for the member, with the next time
+  and the last period emailed.
+- **Tests:** unit (times across daylight-saving changes, periods, figures, payload, escaping, the
+  queue's wait limit); integration (`report-emails.test.ts`: choices, permissions, audit,
+  isolation, the sweep query, one email per member and period, stopping, lateness, hourly retries,
+  repeats, suspended companies); e2e (`reports.spec.ts`: the weekly email turned on and kept).
+  Written for CI; the integration and e2e tests were not run here.
+- **Docs:** ADR-376; SECURITY; THREAT-MODEL T333; ARCHITECTURE; DEPLOYMENT (0295); BACKLOG P3-05;
+  DATA-RETENTION; the feature matrix (W-157, status unchanged).
+- **Mutation checks:** 24 of 24 deliberate regressions in the times, periods, figures and email
+  rendering caught, one after a test was added (amounts when no deal was won). The database paths
+  are covered by the integration tests, which run in CI only.
+
+### Test commands and results (local, 2026-10-16)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 151 files, 1600 tests passed                                    |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+| migration 0295                                     | pglast parse check passed (syntax only)                         |
+
 ## 2026-10-13 — Products on deals (P4-04, H-012, ADR-375)
 
 Status: **Implemented; its database and browser tests run in CI only.** A deal said what it was

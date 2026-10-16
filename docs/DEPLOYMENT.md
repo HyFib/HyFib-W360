@@ -1627,6 +1627,14 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    step 295 and definer policies). It is additive: old web servers neither show nor write items.
    Rolling an image back leaves the table in place, unused.
 
+   Migration 0295 (ADR-376) creates `app.report_email_subscriptions` (row security, a composite
+   key to memberships, column-limited updates for the app, tenant deletion step 175 and definer
+   policies) and `ops.due_report_email_companies` (SECURITY DEFINER, executable by the app role
+   only). The migration command also creates the `report.email` queue. It is additive: old workers
+   neither signal nor consume the queue, so choices made meanwhile wait (an email over 72 hours
+   late is skipped for the next period's), and old web servers do not show the choice. Rolling an
+   image back leaves the table and queue in place, unused.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

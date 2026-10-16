@@ -7,6 +7,7 @@
     ".": "./src/index.ts",
     "./template-definition": "./src/templates/definition.ts",
     "./metric-definitions": "./src/reports/definitions.ts",
+    "./report-format": "./src/reports/format.ts",
     "./automation-model": "./src/automations/model.ts",
     "./crm-money": "./src/crm/money.ts",
     "./flow-json": "./src/flows/flow-json.ts",

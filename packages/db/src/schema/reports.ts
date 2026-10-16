@@ -1,4 +1,4 @@
-import { boolean, integer, primaryKey, text, timestamp, uuid } from 'drizzle-orm/pg-core';
+import { boolean, date, integer, primaryKey, text, timestamp, uuid } from 'drizzle-orm/pg-core';
 import { appSchema } from './tenancy';
 import { opsSchema } from './ops';
 
@@ -77,6 +77,28 @@ export const overdueReplyNotices = appSchema.table('overdue_reply_notices', {
   dueAt: tz('due_at').notNull(),
   emailed: integer('emailed').notNull().default(0),
   skipReason: text('skip_reason', { enum: OVERDUE_NOTICE_SKIP_REASONS }),
+  createdAt: tz('created_at').notNull().defaultNow(),
+  updatedAt: tz('updated_at').notNull().defaultNow(),
+});
+
+/** How often a member's report email goes out (ADR-376). */
+export const REPORT_EMAIL_FREQUENCIES = ['weekly', 'monthly'] as const;
+export type ReportEmailFrequency = (typeof REPORT_EMAIL_FREQUENCIES)[number];
+
+/**
+ * Report emails (migration 0295, ADR-376): a member's own choice of an email of the company's
+ * report totals each week or month, due at `nextSendAt`; the last period emailed is kept.
+ */
+export const reportEmailSubscriptions = appSchema.table('report_email_subscriptions', {
+  id: uuid('id').primaryKey(),
+  tenantId: uuid('tenant_id').notNull(),
+  membershipId: uuid('membership_id').notNull(),
+  frequency: text('frequency', { enum: REPORT_EMAIL_FREQUENCIES }).notNull(),
+  nextSendAt: tz('next_send_at').notNull(),
+  attemptedAt: tz('attempted_at'),
+  lastPeriodFrom: date('last_period_from', { mode: 'string' }),
+  lastPeriodTo: date('last_period_to', { mode: 'string' }),
+  lastSentAt: tz('last_sent_at'),
   createdAt: tz('created_at').notNull().defaultNow(),
   updatedAt: tz('updated_at').notNull().defaultNow(),
 });

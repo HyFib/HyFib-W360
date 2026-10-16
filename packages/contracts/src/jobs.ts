@@ -340,6 +340,23 @@ export const QUEUES = {
     deleteAfterHours: 72,
   },
   /**
+   * A company's due report emails (ADR-376): each period's report computed once, then one email
+   * per member who chose it. Signalled per company by the minute sweep; the members' rows decide
+   * what is still due, so a duplicate or late job sends nothing twice.
+   */
+  reportEmail: {
+    name: 'report.email',
+    policy: 'exclusive',
+    retryLimit: 3,
+    retryDelaySeconds: 60,
+    retryBackoff: true,
+    retryDelayMaxSeconds: 900,
+    expireInSeconds: 300,
+    deadLetter: 'dead-letter',
+    deleteAfterHours: 72,
+    maxWaitMinutes: 60,
+  },
+  /**
    * A read receipt (kind `message.read`) or a typing indicator (`message.typing`) for a customer's
    * message (ADR-223). Short-lived: a typing indicator is worth nothing a minute later.
    */

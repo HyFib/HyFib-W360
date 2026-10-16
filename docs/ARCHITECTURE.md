@@ -397,6 +397,17 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   currency fixed when the campaign first priced a message (`campaigns.estimate_currency`).
 - **Exports:** one formula-safe CSV per section, `reports.export` only; the export is audited
   (`report.exported`) before data is returned.
+- **Report emails** (`reports/emails.ts`, 0295, ADR-376): a member with `reports.read` keeps their
+  own rows in `app.report_email_subscriptions` (weekly, monthly), each due at `next_send_at`
+  (`nextReportEmailAt`: 07:00 in the company's time zone on the Monday or the 1st after the
+  period). The messaging sweep reads `ops.due_report_email_companies` (SECURITY DEFINER; active
+  companies, at most once an hour while an attempt fails) and signals a signed `report.email` job
+  per company (`apps/worker/src/handlers/reports.ts`). `sendDueReportEmails` records the attempt,
+  computes each due period once with `readReport` (repeatable read, read only), then, with the rows
+  locked, queues a `reports.summary` email per member who is active and still reads reports
+  (deleting the others' rows), skips emails over 72 hours late and periods already emailed, and
+  moves each row to its next time. Formatting is shared with the page
+  (`@w360/domain/report-format`).
 - **Live inbox updates** (§6): pages read the event-log position before loading their data and hand
   it to the browser, which opens the stream from there, so nothing that changes between the render
   and the connection is missed.

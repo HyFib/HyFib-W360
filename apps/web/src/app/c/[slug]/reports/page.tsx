@@ -35,6 +35,7 @@ import {
   cn,
 } from '@w360/ui';
 import { PageHeader } from '@/components/page-header';
+import { ReportEmailsForm } from '@/components/reports/report-emails-form';
 import { CAMPAIGN_STATUS, failureLabel, percent } from '@/lib/campaign-labels';
 import { formatDateTime } from '@/lib/format';
 import {
@@ -71,7 +72,7 @@ export default async function ReportsPage({
   const sp = await searchParams;
   const ctx = await requireTenant(slug);
   if (!can(ctx, 'reports.read')) notFound();
-  const { reports } = await getRuntime();
+  const { reports, reportEmails } = await getRuntime();
   let report: Report;
   let periodError: string | null = null;
   try {
@@ -87,6 +88,7 @@ export default async function ReportsPage({
   }
   const { period } = report;
   const tz = ctx.tenant.timezone;
+  const emailChoices = await reportEmails.getReportEmails(ctx);
   const exportQuery = `?preset=custom&from=${period.from}&to=${period.to}`;
   const exportHref = can(ctx, 'reports.export')
     ? (section: string) => `/c/${ctx.tenant.slug}/reports/export/${section}${exportQuery}`
@@ -143,6 +145,39 @@ export default async function ReportsPage({
               Computed {formatDateTime(report.generatedAt.toISOString(), tz)}. Delivery statuses
               reach HyFib through Meta’s webhooks and can arrive later.
             </p>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>Report emails</CardTitle>
+            <CardDescription>
+              The totals of this report by email: messages, replies, resolutions, CSAT, automation
+              runs, closed deals and estimated Meta charges, never a customer’s details. Your choice
+              is yours only; other members choose their own.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="grid gap-4">
+            <ReportEmailsForm
+              slug={ctx.tenant.slug}
+              timezone={tz}
+              weekly={emailChoices.some((c) => c.frequency === 'weekly')}
+              monthly={emailChoices.some((c) => c.frequency === 'monthly')}
+            />
+            {emailChoices.length > 0 ? (
+              <ul className="grid gap-1 text-sm text-muted-foreground">
+                {emailChoices.map((c) => (
+                  <li key={c.frequency}>
+                    {c.frequency === 'weekly' ? 'Weekly' : 'Monthly'}: next on{' '}
+                    {formatDateTime(c.nextSendAt.toISOString(), tz)}
+                    {c.lastPeriod
+                      ? `; last sent for ${formatDayLong(c.lastPeriod.from)} – ${formatDayLong(c.lastPeriod.to)}`
+                      : ''}
+                    .
+                  </li>
+                ))}
+              </ul>
+            ) : null}
           </CardContent>
         </Card>
 

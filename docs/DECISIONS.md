@@ -14880,3 +14880,52 @@ Decision:
 Not built: items in the public API, deal webhook events for item changes, items in the deals CSV,
 items without a catalog product, discounts and taxes, the value kept equal to the items' total
 automatically, and items set by automation steps or the deal import.
+
+## ADR-376 Report emails (P3-05) (2026-10-16)
+
+Context: reports were computed only when a member opened the Reports page. Members who follow the
+company's numbers had to remember to look, and "scheduled report emails" was listed as remaining
+under P3-05.
+
+Decision:
+
+- **Each member's own choice:** a member who can read reports (`reports.read`: owners,
+  administrators, supervisors, marketers, analysts) turns on, on the Reports page and for
+  themselves only, a weekly email, a monthly email or both. `app.report_email_subscriptions`
+  (migration 0295) holds one row per member and frequency; nobody chooses for another member, so
+  no email reaches someone who did not ask for it. Turning one on or off is audited
+  (`membership.report_emails_updated`, with the two choices).
+- **When:** at 07:00 in the company's time zone on the first day after the period: Mondays for
+  the week from Monday to Sunday before, the 1st for the month before. Times follow the company's
+  calendar through daylight-saving changes (`resolveLocalTime`, as campaigns). The row holds the
+  next time (`next_send_at`), so the sweep compares times only.
+- **How it is sent:** the worker's minute sweep asks `ops.due_report_email_companies` (SECURITY
+  DEFINER, ids only) for active companies with an email due and signals a `report.email` job per
+  company (a signed envelope; the tenant id comes from the database). The job records its attempt
+  first and commits it; the sweep signals a company again only an hour after an attempt started,
+  so a company whose emails fail is retried hourly, not every minute. Each period due is computed
+  once in one repeatable-read, read-only snapshot by the same code as the Reports page
+  (`readReport`), then the emails are queued and each row moved to its next time in one
+  transaction under a lock on the rows. The outbox's dedupe key names the row and the period.
+- **Who still gets it:** at sending time the member must be active and still hold `reports.read`;
+  otherwise no email is sent and their choice is deleted, so a member who regains the permission
+  chooses again. Companies that are not active (suspended, restricted, being deleted) get none.
+- **Never twice, never stale:** an email more than 72 hours late (the worker was down, the company
+  suspended) is skipped for the next period's. A period is never emailed twice for a row: if the
+  company's time zone moved west after the email was scheduled and the period it names was
+  emailed already, the row moves to the next sending time in the company's time zone instead.
+- **What it says:** the period's totals, labelled as Reports labels them: customer messages,
+  messages sent, delivered, read (a lower bound) and failed shares with their denominators, reply
+  turns, the median first response, answers within the target when there is one, the median
+  resolution, CSAT when surveys are on or were sent, automation runs, deals won and lost per
+  currency with the win rate when deals closed, and estimated Meta charges when a rate card in the
+  company's currency was in force, marked as list-price estimates rather than Meta's invoice. The
+  email links to the Reports page for the same period, where the email can be turned off. It never
+  carries a contact's or a message's details or member names. Formatting helpers moved to
+  `@w360/domain/report-format` so the page and the email format numbers alike.
+- **Deletion and export:** rows are deleted with the company (step 175, before memberships). The
+  company export includes the table without `attempted_at` (bookkeeping of retries).
+
+Not built: report emails chosen by administrators for other members or for addresses outside the
+company, other frequencies, days or hours, sections chosen per email, attachments (CSV or PDF),
+and the emails in the public API.

@@ -92,8 +92,19 @@ test('reports show response times against the target, member activity and a CSV 
   expect(csv.headers()['content-disposition']).toMatch(/attachment; filename="messaging-/);
   expect(await csv.text()).toMatch(/^\uFEFFday,time_zone,customer_messages,messages_sent/);
 
+  // The owner chooses a weekly report email for themselves (ADR-376); the page says when it goes
+  // out next.
+  await page.getByLabel('Every week').check();
+  await page.getByRole('button', { name: 'Save report emails' }).click();
+  await expect(page.getByText('Report emails saved.')).toBeVisible();
+  await expect(page.getByText(/^Weekly: next on /)).toBeVisible();
+  await expect(page.getByText(/^Monthly: next on /)).toHaveCount(0);
+
   // A period longer than 92 days falls back to the last 7 days with an explanation.
   await page.goto(`/c/${slug}/reports?preset=custom&from=2025-01-01&to=2025-12-31`);
   await expect(page.getByText('Showing the last 7 days instead')).toBeVisible();
   await expect(page.getByText(/at most 92 days/)).toBeVisible();
+  // The choice was saved.
+  await expect(page.getByLabel('Every week')).toBeChecked();
+  await expect(page.getByLabel('Every month')).not.toBeChecked();
 });
