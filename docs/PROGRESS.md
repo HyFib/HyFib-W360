@@ -1,5 +1,83 @@
 # Progress
 
+## 2026-10-16 — Deal events for a change of products, part two (P5-09, P4-04, ADR-397)
+
+Status: **Implemented as part two of two (release N+1, migration 0308); its database tests run in CI
+only.** Each product a member or an API key adds to or removes from a deal now sends `deal.updated`
+naming `items`. Part one (the entry below, no migration) ships first and runs everywhere before this
+release: its workers render `items` and its web servers record the maker on the deal before the item
+changes, so 0308 is backward compatible with it and the usual migration-first pipeline is safe.
+
+### Completed
+
+- **Database (migration 0308):** `crm_deal_items_webhook`, after each row inserted into or deleted
+  from `app.crm_deal_items`, runs `app.webhook_capture_deal_item()` (not SECURITY DEFINER, search
+  path pinned, EXECUTE revoked from PUBLIC), which captures one `deal.updated` through
+  `app.capture_webhook_event` with `changes: ["items"]`, an empty `changedFields`, the deal's stage,
+  pipeline, status and contact as they are and its owner as the step's owner. It reads nothing
+  before `app.webhook_subscribed(tenant, 'deal.updated')` says an active endpoint takes the event,
+  so company deletion (endpoints at step 60, items at 295, as the definer role) reads no deal. An
+  addition's maker comes from the item's creator columns; a removal's from the deal's changer when
+  `changed_xact` is the current transaction (part one writes it first), else none. The endpoints'
+  `deal_details` check takes 1 to 5 details with `items` (validated at once). No table, column,
+  policy or grant is added, and no check is widened, so there is no follow-up migration. The
+  migration's header says it is part two and why it follows part one.
+- **One product change, one event:** the deal's own trigger (0305) watches neither the version nor
+  the changer a change of products writes, so it captures nothing for it; a refused change writes no
+  item and sends nothing.
+- **Domain:** `WEBHOOK_DEAL_DETAILS` ends with `items` ("Products" in Settings → Webhooks, which
+  shows it without a component change), so endpoints may choose it in Settings and as `dealDetails`;
+  `WebhookDealDetail` takes it. `deal.updated`'s, `deal.created`'s and the payload's `changes`,
+  `deal.items` and `deal.changedBy` descriptions, and the API deal's `changedBy`, name the change of
+  products.
+- **OpenAPI:** `deal.updated` describes the event for each product added or removed, never naming
+  the product, erasure keeping products and a list of details without `items`; `deal.created` says a
+  receiver keeping products in step takes them from that event; `POST /deals/{id}/items` and
+  `DELETE /deals/{id}/items/{itemId}` say they send it; an endpoint's `dealDetails` names `items`.
+  The history's descriptions from part one are unchanged. No decision numbers.
+- **Tests:** unit (1 new: `webhooks/deal-item-events.test.ts`, migration 0308's check, captured
+  change, trigger, function header, grants and read order kept equal to the code as text; 8 updated
+  across `webhooks.test.ts`, `webhooks/deal-items.test.ts`, `api/deals.test.ts`,
+  `api/deal-items.test.ts` and `api/api.test.ts`: the lists, labels, details schema and the OpenAPI
+  wording); integration (`webhook-events.test.ts`: 2 new, additions and removals by a member and a
+  key with one event each and its maker, refused changes, the detail, owner, pipeline, maker and key
+  lists, a list saved before, delivered payloads, no product in any detail, another company; and a
+  company's deletion with products capturing nothing, with the grants, trigger, check and row
+  security; the ADR-395 test updated for the new events and erasure; `webhooks.test.ts`: the
+  database's detail check; `tenant-isolation.test.ts`: the capture among the trigger functions no
+  runtime role may call). The migration's SQL, its PL/pgSQL body included, parses with pglast 8.6
+  (installed in a scratch directory only).
+- **Docs:** ADR-397 part two (the rollout, the rollback past part one: drop the trigger first in a
+  forward-repair migration, and how the split removes removals naming nobody that the maker and key
+  filters let through; notes in ADR-375, ADR-378 and ADR-395); ARCHITECTURE, SECURITY, THREAT-MODEL
+  T350, DEPLOYMENT (0308 is backward compatible with part one, so the usual order is safe; rolling
+  back past part one while 0308 is applied needs the trigger dropped first), RUNBOOKS (a body with
+  `changes` empty or a removal naming nobody comes only from processes older than part one),
+  BACKLOG, and the matrix's H-012 and H-014 text and evidence (statuses unchanged; the evidence says
+  the trigger's behaviour runs only in the integration tests, in CI).
+- **Mutation checks:** 26 deliberate regressions of part two (`items` left out of the endpoint
+  details, another label, 0308's check without `items` or with 4 details, another captured name,
+  field keys captured, the deal read before the subscription check, the function executable by
+  PUBLIC, SECURITY DEFINER, unpinned or granted to the runtime role, a removal named by an earlier
+  transaction's maker, an addition's maker inverted, additions only, and each description reverted
+  to part one's): 26 caught by the unit tests; the 18 of part one's 23 that apply to this state were
+  run again and caught; each file restored byte for byte. The SQL checks are textual: the trigger's
+  behaviour runs only in PostgreSQL, so the integration tests (CI only) are its first real run.
+- **Not built:** the product, its price, quantity or line id in the event, an event type of its own,
+  several products in one request sending one event, the history naming the product, and an
+  end-to-end test of its own.
+
+### Test commands and results (local, 2026-10-16)
+
+| Command                                                         | Result                                                          |
+| --------------------------------------------------------------- | --------------------------------------------------------------- |
+| `npx eslint . --max-warnings=0`, `npx prettier --check .`       | clean                                                           |
+| `pnpm typecheck`                                                | clean (every workspace project, integration tests included)     |
+| `pnpm test` (unit)                                              | 170 files, 1,815 tests passed                                   |
+| `pnpm build`                                                    | passed                                                          |
+| migration 0308 parsed with pglast 8.6 (statements and PL/pgSQL) | parsed                                                          |
+| `pnpm test:integration`, `pnpm test:e2e`                        | not run here: the local PostgreSQL is unavailable; CI runs them |
+
 ## 2026-10-16 — Deal events for a change of products, part one (P5-09, P4-04, ADR-397)
 
 Status: **Implemented as part one of two (release N, no migration); its database test runs in CI

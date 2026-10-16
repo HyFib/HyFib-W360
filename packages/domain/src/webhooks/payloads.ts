@@ -805,13 +805,13 @@ const webhookDealSchema = z.object({
     .describe('Who added the deal: a member, an automation’s run or an API key.'),
   createdAt: z.iso.datetime(),
   items: apiDealItemsSchema.describe(
-    `The deal’s products when the event is delivered, exactly as GET /deals/{id}/items lists them (\`deals.read\`): in the order they were added, at most ${MAX_DEAL_ITEMS}, each with its content id, its catalog, its name when it was added, its quantity, the price of one and their total in the minor units of its currency, and who added it; empty when it lists none. An erased contact’s deal keeps its products (they name catalog products, not the customer), so they are sent. A change of products alone sends no event. Bodies delivered before deal events carried products have no items.`,
+    `The deal’s products when the event is delivered, exactly as GET /deals/{id}/items lists them (\`deals.read\`): in the order they were added, at most ${MAX_DEAL_ITEMS}, each with its content id, its catalog, its name when it was added, its quantity, the price of one and their total in the minor units of its currency, and who added it; empty when it lists none. An erased contact’s deal keeps its products (they name catalog products, not the customer), so they are sent. Each product added or removed sends deal.updated naming \`items\` in its changes. Bodies delivered before deal events carried products have no items.`,
   ),
   changedBy: z
     .enum(CRM_CHANGERS)
     .nullable()
     .describe(
-      'Who made what this event reports, as it was captured: a member (never which member), an automation’s run, or an API key (api, named by apiKeyId); for deal.created, who added the deal. Null for a change HyFib did not record the maker of, such as erasure retitling the deal.',
+      'Who made what this event reports, as it was captured: a member (never which member), an automation’s run, or an API key (api, named by apiKeyId); for deal.created, who added the deal, and for a product added, who added the product. Null for a change HyFib did not record the maker of, such as erasure retitling the deal.',
     ),
   apiKeyId: z
     .uuid()
@@ -834,9 +834,7 @@ export const dealCreatedPayloadSchema = envelope('deal.created', webhookDealData
 /**
  * The details of a deal whose change deal.updated reports (ADR-275), as its payload names them:
  * `fields` is a change of its custom field values (ADR-390), after the fixed details, and `items` a
- * product added or removed (ADR-397), which the trigger on the deal's items that migration 0308
- * adds captures alone. Workers render it from the release before that migration, so no worker that
- * delivers such an event leaves it out.
+ * product added or removed (ADR-397), captured alone by the trigger on the deal's items.
  */
 export const WEBHOOK_DEAL_DETAIL_CHANGES = [
   'title',
@@ -852,7 +850,7 @@ export const dealUpdatedPayloadSchema = envelope(
       .array(z.enum(WEBHOOK_DEAL_DETAIL_CHANGES))
       .min(1)
       .describe(
-        'What the change changed, once each and in this order: `title`, `valueMinor` (the value, set, changed or cleared), `expectedCloseOn`, `fields` (custom field values, set, changed or removed; changedFields names the fields) and `items` (the deal’s products: a change of them names `items` alone). Names only: the deal carries the details as they are when the event is delivered, its products among them (deal.items), and GET /deals/{id} reads its custom field values (`fields`).',
+        'What the change changed, once each and in this order: `title`, `valueMinor` (the value, set, changed or cleared), `expectedCloseOn`, `fields` (custom field values, set, changed or removed; changedFields names the fields) and `items` (a product added to or removed from the deal, each its own event naming `items` alone). Names only: the deal carries the details as they are when the event is delivered, its products among them (deal.items), and GET /deals/{id} reads its custom field values (`fields`).',
       ),
     changedFields: z
       .array(z.string().regex(FIELD_KEY_RE))

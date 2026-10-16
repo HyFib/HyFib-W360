@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { getTableName, type SQL, type Table } from 'drizzle-orm';
 import { PgDialect } from 'drizzle-orm/pg-core';
@@ -8,13 +10,16 @@ import { apiAddDealItem, apiRemoveDealItem } from '../api/deal-items';
 import { API_DEAL_HISTORY_DETAILS, apiListDealHistory } from '../api/deals';
 import type { TenantContext } from '../authz/context';
 import { dealItemOperations } from '../crm/deal-items';
+import { WEBHOOK_DEAL_DETAILS } from './model';
+import { WEBHOOK_DEAL_DETAIL_CHANGES } from './payloads';
 
 /**
- * A change of a deal's products (ADR-397), part one, which ships before migration 0308: members
- * and keys record themselves on the deal, with its version, before a product is added or
- * removed, so that the capture that migration adds names a removal's maker from what the
- * transaction recorded; and the API's deal history gives each change of products as `items`.
- * Nothing is captured before that migration runs.
+ * deal.updated when a deal's products change (ADR-397). The database's trigger on the item
+ * (migration 0308) captures one event naming `items` for each product added or removed: an
+ * addition's maker is the item's own creator, a removal's the maker the transaction recorded on the
+ * deal before it, so members and keys record themselves on the deal (with its version) before the
+ * item changes. What the trigger captures and the endpoints' check are kept equal to the payload's
+ * and Settings' lists. The capture itself runs in PostgreSQL: the integration tests (CI) cover it.
  */
 
 const TENANT = '0192a1b2-0000-7000-8000-0000000000f0';
@@ -185,7 +190,7 @@ async function refusalCode(promise: Promise<unknown>) {
   throw new Error('expected a refusal');
 }
 
-describe('a change of a deal’s products (ADR-397)', () => {
+describe('a change of a deal’s products as deal.updated (ADR-397)', () => {
   it('records the member on the deal, with its version, before a product is added or removed, then the timeline', async () => {
     const added = recordingDb(answers({ removed: true }));
     const result = await dealItemOperations({ db: added.db, clock }).addDealItem(member, {
@@ -291,6 +296,55 @@ describe('a change of a deal’s products (ADR-397)', () => {
       'not_found',
     );
     expect(writes(gone.steps)).toEqual(['update crm_deals', 'delete crm_deal_items']);
+  });
+
+  it('is captured as migration 0308 says: `items` alone, the endpoints’ details as Settings offers them, nothing read without an endpoint, by the role making the change', () => {
+    const migration = readFileSync(
+      fileURLToPath(
+        new URL('../../../db/migrations/0308_webhook_deal_item_events.sql', import.meta.url),
+      ),
+      'utf8',
+    );
+    // The endpoints' check takes the details Settings and the API offer, no more.
+    const listed = /deal_details <@ ARRAY\[([^\]]*)\]::text\[\]/.exec(migration)?.[1];
+    expect(listed?.split(',').map((name) => name.trim().replace(/^'|'$/g, ''))).toEqual([
+      ...WEBHOOK_DEAL_DETAILS,
+    ]);
+    expect(migration).toContain(
+      `cardinality(deal_details) BETWEEN 1 AND ${WEBHOOK_DEAL_DETAILS.length}`,
+    );
+    expect([...WEBHOOK_DEAL_DETAILS]).toEqual([...WEBHOOK_DEAL_DETAIL_CHANGES]);
+    // The trigger names `items`, the payload's last detail, with no field keys.
+    expect(WEBHOOK_DEAL_DETAIL_CHANGES.at(-1)).toBe('items');
+    expect(migration).toContain(`'changes', jsonb_build_array('items')`);
+    expect(migration).toContain(`'changedFields', '[]'::jsonb`);
+    // On every product added or removed, one row at a time.
+    expect(migration).toContain(
+      'CREATE TRIGGER crm_deal_items_webhook AFTER INSERT OR DELETE ON app.crm_deal_items\n  FOR EACH ROW EXECUTE FUNCTION app.webhook_capture_deal_item();',
+    );
+    // The role making the change runs it (not a definer function), its search path pinned, and
+    // nobody else may.
+    const header = migration.slice(
+      migration.indexOf('CREATE FUNCTION app.webhook_capture_deal_item()'),
+      migration.indexOf('AS $$'),
+    );
+    expect(header).toContain('LANGUAGE plpgsql');
+    expect(header).toContain('SET search_path = pg_catalog, pg_temp');
+    expect(header).not.toContain('SECURITY DEFINER');
+    expect(migration).toContain(
+      'REVOKE EXECUTE ON FUNCTION app.webhook_capture_deal_item() FROM PUBLIC;',
+    );
+    expect(migration).not.toMatch(/^\s*GRANT /m);
+    // No deal is read before an active endpoint is known to take deal.updated (a company being
+    // deleted has none left when its items go, and the definer role may not read a deal).
+    const subscribed = migration.indexOf(`app.webhook_subscribed(v_tenant, 'deal.updated')`);
+    expect(subscribed).toBeGreaterThan(0);
+    expect(subscribed).toBeLessThan(migration.indexOf('FROM app.crm_deals d'));
+    // An addition's maker is the item's creator; a removal's, only what this transaction recorded.
+    expect(migration).toContain(
+      `CASE WHEN NEW.created_by_api_key_id IS NOT NULL THEN 'api' ELSE 'member' END`,
+    );
+    expect(migration).toContain('ELSIF v_changed_xact = pg_catalog.pg_current_xact_id() THEN');
   });
 
   it('are in the API’s deal history: its timeline filter keeps every entry naming a detail it gives, products among them', async () => {

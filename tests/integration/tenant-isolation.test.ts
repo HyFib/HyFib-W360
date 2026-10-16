@@ -397,6 +397,8 @@ describe('database roles', () => {
       // A campaign's skipped recipients (0280): when it starts, and as it skips them.
       'app.webhook_capture_campaign_start_skips()',
       'app.webhook_capture_campaign_recipient_skips()',
+      // A product added to or removed from a deal (0308): fired by its trigger only.
+      'app.webhook_capture_deal_item()',
     ]) {
       for (const role of ['w360_app', 'w360_auth', 'w360_platform']) {
         expect(await can(role, fn), `${role} ${fn}`).toBe(false);

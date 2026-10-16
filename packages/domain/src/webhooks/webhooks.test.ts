@@ -1474,8 +1474,8 @@ describe('webhook payload schemas', () => {
     ).toEqual({ changes: ['fields'], changedFields: ['ok_2'] });
     expect(dealUpdatedChanges({})).toEqual({ changes: [], changedFields: [] });
     expect(dealUpdatedChanges({ changes: 'title' })).toEqual({ changes: [], changedFields: [] });
-    // A product added or removed (ADR-397): `items`, as the item's trigger (migration 0308)
-    // captures it, with no keys; after every other detail if a capture ever named more.
+    // A product added or removed (ADR-397): `items`, as the item's trigger captures it, with no
+    // keys; after every other detail if a capture ever named more.
     expect(dealUpdatedChanges({ changes: ['items'], changedFields: [] })).toEqual({
       changes: ['items'],
       changedFields: [],
@@ -2158,8 +2158,8 @@ describe('the OpenAPI document', () => {
     // A change of details (ADR-275).
     const edited = doc.webhooks['deal.updated'].post.description;
     for (const words of [
-      'A CRM deal’s title, value, expected close date or custom field values changed: by a member, a deal import or an API key, its custom field values by an automation too, or by its contact’s erasure, which retitles it and clears its values',
-      'changes names what changed (title, valueMinor, expectedCloseOn, then fields for custom field values, with changedFields naming the keys of the fields whose values were set, changed or removed), never the values before',
+      'A CRM deal’s title, value, expected close date, custom field values or products changed: by a member, a deal import or an API key, its custom field values by an automation too, its products when a member or an API key adds or removes one, or by its contact’s erasure, which retitles it and clears its values',
+      "changes names what changed (title, valueMinor, expectedCloseOn, then fields for custom field values, with changedFields naming the keys of the fields whose values were set, changed or removed, then items for the deal's products), never the values before",
       'reopened, moved, details changed, given to another owner, closed',
       'Pipelines, stages and owners an endpoint names narrow it as the other deal events',
       // A change of custom field values (ADR-390): keys only, the values read through the API, a
@@ -2167,6 +2167,12 @@ describe('the OpenAPI document', () => {
       'Custom field values are not sent: read them with GET /deals/{id} (`deals.read`, its `fields`)',
       'Deleting a custom field in Settings removes its values from every deal without sending this event',
       "erasing a contact clears its deals' values and names them",
+      // A change of products (ADR-397): an event of its own naming items, never a value; erasure
+      // keeps products, and a list of details without items takes none.
+      'Each product a member or an API key adds to or removes from the deal sends an event of its own whose changes names items alone, never the product, its price or its quantity',
+      'deal.items gives the products as they are when the event is delivered',
+      "erasing a contact keeps its deals' products, so erasure never names items",
+      'a list without items takes no change of products',
     ]) {
       expect(edited).toContain(words);
     }
@@ -2186,9 +2192,8 @@ describe('the OpenAPI document', () => {
       'fields',
       'items',
     ]);
-    // A change of products (ADR-397) is named alone, never the product.
     expect(payload.properties.changes?.description).toContain(
-      '`items` (the deal’s products: a change of them names `items` alone)',
+      '`items` (a product added to or removed from the deal, each its own event naming `items` alone)',
     );
     expect(payload.properties.changedFields?.description).toContain('Keys only, never the values');
     expect(payload.required).toEqual(expect.arrayContaining(['changes', 'changedFields']));
@@ -2264,6 +2269,8 @@ describe('the OpenAPI document', () => {
       "Every task event's task.changedBy says who made what it reports, as captured: a member, an automation (which only adds tasks) or an API key, which task.apiKeyId names",
     );
     expect(deal.changedBy.description).toContain('for deal.created, who added the deal');
+    // A product added names who added it (ADR-397), as the item records it.
+    expect(deal.changedBy.description).toContain('for a product added, who added the product');
     expect(deal.changedBy.description).toContain('such as erasure retitling the deal');
     expect(task.changedBy.description).toContain('for task.created, who added the task');
     // Every deal and task event carries them.
@@ -3518,16 +3525,23 @@ describe('deal and task status filters (ADR-309)', () => {
 });
 
 describe('deal and task detail filters (ADR-310)', () => {
-  it('take 1 to 4 deal details or 1 to 4 task details, once each, in the order the events name their changes; null takes every change', () => {
+  it('take 1 to 5 deal details or 1 to 4 task details, once each, in the order the events name their changes; null takes every change', () => {
     expect(webhookDealDetailsSchema.parse(['expectedCloseOn', 'title', 'expectedCloseOn'])).toEqual(
       ['title', 'expectedCloseOn'],
     );
-    // Custom field values come after the fixed details, as the event's changes name them (ADR-390).
+    // Custom field values come after the fixed details, as the event's changes name them (ADR-390),
+    // and products after them (ADR-397).
     expect(webhookDealDetailsSchema.parse(['fields', 'valueMinor'])).toEqual([
       'valueMinor',
       'fields',
     ]);
     expect(webhookDealDetailsSchema.parse(['fields'])).toEqual(['fields']);
+    expect(webhookDealDetailsSchema.parse(['items', 'fields', 'title'])).toEqual([
+      'title',
+      'fields',
+      'items',
+    ]);
+    expect(webhookDealDetailsSchema.parse(['items'])).toEqual(['items']);
     expect(webhookTaskDetailsSchema.parse(['remindAt', 'dueAt', 'remindAt'])).toEqual([
       'dueAt',
       'remindAt',
@@ -3541,9 +3555,8 @@ describe('deal and task detail filters (ADR-310)', () => {
     ]);
     expect(webhookDealDetailsSchema.parse(null)).toBeNull();
     expect(webhookTaskDetailsSchema.parse(null)).toBeNull();
-    // The details the events' changes name, in their order; workers render `items` (ADR-397) a
-    // release before endpoints may choose it, with migration 0308.
-    expect([...WEBHOOK_DEAL_DETAILS, 'items']).toEqual([...WEBHOOK_DEAL_DETAIL_CHANGES]);
+    // The details the events' changes name, in their order.
+    expect(WEBHOOK_DEAL_DETAILS).toEqual([...WEBHOOK_DEAL_DETAIL_CHANGES]);
     expect(WEBHOOK_TASK_DETAILS).toEqual([...WEBHOOK_TASK_DETAIL_CHANGES]);
     for (const refused of [
       [],
@@ -3554,7 +3567,8 @@ describe('deal and task detail filters (ADR-310)', () => {
       [null],
       ['custom_fields'],
       ['fields.tier'],
-      Array(5).fill('title'),
+      ['products'],
+      Array(6).fill('title'),
     ]) {
       expect(webhookDealDetailsSchema.safeParse(refused).success, JSON.stringify(refused)).toBe(
         false,
@@ -3572,7 +3586,7 @@ describe('deal and task detail filters (ADR-310)', () => {
       'Choose deal details from the list.',
     );
     expect(
-      webhookDealDetailsSchema.safeParse(Array(5).fill('title')).error?.issues[0]?.message,
+      webhookDealDetailsSchema.safeParse(Array(6).fill('title')).error?.issues[0]?.message,
     ).toBe('Give each deal detail once.');
     expect(webhookTaskDetailsSchema.safeParse([]).error?.issues[0]?.message).toBe(
       'Choose at least one task detail, or take every change.',
@@ -3588,6 +3602,7 @@ describe('deal and task detail filters (ADR-310)', () => {
       valueMinor: 'Value',
       expectedCloseOn: 'Expected close date',
       fields: 'Custom fields',
+      items: 'Products',
     });
     expect(WEBHOOK_TASK_DETAIL_LABELS).toEqual({
       title: 'Title',

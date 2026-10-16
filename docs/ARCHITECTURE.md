@@ -2273,9 +2273,9 @@ state` for one that becomes skipped from another state, each only for a message 
   representation (`apiDealItemSchema`, `toApiDealItem`) and order (added time, then id), at most
   `MAX_DEAL_ITEMS` (50). The view and the limits (`crm/deal-item-limits.ts`) import none of the
   deal services, so the payloads do not depend on them. Erasure keeps items, so an erased
-  contact's deal gives them. Adding or removing an item captures nothing (no trigger on
-  `app.crm_deal_items` before migration 0308), and an event delivered later gives the items as
-  they are then. Since ADR-397 part one (no migration), `WEBHOOK_DEAL_DETAIL_CHANGES` ends with
+  contact's deal gives them. Adding or removing an item captured nothing before migration 0308
+  (ADR-397, below), and an event delivered later gives the items as they are then. Since
+  ADR-397 part one (no migration), `WEBHOOK_DEAL_DETAIL_CHANGES` ends with
   `items`, so workers render a change of products before 0308 captures one, and members and keys
   write the deal's version and changer before the item (`markChanged`, `markProductChange`). The
   largest deal event body is 202,667 bytes, so deliveries go through
@@ -2285,6 +2285,20 @@ state` for one that becomes skipped from another state, each only for a message 
   that `maxRequestBytes`), so the 64 KiB client cannot be passed. Each client limits its own
   system lookups (`maxConcurrentLookups`, 2), so the worker's four clients (automation HTTP steps,
   webhooks, stores, alerts) may have 8 in progress at once, 6 for company-chosen addresses.
+- **Deal product change events** (migration 0308, ADR-397 part two): `crm_deal_items_webhook`
+  (after each row inserted or deleted on `app.crm_deal_items`, `app.webhook_capture_deal_item`,
+  not SECURITY DEFINER, search path pinned) captures one `deal.updated` per product added or
+  removed, through `app.capture_webhook_event`, with `changes: ["items"]`, an empty
+  `changedFields`, the deal's stage, pipeline, status and contact as they are and its owner as
+  `stepOwnerId`, stamped with `clock_timestamp()`. It first asks
+  `app.webhook_subscribed(tenant, 'deal.updated')` and reads nothing more without an active
+  endpoint, so company deletion (endpoints at step 60, items at 295, as the definer role) reads no
+  deal. An addition's maker comes from the item's creator columns; a removal's from the deal's
+  `changed_by`/`changed_by_api_key_id` when `changed_xact` is the current transaction, else none:
+  part one's `markChanged` and `markProductChange` write them before the item. The deal's own
+  trigger watches neither the version nor the changer, so one product change captures one event.
+  `WEBHOOK_DEAL_DETAILS` now ends with `items` ("Products"), as `WEBHOOK_DEAL_DETAIL_CHANGES` does
+  since part one, and 0308 lets `deal_details` hold it (1 to 5).
 - **Task events** (migrations 0177–0178, ADR-261): triggers on `app.crm_tasks` capture
   `task.created` when a task is inserted (members, the runner's task steps, keys) and
   `task.status_changed` when an update changes its status (members, keys through `apiUpdateTask`),
@@ -2433,9 +2447,9 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   list.
 - **Deal and task detail filters** (migration 0233, ADR-310): `deal_details` and `task_details` on
   an endpoint list the details whose changes it takes as `deal.updated` (`title`, `valueMinor`,
-  `expectedCloseOn`, and since 0305 `fields`) or `task.updated` (`title`, `notes`, `dueAt`,
-  `remindAt`), null for every change; checks keep each to its known details and to endpoints that
-  take its event.
+  `expectedCloseOn`, since 0305 `fields` and since 0308 `items`) or `task.updated` (`title`,
+  `notes`, `dueAt`, `remindAt`), null for every change; checks keep each to its known details and
+  to endpoints that take its event.
   `app.capture_webhook_event` (replaced with the same signature) creates a change's delivery only
   for endpoints whose list is null or holds a detail the change changed, as the deal and task
   triggers pass them in `changes`, and writes no event when none does. Settings and the API

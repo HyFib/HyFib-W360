@@ -1803,6 +1803,34 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    before it, would name nobody. While 0308 is not applied, rolling this release back is safe; an
    old web server's history simply leaves changes of products out again.
 
+   Migration 0308 (ADR-397 part two) adds a trigger on `app.crm_deal_items` and its capture
+   function, so each product added to or removed from a deal sends `deal.updated` naming `items`
+   from the moment it runs, and replaces the endpoints' `deal_details` check to accept `items`
+   (validated at once: at most 10 endpoints per company). It adds no table, column, policy or grant,
+   and leaves nothing to validate later. It is backward compatible with part one's workers and web
+   servers (above), so the usual order is safe: the migration, then workers, then web servers. Part
+   one's workers already render `items`, and its web servers record the member or key on the deal
+   before removing a product, so every removal names its maker. Until the web rollout ends, a web
+   server of part one neither offers "Products" among an endpoint's deal details nor saves an
+   endpoint whose list holds `items` ("Choose deal details from the list."), and its OpenAPI
+   document still says that no event is sent. Endpoints whose deal details list was saved before
+   keep it, so they do not take a change of products until `items` is added.
+
+   Rolling back to part one leaves the trigger, which part one's workers and web servers were built
+   for. Rolling back past part one while 0308 is applied brings back what the split avoids: a worker
+   from before part one sends these events with `changes` empty (it keeps only the details it
+   knows), which the payload's description does not allow, and a product removed through a web
+   server from before part one is captured with nobody as its maker (`changedBy` null), which
+   endpoints naming makers or leaving out keys let through. So before redeploying a worker or web
+   image from before part one, drop the trigger first in a forward-repair migration (step 5):
+   `DROP TRIGGER crm_deal_items_webhook ON app.crm_deal_items` (the function can stay; only the
+   trigger calls it). Products then change without an event, as before ADR-397, and a later
+   migration creates the trigger again once part one runs everywhere. Deliveries a worker from
+   before part one made with `changes` empty can be replayed once the workers are updated (on the
+   endpoint's page in Settings → Webhooks, or `POST /webhook-deliveries/{id}/replay`; a replay is
+   built by the worker that sends it), though a receiver that deduplicates on the event id ignores
+   the replay.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

@@ -7161,8 +7161,8 @@ describe('products on deals through the API (ADR-378)', () => {
         metadata: { changes: ['products'], source: 'api' },
       },
     ]);
-    // The deal's history gives each change of products (ADR-397): `items`, with who made it,
-    // never the product.
+    // The deal's history gives each change of products as deal events report it (ADR-397):
+    // `items`, with who made it, never the product.
     const historyOf = async () =>
       (await apiListDealHistory(deps(), reader.ctx, deal.id, {})).data.map((e) => [
         e.type,

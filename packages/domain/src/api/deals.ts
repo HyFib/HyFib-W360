@@ -646,7 +646,8 @@ export const apiDealHistoryQuerySchema = z
 
 /**
  * The deal's timeline entries its history gives (ADR-281), and the name of each: the changes the
- * deal events report (ADR-256, ADR-269, ADR-275, ADR-390), never its notes or its tasks' entries.
+ * deal events report (ADR-256, ADR-269, ADR-275, ADR-390, ADR-397), never its notes or its tasks'
+ * entries.
  */
 export const API_DEAL_HISTORY_TYPES = {
   deal_created: 'created',
@@ -664,8 +665,8 @@ export type ApiDealHistoryType =
 /**
  * The timeline's names of a deal's details and the names its history gives them, as its events do:
  * custom field values as `fields` (ADR-390), without the keys, which the timeline does not keep, and
- * a product added or removed as `items` (ADR-397), as `deal.updated` names it, without the
- * product's name the timeline keeps for members.
+ * a product added or removed as `items` (ADR-397), without the product's name the timeline keeps
+ * for members, as the event names none.
  */
 export const API_DEAL_HISTORY_DETAILS = {
   title: 'title',
@@ -777,9 +778,8 @@ export function toApiDealHistoryEntry(
  * A deal's history (ADR-281): the changes its events report, by members, automations and keys,
  * newest first on exact keyset pages, a page never skipping or repeating one. Erasing a contact
  * deletes its timeline, so an erased contact's deal has no history. A change of a deal's custom
- * field values is given as deal events report it (ADR-390), and a product added or removed as
- * `items` (ADR-397), every such entry since products were added to deals (ADR-375) included. Only
- * reads.
+ * field values is given as deal events report it (ADR-390), and so is a product added or removed
+ * (ADR-397), entries recorded before those events were captured included. Only reads.
  */
 export async function apiListDealHistory(
   deps: Pick<OutboundDeps, 'db'>,
