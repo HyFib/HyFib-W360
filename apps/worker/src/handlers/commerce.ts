@@ -3,13 +3,16 @@ import { QUEUES } from '@w360/contracts';
 import { authorizedTenantScope, type TenantScope } from '@w360/db';
 import {
   authorizeJob,
+  deferPausedJob,
   findDueCommerceWork,
   giveUpCommerceSync,
+  isManagementPaused,
   processCommerceSync,
   processPaymentAccountCheck,
   processPaymentLink,
   queueDailyCommerceSync,
   type CommerceJobOutcome,
+  type ManagementPaused,
   type CommerceWorkerDeps,
 } from '@w360/domain';
 import type { WorkerRuntime } from '../runtime';
@@ -29,7 +32,7 @@ function commerceHandler(
     deps: CommerceWorkerDeps,
     scope: TenantScope,
     ref: string,
-  ) => Promise<CommerceJobOutcome | 'no_meta'>,
+  ) => Promise<CommerceJobOutcome | ManagementPaused | 'no_meta'>,
 ) {
   return async ([job]: Job<unknown>[]): Promise<void> => {
     if (!job) return;
@@ -52,6 +55,26 @@ function commerceHandler(
     };
     const outcome = await run(deps, auth.scope, auth.envelope.ref);
     if (outcome === 'no_meta') throw new RetryableJobError('Meta is not configured');
+    if (isManagementPaused(outcome)) {
+      // Meta throttles the account's management calls (ADR-399): nothing failed; the catalog read
+      // runs again just after the pause.
+      const resumeAt = await deferPausedJob(
+        rt,
+        QUEUES.commerceSync.name,
+        {
+          kind,
+          tenantId: auth.scope.tenantId,
+          actorUserId: auth.envelope.actorUserId,
+          ref: auth.envelope.ref,
+        },
+        outcome.paused,
+      );
+      rt.logger.info(
+        { jobId: job.id, kind, ref: auth.envelope.ref, pausedUntil: outcome.paused, resumeAt },
+        'commerce job deferred: Meta is limiting management requests',
+      );
+      return;
+    }
     rt.logger.info({ jobId: job.id, kind, ref: auth.envelope.ref, outcome }, 'commerce job');
     if (outcome === 'retry') {
       throw new RetryableJobError(`${kind}: provider unavailable or the row is busy`);

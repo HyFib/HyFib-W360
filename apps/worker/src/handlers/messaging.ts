@@ -10,9 +10,11 @@ import {
   authorizeJob,
   cancelSendIntent,
   checkQueueWaits,
+  deferPausedJob,
   compactContactChanges,
   findStaleReceipts,
   findStaleSendIntents,
+  isManagementPaused,
   newResealState,
   newResignState,
   noticeApiKeyUsageDue,
@@ -155,6 +157,31 @@ export function channelOnboardHandler(rt: WorkerRuntime) {
       auth.scope,
       auth.envelope.ref,
     );
+    if (isManagementPaused(outcome)) {
+      // Meta throttles the account's management calls (ADR-399): nothing failed; setup resumes
+      // from the same step just after the pause.
+      const resumeAt = await deferPausedJob(
+        rt,
+        QUEUES.channelOnboard.name,
+        {
+          kind: 'channel.onboard',
+          tenantId: auth.scope.tenantId,
+          actorUserId: auth.envelope.actorUserId,
+          ref: auth.envelope.ref,
+        },
+        outcome.paused,
+      );
+      rt.logger.info(
+        {
+          jobId: job.id,
+          channelAccountId: auth.envelope.ref,
+          pausedUntil: outcome.paused,
+          resumeAt,
+        },
+        'onboarding step deferred: Meta is limiting management requests',
+      );
+      return;
+    }
     rt.logger.info(
       { jobId: job.id, channelAccountId: auth.envelope.ref, outcome },
       'onboarding step',

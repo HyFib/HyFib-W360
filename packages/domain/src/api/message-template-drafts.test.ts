@@ -904,6 +904,36 @@ describe('submitting templates and deleting those Meta has, through the API (ADR
     ]);
   });
 
+  it('answers 503 and queues nothing while Meta throttles the account’s management calls (ADR-399)', async () => {
+    const key = ctx(['templates.write', 'templates.submit']);
+    const pausedUntil = new Date(NOW.getTime() + 5 * 60_000);
+    const paused = [{ ...connected[0], managementPausedUntil: pausedUntil }];
+    const row = {
+      status: 'approved',
+      providerTemplateId: '1234567890',
+      name: 'order_shipped',
+      language: 'en',
+      whatsappAccountId: ACCOUNT,
+    };
+    const deletion = recorder([[row], paused]);
+    const refused = await refusal(
+      apiDeleteMessageTemplate({ db: on(deletion.tx), clock, ...deletion }, key, TEMPLATE),
+    );
+    expect(refused[0]).toBe('provider_unavailable');
+    expect(refused[1]).toMatch(
+      /^Meta is limiting management requests for this WhatsApp account until .* UTC\. Try again after that\.$/,
+    );
+    expect(deletion.steps.every((step) => step[0] === 'read')).toBe(true);
+    const submission = recorder([paused]);
+    await expect(
+      writeSubmitTemplate(submission.tx, submission, TENANT, draft, null, NOW),
+    ).rejects.toMatchObject({
+      code: 'provider_unavailable',
+      details: { pausedUntil: pausedUntil.toISOString() },
+    });
+    expect(submission.steps.every((step) => step[0] === 'read')).toBe(true);
+  });
+
   it('deletes a template Meta has with templates.submit too: pending deletion, the request queued in its transaction', async () => {
     const key = ctx(['templates.write', 'templates.submit']);
     for (const status of ['approved', 'rejected', 'paused'] as const) {
@@ -912,13 +942,16 @@ describe('submitting templates and deleting those Meta has, through the API (ADR
         providerTemplateId: '1234567890',
         name: 'order_shipped',
         language: 'en',
+        whatsappAccountId: ACCOUNT,
       };
-      const run = recorder([[row]]);
+      const run = recorder([[row], connected]);
       expect(
         await apiDeleteMessageTemplate({ db: on(run.tx), clock, ...run }, key, TEMPLATE),
       ).toEqual({ id: TEMPLATE, deleted: false, status: 'pending_deletion' });
       expect(run.steps).toEqual([
         ['read', 'message_templates', THIS_TEMPLATE, 'update'],
+        // Whether Meta throttles the account's management calls (ADR-399).
+        ['read', 'whatsapp_accounts', THIS_ACCOUNT],
         [
           'update',
           'message_templates',

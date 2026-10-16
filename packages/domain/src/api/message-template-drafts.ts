@@ -14,6 +14,7 @@ import {
   templateNameSchema,
   writeCreateTemplateDraft,
   writeDeleteLocalTemplate,
+  assertTemplateAccountOpen,
   writeDeleteTemplateAtMeta,
   writeSubmitTemplate,
   writeUpdateTemplateDraft,
@@ -281,6 +282,7 @@ export async function apiDeleteMessageTemplate(
         providerTemplateId: messageTemplates.providerTemplateId,
         name: messageTemplates.name,
         language: messageTemplates.language,
+        whatsappAccountId: messageTemplates.whatsappAccountId,
       })
       .from(messageTemplates)
       .where(and(eq(messageTemplates.tenantId, ctx.tenant.id), eq(messageTemplates.id, id)))
@@ -290,6 +292,8 @@ export async function apiDeleteMessageTemplate(
     const atMeta = templateDeletion(row) === 'meta';
     if (atMeta) {
       assertScope(ctx, 'templates.submit');
+      // Meta throttles the account's management calls: 503 rather than a queued deletion (ADR-399).
+      await assertTemplateAccountOpen(tx, ctx.tenant.id, row.whatsappAccountId, now);
       await writeDeleteTemplateAtMeta(tx, deps, ctx.tenant.id, id, null, now);
     } else {
       await writeDeleteLocalTemplate(tx, ctx.tenant.id, id, null, now);

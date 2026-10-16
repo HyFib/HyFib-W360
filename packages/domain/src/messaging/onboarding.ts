@@ -47,6 +47,12 @@ import {
 import { emitTenantEvent } from './events';
 import type { GraphClient, GraphResult } from './graph';
 import { messagingLimitRefusalMetadata, messagingLimitText } from './messaging-limit';
+import {
+  activeManagementPause,
+  pacedManagementCalls,
+  untilPaused,
+  type ManagementPaused,
+} from './management-pace';
 import { credentialAad } from './outbound';
 import { COUNTED_CHANNEL_STATUSES, assertNumberAvailable } from '../plans/entitlements';
 
@@ -122,6 +128,36 @@ export interface ChannelView {
   webhooksCheckedAt: string | null;
   /** The permissions Meta listed for the account's access when last checked (ADR-381). */
   grantedPermissions: GrantedPermission[];
+  /** The latest management usage Meta reported for the number's account (ADR-399). */
+  managementUsage: ManagementUsageView | null;
+}
+
+/**
+ * The latest management usage Meta reported for an account (ADR-399): the highest of its three
+ * percentages, when it was read, and the end of a pause that has not ended yet.
+ */
+export interface ManagementUsageView {
+  percent: number;
+  readAt: string;
+  pausedUntil: string | null;
+}
+
+/** What Channels shows of an account's stored management usage (none before a first reading). */
+export function managementUsageView(
+  row: {
+    managementUsageReadAt: Date | null;
+    managementUsagePercent: number | null;
+    managementPausedUntil: Date | null;
+  },
+  now: Date,
+): ManagementUsageView | null {
+  if (!row.managementUsageReadAt || row.managementUsagePercent === null) return null;
+  const paused = activeManagementPause(row.managementPausedUntil, now);
+  return {
+    percent: row.managementUsagePercent,
+    readAt: row.managementUsageReadAt.toISOString(),
+    pausedUntil: paused ? paused.toISOString() : null,
+  };
 }
 
 /** An account whose access needs the company's attention (ADR-137). */
@@ -689,6 +725,9 @@ export function createOnboardingService(deps: OnboardingDeps) {
               accessExpiresAt: whatsappAccounts.tokenExpiresAt,
               webhooksCheckedAt: whatsappAccounts.webhooksCheckedAt,
               grantedScopes: whatsappAccounts.grantedScopes,
+              managementUsageReadAt: whatsappAccounts.managementUsageReadAt,
+              managementUsagePercent: whatsappAccounts.managementUsagePercent,
+              managementPausedUntil: whatsappAccounts.managementPausedUntil,
             })
             .from(channelAccounts)
             .innerJoin(
@@ -703,16 +742,30 @@ export function createOnboardingService(deps: OnboardingDeps) {
         { accessMode: 'read only' },
       );
       const now = clock.now();
-      return rows.map(({ grantedScopes, storedLimit, limitCheckedAt, ...r }) => ({
-        ...r,
-        messagingLimit: limitCheckedAt ? messagingLimitText(storedLimit) : null,
-        grantedPermissions: grantedPermissionList(grantedScopes),
-        healthCheckedAt: r.healthCheckedAt?.toISOString() ?? null,
-        accessCheckedAt: r.accessCheckedAt?.toISOString() ?? null,
-        accessExpiresAt: r.accessExpiresAt?.toISOString() ?? null,
-        accessExpired: r.accessExpiresAt !== null && r.accessExpiresAt <= now,
-        webhooksCheckedAt: r.webhooksCheckedAt?.toISOString() ?? null,
-      }));
+      return rows.map(
+        ({
+          grantedScopes,
+          storedLimit,
+          limitCheckedAt,
+          managementUsageReadAt,
+          managementUsagePercent,
+          managementPausedUntil,
+          ...r
+        }) => ({
+          ...r,
+          messagingLimit: limitCheckedAt ? messagingLimitText(storedLimit) : null,
+          managementUsage: managementUsageView(
+            { managementUsageReadAt, managementUsagePercent, managementPausedUntil },
+            now,
+          ),
+          grantedPermissions: grantedPermissionList(grantedScopes),
+          healthCheckedAt: r.healthCheckedAt?.toISOString() ?? null,
+          accessCheckedAt: r.accessCheckedAt?.toISOString() ?? null,
+          accessExpiresAt: r.accessExpiresAt?.toISOString() ?? null,
+          accessExpired: r.accessExpiresAt !== null && r.accessExpiresAt <= now,
+          webhooksCheckedAt: r.webhooksCheckedAt?.toISOString() ?? null,
+        }),
+      );
     },
 
     /**
@@ -801,7 +854,9 @@ export function createOnboardingService(deps: OnboardingDeps) {
 
 export type OnboardingService = ReturnType<typeof createOnboardingService>;
 
-export type OnboardingJobOutcome = 'active' | 'failed' | 'needs_reconnect' | 'retry' | 'skipped';
+/** `paused`: Meta throttles the account's management calls; the next step waits (ADR-399). */
+export type OnboardingJobOutcome =
+  'active' | 'failed' | 'needs_reconnect' | 'retry' | 'skipped' | ManagementPaused;
 
 /**
  * Worker side of onboarding: subscribe the app to the WABA's webhooks, register the number with our
@@ -826,6 +881,7 @@ export async function processChannelOnboarding(
           whatsappAccountId: channelAccounts.whatsappAccountId,
           wabaId: whatsappAccounts.wabaId,
           credential: whatsappAccounts.credentialCiphertext,
+          managementPausedUntil: whatsappAccounts.managementPausedUntil,
         })
         .from(channelAccounts)
         .innerJoin(
@@ -917,82 +973,89 @@ export async function processChannelOnboarding(
     });
     return 'needs_reconnect';
   }
+  // While Meta throttles the account's management calls no step is taken (ADR-399).
+  const paused = activeManagementPause(loaded.managementPausedUntil, deps.clock.now());
+  if (paused) return { paused };
   const token = deps.keyring.decryptString(
     loaded.credential,
     credentialAad(scope.tenantId, loaded.whatsappAccountId),
   );
-  let step = loaded.step ?? 'subscribe_app';
+  const call = pacedManagementCalls(deps, scope, loaded);
+  return untilPaused(async (): Promise<OnboardingJobOutcome> => {
+    let step = loaded.step ?? 'subscribe_app';
 
-  if (step === 'subscribe_app') {
-    const result = await deps.graph.subscribeApp(loaded.wabaId, token);
-    if (!result.ok) return handleFailure(result, 'subscribe_app');
-    step = 'register_number';
-    await update({ onboardingStep: step });
-  }
-  if (step === 'register_number') {
-    if (!loaded.pin) {
-      await update({
-        status: 'failed',
-        onboardingError: 'Registration PIN missing; reconnect the number.',
-      });
-      return 'failed';
+    if (step === 'subscribe_app') {
+      const result = await call(() => deps.graph.subscribeApp(loaded.wabaId, token));
+      if (!result.ok) return handleFailure(result, 'subscribe_app');
+      step = 'register_number';
+      await update({ onboardingStep: step });
     }
-    const pin = deps.keyring.decryptString(
-      loaded.pin,
-      registrationPinAad(scope.tenantId, loaded.id),
-    );
-    const result = await deps.graph.registerNumber(loaded.phoneNumberId, token, pin);
-    if (!result.ok) return handleFailure(result, 'register_number');
-    step = 'health_check';
-    await update({ onboardingStep: step });
-  }
-  if (step === 'health_check' || step === 'done') {
-    const asked = await deps.graph.getPhoneNumber(loaded.phoneNumberId, token);
-    let result = asked;
-    // Which node gives the messaging limit is unconfirmed (Meta's SDK has it on the WhatsApp
-    // Business Account, its documentation says the phone number: research M-059, M-199), and Graph
-    // may refuse a field in more than one way (code 100 for a field it does not have, 200 for a
-    // permission, another code such as 3, or 10, which HyFib reads as lost access). So a read that
-    // asked for it and was refused as permanent or as lost access, whatever the code, is made once
-    // more without it. Only when that read succeeds is the number set up without a limit and the
-    // refusal audited; when it fails too, its failure is handled as before, so a token Meta no
-    // longer accepts still asks for a reconnect (ADR-398). Retryable and unknown failures are
-    // retried as before.
-    let refusal: Extract<typeof asked, { ok: false }> | null = null;
-    if (!asked.ok && (asked.kind === 'permanent' || asked.kind === 'auth')) {
-      result = await deps.graph.getPhoneNumber(loaded.phoneNumberId, token, {
-        messagingLimit: false,
-      });
-      if (result.ok) refusal = asked;
+    if (step === 'register_number') {
+      if (!loaded.pin) {
+        await update({
+          status: 'failed',
+          onboardingError: 'Registration PIN missing; reconnect the number.',
+        });
+        return 'failed';
+      }
+      const pin = deps.keyring.decryptString(
+        loaded.pin,
+        registrationPinAad(scope.tenantId, loaded.id),
+      );
+      const result = await call(() => deps.graph.registerNumber(loaded.phoneNumberId, token, pin));
+      if (!result.ok) return handleFailure(result, 'register_number');
+      step = 'health_check';
+      await update({ onboardingStep: step });
     }
-    if (!result.ok) return handleFailure(result, 'health_check');
-    const checkedAt = deps.clock.now();
-    await update(
-      {
-        status: 'active',
-        onboardingStep: 'done',
-        onboardingError: null,
-        displayPhoneNumber: result.data.displayPhoneNumber,
-        verifiedName: result.data.verifiedName,
-        qualityRating: result.data.qualityRating,
-        nameStatus: result.data.nameStatus,
-        codeVerificationStatus: result.data.codeVerificationStatus,
-        messagingLimit: result.data.messagingLimit,
-        messagingLimitCheckedAt: checkedAt,
-        healthCheckedAt: checkedAt,
-      },
-      (tx) =>
-        recordSystemAudit(tx, scope.tenantId, {
-          action: 'channel.activated',
-          subjectType: 'channel',
-          subjectId: loaded.id,
-          // Channels shows such a number's limit as not reported; the audit says why.
-          ...(refusal ? { metadata: messagingLimitRefusalMetadata(refusal) } : {}),
-        }),
-    );
-    return 'active';
-  }
-  return 'skipped';
+    if (step === 'health_check' || step === 'done') {
+      const asked = await call(() => deps.graph.getPhoneNumber(loaded.phoneNumberId, token));
+      let result = asked;
+      // Which node gives the messaging limit is unconfirmed (Meta's SDK has it on the WhatsApp
+      // Business Account, its documentation says the phone number: research M-059, M-199), and Graph
+      // may refuse a field in more than one way (code 100 for a field it does not have, 200 for a
+      // permission, another code such as 3, or 10, which HyFib reads as lost access). So a read that
+      // asked for it and was refused as permanent or as lost access, whatever the code, is made once
+      // more without it. Only when that read succeeds is the number set up without a limit and the
+      // refusal audited; when it fails too, its failure is handled as before, so a token Meta no
+      // longer accepts still asks for a reconnect (ADR-398). Retryable and unknown failures are
+      // retried as before. The second read is paced too: when the first response paused the
+      // account, it is not made and the step runs again after the pause (ADR-399).
+      let refusal: Extract<typeof asked, { ok: false }> | null = null;
+      if (!asked.ok && (asked.kind === 'permanent' || asked.kind === 'auth')) {
+        result = await call(() =>
+          deps.graph.getPhoneNumber(loaded.phoneNumberId, token, { messagingLimit: false }),
+        );
+        if (result.ok) refusal = asked;
+      }
+      if (!result.ok) return handleFailure(result, 'health_check');
+      const checkedAt = deps.clock.now();
+      await update(
+        {
+          status: 'active',
+          onboardingStep: 'done',
+          onboardingError: null,
+          displayPhoneNumber: result.data.displayPhoneNumber,
+          verifiedName: result.data.verifiedName,
+          qualityRating: result.data.qualityRating,
+          nameStatus: result.data.nameStatus,
+          codeVerificationStatus: result.data.codeVerificationStatus,
+          messagingLimit: result.data.messagingLimit,
+          messagingLimitCheckedAt: checkedAt,
+          healthCheckedAt: checkedAt,
+        },
+        (tx) =>
+          recordSystemAudit(tx, scope.tenantId, {
+            action: 'channel.activated',
+            subjectType: 'channel',
+            subjectId: loaded.id,
+            // Channels shows such a number's limit as not reported; the audit says why.
+            ...(refusal ? { metadata: messagingLimitRefusalMetadata(refusal) } : {}),
+          }),
+      );
+      return 'active';
+    }
+    return 'skipped';
+  });
 }
 
 /**

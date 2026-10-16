@@ -3,8 +3,10 @@ import { QUEUES } from '@w360/contracts';
 import { authorizedTenantScope, type TenantScope } from '@w360/db';
 import {
   authorizeJob,
+  deferPausedJob,
   findDueFlowWork,
   giveUpFlowSync,
+  isManagementPaused,
   processFlowKeys,
   processFlowSync,
   type FlowJobOutcome,
@@ -44,6 +46,26 @@ function flowHandler(
       appBaseUrl: rt.config.APP_BASE_URL,
     };
     const outcome = await run(deps, auth.scope, auth.envelope.ref);
+    if (isManagementPaused(outcome)) {
+      // Meta throttles the account's management calls (ADR-399): nothing failed; the job runs
+      // again just after the pause, from where it stopped.
+      const resumeAt = await deferPausedJob(
+        rt,
+        kind === 'flow.sync' ? QUEUES.flowSync.name : QUEUES.flowKeys.name,
+        {
+          kind,
+          tenantId: auth.scope.tenantId,
+          actorUserId: auth.envelope.actorUserId,
+          ref: auth.envelope.ref,
+        },
+        outcome.paused,
+      );
+      rt.logger.info(
+        { jobId: job.id, kind, ref: auth.envelope.ref, pausedUntil: outcome.paused, resumeAt },
+        'flow job deferred: Meta is limiting management requests',
+      );
+      return;
+    }
     rt.logger.info({ jobId: job.id, kind, ref: auth.envelope.ref, outcome }, 'flow job');
     if (outcome === 'retry') throw new RetryableJobError(`${kind}: Meta temporarily unavailable`);
   };

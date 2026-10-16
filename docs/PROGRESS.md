@@ -1,5 +1,70 @@
 # Progress
 
+## 2026-10-16 — Pacing WhatsApp management calls by Meta's usage header (P2-02, ADR-399)
+
+Status: **Implemented (migration 0310); unit tests run locally, integration tests in CI only; no
+live Meta traffic.** Meta's `x-business-use-case-usage` header is read on every Graph response;
+each WhatsApp account keeps its latest management reading, and while Meta reports minutes to
+regain access, background management work waits for the pause and members' management actions say
+that Meta is limiting management requests until then. This closes P2-02's remainder.
+
+### Completed
+
+- **Parse (`messaging/usage-header.ts`):** `parseBusinessUseCaseUsage` keeps, per WABA id, the
+  `whatsapp_business_management` entry's three percentages and minutes to regain access; bounded
+  (16,384 characters, 32 ids, 16 entries an id, digit ids), lenient (malformed JSON, wrong shapes,
+  negative, non-finite or unreadable numbers give nothing or zero; numeric text read; rounded up;
+  capped at 100 percent and 1,440 minutes). `GraphClient.request` attaches it as an optional `usage`
+  to both arms of `GraphResult` without changing any classification; the raw header is never logged.
+- **Record (`messaging/management-pace.ts`, migration 0310):** `app.whatsapp_accounts` gains
+  `management_usage_read_at`, `management_usage_percent` (0 to 100) and `management_paused_until`;
+  UPDATE on them for `w360_app`, SELECT on the pause for `w360_definer`. Readings are looked up by
+  the account's own WABA id and written in the company's scope only while the row still has that id
+  and no newer reading; other ids are ignored. Exported with the account (`export-spec.ts`).
+- **Pace:** template syncs, submissions and deletions; flow operations and key uploads; catalog
+  reads; access checks (subscribed-apps listing and restoration); and number setup (subscribe,
+  register, and both of ADR-398's health reads: once the first pauses the account, the field-less
+  second read is not made and the step is deferred) check the pause first and ask Graph nothing while it lasts, returning `paused`.
+  Syncs and access checks stay due and `ops.template_sync_due` / `ops.whatsapp_access_checks_due`
+  leave paused accounts out; the other jobs are queued again for 30 seconds after the pause
+  (`deferPausedJob`), and `ops.flow_work_due` / `ops.commerce_work_due` leave paused accounts out
+  too. No retry, dead letter or alert is spent. `pacedManagementCalls` records each response and
+  makes no further call in the job once one pauses the account. A high percentage alone does not
+  defer (ADR-399 says why); a rate-limit error without the header is retried as before.
+- **Members:** "Refresh from Meta", submitting and deleting templates (page and API), flow changes,
+  flow keys and catalog reads answer `provider_unavailable` (503) with the end of the pause in the
+  company's time zone (UTC for the API, with `details.pausedUntil`); nothing is queued. The OpenAPI
+  document lists the 503 on submit and delete.
+- **Show:** Settings → Channels gives each connected number's account one line: "Meta management
+  usage N% (read …)" and, while paused, when Meta stops limiting management requests
+  (`managementUsageView` in `listChannels`).
+- **Left out on purpose:** sends, read receipts and media (`whatsapp` type); Embedded Signup's
+  synchronous calls (no account row yet); company deletion's `unsubscribe` (one best-effort call;
+  deferring it would hold back erasure).
+- **Research:** row M-200 records what was confirmed (units, via search snippets of Meta's
+  rate-limiting page; developers.facebook.com did not resolve from the session) and what was not
+  (the 100-percent threshold, WhatsApp applicability).
+
+### Verification
+
+- Lint, format, typecheck, unit tests and build: see the commit's checks. New unit tests: 14 in
+  `usage-header.test.ts` (parser and Graph client), 14 in `management-pace.test.ts` (pacing
+  decision, paced calls, the Channels view), one more in `api/message-template-drafts.test.ts` (the
+  API's 503 and nothing written); an existing API test now expects the account read.
+- Manual mutation testing of the parser, the pacing decision, the client and the view: 15/15
+  mutations caught.
+- `tests/integration/management-usage.test.ts` (stand-in extended with `usageHeader` and
+  `usageHeaderValue`): readings stored for the right account and company only, a header naming
+  another WABA ignored, malformed headers harmless, a refused call's reading stored, a paused sync
+  and submission asking nothing, the deferred job's `startAfter`, the sweep's due lists, the
+  member's refusal, Channels, number setup making no second health read once the first pauses the
+  account (ADR-398), and the grants and function owners of 0310. **Written and
+  type-checked; they run only in CI (no PostgreSQL here).**
+
+### Not built
+
+Deferring on high usage, pacing by `x-app-usage`, and any check against live Meta traffic.
+
 ## 2026-10-16 — Each WhatsApp number's messaging limit on Channels (P2-10, ADR-398)
 
 Status: **Implemented; its database and browser tests run in CI only.** "Messaging limits display"

@@ -45,6 +45,7 @@ import type { JobQueue } from '../jobs/queue';
 import { emitTenantEvent } from '../messaging/events';
 import { SERVICE_WINDOW_MS, canSeeConversation } from '../messaging/outbound';
 import { STATUS_RANK } from '../messaging/status';
+import { assertManagementOpen } from '../messaging/management-pace';
 import { parseInput } from '../validation';
 import { FLOW_CATEGORIES, FLOW_LIMITS, checkFlowJson } from './flow-json';
 import {
@@ -178,14 +179,27 @@ export function createFlowsService(deps: FlowsDeps) {
     );
   }
 
-  /** Writes the next operation ahead and signals the worker. */
+  /**
+   * Writes the next operation ahead and signals the worker; refused while Meta throttles the
+   * account's management calls (ADR-399).
+   */
   async function requestOp(
     tx: Tx,
     ctx: TenantContext,
-    row: { id: string; version: number },
+    row: { id: string; version: number; whatsappAccountId: string },
     op: FlowSyncOp,
     extra: Partial<typeof flows.$inferInsert> = {},
   ) {
+    const [account] = await tx
+      .select({ pausedUntil: whatsappAccounts.managementPausedUntil })
+      .from(whatsappAccounts)
+      .where(
+        and(
+          eq(whatsappAccounts.tenantId, ctx.tenant.id),
+          eq(whatsappAccounts.id, row.whatsappAccountId),
+        ),
+      );
+    assertManagementOpen(account?.pausedUntil, deps.clock.now(), ctx.tenant.timezone);
     const version = row.version + 1;
     await tx
       .update(flows)
@@ -235,16 +249,28 @@ export function createFlowsService(deps: FlowsDeps) {
     return check.summary;
   }
 
-  async function connectedAccount(tx: Tx, tenantId: string, whatsappAccountId: string) {
+  /**
+   * A connected account of the company whose management calls Meta does not throttle: while it
+   * does, the action says so instead of queuing work for Meta (ADR-399).
+   */
+  async function connectedAccount(tx: Tx, ctx: TenantContext, whatsappAccountId: string) {
     const [account] = await tx
-      .select({ id: whatsappAccounts.id, status: whatsappAccounts.status })
+      .select({
+        id: whatsappAccounts.id,
+        status: whatsappAccounts.status,
+        managementPausedUntil: whatsappAccounts.managementPausedUntil,
+      })
       .from(whatsappAccounts)
       .where(
-        and(eq(whatsappAccounts.tenantId, tenantId), eq(whatsappAccounts.id, whatsappAccountId)),
+        and(
+          eq(whatsappAccounts.tenantId, ctx.tenant.id),
+          eq(whatsappAccounts.id, whatsappAccountId),
+        ),
       );
     if (!account || account.status !== 'connected') {
       throw invalid('whatsappAccountId', 'Choose a connected WhatsApp account.');
     }
+    assertManagementOpen(account.managementPausedUntil, deps.clock.now(), ctx.tenant.timezone);
   }
 
   const nameTaken = () => invalid('name', 'Another flow of this WhatsApp account has this name.');
@@ -377,7 +403,7 @@ export function createFlowsService(deps: FlowsDeps) {
       for (let attempt = 0; ; attempt += 1) {
         try {
           return await db.run(ctx.scope, async (tx) => {
-            await connectedAccount(tx, ctx.tenant.id, data.whatsappAccountId);
+            await connectedAccount(tx, ctx, data.whatsappAccountId);
             const [open] = await tx
               .select({ n: count() })
               .from(flows)
@@ -765,7 +791,7 @@ export function createFlowsService(deps: FlowsDeps) {
         try {
           return await db.run(ctx.scope, async (tx) => {
             const source = await lockFlow(tx, ctx, data.id);
-            await connectedAccount(tx, ctx.tenant.id, source.whatsappAccountId);
+            await connectedAccount(tx, ctx, source.whatsappAccountId);
             const id = uuidv7();
             const name = `${source.name.slice(0, FLOW_LIMITS.nameLength - 10)} (new ${attempt + 1})`;
             await tx.insert(flows).values({
@@ -950,7 +976,7 @@ export function createFlowsService(deps: FlowsDeps) {
       assertCan(ctx, 'flows.write');
       const data = parseInput(z.object({ whatsappAccountId: z.uuid() }), input);
       return db.run(ctx.scope, async (tx) => {
-        await connectedAccount(tx, ctx.tenant.id, data.whatsappAccountId);
+        await connectedAccount(tx, ctx, data.whatsappAccountId);
         // Failed uploads are tried again from scratch.
         await tx
           .update(flowKeyUploads)
@@ -998,7 +1024,7 @@ export function createFlowsService(deps: FlowsDeps) {
       assertCan(ctx, 'flows.publish');
       const data = parseInput(z.object({ whatsappAccountId: z.uuid() }), input);
       return db.run(ctx.scope, async (tx) => {
-        await connectedAccount(tx, ctx.tenant.id, data.whatsappAccountId);
+        await connectedAccount(tx, ctx, data.whatsappAccountId);
         const now = deps.clock.now();
         const account = and(
           eq(flowKeys.tenantId, ctx.tenant.id),

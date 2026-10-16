@@ -31,6 +31,12 @@ import type { JobSigner } from '../jobs/envelope';
 import type { JobQueue } from '../jobs/queue';
 import { emitTenantEvent } from '../messaging/events';
 import type { GraphClient, GraphResult, RemoteProduct } from '../messaging/graph';
+import {
+  activeManagementPause,
+  pacedManagementCalls,
+  untilPaused,
+  type ManagementPaused,
+} from '../messaging/management-pace';
 import { SERVICE_WINDOW_MS } from '../messaging/outbound';
 import { STATUS_RANK } from '../messaging/status';
 import { wabaCredential } from '../templates/service';
@@ -81,12 +87,15 @@ function graphMessage(f: GraphFailure): string {
   return `Meta did not return the catalog: ${(f.detail ?? f.title).slice(0, 600)}`;
 }
 
-/** Reads the account's connected catalogs and their products from Meta (M-172). */
+/**
+ * Reads the account's connected catalogs and their products from Meta (M-172). `paused`: Meta
+ * throttles the account's management calls, and the read waits for the pause (ADR-399).
+ */
 export async function processCommerceSync(
   deps: CatalogSyncDeps,
   scope: TenantScope,
   whatsappAccountId: string,
-): Promise<CommerceJobOutcome> {
+): Promise<CommerceJobOutcome | ManagementPaused> {
   const claimed = await deps.db.run(scope, async (tx) => {
     const [row] = await tx
       .select()
@@ -131,14 +140,36 @@ export async function processCommerceSync(
   };
   if (!credential)
     return fail('The WhatsApp account is not connected. Reconnect it, then try again.');
+  const paused = activeManagementPause(credential.managementPausedUntil, deps.clock.now());
+  if (paused) return { paused };
+  const call = pacedManagementCalls(deps, scope, credential);
+  return untilPaused(() =>
+    readCatalogs(deps, scope, whatsappAccountId, credential, call, { fail, finish }),
+  );
+}
 
+async function readCatalogs(
+  deps: CatalogSyncDeps,
+  scope: TenantScope,
+  whatsappAccountId: string,
+  credential: { wabaId: string; token: string },
+  call: ReturnType<typeof pacedManagementCalls>,
+  {
+    fail,
+    finish,
+  }: {
+    fail: (message: string) => Promise<'done'>;
+    finish: (set: { state: 'idle' | 'failed'; error: string | null }) => Promise<unknown>;
+  },
+): Promise<CommerceJobOutcome> {
   // Catalogs connected to the account.
   const catalogs: { id: string; name: string | null; productCount: number | null }[] = [];
   let after: string | null = null;
   for (let page = 0; page < 5; page += 1) {
-    const listed = await deps.graph.listProductCatalogs(credential.wabaId, credential.token, {
-      after,
-    });
+    const pageAfter: string | null = after;
+    const listed: Awaited<ReturnType<GraphClient['listProductCatalogs']>> = await call(() =>
+      deps.graph.listProductCatalogs(credential.wabaId, credential.token, { after: pageAfter }),
+    );
     if (!listed.ok) {
       return listed.kind === 'retryable' || listed.kind === 'unknown'
         ? 'retry'
@@ -158,9 +189,10 @@ export async function processCommerceSync(
     let cursor: string | null = null;
     let truncated = false;
     for (;;) {
-      const listed = await deps.graph.listCatalogProducts(catalog.id, credential.token, {
-        after: cursor,
-      });
+      const pageCursor: string | null = cursor;
+      const listed: Awaited<ReturnType<GraphClient['listCatalogProducts']>> = await call(() =>
+        deps.graph.listCatalogProducts(catalog.id, credential.token, { after: pageCursor }),
+      );
       if (!listed.ok) {
         return listed.kind === 'retryable' || listed.kind === 'unknown'
           ? 'retry'

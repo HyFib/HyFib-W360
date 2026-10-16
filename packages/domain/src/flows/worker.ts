@@ -17,6 +17,12 @@ import {
   type TenantScope,
 } from '@w360/db';
 import type { GraphClient, GraphResult, RemoteFlow } from '../messaging/graph';
+import {
+  activeManagementPause,
+  pacedManagementCalls,
+  untilPaused,
+  type ManagementPaused,
+} from '../messaging/management-pace';
 import { wabaCredential } from '../templates/service';
 import { generateFlowKeyPair } from './crypto';
 import {
@@ -43,7 +49,10 @@ export interface FlowWorkerDeps {
   appBaseUrl: string;
 }
 
-export type FlowJobOutcome = 'done' | 'skipped' | 'retry';
+/** `paused`: Meta throttles the account's management calls; what is left waits (ADR-399). */
+export type FlowJobOutcome = 'done' | 'skipped' | 'retry' | ManagementPaused;
+
+type PacedCall = ReturnType<typeof pacedManagementCalls>;
 
 /** Operations pending longer than this are failed by the sweep instead of tried again. */
 export const FLOW_SYNC_GIVE_UP_MS = 30 * 60_000;
@@ -71,12 +80,15 @@ function failureMessage(f: Failure): string {
 /** Finds the flow an earlier attempt created (its name carries this flow's reference). */
 async function findOwnFlow(
   graph: GraphClient,
+  call: PacedCall,
   credential: { wabaId: string; token: string },
   publicId: string,
 ): Promise<{ ok: true; id: string | null } | Failure> {
   let after: string | null = null;
   for (let page = 0; page < 20; page += 1) {
-    const listed = await graph.listFlows(credential.wabaId, credential.token, { after });
+    const listed = await call(() =>
+      graph.listFlows(credential.wabaId, credential.token, { after }),
+    );
     if (!listed.ok) return listed;
     const own = listed.data.flows.find((f) => isOwnMetaFlow(f.name, publicId));
     if (own) return { ok: true, id: own.id };
@@ -149,99 +161,110 @@ export async function processFlowSync(
   if (!credential) {
     return fail('The WhatsApp account is not connected. Reconnect it, then try again.');
   }
-  const token = credential.token;
-  const endpointUri = row.dataApiVersion ? flowEndpointUrl(deps.appBaseUrl, row.publicId) : null;
-  const metadata = {
-    name: metaFlowName(row.name, row.publicId),
-    categories: row.categories,
-    endpointUri,
-  };
-  let metaFlowId = row.metaFlowId;
-  let validationErrors = row.validationErrors;
-  let uploadedJsonSha256 = row.uploadedJsonSha256;
+  // While Meta throttles the account's management calls nothing is asked (ADR-399).
+  const paused = activeManagementPause(credential.managementPausedUntil, deps.clock.now());
+  if (paused) return { paused };
+  const call = pacedManagementCalls(deps, scope, credential);
+  return untilPaused(async (): Promise<FlowJobOutcome> => {
+    const token = credential.token;
+    const endpointUri = row.dataApiVersion ? flowEndpointUrl(deps.appBaseUrl, row.publicId) : null;
+    const metadata = {
+      name: metaFlowName(row.name, row.publicId),
+      categories: row.categories,
+      endpointUri,
+    };
+    let metaFlowId = row.metaFlowId;
+    let validationErrors = row.validationErrors;
+    let uploadedJsonSha256 = row.uploadedJsonSha256;
 
-  if (op === 'create' || op === 'upload') {
-    if (!metaFlowId) {
-      const found = await findOwnFlow(deps.graph, credential, row.publicId);
-      if (!found.ok) return onFailure(found);
-      if (found.id) {
-        metaFlowId = found.id;
+    if (op === 'create' || op === 'upload') {
+      if (!metaFlowId) {
+        const found = await findOwnFlow(deps.graph, call, credential, row.publicId);
+        if (!found.ok) return onFailure(found);
+        if (found.id) {
+          metaFlowId = found.id;
+        } else {
+          const created = await call(() =>
+            deps.graph.createFlow(credential.wabaId, token, metadata),
+          );
+          if (!created.ok) return onFailure(created);
+          metaFlowId = created.data.id;
+        }
+        // Kept at once: a crash before the upload must not lose the flow Meta now has.
+        const id = metaFlowId;
+        await deps.db.run(scope, (tx) =>
+          tx
+            .update(flows)
+            .set({ metaFlowId: id, metaStatus: 'DRAFT' })
+            .where(and(eq(flows.tenantId, scope.tenantId), eq(flows.id, flowId))),
+        );
       } else {
-        const created = await deps.graph.createFlow(credential.wabaId, token, metadata);
-        if (!created.ok) return onFailure(created);
-        metaFlowId = created.data.id;
+        const existing = metaFlowId;
+        const updated = await call(() => deps.graph.updateFlowMetadata(existing, token, metadata));
+        if (!updated.ok) return onFailure(updated);
       }
-      // Kept at once: a crash before the upload must not lose the flow Meta now has.
-      const id = metaFlowId;
-      await deps.db.run(scope, (tx) =>
-        tx
-          .update(flows)
-          .set({ metaFlowId: id, metaStatus: 'DRAFT' })
-          .where(and(eq(flows.tenantId, scope.tenantId), eq(flows.id, flowId))),
-      );
-    } else {
-      const updated = await deps.graph.updateFlowMetadata(metaFlowId, token, metadata);
-      if (!updated.ok) return onFailure(updated);
+      const target = metaFlowId;
+      const uploaded = await call(() => deps.graph.uploadFlowJson(target, token, row.flowJson));
+      if (!uploaded.ok) return onFailure(uploaded);
+      validationErrors = uploaded.data.validationErrors;
+      uploadedJsonSha256 = sha256(row.flowJson);
     }
-    const uploaded = await deps.graph.uploadFlowJson(metaFlowId, token, row.flowJson);
-    if (!uploaded.ok) return onFailure(uploaded);
-    validationErrors = uploaded.data.validationErrors;
-    uploadedJsonSha256 = sha256(row.flowJson);
-  }
-  const flowRef = metaFlowId;
-  if (!flowRef) return fail('This flow is not at Meta yet. Send it to Meta first.');
+    const flowRef = metaFlowId;
+    if (!flowRef) return fail('This flow is not at Meta yet. Send it to Meta first.');
 
-  const current = async (): Promise<GraphResult<RemoteFlow>> => deps.graph.getFlow(flowRef, token);
+    const current = async (): Promise<GraphResult<RemoteFlow>> =>
+      call(() => deps.graph.getFlow(flowRef, token));
 
-  if (op === 'publish' || op === 'deprecate') {
-    const target = op === 'publish' ? 'PUBLISHED' : 'DEPRECATED';
-    const before = await current();
-    if (!before.ok) return onFailure(before);
-    if (before.data.status !== target) {
-      const done =
-        op === 'publish'
-          ? await deps.graph.publishFlow(flowRef, token)
-          : await deps.graph.deprecateFlow(flowRef, token);
-      if (!done.ok) return onFailure(done);
+    if (op === 'publish' || op === 'deprecate') {
+      const target = op === 'publish' ? 'PUBLISHED' : 'DEPRECATED';
+      const before = await current();
+      if (!before.ok) return onFailure(before);
+      if (before.data.status !== target) {
+        const done =
+          op === 'publish'
+            ? await call(() => deps.graph.publishFlow(flowRef, token))
+            : await call(() => deps.graph.deprecateFlow(flowRef, token));
+        if (!done.ok) return onFailure(done);
+      }
+    } else if (op === 'delete') {
+      const before = await current();
+      if (!before.ok) {
+        if (before.kind !== 'permanent') return onFailure(before);
+        // Meta cannot read it: it may already be gone. The member can archive it in HyFib.
+        return fail(
+          `Meta could not read this flow (${(before.detail ?? before.title).slice(0, 300)}). If it was already deleted there, archive it.`,
+        );
+      }
+      if (before.data.status !== 'DRAFT') {
+        return fail('Only draft flows can be deleted at Meta; deprecate a published flow instead.');
+      }
+      const deleted = await call(() => deps.graph.deleteFlow(flowRef, token));
+      if (!deleted.ok) return onFailure(deleted);
+      await settle({
+        metaFlowId: null,
+        metaStatus: null,
+        previewUrl: null,
+        previewExpiresAt: null,
+        health: null,
+        archivedAt: deps.clock.now(),
+      });
+      return 'done';
     }
-  } else if (op === 'delete') {
-    const before = await current();
-    if (!before.ok) {
-      if (before.kind !== 'permanent') return onFailure(before);
-      // Meta cannot read it: it may already be gone. The member can archive it in HyFib.
-      return fail(
-        `Meta could not read this flow (${(before.detail ?? before.title).slice(0, 300)}). If it was already deleted there, archive it.`,
-      );
-    }
-    if (before.data.status !== 'DRAFT') {
-      return fail('Only draft flows can be deleted at Meta; deprecate a published flow instead.');
-    }
-    const deleted = await deps.graph.deleteFlow(flowRef, token);
-    if (!deleted.ok) return onFailure(deleted);
+
+    const remote = await current();
+    if (!remote.ok) return onFailure(remote);
     await settle({
-      metaFlowId: null,
-      metaStatus: null,
-      previewUrl: null,
-      previewExpiresAt: null,
-      health: null,
-      archivedAt: deps.clock.now(),
+      metaFlowId: flowRef,
+      metaStatus: metaStatus(remote.data.status),
+      validationErrors:
+        op === 'create' || op === 'upload' ? validationErrors : remote.data.validationErrors,
+      uploadedJsonSha256,
+      health: remote.data.health,
+      previewUrl: remote.data.previewUrl,
+      previewExpiresAt: remote.data.previewExpiresAt,
     });
     return 'done';
-  }
-
-  const remote = await current();
-  if (!remote.ok) return onFailure(remote);
-  await settle({
-    metaFlowId: flowRef,
-    metaStatus: metaStatus(remote.data.status),
-    validationErrors:
-      op === 'create' || op === 'upload' ? validationErrors : remote.data.validationErrors,
-    uploadedJsonSha256,
-    health: remote.data.health,
-    previewUrl: remote.data.previewUrl,
-    previewExpiresAt: remote.data.previewExpiresAt,
   });
-  return 'done';
 }
 
 /** Fails a flow operation that has waited too long (the sweep calls this for old operations). */
@@ -392,63 +415,70 @@ export async function processFlowKeys(
     );
     return 'done';
   }
+  // While Meta throttles the account's management calls no key is uploaded (ADR-399).
+  const credential = work.credential;
+  const paused = activeManagementPause(credential.managementPausedUntil, deps.clock.now());
+  if (paused) return { paused };
+  const call = pacedManagementCalls(deps, scope, credential);
 
-  let retry = false;
-  for (const upload of work.pending) {
-    const phoneNumberId = work.numbers.get(upload.channelAccountId);
-    const record = (set: Partial<typeof flowKeyUploads.$inferInsert>) =>
-      deps.db.run(scope, (tx) =>
-        tx
-          .update(flowKeyUploads)
-          .set({ attempts: sql`${flowKeyUploads.attempts} + 1`, ...set })
-          .where(
-            and(eq(flowKeyUploads.tenantId, scope.tenantId), eq(flowKeyUploads.id, upload.id)),
-          ),
-      );
-    if (!phoneNumberId) {
-      // The number was disconnected since: its upload is no longer needed.
-      await record({ state: 'failed', errorCode: 'number_inactive' });
-      continue;
-    }
-    const failed = async (f: Failure) => {
-      const lastTry = upload.attempts + 1 >= FLOW_KEY_UPLOAD_ATTEMPTS;
-      if (transient(f) && !lastTry) {
-        retry = true;
-        await record({ errorCode: f.title.slice(0, 64) });
-      } else {
-        await record({
-          state: 'failed',
-          errorCode: (f.code ? String(f.code) : f.title).slice(0, 64),
-        });
+  return untilPaused(async (): Promise<FlowJobOutcome> => {
+    let retry = false;
+    for (const upload of work.pending) {
+      const phoneNumberId = work.numbers.get(upload.channelAccountId);
+      const record = (set: Partial<typeof flowKeyUploads.$inferInsert>) =>
+        deps.db.run(scope, (tx) =>
+          tx
+            .update(flowKeyUploads)
+            .set({ attempts: sql`${flowKeyUploads.attempts} + 1`, ...set })
+            .where(
+              and(eq(flowKeyUploads.tenantId, scope.tenantId), eq(flowKeyUploads.id, upload.id)),
+            ),
+        );
+      if (!phoneNumberId) {
+        // The number was disconnected since: its upload is no longer needed.
+        await record({ state: 'failed', errorCode: 'number_inactive' });
+        continue;
       }
-    };
-    const uploaded = await deps.graph.setBusinessPublicKey(
-      phoneNumberId,
-      work.credential.token,
-      key.publicKeyPem,
-    );
-    if (!uploaded.ok) {
-      await failed(uploaded);
-      continue;
+      const failed = async (f: Failure) => {
+        const lastTry = upload.attempts + 1 >= FLOW_KEY_UPLOAD_ATTEMPTS;
+        if (transient(f) && !lastTry) {
+          retry = true;
+          await record({ errorCode: f.title.slice(0, 64) });
+        } else {
+          await record({
+            state: 'failed',
+            errorCode: (f.code ? String(f.code) : f.title).slice(0, 64),
+          });
+        }
+      };
+      const uploaded = await call(() =>
+        deps.graph.setBusinessPublicKey(phoneNumberId, credential.token, key.publicKeyPem),
+      );
+      if (!uploaded.ok) {
+        await failed(uploaded);
+        continue;
+      }
+      const checked = await call(() =>
+        deps.graph.getBusinessPublicKey(phoneNumberId, credential.token),
+      );
+      if (!checked.ok) {
+        await failed(checked);
+        continue;
+      }
+      const sameKey =
+        checked.data.publicKeyPem !== null &&
+        normalizePem(checked.data.publicKeyPem) === normalizePem(key.publicKeyPem);
+      const valid = sameKey && checked.data.signatureStatus === 'VALID';
+      await record({
+        state: 'uploaded',
+        signatureStatus: checked.data.signatureStatus,
+        errorCode: valid ? null : sameKey ? 'signature_mismatch' : 'different_key',
+        uploadedAt: deps.clock.now(),
+        checkedAt: deps.clock.now(),
+      });
     }
-    const checked = await deps.graph.getBusinessPublicKey(phoneNumberId, work.credential.token);
-    if (!checked.ok) {
-      await failed(checked);
-      continue;
-    }
-    const sameKey =
-      checked.data.publicKeyPem !== null &&
-      normalizePem(checked.data.publicKeyPem) === normalizePem(key.publicKeyPem);
-    const valid = sameKey && checked.data.signatureStatus === 'VALID';
-    await record({
-      state: 'uploaded',
-      signatureStatus: checked.data.signatureStatus,
-      errorCode: valid ? null : sameKey ? 'signature_mismatch' : 'different_key',
-      uploadedAt: deps.clock.now(),
-      checkedAt: deps.clock.now(),
-    });
-  }
-  return retry ? 'retry' : 'done';
+    return retry ? 'retry' : 'done';
+  });
 }
 
 export interface FlowWorkItem {

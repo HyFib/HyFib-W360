@@ -16498,3 +16498,94 @@ when its setup is retried (Retry setup does not apply to active numbers), that a
 any audit metadata (now compared exactly), and that `messaging_limit_checked_at` was described as
 the time of a read that asked and succeeded, which a refusal's second read does not do. All were
 fixed.
+
+## ADR-399 Pacing WhatsApp management calls by Meta's usage header (P2-02) (2026-10-16)
+
+Context: the Graph client (P2-02) classified rate-limit errors as `retryable`, and each job retried
+them with its own backoff, but nothing read the usage Meta reports with every response, so
+background work for an account Meta was already throttling (template syncs every 6 hours and when
+asked, daily access checks, flow operations, key uploads, catalog reads, number setup) kept calling
+Graph until each call was refused, spending the account's allowance and the jobs' retry budgets.
+Meta's OpenAPI description gives the header `x-business-use-case-usage`: per business object id
+(the WABA id), entries typed `whatsapp_business_management` and `whatsapp` with `call_count`,
+`total_cputime`, `total_time` and `estimated_time_to_regain_access` (research M-027). Meta's
+rate-limiting page, seen through search snippets only, describes the three counters as whole-number
+percentages of the allowance over a rolling hour and the last as minutes until calls are no longer
+throttled; that throttling starts at 100, and that this holds unchanged for WhatsApp management, was
+not confirmed (M-200).
+
+Decision:
+
+- **Parse leniently, keep little:** `GraphClient.request` reads the header on every response,
+  success or failure, and gives the parse as an optional `usage` on both arms of `GraphResult`; it
+  never changes a call's classification (`messaging/usage-header.ts`). A missing, empty, malformed
+  or longer than 16,384 characters header gives nothing; at most 32 business ids and 16 entries per
+  id are read; ids must be 1 to 32 digits; only `whatsapp_business_management` entries are kept, per
+  id the three percentages and the minutes to regain access. Numbers may be JSON numbers or plain
+  numeric text, are rounded up to whole numbers (a fraction of a minute still pauses), and capped at
+  100 percent and 1,440 minutes; negative, non-finite and unreadable values count as zero, and an
+  entry with no readable value is ignored. Two entries for one id give the higher of each value.
+  The raw header is never logged or stored.
+- **Record per account, never by the header's id alone:** the code paths that already hold an
+  authorized scope for an account (the template, flow, catalog, access-check and number-setup jobs)
+  look up the reading for that account's own stored WABA id (`managementReading`) and store it on
+  `app.whatsapp_accounts` through `db.run(scope, …)`: when it was read, the highest of the three
+  percentages, and `management_paused_until` (the read time plus the minutes) while the minutes are
+  above 0, else null (`recordManagementUsage`). The update also requires the row's `waba_id` to be
+  the id matched and no newer reading stored, so a reconnection or an out-of-order response cannot
+  write a stale or foreign reading. Readings for any other id, including another company's WABA,
+  are ignored.
+- **Pause background work, do not count it as a failure:** while `management_paused_until` is in
+  the future, the jobs ask Graph nothing and return a `paused` outcome. Template syncs and access
+  checks stay due (their timestamps untouched), and the sweep's due lists (`ops.template_sync_due`,
+  `ops.whatsapp_access_checks_due`) leave paused accounts out, so the minute sweep signals them
+  again in the first minute after the pause. Template submissions and deletions, flow operations and
+  key uploads, catalog reads and number setup are queued again, signed as before, to start 30
+  seconds after the pause (`deferPausedJob`, pg-boss `startAfter`, singleton key
+  `paused:<ref>:<time>`, so the deferring job, still active under its own key, does not block it,
+  and a second deferral for one pause collapses); `ops.flow_work_due` and `ops.commerce_work_due`
+  leave their paused accounts out too. The job completes, so no retry is spent, no dead letter is
+  written and nothing alerts. Within one job, once a response pauses the account the job's next call
+  is not made (`pacedManagementCalls`); the jobs' steps were already resumable, so the deferred job
+  carries on from there (a template listing stops before its next page; a webhook-subscription
+  restoration interrupted by a pause is reported as `not_checked` and tried again by the existing
+  30-minute rule; in number setup's health step, a first read that asked for the messaging limit
+  and paused the account is not followed by ADR-398's second, field-less read: the step is deferred
+  and both reads are made after the pause, so ADR-398's rule applies unchanged).
+- **No pause on a high percentage alone:** background work does not defer when usage is merely
+  high (for example 90 percent). The percentages cover a rolling hour whose make-up HyFib does not
+  know, so a fixed deferral would be a guess about when it frees up; these jobs already run at low
+  cadence per account, and Meta's own throttling then arrives either as minutes to regain access,
+  which pause, or as a rate-limit error, which keeps today's retries. Channels shows the percentage.
+- **Members' actions say so instead of queuing:** while an account is paused, "Refresh from Meta",
+  submitting a template, deleting one Meta has (the Templates page and `POST
+/message-templates/{id}/submit`, `DELETE /message-templates/{id}`), flow changes sent to Meta,
+  flow key set-up and rotation, and catalog reads answer `provider_unavailable` (503): "Meta is
+  limiting management requests for this WhatsApp account until <time>. Try again after that.", in
+  the company's time zone (UTC for the API, which also gets `pausedUntil` in the details; the
+  OpenAPI document lists the 503). Nothing is written or queued, so nothing pretends to succeed.
+- **Without the header, as before:** a rate-limit error that carries no header keeps today's
+  classification and retries; no pause length is invented.
+- **Shown on Channels:** each connected number's account shows one line, "Meta management usage N%
+  (read <time>)", and "; Meta is limiting management requests until <time>" while paused
+  (`managementUsageView` in `listChannels`; the page re-checks `channels.read` as before).
+- **Migration 0310:** three nullable columns on `app.whatsapp_accounts` (a check keeps the
+  percentage within 0 to 100); UPDATE on them for `w360_app` (which already reads the table), SELECT
+  on `management_paused_until` and on `app.flows.whatsapp_account_id` for `w360_definer`, nothing
+  broader; the four due-list definer functions are dropped by their owner and created again by the
+  migration role with pinned search paths, granted to `w360_app` before ownership moves back. The
+  table's row security is unchanged. The columns are exported with the account and deleted with
+  the company. Backward compatible: the previous release ignores the columns, so the usual pipeline
+  (migration, workers, web) is safe.
+
+Left out on purpose: message sends, read receipts and media (the `whatsapp` type, out of scope);
+Embedded Signup's synchronous calls (no account row exists yet to pause); company deletion's
+`unsubscribe` (one best-effort call whose outcome the deletion report records; deferring it would
+hold back erasure). `debug_token` is an app-level call; it is skipped while the account is paused
+because the access check as a whole waits.
+
+Known limits: a flow operation or catalog read still pending 30 minutes after it was asked is
+failed by the sweep as before (their existing budget), even if a long pause took part of that time;
+a hostile or wrong header could pause an account for at most a day, and in production only Meta's
+pinned Graph origin answers (T352). Not built: deferring on high usage, pacing by `x-app-usage`, and
+any live verification against Meta (tests use the Graph stand-in only).

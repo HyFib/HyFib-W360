@@ -14,11 +14,21 @@
 import { clipText, parseExternalJson } from '@w360/core';
 import type { FlowValidationError } from '@w360/db';
 import { parseMessagingLimit } from './messaging-limit';
+import {
+  BUSINESS_USE_CASE_USAGE_HEADER,
+  parseBusinessUseCaseUsage,
+  type BusinessUseCaseUsage,
+} from './usage-header';
 
 export type GraphFailureKind = 'retryable' | 'permanent' | 'auth' | 'unknown';
 
+/**
+ * A call's outcome. `usage`: the management usage Meta's `x-business-use-case-usage` header
+ * reported with the response, by business id (ADR-399), when it reported any that could be read;
+ * it never changes how a call is classified.
+ */
 export type GraphResult<T> =
-  | { ok: true; data: T }
+  | { ok: true; data: T; usage?: BusinessUseCaseUsage }
   | {
       ok: false;
       kind: GraphFailureKind;
@@ -27,6 +37,7 @@ export type GraphResult<T> =
       subcode?: number;
       title: string;
       detail?: string;
+      usage?: BusinessUseCaseUsage;
     };
 
 export interface RemoteTemplate {
@@ -296,30 +307,34 @@ export class GraphClient {
         ...(code ? { detail: code } : {}),
       };
     }
+    // Read on every response, success or failure; a header that cannot be read gives nothing.
+    const usage = parseBusinessUseCaseUsage(response.headers.get(BUSINESS_USE_CASE_USAGE_HEADER));
+    const withUsage = <R extends GraphResult<T>>(result: R): R =>
+      usage ? { ...result, usage } : result;
     let json: unknown;
     try {
       json = parseExternalJson(await response.text());
     } catch {
       if (response.ok)
-        return {
+        return withUsage({
           ok: false,
           kind: 'unknown',
           httpStatus: response.status,
           title: 'unreadable_response',
-        };
-      return classifyGraphError(response.status, null);
+        });
+      return withUsage(classifyGraphError(response.status, null));
     }
-    if (!response.ok) return classifyGraphError(response.status, json);
+    if (!response.ok) return withUsage(classifyGraphError(response.status, json));
     const mapped =
       typeof json === 'object' && json !== null ? map(json as Record<string, unknown>) : null;
     if (mapped === null)
-      return {
+      return withUsage({
         ok: false,
         kind: 'unknown',
         httpStatus: response.status,
         title: 'unexpected_response_shape',
-      };
-    return { ok: true, data: mapped };
+      });
+    return withUsage({ ok: true, data: mapped });
   }
 
   /** POST /{phone-number-id}/messages */

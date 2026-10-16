@@ -3,7 +3,9 @@ import { QUEUES } from '@w360/contracts';
 import type { TenantScope } from '@w360/db';
 import {
   authorizeJob,
+  deferPausedJob,
   findTemplateSyncsDue,
+  isManagementPaused,
   processTemplateDelete,
   processTemplateSubmit,
   syncTemplates,
@@ -15,6 +17,12 @@ import type { WorkerRuntime } from '../runtime';
 import { RetryableJobError } from './email';
 
 type TemplateKind = 'template.submit' | 'template.delete' | 'template.sync';
+
+const QUEUE_OF = {
+  'template.submit': QUEUES.templateSubmit.name,
+  'template.delete': QUEUES.templateDelete.name,
+  'template.sync': QUEUES.templateSync.name,
+} as const;
 
 /**
  * Template jobs: the template (or WABA) row is the source of truth and each job re-reads it under
@@ -40,6 +48,30 @@ function templateHandler(
     if (!rt.graph) throw new RetryableJobError('Meta is not configured');
     const deps = { db: rt.db, keyring: rt.keyring, graph: rt.graph, clock: rt.clock };
     const outcome = await run(deps, auth.scope, auth.envelope.ref);
+    if (isManagementPaused(outcome)) {
+      // Meta throttles the account's management calls (ADR-399): nothing was sent and nothing
+      // failed. A sync stays due and the sweep signals it again once the pause ends; a submission
+      // or a deletion is queued again for just after it.
+      const resumeAt =
+        kind === 'template.sync'
+          ? null
+          : await deferPausedJob(
+              rt,
+              QUEUE_OF[kind],
+              {
+                kind,
+                tenantId: auth.scope.tenantId,
+                actorUserId: auth.envelope.actorUserId,
+                ref: auth.envelope.ref,
+              },
+              outcome.paused,
+            );
+      rt.logger.info(
+        { jobId: job.id, kind, ref: auth.envelope.ref, pausedUntil: outcome.paused, resumeAt },
+        'template job deferred: Meta is limiting management requests',
+      );
+      return;
+    }
     rt.logger.info({ jobId: job.id, kind, ref: auth.envelope.ref, outcome }, 'template job');
     if (outcome === 'retry')
       throw new RetryableJobError(`${kind}: provider temporarily unavailable`);
