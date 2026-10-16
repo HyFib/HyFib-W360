@@ -43,6 +43,16 @@ import {
   type MemberRef,
 } from './common';
 import {
+  dealFieldFilterAudit,
+  dealFieldFilterProblemMessage,
+  DEAL_FIELD_FILTER_MAX_LENGTH,
+  filterableDealFields,
+  parseDealFieldFilterParam,
+  resolveDealFieldFilter,
+  type DealFieldFilterField,
+  type ResolvedDealFieldFilter,
+} from './deal-field-filter';
+import {
   loadDealFields,
   lockedDealFields,
   type DealFieldDefinition,
@@ -91,6 +101,15 @@ export interface Board {
   columns: BoardColumn[];
   /** The weighted pipeline of the columns shown, and of the deals expected to close by `monthEnd`. */
   forecast: Forecast & { monthEnd: string };
+  /** The filter by a choice or yes/no field (ADR-391), which columns and forecast follow. */
+  fieldFilter: {
+    /** The company's choice and yes/no fields, to choose from. */
+    fields: DealFieldFilterField[];
+    /** The filter applied, found among the company's fields; null for every deal. */
+    applied: ResolvedDealFieldFilter | null;
+    /** A filter was asked for but matches no field or option (a stale or edited link). */
+    ignored: boolean;
+  };
 }
 
 export interface ActivityItem {
@@ -209,6 +228,12 @@ const boardSchema = z.object({
   owner: z
     .union([z.literal('all'), z.literal('mine'), z.literal('none'), uuidSchema])
     .default('all'),
+  /**
+   * A field filter as the address writes it (`<key>:<option>`, ADR-391). Any text is taken: one the
+   * company's fields do not resolve (malformed, too long, a deleted field or a removed option) is
+   * ignored and reported, so a stale link shows the whole board instead of an error.
+   */
+  field: z.string().nullable().default(null),
 });
 
 const listSchema = z.object({
@@ -224,6 +249,11 @@ export const dealExportSchema = z.object({
   status: z.enum(DEAL_STATUSES).optional(),
   pipelineId: uuidSchema.optional(),
   owner: boardSchema.shape.owner,
+  /** A field filter as the board's address writes it (ADR-391); refused unless it resolves. */
+  field: z
+    .string()
+    .max(DEAL_FIELD_FILTER_MAX_LENGTH, 'The deal field filter is not valid.')
+    .optional(),
 });
 
 /** Deals read per batch of an export, each batch in its own read-only transaction. */
@@ -249,6 +279,17 @@ function ownerFilter(ctx: TenantContext, owner: string) {
   if (owner === 'mine') return eq(crmDeals.ownerMembershipId, ctx.membership.id);
   if (owner === 'none') return isNull(crmDeals.ownerMembershipId);
   return eq(crmDeals.ownerMembershipId, owner);
+}
+
+/**
+ * Deals with the filter's value, or without a value for its field (ADR-391). The stored value is
+ * compared as JSON, so a choice matches its option exactly as written (as every value is stored)
+ * and a yes/no field its boolean; values are never JSON null (an empty value removes the key).
+ */
+export function dealFieldCondition(filter: ResolvedDealFieldFilter | null) {
+  if (!filter) return undefined;
+  if (filter.stored === null) return sql`not (${crmDeals.attributes} ? ${filter.key}::text)`;
+  return sql`(${crmDeals.attributes} -> ${filter.key}::text) = ${JSON.stringify(filter.stored)}::jsonb`;
 }
 
 type DealRow = typeof crmDeals.$inferSelect;
@@ -454,11 +495,19 @@ export function dealOperations(deps: { db: Database; clock: Clock }) {
             if (data.pipelineId) throw notFound('Pipeline');
             return null;
           }
+          // The field filter, resolved against the company's own fields only (ADR-391).
+          const dealFields = await loadDealFields(tx, ctx.tenant.id);
+          const asked = data.field !== null && data.field !== '';
+          const resolved = asked
+            ? resolveDealFieldFilter(dealFields, parseDealFieldFilterParam(data.field))
+            : null;
+          const applied = resolved?.ok ? resolved.filter : null;
           const where = and(
             eq(crmDeals.tenantId, ctx.tenant.id),
             eq(crmDeals.pipelineId, pipeline.id),
             eq(crmDeals.status, 'open'),
             ownerFilter(ctx, data.owner),
+            dealFieldCondition(applied),
           );
           // Deals expected to close by the end of this month, in the company's time (ADR-242).
           const monthEnd = monthEndIn(clock.now(), ctx.tenant.timezone);
@@ -530,6 +579,11 @@ export function dealOperations(deps: { db: Database; clock: Clock }) {
               ),
               monthEnd,
             },
+            fieldFilter: {
+              fields: filterableDealFields(dealFields),
+              applied,
+              ignored: asked && applied === null,
+            },
           };
         },
         { accessMode: 'read only' },
@@ -594,7 +648,9 @@ export function dealOperations(deps: { db: Database; clock: Clock }) {
 
     /**
      * The deals the board or a list shows as CSV (ADR-239), newest first, streamed in batches,
-     * with their filters (a status, a pipeline, an owner). They carry customers' names and numbers,
+     * with their filters (a status, a pipeline, an owner, a choice or yes/no field's value, ADR-391:
+     * refused, before anything is audited, unless it resolves to a field and option of the company,
+     * so an export is never silently wider than asked). They carry customers' names and numbers,
      * so they need `contacts.export` too; numbers are shown as the member may see them (ADR-226).
      * Audited before the first line.
      */
@@ -608,6 +664,7 @@ export function dealOperations(deps: { db: Database; clock: Clock }) {
       const data = parseInput(dealExportSchema, input ?? {});
       // The fields as the export starts: one column each, by key (ADR-373).
       let dealFields: DealFieldDefinition[] = [];
+      let fieldFilter: ResolvedDealFieldFilter | null = null;
       await db.run(ctx.scope, async (tx) => {
         if (data.pipelineId) {
           const [pipeline] = await tx
@@ -619,6 +676,19 @@ export function dealOperations(deps: { db: Database; clock: Clock }) {
           if (!pipeline) throw notFound('Pipeline');
         }
         dealFields = await loadDealFields(tx, ctx.tenant.id);
+        if (data.field !== undefined) {
+          const resolved = resolveDealFieldFilter(
+            dealFields,
+            parseDealFieldFilterParam(data.field),
+          );
+          if (!resolved.ok) {
+            const message = dealFieldFilterProblemMessage(resolved.problem);
+            throw new AppError('validation_failed', message, {
+              issues: [{ path: 'field', message }],
+            });
+          }
+          fieldFilter = resolved.filter;
+        }
         await recordAudit(
           tx,
           ctx,
@@ -630,6 +700,9 @@ export function dealOperations(deps: { db: Database; clock: Clock }) {
               status: data.status ?? null,
               pipelineId: data.pipelineId ?? null,
               owner: data.owner,
+              // The field's key and the kind of match, never the option (ADR-391); left out
+              // without a field filter, so exports audited before it read the same.
+              ...(fieldFilter ? { field: dealFieldFilterAudit(fieldFilter) } : {}),
             },
           },
           meta,
@@ -653,6 +726,7 @@ export function dealOperations(deps: { db: Database; clock: Clock }) {
                   data.status ? eq(crmDeals.status, data.status) : undefined,
                   data.pipelineId ? eq(crmDeals.pipelineId, data.pipelineId) : undefined,
                   ownerFilter(ctx, data.owner),
+                  dealFieldCondition(fieldFilter),
                   cursor
                     ? sql`(${crmDeals.createdAt}, ${crmDeals.id}) < (${cursor.at}::timestamptz, ${cursor.id}::uuid)`
                     : undefined,

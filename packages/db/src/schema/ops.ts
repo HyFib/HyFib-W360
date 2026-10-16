@@ -229,6 +229,10 @@ export const platformAlertChannel = opsSchema.table('platform_alert_channel', {
     .notNull()
     .default(sql`ARRAY['failures', 'queues', 'integrations']::text[]`)
     .$type<('failures' | 'queues' | 'integrations' | 'reconciliation' | 'unsettled')[]>(),
+  /** How it reads a post: a JSON `text` member or a Teams card (ADR-388, migration 0304). */
+  format: text('format', { enum: ['text', 'teams_card'] })
+    .notNull()
+    .default('text'),
   setBy: text('set_by'),
   setAt: tz('set_at').notNull().defaultNow(),
   lastSentAt: tz('last_sent_at'),
@@ -248,6 +252,8 @@ export const platformAlertPosts = opsSchema.table('platform_alert_posts', {
     enum: ['failures', 'queues', 'integrations', 'reconciliation', 'unsettled', 'test'],
   }).notNull(),
   body: text('body').notNull(),
+  /** The text unescaped, rendered in the channel's format when sent (ADR-388); null before 0304. */
+  plainBody: text('plain_body'),
   createdAt: tz('created_at').notNull().defaultNow(),
   attempts: smallint('attempts').notNull().default(0),
   nextAttemptAt: tz('next_attempt_at').notNull().defaultNow(),

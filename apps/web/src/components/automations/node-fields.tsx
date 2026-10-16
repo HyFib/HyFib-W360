@@ -283,7 +283,7 @@ function RuleEditor({
           <option value="field">A contact field</option>
           <option value="tag">A contact tag</option>
           <option value="conversation_tag">A conversation tag</option>
-          <option value="business_hours">Business hours</option>
+          <option value="business_hours">The company’s business hours</option>
         </Select>
       )}
     </Field>

@@ -165,7 +165,15 @@ Phase 3 rules on top of the matrix (enforced in domain services and re-checked w
   ADR-275) names which of the title, value and expected close date changed, never their values
   before, and gives the deal as it is when delivered, so erasure's retitling replaces a title that
   may name the person; its capture during erasure runs as the definer role, which may read a deal's
-  id and owner beyond what erasure already read, nothing more.
+  id and owner beyond what erasure already read, nothing more. A change of custom field values
+  (ADR-390) is one of those details (`fields`), with the keys of the fields whose values changed,
+  never a value, before or after: a receiver reads values with `GET /deals/{id}` and `deals.read`.
+  Only keys of fields the company still has are compared, read under row security in the change's
+  transaction, so deleting a field (which deletes its row, then strips its values) sends no
+  per-deal event, and nothing a company, a request or a job payload supplies can turn events off:
+  there is no setting or flag to set. Erasure's clearing of values names them, as its retitling
+  does; for it the definer role reads a field's key and when it was added, for the company erasure
+  runs for (a column grant and a policy on the company in scope), and nothing else of a field.
 - Integrations hear of CRM tasks (ADR-261) through the company's own endpoints only: `task.created`
   and `task.status_changed` give the task's title, statuses, due time, assignee and deal ids, its
   creator and its contact as the API describes it, never its notes (free text members write;
@@ -244,6 +252,15 @@ Phase 3 rules on top of the matrix (enforced in domain services and re-checked w
   `ops.overdue_reply_turns` is replaced with the same restrictions (SECURITY DEFINER, pinned search
   path, ids only, executable by the app role only) and reads only the team's target column besides
   what it read before.
+- Business hours per team (ADR-389): a team's own weekly schedule is a team setting, set only by
+  members with `inbox.supervise` (keys with `teams.manage`) and audited with the team's change; it
+  changes due times, overdue counts and emails, report figures and when the automatic reply is
+  sent, never who sees a conversation. `app.team_business_hours` has FORCE row security, a
+  composite foreign key to the company's team and column-free grants (the app role selects,
+  inserts and deletes; it never updates); w360_definer may only read the key columns and delete the
+  rows of a company being deleted. The trigger that plans waiting rows again when a conversation
+  changes team runs as the caller (pinned search path, not executable by PUBLIC). No permission is
+  new.
 - Automatic reply when members are slow (ADR-384): reading the setting needs `tenant.read`,
   changing it `tenant.settings.manage` (audited, `inbox.slow_reply_updated`); no new permission.
   The worker finds turns only through `ops.slow_reply_turns` (SECURITY DEFINER, pinned search path,
@@ -437,6 +454,12 @@ Phase 4 rules (CRM, P4-04):
   (`crm.deals_exported`, with its filters). Since ADR-380 it also lists each deal's products with
   their prices and total, which anyone who reads the CRM sees on the deal page; a product's name
   never starts a cell.
+- Filtering the board and its export by a choice or yes/no field (ADR-391): the key and option in
+  the address are looked up only among the company's own fields, in the company's scope, and only a
+  field and option found there reach the query, as bound parameters; anything else is ignored on
+  the board (with a notice that does not echo it) and refused by the export before it is audited, so
+  a file is never wider than asked. The audit records the field's key and the kind of match, never
+  the option. Permissions are unchanged (`crm.read`; the export also `contacts.export`).
 - While a company is suspended, `crm.read` stays available and `crm.write` does not; reminder jobs
   wait, and the sweep sends reminders after reactivation unless they are more than a day late.
 
@@ -1618,7 +1641,8 @@ Phase 5 rules (outgoing webhooks, P5-09):
   against the details the change changed, in the transaction that changes the deal or the task: it
   narrows what one endpoint receives and never adds an event or a delivery for another endpoint or
   company, and the payload is unchanged (never the values before). Detail names are not personal
-  data. Audited with the lists (unit tests; integration tests, run in CI only).
+  data; `fields` (any custom field value, ADR-390) is one of them. Audited with the lists (unit
+  tests; integration tests, run in CI only).
 - An endpoint can take `satisfaction_survey.answered` only for the answers credited to some members
   or of some teams' conversations (ADR-311), chosen with `developer.manage` in Settings or
   `webhooks.manage` through the API. Each id a list adds is checked in the company's scope (members
@@ -2575,6 +2599,19 @@ message text, contact details, payloads, email addresses, secrets or full URLs:
   on its way finishes its attempt. The claim holds the channel's row until the worker has read the
   address, so the posts claimed go to the address they were claimed for, never to one that replaced
   it since.
+- The chat channel's format (ADR-388): only a platform owner chooses JSON text or a Microsoft Teams
+  card, with an address (`ops.platform_set_alert_channel`, five arguments) or alone, without the
+  address (`ops.platform_set_alert_channel_format`); both are SECURITY DEFINER, check the role and
+  the format, and audit the host and the formats (`platform.alert_channel_set`,
+  `platform.alert_channel_format_set`; `platform.alert_channel_tested` names the format too), never
+  the address. Only the definer role writes the format; the runtime role gets no new column and
+  learns the format from the claim, which hands out posts only in the formats the worker names, so
+  a worker that cannot render a card is never given one. The card is the post's counts-only text,
+  one block a line, not escaped: the alerts' text holds no company's or customer's words, only
+  counts, HyFib's labels, queue names and the console's address, so no Markdown can be injected
+  into it, and HTML shows as written (Adaptive Cards do not render it). A post queued before 0304
+  holds Slack-escaped text, which is unescaped exactly (the three escapes `chatEscape` writes) for a
+  card, so nothing is escaped twice or left escaped.
 - Acknowledging integration failures (ADR-141): a platform administrator notes on the console that a
   listed failure is being handled, through `ops.platform_acknowledge_integration_failure` (SECURITY
   DEFINER, executable only by the platform role), which checks the administrator, the note (10 to

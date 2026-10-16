@@ -129,6 +129,16 @@ export const apiReportSchema = z.object({
     businessHours: z
       .boolean()
       .describe('Business hours are on: the target and business-hours times count opening hours.'),
+    teamBusinessHours: z
+      .array(
+        z.object({
+          teamId: z.uuid().describe('The team, as `GET /teams` names it.'),
+          name: z.string(),
+        }),
+      )
+      .describe(
+        'While business hours are on, the teams with their own weekly schedule, by name: their conversations count business time by it instead of the company’s schedule (closed days stay the company’s).',
+      ),
     now: z
       .object({
         open: count,

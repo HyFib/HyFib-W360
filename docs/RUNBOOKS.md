@@ -489,6 +489,12 @@ available. The audit log records each decision as `conversation.routed` (rule `k
 **A reply timer or "overdue" looks wrong.** Timers use the company time zone (Settings → General)
 and, when business hours are on, only the opening hours and closed days in Settings → Inbox. A timer
 shown as paused resumes at the next opening. Reports apply the current calendar to past periods.
+A conversation of a team with its own business hours (Settings → Teams, ADR-389) counts that
+team's week instead, with the company's closed days, and only while the company's business hours
+are on; check which team the conversation is in now (`app.team_business_hours` holds each team's
+week). After a team's week or target, or a conversation's team, changes, the waiting automatic
+replies and overdue notices of its conversations are planned again by the next minute sweep; a
+notice planned again is not skipped as late for having waited.
 
 **CSAT surveys are not sent.** Each resolve records a survey with a reason when nothing was sent
 (Reports → CSAT lists the reasons): the 24-hour window had closed, the customer opted out or the
@@ -2360,10 +2366,11 @@ named.
 
 **An integration misses a deal change, or hears two at once (ADR-256).** Endpoints that take
 `deal.created`, `deal.stage_changed` or `deal.status_changed` are sent one event per deal added and
-per change of a deal's stage or status, whoever made it; edits of its title, value or expected date
-send `deal.updated` to the endpoints that take it (ADR-275), as does erasure's retitling, and merges
-send nothing; a change of its owner sends `deal.owner_changed` to the endpoints that take it
-(ADR-269). Changes made while no endpoint took the type were not recorded and are not sent later. A
+per change of a deal's stage or status, whoever made it; edits of its title, value, expected date
+or custom field values send `deal.updated` to the endpoints that take it (ADR-275, ADR-390), as does
+erasure's retitling, and merges send nothing; a change of its owner sends `deal.owner_changed` to
+the endpoints that take it (ADR-269). Changes made while no endpoint took the type were not recorded
+and are not sent later. A
 deal reopened in another stage (its own was removed), or moved and closed by one API request, sends
 two events, in the order the steps happened and possibly with the same `createdAt`, which their
 `createdAtExact`, to the microsecond, tells apart (ADR-330); each gives the stage and status its
@@ -3252,17 +3259,34 @@ sends the change first, with status `open`, then the completion; one that reopen
 reopening first. Who made the change is not sent.
 
 **A receiver misses a change of a deal's details, or doubts one (ADR-275).** Endpoints that take
-`deal.updated` ("Deal details") are sent one event each time a member editing a deal or a key
-changes its title, value or expected close date, and when erasing its contact retitles it "Deal
-(contact erased)". An edit that changes nothing sends nothing, automations set details only on the
-deals they add (`deal.created`), merges keep them, and changes made while no endpoint took the type
-were not recorded and are not sent later. `changes` names what changed (`title`, `valueMinor`,
-`expectedCloseOn`); the deal is the deal when the event is delivered, so read it there, not the
+`deal.updated` ("Deal details") are sent one event each time a member editing a deal, a key or a
+deal import (ADR-387) changes its title, value or expected close date, or its custom field values
+(ADR-390, below), and when erasing its contact retitles it "Deal (contact erased)". An edit that
+changes nothing sends nothing, automations change details only on the deals they add
+(`deal.created`) and custom field values through their "Update deal fields" steps (ADR-386), merges
+keep them, and changes made while no endpoint took the type were not recorded and are not sent
+later. `changes` names what changed (`title`, `valueMinor`, `expectedCloseOn`, and `fields` since
+ADR-390); the deal is the deal when the event is delivered, so read it there, not the
 values before, which are never sent (members see a value's change on the deal's timeline). Endpoints
 naming pipelines, stages or owners hear it by the deal's as the change left them. One API request
 that changes details and closes the deal sends the change first, with status `open`, then the close;
 one that also gives the deal to another owner sends the change of details before the change of
 owner.
+
+**A receiver misses a change of a deal's custom field values, or asks why a field's values
+vanished without an event (ADR-390).** Since migration 0305, `deal.updated` also names `fields`
+(last in `changes`) when a member on the deal page, a key (`PATCH /deals/{id}` with `fields`), an
+automation's "Update deal fields" step, a deal import or erasure changes the deal's values, with the
+keys of the fields whose values were set, changed or removed in `changedFields`, in the order the
+fields were added. Values are never sent: the receiver reads them with `GET /deals/{id}` (`fields`,
+`deals.read`). The same values again send nothing, and so does a step or import row that changed
+nothing ("No change", `deal_fields_unchanged`). Deleting a field in Settings → Pipelines strips its
+values from every deal without per-deal events: tell the receiver to drop that key from every deal
+it keeps (`GET /deal-fields` no longer lists it; the audit log has `crm.deal_field_deleted` with the
+key). An endpoint whose deal details list was saved before 0305 does not take a change of values
+alone until "Custom fields" is ticked (or its list set to null). During a rollout, a worker from
+before 0305 sends such an event with `changes` leaving out `fields` (empty for a change of values
+alone) and without `changedFields`; replay those deliveries once the workers are updated.
 
 **A receiver misses a change of a task's details, or doubts one (ADR-276).** Endpoints that take
 `task.updated` ("Task details") are sent one event each time a member editing a task or a key
@@ -4029,6 +4053,25 @@ and Platform → Refunds the rest. The worker logs whether each was posted (`pos
 reconciliation alert emailed`, `unsettled payments alert emailed` and `refund requests announced to
 platform owners`). Saving the alerts from a web server older than 0263's release unticks "Refund
 requests", which it does not list.
+
+**A Microsoft Teams channel (ADR-388).** In Teams, open the channel's "Workflows", choose the
+template "Send webhook alerts to a channel" (or build a flow starting "When a Teams webhook request
+is received" that posts the card it receives), save it and copy the webhook link it gives. On
+Operations → Alerts paste the link, choose the format "Microsoft Teams card (Workflows)" and press
+"Set the channel" (or "Replace the channel"), then "Send a test post": the channel shows a card
+with the subject in bold and a line a block. A channel already set changes format alone under
+"Format posted" ("Save the format"), without the address; the posts waiting are sent in the format
+saved. Choose "JSON text" for Slack and services that take a `text` member: some Teams workflow
+templates may take that too, but HyFib has not checked any. The worker sends the same answers'
+rules in both formats (a 2xx is sent; a 429, a 5xx or no answer is tried again). Microsoft documents
+a limit of 28 KB a message, which HyFib's cards stay under, and a throttle above four requests a
+second: posts go out one at a time, at most 5 a run, and a 429 has a post tried again a minute
+later. A Teams workflow belongs to the person who made it:
+if that person leaves, the flow can stop, so give it co-owners in Power Automate; posts that fail
+meanwhile show the workflow's answer under the latest posts. Workflows do not yet post to private
+channels, as Microsoft says. During a rollout, a Teams channel's posts wait while only workers from
+before 0304's release run (DEPLOYMENT, 0304); choose the Teams format once the workers are rolled
+out.
 
 **The last 12 months (ADR-341).** The Usage tab's year comes from counts the worker keeps: each UTC
 day is counted once it has ended, for every company not deleted, and again once a day for a week

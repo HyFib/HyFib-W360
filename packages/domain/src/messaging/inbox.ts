@@ -59,6 +59,7 @@ import {
   replyDueAt,
   replyTimer,
   targetFor,
+  teamsWithOwnClock,
   type ReplyTarget,
 } from '../inbox/sla';
 import { decodeKeysetCursor, encodeKeysetCursor, likePattern } from '../validation';
@@ -1205,9 +1206,10 @@ export function createInboxService(deps: InboxDeps) {
     /**
      * When the replies to the customers waiting in conversations the member can see are due
      * (ADR-241), the earliest first and at most WAITING_REPLY_LIMIT, for the inbox's notice of
-     * overdue replies, each against its team's target or the company's (ADR-377); none in
-     * conversations without either. Only times and whether each conversation is the member's:
-     * nothing about the customers, conversations or messages.
+     * overdue replies, each against its team's target or the company's (ADR-377), in its team's
+     * business hours or the company's (ADR-389); none in conversations without a target. Only
+     * times and whether each conversation is the member's: nothing about the customers,
+     * conversations or messages.
      */
     async waitingReplies(ctx: TenantContext): Promise<{ waits: WaitingReply[]; capped: boolean }> {
       if (!can(ctx, 'inbox.read_all') && !can(ctx, 'inbox.read_assigned')) {
@@ -1218,11 +1220,12 @@ export function createInboxService(deps: InboxDeps) {
         async (tx) => {
           const targets = await loadReplyTargets(tx, ctx.tenant.id, ctx.tenant.timezone);
           if (!hasAnyTarget(targets)) return { waits: [], capped: false };
-          // Under one target a due time follows its start (business minutes only move it later),
-          // so the earliest starts are the earliest due. Conversations of each team with its own
-          // target are ranked apart from the rest (ADR-377): one more than the notice takes from
-          // each holds the earliest due of all.
-          const group = sql`case when ${teams.firstResponseTargetMinutes} is not null
+          // Under one target and one calendar a due time follows its start (business minutes only
+          // move it later), so the earliest starts are the earliest due. Conversations of each team
+          // with its own target (ADR-377) or business hours (ADR-389) are ranked apart from the
+          // rest: one more than the notice takes from each holds the earliest due of all.
+          const ownClock = teamsWithOwnClock(targets);
+          const group = sql`case when ${conversations.teamId} = any(${sql.param(ownClock)}::uuid[])
             then ${conversations.teamId} end`;
           const ranked = tx
             .select({
@@ -1239,10 +1242,6 @@ export function createInboxService(deps: InboxDeps) {
                 eq(conversations.tenantId, conversationTurns.tenantId),
                 eq(conversations.id, conversationTurns.conversationId),
               ),
-            )
-            .leftJoin(
-              teams,
-              and(eq(teams.tenantId, conversations.tenantId), eq(teams.id, conversations.teamId)),
             )
             .where(
               and(

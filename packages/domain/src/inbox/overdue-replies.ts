@@ -44,6 +44,21 @@ import { hasAnyTarget, loadReplyTargets, replyDueAt, targetFor } from './sla';
  */
 export const OVERDUE_NOTICE_LATE_LIMIT_MS = 24 * 3_600_000;
 
+/**
+ * Whether a notice due at `dueAt` is too late at `now`: more than a day after it was due, or after
+ * the time a waiting notice was put off to when that is later. A waiting notice is planned again
+ * (put off to the time of the change) when its calendar or target changes (ADR-389), so it is not
+ * counted late for having waited, as the automatic reply's lateness rule does (ADR-384).
+ */
+export function overdueNoticeTooLate(input: {
+  now: Date;
+  dueAt: Date;
+  waitedUntil: Date | null;
+}): boolean {
+  const lateFrom = Math.max(input.dueAt.getTime(), input.waitedUntil?.getTime() ?? 0);
+  return input.now.getTime() - lateFrom > OVERDUE_NOTICE_LATE_LIMIT_MS;
+}
+
 /** How long a turn the calendar never makes due (closed for a year) waits before another look. */
 const NEVER_DUE_RECHECK_MS = 24 * 3_600_000;
 
@@ -106,6 +121,8 @@ export interface OverdueItem {
   startedAt: Date;
   /** The target of the conversation's team when it has its own (ADR-377); else the company's. */
   teamTargetMinutes?: number | null;
+  /** Its team keeps its own business hours (ADR-389): the due time was counted in them. */
+  teamOwnHours?: boolean;
 }
 
 /**
@@ -119,13 +136,18 @@ export function overdueReplyEmail(input: {
   timeZone: string;
   items: readonly OverdueItem[];
 }): { subject: string; lines: string[] } {
-  const inWords = (minutes: number | null) =>
-    `${minutes === null ? 'its target' : targetText(minutes)}${input.businessHours ? ' of business hours' : ''}`;
+  // In whose business hours a reply was counted: its team's own (ADR-389), or the company's.
+  const inWords = (minutes: number | null, hours: string | null) =>
+    `${minutes === null ? 'its target' : targetText(minutes)}${
+      hours ? ` of ${hours} business hours` : input.businessHours ? ' of business hours' : ''
+    }`;
   // Whose target a reply was due against, in words: a team's own, or the company's.
-  const whose = (item: OverdueItem) =>
-    item.teamTargetMinutes
-      ? `the ${clipText(item.teamName ?? 'team', 80)} team’s reply target of ${inWords(item.teamTargetMinutes)}`
-      : `your company’s reply target of ${inWords(input.targetMinutes)}`;
+  const whose = (item: OverdueItem) => {
+    const team = `the ${clipText(item.teamName ?? 'team', 80)} team’s`;
+    return item.teamTargetMinutes
+      ? `${team} reply target of ${inWords(item.teamTargetMinutes, item.teamOwnHours ? 'its' : null)}`
+      : `your company’s reply target of ${inWords(input.targetMinutes, item.teamOwnHours ? team : null)}`;
+  };
   const since = (at: Date) =>
     `${new Intl.DateTimeFormat('en-IN', {
       timeZone: input.timeZone,
@@ -253,7 +275,25 @@ async function noticeCompanyTurns(
   if (!company) return outcome;
   const targets = await loadReplyTargets(tx, tenantId, company.timezone);
   if (!hasAnyTarget(targets)) return outcome;
-  // Locked so that a member's reply, which closes the turn, either waits for this or is seen.
+  // The conversations first, then the turns, as the automatic reply's sweep takes them (ADR-384):
+  // a change of team (its trigger plans the notice again, ADR-389) either waits for this or is
+  // seen, and a member's reply, which closes the turn, likewise. Conversations another transaction
+  // holds are skipped and looked at in the next sweep, so the sweep never waits on them.
+  const candidates = await tx
+    .select({ conversationId: conversationTurns.conversationId })
+    .from(conversationTurns)
+    .where(
+      and(eq(conversationTurns.tenantId, tenantId), inArray(conversationTurns.id, [...turnIds])),
+    );
+  const conversationIds = [...new Set(candidates.map((c) => c.conversationId))].sort();
+  if (conversationIds.length === 0) return outcome;
+  const held = await tx
+    .select({ id: conversations.id })
+    .from(conversations)
+    .where(and(eq(conversations.tenantId, tenantId), inArray(conversations.id, conversationIds)))
+    .orderBy(asc(conversations.id))
+    .for('share', { skipLocked: true });
+  if (held.length === 0) return outcome;
   const turns = await tx
     .select({
       id: conversationTurns.id,
@@ -265,6 +305,10 @@ async function noticeCompanyTurns(
       and(
         eq(conversationTurns.tenantId, tenantId),
         inArray(conversationTurns.id, [...turnIds]),
+        inArray(
+          conversationTurns.conversationId,
+          held.map((c) => c.id),
+        ),
         isNull(conversationTurns.endedAt),
       ),
     )
@@ -274,7 +318,11 @@ async function noticeCompanyTurns(
   const notices = new Map(
     (
       await tx
-        .select({ turnId: overdueReplyNotices.turnId, state: overdueReplyNotices.state })
+        .select({
+          turnId: overdueReplyNotices.turnId,
+          state: overdueReplyNotices.state,
+          dueAt: overdueReplyNotices.dueAt,
+        })
         .from(overdueReplyNotices)
         .where(
           and(
@@ -285,7 +333,7 @@ async function noticeCompanyTurns(
             ),
           ),
         )
-    ).map((n) => [n.turnId, n.state]),
+    ).map((n) => [n.turnId, n]),
   );
 
   const record = async (
@@ -343,8 +391,8 @@ async function noticeCompanyTurns(
 
   const overdue: { id: string; conversationId: string; startedAt: Date; dueAt: Date }[] = [];
   for (const turn of turns) {
-    const state = notices.get(turn.id);
-    if (state && state !== 'waiting') continue;
+    const notice = notices.get(turn.id);
+    if (notice && notice.state !== 'waiting') continue;
     const target = targetFor(targets, convs.get(turn.conversationId)?.teamId ?? null);
     // Neither its team nor the company has a target any more: nothing is due.
     if (!target.minutes) continue;
@@ -359,7 +407,13 @@ async function noticeCompanyTurns(
     } else if (dueAt > now) {
       await record(turn.id, { state: 'waiting', dueAt });
       outcome.waiting += 1;
-    } else if (now.getTime() - dueAt.getTime() > OVERDUE_NOTICE_LATE_LIMIT_MS) {
+    } else if (
+      overdueNoticeTooLate({
+        now,
+        dueAt,
+        waitedUntil: notice?.state === 'waiting' ? notice.dueAt : null,
+      })
+    ) {
       await record(turn.id, { state: 'skipped', dueAt, skipReason: 'too_late' });
       outcome.skipped += 1;
     } else {
@@ -424,6 +478,7 @@ async function noticeCompanyTurns(
         teamName: conv?.teamName ?? null,
         startedAt: turn.startedAt,
         teamTargetMinutes: conv?.teamId ? (targets.teamMinutes.get(conv.teamId) ?? null) : null,
+        teamOwnHours: conv?.teamId ? targets.teamCalendars.has(conv.teamId) : false,
         turnId: turn.id,
         conversationId: turn.conversationId,
       });

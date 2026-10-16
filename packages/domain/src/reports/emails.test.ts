@@ -62,6 +62,7 @@ function emptyReport(): Report {
     inbox: {
       targetMinutes: null,
       teamTargets: [],
+      teamBusinessHours: [],
       businessHours: false,
       now: {
         open: 0,
@@ -331,6 +332,21 @@ describe('what a report email says', () => {
     expect(within()?.value).toBe('85.5% (94 of 110 within their team’s or the company’s target)');
     report.inbox.teamTargets = [];
     report.inbox.targetMinutes = 30;
+    report.inbox.businessHours = true;
+    // Teams with their own business hours (ADR-389): each conversation in its team's or the
+    // company's hours, with one target or several; none while business hours are off.
+    report.inbox.teamBusinessHours = [{ teamId: 'team', name: 'Night shift' }];
+    expect(within()?.value).toBe(
+      '85.5% (94 of 110 within 30 min in their team’s or the company’s business hours)',
+    );
+    report.inbox.teamTargets = [{ teamId: 'team', name: 'Returns', minutes: 15 }];
+    expect(within()?.value).toBe(
+      '85.5% (94 of 110 within their team’s or the company’s target in their team’s or the company’s business hours)',
+    );
+    report.inbox.businessHours = false;
+    expect(within()?.value).toBe('85.5% (94 of 110 within their team’s or the company’s target)');
+    report.inbox.teamTargets = [];
+    report.inbox.teamBusinessHours = [];
     report.inbox.businessHours = true;
     // Without business hours the target counts absolute time; CSAT surveys sent before CSAT was
     // turned off still count.

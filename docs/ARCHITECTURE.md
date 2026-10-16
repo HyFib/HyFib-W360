@@ -437,11 +437,22 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
 - **Business hours** (`inbox/business-hours.ts`): weekly intervals (ISO weekdays, `24:00` closes at
   midnight) and closed days in the company's time zone, turned into real instants with the same
   daylight-saving rules as campaign schedules; pure functions add business minutes, measure business
-  time and find the next opening.
+  time and find the next opening. Since ADR-389 a team may have its own week
+  (`app.team_business_hours`, 0303; checked by `teamHoursSchema` as the company's week is):
+  `loadBusinessCalendars` reads the company's calendar and, only while its business hours are on,
+  every team's week in one query (`BusinessCalendars`: the company's, and each team's own with the
+  company's closed days and time zone), and `calendarFor(calendars, teamId)` picks a conversation's.
+  `replanWaitingTurns` sets waiting automatic replies and overdue notices due now when the
+  company's week or closed days change, and only those of a team's conversations when that team's
+  week or target changes; the trigger `conversations_replan_waiting_turn` does the same for one
+  conversation's open turn when its `team_id` changes. A row planned again is not counted late for
+  having waited (`overdueNoticeTooLate`, and the automatic reply's rule). Automations' hours stay
+  the company's.
 - **Reply-due timers** (`inbox/sla.ts`): the open reply turn's start plus the first-response target,
   counted in business hours when business hours are on (the timer pauses while closed), else absolute
-  time. Since ADR-377 the target is the conversation's team's own (`teams.first_response_target_minutes`, 0296) when it has one, else the company's: `loadReplyTargets` reads both and `targetFor` picks one;
-  the notice of overdue replies ranks each team with its own target apart (`row_number()` per team)
+  time. Since ADR-377 the target is the conversation's team's own (`teams.first_response_target_minutes`, 0296) when it has one, else the company's: `loadReplyTargets` reads both and `targetFor` picks one,
+  with the team's own calendar since ADR-389 (`ReplyTargets.teamCalendars`);
+  the notice of overdue replies ranks each team with its own target or week apart (`row_number()` per team)
   so its earliest waits stay the earliest due, and reports join each turn's conversation and team. The inbox list and thread show waiting time, due time, overdue and paused states; a
   longest-waiting order pages on `date_trunc('milliseconds', started_at)` so keyset cursors
   round-trip exactly.
@@ -450,7 +461,9 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   (a resolved case never changes). Resolution times are measured on cases.
 - **Reports** (§6C): business-hours reply times are the overlap of each turn with the company's
   opening periods, computed in SQL against an `unnest` of periods generated in TypeScript for the
-  report's range; new versioned definitions (ADR-030).
+  report's range; new versioned definitions (ADR-030). Since ADR-389 the periods are keyed by
+  calendar (`iv(cal, lo, hi)`, `calendarPeriods`: '' for the company's, a team's id for its own) and
+  each turn sums its conversation's team's calendar.
 - **Saved replies** (`inbox/saved-replies.ts`): shared answers with `{{name}}`, `{{agent}}` and
   `{{company}}` placeholders, filled server-side for the conversation; the composer inserts the text
   and the member sends it as an ordinary reply.
@@ -483,7 +496,7 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   without a row or with a due `waiting` row, in conversations not resolved and without an active
   automation run. Per company, in its scope, the conversations and then the turns are locked
   (`FOR UPDATE`); `planSlowReply` ignores, waits (due time from `replyDueAt` with the business
-  calendar) or handles each turn; `slowReplyOutcome`, the WhatsApp id and the consent check
+  calendar of the conversation's team, else the company's, ADR-389) or handles each turn; `slowReplyOutcome`, the WhatsApp id and the consent check
   (`checkTemplateEligibility`, utility) decide between a `skipped` row and the send: a `system` text
   message (`content.slowReply`), its send intent, a `sent` row naming the message and a signed
   `message.send` job, in one transaction. `app.slow_reply_messages` is unique per turn and guarded
@@ -1325,7 +1338,8 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   take it shared (`lockedDealFields`) before locking the deal, so a deletion's `attributes - key`
   never misses a value written meanwhile. `GET /deal-fields` lists them, `Deal.fields` gives values,
   the deals CSV adds a column per field, and the API's deal history leaves out changes of values
-  alone. 0293 also replaces `app.erase_contact` to clear the erased contact's deals' values. Since
+  alone (since ADR-390 it names them as `fields`, and `deal.updated` reports them). 0293 also
+  replaces `app.erase_contact` to clear the erased contact's deals' values. Since
   ADR-379 the new-deal forms (the board, the contact page and the inbox) take values too:
   `crmLookups` (`apps/web/src/server/crm.ts`) reads the definitions with the pipelines and members,
   and `NewDealForm` sends the non-empty ones to `createDeal`.
@@ -1338,6 +1352,15 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   (`removedChosenOptions`, read with `attributes ->> key`), so stored values stay options. Web:
   `DealFieldsManager` takes options one per line (`optionLines`, `lib/deal-fields.ts`) and
   `DealFieldControl` shows a select; `GET /deal-fields` gives `options`.
+- **Filtering the board by a choice field (ADR-391, no migration):** `crm/deal-field-filter.ts`
+  (pure) reads `?field=<key>:<option>` (`<key>:yes`/`no` for yes/no fields, `<key>:` for "Not set")
+  and resolves it against the company's fields (`resolveDealFieldFilter`: a choice option in any
+  case to the option as written, `yes`/`no` to booleans); `dealFieldCondition` (`crm/deals.ts`) adds
+  `(attributes -> key) = value::jsonb` or `not (attributes ? key)` to the board's and the export's
+  conditions, within the existing `crm_deals_board_idx` scan. `board` returns `fieldFilter` (the
+  filterable fields with their choices, the filter applied, and whether one asked for was ignored);
+  `exportDeals` refuses one that does not resolve and audits its key and kind of match. Web: the CRM
+  page's "Deal field" GET form and its notice for a stale link; the export route passes `field`.
 - **Deal import (ADR-374, no migration):** `crm/deal-import.ts` previews a CSV (columns, first
   rows, suggested mapping) and imports it into one pipeline: `planDealRows` checks each row against
   the company's records (contacts by E.164 number, active stages by name, CRM members by email,
@@ -2175,6 +2198,18 @@ state` for one that becomes skipped from another state, each only for a message 
   with the deal, stage and pipeline ids and the names of the changed details in `detail`, between a
   move and a change of owner made by the same update. Its payload (`dealOf`) adds `changes` to the
   deal as it is when delivered.
+- **Deal custom field value events** (migrations 0305–0306, ADR-390): the trigger also fires on
+  `attributes` and names `fields` last in `changes` when the values of any of the company's fields
+  differ, with their keys in `detail.changedFields` in the order the fields were added (read from
+  `app.crm_deal_fields`, so a key no field has is never compared). A field's deletion deletes its
+  row before stripping its key from the deals, so the strip captures nothing; erasure clearing
+  values captures them as the definer role, which may now read a field's key and `created_at` for
+  the company in scope (policy `deal_capture_read`). `crm_deals_changer` also fires on `attributes`.
+  The payload adds `changedFields` (`dealUpdatedChanges`: keys only with `fields`, deduplicated,
+  checked against the key pattern; empty for older events); the deal still carries no values. 0305
+  widens `webhook_events.detail` to 4,096 bytes (NOT VALID; 0306 validates) for 50 keys of 40
+  characters, and lets `deal_details` hold `fields`. The API's deal history names `fields` for a
+  `deal_updated` entry naming `custom_fields`.
 - **Task events** (migrations 0177–0178, ADR-261): triggers on `app.crm_tasks` capture
   `task.created` when a task is inserted (members, the runner's task steps, keys) and
   `task.status_changed` when an update changes its status (members, keys through `apiUpdateTask`),
@@ -2322,8 +2357,9 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   list.
 - **Deal and task detail filters** (migration 0233, ADR-310): `deal_details` and `task_details` on
   an endpoint list the details whose changes it takes as `deal.updated` (`title`, `valueMinor`,
-  `expectedCloseOn`) or `task.updated` (`title`, `notes`, `dueAt`, `remindAt`), null for every
-  change; checks keep each to its known details and to endpoints that take its event.
+  `expectedCloseOn`, and since 0305 `fields`) or `task.updated` (`title`, `notes`, `dueAt`,
+  `remindAt`), null for every change; checks keep each to its known details and to endpoints that
+  take its event.
   `app.capture_webhook_event` (replaced with the same signature) creates a change's delivery only
   for endpoints whose list is null or holds a detail the change changed, as the deal and task
   triggers pass them in `changes`, and writes no event when none does. Settings and the API
@@ -2880,6 +2916,18 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   `queueAlertPost` in the transaction that queues the owners' emails and marks the requests
   announced, the email's counts-only text, and returns whether it posted. 0263 widens the kinds and
   posts checks and replaces `ops.platform_set_alert_channel_kinds` with the kind in its order.
+- **The channel's format** (ADR-388, migration 0304): `ops.platform_alert_channel.format` is `text`
+  (`{"text": …}`, escaped as above) or `teams_card` (a Teams webhook message with one Adaptive Card
+  1.2, a wrapping `TextBlock` a line, the subject bold, not escaped, held to 28,000 bytes:
+  `teamsCardBody`). Owners choose it with the address (`ops.platform_set_alert_channel`, five
+  arguments) or alone (`ops.platform_set_alert_channel_format`). Posts keep the escaped `body` and
+  now also `plain_body` (`alertPostPlain`, through the three-argument queue and test functions).
+  The job claims through `ops.claim_platform_alert_posts(limit, formats)`, naming the formats it
+  renders: posts are handed out only while the channel's format is among them, each with its
+  unescaped text and the format, and `alertPostRequestBody` renders the request body when it is
+  sent, so a format change applies to the posts waiting. A post without `plain_body` (queued before
+  0304, or by an old worker) is sent as queued in `text` and unescaped (`chatUnescape`) for a card.
+  The release before's functions keep their signatures (its claim asks for `text` only).
 - **Acknowledging failures** (ADR-141, migration 0107): a platform administrator acknowledges a
   failure on Current failures with a note, through `ops.platform_acknowledge_integration_failure`
   (definer, platform role only), which checks the administrator and that `ops.integration_failures`

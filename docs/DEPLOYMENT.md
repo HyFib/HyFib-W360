@@ -1711,6 +1711,64 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    reload. Import files with deal ids only after the web rollout ends. Deal files are now limited
    to 928,000 bytes (was 976,000). Rolling an image back restores the earlier import.
 
+   Migration 0304 (ADR-388) gives the alerts' chat channel a format:
+   `ops.platform_alert_channel.format` (`text` for the channel already set, checked against `text`
+   and `teams_card`, written only by the definer role) and `ops.platform_alert_posts.plain_body`
+   (a post's text unescaped, null for every post already queued). It adds
+   `ops.platform_set_alert_channel` with a format (five arguments),
+   `ops.platform_set_alert_channel_format`, `ops.platform_test_alert_channel` and
+   `ops.queue_platform_alert_post` with the unescaped text (three arguments) and
+   `ops.claim_platform_alert_posts(integer, text[])`, which claims posts only while the channel's
+   format is among those the worker names and returns each post's unescaped text and the format;
+   `ops.platform_alert_channel_state` returns the format as one more column. The functions of the
+   release before keep their signatures: setting a channel through the four-argument one sets the
+   `text` format, the two-argument test and queue store the escaped text only, and the
+   one-argument claim now hands out posts only while the format is `text`, with the columns it
+   always returned. So, during the rollout: workers from before it keep sending JSON text exactly
+   as before and are never handed a Teams channel's posts; workers of this release render each post
+   in the channel's format, a post queued without unescaped text (before 0304, or by an old worker)
+   sent as it was queued in `text` and unescaped for a card; web servers from before it show and
+   change the channel without the format, an address they set taking `text`, and send test posts
+   with the escaped text only. Roll out workers before web as usual and choose the Teams format only
+   once no worker from before it runs: until then a Teams channel's posts wait (unclaimed, their
+   attempts untouched) for a worker of this release. After a rollback of the workers with a Teams
+   channel set, its posts wait the same way and are sent when this release returns; set the format
+   back to JSON text (from a web server of this release, or by replacing the address from an old
+   one) to have old workers send them as text. The columns stay in the database unused by older
+   releases.
+
+   Migration 0303 (ADR-389) adds `app.team_business_hours` (empty, so every team keeps the
+   company's hours until one is given its own), its row security and grants, deletion step 655, an
+   `AFTER UPDATE OF team_id` trigger on `app.conversations` that plans waiting automatic replies and
+   overdue notices of the moved conversation again, and three metric definition versions. No
+   definer function changes. Roll out workers before web: an old worker's sweeps count every
+   conversation in the company's hours, so a team's own week would be ignored by overdue emails and
+   automatic replies until the worker rollout ends; old web servers neither show nor write team
+   hours, and `PATCH /teams` with `businessHours` is refused as an unknown field there. Give teams
+   their own hours only after both rollouts end. Rolling an image back leaves the table, trigger and
+   definitions in place: an older release ignores team hours (the trigger only moves due times of
+   waiting rows earlier, which an older sweep simply plans again).
+
+   Migration 0305 (ADR-390) replaces the deal capture function in place and widens its trigger and
+   the changer trigger to `crm_deals.attributes`, so `deal.updated` names custom field value
+   changes (`fields`, with `changedFields`) from the moment it runs, whichever release made the
+   change. It widens `webhook_events.detail`'s size check to 4,096 bytes (NOT VALID, so the table
+   is not read under the brief lock; 0306 validates it while captures go on) and the endpoints'
+   `deal_details` check to accept `fields` (validated at once: at most 10 endpoints per company),
+   and grants the definer role `SELECT (key, created_at)` on `app.crm_deal_fields` with a policy for
+   the company in scope (erasure's capture). Workers from before it render such an event with
+   `changes` leaving out `fields` (an empty list for a change of values alone, which the payload's
+   description does not allow) and without `changedFields`: roll workers out promptly after the
+   migration, and replay the deliveries an old worker made in between (on the endpoint's page in
+   Settings → Webhooks, or `POST /webhook-deliveries/{id}/replay`; a replay is built by the worker
+   that sends it) if a receiver relies on them; rolling workers back does the same. Web servers from
+   before it neither offer nor read `fields`
+   in an endpoint's deal details: until the web rollout ends, an old server shows such a list with
+   an empty label and refuses to save that endpoint ("Choose deal details from the list."), and
+   gives no `fields` in the API's deal history. Endpoints whose deal details list was saved before
+   keep it, so they do not take a change of values alone until `fields` is added. Rolling back
+   leaves the trigger, which old code does not need to know about; events keep their details.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

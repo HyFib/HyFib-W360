@@ -2,15 +2,18 @@ import { and, eq, isNotNull, messagingSettings, teams, type Tx } from '@w360/db'
 import {
   addBusinessMinutes,
   businessStatusAt,
-  loadBusinessCalendar,
+  calendarFor,
+  loadBusinessCalendars,
   type BusinessCalendar,
+  type BusinessCalendars,
 } from './business-hours';
 
 /**
  * Reply-due timers. A waiting customer's reply is due `minutes` after their reply turn started:
  * counted in business hours when the company's business hours are on (the timer pauses while the
  * business is closed), otherwise in absolute time. No target means no timer. The target is the one
- * of the team the conversation is in, when that team has its own, else the company's (ADR-377).
+ * of the team the conversation is in, when that team has its own, else the company's (ADR-377), and
+ * so are the business hours (ADR-389).
  */
 export interface ReplyTarget {
   minutes: number | null;
@@ -25,14 +28,19 @@ export interface ReplyTimer {
   pausedUntil: Date | null;
 }
 
-/** The company's target, its teams' own targets and, when business hours are on, its calendar. */
+/**
+ * The company's target, its teams' own targets and, when business hours are on, the company's
+ * calendar and its teams' own (ADR-389).
+ */
 export interface ReplyTargets {
   /** The company's first-response target in minutes (Settings → Inbox), or null. */
   companyMinutes: number | null;
   /** The targets of the teams that have their own, by team id. */
   teamMinutes: ReadonlyMap<string, number>;
-  /** Present only when business hours are on. */
+  /** The company's calendar, present only when business hours are on. */
   calendar: BusinessCalendar | null;
+  /** The teams with their own weekly schedule, by team id; empty while business hours are off. */
+  teamCalendars: ReadonlyMap<string, BusinessCalendar>;
 }
 
 export async function loadReplyTargets(
@@ -48,18 +56,38 @@ export async function loadReplyTargets(
     .select({ id: teams.id, minutes: teams.firstResponseTargetMinutes })
     .from(teams)
     .where(and(eq(teams.tenantId, tenantId), isNotNull(teams.firstResponseTargetMinutes)));
-  const { enabled, calendar } = await loadBusinessCalendar(tx, tenantId, timezone);
+  const calendars = await loadBusinessCalendars(tx, tenantId, timezone);
   return {
     companyMinutes: row?.minutes ?? null,
     teamMinutes: new Map(teamRows.flatMap((r) => (r.minutes === null ? [] : [[r.id, r.minutes]]))),
-    calendar: enabled ? calendar : null,
+    calendar: calendars.company,
+    teamCalendars: calendars.teams,
   };
 }
 
-/** The target of a conversation in team `teamId`, or in no team: its team's own, else the company's. */
+/** The calendars of `targets`: the company's and its teams' own. */
+export function calendarsOf(targets: ReplyTargets): BusinessCalendars {
+  return { company: targets.calendar, teams: targets.teamCalendars };
+}
+
+/**
+ * The target of a conversation in team `teamId`, or in no team: its team's own, else the company's,
+ * counted by its team's own business hours, else the company's (ADR-389).
+ */
 export function targetFor(targets: ReplyTargets, teamId: string | null): ReplyTarget {
   const team = teamId === null ? undefined : targets.teamMinutes.get(teamId);
-  return { minutes: team ?? targets.companyMinutes, calendar: targets.calendar };
+  return {
+    minutes: team ?? targets.companyMinutes,
+    calendar: calendarFor(calendarsOf(targets), teamId),
+  };
+}
+
+/**
+ * The teams whose conversations may be due at other times than the company's other conversations:
+ * those with their own target or their own business hours.
+ */
+export function teamsWithOwnClock(targets: ReplyTargets): string[] {
+  return [...new Set([...targets.teamMinutes.keys(), ...targets.teamCalendars.keys()])];
 }
 
 /** Whether any conversation of the company has a target: the company has one, or a team does. */

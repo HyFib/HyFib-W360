@@ -41,7 +41,8 @@ import { emitTenantEvent } from '../messaging/events';
 import { STATUS_RANK } from '../messaging/status';
 import { parseInput } from '../validation';
 import {
-  loadBusinessCalendar,
+  calendarFor,
+  loadBusinessCalendars,
   replanWaitingSlowReplies,
   type BusinessCalendar,
 } from './business-hours';
@@ -50,10 +51,11 @@ import { replyDueAt } from './sla';
 /**
  * The automatic reply when members are slow to answer (W-081, ADR-384). A company turns it on in
  * Settings → Inbox with a plain text and a delay. When a customer's reply turn has waited that long
- * without a member's reply (counted in business hours when they are on, as reply targets are), the
- * worker's minute sweep sends the text once in that turn, as a system message through the ordinary
- * send pipeline (message, send intent and `message.send` job in one transaction; the send worker
- * checks the window and the contact's consent again before the request leaves).
+ * without a member's reply (counted in business hours when they are on, as reply targets are: those
+ * of the conversation's team when it has its own, ADR-389, else the company's), the worker's minute
+ * sweep sends the text once in that turn, as a system message through the ordinary send pipeline
+ * (message, send intent and `message.send` job in one transaction; the send worker checks the
+ * window and the contact's consent again before the request leaves).
  *
  * It is never sent twice for a turn: `app.slow_reply_messages` holds one row per turn (unique),
  * written in the transaction that queues the message, under a lock on the conversation and the
@@ -303,8 +305,8 @@ async function sendCompanySlowReplies(
     .from(tenants)
     .where(eq(tenants.id, tenantId));
   if (!company) return outcome;
-  const hours = await loadBusinessCalendar(tx, tenantId, company.timezone);
-  const calendar = hours.enabled ? hours.calendar : null;
+  // The company's calendar and its teams' own (ADR-389), loaded once for the sweep.
+  const calendars = await loadBusinessCalendars(tx, tenantId, company.timezone);
 
   // Lock the conversations, then the turns: the order a member's reply, a resolve and the start of
   // an automation run take them (each ends the turn), so each either waits for this or is seen.
@@ -328,6 +330,7 @@ async function sendCompanySlowReplies(
           contactId: conversations.contactId,
           channelAccountId: conversations.channelAccountId,
           assignedMembershipId: conversations.assignedMembershipId,
+          teamId: conversations.teamId,
           lastInboundAt: conversations.lastInboundAt,
         })
         .from(conversations)
@@ -430,7 +433,8 @@ async function sendCompanySlowReplies(
       startedAt: turn.startedAt,
       since: settings.since,
       delayMinutes: settings.delayMinutes,
-      calendar,
+      // The business hours of the conversation's team when it has its own, else the company's.
+      calendar: conv ? calendarFor(calendars, conv.teamId) : null,
       now,
     });
     if (plan.kind === 'ignore' || !conv) continue;

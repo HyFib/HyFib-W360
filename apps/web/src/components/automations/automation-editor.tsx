@@ -701,7 +701,11 @@ export function AutomationEditor({
                 )}
               </Field>
               {storeEvent || apiStart ? null : (
-                <Field id="trigger-hours" label="Business hours">
+                <Field
+                  id="trigger-hours"
+                  label="Business hours"
+                  description="The company’s business hours (Settings → Inbox); a team’s own hours do not apply."
+                >
                   {(aria) => (
                     <Select
                       {...aria}

@@ -90,6 +90,8 @@ export interface TeamFormInput {
   maxOpenPerMember: string;
   routingKeywords: string;
   firstResponseTargetMinutes: string;
+  /** The team's own week, seven days of ranges as text (ADR-389); null: the company's hours. */
+  businessHours: string[] | null;
   memberIds: string[];
   channelIds: string[];
 }

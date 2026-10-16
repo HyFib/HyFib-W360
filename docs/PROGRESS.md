@@ -1,5 +1,308 @@
 # Progress
 
+## 2026-10-16 — Review fixes for ADR-390 and ADR-391
+
+Status: **Fixed; the database and browser tests run in CI only.** Independent reviews found no High
+or Medium issue in ADR-390 and one Medium issue in ADR-391, with smaller ones in both, all fixed
+before merge.
+
+### Completed
+
+- **Deals board filter (ADR-391):** the "Deal field" select is keyed by the applied filter, so after
+  "Show all deals" (a navigation in the browser that keeps the page's elements) it no longer shows
+  the filter it cleared, which "Filter deals" would have applied again (Medium); a repeated `field`
+  parameter counts by its first value, as the export reads it, instead of being dropped without the
+  notice; the won and lost lists' links drop the filter; a misleading integration test comment and a
+  slip in ADR-391 are corrected.
+- **Deal field value events (ADR-390):** ADR-275's runbook paragraph names imports and custom field
+  values among the changes `deal.updated` reports; `changedBy`'s description in the OpenAPI document
+  names a field's deletion among changes recorded without their maker; ADR-390 says the API's deal
+  history also gives entries recorded before 0305 for a change of values; migration 0305's comment
+  says the capture also relies on 0293's grant; long lines in the docs are wrapped.
+- **Tests:** e2e (`crm.spec.ts`: the select's value after "Show all deals"); unit (the `changedBy`
+  description).
+- **Not covered by a local test:** the board page's reading of a repeated parameter and its tab links
+  (server-rendered page code, no unit test reaches it); the select's remount runs in the e2e test
+  only, in CI.
+
+### Test commands and results (local, 2026-10-16)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 162 files, 1,725 tests passed                                   |
+| `pnpm build`                                       | passed                                                          |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| Migrations 0305 and 0306, pglast parse check       | passed (syntax only)                                            |
+
+## 2026-10-16 — Filtering the deals board by a choice field (P4-04, ADR-391)
+
+Status: **Implemented; its database and browser tests run in CI only.** ADR-385 left filtering the
+board by a choice unbuilt; the board filtered by owner only.
+
+### Completed
+
+- **Domain (`crm/deal-field-filter.ts`, `crm/deals.ts`):** `parseDealFieldFilterParam` reads
+  `field=<key>:<option>` (`<key>:yes`/`no`, `<key>:` for "Not set"), `resolveDealFieldFilter` looks
+  it up among the company's own choice and yes/no fields (an option in any case, resolved as
+  written), `filterableDealFields` lists the choices, `dealFieldFilterAudit` gives the key and kind
+  of match. `board` takes `field`, filters its columns, counts, totals and weighted figures with
+  `dealFieldCondition` (an exact JSON comparison, or the key absent), and returns `fieldFilter`
+  (fields, the filter applied, whether one was ignored); `exportDeals` takes `field`, refuses one
+  that does not resolve before auditing, and records `field: { key, match }`. No migration: the
+  board's existing index scan covers it.
+- **Web:** the CRM board's "Deal field" GET form (an uncontrolled select grouped by field, the
+  pipeline and owner as hidden inputs, "Show all deals"), a notice for a stale link, the filter kept
+  in the board's links and the export link as resolved; the export route passes `field`.
+- **Tests:** unit (`deal-field-filter.test.ts`: 11, the address read and written, malformed and
+  overlong text, the choices offered, options in any case, yes/no, the problems named, the audit,
+  the query's condition rendered); integration (`crm.test.ts`: 2 new, the board by an option, "Not
+  set" and yes/no with counts, totals, weighted figures and the month, with the owner filter, unknown
+  keys and options, a deleted field, isolation, the export following the filter and refusing what
+  does not resolve, and its audit); e2e (`crm.spec.ts`: the ADR-385 test filters the board by the
+  Tier choice, "Not set", a stale link, the export link, no horizontal overflow).
+- **Docs:** ADR-391; ARCHITECTURE, SECURITY, THREAT-MODEL T344, BACKLOG, and the matrix's text and
+  evidence (status unchanged).
+- **Mutation checks:** 14 deliberate regressions in the new TypeScript (the length bound's `>=`,
+  "Not set" read as malformed, a blank option accepted, yes/no fields not offered, "Not set" listed
+  first, the type check dropped, yes or no resolved to the wrong boolean, options matched by case,
+  the link keeping the address's text, `false` audited as not set, the not-set condition without its
+  `not`, a value compared as text instead of JSON, no condition for a filter): 14 caught by the unit
+  tests. The board's notice, the export's refusals and its audit are covered by integration tests,
+  and the page by the e2e step, which run in CI only.
+
+### Test commands and results (local, 2026-10-16)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 161 files, 1,704 tests passed                                   |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+
+## 2026-10-16 — Webhook events when a deal's custom field values change (P5-09, P4-04, ADR-390)
+
+Status: **Implemented; its database tests run in CI only.** A change of a deal's custom field
+values alone sent no webhook event (ADR-373), so an integration keeping deals in step never learnt
+of values members, keys, automation steps and imports set.
+
+### Completed
+
+- **Migrations 0305 and 0306:** `app.webhook_capture_deal` replaced in place: `deal.updated` names
+  `fields` after the fixed details when the values of any of the company's fields differ, with
+  their keys in `detail.changedFields` in the order the fields were added; only keys of fields
+  that still exist are compared, so a field's deletion (row first, then the strip) captures
+  nothing. Its trigger and `crm_deals_changer` also fire on `attributes`. `webhook_events.detail`
+  may hold 4,096 bytes (NOT VALID; 0306 validates), enough for 50 keys of 40 characters; the
+  endpoints' `deal_details` check takes `fields`; the definer role reads a field's `key` and
+  `created_at` for the company in scope (column grant, policy `deal_capture_read`) for erasure's
+  capture. `app.capture_webhook_event` is unchanged.
+- **Domain:** `WEBHOOK_DEAL_DETAIL_CHANGES` and `WEBHOOK_DEAL_DETAILS` end with `fields` ("Custom
+  fields" in Settings); `dealUpdatedPayloadSchema` adds `changedFields`, filled at delivery by
+  `dealUpdatedChanges` (keys only with `fields`, deduplicated, checked against the key pattern,
+  empty for older events); the deal still carries no values. The event's description and the
+  OpenAPI entry say which writes send it, that values are read with `GET /deals/{id}`, that a
+  field's deletion sends nothing and erasure names the values it clears. The API's deal history
+  (`API_DEAL_HISTORY_DETAILS`) names `fields` for a change of values.
+- **Tests:** unit (`webhooks.test.ts`: the payload with and without keys, refused keys and details,
+  `dealUpdatedChanges`, the detail lists and label, the OpenAPI wording; `deals.test.ts`: the
+  history's names and order; `api.test.ts`: the endpoint schema's description); integration
+  (`webhook-events.test.ts`: 2 new, a member's edits (two values, unchanged values, a title with
+  values, values with a change of owner), a key's move with a value, an import row, an automation
+  step, a field's deletion sending nothing, erasure, the pipeline, stage, owner and detail lists,
+  the delivered payloads without values; erasure of a deal with values in 50 fields of 40-character
+  keys, the detail check, the definer role's column grants and policy, the capture function's
+  settings; `api.test.ts`: the history with changes of values; `webhooks.test.ts`: the detail
+  list's database check with four details).
+- **Docs:** ADR-390 (and ADR-373's note); ARCHITECTURE, SECURITY, THREAT-MODEL T343, DEPLOYMENT
+  (0305, 0306 and the rollout: old workers leave `fields` out until they are replaced), RUNBOOKS,
+  BACKLOG, and the matrix's H-012 and H-014 text and evidence (status unchanged).
+- **Mutation checks:** 17 deliberate regressions in the TypeScript (keys sent without `fields`,
+  keys not deduplicated, the key pattern or the string check dropped, `fields` before the fixed
+  details, `changedFields` unchecked or optional, `fields` left out at delivery, the endpoint list
+  or the label changed, the event's description, the OpenAPI sentences on values and deletion, the
+  history's `fields` dropped or out of order): 15 caught by the unit tests at first; the event's
+  description and the history's order survived and are caught by tests added. The capture trigger,
+  the deletion's silence, erasure, the filters, the grants and the detail check are SQL, covered by
+  the integration tests, which run in CI only.
+
+### Test commands and results (local, 2026-10-16)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 160 files, 1,694 tests passed                                   |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+| Migrations 0305 and 0306, pglast parse check       | passed (syntax only)                                            |
+
+## 2026-10-16 — Review fixes for ADR-388 and ADR-389
+
+Status: **Fixed; the database and browser tests run in CI only.** Independent reviews found one
+High issue in ADR-388 (three integration tests that would have failed) with smaller ones, and one
+Medium and four Low issues (and nits) in ADR-389, all fixed before merge; one gap in tests remains
+(below).
+
+### Completed
+
+- **Business hours per team (ADR-389):** an overdue notice planned again more than a day after the
+  due time its new calendar gives (a conversation moved out of a team whose week had put it off) is
+  emailed instead of skipped as too late: lateness counts from the later of the due time and the
+  time the notice was put off to (`overdueNoticeTooLate`), as ADR-389 claimed and as the automatic
+  reply already did (Medium); the overdue sweep takes the conversations (`FOR SHARE SKIP LOCKED`, in
+  id order) before their turns, so a change of team racing a sweep either waits for it or is seen;
+  a team's change of week or target plans again only its own conversations' waiting rows, not the
+  whole company's; Reports build opening periods only for teams with turns in the report; the
+  overdue email names a team's own business hours; `PATCH /teams` says overdue-reply emails are
+  planned again too, and after a target change; migration 0303 adds a unique constraint on a team's
+  ranges (team, weekday, opening time), whose index replaces the read index.
+- **Teams format for the alert channel (ADR-388):** three integration tests set the address without
+  a format (refused since the format became required; they name `text`); the new claim's format
+  guard is NULL-safe (`IS NOT TRUE`); ADR-388 and the runbook no longer claim the card was checked
+  by tests that run in CI only, or that posting one at a time always stays under Microsoft's
+  throttle.
+- **Tests:** unit (lateness from the time put off to, at the limit and beyond; the email naming a
+  team's own hours for its own target and for the company's); integration (`overdue-replies.test.ts`:
+  a notice planned again two days after its due time is emailed; another team's waiting notice keeps
+  its time when one team's week changes, and is emailed naming its team's hours once that team opens
+  all week; `slow-replies.test.ts`: another team's waiting automatic reply keeps its time).
+- **Not covered:** the ranking of the notice of overdue replies by team (ADR-241) still has no test
+  that fails if teams with their own week are ranked with the others (it changes results only beyond
+  200 waits).
+- **Mutation checks:** 6 deliberate regressions of the lateness rule (the later time, the limit, the
+  time put off to ignored) and the email wording (team hours dropped for either target, or ignored),
+  all caught by the unit tests. The sweep's lock order, the team-scoped replan, the reports' calendars
+  and the sweep passing the time put off to are covered by integration tests, which run in CI only.
+
+### Test commands and results (local, 2026-10-16)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 161 files, 1,712 tests passed                                   |
+| `pnpm build`                                       | passed                                                          |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| Migration 0303, pglast parse check                 | passed (syntax only)                                            |
+
+## 2026-10-16 — Business hours per team (P3-06, ADR-389)
+
+Status: **Implemented; its database and browser tests run in CI only.** A team's first-response
+target (ADR-377) was counted in the company's business hours, so a night, weekend or round-the-clock
+team was held to the office's week.
+
+### Completed
+
+- **Database (migration 0303):** `app.team_business_hours` (tenant, team, weekday, opening and
+  closing time; composite foreign key to the company's team, on delete cascade; FORCE row security;
+  the app role selects, inserts and deletes; deletion step 655 with the definer's deletion grants and
+  policies only); an `AFTER UPDATE OF team_id` trigger on `app.conversations` that sets the moved
+  conversation's waiting automatic reply and overdue notice due now (pinned search path, not
+  executable by PUBLIC); metric definitions `inbox.overdue` v4,
+  `inbox.first_response_business_time` v3 and `inbox.within_target` v5. No definer function changes:
+  both sweeps' SQL bounds stay valid for any calendar.
+- **Domain:** `teamHoursSchema` (seven days of text, checked as the company's week, at least one
+  opening time), `loadTeamSchedules`, `loadBusinessCalendars` and `calendarFor` (a team's week with
+  the company's closed days and time zone, only while the company's hours are on; one query for every
+  team), `writeTeamBusinessHours`, `replanWaitingTurns` (waiting automatic replies and overdue
+  notices, now also after company calendar changes and team target changes). `ReplyTargets` carries
+  team calendars, so the inbox's timers, the notice (each team with its own target or week ranked
+  apart), the overdue emails and Reports use the conversation's team's calendar; the automatic
+  reply's sweep does too. Reports key opening periods by calendar (`iv(cal, lo, hi)`) and list
+  `teamBusinessHours` (also in `GET /reports`); report emails say "in their team's or the company's
+  business hours". Teams: `businessHours` in the settings, view, audit (`ownBusinessHours`,
+  `businessHoursRanges`, `businessHoursChanged`) and `POST`/`PATCH /teams` (seven days of
+  `{opens, closes}`, null for the company's), documented in the OpenAPI document. Automations keep
+  the company's calendar.
+- **Web:** Settings → Teams shows each team's own hours and edits them ("Use the company's business
+  hours" or "Its own weekly schedule"), saying they apply only while business hours are on and that
+  closed days and the time zone stay the company's; the automation builder says its hours are the
+  company's; Reports names teams with their own hours.
+- **Tests:** unit (`sla.test.ts`: the calendar choice, business time across New York's 25-hour day,
+  validation, comparing and auditing; `slow-reply.test.ts`: the delay by a team's week;
+  `reports/calendars.test.ts`: periods per calendar and the definitions kept equal to 0303;
+  `emails.test.ts`, `api/teams.test.ts`, `inbox/teams.test.ts`, `api/reports.test.ts`); integration
+  (`inbox-advanced.test.ts`: roles, checks, audit, deletion, row security, grants, foreign keys,
+  timers and notice; `overdue-replies.test.ts`, `slow-replies.test.ts`: due times by the team's week,
+  planned again on a team's or its hours' change; `reports.test.ts`: business medians, within target
+  and overdue by a weekend team's week; `api.test.ts`: the teams API; `company-data.test.ts`: the
+  export); e2e (`inbox-teams.spec.ts`: a team given its own hours and seeing them saved).
+- **Docs:** ADR-389; ARCHITECTURE, SECURITY, THREAT-MODEL T342, DEPLOYMENT (migration 0303 rollout
+  note: workers before web), DATA-RETENTION, RUNBOOKS, BACKLOG, and the matrix's H-011 text and
+  evidence (status unchanged).
+- **Mutation checks:** 22 deliberate regressions (team calendars ignored, applied while business
+  hours are off, empty weeks or no closed days for teams, a week of no opening times accepted,
+  weekdays shifted, issues not naming the day, weeks compared by length, the ranking of teams with
+  their own hours, null weeks taken as equal, audit flags inverted, API days reversed, unchanged
+  checks skipped, API hours dropped, report periods for the company only, email wording, the
+  definition version, the sweep's and the notice's calendar): 20 caught by the unit tests, one after
+  a test was added. Two survived the unit tests: the automatic reply's sweep using the company's
+  calendar (caught by the slow-replies integration test, which runs in CI only) and the notice ranking
+  every team together (it changes results only beyond 200 waits; no test catches it).
+
+### Test commands and results (local, 2026-10-16)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 161 files, 1688 tests passed                                    |
+| `pnpm build`                                       | passed before a last refactor of one helper; run again above    |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+
+## 2026-10-16 — A Microsoft Teams format for the alert channel (P5-10, ADR-388)
+
+Status: **Implemented; its database and browser tests run in CI only; no post was made to a real
+Teams channel.** The chat channel posted JSON text only (ADR-338); Teams webhooks, now made with
+the Workflows app, post Adaptive Cards.
+
+### Completed
+
+- **Migration 0304:** `ops.platform_alert_channel.format` (`text` or `teams_card`, `text` for the
+  channel already set; written only by the definer role) and `ops.platform_alert_posts.plain_body`
+  (a post's text unescaped, null for posts queued before). New definer functions:
+  `ops.platform_set_alert_channel` with a format, `ops.platform_set_alert_channel_format`,
+  `ops.platform_test_alert_channel` and `ops.queue_platform_alert_post` with the unescaped text, and
+  `ops.claim_platform_alert_posts(integer, text[])`, which claims only while the channel's format is
+  among those named and returns it; `ops.platform_alert_channel_state` returns the format. The
+  release before's signatures are kept for old web servers and workers: setting through them sets
+  `text`, and the old claim asks for `text` only, so an old worker is never handed a Teams channel.
+- **Domain (`platform/alert-channel.ts`):** `ALERT_CHANNEL_FORMATS` and labels, `alertPostPlain`,
+  `chatUnescape`, `teamsCardBody` (a wrapping `TextBlock` a line, the subject bold, blank lines left
+  out, not escaped, held to 28,000 bytes serialized) and `alertPostRequestBody`, which the posting
+  job calls when it sends each post, in the format the claim returned; a post without unescaped
+  text is sent as queued in `text` and unescaped for a card. `setChannel` takes a format and
+  `setFormat` changes it alone; the state gives it; the test post and every alert's post carry both
+  texts.
+- **Web:** Operations → Alerts shows the format to every administrator; owners choose it when they
+  set or replace the address and change it alone under "Format posted" (a `ClientForm` select).
+- **Tests:** unit (`alert-channel.test.ts`: 17 new, both bodies, the escapes undone, line order and
+  bold, blank lines, the byte limit and its cut, old posts, format validation, the format alone, the
+  claim's formats; the billing tests' queue statements); integration (`alert-channel.test.ts`: 7
+  new, a Teams channel and its test card, the format alone and its audit, old posts in both formats,
+  the old claim and old web functions, the columns' checks, grants and definer settings;
+  `tenant-isolation.test.ts`: the new functions' grants); e2e (`platform-ops.spec.ts`: an owner
+  switches to a Teams card and the local receiver gets one).
+- **Docs:** ADR-388; ARCHITECTURE, SECURITY, THREAT-MODEL T341, DEPLOYMENT (0304 and the rollout),
+  RUNBOOKS (a Teams channel), DATA-RETENTION, BACKLOG, and the matrix's text and evidence (status
+  unchanged).
+- **Mutation checks:** 20 deliberate regressions in the new logic (the unescape's mapping and
+  pattern, the cut's escape rule and length, blank lines kept, the bold line, the card's version
+  and content type, characters counted instead of bytes, the comma not counted, `>=` at the limit,
+  old posts escaped twice or left escaped in a card, the claim naming `text` only, the queue or the
+  test post storing the wrong text, an unknown format accepted, a 28 KiB limit, the format not
+  passed when setting): 19 caught by the unit tests at first; the limit's `>=` survived and is
+  caught by a test added for a card cut to exactly 28,000 bytes. The SQL (the old claim's format
+  guard, the audit, the grants) is covered by integration tests, which run in CI only.
+
+### Test commands and results (local, 2026-10-16)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 158 files, 1,671 tests passed                                   |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+| Migration 0304, pglast parse check                 | passed (syntax only)                                            |
+
 ## 2026-10-16 — CI fixes: base image mirrors and the deal import's browser test
 
 Status: **Changed; both run in CI only.** ECR Public's anonymous data limit ("429 Too Many Requests:

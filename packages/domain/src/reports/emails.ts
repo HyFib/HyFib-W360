@@ -168,11 +168,16 @@ export function reportEmailRows(report: Report): ReportEmailRow[] {
   ];
   if (turns.withinTarget) {
     const businessHours = report.inbox.businessHours;
-    // Teams may hold their conversations to their own targets (ADR-377).
+    // Teams may hold their conversations to their own targets (ADR-377) and hours (ADR-389).
+    const hours = !businessHours
+      ? ''
+      : report.inbox.teamBusinessHours.length > 0
+        ? ' in their team’s or the company’s business hours'
+        : null;
     const of =
       report.inbox.teamTargets.length === 0 && report.inbox.targetMinutes !== null
-        ? ` within ${report.inbox.targetMinutes} min${businessHours ? ' of business hours' : ''}`
-        : ` within their team’s or the company’s target${businessHours ? ' in business hours' : ''}`;
+        ? ` within ${report.inbox.targetMinutes} min${hours ?? ' of business hours'}`
+        : ` within their team’s or the company’s target${hours ?? ' in business hours'}`;
     rows.push({ label: label('inbox.within_target'), value: share(turns.withinTarget, of) });
   }
   rows.push({

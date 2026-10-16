@@ -315,7 +315,7 @@ describe('CRM pipelines and deals through the API (ADR-253)', () => {
     for (const words of [
       'never which member',
       'Null while the deal is as it was added',
-      'such as erasure retitling the deal; never the maker of an earlier change',
+      'such as erasure retitling the deal or a custom field’s deletion removing its values; never the maker of an earlier change',
     ]) {
       expect(changer.description).toContain(words);
     }
@@ -679,6 +679,7 @@ describe('a CRM deal’s history through the API (ADR-281)', () => {
       title: 'title',
       value: 'valueMinor',
       expected_close_on: 'expectedCloseOn',
+      custom_fields: 'fields',
     });
     expect(apiDealHistoryEntrySchema.shape.type.options).toEqual(
       Object.values(API_DEAL_HISTORY_TYPES),
@@ -728,6 +729,19 @@ describe('a CRM deal’s history through the API (ADR-281)', () => {
     expect(
       entry('deal_updated', { fields: ['value'], valueFrom: 500, valueTo: null }),
     ).toMatchObject({ changes: ['valueMinor'], valueMinor: null, previousValueMinor: 500 });
+    // Custom field values last, as deal events name them, by an automation's run too (ADR-390);
+    // products are not a detail history gives.
+    expect(
+      entry('deal_updated', { fields: ['custom_fields', 'title'], automationId: 'a', runId: 'r' }),
+    ).toMatchObject({ changes: ['title', 'fields'], changedBy: 'automation', valueMinor: null });
+    expect(entry('deal_updated', { fields: ['custom_fields'] }, true)).toMatchObject({
+      changes: ['fields'],
+      changedBy: 'member',
+    });
+    expect(
+      entry('deal_updated', { fields: ['custom_fields', 'expected_close_on', 'products'] }, true),
+    ).toMatchObject({ changes: ['expectedCloseOn', 'fields'] });
+    expect(entry('deal_updated', { fields: ['products'] }, true)).toMatchObject({ changes: [] });
     // Moved by an automation's run to another pipeline, both stages with their pipelines.
     expect(
       entry('stage_changed', {
@@ -853,7 +867,7 @@ describe('a CRM deal’s history through the API (ADR-281)', () => {
     ]);
     for (const words of [
       'Scope: `deals.read`.',
-      'the deal added, its title, value or expected close date changed, moved to another stage or pipeline, given to another owner, won, lost or reopened, by members, automations and API keys, newest first; pages never skip or repeat a change',
+      'the deal added, its title, value, expected close date or custom field values changed, moved to another stage or pipeline, given to another owner, won, lost or reopened, by members, automations and API keys, newest first; pages never skip or repeat a change',
       'says who made it (`changedBy`, never which member, with the key for one made through the API)',
       '(403, reason not_in_plan)',
       'Notes and the deal’s tasks are never given here',
@@ -884,7 +898,7 @@ describe('a CRM deal’s history through the API (ADR-281)', () => {
       'a member (member, never which member)',
     );
     expect(apiDealHistoryEntrySchema.shape.changes.description).toContain(
-      'names only, never the title or date before',
+      'names only, never the title, date or values before',
     );
   });
 });

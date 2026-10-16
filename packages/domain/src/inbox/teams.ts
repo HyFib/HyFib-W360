@@ -26,6 +26,14 @@ import { assertCan, can, type TenantContext } from '../authz/context';
 import { recordAudit, type RequestMeta } from '../audit';
 import { emitTenantEvent } from '../messaging/events';
 import { parseInput } from '../validation';
+import {
+  loadTeamSchedules,
+  replanWaitingTurns,
+  sameIntervals,
+  teamHoursSchema,
+  writeTeamBusinessHours,
+  type BusinessInterval,
+} from './business-hours';
 import { INBOX_WORKER_ROLES, normalizeRoutingText, routeWaitingConversations } from './routing';
 import { assertTeamAvailable } from '../plans/entitlements';
 
@@ -87,6 +95,11 @@ export const teamSchema = z.object({
     1440,
     'Enter a reply target from 1 to 1,440 minutes, or leave it empty.',
   ).default(null),
+  /**
+   * The team's own weekly schedule (ADR-389): seven days of opening ranges as text, Monday first,
+   * checked as the company's; null uses the company's business hours.
+   */
+  businessHours: teamHoursSchema.default(null),
   memberIds: z.array(z.uuid()).max(200).default([]),
   channelIds: z.array(z.uuid()).max(50).default([]),
 });
@@ -105,6 +118,8 @@ export interface TeamView {
   maxOpenPerMember: number | null;
   routingKeywords: string[];
   firstResponseTargetMinutes: number | null;
+  /** The team's own weekly schedule (ADR-389); null uses the company's business hours. */
+  businessHours: BusinessInterval[] | null;
   members: { membershipId: string; name: string; available: boolean }[];
   channelIds: string[];
   openConversations: number;
@@ -245,27 +260,36 @@ export async function writeCreateTeam(
     routingKeywords: data.routingKeywords,
     firstResponseTargetMinutes: data.firstResponseTargetMinutes,
   });
+  // A new team has no conversations yet: nothing waits for its hours.
+  await writeTeamBusinessHours(tx, tenantId, teamId, data.businessHours);
   await syncMembersAndChannels(tx, tenantId, teamId, data);
   return { teamId };
 }
 
 /**
  * Sets a team's settings, members and numbers, its row locked (Settings, and keys since ADR-287).
- * The caller audits it, then routes waiting conversations, and maps a name in use with
- * `teamNameError`.
+ * When its target (ADR-377) or business hours (ADR-389) change, the replies waiting for a due time
+ * are planned again. The caller audits it, then routes waiting conversations, and maps a name in
+ * use with `teamNameError`.
  */
 export async function writeUpdateTeam(
   tx: Tx,
   tenantId: string,
   teamId: string,
   data: TeamSettings,
-): Promise<{ previousAssignment: TeamAssignmentMode }> {
+): Promise<{ previousAssignment: TeamAssignmentMode; hoursChanged: boolean }> {
   const [current] = await tx
-    .select({ id: teams.id, assignment: teams.assignment })
+    .select({
+      id: teams.id,
+      assignment: teams.assignment,
+      firstResponseTargetMinutes: teams.firstResponseTargetMinutes,
+    })
     .from(teams)
     .where(and(eq(teams.tenantId, tenantId), eq(teams.id, teamId)))
     .for('update');
   if (!current) throw notFound('Team');
+  const previousHours = (await loadTeamSchedules(tx, tenantId, [teamId])).get(teamId) ?? null;
+  const hoursChanged = !sameTeamHours(previousHours, data.businessHours);
   await checkMembers(tx, tenantId, data.memberIds);
   await checkChannels(tx, tenantId, data.channelIds);
   await tx
@@ -279,14 +303,37 @@ export async function writeUpdateTeam(
       firstResponseTargetMinutes: data.firstResponseTargetMinutes,
     })
     .where(and(eq(teams.tenantId, tenantId), eq(teams.id, teamId)));
+  if (hoursChanged) await writeTeamBusinessHours(tx, tenantId, teamId, data.businessHours);
+  if (hoursChanged || current.firstResponseTargetMinutes !== data.firstResponseTargetMinutes) {
+    await replanWaitingTurns(tx, tenantId, { teamId });
+  }
   await syncMembersAndChannels(tx, tenantId, teamId, data);
-  return { previousAssignment: current.assignment };
+  return { previousAssignment: current.assignment, hoursChanged };
+}
+
+/** Whether two teams' own schedules are the same (null: the company's business hours). */
+export function sameTeamHours(
+  a: readonly BusinessInterval[] | null,
+  b: readonly BusinessInterval[] | null,
+): boolean {
+  if (a === null || b === null) return a === b;
+  return sameIntervals(a, b);
+}
+
+/** A team's own business hours in audit metadata (ADR-389): whether it has them, and their ranges. */
+export function teamHoursAudit(hours: readonly BusinessInterval[] | null): {
+  ownBusinessHours: boolean;
+  businessHoursRanges: number;
+} {
+  return { ownBusinessHours: hours !== null, businessHoursRanges: hours?.length ?? 0 };
 }
 
 /**
  * Deletes a team (Settings, and keys since ADR-287): its conversations leave the team first, their
- * assignees kept, in routing's lock order (conversation, team). Null when the company has no such
- * team. The caller audits it.
+ * assignees kept, in routing's lock order (conversation, team); its own business hours go with it
+ * (ADR-389), and the replies its conversations wait for are planned again by the company's
+ * calendar (migration 0303's trigger, as the conversations leave). Null when the company has no
+ * such team. The caller audits it.
  */
 export async function writeDeleteTeam(
   tx: Tx,
@@ -333,6 +380,7 @@ export async function readTeamSettings(
     .where(and(eq(teams.tenantId, tenantId), eq(teams.id, teamId)));
   const [team] = options.lock ? await query.for('update') : await query;
   if (!team) return null;
+  const businessHours = (await loadTeamSchedules(tx, tenantId, [teamId])).get(teamId) ?? null;
   const members = await tx
     .select({ membershipId: teamMembers.membershipId })
     .from(teamMembers)
@@ -358,6 +406,7 @@ export async function readTeamSettings(
     .orderBy(asc(channelAccounts.id));
   return {
     ...team,
+    businessHours,
     memberIds: members.map((m) => m.membershipId),
     channelIds: channels.map((c) => c.id),
   };
@@ -507,10 +556,12 @@ export function createTeamsService(deps: { db: Database; clock: Clock }) {
               ),
             )
             .groupBy(conversations.teamId);
+          const schedules = await loadTeamSchedules(tx, ctx.tenant.id, ids);
           return rows.map((t) => {
             const count = counts.find((c) => c.teamId === t.id);
             return {
               ...t,
+              businessHours: schedules.get(t.id) ?? null,
               members: members
                 .filter((m) => m.teamId === t.id)
                 .map((m) => ({
@@ -549,6 +600,7 @@ export function createTeamsService(deps: { db: Database; clock: Clock }) {
                 assignment: data.assignment,
                 maxOpenPerMember: data.maxOpenPerMember,
                 firstResponseTargetMinutes: data.firstResponseTargetMinutes,
+                ...teamHoursAudit(data.businessHours),
                 members: data.memberIds.length,
                 channels: data.channelIds.length,
                 keywords: data.routingKeywords.length,
@@ -575,7 +627,12 @@ export function createTeamsService(deps: { db: Database; clock: Clock }) {
       const data = parseInput(teamSchema, input);
       try {
         return await db.run(ctx.scope, async (tx) => {
-          const { previousAssignment } = await writeUpdateTeam(tx, ctx.tenant.id, teamId, data);
+          const { previousAssignment, hoursChanged } = await writeUpdateTeam(
+            tx,
+            ctx.tenant.id,
+            teamId,
+            data,
+          );
           await recordAudit(
             tx,
             ctx,
@@ -587,6 +644,8 @@ export function createTeamsService(deps: { db: Database; clock: Clock }) {
                 assignment: { from: previousAssignment, to: data.assignment },
                 maxOpenPerMember: data.maxOpenPerMember,
                 firstResponseTargetMinutes: data.firstResponseTargetMinutes,
+                ...teamHoursAudit(data.businessHours),
+                businessHoursChanged: hoursChanged,
                 members: data.memberIds.length,
                 channels: data.channelIds.length,
                 keywords: data.routingKeywords.length,

@@ -2,9 +2,12 @@ import { z } from 'zod';
 import { notFound } from '@w360/core';
 import { TEAM_ASSIGNMENT_MODES, type TeamAssignmentMode, type Tx } from '@w360/db';
 import { recordSystemAudit } from '../audit';
+import { MAX_RANGES_PER_DAY, parseTime, type BusinessInterval } from '../inbox/business-hours';
 import {
   MAX_ROUTING_KEYWORDS,
   readTeamSettings,
+  sameTeamHours,
+  teamHoursAudit,
   teamNameError,
   teamSchema,
   writeCreateTeam,
@@ -13,6 +16,7 @@ import {
   type TeamSettings,
 } from '../inbox/teams';
 import { routeWaitingConversations } from '../inbox/routing';
+import { toApiDays, type ApiTimeRange } from './business-hours';
 import type { OutboundDeps } from '../messaging/outbound';
 import { parseInput } from '../validation';
 import { apiActor, assertAnyScope, assertScope, type ApiContext } from './context';
@@ -43,6 +47,11 @@ export interface ApiTeamSettings {
   routingKeywords: string[];
   /** The team's own first-response target in minutes (ADR-377); null uses the company's. */
   firstResponseTargetMinutes: number | null;
+  /**
+   * The team's own weekly schedule (ADR-389): seven days, Monday first, each with its opening
+   * ranges in the company's time zone; null uses the company's business hours.
+   */
+  businessHours: ApiTimeRange[][] | null;
   /** The team's active members, as GET /members lists them, in the order they joined. */
   memberIds: string[];
   /** The WhatsApp numbers whose new conversations go to the team, as GET /channels lists them. */
@@ -76,6 +85,25 @@ const targetSchema = z
   .nullable()
   .describe(
     'The team’s own first-response target in minutes: customers waiting in its conversations are due a reply within it (in business hours when they are on) instead of the company’s target; null uses the company’s.',
+  );
+const timeSchema = z
+  .string()
+  .max(5)
+  .refine(
+    (text) => parseTime(text) !== null,
+    'Write times as HH:MM, like 09:00; 24:00 is midnight.',
+  )
+  .describe('HH:MM in the company’s time zone; 24:00 closes at midnight.');
+const businessHoursSchema = z
+  .array(
+    z
+      .array(z.object({ opens: timeSchema, closes: timeSchema }).strict())
+      .max(MAX_RANGES_PER_DAY, `Use at most ${MAX_RANGES_PER_DAY} time ranges a day.`),
+  )
+  .length(7, 'Give seven days, Monday first.')
+  .nullable()
+  .describe(
+    `The team’s own weekly schedule: seven days, Monday first, each with up to ${MAX_RANGES_PER_DAY} opening ranges that do not overlap (an empty list closes the day), at least one in the week. While the company’s business hours are on (GET /business-hours), the team’s conversations count reply targets and the automatic reply’s delay in these hours instead of the company’s; the company’s closed days and time zone apply. Null uses the company’s business hours.`,
   );
 const maxOpenSchema = z
   .number()
@@ -114,6 +142,7 @@ export const apiCreateTeamSchema = z
     maxOpenPerMember: maxOpenSchema.optional(),
     routingKeywords: keywordsSchema.optional(),
     firstResponseTargetMinutes: targetSchema.optional(),
+    businessHours: businessHoursSchema.optional(),
     memberIds: memberIdsSchema.optional(),
     channelIds: channelIdsSchema.optional(),
   })
@@ -128,6 +157,7 @@ export const apiUpdateTeamSchema = z
     maxOpenPerMember: maxOpenSchema.optional(),
     routingKeywords: keywordsSchema.optional(),
     firstResponseTargetMinutes: targetSchema.optional(),
+    businessHours: businessHoursSchema.optional(),
     memberIds: memberIdsSchema.optional(),
     channelIds: channelIdsSchema.optional(),
   })
@@ -136,7 +166,15 @@ export const apiUpdateTeamSchema = z
     message: 'Give at least one setting to change.',
   });
 
-/** The settings Settings would keep from these, normalized as members' saves are. */
+/** A week of ranges as the API takes it, as the seven days of text Settings takes (ADR-389). */
+export function apiDaysToTexts(days: readonly (readonly ApiTimeRange[])[]): string[] {
+  return days.map((ranges) => ranges.map((r) => `${r.opens}-${r.closes}`).join(', '));
+}
+
+/**
+ * The settings Settings would keep from these, normalized and checked as members' saves are; a
+ * team's hours are checked day by day as Settings checks them (422 naming `businessHours.<n>`).
+ */
 export function teamSettingsOf(input: z.output<typeof apiCreateTeamSchema>): TeamSettings {
   return parseInput(teamSchema, {
     name: input.name,
@@ -145,9 +183,15 @@ export function teamSettingsOf(input: z.output<typeof apiCreateTeamSchema>): Tea
     maxOpenPerMember: input.maxOpenPerMember ?? null,
     routingKeywords: input.routingKeywords,
     firstResponseTargetMinutes: input.firstResponseTargetMinutes ?? null,
+    businessHours: input.businessHours ? apiDaysToTexts(input.businessHours) : null,
     memberIds: input.memberIds,
     channelIds: input.channelIds,
   });
+}
+
+/** A team's own hours as the API gives and takes them, from stored intervals. */
+export function toApiTeamHours(hours: readonly BusinessInterval[] | null): ApiTimeRange[][] | null {
+  return hours === null ? null : toApiDays(hours);
 }
 
 /** Whether two lists hold the same ids, whatever their order or repeats. */
@@ -165,6 +209,7 @@ export function sameTeamSettings(current: TeamSettings, next: TeamSettings): boo
     current.assignment === next.assignment &&
     current.maxOpenPerMember === next.maxOpenPerMember &&
     current.firstResponseTargetMinutes === next.firstResponseTargetMinutes &&
+    sameTeamHours(current.businessHours, next.businessHours) &&
     current.routingKeywords.length === next.routingKeywords.length &&
     current.routingKeywords.every((keyword, i) => keyword === next.routingKeywords[i]) &&
     sameSet(current.memberIds, next.memberIds) &&
@@ -184,6 +229,7 @@ export function toApiTeamSettings(
     maxOpenPerMember: team.maxOpenPerMember,
     routingKeywords: team.routingKeywords,
     firstResponseTargetMinutes: team.firstResponseTargetMinutes,
+    businessHours: toApiTeamHours(team.businessHours),
     memberIds: team.memberIds,
     channelIds: team.channelIds,
     createdAt: team.createdAt.toISOString(),
@@ -251,6 +297,7 @@ export async function apiCreateTeam(
             assignment: data.assignment,
             maxOpenPerMember: data.maxOpenPerMember,
             firstResponseTargetMinutes: data.firstResponseTargetMinutes,
+            ...teamHoursAudit(data.businessHours),
             members: data.memberIds.length,
             channels: data.channelIds.length,
             keywords: data.routingKeywords.length,
@@ -303,11 +350,20 @@ export async function apiUpdateTeam(
           change.firstResponseTargetMinutes === undefined
             ? current.firstResponseTargetMinutes
             : change.firstResponseTargetMinutes,
+        businessHours:
+          change.businessHours === undefined
+            ? toApiTeamHours(current.businessHours)
+            : change.businessHours,
         memberIds: change.memberIds ?? current.memberIds,
         channelIds: change.channelIds ?? current.channelIds,
       });
       if (sameTeamSettings(current, next)) return toApiTeamSettings(current);
-      const { previousAssignment } = await writeUpdateTeam(tx, ctx.tenant.id, id, next);
+      const { previousAssignment, hoursChanged } = await writeUpdateTeam(
+        tx,
+        ctx.tenant.id,
+        id,
+        next,
+      );
       await recordSystemAudit(
         tx,
         ctx.tenant.id,
@@ -320,6 +376,8 @@ export async function apiUpdateTeam(
             assignment: { from: previousAssignment, to: next.assignment },
             maxOpenPerMember: next.maxOpenPerMember,
             firstResponseTargetMinutes: next.firstResponseTargetMinutes,
+            ...teamHoursAudit(next.businessHours),
+            businessHoursChanged: hoursChanged,
             members: next.memberIds.length,
             channels: next.channelIds.length,
             keywords: next.routingKeywords.length,

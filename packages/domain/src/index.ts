@@ -123,6 +123,7 @@ export * from './crm/money';
 export * from './crm/pipelines';
 export * from './crm/deals';
 export * from './crm/deals-csv';
+export * from './crm/deal-field-filter';
 export {
   MAX_DEAL_FIELD_OPTION_LENGTH,
   MAX_DEAL_FIELD_OPTIONS,

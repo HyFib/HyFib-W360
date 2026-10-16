@@ -6,9 +6,9 @@ export const dynamic = 'force-dynamic';
 
 /**
  * Streams the deals the board or a list shows as CSV (ADR-239; formula-safe, needs `crm.read` and
- * `contacts.export`), filtered by `?status=`, `?pipeline=` and `?owner=` as the CRM page filters
- * them. Authorization runs before the first byte, so a refused export is a plain 403, 404 or 400,
- * never a truncated file.
+ * `contacts.export`), filtered by `?status=`, `?pipeline=`, `?owner=` and `?field=` (a choice or
+ * yes/no field's value, ADR-391) as the CRM page filters them. Authorization runs before the first
+ * byte, so a refused export is a plain 403, 404 or 400, never a truncated file.
  */
 export async function GET(request: Request, { params }: { params: Promise<{ slug: string }> }) {
   const { slug } = await params;
@@ -18,12 +18,15 @@ export async function GET(request: Request, { params }: { params: Promise<{ slug
   const status = query.get('status');
   const pipelineId = query.get('pipeline');
   const owner = query.get('owner');
+  // Refused unless it is one of the company's fields and options (checked by the service).
+  const field = query.get('field');
   const iterator = crm.exportDeals(
     ctx,
     {
       ...(status ? { status } : {}),
       ...(pipelineId ? { pipelineId } : {}),
       ...(owner ? { owner } : {}),
+      ...(field ? { field } : {}),
     },
     await requestMeta(),
   );

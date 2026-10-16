@@ -14793,10 +14793,10 @@ Decision:
 
 Not built: deal webhook events for a change of values (deal.updated names title, valueMinor and
 expectedCloseOn only, so a change of values alone sends no event, and the API's deal history does
-not list it), choice or select types, an order of fields other than when they were added, defining
-fields through the API, values on the new-deal form in the app (since built: ADR-379), values set
-by automation steps, filtering or reporting by a value, and CSV import of deals (since built:
-ADR-374, with values mapped by key).
+not list it; since built: ADR-390), choice or select types, an order of fields other than when they
+were added, defining fields through the API, values on the new-deal form in the app (since built:
+ADR-379), values set by automation steps, filtering or reporting by a value, and CSV import of deals
+(since built: ADR-374, with values mapped by key).
 
 ## ADR-374 Importing deals from CSV (P4-04) (2026-10-13)
 
@@ -15442,3 +15442,379 @@ export unreadable (cells were limited to 1,000 characters). It found three Low o
 for a cell at the check was refused at the import as not checked, a merge between reading a deal's
 contact and locking it left the new contact unchecked, and an unedited export listed every closed
 deal as an error. All were fixed with tests.
+
+## ADR-388 A Microsoft Teams format for the operations alert channel (P5-10) (2026-10-16)
+
+Context: the chat channel (ADR-338) posts each alert as a JSON object with a `text` member, the text
+escaped as Slack's formatting reads it. ADR-338, ADR-340 and ADR-345 left formats other than a JSON
+`text` member, such as Microsoft Teams', unbuilt. Microsoft 365 Connectors, Teams' old incoming
+webhooks, are nearing deprecation; Teams webhooks are now made with the Workflows app, whose flows
+post Adaptive Cards.
+
+Decision:
+
+- **Two formats:** `text`, as before (`POST`, `Content-Type: application/json`, `{"text": "…"}`, `&`,
+  `<` and `>` escaped as ADR-338 says), the format of every channel set before; and `teams_card`,
+  the message Microsoft documents for Teams webhooks: `{"type": "message", "attachments":
+[{"contentType": "application/vnd.microsoft.card.adaptive", "contentUrl": null, "content":
+{"$schema": "http://adaptivecards.io/schemas/adaptive-card.json", "type": "AdaptiveCard",
+"version": "1.2", "body": […]}}]}`, also sent as `application/json`. Each line of the alert (its
+  subject, its lines, its link) is a `TextBlock` with `wrap: true`, the subject with
+  `weight: "bolder"`; blank lines are left out. Nothing is escaped: HTML is not supported in
+  Adaptive Cards and would show as written. No button or action is used (Workflows do not render
+  buttons): the link is a line of text. The console labels them "JSON text (Slack and similar)" and
+  "Microsoft Teams card (Workflows)".
+- **The size limit:** Microsoft gives a message limit of 28 KB without saying whether a KB is 1,000
+  or 1,024 bytes, so a card is held to 28,000 bytes of serialized UTF-8 (`TEAMS_MESSAGE_MAX_BYTES`).
+  The alert text is already at most 4,000 characters, so one line always fits (at most 24,000 bytes
+  even if every character were escaped by JSON as `\u00XX`); only thousands of short lines can pass
+  the limit, and then the lines from the end are left out for a last block "…", the longest run
+  from the first line that fits being kept.
+- **Owners choose, operators see:** a platform owner chooses the format when setting or replacing
+  the address (`ops.platform_set_alert_channel` with five arguments; a new address takes the format
+  chosen, since another address may be another service, and keeps the kinds), or changes the format
+  alone on "Format posted" (`ops.platform_set_alert_channel_format`), without retyping the address:
+  the format says how the service at the same address reads a post and changing it reveals nothing
+  of the address, so asking for the secret again would add no protection. Both are SECURITY DEFINER,
+  owners only (also checked in the service), refuse an unknown format and audit the host and the
+  formats (`platform.alert_channel_set` with `format` and `previousFormat`,
+  `platform.alert_channel_format_set` with the host and the formats before and after, the same format
+  not audited); `platform.alert_channel_tested` names the format too. Never the address. Operators
+  see the format on the Alerts tab. The test post is rendered in the channel's format.
+- **Rendered at send time:** a post keeps its escaped `body` and now also `plain_body`, the same text
+  unescaped (`alertPostPlain`, at most 4,000 characters, cut before a character that would not be
+  whole). The worker renders the request body when it sends the post, from the channel's format of
+  that moment (returned by the claim, which holds the channel's row until the worker has read the
+  address, and which `ops.platform_set_alert_channel_format` locks before changing it) and the
+  unescaped text: `text` escapes it and cuts it as `alertPostBody` does, `teams_card` builds the
+  card. A format change therefore applies to the posts waiting; a post already claimed is sent in
+  the format it was claimed with.
+- **Posts queued before migration 0304 (expand and contract):** they have no `plain_body` and hold
+  Slack-escaped text. In `text` they are sent as queued, as before; for a card the three escapes are
+  undone (`chatUnescape`), which is exact on what `chatEscape` wrote because the cut never splits an
+  escape, so no text is escaped twice or left escaped in a card. `body` stays written (escaped) so
+  that workers of the release before can send any post; a later release may stop writing it once
+  no such worker or post can remain (posts are kept 7 days).
+- **Rollout:** migration 0304 runs first, then workers, then web, as usual. The functions of the
+  release before keep their signatures and behaviour: the four-argument set function sets `text`
+  (what the old form promises), the two-argument test and queue functions store the escaped text
+  only, and the state function returns the format as one more column, which old web servers do not
+  read. An old worker claims through `ops.claim_platform_alert_posts(integer)`, which now asks for
+  the `text` format only, so it is never handed a Teams channel's posts: they wait, unclaimed, their
+  attempts untouched, for a worker of this release, which claims through
+  `ops.claim_platform_alert_posts(integer, text[])` naming the formats it renders. The format is
+  written only by the definer role; the runtime role gets no new column. DEPLOYMENT (0304) gives the
+  order and the rollback.
+- **No company's words in a card:** the alert texts (`failureAlert`, `lateQueueAlert`,
+  `integrationAlert`, `settlementReconPost`, `unsettledPaymentsAlert`, the refund requests' notice
+  and the test post) were checked: they hold counts, days, HyFib's labels for providers, reasons,
+  integration kinds and states, queue names (HyFib's own, checked against `^[a-z][a-z0-9_.-]{0,99}$`
+  when a dead letter is recorded) and the console's address. No company name, contact, message,
+  amount or other text a company or customer writes reaches them, so Markdown cannot be injected
+  into a `TextBlock`, and no escaping is attempted (Microsoft documents none). A queue name with
+  underscores, such as `whatsapp.access_check`, is HyFib's text: should Teams' Markdown subset read
+  a pair of them as emphasis, the name shows in italics, which is cosmetic.
+- **Answers:** unchanged from ADR-338: any 2xx is sent; a 429, a 5xx or no answer is tried again 1,
+  2, 4 and 8 minutes later; anything else fails the post. Posts go out one at a time, at most 5 a
+  run; should a webhook answering fast take more than the four requests a second at which Microsoft
+  throttles, its 429 has the post tried again a minute later.
+- **Migration 0304:** `ops.platform_alert_channel.format` (`text` by default, checked), its update
+  grant to the definer role, `ops.platform_alert_posts.plain_body` (nullable, 1 to 4,000 characters);
+  the new functions above, and the release before's set, test, queue and claim functions and the
+  state function created again (dropped as their owner and created, granted and handed back, as 0261
+  did), each SECURITY DEFINER with its search path pinned and executable only by its calling role.
+
+Sources (fetched through the Microsoft Learn documentation tool on 2026-10-16):
+
+- https://learn.microsoft.com/microsoftteams/platform/webhooks-and-connectors/how-to/add-incoming-webhook:
+  confirmed that Microsoft 365 Connectors are nearing deprecation and Teams webhooks are made with
+  the Workflows app (the template "Send webhook alerts to a channel", or a flow with the trigger
+  "When a Teams webhook request is received"); "The message size limit is 28 KB. When the size
+  exceeds 28 KB, you receive an error."; more than four requests a second are throttled; Workflows
+  support Adaptive Cards and Message Cards without rendering buttons, and post in shared channels
+  but not yet in private ones; the JavaScript example's message (`type` `message`, the attachment's
+  `contentType`, `contentUrl` null, the card's `$schema`, `type` and `version` 1.2, a `TextBlock`);
+  and a plain `{"text": "Hello from a webhook workflow!"}` `POST` to a workflow address, so the
+  `text` format may already work with some workflow templates.
+- https://learn.microsoft.com/microsoftteams/platform/webhooks-and-connectors/how-to/connectors-using#send-adaptive-cards-using-an-incoming-webhook:
+  confirmed that `type` must be `message`, `attachments` holds the cards, `contentType` must be the
+  Adaptive Card type and `content` is the card; all native Adaptive Card elements but
+  `Action.Submit` are supported, and the actions `Action.OpenUrl`, `Action.ShowCard` and
+  `Action.ToggleVisibility`.
+- https://learn.microsoft.com/adaptive-cards/schema-explorer/text-block: `TextBlock`'s `type` and
+  `text` (required; a subset of Markdown), `weight` (`default`, `lighter`, `bolder`) and `wrap` ("If
+  true, allow text to wrap. Otherwise, text is clipped."), all of version 1.0.
+- https://learn.microsoft.com/microsoftteams/platform/task-modules-and-cards/cards/cards-format#format-cards-with-markdown:
+  Markdown is supported in an Adaptive Card's `TextBlock`, and "HTML isn't supported in Adaptive
+  Cards". The page was searched for these sentences and for escapes (it names `\n` and `\r` for
+  newlines and none for Markdown), not read in full.
+
+Not confirmed (not documented on those pages): the HTTP status a Workflows webhook answers with, and
+any Markdown escape syntax. No post was made to a real Teams channel: the card was checked against
+the documented shape by unit tests; integration and end-to-end tests with a local receiver were
+written and run in CI only.
+
+Not built: a format per alert, several channels, PagerDuty's or other formats, Message Cards,
+buttons or other card elements, mentions, reading a legacy connector's 200 answer whose body reports
+an HTTP 429 (Microsoft's sample notes connectors answer so; Workflows are not documented to), and
+dropping `body` (the contract step).
+
+Review (before merge): an independent review found three existing integration tests still setting
+the address without a format (refused since the format became required; they now name `text`), a
+sentence claiming the card was checked by integration and end-to-end tests that had not run, a
+claim that posting one at a time stays under Microsoft's throttle (up to 5 posts go out back to
+back; a 429 is tried again), and a format guard in the new claim that a NULL in the list of formats
+would have passed (now `IS NOT TRUE`). All were fixed.
+
+## ADR-389 Business hours per team (P3-06) (2026-10-16)
+
+Context: business hours were the company's only (ADR-030): one weekly schedule decided when every
+reply target, overdue email and automatic reply counted. ADR-377 gave teams their own
+first-response target but left it counted in the company's hours, so a night or weekend team, or
+one that answers around the clock, was held to the office's week. "Business hours per team" was
+listed as not built under P3-06 and in the feature matrix (H-011).
+
+Decision:
+
+- **A team's own week:** a team either uses the company's business hours (the default; every
+  existing team keeps them) or has its own weekly schedule, `app.team_business_hours` (migration
+  0303; weekday, opening and closing time, as `app.business_hours`, and two ranges of a team's day
+  never open at the same time), with the same shape and checks
+  as the company's: seven days, up to four ranges a day that end after they start and do not
+  overlap, 24:00 for midnight, and at least one opening time in the week (a team never open would
+  never be due a reply). It is set with the team's other settings, in Settings → Teams and through
+  `POST`/`PATCH /teams` (`businessHours`: seven days of `{opens, closes}` ranges, or null for the
+  company's), by those who manage teams (`inbox.supervise`; keys with `teams.manage`), and audited
+  with the team's change (`ownBusinessHours`, `businessHoursRanges`, and on updates
+  `businessHoursChanged`). A save that leaves the week as it is writes nothing to it.
+- **Closed days and time zone stay the company's** and apply to every team: a public holiday closes
+  the night team too, and one time zone keeps every schedule and report day comparable. Teams that
+  work on holidays are not built (below).
+- **Only while the company's business hours are on:** a team's week replaces the company's week,
+  not the switch. While business hours are off (or have no opening time) every conversation counts
+  absolute time and teams' weeks are kept but unused. One switch keeps "are business hours on?"
+  answerable in one place (Settings → Inbox, `GET /business-hours`, Reports' "business hours are
+  on"), and turning them off can never leave some conversations paused. Settings → Teams says so
+  beside the schedule, and when they are off that every conversation counts absolute time.
+- **Which calendar a conversation uses:** its current team's own week when the team has one, else
+  the company's (`calendarFor`), everywhere a business calendar is used for a conversation: the
+  inbox's reply timers (list and conversation) and the notice of overdue replies (ADR-241), which
+  ranks each team with its own target or week apart (one more than the notice takes from each
+  holds the earliest due of all); the overdue-reply emails (ADR-230), which say in whose business
+  hours a reply was counted; Reports' business-time
+  measures; and the automatic reply's delay (ADR-384). A conversation counts by the team it is in
+  now, as targets do (ADR-377). The company's calendar and every team's week are loaded once per
+  request, sweep or report (`loadBusinessCalendars`: one query for all teams' weeks), never per
+  conversation.
+- **Sweeps' SQL is unchanged:** `ops.overdue_reply_turns` and `ops.slow_reply_turns` find turns by
+  the target or delay in absolute time, a lower bound that any calendar only moves later; the
+  worker computes each due time with the conversation's calendar in the company's own scope. No
+  definer function is replaced; w360_definer gets only the deletion grants and policies on the new
+  table.
+- **Waiting rows planned again:** a waiting automatic reply or overdue notice holds the time an old
+  calendar gave. When the company's week or closed days change, every waiting row of the company is
+  planned again by the next sweep (`replanWaitingTurns`: the automatic replies and the overdue
+  notices); when a team's week (or, since this ADR, its target) changes, only the waiting rows of
+  that team's conversations are, so one team's change does not fill the sweeps' shared rounds with
+  the whole company's waits; when a conversation changes team, by any path (the inbox, the API,
+  routing, automations, a team's deletion), a trigger on `conversations.team_id` (0303, running as
+  the caller, which may update those columns of waiting rows) plans its own open turn's rows again.
+  Lateness then counts from the time a row was put off to when that is later than its due time, so
+  a replanned row is not counted late for having waited: the automatic reply's rule (ADR-384) and
+  the overdue notice's (`overdueNoticeTooLate`) alike. The overdue sweep takes the conversations
+  (`FOR SHARE SKIP LOCKED`, in id order) before their turns, as the automatic reply's sweep does, so
+  a change of team either waits for the sweep or is seen by it.
+- **Reports:** turns' business seconds are summed over the opening periods of their calendar
+  (`iv(cal, lo, hi)`: '' for the company's, a team's id for its own), built only for the teams whose
+  turns the report counts (open, or started or ended in its range). New definition versions say so:
+  `inbox.overdue` v4, `inbox.first_response_business_time` v3 and `inbox.within_target` v5; the
+  inbox section and report emails name teams with their own hours ("in their team's or the
+  company's business hours"), and `GET /reports` gives `teamBusinessHours`.
+- **Automations keep the company's calendar:** a trigger's "only while open/closed" and the
+  business-hours condition answer whether the company is open, as `GET /business-hours` does; a new
+  conversation's team is often decided after its trigger is checked, so a team's week there would
+  depend on routing's order. The builder now says "The company's business hours". Behaviour is
+  unchanged for every company.
+- **Deletion, export, erasure:** a team's week is deleted with the team (composite foreign key, on
+  delete cascade) and with the company (step 655, before teams); the company export includes the
+  table; it holds no personal data, so erasure is unaffected.
+
+Not built: closed days or a time zone per team, holiday calendars per team, a team schedule while
+the company's hours are off, per-team hours in automations' conditions and in `GET /business-hours`,
+schedules per WhatsApp number, and measuring a turn by the team (or week) its conversation had when
+the turn started.
+
+Review (before merge): an independent review found one Medium issue: the claim that a replanned
+overdue notice is not counted late for having waited held only for the automatic reply. The overdue
+sweep measured lateness from the newly computed due time alone, so a notice planned again more than
+a day after that time (a conversation moved out of a team whose week had put it off) was skipped as
+too late and nobody was emailed. Lateness now counts from the later of the two
+(`overdueNoticeTooLate`), with unit tests and an integration test that plans a notice again two days
+after its due time. It also found four Low issues and three nits. The overdue sweep read a
+conversation's team without locking it, so a change of team racing a sweep could leave a notice
+with the old calendar's time; it now takes the conversations before their turns. A team's change
+planned again every waiting row of the company; it now plans again only its own conversations'
+rows. Reports built opening periods for every team's week, used or not; now only for teams with
+turns in the report. The overdue email said "of business hours" for a reply counted in its team's
+week; it now names the team's hours. `PATCH /teams`' description named only automatic replies.
+Nothing in the database stopped two of a team's ranges from opening at the same time; a unique
+constraint now does, and its index replaces the read index. All of these were fixed. The ranking of
+the notice of overdue replies by team (ADR-241) still has no test that fails if teams with their own
+week are ranked together with the others; PROGRESS notes the gap.
+
+## ADR-390 A webhook event when a deal's custom field values change (P5-09, P4-04) (2026-10-16)
+
+Context: `deal.updated` (ADR-275) named changes of a deal's title, value and expected close date,
+but a change of its custom field values (ADR-373) sent no event. Members fill values on the deal
+page, keys through `fields`, automations with "Update deal fields" steps (ADR-386) and imports from
+a file (ADR-387), so an integration keeping deals in step (a CRM, a forecast sheet) never learnt of
+most of what changed on a deal. ADR-373 left webhook events for changes of values unbuilt.
+
+Decision:
+
+- **The same event, one more detail:** `deal.updated` names `fields` in `changes`, after the fixed
+  details (`title`, `valueMinor`, `expectedCloseOn`, `fields`), when an update changes the values of
+  any of the company's fields, and a new `changedFields` gives the keys of the fields whose values
+  were set, changed or removed, once each, in the order the fields were added (as Settings and
+  `GET /deal-fields` list them); it is empty when `changes` does not name `fields`, and for events
+  captured before. A new event type was not chosen: a change of values is a change of the deal's
+  details, endpoints already taking "Deal details" receive it without being changed, one edit of a
+  title and a value stays one event, and the pipeline, stage, owner, change-maker and key lists
+  (ADR-263 to ADR-265, ADR-306, ADR-321) apply as they do to every deal event. Keys go in their own
+  list rather than as `fields.<key>` entries in `changes` (as `contact.updated` names them) so that
+  `changes` stays the fixed list endpoints' detail lists are matched against and older workers
+  filter.
+- **Keys, never values:** values before a change are never sent (ADR-275), and the deal in the
+  payload still carries no custom field values (ADR-373, ADR-385): a receiver reads them with
+  `GET /deals/{id}` (`fields`, `deals.read`). Values are free text a company defines and may name
+  the customer, an endpoint has no scope that would say it may receive them, and every other deal
+  event's payload stays as it was. The OpenAPI document describes `fields` and `changedFields`.
+- **Which writes send it:** every update of `crm_deals.attributes` that changes a value of a field
+  the company has, whoever makes it: a member on the deal page, a key (`PATCH /deals/{id}` with
+  `fields`), an automation's step and a deal import changing a deal, each with its `changedBy`;
+  writes whose values compare equal (the same values again, an import row or a step that changed
+  nothing) send nothing. A deal added with values sends `deal.created` only, as before.
+- **A field's deletion sends no per-deal event:** deleting a field strips its value from every deal
+  (possibly thousands), a change of the company's field definitions, not of its deals; receivers
+  learn it from `GET /deal-fields`. The capture compares only keys of fields the company still has,
+  read under row security in the change's transaction, and the deletion deletes the field's row
+  before stripping the key (ADR-373), so the strip compares nothing. There is no setting, flag or
+  input that turns events off, so nothing a company, a request or a job payload supplies can
+  suppress an event; a stored key no field has (none exists, since deletion strips it under the
+  fields' lock) would never be compared either.
+- **Erasure names the values it clears:** erasing a contact clears its deals' values with their
+  title (ADR-373), and its `deal.updated` names `title` and `fields` with the keys cleared, as
+  ADR-275 sends its retitling, so a receiver drops values that may name the person. Erasure runs as
+  the definer role, which may now read a field's key and when it was added (a column grant) for the
+  company erasure runs for (a policy on `app.current_tenant_id()`), and nothing else of a field.
+- **Its place among one update's steps:** with the other details: reopened, moved, details changed
+  (one `deal.updated` naming every detail the update changed), given to another owner, closed, each
+  stamped with `clock_timestamp()`. A key moving a deal and changing a value sends the move, then
+  the change; an import row closing the deal it changes sends the change, then the close.
+- **Endpoints may choose it:** "Custom fields" (`fields`) joins the details an endpoint taking
+  `deal.updated` may list (ADR-310). Lists saved before keep their details, so they do not receive a
+  change of values alone until it is added; null still takes every change.
+- **The API's deal history** (ADR-281) gives the changes the deal events report, so a `deal_updated`
+  entry naming custom fields is now given, with `fields` in its `changes` (the timeline does not
+  keep keys, so the history names none); a change of products alone is still not given. Entries
+  recorded before 0305 for a change of values (members, keys and steps since ADR-373) appear too,
+  though no event was sent for them then.
+- **Who made the change:** the changer trigger (ADR-277) now also fires on values, so a change of
+  values written without its maker (erasure, a field's deletion) never names an earlier one.
+- **Migrations 0305 and 0306:** 0305 replaces `app.webhook_capture_deal` in place (not SECURITY
+  DEFINER: it runs as the role making the change; search path pinned) and its trigger and the
+  changer trigger with `attributes` in their column lists and conditions; widens the events' detail
+  check from 2,048 to 4,096 bytes (NOT VALID; 0306 validates it while captures go on), since 50
+  keys of 40 characters with the rest of the detail take about 2,600 bytes and erasure of such a
+  deal must not fail; replaces the endpoints' `deal_details` check to take 1 to 4 details with
+  `fields` (validated at once: at most 10 endpoints per company); and grants the definer role
+  `SELECT (key, created_at)` on `app.crm_deal_fields` with the policy `deal_capture_read`.
+  `app.capture_webhook_event` is unchanged: its detail filter already matches `changes`.
+- **Rollout:** the trigger runs in the database, so events name values from the migration on,
+  whichever release changed the deal. A worker from before it renders such an event with `changes`
+  leaving out `fields` (empty for a change of values alone) and without `changedFields`; workers
+  roll out right after the migration, as usual, and a delivery an old worker made can be replayed.
+  An old web server neither offers `fields` in Settings nor saves an endpoint whose list holds it,
+  and its history leaves the entries out (`docs/DEPLOYMENT.md`).
+
+Not built: the values (or values before) in the payload, keys named in the API's deal history,
+an event of its own for a change of values, a notice to receivers when a field is deleted, and an
+end-to-end test of its own.
+
+Review (before merge): an independent review found no High or Medium issue. It found ADR-275's
+runbook paragraph still saying `deal.updated` names only the fixed details and comes only from
+members and keys; `changedBy`'s description giving only erasure as a change recorded without its
+maker, though deleting a field clears it too; history entries for a change of values recorded before
+0305, when no event was sent, now given by the API's deal history (said above); and the capture
+relying on 0293's `SELECT (tenant_id, id)` grant as well as the new one (now said in 0305). All were
+fixed. The deal detail keeps the label "Custom fields", as the deal's timeline names it: it sits in
+the deal details' own group, apart from the contact event's "Custom fields" group.
+
+## ADR-391 Filtering the deals board by a choice field (P4-04) (2026-10-16)
+
+Context: choice-type deal fields (ADR-385) let a company sort its deals by a fixed list (a tier, a
+source, a region), but the board showed every open deal of a pipeline, filtered by owner only, so a
+member looking at the Gold deals had to open each one or export everything. ADR-385 left "filtering
+the board or reports by a choice" unbuilt.
+
+Decision:
+
+- **One field filter beside the owner filter:** the board takes one choice field and one of its
+  options, or "Not set" (deals without a value); yes/no fields take Yes, No or Not set through the
+  same mechanism. Columns, counts, totals, each stage's weighted figure and the weighted pipeline
+  and month (ADR-242) follow it exactly as they follow the owner filter, and both apply together. A
+  "Deal field" select (choices grouped by field and named "Tier: Gold", "Tier: Not set") with a
+  "Filter deals" button sits under the pipeline and owner filters when the company has a choice or
+  yes/no field, with "Show all deals" while one applies. It is a plain GET form (an uncontrolled
+  select, the pipeline and owner as hidden inputs), so it works before hydration and needs no
+  client code.
+- **In the address, never trusted:** `?field=<key>:<option>`, `<key>:yes` or `<key>:no` for a yes/no
+  field, and `<key>:` for "Not set". Keys never hold a colon (`^[a-z][a-z0-9_]{0,39}$`) and options
+  are never empty, so the text splits at its first colon unambiguously and an option holding a colon
+  still reads. `parseDealFieldFilterParam` and `resolveDealFieldFilter` (`crm/deal-field-filter.ts`,
+  pure) read it and look the key up among the company's own fields, read in the company's scope in
+  the board's read-only transaction: the field must be a choice or yes/no field, and the option one
+  of its options in any case (options never differ by case alone, ADR-385), resolved to the option
+  as written; `yes`/`no` in any case. A repeated `field` counts by its first value, on the board as
+  in the export. The page keeps the filter in the board's other links and in the export link as the
+  board resolved it, never as the address wrote it; the won and lost lists' links drop it.
+- **The query:** `dealFieldCondition` adds `(attributes -> key) = <value>::jsonb` (the option as a
+  JSON string, or a JSON boolean) or `not (attributes ? key)` for "Not set" to the board's and the
+  export's existing conditions (company, pipeline, status, owner). Values are stored as the option is
+  written (ADR-385) and an empty value removes the key, so an exact JSON comparison is right and a
+  text field holding the same word never matches. The key and the value are bound parameters.
+- **No index, no migration:** the board already reads every open deal of the pipeline for its counts
+  and totals through `crm_deals_board_idx` (tenant, pipeline, status, stage); the field condition
+  only filters those rows, as the owner condition does. A pipeline's open deals are hundreds to a few
+  thousand rows a company, read in one statement for the totals, so an expression index per key
+  (keys are the company's own, up to 50) would add write cost for no measurable read gain. The
+  export filters within the batches it already reads by creation time.
+- **Stale or edited links:** the board ignores a filter that does not resolve (malformed, too long,
+  a deleted field, a removed option, a text, number or date field, another company's key) and shows
+  every deal with a notice, "Showing every deal", that the link's filter matches no field or option,
+  without echoing the address's text. Another company's key resolves only if this company has a
+  field of that key, and then it is this company's field.
+- **The export follows, strictly:** `GET /c/{slug}/crm/export` takes `field` as it takes `owner`;
+  the page sends it only with the board's open deals of a pipeline, the view it filters. An export
+  refuses a filter that does not resolve (400, "This deal field no longer exists.", "This option is
+  not one of the deal field’s options.", "Deals can be filtered only by a choice or yes/no field.",
+  "The deal field filter is not valid.") before anything is audited, so a file is never silently
+  wider than asked. `crm.deals_exported` records `field: { key, match }` with `match` one of
+  `option`, `yes`, `no` and `not_set`: the field's key and the kind of match, never the option, as
+  ADR-385 audits options by count; exports without a field filter are audited as before, with no
+  `field` entry.
+- **Permissions unchanged:** the board needs `crm.read` (the page checks it itself), the export
+  `crm.read` and `contacts.export`. The API is unchanged.
+
+Not built: filtering Reports by a choice, several field filters at once (or several options of one
+field), filters by text, number or date fields, the field filter on the won and lost lists and
+through the public API (`GET /deals`), and saving a filtered view.
+
+Review (before merge): an independent review found one Medium issue: "Show all deals" navigates in
+the browser, which keeps the page's elements, so the select went on showing the filter it had
+cleared, and "Filter deals" would apply it again; the select is now keyed by the applied filter, and
+the end-to-end test checks it after the link. It also found that a repeated `field` was dropped
+without the notice (it now counts by its first value, as the export reads it), that the won and lost
+lists' links carried a filter nothing applies there (they drop it), a misleading test comment and a
+slip in this record. All were fixed. A choice option named "Not set" still reads like the field's
+"Not set" in the select, as on the new-deal form.

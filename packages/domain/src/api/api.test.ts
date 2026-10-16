@@ -4603,7 +4603,7 @@ describe('webhook endpoints through the API (ADR-081)', () => {
     const given = (schemas.CreateWebhookEndpoint as { properties: Record<string, unknown> })
       .properties;
     expect(JSON.stringify(given.dealDetails)).toContain(
-      "as deal.updated (title, valueMinor, expectedCloseOn, as the event's changes names them): a change is sent when it changed one of them, naming every detail it changed; only with the deal.updated event",
+      "as deal.updated (title, valueMinor, expectedCloseOn, fields, as the event's changes names them): a change is sent when it changed one of them, naming every detail it changed; only with the deal.updated event",
     );
     expect(JSON.stringify(given.taskDetails)).toContain(
       "as task.updated (title, notes, dueAt, remindAt, as the event's changes names them): a change is sent when it changed one of them, naming every detail it changed; only with the task.updated event",

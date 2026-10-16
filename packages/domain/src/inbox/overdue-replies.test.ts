@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
+  OVERDUE_NOTICE_LATE_LIMIT_MS,
+  overdueNoticeTooLate,
   overdueReplyEmail,
   responsibleMembers,
   targetText,
@@ -164,6 +166,30 @@ describe('the overdue reply email (ADR-230)', () => {
     );
   });
 
+  it('names the team’s own business hours when its due time was counted in them (ADR-389)', () => {
+    const team = { reason: 'team' as const, teamName: 'Returns', startedAt: at };
+    // The company's target, counted in the team's own week.
+    expect(
+      overdueReplyEmail({
+        ...base,
+        businessHours: true,
+        items: [{ ...team, teamOwnHours: true }],
+      }).lines[0],
+    ).toBe(
+      'A customer has waited longer than your company’s reply target of 30 minutes of the Returns team’s business hours, in a conversation for the Returns team that nobody has taken yet.',
+    );
+    // The team's own target, counted in its own week.
+    expect(
+      overdueReplyEmail({
+        ...base,
+        businessHours: true,
+        items: [{ ...team, teamTargetMinutes: 15, teamOwnHours: true }],
+      }).lines[0],
+    ).toBe(
+      'A customer has waited longer than the Returns team’s reply target of 15 minutes of its business hours, in a conversation for the Returns team that nobody has taken yet.',
+    );
+  });
+
   it('counts the replies of a burst in one email, the longest wait first', () => {
     const email = overdueReplyEmail({
       ...base,
@@ -182,5 +208,51 @@ describe('the overdue reply email (ADR-230)', () => {
         'Open the inbox, longest wait first, to reply; this email leaves out the customers’ details and messages.',
       ],
     });
+  });
+});
+
+describe('when an overdue notice is too late (ADR-230, ADR-389)', () => {
+  const dueAt = new Date('2026-10-12T05:00:00Z');
+  const after = (ms: number) => new Date(dueAt.getTime() + ms);
+
+  it('is more than a day after the reply was due', () => {
+    expect(OVERDUE_NOTICE_LATE_LIMIT_MS).toBe(24 * 3_600_000);
+    expect(
+      overdueNoticeTooLate({ now: after(OVERDUE_NOTICE_LATE_LIMIT_MS), dueAt, waitedUntil: null }),
+    ).toBe(false);
+    expect(
+      overdueNoticeTooLate({
+        now: after(OVERDUE_NOTICE_LATE_LIMIT_MS + 1),
+        dueAt,
+        waitedUntil: null,
+      }),
+    ).toBe(true);
+  });
+
+  it('counts from the time a waiting notice was put off to, when that is later', () => {
+    // Planned again two days after it fell due (its team's week changed): not late for having waited.
+    const replanned = after(2 * 24 * 3_600_000);
+    expect(
+      overdueNoticeTooLate({
+        now: after(2 * 24 * 3_600_000 + 60_000),
+        dueAt,
+        waitedUntil: replanned,
+      }),
+    ).toBe(false);
+    expect(
+      overdueNoticeTooLate({
+        now: new Date(replanned.getTime() + OVERDUE_NOTICE_LATE_LIMIT_MS + 1),
+        dueAt,
+        waitedUntil: replanned,
+      }),
+    ).toBe(true);
+    // An earlier time put off to changes nothing.
+    expect(
+      overdueNoticeTooLate({
+        now: after(OVERDUE_NOTICE_LATE_LIMIT_MS + 1),
+        dueAt,
+        waitedUntil: new Date(dueAt.getTime() - 60_000),
+      }),
+    ).toBe(true);
   });
 });

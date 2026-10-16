@@ -700,7 +700,7 @@ describe('company report', () => {
     expect(report.definitions).toEqual(currentMetricDefinitions());
     // Automations changed what a reply turn is (migration 0011), and teams got their own targets
     // (migration 0296): each a new version, not an edit.
-    expect(report.definitions.find((d) => d.key === 'inbox.within_target')?.version).toBe(4);
+    expect(report.definitions.find((d) => d.key === 'inbox.within_target')?.version).toBe(5);
     expect(report.definitions.find((d) => d.key === 'automation.outcomes')).toMatchObject({
       version: 2,
       available: true,
@@ -1006,6 +1006,66 @@ describe('business hours, resolution time and CSAT', () => {
     expect(teamOnly.inbox.turns.withinTarget).toEqual({ numerator: 2, denominator: 2 });
     expect(teamOnly.inbox.now.overTarget).toBe(0);
     const latest = teamOnly.definitions.find((d) => d.key === 'inbox.within_target');
-    expect(latest?.version).toBe(4);
+    expect(latest?.version).toBe(5);
+  });
+
+  it('counts business time in the hours of each conversation’s team when it has its own (ADR-389)', async () => {
+    const owner = await fx.ctx(c, c.owner);
+    const hours = createBusinessHoursService({ db: fx.dbs.app, clock });
+    const weekdays = [
+      '09:00-17:00',
+      '09:00-17:00',
+      '09:00-17:00',
+      '09:00-17:00',
+      '09:00-17:00',
+      '',
+      '',
+    ];
+    await hours.updateBusinessHours(owner, { enabled: true, days: weekdays });
+    await createInboxService({ db: fx.dbs.app, clock }).updateResponseTarget(owner, {
+      minutes: 60,
+    });
+    // A weekend team, open all Saturday and Sunday, without a target of its own: B and C move to
+    // it; A stays in the night shift (the company's hours, its own day-long target) and D in none.
+    const { teamId } = await createTeamsService({ db: fx.dbs.app, clock }).createTeam(owner, {
+      name: 'Weekends',
+      businessHours: ['', '', '', '', '', '00:00-24:00', '00:00-24:00'],
+    });
+    for (const name of ['b', 'c']) {
+      await fx.query(`UPDATE app.conversations SET team_id = $1 WHERE id = $2`, [
+        teamId,
+        seeded.get(name),
+      ]);
+    }
+    const reports = createReportsService({ db: fx.dbs.app, clock });
+    const report = await reports.getReport(owner, period);
+    expect(report.inbox.businessHours).toBe(true);
+    expect(report.inbox.teamBusinessHours).toEqual([{ teamId, name: 'Weekends' }]);
+    // B, Saturday 10:00 to Monday 09:10, is 38 business hours of the weekend team (Saturday from
+    // 10:00 and all Sunday) instead of the company's 10 minutes; A's are the company's 1 h and 2.5 h.
+    expect(report.inbox.turns).toMatchObject({
+      started: 3,
+      answered: 3,
+      businessMedianSeconds: 9_000,
+      businessP90Seconds: 111_240,
+      // A's two within the night shift's day; B past the company's hour in the team's hours.
+      withinTarget: { numerator: 2, denominator: 3 },
+    });
+    expect(report.inbox.days.find((x) => x.day === '2026-09-19')).toMatchObject({
+      businessMedianSeconds: 136_800,
+    });
+    // C has waited since Friday 16:50: 11.5 hours of the weekend team's Saturday, past the hour;
+    // D since Thursday 09:00, 16 business hours of the company's.
+    expect(report.inbox.now.overTarget).toBe(2);
+    const version = (key: string) => report.definitions.find((d) => d.key === key)?.version;
+    expect(version('inbox.first_response_business_time')).toBe(3);
+    expect(version('inbox.overdue')).toBe(4);
+    expect(version('inbox.within_target')).toBe(5);
+
+    // Business hours off: absolute time for every team, and none listed with its own hours.
+    await hours.updateBusinessHours(owner, { enabled: false, days: weekdays });
+    const off = await reports.getReport(owner, period);
+    expect(off.inbox.teamBusinessHours).toEqual([]);
+    expect(off.inbox.turns.businessMedianSeconds).toBeNull();
   });
 });

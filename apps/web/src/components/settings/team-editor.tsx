@@ -18,9 +18,14 @@ export interface TeamFormValues {
   maxOpenPerMember: number | null;
   routingKeywords: string[];
   firstResponseTargetMinutes: number | null;
+  /** The team's own week as seven days of text (ADR-389); null uses the company's hours. */
+  businessHours: string[] | null;
   memberIds: string[];
   channelIds: string[];
 }
+
+const DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+const CLOSED_WEEK = ['', '', '', '', '', '', ''];
 
 /** Creates or edits a team: members, numbers that start conversations in it, and routing. */
 export function TeamForm({
@@ -28,11 +33,14 @@ export function TeamForm({
   team,
   members,
   channels,
+  companyHours,
 }: {
   slug: string;
   team?: TeamFormValues;
   members: { membershipId: string; name: string }[];
   channels: { id: string; label: string }[];
+  /** The company's business hours: whether they are on, and its time zone (ADR-389). */
+  companyHours: { on: boolean; timeZone: string };
 }) {
   const prefix = useId();
   const [name, setName] = useState(team?.name ?? '');
@@ -45,6 +53,8 @@ export function TeamForm({
   const [target, setTarget] = useState(
     team?.firstResponseTargetMinutes ? String(team.firstResponseTargetMinutes) : '',
   );
+  const [ownHours, setOwnHours] = useState((team?.businessHours ?? null) !== null);
+  const [hours, setHours] = useState<string[]>(team?.businessHours ?? CLOSED_WEEK);
   const [memberIds, setMemberIds] = useState<string[]>(team?.memberIds ?? []);
   const [channelIds, setChannelIds] = useState<string[]>(team?.channelIds ?? []);
   const [error, setError] = useState<string | null>(null);
@@ -68,6 +78,7 @@ export function TeamForm({
           maxOpenPerMember: limit,
           routingKeywords: keywords,
           firstResponseTargetMinutes: target,
+          businessHours: ownHours ? hours : null,
           memberIds,
           channelIds,
         };
@@ -96,6 +107,8 @@ export function TeamForm({
               setLimit('');
               setKeywords('');
               setTarget('');
+              setOwnHours(false);
+              setHours(CLOSED_WEEK);
               setMemberIds([]);
               setChannelIds([]);
             }
@@ -181,7 +194,7 @@ export function TeamForm({
         <Field
           id={`${prefix}-target`}
           label="Reply target in minutes (optional)"
-          description="Customers waiting in the team’s conversations are due a reply within it, in business hours when they are on. Empty uses the company’s target (Settings → Inbox)."
+          description="Customers waiting in the team’s conversations are due a reply within it, in business hours when they are on (the team’s own, else the company’s). Empty uses the company’s target (Settings → Inbox)."
         >
           {(aria) => (
             <Input
@@ -210,6 +223,63 @@ export function TeamForm({
           )}
         </Field>
       </div>
+      <fieldset className="grid gap-2">
+        <legend className="text-sm font-medium">Business hours</legend>
+        <p className="text-sm text-muted-foreground">
+          The hours in which the team’s reply target and the automatic reply’s delay count. A team’s
+          own hours apply only while business hours are on in Settings → Inbox; closed days and the
+          time zone ({companyHours.timeZone}) stay the company’s.
+          {companyHours.on
+            ? ''
+            : ' Business hours are off now, so every conversation counts absolute time.'}
+        </p>
+        <label className="flex items-start gap-2 text-sm">
+          <input
+            type="radio"
+            name={`${prefix}-hours`}
+            className="mt-1"
+            checked={!ownHours}
+            onChange={() => setOwnHours(false)}
+          />
+          <span>Use the company’s business hours</span>
+        </label>
+        <label className="flex items-start gap-2 text-sm">
+          <input
+            type="radio"
+            name={`${prefix}-hours`}
+            className="mt-1"
+            checked={ownHours}
+            onChange={() => setOwnHours(true)}
+          />
+          <span>Its own weekly schedule</span>
+        </label>
+        {ownHours ? (
+          <div className="grid gap-3 sm:grid-cols-2">
+            {DAYS.map((day, i) => (
+              <Field
+                key={day}
+                id={`${prefix}-hours-${i}`}
+                label={day}
+                {...(i === 0
+                  ? { description: 'Ranges like 09:00-13:00, 14:00-18:00. Empty: closed.' }
+                  : {})}
+              >
+                {(aria) => (
+                  <Input
+                    {...aria}
+                    value={hours[i] ?? ''}
+                    placeholder="Closed"
+                    autoComplete="off"
+                    onChange={(e) =>
+                      setHours((prev) => prev.map((d, j) => (j === i ? e.target.value : d)))
+                    }
+                  />
+                )}
+              </Field>
+            ))}
+          </div>
+        ) : null}
+      </fieldset>
       <fieldset className="grid gap-2">
         <legend className="text-sm font-medium">Members</legend>
         {members.length === 0 ? (

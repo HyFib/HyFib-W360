@@ -187,7 +187,11 @@ verification, app review, Embedded Signup configuration).
   business hours when they are on, sent once per wait by the worker's minute sweep through the send
   pipeline, inside the service window, never while an automation handles the conversation, never in
   a resolved conversation, never to customers who opted out; it does not end the wait).
-  **Remaining:** per-team calendars, private team queues (would change visibility,
+  **[Business hours per team built; their database and browser tests run only in CI]** (ADR-389,
+  migration 0303: a team's own weekly schedule, in Settings → Teams and the teams API, used while
+  the company's business hours are on for its conversations' timers, notice, overdue emails,
+  reports and automatic reply; closed days and the time zone stay the company's).
+  **Remaining:** closed days per team, private team queues (would change visibility,
   ADR-029), CSAT by template outside the window (needs a consent decision), CSAT with a real WABA
   (phone-number masking: P3-01, ADR-226).
 
@@ -336,14 +340,21 @@ verification, app review, Embedded Signup configuration).
   migration 0293: owners and administrators define up to 50 text, number, date or yes/no fields in
   Settings → Pipelines, audited; members set values on the deal page and keys through `fields` on
   `POST`/`PATCH /deals`, checked by type; `GET /deal-fields`; a CSV column per field; deletion
-  strips values from every deal; erasure clears them. Not built: webhook events for changes of
-  values; automation steps that set values were built later, ADR-386).
+  strips values from every deal; erasure clears them. Webhook events for changes of values and
+  automation steps that set values were built later, ADR-390 and ADR-386).
   **[Choice-type custom deal fields built; their database and browser tests run only in CI]**
   (ADR-385, migration 0301: a `choice` field has 1 to 50 options, in order, unique ignoring case;
   forms show a select and CSV import takes an option in any case, the API exactly; `GET
 /deal-fields` gives `options`; options can be added and reordered, and removed or renamed only
   while no deal has them chosen. Not built: multi-select, renaming a chosen option with its values,
-  filtering by a choice).
+  filtering by a choice, since built for the board, ADR-391).
+  **[Filtering the deals board by a choice field built; its database and browser tests run only in
+  CI]** (ADR-391, no migration: one choice field's option, or "Not set", filters the board's
+  columns, counts, totals and weighted figures with the owner filter, yes/no fields too, kept in the
+  address as `field=<key>:<option>` and resolved against the company's own fields; a stale link shows
+  every deal with a notice; the export of the view follows it, refusing a filter that does not
+  resolve, audited with the key, never the option. Not built: Reports by a choice, several filters
+  at once, the API filter).
   **[Automation steps that set custom deal fields built; their database and browser tests run only
   in CI]** (ADR-386, migration 0302 for webhook endpoints' kinds of step: an "Update deal fields"
   step sets 1 to 20 values, with placeholders, on the contact's single open deal in a pipeline,
@@ -1258,6 +1269,13 @@ verification, app review, Embedded Signup configuration).
   or API keys, and for erasure's retitling, naming what changed, never the values before; the
   pipeline, stage and owner lists narrow it; one change that also moves, reopens, closes or gives
   the deal away sends each event in the order the steps happen).
+  **[Deal custom field value events built; their database tests run only in CI]** (ADR-390,
+  migrations 0305 and 0306: `deal.updated` names `fields` after the fixed details, with the keys of
+  the fields whose values changed (`changedFields`), never a value, for members, keys, automation
+  steps, deal imports and erasure's clearing; deleting a field sends no per-deal event; endpoints
+  may choose `fields` among their deal details; the API's deal history names it. Not built: the
+  values in the payload, which fields of a deal's import or step a receiver asked for, a
+  `deal.fields_changed` event of its own).
   **[Task detail events built; their database tests run only in CI]** (ADR-276, migrations 0194 and
   0195: `task.updated` for every change of a task's title, notes, due time or reminder by members or
   API keys, naming what changed, never the values or the notes; the assignee list narrows it; one
@@ -1543,11 +1561,14 @@ verification, app review, Embedded Signup configuration).
   **[The year's failed sends by reason and by company as CSV built; their database and browser
   tests run only in CI]** (ADR-365, no migration: "Download CSV" on both cards, audited and
   formula-safe as the console's other exports, a line per reason or company with its months).
+  **[A Microsoft Teams format for the alert channel built; its database and browser tests run only
+  in CI; no post was made to a real Teams channel]** (ADR-388, migration 0304: owners choose JSON
+  text or a Teams Adaptive Card when they set the channel, or change the format alone; the worker
+  renders each post in the channel's format when it sends it).
   Remaining:
-  other alert channels (several channels, a channel per alert, formats other than a JSON `text`
-  member, such as Microsoft Teams' or PagerDuty's, and the owners' other notices, such as personal
-  notices, in a channel; Microsoft's documentation of Teams' webhooks could not be opened from
-  here), other charts (other measures, such as the companies ranked by the share of their sends
+  other alert channels (several channels, a channel per alert, formats other than JSON text and a
+  Teams card, such as PagerDuty's, and the owners' other notices, such as personal notices, in a
+  channel), other charts (other measures, such as the companies ranked by the share of their sends
   failed), Meta's quality
   webhook (unconfirmed), rollups for many companies and pages read from the database.
 - **P5-11 Account export/deletion workflow** **[built, locally verified with test data only]**

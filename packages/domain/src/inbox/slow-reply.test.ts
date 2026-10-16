@@ -1,7 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { isAppError } from '@w360/core';
 import { parseInput } from '../validation';
-import type { BusinessCalendar, BusinessInterval } from './business-hours';
+import {
+  businessCalendars,
+  calendarFor,
+  type BusinessCalendar,
+  type BusinessInterval,
+} from './business-hours';
 import {
   SLOW_REPLY_DEFAULTS,
   SLOW_REPLY_LATE_LIMIT_MS,
@@ -155,6 +160,35 @@ describe('what the sweep does with an open reply turn (ADR-384)', () => {
     expect(
       planSlowReply({ ...base, calendar: kolkata, startedAt: friday, now: new Date(friday) }),
     ).toEqual({ kind: 'wait', dueAt: new Date('2026-09-28T03:35:00Z') });
+  });
+
+  it('counts the delay in the business hours of the conversation’s team when it has its own (ADR-389)', () => {
+    // A weekend team open Saturday and Sunday 10:00 to 14:00 local, with the company's calendar.
+    const weekend = [6, 7].map((weekday) => ({ weekday, opens: 10 * 60, closes: 14 * 60 }));
+    const calendars = businessCalendars(kolkata, new Map([['team-weekend', weekend]]));
+    // Friday 16:50 local: the company's conversations wait for Monday 09:05; the weekend team's
+    // for Saturday 10:15.
+    const friday = new Date('2026-09-25T11:20:00Z');
+    const plan = (teamId: string | null) =>
+      planSlowReply({
+        ...base,
+        calendar: calendarFor(calendars, teamId),
+        startedAt: friday,
+        now: new Date(friday),
+      });
+    expect(plan(null)).toEqual({ kind: 'wait', dueAt: new Date('2026-09-28T03:35:00Z') });
+    expect(plan('team-sales')).toEqual({ kind: 'wait', dueAt: new Date('2026-09-28T03:35:00Z') });
+    expect(plan('team-weekend')).toEqual({ kind: 'wait', dueAt: new Date('2026-09-26T04:45:00Z') });
+    // While the company's business hours are off, the delay is absolute time for every team.
+    const off = businessCalendars(null, new Map([['team-weekend', weekend]]));
+    expect(
+      planSlowReply({
+        ...base,
+        calendar: calendarFor(off, 'team-weekend'),
+        startedAt: friday,
+        now: new Date(friday),
+      }),
+    ).toEqual({ kind: 'wait', dueAt: new Date('2026-09-25T11:35:00Z') });
   });
 
   it('looks again in a day when the calendar never opens for the delay', () => {

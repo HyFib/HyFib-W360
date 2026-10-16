@@ -6753,10 +6753,16 @@ describe('CRM pipelines and deals (ADR-253)', () => {
     expect(
       (await apiUpdateDeal(deps(), writer.ctx, deal.id, { fields: { signed: true } })).version,
     ).toBe(2);
-    // History names the details deal events report; a change of custom fields alone is not one.
+    // History names the details deal events report, custom field values among them (ADR-390).
     expect(
-      (await apiListDealHistory(deps(), reader.ctx, deal.id, {})).data.map((e) => e.type),
-    ).toEqual(['created']);
+      (await apiListDealHistory(deps(), reader.ctx, deal.id, {})).data.map((e) => [
+        e.type,
+        e.changes,
+      ]),
+    ).toEqual([
+      ['updated', ['fields']],
+      ['created', null],
+    ]);
     await apiUpdateDeal(deps(), writer.ctx, deal.id, {
       title: 'Seats plan',
       fields: { signed: false },
@@ -6767,7 +6773,8 @@ describe('CRM pipelines and deals (ADR-253)', () => {
         e.changes,
       ]),
     ).toEqual([
-      ['updated', ['title']],
+      ['updated', ['title', 'fields']],
+      ['updated', ['fields']],
       ['created', null],
     ]);
   });
@@ -9241,6 +9248,103 @@ describe('assigning conversations (ADR-093)', () => {
       ['team.updated', 'api_key', manager.id],
       ['team.updated', 'api_key', manager.id],
       ['team.deleted', 'api_key', manager.id],
+    ]);
+  });
+
+  it('give a team its own business hours, checked as Settings checks them, as the key (ADR-389)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const manager = await apiKey(c, ['teams.manage']);
+    const week = [
+      [
+        { opens: '09:00', closes: '13:00' },
+        { opens: '14:00', closes: '18:00' },
+      ],
+      [],
+      [],
+      [],
+      [],
+      [{ opens: '10:00', closes: '24:00' }],
+      [],
+    ];
+    const created = await apiCreateTeam(
+      deps(),
+      manager.ctx,
+      { name: 'Night', businessHours: week },
+      null,
+    );
+    const night = settingsOfBody(created);
+    expect(night.businessHours).toEqual(week);
+    expect(await apiGetTeam(deps(), manager.ctx, night.id)).toEqual(night);
+    const [inSettings] = (await teams().listTeams(owner)).filter((t) => t.id === night.id);
+    expect(inSettings?.businessHours).toEqual([
+      { weekday: 1, opens: 540, closes: 780 },
+      { weekday: 1, opens: 840, closes: 1080 },
+      { weekday: 6, opens: 600, closes: 1440 },
+    ]);
+    // A team without its own uses the company's.
+    expect(
+      settingsOfBody(await apiCreateTeam(deps(), manager.ctx, { name: 'Sales' }, null))
+        .businessHours,
+    ).toBeNull();
+
+    const update = (input: Record<string, unknown>) =>
+      apiUpdateTeam(deps(), manager.ctx, night.id, input);
+    const paths = (error: unknown) =>
+      isAppError(error) ? (error.issues ?? []).map((i) => i.path) : [];
+    // Ranges that overlap, end before they start, or close the whole week are refused, naming the
+    // day; nothing changes.
+    expect(
+      paths(
+        await expectAppError(
+          update({
+            businessHours: week.map((d, i) =>
+              i === 2
+                ? [
+                    { opens: '09:00', closes: '12:00' },
+                    { opens: '11:00', closes: '13:00' },
+                  ]
+                : d,
+            ),
+          }),
+          'validation_failed',
+          /Wednesday: Time ranges on the same day must not overlap/,
+        ),
+      ),
+    ).toEqual(['businessHours.2']);
+    await expectAppError(
+      update({ businessHours: week.map(() => []) }),
+      'validation_failed',
+      /at least one opening time/,
+    );
+    expect((await apiGetTeam(deps(), manager.ctx, night.id)).businessHours).toEqual(week);
+
+    // Other settings keep the hours; the same hours again write nothing; null gives the team the
+    // company's again.
+    expect((await update({ description: 'After hours' })).businessHours).toEqual(week);
+    expect((await update({ businessHours: week })).businessHours).toEqual(week);
+    expect((await update({ businessHours: null })).businessHours).toBeNull();
+    const rows = await fx.query(`SELECT id FROM app.team_business_hours WHERE team_id = $1`, [
+      night.id,
+    ]);
+    expect(rows).toEqual([]);
+
+    const audits = await fx.query<{ action: string; metadata: Record<string, unknown> }>(
+      `SELECT action, metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND subject_id = $2 ORDER BY occurred_at, id`,
+      [c.tenant.id, night.id],
+    );
+    expect(
+      audits.map((a) => [
+        a.action,
+        a.metadata.ownBusinessHours,
+        a.metadata.businessHoursChanged,
+        a.metadata.source,
+      ]),
+    ).toEqual([
+      ['team.created', true, undefined, 'api'],
+      ['team.updated', true, false, 'api'],
+      ['team.updated', false, true, 'api'],
     ]);
   });
 

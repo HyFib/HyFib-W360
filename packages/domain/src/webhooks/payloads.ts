@@ -48,7 +48,7 @@ import {
   type WebhookEventType,
 } from '@w360/db';
 import { apiContactColumns, apiContactSchema, toApiContact } from '../api/contact-view';
-import { NODE_TYPES } from '../automations/graph';
+import { FIELD_KEY_RE, NODE_TYPES } from '../automations/graph';
 import {
   apiPaymentLinkSchema,
   paymentLinkColumns,
@@ -826,8 +826,16 @@ const webhookDealDataSchema = z.object({
 
 export const dealCreatedPayloadSchema = envelope('deal.created', webhookDealDataSchema);
 
-/** The details of a deal whose change deal.updated reports (ADR-275), as its payload names them. */
-export const WEBHOOK_DEAL_DETAIL_CHANGES = ['title', 'valueMinor', 'expectedCloseOn'] as const;
+/**
+ * The details of a deal whose change deal.updated reports (ADR-275), as its payload names them:
+ * `fields` is a change of its custom field values (ADR-390), after the fixed details.
+ */
+export const WEBHOOK_DEAL_DETAIL_CHANGES = [
+  'title',
+  'valueMinor',
+  'expectedCloseOn',
+  'fields',
+] as const;
 export const dealUpdatedPayloadSchema = envelope(
   'deal.updated',
   webhookDealDataSchema.extend({
@@ -835,10 +843,33 @@ export const dealUpdatedPayloadSchema = envelope(
       .array(z.enum(WEBHOOK_DEAL_DETAIL_CHANGES))
       .min(1)
       .describe(
-        'What the change changed, once each and in this order: `title`, `valueMinor` (the value, set, changed or cleared) and `expectedCloseOn`. Names only: the deal carries the details as they are when the event is delivered.',
+        'What the change changed, once each and in this order: `title`, `valueMinor` (the value, set, changed or cleared), `expectedCloseOn` and `fields` (custom field values, set, changed or removed; changedFields names the fields). Names only: the deal carries the details as they are when the event is delivered, and GET /deals/{id} reads its custom field values (`fields`).',
+      ),
+    changedFields: z
+      .array(z.string().regex(FIELD_KEY_RE))
+      .describe(
+        'The keys of the custom deal fields whose values the change set, changed or removed (GET /deal-fields), once each, in the order the fields were added, as GET /deal-fields lists them; empty when changes does not name `fields`. Keys only, never the values.',
       ),
   }),
 );
+
+/**
+ * What a deal.updated event captured as changed (ADR-275, ADR-390), as its payload gives it: the
+ * details its payload knows, in the payload's order, and the keys of the custom fields whose values
+ * changed (only when the details name `fields`), once each, in the order captured. An event
+ * captured before keys were recorded names none.
+ */
+export function dealUpdatedChanges(detail: Record<string, unknown>) {
+  const changes = detailChanges(detail, WEBHOOK_DEAL_DETAIL_CHANGES);
+  const captured =
+    changes.includes('fields') && Array.isArray(detail.changedFields) ? detail.changedFields : [];
+  const changedFields = [
+    ...new Set(
+      captured.filter((key): key is string => typeof key === 'string' && FIELD_KEY_RE.test(key)),
+    ),
+  ];
+  return { changes, changedFields };
+}
 export const dealStageChangedPayloadSchema = envelope('deal.stage_changed', webhookDealDataSchema);
 export const dealOwnerChangedPayloadSchema = envelope('deal.owner_changed', webhookDealDataSchema);
 export const dealStatusChangedPayloadSchema = envelope(
@@ -2627,9 +2658,7 @@ export async function buildWebhookPayload(
           },
           conversation: deal.conversationId ? { id: deal.conversationId } : null,
           contact: await contactOf(tx, tenantId, deal.contactId),
-          ...(event.type === 'deal.updated'
-            ? { changes: detailChanges(event.detail, WEBHOOK_DEAL_DETAIL_CHANGES) }
-            : {}),
+          ...(event.type === 'deal.updated' ? dealUpdatedChanges(event.detail) : {}),
         },
       };
     }
