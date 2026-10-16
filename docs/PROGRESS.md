@@ -1,5 +1,40 @@
 # Progress
 
+## 2026-10-16 — Review fixes for ADR-390 and ADR-391
+
+Status: **Fixed; the database and browser tests run in CI only.** Independent reviews found no High
+or Medium issue in ADR-390 and one Medium issue in ADR-391, with smaller ones in both, all fixed
+before merge.
+
+### Completed
+
+- **Deals board filter (ADR-391):** the "Deal field" select is keyed by the applied filter, so after
+  "Show all deals" (a navigation in the browser that keeps the page's elements) it no longer shows
+  the filter it cleared, which "Filter deals" would have applied again (Medium); a repeated `field`
+  parameter counts by its first value, as the export reads it, instead of being dropped without the
+  notice; the won and lost lists' links drop the filter; a misleading integration test comment and a
+  slip in ADR-391 are corrected.
+- **Deal field value events (ADR-390):** ADR-275's runbook paragraph names imports and custom field
+  values among the changes `deal.updated` reports; `changedBy`'s description in the OpenAPI document
+  names a field's deletion among changes recorded without their maker; ADR-390 says the API's deal
+  history also gives entries recorded before 0305 for a change of values; migration 0305's comment
+  says the capture also relies on 0293's grant; long lines in the docs are wrapped.
+- **Tests:** e2e (`crm.spec.ts`: the select's value after "Show all deals"); unit (the `changedBy`
+  description).
+- **Not covered by a local test:** the board page's reading of a repeated parameter and its tab links
+  (server-rendered page code, no unit test reaches it); the select's remount runs in the e2e test
+  only, in CI.
+
+### Test commands and results (local, 2026-10-16)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 162 files, 1,725 tests passed                                   |
+| `pnpm build`                                       | passed                                                          |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| Migrations 0305 and 0306, pglast parse check       | passed (syntax only)                                            |
+
 ## 2026-10-16 — Filtering the deals board by a choice field (P4-04, ADR-391)
 
 Status: **Implemented; its database and browser tests run in CI only.** ADR-385 left filtering the

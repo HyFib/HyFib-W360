@@ -275,6 +275,8 @@ test('custom deal field values, a choice among them, are given when a deal is cr
   await page.getByRole('link', { name: 'Show all deals' }).click();
   await expect(dealLink('Regional plan')).toBeVisible();
   await expect(dealLink('Gold plan')).toBeVisible();
+  // The select shows the cleared filter too, though the link navigates in the browser.
+  await expect(filter).toHaveValue('');
   // A link naming an option the field does not have shows every deal, and says so.
   await page.goto(`/c/${slug}/crm?field=tier:Platinum`);
   await expect(page.getByText('Showing every deal')).toBeVisible();

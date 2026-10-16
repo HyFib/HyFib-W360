@@ -61,8 +61,9 @@ export default async function CrmPage({
   const lookups = await crmLookups(ctx);
   const pipelineId = lookups.options.find((p) => p.id === query.pipeline)?.id ?? null;
   // A choice or yes/no field's value (ADR-391), as the address writes it: the board resolves it
-  // against the company's own fields and reports one it cannot apply instead of failing.
-  const field = typeof query.field === 'string' ? query.field : null;
+  // against the company's own fields and reports one it cannot apply instead of failing. A repeated
+  // parameter counts by its first value, as the export reads it.
+  const field = (Array.isArray(query.field) ? query.field[0] : query.field) ?? null;
   const board = view === 'board' ? await crm.board(ctx, { pipelineId, owner, field }) : null;
   // Links carry the filter as the board applied it, never the address's own text.
   const appliedField = board?.fieldFilter.applied ?? null;
@@ -151,7 +152,8 @@ export default async function CrmPage({
         {(['board', 'won', 'lost'] as const).map((v) => (
           <Link
             key={v}
-            href={href({ view: v })}
+            // The won and lost lists are not filtered by a field (ADR-391): their links drop it.
+            href={href({ view: v, ...(v === 'board' ? {} : { field: null }) })}
             aria-current={view === v ? 'page' : undefined}
             className={
               view === v
@@ -247,7 +249,11 @@ export default async function CrmPage({
                   {owner === 'all' ? null : <input type="hidden" name="owner" value={owner} />}
                   <div className="grid min-w-0 max-w-full gap-1">
                     <Label htmlFor="deal-field-filter">Deal field</Label>
+                    {/* Keyed by the applied filter: "Show all deals" navigates in the browser,
+                        which keeps the page's elements, and a kept select would go on showing
+                        the filter it cleared. */}
                     <Select
+                      key={appliedField?.param ?? ''}
                       id="deal-field-filter"
                       name="field"
                       defaultValue={appliedField?.param ?? ''}

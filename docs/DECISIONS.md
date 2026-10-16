@@ -15775,8 +15775,9 @@ Decision:
   pure) read it and look the key up among the company's own fields, read in the company's scope in
   the board's read-only transaction: the field must be a choice or yes/no field, and the option one
   of its options in any case (options never differ by case alone, ADR-385), resolved to the option
-  as written; `yes`/`no` in any case. The page keeps the filter in the board's other links and in the
-  export link as the board resolved it, never as the address wrote it.
+  as written; `yes`/`no` in any case. A repeated `field` counts by its first value, on the board as
+  in the export. The page keeps the filter in the board's other links and in the export link as the
+  board resolved it, never as the address wrote it; the won and lost lists' links drop it.
 - **The query:** `dealFieldCondition` adds `(attributes -> key) = <value>::jsonb` (the option as a
   JSON string, or a JSON boolean) or `not (attributes ? key)` for "Not set" to the board's and the
   export's existing conditions (company, pipeline, status, owner). Values are stored as the option is
@@ -15800,11 +15801,20 @@ Decision:
   "The deal field filter is not valid.") before anything is audited, so a file is never silently
   wider than asked. `crm.deals_exported` records `field: { key, match }` with `match` one of
   `option`, `yes`, `no` and `not_set`: the field's key and the kind of match, never the option, as
-  ADR-385 audits options by count; exports without a field filter are audited as before, without the
-  member.
+  ADR-385 audits options by count; exports without a field filter are audited as before, with no
+  `field` entry.
 - **Permissions unchanged:** the board needs `crm.read` (the page checks it itself), the export
   `crm.read` and `contacts.export`. The API is unchanged.
 
 Not built: filtering Reports by a choice, several field filters at once (or several options of one
 field), filters by text, number or date fields, the field filter on the won and lost lists and
 through the public API (`GET /deals`), and saving a filtered view.
+
+Review (before merge): an independent review found one Medium issue: "Show all deals" navigates in
+the browser, which keeps the page's elements, so the select went on showing the filter it had
+cleared, and "Filter deals" would apply it again; the select is now keyed by the applied filter, and
+the end-to-end test checks it after the link. It also found that a repeated `field` was dropped
+without the notice (it now counts by its first value, as the export reads it), that the won and lost
+lists' links carried a filter nothing applies there (they drop it), a misleading test comment and a
+slip in this record. All were fixed. A choice option named "Not set" still reads like the field's
+"Not set" in the select, as on the new-deal form.

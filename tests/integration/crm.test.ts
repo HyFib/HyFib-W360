@@ -1840,7 +1840,7 @@ describe('filtering the board by a choice or yes/no field (ADR-391)', () => {
       stagesWithoutChance: 0,
       monthEnd,
     });
-    // A text field holding the same word is not the choice.
+    // Another option: only the deal that holds it.
     expect(titles(await board(owner, { field: 'tier:Silver' }))).toEqual([
       [],
       ['Second store'],
