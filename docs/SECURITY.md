@@ -1437,6 +1437,14 @@ Phase 5 rules (Public API, P5-08):
   company, both under row security. Changes are at the deal's version and on its timeline; unit
   prices are typed by members, exact, never read from Meta's price text; an erased contact's deal
   takes none.
+- Products in deal webhook payloads (ADR-395): every deal event's deal gives its products exactly
+  as `GET /deals/{id}/items` reads them (the same read and representation: content id, Meta
+  catalog id, name as recorded, quantity, unit price, total, currency, who added it and the key's
+  id, never a member's), read when the event is delivered, in the worker's company scope (the
+  signed delivery job's tenant, row security and explicit company conditions on the item, product
+  and catalog), at most 50 per deal. Items name catalog products, not customers, and erasure keeps
+  them, so an erased contact's deal gives them; no endpoint scope gates them, as every other part
+  of the deal is sent to endpoints that take deal events. Nothing new is captured.
 - Products on deals through the API (ADR-378): `GET /deals/{id}/items` needs `deals.read`; `POST`
   needs `deals.write` and `orders.read` (the scopes granted only with `crm.write` and
   `commerce.read`, the members' rule) and Commerce in the plan; `DELETE` needs `deals.write`; all

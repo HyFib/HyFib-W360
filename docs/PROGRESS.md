@@ -1,5 +1,61 @@
 # Progress
 
+## 2026-10-16 — Products on deals in deal webhook payloads (P5-09, P4-04, ADR-395)
+
+Status: **Implemented; its database tests run in CI only.** Deal webhook events gave the deal
+without the products listed on it (ADR-375, ADR-378); ADR-375 listed "items in webhooks" as not
+built.
+
+### Completed
+
+- **Payload (`webhooks/payloads.ts`):** every deal event's `deal` (`deal.created`, `deal.updated`,
+  `deal.stage_changed`, `deal.owner_changed`, `deal.status_changed`) gives `items`, after
+  `createdAt` and before `changedBy` and `apiKeyId`: the deal's products read when the event is
+  delivered, in the payload's transaction and the worker's verified company scope, after the deal
+  (a deal that is gone still ends as `event_gone` with nothing more read). No migration.
+- **One representation:** `readApiDealItems`, `toApiDealItem` and `apiDealItemSchema` moved
+  unchanged to `api/deal-item-view.ts` (re-exported from `api/deal-items.ts` and `api/openapi.ts`),
+  so the API and the payload share the read (the company and deal condition, the order: added time,
+  then id) and the description; the payload's list is `apiDealItemsSchema`, that item's array with
+  `max(50)`. `MAX_DEAL_ITEMS`, `MAX_ITEM_QUANTITY` and `lineTotalMinor` moved to
+  `crm/deal-item-limits.ts` (re-exported from `crm/deal-items.ts`), so the payloads load none of
+  the deal services. An erased contact's deal gives its items, which erasure keeps.
+- **OpenAPI:** `items` on every `WebhookDeal*` schema with its description; `deal.created`'s and
+  `deal.updated`'s descriptions say every deal event carries the products as `GET /deals/{id}/items`
+  gives them, that a change of products alone sends no event, and that bodies delivered before have
+  none (no decision numbers).
+- **Tests:** unit (`webhooks/deal-items.test.ts`, 7 tests: the schema's identity with the API's
+  item and its place in every deal event, empty and full lists, order, the bound of 50, invalid
+  items, the rendering of all five events with the read's condition and order checked as SQL, no
+  items, erasure, a deal gone or an id that is not one, the OpenAPI entries and wording;
+  `webhooks.test.ts`: the deal fixture gives `items`); integration (`webhook-events.test.ts`: 1 new,
+  a member's and a key's products delivered as `GET /deals/{id}/items` reads them, a product removed
+  between capture and delivery, a deal without products, erasure, another company's products never
+  sent; the ADR-256 test's deal gives `items: []`).
+- **Docs:** ADR-395 (and notes in ADR-375 and ADR-378); ARCHITECTURE, SECURITY, THREAT-MODEL T348,
+  DEPLOYMENT (rollout: an old worker sends deal events without `deal.items`), RUNBOOKS (products
+  read at delivery, no event for a change of products), BACKLOG, and the matrix's H-012 and H-014
+  text and evidence (statuses unchanged).
+- **Mutation checks:** 17 deliberate regressions in the new TypeScript (items left out, read for
+  another id, read before the deal's check, the company or deal condition dropped, the order
+  swapped or its tiebreak dropped, the bound dropped, a copy of the item schema, `createdBy`
+  inverted, items reversed, the line total added instead of multiplied, the bound raised, the
+  schema's erasure sentence and either OpenAPI sentence removed, `items` optional): 17 caught by the
+  unit tests. The worker's real read under row security is covered by the integration test, which
+  runs in CI only.
+- **Not built:** `deal.updated` naming `items` in `changes` when products change (a capture on
+  `app.crm_deal_items`, migration 0308, an endpoint detail and history), the items' total in the
+  payload, items in the API's deal object, and an e2e test of its own.
+
+### Test commands and results (local, 2026-10-16)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 166 files, 1,777 tests passed                                   |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+
 ## 2026-10-16 — The deal field filter on the won and lost lists and in the API (P4-04, P5-08, ADR-394)
 
 Status: **Implemented; its database and browser tests run in CI only.** ADR-391 filtered the open

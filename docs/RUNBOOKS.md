@@ -3317,6 +3317,18 @@ alone until "Custom fields" is ticked (or its list set to null). During a rollou
 before 0305 sends such an event with `changes` leaving out `fields` (empty for a change of values
 alone) and without `changedFields`; replay those deliveries once the workers are updated.
 
+**A receiver asks why a deal event's products differ from what the deal had at the change, or why
+a change of products sent nothing (ADR-395).** Every deal event's `deal.items` lists the deal's
+products as `GET /deals/{id}/items` reads them when the event is delivered (in the order they were
+added, at most 50), like the rest of the deal: an event delivered (or retried, or replayed) after a
+product was added or removed gives the products as they are then, not as they were when the event
+was captured. Adding or removing a product (on the deal page or through the API) sends no event and
+`changes` never names products; a receiver keeping products in step reads them with
+`GET /deals/{id}/items` (`deals.read`) or takes them from the deal's next event. An erased
+contact's deal keeps its products (they name catalog products, not the customer), so they are
+still sent. A body without `deal.items` was delivered by a worker from before ADR-395 (during a
+rollout, or after rolling workers back); replay it once the workers are updated.
+
 **A receiver misses a change of a task's details, or doubts one (ADR-276).** Endpoints that take
 `task.updated` ("Task details") are sent one event each time a member editing a task or a key
 changes its title, notes, due time or reminder time. An edit that changes nothing sends nothing,

@@ -2,7 +2,6 @@ import { z } from 'zod';
 import { AppError, notFound, uuidv7 } from '@w360/core';
 import {
   and,
-  asc,
   commerceCatalogs,
   commerceProducts,
   crmDealItems,
@@ -20,6 +19,7 @@ import { MAX_DEAL_MINOR } from '../crm/money';
 import type { OutboundDeps } from '../messaging/outbound';
 import { parseInput } from '../validation';
 import { apiActor, assertScope, type ApiContext } from './context';
+import { readApiDealItems, type ApiDealItem } from './deal-item-view';
 import { assertCrmInPlan, invalidField, lockApiDeal } from './deals';
 import {
   claimIdempotencyKey,
@@ -36,30 +36,11 @@ import { assertCommerceInPlan } from './orders';
  * content id as product messages name products (ADR-086), with a quantity and a unit price in the
  * minor units of the deal's currency; and removes them with `deals.write`. Each addition or removal
  * moves the deal's version on, is on its timeline naming the key, and is audited as the key. Like
- * members' changes of products, it sends no deal event (deal events report the deal's own details).
+ * members' changes of products, it sends no deal event (deal events report the deal's own details),
+ * though every deal event's deal gives its items as these reads do when it is delivered (ADR-395).
  */
 
-/** One product on a deal, as `GET /deals/{id}/items` gives it. */
-export interface ApiDealItem {
-  id: string;
-  /** The product's content id (its SKU) in its catalog, as product messages name it. */
-  retailerId: string;
-  /** The catalog it is in, by Meta's id. */
-  catalogId: string;
-  /** The product's name when it was added: a later rename or removal in the catalog keeps it. */
-  name: string;
-  quantity: number;
-  /** The price of one, in the minor units of `currency`. */
-  unitPriceMinor: number;
-  /** The deal's pipeline currency when it was added. */
-  currency: string;
-  /** Quantity times unit price, exact, in the minor units of `currency`. */
-  totalMinor: number;
-  /** Who added it: a member (never which) or a key (`createdByApiKeyId`). */
-  createdBy: 'member' | 'api';
-  createdByApiKeyId: string | null;
-  createdAt: string;
-}
+export { toApiDealItem, type ApiDealItem } from './deal-item-view';
 
 /** What `POST /deals/{id}/items` takes. */
 export const apiAddDealItemSchema = z
@@ -115,82 +96,6 @@ export const apiRemoveDealItemQuerySchema = z
       ),
   })
   .strict();
-
-/**
- * A deal's items in the order they were added, with each product's content id and catalog, or the
- * one `itemId` names.
- */
-async function readApiDealItems(
-  tx: Tx,
-  tenantId: string,
-  dealId: string,
-  itemId?: string,
-): Promise<ApiDealItem[]> {
-  const rows = await tx
-    .select({
-      id: crmDealItems.id,
-      retailerId: commerceProducts.retailerId,
-      catalogId: commerceCatalogs.metaCatalogId,
-      name: crmDealItems.name,
-      quantity: crmDealItems.quantity,
-      unitPriceMinor: crmDealItems.unitPriceMinor,
-      currency: crmDealItems.currency,
-      createdByApiKeyId: crmDealItems.createdByApiKeyId,
-      createdAt: crmDealItems.createdAt,
-    })
-    .from(crmDealItems)
-    .innerJoin(
-      commerceProducts,
-      and(
-        eq(commerceProducts.tenantId, crmDealItems.tenantId),
-        eq(commerceProducts.id, crmDealItems.productId),
-      ),
-    )
-    .innerJoin(
-      commerceCatalogs,
-      and(
-        eq(commerceCatalogs.tenantId, commerceProducts.tenantId),
-        eq(commerceCatalogs.id, commerceProducts.catalogId),
-      ),
-    )
-    .where(
-      and(
-        eq(crmDealItems.tenantId, tenantId),
-        eq(crmDealItems.dealId, dealId),
-        itemId ? eq(crmDealItems.id, itemId) : undefined,
-      ),
-    )
-    .orderBy(asc(crmDealItems.createdAt), asc(crmDealItems.id));
-  return rows.map(toApiDealItem);
-}
-
-/** An item row as the API gives it. */
-export function toApiDealItem(row: {
-  id: string;
-  retailerId: string;
-  catalogId: string;
-  name: string;
-  quantity: number;
-  unitPriceMinor: number;
-  currency: string;
-  createdByApiKeyId: string | null;
-  createdAt: Date;
-}): ApiDealItem {
-  return {
-    id: row.id,
-    retailerId: row.retailerId,
-    catalogId: row.catalogId,
-    name: row.name,
-    quantity: row.quantity,
-    unitPriceMinor: row.unitPriceMinor,
-    currency: row.currency,
-    // At most 100,000 times a deal's largest value: exact as a number (ADR-375 caps it there).
-    totalMinor: Number(lineTotalMinor(row)),
-    createdBy: row.createdByApiKeyId ? 'api' : 'member',
-    createdByApiKeyId: row.createdByApiKeyId,
-    createdAt: row.createdAt.toISOString(),
-  };
-}
 
 /** The deal's products, in the order they were added (at most 50). Only reads. */
 export async function apiListDealItems(

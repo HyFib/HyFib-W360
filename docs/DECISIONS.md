@@ -14879,7 +14879,8 @@ Decision:
 
 Not built: deal webhook events for item changes, items without a catalog product, discounts and
 taxes, the value kept equal to the items' total automatically, and items set by automation steps or
-the deal import. (Items in the public API: ADR-378; in the deals CSV: ADR-380.)
+the deal import. (Items in the public API: ADR-378; in the deals CSV: ADR-380; in deal webhook
+payloads, since built: ADR-395, though a change of items still sends no event.)
 
 ## ADR-376 Report emails (P3-05) (2026-10-16)
 
@@ -14999,7 +15000,8 @@ Decision:
 
 Not built: changing an item's quantity or price in place (remove and add it again), adding several
 products in one request, items in the deal object, its webhook events or the deals CSV, and items
-added by automation steps.
+added by automation steps. (Items in the deals CSV since built: ADR-380; in deal webhook payloads:
+ADR-395.)
 
 ## ADR-379 Custom field values when a deal is created (P4-04) (2026-10-16)
 
@@ -16078,3 +16080,57 @@ now points to this record); the API's message for a malformed `field` not saying
 lower-case key `GET /deal-fields` gives (it now does); and the OpenAPI text not saying that an empty
 `field` is refused (it now does, so an integration leaves the parameter out). All were fixed.
 Cursors stay positions only, as for every other filter of `GET /deals`, which the review checked.
+
+## ADR-395 Products on deals in deal webhook payloads (P5-09, P4-04) (2026-10-16)
+
+Context: members and keys list catalog products on deals (ADR-375, ADR-378), but deal webhook
+events gave the deal without them, so an integration that keeps quotes or orders in step with deals
+(an ERP, an invoicing tool) heard that a deal was won and then had to call `GET /deals/{id}/items`
+for every event to learn what it was won for. ADR-375 listed "items in webhooks" as not built.
+
+Decision:
+
+- **`deal.items` on every deal event:** `deal.created`, `deal.updated`, `deal.stage_changed`,
+  `deal.owner_changed` and `deal.status_changed` (all five deal events) give the deal's products as
+  `items`, after `createdAt` and before `changedBy` and `apiKeyId`, which stay last. A member added
+  to the deal object rather than beside it: products are part of what the deal is, and receivers
+  already read the deal from `data.deal`.
+- **The API's items, exactly:** each item is what `GET /deals/{id}/items` gives (ADR-378): its id
+  (the line `DELETE /deals/{id}/items/{itemId}` takes), content id and Meta catalog id, its name
+  when it was added, quantity, the price of one, the total in the minor units of its currency, the
+  currency, who added it (`member`, never which, or `api` with the key's id) and when. Nothing in it
+  is unfit for a webhook: no member is named, the key's id is what `changedBy`'s `apiKeyId` already
+  gives, and the catalog's price text is never stored. The read and the description are one:
+  `readApiDealItems` and `apiDealItemSchema` moved, unchanged, to `api/deal-item-view.ts`, used by
+  the API and the payload alike, and the payload's list is that schema's array, so the two cannot
+  drift apart. The view and the item limits (`crm/deal-item-limits.ts`, re-exported where they
+  were) import none of the deal services, so the payloads do not load them.
+- **Read when delivered:** like the rest of the deal ("the deal is the deal when the event is
+  delivered", ADR-256), the items are read in the payload's transaction when the event is
+  delivered, in the worker's verified company scope, filtered by the event's company and the deal:
+  an event delivered, retried or replayed after a product was added or removed gives the products as
+  they are then. A deal without products gives `items: []`; an event whose deal is gone still ends
+  as `event_gone` before anything else is read.
+- **Bounded:** at most 50 items a deal (ADR-375, enforced under the deal's lock when one is added),
+  in the order they were added (added time, then id, as the API orders them); the schema says so
+  (`maxItems`). With names of at most 500 characters and content ids of at most 100, the list adds
+  at most about 140 KB to a body in the worst case and a few hundred bytes an item in practice;
+  webhook bodies have no size limit of their own, and the receiver's timeout is unchanged.
+- **Erasure:** a deal's payload is sent as erasure left it (ADR-256): the title replaced, the lost
+  reason and custom field values cleared, the contact without number or name. Erasure keeps a deal's
+  products, which name catalog products, not the customer (ADR-375), and the API still gives them,
+  so the payload gives them too.
+- **No new event:** adding or removing a product still captures nothing (ADR-378), `changes` never
+  names products, and no endpoint setting chooses them; a receiver keeping products in step reads
+  them with `GET /deals/{id}/items` or takes them from the deal's next event. The OpenAPI document
+  describes `items` on each deal event and says this, without decision numbers.
+- **Rollout:** no migration; the worker already reads the three tables as `w360_app`. A worker from
+  before it delivers deal events without `deal.items` until the worker rollout ends (a retry or a
+  replay a newer worker sends has them), as does rolling workers back; adding a member is additive
+  for receivers (`docs/DEPLOYMENT.md`).
+
+Not built: `deal.updated` naming `items` in `changes` when a deal's products change (it needs a
+capture on `app.crm_deal_items` in a migration, an endpoint detail, the API's deal history and
+their tests, left for a slice of its own), the items' total in the payload (a receiver sums
+`totalMinor`, as the deal page does, when every item is in the deal's currency), items in the API's
+deal object, and an end-to-end test of its own.

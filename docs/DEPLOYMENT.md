@@ -1781,6 +1781,13 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    keep it, so they do not take a change of values alone until `fields` is added. Rolling back
    leaves the trigger, which old code does not need to know about; events keep their details.
 
+   ADR-395 adds no migration. Workers build each payload when they deliver it: until the worker
+   rollout ends, a deal event delivered by a worker from before it has no `deal.items` (a retry or a
+   replay a newer worker delivers has them, read when it is sent), and rolling workers back to an
+   image from before it does the same; until the web rollout ends, an old server's OpenAPI document
+   does not describe them. The worker reads `app.crm_deal_items`, `app.commerce_products` and
+   `app.commerce_catalogs` as `w360_app`, which already holds `SELECT` on them (0018, 0294).
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

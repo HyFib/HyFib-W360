@@ -1426,6 +1426,8 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   key share, then the deal for update, the expected version checked), move the version on with
   `crmChangedBy({ apiKeyId })`, add a `deal_updated` activity naming `products` and the key, and
   audit `crm.deal_updated` as the key. `crm_deal_items.created_by_api_key_id` names a key's item.
+  The item representation and its read live in `api/deal-item-view.ts`, shared with the deal
+  webhook payloads (ADR-395).
 - **Defining contact fields (0092, ADR-115):** `contacts/field-definitions.ts` adds, renames and
   deletes a company's custom fields for both Settings (`contacts/service.ts`, by id) and the API
   (`api/contact-fields.ts`, by key, scope `contact_fields.manage`); callers check who may and audit
@@ -2241,6 +2243,15 @@ state` for one that becomes skipped from another state, each only for a message 
   widens `webhook_events.detail` to 4,096 bytes (NOT VALID; 0306 validates) for 50 keys of 40
   characters, and lets `deal_details` hold `fields`. The API's deal history names `fields` for a
   `deal_updated` entry naming `custom_fields`.
+- **Products in deal payloads** (no migration, ADR-395): every deal event's `deal` gives `items`,
+  read when the event is delivered in the payload's transaction by `readApiDealItems`
+  (`api/deal-item-view.ts`), the read behind `GET /deals/{id}/items`, so each item has the API's
+  representation (`apiDealItemSchema`, `toApiDealItem`) and order (added time, then id), at most
+  `MAX_DEAL_ITEMS` (50). The view and the limits (`crm/deal-item-limits.ts`) import none of the
+  deal services, so the payloads do not depend on them. Erasure keeps items, so an erased
+  contact's deal gives them. Adding or removing an item captures nothing (no trigger on
+  `app.crm_deal_items`): `changes` never names products, and an event delivered later gives the
+  items as they are then.
 - **Task events** (migrations 0177–0178, ADR-261): triggers on `app.crm_tasks` capture
   `task.created` when a task is inserted (members, the runner's task steps, keys) and
   `task.status_changed` when an update changes its status (members, keys through `apiUpdateTask`),
