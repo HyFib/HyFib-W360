@@ -1,5 +1,186 @@
 # Progress
 
+## 2026-10-16 — CI fixes: base image mirrors and the deal import's browser test
+
+Status: **Changed; both run in CI only.** ECR Public's anonymous data limit ("429 Too Many Requests:
+Data limit exceeded") failed the web or worker image build on PR #90 and PR #92, at least once after
+serving the tag, on the platform's manifest. The deal import's browser test (ADR-374, ADR-387)
+failed on Chromium and mobile Chromium on PR #92 (Firefox passed).
+
+### Completed
+
+- **`containers.yml`:** the step that picks the Dockerfile's Node image tries Google's mirror of
+  Docker Hub first (as CI's PostgreSQL service does), then Amazon ECR Public, then Docker Hub, and
+  builds from the first whose tag it can read (`docker buildx imagetools inspect`), warning about
+  each one it skips. Builds outside CI keep the Dockerfile's default.
+- **`tests/e2e/crm.spec.ts`:** after "Import 2 rows" the test waited for the counts, which the
+  check's summary also holds ("Importing will give: …") until the result replaces it, so it could go
+  on, and leave the page, before the import was written: the deal page then showed the deal
+  unchanged. It now waits for "Import finished" first. The app is unchanged.
+
+### Test commands and results
+
+| Command                        | Result                           |
+| ------------------------------ | -------------------------------- |
+| `prettier --check`, YAML parse | clean                            |
+| The containers workflow        | not run here; CI runs it on push |
+| The deal import's browser test | not run here; CI runs it on push |
+
+## 2026-10-16 — Review fixes for ADR-386 and ADR-387
+
+Status: **Fixed; the database and browser tests run in CI only.** Independent reviews of both
+features found two Medium and seven Low issues (and nits), all fixed before merge.
+
+### Completed
+
+- **Deal import (ADR-387):** two stages with the same name no longer move a deal whose export row
+  names its own stage (a name two active stages share is refused, "rename one", unless it is the
+  deal's own stage, archived or not) (Medium); a deals export whose products cell is longer than
+  1,000 characters reads back (cells up to 30,000 characters; the cells read are bounded on their
+  own) (Medium); a row refused for a cell at the check is refused for that cell at the import, not as
+  unchecked; a deal a merge moved to another contact after the contacts were read is skipped; a
+  closed deal's row as the export writes it is "No change" instead of an error; ADR-387's and T340's
+  lock-order wording; the page says a closed deal changes only after it is reopened.
+- **Steps that set deal fields (ADR-386):** the `updated` outcome is labelled "Updated details"; each
+  value control is named after its row ("Value 1"); a company without deal fields is told to add
+  them; the simulator shows values as the deal will hold them; a date not written as YYYY-MM-DD stays
+  visible as text; the invalid-value note no longer names choices for every type; the progress notes
+  no longer claim the integration test races the locks; ADR-386 lists the missing warning when a field
+  that published steps use is deleted.
+- **Order fields in steps that send no text (Codex):** `{{order.*}}` placeholders rendered empty in
+  the values of a step that sets deal fields, and also in forms, products, and task and deal titles,
+  in automations that order messages start: the runner loaded an order's values only for a fixed
+  list of steps. It now loads them for every step whose texts the graph checks.
+- **Tests:** unit (shared stage names for new and changed deals, a deal's own stage kept, closed
+  deals' rows unchanged or refused, a deal moved by a merge, a long products cell read back, a cell
+  error reported again at the import, a company without deal fields, the steps that load an order's
+  values); integration (the round trip with a lost deal unchanged and refused when renamed; a store
+  automation filling a deal's title and a field from the order).
+- **Mutation checks:** 10 deliberate regressions of the fixes (shared names kept, the own-stage rule,
+  the cell limit, the moved contact, the closed rows' status, reason and change rules, the unchanged
+  outcome, the ambiguous name, the no-fields message), all caught by the unit tests.
+
+### Test commands and results (local, 2026-10-16)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 160 files, 1,677 tests passed                                   |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+
+## 2026-10-16 — Deal import that changes and closes deals (P4-04, ADR-387)
+
+Status: **Implemented; its database and browser tests run in CI only.** Deal import only added
+open deals: a deals export imported back added every deal again, and won or lost deals could not be
+brought in.
+
+### Completed
+
+- **Domain (`crm/deal-import.ts`, no migration):** optional deal id, currency, status and lost
+  reason columns; the phone number and title columns are needed only without a deal id column.
+  `planDealRows` plans a `PlannedUpdate` for a row naming a deal (the company's, in the pipeline,
+  open, with a live contact, named once, at the checked version on import; blank cells keep values;
+  "No change" when the cells hold its values) and a close for `won`/`lost` rows, new or changed;
+  owners by email or by a name one active CRM member has, a deal's departed owner kept;
+  `updateActivities` gives the deal page's entries in the API's combined order, marked `imported`;
+  `dealImportCounts`. `planImport` loads the lookups for `checkDealImport` (read-only, no locks:
+  each row's action, the counts and the deals' versions) and for `importDeals` (contacts, pipeline,
+  deal fields, then the named deals `FOR UPDATE`), which closes new deals at the import's time
+  (version 2) and changes deals in one update each, audited with created, updated, closed,
+  unchanged and skipped. The export's products columns are never suggested or read; custom field
+  columns are suggested from the last matching header. Deal files are limited to 928,000 bytes so
+  the versions fit the 1 MB server action body.
+- **Web:** the import page has a third step: "Check N rows" shows every row's action (adds a deal,
+  closed or not; changes the deal, and closes it; no change; not imported, and why) with the counts
+  before anything is written; "Import N rows" sends the versions read. New mapping fields: deal id,
+  currency, status and lost reason; the page explains blank cells, products and close times. The
+  import goes through a new action, `importCheckedDealsAction`, beside `checkDealImportAction`.
+- **Tests:** unit (`deal-import.test.ts`: the schema, a deals export read back unchanged through
+  the CSV reader, changes, moves, owners by name, a departed owner, closes and their entries, every
+  refusal, duplicate rows, versions, closed new deals, counts, the files' limit); integration
+  (`crm.test.ts`: an export read back, edited, checked without writing, imported with a stale deal
+  skipped, the deals, timelines, reports and audit; another company's and another pipeline's deals,
+  missing and stale versions, roles); e2e (`crm.spec.ts`: the check step, then a file with a deal
+  id changing and closing the imported deal).
+- **Docs:** ADR-387; ARCHITECTURE, SECURITY, THREAT-MODEL T340, DEPLOYMENT (rollout note), BACKLOG,
+  and the matrix's H-012 text and evidence (status unchanged).
+- **Mutation checks:** 18 deliberate regressions (blank cells clearing custom fields or titles,
+  closed, other pipelines' or erased contacts' deals changed, missing or stale versions accepted,
+  duplicate rows, a lost reason on a won row, the currency unchecked, a departed owner refused, an
+  ambiguous name taken, closes counted for new deals only, the deal_updated entry dropped, unchanged
+  rows not holding their deal, the won entry without its value, phones read for rows with an id,
+  ids compared case-sensitively), all caught by the unit tests, one after a test was added. The
+  locks, row security and the database writes are covered by integration tests, which run in CI
+  only.
+
+### Test commands and results (local, 2026-10-16)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 158 files, 1659 tests passed                                    |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | not run here (left to the integrating build)                    |
+
+## 2026-10-16 — Automation steps that set custom deal fields (P4-04, ADR-386)
+
+Status: **Implemented; its database and browser tests run in CI only.** Automations created, moved
+and closed deals but could not record what a run learnt in the deal's custom fields; BACKLOG listed
+"automation steps that set values" as not built.
+
+### Completed
+
+- **Domain (`automations/graph.ts`, `interpreter.ts`):** the `update_deal_fields` node ("Update deal
+  fields": a pipeline and 1 to 20 field values of up to 500 characters) in `NODE_TYPES`, its label,
+  `edgesOf` and `textsOf`; `checkGraph` refuses no field, a field set twice, an inactive pipeline,
+  an unknown field and a value without placeholders its field does not take
+  (`GraphReferences.dealFields`). The interpreter renders the values (an empty one clears its field)
+  into an `update_deal_fields` effect logged `updated`.
+- **Domain (`crm/deal-field-values.ts`, `crm/deal-fields.ts`):** `coerceDealFieldValue` moved to a
+  browser-safe module (re-exported); `stepDealAttributes` reads a step's values against the fields
+  and returns the new values or the note of the first field it cannot set;
+  `dealAttributesTooLarge`.
+- **Runner:** `applyDealFieldsEffect` shares `holdForDealChange` and `onlyOpenDeal` with moves and
+  closes, takes the deal-field lock shared before the deal, writes the values with a new version
+  and the automation as changer, and adds a `deal_updated` activity naming the automation and the
+  run; otherwise a `skipped` step with its note.
+- **Service:** the step is a CRM step (plan and `crm.write` to publish or test); the builder's
+  options and the graph checks get the company's deal fields.
+- **Migration 0302:** the webhook endpoints' `run_step_node_types` check takes 1 to 20 kinds,
+  `update_deal_fields` among them; Drizzle's `WebhookRunStepNodeType` and the domain's lists and
+  labels follow.
+- **Web:** the builder's step (pipeline, one row per field with a list for choices and yes/no, a date
+  input for dates and text otherwise, add and remove rows), its default, `retarget`, the simulator's
+  note, run-page notes naming the field (`describeDetail`), and the `updated` outcome labelled
+  "Updated details".
+- **Tests:** unit (`automations/deal-fields-step.test.ts`, 10 tests: the node, parsing, graph checks
+  with and without the company's fields, placeholders, the effect, `stepDealAttributes`;
+  `lib/automation-labels.test.ts`: the notes; `webhooks.test.ts`: 20 kinds); integration
+  (`automations.test.ts`: values set as the automation with its activity, no deal, unchanged values,
+  an option removed, a cleared value, a deleted field, two open deals, publishing refused, the
+  builder's options; `webhooks.test.ts`, `webhook-events.test.ts`, `api-webhook-endpoints.test.ts`:
+  the new kind); e2e (`automations.spec.ts`: the step built, checked, simulated and run, its values
+  and timeline entry on the deal page).
+- **Docs:** ADR-386; ARCHITECTURE, SECURITY, THREAT-MODEL T339, DEPLOYMENT (0302), BACKLOG, and the
+  matrix's H-012 text and evidence (status unchanged).
+- **Mutation checks:** 17 deliberate regressions (no-field and pipeline checks, duplicates allowed,
+  placeholder values coerced, the placeholder-only warning, placeholders unchecked, 21 values, no
+  clipping, a placeholder left empty taken as a clear, the wrong log outcome, an empty result
+  accepted, a clear ignored, deleted fields' values kept, no size bound, a missing field skipped,
+  case-sensitive options, notes not naming the field), all caught by the unit tests. The writes,
+  the activity and the re-checks after a field deletion or an option change are covered by the
+  integration test, which runs in CI only; the lock order is reviewed, not raced in a test.
+
+### Test commands and results (local, 2026-10-16)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 160 files, 1665 tests passed                                    |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | not run here (left to the integrating build)                    |
+
 ## 2026-10-16 — Review fixes for ADR-384 and ADR-385 (PR #91)
 
 Status: **Fixed; the database and browser tests run in CI only.** Independent reviews of both

@@ -50,6 +50,7 @@ import { parseInput } from '../validation';
 import { CSV_BOM, csvLine } from '../contacts/csv';
 import { crmMembers } from '../crm/common';
 import { loadPipelines } from '../crm/pipelines';
+import { loadDealFields } from '../crm/deal-fields';
 import { SENDABLE_STATUSES } from '../flows/service';
 import { RUN_CSV_COLUMNS, runCsvLine, type RunCsvRow } from './runs-csv';
 import {
@@ -190,6 +191,8 @@ export interface AutomationDetail {
     crmMembers: { id: string; name: string }[];
     /** Active pipelines with their currency and active stages, for deal steps (ADR-245). */
     crmPipelines: AutomationPipelineOption[];
+    /** The company's custom deal fields, oldest first, for steps that set them (ADR-386). */
+    dealFields: AutomationDealFieldOption[];
     /** The company's forms that are not archived, for form steps (ADR-248). */
     flows: AutomationFlowOption[];
     /**
@@ -206,13 +209,22 @@ export interface AutomationDetail {
   };
 }
 
-/** Steps that write to the CRM (ADR-244, ADR-245, ADR-250, ADR-251). */
+/** Steps that write to the CRM (ADR-244, ADR-245, ADR-250, ADR-251, ADR-386). */
 const CRM_NODE_TYPES: ReadonlySet<string> = new Set([
   'create_task',
   'create_deal',
   'move_deal',
   'close_deal',
+  'update_deal_fields',
 ]);
+
+/** A custom deal field a step may set (ADR-386), with a choice field's options. */
+export interface AutomationDealFieldOption {
+  key: string;
+  label: string;
+  type: 'text' | 'number' | 'date' | 'boolean' | 'choice';
+  options: string[] | null;
+}
 
 /** A form a form step may send (ADR-248): only one published at Meta can be sent. */
 export interface AutomationFlowOption {
@@ -581,6 +593,12 @@ export function createAutomationService(deps: AutomationServiceDeps) {
           stages: p.stages.filter((st) => !st.archived).map((st) => ({ id: st.id, name: st.name })),
         }),
       ),
+      dealFields: (await loadDealFields(tx, tenantId)).map((f): AutomationDealFieldOption => ({
+        key: f.key,
+        label: f.label,
+        type: f.type,
+        options: f.options,
+      })),
       domains: domainRows.map((d) => d.domain),
       secrets: secretRows,
       templates: templateRows.map(templateOption),
@@ -620,6 +638,7 @@ export function createAutomationService(deps: AutomationServiceDeps) {
         ]),
       ),
       fieldKeys: new Set(refs.fieldRows.map((f) => f.key)),
+      dealFields: new Map(refs.dealFields.map((f) => [f.key, f])),
       allowedDomains: refs.domains,
       secrets: new Map(refs.secrets.map((r) => [r.name, r.domain])),
       allowInsecureHttp: deps.allowInsecureHttp ?? false,
@@ -671,9 +690,9 @@ export function createAutomationService(deps: AutomationServiceDeps) {
   }
 
   /**
-   * Publishing or testing a graph that creates CRM tasks or deals, or moves or closes deals, needs
-   * the CRM in the company's plan (ADR-249) and `crm.write`, as doing so in the CRM does (ADR-244,
-   * ADR-245, ADR-250, ADR-251).
+   * Publishing or testing a graph that creates CRM tasks or deals, or moves, closes or updates
+   * deals, needs the CRM in the company's plan (ADR-249) and `crm.write`, as doing so in the CRM
+   * does (ADR-244, ADR-245, ADR-250, ADR-251, ADR-386).
    */
   function assertMayChangeCrm(
     ctx: TenantContext,
@@ -1041,6 +1060,7 @@ export function createAutomationService(deps: AutomationServiceDeps) {
               teams: teamRows,
               crmMembers: refs.crmMembers,
               crmPipelines: refs.crmPipelines,
+              dealFields: refs.dealFields,
               flows: refs.flows,
               products: seesCatalogs ? refs.products : null,
               fields: fieldRows,

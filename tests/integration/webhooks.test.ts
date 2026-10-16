@@ -3626,7 +3626,7 @@ describe('run step kind of node filters (ADR-328)', () => {
     await change({ runStepNodeTypes: null });
     expect(await current()).toBeNull();
     await change({ runStepNodeTypes: ['end'] });
-    // The database refuses an empty list, more than 19 entries, an unknown kind (a trigger
+    // The database refuses an empty list, more than 20 entries, an unknown kind (a trigger
     // included), a missing one or a nested list from an endpoint taking the event…
     const setInDatabase = (value: string) =>
       fx.query(`UPDATE app.webhook_endpoints SET run_step_node_types = ${value} WHERE id = $1`, [
@@ -3634,7 +3634,7 @@ describe('run step kind of node filters (ADR-328)', () => {
       ]);
     for (const bad of [
       `'{}'`,
-      `'{${Array(20).fill('wait').join(',')}}'`,
+      `'{${Array(21).fill('wait').join(',')}}'`,
       `'{wait,keyword}'`,
       `'{wait,none}'`,
       `'{wait,Wait}'`,
@@ -3649,8 +3649,8 @@ describe('run step kind of node filters (ADR-328)', () => {
     await setInDatabase(
       `ARRAY['send_text', 'ask_buttons', 'ask_text', 'send_template', 'ask_template', 'send_flow',
              'send_products', 'condition', 'update_contact', 'update_conversation',
-             'http_request', 'create_task', 'create_deal', 'move_deal', 'close_deal', 'wait',
-             'handoff', 'end', 'outside_node']::text[]`,
+             'http_request', 'create_task', 'create_deal', 'move_deal', 'close_deal',
+             'update_deal_fields', 'wait', 'handoff', 'end', 'outside_node']::text[]`,
     );
     await change({ eventTypes: ['consent.changed'] });
     expect(await current()).toBeNull();

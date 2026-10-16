@@ -209,7 +209,7 @@ test('an automation tags the conversation it answers, and the inbox shows the ta
   }).toPass({ timeout: 30_000 });
 });
 
-test('an automation creates a CRM task and a deal about the customer, and moves the deal (ADR-244, ADR-245, ADR-250)', async ({
+test('an automation creates a CRM task and a deal about the customer, moves the deal and sets its fields (ADR-244, ADR-245, ADR-250, ADR-386)', async ({
   page,
   request,
 }) => {
@@ -228,6 +228,16 @@ test('an automation creates a CRM task and a deal about the customer, and moves 
   await page.getByLabel('Name', { exact: true }).fill('Sales');
   await page.getByRole('button', { name: 'Create pipeline' }).click();
   await expect(page.getByText('Pipeline created.')).toBeVisible();
+  // Custom deal fields the automation sets (ADR-386): a choice and a number.
+  await page.getByLabel('New deal field').fill('Tier');
+  await page.locator('#deal-field-type').selectOption('choice');
+  await page.locator('#deal-field-options').fill('Gold\nSilver');
+  await page.getByRole('button', { name: 'Add deal field' }).click();
+  await expect(page.getByRole('cell', { name: 'tier', exact: true })).toBeVisible();
+  await page.getByLabel('New deal field').fill('Seats');
+  await page.locator('#deal-field-type').selectOption('number');
+  await page.getByRole('button', { name: 'Add deal field' }).click();
+  await expect(page.getByRole('cell', { name: 'seats', exact: true })).toBeVisible();
 
   // The pipelines page has Name fields of its own: the link navigates on the client.
   await page.getByRole('link', { name: 'Automations' }).first().click();
@@ -261,6 +271,23 @@ test('an automation creates a CRM task and a deal about the customer, and moves 
   await page.getByRole('button', { name: 'Add step' }).click();
   await page.locator('#step-move-deal-1-stage').selectOption({ label: 'Qualified' });
   await page.locator('#step-create-deal-1-next').selectOption('move-deal-1');
+  // Then the deal's fields are set (ADR-386): the tier chosen from its options, a number typed.
+  await page.getByLabel('Add a step').selectOption('update_deal_fields');
+  await page.getByRole('button', { name: 'Add step' }).click();
+  await expect(page.locator('#step-update-deal-fields-1-field-0')).toHaveValue('tier');
+  await expect(page.locator('#step-update-deal-fields-1-value-0 option')).toHaveText([
+    'Clear the value',
+    'Gold',
+    'Silver',
+  ]);
+  await page.locator('#step-update-deal-fields-1-value-0').selectOption('Gold');
+  await page.getByRole('button', { name: 'Add a field' }).click();
+  await expect(page.locator('#step-update-deal-fields-1-field-1')).toHaveValue('seats');
+  // A number that is not one is named before publishing.
+  await page.locator('#step-update-deal-fields-1-value-1').fill('three');
+  await expect(page.getByText('Seats must be a number.').first()).toBeVisible();
+  await page.locator('#step-update-deal-fields-1-value-1').fill('3');
+  await page.locator('#step-move-deal-1-next').selectOption('update-deal-fields-1');
   await expect(page.getByText(/to fix before publishing/)).toBeHidden();
 
   // The simulator says what the steps would do, and creates nothing.
@@ -278,6 +305,11 @@ test('an automation creates a CRM task and a deal about the customer, and moves 
   await expect(
     page.getByText(
       'The contact’s open deal in Sales moved to Qualified, if the contact has exactly one there.',
+    ),
+  ).toBeVisible();
+  await expect(
+    page.getByText(
+      'On the contact’s open deal in Sales, if the contact has exactly one there: Tier set to Gold, Seats set to 3.',
     ),
   ).toBeVisible();
 
@@ -326,5 +358,17 @@ test('an automation creates a CRM task and a deal about the customer, and moves 
       .filter({ hasText: 'New → Qualified' });
     await expect(moved).toContainText('by an automation', { timeout: 2_000 });
   }).toPass({ timeout: 30_000 });
+  // The step after that set the deal's fields, as the automation (ADR-386).
+  await expect(async () => {
+    await page.reload();
+    const edited = page
+      .getByRole('list', { name: 'Timeline' })
+      .getByRole('listitem')
+      .filter({ hasText: 'Deal edited' });
+    await expect(edited).toContainText('custom fields', { timeout: 2_000 });
+    await expect(edited).toContainText('by an automation');
+  }).toPass({ timeout: 30_000 });
+  await expect(page.getByLabel('Tier', { exact: true })).toHaveValue('Gold');
+  await expect(page.getByLabel('Seats', { exact: true })).toHaveValue('3');
   await expectNoHorizontalOverflow(page);
 });

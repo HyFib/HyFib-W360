@@ -3159,7 +3159,7 @@ describe('run step outcome filters (ADR-327)', () => {
 });
 
 describe('run step kind of node filters (ADR-328)', () => {
-  it('take 1 to 19 of the automation builder’s kinds of node and the steps outside one, once each, in its order; null takes every step', () => {
+  it('take 1 to 20 of the automation builder’s kinds of node and the steps outside one, once each, in its order; null takes every step', () => {
     expect(webhookRunStepNodeTypesSchema.parse(['wait', 'send_text', 'wait'])).toEqual([
       'send_text',
       'wait',
@@ -3175,7 +3175,8 @@ describe('run step kind of node filters (ADR-328)', () => {
     // Every kind of node a step can run, as automation.run_step's step.nodeType names them, then
     // the steps outside a node (step.nodeType null), so every subset of steps can be named.
     expect(WEBHOOK_RUN_STEP_NODE_TYPES).toEqual([...NODE_TYPES, 'outside_node']);
-    expect(WEBHOOK_RUN_STEP_NODE_TYPES).toHaveLength(19);
+    expect(WEBHOOK_RUN_STEP_NODE_TYPES).toHaveLength(20);
+    expect(WEBHOOK_RUN_STEP_NODE_TYPES).toContain('update_deal_fields');
     // A trigger is not a node: no step runs one.
     for (const refused of [
       [],
@@ -3185,7 +3186,7 @@ describe('run step kind of node filters (ADR-328)', () => {
       'wait',
       [null],
       ['none'],
-      Array(20).fill('wait'),
+      Array(21).fill('wait'),
     ]) {
       expect(
         webhookRunStepNodeTypesSchema.safeParse(refused).success,
@@ -3199,7 +3200,7 @@ describe('run step kind of node filters (ADR-328)', () => {
       'Choose kinds of step from the list.',
     );
     expect(
-      webhookRunStepNodeTypesSchema.safeParse(Array(20).fill('wait')).error?.issues[0]?.message,
+      webhookRunStepNodeTypesSchema.safeParse(Array(21).fill('wait')).error?.issues[0]?.message,
     ).toBe('Give each kind of step once.');
     // Named as the automation builder names them, in the list's order.
     expect(WEBHOOK_RUN_STEP_NODE_TYPE_LABELS).toEqual({

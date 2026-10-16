@@ -79,6 +79,7 @@ export default async function AutomationPage({
           teams={detail.options.teams}
           crmMembers={detail.options.crmMembers}
           crmPipelines={detail.options.crmPipelines}
+          dealFields={detail.options.dealFields}
           flows={detail.options.flows}
           products={detail.options.products}
           fields={detail.options.fields}

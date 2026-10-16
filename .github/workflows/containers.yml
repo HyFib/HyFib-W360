@@ -26,16 +26,27 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-      # The Dockerfile's own Node image, pulled through the Amazon ECR Public mirror of Docker's
-      # official images (the same digests as Docker Hub's, checked 2026-10-09): Docker Hub's
-      # anonymous pull limit failed these builds on bb80f93 (ADR-343). Builds outside CI keep the
-      # Dockerfile's default.
-      - name: Base image through the mirror
+      # The Dockerfile's own Node image, pulled through a mirror of Docker's official images, the
+      # first that serves its tag: Google's mirror of Docker Hub, as for CI's PostgreSQL service,
+      # then Amazon ECR Public (the same digests as Docker Hub's, checked 2026-10-09), then Docker
+      # Hub. Docker Hub's anonymous pull limit failed these builds on bb80f93 (ADR-343), and ECR
+      # Public's anonymous data limit ("429 Too Many Requests: Data limit exceeded") failed them on
+      # PR #90 and PR #92, at least once after serving the tag (on the platform's manifest), so it
+      # is not tried first. Builds outside CI keep the Dockerfile's default.
+      - name: Base image through a mirror
         id: base
         run: |
           image=$(sed -n 's/^ARG NODE_IMAGE=//p' infra/docker/${{ matrix.image }}.Dockerfile)
           test -n "$image"
-          echo "node=public.ecr.aws/docker/library/$image" >> "$GITHUB_OUTPUT"
+          for ref in "mirror.gcr.io/library/$image" "public.ecr.aws/docker/library/$image" "docker.io/library/$image"; do
+            if docker buildx imagetools inspect "$ref" > /dev/null; then
+              echo "node=$ref" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "::warning::$ref could not be read from this runner; trying the next mirror"
+          done
+          echo "::error::No mirror served $image"
+          exit 1
       - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .

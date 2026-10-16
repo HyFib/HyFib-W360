@@ -550,6 +550,15 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   only for a lost deal; `applyCloseDealEffect` shares `holdForDealChange` (the plan, the contact,
   the pipeline) and `onlyOpenDeal` with moves, then closes the deal with no member closer and adds a
   `deal_won` or `deal_lost` activity without an actor.
+- **Automations that set custom deal fields** (ADR-386): `update_deal_fields` steps (a pipeline and
+  1 to 20 field values, checked against `crmPipelines` and `dealFields`, values without
+  placeholders read by the deal forms' `coerceDealFieldValue`, now in the browser-safe
+  `crm/deal-field-values.ts`); the interpreter renders the values into an `update_deal_fields`
+  effect logged `updated` (null clears a field, an empty string is a placeholder that filled in
+  nothing); `applyDealFieldsEffect` shares `holdForDealChange` and `onlyOpenDeal`, takes
+  `lockedDealFields` (shared) before the deal, reads the values again with `stepDealAttributes`
+  (all or none, the note naming the first field it cannot set), writes them with a new version and
+  the automation as changer and adds a `deal_updated` activity without an actor.
 - **Read receipts and typing indicators** (`inbox/read-receipts.ts`, ADR-223): `markRead` in
   `messaging/inbox.ts` calls `queueReadReceipt` in its transaction; the composer calls
   `showTypingAction` at most every 20 seconds, which `showTyping` checks and queues; both sign a job
@@ -685,8 +694,8 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   (`integrations.manage`); run pages list each call (method, host, path, outcome).
 - **Not built yet:** templates with media headers in template steps, usage billing. Form steps
   (ADR-248), runs started through the public API (ADR-077), template steps' website buttons whose
-  link ends with a value (ADR-229) and products steps (ADR-383) were built after this list was
-  first written.
+  link ends with a value (ADR-229), products steps (ADR-383) and steps that set deal fields
+  (ADR-386) were built after this list was first written.
 
 ## 6F. CRM **[built — reminder emails verified through Mailpit only]**
 
@@ -1336,7 +1345,17 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   named contacts (`FOR KEY SHARE`, id order), the pipeline (`FOR SHARE`) and the deal fields
   (shared), then inserts deals and `deal_created` activities (`imported: true`) in batches of 200
   and audits `crm.deals_imported`. Web: `app/c/[slug]/crm/import`, `DealImportWizard`, actions
-  `previewDealImportAction` and `importDealsAction`.
+  `previewDealImportAction`, `checkDealImportAction` and `importCheckedDealsAction`. Changes and
+  closed deals (ADR-387, no migration): a row whose `deal_id` cell names a deal plans a
+  `PlannedUpdate` (blank cells keep values; stage, title, value, owner by email or by a name one
+  member has, expected close date, custom fields), refused unless the deal is the company's, in
+  the pipeline, open, with a live contact, named by one row and, on import, at the version the
+  check returned; a `won`/`lost` status closes the new or changed deal. `planImport` loads the
+  lookups for `checkDealImport` (read-only, no locks; returns each row's action and the deals'
+  versions) and for `importDeals`, which locks contacts (new deals' and changed deals'), the
+  pipeline, the deal fields and then the named deals `FOR UPDATE`, inserts, closes new deals
+  (version 2), and updates changed ones in one statement each with `updateActivities` (stage,
+  details, owner, close, marked `imported`), the webhook trigger capturing their events.
 - **Products on deals (0294, ADR-375):** `crm/deal-items.ts` searches the company's connected
   catalogs (`dealProductOptions`), adds and removes `app.crm_deal_items` (product, its name then,
   quantity, unit price and currency) under `lockDealForChange` at the deal's version, bumping it
@@ -2096,8 +2115,8 @@ state` for one that becomes skipped from another state, each only for a message 
   `automation.run_step` clears it.
 - **Step kind filters** (migration 0250, ADR-328): `run_step_node_types` on an endpoint lists the
   kinds of node whose run steps it takes as `automation.run_step`, null for every step; a check
-  keeps it to 1 to 19 known kinds (`outside_node` naming the steps outside a node; migration 0299
-  adds `send_products`, ADR-383) and to endpoints that take `automation.run_step`. The step trigger passes the step's `nodeType` in the detail, and
+  keeps it to 1 to 20 known kinds (`outside_node` naming the steps outside a node; migration 0299
+  adds `send_products`, ADR-383, and 0302 `update_deal_fields`, ADR-386) and to endpoints that take `automation.run_step`. The step trigger passes the step's `nodeType` in the detail, and
   `app.capture_webhook_event` (replaced with the same signature) creates a step's delivery only for
   endpoints whose list is null or holds it (`outside_node` for a step outside a node), taking the
   kind out of the detail before the event is stored. Settings ("Kinds of step sent" under Automation

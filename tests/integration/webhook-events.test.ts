@@ -3712,6 +3712,7 @@ describe('automation run events (ADR-078)', () => {
       'create_deal',
       'move_deal',
       'close_deal',
+      'update_deal_fields',
       'wait',
       'handoff',
       'end',

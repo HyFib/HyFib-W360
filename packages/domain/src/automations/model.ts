@@ -8,3 +8,5 @@ export * from './interpreter';
 export { normalizeTag } from '../contacts/fields';
 /** The limits of product messages, for products steps (ADR-383). */
 export { PRODUCT_MESSAGE_LIMITS } from '../commerce/product-message';
+/** Custom deal field values as typed, for steps that set deal fields (ADR-386). */
+export { coerceDealFieldValue, type DealFieldShape } from '../crm/deal-field-values';

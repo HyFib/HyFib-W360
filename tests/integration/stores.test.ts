@@ -12,6 +12,7 @@ import {
   codPayload,
   createAutomationService,
   createConsentService,
+  createCrmService,
   createContactsService,
   createInboxService,
   createPlanAdminService,
@@ -4831,6 +4832,63 @@ describe('Store events in automations', () => {
     });
     expect(await driveRun(c, secondRun)).toBe('handed_off');
     expect((await storeRun(secondRun)).variables).toEqual({});
+  });
+
+  it('fills order fields into the texts of CRM steps, a deal’s title and its field values', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const { shop, storeId } = await shopifyStoreForMessages(c, owner);
+    await optIn(owner, storeId);
+    const crm = createCrmService({
+      db: fx.dbs.app,
+      clock: systemClock,
+      jobs: fx.jobs(),
+      signer: fx.signer,
+    });
+    const { id: pipelineId } = await crm.createPipeline(owner, {
+      name: 'Orders',
+      currency: 'INR',
+      stages: ['New'],
+    });
+    const stageId = (await crm.listPipelines(owner)).find((p) => p.id === pipelineId)!.stages[0]!
+      .id;
+    await crm.createDealField(owner, { label: 'Order', key: 'order_ref', type: 'text' });
+    // Steps that send nothing may come first: the order's values fill their texts.
+    const flow = await publishAutomation(owner, 'Order deal', storeEvent, {
+      version: 1,
+      start: 'deal',
+      nodes: [
+        {
+          id: 'deal',
+          type: 'create_deal',
+          title: 'Order {{order.number}}',
+          pipelineId,
+          stageId,
+          value: null,
+          ownerMembershipId: null,
+          next: 'fields',
+        },
+        {
+          id: 'fields',
+          type: 'update_deal_fields',
+          pipelineId,
+          values: [{ field: 'order_ref', value: '{{order.number}} for {{order.customer_name}}' }],
+          next: null,
+        },
+      ],
+    });
+    await automationRule(owner, c, storeId, 'order_placed', flow.id);
+    await placeOrder(c, shop, storeId, '7301', '+919812373001');
+    const [outcome] = await runMessages(c, storeId);
+    expect(outcome).toMatchObject({ outcome: 'started' });
+    expect(await driveRun(c, (outcome as { runId: string }).runId)).toBe('completed');
+    const deals = await fx.query<{ title: string; attributes: Record<string, unknown> }>(
+      'SELECT title, attributes FROM app.crm_deals WHERE tenant_id = $1 AND pipeline_id = $2',
+      [c.tenant.id, pipelineId],
+    );
+    expect(deals).toEqual([
+      { title: 'Order #7301', attributes: { order_ref: '#7301 for Asha K' } },
+    ]);
   });
 
   it('skips an order when the automation, the conversation or the customer cannot take a run', async () => {

@@ -199,6 +199,16 @@ export type RunEffect =
       /** Only for a lost deal. */
       lostReason: string | null;
     }
+  /**
+   * Custom field values set on the run's contact's open deal in the pipeline, by the automation
+   * (ADR-386), as typed and rendered: null clears the field (the value was left empty), an empty
+   * string is a value whose placeholders filled in nothing (the step then changes nothing).
+   */
+  | {
+      kind: 'update_deal_fields';
+      pipelineId: string;
+      values: { field: string; value: string | null }[];
+    }
   | { kind: 'handoff'; teamId: string | null };
 
 export type StepStatus = 'running' | 'waiting' | 'completed' | 'handed_off' | 'failed';
@@ -233,8 +243,8 @@ export type StepLogOutcome =
   /** A step that closes a deal (ADR-251). */
   | 'closed'
   /**
-   * Recorded by the runner when a task or deal step created nothing, or a step that moves a deal
-   * moved nothing (ADR-244, ADR-245, ADR-250).
+   * Recorded by the runner when a task or deal step created nothing, or a step that moves, closes
+   * or updates a deal changed nothing (ADR-244, ADR-245, ADR-250, ADR-251, ADR-386).
    */
   | 'skipped';
 
@@ -721,6 +731,21 @@ export function advance(input: AdvanceInput): StepResult {
           lostReason: current.outcome === 'lost' ? current.lostReason : null,
         };
         return moveTo(current.next, base, [effect], 'closed', null);
+      }
+      case 'update_deal_fields': {
+        const vals = values(base.variables);
+        const effect: RunEffect = {
+          kind: 'update_deal_fields',
+          pipelineId: current.pipelineId,
+          values: current.values.map((v) => ({
+            field: v.field,
+            // Values are trimmed when the graph is read: only one left empty is empty here.
+            value: v.value
+              ? clipText(renderText(v.value, vals), AUTOMATION_LIMITS.fieldValueLength)
+              : null,
+          })),
+        };
+        return moveTo(current.next, base, [effect], 'updated', null);
       }
       case 'http_request': {
         if (base.httpCalls + 1 > RUN_BUDGETS.maxHttpCalls)

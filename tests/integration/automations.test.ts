@@ -2759,6 +2759,205 @@ describe('automations that create CRM deals (ADR-245)', () => {
     });
   });
 
+  it('sets custom fields on the contact’s open deal as the automation, checked again when it runs (ADR-386)', async () => {
+    const s = await setup();
+    const region = await crm().createDealField(s.owner, {
+      label: 'Region',
+      key: 'region',
+      type: 'text',
+    });
+    await crm().createDealField(s.owner, { label: 'Budget', key: 'budget', type: 'number' });
+    const tier = await crm().createDealField(s.owner, {
+      label: 'Tier',
+      key: 'tier',
+      type: 'choice',
+      options: ['Gold', 'Silver', 'Bronze'],
+    });
+    const trial = await crm().createDealField(s.owner, {
+      label: 'Trial',
+      key: 'trial',
+      type: 'boolean',
+    });
+    await crm().createDealField(s.owner, { label: 'Visit', key: 'visit', type: 'date' });
+    const setter = (values: { field: string; value: string }[]) => ({
+      version: 1,
+      start: 'fields',
+      nodes: [
+        {
+          id: 'fields',
+          type: 'update_deal_fields',
+          pipelineId: s.pipelineId,
+          values,
+          next: 'thanks',
+        },
+        { id: 'thanks', type: 'send_text', text: 'Noted.', next: null },
+      ],
+    });
+    // Publishing refuses a field the company does not have, or a value its field never takes.
+    await expectAppError(
+      publish(s.owner, 'Seats', keyword('seats'), setter([{ field: 'seats', value: '3' }])),
+      'precondition_failed',
+      /The deal field “seats” does not exist/,
+    );
+    await expectAppError(
+      publish(s.owner, 'Platinum', keyword('platinum'), setter([{ field: 'tier', value: 'Tin' }])),
+      'precondition_failed',
+      /Tier must be one of its options/,
+    );
+    const { id: detailsId } = await publish(
+      s.owner,
+      'Details',
+      keyword('details'),
+      setter([
+        { field: 'region', value: 'North' },
+        { field: 'tier', value: 'silver' },
+        { field: 'budget', value: '2500.5' },
+        { field: 'trial', value: 'yes' },
+        { field: 'visit', value: '2026-11-01' },
+      ]),
+    );
+    // The builder lists the company's deal fields, oldest first, with a choice's options.
+    expect((await automations().getAutomation(s.owner, detailsId)).options.dealFields).toEqual([
+      { key: 'region', label: 'Region', type: 'text', options: null },
+      { key: 'budget', label: 'Budget', type: 'number', options: null },
+      { key: 'tier', label: 'Tier', type: 'choice', options: ['Gold', 'Silver', 'Bronze'] },
+      { key: 'trial', label: 'Trial', type: 'boolean', options: null },
+      { key: 'visit', label: 'Visit', type: 'date', options: null },
+    ]);
+    const { id: upgradeId } = await publish(
+      s.owner,
+      'Upgrade',
+      keyword('upgrade'),
+      // An empty value clears its field.
+      setter([
+        { field: 'tier', value: 'Gold' },
+        { field: 'budget', value: '' },
+      ]),
+    );
+    const runIn = async (conversationId: string) => {
+      const run = (await runsOf(conversationId)).at(-1)!;
+      expect((await drive(s.c, conversationId, run.id)).outcome).toBe('ended');
+      return run;
+    };
+    const fieldsStep = async (runId: string) =>
+      (await stepLog(runId)).find((st) => st.node_id === 'fields');
+    const row = async (id: string) =>
+      (
+        await fx.query<{
+          attributes: Record<string, unknown>;
+          version: number;
+          changed_by: string | null;
+        }>('SELECT attributes, version, changed_by FROM app.crm_deals WHERE id = $1', [id])
+      )[0]!;
+    const edits = (dealId: string) =>
+      fx.query(
+        `SELECT actor_membership_id, data FROM app.crm_activities
+          WHERE deal_id = $1 AND kind = 'deal_updated' ORDER BY created_at, id`,
+        [dealId],
+      );
+
+    // A customer without a deal: nothing changes, and the run goes on.
+    const stranger = await runIn(await inbound(s.c, waId(), 'details please'));
+    expect(await fieldsStep(stranger.id)).toMatchObject({
+      outcome: 'skipped',
+      detail: 'deal_not_open',
+    });
+    expect((await stepLog(stranger.id)).find((st) => st.node_id === 'thanks')?.outcome).toBe(
+      'sent',
+    );
+
+    // A customer asks the price (their deal is created), then gives details: the values are set,
+    // read as the deal's form reads them.
+    const from = waId();
+    const conversationId = await inbound(s.c, from, 'what is the price?');
+    await runIn(conversationId);
+    const [deal] = await dealsOf(s.c.tenant.id);
+    const before = await row(deal!.id);
+    expect(before.attributes).toEqual({});
+    await inbound(s.c, from, 'my details');
+    const details = await runIn(conversationId);
+    expect(await fieldsStep(details.id)).toMatchObject({ outcome: 'updated', detail: null });
+    const set = {
+      region: 'North',
+      tier: 'Silver',
+      budget: 2500.5,
+      trial: true,
+      visit: '2026-11-01',
+    };
+    expect(await row(deal!.id)).toEqual({
+      attributes: set,
+      version: before.version + 1,
+      changed_by: 'automation',
+    });
+    // On the deal's timeline as a member's edit is, by the automation.
+    expect(await edits(deal!.id)).toEqual([
+      {
+        actor_membership_id: null,
+        data: { fields: ['custom_fields'], automationId: detailsId, runId: details.id },
+      },
+    ]);
+
+    // The same details again: the deal already has them.
+    await inbound(s.c, from, 'details again');
+    expect(await fieldsStep((await runIn(conversationId)).id)).toMatchObject({
+      outcome: 'skipped',
+      detail: 'deal_fields_unchanged',
+    });
+    expect((await row(deal!.id)).version).toBe(before.version + 1);
+
+    // Gold is no longer an option when the upgrade runs: nothing changes, naming the field.
+    await crm().setDealFieldOptions(s.owner, tier.id, ['Silver', 'Bronze']);
+    await inbound(s.c, from, 'upgrade me');
+    expect(await fieldsStep((await runIn(conversationId)).id)).toMatchObject({
+      outcome: 'skipped',
+      detail: 'deal_field_invalid:tier',
+    });
+    expect((await row(deal!.id)).attributes).toEqual(set);
+    // Gold again: the tier is upgraded and the budget cleared.
+    await crm().setDealFieldOptions(s.owner, tier.id, ['Gold', 'Silver', 'Bronze']);
+    await inbound(s.c, from, 'upgrade me now');
+    const upgrade = await runIn(conversationId);
+    expect(await fieldsStep(upgrade.id)).toMatchObject({ outcome: 'updated', detail: null });
+    expect(await row(deal!.id)).toEqual({
+      attributes: { region: 'North', tier: 'Gold', trial: true, visit: '2026-11-01' },
+      version: before.version + 2,
+      changed_by: 'automation',
+    });
+    expect((await edits(deal!.id)).at(-1)).toEqual({
+      actor_membership_id: null,
+      data: { fields: ['custom_fields'], automationId: upgradeId, runId: upgrade.id },
+    });
+
+    // A field deleted since publishing: nothing changes, naming the first missing field.
+    await crm().deleteDealField(s.owner, trial.id);
+    await inbound(s.c, from, 'details once more');
+    expect(await fieldsStep((await runIn(conversationId)).id)).toMatchObject({
+      outcome: 'skipped',
+      detail: 'deal_field_missing:trial',
+    });
+    expect((await row(deal!.id)).attributes).toEqual({
+      region: 'North',
+      tier: 'Gold',
+      visit: '2026-11-01',
+    });
+
+    // A member opens a second deal for the customer in the pipeline: which one is meant is not
+    // known, so nothing changes.
+    await crm().deleteDealField(s.owner, region.id);
+    await crm().createDeal(s.owner, {
+      contactId: deal!.contact_id,
+      pipelineId: s.pipelineId,
+      stageId: s.stageId,
+      title: 'Spare kettle',
+    });
+    await inbound(s.c, from, 'upgrade both');
+    expect(await fieldsStep((await runIn(conversationId)).id)).toMatchObject({
+      outcome: 'skipped',
+      detail: 'deal_ambiguous',
+    });
+    expect((await row(deal!.id)).version).toBe(before.version + 2);
+  });
+
   it('is published only with an active stage, by a member who may edit the CRM (ADR-250)', async () => {
     const c = await fx.company();
     const owner = await fx.ctx(c, c.owner);

@@ -6,6 +6,7 @@ import {
   HTTP_WAIT_MINUTES,
   RUN_BUDGETS,
   advance,
+  coerceDealFieldValue,
   dealValueMinor,
   httpHeaderText,
   initialRunState,
@@ -18,7 +19,7 @@ import {
   type RunState,
 } from '@w360/domain/automation-model';
 import { ClientButton, ClientForm, useHydrated } from '@/components/client-form';
-import type { EditorPipeline, EditorTemplate } from './node-fields';
+import type { EditorDealField, EditorPipeline, EditorTemplate } from './node-fields';
 
 /**
  * Tries the current (unsaved) steps in the browser with the interpreter the worker uses. Nothing
@@ -130,6 +131,7 @@ export function AutomationSimulator({
   teams,
   crmMembers,
   crmPipelines,
+  dealFields,
   flows,
   products,
   templates,
@@ -144,6 +146,8 @@ export function AutomationSimulator({
   crmMembers: { id: string; name: string }[];
   /** Pipelines deal steps may use, to name them and their stages. */
   crmPipelines: EditorPipeline[];
+  /** Custom deal fields steps may set, to name them and check their values (ADR-386). */
+  dealFields: EditorDealField[];
   /** Forms form steps may send, to name them. */
   flows: { id: string; name: string }[];
   /** Products products steps may send, to name them. */
@@ -319,6 +323,39 @@ export function AutomationSimulator({
           out.push({
             who: 'note',
             text: `The contact’s open deal in ${pipeline?.name ?? 'a pipeline'} closed as ${effect.outcome}${effect.lostReason ? ` (“${effect.lostReason}”)` : ''}, if the contact has exactly one there.`,
+          });
+          break;
+        }
+        case 'update_deal_fields': {
+          const pipeline = crmPipelines.find((pl) => pl.id === effect.pipelineId);
+          // As the runner reads them: the first value that cannot be set changes nothing.
+          const changes: string[] = [];
+          let problem: string | null = null;
+          for (const { field: key, value } of effect.values) {
+            const field = dealFields.find((f) => f.key === key);
+            if (!field) problem = `the deal field “${key}” does not exist`;
+            else if (value === null) changes.push(`${field.label} cleared`);
+            else if (!value) problem = `${field.label} is empty after filling in placeholders`;
+            else {
+              const coerced = coerceDealFieldValue(field, value);
+              // As the deal will hold it: a choice as its option is written, yes/no as Yes or No.
+              if (coerced.ok) {
+                const shown =
+                  typeof coerced.value === 'boolean'
+                    ? coerced.value
+                      ? 'Yes'
+                      : 'No'
+                    : String(coerced.value ?? value);
+                changes.push(`${field.label} set to ${shown}`);
+              } else problem = coerced.message.replace(/\.$/, '');
+            }
+            if (problem) break;
+          }
+          out.push({
+            who: 'note',
+            text: problem
+              ? `The contact’s deal in ${pipeline?.name ?? 'a pipeline'} would not change: ${problem}.`
+              : `On the contact’s open deal in ${pipeline?.name ?? 'a pipeline'}, if the contact has exactly one there: ${changes.join(', ')}.`,
           });
           break;
         }

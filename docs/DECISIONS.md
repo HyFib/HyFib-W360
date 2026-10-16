@@ -15282,3 +15282,163 @@ Decision:
 Not built: several options per deal (multi-select), colours or descriptions per option, renaming an
 option that deals have chosen (with its values carried over), and filtering the board or reports by
 a choice.
+
+## ADR-386 Automation steps that set custom deal fields (P4-04) (2026-10-16)
+
+Context: custom deal fields (ADR-373, ADR-385) are filled in by members on the deal page, by CSV
+import and through the API, and automations create, move and close deals (ADR-245, ADR-250,
+ADR-251), but a run could not record what it learnt on the deal: a bot that asks for a budget or a
+tier left a member to copy the answer. "Automation steps that set values" remained under P4-04's
+custom deal fields.
+
+Decision:
+
+- **An `update_deal_fields` step** ("Update deal fields", `automations/graph.ts`): a pipeline and 1
+  to 20 rows of a field key and a value of up to 500 characters, typed as a member types it in the
+  deal's form. The run's contact's open deal in the pipeline changes, found as moves and closes find
+  it (`holdForDealChange`, `onlyOpenDeal`): nothing changes when the contact has none there or more
+  than one, the pipeline is archived or gone, the contact was erased, or the plan leaves out the
+  CRM. It is not a message, so it has no window rule.
+- **Placeholders:** a value may hold {{name}}, {{company}}, {{answer.<name>}} and, where the
+  automation allows them, {{order.<field>}} and {{input.<name>}}, checked as other texts' are and
+  filled in when the step runs, then clipped to 500 characters as a contact field's value is. The
+  builder offers them for text and number fields; choices and yes/no are chosen from a list and
+  dates from a date input.
+- **Empty values:** a value left empty clears its field, whatever its type ("Clear the value" in
+  the builder's lists). A value whose placeholders fill in nothing is not taken as a clear: the step
+  changes nothing and says which field (`deal_field_empty:<key>`), so a question a path skipped
+  never wipes a value a member entered.
+- **Checked with the graph:** at least one field, each field once, an active pipeline, fields the
+  company has, and, for values without placeholders, the deal forms' own reading
+  (`coerceDealFieldValue`: a number as members type it, a real YYYY-MM-DD date, yes or no, one of a
+  choice's options in any case). Publishing refuses a broken step; a draft is saved with its issues.
+  The value reading moved to `crm/deal-field-values.ts`, which has no server dependencies, so the
+  builder checks with the same code; the builder lists the company's deal fields with their options.
+- **When it runs** (`applyDealFieldsEffect`): after the plan, the contact and the pipeline, the
+  company's deal fields are locked shared (`lockedDealFields`) before the deal is locked, the order
+  a member's edit and a field's deletion use. Every value is read again (`stepDealAttributes`):
+  the step sets all of them or none, and its note names the first field it could not set, a field
+  deleted since publishing (`deal_field_missing:<key>`) or a value its field no longer takes, for
+  example an option removed (`deal_field_invalid:<key>`); values over the 12 KiB bound
+  (`deal_fields_too_large`) and values the deal already has (`deal_fields_unchanged`) change nothing
+  either. A step that changed nothing is logged `skipped` with its note and the run goes on; one
+  that changed the deal is logged `updated` (an outcome automation run steps already had, so no
+  outcome migration), raises the deal's version, records the automation as its changer and adds a
+  `deal_updated` activity with `fields: ['custom_fields']`, no actor, the automation and the run,
+  shown on the timeline as "Deal edited · by an automation". The run page names the field in its
+  notes. The `updated` outcome, also used by contact and conversation steps, is now labelled
+  "Updated details" on run pages and in Settings → Webhooks.
+- **Who may publish:** as for the other CRM steps, publishing or testing needs the CRM in the plan
+  and `crm.write`.
+- **Webhook endpoints** can choose the new kind of step, as every kind the builder defines
+  (ADR-328): migration 0302 widens the check on `run_step_node_types` to 1 to 20 kinds.
+
+Not built: setting the deal's title, value, owner or expected close date, fields of a deal the
+contact has in several pipelines at once, values copied from another deal or a contact field, a
+condition on a deal's field values, and a warning when a field or an option that published steps
+use is deleted or removed (those steps then change nothing, with a note on each run).
+
+Review (before merge): an independent review found no High or Medium issue. It found the progress
+notes claiming the integration test covered the locks (it covers the writes and the re-checks; the
+lock order is reviewed, not raced), the `updated` outcome's first new label ("Made the change")
+vague, every value control named "Value", a company without deal fields told that each row's field
+does not exist, the simulator showing a value as typed rather than as stored, a date not written as
+YYYY-MM-DD hidden by the date input, and a run note naming choices for any type. All were fixed.
+Codex then found that `{{order.*}}` in this step's values rendered empty in automations that order
+messages start: the runner loaded an order's values only for a fixed list of steps, which also left
+out forms, products, and task and deal titles. It now loads them for every step whose texts the
+graph checks (`stepRendersPlaceholders`), and a store test fills a deal's title and a field from an
+order.
+
+## ADR-387 Deal import that changes and closes deals (P4-04) (2026-10-16)
+
+Context: deal import (ADR-374) only added open deals. A company that exported its deals (ADR-239),
+corrected them in a spreadsheet and imported the file got every deal twice, and a company moving
+from another CRM could not bring its won and lost deals. "Updating deals or importing closed deals
+from a file" remained under P4-04.
+
+Decision:
+
+- **A row with a deal id changes that deal** (`crm/deal-import.ts`): an optional deal id column
+  (suggested for `deal_id`, as the deals export writes it). A row whose cell holds an id changes the
+  deal instead of adding one; a row without one adds a deal as before. The deal must be the
+  company's (looked up only in the company's scope, under row security), in the pipeline chosen,
+  with a live contact (as the deal page refuses), and named by one row only (a second row naming it
+  is skipped, naming the first). A malformed id is skipped without being looked up. A closed deal
+  is not changed from a file ("reopen it on its page to change it": changing outcomes from a file
+  would rewrite reports silently), but its row as the export writes it (its status, or a blank one,
+  and nothing else new) is "No change", so a whole export reads back without errors.
+- **Cells given change, blank cells keep:** the stage (a stage of the pipeline by name, any case;
+  moving resets the time in stage; stage names need not be unique, so a name two active stages share
+  is refused, "More than one stage is named …; rename one in Settings → Pipelines.", for new deals
+  too, unless it is the deal's own stage, archived or not, which the export names), the title, the value (major units in the pipeline's currency,
+  parsed exactly as before), the owner, the expected close date and custom field values (checked by
+  type over the deal's values, as the deal page does). A blank cell never clears a value: a
+  spreadsheet cannot tell an emptied cell from one left alone, so clearing stays on the deal page.
+  The phone number is not read for these rows: a deal's contact is not changed from a file, and an
+  export may carry masked numbers (ADR-226). A row whose cells hold the deal's values changes nothing and does
+  not move its version ("No change").
+- **The deals export imports back:** its columns are suggested by name; `products` and
+  `products_total` are never suggested and nothing reads them (products are listed on the deal
+  page), and a cell may hold up to 30,000 characters, so the products cell of a deal with 50 products
+  of long names still reads (the cells read are bounded on their own: a title 120 characters, a lost
+  reason 200, a text field 500); `value` is read in major units as written; `owner` holds a name, so an owner is now an
+  active CRM member's email or their name when no other such member has it ("More than one member is
+  named …; give the owner's email."), and a deal whose owner has left keeps them when the cell names
+  them. An optional currency column refuses a row in another currency than the pipeline's (an export
+  of another pipeline). Custom field columns are suggested by key from the last matching header, as
+  the export writes them after its own columns. An export with 33 or more custom fields has more
+  columns than the importer reads (50) and cannot be imported back whole.
+- **Closed deals:** an optional status column takes `open`, `won` or `lost` (any case; blank is
+  open), and an optional lost reason column (lost rows only, at most 200 characters). A won or lost
+  row adds its deal and then closes it, or changes its deal and closes it, as the deal page's close
+  action does: closed by the importing member, at the import's time, with the deal page's `deal_won`
+  (with the value) or `deal_lost` entry, and the `deal.status_changed` webhook event after
+  `deal.created` or the change's events. A new deal closed this way has version 2, as one added and
+  then closed on its page.
+- **No back-dated close times:** the export's `closed_at`, or any date in a file, is never used as
+  the close time. Reports count closed deals by close time and measure time to win from creation, so
+  a back-dated close would change figures of periods already read and shared, and close a deal
+  before it was created (a negative time to win). Imported outcomes therefore count in Reports as
+  any other close on the import's day; a company that needs the original dates keeps them in a date
+  field (ADR-373). The page says so beside the status column.
+- **Checked first, then imported at the versions checked:** a new step between the mapping and the
+  import, `checkDealImport` (same permissions, a read-only transaction, no locks, nothing written or
+  audited), returns for every row whether it adds a deal, changes one, closes it, changes nothing or
+  is skipped and why, with the counts, and the version of every deal the rows change or leave as
+  they are. The page shows them and sends those versions with the import (`expectedVersions`); a
+  deal whose version differs, or that was not among the rows checked, is skipped ("Someone changed
+  this deal after the rows were checked. Check the rows again."), as the deal page refuses a stale
+  edit; versions are compared after a row's cells are read, so a row refused for a cell at the check
+  is refused for it again. The import is still one transaction in which each row is planned before anything is written,
+  so a row with an error skips only that row.
+- **Locks and entries:** the import locks the contacts of new deals and of the changed deals
+  (`FOR KEY SHARE`, in id order), then the pipeline (`FOR SHARE`), then the deal fields (shared),
+  then the named deals (`FOR UPDATE`, in id order), as a member's new deal takes contact then fields;
+  the deal page's edit takes the fields before the contact, but both locks are shared, so the orders
+  cannot deadlock. A merge (ADR-224) can move a deal to another contact after the deals' contacts
+  were read; such a deal is skipped ("This deal moved to another contact meanwhile. Check the rows
+  again."), since its new contact is neither locked nor checked against erasure. Each change is one update by the
+  member (`changed_by` member), with the version moved on and the entries the API writes for a
+  combined change (ADR-255): `stage_changed`, `deal_updated` (with the fields and the value's
+  change), `owner_changed`, then the close, each marked `imported`.
+- **Counts and audit:** the check and the result give added, changed, closed (new or existing),
+  unchanged and rows with errors; `crm.deals_imported` now records `updated`, `closed`,
+  `unchanged` and `skipped` beside `created` and `errorCount` (kept, equal to `skipped`), never the
+  rows. Permissions are unchanged (`crm.write` and `contacts.import`).
+- **Request size:** the versions travel with the file in the server action, so the file limit is
+  928,000 bytes (was 976,000), leaving room for 1,000 ids and versions under the 1 MB body limit.
+- **Rollout:** the page imports through a new server action (`importCheckedDealsAction`), so a page
+  of this release never reaches an old web server's import, which ignores the new columns and would
+  add every row of an export as a new deal. No migration.
+
+Not built: clearing values from a file, back-dated close times, changing or reopening closed deals
+from a file, moving deals to another pipeline from a file, creating contacts, matching deals by
+anything but their id, and import through the public API.
+
+Review (before merge): an independent review found two Medium issues: two stages with the same name
+made an unedited export row move its deal to the other one, and a deal with many products made its
+export unreadable (cells were limited to 1,000 characters). It found three Low ones: a row refused
+for a cell at the check was refused at the import as not checked, a merge between reading a deal's
+contact and locking it left the new contact unchecked, and an unedited export listed every closed
+deal as an error. All were fixed with tests.

@@ -1689,6 +1689,28 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    column and checks in place; an older release then fails the same way for deals with choice
    values until the choice fields are deleted.
 
+   Migration 0302 (ADR-386) replaces the check on `app.webhook_endpoints.run_step_node_types` with
+   one that also accepts `update_deal_fields` (1 to 20 kinds), as 0299 did for products steps:
+   every list it allowed is still allowed, and the table is small, so the check is validated at
+   once. A worker of the previous release cannot read a published version with a step that sets
+   deal fields and would fail its runs as unreadable, so roll the workers out first and publish such
+   automations only after the worker rollout ends; an old web server opens such a draft with the
+   starter steps, so do not edit automations with these steps until the web rollout ends. Rolling an
+   image back leaves the wider check in place. An endpoint whose list was set through the API to all
+   19 earlier kinds keeps that list, so it does not receive these steps: tell its company to tick
+   "Update deal fields" in Settings → Webhooks, or set the list to null. Until the web rollout ends,
+   an old web server refuses to save an endpoint whose list names these steps ("Choose kinds of step
+   from the list.").
+
+   ADR-387 has no migration. Until the web rollout ends, an old web server treats a deals file as
+   before: it ignores the deal id, status and lost reason columns and adds a deal for every row
+   with a phone number and a title, so a deals export imported there would add its deals again.
+   The new import page checks rows and imports through server actions an old server does not have
+   (`checkDealImportAction`, `importCheckedDealsAction`), so its requests fail there with nothing
+   written; an import page opened before the rollout fails on a new server the same way and needs a
+   reload. Import files with deal ids only after the web rollout ends. Deal files are now limited
+   to 928,000 bytes (was 976,000). Rolling an image back restores the earlier import.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

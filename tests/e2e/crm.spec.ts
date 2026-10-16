@@ -59,7 +59,7 @@ async function createPipeline(
   await expect(page.getByText('2. Qualified')).toBeVisible();
 }
 
-test('deals are imported from a CSV file into a pipeline, rows with errors listed (ADR-374)', async ({
+test('deals are imported from a CSV file into a pipeline, checked first, rows with errors listed, then changed and closed by deal id (ADR-374, ADR-387)', async ({
   page,
 }) => {
   const { slug } = await createCompany(page, 'crmimport', 'Ishaan');
@@ -85,9 +85,26 @@ test('deals are imported from a CSV file into a pipeline, rows with errors liste
   await expect(page.getByLabel("Contact's phone number")).toHaveValue('0');
   await expect(page.getByLabel('Deal title')).toHaveValue('1');
   await expect(page.getByLabel('Stage', { exact: true })).toHaveValue('2');
+  await expect(page.getByLabel('Deal id')).toHaveValue('');
+  await expectNoHorizontalOverflow(page);
+  // Each row says what it will do before anything is written (ADR-387).
+  await page.getByRole('button', { name: 'Check 2 rows' }).click();
+  await expect(
+    page.getByText(
+      'Importing will give: 1 deals added, 0 changed, 0 closed, 0 unchanged, 1 rows with errors (of 2). Nothing has been written yet.',
+    ),
+  ).toBeVisible();
+  await expect(page.getByText('Adds a deal', { exact: true })).toBeVisible();
+  await expect(
+    page.getByText('Not imported: The pipeline has no stage named “Lost”.'),
+  ).toBeVisible();
   await expectNoHorizontalOverflow(page);
   await page.getByRole('button', { name: 'Import 2 rows' }).click();
-  await expect(page.getByText('1 deals added, 1 rows with errors (of 2).')).toBeVisible();
+  // The check's summary holds the same counts until the result replaces it: wait for the result.
+  await expect(page.getByRole('heading', { name: 'Import finished' })).toBeVisible();
+  await expect(
+    page.getByText('1 deals added, 0 changed, 0 closed, 0 unchanged, 1 rows with errors (of 2).'),
+  ).toBeVisible();
   await expect(
     page.getByText('Not imported: The pipeline has no stage named “Lost”.'),
   ).toBeVisible();
@@ -99,6 +116,51 @@ test('deals are imported from a CSV file into a pipeline, rows with errors liste
     'Qualified',
   );
   await expect(page.getByText('Nisha Rao · ₹1,500.00')).toBeVisible();
+
+  // A file naming the deal by its id changes it and closes it as won; a row without an id and
+  // without a phone number column is skipped (ADR-387).
+  const href = await page.getByRole('link', { name: 'Imported plan' }).getAttribute('href');
+  const dealId = href?.split('/').pop() ?? '';
+  expect(dealId).toMatch(/^[0-9a-f-]{36}$/);
+  await page.goto(`/c/${slug}/crm/import`);
+  await page.getByLabel('CSV file').setInputFiles({
+    name: 'changes.csv',
+    mimeType: 'text/csv',
+    buffer: Buffer.from(
+      `Deal ID,Title,Stage,Status,Lost reason\n${dealId},Imported plan v2,Proposal,won,\n,No contact,,lost,Too dear\n`,
+    ),
+  });
+  await page.getByRole('button', { name: 'Preview' }).click();
+  await expect(page.getByLabel('Deal id')).toHaveValue('0');
+  await expect(page.getByLabel("Contact's phone number")).toHaveValue('');
+  await expect(page.getByLabel('Status', { exact: true })).toHaveValue('3');
+  await expect(page.getByLabel('Lost reason')).toHaveValue('4');
+  await page.getByRole('button', { name: 'Check 2 rows' }).click();
+  await expect(
+    page.getByText(
+      'Importing will give: 0 deals added, 1 changed, 1 closed, 0 unchanged, 1 rows with errors (of 2). Nothing has been written yet.',
+    ),
+  ).toBeVisible();
+  await expect(page.getByText('Changes the deal and closes it as won')).toBeVisible();
+  await expect(
+    page.getByText(
+      'Not imported: A new deal needs its contact’s phone number: choose the phone number column.',
+    ),
+  ).toBeVisible();
+  await page.getByRole('button', { name: 'Import 2 rows' }).click();
+  await expect(page.getByRole('heading', { name: 'Import finished' })).toBeVisible();
+  await expect(
+    page.getByText('0 deals added, 1 changed, 1 closed, 0 unchanged, 1 rows with errors (of 2).'),
+  ).toBeVisible();
+
+  // The deal page shows it won, moved and retitled, as its own actions would.
+  await page.goto(`/c/${slug}/crm/deals/${dealId}`);
+  await expect(page.getByRole('heading', { name: 'Imported plan v2', level: 1 })).toBeVisible();
+  await expect(page.getByText('Won', { exact: true }).first()).toBeVisible();
+  const timeline = page.getByRole('list', { name: 'Timeline' });
+  await expect(timeline.getByText('Deal won')).toBeVisible();
+  await expect(timeline.getByText('Stage changed')).toBeVisible();
+  await expect(timeline.getByText('Deal edited')).toBeVisible();
 });
 
 test('custom deal field values, a choice among them, are given when a deal is created (ADR-379, ADR-385)', async ({
