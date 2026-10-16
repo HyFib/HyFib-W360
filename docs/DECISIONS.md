@@ -15809,7 +15809,7 @@ Decision:
 
 Not built: filtering Reports by a choice, several field filters at once (or several options of one
 field), filters by text, number or date fields, the field filter on the won and lost lists and
-through the public API (`GET /deals`), and saving a filtered view.
+through the public API (`GET /deals`) (since built: ADR-394), and saving a filtered view.
 
 Review (before merge): an independent review found one Medium issue: "Show all deals" navigates in
 the browser, which keeps the page's elements, so the select went on showing the filter it had
@@ -16002,3 +16002,69 @@ mechanism could read them, but each needs its own comparisons and wording), cond
 deals or deals of any status, comparing two fields (or a field with an answer or a placeholder),
 dates relative to the day the condition runs ("within 7 days"), and a rule that holds when the
 contact has no open deal in a pipeline.
+
+## ADR-394 The deal field filter on the won and lost lists and in the API (P4-04, P5-08) (2026-10-16)
+
+Context: ADR-391 filters the open deals board, and the export of what it shows, by one choice or
+yes/no field's value, but the won and lost lists showed every closed deal and dropped the filter
+from their links, and `GET /deals` had no such filter, so an integration reading the Gold deals
+paged through all of them. ADR-391 listed "the field filter on the won and lost lists and through
+the public API (`GET /deals`)" as not built.
+
+Decision:
+
+- **One mechanism, two readings:** the lists and the API reuse ADR-391's
+  `parseDealFieldFilterParam`, `resolveDealFieldFilter` and `dealFieldCondition` unchanged. Two
+  small pure functions sit on top of them in `crm/deal-field-filter.ts`: `dealFieldFilterView`, the
+  lenient reading of the board and now the lists (an absent or empty text asks for nothing; one that
+  does not resolve is ignored and reported), and `requireDealFieldFilter`, the strict reading of the
+  export and now the API (a refusal, `validation_failed` naming `field`, through
+  `dealFieldFilterRefusal`, in the caller's words). The board and the export are refactored onto
+  them without a change in behaviour.
+- **The won and lost lists:** `listDeals` takes `field` as the board does, resolves it against the
+  company's own fields in its read-only transaction, adds the condition to its keyset query and
+  returns `fieldFilter` (the fields, the filter applied, whether one was ignored). The CRM page shows
+  the same "Deal field" GET form above the list (the view, and the owner when one is chosen, as
+  hidden inputs; one `DealFieldFilter` component for the board and the lists), the same "Showing
+  every deal" notice for a stale, malformed or foreign filter (naming the list rather than the
+  board), "No deals match the deal field filter." for an empty filtered list, and keys the select by
+  the applied filter as ADR-391's fix does. "Older deals" and "Newest" carry the filter as resolved;
+  submitting the form or "Show all deals" starts at the newest page. A cursor from an old link that
+  no longer reads falls back to the newest page with the same filter.
+- **Switching views keeps the filter:** ADR-391 made the won and lost links drop it because nothing
+  applied it there. Every view applies it now, so the Open deals, Won and Lost links all carry it as
+  the current view resolved it (each view resolves it again against the company's fields), and "Show
+  all deals" clears it for whichever view is shown.
+- **The export:** the route already passed `field` for any status and `exportDeals` already
+  resolved it strictly; the lists' export link now sends it with `status=won` or `lost`, so the file
+  holds exactly the list's deals across all its pages. A filter that does not resolve is refused
+  (400) before anything is audited; `crm.deals_exported` records `field: { key, match }` as ADR-391
+  does.
+- **`GET /deals?field=<key>:<value>`:** the same text as the app's address (`<key>:<option>` in any
+  case, `<key>:yes` or `<key>:no`, `<key>:` for deals without a value), at most 200 characters. It
+  combines with `pipelineId`, `stageId`, `status`, `contactId`, `ownerId` and `updatedSince`.
+  **Refused, never ignored:** an API caller must never get a wider list than asked, so a filter that
+  does not resolve answers 422 `validation_failed` naming `field`, as the API's other validation
+  errors do, with words for an integration (`apiDealFieldFilterMessage`: "The company has no deal
+  field with this key (GET /deal-fields).", "Deals can be filtered only by a choice or yes/no
+  field.", "This value is not one of the deal field’s options, or `yes` or `no` for a yes/no
+  field.", and the form of the text when it is malformed). The text's form is checked before the
+  transaction; the key and value are resolved against the company's own fields after the scope and
+  plan checks, so another company's key or option is refused as unknown. A repeated parameter counts
+  by its last value, as every API query parameter does.
+- **Cursors:** the API's cursors are keyset positions (creation time and id) that encode no filter,
+  for `field` as for `pipelineId` or `status`: each page applies the filters it is sent with, so it
+  can never hold a deal those filters do not match, and the caller sends the same `field` with each
+  `cursor`, as the OpenAPI document says. Binding cursors to their filters would change every
+  existing list's cursors for no safety gain. The same holds for the lists' cursors in the app.
+- **No index, no migration:** the condition only filters the rows the lists' and the API's existing
+  queries read in their existing order (the API through `crm_deals_list_idx`), as ADR-391's does on
+  the board; a company's deals are thousands of rows at most, and an expression index per key would
+  add write cost for every company for a rare read.
+  Scopes, plan checks and rate limits are unchanged (`deals.read`; the lists `crm.read`, the export
+  also `contacts.export`). The OpenAPI document describes the parameter, its forms, the refusal and
+  the cursor.
+
+Not built: filtering Reports by a choice, several field filters at once (or several options of one
+field), filters by text, number or date fields, saving a filtered view, and the field filter on
+`GET /tasks` or deal webhooks.

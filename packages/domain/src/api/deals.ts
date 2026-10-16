@@ -24,6 +24,14 @@ import {
 import { recordSystemAudit } from '../audit';
 import { addActivity, crmChangedBy, crmCreatedBy, memberRefs } from '../crm/common';
 import {
+  DEAL_FIELD_FILTER_MAX_LENGTH,
+  dealFieldFilterRefusal,
+  parseDealFieldFilterParam,
+  requireDealFieldFilter,
+  type DealFieldFilterProblem,
+} from '../crm/deal-field-filter';
+import { dealFieldCondition } from '../crm/deals';
+import {
   apiMergedDealAttributes,
   keptDealAttributes,
   loadDealFields,
@@ -60,6 +68,28 @@ const page = {
 
 export const apiPipelineListQuerySchema = z.object(page).strict();
 
+/** How `GET /deals` takes a filter by a choice or yes/no field (ADR-394). */
+export const API_DEAL_FIELD_FILTER_DESCRIPTION =
+  'Only the deals with this value of a choice or yes/no custom deal field (GET /deal-fields), as `<key>:<value>`: one of a choice field’s options (in any case), `yes` or `no` for a yes/no field, or nothing after the colon for the deals without a value. A key or option the company’s fields do not have, a field of another type or a value written otherwise is refused with 422 naming `field`, never ignored. Send it again with each `cursor`, as every filter.';
+
+/**
+ * The refusal's words for a field filter `GET /deals` cannot apply (ADR-394): the same reasons as
+ * the CRM export's (ADR-391), written for an integration, which reads the fields with
+ * GET /deal-fields.
+ */
+export function apiDealFieldFilterMessage(problem: DealFieldFilterProblem): string {
+  switch (problem) {
+    case 'malformed':
+      return '`field` takes `<key>:<value>`: a choice field’s option, `yes` or `no` for a yes/no field, or nothing after the colon for deals without a value.';
+    case 'no_field':
+      return 'The company has no deal field with this key (GET /deal-fields).';
+    case 'not_filterable':
+      return 'Deals can be filtered only by a choice or yes/no field.';
+    case 'no_option':
+      return 'This value is not one of the deal field’s options, or `yes` or `no` for a yes/no field.';
+  }
+}
+
 export const apiDealListQuerySchema = z
   .object({
     ...page,
@@ -77,6 +107,11 @@ export const apiDealListQuerySchema = z
       .describe(
         'Only deals changed at or after this time (created, edited, moved, closed or reopened, moved to another contact by a merge, or renamed when their contact was erased).',
       ),
+    field: z
+      .string()
+      .max(DEAL_FIELD_FILTER_MAX_LENGTH, apiDealFieldFilterMessage('malformed'))
+      .optional()
+      .describe(API_DEAL_FIELD_FILTER_DESCRIPTION),
   })
   .strict();
 
@@ -470,7 +505,9 @@ const pipelineOfDeal = and(
 
 /**
  * The company's deals, newest first by when they were created, on exact keyset pages: a page never
- * skips or repeats a deal. Filters combine. Only reads, so it records nothing.
+ * skips or repeats a deal. Filters combine, a choice or yes/no field's value among them (ADR-394).
+ * A cursor is a position only, as for every list: each page applies the filters it is asked with,
+ * so a page is never wider than its own query. Only reads, so it records nothing.
  */
 export async function apiListDeals(
   deps: Pick<OutboundDeps, 'db'>,
@@ -480,10 +517,21 @@ export async function apiListDeals(
   assertScope(ctx, 'deals.read');
   const q = parseInput(apiDealListQuerySchema, query);
   const cursor = decodeKeysetCursor(q.cursor);
+  // A field filter written otherwise is refused before anything is read (ADR-394).
+  if (q.field !== undefined && parseDealFieldFilterParam(q.field) === null) {
+    throw dealFieldFilterRefusal('malformed', apiDealFieldFilterMessage);
+  }
   return deps.db.run(
     ctx.scope,
     async (tx) => {
       await assertCrmInPlan(tx, ctx.tenant.id);
+      const dealFields = await loadDealFields(tx, ctx.tenant.id);
+      // Resolved against the company's own fields, read in its scope; refused, never ignored, when
+      // it does not resolve, so a page is never wider than asked (ADR-394).
+      const fieldFilter =
+        q.field === undefined
+          ? null
+          : requireDealFieldFilter(dealFields, q.field, apiDealFieldFilterMessage);
       const rows = await tx
         .select(dealColumns)
         .from(crmDeals)
@@ -503,6 +551,7 @@ export async function apiListDeals(
             q.updatedSince
               ? sql`${crmDeals.updatedAt} >= ${q.updatedSince}::timestamptz`
               : undefined,
+            dealFieldCondition(fieldFilter),
             cursor
               ? sql`(${crmDeals.createdAt}, ${crmDeals.id}) < (${cursor.at}::timestamptz, ${cursor.id}::uuid)`
               : undefined,
@@ -512,7 +561,6 @@ export async function apiListDeals(
         .limit(q.limit + 1);
       const shown = rows.slice(0, q.limit);
       const last = shown.at(-1);
-      const dealFields = await loadDealFields(tx, ctx.tenant.id);
       return {
         data: shown.map((row) => toApiDeal(row, dealFields)),
         nextCursor:

@@ -477,6 +477,13 @@ Phase 4 rules (CRM, P4-04):
   the board (with a notice that does not echo it) and refused by the export before it is audited, so
   a file is never wider than asked. The audit records the field's key and the kind of match, never
   the option. Permissions are unchanged (`crm.read`; the export also `contacts.export`).
+- The same filter on the won and lost lists, their export and `GET /deals` (ADR-394): resolved the
+  same way, in the company's scope; the lists ignore what does not resolve with the same notice, the
+  export refuses it before auditing, and the API refuses it with 422 naming `field` (never a wider
+  page than asked), checking only the text's form before the transaction and the key against the
+  company's fields within it, after the scope and plan checks. A cursor is a position only and
+  carries no filter: each page applies the filters sent with it. Scopes, permissions and rate limits
+  are unchanged (`deals.read`; the lists `crm.read`).
 - While a company is suspended, `crm.read` stays available and `crm.write` does not; reminder jobs
   wait, and the sweep sends reminders after reactivation unless they are more than a day late.
 
@@ -1175,7 +1182,8 @@ Phase 5 rules (Public API, P5-08):
   a pipeline or deal is read. They read in the key's company only (row security and an explicit
   company condition): another company's deal answers 404 as an unknown one does, an id that is not a
   UUID is refused before any query, and every filter is typed (a status from the list, UUIDs or
-  `none`, an ISO time). Deals name the contact, conversation and owner by id only, never the
+  `none`, an ISO time, and since ADR-394 a field filter resolved against the company's own fields or
+  refused). Deals name the contact, conversation and owner by id only, never the
   customer's number or name, notes, tasks or the timeline; an erased contact's deals are read
   renamed and without the lost reason, as erasure leaves them (unit tests; integration and e2e
   tests, run in CI only). A deal names who made its latest change (ADR-278) as the deal events do

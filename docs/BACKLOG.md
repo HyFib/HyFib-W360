@@ -358,7 +358,15 @@ verification, app review, Embedded Signup configuration).
   address as `field=<key>:<option>` and resolved against the company's own fields; a stale link shows
   every deal with a notice; the export of the view follows it, refusing a filter that does not
   resolve, audited with the key, never the option. Not built: Reports by a choice, several filters
-  at once, the API filter).
+  at once, the API filter, since built with the won and lost lists, ADR-394).
+  **[The deal field filter on the won and lost lists and in `GET /deals` built; its database and
+  browser tests run only in CI]** (ADR-394, no migration; the API part recorded under P5-08: the
+  won and lost lists, their pages and their export follow the same filter, a stale link showing
+  every deal with the notice, and switching between the board and the lists keeps it; `GET
+/deals?field=<key>:<value>` combines with the other filters and refuses with 422 naming `field` a
+  filter that does not resolve; cursors stay positions, each page applying the filters it is sent
+  with. Not built: Reports by a choice, several filters at once, text, number or date filters, saved
+  filtered views).
   **[Automation steps that set custom deal fields built; their database and browser tests run only
   in CI]** (ADR-386, migration 0302 for webhook endpoints' kinds of step: an "Update deal fields"
   step sets 1 to 20 values, with placeholders, on the contact's single open deal in a pipeline,

@@ -44,12 +44,10 @@ import {
 } from './common';
 import {
   dealFieldFilterAudit,
-  dealFieldFilterProblemMessage,
   DEAL_FIELD_FILTER_MAX_LENGTH,
-  filterableDealFields,
-  parseDealFieldFilterParam,
-  resolveDealFieldFilter,
-  type DealFieldFilterField,
+  dealFieldFilterView,
+  requireDealFieldFilter,
+  type DealFieldFilterView,
   type ResolvedDealFieldFilter,
 } from './deal-field-filter';
 import {
@@ -102,14 +100,16 @@ export interface Board {
   /** The weighted pipeline of the columns shown, and of the deals expected to close by `monthEnd`. */
   forecast: Forecast & { monthEnd: string };
   /** The filter by a choice or yes/no field (ADR-391), which columns and forecast follow. */
-  fieldFilter: {
-    /** The company's choice and yes/no fields, to choose from. */
-    fields: DealFieldFilterField[];
-    /** The filter applied, found among the company's fields; null for every deal. */
-    applied: ResolvedDealFieldFilter | null;
-    /** A filter was asked for but matches no field or option (a stale or edited link). */
-    ignored: boolean;
-  };
+  fieldFilter: DealFieldFilterView;
+}
+
+/** A page of the won or lost list (or of every deal), most recently changed first. */
+export interface DealListPage {
+  deals: DealCard[];
+  /** The next page's position; the next page is asked for with the same filters. */
+  nextCursor: string | null;
+  /** The filter by a choice or yes/no field (ADR-394), which the page follows. */
+  fieldFilter: DealFieldFilterView;
 }
 
 export interface ActivityItem {
@@ -240,6 +240,8 @@ const listSchema = z.object({
   status: z.enum(['open', 'won', 'lost']).nullable().default(null),
   pipelineId: uuidSchema.nullable().default(null),
   cursor: z.string().max(200).nullable().default(null),
+  /** A field filter as the address writes it (ADR-394), read as the board reads it. */
+  field: boardSchema.shape.field,
 });
 
 const LIST_PAGE = 50;
@@ -496,12 +498,11 @@ export function dealOperations(deps: { db: Database; clock: Clock }) {
             return null;
           }
           // The field filter, resolved against the company's own fields only (ADR-391).
-          const dealFields = await loadDealFields(tx, ctx.tenant.id);
-          const asked = data.field !== null && data.field !== '';
-          const resolved = asked
-            ? resolveDealFieldFilter(dealFields, parseDealFieldFilterParam(data.field))
-            : null;
-          const applied = resolved?.ok ? resolved.filter : null;
+          const fieldFilter = dealFieldFilterView(
+            await loadDealFields(tx, ctx.tenant.id),
+            data.field,
+          );
+          const applied = fieldFilter.applied;
           const where = and(
             eq(crmDeals.tenantId, ctx.tenant.id),
             eq(crmDeals.pipelineId, pipeline.id),
@@ -579,19 +580,20 @@ export function dealOperations(deps: { db: Database; clock: Clock }) {
               ),
               monthEnd,
             },
-            fieldFilter: {
-              fields: filterableDealFields(dealFields),
-              applied,
-              ignored: asked && applied === null,
-            },
+            fieldFilter,
           };
         },
         { accessMode: 'read only' },
       );
     },
 
-    /** Deals across pipelines, most recently changed first (for won, lost and all-deal lists). */
-    async listDeals(ctx: TenantContext, input: unknown = {}) {
+    /**
+     * Deals across pipelines, most recently changed first (for won, lost and all-deal lists),
+     * filtered by a choice or yes/no field's value as the board is (ADR-394): resolved against the
+     * company's own fields, and ignored and reported when it does not resolve. The cursor is a
+     * position only; each page applies the filters it is asked with.
+     */
+    async listDeals(ctx: TenantContext, input: unknown = {}): Promise<DealListPage> {
       assertCan(ctx, 'crm.read');
       const data = parseInput(listSchema, input);
       let cursor: { at: Date; id: string } | null = null;
@@ -609,6 +611,10 @@ export function dealOperations(deps: { db: Database; clock: Clock }) {
       return db.run(
         ctx.scope,
         async (tx) => {
+          const fieldFilter = dealFieldFilterView(
+            await loadDealFields(tx, ctx.tenant.id),
+            data.field,
+          );
           const rows = await tx
             .select({ deal: crmDeals, changedAt })
             .from(crmDeals)
@@ -617,6 +623,7 @@ export function dealOperations(deps: { db: Database; clock: Clock }) {
                 eq(crmDeals.tenantId, ctx.tenant.id),
                 data.status ? eq(crmDeals.status, data.status) : undefined,
                 data.pipelineId ? eq(crmDeals.pipelineId, data.pipelineId) : undefined,
+                dealFieldCondition(fieldFilter.applied),
                 cursor
                   ? sql`(${changedAt}, ${crmDeals.id}) < (${cursor.at.toISOString()}::timestamptz, ${cursor.id}::uuid)`
                   : undefined,
@@ -640,6 +647,7 @@ export function dealOperations(deps: { db: Database; clock: Clock }) {
                     'base64url',
                   )
                 : null,
+            fieldFilter,
           };
         },
         { accessMode: 'read only' },
@@ -677,17 +685,7 @@ export function dealOperations(deps: { db: Database; clock: Clock }) {
         }
         dealFields = await loadDealFields(tx, ctx.tenant.id);
         if (data.field !== undefined) {
-          const resolved = resolveDealFieldFilter(
-            dealFields,
-            parseDealFieldFilterParam(data.field),
-          );
-          if (!resolved.ok) {
-            const message = dealFieldFilterProblemMessage(resolved.problem);
-            throw new AppError('validation_failed', message, {
-              issues: [{ path: 'field', message }],
-            });
-          }
-          fieldFilter = resolved.filter;
+          fieldFilter = requireDealFieldFilter(dealFields, data.field);
         }
         await recordAudit(
           tx,

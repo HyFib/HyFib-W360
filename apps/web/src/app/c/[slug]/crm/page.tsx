@@ -2,7 +2,7 @@ import type { Metadata } from 'next';
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { isAppError } from '@w360/core';
-import { can } from '@w360/domain';
+import { can, type DealFieldFilterView } from '@w360/domain';
 import { formatMinor } from '@w360/domain/crm-money';
 import {
   Alert,
@@ -60,24 +60,27 @@ export default async function CrmPage({
   const owner = OWNER_FILTERS.find((f) => f.key === query.owner)?.key ?? 'all';
   const lookups = await crmLookups(ctx);
   const pipelineId = lookups.options.find((p) => p.id === query.pipeline)?.id ?? null;
-  // A choice or yes/no field's value (ADR-391), as the address writes it: the board resolves it
-  // against the company's own fields and reports one it cannot apply instead of failing. A repeated
-  // parameter counts by its first value, as the export reads it.
+  // A choice or yes/no field's value (ADR-391), as the address writes it: the board and the won and
+  // lost lists (ADR-394) resolve it against the company's own fields and report one they cannot
+  // apply instead of failing. A repeated parameter counts by its first value, as the export reads
+  // it.
   const field = (Array.isArray(query.field) ? query.field[0] : query.field) ?? null;
   const board = view === 'board' ? await crm.board(ctx, { pipelineId, owner, field }) : null;
-  // Links carry the filter as the board applied it, never the address's own text.
-  const appliedField = board?.fieldFilter.applied ?? null;
   const cursor = view === 'board' ? null : (query.cursor ?? null);
   let closed: Awaited<ReturnType<typeof crm.listDeals>> | null = null;
   if (view !== 'board') {
     try {
-      closed = await crm.listDeals(ctx, { status: view, cursor });
+      closed = await crm.listDeals(ctx, { status: view, cursor, field });
     } catch (error) {
-      // A cursor from an old or edited link: show the newest page instead.
+      // A cursor from an old or edited link: show the newest page, with the same filter, instead.
       if (!isAppError(error) || error.code !== 'validation_failed' || !cursor) throw error;
-      closed = await crm.listDeals(ctx, { status: view });
+      closed = await crm.listDeals(ctx, { status: view, field });
     }
   }
+  // Every view applies the field filter: links carry it as the view applied it, never the
+  // address's own text, so switching between the board and the lists keeps it.
+  const fieldFilter = board?.fieldFilter ?? closed?.fieldFilter ?? null;
+  const appliedField = fieldFilter?.applied ?? null;
   const href = (extra: Record<string, string | null>) => {
     const p = new URLSearchParams();
     const merged = {
@@ -105,7 +108,11 @@ export default async function CrmPage({
                 ...(owner === 'all' ? {} : { owner }),
                 ...(appliedField ? { field: appliedField.param } : {}),
               }
-            : { status: view },
+            : {
+                status: view,
+                // The won or lost list's filter (ADR-394).
+                ...(appliedField ? { field: appliedField.param } : {}),
+              },
         ).toString()}`
       : null;
   const settings = can(ctx, 'tenant.settings.manage');
@@ -152,8 +159,8 @@ export default async function CrmPage({
         {(['board', 'won', 'lost'] as const).map((v) => (
           <Link
             key={v}
-            // The won and lost lists are not filtered by a field (ADR-391): their links drop it.
-            href={href({ view: v, ...(v === 'board' ? {} : { field: null }) })}
+            // Every view applies the field filter (ADR-394), so switching views keeps it.
+            href={href({ view: v })}
             aria-current={view === v ? 'page' : undefined}
             className={
               view === v
@@ -230,60 +237,13 @@ export default async function CrmPage({
                 </nav>
                 <span className="text-muted-foreground">Values in {board.pipeline.currency}</span>
               </div>
-              {board.fieldFilter.ignored ? (
-                <Alert tone="warning" title="Showing every deal">
-                  The deal field filter in this link matches no field or option of the company (it
-                  may have been deleted or renamed), so the board is not filtered.
-                </Alert>
-              ) : null}
-              {board.fieldFilter.fields.length > 0 ? (
-                // A plain GET form (ADR-391): it works before hydration, and the board's other
-                // filters travel with it.
-                <form
-                  method="get"
-                  action={base}
-                  className="flex flex-wrap items-end gap-3"
-                  aria-label="Filter deals by a field"
-                >
-                  <input type="hidden" name="pipeline" value={board.pipeline.id} />
-                  {owner === 'all' ? null : <input type="hidden" name="owner" value={owner} />}
-                  <div className="grid min-w-0 max-w-full gap-1">
-                    <Label htmlFor="deal-field-filter">Deal field</Label>
-                    {/* Keyed by the applied filter: "Show all deals" navigates in the browser,
-                        which keeps the page's elements, and a kept select would go on showing
-                        the filter it cleared. */}
-                    <Select
-                      key={appliedField?.param ?? ''}
-                      id="deal-field-filter"
-                      name="field"
-                      defaultValue={appliedField?.param ?? ''}
-                      className="w-64 max-w-full"
-                    >
-                      <option value="">All deals</option>
-                      {board.fieldFilter.fields.map((f) => (
-                        <optgroup key={f.key} label={f.label}>
-                          {f.choices.map((choice) => (
-                            <option key={choice.param} value={choice.param}>
-                              {`${f.label}: ${choice.label}`}
-                            </option>
-                          ))}
-                        </optgroup>
-                      ))}
-                    </Select>
-                  </div>
-                  <Button type="submit" variant="outline">
-                    Filter deals
-                  </Button>
-                  {appliedField ? (
-                    <Link
-                      href={href({ field: null })}
-                      className="self-center text-sm text-primary underline-offset-4 hover:underline"
-                    >
-                      Show all deals
-                    </Link>
-                  ) : null}
-                </form>
-              ) : null}
+              <DealFieldFilter
+                base={base}
+                filter={board.fieldFilter}
+                shown="board"
+                hidden={{ pipeline: board.pipeline.id, ...(owner === 'all' ? {} : { owner }) }}
+                clearHref={href({ field: null })}
+              />
               {board.forecast.hasChances ? (
                 // Weighted by each stage's chance of winning (ADR-242). The month's end is a
                 // calendar date in the company's time already, so it is shown as written (UTC).
@@ -376,64 +336,78 @@ export default async function CrmPage({
             </>
           )
         ) : (
-          <Card>
-            <CardHeader>
-              <CardTitle>{view === 'won' ? 'Won deals' : 'Lost deals'}</CardTitle>
-              <CardDescription>Most recently changed first, 50 at a time.</CardDescription>
-            </CardHeader>
-            <CardContent className="grid gap-4">
-              {closed && closed.deals.length > 0 ? (
-                <ul className="grid gap-3">
-                  {closed.deals.map((d) => {
-                    const status = DEAL_STATUS[d.status] ?? {
-                      label: d.status,
-                      tone: 'neutral' as const,
-                    };
-                    return (
-                      <li key={d.id} className="flex flex-wrap items-center gap-2 text-sm">
-                        <Link
-                          href={`${base}/deals/${d.id}`}
-                          className="min-w-0 break-words font-medium text-primary underline-offset-4 hover:underline"
-                        >
-                          {d.title}
-                        </Link>
-                        <Badge tone={status.tone}>{status.label}</Badge>
-                        <span className="text-muted-foreground">
-                          {contactLabel(d.contact)}
-                          {d.valueMinor !== null
-                            ? ` · ${formatMinor(d.valueMinor, d.currency)}`
-                            : ''}
-                          {d.closedAt ? ` · ${formatDateTime(d.closedAt, tz)}` : ''}
-                        </span>
-                      </li>
-                    );
-                  })}
-                </ul>
-              ) : (
-                <p className="text-sm text-muted-foreground">None yet.</p>
-              )}
-              {cursor || closed?.nextCursor ? (
-                <nav aria-label="More deals" className="flex flex-wrap gap-4 text-sm">
-                  {cursor ? (
-                    <Link
-                      href={href({ view })}
-                      className="text-primary underline-offset-4 hover:underline"
-                    >
-                      Newest
-                    </Link>
-                  ) : null}
-                  {closed?.nextCursor ? (
-                    <Link
-                      href={href({ view, cursor: closed.nextCursor })}
-                      className="text-primary underline-offset-4 hover:underline"
-                    >
-                      Older deals
-                    </Link>
-                  ) : null}
-                </nav>
-              ) : null}
-            </CardContent>
-          </Card>
+          <>
+            {closed ? (
+              // The won or lost list's field filter (ADR-394); a new filter starts at the newest page.
+              <DealFieldFilter
+                base={base}
+                filter={closed.fieldFilter}
+                shown="list"
+                hidden={{ view, ...(owner === 'all' ? {} : { owner }) }}
+                clearHref={href({ field: null })}
+              />
+            ) : null}
+            <Card>
+              <CardHeader>
+                <CardTitle>{view === 'won' ? 'Won deals' : 'Lost deals'}</CardTitle>
+                <CardDescription>Most recently changed first, 50 at a time.</CardDescription>
+              </CardHeader>
+              <CardContent className="grid gap-4">
+                {closed && closed.deals.length > 0 ? (
+                  <ul className="grid gap-3">
+                    {closed.deals.map((d) => {
+                      const status = DEAL_STATUS[d.status] ?? {
+                        label: d.status,
+                        tone: 'neutral' as const,
+                      };
+                      return (
+                        <li key={d.id} className="flex flex-wrap items-center gap-2 text-sm">
+                          <Link
+                            href={`${base}/deals/${d.id}`}
+                            className="min-w-0 break-words font-medium text-primary underline-offset-4 hover:underline"
+                          >
+                            {d.title}
+                          </Link>
+                          <Badge tone={status.tone}>{status.label}</Badge>
+                          <span className="text-muted-foreground">
+                            {contactLabel(d.contact)}
+                            {d.valueMinor !== null
+                              ? ` · ${formatMinor(d.valueMinor, d.currency)}`
+                              : ''}
+                            {d.closedAt ? ` · ${formatDateTime(d.closedAt, tz)}` : ''}
+                          </span>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                ) : (
+                  <p className="text-sm text-muted-foreground">
+                    {appliedField ? 'No deals match the deal field filter.' : 'None yet.'}
+                  </p>
+                )}
+                {cursor || closed?.nextCursor ? (
+                  <nav aria-label="More deals" className="flex flex-wrap gap-4 text-sm">
+                    {cursor ? (
+                      <Link
+                        href={href({ view })}
+                        className="text-primary underline-offset-4 hover:underline"
+                      >
+                        Newest
+                      </Link>
+                    ) : null}
+                    {closed?.nextCursor ? (
+                      <Link
+                        href={href({ view, cursor: closed.nextCursor })}
+                        className="text-primary underline-offset-4 hover:underline"
+                      >
+                        Older deals
+                      </Link>
+                    ) : null}
+                  </nav>
+                ) : null}
+              </CardContent>
+            </Card>
+          </>
         )}
 
         {canWrite && lookups.options.length > 0 ? (
@@ -458,6 +432,83 @@ export default async function CrmPage({
           </Card>
         ) : null}
       </div>
+    </>
+  );
+}
+
+/**
+ * The "Deal field" filter of the board (ADR-391) and of the won and lost lists (ADR-394): the
+ * notice for a filter the view ignored, and a plain GET form (it works before hydration) whose
+ * hidden inputs carry the view's other parameters. A new filter starts at the list's newest page.
+ */
+function DealFieldFilter({
+  base,
+  filter,
+  shown,
+  hidden,
+  clearHref,
+}: {
+  base: string;
+  filter: DealFieldFilterView;
+  shown: 'board' | 'list';
+  hidden: Record<string, string>;
+  clearHref: string;
+}) {
+  const applied = filter.applied?.param ?? '';
+  return (
+    <>
+      {filter.ignored ? (
+        <Alert tone="warning" title="Showing every deal">
+          {`The deal field filter in this link matches no field or option of the company (it may have been deleted or renamed), so the ${shown === 'board' ? 'board' : 'list'} is not filtered.`}
+        </Alert>
+      ) : null}
+      {filter.fields.length > 0 ? (
+        <form
+          method="get"
+          action={base}
+          className="flex flex-wrap items-end gap-3"
+          aria-label="Filter deals by a field"
+        >
+          {Object.entries(hidden).map(([name, value]) => (
+            <input key={name} type="hidden" name={name} value={value} />
+          ))}
+          <div className="grid min-w-0 max-w-full gap-1">
+            <Label htmlFor="deal-field-filter">Deal field</Label>
+            {/* Keyed by the applied filter: "Show all deals" and the view links navigate in the
+                browser, which keeps the page's elements, and a kept select would go on showing
+                the filter of the page before. */}
+            <Select
+              key={applied}
+              id="deal-field-filter"
+              name="field"
+              defaultValue={applied}
+              className="w-64 max-w-full"
+            >
+              <option value="">All deals</option>
+              {filter.fields.map((f) => (
+                <optgroup key={f.key} label={f.label}>
+                  {f.choices.map((choice) => (
+                    <option key={choice.param} value={choice.param}>
+                      {`${f.label}: ${choice.label}`}
+                    </option>
+                  ))}
+                </optgroup>
+              ))}
+            </Select>
+          </div>
+          <Button type="submit" variant="outline">
+            Filter deals
+          </Button>
+          {filter.applied ? (
+            <Link
+              href={clearHref}
+              className="self-center text-sm text-primary underline-offset-4 hover:underline"
+            >
+              Show all deals
+            </Link>
+          ) : null}
+        </form>
+      ) : null}
     </>
   );
 }

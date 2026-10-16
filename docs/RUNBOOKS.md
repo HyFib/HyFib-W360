@@ -2168,6 +2168,16 @@ erased contact. Archived pipelines are listed with `archived: true`; their deals
 index can remain: run `DROP INDEX CONCURRENTLY app.crm_deals_list_idx;` and run the migrations
 again.
 
+**`GET /api/v1/deals?field=…` answers 422 naming `field` (ADR-394).** The filter is refused, never
+ignored, when it does not resolve: the message says why. The text must be `<key>:<value>` with a
+lower-case key (a key, not a label); the key must be one of the company's deal fields (GET
+/deal-fields: a field deleted since is unknown), of the choice or yes/no type; the value one of a
+choice field's options (any case) or `yes`/`no`, and nothing after the colon for deals without a
+value. Deals on later pages that do not match the filter mean the integration sent `cursor`
+without the filter it used for the first page, or with another one: a cursor is a position only,
+and each page applies the filters sent with it. In the app, the won and lost lists take the same filter and
+show every deal with "Showing every deal" when a link's filter no longer resolves.
+
 **`POST /api/v1/deals` answers 403, 404, 409, 422 or 423 (ADR-254).** 403 `forbidden` names the
 scope the key lacks, `deals.write` (granted by members with `crm.write`), or with reason
 `not_in_plan` the company's plan leaves out the CRM or the scope. 404 means the contact is not one

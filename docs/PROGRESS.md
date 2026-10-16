@@ -1,5 +1,60 @@
 # Progress
 
+## 2026-10-16 — The deal field filter on the won and lost lists and in the API (P4-04, P5-08, ADR-394)
+
+Status: **Implemented; its database and browser tests run in CI only.** ADR-391 filtered the open
+deals board by a choice or yes/no field and listed the won and lost lists and `GET /deals` as not
+built.
+
+### Completed
+
+- **Domain (`crm/deal-field-filter.ts`):** two readings on top of ADR-391's unchanged parsing,
+  resolution and condition: `dealFieldFilterView` (lenient: ignored and reported) and
+  `requireDealFieldFilter` with `dealFieldFilterRefusal` (strict: `validation_failed` naming
+  `field`, in the caller's words). The board and the export use them without a change in behaviour.
+- **Lists (`crm/deals.ts`):** `listDeals` takes `field`, adds `dealFieldCondition` to its keyset
+  query and returns `fieldFilter`; its result is typed (`DealListPage`).
+- **API (`api/deals.ts`, `openapi.ts`):** `GET /deals?field=<key>:<value>` (at most 200
+  characters) combines with the other filters; a malformed text is refused before the transaction,
+  a key or value the company's fields do not resolve after the scope and plan checks, both with 422
+  naming `field` (`apiDealFieldFilterMessage`). Cursors stay positions; each page applies the filters
+  sent with it. The OpenAPI document describes the parameter (no decision numbers).
+- **Web:** the CRM page's `DealFieldFilter` (the "Showing every deal" notice and the GET form, the
+  select keyed by the applied filter) on the board and the won and lost lists; the view links keep
+  the filter (ADR-391 dropped it on the lists), and "Older deals", "Newest" and the lists' export
+  link carry it as resolved; an empty filtered list says no deals match.
+- **Tests:** unit (`deal-field-filter.test.ts`: 2 new, the lenient reading's ignored and empty
+  texts, the strict reading's refusals naming `field` in either words; `api/deals.test.ts`: 1 new,
+  the schema's bound, the early refusal of malformed texts without a database, the read-only
+  transaction, the scope first, the API's messages; the OpenAPI test checks the parameter, its text
+  and no decision numbers); integration (`crm.test.ts`: 2 new and 1 extended, the won and lost
+  lists by each kind of match, ignored filters, the lists' exports and their audit, refusals, 55 of
+  60 deals paged with the filter, isolation of the lists; `api.test.ts`: 1 new, each kind of match,
+  every other filter combined, cursor pages, the cursor as a position, refusals of another
+  company's key and option, unknown options, other types, malformed and overlong texts, a deleted
+  field, and the other company's own filter); e2e (`crm.spec.ts`: the ADR-391 step wins both deals,
+  carries the filter from the board to the Won list and its export link, filters the list by
+  another option, clears it, a stale link on the list, no horizontal overflow).
+- **Docs:** ADR-394 (and ADR-391's note); ARCHITECTURE, SECURITY, THREAT-MODEL T347, RUNBOOKS
+  (`GET /deals` answering 422 for `field`), BACKLOG, and the matrix's H-012 and H-033 text and
+  H-012 evidence (statuses unchanged).
+- **Mutation checks:** 14 deliberate regressions in the new TypeScript (an empty text read as asked,
+  a resolved filter reported as ignored, no fields offered, the refusal's path, the caller's words
+  ignored, the strict reading's check inverted, the API's early check inverted or dropped, its
+  length bound, an API message, the API's early refusal in the app's words, the OpenAPI parameter's
+  name, bound and description): 14 caught by the unit tests, the code restored exactly (`git diff`
+  checked). The SQL conditions in `listDeals` and `apiListDeals` are covered by the integration
+  tests, which run in CI only.
+
+### Test commands and results (local, 2026-10-16)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 165 files, 1,773 tests passed                                   |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+
 ## 2026-10-16 — CI and review fixes for ADR-392 and ADR-393
 
 Status: **Fixed; the database and browser tests run in CI only.** CI's integration tests failed on

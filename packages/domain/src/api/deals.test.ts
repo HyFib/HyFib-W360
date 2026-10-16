@@ -5,9 +5,11 @@ import { ROLE_PERMISSIONS } from '../authz/permissions';
 import type { ApiContext } from './context';
 import { MAX_DEAL_MINOR } from '../crm/money';
 import {
+  API_DEAL_FIELD_FILTER_DESCRIPTION,
   API_DEAL_HISTORY_DETAILS,
   API_DEAL_HISTORY_TYPES,
   apiCreateDeal,
+  apiDealFieldFilterMessage,
   apiCreateDealSchema,
   apiDealHistoryQuerySchema,
   apiDealListQuerySchema,
@@ -131,6 +133,41 @@ describe('CRM pipelines and deals through the API (ADR-253)', () => {
     }
   });
 
+  it('take a choice or yes/no field filter, refusing one written otherwise before reading (ADR-394)', async () => {
+    const parse = (input: unknown) => apiDealListQuerySchema.safeParse(input);
+    for (const field of ['tier:Gold', 'signed:yes', 'tier:', 'x'.repeat(200)]) {
+      expect(parse({ field }).success, field).toBe(true);
+    }
+    const tooLong = parse({ field: 'x'.repeat(201) });
+    expect(tooLong.success).toBe(false);
+    expect(tooLong.error?.issues.map((i) => [i.path.join('.'), i.message])).toEqual([
+      ['field', apiDealFieldFilterMessage('malformed')],
+    ]);
+    // Written otherwise: refused with 422 naming `field`, before anything is read.
+    const malformed = ['validation_failed', apiDealFieldFilterMessage('malformed'), ['field']];
+    for (const field of ['', 'tier', 'Tier:Gold', 'tier: ', ':Gold', `tier:${'x'.repeat(200)}`]) {
+      expect(
+        await refusal(apiListDeals({ db: untouched }, ctx(['deals.read']), { field })),
+        field,
+      ).toEqual(malformed);
+    }
+    // Well written, it is resolved against the company's fields in its scope, read only.
+    const { db, runs } = reached();
+    await expect(
+      apiListDeals({ db }, ctx(['deals.read']), { field: 'tier:Gold', status: 'won' }),
+    ).rejects.toThrow('reached the database');
+    expect(runs).toEqual([{ accessMode: 'read only' }]);
+    // The scope is checked first.
+    expect(
+      (await refusal(apiListDeals({ db: untouched }, ctx(['orders.read']), { field: '' })))[0],
+    ).toBe('forbidden');
+    // Each reason in an integration's words, pointing to GET /deal-fields where it helps.
+    expect(apiDealFieldFilterMessage('malformed')).toContain('`<key>:<value>`');
+    expect(apiDealFieldFilterMessage('no_field')).toContain('GET /deal-fields');
+    expect(apiDealFieldFilterMessage('not_filterable')).toContain('choice or yes/no field');
+    expect(apiDealFieldFilterMessage('no_option')).toContain('not one of the deal field’s options');
+  });
+
   it('need deals.read and refuse bad requests before reading anything', async () => {
     const missing = ['forbidden', 'This API key does not have the deals.read scope.', []];
     expect(await refusal(apiListPipelines({ db: untouched }, ctx(['contacts.read']), {}))).toEqual(
@@ -224,7 +261,24 @@ describe('CRM pipelines and deals through the API (ADR-253)', () => {
       'contactId',
       'ownerId',
       'updatedSince',
+      'field',
     ]);
+    // The field filter (ADR-394): its form, the refusal and the cursor, without decision numbers.
+    const fieldParam = list.parameters.find((p) => p.name === 'field') as
+      { description?: string; schema?: { maxLength?: number } } | undefined;
+    expect(fieldParam?.description).toBe(API_DEAL_FIELD_FILTER_DESCRIPTION);
+    expect(fieldParam?.schema?.maxLength).toBe(200);
+    for (const words of [
+      '`<key>:<value>`',
+      'GET /deal-fields',
+      '`yes` or `no`',
+      'nothing after the colon',
+      'refused with 422 naming `field`',
+      'with each `cursor`',
+    ]) {
+      expect(API_DEAL_FIELD_FILTER_DESCRIPTION).toContain(words);
+    }
+    expect(JSON.stringify(list)).not.toMatch(/ADR-\d/);
     const param = (name: string) => list.parameters.find((p) => p.name === name)?.schema;
     expect(param('status')?.enum).toEqual([...DEAL_STATUSES]);
     expect(param('ownerId')?.anyOf).toContainEqual({ const: 'none' });

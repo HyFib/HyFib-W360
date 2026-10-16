@@ -2005,6 +2005,200 @@ describe('filtering the board by a choice or yes/no field (ADR-391)', () => {
     // A's own board still finds its deal.
     const aBoard = (await svc.board(a.owner, { pipelineId: a.pipeline.id, field: 'tier:Gold' }))!;
     expect(aBoard.columns[0]!.deals.map((d) => d.title)).toEqual(['A gold deal']);
+    // The deal lists (ADR-394) resolve the key the same way: B's ignores it, A's applies it.
+    const bList = await svc.listDeals(b.owner, { field: 'tier:Gold' });
+    expect(bList.fieldFilter).toMatchObject({ applied: null, ignored: true });
+    expect(bList.deals).toEqual([]);
+    const aList = await svc.listDeals(a.owner, { field: 'tier:Gold' });
+    expect(aList.fieldFilter.ignored).toBe(false);
+    expect(aList.deals.map((d) => d.title)).toEqual(['A gold deal']);
+  });
+
+  it('filters the won and lost lists and their exports, ignoring what a list cannot apply (ADR-394)', async () => {
+    const { c, owner, pipeline, newStage } = await setup();
+    const svc = crm();
+    await svc.createDealField(owner, { label: 'Region', type: 'text' });
+    await svc.createDealField(owner, {
+      label: 'Tier',
+      type: 'choice',
+      options: ['Gold', 'Silver'],
+    });
+    await svc.createDealField(owner, { label: 'Signed', type: 'boolean' });
+    const contactId = await newContact(owner, 'Meera');
+    const create = (title: string, fields: Record<string, string>) =>
+      svc.createDeal(owner, {
+        contactId,
+        pipelineId: pipeline.id,
+        stageId: newStage.id,
+        title,
+        fields,
+      });
+    const closed = async (
+      title: string,
+      fields: Record<string, string>,
+      outcome: 'won' | 'lost',
+    ) => {
+      const { id } = await create(title, fields);
+      await svc.closeDeal(owner, {
+        id,
+        expectedVersion: 1,
+        outcome,
+        ...(outcome === 'lost' ? { lostReason: 'Too dear' } : {}),
+      });
+      return id;
+    };
+    await closed('Gold won', { tier: 'gold', signed: 'yes' }, 'won');
+    await closed('Silver won', { tier: 'Silver', signed: 'no' }, 'won');
+    // A text field holding the same word never matches.
+    const plainWon = await closed('Plain won', { region: 'Gold' }, 'won');
+    const goldLost = await closed('Gold lost', { tier: 'Gold' }, 'lost');
+    await closed('Plain lost', {}, 'lost');
+    // An open Gold deal is in neither list, nor in their exports.
+    await create('Gold open', { tier: 'Gold' });
+
+    const titles = async (status: 'won' | 'lost', field?: string) =>
+      (await svc.listDeals(owner, { status, field })).deals.map((d) => d.title).sort();
+
+    // Without a filter: every closed deal of the status, and the fields to choose from.
+    const all = await svc.listDeals(owner, { status: 'won' });
+    expect(all.fieldFilter).toEqual({
+      fields: [
+        {
+          key: 'tier',
+          label: 'Tier',
+          type: 'choice',
+          choices: [
+            { param: 'tier:Gold', label: 'Gold' },
+            { param: 'tier:Silver', label: 'Silver' },
+            { param: 'tier:', label: 'Not set' },
+          ],
+        },
+        {
+          key: 'signed',
+          label: 'Signed',
+          type: 'boolean',
+          choices: [
+            { param: 'signed:yes', label: 'Yes' },
+            { param: 'signed:no', label: 'No' },
+            { param: 'signed:', label: 'Not set' },
+          ],
+        },
+      ],
+      applied: null,
+      ignored: false,
+    });
+    expect(all.deals.map((d) => d.title).sort()).toEqual(['Gold won', 'Plain won', 'Silver won']);
+
+    // Each kind of match, on both lists.
+    const gold = await svc.listDeals(owner, { status: 'won', field: 'tier:GOLD' });
+    expect(gold.fieldFilter.applied).toEqual({
+      key: 'tier',
+      label: 'Tier',
+      type: 'choice',
+      stored: 'Gold',
+      param: 'tier:Gold',
+      valueLabel: 'Gold',
+    });
+    expect(gold.fieldFilter.ignored).toBe(false);
+    expect(gold.deals.map((d) => d.title)).toEqual(['Gold won']);
+    expect(await titles('won', 'tier:Silver')).toEqual(['Silver won']);
+    expect(await titles('won', 'tier:')).toEqual(['Plain won']);
+    expect(await titles('won', 'signed:yes')).toEqual(['Gold won']);
+    expect(await titles('won', 'signed:No')).toEqual(['Silver won']);
+    expect(await titles('won', 'signed:')).toEqual(['Plain won']);
+    expect(await titles('lost', 'tier:Gold')).toEqual(['Gold lost']);
+    expect(await titles('lost', 'tier:')).toEqual(['Plain lost']);
+    expect(await titles('lost', 'tier:Silver')).toEqual([]);
+    expect(await titles('lost', 'signed:')).toEqual(['Gold lost', 'Plain lost']);
+
+    // A filter a list cannot apply is ignored and reported: the whole list is shown.
+    for (const field of [
+      'plan:Gold',
+      'tier:Platinum',
+      'region:Gold',
+      'tier',
+      'Tier:Gold',
+      `tier:${'x'.repeat(300)}`,
+    ]) {
+      const ignored = await svc.listDeals(owner, { status: 'won', field });
+      expect(ignored.fieldFilter, field).toMatchObject({ applied: null, ignored: true });
+      expect(ignored.deals.map((d) => d.title).sort(), field).toEqual([
+        'Gold won',
+        'Plain won',
+        'Silver won',
+      ]);
+    }
+    expect((await svc.listDeals(owner, { status: 'won', field: '' })).fieldFilter.ignored).toBe(
+      false,
+    );
+
+    // The export of a won or lost list follows its filter, and refuses one it cannot match.
+    const ids = (lines: string[]) => lines.slice(1).map((line) => line.split(',')[0]);
+    expect(ids(await exported(owner, { status: 'lost', field: 'tier:gold' }))).toEqual([goldLost]);
+    expect(ids(await exported(owner, { status: 'won', field: 'signed:' }))).toEqual([plainWon]);
+    await expectAppError(
+      exported(owner, { status: 'lost', field: 'tier:Platinum' }),
+      'validation_failed',
+      /not one of the deal field’s options/,
+    );
+    await expectAppError(
+      exported(owner, { status: 'won', field: 'region:Gold' }),
+      'validation_failed',
+      /choice or yes\/no/,
+    );
+    await expectAppError(
+      exported(owner, { status: 'won', field: 'plan:Gold' }),
+      'validation_failed',
+      /no longer exists/,
+    );
+
+    // Audited with the field's key and the kind of match, never the option; refusals are not.
+    const audit = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND action = 'crm.deals_exported' ORDER BY id`,
+      [c.tenant.id],
+    );
+    expect(audit.map((a) => a.metadata)).toEqual([
+      { status: 'lost', pipelineId: null, owner: 'all', field: { key: 'tier', match: 'option' } },
+      { status: 'won', pipelineId: null, owner: 'all', field: { key: 'signed', match: 'not_set' } },
+    ]);
+    expect(JSON.stringify(audit)).not.toContain('Gold');
+  });
+
+  it('pages through a filtered list with the filter on every page (ADR-394)', async () => {
+    const { owner, pipeline, newStage } = await setup();
+    await crm().createDealField(owner, {
+      label: 'Tier',
+      type: 'choice',
+      options: ['Gold', 'Silver'],
+    });
+    const contactId = await newContact(owner, 'Kavya');
+    // 55 Gold and 5 Silver deals won in one statement share one change time, to the microsecond.
+    await fx.query(
+      `insert into app.crm_deals (id, tenant_id, pipeline_id, stage_id, contact_id, title, status,
+         closed_at, closed_by_membership_id, created_by_membership_id, attributes)
+       select gen_random_uuid(), $1, $2, $3, $4, 'Deal ' || g, 'won', now(), $5, $5,
+              case when g <= 55 then '{"tier": "Gold"}'::jsonb else '{"tier": "Silver"}'::jsonb end
+         from generate_series(1, 60) g`,
+      [owner.tenant.id, pipeline.id, newStage.id, contactId, owner.membership.id],
+    );
+    const field = 'tier:Gold';
+    const first = await crm().listDeals(owner, { status: 'won', field });
+    expect(first.deals).toHaveLength(50);
+    expect(first.nextCursor).not.toBeNull();
+    const second = await crm().listDeals(owner, { status: 'won', field, cursor: first.nextCursor });
+    expect(second.deals).toHaveLength(5);
+    expect(second.nextCursor).toBeNull();
+    expect(second.fieldFilter.applied?.param).toBe('tier:Gold');
+    const seen = [...first.deals, ...second.deals].map((d) => d.title);
+    expect(new Set(seen).size).toBe(55);
+    expect(seen.map((title) => Number(title.slice('Deal '.length))).every((n) => n <= 55)).toBe(
+      true,
+    );
+    // "Not set" matches none of them; Silver only its five, on one page.
+    expect((await crm().listDeals(owner, { status: 'won', field: 'tier:' })).deals).toEqual([]);
+    const silver = await crm().listDeals(owner, { status: 'won', field: 'tier:Silver' });
+    expect([silver.deals.length, silver.nextCursor]).toEqual([5, null]);
   });
 });
 

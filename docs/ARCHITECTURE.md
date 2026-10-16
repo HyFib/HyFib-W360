@@ -1379,6 +1379,18 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   filterable fields with their choices, the filter applied, and whether one asked for was ignored);
   `exportDeals` refuses one that does not resolve and audits its key and kind of match. Web: the CRM
   page's "Deal field" GET form and its notice for a stale link; the export route passes `field`.
+- **The field filter on the won and lost lists and in `GET /deals` (ADR-394, no migration):** two
+  readings in `crm/deal-field-filter.ts` share ADR-391's parsing and resolution: `dealFieldFilterView`
+  (lenient: the board and `listDeals` ignore a filter that does not resolve and report it, the
+  `fieldFilter` both return) and `requireDealFieldFilter` (strict: `exportDeals` and `apiListDeals`
+  refuse it with `validation_failed` naming `field`, through `dealFieldFilterRefusal`, the API in
+  its own words, `apiDealFieldFilterMessage`). `listDeals` adds `dealFieldCondition` to its keyset
+  query; `apiListDeals` refuses a malformed text before the transaction, then resolves the key
+  against the company's fields after the plan check and adds the condition to its others. Cursors
+  are positions only, as for every list: each page applies the filters it is asked with. Web: the
+  CRM page's `DealFieldFilter` (the notice and the GET form, the view's other parameters as hidden
+  inputs) on the board and the lists; the view links, "Older deals", "Newest" and the lists' export
+  link carry the filter as resolved.
 - **Deal import (ADR-374, no migration):** `crm/deal-import.ts` previews a CSV (columns, first
   rows, suggested mapping) and imports it into one pipeline: `planDealRows` checks each row against
   the company's records (contacts by E.164 number, active stages by name, CRM members by email,
@@ -1639,7 +1651,8 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   cursors (`created_at`, `id`) with the page's stages in a second query, both in one repeatable-read
   snapshot. Deals are read in the company joined to their pipeline (its currency), newest first by
   `created_at` on exact keyset cursors (`crm_deals_list_idx`), the filters as plain equalities
-  (`ownerId` `none` as a null owner) and `updated_at >= updatedSince`; `toApiDeal` gives ids in
+  (`ownerId` `none` as a null owner), `updated_at >= updatedSince` and, since ADR-394, a choice or
+  yes/no field's value (`field`, resolved or refused as the CRM export does); `toApiDeal` gives ids in
   place of the contact, conversation and owner, since ADR-278 who made its latest change
   (`changedBy`, `changedByApiKeyId`, read from the columns of ADR-277), and since ADR-282 who added
   it (`createdBy`, `createdByApiKeyId`: `crmCreatedBy` reads `created_by_api_key_id` and

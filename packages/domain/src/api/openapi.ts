@@ -155,6 +155,7 @@ import {
 import { API_LIMITS, API_SCOPE_INFO, API_SCOPE_KEYS } from './model';
 import { apiPaymentLinkSchema } from './payment-link-view';
 import {
+  API_DEAL_FIELD_FILTER_DESCRIPTION,
   API_DEAL_HISTORY_DETAILS,
   API_DEAL_HISTORY_TYPES,
   apiCreateDealSchema,
@@ -164,6 +165,7 @@ import {
 } from './deals';
 import { apiAddDealItemSchema } from './deal-items';
 import { MAX_DEAL_ITEMS, MAX_ITEM_QUANTITY } from '../crm/deal-items';
+import { DEAL_FIELD_FILTER_MAX_LENGTH } from '../crm/deal-field-filter';
 import { API_NOTE_MAX_LENGTH, apiCreateNoteSchema } from './notes';
 import { apiCreatePipelineSchema, apiUpdatePipelineSchema } from './pipelines';
 import { apiPipelineForecastSchema } from './pipeline-forecast';
@@ -3942,6 +3944,12 @@ export function buildOpenApiDocument(serverUrl: string) {
               schema: { type: 'string', format: 'date-time' },
               description:
                 'Only deals changed at or after this time (created, edited, moved, closed or reopened, moved to another contact by a merge, or renamed when their contact was erased).',
+            },
+            {
+              name: 'field',
+              in: 'query',
+              schema: { type: 'string', maxLength: DEAL_FIELD_FILTER_MAX_LENGTH },
+              description: API_DEAL_FIELD_FILTER_DESCRIPTION,
             },
           ],
           responses: {
