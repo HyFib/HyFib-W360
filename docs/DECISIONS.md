@@ -15344,6 +15344,11 @@ lock order is reviewed, not raced), the `updated` outcome's first new label ("Ma
 vague, every value control named "Value", a company without deal fields told that each row's field
 does not exist, the simulator showing a value as typed rather than as stored, a date not written as
 YYYY-MM-DD hidden by the date input, and a run note naming choices for any type. All were fixed.
+Codex then found that `{{order.*}}` in this step's values rendered empty in automations that order
+messages start: the runner loaded an order's values only for a fixed list of steps, which also left
+out forms, products, and task and deal titles. It now loads them for every step whose texts the
+graph checks (`stepRendersPlaceholders`), and a store test fills a deal's title and a field from an
+order.
 
 ## ADR-387 Deal import that changes and closes deals (P4-04) (2026-10-16)
 

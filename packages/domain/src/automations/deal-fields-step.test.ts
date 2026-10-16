@@ -8,6 +8,7 @@ import {
   checkGraph,
   edgesOf,
   parseGraph,
+  stepRendersPlaceholders,
   type AutomationGraph,
   type GraphReferences,
 } from './graph';
@@ -406,6 +407,82 @@ describe('a deal’s values after a step sets some (ADR-386)', () => {
     });
     expect(stepDealAttributes(many, full, [{ field: 'f0', value: null }])).toMatchObject({
       ok: true,
+    });
+  });
+});
+
+describe('the run values a step needs (ADR-386)', () => {
+  it('loads an order’s values for every step whose texts hold placeholders, these steps included', () => {
+    const ID = '0190a3e4-9999-7000-8000-000000000009';
+    const graph = graphOf({
+      version: 1,
+      start: 'fields',
+      nodes: [
+        {
+          id: 'fields',
+          type: 'update_deal_fields',
+          pipelineId: PIPELINE,
+          values: [{ field: 'region', value: '{{order.number}}' }],
+          next: 'task',
+        },
+        {
+          id: 'task',
+          type: 'create_task',
+          title: 'Call about {{order.number}}',
+          assigneeMembershipId: ID,
+          dueInHours: 24,
+          next: 'deal',
+        },
+        {
+          id: 'deal',
+          type: 'create_deal',
+          title: 'Order {{order.number}}',
+          pipelineId: PIPELINE,
+          stageId: STAGE,
+          value: null,
+          ownerMembershipId: null,
+          next: 'form',
+        },
+        {
+          id: 'form',
+          type: 'send_flow',
+          flowId: ID,
+          header: 'Book a visit',
+          body: 'About order {{order.number}}',
+          footer: null,
+          cta: 'Open the form',
+          next: 'offer',
+        },
+        {
+          id: 'offer',
+          type: 'send_products',
+          kind: 'product',
+          productIds: [ID],
+          sectionTitle: null,
+          header: null,
+          body: 'For order {{order.number}}',
+          footer: null,
+          next: 'cleared',
+        },
+        // A step whose values are all left empty renders nothing.
+        {
+          id: 'cleared',
+          type: 'update_deal_fields',
+          pipelineId: PIPELINE,
+          values: [{ field: 'region', value: '' }],
+          next: 'bye',
+        },
+        { id: 'bye', type: 'end' },
+      ],
+    });
+    expect(Object.fromEntries(graph.nodes.map((n) => [n.id, stepRendersPlaceholders(n)]))).toEqual({
+      fields: true,
+      task: true,
+      deal: true,
+      form: true,
+      offer: true,
+      cleared: false,
+      bye: false,
     });
   });
 });

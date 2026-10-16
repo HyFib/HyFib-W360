@@ -63,6 +63,7 @@ import {
   RUN_BUDGETS,
   dealValueMinor,
   graphSchema,
+  stepRendersPlaceholders,
   type AutomationGraph,
   type AutomationNode,
 } from './graph';
@@ -204,17 +205,6 @@ export function replyFromMessage(message: {
   return { type: 'other', text: null, buttonId: null };
 }
 
-/** Steps whose texts can hold placeholders. */
-const TEXT_NODE_TYPES: ReadonlySet<AutomationNode['type']> = new Set([
-  'send_text',
-  'ask_buttons',
-  'ask_text',
-  'send_template',
-  'ask_template',
-  'update_contact',
-  'http_request',
-]);
-
 async function loadFacts(
   tx: Tx,
   run: AutomationRun,
@@ -249,7 +239,7 @@ async function loadFacts(
   }
   // The order of a run started by order messages, as it is now (only for steps with texts).
   const order =
-    run.storeOrderId && node && TEXT_NODE_TYPES.has(node.type)
+    run.storeOrderId && node && stepRendersPlaceholders(node)
       ? await orderPlaceholderValues(tx, run.tenantId, run.storeOrderId)
       : null;
   return {

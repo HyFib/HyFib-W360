@@ -1382,6 +1382,15 @@ function textsOf(node: AutomationNode): string[] {
   }
 }
 
+/**
+ * Whether a step's texts are rendered with the run's values, an order's included (`{{order.*}}` in
+ * automations that order messages start): every step whose texts the graph checks, and web requests
+ * (their address, headers and body), so the runner loads those values for exactly these steps.
+ */
+export function stepRendersPlaceholders(node: AutomationNode): boolean {
+  return node.type === 'http_request' || textsOf(node).length > 0;
+}
+
 export interface GraphReferences {
   /** Teams of the company; when given, hand-off teams must be among them. */
   teamIds?: ReadonlySet<string>;

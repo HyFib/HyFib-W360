@@ -21,10 +21,15 @@ features found two Medium and seven Low issues (and nits), all fixed before merg
   visible as text; the invalid-value note no longer names choices for every type; the progress notes
   no longer claim the integration test races the locks; ADR-386 lists the missing warning when a field
   that published steps use is deleted.
+- **Order fields in steps that send no text (Codex):** `{{order.*}}` placeholders rendered empty in
+  the values of a step that sets deal fields, and also in forms, products, and task and deal titles,
+  in automations that order messages start: the runner loaded an order's values only for a fixed
+  list of steps. It now loads them for every step whose texts the graph checks.
 - **Tests:** unit (shared stage names for new and changed deals, a deal's own stage kept, closed
   deals' rows unchanged or refused, a deal moved by a merge, a long products cell read back, a cell
-  error reported again at the import, a company without deal fields); integration (the round trip
-  with a lost deal unchanged and refused when renamed).
+  error reported again at the import, a company without deal fields, the steps that load an order's
+  values); integration (the round trip with a lost deal unchanged and refused when renamed; a store
+  automation filling a deal's title and a field from the order).
 - **Mutation checks:** 10 deliberate regressions of the fixes (shared names kept, the own-stage rule,
   the cell limit, the moved contact, the closed rows' status, reason and change rules, the unchanged
   outcome, the ambiguous name, the no-fields message), all caught by the unit tests.
@@ -34,7 +39,7 @@ features found two Medium and seven Low issues (and nits), all fixed before merg
 | Command                                            | Result                                                          |
 | -------------------------------------------------- | --------------------------------------------------------------- |
 | `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
-| `pnpm test` (unit)                                 | 160 files, 1,676 tests passed                                   |
+| `pnpm test` (unit)                                 | 160 files, 1,677 tests passed                                   |
 | `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
 | `pnpm build`                                       | passed                                                          |
 
