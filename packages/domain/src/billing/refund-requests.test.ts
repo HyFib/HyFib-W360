@@ -4,7 +4,7 @@ import { PgDialect } from 'drizzle-orm/pg-core';
 import { Keyring } from '@w360/core';
 import type { Database, SQL } from '@w360/db';
 import { renderEmail } from '../email/templates';
-import { alertPostBody } from '../platform/alert-channel';
+import { alertPostBody, alertPostPlain } from '../platform/alert-channel';
 import {
   REFUND_REQUEST_LIMITS,
   announceRefundRequests,
@@ -157,8 +157,12 @@ describe('the refund requests’ post (ADR-345)', () => {
     const marked = statements.filter((s) => s.sql.includes('mark_announced'));
     expect(statements.at(-1)).toEqual({
       tx: marked[0]!.tx,
-      sql: 'select ops.queue_platform_alert_post($1, $2) as queued',
-      params: ['refund_requests', alertPostBody(refundRequestsAnnouncement(1, BASE, 1))],
+      sql: 'select ops.queue_platform_alert_post($1, $2, $3) as queued',
+      params: [
+        'refund_requests',
+        alertPostBody(refundRequestsAnnouncement(1, BASE, 1)),
+        alertPostPlain(refundRequestsAnnouncement(1, BASE, 1)),
+      ],
     });
     expect(marked.map((s) => s.tx)).toEqual([3, 3]);
     expect(order.slice(-3)).toEqual(['email', 'email', 'post']);
@@ -181,6 +185,7 @@ describe('the refund requests’ post (ADR-345)', () => {
     expect(statements.at(-1)?.params).toEqual([
       'refund_requests',
       alertPostBody(refundRequestsAnnouncement(1, BASE)),
+      alertPostPlain(refundRequestsAnnouncement(1, BASE)),
     ]);
   });
 

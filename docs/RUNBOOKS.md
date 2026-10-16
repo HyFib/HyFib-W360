@@ -4030,6 +4030,24 @@ reconciliation alert emailed`, `unsettled payments alert emailed` and `refund re
 platform owners`). Saving the alerts from a web server older than 0263's release unticks "Refund
 requests", which it does not list.
 
+**A Microsoft Teams channel (ADR-388).** In Teams, open the channel's "Workflows", choose the
+template "Send webhook alerts to a channel" (or build a flow starting "When a Teams webhook request
+is received" that posts the card it receives), save it and copy the webhook link it gives. On
+Operations → Alerts paste the link, choose the format "Microsoft Teams card (Workflows)" and press
+"Set the channel" (or "Replace the channel"), then "Send a test post": the channel shows a card
+with the subject in bold and a line a block. A channel already set changes format alone under
+"Format posted" ("Save the format"), without the address; the posts waiting are sent in the format
+saved. Choose "JSON text" for Slack and services that take a `text` member: some Teams workflow
+templates may take that too, but HyFib has not checked any. The worker sends the same answers'
+rules in both formats (a 2xx is sent; a 429, a 5xx or no answer is tried again). Microsoft documents
+a limit of 28 KB a message, which HyFib's cards stay under, and a throttle above four requests a
+second, which one post at a time does not reach. A Teams workflow belongs to the person who made it:
+if that person leaves, the flow can stop, so give it co-owners in Power Automate; posts that fail
+meanwhile show the workflow's answer under the latest posts. Workflows do not yet post to private
+channels, as Microsoft says. During a rollout, a Teams channel's posts wait while only workers from
+before 0304's release run (DEPLOYMENT, 0304); choose the Teams format once the workers are rolled
+out.
+
 **The last 12 months (ADR-341).** The Usage tab's year comes from counts the worker keeps: each UTC
 day is counted once it has ended, for every company not deleted, and again once a day for a week
 while statuses arrive; after a deployment the 365 days before it are counted 3 a minute, newest

@@ -970,8 +970,12 @@ test('an owner posts the operations alerts to a chat channel and sends it a test
     await page
       .getByLabel('The channel’s incoming webhook address')
       .fill(`http://${host}:${port}${path}`);
+    // A new channel takes JSON text unless another format is chosen (ADR-388).
+    await expect(page.getByLabel('Format', { exact: true })).toHaveValue('text');
     await page.getByRole('button', { name: 'Set the channel' }).click();
-    await expect(page.getByText(`Alerts are posted to ${host} from now on.`)).toBeVisible();
+    await expect(
+      page.getByText(`Alerts are posted to ${host} from now on, as JSON text (Slack and similar).`),
+    ).toBeVisible();
     // The page names the host, never the address, which holds the channel's secret.
     await expect(page.getByText(host, { exact: true })).toBeVisible();
     await expect(page.getByText(token)).toHaveCount(0);
@@ -1000,14 +1004,16 @@ test('an owner posts the operations alerts to a chat channel and sends it a test
     await expect(page.getByText(/^Test post queued/)).toBeVisible();
     // The alerts other tests cause while the channel is set are posted too: only the test post is
     // counted.
+    const TEST_SUBJECT = 'HyFib W360: a test post from the operations console';
     const tests = () =>
-      received.filter(
-        (r) =>
+      received.filter((r) => {
+        const sent = JSON.parse(r.body) as { text?: unknown };
+        return (
           r.path === path &&
-          (JSON.parse(r.body) as { text: string }).text.startsWith(
-            'HyFib W360: a test post from the operations console\n',
-          ),
-      );
+          typeof sent.text === 'string' &&
+          sent.text.startsWith(`${TEST_SUBJECT}\n`)
+        );
+      });
     await expect.poll(() => tests().length, { timeout: 30_000 }).toBe(1);
     expect(tests()[0]!.type).toBe('application/json');
     // Posts are kept 7 days and listed newest first: run together, as locally, the projects share
@@ -1023,6 +1029,50 @@ test('an owner posts the operations alerts to a chat channel and sends it a test
       await expect(testRow).toContainText('Sent', { timeout: 1_000 });
     }).toPass({ timeout: 30_000 });
     await expect(testRow).toContainText('HTTP 200');
+
+    // The format alone changes to a Teams card, the address kept and not asked for again
+    // (ADR-388); the next test post is a card whose first block is the subject.
+    // The channel's details give its format (the selects' options say it too).
+    const formatShown = (label: string) =>
+      page.locator('dd').filter({ hasText: new RegExp(`^${label.replace(/[()]/g, '\\$&')}$`) });
+    await expect(formatShown('JSON text (Slack and similar)')).toBeVisible();
+    await page.getByLabel('Format posted').selectOption('teams_card');
+    await page.getByRole('button', { name: 'Save the format' }).click();
+    await expect(page.getByText(/^Saved: posts, those waiting among them/)).toBeVisible();
+    await expect(formatShown('Microsoft Teams card (Workflows)')).toBeVisible();
+    await expect(page.getByLabel('Format of the new address')).toHaveValue('teams_card');
+    await expect(page.getByText(token)).toHaveCount(0);
+    await page.getByRole('button', { name: 'Send a test post' }).click();
+    await expect(page.getByText(/^Test post queued/)).toBeVisible();
+    type Card = {
+      type?: unknown;
+      attachments?: { contentType: string; content: { type: string; body: unknown[] } }[];
+    };
+    const cards = () =>
+      received.filter((r) => {
+        const sent = JSON.parse(r.body) as Card;
+        const block = sent.attachments?.[0]?.content.body[0] as { text?: unknown } | undefined;
+        return r.path === path && sent.type === 'message' && block?.text === TEST_SUBJECT;
+      });
+    await expect.poll(() => cards().length, { timeout: 30_000 }).toBe(1);
+    expect(cards()[0]!.type).toBe('application/json');
+    const sentCard = JSON.parse(cards()[0]!.body) as Card;
+    expect(sentCard.attachments?.[0]).toMatchObject({
+      contentType: 'application/vnd.microsoft.card.adaptive',
+      content: {
+        type: 'AdaptiveCard',
+        version: '1.2',
+        body: [
+          { type: 'TextBlock', text: TEST_SUBJECT, weight: 'bolder', wrap: true },
+          {
+            type: 'TextBlock',
+            text: 'The alerts chosen under Operations → Alerts are posted here when they are emailed, with counts only.',
+            wrap: true,
+          },
+          { type: 'TextBlock', text: expect.stringMatching(/^Open the alerts: /), wrap: true },
+        ],
+      },
+    });
     await expectNoHorizontalOverflow(page);
 
     await page.getByRole('button', { name: 'Remove the channel' }).click();

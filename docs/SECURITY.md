@@ -2575,6 +2575,19 @@ message text, contact details, payloads, email addresses, secrets or full URLs:
   on its way finishes its attempt. The claim holds the channel's row until the worker has read the
   address, so the posts claimed go to the address they were claimed for, never to one that replaced
   it since.
+- The chat channel's format (ADR-388): only a platform owner chooses JSON text or a Microsoft Teams
+  card, with an address (`ops.platform_set_alert_channel`, five arguments) or alone, without the
+  address (`ops.platform_set_alert_channel_format`); both are SECURITY DEFINER, check the role and
+  the format, and audit the host and the formats (`platform.alert_channel_set`,
+  `platform.alert_channel_format_set`; `platform.alert_channel_tested` names the format too), never
+  the address. Only the definer role writes the format; the runtime role gets no new column and
+  learns the format from the claim, which hands out posts only in the formats the worker names, so
+  a worker that cannot render a card is never given one. The card is the post's counts-only text,
+  one block a line, not escaped: the alerts' text holds no company's or customer's words, only
+  counts, HyFib's labels, queue names and the console's address, so no Markdown can be injected
+  into it, and HTML shows as written (Adaptive Cards do not render it). A post queued before 0304
+  holds Slack-escaped text, which is unescaped exactly (the three escapes `chatEscape` writes) for a
+  card, so nothing is escaped twice or left escaped.
 - Acknowledging integration failures (ADR-141): a platform administrator notes on the console that a
   listed failure is being handled, through `ops.platform_acknowledge_integration_failure` (SECURITY
   DEFINER, executable only by the platform role), which checks the administrator, the note (10 to

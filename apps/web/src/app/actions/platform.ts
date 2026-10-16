@@ -1,7 +1,7 @@
 'use server';
 import { refresh } from 'next/cache';
 import { AppError } from '@w360/core';
-import type { AlertChannelKind } from '@w360/domain';
+import type { AlertChannelFormat, AlertChannelKind } from '@w360/domain';
 import { getRuntime } from '@/server/runtime';
 import { runAction, type ActionResult } from '@/server/action';
 import { correlationId } from '@/server/session';
@@ -408,13 +408,28 @@ export async function resolveQuarantineAction(input: unknown): Promise<ActionRes
   });
 }
 
-/** Sets the chat channel the operations alerts are posted to (platform owners, audited, ADR-338). */
+/**
+ * Sets the chat channel the operations alerts are posted to, with its format (platform owners,
+ * audited, ADR-338, ADR-388).
+ */
 export async function setAlertChannelAction(
   input: unknown,
-): Promise<ActionResult<{ host: string }>> {
+): Promise<ActionResult<{ host: string; format: AlertChannelFormat }>> {
   return runAction(async () => {
     const { actor, runtime } = await actorForAction();
     const result = await runtime.alertChannel.setChannel(actor, input);
+    refresh();
+    return result;
+  });
+}
+
+/** Changes the chat channel's format alone, its address kept (platform owners, audited, ADR-388). */
+export async function setAlertChannelFormatAction(
+  input: unknown,
+): Promise<ActionResult<{ format: AlertChannelFormat }>> {
+  return runAction(async () => {
+    const { actor, runtime } = await actorForAction();
+    const result = await runtime.alertChannel.setFormat(actor, input);
     refresh();
     return result;
   });

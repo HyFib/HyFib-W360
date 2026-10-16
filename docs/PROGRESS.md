@@ -1,5 +1,60 @@
 # Progress
 
+## 2026-10-16 — A Microsoft Teams format for the alert channel (P5-10, ADR-388)
+
+Status: **Implemented; its database and browser tests run in CI only; no post was made to a real
+Teams channel.** The chat channel posted JSON text only (ADR-338); Teams webhooks, now made with
+the Workflows app, post Adaptive Cards.
+
+### Completed
+
+- **Migration 0304:** `ops.platform_alert_channel.format` (`text` or `teams_card`, `text` for the
+  channel already set; written only by the definer role) and `ops.platform_alert_posts.plain_body`
+  (a post's text unescaped, null for posts queued before). New definer functions:
+  `ops.platform_set_alert_channel` with a format, `ops.platform_set_alert_channel_format`,
+  `ops.platform_test_alert_channel` and `ops.queue_platform_alert_post` with the unescaped text, and
+  `ops.claim_platform_alert_posts(integer, text[])`, which claims only while the channel's format is
+  among those named and returns it; `ops.platform_alert_channel_state` returns the format. The
+  release before's signatures are kept for old web servers and workers: setting through them sets
+  `text`, and the old claim asks for `text` only, so an old worker is never handed a Teams channel.
+- **Domain (`platform/alert-channel.ts`):** `ALERT_CHANNEL_FORMATS` and labels, `alertPostPlain`,
+  `chatUnescape`, `teamsCardBody` (a wrapping `TextBlock` a line, the subject bold, blank lines left
+  out, not escaped, held to 28,000 bytes serialized) and `alertPostRequestBody`, which the posting
+  job calls when it sends each post, in the format the claim returned; a post without unescaped
+  text is sent as queued in `text` and unescaped for a card. `setChannel` takes a format and
+  `setFormat` changes it alone; the state gives it; the test post and every alert's post carry both
+  texts.
+- **Web:** Operations → Alerts shows the format to every administrator; owners choose it when they
+  set or replace the address and change it alone under "Format posted" (a `ClientForm` select).
+- **Tests:** unit (`alert-channel.test.ts`: 17 new, both bodies, the escapes undone, line order and
+  bold, blank lines, the byte limit and its cut, old posts, format validation, the format alone, the
+  claim's formats; the billing tests' queue statements); integration (`alert-channel.test.ts`: 7
+  new, a Teams channel and its test card, the format alone and its audit, old posts in both formats,
+  the old claim and old web functions, the columns' checks, grants and definer settings;
+  `tenant-isolation.test.ts`: the new functions' grants); e2e (`platform-ops.spec.ts`: an owner
+  switches to a Teams card and the local receiver gets one).
+- **Docs:** ADR-388; ARCHITECTURE, SECURITY, THREAT-MODEL T341, DEPLOYMENT (0304 and the rollout),
+  RUNBOOKS (a Teams channel), DATA-RETENTION, BACKLOG, and the matrix's text and evidence (status
+  unchanged).
+- **Mutation checks:** 20 deliberate regressions in the new logic (the unescape's mapping and
+  pattern, the cut's escape rule and length, blank lines kept, the bold line, the card's version
+  and content type, characters counted instead of bytes, the comma not counted, `>=` at the limit,
+  old posts escaped twice or left escaped in a card, the claim naming `text` only, the queue or the
+  test post storing the wrong text, an unknown format accepted, a 28 KiB limit, the format not
+  passed when setting): 19 caught by the unit tests at first; the limit's `>=` survived and is
+  caught by a test added for a card cut to exactly 28,000 bytes. The SQL (the old claim's format
+  guard, the audit, the grants) is covered by integration tests, which run in CI only.
+
+### Test commands and results (local, 2026-10-16)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 158 files, 1,671 tests passed                                   |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+| Migration 0304, pglast parse check                 | passed (syntax only)                                            |
+
 ## 2026-10-16 — CI fixes: base image mirrors and the deal import's browser test
 
 Status: **Changed; both run in CI only.** ECR Public's anonymous data limit ("429 Too Many Requests:

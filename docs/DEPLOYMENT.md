@@ -1711,6 +1711,32 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    reload. Import files with deal ids only after the web rollout ends. Deal files are now limited
    to 928,000 bytes (was 976,000). Rolling an image back restores the earlier import.
 
+   Migration 0304 (ADR-388) gives the alerts' chat channel a format:
+   `ops.platform_alert_channel.format` (`text` for the channel already set, checked against `text`
+   and `teams_card`, written only by the definer role) and `ops.platform_alert_posts.plain_body`
+   (a post's text unescaped, null for every post already queued). It adds
+   `ops.platform_set_alert_channel` with a format (five arguments),
+   `ops.platform_set_alert_channel_format`, `ops.platform_test_alert_channel` and
+   `ops.queue_platform_alert_post` with the unescaped text (three arguments) and
+   `ops.claim_platform_alert_posts(integer, text[])`, which claims posts only while the channel's
+   format is among those the worker names and returns each post's unescaped text and the format;
+   `ops.platform_alert_channel_state` returns the format as one more column. The functions of the
+   release before keep their signatures: setting a channel through the four-argument one sets the
+   `text` format, the two-argument test and queue store the escaped text only, and the
+   one-argument claim now hands out posts only while the format is `text`, with the columns it
+   always returned. So, during the rollout: workers from before it keep sending JSON text exactly
+   as before and are never handed a Teams channel's posts; workers of this release render each post
+   in the channel's format, a post queued without unescaped text (before 0304, or by an old worker)
+   sent as it was queued in `text` and unescaped for a card; web servers from before it show and
+   change the channel without the format, an address they set taking `text`, and send test posts
+   with the escaped text only. Roll out workers before web as usual and choose the Teams format only
+   once no worker from before it runs: until then a Teams channel's posts wait (unclaimed, their
+   attempts untouched) for a worker of this release. After a rollback of the workers with a Teams
+   channel set, its posts wait the same way and are sent when this release returns; set the format
+   back to JSON text (from a web server of this release, or by replacing the address from an old
+   one) to have old workers send them as text. The columns stay in the database unused by older
+   releases.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

@@ -1,12 +1,13 @@
 'use client';
 import { useState } from 'react';
-import type { AlertChannelKind } from '@w360/domain';
-import { Button, Checkbox, Field, Input, Label } from '@w360/ui';
+import type { AlertChannelFormat, AlertChannelKind } from '@w360/domain';
+import { Button, Checkbox, Field, Input, Label, Select } from '@w360/ui';
 import { ConfirmDialog } from '@w360/ui/client';
 import {
   removeAlertChannelAction,
   sendAlertChannelTestAction,
   setAlertChannelAction,
+  setAlertChannelFormatAction,
   setAlertChannelKindsAction,
 } from '@/app/actions/platform';
 import { ClientButton, ClientForm } from '@/components/client-form';
@@ -18,21 +19,78 @@ const quotedList = (labels: readonly string[]) => {
   return quoted.length > 1 ? `${quoted.slice(0, -1).join(', ')} and ${quoted.at(-1)}` : quoted[0];
 };
 
+/** A format the channel can take, as the page lists it (ADR-388). */
+export interface AlertFormatOption {
+  format: AlertChannelFormat;
+  label: string;
+}
+
+/** What each format posts, under the format's field. */
+const FORMAT_DESCRIPTIONS: Record<AlertChannelFormat, string> = {
+  text: 'A JSON POST with a “text” member, as Slack’s incoming webhooks take (https://hooks.slack.com/services/…).',
+  teams_card:
+    'An Adaptive Card, one line of the alert a block, for a Microsoft Teams webhook made with the Workflows app (the template “Send webhook alerts to a channel”, or a flow starting “When a Teams webhook request is received” that posts the card).',
+};
+
+/** The format's choice, a select of the formats listed and a description of the one chosen. */
+function FormatField({
+  id,
+  label,
+  options,
+  value,
+  onChange,
+}: {
+  id: string;
+  label: string;
+  options: readonly AlertFormatOption[];
+  value: AlertChannelFormat;
+  onChange: (format: AlertChannelFormat) => void;
+}) {
+  return (
+    <Field id={id} label={label} description={FORMAT_DESCRIPTIONS[value]}>
+      {(aria) => (
+        <Select
+          {...aria}
+          value={value}
+          onChange={(e) => {
+            const chosen = options.find((o) => o.format === e.target.value);
+            if (chosen) onChange(chosen.format);
+          }}
+        >
+          {options.map((option) => (
+            <option key={option.format} value={option.format}>
+              {option.label}
+            </option>
+          ))}
+        </Select>
+      )}
+    </Field>
+  );
+}
+
 /**
  * Setting, testing and removing the chat channel the operations alerts are posted to (platform
- * owners, ADR-338). The address is sent once and never shown back: the page names its host only.
- * A new address keeps the alerts the channel gets (ADR-340), so the form names the platform owners'
- * alerts among them, which would reach the new address's readers too.
+ * owners, ADR-338), with its format (ADR-388). The address is sent once and never shown back: the
+ * page names its host only. A new address keeps the alerts the channel gets (ADR-340), so the form
+ * names the platform owners' alerts among them, which would reach the new address's readers too.
  */
 export function AlertChannelForms({
   host,
+  format,
+  formats,
   ownersAlerts,
 }: {
   host: string | null;
+  /** The channel's format, which a replacement starts from; null when no channel is set. */
+  format: AlertChannelFormat | null;
+  formats: readonly AlertFormatOption[];
   /** The labels of the platform owners' alerts the channel gets. */
   ownersAlerts: readonly string[];
 }) {
   const [url, setUrl] = useState('');
+  // Null follows the channel's format as the page gives it, which may change on another form.
+  const [pickedFormat, setPickedFormat] = useState<AlertChannelFormat | null>(null);
+  const chosenFormat = pickedFormat ?? format ?? 'text';
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState<string | null>(null);
@@ -44,14 +102,18 @@ export function AlertChannelForms({
   async function submit(event: React.FormEvent) {
     event.preventDefault();
     begin();
-    const result = await setAlertChannelAction({ url });
+    const result = await setAlertChannelAction({ url, format: chosenFormat });
     setBusy(false);
     if (!result.ok) {
       setError(result.message);
       return;
     }
     setUrl('');
-    setDone(`Alerts are posted to ${result.data.host} from now on. Send a test post to check it.`);
+    setPickedFormat(null);
+    const label = formats.find((o) => o.format === result.data.format)?.label ?? result.data.format;
+    setDone(
+      `Alerts are posted to ${result.data.host} from now on, as ${label}. Send a test post to check it.`,
+    );
   }
   async function test() {
     begin();
@@ -80,7 +142,7 @@ export function AlertChannelForms({
         <Field
           id="alert-channel-url"
           label={host ? 'Replace the channel’s address' : 'The channel’s incoming webhook address'}
-          description={`An https:// address that takes a JSON POST with a “text” member, such as a Slack incoming webhook (https://hooks.slack.com/services/…). It holds the channel’s secret: it is stored encrypted and never shown again.${
+          description={`An https:// incoming webhook address that takes the format below. It holds the channel’s secret: it is stored encrypted and never shown again.${
             host && ownersAlerts.length > 0
               ? ` A new address gets the alerts posted now, among them the platform owners’ ${quotedList(ownersAlerts)}: untick ${ownersAlerts.length === 1 ? 'it first if its readers should not see it' : 'them first if its readers should not see them'}.`
               : ''
@@ -100,6 +162,13 @@ export function AlertChannelForms({
             />
           )}
         </Field>
+        <FormatField
+          id="alert-channel-new-format"
+          label={host ? 'Format of the new address' : 'Format'}
+          options={formats}
+          value={chosenFormat}
+          onChange={setPickedFormat}
+        />
         <div>
           <Button type="submit" disabled={busy || !url.trim()}>
             {busy ? 'Saving…' : host ? 'Replace the channel' : 'Set the channel'}
@@ -198,6 +267,59 @@ export function AlertChannelKindsForm({
       <div>
         <Button type="submit" disabled={busy || chosen.length === 0 || unchanged}>
           {busy ? 'Saving…' : 'Save the alerts posted'}
+        </Button>
+      </div>
+    </ClientForm>
+  );
+}
+
+/**
+ * Changing the chat channel's format alone (platform owners, ADR-388): the address stays as it is
+ * and is not asked for, and the posts waiting are sent in the format saved.
+ */
+export function AlertChannelFormatForm({
+  options,
+  format,
+}: {
+  options: readonly AlertFormatOption[];
+  format: AlertChannelFormat;
+}) {
+  // Null follows the channel's format as the page gives it.
+  const [picked, setPicked] = useState<AlertChannelFormat | null>(null);
+  const chosen = picked ?? format;
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [done, setDone] = useState<string | null>(null);
+  async function submit(event: React.FormEvent) {
+    event.preventDefault();
+    setBusy(true);
+    setError(null);
+    setDone(null);
+    const result = await setAlertChannelFormatAction({ format: chosen });
+    setBusy(false);
+    if (!result.ok) {
+      setError(result.message);
+      return;
+    }
+    setPicked(null);
+    setDone(
+      'Saved: posts, those waiting among them, are sent in this format from now on. Send a test post to check it.',
+    );
+  }
+  return (
+    <ClientForm onSubmit={submit} className="grid max-w-xl gap-3">
+      <FormError message={error} />
+      <FormSuccess message={done} />
+      <FormatField
+        id="alert-channel-format"
+        label="Format posted"
+        options={options}
+        value={chosen}
+        onChange={setPicked}
+      />
+      <div>
+        <Button type="submit" disabled={busy || chosen === format}>
+          {busy ? 'Saving…' : 'Save the format'}
         </Button>
       </div>
     </ClientForm>

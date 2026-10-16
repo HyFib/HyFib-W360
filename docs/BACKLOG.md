@@ -1543,11 +1543,14 @@ verification, app review, Embedded Signup configuration).
   **[The year's failed sends by reason and by company as CSV built; their database and browser
   tests run only in CI]** (ADR-365, no migration: "Download CSV" on both cards, audited and
   formula-safe as the console's other exports, a line per reason or company with its months).
+  **[A Microsoft Teams format for the alert channel built; its database and browser tests run only
+  in CI; no post was made to a real Teams channel]** (ADR-388, migration 0304: owners choose JSON
+  text or a Teams Adaptive Card when they set the channel, or change the format alone; the worker
+  renders each post in the channel's format when it sends it).
   Remaining:
-  other alert channels (several channels, a channel per alert, formats other than a JSON `text`
-  member, such as Microsoft Teams' or PagerDuty's, and the owners' other notices, such as personal
-  notices, in a channel; Microsoft's documentation of Teams' webhooks could not be opened from
-  here), other charts (other measures, such as the companies ranked by the share of their sends
+  other alert channels (several channels, a channel per alert, formats other than JSON text and a
+  Teams card, such as PagerDuty's, and the owners' other notices, such as personal notices, in a
+  channel), other charts (other measures, such as the companies ranked by the share of their sends
   failed), Meta's quality
   webhook (unconfirmed), rollups for many companies and pages read from the database.
 - **P5-11 Account export/deletion workflow** **[built, locally verified with test data only]**

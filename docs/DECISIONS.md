@@ -15442,3 +15442,117 @@ export unreadable (cells were limited to 1,000 characters). It found three Low o
 for a cell at the check was refused at the import as not checked, a merge between reading a deal's
 contact and locking it left the new contact unchecked, and an unedited export listed every closed
 deal as an error. All were fixed with tests.
+
+## ADR-388 A Microsoft Teams format for the operations alert channel (P5-10) (2026-10-16)
+
+Context: the chat channel (ADR-338) posts each alert as a JSON object with a `text` member, the text
+escaped as Slack's formatting reads it. ADR-338, ADR-340 and ADR-345 left formats other than a JSON
+`text` member, such as Microsoft Teams', unbuilt. Microsoft 365 Connectors, Teams' old incoming
+webhooks, are nearing deprecation; Teams webhooks are now made with the Workflows app, whose flows
+post Adaptive Cards.
+
+Decision:
+
+- **Two formats:** `text`, as before (`POST`, `Content-Type: application/json`, `{"text": "…"}`, `&`,
+  `<` and `>` escaped as ADR-338 says), the format of every channel set before; and `teams_card`,
+  the message Microsoft documents for Teams webhooks: `{"type": "message", "attachments":
+[{"contentType": "application/vnd.microsoft.card.adaptive", "contentUrl": null, "content":
+{"$schema": "http://adaptivecards.io/schemas/adaptive-card.json", "type": "AdaptiveCard",
+"version": "1.2", "body": […]}}]}`, also sent as `application/json`. Each line of the alert (its
+  subject, its lines, its link) is a `TextBlock` with `wrap: true`, the subject with
+  `weight: "bolder"`; blank lines are left out. Nothing is escaped: HTML is not supported in
+  Adaptive Cards and would show as written. No button or action is used (Workflows do not render
+  buttons): the link is a line of text. The console labels them "JSON text (Slack and similar)" and
+  "Microsoft Teams card (Workflows)".
+- **The size limit:** Microsoft gives a message limit of 28 KB without saying whether a KB is 1,000
+  or 1,024 bytes, so a card is held to 28,000 bytes of serialized UTF-8 (`TEAMS_MESSAGE_MAX_BYTES`).
+  The alert text is already at most 4,000 characters, so one line always fits (at most 24,000 bytes
+  even if every character were escaped by JSON as `\u00XX`); only thousands of short lines can pass
+  the limit, and then the lines from the end are left out for a last block "…", the longest run
+  from the first line that fits being kept.
+- **Owners choose, operators see:** a platform owner chooses the format when setting or replacing
+  the address (`ops.platform_set_alert_channel` with five arguments; a new address takes the format
+  chosen, since another address may be another service, and keeps the kinds), or changes the format
+  alone on "Format posted" (`ops.platform_set_alert_channel_format`), without retyping the address:
+  the format says how the service at the same address reads a post and changing it reveals nothing
+  of the address, so asking for the secret again would add no protection. Both are SECURITY DEFINER,
+  owners only (also checked in the service), refuse an unknown format and audit the host and the
+  formats (`platform.alert_channel_set` with `format` and `previousFormat`,
+  `platform.alert_channel_format_set` with the host and the formats before and after, the same format
+  not audited); `platform.alert_channel_tested` names the format too. Never the address. Operators
+  see the format on the Alerts tab. The test post is rendered in the channel's format.
+- **Rendered at send time:** a post keeps its escaped `body` and now also `plain_body`, the same text
+  unescaped (`alertPostPlain`, at most 4,000 characters, cut before a character that would not be
+  whole). The worker renders the request body when it sends the post, from the channel's format of
+  that moment (returned by the claim, which holds the channel's row until the worker has read the
+  address, and which `ops.platform_set_alert_channel_format` locks before changing it) and the
+  unescaped text: `text` escapes it and cuts it as `alertPostBody` does, `teams_card` builds the
+  card. A format change therefore applies to the posts waiting; a post already claimed is sent in
+  the format it was claimed with.
+- **Posts queued before migration 0304 (expand and contract):** they have no `plain_body` and hold
+  Slack-escaped text. In `text` they are sent as queued, as before; for a card the three escapes are
+  undone (`chatUnescape`), which is exact on what `chatEscape` wrote because the cut never splits an
+  escape, so no text is escaped twice or left escaped in a card. `body` stays written (escaped) so
+  that workers of the release before can send any post; a later release may stop writing it once
+  no such worker or post can remain (posts are kept 7 days).
+- **Rollout:** migration 0304 runs first, then workers, then web, as usual. The functions of the
+  release before keep their signatures and behaviour: the four-argument set function sets `text`
+  (what the old form promises), the two-argument test and queue functions store the escaped text
+  only, and the state function returns the format as one more column, which old web servers do not
+  read. An old worker claims through `ops.claim_platform_alert_posts(integer)`, which now asks for
+  the `text` format only, so it is never handed a Teams channel's posts: they wait, unclaimed, their
+  attempts untouched, for a worker of this release, which claims through
+  `ops.claim_platform_alert_posts(integer, text[])` naming the formats it renders. The format is
+  written only by the definer role; the runtime role gets no new column. DEPLOYMENT (0304) gives the
+  order and the rollback.
+- **No company's words in a card:** the alert texts (`failureAlert`, `lateQueueAlert`,
+  `integrationAlert`, `settlementReconPost`, `unsettledPaymentsAlert`, the refund requests' notice
+  and the test post) were checked: they hold counts, days, HyFib's labels for providers, reasons,
+  integration kinds and states, queue names (HyFib's own, checked against `^[a-z][a-z0-9_.-]{0,99}$`
+  when a dead letter is recorded) and the console's address. No company name, contact, message,
+  amount or other text a company or customer writes reaches them, so Markdown cannot be injected
+  into a `TextBlock`, and no escaping is attempted (Microsoft documents none). A queue name with
+  underscores, such as `whatsapp.access_check`, is HyFib's text: should Teams' Markdown subset read
+  a pair of them as emphasis, the name shows in italics, which is cosmetic.
+- **Answers:** unchanged from ADR-338: any 2xx is sent; a 429, a 5xx or no answer is tried again 1,
+  2, 4 and 8 minutes later; anything else fails the post. Posts go out one at a time, below the
+  four requests a second at which Microsoft throttles a webhook.
+- **Migration 0304:** `ops.platform_alert_channel.format` (`text` by default, checked), its update
+  grant to the definer role, `ops.platform_alert_posts.plain_body` (nullable, 1 to 4,000 characters);
+  the new functions above, and the release before's set, test, queue and claim functions and the
+  state function created again (dropped as their owner and created, granted and handed back, as 0261
+  did), each SECURITY DEFINER with its search path pinned and executable only by its calling role.
+
+Sources (fetched through the Microsoft Learn documentation tool on 2026-10-16):
+
+- https://learn.microsoft.com/microsoftteams/platform/webhooks-and-connectors/how-to/add-incoming-webhook:
+  confirmed that Microsoft 365 Connectors are nearing deprecation and Teams webhooks are made with
+  the Workflows app (the template "Send webhook alerts to a channel", or a flow with the trigger
+  "When a Teams webhook request is received"); "The message size limit is 28 KB. When the size
+  exceeds 28 KB, you receive an error."; more than four requests a second are throttled; Workflows
+  support Adaptive Cards and Message Cards without rendering buttons, and post in shared channels
+  but not yet in private ones; the JavaScript example's message (`type` `message`, the attachment's
+  `contentType`, `contentUrl` null, the card's `$schema`, `type` and `version` 1.2, a `TextBlock`);
+  and a plain `{"text": "Hello from a webhook workflow!"}` `POST` to a workflow address, so the
+  `text` format may already work with some workflow templates.
+- https://learn.microsoft.com/microsoftteams/platform/webhooks-and-connectors/how-to/connectors-using#send-adaptive-cards-using-an-incoming-webhook:
+  confirmed that `type` must be `message`, `attachments` holds the cards, `contentType` must be the
+  Adaptive Card type and `content` is the card; all native Adaptive Card elements but
+  `Action.Submit` are supported, and the actions `Action.OpenUrl`, `Action.ShowCard` and
+  `Action.ToggleVisibility`.
+- https://learn.microsoft.com/adaptive-cards/schema-explorer/text-block: `TextBlock`'s `type` and
+  `text` (required; a subset of Markdown), `weight` (`default`, `lighter`, `bolder`) and `wrap` ("If
+  true, allow text to wrap. Otherwise, text is clipped."), all of version 1.0.
+- https://learn.microsoft.com/microsoftteams/platform/task-modules-and-cards/cards/cards-format#format-cards-with-markdown:
+  Markdown is supported in an Adaptive Card's `TextBlock`, and "HTML isn't supported in Adaptive
+  Cards". The page was searched for these sentences and for escapes (it names `\n` and `\r` for
+  newlines and none for Markdown), not read in full.
+
+Not confirmed (not documented on those pages): the HTTP status a Workflows webhook answers with, and
+any Markdown escape syntax. No post was made to a real Teams channel: the card was checked against
+the documented shape by unit, integration and end-to-end tests with a local receiver only.
+
+Not built: a format per alert, several channels, PagerDuty's or other formats, Message Cards,
+buttons or other card elements, mentions, reading a legacy connector's 200 answer whose body reports
+an HTTP 429 (Microsoft's sample notes connectors answer so; Workflows are not documented to), and
+dropping `body` (the contract step).

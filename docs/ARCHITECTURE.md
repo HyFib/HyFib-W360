@@ -2880,6 +2880,18 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   `queueAlertPost` in the transaction that queues the owners' emails and marks the requests
   announced, the email's counts-only text, and returns whether it posted. 0263 widens the kinds and
   posts checks and replaces `ops.platform_set_alert_channel_kinds` with the kind in its order.
+- **The channel's format** (ADR-388, migration 0304): `ops.platform_alert_channel.format` is `text`
+  (`{"text": …}`, escaped as above) or `teams_card` (a Teams webhook message with one Adaptive Card
+  1.2, a wrapping `TextBlock` a line, the subject bold, not escaped, held to 28,000 bytes:
+  `teamsCardBody`). Owners choose it with the address (`ops.platform_set_alert_channel`, five
+  arguments) or alone (`ops.platform_set_alert_channel_format`). Posts keep the escaped `body` and
+  now also `plain_body` (`alertPostPlain`, through the three-argument queue and test functions).
+  The job claims through `ops.claim_platform_alert_posts(limit, formats)`, naming the formats it
+  renders: posts are handed out only while the channel's format is among them, each with its
+  unescaped text and the format, and `alertPostRequestBody` renders the request body when it is
+  sent, so a format change applies to the posts waiting. A post without `plain_body` (queued before
+  0304, or by an old worker) is sent as queued in `text` and unescaped (`chatUnescape`) for a card.
+  The release before's functions keep their signatures (its claim asks for `text` only).
 - **Acknowledging failures** (ADR-141, migration 0107): a platform administrator acknowledges a
   failure on Current failures with a note, through `ops.platform_acknowledge_integration_failure`
   (definer, platform role only), which checks the administrator and that `ops.integration_failures`

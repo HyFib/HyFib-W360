@@ -5,7 +5,7 @@ import { Keyring } from '@w360/core';
 import type { Database, SQL } from '@w360/db';
 import { outboxAad } from '../email/outbox';
 import { renderEmail } from '../email/templates';
-import { alertPostBody } from '../platform/alert-channel';
+import { alertPostBody, alertPostPlain } from '../platform/alert-channel';
 import {
   alertSettlementReconFindings,
   alertUnsettledPayments,
@@ -280,10 +280,15 @@ describe('the financial alerts’ posts (ADR-340)', () => {
       openNotHyfib: 0,
     };
     expect(statements.at(-1)).toEqual({
-      sql: 'select ops.queue_platform_alert_post($1, $2) as queued',
-      params: ['reconciliation', alertPostBody(settlementReconPost([day], BASE))],
+      sql: 'select ops.queue_platform_alert_post($1, $2, $3) as queued',
+      params: [
+        'reconciliation',
+        alertPostBody(settlementReconPost([day], BASE)),
+        alertPostPlain(settlementReconPost([day], BASE)),
+      ],
     });
     expect(String(statements.at(-1)?.params[1])).not.toContain('Razorpay refused');
+    expect(String(statements.at(-1)?.params[2])).not.toContain('Razorpay refused');
   });
 
   it('posts the unsettled payments alert after its emails with the emails’ text', async () => {
@@ -304,8 +309,8 @@ describe('the financial alerts’ posts (ADR-340)', () => {
     const alert = unsettledPaymentsAlert([new Date(paidAt)], BASE);
     expect(payload(emails[1]!).lines).toEqual(alert.lines);
     expect(statements.at(-1)).toEqual({
-      sql: 'select ops.queue_platform_alert_post($1, $2) as queued',
-      params: ['unsettled', alertPostBody(alert)],
+      sql: 'select ops.queue_platform_alert_post($1, $2, $3) as queued',
+      params: ['unsettled', alertPostBody(alert), alertPostPlain(alert)],
     });
   });
 
