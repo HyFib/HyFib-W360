@@ -233,7 +233,9 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   a failed request changes nothing and is retried after 30 minutes. Once Meta admits the token,
   the same job lists the account's subscribed apps and subscribes HyFib's app again when it is
   missing (ADR-138): a restoration is audited and emailed; one that fails is emailed once, shown on
-  every page of the company and tried again after 30 minutes.
+  every page of the company and tried again after 30 minutes. `listChannels` gives each number its
+  account's stored permissions through `grantedPermissionList` (ADR-381), which Settings → Channels
+  shows.
 - **Not built yet:** media download to private object storage, message search, Meta-side
   deregistration on disconnect (templates and template sends: section 6A).
 
@@ -438,7 +440,9 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   time and find the next opening.
 - **Reply-due timers** (`inbox/sla.ts`): the open reply turn's start plus the first-response target,
   counted in business hours when business hours are on (the timer pauses while closed), else absolute
-  time. The inbox list and thread show waiting time, due time, overdue and paused states; a
+  time. Since ADR-377 the target is the conversation's team's own (`teams.first_response_target_minutes`, 0296) when it has one, else the company's: `loadReplyTargets` reads both and `targetFor` picks one;
+  the notice of overdue replies ranks each team with its own target apart (`row_number()` per team)
+  so its earliest waits stay the earliest due, and reports join each turn's conversation and team. The inbox list and thread show waiting time, due time, overdue and paused states; a
   longest-waiting order pages on `date_trunc('milliseconds', started_at)` so keyset cursors
   round-trip exactly.
 - **Cases** (`app.conversation_cases`): opened by a trigger when a conversation is created or
@@ -460,9 +464,10 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   can still see the conversation, with no newer unread mention of the member there; the email names
   the author and the unread count, never the note or the customer.
   **Overdue reply emails** (`inbox/overdue-replies.ts`, ADR-230): the messaging sweep calls
-  `noticeOverdueReplies` after routing. `ops.overdue_reply_turns(now, limit)` (definer, ids only)
-  lists open turns of active companies with a target that started at least the target ago (within 30
-  days) without a notice, or whose `waiting` notice is due. Per company, in its scope, the turns are
+  `noticeOverdueReplies` after routing. `ops.overdue_reply_turns(now, limit)` (definer, ids only;
+  replaced by 0296 to take the conversation's team's target, else the company's) lists open turns
+  with a target that started at least the target ago (within 30 days) without a notice, or whose
+  `waiting` notice is due. Per company, in its scope, the turns are
   locked (`FOR UPDATE`), each gets its due time from `replyDueAt`, and `app.overdue_reply_notices`
   records `waiting` (with the due time), `skipped` (`too_late`, `no_one`, `opted_out`) or `sent`;
   `responsibleMembers` picks the assignee, the team or the members with `inbox.assign`, and each
@@ -511,6 +516,15 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   `send_flow` effect counted as a message; `queueBotMessage` runs a text's checks and `queueBotFlow`
   checks the plan and the form again, then inserts the message, its send intent
   (`buildFlowMessageRequest`) and a `flow_sends` row with a new token, as a member's send does.
+- **Automations that send products** (ADR-383): `send_products` steps (one product, a list in one
+  section, or the catalog; checked against `products`, the steps' products in connected catalogs
+  with their catalog and WhatsApp account); the interpreter gives a `send_products` effect counted
+  as a message, with a heading and section title for a list only; `queueBotProducts` checks the
+  plan and reads the products again in one connected catalog of the number's account, then queues
+  the message and its send intent (`buildProductMessageRequest`, retailer ids) through
+  `queueBotRequest`, which text and button messages share. The limits live in the browser-safe
+  `commerce/product-message.ts`; the builder lists the first `PRODUCT_PICKER_LIMIT` products of
+  each connected catalog by name, plus those the draft sends, to members with `commerce.read`.
 - **Automations that move CRM deals** (ADR-250): `move_deal` steps (checked against `crmPipelines`);
   the interpreter gives a `move_deal` effect logged as `moved`; `applyMoveDealEffect` in the runner
   checks the plan, locks the contact (key share) and shares the pipeline, reads the stage, locks the
@@ -539,7 +553,10 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   read-only transaction, then asks Graph for the file's address (`GraphClient.getMedia`) and
   downloads it with the token (`downloadMedia`: https or the Graph origin only, no redirects),
   passing the bytes on through a stream that stops past 100 MB. Nothing is stored;
-  `mediaPresentation` decides the response's type and disposition.
+  `mediaPresentation` decides the response's type and disposition. A request for one range of
+  bytes (ADR-382) is read by `byteRange` against the length Meta's download gives, and answered
+  with that part through `byteRangeStream`, which skips the bytes before it and cancels the
+  download after it (206, or 416 past the end); `proxy.ts` gives the route `FILE_POLICY`.
   Keys get the same file from `GET /api/v1/messages/{id}/media` (ADR-217,
   `openReceivedMediaForKey`): `conversations.read`, the message in the key's company and not of an
   erased contact, then the same fetch, answered as an attachment with the file's own type through
@@ -651,9 +668,10 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   retried. The minute sweep re-signals queued calls whose job was lost
   (`ops.automation_http_calls_due`). Settings → Web requests manages domains and secrets
   (`integrations.manage`); run pages list each call (method, host, path, outcome).
-- **Not built yet:** WhatsApp Flows steps (P4-03), catalog steps (P4-06), starting a run through the
-  public API (P5), templates with media headers or variable buttons in template steps, usage
-  billing.
+- **Not built yet:** templates with media headers in template steps, usage billing. Form steps
+  (ADR-248), runs started through the public API (ADR-077), template steps' website buttons whose
+  link ends with a value (ADR-229) and products steps (ADR-383) were built after this list was
+  first written.
 
 ## 6F. CRM **[built — reminder emails verified through Mailpit only]**
 
@@ -1280,7 +1298,10 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   take it shared (`lockedDealFields`) before locking the deal, so a deletion's `attributes - key`
   never misses a value written meanwhile. `GET /deal-fields` lists them, `Deal.fields` gives values,
   the deals CSV adds a column per field, and the API's deal history leaves out changes of values
-  alone. 0293 also replaces `app.erase_contact` to clear the erased contact's deals' values.
+  alone. 0293 also replaces `app.erase_contact` to clear the erased contact's deals' values. Since
+  ADR-379 the new-deal forms (the board, the contact page and the inbox) take values too:
+  `crmLookups` (`apps/web/src/server/crm.ts`) reads the definitions with the pipelines and members,
+  and `NewDealForm` sends the non-empty ones to `createDeal`.
 - **Deal import (ADR-374, no migration):** `crm/deal-import.ts` previews a CSV (columns, first
   rows, suggested mapping) and imports it into one pipeline: `planDealRows` checks each row against
   the company's records (contacts by E.164 number, active stages by name, CRM members by email,
@@ -1296,7 +1317,16 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   `itemsTotal` (`dealItemsTotal`, summed as `bigint`, null across currencies or beyond a deal's
   value). Web: the deal page's Products card (`DealProducts`); its "use as value" goes through
   `updateDeal`. The API's deal history now leaves out every `deal_updated` entry naming none of
-  title, value and expected close date.
+  title, value and expected close date. The deals CSV (ADR-380) reads each batch's items with
+  `loadItemsOfDeals` and writes them in a `products` cell (`dealItemsCell`) with `products_total`.
+- **Products on deals through the API (0297, 0298, ADR-378):** `api/deal-items.ts` lists a
+  deal's items with each product's content id and Meta catalog id (`GET /deals/{id}/items`,
+  `deals.read`), adds one named by content id from a connected catalog (`POST`, `deals.write` and
+  `orders.read`, idempotent) and removes one (`DELETE /deals/{id}/items/{itemId}`). Changes go
+  through `lockApiDeal` (`api/deals.ts`, shared with `PATCH /deals/{id}`: the contact locked for
+  key share, then the deal for update, the expected version checked), move the version on with
+  `crmChangedBy({ apiKeyId })`, add a `deal_updated` activity naming `products` and the key, and
+  audit `crm.deal_updated` as the key. `crm_deal_items.created_by_api_key_id` names a key's item.
 - **Defining contact fields (0092, ADR-115):** `contacts/field-definitions.ts` adds, renames and
   deletes a company's custom fields for both Settings (`contacts/service.ts`, by id) and the API
   (`api/contact-fields.ts`, by key, scope `contact_fields.manage`); callers check who may and audit
@@ -2039,8 +2069,8 @@ state` for one that becomes skipped from another state, each only for a message 
   `automation.run_step` clears it.
 - **Step kind filters** (migration 0250, ADR-328): `run_step_node_types` on an endpoint lists the
   kinds of node whose run steps it takes as `automation.run_step`, null for every step; a check
-  keeps it to 1 to 18 known kinds (`outside_node` naming the steps outside a node) and to endpoints
-  that take `automation.run_step`. The step trigger passes the step's `nodeType` in the detail, and
+  keeps it to 1 to 19 known kinds (`outside_node` naming the steps outside a node; migration 0299
+  adds `send_products`, ADR-383) and to endpoints that take `automation.run_step`. The step trigger passes the step's `nodeType` in the detail, and
   `app.capture_webhook_event` (replaced with the same signature) creates a step's delivery only for
   endpoints whose list is null or holds it (`outside_node` for a step outside a node), taking the
   kind out of the detail before the event is stored. Settings ("Kinds of step sent" under Automation

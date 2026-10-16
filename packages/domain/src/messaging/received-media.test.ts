@@ -4,6 +4,8 @@ import { GraphClient } from './graph';
 import {
   MEDIA_MAX_BYTES,
   baseMediaType,
+  byteRange,
+  byteRangeStream,
   contentDisposition,
   limitedStream,
   mediaDownloadFailure,
@@ -131,6 +133,119 @@ describe('how a file a customer sent reaches the browser (ADR-216)', () => {
   });
 });
 
+describe('parts of a file, as Safari’s and iOS’s players ask (ADR-382)', () => {
+  const ask = (
+    range: string | null,
+    size: number | null = 1000,
+    extra: { method?: string; ifRange?: string } = {},
+  ) => {
+    const headers = new Headers();
+    if (range !== null) headers.set('range', range);
+    if (extra.ifRange) headers.set('if-range', extra.ifRange);
+    return byteRange({ method: extra.method ?? 'GET', headers }, size);
+  };
+  const part = (start: number, end: number) => ({ kind: 'part', start, end, size: 1000 });
+
+  it('answers one range of bytes, counted from 0 with its end included', () => {
+    expect(ask('bytes=0-1')).toEqual(part(0, 1));
+    expect(ask('bytes=0-')).toEqual(part(0, 999));
+    expect(ask('bytes=990-')).toEqual(part(990, 999));
+    expect(ask('bytes=999-999')).toEqual(part(999, 999));
+    // An end past the file's is its end; the last n bytes are a suffix.
+    expect(ask('bytes=500-99999999999999999999')).toEqual(part(500, 999));
+    expect(ask('bytes=-4')).toEqual(part(996, 999));
+    expect(ask('bytes=-5000')).toEqual(part(0, 999));
+    expect(ask('Bytes=10-20')).toEqual(part(10, 20));
+    expect(ask('bytes=\t10-20')).toEqual(part(10, 20));
+  });
+
+  it('has no part for a range that starts past the end', () => {
+    expect(ask('bytes=1000-')).toEqual({ kind: 'unsatisfiable', size: 1000 });
+    expect(ask('bytes=1000-1001')).toEqual({ kind: 'unsatisfiable', size: 1000 });
+    expect(ask('bytes=99999999999999999999-')).toEqual({ kind: 'unsatisfiable', size: 1000 });
+    expect(ask('bytes=-0')).toEqual({ kind: 'unsatisfiable', size: 1000 });
+  });
+
+  it('sends the whole file for any other request', () => {
+    for (const header of [
+      null,
+      'bytes=5-1',
+      'bytes=0-1, 5-9',
+      'bytes=0-1,',
+      'items=0-1',
+      'bytes=',
+      'bytes=-',
+      'bytes=a-b',
+      'bytes = 0-1',
+      'bytes=0x10-20',
+      'bytes=1.5-2',
+      'bytes=+1-2',
+    ]) {
+      expect(ask(header), String(header)).toEqual({ kind: 'whole' });
+    }
+    // Its length is not known, or it has none.
+    expect(ask('bytes=0-1', null)).toEqual({ kind: 'whole' });
+    expect(ask('bytes=0-1', 0)).toEqual({ kind: 'whole' });
+    // Ranges are for GET; an If-Range cannot match, as HyFib gives no validator.
+    expect(ask('bytes=0-1', 1000, { method: 'HEAD' })).toEqual({ kind: 'whole' });
+    expect(ask('bytes=0-1', 1000, { ifRange: '"v1"' })).toEqual({ kind: 'whole' });
+  });
+
+  it('passes on only the part, across the chunks it arrives in', async () => {
+    const file = Uint8Array.from({ length: 15 }, (_, i) => i);
+    const sliced = async (start: number, end: number) => [
+      ...(await readAll(
+        byteRangeStream(streamOf(file.slice(0, 5), file.slice(5, 10), file.slice(10)), start, end),
+      )),
+    ];
+    expect(await sliced(0, 0)).toEqual([0]);
+    expect(await sliced(3, 7)).toEqual([3, 4, 5, 6, 7]);
+    expect(await sliced(5, 9)).toEqual([5, 6, 7, 8, 9]);
+    expect(await sliced(4, 5)).toEqual([4, 5]);
+    expect(await sliced(12, 14)).toEqual([12, 13, 14]);
+    expect(await sliced(0, 14)).toEqual([...file]);
+  });
+
+  it('stops the download after the part, and when the browser stops reading', async () => {
+    const download = () => {
+      const seen = { chunks: 0, cancelled: false, reason: undefined as unknown };
+      const body = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          seen.chunks += 1;
+          controller.enqueue(new Uint8Array(4).fill(seen.chunks));
+        },
+        cancel(reason) {
+          seen.cancelled = true;
+          seen.reason = reason;
+        },
+      });
+      return { seen, body };
+    };
+    const first = download();
+    expect([...(await readAll(byteRangeStream(first.body, 2, 5)))]).toEqual([1, 1, 2, 2]);
+    expect(first.seen.cancelled).toBe(true);
+    expect(first.seen.chunks).toBeLessThanOrEqual(3);
+
+    const second = download();
+    await byteRangeStream(second.body, 0, 1_000_000).cancel('closed');
+    expect(second.seen).toMatchObject({ cancelled: true, reason: 'closed' });
+  });
+
+  it('fails when the file ends before the part, or the download fails', async () => {
+    await expect(
+      readAll(byteRangeStream(streamOf(new Uint8Array([1, 2, 3])), 1, 5)),
+    ).rejects.toThrow('The file ended before the part asked for.');
+    const broken = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.error(new Error('Meta closed the connection'));
+      },
+    });
+    await expect(readAll(byteRangeStream(broken, 0, 1))).rejects.toThrow(
+      'Meta closed the connection',
+    );
+  });
+});
+
 describe('the Graph client’s media calls (research M-047)', () => {
   const calls: { url: string; init: RequestInit }[] = [];
   const client = (respond: (url: string) => Response) =>
@@ -219,6 +334,24 @@ describe('the Graph client’s media calls (research M-047)', () => {
     expect(await graph.downloadMedia('http://127.0.0.1:4010/__media/1', 'tok')).toMatchObject({
       ok: true,
     });
+  });
+
+  it('gives no length for a compressed download, which fetch passes on decompressed', async () => {
+    const encoded = (encoding: string) =>
+      client(
+        () =>
+          new Response('file', {
+            status: 200,
+            headers: {
+              'content-type': 'audio/ogg',
+              'content-length': '4',
+              'content-encoding': encoding,
+            },
+          }),
+      ).downloadMedia('https://media.example/file?id=1', 'tok');
+    expect(await encoded('gzip')).toMatchObject({ ok: true, contentLength: null });
+    expect(await encoded('br')).toMatchObject({ ok: true, contentLength: null });
+    expect(await encoded('Identity')).toMatchObject({ ok: true, contentLength: 4 });
   });
 
   it('classifies a failed download, an error page included', async () => {

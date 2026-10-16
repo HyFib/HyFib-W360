@@ -20,6 +20,8 @@ export const teams = appSchema.table('teams', {
   maxOpenPerMember: smallint('max_open_per_member'),
   routingKeywords: text('routing_keywords').array().notNull().default([]),
   lastAssignedMembershipId: uuid('last_assigned_membership_id'),
+  /** The team's own first-response target in minutes (ADR-377); null uses the company's. */
+  firstResponseTargetMinutes: smallint('first_response_target_minutes'),
   createdAt: tz('created_at').notNull().defaultNow(),
   updatedAt: tz('updated_at').notNull().defaultNow(),
 });

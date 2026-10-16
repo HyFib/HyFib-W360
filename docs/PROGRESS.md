@@ -1,5 +1,313 @@
 # Progress
 
+## 2026-10-16 — Fixes before merging ADR-377 to ADR-383 (PR #90)
+
+Status: **Fixed; the database and browser tests run in CI only.** PR #90's first CI run failed
+three integration tests that had not run before, and a review of ADR-383 (with Codex's) found
+defects in the products step.
+
+### Completed
+
+- **Integration tests brought up to date:** `reports.test.ts` expects version 4 of
+  `inbox.within_target` (ADR-377's team targets); `crm.test.ts` expects the deals CSV's empty
+  `products` and `products_total` cells (ADR-380); `webhooks.test.ts` expects the database to refuse
+  20 kinds of step (19 are allowed now) and names `send_products` among every kind, as
+  `webhook-events.test.ts` now does (ADR-383).
+- **Products step (ADR-383):** the builder's catalog follows the number chosen (Codex: a catalog no
+  longer listed was kept, with no way to choose another); a list offers to remove products it no
+  longer lists; the first 500 products of each connected catalog are listed, not 500 across them
+  all, with a note when a catalog reaches 500; a single product or the catalog is sent and previewed
+  without the heading and section title a list had; a single product's message of placeholders alone
+  no longer warns that the step cannot be sent (it is sent without one).
+- **Tests:** unit (`products-step.test.ts`: the placeholder warning by kind, the heading and section
+  title dropped for one product and the catalog, the picker's limit); integration
+  (`automations.test.ts`: the Graph stand-in holds the catalog, so the list is accepted and the run
+  completes; products listed only to members who see the catalogs, and publishing and testing
+  refused without `commerce.read`; the first 500 products of each catalog listed); e2e
+  (`commerce.spec.ts`: the list in the order it is built, the step's first product by name first).
+- **Docs:** ADR-383 (review); ARCHITECTURE (the products step, and a "Not built yet" line that still
+  named form steps, API starts and catalog steps); DEPLOYMENT (0299: endpoints listing the 18 earlier
+  kinds, old web servers); THREAT-MODEL T336; the matrix's W-077 evidence (status unchanged).
+- **Mutation checks:** 7 deliberate regressions in the fixes (the heading and the section title kept
+  for one product or the catalog, the catalog taken for a list, the heading's check inverted, the
+  placeholder warning for every products step or for none, a smaller picker limit), all caught by
+  the unit tests. The listing per catalog, the stand-in accepting the list and the permission checks
+  are integration tests, which run in CI only.
+
+### Test commands and results (local, 2026-10-16)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 157 files, 1630 tests passed                                    |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+
+## 2026-10-16 — Automation steps that send products (P4-01, ADR-383)
+
+Status: **Implemented; its database and browser tests run in CI only.** Automations could not send
+products from the company's catalogs, which members send from the inbox.
+
+### Completed
+
+- **Domain:** a `send_products` step (`automations/graph.ts`: one product, a list or the catalog,
+  checked by kind and against the products of connected catalogs); the interpreter's
+  `send_products` effect; `queueBotProducts` in the runner (the plan, the products in one connected
+  catalog of the number's account, sent by retailer ids through `queueBotRequest`, which text and
+  button messages now share); the service loads the steps' products for the checks and up to 500
+  for the builder, and refuses publishing or testing without commerce or `commerce.read`. The
+  product message limits moved to the browser-safe `commerce/product-message.ts`.
+- **Migration 0299:** webhook endpoints can choose `send_products` steps (1 to 19 kinds).
+- **Web:** the builder's "Send products" step (kind, catalog, products with a filter, heading,
+  section title, message, footer), the simulator's preview and the run log's reasons.
+- **Tests:** unit (`products-step.test.ts`: kinds, limits, checks, the catalog and account rules,
+  placeholders, the effect; the webhook kinds); integration (`automations.test.ts`: the list sent
+  by retailer ids, a removed product, a disconnected catalog, the plan; `api-webhook-endpoints`:
+  every kind accepted); e2e (`commerce.spec.ts`: a catalog read, the step built, simulated and
+  published, and the list sent to a customer). Written for CI; the integration and e2e tests were
+  not run here.
+- **Docs:** ADR-383; SECURITY; THREAT-MODEL T336 (and the status column of T329 to T335, which was
+  missing); ARCHITECTURE; DEPLOYMENT (0299); BACKLOG P4-01; the feature matrix (W-077, status
+  unchanged).
+- **Mutation checks:** 20 deliberate regressions in the step's checks, its effect, the webhook
+  kinds and the product message limits, all caught by the unit tests, three only after tests were
+  added (a missing product list, the message cut to its limit, products named once across steps).
+  The runner's and the service's changes are covered by the integration and e2e tests, which run
+  in CI only.
+
+### Test commands and results (local, 2026-10-16)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 157 files, 1630 tests passed                                    |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+| Migration 0299                                     | parses (pglast); not applied here                               |
+
+## 2026-10-16 — Byte ranges for the inbox's recordings and videos (P2-09, ADR-382)
+
+Status: **Implemented; its database and browser tests run in CI only.** The inbox answered every
+request for a customer's file with the whole file, so Safari and iOS, whose players ask for parts,
+did not play recordings and videos. The files' answers also went out with a page's
+Content-Security-Policy, not the `sandbox` one ADR-216 describes, because Next sends the headers
+`next.config.ts` and `proxy.ts` give before a route's own.
+
+### Completed
+
+- **Domain:** `byteRange` (`messaging/received-media.ts`) reads one range of bytes from a GET's
+  Range header against the file's length (a part, none past the end, or the whole file for any
+  other request, If-Range included); `byteRangeStream` passes the part on from the download, cancels
+  the rest and fails if the file is shorter. `ReceivedMediaFile.size` is the length Meta's download
+  gives; `downloadMedia` gives none for a compressed response. No migration.
+- **Web:** the inbox's file route answers 206 with `Content-Range` and `Content-Length`, 416 past
+  the end, and `Accept-Ranges: bytes` on whole files of known length; `proxy.ts` gives the route
+  `default-src 'none'; sandbox` (`FILE_ROUTE`, `FILE_POLICY`), and the route states the
+  `private, no-store` every page gets.
+- **Tests:** unit (`received-media.test.ts`: the ranges, the cut across chunks, cancelling, a short
+  file, a failed download, a compressed download's length; `document-routes.test.ts`: the files'
+  route and policy); integration (`received-media.test.ts`: the file's length, a part read from the
+  download); e2e (`inbox.spec.ts`: a voice note's parts, the refusal past the end, the whole file,
+  and the headers as the browser gets them). Written for CI; the integration and e2e tests were not
+  run here.
+- **Docs:** ADR-382; SECURITY; THREAT-MODEL T203; ARCHITECTURE; DEPLOYMENT; RUNBOOKS; BACKLOG
+  P2-09; the feature matrix (W-032, status unchanged).
+- **Mutation checks:** 24 deliberate regressions in the ranges, the cut, the compressed length and
+  the files' route and policy: 21 caught by the unit tests; one is equivalent (a chunk that ends
+  where the part starts is passed on as an empty chunk); the two that drop the file's length are
+  caught by the integration and e2e tests, which run in CI only.
+
+### Test commands and results (local, 2026-10-16)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 156 files, 1624 tests passed                                    |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+
+## 2026-10-16 — The permissions granted to HyFib on Channels (P2-10, ADR-381)
+
+Status: **Implemented; its database and browser tests run in CI only.** The permissions Meta lists
+for each account's access were kept but shown only when one went missing.
+
+### Completed
+
+- **Domain:** `grantedPermissionList` (`messaging/access.ts`) orders an account's stored permissions
+  (the needed ones first, each with what it is for, then the others by name, each once);
+  `listChannels` gives each number its account's list. No new request to Meta and no migration.
+- **Web:** Settings → Channels shows "Granted to HyFib: …" under the access check time of each
+  connected account's numbers.
+- **Tests:** unit (`access.test.ts`: order, purposes, duplicates and blanks); integration
+  (`whatsapp-access.test.ts`: the list after a check); e2e (`whatsapp-access.spec.ts`: the line on
+  Channels). Written for CI; the integration and e2e tests were not run here.
+- **Docs:** ADR-381; SECURITY; ARCHITECTURE; BACKLOG P2-10; the feature matrix (W-021, status
+  unchanged).
+- **Mutation checks:** 5 of 5 deliberate regressions in the list's order, trimming and purposes
+  caught by the unit test.
+
+### Test commands and results (local, 2026-10-16)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 155 files, 1615 tests passed                                    |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+
+## 2026-10-16 — Products in the deals CSV (P4-04, ADR-380)
+
+Status: **Implemented; its database test runs in CI only.** The deals CSV gave a deal's value but
+not the products listed on it.
+
+### Completed
+
+- **Domain:** the deals CSV has two more columns after the fixed ones: `products`, a line per
+  product in the order added ("3 × Blue mug at 1500.50 INR", `dealItemsCell`), and
+  `products_total` in the deal's currency (`dealItemsTotal`; empty without products, across
+  currencies or beyond a deal's value). The export reads each batch's items in one query
+  (`loadItemsOfDeals`). Custom field columns still follow the fixed columns.
+- **Tests:** unit (`deals-csv.test.ts`: the cell, quoting, the total, formula safety, the column
+  count); integration (`commerce.test.ts`: an exported deal with its product and total). Written for
+  CI; the integration test was not run here.
+- **Docs:** ADR-380 (and ADR-375's "not built" note); SECURITY; ARCHITECTURE; BACKLOG P4-04; the
+  feature matrix (H-012, status unchanged).
+- **Mutation checks:** 7 of 7 deliberate regressions in the cell's text, its prices and the
+  columns caught by the unit tests; the export's reading of items is covered by the integration
+  test, which runs in CI only.
+
+### Test commands and results (local, 2026-10-16)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 155 files, 1614 tests passed                                    |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+
+## 2026-10-16 — Custom field values when a deal is created (P4-04, ADR-379)
+
+Status: **Implemented; its browser test runs in CI only.** Members could set a deal's custom field
+values only on its page, after creating it.
+
+### Completed
+
+- **Web:** the new-deal forms on the CRM board, the contact page and the inbox show an input per
+  custom field (text, number, date, or yes/no), as the deal page does, and send the values typed
+  (`givenFieldValues`) to the existing `createDeal`, which checks them by type under the fields'
+  lock (ADR-373). `crmLookups` reads the field definitions with the pipelines and members; the deal
+  page uses them instead of a read of its own. No domain or database change.
+- **Tests:** unit (`lib/deal-fields.test.ts`: only typed values are sent); e2e (`crm.spec.ts`: a
+  deal created from a contact's page with a text field given and a yes/no field left unset).
+  Written for CI; the e2e test was not run here.
+- **Docs:** ADR-379 (and ADR-373's "not built" note); ARCHITECTURE; BACKLOG P4-04; the feature
+  matrix (H-012, status unchanged).
+- **Mutation checks:** 3 of 3 deliberate regressions in which values are sent caught by the unit
+  test; that the forms show and send the fields is covered by the e2e test, which runs in CI only.
+
+### Test commands and results (local, 2026-10-16)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 155 files, 1613 tests passed                                    |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+
+## 2026-10-16 — Products on deals through the public API (P4-04, P5-08, ADR-378)
+
+Status: **Implemented; its database tests run in CI only.** Members listed catalog products on
+deals (ADR-375), but the public API read and wrote deals without them.
+
+### Completed
+
+- **Database:** migration 0297 lets `app.crm_deal_items.created_by_membership_id` be null and adds
+  `created_by_api_key_id` with a foreign key to the company's keys and a check that an item has
+  exactly one creator, both NOT VALID; 0298 validates them.
+- **Domain:** `api/deal-items.ts`: `GET /deals/{id}/items` (`deals.read`) lists a deal's products
+  with each product's content id and Meta catalog id, quantity, unit price and total in minor units
+  and who added it; `POST /deals/{id}/items` (`deals.write` and `orders.read`, CRM and Commerce in
+  the plan, idempotent) adds a product named by content id from a connected catalog (`catalogId`
+  when two catalogs have it), with the members' limits; `DELETE /deals/{id}/items/{itemId}`
+  (`deals.write`) removes one. Each change locks the contact, then the deal, through
+  `lockApiDeal` (now shared with `PATCH /deals/{id}`), checks `expectedVersion`, moves the version
+  on (`dealVersion`), records a timeline entry naming the key and audits it as the key; no deal
+  event, and the deal's history leaves it out, as for members' changes. The OpenAPI document and
+  the deal scopes' descriptions say so; the company export includes the new column.
+- **Web:** the route handlers under `/api/v1/deals/{id}/items`. The deal page already shows items
+  keys add, and its timeline names the API.
+- **Tests:** unit (`api/deal-items.test.ts`: scopes, suspended companies, requests, totals, who
+  added an item, the document); integration (`api.test.ts`: listing, adding and removing with
+  versions, the timeline, the audit log, idempotent retries, history, other companies' deals and
+  products, catalogs sharing a content id, removed products, the 50-product limit, the creator
+  check, erased contacts, plans without Commerce or the CRM). Written for CI; the integration tests
+  were not run here.
+- **Docs:** ADR-378 (and ADR-375's "not built" note); SECURITY; THREAT-MODEL T335; ARCHITECTURE;
+  DEPLOYMENT (0297, 0298); BACKLOG P4-04 and P5-08; the feature matrix (H-012, H-033, status
+  unchanged).
+- **Mutation checks:** 21 of 21 deliberate regressions in the scope checks, the request schemas,
+  totals and who added an item, the document and the scope descriptions caught by the unit tests.
+  The database paths (locks, versions, catalogs, plans, erasure) are covered by the integration
+  tests, which run in CI only.
+
+### Test commands and results (local, 2026-10-16)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 154 files, 1612 tests passed                                    |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+| migrations 0297, 0298                              | pglast parse check passed (syntax only)                         |
+
+## 2026-10-16 — Per-team first-response targets (P3-06, ADR-377)
+
+Status: **Implemented; its database and browser tests run in CI only.** The first-response target
+was the company's only, one number for every conversation.
+
+### Completed
+
+- **Database:** migration 0296 adds `app.teams.first_response_target_minutes` (1 to 1,440, null
+  for none; updated only through a column grant) and replaces `ops.overdue_reply_turns` so the
+  overdue-reply sweep finds turns by their conversation's team's target, else the company's. New
+  metric definition versions: `inbox.overdue` v3 and `inbox.within_target` v4.
+- **Domain:** `inbox/sla.ts` loads the company's target with each team's (`loadReplyTargets`) and
+  picks a conversation's (`targetFor`). The teams service and `POST`/`PATCH /teams` take
+  `firstResponseTargetMinutes` (audited with the team's change). The inbox's reply timers, the
+  notice of overdue replies (each team with its own target ranked apart, so the earliest due of all
+  are still the ones shown), the overdue-reply emails (which name the team's target when it
+  applied) and Reports ("Answered within target" and "Overdue" per turn against its conversation's
+  target; `teamTargets` in the inbox section and in `GET /reports`) use it. Report emails say
+  "within their team's or the company's target" when teams have their own. The company export
+  includes the column. A team's number fields now answer a value that is not a number with their
+  own message rather than a generic one.
+- **Web:** Settings → Teams: "Reply target in minutes (optional)" in the team editor, shown in the
+  list; Settings → Inbox says teams can have their own; Reports names the teams with their own
+  target.
+- **Tests:** unit (`inbox/sla.test.ts`, `inbox/teams.test.ts` for the form's limits, the
+  overdue-reply email's wording, the report email's phrase, the API's team and report schemas);
+  integration (`overdue-replies.test.ts`: a team's target with and without a company target, the
+  sweep and the notice; `reports.test.ts`: turns measured per team; `api.test.ts`: the target
+  through the API); e2e (`inbox-teams.spec.ts`: a team created with a 15-minute target). Written
+  for CI; the integration and e2e tests were not run here.
+- **Docs:** ADR-377; SECURITY; THREAT-MODEL T334; ARCHITECTURE; DEPLOYMENT (0296); BACKLOG P3-06;
+  the feature matrix (H-011, status unchanged).
+- **Mutation checks:** 19 of 19 deliberate regressions in choosing a conversation's target, the
+  overdue-reply email's wording, the report email's phrase, the API's team schema and report
+  mapping, and the team form's limits caught, one after a test was added (the form's 1,440-minute
+  limit). The database paths (the sweep, the notice's ranking, reports) are covered by the
+  integration tests, which run in CI only.
+
+### Test commands and results (local, 2026-10-16)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 153 files, 1605 tests passed                                    |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+| migration 0296                                     | pglast parse check passed (syntax only)                         |
+
 ## 2026-10-16 — Report emails (P3-05, ADR-376)
 
 Status: **Implemented; its database and browser tests run in CI only.** Reports were computed only

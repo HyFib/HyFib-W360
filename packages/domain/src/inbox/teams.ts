@@ -40,7 +40,7 @@ const MAX_KEYWORD_LENGTH = 40;
 const optionalNumber = (max: number, message: string) =>
   z.preprocess(
     (v) => (v === '' || v === undefined ? null : v),
-    z.coerce.number().int(message).min(1, message).max(max, message).nullable(),
+    z.coerce.number({ error: message }).int(message).min(1, message).max(max, message).nullable(),
   );
 
 const keywordsSchema = z
@@ -82,6 +82,11 @@ export const teamSchema = z.object({
     null,
   ),
   routingKeywords: keywordsSchema.default([]),
+  /** The team's own first-response target (ADR-377); null uses the company's. */
+  firstResponseTargetMinutes: optionalNumber(
+    1440,
+    'Enter a reply target from 1 to 1,440 minutes, or leave it empty.',
+  ).default(null),
   memberIds: z.array(z.uuid()).max(200).default([]),
   channelIds: z.array(z.uuid()).max(50).default([]),
 });
@@ -99,6 +104,7 @@ export interface TeamView {
   assignment: TeamAssignmentMode;
   maxOpenPerMember: number | null;
   routingKeywords: string[];
+  firstResponseTargetMinutes: number | null;
   members: { membershipId: string; name: string; available: boolean }[];
   channelIds: string[];
   openConversations: number;
@@ -237,6 +243,7 @@ export async function writeCreateTeam(
     assignment: data.assignment,
     maxOpenPerMember: data.maxOpenPerMember,
     routingKeywords: data.routingKeywords,
+    firstResponseTargetMinutes: data.firstResponseTargetMinutes,
   });
   await syncMembersAndChannels(tx, tenantId, teamId, data);
   return { teamId };
@@ -269,6 +276,7 @@ export async function writeUpdateTeam(
       assignment: data.assignment,
       maxOpenPerMember: data.maxOpenPerMember,
       routingKeywords: data.routingKeywords,
+      firstResponseTargetMinutes: data.firstResponseTargetMinutes,
     })
     .where(and(eq(teams.tenantId, tenantId), eq(teams.id, teamId)));
   await syncMembersAndChannels(tx, tenantId, teamId, data);
@@ -317,6 +325,7 @@ export async function readTeamSettings(
       assignment: teams.assignment,
       maxOpenPerMember: teams.maxOpenPerMember,
       routingKeywords: teams.routingKeywords,
+      firstResponseTargetMinutes: teams.firstResponseTargetMinutes,
       createdAt: teams.createdAt,
       updatedAt: teams.updatedAt,
     })
@@ -436,6 +445,7 @@ export function createTeamsService(deps: { db: Database; clock: Clock }) {
               assignment: teams.assignment,
               maxOpenPerMember: teams.maxOpenPerMember,
               routingKeywords: teams.routingKeywords,
+              firstResponseTargetMinutes: teams.firstResponseTargetMinutes,
             })
             .from(teams)
             .where(eq(teams.tenantId, ctx.tenant.id))
@@ -538,6 +548,7 @@ export function createTeamsService(deps: { db: Database; clock: Clock }) {
               metadata: {
                 assignment: data.assignment,
                 maxOpenPerMember: data.maxOpenPerMember,
+                firstResponseTargetMinutes: data.firstResponseTargetMinutes,
                 members: data.memberIds.length,
                 channels: data.channelIds.length,
                 keywords: data.routingKeywords.length,
@@ -575,6 +586,7 @@ export function createTeamsService(deps: { db: Database; clock: Clock }) {
               metadata: {
                 assignment: { from: previousAssignment, to: data.assignment },
                 maxOpenPerMember: data.maxOpenPerMember,
+                firstResponseTargetMinutes: data.firstResponseTargetMinutes,
                 members: data.memberIds.length,
                 channels: data.channelIds.length,
                 keywords: data.routingKeywords.length,

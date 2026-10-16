@@ -1,5 +1,5 @@
 'use client';
-import type { ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
 import { Button, Checkbox, Field, Input, Select, Textarea } from '@w360/ui';
 import {
   ANSWER_FORMATS,
@@ -9,10 +9,13 @@ import {
   HTTP_BODY_METHODS,
   HTTP_METHODS,
   HTTP_WAIT_MINUTES,
+  PRODUCT_MESSAGE_LIMITS,
+  PRODUCT_PICKER_LIMIT,
   type AutomationNode,
   type ConditionRule,
   type HttpMethod,
   type NodeOf,
+  type ProductStepKind,
 } from '@w360/domain/automation-model';
 import { FLOW_LIMITS } from '@w360/domain/flow-json';
 
@@ -31,6 +34,17 @@ export interface EditorPipeline {
   name: string;
   currency: string;
   stages: { id: string; name: string }[];
+}
+
+/** A product of a connected catalog a products step may send (ADR-383). */
+export interface EditorProduct {
+  id: string;
+  name: string;
+  retailerId: string;
+  priceText: string | null;
+  catalogId: string;
+  catalogName: string | null;
+  whatsappAccountId: string;
 }
 
 /** A company template as the builder sees it (from the latest copy synced from Meta). */
@@ -61,6 +75,11 @@ export interface NodeFieldOptions {
   crmPipelines: EditorPipeline[];
   /** The company's forms that can be sent, of the automation's number's account when it has one. */
   flows: { id: string; name: string }[];
+  /**
+   * Products a products step may send, of the automation's number's account when it has one;
+   * null for a member who cannot see the catalogs.
+   */
+  products: EditorProduct[] | null;
   fields: { key: string; label: string; type: string }[];
   /** Answer names saved by questions and web requests in this automation. */
   answers: string[];
@@ -503,6 +522,8 @@ export function NodeFields({
           />
         </div>
       );
+    case 'send_products':
+      return <ProductsFields node={node} options={options} onChange={onChange} />;
     case 'ask_buttons':
       return <AskButtonsFields node={node} options={options} onChange={onChange} />;
     case 'send_template':
@@ -1208,6 +1229,268 @@ export function NodeFields({
     case 'end':
       return <p className="text-sm text-muted-foreground">The automation ends here.</p>;
   }
+}
+
+const PRODUCT_KIND_LABELS: Record<ProductStepKind, string> = {
+  product: 'One product',
+  product_list: 'Several products',
+  catalog: 'The whole catalog',
+};
+
+const productLabel = (x: EditorProduct) =>
+  `${x.name}${x.priceText ? ` · ${x.priceText}` : ''} (${x.retailerId})`;
+
+/**
+ * A products step (ADR-383): one product, several products of one catalog, or the catalog shown
+ * with one of its products, as the inbox sends them.
+ */
+function ProductsFields({
+  node,
+  options,
+  onChange,
+}: {
+  node: NodeOf<'send_products'>;
+  options: NodeFieldOptions;
+  onChange: (node: AutomationNode) => void;
+}) {
+  const p = `step-${node.id}`;
+  const patch = (values: Partial<NodeOf<'send_products'>>) => onChange({ ...node, ...values });
+  const [filter, setFilter] = useState('');
+  const products = options.products ?? [];
+  const catalogs = [...new Map(products.map((x) => [x.catalogId, x.catalogName])).entries()];
+  // The listed products change with the automation's number: the catalog shown is that of the
+  // step's products still listed, else the one picked here while it is listed, else the first.
+  const first = node.productIds
+    .map((id) => products.find((x) => x.id === id))
+    .find((x) => x !== undefined);
+  const [pickedCatalog, setPickedCatalog] = useState(catalogs[0]?.[0] ?? '');
+  const catalogId =
+    first?.catalogId ??
+    (catalogs.some(([id]) => id === pickedCatalog) ? pickedCatalog : (catalogs[0]?.[0] ?? ''));
+  const inCatalog = products.filter((x) => x.catalogId === catalogId);
+  // A list keeps the step's products of the catalog shown; changing it drops any no longer listed.
+  const shown = node.productIds.filter((id) => inCatalog.some((x) => x.id === id));
+  const needle = filter.trim().toLowerCase();
+  const visible = needle
+    ? inCatalog.filter(
+        (x) => x.name.toLowerCase().includes(needle) || x.retailerId.toLowerCase().includes(needle),
+      )
+    : inCatalog;
+  const full = shown.length >= PRODUCT_MESSAGE_LIMITS.productsPerMessage;
+  const unlisted = node.productIds.length - shown.length;
+  const next = (
+    <NextSelect
+      id={`${p}-next`}
+      label="Then"
+      value={node.next}
+      self={node.id}
+      options={options}
+      onChange={(n) => patch({ next: n })}
+    />
+  );
+  if (options.products === null) {
+    return (
+      <div className="grid gap-4">
+        <p className="text-sm text-muted-foreground">
+          Choosing products needs permission to see the catalogs. The step sends{' '}
+          {node.productIds.length === 1 ? 'one product' : `${node.productIds.length} products`}.
+        </p>
+        {next}
+      </div>
+    );
+  }
+  return (
+    <div className="grid gap-4">
+      {products.length === 0 ? (
+        <p className="text-sm text-muted-foreground">
+          No products to choose from. Connect a catalog with products in Commerce; an automation
+          limited to one number sends products of its WhatsApp account’s catalogs.
+        </p>
+      ) : null}
+      <div className="grid gap-4 sm:grid-cols-2">
+        <Field id={`${p}-kind`} label="Send">
+          {(aria) => (
+            <Select
+              {...aria}
+              value={node.kind}
+              onChange={(e) => {
+                const kind = e.target.value as ProductStepKind;
+                // One product and the catalog show a single product: keep the first.
+                patch({
+                  kind,
+                  productIds:
+                    kind === 'product_list' ? node.productIds : node.productIds.slice(0, 1),
+                });
+              }}
+            >
+              {Object.entries(PRODUCT_KIND_LABELS).map(([value, text]) => (
+                <option key={value} value={value}>
+                  {text}
+                </option>
+              ))}
+            </Select>
+          )}
+        </Field>
+        {catalogs.length > 1 ? (
+          <Field
+            id={`${p}-catalog`}
+            label="Catalog"
+            description="A message holds products of one catalog."
+          >
+            {(aria) => (
+              <Select
+                {...aria}
+                value={catalogId}
+                onChange={(e) => {
+                  setPickedCatalog(e.target.value);
+                  patch({ productIds: [] });
+                }}
+              >
+                {catalogs.map(([id, name]) => (
+                  <option key={id} value={id}>
+                    {name ?? 'Catalog'}
+                  </option>
+                ))}
+              </Select>
+            )}
+          </Field>
+        ) : null}
+      </div>
+      {inCatalog.length >= PRODUCT_PICKER_LIMIT ? (
+        <p className="text-sm text-muted-foreground">
+          The first {PRODUCT_PICKER_LIMIT} products of the catalog by name are listed here.
+        </p>
+      ) : null}
+      {node.kind === 'product_list' ? (
+        <fieldset className="grid gap-2">
+          <legend className="text-sm font-medium">
+            Products ({shown.length} of at most {PRODUCT_MESSAGE_LIMITS.productsPerMessage})
+          </legend>
+          <Input
+            aria-label="Filter products"
+            placeholder="Filter by name or retailer id"
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+          />
+          <ul className="grid max-h-60 gap-1 overflow-y-auto rounded-md border border-border p-2 text-sm">
+            {visible.map((x) => {
+              const checked = shown.includes(x.id);
+              return (
+                <li key={x.id}>
+                  <label className="flex items-start gap-2">
+                    <input
+                      type="checkbox"
+                      className="mt-1"
+                      checked={checked}
+                      disabled={!checked && full}
+                      onChange={(e) =>
+                        patch({
+                          productIds: e.target.checked
+                            ? [...shown, x.id]
+                            : shown.filter((id) => id !== x.id),
+                        })
+                      }
+                    />
+                    <span className="break-words">{productLabel(x)}</span>
+                  </label>
+                </li>
+              );
+            })}
+            {visible.length === 0 ? (
+              <li className="text-muted-foreground">No product matches.</li>
+            ) : null}
+          </ul>
+          {unlisted > 0 ? (
+            <div className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
+              <span>
+                {unlisted === 1
+                  ? 'One of the step’s products is not listed here: it was removed, or is of another catalog.'
+                  : `${unlisted} of the step’s products are not listed here: they were removed, or are of another catalog.`}
+              </span>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={() => patch({ productIds: shown })}
+              >
+                {unlisted === 1 ? 'Remove it' : 'Remove them'}
+              </Button>
+            </div>
+          ) : null}
+        </fieldset>
+      ) : (
+        <Field
+          id={`${p}-product`}
+          label={node.kind === 'catalog' ? 'Product shown on the message' : 'Product'}
+        >
+          {(aria) => (
+            <Select
+              {...aria}
+              value={node.productIds[0] ?? ''}
+              onChange={(e) => patch({ productIds: e.target.value ? [e.target.value] : [] })}
+            >
+              <option value="">Choose a product</option>
+              {inCatalog.map((x) => (
+                <option key={x.id} value={x.id}>
+                  {productLabel(x)}
+                </option>
+              ))}
+            </Select>
+          )}
+        </Field>
+      )}
+      {node.kind === 'product_list' ? (
+        <div className="grid gap-4 sm:grid-cols-2">
+          <Field id={`${p}-header`} label="Heading">
+            {(aria) => (
+              <Input
+                {...aria}
+                value={node.header ?? ''}
+                maxLength={PRODUCT_MESSAGE_LIMITS.headerLength}
+                onChange={(e) => patch({ header: e.target.value || null })}
+              />
+            )}
+          </Field>
+          <Field id={`${p}-section`} label="Section title (optional)">
+            {(aria) => (
+              <Input
+                {...aria}
+                value={node.sectionTitle ?? ''}
+                maxLength={PRODUCT_MESSAGE_LIMITS.sectionTitleLength}
+                onChange={(e) => patch({ sectionTitle: e.target.value || null })}
+              />
+            )}
+          </Field>
+        </div>
+      ) : null}
+      <Field
+        id={`${p}-body`}
+        label={node.kind === 'product' ? 'Message (optional)' : 'Message'}
+        description={hintFor(options)}
+      >
+        {(aria) => (
+          <Textarea
+            {...aria}
+            rows={2}
+            value={node.body}
+            maxLength={PRODUCT_MESSAGE_LIMITS.bodyLength}
+            onChange={(e) => patch({ body: e.target.value })}
+          />
+        )}
+      </Field>
+      <Field id={`${p}-footer`} label="Footer (optional)">
+        {(aria) => (
+          <Input
+            {...aria}
+            value={node.footer ?? ''}
+            maxLength={PRODUCT_MESSAGE_LIMITS.footerLength}
+            onChange={(e) => patch({ footer: e.target.value || null })}
+          />
+        )}
+      </Field>
+      {next}
+    </div>
+  );
 }
 
 function AskButtonsFields({

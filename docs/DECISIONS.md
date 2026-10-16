@@ -14794,9 +14794,9 @@ Decision:
 Not built: deal webhook events for a change of values (deal.updated names title, valueMinor and
 expectedCloseOn only, so a change of values alone sends no event, and the API's deal history does
 not list it), choice or select types, an order of fields other than when they were added, defining
-fields through the API, values on the new-deal form in the app (a deal is created, then its values
-set on its page; the API takes them on creation), values set by automation steps, filtering or
-reporting by a value, and CSV import of deals (since built: ADR-374, with values mapped by key).
+fields through the API, values on the new-deal form in the app (since built: ADR-379), values set
+by automation steps, filtering or reporting by a value, and CSV import of deals (since built:
+ADR-374, with values mapped by key).
 
 ## ADR-374 Importing deals from CSV (P4-04) (2026-10-13)
 
@@ -14877,9 +14877,9 @@ Decision:
   else. Item names are catalog product names, not customer data, so erasure keeps them. The
   company export includes the table.
 
-Not built: items in the public API, deal webhook events for item changes, items in the deals CSV,
-items without a catalog product, discounts and taxes, the value kept equal to the items' total
-automatically, and items set by automation steps or the deal import.
+Not built: deal webhook events for item changes, items without a catalog product, discounts and
+taxes, the value kept equal to the items' total automatically, and items set by automation steps or
+the deal import. (Items in the public API: ADR-378; in the deals CSV: ADR-380.)
 
 ## ADR-376 Report emails (P3-05) (2026-10-16)
 
@@ -14929,3 +14929,234 @@ Decision:
 Not built: report emails chosen by administrators for other members or for addresses outside the
 company, other frequencies, days or hours, sections chosen per email, attachments (CSV or PDF),
 and the emails in the public API.
+
+## ADR-377 Per-team first-response targets (P3-06) (2026-10-16)
+
+Context: the first-response target was the company's only (0007, ADR-030), one number for every
+conversation. Companies whose teams promise different service (a priority line that answers in
+minutes, a back office that answers within the day) could not say so, and "per-team SLA targets"
+was listed as remaining under P3-06.
+
+Decision:
+
+- **A team's own target:** `app.teams.first_response_target_minutes` (migration 0296; 1 to 1,440
+  minutes, null for none) is set with the team's other settings, in Settings → Teams and through
+  `POST`/`PATCH /teams` (`firstResponseTargetMinutes`), by those who manage teams (`inbox.supervise`;
+  keys with `teams.manage`), and audited with the team's change.
+- **Which target a conversation has:** its team's own target when the team has one, else the
+  company's (Settings → Inbox); a company without a target of its own may have teams with one. A
+  conversation counts against the team it is in now, as reports already apply the current calendar
+  to the whole period (ADR-030) instead of versioning settings. Business hours stay the company's: a
+  team's target is counted in business hours when they are on.
+- **Everywhere a target is used:** the inbox's reply timers (list and conversation); the notice of
+  overdue replies (ADR-241), where the conversations of each team with its own target are ranked
+  apart, so the waits a page is given are still the earliest due of all; the overdue-reply emails
+  (ADR-230), whose sweep query `ops.overdue_reply_turns` is replaced to find turns by the
+  conversation's team's target, else the company's, and whose email names the team's target when it
+  applied; and Reports, where "Answered within target" and "Overdue" measure each turn against its
+  conversation's target (new definition versions: `inbox.within_target` v4, `inbox.overdue` v3),
+  turns of conversations without any target are left out, and the inbox section names the teams
+  with their own target (also `teamTargets` in `GET /reports`). Report emails (ADR-376) say
+  "within their team's or the company's target" when teams have their own.
+- **Deletion and export:** the column goes with its team; the company export includes it.
+
+Not built: business hours per team, targets per WhatsApp number or customer priority, resolution
+targets, and measuring a turn against the team its conversation was in when the turn started.
+
+## ADR-378 Products on deals through the public API (P4-04, P5-08) (2026-10-16)
+
+Context: members list catalog products on deals (ADR-375), but the public API read and wrote deals
+without them, so an integration that keeps quotes elsewhere could not see or set what a deal
+covered. "Items in the public API" was listed as not built under ADR-375.
+
+Decision:
+
+- **Endpoints:** `GET /deals/{id}/items` lists a deal's products in the order they were added (at
+  most 50, no pages), `POST /deals/{id}/items` adds one and `DELETE /deals/{id}/items/{itemId}`
+  removes one. The deal object and its pages stay as they were, so `GET /deals` costs no more.
+- **Who may:** reading needs `deals.read`, as anyone who reads the CRM sees products on the deal
+  page. Adding needs `deals.write` and `orders.read`, the scopes that stand for the members' rule
+  (`crm.write` and `commerce.read`); removing needs `deals.write`. The CRM must be in the company's
+  plan for all three, and Commerce too for adding, as for reading orders and sending products.
+- **Products by content id:** a key names a product as product messages do (ADR-086): its content
+  id (`retailerId`), in one of the company's connected catalogs, not removed at Meta; `catalogId`
+  (Meta's id) picks the catalog when two have it. Each item reads back with its content id and
+  catalog, its name when it was added, the quantity, the price of one and the total in the minor
+  units of its currency, and who added it (a member, never which, or the key).
+- **Prices from the key:** the unit price is given in the minor units of the deal's pipeline
+  currency, as deal values are; the catalog's price text is never read (research M-172). The
+  members' limits hold: 1 to 100,000 of a product, at most 50 products, a total a deal's value can
+  hold, no changes on an erased contact's deal.
+- **As members change them:** each addition or removal locks the contact, then the deal (as
+  `PATCH /deals/{id}` does, now through one helper), checks `expectedVersion` when given, moves the
+  version on (given back as `dealVersion`), records the key as the deal's changer and a
+  `deal_updated` timeline entry naming `products` and the key, and audits `crm.deal_updated` as the
+  key. Like members' product changes, it sends no deal event and is left out of the deal's history,
+  which report the deal's own details. `POST` takes an `Idempotency-Key`.
+- **Who added an item:** `app.crm_deal_items.created_by_api_key_id` (migrations 0297 and 0298, the
+  foreign key and check added NOT VALID and validated after, as for deals in 0169 and 0170): an item
+  is added by a member or by a key, never both. The company export includes the column.
+
+Not built: changing an item's quantity or price in place (remove and add it again), adding several
+products in one request, items in the deal object, its webhook events or the deals CSV, and items
+added by automation steps.
+
+## ADR-379 Custom field values when a deal is created (P4-04) (2026-10-16)
+
+Context: members could set a deal's custom field values (ADR-373) only on its page, after creating
+it; the API and the deal import took them on creation. "Values on the new-deal form" was listed as
+not built under ADR-373.
+
+Decision:
+
+- **On every new-deal form:** the CRM board's, the contact page's and the inbox's (next to a
+  conversation) show an input per custom field, as the deal page does (text, a number, a date, or
+  yes/no with "Not set"), after the deal's own details.
+- **The same rules:** the values go with the deal to the service's `createDeal`, which already
+  checked them by type against the company's fields under the fields' lock and stored them with the
+  deal (ADR-373). Empty inputs are not sent, so a field deleted while the form was open and left
+  empty is no error; one given a value is refused as no longer existing.
+- **One read:** the field definitions are read with the pipelines and members the forms already
+  need (`crmLookups`), which the deal page now uses too instead of a read of its own.
+
+Not built: required fields, default values, and values chosen from a list.
+
+## ADR-380 Products in the deals CSV (P4-04) (2026-10-16)
+
+Context: the deals CSV (ADR-239) gave a deal's value but not the products listed on it (ADR-375),
+so a spreadsheet of deals could not say what each one quoted. "Items in the deals CSV" was listed
+as not built under ADR-375.
+
+Decision:
+
+- **Two columns after the fixed ones:** `products`, one cell with a line per product in the order
+  they were added, such as "3 × Blue mug at 1500.50 INR" (the quantity, the name kept when it was
+  added, and the price of one, exact in its currency's major unit), and `products_total`, their
+  total in the deal's currency as the deal page gives it (`dealItemsTotal`): empty without products,
+  with a product in another currency, or beyond what a deal's value holds. Custom field columns
+  still follow the fixed columns, so they move two to the right; columns are read by their header.
+- **One read a batch:** the export reads the items of each batch of 500 deals in one query, under
+  the export's own permissions (`crm.read` and `contacts.export`), as anyone who reads the CRM sees
+  products on the deal page.
+- **Formula-safe:** a cell starts with the quantity, so a product's name can never start it; the
+  cell is quoted as CSV needs (it holds line breaks when a deal has several products).
+
+Not built: a line per product (one line stays one deal), retailer ids in the file, and the products
+in the deal import.
+
+## ADR-381 The permissions granted to HyFib on Settings → Channels (P2-10) (2026-10-16)
+
+Context: onboarding and the daily access check (ADR-137) keep the permissions Meta's `debug_token`
+lists for each WhatsApp account's access (`whatsapp_accounts.granted_scopes`), but the company saw
+them only when one went missing, in the reconnect banner. "Granted permissions display" was listed
+as remaining under P2-10.
+
+Decision:
+
+- **On each number's row:** Settings → Channels shows, for a connected account, the permissions
+  Meta listed when its access was last checked (or connected): those HyFib's access needs first, in
+  their order, each with what it lets HyFib do ("send messages", "manage the account, its numbers
+  and templates"), then any others by their Meta name, each once (`grantedPermissionList`).
+- **What is shown is what is stored:** no new request to Meta. The list changes when a check
+  succeeds; an account that lost a permission is marked for reconnecting by the check, and its
+  banner says which, as before.
+- **Who sees it:** members who can read channels (`channels.read`), as the access check times on the
+  same row; permission names are not secrets, and no token, id or other data of Meta's answer is
+  shown.
+
+Not built: the messaging limits of each number (their Graph fields are not read yet), and which
+assets each permission covers (`granular_scopes` target ids).
+
+## ADR-382 Byte ranges for the inbox's recordings and videos (P2-09) (2026-10-16)
+
+Context: the inbox passes on the files customers send from WhatsApp (ADR-216), but answered every
+request with the whole file. Apple's guide for media on its devices says that servers hosting media
+files for iOS must support byte-range requests, which iOS uses for random access in playback
+(Safari Web Content Guide, "Configuring Your Server"), so members on Safari and iOS downloaded
+recordings and videos with the link below the player. "Byte ranges" was listed as not built under
+ADR-216 and remained under P2-09. Looking at the answers' headers also showed that Next sends the
+headers `next.config.ts` and `proxy.ts` give before a route's own and does not replace them, so the
+inbox's files went out with a page's Content-Security-Policy rather than the `sandbox` one ADR-216
+describes, and with every page's `private, no-store` rather than an hour in the member's cache.
+
+Decision:
+
+- **One range of bytes (`messaging/received-media.ts`, `byteRange`):** a GET whose Range header asks
+  for `bytes=first-last`, `first-` or the last `-n` gets that part: 206 with
+  `Content-Range: bytes first-last/length`, its `Content-Length` and `Accept-Ranges: bytes` (an end
+  past the file's is its end). A range that starts past the end (or `-0`) gets 416 with
+  `Content-Range: bytes */length`. Every other request gets the whole file, as a server may answer
+  (RFC 9110 §14): no Range, several ranges, another unit or a malformed header, a method other than
+  GET, and any If-Range, since HyFib gives no ETag or date it could match. A whole file whose length
+  is known says `Accept-Ranges: bytes`.
+- **Only with a length HyFib can vouch for:** the length is the one Meta's download response gives
+  for its bytes. A compressed response (fetch passes it on decompressed) or one without a length
+  gets no ranges, and the whole file as before; Graph's `file_size` alone is not used, since a
+  wrong one would describe a part wrongly.
+- **Cut from the download (`byteRangeStream`):** what is known of Meta's media download (research
+  M-196) says nothing of ranges, so HyFib does not ask Meta for one. It downloads the file from its
+  start as before, skips the bytes before the part, passes the part on and cancels the rest of the
+  download; the stream fails if the file ends before the part, so a short file is never passed on
+  as the part asked for. A player's first question (`bytes=0-1`) costs one chunk.
+- **The headers the browser gets:** `proxy.ts` gives the inbox's file route the policy
+  `default-src 'none'; sandbox` in place of a page's (`FILE_ROUTE` and `FILE_POLICY` in
+  `lib/document-routes.ts`), so the policy ADR-216 describes now reaches the browser for files and
+  refusals alike. The route states `private, no-store` like every page: no browser keeps a
+  customer's file, which also keeps them off shared computers. Next's own compression leaves these
+  answers alone (none of the types passed on is compressible in the type list it uses), so a
+  part's bytes are the file's.
+- **No migration.** The public API's file endpoint (ADR-217) still answers with the whole file.
+
+Not built: ranges through the public API, several ranges in one answer (multipart), ETags and
+If-Range, keeping a file's Graph address between a player's requests (each request asks Graph and
+downloads from the start), and checking playback in Safari itself (no Safari here; the end-to-end
+test checks the answers a player gets).
+
+## ADR-383 Automation steps that send products (P4-01) (2026-10-16)
+
+Context: members send products from the company's catalogs in the inbox (P4-06a: one product, a
+list or the catalog, research M-169), and automations send texts, questions, templates and forms,
+but an automation could not show products: a bot answering "do you have mugs?" handed the
+conversation to a person. "Catalog steps (sending products from a run)" remained under P4-01.
+
+Decision:
+
+- **A `send_products` step** (`automations/graph.ts`): one product, several products of one catalog
+  in one section (with a heading and an optional section title, as the inbox sends them), or the
+  catalog shown with one of its products; an optional footer, and a message that may hold
+  placeholders (required for a list and the catalog, optional for one product). Products are named
+  by HyFib's ids. It is a session message, so it follows the window rules of texts and forms (after
+  order messages or an API start, only after a customer reply).
+- **Checked with the graph:** what each kind needs (one product, the products of a list each once
+  and at most 30, a heading, a message), and, with the company's products, that they are all in one
+  connected catalog, of the account of the automation's number when it is limited to one. The
+  builder lists the first 500 products of each connected catalog by name (so one catalog's size
+  never hides another's) plus those the draft sends, to members with `commerce.read`; for others
+  it lists none and the server's checks cover the step. The catalog shown follows the number
+  chosen, a list offers to remove products it no longer lists, and a single product or the catalog
+  is sent, and previewed, without the heading and section title a list had.
+- **Who may publish:** publishing or testing an automation with a products step needs commerce in
+  the company's plan and `commerce.read`, as sending products in the inbox does.
+- **When it runs** (`queueBotProducts`): after a bot message's checks (active number, open window, a
+  WhatsApp number on the line), the plan is checked again and the products are read in one connected
+  catalog of the number's WhatsApp account; they are sent by their retailer ids (the inbox's
+  `buildProductMessageRequest`) and shown in the thread with their names. A product removed since,
+  a disconnected catalog or another account's catalog fails the step (`products_unavailable`), as a
+  plan without commerce does (`commerce_not_in_plan`); the run passes the conversation to people.
+- **The limits of product messages** moved to `commerce/product-message.ts`, which has no server
+  dependencies, so the builder in the browser checks with the inbox's numbers.
+- **Webhook endpoints** can choose the new kind of step, as every kind the builder defines
+  (ADR-328): migration 0299 widens the check on `run_step_node_types` to 1 to 19 kinds.
+
+Not built: several sections in one list, products chosen by a search beyond the first 500 of a
+catalog, steps that send the products of an order or a deal, and catalog messages with a product
+picked per run.
+
+Review (before merge): the e2e test expected the list in the order its products were ticked while
+the step starts with the first product by name; an integration test of the database check still
+expected 19 kinds refused; the send's integration test never had Meta's stand-in accept the list
+(its catalog was not registered there); the builder could keep a catalog no longer listed after the
+number changed (Codex), left removed products in a list with no way to take them out, previewed a
+heading WhatsApp does not send for a single product, warned that a single product's message of
+placeholders alone could stop it, and cut the products at 500 across every catalog. All were fixed
+with tests; the checks of `commerce.read` are now tested too.

@@ -1635,6 +1635,38 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    late is skipped for the next period's), and old web servers do not show the choice. Rolling an
    image back leaves the table and queue in place, unused.
 
+   Migration 0296 (ADR-377) adds `app.teams.first_response_target_minutes` (null for every team, so
+   nothing changes until a team sets one), replaces `ops.overdue_reply_turns` (dropped by
+   w360_definer and created again with the same grants) and adds two metric definition versions.
+   Old web servers neither show nor write team targets; old workers' sweeps read the replaced
+   function, which still answers the companies' turns with a target. Rolling an image back leaves
+   the column, function and definitions in place: an older release ignores team targets.
+
+   Migration 0297 (ADR-378) lets `app.crm_deal_items.created_by_membership_id` be null and adds
+   `created_by_api_key_id`, with a foreign key to the company's keys and a check that exactly one of
+   the two is set, both NOT VALID so the table is not read under the migration's lock; 0298
+   validates them without blocking writes. It is additive: old web servers still add items as
+   members and do not serve the new endpoints. Rolling an image back leaves the column in place;
+   items keys added stay on their deals and show on the deal page.
+
+   ADR-382 has no migration. Safari's and iOS's players ask for a recording or a video in parts,
+   and each part is downloaded from Meta from the file's start, so playing one makes several
+   requests to Graph and to Meta's media host; a proxy in front of the web tier must pass `Range`
+   headers and 206 answers through. Until the web rollout ends, an old web server answers a range
+   request with the whole file, as before.
+
+   Migration 0299 (ADR-383) replaces the check on `app.webhook_endpoints.run_step_node_types` with
+   one that also accepts `send_products` (1 to 19 kinds): every list it allowed is still allowed,
+   and the table is small, so the check is validated at once. A worker of the previous release
+   cannot read a published version with a products step and would fail its runs as unreadable, so
+   roll the workers out first; an old web server opens such a draft with the starter steps, so do
+   not edit automations with products steps until the web rollout ends. Rolling an image back
+   leaves the wider check in place. An endpoint whose list was set through the API to all 18 earlier
+   kinds (which ADR-328 made equal to null) keeps that list, so it does not receive products steps:
+   tell its company to tick "Send products" in Settings → Webhooks, or set the list to null. Until
+   the web rollout ends, an old web server refuses to save an endpoint whose list names products
+   steps, in Settings and through the API ("Choose kinds of step from the list.").
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

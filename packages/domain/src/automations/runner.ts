@@ -6,6 +6,8 @@ import {
   automationRuns,
   automationVersions,
   channelAccounts,
+  commerceCatalogs,
+  commerceProducts,
   contactFields,
   contactIdentities,
   contactTags,
@@ -21,6 +23,7 @@ import {
   eq,
   gte,
   inArray,
+  isNull,
   memberships,
   messageTemplates,
   messages,
@@ -34,6 +37,7 @@ import {
 } from '@w360/db';
 import { permissionsForRoles } from '../authz/permissions';
 import { lockCampaignSends, marketingCapReached } from '../campaigns/frequency-cap';
+import { buildProductMessageRequest, type ResolvedProductMessage } from '../commerce/model';
 import { checkTemplateEligibility } from '../consent/service';
 import { MAX_TAGS_PER_CONTACT, coerceFieldValue } from '../contacts/fields';
 import { addActivity, crmChangedBy, memberRefs } from '../crm/common';
@@ -258,7 +262,10 @@ async function loadFacts(
   };
 }
 
-type SendEffect = Extract<RunEffect, { kind: 'send_text' | 'send_buttons' | 'send_flow' }>;
+type SendEffect = Extract<
+  RunEffect,
+  { kind: 'send_text' | 'send_buttons' | 'send_flow' | 'send_products' }
+>;
 
 /**
  * Queues a bot message through the send pipeline, after the checks a member's reply gets: the
@@ -322,6 +329,16 @@ export async function queueBotMessage(
       whatsappAccountId: channel.whatsappAccountId,
     });
   }
+  if (effect.kind === 'send_products') {
+    return queueBotProducts(tx, deps, {
+      run,
+      conversation,
+      effect,
+      now,
+      waId: identity.waId,
+      whatsappAccountId: channel.whatsappAccountId,
+    });
+  }
 
   const base = { messaging_product: 'whatsapp', recipient_type: 'individual', to: identity.waId };
   const request =
@@ -353,7 +370,35 @@ export async function queueBotMessage(
           buttons: effect.buttons.map((b) => b.title),
           automationRunId: run.id,
         };
-  const preview = effect.kind === 'send_text' ? effect.text : effect.body;
+  return queueBotRequest(tx, deps, {
+    run,
+    conversation,
+    now,
+    type: effect.kind === 'send_text' ? 'text' : 'interactive',
+    content,
+    request,
+    preview: effect.kind === 'send_text' ? effect.text : effect.body,
+  });
+}
+
+/**
+ * Records a bot message with its send intent, shows it as the conversation's last message and
+ * queues its send (one job per intent, in the number's order).
+ */
+async function queueBotRequest(
+  tx: Tx,
+  deps: RunSignalDeps,
+  input: {
+    run: AutomationRun;
+    conversation: { id: string; channelAccountId: string };
+    now: Date;
+    type: 'text' | 'interactive';
+    content: Record<string, unknown>;
+    request: Record<string, unknown>;
+    preview: string;
+  },
+): Promise<{ ok: true; messageId: string }> {
+  const { run, conversation, now } = input;
   const messageId = uuidv7();
   const intentId = uuidv7();
   await tx.insert(messages).values({
@@ -362,8 +407,8 @@ export async function queueBotMessage(
     conversationId: conversation.id,
     channelAccountId: conversation.channelAccountId,
     direction: 'outbound',
-    type: effect.kind === 'send_text' ? 'text' : 'interactive',
-    content,
+    type: input.type,
+    content: input.content,
     status: 'queued',
     statusRank: STATUS_RANK.queued,
     senderType: 'bot',
@@ -374,12 +419,12 @@ export async function queueBotMessage(
     tenantId: run.tenantId,
     messageId,
     channelAccountId: conversation.channelAccountId,
-    request,
+    request: input.request,
     actorUserId: run.startedByUserId,
   });
   await tx
     .update(conversations)
-    .set({ lastMessageAt: now, lastMessagePreview: clipText(preview, 200) })
+    .set({ lastMessageAt: now, lastMessagePreview: clipText(input.preview, 200) })
     .where(and(eq(conversations.tenantId, run.tenantId), eq(conversations.id, conversation.id)));
   await emitTenantEvent(tx, run.tenantId, {
     type: 'message.created',
@@ -398,6 +443,117 @@ export async function queueBotMessage(
     { singletonKey: intentId, group: { id: conversation.channelAccountId } },
   );
   return { ok: true, messageId };
+}
+
+/**
+ * Queues a products step's message (ADR-383) once the channel, window and number checks passed: as
+ * in the inbox, the company's plan must include commerce (otherwise `commerce_not_in_plan`), and the
+ * products must all still be in one connected catalog of the number's WhatsApp account (otherwise
+ * `products_unavailable`). They are sent by their retailer ids in that catalog, as a member sends
+ * them, and shown in the thread with their names.
+ */
+async function queueBotProducts(
+  tx: Tx,
+  deps: RunSignalDeps,
+  input: {
+    run: AutomationRun;
+    conversation: { id: string; channelAccountId: string };
+    effect: Extract<RunEffect, { kind: 'send_products' }>;
+    now: Date;
+    waId: string;
+    whatsappAccountId: string;
+  },
+): Promise<{ ok: true; messageId: string } | { ok: false; code: string }> {
+  const { run, effect } = input;
+  if (!(await loadEntitlements(tx, run.tenantId)).modules.has('commerce')) {
+    return { ok: false, code: 'commerce_not_in_plan' };
+  }
+  const found =
+    effect.productIds.length === 0
+      ? []
+      : await tx
+          .select({
+            id: commerceProducts.id,
+            retailerId: commerceProducts.retailerId,
+            name: commerceProducts.name,
+            catalogId: commerceCatalogs.metaCatalogId,
+          })
+          .from(commerceProducts)
+          .innerJoin(
+            commerceCatalogs,
+            and(
+              eq(commerceCatalogs.tenantId, commerceProducts.tenantId),
+              eq(commerceCatalogs.id, commerceProducts.catalogId),
+            ),
+          )
+          .where(
+            and(
+              eq(commerceProducts.tenantId, run.tenantId),
+              inArray(commerceProducts.id, effect.productIds),
+              eq(commerceCatalogs.whatsappAccountId, input.whatsappAccountId),
+              isNull(commerceCatalogs.disconnectedAt),
+              isNull(commerceProducts.removedAt),
+            ),
+          );
+  const byId = new Map(found.map((p) => [p.id, p]));
+  const listed = effect.productIds.flatMap((id) => {
+    const product = byId.get(id);
+    return product ? [product] : [];
+  });
+  const [first] = listed;
+  if (
+    !first ||
+    listed.length !== effect.productIds.length ||
+    new Set(listed.map((p) => p.catalogId)).size !== 1
+  ) {
+    return { ok: false, code: 'products_unavailable' };
+  }
+  const footer = effect.footer ?? '';
+  const message: ResolvedProductMessage =
+    effect.productKind === 'product'
+      ? {
+          kind: 'product',
+          catalogId: first.catalogId,
+          retailerId: first.retailerId,
+          body: effect.body,
+          footer,
+        }
+      : effect.productKind === 'catalog'
+        ? { kind: 'catalog', thumbnailRetailerId: first.retailerId, body: effect.body, footer }
+        : {
+            kind: 'product_list',
+            catalogId: first.catalogId,
+            header: effect.header ?? '',
+            body: effect.body,
+            footer,
+            sections: [
+              { title: effect.sectionTitle ?? '', retailerIds: listed.map((p) => p.retailerId) },
+            ],
+          };
+  const names = listed.map((p) => p.name);
+  return queueBotRequest(tx, deps, {
+    run,
+    conversation: input.conversation,
+    now: input.now,
+    type: 'interactive',
+    content: {
+      products: {
+        kind: effect.productKind,
+        names,
+        ...(effect.productKind === 'product_list' ? { header: effect.header } : {}),
+        body: effect.body,
+        footer,
+      },
+      automationRunId: run.id,
+    },
+    request: buildProductMessageRequest(input.waId, message),
+    preview:
+      effect.productKind === 'catalog'
+        ? '[Catalog]'
+        : effect.productKind === 'product'
+          ? `[Product] ${first.name ?? ''}`
+          : `[Products] ${names.length}`,
+  });
 }
 
 /**
@@ -1366,7 +1522,8 @@ async function runStep(
       if (
         effect.kind === 'send_text' ||
         effect.kind === 'send_buttons' ||
-        effect.kind === 'send_flow'
+        effect.kind === 'send_flow' ||
+        effect.kind === 'send_products'
       ) {
         const sent = await queueBotMessage(tx, deps, { run, conversation: conv, effect, now });
         if (!sent.ok) {

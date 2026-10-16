@@ -364,6 +364,7 @@ export default async function CrmPage({
                 slug={ctx.tenant.slug}
                 pipelines={lookups.options}
                 members={lookups.memberOptions}
+                fields={lookups.dealFields}
                 defaultOwnerId={
                   lookups.memberOptions.some((m) => m.membershipId === me) ? me : null
                 }

@@ -67,9 +67,12 @@ test('teams route conversations, saved replies fill the composer and CSAT answer
   await form.getByLabel('Assign in turn (round robin)').check();
   await form.getByLabel('Tara Teams').check();
   await form.getByLabel(/\+91/).check();
+  // Its own reply target, used for its conversations instead of the company's (ADR-377).
+  await form.getByLabel('Reply target in minutes (optional)').fill('15');
   await form.getByRole('button', { name: 'Create team' }).click();
   await expect(page.getByText('Team created.')).toBeVisible();
   await expect(page.getByRole('heading', { name: /Support/ })).toBeVisible();
+  await expect(page.getByText(/reply target 15 min/)).toBeVisible();
   await expectNoHorizontalOverflow(page);
 
   // Settings → Saved replies.

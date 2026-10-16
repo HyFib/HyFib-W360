@@ -75,6 +75,7 @@ export interface TeamFormInput {
   assignment: 'manual' | 'round_robin';
   maxOpenPerMember: string;
   routingKeywords: string;
+  firstResponseTargetMinutes: string;
   memberIds: string[];
   channelIds: string[];
 }

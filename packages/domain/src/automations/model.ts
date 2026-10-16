@@ -6,3 +6,5 @@ export * from './graph';
 export * from './interpreter';
 /** Tags as the inbox stores them, for the simulator's typed tags. */
 export { normalizeTag } from '../contacts/fields';
+/** The limits of product messages, for products steps (ADR-383). */
+export { PRODUCT_MESSAGE_LIMITS } from '../commerce/product-message';

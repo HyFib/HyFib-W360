@@ -1716,6 +1716,11 @@ describe('products on deals (ADR-375)', () => {
       kind: 'deal_updated',
       data: { fields: ['products'], productAdded: 'Product 002' },
     });
+    // The deals CSV lists the products in one cell, with their total (ADR-380).
+    let csv = '';
+    for await (const chunk of svc.exportDeals(owner, {})) csv += chunk;
+    const exported = csv.split('\r\n').find((line) => line.startsWith(deal.id));
+    expect(exported).toContain(',3 × Product 002 at 1500.50 INR,4501.50');
 
     const removed = await svc.removeDealItem(agent, {
       dealId: deal.id,

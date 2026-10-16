@@ -17,6 +17,7 @@ export interface TeamFormValues {
   assignment: 'manual' | 'round_robin';
   maxOpenPerMember: number | null;
   routingKeywords: string[];
+  firstResponseTargetMinutes: number | null;
   memberIds: string[];
   channelIds: string[];
 }
@@ -41,6 +42,9 @@ export function TeamForm({
   );
   const [limit, setLimit] = useState(team?.maxOpenPerMember ? String(team.maxOpenPerMember) : '');
   const [keywords, setKeywords] = useState((team?.routingKeywords ?? []).join(', '));
+  const [target, setTarget] = useState(
+    team?.firstResponseTargetMinutes ? String(team.firstResponseTargetMinutes) : '',
+  );
   const [memberIds, setMemberIds] = useState<string[]>(team?.memberIds ?? []);
   const [channelIds, setChannelIds] = useState<string[]>(team?.channelIds ?? []);
   const [error, setError] = useState<string | null>(null);
@@ -63,6 +67,7 @@ export function TeamForm({
           assignment,
           maxOpenPerMember: limit,
           routingKeywords: keywords,
+          firstResponseTargetMinutes: target,
           memberIds,
           channelIds,
         };
@@ -90,6 +95,7 @@ export function TeamForm({
               setAssignment('manual');
               setLimit('');
               setKeywords('');
+              setTarget('');
               setMemberIds([]);
               setChannelIds([]);
             }
@@ -169,6 +175,23 @@ export function TeamForm({
               max={500}
               value={limit}
               onChange={(e) => setLimit(e.target.value)}
+            />
+          )}
+        </Field>
+        <Field
+          id={`${prefix}-target`}
+          label="Reply target in minutes (optional)"
+          description="Customers waiting in the team’s conversations are due a reply within it, in business hours when they are on. Empty uses the company’s target (Settings → Inbox)."
+        >
+          {(aria) => (
+            <Input
+              {...aria}
+              type="number"
+              inputMode="numeric"
+              min={1}
+              max={1440}
+              value={target}
+              onChange={(e) => setTarget(e.target.value)}
             />
           )}
         </Field>

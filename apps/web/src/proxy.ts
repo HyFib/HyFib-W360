@@ -1,5 +1,5 @@
 import { NextResponse, type NextRequest } from 'next/server';
-import { PROVIDER_PAGES } from '@/lib/document-routes';
+import { FILE_POLICY, FILE_ROUTE, PROVIDER_PAGES } from '@/lib/document-routes';
 
 /**
  * Runs before every page request: generates a per-request CSP nonce and a correlation id.
@@ -15,7 +15,7 @@ export function proxy(request: NextRequest) {
   const facebook = PROVIDER_PAGES.facebook.test(request.nextUrl.pathname);
   // Razorpay Standard Checkout (script plus its payment frame) runs on the billing page only.
   const razorpay = PROVIDER_PAGES.razorpay.test(request.nextUrl.pathname);
-  const csp = [
+  const pagePolicy = [
     "default-src 'self'",
     `script-src 'self' 'nonce-${nonce}' 'strict-dynamic'${facebook ? ' https://connect.facebook.net' : ''}${razorpay ? ' https://checkout.razorpay.com' : ''}${isDev ? " 'unsafe-eval'" : ''}`,
     `style-src 'self'${isDev ? " 'unsafe-inline'" : ` 'nonce-${nonce}'`}`,
@@ -36,6 +36,8 @@ export function proxy(request: NextRequest) {
     "frame-ancestors 'none'",
     ...(httpsOrigin ? ['upgrade-insecure-requests'] : []),
   ].join('; ');
+  // A file passed on from WhatsApp is not a page: nothing in it may run or load (ADR-382).
+  const csp = FILE_ROUTE.test(request.nextUrl.pathname) ? FILE_POLICY : pagePolicy;
 
   const requestHeaders = new Headers(request.headers);
   requestHeaders.set('x-nonce', nonce);

@@ -9,6 +9,7 @@ import {
   typoAllowance,
 } from '../inbox/keywords';
 import { parseAmountToMinor } from '../crm/money';
+import { PRODUCT_MESSAGE_LIMITS } from '../commerce/product-message';
 import { FLOW_LIMITS } from '../flows/flow-json';
 import { TEMPLATE_LIMITS } from '../templates/definition';
 
@@ -428,6 +429,50 @@ const createTaskNode = z.object({
   next: nextSchema,
 });
 
+/** What a products step sends: one product, a list of products, or the catalog (ADR-383). */
+export const PRODUCT_STEP_KINDS = ['product', 'product_list', 'catalog'] as const;
+export type ProductStepKind = (typeof PRODUCT_STEP_KINDS)[number];
+
+/**
+ * Products of each catalog the automation builder lists for products steps, the first by name (as
+ * many as the inbox lists).
+ */
+export const PRODUCT_PICKER_LIMIT = 500;
+
+/**
+ * Products of one of the company's catalogs sent in the conversation (ADR-383), a session message
+ * like a text: one product, a list of products (one section), or the catalog shown with one of its
+ * products. Products are named by HyFib's ids and sent by their retailer ids in their catalog. The
+ * message may hold placeholders; the heading, section title and footer are sent as written. What
+ * each kind needs is checked with the graph, so an unfinished draft can be saved.
+ */
+const sendProductsNode = z.object({
+  id: nodeIdSchema,
+  type: z.literal('send_products'),
+  label: labelSchema,
+  kind: z.enum(PRODUCT_STEP_KINDS),
+  productIds: z
+    .array(z.uuid('Choose a product.'))
+    .max(
+      PRODUCT_MESSAGE_LIMITS.productsPerMessage,
+      `Send at most ${PRODUCT_MESSAGE_LIMITS.productsPerMessage} products in one message.`,
+    ),
+  /** The list's section title (a product list only). */
+  sectionTitle: optionalShortText(PRODUCT_MESSAGE_LIMITS.sectionTitleLength, 'section title'),
+  /** The list's heading (a product list only, where it is required). */
+  header: optionalShortText(PRODUCT_MESSAGE_LIMITS.headerLength, 'heading'),
+  /** Required for a list and the catalog; a single product may go without. */
+  body: z
+    .string()
+    .trim()
+    .max(
+      PRODUCT_MESSAGE_LIMITS.bodyLength,
+      `The message is limited to ${PRODUCT_MESSAGE_LIMITS.bodyLength} characters.`,
+    ),
+  footer: optionalShortText(PRODUCT_MESSAGE_LIMITS.footerLength, 'footer'),
+  next: nextSchema,
+});
+
 /** A template variable's text (an empty one is a check error, so an unfinished draft can be saved). */
 const templateParamSchema = z
   .string()
@@ -592,6 +637,7 @@ export const nodeSchema = z.discriminatedUnion('type', [
   sendTemplateNode,
   askTemplateNode,
   sendFlowNode,
+  sendProductsNode,
   conditionNode,
   updateContactNode,
   updateConversationNode,
@@ -615,6 +661,7 @@ export const NODE_TYPES: readonly NodeType[] = [
   'send_template',
   'ask_template',
   'send_flow',
+  'send_products',
   'condition',
   'update_contact',
   'update_conversation',
@@ -635,6 +682,7 @@ export const NODE_TYPE_LABELS: Record<NodeType, string> = {
   send_template: 'Send a template',
   ask_template: 'Ask with a template',
   send_flow: 'Send a form',
+  send_products: 'Send products',
   condition: 'Condition',
   update_contact: 'Update contact',
   update_conversation: 'Tag the conversation',
@@ -665,6 +713,7 @@ export const SESSION_MESSAGE_NODE_TYPES: ReadonlySet<NodeType> = new Set([
   'ask_buttons',
   'ask_text',
   'send_flow',
+  'send_products',
 ]);
 
 export const graphSchema = z.object({
@@ -1123,6 +1172,11 @@ export function templatesOf(graph: AutomationGraph): string[] {
   ];
 }
 
+/** Product ids a graph's products steps send (ADR-383). */
+export function productsOf(graph: AutomationGraph): string[] {
+  return [...new Set(graph.nodes.flatMap((n) => (n.type === 'send_products' ? n.productIds : [])))];
+}
+
 /**
  * The values a call (or a member's test run) gives an automation started through the API, checked
  * against the inputs its trigger declares (ADR-077): each declared input once, not blank, at most
@@ -1199,6 +1253,7 @@ export function edgesOf(node: AutomationNode): { label: string; target: string |
     case 'send_text':
     case 'send_template':
     case 'send_flow':
+    case 'send_products':
     case 'update_contact':
     case 'update_conversation':
     case 'create_task':
@@ -1264,6 +1319,9 @@ function textsOf(node: AutomationNode): string[] {
       return [node.text];
     case 'send_flow':
       return [node.body];
+    case 'send_products':
+      // A single product may go without a message (an empty one has nothing to check).
+      return node.body ? [node.body] : [];
     case 'send_template':
     case 'ask_template':
       return [...node.header, ...node.body];
@@ -1289,6 +1347,12 @@ export interface GraphReferences {
    * at Meta); when given, form steps must use one that can, of the automation's account (ADR-248).
    */
   flows?: ReadonlyMap<string, { whatsappAccountId: string; sendable: boolean }>;
+  /**
+   * Products in the company's connected catalogs, by id, with their catalog and its WhatsApp
+   * account; when given, products steps must send products of one of them, of the automation's
+   * account (ADR-383).
+   */
+  products?: ReadonlyMap<string, { catalogId: string; whatsappAccountId: string }>;
   /**
    * Active members who can use the CRM; when given, the members task steps create tasks for must
    * be among them (ADR-244).
@@ -1457,12 +1521,14 @@ export function checkGraph(graph: AutomationGraph, refs: GraphReferences = {}): 
       for (const u of found.undeclaredInputs) undeclaredInput(node.id, u);
       for (const a of found.answers) checkAnswerUse(node.id, a);
       // A template variable that is only a placeholder is usual ({{1}} = {{name}}); left empty, the
-      // step fails without sending instead.
+      // step fails without sending instead. A single product left without its message is sent
+      // without one.
       if (
         !found.literal &&
         node.type !== 'update_contact' &&
         node.type !== 'send_template' &&
-        node.type !== 'ask_template'
+        node.type !== 'ask_template' &&
+        !(node.type === 'send_products' && node.kind === 'product')
       ) {
         issues.push({
           level: 'warning',
@@ -1616,6 +1682,11 @@ export function checkGraph(graph: AutomationGraph, refs: GraphReferences = {}): 
             ? 'Choose a form of the WhatsApp account of the automation’s number.'
             : null;
       if (message) issues.push({ level: 'error', nodeId: node.id, message });
+    }
+    if (node.type === 'send_products') {
+      for (const message of productStepIssues(node, refs)) {
+        issues.push({ level: 'error', nodeId: node.id, message });
+      }
     }
     if (node.type === 'move_deal' && refs.crmPipelines) {
       const pipeline = refs.crmPipelines.get(node.pipelineId);
@@ -1970,6 +2041,44 @@ function loopsWithoutWaiting(
 }
 
 // Parsing ----------------------------------------------------------------------------------------
+
+/** What a products step lacks (ADR-383): its kind's products and texts, and, given, its catalog. */
+function productStepIssues(node: NodeOf<'send_products'>, refs: GraphReferences): string[] {
+  const out: string[] = [];
+  const ids = node.productIds;
+  if (ids.length === 0) {
+    out.push(
+      node.kind === 'product_list'
+        ? 'Choose the products to send.'
+        : node.kind === 'product'
+          ? 'Choose a product.'
+          : 'Choose the product shown on the message.',
+    );
+  } else if (node.kind !== 'product_list' && ids.length > 1) {
+    out.push('Choose one product.');
+  } else if (new Set(ids).size !== ids.length) {
+    out.push('Each product can appear only once.');
+  }
+  if (node.kind === 'product_list' && !node.header) out.push('Write a heading.');
+  if (node.kind !== 'product' && !node.body) out.push('Write the message.');
+  if (refs.products && ids.length > 0) {
+    const found = ids.map((id) => refs.products?.get(id));
+    const catalogs = new Set(found.map((p) => p?.catalogId));
+    if (found.some((p) => !p)) {
+      out.push('A product of this step is no longer in a connected catalog.');
+    } else if (catalogs.size > 1) {
+      out.push('Choose products from one catalog.');
+    } else if (
+      refs.channelWhatsappAccountId &&
+      found[0]?.whatsappAccountId !== refs.channelWhatsappAccountId
+    ) {
+      out.push(
+        'Choose products from a catalog of the WhatsApp account of the automation’s number.',
+      );
+    }
+  }
+  return out;
+}
 
 export interface GraphParseIssue {
   nodeId: string | null;

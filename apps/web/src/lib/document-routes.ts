@@ -13,3 +13,12 @@ export const PROVIDER_PAGES = {
 export function needsOwnDocument(pathname: string): boolean {
   return Object.values(PROVIDER_PAGES).some((pattern) => pattern.test(pathname));
 }
+
+/**
+ * The inbox's files passed on from WhatsApp (ADR-216). They are never pages of HyFib, so proxy.ts
+ * gives them `FILE_POLICY` in place of a page's policy (ADR-382).
+ */
+export const FILE_ROUTE = /^\/c\/[^/]+\/inbox\/[^/]+\/media\/[^/]+\/?$/;
+
+/** A file's Content-Security-Policy: nothing in it runs or loads, should a browser render it. */
+export const FILE_POLICY = "default-src 'none'; sandbox";

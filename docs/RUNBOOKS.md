@@ -419,8 +419,10 @@ email that was turned off. The audit log records each change as
 received it is disconnected or Meta refused its token (reconnect it in Settings → Channels; the
 daily access check reports the same), WhatsApp no longer keeps the file (it keeps files for a
 limited time; there is nothing to restore, since HyFib keeps no copy), or WhatsApp did not answer
-(try again, and check the web tier's outbound https to Meta). Safari and iOS do not play recordings
-and videos from HyFib: members download them with the link below the player.
+(try again, and check the web tier's outbound https to Meta). Safari and iOS play recordings and
+videos by asking for parts of them (ADR-382), which HyFib answers when Meta's download gives the
+file's length; if one does not play there, check that a proxy in front of the web tier passes
+`Range` headers and 206 answers through, and use the link below the player to download it.
 
 **An integration cannot download a file a customer sent (ADR-217).** The JSON error's reason says
 why: `no_file` (the message has no file from the customer: check its `direction` and `type`),

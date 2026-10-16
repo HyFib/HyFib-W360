@@ -273,6 +273,7 @@ export default async function ContactPage({
                   data={crmData}
                   pipelines={lookups.options}
                   members={lookups.memberOptions}
+                  dealFields={lookups.dealFields}
                   myMembershipId={ctx.membership.id}
                   stageNames={lookups.stageNames}
                   memberNames={lookups.memberNames}

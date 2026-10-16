@@ -40,7 +40,8 @@ export default async function DealPage({
     if (isAppError(error) && error.code === 'not_found') notFound();
     throw error;
   }
-  const [lookups, dealFields] = await Promise.all([crmLookups(ctx), crm.listDealFields(ctx)]);
+  const lookups = await crmLookups(ctx);
+  const { dealFields } = lookups;
   const tz = ctx.tenant.timezone;
   const canWrite = can(ctx, 'crm.write');
   const editable = canWrite && !deal.contact.erased;

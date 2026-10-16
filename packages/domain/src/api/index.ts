@@ -21,6 +21,7 @@ export * from './conversations';
 export * from './orders';
 export * from './payment-link-view';
 export * from './deals';
+export * from './deal-items';
 export * from './pipelines';
 export * from './pipeline-forecast';
 export * from './teams';

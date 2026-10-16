@@ -965,6 +965,46 @@ async function sharedActivePipeline(tx: Tx, tenantId: string, pipelineId: string
 }
 
 /**
+ * Locks one of the company's deals for a change through the API, after its contact (the order
+ * erasure takes them in), refused when it changed since `expectedVersion` (when one is given) or a
+ * merge moved it to another contact between the reads. Null when the company has no such deal.
+ */
+export async function lockApiDeal(
+  tx: Tx,
+  tenantId: string,
+  dealId: string,
+  expectedVersion: number | undefined,
+) {
+  const [ref] = await tx
+    .select({ contactId: crmDeals.contactId })
+    .from(crmDeals)
+    .where(and(eq(crmDeals.tenantId, tenantId), eq(crmDeals.id, dealId)));
+  if (!ref) return null;
+  const [contact] = await tx
+    .select({ erasedAt: contacts.erasedAt })
+    .from(contacts)
+    .where(and(eq(contacts.tenantId, tenantId), eq(contacts.id, ref.contactId)))
+    .for('key share');
+  const [deal] = await tx
+    .select()
+    .from(crmDeals)
+    .where(and(eq(crmDeals.tenantId, tenantId), eq(crmDeals.id, dealId)))
+    .for('update');
+  if (!deal) return null;
+  // A merge moved the deal to another contact between the reads: its contact is not locked.
+  if (!contact || deal.contactId !== ref.contactId) {
+    throw new AppError('conflict', 'The deal moved to another contact meanwhile; try again.');
+  }
+  if (expectedVersion !== undefined && expectedVersion !== deal.version) {
+    throw new AppError(
+      'conflict',
+      `The deal changed since version ${expectedVersion}; its version is ${deal.version}. Read it again.`,
+    );
+  }
+  return { deal, erased: contact.erasedAt !== null };
+}
+
+/**
  * Changes one of the company's deals as members do on the board and the deal page (ADR-255), in one
  * transaction with the deal's contact and then its row locked (the order erasure takes them in): a
  * closed deal is reopened (in its stage, or the pipeline's first active one when its stage was
@@ -990,33 +1030,9 @@ export async function apiUpdateDeal(
     await assertCrmInPlan(tx, ctx.tenant.id);
     // The fields before the deal, as a field's deletion takes them (ADR-373).
     const dealFields = data.fields ? await lockedDealFields(tx, ctx.tenant.id) : [];
-    const [ref] = await tx
-      .select({ contactId: crmDeals.contactId })
-      .from(crmDeals)
-      .where(and(eq(crmDeals.tenantId, ctx.tenant.id), eq(crmDeals.id, dealId)));
-    if (!ref) return null;
-    const [contact] = await tx
-      .select({ erasedAt: contacts.erasedAt })
-      .from(contacts)
-      .where(and(eq(contacts.tenantId, ctx.tenant.id), eq(contacts.id, ref.contactId)))
-      .for('key share');
-    const [current] = await tx
-      .select()
-      .from(crmDeals)
-      .where(and(eq(crmDeals.tenantId, ctx.tenant.id), eq(crmDeals.id, dealId)))
-      .for('update');
-    if (!current) return null;
-    // A merge moved the deal to another contact between the reads: its contact is not locked.
-    if (!contact || current.contactId !== ref.contactId) {
-      throw new AppError('conflict', 'The deal moved to another contact meanwhile; try again.');
-    }
-    if (data.expectedVersion !== undefined && data.expectedVersion !== current.version) {
-      throw new AppError(
-        'conflict',
-        `The deal changed since version ${data.expectedVersion}; its version is ${current.version}. Read it again.`,
-      );
-    }
-    const erased = contact.erasedAt !== null;
+    const locked = await lockApiDeal(tx, ctx.tenant.id, dealId, data.expectedVersion);
+    if (!locked) return null;
+    const { deal: current, erased } = locked;
     const detailsGiven =
       data.title !== undefined ||
       data.valueMinor !== undefined ||

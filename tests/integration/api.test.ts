@@ -16,6 +16,7 @@ import {
   advanceAutomationRun,
   authorizeJob,
   apiAddConversationNote,
+  apiAddDealItem,
   apiCreateClosedDay,
   apiCreateSavedReply,
   apiCreateContact,
@@ -57,6 +58,7 @@ import {
   apiListConversations,
   apiListDealFields,
   apiListDealHistory,
+  apiListDealItems,
   apiListDeals,
   apiListMembers,
   apiListMessages,
@@ -69,6 +71,7 @@ import {
   apiListTeams,
   apiListTemplates,
   apiRecordConsent,
+  apiRemoveDealItem,
   apiSendManyTemplates,
   apiSendMessage,
   apiSendTemplate,
@@ -133,6 +136,7 @@ import {
   type ApiContext,
   type ApiConversation,
   type ApiDeal,
+  type ApiDealItem,
   type ApiNote,
   type ApiPipeline,
   type ApiTask,
@@ -6769,6 +6773,356 @@ describe('CRM pipelines and deals (ADR-253)', () => {
   });
 });
 
+describe('products on deals through the API (ADR-378)', () => {
+  const crm = () =>
+    createCrmService({ db: fx.dbs.app, clock: systemClock, jobs: fx.jobs(), signer: fx.signer });
+  const contacts = () => createContactsService({ db: fx.dbs.app, clock: systemClock });
+  const commerce = () =>
+    createCommerceService({
+      db: fx.dbs.app,
+      clock: systemClock,
+      jobs: fx.jobs(),
+      signer: fx.signer,
+      keyring: fx.keyring,
+      appBaseUrl: 'https://app.example.test',
+      allowLiveKeys: false,
+    });
+
+  /** The company's catalogs at Meta, each with its products, read by HyFib (Commerce → Catalogs). */
+  async function catalogs(c: Company, entries: { id: string; products: [string, string][] }[]) {
+    fx.standIn.state.catalogs.set(
+      c.wabaId,
+      entries.map((e) => ({ id: e.id, name: `Catalog ${e.id}`, product_count: e.products.length })),
+    );
+    for (const e of entries) {
+      fx.standIn.state.catalogProducts.set(
+        e.id,
+        e.products.map(([retailerId, name], i) => ({
+          id: `${e.id}${i}`,
+          retailer_id: retailerId,
+          name,
+          price: '₹100.00',
+          currency: 'INR',
+          availability: 'in stock',
+          review_status: 'approved',
+        })),
+      );
+    }
+    await commerce().requestSync(await fx.ctx(c, c.owner), {
+      whatsappAccountId: c.whatsappAccountId,
+    });
+    expect(
+      await processCommerceSync(
+        {
+          db: fx.dbs.app,
+          keyring: fx.keyring,
+          graph: fx.graph,
+          clock: systemClock,
+          razorpayBaseUrl: 'http://127.0.0.1:9',
+          jobs: fx.jobs(),
+          signer: fx.signer,
+        },
+        authorizedTenantScope(c.tenant.id, null),
+        c.whatsappAccountId,
+      ),
+    ).toBe('done');
+  }
+
+  let phones = 0;
+  /** A deal (version 1) for a new contact in a new INR pipeline of the company. */
+  async function dealOf(owner: TenantContext) {
+    phones += 1;
+    const digits = `${String(Date.now() % 1_000_000).padStart(6, '0')}${String(phones % 100).padStart(2, '0')}`;
+    const { id: contactId } = await contacts().createContact(owner, {
+      displayName: 'Asha',
+      phone: `+9197${digits}`,
+    });
+    const { id: pipelineId } = await crm().createPipeline(owner, {
+      name: `Quotes ${phones}`,
+      currency: 'INR',
+      stages: ['New'],
+    });
+    const [pipeline] = (await crm().listPipelines(owner)).filter((p) => p.id === pipelineId);
+    const { id } = await crm().createDeal(owner, {
+      contactId,
+      pipelineId,
+      stageId: pipeline!.stages[0]!.id,
+      title: 'Bulk order',
+    });
+    return { id, contactId };
+  }
+
+  const added = (response: { body: unknown }) =>
+    (response.body as { data: ApiDealItem & { dealVersion: number } }).data;
+
+  it('lists, adds and removes catalog products at the deal’s version, each change the key’s', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const reader = await apiKey(c, ['deals.read'], 'Quote reader');
+    const writer = await apiKey(c, ['deals.write', 'orders.read'], 'Quote sync');
+    const remover = await apiKey(c, ['deals.write'], 'Quote cleaner');
+    await catalogs(c, [
+      {
+        id: '7781000001',
+        products: [
+          ['MUG-01', 'Blue mug'],
+          ['PLATE-01', 'Plate'],
+        ],
+      },
+    ]);
+    const deal = await dealOf(owner);
+    expect(await apiListDealItems(deps(), reader.ctx, deal.id)).toEqual([]);
+
+    // A member lists one on the deal page first (ADR-375).
+    const [plate] = await crm().dealProductOptions(owner, 'PLATE-01');
+    await crm().addDealItem(owner, {
+      dealId: deal.id,
+      expectedVersion: 1,
+      productId: plate!.id,
+      quantity: 1,
+      unitPrice: '10',
+    });
+
+    const mug = { retailerId: 'MUG-01', quantity: 3, unitPriceMinor: 150_050 };
+    const response = await apiAddDealItem(
+      deps(),
+      writer.ctx,
+      deal.id,
+      { ...mug, expectedVersion: 2 },
+      null,
+    );
+    expect(response).toMatchObject({ status: 201, replayed: false });
+    expect(added(response)).toMatchObject({
+      retailerId: 'MUG-01',
+      catalogId: '7781000001',
+      name: 'Blue mug',
+      quantity: 3,
+      unitPriceMinor: 150_050,
+      currency: 'INR',
+      totalMinor: 450_150,
+      createdBy: 'api',
+      createdByApiKeyId: writer.id,
+      dealVersion: 3,
+    });
+    // A stale version is refused and adds nothing.
+    await expectAppError(
+      apiAddDealItem(deps(), writer.ctx, deal.id, { ...mug, expectedVersion: 2 }, null),
+      'conflict',
+      /since version 2; its version is 3/,
+    );
+
+    // Listed in the order added, the member's first; the deal moved on as the key's change, the
+    // page shows both, the timeline says the key added it, and the audit log names the key.
+    const listed = await apiListDealItems(deps(), reader.ctx, deal.id);
+    expect(listed.map((i) => [i.name, i.totalMinor, i.createdBy, i.createdByApiKeyId])).toEqual([
+      ['Plate', 1_000, 'member', null],
+      ['Blue mug', 450_150, 'api', writer.id],
+    ]);
+    const read = await apiGetDeal(deps(), reader.ctx, deal.id);
+    expect([read.version, read.changedBy, read.changedByApiKeyId]).toEqual([3, 'api', writer.id]);
+    const shown = await crm().getDeal(owner, deal.id);
+    expect(shown.items.map((i) => i.name)).toEqual(['Plate', 'Blue mug']);
+    expect(shown.timeline[0]).toMatchObject({
+      kind: 'deal_updated',
+      actor: null,
+      data: { fields: ['products'], productAdded: 'Blue mug', apiKeyId: writer.id },
+    });
+    const audits = await fx.query<{ actor_type: string; actor_id: string; metadata: unknown }>(
+      `SELECT actor_type, actor_id, metadata FROM app.audit_events
+        WHERE action = 'crm.deal_updated' AND subject_id = $1`,
+      [deal.id],
+    );
+    expect(audits).toEqual([
+      {
+        actor_type: 'api_key',
+        actor_id: writer.id,
+        metadata: { changes: ['products'], source: 'api' },
+      },
+    ]);
+    // The deal's history and its events report its own details only.
+    expect(
+      (await apiListDealHistory(deps(), reader.ctx, deal.id, {})).data.map((e) => e.type),
+    ).toEqual(['created']);
+
+    // With an Idempotency-Key a retry answers the first response and adds nothing more.
+    const once = idem('deal-item-1', 'one more mug');
+    const first = await apiAddDealItem(deps(), writer.ctx, deal.id, { ...mug, quantity: 1 }, once);
+    expect(
+      await apiAddDealItem(deps(), writer.ctx, deal.id, { ...mug, quantity: 1 }, once),
+    ).toEqual({ ...first, replayed: true });
+    expect(await apiListDealItems(deps(), reader.ctx, deal.id)).toHaveLength(3);
+
+    // A key that changes deals removes any product, the member's too, at the version given.
+    await expectAppError(
+      apiRemoveDealItem(deps(), remover.ctx, deal.id, listed[0]!.id, { expectedVersion: '3' }),
+      'conflict',
+      /since version 3; its version is 4/,
+    );
+    expect(
+      await apiRemoveDealItem(deps(), remover.ctx, deal.id, listed[0]!.id, {
+        expectedVersion: '4',
+      }),
+    ).toEqual({ id: listed[0]!.id, deleted: true, dealVersion: 5 });
+    await expectAppError(
+      apiRemoveDealItem(deps(), remover.ctx, deal.id, listed[0]!.id, {}),
+      'not_found',
+      /Product on this deal/,
+    );
+    expect((await crm().getDeal(owner, deal.id)).timeline[0]).toMatchObject({
+      kind: 'deal_updated',
+      data: { fields: ['products'], productRemoved: 'Plate', apiKeyId: remover.id },
+    });
+    // Adding needs the scope that reads orders as well.
+    await expectAppError(
+      apiAddDealItem(deps(), remover.ctx, deal.id, mug, null),
+      'forbidden',
+      /orders\.read/,
+    );
+  });
+
+  it('refuses what members are refused, other companies’ deals and products, and plans without the CRM or Commerce', async () => {
+    const a = await fx.company();
+    const b = await fx.company();
+    const aOwner = await fx.ctx(a, a.owner);
+    const bOwner = await fx.ctx(b, b.owner);
+    const reader = await apiKey(a, ['deals.read'], 'Quote reader');
+    const writer = await apiKey(a, ['deals.write', 'orders.read'], 'Quote sync');
+    await catalogs(a, [
+      { id: '7781000002', products: [['SKU-1', 'One']] },
+      {
+        id: '7781000003',
+        products: [
+          ['SKU-1', 'One again'],
+          ['SKU-2', 'Two'],
+        ],
+      },
+    ]);
+    await catalogs(b, [{ id: '7781000004', products: [['THEIRS-1', 'Theirs']] }]);
+    const mine = await dealOf(aOwner);
+    const theirs = await dealOf(bOwner);
+    const one = (retailerId: string, extra: Record<string, unknown> = {}) => ({
+      retailerId,
+      quantity: 1,
+      unitPriceMinor: 500,
+      ...extra,
+    });
+
+    // Another company's deal is not found here, nor its products.
+    await expectAppError(
+      apiAddDealItem(deps(), writer.ctx, theirs.id, one('SKU-2'), null),
+      'not_found',
+      /Deal/,
+    );
+    await expectAppError(apiListDealItems(deps(), reader.ctx, theirs.id), 'not_found', /Deal/);
+    await expectAppError(
+      apiAddDealItem(deps(), writer.ctx, mine.id, one('THEIRS-1'), null),
+      'validation_failed',
+      /No connected catalog of the company has this content id/,
+    );
+    // Two catalogs have SKU-1: the key names one.
+    await expectAppError(
+      apiAddDealItem(deps(), writer.ctx, mine.id, one('SKU-1'), null),
+      'validation_failed',
+      /name one with catalogId/,
+    );
+    const picked = await apiAddDealItem(
+      deps(),
+      writer.ctx,
+      mine.id,
+      one('SKU-1', { catalogId: '7781000003' }),
+      null,
+    );
+    expect(added(picked)).toMatchObject({ name: 'One again', catalogId: '7781000003' });
+    // A product removed at Meta is not added.
+    await fx.query(
+      `UPDATE app.commerce_products SET removed_at = now() WHERE tenant_id = $1 AND retailer_id = 'SKU-2'`,
+      [a.tenant.id],
+    );
+    await expectAppError(
+      apiAddDealItem(deps(), writer.ctx, mine.id, one('SKU-2'), null),
+      'validation_failed',
+      /No connected catalog/,
+    );
+
+    // A deal lists at most 50 products.
+    await fx.query(
+      `INSERT INTO app.crm_deal_items (id, tenant_id, deal_id, product_id, name, quantity,
+              unit_price_minor, currency, created_by_membership_id)
+       SELECT gen_random_uuid(), tenant_id, deal_id, product_id, name, 1, 1, currency, $2
+         FROM app.crm_deal_items, generate_series(1, 49)
+        WHERE deal_id = $1`,
+      [mine.id, aOwner.membership.id],
+    );
+    await expectAppError(
+      apiAddDealItem(deps(), writer.ctx, mine.id, one('SKU-1', { catalogId: '7781000002' }), null),
+      'validation_failed',
+      /at most 50 products/,
+    );
+    // An item is added by a member or by a key: never both, never nobody.
+    await expect(
+      fx.query(`UPDATE app.crm_deal_items SET created_by_api_key_id = $2 WHERE deal_id = $1`, [
+        mine.id,
+        writer.id,
+      ]),
+    ).rejects.toThrow(/crm_deal_items_creator/);
+    await expect(
+      fx.query(
+        `UPDATE app.crm_deal_items SET created_by_membership_id = NULL
+          WHERE deal_id = $1 AND created_by_api_key_id IS NULL`,
+        [mine.id],
+      ),
+    ).rejects.toThrow(/crm_deal_items_creator/);
+
+    // An erased contact's deal takes no changes of its products.
+    const erasable = await dealOf(aOwner);
+    const kept = added(
+      await apiAddDealItem(
+        deps(),
+        writer.ctx,
+        erasable.id,
+        one('SKU-1', { catalogId: '7781000002' }),
+        null,
+      ),
+    );
+    await contacts().eraseContact(aOwner, { contactId: erasable.contactId, suppress: false });
+    await expectAppError(
+      apiAddDealItem(
+        deps(),
+        writer.ctx,
+        erasable.id,
+        one('SKU-1', { catalogId: '7781000002' }),
+        null,
+      ),
+      'conflict',
+      /erased/,
+    );
+    await expectAppError(
+      apiRemoveDealItem(deps(), writer.ctx, erasable.id, kept.id, {}),
+      'conflict',
+      /erased/,
+    );
+    expect(await apiListDealItems(deps(), reader.ctx, erasable.id)).toHaveLength(1);
+
+    // A plan without Commerce adds none but still lists and removes; without the CRM, nothing.
+    await onPlan(a, ['crm']);
+    const noCommerce = await expectAppError(
+      apiAddDealItem(deps(), writer.ctx, mine.id, one('SKU-1', { catalogId: '7781000002' }), null),
+      'forbidden',
+      /does not include Commerce/,
+    );
+    expect(isAppError(noCommerce) && noCommerce.details).toEqual({ apiReason: 'not_in_plan' });
+    expect(await apiListDealItems(deps(), reader.ctx, mine.id)).toHaveLength(50);
+    await onPlan(a, []);
+    for (const call of [
+      () => apiListDealItems(deps(), reader.ctx, mine.id),
+      () => apiRemoveDealItem(deps(), writer.ctx, mine.id, added(picked).id, {}),
+    ]) {
+      const error = await expectAppError(call(), 'forbidden', /does not include the CRM/);
+      expect(isAppError(error) && error.details).toEqual({ apiReason: 'not_in_plan' });
+    }
+  });
+});
+
 describe('conversation reads (ADR-072)', () => {
   /** Every page of a listing, following `nextCursor`. */
   async function everyPage<T>(
@@ -8720,6 +9074,7 @@ describe('assigning conversations (ADR-093)', () => {
       assignment: 'round_robin',
       maxOpenPerMember: 5,
       routingKeywords: ['Refund', 'refund ', 'Order status'],
+      firstResponseTargetMinutes: 20,
       memberIds: [agent.membership.id, supervisor.membership.id],
       channelIds: [c.channelAccountId],
     };
@@ -8735,6 +9090,7 @@ describe('assigning conversations (ADR-093)', () => {
       assignment: 'round_robin',
       maxOpenPerMember: 5,
       routingKeywords: ['refund', 'order status'],
+      firstResponseTargetMinutes: 20,
       channelIds: [c.channelAccountId],
     });
     expect([...support.memberIds].sort()).toEqual(
@@ -8743,6 +9099,8 @@ describe('assigning conversations (ADR-093)', () => {
     expect(await apiGetTeam(deps(), manager.ctx, support.id)).toEqual(support);
     const [inSettings] = (await teams().listTeams(owner)).filter((t) => t.id === support.id);
     expect(inSettings?.channelIds).toEqual([c.channelAccountId]);
+    // Its own reply target holds its conversations (ADR-377).
+    expect(inSettings?.firstResponseTargetMinutes).toBe(20);
     expect((await apiListTeams(deps(), manager.ctx, {})).data.map((t) => t.id)).toEqual([
       support.id,
     ]);
@@ -8750,12 +9108,17 @@ describe('assigning conversations (ADR-093)', () => {
     // A change of some settings keeps the rest; the same change again writes nothing.
     const update = (input: Record<string, unknown>) =>
       apiUpdateTeam(deps(), manager.ctx, support.id, input);
-    const renamed = await update({ name: 'Customer care', memberIds: [agent.membership.id] });
+    const renamed = await update({
+      name: 'Customer care',
+      memberIds: [agent.membership.id],
+      firstResponseTargetMinutes: null,
+    });
     expect(renamed).toMatchObject({
       name: 'Customer care',
       assignment: 'round_robin',
       maxOpenPerMember: 5,
       routingKeywords: ['refund', 'order status'],
+      firstResponseTargetMinutes: null,
       memberIds: [agent.membership.id],
       channelIds: [c.channelAccountId],
     });

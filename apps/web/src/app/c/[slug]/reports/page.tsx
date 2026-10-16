@@ -521,6 +521,18 @@ function InboxSection({
   const i = report.inbox;
   const n = i.now;
   const t = i.turns;
+  const inBusinessHours = i.businessHours ? ' of business hours' : '';
+  // The targets conversations are measured against: their team's own (ADR-377), else the company's.
+  const targetsText =
+    i.teamTargets.length === 0
+      ? i.targetMinutes === null
+        ? 'No target set'
+        : `Target ${i.targetMinutes} min${inBusinessHours}`
+      : `${i.teamTargets.map((team) => `${team.name} ${team.minutes} min`).join(', ')}; ${
+          i.targetMinutes === null
+            ? 'no target for other conversations'
+            : `${i.targetMinutes} min for other conversations`
+        }${i.businessHours ? ' (business hours)' : ''}`;
   return (
     <Card>
       <SectionHeader
@@ -542,15 +554,7 @@ function InboxSection({
               value={n.windowsClosing}
               detail={`${n.windowsClosed} waiting with the window already closed`}
             />
-            <Stat
-              label={label('inbox.overdue')}
-              value={n.overTarget ?? '—'}
-              detail={
-                i.targetMinutes === null
-                  ? 'No target set'
-                  : `Target ${i.targetMinutes} min${i.businessHours ? ' of business hours' : ''}`
-              }
-            />
+            <Stat label={label('inbox.overdue')} value={n.overTarget ?? '—'} detail={targetsText} />
           </dl>
           {n.byAssignee.length > 0 ? (
             <div className="overflow-x-auto">
@@ -611,8 +615,12 @@ function InboxSection({
               }
               detail={
                 t.withinTarget
-                  ? `${t.withinTarget.numerator} of ${t.withinTarget.denominator} within ${i.targetMinutes} min${i.businessHours ? ' of business hours' : ''}`
-                  : 'Set one in Settings → Inbox'
+                  ? `${t.withinTarget.numerator} of ${t.withinTarget.denominator} within ${
+                      i.teamTargets.length === 0 && i.targetMinutes !== null
+                        ? `${i.targetMinutes} min${inBusinessHours}`
+                        : `their team’s or the company’s target${i.businessHours ? ' in business hours' : ''}`
+                    }`
+                  : 'Set one in Settings → Inbox, or for a team in Settings → Teams'
               }
             />
             <Stat

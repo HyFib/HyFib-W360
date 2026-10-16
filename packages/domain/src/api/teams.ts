@@ -41,6 +41,8 @@ export interface ApiTeamSettings {
   maxOpenPerMember: number | null;
   /** Words in a customer's first message that route the conversation to the team. */
   routingKeywords: string[];
+  /** The team's own first-response target in minutes (ADR-377); null uses the company's. */
+  firstResponseTargetMinutes: number | null;
   /** The team's active members, as GET /members lists them, in the order they joined. */
   memberIds: string[];
   /** The WhatsApp numbers whose new conversations go to the team, as GET /channels lists them. */
@@ -65,6 +67,15 @@ const assignmentSchema = z
   .enum(TEAM_ASSIGNMENT_MODES)
   .describe(
     '`manual`: members pick conversations up; `round_robin`: the team gives conversations without a member to its available members in turn.',
+  );
+const targetSchema = z
+  .number()
+  .int('Enter a reply target from 1 to 1,440 minutes, or null.')
+  .min(1, 'Enter a reply target from 1 to 1,440 minutes, or null.')
+  .max(1440, 'Enter a reply target from 1 to 1,440 minutes, or null.')
+  .nullable()
+  .describe(
+    'The team’s own first-response target in minutes: customers waiting in its conversations are due a reply within it (in business hours when they are on) instead of the company’s target; null uses the company’s.',
   );
 const maxOpenSchema = z
   .number()
@@ -102,6 +113,7 @@ export const apiCreateTeamSchema = z
     assignment: assignmentSchema.optional(),
     maxOpenPerMember: maxOpenSchema.optional(),
     routingKeywords: keywordsSchema.optional(),
+    firstResponseTargetMinutes: targetSchema.optional(),
     memberIds: memberIdsSchema.optional(),
     channelIds: channelIdsSchema.optional(),
   })
@@ -115,6 +127,7 @@ export const apiUpdateTeamSchema = z
     assignment: assignmentSchema.optional(),
     maxOpenPerMember: maxOpenSchema.optional(),
     routingKeywords: keywordsSchema.optional(),
+    firstResponseTargetMinutes: targetSchema.optional(),
     memberIds: memberIdsSchema.optional(),
     channelIds: channelIdsSchema.optional(),
   })
@@ -131,6 +144,7 @@ export function teamSettingsOf(input: z.output<typeof apiCreateTeamSchema>): Tea
     assignment: input.assignment,
     maxOpenPerMember: input.maxOpenPerMember ?? null,
     routingKeywords: input.routingKeywords,
+    firstResponseTargetMinutes: input.firstResponseTargetMinutes ?? null,
     memberIds: input.memberIds,
     channelIds: input.channelIds,
   });
@@ -150,6 +164,7 @@ export function sameTeamSettings(current: TeamSettings, next: TeamSettings): boo
     current.description === next.description &&
     current.assignment === next.assignment &&
     current.maxOpenPerMember === next.maxOpenPerMember &&
+    current.firstResponseTargetMinutes === next.firstResponseTargetMinutes &&
     current.routingKeywords.length === next.routingKeywords.length &&
     current.routingKeywords.every((keyword, i) => keyword === next.routingKeywords[i]) &&
     sameSet(current.memberIds, next.memberIds) &&
@@ -168,6 +183,7 @@ export function toApiTeamSettings(
     assignment: team.assignment,
     maxOpenPerMember: team.maxOpenPerMember,
     routingKeywords: team.routingKeywords,
+    firstResponseTargetMinutes: team.firstResponseTargetMinutes,
     memberIds: team.memberIds,
     channelIds: team.channelIds,
     createdAt: team.createdAt.toISOString(),
@@ -234,6 +250,7 @@ export async function apiCreateTeam(
           metadata: {
             assignment: data.assignment,
             maxOpenPerMember: data.maxOpenPerMember,
+            firstResponseTargetMinutes: data.firstResponseTargetMinutes,
             members: data.memberIds.length,
             channels: data.channelIds.length,
             keywords: data.routingKeywords.length,
@@ -282,6 +299,10 @@ export async function apiUpdateTeam(
             ? current.maxOpenPerMember
             : change.maxOpenPerMember,
         routingKeywords: change.routingKeywords ?? current.routingKeywords,
+        firstResponseTargetMinutes:
+          change.firstResponseTargetMinutes === undefined
+            ? current.firstResponseTargetMinutes
+            : change.firstResponseTargetMinutes,
         memberIds: change.memberIds ?? current.memberIds,
         channelIds: change.channelIds ?? current.channelIds,
       });
@@ -298,6 +319,7 @@ export async function apiUpdateTeam(
           metadata: {
             assignment: { from: previousAssignment, to: next.assignment },
             maxOpenPerMember: next.maxOpenPerMember,
+            firstResponseTargetMinutes: next.firstResponseTargetMinutes,
             members: next.memberIds.length,
             channels: next.channelIds.length,
             keywords: next.routingKeywords.length,

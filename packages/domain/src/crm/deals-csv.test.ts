@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { DEAL_CSV_COLUMNS, dealCsvLine, type DealCsvRow } from './deals-csv';
+import { DEAL_CSV_COLUMNS, dealCsvLine, dealItemsCell, type DealCsvRow } from './deals-csv';
 import { DEAL_EXPORT_BATCH, dealExportSchema } from './deals';
 
 const row: DealCsvRow = {
@@ -44,6 +44,8 @@ describe('deals as CSV (ADR-239)', () => {
       '2026-10-05T12:15:00.000Z',
       'Chose a cheaper plan',
       '2',
+      '',
+      '',
     ]);
     expect(DEAL_CSV_COLUMNS).toHaveLength(cells(line).length);
     // An open deal without a value, an owner, a close date or a reason leaves them empty; a
@@ -78,8 +80,34 @@ describe('deals as CSV (ADR-239)', () => {
       '',
       '',
       '0',
+      '',
+      '',
     ]);
     expect(cells(dealCsvLine({ ...row, currency: 'JPY', valueMinor: 1500 }))[6]).toBe('1500');
+  });
+
+  it('writes the products on a deal in one cell, a line each, with their total (ADR-380)', () => {
+    const mug = { name: 'Blue mug', quantity: 3, unitPriceMinor: 150_050, currency: 'INR' };
+    const plate = { name: 'Plate, "large"', quantity: 1, unitPriceMinor: 1_000, currency: 'INR' };
+    expect(dealItemsCell([mug, plate])).toBe(
+      '3 × Blue mug at 1500.50 INR\n1 × Plate, "large" at 10.00 INR',
+    );
+    expect(
+      dealItemsCell([{ name: 'Tea', quantity: 2, unitPriceMinor: 500, currency: 'JPY' }]),
+    ).toBe('2 × Tea at 500 JPY');
+    expect(dealItemsCell([])).toBe('');
+    const line = dealCsvLine({ ...row, items: [mug, plate], itemsTotalMinor: 451_150 });
+    expect(line).toContain(
+      ',2,"3 × Blue mug at 1500.50 INR\n1 × Plate, ""large"" at 10.00 INR",4511.50\r\n',
+    );
+    // Products in another currency, or beyond a deal's value, have no total.
+    expect(dealCsvLine({ ...row, items: [mug], itemsTotalMinor: null })).toContain(
+      ',2,3 × Blue mug at 1500.50 INR,\r\n',
+    );
+    // A product's name never starts the cell, so it cannot be read as a formula.
+    expect(dealCsvLine({ ...row, items: [{ ...mug, name: '=HYPERLINK("http://x")' }] })).toContain(
+      ',"3 × =HYPERLINK(""http://x"") at 1500.50 INR",',
+    );
   });
 
   it('never writes an erased contact’s name or number', () => {

@@ -6,6 +6,7 @@ import {
   accessProblemReason,
   accountLabel,
   assessGrant,
+  grantedPermissionList,
   lostAccessNumberError,
   missingPermissions,
   REQUIRED_META_PERMISSIONS,
@@ -191,6 +192,34 @@ describe('what the company is told', () => {
       'Meta no longer accepts HyFib’s access to this number’s WhatsApp Business Account: Meta reports that the access token is no longer valid. Reconnect WhatsApp.',
     );
     expect(lostAccessNumberError('x'.repeat(2000))).toHaveLength(1000);
+  });
+});
+
+describe('the permissions shown on Settings → Channels (ADR-381)', () => {
+  it('lists the needed ones first with what each is for, then the others by name, each once', () => {
+    expect(
+      grantedPermissionList([
+        'public_profile',
+        'whatsapp_business_messaging',
+        ' business_management ',
+        'whatsapp_business_management',
+        'public_profile',
+        '',
+      ]),
+    ).toEqual([
+      {
+        scope: 'whatsapp_business_management',
+        purpose: 'manage the account, its numbers and templates',
+      },
+      { scope: 'whatsapp_business_messaging', purpose: 'send messages' },
+      { scope: 'business_management', purpose: null },
+      { scope: 'public_profile', purpose: null },
+    ]);
+    expect(grantedPermissionList([])).toEqual([]);
+    // A needed one missing is simply not listed (the account then needs reconnecting).
+    expect(grantedPermissionList(['whatsapp_business_messaging']).map((p) => p.scope)).toEqual([
+      'whatsapp_business_messaging',
+    ]);
   });
 });
 

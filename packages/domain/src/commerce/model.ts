@@ -3,6 +3,9 @@ import { clipText } from '@w360/core';
 import type { OrderStatus } from '@w360/db';
 import { formatMinor, isCurrency, parseAmountToMinor } from '../crm/money';
 import { REF_ALPHABET, TOKEN_ALPHABET, randomToken } from '../growth/model';
+import { PRODUCT_MESSAGE_LIMITS } from './product-message';
+
+export { PRODUCT_MESSAGE_LIMITS, productListProblem } from './product-message';
 
 /**
  * Commerce on WhatsApp (P4-06): product messages (research M-169), orders customers send from their
@@ -15,13 +18,8 @@ export const COMMERCE_LIMITS = {
   /** Products HyFib reads per catalog (the rest can still be sent at Meta, just not picked here). */
   productsPerCatalog: 5000,
   catalogsPerAccount: 10,
-  /** product_list: 1 to 10 sections (M-169); HyFib also keeps the total at 30 products. */
-  sections: 10,
-  productsPerMessage: 30,
-  sectionTitleLength: 24,
-  headerLength: 60,
-  bodyLength: 1024,
-  footerLength: 60,
+  /** The limits of product messages (M-169). */
+  ...PRODUCT_MESSAGE_LIMITS,
   /** Items HyFib keeps from one order message. */
   orderItems: 100,
   /** Payment Links stay open this long (Razorpay allows up to six months, R-016). */
@@ -101,20 +99,6 @@ export const productMessageSchema = z.discriminatedUnion('kind', [
   }),
 ]);
 export type ProductMessageInput = z.infer<typeof productMessageSchema>;
-
-/** Further rules the schema cannot express (the product_list limits of M-169). */
-export function productListProblem(sections: { title: string; productIds: string[] }[]) {
-  const total = sections.reduce((n, s) => n + s.productIds.length, 0);
-  if (total > COMMERCE_LIMITS.productsPerMessage) {
-    return `Send at most ${COMMERCE_LIMITS.productsPerMessage} products in one message.`;
-  }
-  if (sections.length > 1 && sections.some((s) => !s.title)) {
-    return 'Give every section a title when there is more than one.';
-  }
-  const ids = sections.flatMap((s) => s.productIds);
-  if (new Set(ids).size !== ids.length) return 'Each product can appear only once.';
-  return null;
-}
 
 /** The resolved message: products are named by their retailer ids in one catalog. */
 export type ResolvedProductMessage =

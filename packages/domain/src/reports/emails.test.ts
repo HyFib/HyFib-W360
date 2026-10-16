@@ -61,6 +61,7 @@ function emptyReport(): Report {
     },
     inbox: {
       targetMinutes: null,
+      teamTargets: [],
       businessHours: false,
       now: {
         open: 0,
@@ -318,6 +319,19 @@ describe('what a report email says', () => {
         value: '₹1,234.56 (380 priced of 385 billable delivered messages)',
       },
     ]);
+    // Teams with their own targets (ADR-377): each conversation against its team's or the
+    // company's, even when the company has none.
+    report.inbox.teamTargets = [{ teamId: 'team', name: 'Returns', minutes: 15 }];
+    const within = () => reportEmailRows(report).find((r) => r.label === 'Answered within target');
+    expect(within()?.value).toBe(
+      '85.5% (94 of 110 within their team’s or the company’s target in business hours)',
+    );
+    report.inbox.targetMinutes = null;
+    report.inbox.businessHours = false;
+    expect(within()?.value).toBe('85.5% (94 of 110 within their team’s or the company’s target)');
+    report.inbox.teamTargets = [];
+    report.inbox.targetMinutes = 30;
+    report.inbox.businessHours = true;
     // Without business hours the target counts absolute time; CSAT surveys sent before CSAT was
     // turned off still count.
     report.inbox.businessHours = false;

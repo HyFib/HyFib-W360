@@ -44,15 +44,19 @@ verification, app review, Embedded Signup configuration).
   (ADR-216: photos, stickers, voice notes, videos and documents fetched from WhatsApp when shown and
   never stored; no migration). **[Sending files built; their database and browser tests run only in
   CI]** (ADR-218: photos, videos, recordings and documents up to 16 MB uploaded to WhatsApp when a
-  member sends them and sent by their id; no migration). Remaining: list virtualisation, collision
-  warnings (phase 3 with presence), template picker (phase 3), byte ranges so Safari plays
-  recordings and videos.
+  member sends them and sent by their id; no migration). **[Byte ranges built; their database and
+  browser tests run only in CI]** (ADR-382: one range of bytes answered with that part, cut from
+  the download, when Meta gives the file's length, so Safari and iOS can play recordings and
+  videos; the files' sandbox policy now reaches the browser; no migration). Remaining: list
+  virtualisation, collision warnings (phase 3 with presence), template picker (phase 3).
 - **P2-10 Channel settings UI** — done: connect (Embedded Signup), setup progress and errors, retry,
   disconnect, quality and health time. **[The overview's setup checklist built from the company's
   data; its database and browser tests run only in CI]** (ADR-233, W-026: two-factor, an active
   number or one to reconnect, an approved template, contacts, teammates or a pending invitation, a
-  first-response target, each shown to members who can read its data; no migration). Remaining:
-  messaging limits and granted permissions display.
+  first-response target, each shown to members who can read its data; no migration).
+  **[The permissions granted to HyFib shown on Channels; its database and browser tests run only in
+  CI]** (ADR-381, no migration: the permissions Meta listed for each account's access at its last
+  check, the needed ones first with what each is for). Remaining: messaging limits display.
 - **P2-11 Platform quarantine view** — done with P5-10 (ADR-054): the operations console's
   Integrations page lists quarantined webhooks without their content and platform administrators
   resolve them, or retry their receipts, with a reason in the platform audit log.
@@ -174,7 +178,11 @@ verification, app review, Embedded Signup configuration).
   **[Presence of members built; its database and browser tests run only in CI]** (ADR-243, migration
   0157: a conversation names the other members who have it open, reported every 20 seconds while its
   page is visible; a member's row is deleted when they leave and an hour after their last report).
-  **Remaining:** per-team SLA targets and calendars, private team queues (would change visibility,
+  **[Per-team reply targets built; their database and browser tests run only in CI]** (ADR-377,
+  migration 0296: a team's own first-response target, in Settings → Teams and the teams API, used
+  for its conversations instead of the company's in the inbox's timers and notice, the overdue
+  emails and reports, each conversation by the team it is in now).
+  **Remaining:** per-team calendars, private team queues (would change visibility,
   ADR-029), CSAT by template outside the window (needs a consent decision), CSAT with a real WABA
   (phone-number masking: P3-01, ADR-226).
 
@@ -202,8 +210,10 @@ verification, app review, Embedded Signup configuration).
   conversation with a token of its own, as a member sends it, while the plan includes WhatsApp
   Flows; no migration). Steps that create, move and close CRM tasks and deals are recorded under
   P4-04 (ADR-244 to ADR-247, ADR-249 to ADR-251), and runs started through the public API under
-  P5-08 (ADR-077). **Remaining:** catalog steps (sending products from a run), starting runs from
-  campaigns, enrolling contacts or segments in a sequence without a customer message or order event,
+  P5-08 (ADR-077). **[Products steps built; their database and browser tests run only in CI]**
+  (ADR-383, migration 0299: a step sends one product, a list of products or the catalog of a
+  connected catalog, as the inbox sends them, while the plan includes commerce; webhook endpoints
+  can choose its steps). **Remaining:** starting runs from campaigns, enrolling contacts or segments in a sequence without a customer message or order event,
   a drag-and-drop canvas (ADR-034), usage billing for automation steps, a real sandbox run (release
   checklist).
 - **P4-02 HTTP node + egress guard** — _implemented and locally verified (2026-09-27) against a
@@ -322,7 +332,10 @@ verification, app review, Embedded Signup configuration).
   Settings → Pipelines, audited; members set values on the deal page and keys through `fields` on
   `POST`/`PATCH /deals`, checked by type; `GET /deal-fields`; a CSV column per field; deletion
   strips values from every deal; erasure clears them. Not built: webhook events for changes of
-  values, choice types, values on the new-deal form, automation steps that set values).
+  values, choice types, automation steps that set values).
+  **[Custom field values on the new-deal form built; its browser test runs only in CI]** (ADR-379,
+  no migration: the board's, the contact page's and the inbox's new-deal forms take a value per
+  field, checked by the deal creation's existing rules).
   **[Deal import built; its database and browser tests run only in CI]** (ADR-374, no migration:
   CRM → Import CSV for owners, administrators and supervisors; each row a deal for an existing
   contact found by number, with a title, a stage by name, a value, an owner by email, an expected
@@ -331,7 +344,14 @@ verification, app review, Embedded Signup configuration).
   **[Products on deals built; their database and browser tests run only in CI]** (ADR-375,
   migration 0294: catalog products listed on a deal with a quantity and an exact unit price, at the
   deal's version and on its timeline, their total shown and usable as the deal's value. Not built:
-  items in the API, webhooks and CSV, discounts and taxes).
+  items in webhooks, discounts and taxes).
+  **[Products in the deals CSV built; its database test runs only in CI]** (ADR-380, no migration:
+  a `products` cell with a line per product and a `products_total` column in the deal's currency).
+  **[Products on deals through the API built; their database tests run only in CI]** (ADR-378,
+  migrations 0297 and 0298: `GET`/`POST /deals/{id}/items` and `DELETE /deals/{id}/items/{itemId}`;
+  products named by content id from the company's connected catalogs, unit prices in minor units,
+  reading with `deals.read`, adding with `deals.write` and `orders.read`, removing with
+  `deals.write`, at the deal's version, on its timeline and audited as the key).
   **Remaining:** CRM connectors (HubSpot,
   Salesforce, Zoho: integrations), reminder emails through the production SMTP provider (release
   checklist).
@@ -986,6 +1006,10 @@ verification, app review, Embedded Signup configuration).
   such as a webhook endpoint's whole configuration, an order with its items or a template with its
   history, are kept past the 64 KiB that failed them with an internal error; a larger answer is
   refused with 422 `idempotency_response_too_large` and the request rolled back).
+  **[Products on deals through the public API built; its database tests run only in CI]**
+  (ADR-378, migrations 0297 and 0298: `GET /deals/{id}/items` with `deals.read`, `POST` with
+  `deals.write` and `orders.read` and `DELETE /deals/{id}/items/{itemId}` with `deals.write`, as
+  members change them on the deal page; recorded under P4-04).
   Remaining: call-to-action messages through the API, taking
   reactions back,
   changing a field's type,

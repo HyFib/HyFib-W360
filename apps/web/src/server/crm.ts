@@ -1,6 +1,6 @@
 import 'server-only';
 import type { PipelineSummary, TenantContext } from '@w360/domain';
-import type { MemberOption, PipelineOption } from '@/components/crm/deal-forms';
+import type { DealFieldOption, MemberOption, PipelineOption } from '@/components/crm/deal-forms';
 import { getRuntime } from '@/server/runtime';
 
 /** Pipelines in use with their stages in use, for deal forms. */
@@ -28,12 +28,16 @@ export function memberOptionsWith(
     : options;
 }
 
-/** Names for timeline entries: every stage (archived too) and every member with CRM access. */
+/**
+ * Names for timeline entries: every stage (archived too) and every member with CRM access; and the
+ * company's custom deal fields (ADR-373) for deal forms.
+ */
 export async function crmLookups(ctx: TenantContext) {
   const { crm } = await getRuntime();
-  const [pipelines, members] = await Promise.all([
+  const [pipelines, members, fields] = await Promise.all([
     crm.listPipelines(ctx, { includeArchived: true }),
     crm.members(ctx),
+    crm.listDealFields(ctx),
   ]);
   const stageNames: Record<string, string> = {};
   for (const p of pipelines) for (const s of p.stages) stageNames[s.id] = s.name;
@@ -43,5 +47,17 @@ export async function crmLookups(ctx: TenantContext) {
     membershipId: m.membershipId,
     name: m.name,
   }));
-  return { pipelines, options: pipelineOptions(pipelines), stageNames, memberNames, memberOptions };
+  const dealFields: DealFieldOption[] = fields.map((f) => ({
+    key: f.key,
+    label: f.label,
+    type: f.type,
+  }));
+  return {
+    pipelines,
+    options: pipelineOptions(pipelines),
+    stageNames,
+    memberNames,
+    memberOptions,
+    dealFields,
+  };
 }

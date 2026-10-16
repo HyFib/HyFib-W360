@@ -39,8 +39,10 @@ import {
   accessProblemReason,
   accountLabel,
   assessGrant,
+  grantedPermissionList,
   missingPermissions,
   type AccessProblem,
+  type GrantedPermission,
 } from './access';
 import { emitTenantEvent } from './events';
 import type { GraphClient, GraphResult } from './graph';
@@ -112,6 +114,8 @@ export interface ChannelView {
   accessExpired: boolean;
   /** When the app's webhook subscription to the number's account was last confirmed (ADR-138). */
   webhooksCheckedAt: string | null;
+  /** The permissions Meta listed for the account's access when last checked (ADR-381). */
+  grantedPermissions: GrantedPermission[];
 }
 
 /** An account whose access needs the company's attention (ADR-137). */
@@ -676,6 +680,7 @@ export function createOnboardingService(deps: OnboardingDeps) {
               accessCheckedAt: whatsappAccounts.tokenCheckedAt,
               accessExpiresAt: whatsappAccounts.tokenExpiresAt,
               webhooksCheckedAt: whatsappAccounts.webhooksCheckedAt,
+              grantedScopes: whatsappAccounts.grantedScopes,
             })
             .from(channelAccounts)
             .innerJoin(
@@ -690,8 +695,9 @@ export function createOnboardingService(deps: OnboardingDeps) {
         { accessMode: 'read only' },
       );
       const now = clock.now();
-      return rows.map((r) => ({
+      return rows.map(({ grantedScopes, ...r }) => ({
         ...r,
+        grantedPermissions: grantedPermissionList(grantedScopes),
         healthCheckedAt: r.healthCheckedAt?.toISOString() ?? null,
         accessCheckedAt: r.accessCheckedAt?.toISOString() ?? null,
         accessExpiresAt: r.accessExpiresAt?.toISOString() ?? null,
