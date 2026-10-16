@@ -118,7 +118,7 @@ const businessHoursSchema = z
     `The team’s own weekly schedule: seven days, Monday first, each with up to ${MAX_RANGES_PER_DAY} opening ranges that do not overlap (an empty list closes the day), at least one in the week. While the company’s business hours are on (GET /business-hours), the team’s conversations count reply targets and the automatic reply’s delay in these hours instead of the company’s, with the team’s closed days (\`closedDays\`) and the company’s time zone. Null uses the company’s business hours.`,
   );
 const closedDaysSchema = z
-  .array(z.string().max(10, 'Give a date as YYYY-MM-DD.'))
+  .array(z.string().max(10, 'Enter the date as YYYY-MM-DD.'))
   .max(MAX_TEAM_CLOSED_DAYS, `Use at most ${MAX_TEAM_CLOSED_DAYS} closed days.`)
   .nullable()
   .describe(

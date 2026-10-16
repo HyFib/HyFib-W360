@@ -15641,9 +15641,9 @@ Decision:
   table; it holds no personal data, so erasure is unaffected.
 
 Not built: closed days (since built: ADR-392) or a time zone per team, holiday calendars per team,
-a team schedule while the company's hours are off, per-team hours in automations' conditions and in `GET /business-hours`,
-schedules per WhatsApp number, and measuring a turn by the team (or week) its conversation had when
-the turn started.
+a team schedule while the company's hours are off, per-team hours in automations' conditions and
+in `GET /business-hours`, schedules per WhatsApp number, and measuring a turn by the team (or week)
+its conversation had when the turn started.
 
 Review (before merge): an independent review found one Medium issue: the claim that a replanned
 overdue notice is not counted late for having waited held only for the automatic reply. The overdue
@@ -15834,8 +15834,10 @@ Decision:
 - **A team's own list, or the company's:** a team either uses the company's closed days (the
   default; every existing team keeps them) or has its own list, which replaces the company's for
   it. The list may be empty: the team works on every day its week opens, holidays included. Days
-  are dates in the company's time zone, as the company's closed days are; a team's list starts from
-  the company's in Settings → Teams, so working on one holiday is removing that day. A list holds
+  are dates in the company's time zone, as the company's closed days are; in Settings → Teams a
+  team's list starts from the company's closed days from today on (today in the company's time
+  zone; past days no longer matter to any timer, and a company's history of several years would not
+  fit a team's bound), so working on one holiday is removing that day. A list holds
   at most 366 days (a year of days; the company's list has no limit, but a team's is sent whole
   with the team's settings, so it is bounded), each a real date (`closedDaySchema`, the company's
   check), kept once each and in order. Past days are kept, as the company's are; they no longer
@@ -15891,11 +15893,14 @@ Decision:
   `teamClosedDays` (teams with their own list, while business hours are on) beside
   `teamBusinessHours`, which now lists only teams with their own week; the Reports page and report
   emails name them.
-- **Deletion, export, erasure:** a team's days are deleted with the team (on delete cascade) and with
-  the company (step 656, before teams at 800, beside the teams' weeks at 655; `w360_definer` gets
-  only the select of the key columns, the delete and the two deletion policies). The company export
-  includes the table and the team's flag. Rows hold dates only, no personal data, so erasure is
-  unaffected.
+- **Deletion, export, erasure:** a team's days are deleted with the team (on delete cascade) and
+  with the company (step 656, before teams at 800, beside the teams' weeks at 655; `w360_definer`
+  gets only the select of the key columns, the delete and the two deletion policies). The company
+  export includes the table and the team's flag. Rows hold dates only, no personal data, so erasure
+  is unaffected.
+- **Switching back with the same days:** a team that goes from its own list to the company's when
+  both hold the same days plans its waiting rows again although its calendar is unchanged; that is
+  harmless (the next sweep puts them off to the same time) and matches ADR-389's handling of a week.
 
 Not built: holiday calendars imported from a provider (a team's list, like the company's, is
 entered by hand), names for a team's closed days, closed days per WhatsApp number, partial-day

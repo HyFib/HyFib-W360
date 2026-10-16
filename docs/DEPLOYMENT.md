@@ -1758,8 +1758,8 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    servers neither show nor write a team's closed days (an old server's save of a team in Settings
    leaves its list as it is, as it never names the column), and `POST`/`PATCH /teams` with
    `closedDays` is refused as an unknown field there. Give teams their own closed days only after
-   both rollouts end. Rolling an image back leaves the column, table and definitions in place: an older release
-   ignores them and counts every team by the company's closed days again.
+   both rollouts end. Rolling an image back leaves the column, table and definitions in place: an
+   older release ignores them and counts every team by the company's closed days again.
 
    Migration 0305 (ADR-390) replaces the deal capture function in place and widens its trigger and
    the changer trigger to `crm_deals.attributes`, so `deal.updated` names custom field value

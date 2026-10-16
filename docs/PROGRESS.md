@@ -125,12 +125,23 @@ the company's: a public holiday closed every team, and a team could not close on
   always changes the month. The database reads and writes, re-planning and Reports' SQL are covered
   by integration tests, which run in CI only.
 
+- **Review fixes:** day lists in Settings → Teams are written by `formatClosedDay`
+  (`apps/web/src/lib/closed-days.ts`, fixed English month abbreviations, no `Intl`), so the server
+  page and the browser editor give the same text in every engine; a team's own list starts from the
+  company's closed days from today on in its time zone (`upcomingClosedDays`; the help text names
+  this and the 366-day bound); a date picked but not added is saved with the list
+  (`withPendingClosedDay`); the API's date-length message uses the domain's words; ADR-392 notes
+  that switching back to the company's list with the same days plans waiting rows again (harmless).
+  Unit tests (`closed-days.test.ts`: 3) and 10 more deliberate regressions (the month index, the
+  day's leading zero, an unknown month, today left out, unsorted or repeated days, an invalid or a
+  dropped pending date, the API message): 10 caught.
+
 ### Test commands and results (local, 2026-10-16)
 
 | Command                                            | Result                                                          |
 | -------------------------------------------------- | --------------------------------------------------------------- |
 | `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
-| `pnpm test` (unit)                                 | 162 files, 1,739 tests passed                                   |
+| `pnpm test` (unit)                                 | 163 files, 1,742 tests passed (after the review fixes)          |
 | `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
 | `pnpm build`                                       | passed                                                          |
 

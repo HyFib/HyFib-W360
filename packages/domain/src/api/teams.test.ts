@@ -580,6 +580,11 @@ describe('a team’s own closed days through the API (ADR-392)', () => {
       expect(result.success, JSON.stringify(closedDays).slice(0, 40)).toBe(false);
       expect(result.error?.issues.map((i) => i.path.join('.'))).toContain(path);
     }
+    // Too long for a date: the same words as the checks Settings uses.
+    expect(
+      apiCreateTeamSchema.safeParse({ name: 'Care', closedDays: ['2026-11-08T00:00'] }).error
+        ?.issues[0]?.message,
+    ).toBe('Enter the date as YYYY-MM-DD.');
     // 366 days are taken (a leap year's days), however they repeat.
     expect(
       apiCreateTeamSchema.safeParse({
