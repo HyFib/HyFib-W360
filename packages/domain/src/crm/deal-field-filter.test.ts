@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import { isAppError } from '@w360/core';
+import { crmDeals, sql } from '@w360/db';
 import {
   DEAL_FIELD_FILTER_MAX_LENGTH,
   dealFieldFilterAudit,
@@ -8,6 +9,7 @@ import {
   dealFieldFilterProblemMessage,
   dealFieldFilterRefusal,
   dealFieldFilterView,
+  dealFieldMatch,
   filterableDealFields,
   parseDealFieldFilterParam,
   requireDealFieldFilter,
@@ -214,6 +216,53 @@ describe('the board query’s field condition (ADR-391)', () => {
       sql: 'not ("app"."crm_deals"."attributes" ? $1::text)',
       params: ['tier'],
     });
+  });
+});
+
+describe('the same condition on an aliased table (ADR-396)', () => {
+  const query = (condition: ReturnType<typeof dealFieldMatch>) => {
+    const { sql: text, params } = new PgDialect().sqlToQuery(condition);
+    return { sql: text, params };
+  };
+  const matched = (key: string, value: string | null) => {
+    const resolved = resolveDealFieldFilter(fields, { key, value });
+    if (!resolved.ok) throw new Error(resolved.problem);
+    return query(dealFieldMatch(resolved.filter, sql`d.attributes`));
+  };
+
+  it('names the attributes as the raw query does, with the same bound key and value', () => {
+    expect(matched('tier', 'gOLD')).toEqual({
+      sql: '(d.attributes -> $1::text) = $2::jsonb',
+      params: ['tier', '"Gold"'],
+    });
+    expect(matched('signed', 'no')).toEqual({
+      sql: '(d.attributes -> $1::text) = $2::jsonb',
+      params: ['signed', 'false'],
+    });
+    expect(matched('signed', null)).toEqual({
+      sql: 'not (d.attributes ? $1::text)',
+      params: ['signed'],
+    });
+    // An option holding a quote or a colon is a parameter, never part of the statement.
+    const quoted = resolveDealFieldFilter(
+      [{ key: 'tier', label: 'Tier', type: 'choice', options: [`O'Brien: "gold"`] }],
+      { key: 'tier', value: `o'brien: "GOLD"` },
+    );
+    if (!quoted.ok) throw new Error(quoted.problem);
+    expect(query(dealFieldMatch(quoted.filter, sql`d.attributes`))).toEqual({
+      sql: '(d.attributes -> $1::text) = $2::jsonb',
+      params: ['tier', JSON.stringify(`O'Brien: "gold"`)],
+    });
+  });
+
+  it('is the board’s condition, on the column', () => {
+    for (const value of ['Gold', null]) {
+      const resolved = resolveDealFieldFilter(fields, { key: 'tier', value });
+      if (!resolved.ok) throw new Error(resolved.problem);
+      expect(query(dealFieldCondition(resolved.filter)!)).toEqual(
+        query(dealFieldMatch(resolved.filter, sql`${crmDeals.attributes}`)),
+      );
+    }
   });
 });
 

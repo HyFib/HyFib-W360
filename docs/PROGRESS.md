@@ -1,5 +1,78 @@
 # Progress
 
+## 2026-10-16 — Filtering the deals section of Reports by a choice field (P4-04, P5-08, ADR-396)
+
+Status: **Implemented; its database and browser tests run in CI only.** ADR-385, ADR-391 and
+ADR-394 listed "filtering Reports by a choice" as not built: the board, the won and lost lists and
+`GET /deals` took a choice or yes/no deal field's value, Reports' deals section did not.
+
+### Completed
+
+- **One condition (`crm/deal-field-filter.ts`):** ADR-391's condition moved unchanged into
+  `dealFieldMatch`, which takes the attributes as the query names them; `dealFieldCondition` passes
+  the column (the board, lists, export and `GET /deals` render exactly as before), Reports' raw
+  queries pass `d.attributes`. No migration.
+- **The deals section (`reports/service.ts`):** `dealReport` adds the condition to its four queries
+  (closed deals per currency and day, so the win rate; the time to win; the open deals' left join,
+  so every stage stays listed; the forecast through `readForecastGroups`, which takes the filter)
+  and returns `field`; `readReport` takes the resolved filter (report emails pass none). Other
+  sections and the metric definitions are unchanged.
+- **Who and how (`reports/deal-filter.ts`):** `getReport` resolves `field` leniently in the
+  report's snapshot through `readReportDealFilter`, reading the company's fields only with
+  `crm.read` (Reports need only `reports.read`), and returns it as `ReportPage.dealFilter`
+  (`permitted`, the fields, the filter applied, whether one was not). `exportSection` refuses a
+  filter with another section (400) or without `crm.read` (403) before anything is read, resolves
+  it strictly (ADR-391's 400s), names a filtered file `deals-filtered-by-<key>-…` (never the option)
+  and audits `report.exported` with `field: { key, match }`.
+- **API (`api/reports.ts`, `openapi.ts`):** `GET /reports?field=` needs `deals.read` too (checked
+  before the text) and the CRM in the plan, refuses a malformed text before the transaction and a
+  key or value the company's fields do not resolve within it, with 422 naming `field` in the API's
+  words; `deals.field` echoes the filter as resolved, or null. The OpenAPI document describes the
+  parameter, the scope, the refusals and the echo (no decision numbers).
+- **Web:** the board's `DealFieldFilter` moved to `components/crm/deal-field-filter.tsx`, shared by
+  the board, the won and lost lists and Reports' deals section (the notice text passed in); the
+  Reports page reads `field` (a repeated one by its first value), shows the form with the period as
+  hidden inputs, keeps the filter in the period form, says which deals the section counts, and links
+  the deals export with the filter (`lib/report-links.ts`); the export route passes `field`.
+- **Tests:** unit (23 new: `reports/deal-report.test.ts` 6, each query's condition and where it
+  sits, "Not set", yes/no, the figures, the permission gate reading no fields without `crm.read`;
+  `reports/deal-filter.test.ts` 6, the page's reading for members with and without `crm.read`, the
+  export's refusals in order, the file name; `crm/deal-field-filter.test.ts` 2, the aliased
+  condition and its identity with the board's; `api/reports.test.ts` 6 new and 1 updated, the query
+  schema, the scope before the text, malformed texts before reading, the plan and each refusal
+  against fake fields, the echo, the OpenAPI text; `lib/report-links.test.ts` 3); integration
+  (`crm.test.ts`: 2 new, every figure by an option, "Not set", yes, no and not set, other sections
+  unchanged, ignored filters, a marketer without `crm.read`, the export's rows, file name,
+  refusals and audit, isolation between companies; `api.test.ts`: 1 new, the API's report equal to
+  the page's for the same filter and moment, "Not set", each refusal, a key without `deals.read`,
+  a plan without the CRM); e2e (`crm.spec.ts`: the ADR-391/394 test goes on to Reports, filters the
+  deals section, checks the export links, "Show all deals" and a stale link).
+- **Docs:** ADR-396 (and notes in ADR-252, ADR-385, ADR-391 and ADR-394); ARCHITECTURE, SECURITY,
+  THREAT-MODEL T349, RUNBOOKS (the notice, the export's and the API's refusals), BACKLOG, and the
+  matrix's H-012, H-033 and W-157 text and evidence (statuses unchanged).
+- **Mutation checks:** 30 deliberate regressions in the new code (each of the four queries losing
+  the condition, the open deals' condition moved to the `where`, the forecast not given the filter
+  or dropping it, "not set" inverted, the value bound as text, the board's condition on the alias,
+  the report forgetting its filter, the page's reading for members with and without `crm.read`,
+  the permission gate reading fields for everyone, the export's checks reordered or dropped, the
+  option in the file name, the API's scope check dropped or skipped for an empty text, its early
+  refusal, plan check and words, the echo's form or a leaked record, the OpenAPI parameter's name
+  and text, and the links' filter, period and section rules): 30 caught by the unit tests, each file
+  restored exactly. The wiring of `getReport`, `exportSection` and `apiGetReport` to the database
+  (what reaches `readReport`) is covered by the integration tests, which run in CI only.
+- **Not built:** several field filters at once, text, number or date filters, saved filtered views
+  and filtered report emails, the filter on `GET /pipelines/{id}/forecast`, and naming the filter
+  inside the CSV file.
+
+### Test commands and results (local, 2026-10-16)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 169 files, 1,806 tests passed                                   |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+
 ## 2026-10-16 — Products on deals in deal webhook payloads (P5-09, P4-04, ADR-395)
 
 Status: **Implemented; its database tests run in CI only.** Deal webhook events gave the deal

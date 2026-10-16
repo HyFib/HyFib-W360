@@ -22,7 +22,7 @@ import {
   type TenantRole,
   type Tx,
 } from '@w360/db';
-import { assertCan, type TenantContext } from '../authz/context';
+import { assertCan, can, type TenantContext } from '../authz/context';
 import { permissionsForRoles } from '../authz/permissions';
 import { recordAudit, type RequestMeta } from '../audit';
 import {
@@ -33,10 +33,24 @@ import {
   priceFor,
 } from '../campaigns/costs';
 import { CSV_BOM, csvLine } from '../contacts/csv';
+import {
+  DEAL_FIELD_FILTER_MAX_LENGTH,
+  dealFieldFilterAudit,
+  dealFieldMatch,
+  requireDealFieldFilter,
+  type ResolvedDealFieldFilter,
+} from '../crm/deal-field-filter';
+import { loadDealFields } from '../crm/deal-fields';
 import { minorToInput } from '../crm/money';
 import { loadTeamSchedules, openPeriods, type BusinessCalendars } from '../inbox/business-hours';
 import { calendarsOf, hasAnyTarget, loadReplyTargets, type ReplyTargets } from '../inbox/sla';
 import { parseInput } from '../validation';
+import {
+  assertReportDealFilterAllowed,
+  reportDealFilter,
+  reportExportFilename,
+  type ReportDealFilter,
+} from './deal-filter';
 import { METRIC_DEFINITIONS, type MetricDefinition } from './definitions';
 import {
   forecastByMonth,
@@ -55,7 +69,8 @@ import { resolvePeriod, type ReportPeriod } from './period';
  *
  * Reports expose aggregates and member names only (no message content or contact details), so
  * `reports.read` is enough to view them; exports additionally need `reports.export` and are
- * audited.
+ * audited. Filtering the deals section by a deal field also needs `crm.read`, since its choices
+ * name the company's deal fields and options (ADR-396).
  */
 
 export interface Ratio {
@@ -271,6 +286,11 @@ export interface DealReport {
     lost: number;
     lostValueMinor: number;
   }[];
+  /**
+   * The choice or yes/no field's value every figure above counts deals by (ADR-396), found among
+   * the company's fields; null when every deal is counted.
+   */
+  field: ResolvedDealFieldFilter | null;
 }
 
 export interface AgentRow {
@@ -327,6 +347,15 @@ export interface Report {
   campaigns: CampaignFunnel;
   /** Latest version of every persisted definition, in registry order. */
   definitions: MetricDefinition[];
+}
+
+/**
+ * The report as the Reports page reads it: the deals section's filter by a choice or yes/no field
+ * too, as the page offers it (ADR-396): the fields to choose from, the filter applied and whether
+ * one asked for was not.
+ */
+export interface ReportPage extends Report {
+  dealFilter: ReportDealFilter;
 }
 
 export const REPORT_SECTIONS = [
@@ -960,13 +989,21 @@ async function automationReport(
   };
 }
 
-/** Deals closed in the period (by close time) and open deals now, with their forecast. */
-async function dealReport(
+/**
+ * Deals closed in the period (by close time) and open deals now, with their forecast. With a
+ * filter by a choice or yes/no field (ADR-396), every one of its queries counts only the deals the
+ * filter matches: the closed deals (per currency, per day, the win rate), the time to win, the open
+ * deals by stage (in the join, so every active stage stays listed, with none when none match) and
+ * the forecast. Stages' chances are the stages' own, so whether a pipeline has one does not change.
+ */
+export async function dealReport(
   tx: Tx,
   tenantId: string,
   period: ReportPeriod,
   now: Date,
+  filter: ResolvedDealFieldFilter | null = null,
 ): Promise<DealReport> {
+  const match = filter === null ? sql`` : sql`and ${dealFieldMatch(filter, sql`d.attributes`)}`;
   const closed = await tx.execute<{
     day: string;
     currency: string;
@@ -984,13 +1021,15 @@ async function dealReport(
     join app.crm_pipelines p on p.tenant_id = d.tenant_id and p.id = d.pipeline_id
     where d.tenant_id = ${tenantId} and d.status in ('won', 'lost')
       and d.closed_at >= ${ts(period.start)} and d.closed_at < ${ts(period.end)}
+      ${match}
     group by 1, 2 order by 1, 2`);
   const [median] = (
     await tx.execute<{ median: number | null }>(sql`
       select (percentile_cont(0.5) within group (order by extract(epoch from d.closed_at - d.created_at)))::float8 as median
         from app.crm_deals d
        where d.tenant_id = ${tenantId} and d.status = 'won'
-         and d.closed_at >= ${ts(period.start)} and d.closed_at < ${ts(period.end)}`)
+         and d.closed_at >= ${ts(period.start)} and d.closed_at < ${ts(period.end)}
+         ${match}`)
   ).rows;
   const open = await tx.execute<{
     pipeline_id: string;
@@ -1008,11 +1047,12 @@ async function dealReport(
       from app.crm_pipelines p
       join app.crm_stages s on s.tenant_id = p.tenant_id and s.pipeline_id = p.id and s.archived_at is null
       left join app.crm_deals d on d.tenant_id = s.tenant_id and d.stage_id = s.id and d.status = 'open'
+        ${match}
      where p.tenant_id = ${tenantId} and p.archived_at is null
      group by p.id, p.name, p.currency, p.position, s.id, s.name, s.win_percent, s.position
      order by p.position, lower(p.name), s.position`);
   // The forecast (ADR-252): open deals in active stages by stage and expected close month.
-  const byMonth = await readForecastGroups(tx, tenantId);
+  const byMonth = await readForecastGroups(tx, tenantId, undefined, filter);
   const months = forecastMonths(now, period.timezone);
 
   const totals = (status: 'won' | 'lost'): DealAmount[] => {
@@ -1069,6 +1109,7 @@ async function dealReport(
       lost: r.lost,
       lostValueMinor: num(r.lost_value),
     })),
+    field: filter,
   };
 }
 
@@ -1562,7 +1603,8 @@ export interface ReportsDeps {
 /**
  * The company's report for a period, as Reports shows it and the API reads it (ADR-297). The
  * caller runs it in one repeatable-read, read-only transaction, so every number comes from the same
- * moment.
+ * moment. `dealFilter`, resolved by the caller against the company's fields in that transaction,
+ * filters the deals section only (ADR-396); report emails never pass one.
  */
 export async function readReport(
   tx: Tx,
@@ -1570,6 +1612,7 @@ export async function readReport(
   timezone: string,
   period: ReportPeriod,
   now: Date,
+  dealFilter: ResolvedDealFieldFilter | null = null,
 ): Promise<Report> {
   const settings = await loadReportSettings(tx, tenantId, timezone);
   const messaging = await messagingReport(tx, tenantId, period);
@@ -1577,7 +1620,7 @@ export async function readReport(
   const inbox = await inboxReport(tx, tenantId, period, now, settings.targets);
   const csat = await csatReport(tx, tenantId, period, settings.csatEnabled);
   const automations = await automationReport(tx, tenantId, period);
-  const deals = await dealReport(tx, tenantId, period, now);
+  const deals = await dealReport(tx, tenantId, period, now, dealFilter);
   const agents = await agentReport(tx, tenantId, period);
   const campaigns = await campaignFunnel(tx, tenantId, period, settings.costCurrency);
   const definitions = await loadDefinitions(tx);
@@ -1596,17 +1639,65 @@ export async function readReport(
   };
 }
 
+/**
+ * The Reports page's deal field filter (ADR-396), as its address writes it: any text, read as the
+ * board reads it, so one that does not resolve is ignored and reported instead of failing.
+ */
+const reportPageInputSchema = z.object({ field: z.string().nullish() });
+
+/** A section export's deal field filter (ADR-396): refused unless it resolves, as the CRM export's. */
+const reportExportInputSchema = z.object({
+  field: z
+    .string()
+    .max(DEAL_FIELD_FILTER_MAX_LENGTH, 'The deal field filter is not valid.')
+    .optional(),
+});
+
+const SNAPSHOT = { isolationLevel: 'repeatable read', accessMode: 'read only' } as const;
+
+/**
+ * The page's deal field filter (ADR-396), read in the report's transaction: the company's own
+ * fields are read, and the filter resolved against them, only for members who may see the CRM.
+ */
+export async function readReportDealFilter(
+  tx: Tx,
+  ctx: TenantContext,
+  raw: string | null | undefined,
+): Promise<ReportDealFilter> {
+  return reportDealFilter(
+    can(ctx, 'crm.read') ? await loadDealFields(tx, ctx.tenant.id) : null,
+    raw,
+  );
+}
+
 export function createReportsService(deps: ReportsDeps) {
   const { db, clock } = deps;
 
-  async function getReport(ctx: TenantContext, input: unknown): Promise<Report> {
+  /**
+   * The report for the page. Its deals section follows the filter by a choice or yes/no field in
+   * `input.field` (ADR-396) for members who may see the CRM, resolved against the company's own
+   * fields in the report's snapshot; for others it is neither read nor applied.
+   */
+  async function getReport(ctx: TenantContext, input: unknown): Promise<ReportPage> {
     assertCan(ctx, 'reports.read');
     const now = clock.now();
     const period = resolvePeriod(input, ctx.tenant.timezone, now);
+    const { field } = parseInput(reportPageInputSchema, input ?? {});
     return db.run(
       ctx.scope,
-      (tx) => readReport(tx, ctx.tenant.id, ctx.tenant.timezone, period, now),
-      { isolationLevel: 'repeatable read', accessMode: 'read only' },
+      async (tx) => {
+        const dealFilter = await readReportDealFilter(tx, ctx, field);
+        const report = await readReport(
+          tx,
+          ctx.tenant.id,
+          ctx.tenant.timezone,
+          period,
+          now,
+          dealFilter.applied,
+        );
+        return { ...report, dealFilter };
+      },
+      SNAPSHOT,
     );
   }
 
@@ -1615,7 +1706,10 @@ export function createReportsService(deps: ReportsDeps) {
 
     /**
      * One report section as CSV (formula-safe, see contacts/csv). Needs `reports.export`; the
-     * export is audited before any data is returned.
+     * export is audited before any data is returned. The deals section takes the page's deal field
+     * filter (ADR-396), strictly: refused for another section, without `crm.read`, or when it does
+     * not resolve, before anything is audited; audited with the field's key and the kind of match,
+     * never the option.
      */
     async exportSection(
       ctx: TenantContext,
@@ -1626,8 +1720,26 @@ export function createReportsService(deps: ReportsDeps) {
       assertCan(ctx, 'reports.read');
       assertCan(ctx, 'reports.export');
       const which = parseInput(z.enum(REPORT_SECTIONS), section);
-      const report = await getReport(ctx, input);
-      const { period } = report;
+      const { field } = parseInput(reportExportInputSchema, input ?? {});
+      if (field !== undefined) assertReportDealFilterAllowed(which, can(ctx, 'crm.read'));
+      const now = clock.now();
+      const period = resolvePeriod(input, ctx.tenant.timezone, now);
+      const report = await db.run(
+        ctx.scope,
+        async (tx) =>
+          readReport(
+            tx,
+            ctx.tenant.id,
+            ctx.tenant.timezone,
+            period,
+            now,
+            field === undefined
+              ? null
+              : requireDealFieldFilter(await loadDealFields(tx, ctx.tenant.id), field),
+          ),
+        SNAPSHOT,
+      );
+      const filter = report.deals.field;
       await db.run(ctx.scope, (tx) =>
         recordAudit(
           tx,
@@ -1641,13 +1753,16 @@ export function createReportsService(deps: ReportsDeps) {
               to: period.to,
               timezone: period.timezone,
               preset: period.preset,
+              // The field's key and the kind of match, never the option (ADR-396, as ADR-391);
+              // left out without a filter, so exports audited before it read the same.
+              ...(filter ? { field: dealFieldFilterAudit(filter) } : {}),
             },
           },
           meta,
         ),
       );
       return {
-        filename: `${which}-${period.from}-to-${period.to}.csv`,
+        filename: reportExportFilename(which, period, filter),
         body: sectionCsv(which, report),
       };
     },

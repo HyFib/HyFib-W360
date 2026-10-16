@@ -94,6 +94,7 @@ export * from './platform/rate-cards';
 export * from './reports/definitions';
 export * from './reports/period';
 export * from './reports/service';
+export * from './reports/deal-filter';
 export * from './reports/emails';
 export * from './inbox/routing';
 export * from './inbox/teams';

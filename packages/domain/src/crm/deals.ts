@@ -46,6 +46,7 @@ import {
   dealFieldFilterAudit,
   DEAL_FIELD_FILTER_MAX_LENGTH,
   dealFieldFilterView,
+  dealFieldMatch,
   requireDealFieldFilter,
   type DealFieldFilterView,
   type ResolvedDealFieldFilter,
@@ -284,14 +285,12 @@ function ownerFilter(ctx: TenantContext, owner: string) {
 }
 
 /**
- * Deals with the filter's value, or without a value for its field (ADR-391). The stored value is
- * compared as JSON, so a choice matches its option exactly as written (as every value is stored)
- * and a yes/no field its boolean; values are never JSON null (an empty value removes the key).
+ * Deals with the filter's value, or without a value for its field (ADR-391), on the deals table's
+ * own column (`dealFieldMatch`, which Reports' raw queries use with their alias, ADR-396).
  */
 export function dealFieldCondition(filter: ResolvedDealFieldFilter | null) {
   if (!filter) return undefined;
-  if (filter.stored === null) return sql`not (${crmDeals.attributes} ? ${filter.key}::text)`;
-  return sql`(${crmDeals.attributes} -> ${filter.key}::text) = ${JSON.stringify(filter.stored)}::jsonb`;
+  return dealFieldMatch(filter, sql`${crmDeals.attributes}`);
 }
 
 type DealRow = typeof crmDeals.$inferSelect;

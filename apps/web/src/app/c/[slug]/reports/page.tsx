@@ -6,11 +6,13 @@ import { isAppError } from '@w360/core';
 import {
   PERIOD_PRESETS,
   RATE_CATEGORY_LABELS,
+  REPORT_DEAL_FILTER_FORBIDDEN_MESSAGE,
   can,
   formatMicros,
   type CloseBucket,
   type MetricDefinition,
   type Report,
+  type ReportPage,
   type TenantContext,
 } from '@w360/domain';
 import { formatMinor } from '@w360/domain/crm-money';
@@ -34,6 +36,7 @@ import {
   Table,
   cn,
 } from '@w360/ui';
+import { DealFieldFilter, staleDealFieldFilterNotice } from '@/components/crm/deal-field-filter';
 import { PageHeader } from '@/components/page-header';
 import { ReportEmailsForm } from '@/components/reports/report-emails-form';
 import { CAMPAIGN_STATUS, failureLabel, percent } from '@/lib/campaign-labels';
@@ -45,6 +48,7 @@ import {
   formatDuration,
   formatMonth,
 } from '@/lib/report-format';
+import { reportExportHref, reportHref, reportPeriodParams } from '@/lib/report-links';
 import { getRuntime } from '@/server/runtime';
 import { requireTenant } from '@/server/session';
 
@@ -73,25 +77,32 @@ export default async function ReportsPage({
   const ctx = await requireTenant(slug);
   if (!can(ctx, 'reports.read')) notFound();
   const { reports, reportEmails } = await getRuntime();
-  let report: Report;
+  // The deals section's filter by a choice or yes/no field (ADR-396), as the address writes it:
+  // the service resolves it against the company's own fields for members who may see the CRM and
+  // reports one it cannot apply instead of failing. A repeated parameter counts by its first value,
+  // as on the board.
+  const field = (Array.isArray(sp.field) ? sp.field[0] : sp.field) ?? null;
+  let report: ReportPage;
   let periodError: string | null = null;
   try {
     report = await reports.getReport(ctx, {
       preset: one(sp.preset),
       from: one(sp.from),
       to: one(sp.to),
+      field,
     });
   } catch (error) {
     if (!isAppError(error) || error.code !== 'validation_failed') throw error;
     periodError = error.publicMessage;
-    report = await reports.getReport(ctx, {});
+    report = await reports.getReport(ctx, { field });
   }
   const { period } = report;
   const tz = ctx.tenant.timezone;
   const emailChoices = await reportEmails.getReportEmails(ctx);
-  const exportQuery = `?preset=custom&from=${period.from}&to=${period.to}`;
+  // Links carry the filter as the page applied it, never the address's own text.
+  const appliedField = report.dealFilter.applied?.param ?? null;
   const exportHref = can(ctx, 'reports.export')
-    ? (section: string) => `/c/${ctx.tenant.slug}/reports/export/${section}${exportQuery}`
+    ? (section: string) => reportExportHref(ctx.tenant.slug, section, period, appliedField)
     : null;
   const label = (key: string) => report.definitions.find((d) => d.key === key)?.label ?? key;
 
@@ -110,6 +121,8 @@ export default async function ReportsPage({
               </Alert>
             ) : null}
             <form method="get" className="grid items-end gap-4 sm:grid-cols-4">
+              {/* Another period keeps the deals section's filter (ADR-396). */}
+              {appliedField ? <input type="hidden" name="field" value={appliedField} /> : null}
               <div className="grid gap-1.5">
                 <Label htmlFor="rp-preset">Period</Label>
                 <Select id="rp-preset" name="preset" defaultValue={period.preset}>
@@ -188,7 +201,7 @@ export default async function ReportsPage({
         <AutomationSection report={report} label={label} exportHref={exportHref} />
         <AgentSection report={report} exportHref={exportHref} />
         <CampaignSection report={report} ctx={ctx} exportHref={exportHref} />
-        <DealSection report={report} label={label} exportHref={exportHref} />
+        <DealSection report={report} label={label} exportHref={exportHref} slug={ctx.tenant.slug} />
         <UnavailableSection definitions={report.definitions} />
         <DefinitionsSection definitions={report.definitions} />
       </div>
@@ -909,12 +922,15 @@ function DealSection({
   report,
   label,
   exportHref,
+  slug,
 }: {
-  report: Report;
+  report: ReportPage;
   label: (key: string) => string;
   exportHref: ExportHref;
+  slug: string;
 }) {
   const d = report.deals;
+  const filter = report.dealFilter;
   const won = d.won.reduce((n, a) => n + a.deals, 0);
   const lost = d.lost.reduce((n, a) => n + a.deals, 0);
   const openPipelines = d.pipelines.filter((p) => p.stages.length > 0);
@@ -927,6 +943,26 @@ function DealSection({
         section="deals"
       />
       <CardContent className="grid grid-cols-1 gap-6">
+        {/* Filtered by a choice or yes/no field as the board is (ADR-396), for members who may
+            see the CRM; the period's parameters ride along, and no other section changes. */}
+        <DealFieldFilter
+          action={`/c/${slug}/reports`}
+          filter={filter}
+          notice={
+            filter.permitted
+              ? staleDealFieldFilterNotice('deals section')
+              : `${REPORT_DEAL_FILTER_FORBIDDEN_MESSAGE} The deals section is not filtered.`
+          }
+          hidden={reportPeriodParams(report.period)}
+          clearHref={reportHref(slug, report.period, null)}
+        />
+        {d.field ? (
+          <p className="text-sm text-muted-foreground">
+            Every figure in this section counts only the deals with{' '}
+            <span className="font-medium text-foreground">{`${d.field.label}: ${d.field.valueLabel}`}</span>
+            . No other section is filtered, and report emails count every deal.
+          </p>
+        ) : null}
         <dl className="grid grid-cols-2 gap-3 lg:grid-cols-4">
           <Stat label="Deals won" value={formatCount(won)} detail={amounts(d.won)} />
           <Stat label="Deals lost" value={formatCount(lost)} detail={amounts(d.lost)} />

@@ -326,6 +326,37 @@ test('custom deal field values, a choice among them, are given when a deal is cr
   await expect(dealLink('Regional plan')).toBeVisible();
   await expect(dealLink('Gold plan')).toBeVisible();
   await expectNoHorizontalOverflow(page);
+
+  // Reports' deals section takes the same filter (ADR-396): both deals were won today.
+  await page.goto(`/c/${slug}/reports`);
+  const wonCount = stat(page, 'Deals won').locator('dd').first();
+  await expect(wonCount).toHaveText('2');
+  const reportFilter = page.getByLabel('Deal field', { exact: true });
+  await reportFilter.selectOption({ label: 'Tier: Gold' });
+  await page.getByRole('button', { name: 'Filter deals' }).click();
+  await expect(page).toHaveURL(/[?&]field=tier%3AGold(&|$)/);
+  await expect(wonCount).toHaveText('1');
+  await expect(reportFilter).toHaveValue('tier:Gold');
+  await expect(
+    page.getByText('Every figure in this section counts only the deals with'),
+  ).toBeVisible();
+  // The section's export follows it; no other section's does.
+  await expect(page.getByRole('link', { name: 'Export CSV (Deals)' })).toHaveAttribute(
+    'href',
+    /[?&]field=tier%3AGold(&|$)/,
+  );
+  await expect(
+    page.getByRole('link', { name: 'Export CSV (Messaging outcomes)' }),
+  ).not.toHaveAttribute('href', /field=/);
+  await expectNoHorizontalOverflow(page);
+  await page.getByRole('link', { name: 'Show all deals' }).click();
+  await expect(wonCount).toHaveText('2');
+  await expect(reportFilter).toHaveValue('');
+  // A link naming an option the field does not have counts every deal, and says so.
+  await page.goto(`/c/${slug}/reports?field=tier:Platinum`);
+  await expect(page.getByText('Showing every deal')).toBeVisible();
+  await expect(wonCount).toHaveText('2');
+  await expectNoHorizontalOverflow(page);
 });
 
 test('a deal moves through a pipeline with tasks, an emailed reminder, notes and reports', async ({

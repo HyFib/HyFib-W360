@@ -1,10 +1,11 @@
 import { validationFailed } from '@w360/core';
-import type { DealFieldType } from '@w360/db';
+import { sql, type DealFieldType, type SQL } from '@w360/db';
 import { dealFieldOptionKey } from './deal-field-values';
 
 /**
  * Filtering the deals board, the won and lost lists, the export of what they show (ADR-391,
- * ADR-394) and `GET /deals` through the API (ADR-394) by one custom deal field:
+ * ADR-394), `GET /deals` through the API (ADR-394) and the deals section of Reports, its export and
+ * `GET /reports` (ADR-396) by one custom deal field:
  * a choice field (ADR-385) by one of its options or by having none, or a yes/no field by yes, no or
  * none. The filter travels in the page's address as `field=<key>:<option>` (`<key>:yes`,
  * `<key>:no` for a yes/no field), and `field=<key>:` for deals without a value: keys never hold a
@@ -15,9 +16,9 @@ import { dealFieldOptionKey } from './deal-field-values';
  * read in the company's scope, and only a field and an option found there reach the query, as the
  * value stored on deals (an option as written, or a boolean). Pure, so it is unit-tested alone.
  *
- * The board and the won and lost lists ignore a filter that does not resolve and say so
- * (`dealFieldFilterView`); the export and the API refuse it (`requireDealFieldFilter`), so neither
- * is ever wider than asked.
+ * The board, the won and lost lists and Reports ignore a filter that does not resolve and say so
+ * (`dealFieldFilterView`); the exports and the API refuse it (`requireDealFieldFilter`), so none is
+ * ever wider than asked.
  */
 
 /** The longest filter text taken: a 40-character key, a colon and an 80-character option, with room. */
@@ -159,6 +160,19 @@ export function resolveDealFieldFilter(
     (candidate) => dealFieldOptionKey(candidate) === wanted,
   );
   return option === undefined ? { ok: false, problem: 'no_option' } : resolved(option, option);
+}
+
+/**
+ * The condition that keeps the deals a filter matches, on the deals' `attributes` as the query
+ * names them: the column itself (`dealFieldCondition`, ADR-391) or `d.attributes` in Reports' and
+ * the forecast's raw queries over `app.crm_deals d` (ADR-396). The stored value is compared as
+ * JSON, so a choice matches its option exactly as written (as every value is stored) and a yes/no
+ * field its boolean; values are never JSON null (an empty value removes the key), so "not set" is
+ * the key's absence. The key and the value are bound parameters.
+ */
+export function dealFieldMatch(filter: ResolvedDealFieldFilter, attributes: SQL): SQL {
+  if (filter.stored === null) return sql`not (${attributes} ? ${filter.key}::text)`;
+  return sql`(${attributes} -> ${filter.key}::text) = ${JSON.stringify(filter.stored)}::jsonb`;
 }
 
 /** What the audit log records of a filter: the field's key and the kind of match, never the option. */

@@ -6,7 +6,9 @@ export const dynamic = 'force-dynamic';
 
 /**
  * One report section as CSV (formula-safe, see contacts/csv). Needs `reports.export`; the
- * service audits the export before returning data, so a refused export is a plain 403/400.
+ * service audits the export before returning data, so a refused export is a plain 403/400. The
+ * deals section takes `?field=` (a choice or yes/no field's value, ADR-396) as the page filters
+ * it: refused unless it resolves (checked by the service), and with any other section.
  */
 export async function GET(
   request: Request,
@@ -23,6 +25,9 @@ export async function GET(
         preset: url.searchParams.get('preset') ?? undefined,
         from: url.searchParams.get('from') ?? undefined,
         to: url.searchParams.get('to') ?? undefined,
+        // A repeated parameter counts by its first value, as on the page; an empty one asks for
+        // nothing, as the CRM export reads it.
+        field: url.searchParams.get('field') || undefined,
       },
       section,
       await requestMeta(),

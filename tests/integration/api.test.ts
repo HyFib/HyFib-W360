@@ -10985,6 +10985,120 @@ describe('reports through the API (ADR-297)', () => {
       /Read reports/,
     );
   });
+
+  it('filter the deals section by a choice or yes/no field as the page does, refusing one that does not resolve (ADR-396)', async () => {
+    const c = await fx.company();
+    const other = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const theirOwner = await fx.ctx(other, other.owner);
+    const reader = await apiKey(c, ['reports.read', 'deals.read']);
+    const reportsOnly = await apiKey(c, ['reports.read'], 'BI');
+    const crm = createCrmService({
+      db: fx.dbs.app,
+      clock: systemClock,
+      jobs: fx.jobs(),
+      signer: fx.signer,
+    });
+    const { id: pipelineId } = await crm.createPipeline(owner, {
+      name: 'Sales',
+      currency: 'INR',
+      stages: [{ name: 'New', winPercent: 20 }],
+    });
+    const stageId = (await crm.listPipelines(owner)).find((p) => p.id === pipelineId)!.stages[0]!
+      .id;
+    await crm.createDealField(owner, { label: 'Region', type: 'text' });
+    await crm.createDealField(owner, {
+      label: 'Tier',
+      type: 'choice',
+      options: ['Gold', 'Silver'],
+    });
+    // Another company's field, of a key this company does not have.
+    await crm.createDealField(theirOwner, { label: 'Plan', type: 'choice', options: ['Gold'] });
+    const { id: contactId } = await createContactsService({
+      db: fx.dbs.app,
+      clock: systemClock,
+    }).createContact(owner, { displayName: 'Uma', phone: '+919811100312' });
+    const deal = (title: string, value: string, fields: Record<string, string>) =>
+      crm.createDeal(owner, { contactId, pipelineId, stageId, title, value, fields });
+    await deal('Gold open', '1,000', { tier: 'Gold' });
+    await deal('Plain open', '500', {});
+    const goldWon = await deal('Gold won', '300', { tier: 'gold' });
+    await crm.closeDeal(owner, { id: goldWon.id, expectedVersion: 1, outcome: 'won' });
+    // A text field holding the same word never matches.
+    const silverLost = await deal('Silver lost', '200', { tier: 'Silver', region: 'Gold' });
+    await crm.closeDeal(owner, { id: silverLost.id, expectedVersion: 1, outcome: 'lost' });
+
+    // The page's numbers for the same filter, read at the same moment.
+    const when = at(new Date());
+    const query = { preset: 'last_7_days', field: 'tier:gold' };
+    const api = await apiGetReport(deps(when), reader.ctx, query);
+    const page = await createReportsService({ db: fx.dbs.app, clock: when }).getReport(
+      owner,
+      query,
+    );
+    expect(api).toEqual(toApiReport(page));
+    expect(api.deals.field).toBe('tier:Gold');
+    expect(api.deals.won).toEqual([{ currency: 'INR', deals: 1, valueMinor: 30_000 }]);
+    expect(api.deals.lost).toEqual([]);
+    expect(api.deals.winRate).toEqual({ numerator: 1, denominator: 1 });
+    expect(api.deals.pipelines[0]!.stages).toEqual([
+      expect.objectContaining({ id: stageId, deals: 1, valueMinor: 100_000 }),
+    ]);
+    expect(api.deals.pipelines[0]!.forecast.buckets.at(-1)).toEqual({
+      bucket: 'undated',
+      deals: 1,
+      valueMinor: 100_000,
+      weightedMinor: 20_000,
+    });
+    // Without it, every deal; the other sections are the same either way.
+    const all = await apiGetReport(deps(when), reader.ctx, { preset: 'last_7_days' });
+    expect(all.deals.field).toBeNull();
+    expect(all.deals.lost).toEqual([{ currency: 'INR', deals: 1, valueMinor: 20_000 }]);
+    expect(all.deals.pipelines[0]!.stages[0]).toMatchObject({ deals: 2, valueMinor: 150_000 });
+    const { deals: _filtered, ...rest } = api;
+    const { deals: _every, ...restOfAll } = all;
+    expect(rest).toEqual(restOfAll);
+    // "Not set": the open deal without a tier.
+    const unset = await apiGetReport(deps(when), reader.ctx, { field: 'tier:' });
+    expect(unset.deals.field).toBe('tier:');
+    expect([unset.deals.won, unset.deals.lost]).toEqual([[], []]);
+    expect(unset.deals.pipelines[0]!.stages[0]).toMatchObject({ deals: 1, valueMinor: 50_000 });
+
+    // Refused with 422 naming `field`, never ignored: another company's key, an option or a type
+    // the field does not take, and a text written otherwise.
+    for (const [field, message] of [
+      ['plan:Gold', /no deal field with this key/],
+      ['tier:Platinum', /not one of the deal field’s options/],
+      ['region:Gold', /choice or yes\/no field/],
+      ['tier', /`<key>:<value>`/],
+      ['', /`<key>:<value>`/],
+    ] as const) {
+      const error = await expectAppError(
+        apiGetReport(deps(), reader.ctx, { field }),
+        'validation_failed',
+        message,
+      );
+      expect(isAppError(error) && error.issues?.map((i) => i.path), field).toEqual(['field']);
+    }
+    // A key without deals.read reads the report, but not filtered.
+    expect((await apiGetReport(deps(), reportsOnly.ctx, {})).deals.field).toBeNull();
+    await expectAppError(
+      apiGetReport(deps(), reportsOnly.ctx, { field: 'tier:Gold' }),
+      'forbidden',
+      /deals\.read/,
+    );
+    // A plan without the CRM: the report is read, its deals are not filtered.
+    await onPlan(c, []);
+    const error = await expectAppError(
+      apiGetReport(deps(), reader.ctx, { field: 'tier:Gold' }),
+      'forbidden',
+      /does not include the CRM/,
+    );
+    expect(isAppError(error) && error.details).toEqual({ apiReason: 'not_in_plan' });
+    expect((await apiGetReport(deps(), reader.ctx, {})).deals.won).toEqual([
+      { currency: 'INR', deals: 1, valueMinor: 30_000 },
+    ]);
+  });
 });
 
 describe('WhatsApp Flows and their responses through the API (ADR-298)', () => {
