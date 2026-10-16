@@ -101,7 +101,9 @@ test('deals are imported from a CSV file into a pipeline, rows with errors liste
   await expect(page.getByText('Nisha Rao · ₹1,500.00')).toBeVisible();
 });
 
-test('custom deal field values are given when a deal is created (ADR-379)', async ({ page }) => {
+test('custom deal field values, a choice among them, are given when a deal is created (ADR-379, ADR-385)', async ({
+  page,
+}) => {
   const { slug } = await createCompany(page, 'crmfields', 'Farah');
   await createPipeline(page, slug);
   // A text field and a yes/no field, defined in Settings → Pipelines (ADR-373).
@@ -113,6 +115,15 @@ test('custom deal field values are given when a deal is created (ADR-379)', asyn
   await page.locator('#deal-field-type').selectOption('boolean');
   await page.getByRole('button', { name: 'Add deal field' }).click();
   await expect(page.getByRole('cell', { name: 'signed', exact: true })).toBeVisible();
+  // A choice field (ADR-385): its options typed one per line, blank lines left out.
+  await page.getByLabel('New deal field').fill('Tier');
+  await page.locator('#deal-field-type').selectOption('choice');
+  await page.locator('#deal-field-options').fill('Gold\n\nSilver\n');
+  await page.getByRole('button', { name: 'Add deal field' }).click();
+  await expect(page.getByRole('cell', { name: 'tier', exact: true })).toBeVisible();
+  await expect(
+    page.getByRole('list', { name: 'Options of “Tier”' }).getByRole('listitem'),
+  ).toHaveText(['Gold', 'Silver']);
 
   await page.goto(`/c/${slug}/contacts/new`);
   await page.getByLabel('Name').fill('Farah Khan');
@@ -122,12 +133,39 @@ test('custom deal field values are given when a deal is created (ADR-379)', asyn
   await page.getByText('New deal', { exact: true }).click();
   await page.getByLabel('Deal title').fill('Regional plan');
   await page.getByLabel('Region', { exact: true }).fill('South');
+  // The choice offers “Not set” and its options, in order.
+  await expect(page.getByLabel('Tier', { exact: true }).locator('option')).toHaveText([
+    'Not set',
+    'Gold',
+    'Silver',
+  ]);
+  await page.getByLabel('Tier', { exact: true }).selectOption('Silver');
   // Signed is left “Not set”: the deal gets no value for it.
   await expectNoHorizontalOverflow(page);
   await page.getByRole('button', { name: 'Create deal' }).click();
   await expect(page.getByRole('heading', { name: 'Regional plan', level: 1 })).toBeVisible();
   await expect(page.getByLabel('Region', { exact: true })).toHaveValue('South');
   await expect(page.getByLabel('Signed', { exact: true })).toHaveValue('');
+  await expect(page.getByLabel('Tier', { exact: true })).toHaveValue('Silver');
+
+  // An option a deal has chosen stays: taking it out is refused, adding another is saved.
+  await page.goto(`/c/${slug}/settings/pipelines`);
+  await page.getByRole('button', { name: 'Edit options of the deal field “Tier”' }).click();
+  const options = page.locator('textarea[id^="deal-field-options-"]');
+  await expect(options).toHaveValue('Gold\nSilver');
+  await options.fill('Gold\nBronze');
+  await page.getByRole('button', { name: 'Save options' }).click();
+  await expect(
+    page.getByText(
+      'Deals have “Silver” chosen, so it cannot be removed or renamed. Change those deals first.',
+    ),
+  ).toBeVisible();
+  await options.fill('Gold\nSilver\nBronze');
+  await page.getByRole('button', { name: 'Save options' }).click();
+  await expect(page.getByText('Options saved.')).toBeVisible();
+  await expect(
+    page.getByRole('list', { name: 'Options of “Tier”' }).getByRole('listitem'),
+  ).toHaveText(['Gold', 'Silver', 'Bronze']);
 });
 
 test('a deal moves through a pipeline with tasks, an emailed reminder, notes and reports', async ({

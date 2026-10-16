@@ -8,6 +8,8 @@ import {
   eq,
   isUniqueViolation,
   messagingSettings,
+  slowReplyMessages,
+  sql,
   type Database,
   type Tx,
 } from '@w360/db';
@@ -384,6 +386,20 @@ export async function writeBusinessHours(
       })),
     );
   }
+  await replanWaitingSlowReplies(tx, tenantId);
+}
+
+/**
+ * Has the next sweep look again at every automatic reply that waits for the company's business
+ * hours (ADR-384): a changed calendar or delay can make it due earlier or later than the time it
+ * was put off to, so it is planned again from the current settings (the database's time, as the
+ * sweep's due times).
+ */
+export async function replanWaitingSlowReplies(tx: Tx, tenantId: string): Promise<void> {
+  await tx
+    .update(slowReplyMessages)
+    .set({ dueAt: sql`now()`, updatedAt: sql`now()` })
+    .where(and(eq(slowReplyMessages.tenantId, tenantId), eq(slowReplyMessages.state, 'waiting')));
 }
 
 /** A day already marked closed, as a conflict; any other error as it is. */
@@ -404,6 +420,7 @@ export async function writeAddClosedDay(
 ): Promise<string> {
   const id = uuidv7();
   await tx.insert(businessHolidays).values({ id, tenantId, day: data.day, name: data.name });
+  await replanWaitingSlowReplies(tx, tenantId);
   return id;
 }
 
@@ -417,6 +434,7 @@ export async function writeRemoveClosedDay(
     .delete(businessHolidays)
     .where(and(eq(businessHolidays.tenantId, tenantId), eq(businessHolidays.id, id)))
     .returning({ day: businessHolidays.day, name: businessHolidays.name });
+  if (deleted) await replanWaitingSlowReplies(tx, tenantId);
   return deleted ?? null;
 }
 

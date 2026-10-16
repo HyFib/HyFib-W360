@@ -33,6 +33,7 @@ import {
   resignQueuedJobs,
   RESIGN_SKIP_LIMIT,
   routeDueConversations,
+  sendSlowReplies,
   settleStrandedWork,
 } from '@w360/domain';
 import type { WorkerRuntime } from '../runtime';
@@ -167,12 +168,12 @@ export function channelOnboardHandler(rt: WorkerRuntime) {
  * intents whose worker died (before dispatch: re-queued; after dispatch: unknown outcome, never an
  * automatic resend), signal template syncs and checks of WhatsApp access that are due, signal
  * automation runs and task reminders that are due or lost their signal and companies' report
- * emails that are due, route waiting conversations of round-robin teams, remind companies of API
- * keys that expire soon, delete rate limit buckets that are full again, end work whose job ran out
- * of retries where its company sees it, re-encrypt stored secrets under the primary key while
- * another key is configured, sign queued jobs again while a previous job signing key is
- * configured, alert platform staff to work that failed for good, and check how long jobs wait in
- * each queue.
+ * emails that are due, route waiting conversations of round-robin teams, send the automatic reply
+ * to customers members are slow to answer, remind companies of API keys that expire soon, delete
+ * rate limit buckets that are full again, end work whose job ran out of retries where its company
+ * sees it, re-encrypt stored secrets under the primary key while another key is configured, sign
+ * queued jobs again while a previous job signing key is configured, alert platform staff to work
+ * that failed for good, and check how long jobs wait in each queue.
  */
 export function messagingSweepHandler(rt: WorkerRuntime) {
   // Values this worker could not open and when it next looks for values to re-encrypt (ADR-134).
@@ -251,6 +252,23 @@ export function messagingSweepHandler(rt: WorkerRuntime) {
     if (overdue.noticed + overdue.waiting + overdue.skipped > 0) {
       const { noticed, emails, waiting, skipped } = overdue;
       rt.logger.info({ noticed, emails, waiting, skipped }, 'overdue replies');
+    }
+    // The automatic reply to customers members are slow to answer (ADR-384).
+    const slowReplies = await sendSlowReplies({
+      db: rt.db,
+      clock: rt.clock,
+      jobs: rt.jobs,
+      signer: rt.signer,
+    });
+    for (const failure of slowReplies.failed) {
+      rt.logger.warn(
+        { tenantId: failure.tenantId, err: toError(failure.error).message },
+        'automatic replies failed; will retry',
+      );
+    }
+    if (slowReplies.sent + slowReplies.waiting + slowReplies.skipped > 0) {
+      const { sent, waiting, skipped } = slowReplies;
+      rt.logger.info({ sent, waiting, skipped }, 'automatic replies to waiting customers');
     }
     const retention = await applyMessagingRetention(rt.db);
     if (retention.bodiesErased + retention.receiptsDeleted + retention.eventsPruned > 0) {

@@ -34,6 +34,18 @@ function storeMessageLabel(content: unknown): string | null {
   return typeof store.name === 'string' ? `${store.label} · ${store.name}` : store.label;
 }
 
+/** What a message HyFib sent by itself is labelled in the thread: an order message's, or its kind. */
+function systemMessageLabel(content: unknown): string {
+  const store = storeMessageLabel(content);
+  if (store) return store;
+  const slowReply =
+    typeof content === 'object' &&
+    content !== null &&
+    (content as { slowReply?: unknown }).slowReply === true;
+  // The automatic reply when members are slow to answer (ADR-384).
+  return slowReply ? 'Automatic reply' : 'Sent automatically';
+}
+
 const STATUS_LABELS: Record<string, string> = {
   queued: 'Queued',
   sending: 'Sending',
@@ -620,7 +632,7 @@ export function MessageBubble({
         <p className="mt-1 flex flex-wrap items-center gap-x-2 text-xs text-muted-foreground">
           <time dateTime={message.providerTimestamp ?? message.createdAt}>{at}</time>
           {outbound && message.senderType === 'system' ? (
-            <span>· {storeMessageLabel(message.content) ?? 'Sent automatically'}</span>
+            <span>· {systemMessageLabel(message.content)}</span>
           ) : null}
           {outbound && message.senderType === 'bot' ? <span>· Automation</span> : null}
           {outbound && message.senderType === 'api' ? (

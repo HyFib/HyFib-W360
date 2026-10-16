@@ -106,6 +106,7 @@ export * from './inbox/overdue-replies';
 export * from './inbox/overdue-notice';
 export * from './inbox/conversation-tags';
 export * from './inbox/read-receipts';
+export * from './inbox/slow-reply';
 export * from './inbox/presence';
 export * from './inbox/presence-service';
 export * from './automations/graph';
@@ -122,7 +123,12 @@ export * from './crm/money';
 export * from './crm/pipelines';
 export * from './crm/deals';
 export * from './crm/deals-csv';
-export { MAX_DEAL_FIELDS, type DealFieldDefinition } from './crm/deal-fields';
+export {
+  MAX_DEAL_FIELD_OPTION_LENGTH,
+  MAX_DEAL_FIELD_OPTIONS,
+  MAX_DEAL_FIELDS,
+  type DealFieldDefinition,
+} from './crm/deal-fields';
 export {
   DEAL_IMPORT_LIMITS,
   type DealImportOptions,

@@ -7,6 +7,7 @@ import {
   CONVERSATION_SOURCE_KINDS,
   CONVERSATION_STATUSES,
   CRM_CHANGERS,
+  DEAL_FIELD_TYPES,
   DEAL_STATUSES,
   MESSAGE_STATUSES,
   TEAM_ASSIGNMENT_MODES,
@@ -519,13 +520,21 @@ export const apiPipelineSchema = z.object({
 });
 
 /** A CRM deal (ADR-253). */
-/** A custom deal field (ADR-373). */
+/** A custom deal field (ADR-373), a choice with its options (ADR-385). */
 export const apiDealFieldSchema = z.object({
   key: z.string().describe('What a deal’s `fields` holds its value under; never changes.'),
   label: z.string().describe('The name members see.'),
   type: z
-    .enum(['text', 'number', 'date', 'boolean'])
-    .describe('The type its values take; never changes.'),
+    .enum(DEAL_FIELD_TYPES)
+    .describe(
+      'The type its values take; never changes. A `choice` takes one of its `options` as text.',
+    ),
+  options: z
+    .array(z.string())
+    .nullable()
+    .describe(
+      'A choice field’s options, in order (1 to 50, each at most 80 characters, none twice ignoring case); null for every other type. Owners and administrators may add options, reorder them, and remove or rename options no deal has chosen.',
+    ),
   createdAt: z.iso.datetime(),
 });
 
@@ -562,7 +571,7 @@ export const apiDealSchema = z.object({
   fields: z
     .record(z.string(), z.union([z.string(), z.number(), z.boolean()]))
     .describe(
-      'Its custom field values by field key (GET /deal-fields), only of fields the company still has: text, a number, a date as YYYY-MM-DD, or true/false. Emptied once its contact is erased.',
+      'Its custom field values by field key (GET /deal-fields), only of fields the company still has: text, a number, a date as YYYY-MM-DD, true/false, or a choice field’s option as text. Emptied once its contact is erased.',
     ),
   stageEnteredAt: z.iso.datetime().describe('When the deal entered its stage.'),
   lostReason: z
@@ -3863,7 +3872,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         get: {
           operationId: 'listDealFields',
           summary: 'The company’s custom deal fields',
-          description: `${scopeNote('deals.read')} The keys and types of the values deals’ \`fields\` hold, oldest first. Owners and administrators define them in Settings → Pipelines. Needs the CRM in the company’s plan (403, reason not_in_plan).`,
+          description: `${scopeNote('deals.read')} The keys and types of the values deals’ \`fields\` hold, with a choice field’s options, oldest first. Owners and administrators define them in Settings → Pipelines. Needs the CRM in the company’s plan (403, reason not_in_plan).`,
           responses: {
             '200': {
               description: 'The fields (at most 50).',

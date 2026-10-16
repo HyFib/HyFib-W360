@@ -149,6 +149,7 @@ export default async function DealPage({
                       key: field.key,
                       label: field.label,
                       type: field.type,
+                      options: field.options,
                       value: value === undefined ? '' : String(value),
                     };
                   })}

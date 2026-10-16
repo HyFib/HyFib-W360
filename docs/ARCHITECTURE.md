@@ -474,6 +474,21 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   member gets one `tenant.notice` (`overdueReplyEmail`, dedupe key
   `reply-overdue:<first turn>:<member>`). A company's failure is logged and retried by the next
   sweep.
+  **Automatic reply when members are slow** (`inbox/slow-reply.ts`, ADR-384, migration 0300): the
+  company's setting (`messaging_settings.slow_reply_enabled`, `_text`, `_delay_minutes`, `_since`)
+  is read and changed by `createSlowReplyService` (`tenant.read`, `tenant.settings.manage`,
+  audited). After the overdue emails the messaging sweep calls `sendSlowReplies`:
+  `ops.slow_reply_turns(now, limit)` (definer, ids only) lists open turns of active companies with
+  the reply on that started since it was turned on and at least the delay ago (within 30 days),
+  without a row or with a due `waiting` row, in conversations not resolved and without an active
+  automation run. Per company, in its scope, the conversations and then the turns are locked
+  (`FOR UPDATE`); `planSlowReply` ignores, waits (due time from `replyDueAt` with the business
+  calendar) or handles each turn; `slowReplyOutcome`, the WhatsApp id and the consent check
+  (`checkTemplateEligibility`, utility) decide between a `skipped` row and the send: a `system` text
+  message (`content.slowReply`), its send intent, a `sent` row naming the message and a signed
+  `message.send` job, in one transaction. `app.slow_reply_messages` is unique per turn and guarded
+  once sent or skipped. The send worker's claim runs `slowReplySendBlock` for text messages (the
+  consent check again). The thread labels it "Automatic reply"; it does not end the turn.
 - **Transcripts** (`messaging/transcript.ts`, `exportTranscript` in `messaging/inbox.ts`, ADR-212):
   an async generator checks `inbox.export` and that the member can see the conversation and writes
   the audit entry in one transaction, then yields the header and pages of 500 messages (keyset on
@@ -717,8 +732,11 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   win and the open pipeline, per pipeline currency, with a CSV export of closed deals per day.
 - **Erasure** (`app.erase_contact`): deletes the contact's timeline, notes and tasks and blanks the
   titles and lost reasons of its deals, keeping outcomes and values for reports.
-- **Not built yet:** custom deal fields, products on deals, deal import and export, forecasting,
-  automation steps that create deals or tasks, and syncing with external CRMs (integrations, P4–6).
+- **Not built yet:** syncing with external CRMs (integrations, P4–6), webhook events for changes of
+  custom field values and automation steps that set them, importing closed deals or updating deals
+  from a file, and discounts and taxes on deal products. Custom deal fields (ADR-373, choices
+  ADR-385), deal import (ADR-374), products on deals (ADR-375), forecasting (ADR-252) and automation
+  steps that create tasks and deals (ADR-244, ADR-245) were built after this list was first written.
 
 ## 6G. Growth tools **[built — links and ad sources verified with signed test webhooks only; no live WhatsApp or ad traffic]**
 
@@ -1302,6 +1320,15 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   ADR-379 the new-deal forms (the board, the contact page and the inbox) take values too:
   `crmLookups` (`apps/web/src/server/crm.ts`) reads the definitions with the pipelines and members,
   and `NewDealForm` sends the non-empty ones to `createDeal`.
+- **Choice-type deal fields (0301, ADR-385):** a `choice` field has `options` (a text array of 1 to
+  50, in order; null for other types; the shape held by a check, case-insensitive uniqueness by
+  `dealFieldOptionsSchema`). `coerceDealFieldValue` (forms and CSV import: any case, stored as the
+  option is written) and `apiDealFieldValue` (API: exactly as written) wrap the contact fields'
+  coercions for the other types. `setDealFieldOptions` replaces the list under the field lock taken
+  exclusively and refuses one that drops or rewrites an option some deal has chosen
+  (`removedChosenOptions`, read with `attributes ->> key`), so stored values stay options. Web:
+  `DealFieldsManager` takes options one per line (`optionLines`, `lib/deal-fields.ts`) and
+  `DealFieldControl` shows a select; `GET /deal-fields` gives `options`.
 - **Deal import (ADR-374, no migration):** `crm/deal-import.ts` previews a CSV (columns, first
   rows, suggested mapping) and imports it into one pipeline: `planDealRows` checks each row against
   the company's records (contacts by E.164 number, active stages by name, CRM members by email,

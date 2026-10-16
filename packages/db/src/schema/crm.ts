@@ -104,8 +104,13 @@ export const crmDeals = appSchema.table('crm_deals', {
   updatedAt: tz('updated_at').notNull().defaultNow(),
 });
 
+/** The types of a custom deal field: those contact fields take, and a choice (ADR-385). */
+export const DEAL_FIELD_TYPES = [...CONTACT_FIELD_TYPES, 'choice'] as const;
+export type DealFieldType = (typeof DEAL_FIELD_TYPES)[number];
+
 /**
- * A company's custom deal fields (migration 0293, ADR-373), of the types contact fields take; a
+ * A company's custom deal fields (migration 0293, ADR-373): of the types contact fields take, or a
+ * choice among 1 to 50 options kept in order (migration 0301, ADR-385; null for other types). A
  * field's key and type never change.
  */
 export const crmDealFields = appSchema.table('crm_deal_fields', {
@@ -113,7 +118,8 @@ export const crmDealFields = appSchema.table('crm_deal_fields', {
   tenantId: uuid('tenant_id').notNull(),
   key: text('key').notNull(),
   label: text('label').notNull(),
-  type: text('type', { enum: CONTACT_FIELD_TYPES }).notNull(),
+  type: text('type', { enum: DEAL_FIELD_TYPES }).notNull(),
+  options: text('options').array(),
   createdAt: tz('created_at').notNull().defaultNow(),
 });
 

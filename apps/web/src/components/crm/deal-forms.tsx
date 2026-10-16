@@ -306,7 +306,9 @@ interface DealEditProps {
 export interface DealFieldOption {
   key: string;
   label: string;
-  type: 'text' | 'number' | 'date' | 'boolean';
+  type: 'text' | 'number' | 'date' | 'boolean' | 'choice';
+  /** A choice field's options, in order (ADR-385); null for every other type. */
+  options: readonly string[] | null;
 }
 
 export interface DealFieldInput extends DealFieldOption {
@@ -314,7 +316,7 @@ export interface DealFieldInput extends DealFieldOption {
   value: string;
 }
 
-/** One custom field's input: text, a number, a date, or yes/no (empty for none). */
+/** One custom field's input: text, a number, a date, yes/no or one of a choice's options (empty for none). */
 function DealFieldControl({
   id,
   field,
@@ -334,6 +336,15 @@ function DealFieldControl({
             <option value="">Not set</option>
             <option value="true">Yes</option>
             <option value="false">No</option>
+          </Select>
+        ) : field.type === 'choice' ? (
+          <Select {...aria} value={value} onChange={(e) => onChange(e.target.value)}>
+            <option value="">Not set</option>
+            {(field.options ?? []).map((option) => (
+              <option key={option} value={option}>
+                {option}
+              </option>
+            ))}
           </Select>
         ) : (
           <Input

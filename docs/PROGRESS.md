@@ -1,5 +1,142 @@
 # Progress
 
+## 2026-10-16 — Review fixes for ADR-384 and ADR-385 (PR #91)
+
+Status: **Fixed; the database and browser tests run in CI only.** Independent reviews of both
+features found one Medium and nine Low issues, all fixed before merge.
+
+### Completed
+
+- **Automatic reply (ADR-384):** a queued reply whose wait ended before it could be sent (a member
+  answered, the conversation was resolved or an automation took over, e.g. while the number was
+  reconnecting) is now cancelled at send time (`slow_reply_answered`) instead of being delivered
+  after the answer (Medium); a waiting row is planned again by the next sweep when the delay or the
+  calendar changes (Codex found this too), and not counted late for having waited; an erased
+  contact is recorded as `contact_erased`, not `no_phone`;
+  the sweep skips conversations another transaction holds (`SKIP LOCKED`), so it cannot deadlock
+  with the campaign runner's set-based update; turning the reply off needs no valid text or delay.
+- **Choice-type deal fields (ADR-385):** the "Edit options" button's accessible name starts with its
+  visible text; the API's description says spaces around a choice are ignored and an empty string
+  removes a value; migration 0301's check guards `array_position` with a `CASE` (it errors on a
+  multidimensional array, and the order AND's arguments are evaluated in is not defined);
+  `GET /deal-fields` mentions the options; ARCHITECTURE's CRM "Not built yet" line is up to date.
+- **Tests:** unit (lateness from the put-off time); integration (cancellation after an answer and
+  after a resolve, erasure while waiting, a held conversation skipped and handled next time, a
+  waiting reply planned again after the delay and the calendar change, turning off with an invalid
+  text); e2e (the "Edit options" button's name).
+- **Mutation checks:** the lateness rule's regression is caught by the unit tests; the send-time
+  cancellation, the erased check, `SKIP LOCKED`, the re-planning and the settings rule are covered
+  by integration tests, which run in CI only.
+
+### Test commands and results (local, 2026-10-16)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 158 files, 1,654 tests passed                                   |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+
+## 2026-10-16 — Choice-type custom deal fields (P4-04, ADR-385)
+
+Status: **Implemented; its database and browser tests run in CI only.** Custom deal fields took
+text, a number, a date or yes/no; a company sorting deals by a fixed list had to use free text.
+
+### Completed
+
+- **Migration 0301:** `app.crm_deal_fields.options` (text array, null for other types), the type
+  check widened to `choice`, and a check of the options' shape (1 to 50, each 1 to 80 characters
+  without a line break or an edge space; none on other types), validated at once (a small table);
+  `UPDATE (options)` for the runtime role. Drizzle: `DEAL_FIELD_TYPES`, `DealFieldType`, `options`.
+- **Domain (`crm/deal-fields.ts`):** `dealFieldOptionsSchema` (trimmed, no control characters,
+  unique ignoring case, in order); `createDealField` takes options for a choice and refuses them for
+  other types; `coerceDealFieldValue` (forms and CSV import: any case, stored as the option is
+  written) and `apiDealFieldValue` (API: exactly as written) feed `mergedDealAttributes` and
+  `apiMergedDealAttributes`; `setDealFieldOptions` (owners and administrators) adds, reorders and
+  removes options under the field lock taken exclusively, refusing to drop or rewrite an option a
+  deal has chosen, audited as `crm.deal_field_options_changed` with counts. `GET /deal-fields` and
+  the OpenAPI document give `options` and the type `choice`; the tenant export lists the column.
+- **Web:** Settings → Pipelines takes a choice's options one per line, lists them under the type and
+  edits them in place ("Edit options"); the deal page and the new-deal forms show a select with "Not
+  set" and the options.
+- **Tests:** unit (`deal-fields.test.ts`: options, values from forms, imports and the API, the change
+  rule and its message; `deal-import.test.ts`: a choice column; `lib/deal-fields.test.ts`: options
+  typed one per line); integration (`crm.test.ts`: definitions, values, option changes refused and
+  saved, isolation, the export, the audit, and the database check against malformed options;
+  `api.test.ts`: `options` listed, strict values, a chosen option kept, null removing); e2e
+  (`crm.spec.ts`: a choice defined, chosen on a new deal, a chosen option's removal refused and an
+  option added).
+- **Docs:** ADR-385; ARCHITECTURE, SECURITY, THREAT-MODEL T338, DEPLOYMENT (0301), BACKLOG, and the
+  matrix's H-012 text and evidence (status unchanged).
+- **Mutation checks:** 17 deliberate regressions (case-sensitive matching, the typed value stored
+  instead of the option, blank not removing, the API accepting any text or an empty string kept, 51
+  options, duplicates or control characters allowed, a choice without options or another type with
+  them, order-insensitive comparison, unused options counted as chosen, the message's number, the
+  merges bypassing the choice check, blank lines kept by the web), all caught by the unit tests. The
+  lock, the read of chosen values and the database check are covered by integration tests, which
+  run in CI only.
+
+### Test commands and results (local, 2026-10-16)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 157 files, 1637 tests passed                                    |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | not run here (left to the integrating build)                    |
+
+## 2026-10-16 — An automatic reply when members are slow to answer (W-081, P3-06, ADR-384)
+
+Status: **Implemented; its database and browser tests run in CI only.** A customer whose message
+members did not answer heard nothing until a member replied; the matrix listed this reply as not
+built under W-081.
+
+### Completed
+
+- **Domain (`inbox/slow-reply.ts`):** the setting (a text of 1 to 1,024 characters with only
+  {{name}} and {{company}}, filled by the automations' renderer, and a delay of 1 to 1,440 minutes;
+  `tenant.read` to read, `tenant.settings.manage` to change, audited as `inbox.slow_reply_updated`);
+  `sendSlowReplies`, the minute sweep (the definer query, then per company: conversations and turns
+  locked, `planSlowReply` with the business calendar, `slowReplyOutcome`, the WhatsApp id and the
+  utility consent check, then a `system` text message, its send intent, the turn's row and a signed
+  `message.send` job in one transaction); `slowReplySendBlock`, the consent check again in the send
+  worker's claim. Only waits started after the reply was turned on get it; one due more than an hour
+  before the sweep saw it is skipped.
+- **Migration 0300:** the four `messaging_settings.slow_reply_*` columns with their checks,
+  `app.slow_reply_messages` (one row per turn, row security, composite keys, guard trigger, deletion
+  step 326, definer reads) and `ops.slow_reply_turns` (SECURITY DEFINER, ids only). Drizzle schema
+  and the company export follow.
+- **Worker:** the messaging sweep calls `sendSlowReplies` after the overdue-reply emails.
+- **Web:** Settings → Inbox has an "Automatic reply when members are slow" card (`SlowReplyForm`
+  in a `ClientForm`, `updateSlowReplyAction`); the thread labels the message "Automatic reply".
+- **Tests:** unit (`slow-reply.test.ts`, 16 tests: settings and placeholders, due times with and
+  without business hours, the plan per turn, the skip rules and their order, consent mapping, the
+  rendered text and request); integration (`slow-replies.test.ts`: settings, permissions and audit,
+  once per wait with the send through Meta's stand-in, three concurrent sweeps, answered and
+  resolved conversations, waits from before it was turned on or while off, opted out, window
+  closed, too late, inactive number, an opt-out after queueing, business hours, the guard, the
+  unique turn and the function's privileges); e2e (`slow-reply.spec.ts`: the setting saved, the
+  text sent by the running worker and shown in the thread).
+- **Docs:** ADR-384; ARCHITECTURE, SECURITY, THREAT-MODEL T337, DATA-RETENTION, DEPLOYMENT (0300),
+  RUNBOOKS, BACKLOG (P3-06) and the matrix's W-081 (now implemented, not locally verified).
+- **Mutation checks:** 17 deliberate regressions in `slow-reply.ts` (a skipped turn handled again,
+  resolved conversations or active automation runs not ignored, the boundaries of the start, the due
+  time, the lateness limit and the window, a never-due turn sent at once, lateness checked after the
+  number, the number's check, a suppression reported as an opt-out, the start kept after turning it
+  off, business hours ignored, placeholders alone allowed, placeholders case-sensitive, link
+  previews on, a two-hour lateness limit), all caught by the unit tests. The locks, the unique row,
+  the definer query and the send-time check are covered by the integration tests, which run in CI
+  only.
+
+### Test commands and results (local, 2026-10-16)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 158 files, 1646 tests passed                                    |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | not run here (left to the integration build)                    |
+
 ## 2026-10-16 — Fixes before merging ADR-377 to ADR-383 (PR #90)
 
 Status: **Fixed; the database and browser tests run in CI only.** PR #90's first CI run failed

@@ -181,7 +181,12 @@ verification, app review, Embedded Signup configuration).
   **[Per-team reply targets built; their database and browser tests run only in CI]** (ADR-377,
   migration 0296: a team's own first-response target, in Settings → Teams and the teams API, used
   for its conversations instead of the company's in the inbox's timers and notice, the overdue
-  emails and reports, each conversation by the team it is in now).
+  emails and reports, each conversation by the team it is in now). **[An automatic reply when
+  members are slow to answer built; its database and browser tests run only in CI]** (ADR-384,
+  W-081, migration 0300: a company setting in Settings → Inbox, a text and a delay counted in
+  business hours when they are on, sent once per wait by the worker's minute sweep through the send
+  pipeline, inside the service window, never while an automation handles the conversation, never in
+  a resolved conversation, never to customers who opted out; it does not end the wait).
   **Remaining:** per-team calendars, private team queues (would change visibility,
   ADR-029), CSAT by template outside the window (needs a consent decision), CSAT with a real WABA
   (phone-number masking: P3-01, ADR-226).
@@ -332,7 +337,13 @@ verification, app review, Embedded Signup configuration).
   Settings → Pipelines, audited; members set values on the deal page and keys through `fields` on
   `POST`/`PATCH /deals`, checked by type; `GET /deal-fields`; a CSV column per field; deletion
   strips values from every deal; erasure clears them. Not built: webhook events for changes of
-  values, choice types, automation steps that set values).
+  values, automation steps that set values).
+  **[Choice-type custom deal fields built; their database and browser tests run only in CI]**
+  (ADR-385, migration 0301: a `choice` field has 1 to 50 options, in order, unique ignoring case;
+  forms show a select and CSV import takes an option in any case, the API exactly; `GET
+/deal-fields` gives `options`; options can be added and reordered, and removed or renamed only
+  while no deal has them chosen. Not built: multi-select, renaming a chosen option with its values,
+  filtering by a choice).
   **[Custom field values on the new-deal form built; its browser test runs only in CI]** (ADR-379,
   no migration: the board's, the contact page's and the inbox's new-deal forms take a value per
   field, checked by the deal creation's existing rules).

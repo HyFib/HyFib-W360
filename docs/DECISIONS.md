@@ -15160,3 +15160,125 @@ number changed (Codex), left removed products in a list with no way to take them
 heading WhatsApp does not send for a single product, warned that a single product's message of
 placeholders alone could stop it, and cut the products at 500 across every catalog. All were fixed
 with tests; the checks of `commerce.read` are now tested too.
+
+## ADR-384 An automatic reply when members are slow to answer (P3-06) (2026-10-16)
+
+Context: a customer whose message nobody answers hears nothing until a member replies. Automations
+answer out of hours (W-079) and round-robin teams spread conversations, and the overdue-reply
+emails (ADR-230) and notice (ADR-241) tell members, but the customer is never told their message
+arrived when members are busy. The feature matrix listed "an automatic reply when members are slow
+to answer" as not built under W-081.
+
+Decision:
+
+- **A company setting:** Settings → Inbox, beside the first-response target, turns on a plain
+  WhatsApp text (1 to 1,024 characters, placeholders {{name}} and {{company}} only, filled by the
+  automations' renderer, and some words besides them) and a delay of 1 to 1,440 minutes
+  (`app.messaging_settings.slow_reply_*`, migration 0300). It is off by default; the text starts as
+  a neutral "Thank you for waiting…". Reading it needs `tenant.read`, changing it
+  `tenant.settings.manage`, as the other inbox settings; each change is audited
+  (`inbox.slow_reply_updated`, with on or off and the delay).
+- **When:** the delay counts from the start of the customer's reply turn, the same turn reply
+  targets measure, and in business hours when the company uses them (the timer pauses while the
+  business is closed), otherwise in absolute time. The delay is the company's own and applies to
+  every conversation: team targets (ADR-377) say when members owe a reply, and a team with a short
+  target can be given a shorter company delay; the reply never changes when a reply is overdue.
+  Only waits that start after the reply was turned on get it (`slow_reply_since`, the database's
+  time), so turning it on never messages customers already waiting; turning it off stops it at once.
+- **How it is sent:** the worker's minute sweep asks `ops.slow_reply_turns` (SECURITY DEFINER, ids
+  only) for open turns of active companies with the reply on that may be due (started at least the
+  delay ago; business hours only move a due time later), then works through each company in its own
+  scope: it locks the conversations, then the turns (the order a member's reply, a resolve and an
+  automation's start take them), skipping conversations another transaction holds (they are looked
+  at in the next sweep, so the sweep never waits on a conversation lock and cannot deadlock with
+  updates that take many conversations in another order, such as a campaign batch), computes the
+  due time with the company's calendar, and queues the
+  text as a `system` message through the ordinary send pipeline (message, send intent and signed
+  `message.send` job in one transaction). It is shown in the thread as "Automatic reply" and as the
+  conversation's last message.
+- **Once per wait:** `app.slow_reply_messages` holds one row per turn (unique): `waiting` while
+  business hours put the due time later (looked at again then, and planned again by the next sweep
+  when the delay or the calendar changes, through Settings or the API, so it is neither held to an
+  old time nor counted late for having waited), `sent` with its message or
+  `skipped` with the reason, for good (a guard trigger), written in the transaction that queues the
+  message. A worker restart before commit leaves nothing; concurrent sweeps skip the conversations
+  one of them holds and then see its row. A customer writing again in the same wait gets nothing more; after a member's reply their
+  next message starts a new wait.
+- **When it is not sent:** while an automation run handles the conversation (no turn is open then,
+  and the sweep checks again), in a resolved conversation (a resolve ends the turn), after a member
+  replied; and, recorded as skipped: an inactive number (`channel_inactive`), the 24-hour customer
+  service window closed (`window_closed`), no WhatsApp id on the number's account (`no_phone`), a
+  contact who opted out of non-marketing messages, is suppressed or erased (`opted_out`,
+  `suppressed`, `contact_erased`, the CSAT questions' check), or due more than an hour before the
+  sweep saw it (`too_late`: the worker was down, the company suspended). An erased contact is told
+  apart before its WhatsApp id is looked up (erasure removes it). The send worker checks again
+  before the request leaves: a reply whose wait ended meanwhile (a member answered, the conversation
+  was resolved or an automation took it over, for example while the number was reconnecting) is
+  cancelled (`slow_reply_answered`) rather than delivered after the answer, and the window and the
+  contact's consent are checked, so an opt-out after queueing stops it. Turning the reply off needs
+  no valid text or delay; invalid ones keep the stored values. The text names at most the customer's own name and the company, never a number, so
+  number masking (ADR-226) is unaffected.
+- **Not a reply:** the message is the company's, not a member's, so the wait goes on: the inbox's
+  reply timers, the overdue emails and notice and Reports' first-response figures still wait for a
+  member. Reports count it among the messages sent, neither by members nor by campaigns, as CSAT
+  questions; webhooks and the API report it as sent by `system`.
+- **Deletion and export:** rows are deleted with the company (step 326, before the turns and
+  messages they name) and go with their turn; the company export includes the table and the four
+  columns.
+
+Not built: a reply per team or per number, more than one reply per wait (a second after a longer
+wait), templates outside the window, a reply that names the expected wait, the setting in the public
+API, and replies to waits that began before it was turned on.
+
+Review (before merge): an independent review found a queued reply could still be delivered after a
+member answered, when its send was put off (now cancelled at send time), a waiting row held to its
+old time, and turned `too_late`, after the delay was cut or the calendar changed (Codex found the
+same; such rows are now planned again), erased contacts recorded as `no_phone`,
+a possible deadlock with the campaign runner's set-based conversation update (the sweep now skips
+held conversations), and that turning the reply off required a valid text. All were fixed with
+tests.
+
+## ADR-385 Choice-type custom deal fields (P4-04) (2026-10-16)
+
+Context: custom deal fields (ADR-373) took text, a number, a date or yes/no. A company that sorts
+its deals by a fixed list (a tier, a source, a region) had to use text, so members typed "Gold",
+"gold" and "Gld" for the same thing and exports could not be grouped. "Choice types" remained under
+P4-04's custom deal fields.
+
+Decision:
+
+- **A `choice` type** (`crm/deal-fields.ts`): a field with 1 to 50 options, kept in the order
+  given, each trimmed, 1 to 80 characters without line breaks or control characters, and none twice
+  ignoring case. Settings → Pipelines takes them one per line (blank lines left out) and lists them
+  under the field's type. A deal takes one option or none.
+- **Stored on the field** (migration 0301): `app.crm_deal_fields.options` is a text array, null for
+  every other type. A check holds the shape: a choice has 1 to 50 options of 1 to 80 characters with
+  no line break and no space at either end, and other types have none; the type check now accepts
+  `choice`. Options that differ only in case are refused by the service, which a check without a
+  function cannot express. The table holds at most 50 rows a company, so both checks are validated
+  in the migration. The runtime role may update `options` (a column grant); keys and types still
+  never change.
+- **Changing options:** owners and administrators may add options, reorder them, and remove or
+  rename options no deal has chosen. An option a deal has chosen must stay in the list exactly as
+  written (a change of case is a rename), or the change is refused naming it ("Deals have “Silver”
+  chosen, so it cannot be removed or renamed. Change those deals first."). This keeps every stored
+  value one of its field's options without rewriting deals behind members' backs. The change takes
+  the company's deal-field lock exclusively; every write of values takes it shared before checking,
+  so a value is never checked against options that are being replaced. The same list again changes
+  nothing and is not audited.
+- **Values:** the deal page and the new-deal forms show a select with "Not set" and the options.
+  Forms and CSV import take an option whatever its case and store it as the option is written, so
+  "gold" in a file becomes "Gold"; anything else is refused ("Tier must be one of its options.").
+  The API is strict, as for other types: `fields` takes the option as written, as a string (spaces
+  around it are ignored, as for text values; null or an empty string removes it). The deals CSV writes the chosen option as text, and
+  `Deal.fields` gives it as a string, as text values are. Deal webhook payloads carry no custom
+  field values (ADR-373), so they are unchanged.
+- **API:** `GET /deal-fields` gives each field's `options` (null for other types) and the type
+  `choice`; the OpenAPI document describes both.
+- **Audit:** a choice field's creation records the number of options; a change records
+  `crm.deal_field_options_changed` with the field's key and the numbers of options, added and
+  removed, never the options themselves. Permissions are unchanged.
+
+Not built: several options per deal (multi-select), colours or descriptions per option, renaming an
+option that deals have chosen (with its values carried over), and filtering the board or reports by
+a choice.

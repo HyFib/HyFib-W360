@@ -2,8 +2,16 @@ import { describe, expect, it } from 'vitest';
 import { isAppError } from '@w360/core';
 import { DEAL_CSV_COLUMNS, dealCsvLine } from './deals-csv';
 import {
+  apiDealFieldValue,
   apiMergedDealAttributes,
+  chosenOptionsMessage,
+  coerceDealFieldValue,
   createDealFieldSchema,
+  dealFieldOptionsSchema,
+  MAX_DEAL_FIELD_OPTION_LENGTH,
+  MAX_DEAL_FIELD_OPTIONS,
+  removedChosenOptions,
+  sameOptions,
   keptDealAttributes,
   MAX_DEAL_ATTRIBUTES_BYTES,
   MAX_DEAL_FIELDS,
@@ -20,6 +28,7 @@ const fields: DealFieldDefinition[] = [
     key: 'region',
     label: 'Region',
     type: 'text',
+    options: null,
     createdAt: at,
   },
   {
@@ -27,6 +36,7 @@ const fields: DealFieldDefinition[] = [
     key: 'seats',
     label: 'Seats',
     type: 'number',
+    options: null,
     createdAt: at,
   },
   {
@@ -34,6 +44,7 @@ const fields: DealFieldDefinition[] = [
     key: 'renewal',
     label: 'Renewal',
     type: 'date',
+    options: null,
     createdAt: at,
   },
   {
@@ -41,6 +52,7 @@ const fields: DealFieldDefinition[] = [
     key: 'signed',
     label: 'Signed',
     type: 'boolean',
+    options: null,
     createdAt: at,
   },
 ];
@@ -133,6 +145,7 @@ describe('custom deal fields (ADR-373)', () => {
       key: `note_${n}`,
       label: `Note ${n}`,
       type: 'text',
+      options: null,
       createdAt: at,
     }));
     const given = (length: number) =>
@@ -189,5 +202,140 @@ describe('custom deal fields (ADR-373)', () => {
     expect(cells).toHaveLength(DEAL_CSV_COLUMNS.length + 3);
     // Formula-safe as every other cell.
     expect(cells.slice(DEAL_CSV_COLUMNS.length)).toEqual(['North', '', "'=1+1"]);
+  });
+});
+
+describe('choice-type custom deal fields (ADR-385)', () => {
+  const tier: DealFieldDefinition = {
+    id: '0192f0c4-8e2b-7c1d-9a3e-5b6c7d8e9f05',
+    key: 'tier',
+    label: 'Tier',
+    type: 'choice',
+    options: ['Gold', 'Silver', 'Bronze'],
+    createdAt: at,
+  };
+  const withTier = [...fields, tier];
+  const issue = (input: unknown) => {
+    const result = createDealFieldSchema.safeParse(input);
+    return result.success ? null : result.error.issues[0]?.message;
+  };
+
+  it('define a choice with 1 to 50 options, each trimmed, at most 80 characters, none twice', () => {
+    expect([MAX_DEAL_FIELD_OPTIONS, MAX_DEAL_FIELD_OPTION_LENGTH]).toEqual([50, 80]);
+    expect(
+      createDealFieldSchema.parse({ label: 'Tier', type: 'choice', options: [' Gold ', 'Silver'] }),
+    ).toEqual({ label: 'Tier', type: 'choice', options: ['Gold', 'Silver'] });
+    // Kept in the order given, not sorted.
+    expect(dealFieldOptionsSchema.parse(['b', 'a', 'C'])).toEqual(['b', 'a', 'C']);
+    const fifty = Array.from({ length: 50 }, (_, n) => `Option ${n}`);
+    expect(dealFieldOptionsSchema.parse(fifty)).toHaveLength(50);
+    expect(dealFieldOptionsSchema.parse(['x'.repeat(80)])[0]).toHaveLength(80);
+    expect(issue({ label: 'Tier', type: 'choice' })).toBe(
+      'Give a choice field at least one option.',
+    );
+    expect(issue({ label: 'Tier', type: 'choice', options: [] })).toBe(
+      'Give a choice field at least one option.',
+    );
+    expect(issue({ label: 'Tier', type: 'choice', options: [...fifty, 'One more'] })).toBe(
+      'A choice field has at most 50 options.',
+    );
+    expect(issue({ label: 'Tier', type: 'choice', options: ['Gold', '  '] })).toBe(
+      'Options cannot be empty.',
+    );
+    expect(issue({ label: 'Tier', type: 'choice', options: ['x'.repeat(81)] })).toBe(
+      'Options are limited to 80 characters.',
+    );
+    expect(issue({ label: 'Tier', type: 'choice', options: ['Gold', 'Two\nlines'] })).toBe(
+      'Options cannot hold line breaks or control characters.',
+    );
+    expect(issue({ label: 'Tier', type: 'choice', options: ['a\u0085b'] })).toBe(
+      'Options cannot hold line breaks or control characters.',
+    );
+    const twice = createDealFieldSchema.safeParse({
+      label: 'Tier',
+      type: 'choice',
+      options: ['Gold', 'Silver', ' gold'],
+    });
+    expect(twice.success ? null : twice.error.issues[0]).toMatchObject({
+      message: '“gold” is listed twice.',
+      path: ['options', 2],
+    });
+    // Other types take no options.
+    expect(issue({ label: 'Region', type: 'text', options: ['North'] })).toBe(
+      'Only choice fields have options.',
+    );
+  });
+
+  it('take one of the options from forms and CSV files whatever the case, stored as written', () => {
+    expect(coerceDealFieldValue(tier, ' silver ')).toEqual({ ok: true, value: 'Silver' });
+    expect(coerceDealFieldValue(tier, 'Gold')).toEqual({ ok: true, value: 'Gold' });
+    expect(coerceDealFieldValue(tier, '  ')).toEqual({ ok: true, value: null });
+    expect(coerceDealFieldValue(tier, 'Platinum')).toEqual({
+      ok: false,
+      message: 'Tier must be one of its options.',
+    });
+    expect(coerceDealFieldValue(tier, 'Gol')).toMatchObject({ ok: false });
+    // Other types keep the contact fields' rules.
+    expect(coerceDealFieldValue(fields[3]!, 'yes')).toEqual({ ok: true, value: true });
+    expect(mergedDealAttributes(withTier, { tier: 'Gold', seats: 2 }, { tier: 'BRONZE' })).toEqual({
+      tier: 'Bronze',
+      seats: 2,
+    });
+    expect(mergedDealAttributes(withTier, { tier: 'Gold' }, { tier: '' })).toEqual({});
+    expect(refusal(() => mergedDealAttributes(withTier, {}, { tier: 'Tin' }))).toEqual({
+      message: 'Tier must be one of its options.',
+      path: 'fields.tier',
+    });
+  });
+
+  it('take one of the options through the API exactly as written; null or empty removes it', () => {
+    expect(apiDealFieldValue(tier, 'Silver')).toEqual({ ok: true, value: 'Silver' });
+    expect(apiDealFieldValue(tier, null)).toEqual({ ok: true, value: null });
+    expect(apiDealFieldValue(tier, '')).toEqual({ ok: true, value: null });
+    const refused = {
+      ok: false,
+      message: 'Tier takes one of its options, written as GET /deal-fields lists them.',
+    };
+    for (const bad of ['silver', 'Platinum', 1, true, ['Gold']]) {
+      expect(apiDealFieldValue(tier, bad)).toEqual(refused);
+    }
+    expect(apiDealFieldValue(fields[1]!, 3)).toEqual({ ok: true, value: 3 });
+    expect(apiMergedDealAttributes(withTier, { tier: 'Gold' }, { tier: 'Bronze' })).toEqual({
+      tier: 'Bronze',
+    });
+    expect(refusal(() => apiMergedDealAttributes(withTier, {}, { tier: 'gold' })).path).toBe(
+      'fields.tier',
+    );
+  });
+
+  it('change options only while every option deals have chosen stays as written', () => {
+    expect(sameOptions(['Gold', 'Silver'], ['Gold', 'Silver'])).toBe(true);
+    expect(sameOptions(['Gold', 'Silver'], ['Silver', 'Gold'])).toBe(false);
+    expect(sameOptions(['Gold'], ['gold'])).toBe(false);
+    expect(sameOptions(['Gold'], ['Gold', 'Silver'])).toBe(false);
+    const current = ['Gold', 'Silver', 'Bronze'];
+    // Added, reordered, an unused option removed: nothing chosen is lost.
+    expect(removedChosenOptions(current, ['Bronze', 'Gold', 'Tin'], ['Gold', 'Bronze'])).toEqual(
+      [],
+    );
+    // Removing or renaming (even its case) a chosen option names it, in the current order.
+    expect(removedChosenOptions(current, ['gold'], ['Bronze', 'Gold', 'Silver'])).toEqual([
+      'Gold',
+      'Silver',
+      'Bronze',
+    ]);
+    expect(removedChosenOptions(current, ['Gold', 'Bronze'], ['Silver'])).toEqual(['Silver']);
+    expect(chosenOptionsMessage(['Silver'])).toBe(
+      'Deals have “Silver” chosen, so it cannot be removed or renamed. Change those deals first.',
+    );
+    expect(chosenOptionsMessage(['Gold', 'Silver'])).toBe(
+      'Deals have “Gold”, “Silver” chosen, so they cannot be removed or renamed. Change those deals first.',
+    );
+  });
+
+  it('show and export a chosen option as written', () => {
+    expect(shownDealAttributes(withTier, { tier: 'Silver', gone: 'x' })).toEqual([
+      { key: 'tier', label: 'Tier', type: 'choice', value: 'Silver' },
+    ]);
   });
 });

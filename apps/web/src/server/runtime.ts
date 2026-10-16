@@ -72,6 +72,7 @@ import {
   createSavedRepliesService,
   createConversationTagsService,
   createReadReceiptsService,
+  createSlowReplyService,
   createSegmentsService,
   createTeamsService,
   createTemplatesService,
@@ -129,6 +130,7 @@ import {
   type SavedRepliesService,
   type ConversationTagsService,
   type ReadReceiptsService,
+  type SlowReplyService,
   type SegmentsService,
   type TeamsService,
   type TemplatesService,
@@ -201,6 +203,8 @@ export interface Runtime {
   /** Read receipts and typing indicators to customers (ADR-223). */
   readReceipts: ReadReceiptsService;
   csat: CsatService;
+  /** The automatic reply when members are slow to answer (ADR-384). */
+  slowReply: SlowReplyService;
   outbound: OutboundDeps;
   /** Emails to the members who can approve a campaign waiting for approval (ADR-204). */
   campaignNotices: CampaignNoticeDeps;
@@ -381,6 +385,7 @@ async function init(): Promise<Runtime> {
   const conversationTags = createConversationTagsService({ db });
   const readReceipts = createReadReceiptsService({ db, clock: systemClock, jobs, signer });
   const csat = createCsatService({ db, clock: systemClock });
+  const slowReply = createSlowReplyService({ db, clock: systemClock });
   const outbound: OutboundDeps = { db, jobs, signer, clock: systemClock };
   const contacts = createContactsService({ db, clock: systemClock });
   const contactMerges = createContactMergeService({ db, clock: systemClock });
@@ -600,6 +605,7 @@ async function init(): Promise<Runtime> {
     conversationTags,
     readReceipts,
     csat,
+    slowReply,
     outbound,
     campaignNotices,
     contacts,

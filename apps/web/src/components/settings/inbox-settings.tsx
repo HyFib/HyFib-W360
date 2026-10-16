@@ -7,6 +7,7 @@ import {
   updateBusinessHoursAction,
   updateCsatSettingsAction,
   updateReadReceiptsAction,
+  updateSlowReplyAction,
 } from '@/app/actions/inbox-settings';
 import { ClientButton, ClientForm } from '@/components/client-form';
 import { FormError, FormSuccess } from '@/components/form-status';
@@ -347,6 +348,118 @@ export function ReadReceiptsForm({
           <div>
             <Button type="submit" disabled={busy}>
               {busy ? 'Saving…' : 'Save read receipt settings'}
+            </Button>
+          </div>
+        ) : (
+          <p className="text-sm text-muted-foreground">
+            Only members who manage company settings can change this.
+          </p>
+        )}
+      </fieldset>
+    </ClientForm>
+  );
+}
+
+/**
+ * The automatic reply when members are slow to answer (ADR-384): a plain text sent once to a
+ * customer whose reply has waited the chosen minutes without a member's answer.
+ */
+export function SlowReplyForm({
+  slug,
+  initial,
+  businessHours,
+  canEdit,
+}: {
+  slug: string;
+  initial: { enabled: boolean; text: string; delayMinutes: number };
+  /** Whether the company's business hours are on, so the delay counts only them. */
+  businessHours: boolean;
+  canEdit: boolean;
+}) {
+  const [enabled, setEnabled] = useState(initial.enabled);
+  const [text, setText] = useState(initial.text);
+  const [delayMinutes, setDelayMinutes] = useState(String(initial.delayMinutes));
+  const [error, setError] = useState<string | null>(null);
+  const [saved, setSaved] = useState(false);
+  const [busy, setBusy] = useState(false);
+  return (
+    <ClientForm
+      className="grid gap-4"
+      onSubmit={(event) => {
+        event.preventDefault();
+        setBusy(true);
+        setError(null);
+        setSaved(false);
+        void updateSlowReplyAction(slug, { enabled, text, delayMinutes }).then((r) => {
+          setBusy(false);
+          if (!r.ok) setError(r.message);
+          else setSaved(true);
+        });
+      }}
+    >
+      <FormError message={error} />
+      <FormSuccess message={saved ? 'Automatic reply saved.' : null} />
+      <fieldset disabled={!canEdit} className="grid gap-4">
+        <label htmlFor="slow-reply-on" className="flex items-start gap-2 text-sm">
+          <Checkbox
+            id="slow-reply-on"
+            checked={enabled}
+            onChange={(e) => setEnabled(e.target.checked)}
+          />
+          <span>
+            Reply automatically when members are slow to answer
+            <span className="block text-muted-foreground">
+              Sent once per wait, as a WhatsApp text, when a customer has waited this long without a
+              member’s reply: only inside the 24-hour customer service window, never while an
+              automation handles the conversation, never in a resolved conversation, and never to
+              customers who opted out. It does not count as a reply: the wait, the reply timers and
+              overdue emails go on until a member answers. Applies to waits that start after you
+              turn it on.
+            </span>
+          </span>
+        </label>
+        <Field
+          id="slow-reply-text"
+          label="Message"
+          description="Up to 1024 characters. {{name}} becomes the customer’s name and {{company}} your company’s."
+        >
+          {(aria) => (
+            <Textarea
+              {...aria}
+              rows={3}
+              maxLength={1024}
+              required
+              value={text}
+              onChange={(e) => setText(e.target.value)}
+            />
+          )}
+        </Field>
+        <Field
+          id="slow-reply-delay"
+          label="Send after (minutes)"
+          description={
+            businessHours
+              ? 'From the customer’s first waiting message; 1 to 1440. Counted in business hours, like reply targets.'
+              : 'From the customer’s first waiting message; 1 to 1440.'
+          }
+        >
+          {(aria) => (
+            <Input
+              {...aria}
+              type="number"
+              inputMode="numeric"
+              min={1}
+              max={1440}
+              required
+              value={delayMinutes}
+              onChange={(e) => setDelayMinutes(e.target.value)}
+            />
+          )}
+        </Field>
+        {canEdit ? (
+          <div>
+            <Button type="submit" disabled={busy}>
+              {busy ? 'Saving…' : 'Save automatic reply'}
             </Button>
           </div>
         ) : (
