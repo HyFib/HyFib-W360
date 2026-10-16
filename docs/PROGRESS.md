@@ -46,6 +46,10 @@ built.
   checked). The SQL conditions in `listDeals` and `apiListDeals` are covered by the integration
   tests, which run in CI only.
 
+- **Review fixes:** ADR-391's text points to this record where it described the lists and their
+  links; the API's malformed-filter message names the lower-case key from `GET /deal-fields`; the
+  OpenAPI text says an empty `field` is refused. Unit tests pass (see the next PR's results).
+
 ### Test commands and results (local, 2026-10-16)
 
 | Command                                            | Result                                                          |

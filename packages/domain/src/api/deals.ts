@@ -70,7 +70,7 @@ export const apiPipelineListQuerySchema = z.object(page).strict();
 
 /** How `GET /deals` takes a filter by a choice or yes/no field (ADR-394). */
 export const API_DEAL_FIELD_FILTER_DESCRIPTION =
-  'Only the deals with this value of a choice or yes/no custom deal field (GET /deal-fields), as `<key>:<value>`: one of a choice field’s options (in any case), `yes` or `no` for a yes/no field, or nothing after the colon for the deals without a value. A key or option the company’s fields do not have, a field of another type or a value written otherwise is refused with 422 naming `field`, never ignored. Send it again with each `cursor`, as every filter.';
+  'Only the deals with this value of a choice or yes/no custom deal field (GET /deal-fields), as `<key>:<value>`: one of a choice field’s options (in any case), `yes` or `no` for a yes/no field, or nothing after the colon for the deals without a value. A key or option the company’s fields do not have, a field of another type or a value written otherwise is refused with 422 naming `field`, never ignored; so is an empty `field`, so leave the parameter out to list every deal. Send it again with each `cursor`, as every filter.';
 
 /**
  * The refusal's words for a field filter `GET /deals` cannot apply (ADR-394): the same reasons as
@@ -80,7 +80,7 @@ export const API_DEAL_FIELD_FILTER_DESCRIPTION =
 export function apiDealFieldFilterMessage(problem: DealFieldFilterProblem): string {
   switch (problem) {
     case 'malformed':
-      return '`field` takes `<key>:<value>`: a choice field’s option, `yes` or `no` for a yes/no field, or nothing after the colon for deals without a value.';
+      return '`field` takes `<key>:<value>`, the key as GET /deal-fields gives it (lower case): a choice field’s option, `yes` or `no` for a yes/no field, or nothing after the colon for deals without a value.';
     case 'no_field':
       return 'The company has no deal field with this key (GET /deal-fields).';
     case 'not_filterable':

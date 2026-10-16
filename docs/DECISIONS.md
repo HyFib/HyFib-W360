@@ -15778,7 +15778,8 @@ Decision:
   of its options in any case (options never differ by case alone, ADR-385), resolved to the option
   as written; `yes`/`no` in any case. A repeated `field` counts by its first value, on the board as
   in the export. The page keeps the filter in the board's other links and in the export link as the
-  board resolved it, never as the address wrote it; the won and lost lists' links drop it.
+  board resolved it, never as the address wrote it; the won and lost lists' links drop it (since
+  ADR-394 every view applies the filter and its links keep it).
 - **The query:** `dealFieldCondition` adds `(attributes -> key) = <value>::jsonb` (the option as a
   JSON string, or a JSON boolean) or `not (attributes ? key)` for "Not set" to the board's and the
   export's existing conditions (company, pipeline, status, owner). Values are stored as the option is
@@ -15796,7 +15797,8 @@ Decision:
   without echoing the address's text. Another company's key resolves only if this company has a
   field of that key, and then it is this company's field.
 - **The export follows, strictly:** `GET /c/{slug}/crm/export` takes `field` as it takes `owner`;
-  the page sends it only with the board's open deals of a pipeline, the view it filters. An export
+  the page sends it only with the board's open deals of a pipeline, the view it filters (since
+  ADR-394, with the won and lost lists too). An export
   refuses a filter that does not resolve (400, "This deal field no longer exists.", "This option is
   not one of the deal field’s options.", "Deals can be filtered only by a choice or yes/no field.",
   "The deal field filter is not valid.") before anything is audited, so a file is never silently
@@ -15816,7 +15818,8 @@ the browser, which keeps the page's elements, so the select went on showing the 
 cleared, and "Filter deals" would apply it again; the select is now keyed by the applied filter, and
 the end-to-end test checks it after the link. It also found that a repeated `field` was dropped
 without the notice (it now counts by its first value, as the export reads it), that the won and lost
-lists' links carried a filter nothing applies there (they drop it), a misleading test comment and a
+lists' links carried a filter nothing applies there (they dropped it, until ADR-394 applied the
+filter there), a misleading test comment and a
 slip in this record. All were fixed. A choice option named "Not set" still reads like the field's
 "Not set" in the select, as on the new-deal form.
 
@@ -16068,3 +16071,10 @@ Decision:
 Not built: filtering Reports by a choice, several field filters at once (or several options of one
 field), filters by text, number or date fields, saving a filtered view, and the field filter on
 `GET /tasks` or deal webhooks.
+
+Review (before merge): an independent review found no High or Medium issue. It found ADR-391's own
+text still describing the won and lost lists as unfiltered and their links dropping the filter (it
+now points to this record); the API's message for a malformed `field` not saying the key is the
+lower-case key `GET /deal-fields` gives (it now does); and the OpenAPI text not saying that an empty
+`field` is refused (it now does, so an integration leaves the parameter out). All were fixed.
+Cursors stay positions only, as for every other filter of `GET /deals`, which the review checked.
