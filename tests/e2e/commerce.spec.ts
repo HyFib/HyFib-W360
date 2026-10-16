@@ -406,3 +406,68 @@ test('a catalog is read from Meta, products are sent in a chat and an order is p
   await openTab(page, 'Orders');
   await expect(page.getByRole('cell', { name: 'Fulfilled' })).toBeVisible();
 });
+
+test('catalog products are listed on a deal with quantities and prices, and their total becomes its value (ADR-375)', async ({
+  page,
+  request,
+}) => {
+  test.setTimeout(180_000);
+  const { slug, wabaId } = await newCompany(page, 'dealitems', 'Dev Deals');
+  const catalogId = String(randomInt(100_000_000, 999_999_999));
+  const catalogRes = await request.post(`${GRAPH}/__stand-in/catalog`, {
+    data: {
+      wabaId,
+      catalog: { id: catalogId, name: 'Tea house', product_count: 2 },
+      products: [
+        ['chai-1', 'Masala chai', '₹120.00'],
+        ['chai-2', 'Ginger biscuits', '₹80.50'],
+      ].map(([retailerId, name, price], i) => ({
+        id: String(710_000 + i),
+        retailer_id: retailerId,
+        name,
+        price,
+        currency: 'INR',
+        availability: 'in stock',
+        review_status: 'approved',
+      })),
+    },
+  });
+  expect(catalogRes.ok()).toBe(true);
+  await openFromNav(page, 'Commerce');
+  await openTab(page, 'Catalogs');
+  await page.getByRole('button', { name: 'Read from Meta' }).click();
+  await reloadUntil(page, () => page.getByText('2 of 2 at Meta'));
+
+  // A pipeline, a contact and a deal for them.
+  await page.goto(`/c/${slug}/settings/pipelines`);
+  await page.getByLabel('Name', { exact: true }).fill('Sales');
+  await page.getByRole('button', { name: 'Create pipeline' }).click();
+  await expect(page.getByText('Pipeline created.')).toBeVisible();
+  await page.goto(`/c/${slug}/contacts/new`);
+  await page.getByLabel('Name').fill('Meena Iyer');
+  await page.getByLabel('Phone number').fill('+91 98765 43299');
+  await page.getByRole('button', { name: 'Add contact' }).click();
+  await expect(page.getByRole('heading', { name: 'Meena Iyer', level: 1 })).toBeVisible();
+  await page.getByText('New deal', { exact: true }).click();
+  await page.getByLabel('Deal title').fill('Cafe supplies');
+  await page.getByRole('button', { name: 'Create deal' }).click();
+  await expect(page.getByRole('heading', { name: 'Cafe supplies', level: 1 })).toBeVisible();
+
+  // The deal's Products card: search the catalog, add two of a product at an exact price.
+  await page.getByLabel('Add a product').fill('chai');
+  await page.getByRole('button', { name: 'Search products' }).click();
+  await page.getByRole('button', { name: 'Masala chai · chai-1 · ₹120.00' }).click();
+  await page.getByLabel('Quantity').fill('2');
+  await page.getByLabel('Unit price (INR)').fill('120.50');
+  await page.getByRole('button', { name: 'Add product' }).click();
+  await expect(page.getByRole('cell', { name: 'Masala chai', exact: true })).toBeVisible();
+  await expect(page.getByText('Products total: ₹241.00')).toBeVisible();
+  const timeline = page.getByRole('list', { name: 'Timeline' });
+  await expect(timeline.getByText('products: added Masala chai')).toBeVisible();
+  await expectNoHorizontalOverflow(page);
+
+  // Its total becomes the deal's value.
+  await page.getByRole('button', { name: 'Use the products total as the deal’s value' }).click();
+  await expect(page.getByText('Sales · ₹241.00')).toBeVisible();
+  await expect(page.getByText('(the deal’s value)')).toBeVisible();
+});

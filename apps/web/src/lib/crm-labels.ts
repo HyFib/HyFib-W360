@@ -46,6 +46,7 @@ export const DEAL_FIELD_TEXT: Record<string, string> = {
   value: 'value',
   expected_close_on: 'expected close date',
   custom_fields: 'custom fields',
+  products: 'products',
 };
 
 export function contactLabel(contact: {

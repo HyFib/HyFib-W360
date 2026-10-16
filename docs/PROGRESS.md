@@ -1,5 +1,42 @@
 # Progress
 
+## 2026-10-13 — Products on deals (P4-04, H-012, ADR-375)
+
+Status: **Implemented; its database and browser tests run in CI only.** A deal said what it was
+for only in its title and value.
+
+### Completed
+
+- **Database:** migration 0294 creates `app.crm_deal_items` (deal, catalog product, its name then,
+  quantity, unit price and currency; row security, composite keys, `SELECT, INSERT, DELETE` only,
+  tenant deletion step 295).
+- **Domain:** `crm/deal-items.ts` searches the company's connected catalogs and adds and removes
+  items at the deal's version (`lockDealForChange`), bumping it and recording a `deal_updated`
+  timeline entry naming `products`; unit prices are typed, exact, never read from Meta's text; at
+  most 50 items, each total within a deal's value. `getDeal` gives the items and their total (null
+  across currencies). The API's deal history leaves out entries naming none of its details. The
+  company export includes the table.
+- **Web:** the deal page's Products card: catalog search, quantity and unit price, removal, the
+  total, and "Use the products total as the deal's value".
+- **Tests:** unit (totals, requests, unit prices); integration (`commerce.test.ts`: adding,
+  removing, versions, refusals, isolation, erasure); e2e (`commerce.spec.ts`: a product added from a
+  catalog read from the Graph stand-in, its total used as the value). Written for CI; the
+  integration and e2e tests were not run here.
+- **Docs:** ADR-375; SECURITY; THREAT-MODEL T332; ARCHITECTURE; DEPLOYMENT (0294); BACKLOG P4-04;
+  DATA-RETENTION; the feature matrix (status unchanged).
+- **Mutation checks:** 12 of 12 deliberate regressions caught; a 13th was equivalent (a check
+  `parseAmountToMinor` already makes), and the redundant check was removed.
+
+### Test commands and results (local, 2026-10-13)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 150 files, 1590 tests passed                                    |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+| migration 0294                                     | pglast parse check passed (syntax only)                         |
+
 ## 2026-10-13 — Importing deals from CSV (P4-04, H-012, ADR-374)
 
 Status: **Implemented; its database and browser tests run in CI only.** Companies moving from a

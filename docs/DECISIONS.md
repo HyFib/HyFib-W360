@@ -14840,3 +14840,43 @@ Decision:
 Not built: creating contacts from a deal file, matching contacts by email or WhatsApp user id,
 updating existing deals from a file, importing closed (won or lost) deals, a record of past deal
 imports beside the audit log, importing through the public API, and products on deals.
+
+## ADR-375 Products on deals (P4-04) (2026-10-13)
+
+Context: a deal said what it was for only in its title and value. Companies that sell from the
+WhatsApp catalogs HyFib reads (P4-06a) could not record which products a deal covered, in what
+quantity or at what price. "Products on deals" was listed as remaining under P4-04.
+
+Decision:
+
+- **Items from the company's catalogs:** `app.crm_deal_items` (migration 0294) lists a product
+  from one of the company's connected catalogs (not removed by Meta) on a deal, with a quantity
+  (1 to 100,000) and a unit price, exact in the minor unit of the deal's currency when it was added
+  (stored with the item). The product's name is kept as it was then, so the deal still shows what
+  was quoted when the catalog renames or removes the product. At most 50 items a deal; an item's
+  total (quantity times unit price) fits a deal's value. Items are added and removed, never changed
+  (the table grants `SELECT, INSERT, DELETE` only).
+- **No catalog price is assumed:** Meta's price text has no documented format (research M-172), so
+  members type the unit price; the catalog's text is shown beside the product as a hint only.
+- **Who may:** members who change deals and may see the catalogs (`crm.write` and `commerce.read`:
+  owners, administrators, supervisors, agents) search the catalogs and add items; members who
+  change deals remove them; anyone who reads the CRM sees them on the deal page. An erased
+  contact's deal takes no changes.
+- **At the deal's version, on its timeline:** adding or removing an item locks the contact and the
+  deal (`lockDealForChange`, the order every deal change takes), checks the version the page
+  showed, bumps it and records a `deal_updated` entry naming `products` and the product added or
+  removed. The API's deal history leaves out entries that name none of the details it reports, so
+  such entries are not given there, as for custom fields (ADR-373).
+- **The total, and the value:** the deal page shows each item's total and the items' total in the
+  deal's currency. Items added before the deal moved to a pipeline of another currency keep their
+  own currency, and then no total is given. The deal's value stays the members' own; "Use the
+  products total as the deal's value" sets it through the ordinary deal update, at the deal's
+  version.
+- **Deletion:** items are deleted with the company (step 295, before deals at 300 and catalog
+  products at 570, which they reference); deals and catalog products are deleted with nothing
+  else. Item names are catalog product names, not customer data, so erasure keeps them. The
+  company export includes the table.
+
+Not built: items in the public API, deal webhook events for item changes, items in the deals CSV,
+items without a catalog product, discounts and taxes, the value kept equal to the items' total
+automatically, and items set by automation steps or the deal import.

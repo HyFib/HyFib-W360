@@ -1622,6 +1622,11 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    updates leave `attributes` as it is. Rolling an image back leaves the table and column in place,
    unused.
 
+   Migration 0294 (ADR-375) creates `app.crm_deal_items` (row security, composite keys to deals,
+   catalog products and memberships, `SELECT, INSERT, DELETE` for the app, its tenant deletion
+   step 295 and definer policies). It is additive: old web servers neither show nor write items.
+   Rolling an image back leaves the table in place, unused.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

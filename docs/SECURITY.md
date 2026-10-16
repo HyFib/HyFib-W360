@@ -1330,6 +1330,11 @@ Phase 5 rules (Public API, P5-08):
   active members with CRM access, by email. One transaction; rows with errors are listed and not
   imported. Each deal is the importing member's, with an `imported` timeline entry and a
   `deal.created` event; the import is audited with its counts, never the rows.
+- Products on deals (ADR-375): adding needs `crm.write` and `commerce.read`, removing
+  `crm.write`; products come only from the company's connected catalogs, deals only from the
+  company, both under row security. Changes are at the deal's version and on its timeline; unit
+  prices are typed by members, exact, never read from Meta's price text; an erased contact's deal
+  takes none.
 - Following message changes (ADR-116): `GET /message-changes` reads the key's company's messages
   only (`conversations.read`, which only members who read every conversation grant; RLS and an
   explicit company filter). Its cursor is sealed as the contact feed's is, with the feed's name and

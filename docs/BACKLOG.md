@@ -322,7 +322,11 @@ verification, app review, Embedded Signup configuration).
   contact found by number, with a title, a stage by name, a value, an owner by email, an expected
   close date and custom field values; rows with errors listed and skipped; audited. Not built:
   creating contacts, updating deals or importing closed deals from a file, API import).
-  **Remaining:** products on deals, CRM connectors (HubSpot,
+  **[Products on deals built; their database and browser tests run only in CI]** (ADR-375,
+  migration 0294: catalog products listed on a deal with a quantity and an exact unit price, at the
+  deal's version and on its timeline, their total shown and usable as the deal's value. Not built:
+  items in the API, webhooks and CSV, discounts and taxes).
+  **Remaining:** CRM connectors (HubSpot,
   Salesforce, Zoho: integrations), reminder emails through the production SMTP provider (release
   checklist).
 - **P4-05 Growth tools** — _implemented and locally verified (2026-09-27); no live WhatsApp or ad

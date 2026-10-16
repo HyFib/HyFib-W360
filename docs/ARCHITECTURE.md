@@ -1278,6 +1278,14 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   (shared), then inserts deals and `deal_created` activities (`imported: true`) in batches of 200
   and audits `crm.deals_imported`. Web: `app/c/[slug]/crm/import`, `DealImportWizard`, actions
   `previewDealImportAction` and `importDealsAction`.
+- **Products on deals (0294, ADR-375):** `crm/deal-items.ts` searches the company's connected
+  catalogs (`dealProductOptions`), adds and removes `app.crm_deal_items` (product, its name then,
+  quantity, unit price and currency) under `lockDealForChange` at the deal's version, bumping it
+  and recording a `deal_updated` entry naming `products`. `getDeal` gives `items` and
+  `itemsTotal` (`dealItemsTotal`, summed as `bigint`, null across currencies or beyond a deal's
+  value). Web: the deal page's Products card (`DealProducts`); its "use as value" goes through
+  `updateDeal`. The API's deal history now leaves out every `deal_updated` entry naming none of
+  title, value and expected close date.
 - **Defining contact fields (0092, ADR-115):** `contacts/field-definitions.ts` adds, renames and
   deletes a company's custom fields for both Settings (`contacts/service.ts`, by id) and the API
   (`api/contact-fields.ts`, by key, scope `contact_fields.manage`); callers check who may and audit

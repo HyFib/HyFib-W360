@@ -50,6 +50,7 @@ import {
   sameAttributes,
   shownDealAttributes,
 } from './deal-fields';
+import { dealItemsTotal, loadDealItems, type DealItem } from './deal-items';
 import { DEAL_CSV_COLUMNS, dealCsvLine } from './deals-csv';
 import { forecast, weigh, type Forecast } from './forecast';
 import { currencyDigits, parseAmountToMinor } from './money';
@@ -120,6 +121,9 @@ export interface DealDetail extends DealCard {
   conversationId: string | null;
   /** Its custom field values (ADR-373), in the fields' order, only of fields that still exist. */
   fields: ReturnType<typeof shownDealAttributes>;
+  /** Products listed on it (ADR-375), in the order they were added, and their total. */
+  items: DealItem[];
+  itemsTotal: ReturnType<typeof dealItemsTotal>;
   tasks: { open: TaskItem[]; done: TaskItem[] };
   timeline: ActivityItem[];
 }
@@ -377,7 +381,12 @@ async function lockDeal(tx: Tx, tenantId: string, id: string, expectedVersion: n
  * Locks a deal for a change, after locking its contact against erasure (the order erasure uses:
  * contact, then deals). A deal's contact never changes, so reading it before the locks is safe.
  */
-async function lockDealForChange(tx: Tx, tenantId: string, id: string, expectedVersion: number) {
+export async function lockDealForChange(
+  tx: Tx,
+  tenantId: string,
+  id: string,
+  expectedVersion: number,
+) {
   const [ref] = await tx
     .select({ contactId: crmDeals.contactId })
     .from(crmDeals)
@@ -753,6 +762,7 @@ export function dealOperations(deps: { db: Database; clock: Clock }) {
             row.deal.closedByMembershipId,
             row.deal.createdByMembershipId,
           ]);
+          const items = await loadDealItems(tx, ctx.tenant.id, id);
           const visible =
             row.deal.conversationId !== null &&
             inboxReader(ctx) &&
@@ -776,6 +786,8 @@ export function dealOperations(deps: { db: Database; clock: Clock }) {
               await loadDealFields(tx, ctx.tenant.id),
               row.deal.attributes,
             ),
+            items,
+            itemsTotal: dealItemsTotal(items, row.currency),
             tasks: {
               open: await tasksWhere(tx, ctx.tenant.id, { dealId: id, status: 'open' }, ctx),
               done: await tasksWhere(tx, ctx.tenant.id, { dealId: id, status: 'done' }, ctx),

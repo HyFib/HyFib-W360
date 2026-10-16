@@ -127,6 +127,7 @@ export {
   type DealImportOptions,
   type DealImportResult,
 } from './crm/deal-import';
+export { MAX_DEAL_ITEMS, dealItemsTotal, lineTotalMinor, type DealItem } from './crm/deal-items';
 export * from './crm/tasks';
 export * from './crm/time';
 export * from './crm/forecast';

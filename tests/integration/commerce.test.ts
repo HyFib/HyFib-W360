@@ -11,6 +11,7 @@ import {
   createApiKeysService,
   createCommerceService,
   createContactsService,
+  createCrmService,
   createPlanAdminService,
   createWebhooksService,
   dayOf,
@@ -1622,5 +1623,166 @@ describe('payment links', () => {
       'done',
     );
     expect(await linkRow(order.id as string)).toMatchObject({ status: 'cancelled' });
+  });
+});
+
+describe('products on deals (ADR-375)', () => {
+  const crm = () =>
+    createCrmService({ db: fx.dbs.app, clock: systemClock, jobs: fx.jobs(), signer: fx.signer });
+
+  async function dealOf(c: Company, owner: TenantContext, by: TenantContext) {
+    const { id: pipelineId } = await crm().createPipeline(owner, {
+      name: 'Sales',
+      currency: 'INR',
+      stages: ['New'],
+    });
+    const [pipeline] = (await crm().listPipelines(owner)).filter((p) => p.id === pipelineId);
+    const { id: contactId } = await createContactsService({
+      db: fx.dbs.app,
+      clock: systemClock,
+    }).createContact(owner, { displayName: 'Asha', phone: `+${waId()}` });
+    const { id } = await crm().createDeal(by, {
+      contactId,
+      pipelineId,
+      stageId: pipeline!.stages[0]!.id,
+      title: 'Bulk order',
+    });
+    return { id, contactId };
+  }
+
+  it('lists catalog products with a quantity and an exact unit price, at the deal’s version, on its timeline', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const agent = await fx.ctx(c, c.agent);
+    const marketer = await fx.ctx(c, c.marketer);
+    await syncedCatalog(c, owner, '7750000001', 2);
+    const deal = await dealOf(c, owner, agent);
+    const svc = crm();
+
+    // Members who change deals and see the catalogs search them; marketers change no deals.
+    const options = await svc.dealProductOptions(agent, 'sku-2');
+    expect(options.map((p) => [p.name, p.retailerId])).toEqual([['Product 002', 'sku-2']]);
+    await expectAppError(svc.dealProductOptions(marketer, ''), 'forbidden');
+    const productId = options[0]!.id;
+
+    const added = await svc.addDealItem(agent, {
+      dealId: deal.id,
+      expectedVersion: 1,
+      productId,
+      quantity: '3',
+      unitPrice: '1,500.50',
+    });
+    expect(added.version).toBe(2);
+    // A stale version, a price the currency cannot hold or a quantity too large is refused.
+    await expectAppError(
+      svc.addDealItem(agent, {
+        dealId: deal.id,
+        expectedVersion: 1,
+        productId,
+        quantity: 1,
+        unitPrice: '1',
+      }),
+      'conflict',
+    );
+    await expectAppError(
+      svc.addDealItem(agent, {
+        dealId: deal.id,
+        expectedVersion: 2,
+        productId,
+        quantity: 1,
+        unitPrice: '1.001',
+      }),
+      'validation_failed',
+      /at most 2 decimals/,
+    );
+    await expectAppError(
+      svc.addDealItem(agent, {
+        dealId: deal.id,
+        expectedVersion: 2,
+        productId,
+        quantity: 100_000,
+        unitPrice: '100000000000',
+      }),
+      'validation_failed',
+      /more than a deal can be worth/,
+    );
+
+    const shown = await svc.getDeal(owner, deal.id);
+    expect(shown.items.map((i) => [i.name, i.quantity, i.unitPriceMinor, i.currency])).toEqual([
+      ['Product 002', 3, 150_050, 'INR'],
+    ]);
+    expect(shown.itemsTotal).toEqual({ totalMinor: 450_150, otherCurrency: false });
+    expect(shown.timeline[0]).toMatchObject({
+      kind: 'deal_updated',
+      data: { fields: ['products'], productAdded: 'Product 002' },
+    });
+
+    const removed = await svc.removeDealItem(agent, {
+      dealId: deal.id,
+      expectedVersion: 2,
+      itemId: shown.items[0]!.id,
+    });
+    expect(removed.version).toBe(3);
+    expect((await svc.getDeal(owner, deal.id)).items).toEqual([]);
+    await expectAppError(
+      svc.removeDealItem(agent, {
+        dealId: deal.id,
+        expectedVersion: 3,
+        itemId: shown.items[0]!.id,
+      }),
+      'not_found',
+    );
+  });
+
+  it('keeps products and items inside their company and takes none for an erased contact', async () => {
+    const a = await fx.company();
+    const b = await fx.company();
+    const aOwner = await fx.ctx(a, a.owner);
+    const bOwner = await fx.ctx(b, b.owner);
+    await syncedCatalog(a, aOwner, '7750000002', 1);
+    const [product] = await crm().dealProductOptions(aOwner, '');
+    expect(await crm().dealProductOptions(bOwner, '')).toEqual([]);
+    const theirs = await dealOf(b, bOwner, bOwner);
+    await expectAppError(
+      crm().addDealItem(bOwner, {
+        dealId: theirs.id,
+        expectedVersion: 1,
+        productId: product!.id,
+        quantity: 1,
+        unitPrice: '10',
+      }),
+      'not_found',
+    );
+    await expectAppError(
+      crm().addDealItem(aOwner, {
+        dealId: theirs.id,
+        expectedVersion: 1,
+        productId: product!.id,
+        quantity: 1,
+        unitPrice: '10',
+      }),
+      'not_found',
+    );
+
+    const mine = await dealOf(a, aOwner, aOwner);
+    await createContactsService({ db: fx.dbs.app, clock: systemClock }).eraseContact(aOwner, {
+      contactId: mine.contactId,
+      suppress: false,
+    });
+    const [row] = await fx.query<{ version: number }>(
+      'SELECT version FROM app.crm_deals WHERE id = $1',
+      [mine.id],
+    );
+    await expectAppError(
+      crm().addDealItem(aOwner, {
+        dealId: mine.id,
+        expectedVersion: row!.version,
+        productId: product!.id,
+        quantity: 1,
+        unitPrice: '10',
+      }),
+      'conflict',
+      /erased/,
+    );
   });
 });
