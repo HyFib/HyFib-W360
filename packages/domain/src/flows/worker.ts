@@ -9,7 +9,9 @@ import {
   flowKeys,
   flows,
   inArray,
+  isNull,
   lt,
+  or,
   sql,
   systemScope,
   type Database,
@@ -19,6 +21,8 @@ import {
 import type { GraphClient, GraphResult, RemoteFlow } from '../messaging/graph';
 import {
   activeManagementPause,
+  isManagementPaused,
+  managementResumeAt,
   pacedManagementCalls,
   untilPaused,
   type ManagementPaused,
@@ -161,11 +165,32 @@ export async function processFlowSync(
   if (!credential) {
     return fail('The WhatsApp account is not connected. Reconnect it, then try again.');
   }
+  /**
+   * Deferred because Meta throttles the account's management calls (ADR-399): records when the job
+   * runs again, while the flow still waits for this operation, so the sweep's 30-minute give-up
+   * counts from then.
+   */
+  const defer = async (pausedUntil: Date): Promise<ManagementPaused> => {
+    await deps.db.run(scope, (tx) =>
+      tx
+        .update(flows)
+        .set({ managementDeferredUntil: managementResumeAt(pausedUntil) })
+        .where(
+          and(
+            eq(flows.tenantId, scope.tenantId),
+            eq(flows.id, flowId),
+            eq(flows.syncOp, op),
+            inArray(flows.syncState, ['queued', 'running']),
+          ),
+        ),
+    );
+    return { paused: pausedUntil };
+  };
   // While Meta throttles the account's management calls nothing is asked (ADR-399).
   const paused = activeManagementPause(credential.managementPausedUntil, deps.clock.now());
-  if (paused) return { paused };
+  if (paused) return defer(paused);
   const call = pacedManagementCalls(deps, scope, credential);
-  return untilPaused(async (): Promise<FlowJobOutcome> => {
+  const outcome = await untilPaused(async (): Promise<FlowJobOutcome> => {
     const token = credential.token;
     const endpointUri = row.dataApiVersion ? flowEndpointUrl(deps.appBaseUrl, row.publicId) : null;
     const metadata = {
@@ -265,9 +290,13 @@ export async function processFlowSync(
     });
     return 'done';
   });
+  return isManagementPaused(outcome) ? defer(outcome.paused) : outcome;
 }
 
-/** Fails a flow operation that has waited too long (the sweep calls this for old operations). */
+/**
+ * Fails a flow operation that has waited too long (the sweep calls this for old operations): asked
+ * more than 30 minutes ago, and not deferred for a pause to less than 30 minutes ago (ADR-399).
+ */
 export async function giveUpFlowSync(
   deps: { db: Database; clock: Clock },
   scope: TenantScope,
@@ -287,6 +316,13 @@ export async function giveUpFlowSync(
           eq(flows.id, flowId),
           inArray(flows.syncState, ['queued', 'running']),
           lt(flows.syncRequestedAt, new Date(deps.clock.now().getTime() - FLOW_SYNC_GIVE_UP_MS)),
+          or(
+            isNull(flows.managementDeferredUntil),
+            lt(
+              flows.managementDeferredUntil,
+              new Date(deps.clock.now().getTime() - FLOW_SYNC_GIVE_UP_MS),
+            ),
+          ),
         ),
       ),
   );

@@ -10,7 +10,6 @@ import {
   authorizeJob,
   cancelSendIntent,
   checkQueueWaits,
-  deferPausedJob,
   compactContactChanges,
   findStaleReceipts,
   findStaleSendIntents,
@@ -44,6 +43,7 @@ import { sweepTaskReminders } from './crm';
 import { signalDueReportEmails } from './reports';
 import { signalDueCampaigns } from './campaigns';
 import { RetryableJobError } from './email';
+import { deferPausedWork } from './management-deferral';
 import { signalDueTemplateSyncs } from './templates';
 import { signalDueAccessChecks } from './whatsapp-access';
 import { sweepCommerceWork } from './commerce';
@@ -158,28 +158,15 @@ export function channelOnboardHandler(rt: WorkerRuntime) {
       auth.envelope.ref,
     );
     if (isManagementPaused(outcome)) {
-      // Meta throttles the account's management calls (ADR-399): nothing failed; setup resumes
-      // from the same step just after the pause.
-      const resumeAt = await deferPausedJob(
-        rt,
-        QUEUES.channelOnboard.name,
-        {
-          kind: 'channel.onboard',
-          tenantId: auth.scope.tenantId,
-          actorUserId: auth.envelope.actorUserId,
-          ref: auth.envelope.ref,
-        },
-        outcome.paused,
-      );
-      rt.logger.info(
-        {
-          jobId: job.id,
-          channelAccountId: auth.envelope.ref,
-          pausedUntil: outcome.paused,
-          resumeAt,
-        },
-        'onboarding step deferred: Meta is limiting management requests',
-      );
+      // Meta throttles the account's management calls (ADR-399): setup resumes after the pause.
+      await deferPausedWork(rt, {
+        jobId: job.id,
+        kind: 'channel.onboard',
+        tenantId: auth.scope.tenantId,
+        actorUserId: auth.envelope.actorUserId,
+        ref: auth.envelope.ref,
+        pausedUntil: outcome.paused,
+      });
       return;
     }
     rt.logger.info(

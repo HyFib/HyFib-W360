@@ -3,7 +3,6 @@ import { QUEUES } from '@w360/contracts';
 import { authorizedTenantScope, type TenantScope } from '@w360/db';
 import {
   authorizeJob,
-  deferPausedJob,
   findDueFlowWork,
   giveUpFlowSync,
   isManagementPaused,
@@ -14,6 +13,7 @@ import {
 } from '@w360/domain';
 import type { WorkerRuntime } from '../runtime';
 import { RetryableJobError } from './email';
+import { deferPausedWork } from './management-deferral';
 
 type FlowKind = 'flow.sync' | 'flow.keys';
 
@@ -47,23 +47,15 @@ function flowHandler(
     };
     const outcome = await run(deps, auth.scope, auth.envelope.ref);
     if (isManagementPaused(outcome)) {
-      // Meta throttles the account's management calls (ADR-399): nothing failed; the job runs
-      // again just after the pause, from where it stopped.
-      const resumeAt = await deferPausedJob(
-        rt,
-        kind === 'flow.sync' ? QUEUES.flowSync.name : QUEUES.flowKeys.name,
-        {
-          kind,
-          tenantId: auth.scope.tenantId,
-          actorUserId: auth.envelope.actorUserId,
-          ref: auth.envelope.ref,
-        },
-        outcome.paused,
-      );
-      rt.logger.info(
-        { jobId: job.id, kind, ref: auth.envelope.ref, pausedUntil: outcome.paused, resumeAt },
-        'flow job deferred: Meta is limiting management requests',
-      );
+      // Meta throttles the account's management calls (ADR-399): nothing failed.
+      await deferPausedWork(rt, {
+        jobId: job.id,
+        kind: kind,
+        tenantId: auth.scope.tenantId,
+        actorUserId: auth.envelope.actorUserId,
+        ref: auth.envelope.ref,
+        pausedUntil: outcome.paused,
+      });
       return;
     }
     rt.logger.info({ jobId: job.id, kind, ref: auth.envelope.ref, outcome }, 'flow job');

@@ -154,23 +154,46 @@ export function assertManagementOpen(
   if (until) throw managementPausedError(until, timeZone);
 }
 
+/** The singleton key of the job a paused job queues for after the pause: `paused:<its job id>`. */
+export function pausedJobKey(currentJobId: string): string {
+  return `paused:${currentJobId}`;
+}
+
 /**
- * Queues a job again to run just after the pause ends, signed as before. Its singleton key names
- * the pause, so the job that defers (still active, and holding its own key) does not block it, and
- * deferring twice for one pause queues it once.
+ * Queues a job again to run just after the pause ends, signed as before, and gives when it starts,
+ * or null when nothing was queued (the caller then fails the job, so pg-boss retries it rather
+ * than the deferral being lost). Its singleton key is derived from the deferring job's id
+ * (`pausedJobKey`): stable across retries of that job, so one deferral is queued for it, and never
+ * the key the running job holds, whatever the clocks of the worker and the database say. pg-boss
+ * compares `startAfter` with the database's clock; a worker whose clock is behind sees the pause as
+ * still running when the job starts and defers again without calling Graph (ADR-399).
  */
 export async function deferPausedJob(
   deps: { jobs: JobQueue; signer: JobSigner },
   queue: QueueName,
   job: { kind: string; tenantId: string; actorUserId: string | null; ref: string },
   pausedUntil: Date,
-): Promise<Date> {
+  currentJobId: string,
+): Promise<Date | null> {
   const startAfter = managementResumeAt(pausedUntil);
-  await deps.jobs.enqueue(null, queue, deps.signer.sign(job), {
-    singletonKey: `paused:${job.ref}:${startAfter.getTime()}`,
+  const queued = await deps.jobs.enqueue(null, queue, deps.signer.sign(job), {
+    singletonKey: pausedJobKey(currentJobId),
     startAfter,
   });
-  return startAfter;
+  return queued === null ? null : startAfter;
+}
+
+/**
+ * Whether a response is Meta refusing the call for now (`retryable`, such as a rate limit) while its
+ * own header paused the account: such a call is deferred like the rest of the job, not counted as a
+ * failure. A permanent or credential refusal stays a failure; a response that may have done its work
+ * (`unknown`) is handled as before.
+ */
+export function refusedForPause(
+  result: { ok: boolean; kind?: string },
+  pausedUntil: Date | null,
+): pausedUntil is Date {
+  return pausedUntil !== null && result.ok === false && result.kind === 'retryable';
 }
 
 /** Thrown by a paced call made after a response paused the account; caught by `untilPaused`. */
@@ -183,7 +206,9 @@ export class ManagementPauseSignal extends Error {
 
 /**
  * Graph calls of one job for one account: each response's usage is recorded, and once a response
- * pauses the account the job's next call is not made (`ManagementPauseSignal`). The jobs' steps are
+ * pauses the account the job's next call is not made (`ManagementPauseSignal`); a response refused
+ * as retryable that itself paused the account signals at once, so the job defers instead of
+ * spending a retry or recording a failure. The jobs' steps are
  * resumable, so the deferred job carries on from there after the pause.
  */
 export function pacedManagementCalls(
@@ -192,12 +217,16 @@ export function pacedManagementCalls(
   account: { whatsappAccountId: string; wabaId: string },
 ) {
   let pausedUntil: Date | null = null;
-  return async function call<R extends { usage?: BusinessUseCaseUsage }>(
+  return async function call<R extends { ok: boolean; usage?: BusinessUseCaseUsage }>(
     request: () => Promise<R>,
   ): Promise<R> {
     if (pausedUntil) throw new ManagementPauseSignal(pausedUntil);
     const result = await request();
     pausedUntil = await noteManagementUsage(deps, scope, account, result);
+    // Refused for now by the response that paused the account: deferred, not a failure.
+    if (refusedForPause(result as { ok: boolean; kind?: string }, pausedUntil)) {
+      throw new ManagementPauseSignal(pausedUntil);
+    }
     return result;
   };
 }

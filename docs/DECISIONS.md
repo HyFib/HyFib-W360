@@ -16525,7 +16525,12 @@ Decision:
   numeric text, are rounded up to whole numbers (a fraction of a minute still pauses), and capped at
   100 percent and 1,440 minutes; negative, non-finite and unreadable values count as zero, and an
   entry with no readable value is ignored. Two entries for one id give the higher of each value.
-  The raw header is never logged or stored.
+  The raw header is never logged or stored. Node's HTTP client (undici) refuses a response whose
+  header section reaches 16 KiB (`UND_ERR_HEADERS_OVERFLOW`), which the client reports as
+  `unknown`/`no_response` as it did before this decision, so a value near the parser's bound never
+  arrives: the bound is defence in depth (for another `fetch`, or a raised transport limit) and is
+  kept rather than lowered, since no real reading comes near it (32 ids of two entries is about 9,000
+  characters).
 - **Record per account, never by the header's id alone:** the code paths that already hold an
   authorized scope for an account (the template, flow, catalog, access-check and number-setup jobs)
   look up the reading for that account's own stored WABA id (`managementReading`) and store it on
@@ -16542,16 +16547,42 @@ Decision:
   again in the first minute after the pause. Template submissions and deletions, flow operations and
   key uploads, catalog reads and number setup are queued again, signed as before, to start 30
   seconds after the pause (`deferPausedJob`, pg-boss `startAfter`, singleton key
-  `paused:<ref>:<time>`, so the deferring job, still active under its own key, does not block it,
-  and a second deferral for one pause collapses); `ops.flow_work_due` and `ops.commerce_work_due`
-  leave their paused accounts out too. The job completes, so no retry is spent, no dead letter is
-  written and nothing alerts. Within one job, once a response pauses the account the job's next call
-  is not made (`pacedManagementCalls`); the jobs' steps were already resumable, so the deferred job
+  `paused:<id of the deferring job>` (`pausedJobKey`): stable across retries of that job, so one
+  deferral is queued for it, and never the key the running job holds, whatever the clocks say). When
+  nothing was queued, the job fails with `RetryableJobError`, so pg-boss retries it and the deferral
+  is never lost while the log says "deferred" (`deferPausedWork` in the worker, which also picks
+  each kind's own queue). `ops.flow_work_due` and `ops.commerce_work_due` leave their paused accounts
+  out too. The job completes, so no retry is spent, no dead letter is written and nothing alerts.
+  Clocks: a pause is computed and compared on the worker's clock; pg-boss's `startAfter` and the
+  due lists compare with the database's. A worker whose clock is behind the database's sees the
+  pause as still running when the deferred job starts and defers again without calling Graph; one
+  ahead calls up to its skew early, and Meta's own throttling then answers as below. Within one job,
+  once a response pauses the account the job's next call is not made (`pacedManagementCalls`), and
+  a call Meta refused for now (`retryable`, such as rate limit 80007) whose own response set the
+  pause defers the job at once (`refusedForPause`): no retry, no `delete_failed`, no failed key
+  upload, no dead letter. A permanent or credential refusal stays a failure, and a response that may
+  have done its work (`unknown`) is handled as before. A template listing whose first page is refused
+  with code 100 while pausing the account is not retried with fewer fields until after the pause. The
+  jobs' steps were already resumable, so the deferred job
   carries on from there (a template listing stops before its next page; a webhook-subscription
   restoration interrupted by a pause is reported as `not_checked` and tried again by the existing
   30-minute rule; in number setup's health step, a first read that asked for the messaging limit
   and paused the account is not followed by ADR-398's second, field-less read: the step is deferred
   and both reads are made after the pause, so ADR-398's rule applies unchanged).
+- **Time deferred for a pause does not age a request:** the sync fails a submission Meta has no
+  record of 10 minutes after it was submitted, keeps a deletion pending 8 hours after it was asked,
+  and the sweep gives up on a flow operation or a catalog read 30 minutes after it was asked; each
+  window would otherwise expire during a pause (up to a day) and fail work that was never sent. When
+  a submission, deletion, flow operation or catalog read defers, its own row records when its
+  deferred job runs (`management_deferred_until` on `app.message_templates`, `app.flows`,
+  `app.commerce_syncs`, only while the row still waits for that work), and each window counts from
+  the later of the request and that time (`requestClockStart`; `giveUpFlowSync` and
+  `giveUpCommerceSync` require both to be older than 30 minutes); the flow and commerce due lists
+  also wait for that time before signalling the row again. The request's own time is not moved: the
+  flow page shows "requested <time>" and the catalog read its request time, which must stay true,
+  and the alternative of recording when a request was first sent to Meta would have needed a
+  sending mark on every step of every job. Rows never deferred keep a null and their windows as
+  before. A deferral older than a later request is ignored, since the later time wins.
 - **No pause on a high percentage alone:** background work does not defer when usage is merely
   high (for example 90 percent). The percentages cover a rolling hour whose make-up HyFib does not
   know, so a fixed deferral would be a guess about when it frees up; these jobs already run at low
@@ -16573,10 +16604,17 @@ Decision:
   percentage within 0 to 100); UPDATE on them for `w360_app` (which already reads the table), SELECT
   on `management_paused_until` and on `app.flows.whatsapp_account_id` for `w360_definer`, nothing
   broader; the four due-list definer functions are dropped by their owner and created again by the
-  migration role with pinned search paths, granted to `w360_app` before ownership moves back. The
-  table's row security is unchanged. The columns are exported with the account and deleted with
-  the company. Backward compatible: the previous release ignores the columns, so the usual pipeline
-  (migration, workers, web) is safe.
+  migration role with pinned search paths, granted to `w360_app` before ownership moves back.
+  `management_deferred_until` is added to `app.message_templates`, `app.flows` and
+  `app.commerce_syncs` (UPDATE for `w360_app`; SELECT on the flows' and catalog reads' for
+  `w360_definer`, whose due lists read it). `ops.dead_letter_work_live` (0089), which tells the
+  dead-letter sweep whether a setup or a deletion is being done again, is recreated the same way to
+  also see a waiting deferral of that work (key `paused:…`, its envelope's `ref`, from the `data`
+  column the migration runner grants the definer), so a dead letter is not settled under a deferred
+  job; otherwise unchanged (not SECURITY DEFINER, search path pinned, not executable by PUBLIC).
+  Row security is unchanged. The columns are exported with their rows and deleted with the company.
+  Backward compatible: the previous release ignores the columns, so the usual pipeline (migration,
+  workers, web) is safe.
 
 Left out on purpose: message sends, read receipts and media (the `whatsapp` type, out of scope);
 Embedded Signup's synchronous calls (no account row exists yet to pause); company deletion's
@@ -16584,8 +16622,18 @@ Embedded Signup's synchronous calls (no account row exists yet to pause); compan
 hold back erasure). `debug_token` is an app-level call; it is skipped while the account is paused
 because the access check as a whole waits.
 
-Known limits: a flow operation or catalog read still pending 30 minutes after it was asked is
-failed by the sweep as before (their existing budget), even if a long pause took part of that time;
-a hostile or wrong header could pause an account for at most a day, and in production only Meta's
-pinned Graph origin answers (T352). Not built: deferring on high usage, pacing by `x-app-usage`, and
-any live verification against Meta (tests use the Graph stand-in only).
+Known limits: a hostile or wrong header could pause an account for at most a day, and in production
+only Meta's pinned Graph origin answers (T352). Not built: deferring on high usage, pacing by
+`x-app-usage`, and any live verification against Meta (tests use the Graph stand-in only).
+
+Review (before merge): an independent review found that a sync running between the end of a pause
+and the deferred job failed a submission or restored a deletion whose window had passed during the
+pause, and that the sweep gave up on flow operations and catalog reads the same way (fixed by the
+deferral time above); that a refused call whose own response paused the account still counted as a
+failure (fixed by `refusedForPause`); that an integration test sent a 20,000-character header,
+which Node refuses before the parser (the test now sends 4,000 characters, a unit test covers the
+bound with a fake `fetch`, and the transport limit is described above); that a deferral that was not
+queued was logged as deferred and its key could equal the running job's under clock skew (fixed by
+`pausedJobKey` and the failing job); that the code-100 fallback was tried after a pausing response;
+that the dead-letter sweep could not see a deferral; and that the commerce handler deferred every
+kind to the catalog queue. All were fixed.

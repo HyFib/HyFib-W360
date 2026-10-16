@@ -5,12 +5,18 @@ import {
   MANAGEMENT_RESUME_MARGIN_MS,
   activeManagementPause,
   assertManagementOpen,
+  deferPausedJob,
   isManagementPaused,
   managementReading,
   managementResumeAt,
   pacedManagementCalls,
+  pausedJobKey,
+  refusedForPause,
   untilPaused,
 } from './management-pace';
+import type { JobSigner } from '../jobs/envelope';
+import type { JobQueue } from '../jobs/queue';
+import { requestClockStart } from '../templates/service';
 import { managementUsageView } from './onboarding';
 import type { BusinessUseCaseUsage, ManagementUsage } from './usage-header';
 
@@ -158,6 +164,108 @@ describe('pacedManagementCalls', () => {
         throw new Error('database down');
       }),
     ).rejects.toThrow('database down');
+  });
+
+  it('defers at once when a refusal for now carries the pause itself', async () => {
+    const { db, runs } = fakeDb();
+    const call = pacedManagementCalls({ db, clock }, scope, account);
+    const outcome = await untilPaused(async () => {
+      await call(async () => ({
+        ok: false,
+        kind: 'retryable',
+        code: 80007,
+        usage: usage(WABA, { callCount: 100, regainAccessMinutes: 4 }),
+      }));
+      throw new Error('the refusal was returned as a failure');
+    });
+    expect(outcome).toEqual({ paused: new Date('2026-10-16T10:04:00.000Z') });
+    expect(runs).toEqual([scope]);
+  });
+
+  it('returns a permanent, credential or unknown refusal that pauses, then makes no further call', async () => {
+    for (const kind of ['permanent', 'auth', 'unknown']) {
+      const { db } = fakeDb();
+      const call = pacedManagementCalls({ db, clock }, scope, account);
+      const refused = {
+        ok: false,
+        kind,
+        usage: usage(WABA, { regainAccessMinutes: 1 }),
+      };
+      let next = 0;
+      const outcome = await untilPaused(async () => {
+        expect(await call(async () => refused)).toBe(refused);
+        await call(async () => {
+          next += 1;
+          return noUsage;
+        });
+        return 'done' as const;
+      });
+      expect(outcome, kind).toEqual({ paused: new Date('2026-10-16T10:01:00.000Z') });
+      expect(next).toBe(0);
+    }
+  });
+
+  it('returns a refusal for now without a pause as before', async () => {
+    const { db } = fakeDb();
+    const call = pacedManagementCalls({ db, clock }, scope, account);
+    const refused = { ok: false, kind: 'retryable', usage: usage(WABA, { callCount: 99 }) };
+    expect(await untilPaused(() => call(async () => refused))).toBe(refused);
+  });
+});
+
+describe('refusedForPause', () => {
+  it('holds only for a retryable refusal whose own response set a pause', () => {
+    expect(refusedForPause({ ok: false, kind: 'retryable' }, NOW)).toBe(true);
+    expect(refusedForPause({ ok: false, kind: 'retryable' }, null)).toBe(false);
+    for (const kind of ['permanent', 'auth', 'unknown']) {
+      expect(refusedForPause({ ok: false, kind }, NOW)).toBe(false);
+    }
+    expect(refusedForPause({ ok: true }, NOW)).toBe(false);
+  });
+});
+
+describe('deferPausedJob', () => {
+  const job = {
+    kind: 'template.submit',
+    tenantId: '01900000-0000-7000-8000-000000000001',
+    actorUserId: null,
+    ref: '01900000-0000-7000-8000-000000000003',
+  };
+  const signer = { sign: (input: unknown) => ({ signed: input }) } as unknown as JobSigner;
+
+  it('queues the job for just after the pause under a key of the deferring job’s id', async () => {
+    const sent: unknown[][] = [];
+    const jobs = {
+      enqueue: async (...args: unknown[]) => {
+        sent.push(args);
+        return 'new-job';
+      },
+    } as unknown as JobQueue;
+    const resumeAt = await deferPausedJob({ jobs, signer }, 'template.submit', job, NOW, 'job-1');
+    expect(resumeAt).toEqual(new Date(NOW.getTime() + MANAGEMENT_RESUME_MARGIN_MS));
+    expect(sent).toEqual([
+      [
+        null,
+        'template.submit',
+        { signed: job },
+        { singletonKey: pausedJobKey('job-1'), startAfter: resumeAt },
+      ],
+    ]);
+    expect(pausedJobKey('job-1')).toBe('paused:job-1');
+  });
+
+  it('says when nothing was queued', async () => {
+    const jobs = { enqueue: async () => null } as unknown as JobQueue;
+    expect(await deferPausedJob({ jobs, signer }, 'template.submit', job, NOW, 'job-1')).toBeNull();
+  });
+});
+
+describe('requestClockStart', () => {
+  it('counts a request from the later of its time and its deferred job’s run', () => {
+    const later = new Date(NOW.getTime() + 60_000);
+    expect(requestClockStart(NOW, null)).toBe(NOW);
+    expect(requestClockStart(NOW, later)).toBe(later);
+    expect(requestClockStart(later, NOW)).toBe(later);
   });
 });
 

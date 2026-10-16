@@ -29,7 +29,9 @@ import { requestAccessCheck } from '../messaging/access';
 import {
   activeManagementPause,
   assertManagementOpen,
+  managementResumeAt,
   noteManagementUsage,
+  refusedForPause,
   type ManagementPaused,
 } from '../messaging/management-pace';
 import { credentialAad } from '../messaging/credentials';
@@ -833,6 +835,39 @@ export async function wabaCredential(
 /** `paused`: Meta throttles the account's management calls; nothing was sent (ADR-399). */
 export type TemplateJobOutcome = 'done' | 'skipped' | 'retry' | ManagementPaused;
 
+/**
+ * A template's submission or deletion deferred because Meta throttles the account's management
+ * calls (ADR-399): records when its job runs again, while the template still waits for it, so the
+ * sync's confirmation window and the deletion's keep count from then (no time spent deferred
+ * counts against the request), and gives the job's `paused` outcome.
+ */
+async function deferTemplateWork(
+  deps: TemplateWorkerDeps,
+  scope: TenantScope,
+  templateId: string,
+  status: 'submitting' | 'pending_deletion',
+  pausedUntil: Date,
+): Promise<ManagementPaused> {
+  await deps.db.run(scope, (tx) =>
+    tx
+      .update(messageTemplates)
+      .set({ managementDeferredUntil: managementResumeAt(pausedUntil) })
+      .where(
+        and(
+          eq(messageTemplates.tenantId, scope.tenantId),
+          eq(messageTemplates.id, templateId),
+          eq(messageTemplates.status, status),
+        ),
+      ),
+  );
+  return { paused: pausedUntil };
+}
+
+/** The later of a request's time and the time its deferred job runs again (ADR-399). */
+export function requestClockStart(requestedAt: Date, deferredUntil: Date | null): Date {
+  return deferredUntil && deferredUntil > requestedAt ? deferredUntil : requestedAt;
+}
+
 /** Worker: sends the create request for a template marked `submitting`. */
 export async function processTemplateSubmit(
   deps: TemplateWorkerDeps,
@@ -898,14 +933,18 @@ export async function processTemplateSubmit(
     return 'done';
   }
   const paused = activeManagementPause(credential.managementPausedUntil, deps.clock.now());
-  if (paused) return { paused };
+  if (paused) return deferTemplateWork(deps, scope, templateId, 'submitting', paused);
   const result = await deps.graph.createTemplate(credential.wabaId, credential.token, {
     name: row.name,
     language: row.language,
     category: row.category,
     components: row.components,
   });
-  await noteManagementUsage(deps, scope, credential, result);
+  const pausedBy = await noteManagementUsage(deps, scope, credential, result);
+  // Meta refused it for now and paused the account: submitted again after the pause, no retry spent.
+  if (refusedForPause(result, pausedBy)) {
+    return deferTemplateWork(deps, scope, templateId, 'submitting', pausedBy);
+  }
   if (result.ok) {
     const status = mapProviderTemplateStatus(result.data.status ?? 'PENDING');
     await settle(
@@ -996,12 +1035,16 @@ export async function processTemplateDelete(
     return 'done';
   }
   const paused = activeManagementPause(credential.managementPausedUntil, deps.clock.now());
-  if (paused) return { paused };
+  if (paused) return deferTemplateWork(deps, scope, templateId, 'pending_deletion', paused);
   const result = await deps.graph.deleteTemplate(credential.wabaId, credential.token, {
     name: row.name,
     hsmId,
   });
-  await noteManagementUsage(deps, scope, credential, result);
+  const pausedBy = await noteManagementUsage(deps, scope, credential, result);
+  // Meta refused it for now and paused the account: deleted after the pause, no `delete_failed`.
+  if (refusedForPause(result, pausedBy)) {
+    return deferTemplateWork(deps, scope, templateId, 'pending_deletion', pausedBy);
+  }
   if (!result.ok && result.kind === 'retryable' && result.httpStatus === undefined) return 'retry';
   await deps.db.run(scope, async (tx) => {
     const now = deps.clock.now();
@@ -1045,15 +1088,18 @@ export async function processTemplateDelete(
 }
 
 /**
- * Of the given templates pending deletion, those whose deletion was asked for since `since` and has
- * not failed: the last deletion event of each is the request itself (ADR-111).
+ * Of the given templates pending deletion (with when a deferred deletion job runs again), those
+ * whose deletion was asked for since `since` and has not failed: the last deletion event of each is
+ * the request itself (ADR-111). A deletion deferred for a pause after it was asked counts from when
+ * its job runs again (ADR-399).
  */
 async function deletionsAskedSince(
   tx: Tx,
   tenantId: string,
-  templateIds: string[],
+  deferredUntil: ReadonlyMap<string, Date | null>,
   since: Date,
 ): Promise<Set<string>> {
+  const templateIds = [...deferredUntil.keys()];
   if (templateIds.length === 0) return new Set();
   const last = await tx
     .selectDistinctOn([templateStatusEvents.templateId], {
@@ -1076,7 +1122,11 @@ async function deletionsAskedSince(
     );
   return new Set(
     last
-      .filter((e) => e.status === 'pending_deletion' && e.occurredAt >= since)
+      .filter(
+        (e) =>
+          e.status === 'pending_deletion' &&
+          requestClockStart(e.occurredAt, deferredUntil.get(e.templateId) ?? null) >= since,
+      )
       .map((e) => e.templateId),
   );
 }
@@ -1152,6 +1202,18 @@ async function listAllTemplates(
     const result = await deps.graph.listTemplates(wabaId, token, { after, fields });
     const pausedUntil = await noteManagementUsage(deps, scope, credential, result);
     if (!result.ok) {
+      // The response paused the account: no further call, not even the fallback below, and a
+      // refusal for now is not a failure; the sync runs again after the pause (ADR-399).
+      if (
+        pausedUntil &&
+        (result.kind === 'retryable' ||
+          (page === 0 &&
+            fields === SYNC_FIELDS &&
+            result.kind === 'permanent' &&
+            result.code === 100))
+      ) {
+        return { ok: false, paused: pausedUntil };
+      }
       // Unknown extra fields are rejected with code 100: fall back to the default fields once.
       if (
         page === 0 &&
@@ -1245,7 +1307,11 @@ export async function syncTemplates(
     const deletionsInProgress = await deletionsAskedSince(
       tx,
       scope.tenantId,
-      local.filter((l) => l.status === 'pending_deletion').map((l) => l.id),
+      new Map(
+        local
+          .filter((l) => l.status === 'pending_deletion')
+          .map((l) => [l.id, l.managementDeferredUntil] as const),
+      ),
       new Date(now.getTime() - DELETION_KEEP_MS),
     );
     const byKey = new Map(local.map((l) => [`${l.name}|${l.language}`, l]));
@@ -1343,9 +1409,13 @@ export async function syncTemplates(
     for (const row of local) {
       if (seen.has(row.id)) continue;
       if (row.status === 'submitting') {
+        // Counted from the later of the submission and its deferred job's run, so a pause Meta
+        // imposed before the create was sent does not fail it (ADR-399).
         if (
           row.submittedAt &&
-          now.getTime() - row.submittedAt.getTime() > SUBMIT_CONFIRM_WINDOW_MS
+          now.getTime() -
+            requestClockStart(row.submittedAt, row.managementDeferredUntil).getTime() >
+            SUBMIT_CONFIRM_WINDOW_MS
         ) {
           await tx
             .update(messageTemplates)

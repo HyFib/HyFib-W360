@@ -11,6 +11,12 @@
 -- sweep, and members' management actions say Meta is limiting management requests until then.
 -- The values are Meta's counters about the company's own account, no personal data; they are
 -- exported with the account and deleted with it.
+--
+-- Work a pause defers must not age while it waits: a template submission or deletion, a flow
+-- operation and a catalog read each record, on their own row, when their deferred job runs again
+-- (`management_deferred_until`), and the windows that give up on such a request (the sync's
+-- 10-minute confirmation window and 8-hour deletion keep, the sweep's 30-minute give-up) count from
+-- the later of the request and that time. The request's own time, which members see, is unchanged.
 ALTER TABLE app.whatsapp_accounts
   ADD COLUMN management_usage_read_at timestamptz,
   ADD COLUMN management_usage_percent smallint
@@ -24,6 +30,16 @@ GRANT UPDATE (management_usage_read_at, management_usage_percent, management_pau
 -- The sweep's due lists below read the pause through their definer functions.
 GRANT SELECT (management_paused_until) ON app.whatsapp_accounts TO w360_definer;
 GRANT SELECT (whatsapp_account_id) ON app.flows TO w360_definer;
+
+ALTER TABLE app.message_templates ADD COLUMN management_deferred_until timestamptz;
+ALTER TABLE app.flows ADD COLUMN management_deferred_until timestamptz;
+ALTER TABLE app.commerce_syncs ADD COLUMN management_deferred_until timestamptz;
+GRANT UPDATE (management_deferred_until) ON app.message_templates TO w360_app;
+GRANT UPDATE (management_deferred_until) ON app.flows TO w360_app;
+GRANT UPDATE (management_deferred_until) ON app.commerce_syncs TO w360_app;
+-- The sweep's due lists below leave out operations whose deferred job has not run yet.
+GRANT SELECT (management_deferred_until) ON app.flows TO w360_definer;
+GRANT SELECT (management_deferred_until) ON app.commerce_syncs TO w360_definer;
 
 -- Template syncs: the due list of 0126, without accounts Meta is throttling. The owner drops the
 -- function and the migration role creates it again, granting before handing it back (see 0011).
@@ -97,7 +113,8 @@ GRANT EXECUTE ON FUNCTION ops.whatsapp_access_checks_due(integer) TO w360_app;
 ALTER FUNCTION ops.whatsapp_access_checks_due(integer) OWNER TO w360_definer;
 
 -- Flow work: the list of 0017, without flow operations and key work of accounts Meta is
--- throttling (a deferred job of their own runs them just after the pause).
+-- throttling, nor flow operations whose deferred job has not run yet (that job runs them just after
+-- the pause; the sweep re-signals them, and gives up on them, only after it).
 SET ROLE w360_definer;
 DROP FUNCTION ops.flow_work_due(integer);
 RESET ROLE;
@@ -109,6 +126,7 @@ CREATE FUNCTION ops.flow_work_due(p_limit integer)
   (SELECT f.tenant_id, 'sync'::text, f.id
      FROM app.flows f JOIN app.tenants t ON t.id = f.tenant_id AND t.status = 'active'
     WHERE f.sync_state IN ('queued', 'running') AND f.sync_requested_at < now() - interval '2 minutes'
+      AND (f.management_deferred_until IS NULL OR f.management_deferred_until <= now())
       AND NOT EXISTS (SELECT 1 FROM app.whatsapp_accounts w
                        WHERE w.tenant_id = f.tenant_id AND w.id = f.whatsapp_account_id
                          AND w.management_paused_until > now())
@@ -137,8 +155,8 @@ REVOKE EXECUTE ON FUNCTION ops.flow_work_due(integer) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION ops.flow_work_due(integer) TO w360_app;
 ALTER FUNCTION ops.flow_work_due(integer) OWNER TO w360_definer;
 
--- Commerce work: the list of 0018, without catalog reads of accounts Meta is throttling (a
--- deferred job of their own runs them just after the pause). Payment Links go to Razorpay and are
+-- Commerce work: the list of 0018, without catalog reads of accounts Meta is throttling, nor
+-- catalog reads whose deferred job has not run yet (that job runs them just after the pause). Payment Links go to Razorpay and are
 -- listed as before.
 SET ROLE w360_definer;
 DROP FUNCTION ops.commerce_work_due(integer);
@@ -152,6 +170,7 @@ CREATE FUNCTION ops.commerce_work_due(p_limit integer)
      FROM app.commerce_syncs s JOIN app.tenants t ON t.id = s.tenant_id AND t.status = 'active'
     WHERE ((s.state IN ('queued', 'running') AND s.requested_at < now() - interval '5 minutes')
        OR (s.state = 'idle' AND s.finished_at < now() - interval '24 hours'))
+      AND (s.management_deferred_until IS NULL OR s.management_deferred_until <= now())
       AND NOT EXISTS (SELECT 1 FROM app.whatsapp_accounts w
                        WHERE w.tenant_id = s.tenant_id AND w.id = s.whatsapp_account_id
                          AND w.management_paused_until > now())
@@ -168,3 +187,36 @@ $$;
 REVOKE EXECUTE ON FUNCTION ops.commerce_work_due(integer) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION ops.commerce_work_due(integer) TO w360_app;
 ALTER FUNCTION ops.commerce_work_due(integer) OWNER TO w360_definer;
+
+-- Dead letters (0089): a setup or a deletion whose job died is settled only when no live job is
+-- doing the work again. A job deferred for a pause waits under the key `paused:<id of the job that
+-- deferred>`, which names no work, so the work is read from its envelope's `ref` (the definer reads
+-- `data`, granted by the migration runner). Otherwise as in 0089: not SECURITY DEFINER (only the
+-- definer functions of 0089 call it), search path pinned, not executable by PUBLIC. The owner drops
+-- it and the migration role creates it again (see 0011); 0089's SQL functions that call it resolve
+-- it when they run.
+SET ROLE w360_definer;
+DROP FUNCTION ops.dead_letter_work_live(text, text);
+RESET ROLE;
+CREATE FUNCTION ops.dead_letter_work_live(p_queue text, p_ref text)
+  RETURNS boolean
+  LANGUAGE plpgsql STABLE
+  SET search_path = pg_catalog, pg_temp
+  AS $$
+BEGIN
+  RETURN EXISTS (
+    SELECT 1 FROM pgboss.job j
+     WHERE j.name = p_queue
+       AND j.state IN ('created', 'retry', 'active')
+       AND CASE p_queue
+             WHEN 'channel.onboard' THEN j.singleton_key = p_ref
+               OR (starts_with(j.singleton_key, 'paused:') AND j.data->>'ref' = p_ref)
+             WHEN 'template.delete' THEN j.singleton_key = p_ref || ':delete'
+               OR (starts_with(j.singleton_key, 'paused:') AND j.data->>'ref' = p_ref)
+             WHEN 'commerce.account' THEN starts_with(j.singleton_key, p_ref || ':')
+             ELSE false
+           END);
+END
+$$;
+REVOKE EXECUTE ON FUNCTION ops.dead_letter_work_live(text, text) FROM PUBLIC;
+ALTER FUNCTION ops.dead_letter_work_live(text, text) OWNER TO w360_definer;

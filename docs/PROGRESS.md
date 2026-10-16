@@ -28,9 +28,23 @@ that Meta is limiting management requests until then. This closes P2-02's remain
   Syncs and access checks stay due and `ops.template_sync_due` / `ops.whatsapp_access_checks_due`
   leave paused accounts out; the other jobs are queued again for 30 seconds after the pause
   (`deferPausedJob`), and `ops.flow_work_due` / `ops.commerce_work_due` leave paused accounts out
-  too. No retry, dead letter or alert is spent. `pacedManagementCalls` records each response and
-  makes no further call in the job once one pauses the account. A high percentage alone does not
+  too. No retry, dead letter or alert is spent. The deferred job's key is `paused:<id of the
+deferring job>` (`pausedJobKey`), and a deferral that was not queued fails the job for a retry
+  (`deferPausedWork` in `apps/worker/src/handlers/management-deferral.ts`, which picks each kind's
+  own queue). `pacedManagementCalls` records each response, makes no further call in the job once
+  one pauses the account, and defers at once when a call refused for now (`retryable`) carried the
+  pause itself (`refusedForPause`; template submissions and deletions apply the same rule); a
+  permanent or credential refusal stays a failure. A template listing refused with code 100 while
+  pausing is not retried with fewer fields until after the pause. A high percentage alone does not
   defer (ADR-399 says why); a rate-limit error without the header is retried as before.
+- **Deferred time does not age a request:** a submission, deletion, flow operation or catalog read
+  that defers records on its row when its deferred job runs (`management_deferred_until`, 0310), and
+  the sync's 10-minute confirmation window, the 8-hour deletion keep and the sweep's 30-minute
+  give-ups count from the later of the request and that time (`requestClockStart`); the flow and
+  commerce due lists wait for it too. Members still see the request's own time.
+- **Dead letters:** `ops.dead_letter_work_live` (0089) is recreated in 0310 to see a waiting
+  deferral of a setup or a deletion, so the dead-letter sweep does not settle work a deferred job
+  will still do.
 - **Members:** "Refresh from Meta", submitting and deleting templates (page and API), flow changes,
   flow keys and catalog reads answer `provider_unavailable` (503) with the end of the pause in the
   company's time zone (UTC for the API, with `details.pausedUntil`); nothing is queued. The OpenAPI
@@ -47,18 +61,31 @@ that Meta is limiting management requests until then. This closes P2-02's remain
 
 ### Verification
 
-- Lint, format, typecheck, unit tests and build: see the commit's checks. New unit tests: 14 in
-  `usage-header.test.ts` (parser and Graph client), 14 in `management-pace.test.ts` (pacing
-  decision, paced calls, the Channels view), one more in `api/message-template-drafts.test.ts` (the
-  API's 503 and nothing written); an existing API test now expects the account read.
-- Manual mutation testing of the parser, the pacing decision, the client and the view: 15/15
-  mutations caught.
+- Ran here: `eslint . --max-warnings=0`, `prettier --check .`, `pnpm typecheck` (every package,
+  the integration and e2e suites included), `pnpm test` (the unit project: 174 files, 1,868 tests) and
+  `pnpm build`, all passing; the pglast parse of migration 0310. Not run here: the integration and
+  e2e suites (no PostgreSQL or browsers in this environment; CI runs them).
+- New unit tests: 15 in `usage-header.test.ts` (parser and Graph client, the length bound through a
+  fake `fetch`), 21 in `management-pace.test.ts` (pacing decision, paced calls and refusals that
+  pause, the deferral's key and its failure to queue, the request clock, the Channels view), 4 in
+  `apps/worker/src/handlers/management-deferral.test.ts` (each kind's queue, the template sync that
+  is not queued, a deferral not queued, kinds that are not paced), and one more in
+  `api/message-template-drafts.test.ts` (the API's 503 and nothing written); an existing API test
+  now expects the account read.
+- Manual mutation testing: 15/15 for the parser, pacing decision, client and view; 10/12 for the
+  review fixes, the two survivors being the sync's request clock and the flow give-up's deferral
+  condition, which only the integration tests (CI) exercise.
 - `tests/integration/management-usage.test.ts` (stand-in extended with `usageHeader` and
   `usageHeaderValue`): readings stored for the right account and company only, a header naming
   another WABA ignored, malformed headers harmless, a refused call's reading stored, a paused sync
   and submission asking nothing, the deferred job's `startAfter`, the sweep's due lists, the
   member's refusal, Channels, number setup making no second health read once the first pauses the
-  account (ADR-398), and the grants and function owners of 0310. **Written and
+  account (ADR-398), a submission and a deletion deferred past their 10-minute and 8-hour windows
+  and done after the pause, flow and catalog give-ups waiting for the deferred job, the flow and
+  commerce due lists with paused and unpaused accounts, refusals that pause (submission, deletion,
+  catalog read, setup step; a flow operation stopped by its first call's pause), the dead-letter
+  check seeing a deferral, and the grants and function owners of 0310 (4,000-character malformed
+  header: Node refuses 16 KiB of headers before the parser). **Written and
   type-checked; they run only in CI (no PostgreSQL here).**
 
 ### Not built

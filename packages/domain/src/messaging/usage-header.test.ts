@@ -289,4 +289,20 @@ describe('the Graph client and the usage header', () => {
       expect(result).toEqual({ ok: true, data: { ids: ['1'] } });
     }
   });
+
+  it('ignores a well-formed reading longer than the bound (a fake fetch: Node refuses such headers)', async () => {
+    const valid = usageValue;
+    // Padded inside the JSON: a header value's outer spaces are trimmed.
+    const padded = (length: number) => `{${' '.repeat(length - valid.length)}${valid.slice(1)}`;
+    const long = padded(MAX_USAGE_HEADER_CHARS + 1);
+    const atBound = padded(MAX_USAGE_HEADER_CHARS);
+    const over = await client(() =>
+      withHeader({ data: [{ id: '1' }] }, 200, long),
+    ).listPhoneNumbers(WABA, 'token');
+    expect(over).toEqual({ ok: true, data: { ids: ['1'] } });
+    const within = await client(() =>
+      withHeader({ data: [{ id: '1' }] }, 200, atBound),
+    ).listPhoneNumbers(WABA, 'token');
+    expect(within.usage?.get(WABA)).toEqual(reading);
+  });
 });

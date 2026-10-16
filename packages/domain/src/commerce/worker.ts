@@ -15,6 +15,7 @@ import {
   inArray,
   isNull,
   lt,
+  or,
   messages,
   notInArray,
   sendIntents,
@@ -33,6 +34,8 @@ import { emitTenantEvent } from '../messaging/events';
 import type { GraphClient, GraphResult, RemoteProduct } from '../messaging/graph';
 import {
   activeManagementPause,
+  isManagementPaused,
+  managementResumeAt,
   pacedManagementCalls,
   untilPaused,
   type ManagementPaused,
@@ -140,12 +143,33 @@ export async function processCommerceSync(
   };
   if (!credential)
     return fail('The WhatsApp account is not connected. Reconnect it, then try again.');
+  /**
+   * Deferred because Meta throttles the account's management calls (ADR-399): records when the job
+   * runs again, while this read still waits, so the sweep's 30-minute give-up counts from then.
+   */
+  const defer = async (pausedUntil: Date): Promise<ManagementPaused> => {
+    await deps.db.run(scope, (tx) =>
+      tx
+        .update(commerceSyncs)
+        .set({ managementDeferredUntil: managementResumeAt(pausedUntil) })
+        .where(
+          and(
+            eq(commerceSyncs.tenantId, scope.tenantId),
+            eq(commerceSyncs.id, row.id),
+            eq(commerceSyncs.version, row.version),
+            inArray(commerceSyncs.state, ['queued', 'running']),
+          ),
+        ),
+    );
+    return { paused: pausedUntil };
+  };
   const paused = activeManagementPause(credential.managementPausedUntil, deps.clock.now());
-  if (paused) return { paused };
+  if (paused) return defer(paused);
   const call = pacedManagementCalls(deps, scope, credential);
-  return untilPaused(() =>
+  const outcome = await untilPaused(() =>
     readCatalogs(deps, scope, whatsappAccountId, credential, call, { fail, finish }),
   );
+  return isManagementPaused(outcome) ? defer(outcome.paused) : outcome;
 }
 
 async function readCatalogs(
@@ -350,6 +374,14 @@ export async function giveUpCommerceSync(
           lt(
             commerceSyncs.requestedAt,
             new Date(deps.clock.now().getTime() - COMMERCE_SYNC_GIVE_UP_MS),
+          ),
+          // Time deferred for a pause Meta imposed does not count (ADR-399).
+          or(
+            isNull(commerceSyncs.managementDeferredUntil),
+            lt(
+              commerceSyncs.managementDeferredUntil,
+              new Date(deps.clock.now().getTime() - COMMERCE_SYNC_GIVE_UP_MS),
+            ),
           ),
         ),
       ),

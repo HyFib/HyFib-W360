@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { isAppError, systemClock } from '@w360/core';
+import { isAppError, systemClock, uuidv7, type Clock } from '@w360/core';
 import { QUEUES } from '@w360/contracts';
 import { authorizedTenantScope } from '@w360/db';
 import {
@@ -8,6 +8,17 @@ import {
   createOnboardingService,
   createTemplatesService,
   deferPausedJob,
+  findDueCommerceWork,
+  findDueFlowWork,
+  giveUpCommerceSync,
+  giveUpFlowSync,
+  pausedJobKey,
+  processCommerceSync,
+  processFlowSync,
+  processTemplateDelete,
+  STARTER_FLOW_JSON,
+  createCommerceService,
+  createFlowsService,
   findAccessChecksDue,
   findTemplateSyncsDue,
   processChannelOnboarding,
@@ -48,11 +59,11 @@ beforeEach(() => {
   fx.standIn.state.usageHeader = null;
 });
 
-const workerDeps = () => ({
+const workerDeps = (clock: Clock = systemClock) => ({
   db: fx.dbs.app,
   keyring: fx.keyring,
   graph: fx.graph,
-  clock: systemClock,
+  clock,
 });
 const scopeOf = (c: Company) => authorizedTenantScope(c.tenant.id, null);
 
@@ -122,7 +133,9 @@ describe('readings', () => {
 
   it('keeps a call working, and stores nothing, with a malformed header', async () => {
     const c = await fx.company();
-    for (const value of ['{oops', '[]', '{"1":"x"}', 'x'.repeat(20_000)]) {
+    // Node's HTTP client refuses a response whose headers reach 16 KiB before the parser sees them
+    // (as before ADR-399), so the long value here stays well under it.
+    for (const value of ['{oops', '[]', '{"1":"x"}', 'x'.repeat(4_000)]) {
       fx.standIn.state.usageHeader = value;
       expect(await syncTemplates(workerDeps(), scopeOf(c), c.whatsappAccountId)).toBe('done');
     }
@@ -232,21 +245,33 @@ describe('a paused account', () => {
     );
     expect(row).toEqual({ status: 'submitting', submit_error: null });
 
-    // What the worker does with it: the job again, signed as before, for just after the pause.
-    const resumeAt = await deferPausedJob(
-      { jobs: fx.jobs(), signer: fx.signer },
-      QUEUES.templateSubmit.name,
-      { kind: 'template.submit', tenantId: c.tenant.id, actorUserId: c.owner.id, ref: id },
-      until,
-    );
-    expect(resumeAt.getTime()).toBe(until.getTime() + MANAGEMENT_RESUME_MARGIN_MS);
+    // What the worker does with it: the job again, signed as before, for just after the pause,
+    // keyed by the deferring job's id (a retry of that job queues nothing more).
+    const deferringJobId = uuidv7();
+    const defer = () =>
+      deferPausedJob(
+        { jobs: fx.jobs(), signer: fx.signer },
+        QUEUES.templateSubmit.name,
+        { kind: 'template.submit', tenantId: c.tenant.id, actorUserId: c.owner.id, ref: id },
+        until,
+        deferringJobId,
+      );
+    const resumeAt = await defer();
+    expect(resumeAt?.getTime()).toBe(until.getTime() + MANAGEMENT_RESUME_MARGIN_MS);
+    expect(await defer()).toBeNull();
     const jobs = await fx.query<{ start_after: Date; data: { ref: string; tenantId: string } }>(
       `SELECT start_after, data FROM pgboss.job WHERE name = $1 AND singleton_key = $2`,
-      [QUEUES.templateSubmit.name, `paused:${id}:${resumeAt.getTime()}`],
+      [QUEUES.templateSubmit.name, pausedJobKey(deferringJobId)],
     );
     expect(jobs).toHaveLength(1);
-    expect(jobs[0]!.start_after.getTime()).toBe(resumeAt.getTime());
+    expect(jobs[0]!.start_after.getTime()).toBe(resumeAt!.getTime());
     expect(jobs[0]!.data).toMatchObject({ ref: id, tenantId: c.tenant.id });
+    // The row says when its deferred job runs, so the sync's window counts from then.
+    const [deferred] = await fx.query<{ management_deferred_until: Date }>(
+      'SELECT management_deferred_until FROM app.message_templates WHERE id = $1',
+      [id],
+    );
+    expect(deferred!.management_deferred_until.getTime()).toBe(resumeAt!.getTime());
   });
 
   it('tells a member Meta is limiting management requests, and queues nothing', async () => {
@@ -347,6 +372,307 @@ describe('number setup (with ADR-398’s second health read)', () => {
     } finally {
       fx.standIn.state.messagingLimitError = null;
     }
+  });
+});
+
+const at = (time: Date): Clock => ({ now: () => new Date(time) });
+const plus = (time: Date, ms: number) => new Date(time.getTime() + ms);
+const flowsService = () =>
+  createFlowsService({
+    db: fx.dbs.app,
+    clock: systemClock,
+    jobs: fx.jobs(),
+    signer: fx.signer,
+    appBaseUrl: 'https://app.example.test',
+    allowInsecureHttp: true,
+  });
+const flowDeps = (clock: Clock = systemClock) => ({
+  ...workerDeps(clock),
+  appBaseUrl: 'https://app.example.test',
+});
+const commerceService = () =>
+  createCommerceService({
+    db: fx.dbs.app,
+    clock: systemClock,
+    jobs: fx.jobs(),
+    signer: fx.signer,
+    keyring: fx.keyring,
+    appBaseUrl: 'https://app.example.test',
+    allowLiveKeys: false,
+  });
+const commerceDeps = (clock: Clock = systemClock) => ({
+  ...workerDeps(clock),
+  razorpayBaseUrl: 'https://razorpay.invalid',
+  jobs: fx.jobs(),
+  signer: fx.signer,
+});
+const ROW_DRAFT = {
+  category: 'UTILITY' as const,
+  header: { type: 'none' as const },
+  body: { text: 'Your parcel {{1}} is out for delivery.', examples: ['P-1'] },
+  footer: null,
+  buttons: [],
+};
+
+async function templateState(id: string) {
+  const [row] = await fx.query<{ status: string; submit_error: string | null }>(
+    'SELECT status, submit_error FROM app.message_templates WHERE id = $1',
+    [id],
+  );
+  return row!;
+}
+
+describe('time deferred for a pause does not count against a request', () => {
+  it('keeps a submission deferred past the 10-minute window submitting, and submits it after the pause', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const { id } = await templates.createDraft(owner, {
+      whatsappAccountId: c.whatsappAccountId,
+      name: 'paced_long_submit',
+      language: 'en',
+      definition: ROW_DRAFT,
+    });
+    await templates.submitTemplate(owner, id);
+    const until = await pause(c, 15);
+    expect(await processTemplateSubmit(workerDeps(), scopeOf(c), id)).toEqual({ paused: until });
+    // The pause has ended; a sync runs before the deferred submission, more than 10 minutes after
+    // the template was submitted. Meta has no record of it, which is right: it was never sent.
+    expect(
+      await syncTemplates(workerDeps(at(plus(until, 10_000))), scopeOf(c), c.whatsappAccountId),
+    ).toBe('done');
+    expect(await templateState(id)).toEqual({ status: 'submitting', submit_error: null });
+    // The deferred job runs and submits it.
+    expect(await processTemplateSubmit(workerDeps(at(plus(until, 31_000))), scopeOf(c), id)).toBe(
+      'done',
+    );
+    expect((await templateState(id)).status).toBe('pending');
+  });
+
+  it('keeps a deletion deferred past the 8-hour keep pending, and deletes it after the pause', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const { id } = await templates.createDraft(owner, {
+      whatsappAccountId: c.whatsappAccountId,
+      name: 'paced_long_delete',
+      language: 'en',
+      definition: ROW_DRAFT,
+    });
+    await templates.submitTemplate(owner, id);
+    expect(await processTemplateSubmit(workerDeps(), scopeOf(c), id)).toBe('done');
+    const t = fx.standIn.state.templates
+      .get(c.wabaId)!
+      .find((x) => x.name === 'paced_long_delete')!;
+    t.status = 'APPROVED';
+    expect(await syncTemplates(workerDeps(), scopeOf(c), c.whatsappAccountId)).toBe('done');
+    await templates.deleteTemplate(owner, id);
+    const until = await pause(c, 9 * 60);
+    expect(await processTemplateDelete(workerDeps(), scopeOf(c), id)).toEqual({ paused: until });
+    // Nine hours on, Meta still lists it (the request was never sent): the deletion stays pending.
+    expect(
+      await syncTemplates(workerDeps(at(plus(until, 10_000))), scopeOf(c), c.whatsappAccountId),
+    ).toBe('done');
+    expect((await templateState(id)).status).toBe('pending_deletion');
+    expect(await processTemplateDelete(workerDeps(at(plus(until, 31_000))), scopeOf(c), id)).toBe(
+      'done',
+    );
+    expect((await templateState(id)).status).toBe('deleted');
+  });
+
+  it('gives up on a flow operation or catalog read only 30 minutes after its deferred job ran', async () => {
+    const c = await fx.company();
+    const other = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const { id: flowId } = await flowsService().create(owner, {
+      whatsappAccountId: c.whatsappAccountId,
+      name: 'Paced survey',
+      categories: ['SURVEY'],
+      json: STARTER_FLOW_JSON,
+    });
+    const { id: otherFlow } = await flowsService().create(await fx.ctx(other, other.owner), {
+      whatsappAccountId: other.whatsappAccountId,
+      name: 'Unpaced survey',
+      categories: ['SURVEY'],
+      json: STARTER_FLOW_JSON,
+    });
+    await commerceService().requestSync(owner, { whatsappAccountId: c.whatsappAccountId });
+    const until = await pause(c, 40);
+    expect(await processFlowSync(flowDeps(), scopeOf(c), flowId)).toEqual({ paused: until });
+    expect(await processCommerceSync(commerceDeps(), scopeOf(c), c.whatsappAccountId)).toEqual({
+      paused: until,
+    });
+    // Both requests look lost to the sweep (asked more than 2 and 5 minutes ago).
+    await fx.query(
+      `UPDATE app.flows SET sync_requested_at = now() - interval '10 minutes' WHERE id = ANY($1)`,
+      [[flowId, otherFlow]],
+    );
+    await fx.query(
+      `UPDATE app.commerce_syncs SET requested_at = now() - interval '10 minutes'
+        WHERE whatsapp_account_id = $1`,
+      [c.whatsappAccountId],
+    );
+    // The paused account's work is not listed; the other company's flow is.
+    const flowRefs = (await findDueFlowWork(fx.dbs.app, 5000)).map((w) => w.ref);
+    expect(flowRefs).toContain(otherFlow);
+    expect(flowRefs).not.toContain(flowId);
+    expect((await findDueCommerceWork(fx.dbs.app, 5000)).map((w) => w.ref)).not.toContain(
+      c.whatsappAccountId,
+    );
+    // A minute after the pause, 41 minutes after the requests: neither is given up.
+    const after = at(plus(until, 60_000));
+    await giveUpFlowSync({ db: fx.dbs.app, clock: after }, scopeOf(c), flowId);
+    await giveUpCommerceSync({ db: fx.dbs.app, clock: after }, scopeOf(c), c.whatsappAccountId);
+    const [flow] = await fx.query<{ sync_state: string }>(
+      'SELECT sync_state FROM app.flows WHERE id = $1',
+      [flowId],
+    );
+    expect(flow!.sync_state).not.toBe('failed');
+    const [read] = await fx.query<{ state: string }>(
+      'SELECT state FROM app.commerce_syncs WHERE whatsapp_account_id = $1',
+      [c.whatsappAccountId],
+    );
+    expect(read!.state).not.toBe('failed');
+    // 30 minutes after the deferred jobs were due, the existing give-up applies.
+    const late = at(plus(until, 31 * 60_000 + 30_000));
+    await giveUpFlowSync({ db: fx.dbs.app, clock: late }, scopeOf(c), flowId);
+    await giveUpCommerceSync({ db: fx.dbs.app, clock: late }, scopeOf(c), c.whatsappAccountId);
+    expect(
+      (
+        await fx.query<{ sync_state: string }>('SELECT sync_state FROM app.flows WHERE id = $1', [
+          flowId,
+        ])
+      )[0]!.sync_state,
+    ).toBe('failed');
+  });
+});
+
+describe('a refusal whose own response pauses the account', () => {
+  const RATE_LIMITED = { status: 400, code: 80007, message: 'Rate limit hit' };
+  const pausing = (c: Company) =>
+    usageHeaderValue({ [c.wabaId]: { callCount: 100, regainMinutes: 5 } });
+
+  it('defers a submission and a deletion instead of spending a retry or recording a failure', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const { id } = await templates.createDraft(owner, {
+      whatsappAccountId: c.whatsappAccountId,
+      name: 'paced_refused_submit',
+      language: 'en',
+      definition: ROW_DRAFT,
+    });
+    await templates.submitTemplate(owner, id);
+    fx.standIn.state.templateCreateQueue.push({ kind: 'error', ...RATE_LIMITED });
+    fx.standIn.state.usageHeader = pausing(c);
+    const submitted = await processTemplateSubmit(workerDeps(), scopeOf(c), id);
+    fx.standIn.state.usageHeader = null;
+    expect(submitted).toEqual({ paused: (await usageRow(c)).management_paused_until });
+    expect(await templateState(id)).toEqual({ status: 'submitting', submit_error: null });
+
+    // A deletion refused for now, with the pause: no delete_failed, still pending.
+    const d = await fx.company();
+    const dOwner = await fx.ctx(d, d.owner);
+    const { id: tid } = await templates.createDraft(dOwner, {
+      whatsappAccountId: d.whatsappAccountId,
+      name: 'paced_refused_delete',
+      language: 'en',
+      definition: ROW_DRAFT,
+    });
+    await templates.submitTemplate(dOwner, tid);
+    expect(await processTemplateSubmit(workerDeps(), scopeOf(d), tid)).toBe('done');
+    await templates.deleteTemplate(dOwner, tid);
+    fx.standIn.state.templateDeleteError = RATE_LIMITED;
+    fx.standIn.state.usageHeader = pausing(d);
+    try {
+      expect(await processTemplateDelete(workerDeps(), scopeOf(d), tid)).toEqual({
+        paused: (await usageRow(d)).management_paused_until,
+      });
+    } finally {
+      fx.standIn.state.templateDeleteError = null;
+      fx.standIn.state.usageHeader = null;
+    }
+    expect((await templateState(tid)).status).toBe('pending_deletion');
+    const failures = await fx.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM app.template_status_events
+        WHERE template_id = $1 AND status = 'delete_failed'`,
+      [tid],
+    );
+    expect(failures[0]!.n).toBe(0);
+    // The deferral is live work for the dead-letter sweep (0089, recreated in 0310).
+    await deferPausedJob(
+      { jobs: fx.jobs(), signer: fx.signer },
+      QUEUES.templateDelete.name,
+      { kind: 'template.delete', tenantId: d.tenant.id, actorUserId: null, ref: tid },
+      (await usageRow(d)).management_paused_until!,
+      uuidv7(),
+    );
+    const [live] = await fx.query<{ live: boolean }>(
+      `SELECT ops.dead_letter_work_live('template.delete', $1) AS live`,
+      [tid],
+    );
+    expect(live!.live).toBe(true);
+  });
+
+  it('defers a catalog read and a setup step instead of retrying them, and stops a flow operation', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const { id: flowId } = await flowsService().create(owner, {
+      whatsappAccountId: c.whatsappAccountId,
+      name: 'Refused survey',
+      categories: ['SURVEY'],
+      json: STARTER_FLOW_JSON,
+    });
+    // The operation's first call (looking for a flow an earlier attempt made) pauses the account,
+    // so the create is not sent and the operation waits, not failed.
+    fx.standIn.state.usageHeader = pausing(c);
+    const flowOutcome = await processFlowSync(flowDeps(), scopeOf(c), flowId);
+    fx.standIn.state.usageHeader = null;
+    expect(flowOutcome).toEqual({ paused: (await usageRow(c)).management_paused_until });
+    const [flow] = await fx.query<{ sync_state: string; sync_error: string | null }>(
+      'SELECT sync_state, sync_error FROM app.flows WHERE id = $1',
+      [flowId],
+    );
+    expect(flow).toEqual({ sync_state: 'running', sync_error: null });
+
+    const k = await fx.company();
+    await commerceService().requestSync(await fx.ctx(k, k.owner), {
+      whatsappAccountId: k.whatsappAccountId,
+    });
+    fx.standIn.state.catalogError = RATE_LIMITED;
+    fx.standIn.state.usageHeader = pausing(k);
+    try {
+      expect(await processCommerceSync(commerceDeps(), scopeOf(k), k.whatsappAccountId)).toEqual({
+        paused: (await usageRow(k)).management_paused_until,
+      });
+    } finally {
+      fx.standIn.state.catalogError = null;
+      fx.standIn.state.usageHeader = null;
+    }
+
+    const n = await fx.company();
+    // Subscribing is refused for now with the pause: the step stays, nothing fails.
+    await fx.query(
+      `UPDATE app.channel_accounts SET status = 'onboarding', onboarding_step = 'subscribe_app'
+        WHERE id = $1`,
+      [n.channelAccountId],
+    );
+    fx.standIn.state.subscribeErrors.set(n.wabaId, RATE_LIMITED);
+    fx.standIn.state.usageHeader = pausing(n);
+    try {
+      expect(
+        await processChannelOnboarding(
+          { db: fx.dbs.app, keyring: fx.keyring, graph: fx.graph, clock: systemClock },
+          scopeOf(n),
+          n.channelAccountId,
+        ),
+      ).toEqual({ paused: (await usageRow(n)).management_paused_until });
+    } finally {
+      fx.standIn.state.subscribeErrors.delete(n.wabaId);
+      fx.standIn.state.usageHeader = null;
+    }
+    const [channel] = await fx.query<{ status: string; onboarding_step: string }>(
+      'SELECT status, onboarding_step FROM app.channel_accounts WHERE id = $1',
+      [n.channelAccountId],
+    );
+    expect(channel).toEqual({ status: 'onboarding', onboarding_step: 'subscribe_app' });
   });
 });
 
