@@ -1,5 +1,46 @@
 # Progress
 
+## 2026-10-16 — Byte ranges for the inbox's recordings and videos (P2-09, ADR-382)
+
+Status: **Implemented; its database and browser tests run in CI only.** The inbox answered every
+request for a customer's file with the whole file, so Safari and iOS, whose players ask for parts,
+did not play recordings and videos. The files' answers also went out with a page's
+Content-Security-Policy, not the `sandbox` one ADR-216 describes, because Next sends the headers
+`next.config.ts` and `proxy.ts` give before a route's own.
+
+### Completed
+
+- **Domain:** `byteRange` (`messaging/received-media.ts`) reads one range of bytes from a GET's
+  Range header against the file's length (a part, none past the end, or the whole file for any
+  other request, If-Range included); `byteRangeStream` passes the part on from the download, cancels
+  the rest and fails if the file is shorter. `ReceivedMediaFile.size` is the length Meta's download
+  gives; `downloadMedia` gives none for a compressed response. No migration.
+- **Web:** the inbox's file route answers 206 with `Content-Range` and `Content-Length`, 416 past
+  the end, and `Accept-Ranges: bytes` on whole files of known length; `proxy.ts` gives the route
+  `default-src 'none'; sandbox` (`FILE_ROUTE`, `FILE_POLICY`), and the route states the
+  `private, no-store` every page gets.
+- **Tests:** unit (`received-media.test.ts`: the ranges, the cut across chunks, cancelling, a short
+  file, a failed download, a compressed download's length; `document-routes.test.ts`: the files'
+  route and policy); integration (`received-media.test.ts`: the file's length, a part read from the
+  download); e2e (`inbox.spec.ts`: a voice note's parts, the refusal past the end, the whole file,
+  and the headers as the browser gets them). Written for CI; the integration and e2e tests were not
+  run here.
+- **Docs:** ADR-382; SECURITY; THREAT-MODEL T203; ARCHITECTURE; DEPLOYMENT; RUNBOOKS; BACKLOG
+  P2-09; the feature matrix (W-032, status unchanged).
+- **Mutation checks:** 24 deliberate regressions in the ranges, the cut, the compressed length and
+  the files' route and policy: 21 caught by the unit tests; one is equivalent (a chunk that ends
+  where the part starts is passed on as an empty chunk); the two that drop the file's length are
+  caught by the integration and e2e tests, which run in CI only.
+
+### Test commands and results (local, 2026-10-16)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 156 files, 1624 tests passed                                    |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+
 ## 2026-10-16 — The permissions granted to HyFib on Channels (P2-10, ADR-381)
 
 Status: **Implemented; its database and browser tests run in CI only.** The permissions Meta lists

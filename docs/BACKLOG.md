@@ -44,9 +44,11 @@ verification, app review, Embedded Signup configuration).
   (ADR-216: photos, stickers, voice notes, videos and documents fetched from WhatsApp when shown and
   never stored; no migration). **[Sending files built; their database and browser tests run only in
   CI]** (ADR-218: photos, videos, recordings and documents up to 16 MB uploaded to WhatsApp when a
-  member sends them and sent by their id; no migration). Remaining: list virtualisation, collision
-  warnings (phase 3 with presence), template picker (phase 3), byte ranges so Safari plays
-  recordings and videos.
+  member sends them and sent by their id; no migration). **[Byte ranges built; their database and
+  browser tests run only in CI]** (ADR-382: one range of bytes answered with that part, cut from
+  the download, when Meta gives the file's length, so Safari and iOS can play recordings and
+  videos; the files' sandbox policy now reaches the browser; no migration). Remaining: list
+  virtualisation, collision warnings (phase 3 with presence), template picker (phase 3).
 - **P2-10 Channel settings UI** — done: connect (Embedded Signup), setup progress and errors, retry,
   disconnect, quality and health time. **[The overview's setup checklist built from the company's
   data; its database and browser tests run only in CI]** (ADR-233, W-026: two-factor, an active

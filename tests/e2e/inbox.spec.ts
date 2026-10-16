@@ -206,6 +206,77 @@ test('a photo and a document the customer sends open from the conversation (ADR-
   expect(fetched.every((r) => r.authorization === `Bearer ${E2E_CHANNEL_TOKEN}`)).toBe(true);
 });
 
+test('a voice note is passed on in the parts a player asks for, as Safari’s does (ADR-382)', async ({
+  page,
+  request,
+}) => {
+  const email = uniqueEmail('inbox-ranges');
+  const slug = `ranges-${Date.now().toString(36)}`;
+  await signUpAndVerify(page, { name: 'Rhea Ranges', email, password: PASSWORD });
+  await page.getByLabel('Company name').fill('Range Traders');
+  await page.getByLabel('Company address').fill(slug);
+  await page.getByRole('button', { name: 'Create company' }).click();
+  await expect(page).toHaveURL(new RegExp(`/c/${slug}$`));
+  const { wabaId, phoneNumberId } = await connectTestChannel({ ownerEmail: email, slug });
+
+  const voiceId = newMediaId();
+  const voice = Buffer.from(Array.from({ length: 1000 }, (_, i) => i % 251));
+  await setStandInMedia(request, { id: voiceId, mimeType: 'audio/ogg', bytes: voice });
+  await sendSignedWebhook(
+    request,
+    inboundMessages(wabaId, phoneNumberId, randomWaId(), [
+      { type: 'audio', audio: { id: voiceId, mime_type: 'audio/ogg; codecs=opus', voice: true } },
+    ]),
+  );
+  await page.getByRole('link', { name: 'Inbox' }).click();
+  const conversation = page.getByRole('link', { name: /Priya Customer/ });
+  await expect(conversation).toBeVisible({ timeout: 20_000 });
+  await conversation.click();
+  const thread = page.getByRole('list', { name: /^Messages with/ });
+  await expect(thread.getByText('Voice message')).toBeVisible();
+  const src = await thread.locator('audio').getAttribute('src');
+  expect(src).toMatch(new RegExp(`^/c/${slug}/inbox/[0-9a-f-]+/media/[0-9a-f-]+$`));
+  const fetchPart = (range?: string) =>
+    page.request.get(src!, range ? { headers: { Range: range } } : {});
+
+  // A player's first question: the first two bytes, and how long the file is.
+  const probe = await fetchPart('bytes=0-1');
+  expect(probe.status()).toBe(206);
+  expect(probe.headers()).toMatchObject({
+    'content-type': 'audio/ogg',
+    'content-range': 'bytes 0-1/1000',
+    'content-length': '2',
+    'accept-ranges': 'bytes',
+    // As the browser gets them: kept by no browser, and nothing in the file runs.
+    'cache-control': 'private, no-store',
+    'content-security-policy': "default-src 'none'; sandbox",
+    'x-content-type-options': 'nosniff',
+  });
+  expect((await probe.body()).equals(voice.subarray(0, 2))).toBe(true);
+  // From the middle to the end, and the last bytes.
+  const rest = await fetchPart('bytes=600-');
+  expect(rest.status()).toBe(206);
+  expect(rest.headers()['content-range']).toBe('bytes 600-999/1000');
+  expect((await rest.body()).equals(voice.subarray(600))).toBe(true);
+  const last = await fetchPart('bytes=-10');
+  expect(last.headers()['content-range']).toBe('bytes 990-999/1000');
+  expect((await last.body()).equals(voice.subarray(990))).toBe(true);
+  // Past the end there is no part; the whole file says that parts can be asked for.
+  const past = await fetchPart('bytes=1000-');
+  expect(past.status()).toBe(416);
+  expect(past.headers()).toMatchObject({
+    'content-range': 'bytes */1000',
+    'content-security-policy': "default-src 'none'; sandbox",
+  });
+  const whole = await fetchPart();
+  expect(whole.status()).toBe(200);
+  expect(whole.headers()).toMatchObject({
+    'accept-ranges': 'bytes',
+    'content-security-policy': "default-src 'none'; sandbox",
+  });
+  expect((await whole.body()).equals(voice)).toBe(true);
+});
+
 test('a member sends a document from the conversation, uploaded to WhatsApp and sent by its id (ADR-218)', async ({
   page,
   request,

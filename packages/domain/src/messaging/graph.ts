@@ -217,7 +217,12 @@ export const MEDIA_UPLOAD_TIMEOUT_MS = 120_000;
 const MEDIA_USER_AGENT = 'HyFib-W360/1.0.0';
 
 export type MediaDownload =
-  | { ok: true; body: ReadableStream<Uint8Array>; contentLength: number | null }
+  | {
+      ok: true;
+      body: ReadableStream<Uint8Array>;
+      /** The length Meta gives for the bytes of `body`: none for a compressed response. */
+      contentLength: number | null;
+    }
   | { ok: false; kind: GraphFailureKind; httpStatus?: number; title: string };
 
 export class GraphClient {
@@ -923,10 +928,15 @@ export class GraphClient {
       };
     }
     const length = response.headers.get('content-length');
+    // fetch decompresses a compressed response, whose length is then not that of the bytes read.
+    const encoding = (response.headers.get('content-encoding') ?? '').trim().toLowerCase();
     return {
       ok: true,
       body: response.body,
-      contentLength: length && /^\d{1,15}$/.test(length) ? Number(length) : null,
+      contentLength:
+        (encoding === '' || encoding === 'identity') && length && /^\d{1,15}$/.test(length)
+          ? Number(length)
+          : null,
     };
   }
 }

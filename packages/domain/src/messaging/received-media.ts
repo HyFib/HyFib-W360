@@ -139,6 +139,93 @@ export function limitedStream(
   );
 }
 
+/** The part of a file a request asks for (ADR-382): all of it, bytes `start` to `end`, or none. */
+export type ByteRange =
+  | { kind: 'whole' }
+  | { kind: 'part'; start: number; end: number; size: number }
+  | { kind: 'unsatisfiable'; size: number };
+
+/** One range of bytes: `first-last`, `first-` or the last `-n` bytes (RFC 9110 §14.1). */
+const BYTE_RANGE = /^bytes=[ \t]*(?:(\d+)-(\d*)|-(\d+))[ \t]*$/i;
+
+/**
+ * The part of a file of `size` bytes a request's Range header asks for (RFC 9110 §14, ADR-382).
+ * Bytes are counted from 0 and `end` is included. A single range is answered; any other request
+ * gets the whole file: no Range, a method other than GET, a file whose length is not known or is
+ * 0, an If-Range (HyFib gives no validator it could match), and a header a server may ignore
+ * (another unit, several ranges, or one malformed). A range starting past the end has no part.
+ */
+export function byteRange(
+  request: { method: string; headers: Headers },
+  size: number | null,
+): ByteRange {
+  const header = request.headers.get('range');
+  if (
+    request.method !== 'GET' ||
+    header === null ||
+    request.headers.has('if-range') ||
+    size === null ||
+    size === 0
+  )
+    return { kind: 'whole' };
+  const match = BYTE_RANGE.exec(header);
+  if (!match) return { kind: 'whole' };
+  const [, first, last, suffix] = match;
+  if (suffix !== undefined) {
+    const length = Number(suffix);
+    return length === 0
+      ? { kind: 'unsatisfiable', size }
+      : { kind: 'part', start: Math.max(size - length, 0), end: size - 1, size };
+  }
+  const start = Number(first);
+  if (last && Number(last) < start) return { kind: 'whole' };
+  if (start >= size) return { kind: 'unsatisfiable', size };
+  return { kind: 'part', start, end: last ? Math.min(Number(last), size - 1) : size - 1, size };
+}
+
+/**
+ * Passes on bytes `start` to `end` of `body` (from 0, `end` included), then cancels the rest of
+ * the download. The stream fails when `body` ends first, so a shorter file is never passed on as
+ * the part asked for.
+ */
+export function byteRangeStream(
+  body: ReadableStream<Uint8Array>,
+  start: number,
+  end: number,
+): ReadableStream<Uint8Array> {
+  const reader = body.getReader();
+  let read = 0;
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) {
+          controller.error(new Error('The file ended before the part asked for.'));
+          return;
+        }
+        const from = read;
+        read += value.byteLength;
+        if (read <= start) continue;
+        const part = value.subarray(
+          Math.max(start - from, 0),
+          Math.min(end + 1 - from, value.byteLength),
+        );
+        if (read > end) {
+          await reader.cancel();
+          controller.enqueue(part);
+          controller.close();
+        } else {
+          controller.enqueue(part);
+        }
+        return;
+      }
+    },
+    cancel(reason) {
+      return reader.cancel(reason);
+    },
+  });
+}
+
 const DISCONNECTED =
   'The WhatsApp account that received this file is disconnected. An administrator can reconnect it in Settings → Channels.';
 const ACCESS_REFUSED =
@@ -183,6 +270,8 @@ export interface ReceivedMediaFile {
   contentType: string;
   disposition: 'inline' | 'attachment';
   filename: string;
+  /** The bytes in `body`, when WhatsApp's download gives their length (ADR-382). */
+  size: number | null;
   body: ReadableStream<Uint8Array>;
 }
 
@@ -273,7 +362,12 @@ export function createReceivedMediaService(deps: ReceivedMediaDeps) {
     messageId: string,
     row: NonNullable<Awaited<ReturnType<typeof findReceivedFile>>>,
     customerOnly: boolean,
-  ): Promise<{ mimeType: string | null; filename: string; body: ReadableStream<Uint8Array> }> {
+  ): Promise<{
+    mimeType: string | null;
+    filename: string;
+    size: number | null;
+    body: ReadableStream<Uint8Array>;
+  }> {
     // A message has a media record when the customer sent a file or a member uploaded one
     // (ADR-218); an erased customer's are gone with their messages' content.
     if (
@@ -306,6 +400,7 @@ export function createReceivedMediaService(deps: ReceivedMediaDeps) {
     return {
       mimeType,
       filename: mediaFilename({ type: row.type, mimeType, filename: row.filename, messageId }),
+      size: download.contentLength,
       body: limitedStream(download.body, MEDIA_MAX_BYTES),
     };
   }
@@ -325,7 +420,12 @@ export function createReceivedMediaService(deps: ReceivedMediaDeps) {
       const row = await findReceivedFile(db, ctx.scope, ctx.tenant.id, messageId, conversationId);
       if (!row || !canSeeConversation(ctx, row.assignedMembershipId)) throw notFound('Message');
       const file = await fetchFile(ctx.tenant.id, messageId, row, false);
-      return { ...mediaPresentation(file.mimeType), filename: file.filename, body: file.body };
+      return {
+        ...mediaPresentation(file.mimeType),
+        filename: file.filename,
+        size: file.size,
+        body: file.body,
+      };
     },
 
     /**
@@ -343,6 +443,7 @@ export function createReceivedMediaService(deps: ReceivedMediaDeps) {
         contentType: baseMediaType(file.mimeType) ?? 'application/octet-stream',
         disposition: 'attachment',
         filename: file.filename,
+        size: file.size,
         body: file.body,
       };
     },

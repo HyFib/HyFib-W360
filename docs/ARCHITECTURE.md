@@ -544,7 +544,10 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   read-only transaction, then asks Graph for the file's address (`GraphClient.getMedia`) and
   downloads it with the token (`downloadMedia`: https or the Graph origin only, no redirects),
   passing the bytes on through a stream that stops past 100 MB. Nothing is stored;
-  `mediaPresentation` decides the response's type and disposition.
+  `mediaPresentation` decides the response's type and disposition. A request for one range of
+  bytes (ADR-382) is read by `byteRange` against the length Meta's download gives, and answered
+  with that part through `byteRangeStream`, which skips the bytes before it and cancels the
+  download after it (206, or 416 past the end); `proxy.ts` gives the route `FILE_POLICY`.
   Keys get the same file from `GET /api/v1/messages/{id}/media` (ADR-217,
   `openReceivedMediaForKey`): `conversations.read`, the message in the key's company and not of an
   erased contact, then the same fetch, answered as an attachment with the file's own type through

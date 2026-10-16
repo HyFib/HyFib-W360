@@ -15066,3 +15066,48 @@ Decision:
 
 Not built: the messaging limits of each number (their Graph fields are not read yet), and which
 assets each permission covers (`granular_scopes` target ids).
+
+## ADR-382 Byte ranges for the inbox's recordings and videos (P2-09) (2026-10-16)
+
+Context: the inbox passes on the files customers send from WhatsApp (ADR-216), but answered every
+request with the whole file. Apple's guide for media on its devices says that servers hosting media
+files for iOS must support byte-range requests, which iOS uses for random access in playback
+(Safari Web Content Guide, "Configuring Your Server"), so members on Safari and iOS downloaded
+recordings and videos with the link below the player. "Byte ranges" was listed as not built under
+ADR-216 and remained under P2-09. Looking at the answers' headers also showed that Next sends the
+headers `next.config.ts` and `proxy.ts` give before a route's own and does not replace them, so the
+inbox's files went out with a page's Content-Security-Policy rather than the `sandbox` one ADR-216
+describes, and with every page's `private, no-store` rather than an hour in the member's cache.
+
+Decision:
+
+- **One range of bytes (`messaging/received-media.ts`, `byteRange`):** a GET whose Range header asks
+  for `bytes=first-last`, `first-` or the last `-n` gets that part: 206 with
+  `Content-Range: bytes first-last/length`, its `Content-Length` and `Accept-Ranges: bytes` (an end
+  past the file's is its end). A range that starts past the end (or `-0`) gets 416 with
+  `Content-Range: bytes */length`. Every other request gets the whole file, as a server may answer
+  (RFC 9110 §14): no Range, several ranges, another unit or a malformed header, a method other than
+  GET, and any If-Range, since HyFib gives no ETag or date it could match. A whole file whose length
+  is known says `Accept-Ranges: bytes`.
+- **Only with a length HyFib can vouch for:** the length is the one Meta's download response gives
+  for its bytes. A compressed response (fetch passes it on decompressed) or one without a length
+  gets no ranges, and the whole file as before; Graph's `file_size` alone is not used, since a
+  wrong one would describe a part wrongly.
+- **Cut from the download (`byteRangeStream`):** what is known of Meta's media download (research
+  M-196) says nothing of ranges, so HyFib does not ask Meta for one. It downloads the file from its
+  start as before, skips the bytes before the part, passes the part on and cancels the rest of the
+  download; the stream fails if the file ends before the part, so a short file is never passed on
+  as the part asked for. A player's first question (`bytes=0-1`) costs one chunk.
+- **The headers the browser gets:** `proxy.ts` gives the inbox's file route the policy
+  `default-src 'none'; sandbox` in place of a page's (`FILE_ROUTE` and `FILE_POLICY` in
+  `lib/document-routes.ts`), so the policy ADR-216 describes now reaches the browser for files and
+  refusals alike. The route states `private, no-store` like every page: no browser keeps a
+  customer's file, which also keeps them off shared computers. Next's own compression leaves these
+  answers alone (none of the types passed on is compressible in the type list it uses), so a
+  part's bytes are the file's.
+- **No migration.** The public API's file endpoint (ADR-217) still answers with the whole file.
+
+Not built: ranges through the public API, several ranges in one answer (multipart), ETags and
+If-Range, keeping a file's Graph address between a player's requests (each request asks Graph and
+downloads from the start), and checking playback in Safari itself (no Safari here; the end-to-end
+test checks the answers a player gets).

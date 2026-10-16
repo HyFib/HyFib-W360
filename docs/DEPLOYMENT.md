@@ -1649,6 +1649,12 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    members and do not serve the new endpoints. Rolling an image back leaves the column in place;
    items keys added stay on their deals and show on the deal page.
 
+   ADR-382 has no migration. Safari's and iOS's players ask for a recording or a video in parts,
+   and each part is downloaded from Meta from the file's start, so playing one makes several
+   requests to Graph and to Meta's media host; a proxy in front of the web tier must pass `Range`
+   headers and 206 answers through. Until the web rollout ends, an old web server answers a range
+   request with the whole file, as before.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

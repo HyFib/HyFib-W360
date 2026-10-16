@@ -299,7 +299,10 @@ Phase 3 rules on top of the matrix (enforced in domain services and re-checked w
   Graph returned (no user name or password, no redirects; the address is never stored or logged),
   and passed on without a copy. Only photos, stickers, recordings and videos keep their type; every
   other file is an `application/octet-stream` attachment. Answers carry `nosniff`, a `sandbox`
-  Content-Security-Policy and a same-origin resource policy, and stop past 100 MB.
+  Content-Security-Policy (`proxy.ts` gives it since ADR-382; before, a page's policy reached the
+  browser) and a same-origin resource policy, are kept by no browser (`private, no-store`), and
+  stop past 100 MB. A request for one range of bytes gets that part, cut from the download, only
+  when Meta's download gives the file's length (ADR-382).
   Files members send (ADR-218) need `inbox.reply` and every check of a text reply, go through a
   route only HyFib's own pages may post to (the trusted-origin check) with the member's session, are
   read up to 16 MB and accepted only as listed photo, video, recording and document types, and are

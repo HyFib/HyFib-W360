@@ -3,6 +3,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { systemClock, uuidv7 } from '@w360/core';
 import {
   authenticateApiToken,
+  byteRangeStream,
   createApiKeysService,
   createContactsService,
   createReceivedMediaService,
@@ -78,6 +79,7 @@ describe('files customers send (ADR-216)', () => {
       contentType: 'image/jpeg',
       disposition: 'inline',
       filename: `whatsapp-image-${image.messageId.slice(0, 8)}.jpg`,
+      size: 2048,
     });
     expect((await readAll(file.body)).equals(photo.bytes)).toBe(true);
     // Where the file is, then the file, both with the account's own token.
@@ -119,16 +121,20 @@ describe('files customers send (ADR-216)', () => {
       filename: 'Quote A .pdf',
     });
     expect((await readAll(quote.body)).toString()).toBe('%PDF-1.4 quote');
+    const recording = randomBytes(512);
     const voice = await receive(
       c,
       waId,
       'audio',
       { mime_type: 'audio/ogg; codecs=opus', voice: true },
-      { bytes: randomBytes(512), mimeType: 'audio/ogg; codecs=opus' },
+      { bytes: recording, mimeType: 'audio/ogg; codecs=opus' },
     );
     const note = await service().openReceivedMedia(owner, voice.conversationId, voice.messageId);
-    expect(note).toMatchObject({ contentType: 'audio/ogg', disposition: 'inline' });
-    await note.body.cancel();
+    expect(note).toMatchObject({ contentType: 'audio/ogg', disposition: 'inline', size: 512 });
+    // A part of it, as a player asks; the download stops after the part (ADR-382).
+    expect(
+      (await readAll(byteRangeStream(note.body, 100, 199))).equals(recording.subarray(100, 200)),
+    ).toBe(true);
 
     // An agent sees unassigned conversations and their own, not another member's.
     const [ownerMembership] = await fx.query<{ id: string }>(
