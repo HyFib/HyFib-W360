@@ -7161,10 +7161,20 @@ describe('products on deals through the API (ADR-378)', () => {
         metadata: { changes: ['products'], source: 'api' },
       },
     ]);
-    // The deal's history and its events report its own details only.
-    expect(
-      (await apiListDealHistory(deps(), reader.ctx, deal.id, {})).data.map((e) => e.type),
-    ).toEqual(['created']);
+    // The deal's history gives each change of products (ADR-397): `items`, with who made it,
+    // never the product.
+    const historyOf = async () =>
+      (await apiListDealHistory(deps(), reader.ctx, deal.id, {})).data.map((e) => [
+        e.type,
+        e.changes,
+        e.changedBy,
+        e.changedByApiKeyId,
+      ]);
+    expect(await historyOf()).toEqual([
+      ['updated', ['items'], 'api', writer.id],
+      ['updated', ['items'], 'member', null],
+      ['created', null, 'member', null],
+    ]);
 
     // With an Idempotency-Key a retry answers the first response and adds nothing more.
     const once = idem('deal-item-1', 'one more mug');
@@ -7194,6 +7204,14 @@ describe('products on deals through the API (ADR-378)', () => {
       kind: 'deal_updated',
       data: { fields: ['products'], productRemoved: 'Plate', apiKeyId: remover.id },
     });
+    // The removal is in the history too; the refused attempts are not.
+    const history = await historyOf();
+    expect(history).toHaveLength(5);
+    expect(history.slice(0, 2)).toEqual([
+      ['updated', ['items'], 'api', remover.id],
+      ['updated', ['items'], 'api', writer.id],
+    ]);
+    expect(JSON.stringify(history)).not.toMatch(/Plate|Blue mug/);
     // Adding needs the scope that reads orders as well.
     await expectAppError(
       apiAddDealItem(deps(), remover.ctx, deal.id, mug, null),

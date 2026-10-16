@@ -321,14 +321,20 @@ describe('products on deals through the API (ADR-378)', () => {
       `when the deal already lists ${MAX_DEAL_ITEMS} products`,
       'with 409 on an erased contact’s deal',
       'Needs the CRM and Commerce in the company’s plan',
-      'no deal event is sent, as when members add one, and the deal’s history leaves it out',
+      // In the deal's history since ADR-397, as `items`.
+      'no deal event is sent, as when members add one, and the deal’s history gives it (`changes`: `items`)',
       'PATCH /deals/{id} sets it',
     ]) {
       expect(add.description).toContain(words);
     }
-    for (const words of ['Scope: `deals.write`.', 'A product already removed answers 404']) {
+    for (const words of [
+      'Scope: `deals.write`.',
+      'no deal event is sent, and the deal’s history gives it',
+      'A product already removed answers 404',
+    ]) {
       expect(remove.description).toContain(words);
     }
+    expect(`${add.description} ${remove.description}`).not.toMatch(/leaves it out|ADR-\d/);
     const schemas = doc.components.schemas;
     expect(schemas.DealItem?.required.sort()).toEqual(
       [

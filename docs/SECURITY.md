@@ -494,7 +494,8 @@ Phase 4 rules (CRM, P4-04):
   from a member without `crm.read` before anything is read or audited, and records
   `field: { key, match }` in `report.exported`, never the option; a filtered file's name gives the
   key only. `GET /reports?field=` needs `deals.read` as well as `reports.read` (checked before
-  anything in the query is) and the CRM in the plan, as `GET /deal-fields` does, and refuses with
+  the route reads the query; the API's request handler refuses a NUL character in any request
+  first, for every route, naming only the parameter) and the CRM in the plan, as `GET /deal-fields` does, and refuses with
   422 naming `field` what does not resolve; without `field` a `reports.read` key reads the report
   as before. Other sections and report emails are never filtered. The page, the board and the lists
   read the filter's text apart from their input's validation, so text it refuses (a NUL character)

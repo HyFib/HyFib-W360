@@ -27,7 +27,9 @@ import { currencyDigits, MAX_DEAL_MINOR, parseAmountToMinor } from './money';
  * Products on deals (ADR-375): products from the company's WhatsApp catalogs listed on a deal, each
  * with a quantity and a unit price in the deal's currency when it was added, its name kept as it
  * was then. Members who change deals and may see the catalogs add and remove them; anyone who reads
- * the CRM sees them on the deal.
+ * the CRM sees them on the deal. Each addition or removal records the member on the deal, with its
+ * version, before the item changes (ADR-397), so the capture migration 0308 adds can name a
+ * removal's maker.
  */
 
 export { lineTotalMinor, MAX_DEAL_ITEMS, MAX_ITEM_QUANTITY };
@@ -136,18 +138,31 @@ export function parseUnitPrice(text: string, currency: string): number {
 export function dealItemOperations(deps: { db: Database; clock: Clock }) {
   const { db, clock } = deps;
 
-  /** Bumps the deal's version and records the change on its timeline. */
-  async function recordChange(
+  /**
+   * Bumps the deal's version with the member as its changer (ADR-277), before its products change:
+   * the capture on the item that migration 0308 adds (ADR-397) names a removal's maker from what
+   * this transaction recorded on the deal, so this comes first, from before that migration runs.
+   */
+  async function markChanged(
     tx: Tx,
     ctx: TenantContext,
-    deal: { id: string; contactId: string; version: number },
-    data: Record<string, unknown>,
-  ) {
+    deal: { id: string; version: number },
+  ): Promise<number> {
     const version = deal.version + 1;
     await tx
       .update(crmDeals)
       .set({ version, ...crmChangedBy('member') })
       .where(and(eq(crmDeals.tenantId, ctx.tenant.id), eq(crmDeals.id, deal.id)));
+    return version;
+  }
+
+  /** Records the change of products on the deal's timeline. */
+  async function recordChange(
+    tx: Tx,
+    ctx: TenantContext,
+    deal: { id: string; contactId: string },
+    data: Record<string, unknown>,
+  ) {
     await addActivity(tx, {
       tenantId: ctx.tenant.id,
       contactId: deal.contactId,
@@ -157,7 +172,6 @@ export function dealItemOperations(deps: { db: Database; clock: Clock }) {
       data: { fields: ['products'], ...data },
       at: clock.now(),
     });
-    return { version };
   }
 
   return {
@@ -263,6 +277,7 @@ export function dealItemOperations(deps: { db: Database; clock: Clock }) {
           });
         }
         const id = uuidv7();
+        const version = await markChanged(tx, ctx, deal);
         await tx.insert(crmDealItems).values({
           id,
           tenantId: ctx.tenant.id,
@@ -274,9 +289,7 @@ export function dealItemOperations(deps: { db: Database; clock: Clock }) {
           currency: pipeline.currency,
           createdByMembershipId: ctx.membership.id,
         });
-        const { version } = await recordChange(tx, ctx, deal, {
-          productAdded: product.name.slice(0, 500),
-        });
+        await recordChange(tx, ctx, deal, { productAdded: product.name.slice(0, 500) });
         return { id, version };
       });
     },
@@ -293,6 +306,9 @@ export function dealItemOperations(deps: { db: Database; clock: Clock }) {
           data.expectedVersion,
         );
         if (erased) throw new AppError('conflict', 'This contact was erased.');
+        // Recorded first, so the removal's event (migration 0308) names the member; a product
+        // already removed rolls it back.
+        const version = await markChanged(tx, ctx, deal);
         const [removed] = await tx
           .delete(crmDealItems)
           .where(
@@ -304,7 +320,8 @@ export function dealItemOperations(deps: { db: Database; clock: Clock }) {
           )
           .returning({ name: crmDealItems.name });
         if (!removed) throw notFound('Product on this deal');
-        return recordChange(tx, ctx, deal, { productRemoved: removed.name });
+        await recordChange(tx, ctx, deal, { productRemoved: removed.name });
+        return { version };
       });
     },
   };

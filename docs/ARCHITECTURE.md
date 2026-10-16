@@ -1403,7 +1403,8 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   `exportSection` refuses a filter with another section or without `crm.read`
   (`assertReportDealFilterAllowed`) before resolving it strictly, names a filtered file by the key
   (`reportExportFilename`) and audits `field: { key, match }`. `apiGetReport` checks `deals.read`
-  before reading the query and the text's form before the transaction, then the CRM plan and the
+  before reading the query (after `handleApiRequest`'s NUL refusal, which every route gets) and
+  the text's form before the transaction, then the CRM plan and the
   company's fields within it, and gives `deals.field`. The lenient readings (the board,
   `listDeals`, `getReport`) take the text with `dealFieldFilterText`, apart from their input's
   validation, so text it refuses (NUL) is ignored and reported instead of failing the page. Web: `DealFieldFilter` moved to `components/crm/deal-field-filter.tsx` and is
@@ -1435,7 +1436,8 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   `itemsTotal` (`dealItemsTotal`, summed as `bigint`, null across currencies or beyond a deal's
   value). Web: the deal page's Products card (`DealProducts`); its "use as value" goes through
   `updateDeal`. The API's deal history now leaves out every `deal_updated` entry naming none of
-  title, value and expected close date. The deals CSV (ADR-380) reads each batch's items with
+  title, value and expected close date (since ADR-397 it gives those naming `products`, as
+  `items`). The deals CSV (ADR-380) reads each batch's items with
   `loadItemsOfDeals` and writes them in a `products` cell (`dealItemsCell`) with `products_total`.
 - **Products on deals through the API (0297, 0298, ADR-378):** `api/deal-items.ts` lists a
   deal's items with each product's content id and Meta catalog id (`GET /deals/{id}/items`,
@@ -1443,8 +1445,9 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   `orders.read`, idempotent) and removes one (`DELETE /deals/{id}/items/{itemId}`). Changes go
   through `lockApiDeal` (`api/deals.ts`, shared with `PATCH /deals/{id}`: the contact locked for
   key share, then the deal for update, the expected version checked), move the version on with
-  `crmChangedBy({ apiKeyId })`, add a `deal_updated` activity naming `products` and the key, and
-  audit `crm.deal_updated` as the key. `crm_deal_items.created_by_api_key_id` names a key's item.
+  `crmChangedBy({ apiKeyId })` (before the item is added or removed since ADR-397:
+  `markProductChange`), add a `deal_updated` activity naming `products` and the key, and audit
+  `crm.deal_updated` as the key. `crm_deal_items.created_by_api_key_id` names a key's item.
   The item representation and its read live in `api/deal-item-view.ts`, shared with the deal
   webhook payloads (ADR-395).
 - **Defining contact fields (0092, ADR-115):** `contacts/field-definitions.ts` adds, renames and
@@ -2271,8 +2274,11 @@ state` for one that becomes skipped from another state, each only for a message 
   `MAX_DEAL_ITEMS` (50). The view and the limits (`crm/deal-item-limits.ts`) import none of the
   deal services, so the payloads do not depend on them. Erasure keeps items, so an erased
   contact's deal gives them. Adding or removing an item captures nothing (no trigger on
-  `app.crm_deal_items`): `changes` never names products, and an event delivered later gives the
-  items as they are then. The largest deal event body is 202,667 bytes, so deliveries go through
+  `app.crm_deal_items` before migration 0308), and an event delivered later gives the items as
+  they are then. Since ADR-397 part one (no migration), `WEBHOOK_DEAL_DETAIL_CHANGES` ends with
+  `items`, so workers render a change of products before 0308 captures one, and members and keys
+  write the deal's version and changer before the item (`markChanged`, `markProductChange`). The
+  largest deal event body is 202,667 bytes, so deliveries go through
   the worker's `webhookEgress` (`createWebhookEgressClient`, applying `webhookEgressPolicy`: the
   worker's policy with request bodies up to `WEBHOOK_LIMITS.requestBytes`, 256 KiB); every other
   egress caller keeps 64 KiB. `WebhookDeliveryDeps.egress` is a `WebhookEgressClient` (it carries

@@ -36,8 +36,9 @@ import { assertCommerceInPlan } from './orders';
  * content id as product messages name products (ADR-086), with a quantity and a unit price in the
  * minor units of the deal's currency; and removes them with `deals.write`. Each addition or removal
  * moves the deal's version on, is on its timeline naming the key, and is audited as the key. Like
- * members' changes of products, it sends no deal event (deal events report the deal's own details),
- * though every deal event's deal gives its items as these reads do when it is delivered (ADR-395).
+ * members' changes of products, it records the key on the deal before the item changes and sends
+ * no deal event yet (migration 0308 adds the capture, ADR-397), though every deal event's deal
+ * gives its items as these reads do when it is delivered (ADR-395).
  */
 
 export { toApiDealItem, type ApiDealItem } from './deal-item-view';
@@ -167,19 +168,32 @@ async function catalogProduct(
   return product;
 }
 
-/** Moves the deal's version on for a change of its products by the key, on its timeline. */
-async function recordProductChange(
+/**
+ * Moves the deal's version on with the key as its changer (ADR-277), before its products change:
+ * the capture on the item that migration 0308 adds (ADR-397) names a removal's maker from what this
+ * transaction recorded on the deal, so this comes first, from before that migration runs.
+ */
+async function markProductChange(
   tx: Tx,
   ctx: ApiContext,
-  deal: { id: string; contactId: string; version: number },
-  data: Record<string, unknown>,
-  now: Date,
+  deal: { id: string; version: number },
 ): Promise<number> {
   const version = deal.version + 1;
   await tx
     .update(crmDeals)
     .set({ version, ...crmChangedBy({ apiKeyId: ctx.key.id }) })
     .where(and(eq(crmDeals.tenantId, ctx.tenant.id), eq(crmDeals.id, deal.id)));
+  return version;
+}
+
+/** Records the key's change of the deal's products on its timeline and in the audit log. */
+async function recordProductChange(
+  tx: Tx,
+  ctx: ApiContext,
+  deal: { id: string; contactId: string },
+  data: Record<string, unknown>,
+  now: Date,
+): Promise<void> {
   await addActivity(tx, {
     tenantId: ctx.tenant.id,
     contactId: deal.contactId,
@@ -201,7 +215,6 @@ async function recordProductChange(
     },
     apiActor(ctx),
   );
-  return version;
 }
 
 const erasedConflict = () =>
@@ -261,6 +274,7 @@ export async function apiAddDealItem(
     if (!pipeline) throw notFound('Pipeline');
     const id = uuidv7();
     const name = product.name.slice(0, 500);
+    const dealVersion = await markProductChange(tx, ctx, deal);
     await tx.insert(crmDealItems).values({
       id,
       tenantId: ctx.tenant.id,
@@ -271,7 +285,7 @@ export async function apiAddDealItem(
       currency: pipeline.currency,
       createdByApiKeyId: ctx.key.id,
     });
-    const dealVersion = await recordProductChange(tx, ctx, deal, { productAdded: name }, now);
+    await recordProductChange(tx, ctx, deal, { productAdded: name }, now);
     const [item] = await readApiDealItems(tx, ctx.tenant.id, deal.id, id);
     if (!item) throw notFound('Product on this deal');
     const response = { status: 201, body: { data: { ...item, dealVersion } } };
@@ -302,6 +316,9 @@ export async function apiRemoveDealItem(
     if (!locked) return null;
     const { deal, erased } = locked;
     if (erased) throw erasedConflict();
+    // Recorded first, so the removal's event (migration 0308) names the key; a product already
+    // removed rolls it back.
+    const dealVersion = await markProductChange(tx, ctx, deal);
     const [item] = await tx
       .delete(crmDealItems)
       .where(
@@ -313,13 +330,7 @@ export async function apiRemoveDealItem(
       )
       .returning({ name: crmDealItems.name });
     if (!item) throw notFound('Product on this deal');
-    const dealVersion = await recordProductChange(
-      tx,
-      ctx,
-      deal,
-      { productRemoved: item.name },
-      now,
-    );
+    await recordProductChange(tx, ctx, deal, { productRemoved: item.name }, now);
     return { id: itemId, deleted: true as const, dealVersion };
   });
   if (!removed) throw notFound('Deal');

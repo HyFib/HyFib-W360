@@ -1434,7 +1434,7 @@ describe('webhook payload schemas', () => {
     ).toBe(false);
   });
 
-  it('give a change of details as captured: the details known in their order, custom field values last with their keys (ADR-275, ADR-390)', () => {
+  it('give a change of details as captured: the details known in their order, custom field values with their keys, then products (ADR-275, ADR-390, ADR-397)', () => {
     // The details in the payload's order, whatever order or repeats the capture held.
     expect(
       dealUpdatedChanges({ changes: ['fields', 'expectedCloseOn', 'title'], changedFields: ['b'] }),
@@ -1474,6 +1474,19 @@ describe('webhook payload schemas', () => {
     ).toEqual({ changes: ['fields'], changedFields: ['ok_2'] });
     expect(dealUpdatedChanges({})).toEqual({ changes: [], changedFields: [] });
     expect(dealUpdatedChanges({ changes: 'title' })).toEqual({ changes: [], changedFields: [] });
+    // A product added or removed (ADR-397): `items`, as the item's trigger (migration 0308)
+    // captures it, with no keys; after every other detail if a capture ever named more.
+    expect(dealUpdatedChanges({ changes: ['items'], changedFields: [] })).toEqual({
+      changes: ['items'],
+      changedFields: [],
+    });
+    expect(
+      dealUpdatedChanges({ changes: ['items', 'fields', 'title'], changedFields: ['tier'] }),
+    ).toEqual({ changes: ['title', 'fields', 'items'], changedFields: ['tier'] });
+    expect(dealUpdatedChanges({ changes: ['items'], changedFields: ['tier'] })).toEqual({
+      changes: ['items'],
+      changedFields: [],
+    });
     // What it gives passes the payload's own description.
     const given = dealUpdatedChanges({ changes: ['title', 'fields'], changedFields: ['tier'] });
     expect(dealUpdatedPayloadSchema.shape.data.shape.changes.safeParse(given.changes).success).toBe(
@@ -1558,6 +1571,8 @@ describe('webhook payload schemas', () => {
         ['seats', 'renewal_on'],
       ],
       [['title', 'valueMinor', 'expectedCloseOn', 'fields'], ['a']],
+      // A product added or removed (ADR-397): `items` alone, with no keys.
+      [['items'], []],
     ]) {
       expect(
         dealUpdatedPayloadSchema.safeParse({
@@ -1572,6 +1587,8 @@ describe('webhook payload schemas', () => {
       [['owner'], []],
       [['lostReason'], []],
       [['custom_fields'], []],
+      [['products'], []],
+      [['item'], []],
       [undefined, []],
       [['title'], undefined],
       [['title'], null],
@@ -1592,6 +1609,7 @@ describe('webhook payload schemas', () => {
       'valueMinor',
       'expectedCloseOn',
       'fields',
+      'items',
     ]);
     expect(dealUpdatedPayloadSchema.safeParse(created).success).toBe(false);
     // Who made what the event reports, as captured (ADR-277): each kind, the key for a key's
@@ -2166,7 +2184,12 @@ describe('the OpenAPI document', () => {
       'valueMinor',
       'expectedCloseOn',
       'fields',
+      'items',
     ]);
+    // A change of products (ADR-397) is named alone, never the product.
+    expect(payload.properties.changes?.description).toContain(
+      '`items` (the deal’s products: a change of them names `items` alone)',
+    );
     expect(payload.properties.changedFields?.description).toContain('Keys only, never the values');
     expect(payload.required).toEqual(expect.arrayContaining(['changes', 'changedFields']));
     expect(JSON.stringify(doc.webhooks['deal.updated'])).not.toMatch(/ADR-\d/);
@@ -3518,8 +3541,9 @@ describe('deal and task detail filters (ADR-310)', () => {
     ]);
     expect(webhookDealDetailsSchema.parse(null)).toBeNull();
     expect(webhookTaskDetailsSchema.parse(null)).toBeNull();
-    // The details the events' changes name, in their order.
-    expect(WEBHOOK_DEAL_DETAILS).toEqual([...WEBHOOK_DEAL_DETAIL_CHANGES]);
+    // The details the events' changes name, in their order; workers render `items` (ADR-397) a
+    // release before endpoints may choose it, with migration 0308.
+    expect([...WEBHOOK_DEAL_DETAILS, 'items']).toEqual([...WEBHOOK_DEAL_DETAIL_CHANGES]);
     expect(WEBHOOK_TASK_DETAILS).toEqual([...WEBHOOK_TASK_DETAIL_CHANGES]);
     for (const refused of [
       [],

@@ -1,5 +1,69 @@
 # Progress
 
+## 2026-10-16 — Deal events for a change of products, part one (P5-09, P4-04, ADR-397)
+
+Status: **Implemented as part one of two (release N, no migration); its database test runs in CI
+only.** Adding or removing a product on a deal sends no event; ADR-395 listed "`deal.updated`
+naming `items` in `changes`" as not built. The capture that sends it (migration 0308) is part two,
+the next release. A review of the first, single-release version found that capturing while older
+workers and web servers still ran would send events with an empty `changes` and removals naming
+nobody, so this release prepares every process first and the migration stays backward compatible
+with the release running when it is applied.
+
+### Completed
+
+- **Workers render `items` (`webhooks/payloads.ts`):** `WEBHOOK_DEAL_DETAIL_CHANGES` ends with
+  `items`, so `dealUpdatedChanges` keeps it, after `fields`, with no keys, and the payload's
+  `changes` takes it; its description lists it. Nothing captures it yet, and `WEBHOOK_DEAL_DETAILS`
+  (what endpoints may choose in Settings, the API and the database's check) is unchanged.
+- **Members and keys record themselves first:** `markChanged` (`crm/deal-items.ts`) and
+  `markProductChange` (`api/deal-items.ts`) write the deal's version and changer (ADR-277) before
+  the item is inserted or deleted; the timeline entry (`recordChange`, `recordProductChange`, with
+  the key's audit) follows. A product already removed is refused after the mark, which the
+  transaction rolls back. Nothing reads the order yet: part two's capture names a removal's maker
+  from what the removing transaction recorded on the deal.
+- **The API's deal history gives product changes (`api/deals.ts`):** `API_DEAL_HISTORY_DETAILS`
+  maps the timeline's `products` to `items`, last, and the history's filter keeps entries naming
+  `products`, so each product added or removed by a member or a key, every one since products
+  were added to deals, is given as `updated` with `items` in its `changes` and who made it, never
+  the product's name. The timeline already records each change, so this needs no capture.
+- **OpenAPI (`openapi.ts`):** the history's description and its entry's `type` and `changes` name
+  products; `POST /deals/{id}/items` and `DELETE /deals/{id}/items/{itemId}` say the history gives
+  the change and that no deal event is sent; `deal.updated`'s `changes` lists `items`, and its
+  description still says a change of products alone sends no event. No decision numbers.
+- **Tests:** unit (4 new: `webhooks/deal-item-events.test.ts` 3, the order of writes in the
+  member's and the key's additions and removals against a recording database, with the maker on
+  the deal and on the item, and refused removals writing no timeline entry; the history's
+  timeline filter rendered as SQL and kept equal to its details; `webhooks/deal-items.test.ts` 1,
+  a change of products rendered as the capture will give it, by a key, a member and nobody, with
+  the products read when delivered, and an empty `changes` refused; 8 updated across
+  `webhooks.test.ts`, `api/deals.test.ts` and `api/deal-items.test.ts`: the payload's list, schema
+  and `dealUpdatedChanges`, the history's names and entries, and the OpenAPI wording); integration
+  (`api.test.ts`: the history entries of a member's and keys' additions and removals, refused
+  attempts left out, no product named).
+- **Docs:** ADR-397 part one (and notes in ADR-378 and ADR-390); ARCHITECTURE, DEPLOYMENT (deploy
+  this release everywhere before the one carrying 0308; rolling it back is safe while 0308 is not
+  applied) and RUNBOOKS (the history). BACKLOG, SECURITY, THREAT-MODEL and the matrix change with
+  part two, which changes what is sent.
+- **Mutation checks:** 23 deliberate regressions (the mark after the item in each of the four
+  paths, a removal by a member or a key without the mark, the key marked as a member, a member as
+  an automation, `items` left out of the payload's list or before `fields`, endpoints offered
+  `items` before the migration, `changedFields` given for products, the history leaving out
+  products, naming them before custom fields or as `fields`, its filter leaving them out, and each
+  new description reverted): 23 caught by the unit tests, each file restored byte for byte.
+- **Not built in part one:** the capture (migration 0308), `items` among the details endpoints may
+  choose, the event's descriptions that depend on it and their database tests: part two.
+
+### Test commands and results (local, 2026-10-16)
+
+| Command                                                   | Result                                                          |
+| --------------------------------------------------------- | --------------------------------------------------------------- |
+| `npx eslint . --max-warnings=0`, `npx prettier --check .` | clean                                                           |
+| `pnpm typecheck`                                          | clean (every workspace project, integration tests included)     |
+| `pnpm test` (unit)                                        | 170 files, 1,814 tests passed                                   |
+| `pnpm build`                                              | not run on this commit: run once on part two, which contains it |
+| `pnpm test:integration`, `pnpm test:e2e`                  | not run here: the local PostgreSQL is unavailable; CI runs them |
+
 ## 2026-10-16 — Filtering the deals section of Reports by a choice field (P4-04, P5-08, ADR-396)
 
 Status: **Implemented; its database and browser tests run in CI only.** ADR-385, ADR-391 and
@@ -25,8 +89,9 @@ ADR-394 listed "filtering Reports by a choice" as not built: the board, the won 
   it strictly (ADR-391's 400s), names a filtered file `deals-filtered-by-<key>-…` (never the option)
   and audits `report.exported` with `field: { key, match }`.
 - **API (`api/reports.ts`, `openapi.ts`):** `GET /reports?field=` needs `deals.read` too (checked
-  before anything in the query) and the CRM in the plan, refuses a malformed text before the transaction and a
-  key or value the company's fields do not resolve within it, with 422 naming `field` in the API's
+  before the route reads the query; the API's request handler refuses a NUL character in any
+  request first, for every route) and the CRM in the plan, refuses a malformed text before the
+  transaction and a key or value the company's fields do not resolve within it, with 422 naming `field` in the API's
   words; `deals.field` echoes the filter as resolved, or null. The OpenAPI document describes the
   parameter, the scope, the refusals and the echo (no decision numbers).
 - **Web:** the board's `DealFieldFilter` moved to `components/crm/deal-field-filter.tsx`, shared by
