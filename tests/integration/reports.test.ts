@@ -698,8 +698,9 @@ describe('company report', () => {
 
   it('includes the current version of every definition, with unavailable metrics marked', () => {
     expect(report.definitions).toEqual(currentMetricDefinitions());
-    // Automations changed what a reply turn is (migration 0011): a new version, not an edit.
-    expect(report.definitions.find((d) => d.key === 'inbox.within_target')?.version).toBe(3);
+    // Automations changed what a reply turn is (migration 0011), and teams got their own targets
+    // (migration 0296): each a new version, not an edit.
+    expect(report.definitions.find((d) => d.key === 'inbox.within_target')?.version).toBe(4);
     expect(report.definitions.find((d) => d.key === 'automation.outcomes')).toMatchObject({
       version: 2,
       available: true,

@@ -15130,8 +15130,11 @@ Decision:
 - **Checked with the graph:** what each kind needs (one product, the products of a list each once
   and at most 30, a heading, a message), and, with the company's products, that they are all in one
   connected catalog, of the account of the automation's number when it is limited to one. The
-  builder lists the first 500 products by name plus those the draft sends, to members with
-  `commerce.read`; for others it lists none and the server's checks cover the step.
+  builder lists the first 500 products of each connected catalog by name (so one catalog's size
+  never hides another's) plus those the draft sends, to members with `commerce.read`; for others
+  it lists none and the server's checks cover the step. The catalog shown follows the number
+  chosen, a list offers to remove products it no longer lists, and a single product or the catalog
+  is sent, and previewed, without the heading and section title a list had.
 - **Who may publish:** publishing or testing an automation with a products step needs commerce in
   the company's plan and `commerce.read`, as sending products in the inbox does.
 - **When it runs** (`queueBotProducts`): after a bot message's checks (active number, open window, a
@@ -15145,5 +15148,15 @@ Decision:
 - **Webhook endpoints** can choose the new kind of step, as every kind the builder defines
   (ADR-328): migration 0299 widens the check on `run_step_node_types` to 1 to 19 kinds.
 
-Not built: several sections in one list, products chosen by a search beyond the first 500, steps
-that send the products of an order or a deal, and catalog messages with a product picked per run.
+Not built: several sections in one list, products chosen by a search beyond the first 500 of a
+catalog, steps that send the products of an order or a deal, and catalog messages with a product
+picked per run.
+
+Review (before merge): the e2e test expected the list in the order its products were ticked while
+the step starts with the first product by name; an integration test of the database check still
+expected 19 kinds refused; the send's integration test never had Meta's stand-in accept the list
+(its catalog was not registered there); the builder could keep a catalog no longer listed after the
+number changed (Codex), left removed products in a list with no way to take them out, previewed a
+heading WhatsApp does not send for a single product, warned that a single product's message of
+placeholders alone could stop it, and cut the products at 500 across every catalog. All were fixed
+with tests; the checks of `commerce.read` are now tested too.

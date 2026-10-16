@@ -519,12 +519,12 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
 - **Automations that send products** (ADR-383): `send_products` steps (one product, a list in one
   section, or the catalog; checked against `products`, the steps' products in connected catalogs
   with their catalog and WhatsApp account); the interpreter gives a `send_products` effect counted
-  as a message; `queueBotProducts` checks the plan and reads the products again in one connected
-  catalog of the number's account, then queues the message and its send intent
-  (`buildProductMessageRequest`, retailer ids) through `queueBotRequest`, which text and button
-  messages share. The limits live in the browser-safe `commerce/product-message.ts`; the builder
-  lists up to `PRODUCT_PICKER_LIMIT` products by name, plus those the draft sends, to members with
-  `commerce.read`.
+  as a message, with a heading and section title for a list only; `queueBotProducts` checks the
+  plan and reads the products again in one connected catalog of the number's account, then queues
+  the message and its send intent (`buildProductMessageRequest`, retailer ids) through
+  `queueBotRequest`, which text and button messages share. The limits live in the browser-safe
+  `commerce/product-message.ts`; the builder lists the first `PRODUCT_PICKER_LIMIT` products of
+  each connected catalog by name, plus those the draft sends, to members with `commerce.read`.
 - **Automations that move CRM deals** (ADR-250): `move_deal` steps (checked against `crmPipelines`);
   the interpreter gives a `move_deal` effect logged as `moved`; `applyMoveDealEffect` in the runner
   checks the plan, locks the contact (key share) and shares the pipeline, reads the stage, locks the
@@ -668,9 +668,10 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   retried. The minute sweep re-signals queued calls whose job was lost
   (`ops.automation_http_calls_due`). Settings → Web requests manages domains and secrets
   (`integrations.manage`); run pages list each call (method, host, path, outcome).
-- **Not built yet:** WhatsApp Flows steps (P4-03), catalog steps (P4-06), starting a run through the
-  public API (P5), templates with media headers or variable buttons in template steps, usage
-  billing.
+- **Not built yet:** templates with media headers in template steps, usage billing. Form steps
+  (ADR-248), runs started through the public API (ADR-077), template steps' website buttons whose
+  link ends with a value (ADR-229) and products steps (ADR-383) were built after this list was
+  first written.
 
 ## 6F. CRM **[built — reminder emails verified through Mailpit only]**
 

@@ -3703,6 +3703,7 @@ describe('automation run events (ADR-078)', () => {
       'send_template',
       'ask_template',
       'send_flow',
+      'send_products',
       'condition',
       'update_contact',
       'update_conversation',

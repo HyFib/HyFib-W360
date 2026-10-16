@@ -434,6 +434,12 @@ export const PRODUCT_STEP_KINDS = ['product', 'product_list', 'catalog'] as cons
 export type ProductStepKind = (typeof PRODUCT_STEP_KINDS)[number];
 
 /**
+ * Products of each catalog the automation builder lists for products steps, the first by name (as
+ * many as the inbox lists).
+ */
+export const PRODUCT_PICKER_LIMIT = 500;
+
+/**
  * Products of one of the company's catalogs sent in the conversation (ADR-383), a session message
  * like a text: one product, a list of products (one section), or the catalog shown with one of its
  * products. Products are named by HyFib's ids and sent by their retailer ids in their catalog. The
@@ -1515,12 +1521,14 @@ export function checkGraph(graph: AutomationGraph, refs: GraphReferences = {}): 
       for (const u of found.undeclaredInputs) undeclaredInput(node.id, u);
       for (const a of found.answers) checkAnswerUse(node.id, a);
       // A template variable that is only a placeholder is usual ({{1}} = {{name}}); left empty, the
-      // step fails without sending instead.
+      // step fails without sending instead. A single product left without its message is sent
+      // without one.
       if (
         !found.literal &&
         node.type !== 'update_contact' &&
         node.type !== 'send_template' &&
-        node.type !== 'ask_template'
+        node.type !== 'ask_template' &&
+        !(node.type === 'send_products' && node.kind === 'product')
       ) {
         issues.push({
           level: 'warning',

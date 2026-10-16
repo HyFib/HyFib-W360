@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   NODE_TYPES,
   NODE_TYPE_LABELS,
+  PRODUCT_PICKER_LIMIT,
   RUN_BUDGETS,
   SESSION_MESSAGE_NODE_TYPES,
   checkGraph,
@@ -118,6 +119,8 @@ describe('steps that send products (ADR-383)', () => {
       footerLength: 60,
       sectionTitleLength: 24,
     });
+    // The builder lists as many products of each catalog as the inbox lists.
+    expect(PRODUCT_PICKER_LIMIT).toBe(500);
     const thirty = Array.from(
       { length: 30 },
       (_, i) => `0190a3e4-5555-7000-8000-${String(i).padStart(12, '0')}`,
@@ -156,6 +159,15 @@ describe('steps that send products (ADR-383)', () => {
       'Choose the product shown on the message.',
       'Write the message.',
     ]);
+    // A message of placeholders alone may come out empty: a list or the catalog is then not sent,
+    // while one product is sent without it.
+    const onlyPlaceholders =
+      'This text is only placeholders; if they are empty the message cannot be sent.';
+    expect(messages({ body: '{{name}}' })).toEqual([onlyPlaceholders]);
+    expect(messages({ kind: 'catalog', productIds: [MUG], body: '{{name}}' })).toEqual([
+      onlyPlaceholders,
+    ]);
+    expect(messages({ kind: 'product', productIds: [MUG], body: '{{name}}' })).toEqual([]);
   });
 
   it('sends products of one connected catalog, of the automation’s WhatsApp account', () => {
@@ -206,6 +218,23 @@ describe('steps that send products (ADR-383)', () => {
       state: { nodeId: 'bye', messages: 1 },
       log: { nodeId: 'offer', nodeType: 'send_products', outcome: 'sent' },
     });
+    // One product and the catalog go without the heading and section title a list had.
+    for (const kind of ['product', 'catalog']) {
+      expect(run(graphOf(graphInput({ kind, productIds: [MUG] }))), kind).toMatchObject({
+        effects: [
+          {
+            kind: 'send_products',
+            productKind: kind,
+            productIds: [MUG],
+            sectionTitle: null,
+            header: null,
+            body: 'Hi Asha Rao, these are back in stock.',
+            footer: 'Free delivery',
+          },
+        ],
+        status: 'running',
+      });
+    }
     // One product goes without a message; a list or the catalog does not.
     expect(
       run(graphOf(graphInput({ kind: 'product', productIds: [MUG], body: '{{answer.size}}' }))),

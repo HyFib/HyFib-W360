@@ -60,6 +60,7 @@ import {
   parseGraph,
   parseTrigger,
   productsOf,
+  PRODUCT_PICKER_LIMIT,
   starterGraph,
   starterTrigger,
   templatesOf,
@@ -193,8 +194,8 @@ export interface AutomationDetail {
     flows: AutomationFlowOption[];
     /**
      * Products of the company's connected catalogs, for products steps (ADR-383): the first
-     * `PRODUCT_PICKER_LIMIT` by name and those the draft's steps send. Null for a member who cannot
-     * see the catalogs (`commerce.read`).
+     * `PRODUCT_PICKER_LIMIT` of each catalog by name and those the draft's steps send. Null for a
+     * member who cannot see the catalogs (`commerce.read`).
      */
     products: AutomationProductOption[] | null;
     fields: { key: string; label: string; type: string }[];
@@ -220,9 +221,6 @@ export interface AutomationFlowOption {
   whatsappAccountId: string;
   sendable: boolean;
 }
-
-/** Products the automation builder lists for products steps (as many as the inbox lists). */
-export const PRODUCT_PICKER_LIMIT = 500;
 
 /** A product of a connected catalog a products step may send (ADR-383). */
 export interface AutomationProductOption {
@@ -450,7 +448,8 @@ export function createAutomationService(deps: AutomationServiceDeps) {
 
   /**
    * Products of connected catalogs (not removed): those `ids` names and, for the builder's
-   * picker, the first `PRODUCT_PICKER_LIMIT` by name (ADR-383).
+   * picker, the first `PRODUCT_PICKER_LIMIT` of each catalog by name (ADR-383), so every
+   * catalog is listed however many products the others hold.
    */
   async function productOptions(
     tx: Tx,
@@ -482,12 +481,24 @@ export function createAutomationService(deps: AutomationServiceDeps) {
       isNull(commerceProducts.removedAt),
       isNull(commerceCatalogs.disconnectedAt),
     );
-    const listed = picker
-      ? await select()
-          .where(live)
-          .orderBy(asc(commerceProducts.name), asc(commerceProducts.id))
-          .limit(PRODUCT_PICKER_LIMIT)
+    const catalogs = picker
+      ? await tx
+          .select({ id: commerceCatalogs.id })
+          .from(commerceCatalogs)
+          .where(
+            and(eq(commerceCatalogs.tenantId, tenantId), isNull(commerceCatalogs.disconnectedAt)),
+          )
+          .orderBy(asc(commerceCatalogs.name), asc(commerceCatalogs.id))
       : [];
+    const listed: AutomationProductOption[] = [];
+    for (const catalog of catalogs) {
+      listed.push(
+        ...(await select()
+          .where(and(live, eq(commerceProducts.catalogId, catalog.id)))
+          .orderBy(asc(commerceProducts.name), asc(commerceProducts.id))
+          .limit(PRODUCT_PICKER_LIMIT)),
+      );
+    }
     const missing = ids.filter((id) => !listed.some((p) => p.id === id));
     const named =
       missing.length > 0

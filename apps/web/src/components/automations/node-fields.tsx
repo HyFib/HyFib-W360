@@ -10,6 +10,7 @@ import {
   HTTP_METHODS,
   HTTP_WAIT_MINUTES,
   PRODUCT_MESSAGE_LIMITS,
+  PRODUCT_PICKER_LIMIT,
   type AutomationNode,
   type ConditionRule,
   type HttpMethod,
@@ -1257,18 +1258,26 @@ function ProductsFields({
   const [filter, setFilter] = useState('');
   const products = options.products ?? [];
   const catalogs = [...new Map(products.map((x) => [x.catalogId, x.catalogName])).entries()];
-  const chosen = node.productIds.map((id) => products.find((x) => x.id === id));
-  // The catalog of the step's products; with none chosen yet, the one picked here.
+  // The listed products change with the automation's number: the catalog shown is that of the
+  // step's products still listed, else the one picked here while it is listed, else the first.
+  const first = node.productIds
+    .map((id) => products.find((x) => x.id === id))
+    .find((x) => x !== undefined);
   const [pickedCatalog, setPickedCatalog] = useState(catalogs[0]?.[0] ?? '');
-  const catalogId = chosen[0]?.catalogId ?? pickedCatalog;
+  const catalogId =
+    first?.catalogId ??
+    (catalogs.some(([id]) => id === pickedCatalog) ? pickedCatalog : (catalogs[0]?.[0] ?? ''));
   const inCatalog = products.filter((x) => x.catalogId === catalogId);
+  // A list keeps the step's products of the catalog shown; changing it drops any no longer listed.
+  const shown = node.productIds.filter((id) => inCatalog.some((x) => x.id === id));
   const needle = filter.trim().toLowerCase();
   const visible = needle
     ? inCatalog.filter(
         (x) => x.name.toLowerCase().includes(needle) || x.retailerId.toLowerCase().includes(needle),
       )
     : inCatalog;
-  const full = node.productIds.length >= PRODUCT_MESSAGE_LIMITS.productsPerMessage;
+  const full = shown.length >= PRODUCT_MESSAGE_LIMITS.productsPerMessage;
+  const unlisted = node.productIds.length - shown.length;
   const next = (
     <NextSelect
       id={`${p}-next`}
@@ -1347,11 +1356,15 @@ function ProductsFields({
           </Field>
         ) : null}
       </div>
+      {inCatalog.length >= PRODUCT_PICKER_LIMIT ? (
+        <p className="text-sm text-muted-foreground">
+          The first {PRODUCT_PICKER_LIMIT} products of the catalog by name are listed here.
+        </p>
+      ) : null}
       {node.kind === 'product_list' ? (
         <fieldset className="grid gap-2">
           <legend className="text-sm font-medium">
-            Products ({node.productIds.length} of at most{' '}
-            {PRODUCT_MESSAGE_LIMITS.productsPerMessage})
+            Products ({shown.length} of at most {PRODUCT_MESSAGE_LIMITS.productsPerMessage})
           </legend>
           <Input
             aria-label="Filter products"
@@ -1361,7 +1374,7 @@ function ProductsFields({
           />
           <ul className="grid max-h-60 gap-1 overflow-y-auto rounded-md border border-border p-2 text-sm">
             {visible.map((x) => {
-              const checked = node.productIds.includes(x.id);
+              const checked = shown.includes(x.id);
               return (
                 <li key={x.id}>
                   <label className="flex items-start gap-2">
@@ -1373,8 +1386,8 @@ function ProductsFields({
                       onChange={(e) =>
                         patch({
                           productIds: e.target.checked
-                            ? [...node.productIds, x.id]
-                            : node.productIds.filter((id) => id !== x.id),
+                            ? [...shown, x.id]
+                            : shown.filter((id) => id !== x.id),
                         })
                       }
                     />
@@ -1387,6 +1400,23 @@ function ProductsFields({
               <li className="text-muted-foreground">No product matches.</li>
             ) : null}
           </ul>
+          {unlisted > 0 ? (
+            <div className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
+              <span>
+                {unlisted === 1
+                  ? 'One of the step’s products is not listed here: it was removed, or is of another catalog.'
+                  : `${unlisted} of the step’s products are not listed here: they were removed, or are of another catalog.`}
+              </span>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={() => patch({ productIds: shown })}
+              >
+                {unlisted === 1 ? 'Remove it' : 'Remove them'}
+              </Button>
+            </div>
+          ) : null}
         </fieldset>
       ) : (
         <Field

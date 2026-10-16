@@ -1,5 +1,48 @@
 # Progress
 
+## 2026-10-16 — Fixes before merging ADR-377 to ADR-383 (PR #90)
+
+Status: **Fixed; the database and browser tests run in CI only.** PR #90's first CI run failed
+three integration tests that had not run before, and a review of ADR-383 (with Codex's) found
+defects in the products step.
+
+### Completed
+
+- **Integration tests brought up to date:** `reports.test.ts` expects version 4 of
+  `inbox.within_target` (ADR-377's team targets); `crm.test.ts` expects the deals CSV's empty
+  `products` and `products_total` cells (ADR-380); `webhooks.test.ts` expects the database to refuse
+  20 kinds of step (19 are allowed now) and names `send_products` among every kind, as
+  `webhook-events.test.ts` now does (ADR-383).
+- **Products step (ADR-383):** the builder's catalog follows the number chosen (Codex: a catalog no
+  longer listed was kept, with no way to choose another); a list offers to remove products it no
+  longer lists; the first 500 products of each connected catalog are listed, not 500 across them
+  all, with a note when a catalog reaches 500; a single product or the catalog is sent and previewed
+  without the heading and section title a list had; a single product's message of placeholders alone
+  no longer warns that the step cannot be sent (it is sent without one).
+- **Tests:** unit (`products-step.test.ts`: the placeholder warning by kind, the heading and section
+  title dropped for one product and the catalog, the picker's limit); integration
+  (`automations.test.ts`: the Graph stand-in holds the catalog, so the list is accepted and the run
+  completes; products listed only to members who see the catalogs, and publishing and testing
+  refused without `commerce.read`; the first 500 products of each catalog listed); e2e
+  (`commerce.spec.ts`: the list in the order it is built, the step's first product by name first).
+- **Docs:** ADR-383 (review); ARCHITECTURE (the products step, and a "Not built yet" line that still
+  named form steps, API starts and catalog steps); DEPLOYMENT (0299: endpoints listing the 18 earlier
+  kinds, old web servers); THREAT-MODEL T336; the matrix's W-077 evidence (status unchanged).
+- **Mutation checks:** 7 deliberate regressions in the fixes (the heading and the section title kept
+  for one product or the catalog, the catalog taken for a list, the heading's check inverted, the
+  placeholder warning for every products step or for none, a smaller picker limit), all caught by
+  the unit tests. The listing per catalog, the stand-in accepting the list and the permission checks
+  are integration tests, which run in CI only.
+
+### Test commands and results (local, 2026-10-16)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 157 files, 1630 tests passed                                    |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+
 ## 2026-10-16 — Automation steps that send products (P4-01, ADR-383)
 
 Status: **Implemented; its database and browser tests run in CI only.** Automations could not send

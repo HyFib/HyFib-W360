@@ -513,14 +513,18 @@ test('an automation sends products from the catalog to a customer who asks (ADR-
   await page.getByLabel('Add a step').selectOption('send_products');
   await page.getByRole('button', { name: 'Add step' }).click();
   await page.locator('#step-send-products-1-kind').selectOption('product_list');
+  // The step starts with the first product by name, which the list keeps; the next one checked
+  // comes after it.
+  await expect(
+    page.getByRole('checkbox', { name: 'Ginger biscuits · ₹80.50 (chai-2)' }),
+  ).toBeChecked();
   await page.getByRole('checkbox', { name: 'Masala chai · ₹120.00 (chai-1)' }).check();
-  await page.getByRole('checkbox', { name: 'Ginger biscuits · ₹80.50 (chai-2)' }).check();
   await page.locator('#step-send-products-1-header').fill('Fresh today');
   await page.locator('#step-send-products-1-body').fill('Hi {{name}}, these just arrived.');
   await page.locator('#step-welcome-next').selectOption('send-products-1');
   await expect(page.getByText(/to fix before publishing/)).toBeHidden();
   await page.getByRole('button', { name: 'Start', exact: true }).click();
-  await expect(page.getByText('[2 products] Masala chai, Ginger biscuits')).toBeVisible();
+  await expect(page.getByText('[2 products] Ginger biscuits, Masala chai')).toBeVisible();
   await page.getByRole('button', { name: 'Save draft' }).click();
   await expect(page.getByText('Draft saved.')).toBeVisible();
   await page.getByRole('button', { name: 'Publish' }).click();
@@ -547,7 +551,7 @@ test('an automation sends products from the catalog to a customer who asks (ADR-
         catalog_id: catalogId,
         sections: [
           {
-            product_items: [{ product_retailer_id: 'chai-1' }, { product_retailer_id: 'chai-2' }],
+            product_items: [{ product_retailer_id: 'chai-2' }, { product_retailer_id: 'chai-1' }],
           },
         ],
       },

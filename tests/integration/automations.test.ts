@@ -27,6 +27,7 @@ import {
   findDueAutomationRuns,
   MAX_STEP_FAILURES,
   PgBossJobQueue,
+  PRODUCT_PICKER_LIMIT,
   RUN_CSV_COLUMNS,
   processSendIntent,
   queueTextMessage,
@@ -2986,10 +2987,25 @@ describe('automations that send a form (ADR-248)', () => {
 });
 
 describe('automations that send products (ADR-383)', () => {
-  /** A connected catalog of the company's WhatsApp account with products, as a sync leaves it. */
+  /**
+   * A connected catalog of the company's WhatsApp account with products, as a sync leaves it, and
+   * the same catalog at the stand-in, which accepts product messages of its products only.
+   */
   async function catalog(c: Company, products: [string, string][]) {
     const catalogId = uuidv7();
     const metaCatalogId = nextExternalId();
+    fx.standIn.state.catalogProducts.set(
+      metaCatalogId,
+      products.map(([retailerId, name]) => ({
+        id: nextExternalId(),
+        retailer_id: retailerId,
+        name,
+        price: '₹250.00',
+        currency: 'INR',
+        availability: 'in stock',
+        review_status: 'approved',
+      })),
+    );
     await fx.query(
       `INSERT INTO app.commerce_catalogs (id, tenant_id, whatsapp_account_id, meta_catalog_id, name)
        VALUES ($1, $2, $3, $4, 'Mugs')`,
@@ -3061,8 +3077,8 @@ describe('automations that send products (ADR-383)', () => {
         automationRunId: run.id,
       },
     });
-    const [intent] = await fx.query<{ request: Record<string, unknown> }>(
-      'SELECT request FROM app.send_intents WHERE message_id = $1',
+    const [intent] = await fx.query<{ request: Record<string, unknown>; state: string }>(
+      'SELECT request, state FROM app.send_intents WHERE message_id = $1',
       [sent!.id],
     );
     expect(intent!.request).toMatchObject({
@@ -3081,6 +3097,13 @@ describe('automations that send products (ADR-383)', () => {
           ],
         },
       },
+    });
+    // Meta takes the list, whose products are in its catalog, and the run completes.
+    expect(intent!.state).toBe('accepted');
+    expect(await onlyRun(conversationId)).toMatchObject({
+      status: 'completed',
+      end_reason: 'no_next',
+      message_count: 1,
     });
     expect((await stepLog(run.id)).map((st) => [st.node_id, st.outcome])).toEqual(
       expect.arrayContaining([['offer', 'sent']]),
@@ -3114,7 +3137,7 @@ describe('automations that send products (ADR-383)', () => {
     ).toEqual([]);
   });
 
-  it('is published only with products of a connected catalog, and by members who see the catalogs', async () => {
+  it('is published only with products of a connected catalog', async () => {
     const c = await fx.company();
     const owner = await fx.ctx(c, c.owner);
     const mugs = await catalog(c, [['MUG-1', 'Blue mug']]);
@@ -3131,6 +3154,76 @@ describe('automations that send products (ADR-383)', () => {
     const { id } = await svc.createAutomation(owner, { name: 'More mugs' });
     const detail = await svc.getAutomation(owner, id);
     expect(detail.options.products).toEqual([]);
+  });
+
+  it('lists the products only to members who see the catalogs, and only they publish or test the step', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const mugs = await catalog(c, [['MUG-1', 'Blue mug']]);
+    const svc = automations();
+    const { id } = await svc.createAutomation(owner, { name: 'Mugs' });
+    const saved = await svc.updateAutomation(owner, {
+      id,
+      expectedVersion: 0,
+      name: 'Mugs',
+      description: null,
+      channelAccountId: null,
+      trigger: keyword('mugs'),
+      graph: offer(mugs.ids),
+    });
+    expect((await svc.getAutomation(owner, id)).options.products).toEqual([
+      expect.objectContaining({ id: mugs.ids[0], name: 'Blue mug', retailerId: 'MUG-1' }),
+    ]);
+    // Analysts read automations without seeing the catalogs: no products are listed to them.
+    await fx.query(
+      `UPDATE app.memberships SET roles = '{analyst}' WHERE tenant_id = $1 AND user_id = $2`,
+      [c.tenant.id, c.agent.id],
+    );
+    const analyst = await fx.ctx(c, c.agent);
+    expect(analyst.permissions.has('commerce.read')).toBe(false);
+    expect((await svc.getAutomation(analyst, id)).options.products).toBeNull();
+    // Every role that publishes or tests automations sees the catalogs; a member without that
+    // permission neither publishes nor tests a step that sends products.
+    const blind = {
+      ...owner,
+      permissions: new Set([...owner.permissions].filter((p) => p !== 'commerce.read')),
+    };
+    await expectAppError(
+      svc.publishAutomation(blind, { id, expectedVersion: saved.version, note: null }),
+      'forbidden',
+      /Publishing an automation that sends products needs the permission to see the catalogs/,
+    );
+    const conversationId = await inbound(c, waId(), 'hello');
+    await expectAppError(
+      svc.startTestRun(blind, { id, expectedVersion: saved.version, conversationId }),
+      'forbidden',
+      /Testing an automation that sends products needs the permission to see the catalogs/,
+    );
+    expect((await svc.getAutomation(owner, id)).versions).toEqual([]);
+    expect(await runsOf(conversationId)).toEqual([]);
+  });
+
+  it('lists the first products of each connected catalog by name, however many another holds', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    // One catalog with more products than are listed, all named before the other's.
+    const big = await catalog(c, []);
+    await fx.query(
+      `INSERT INTO app.commerce_products (id, tenant_id, catalog_id, retailer_id, name, synced_at)
+       SELECT gen_random_uuid(), $1, $2, 'BIG-' || g, 'A item ' || lpad(g::text, 4, '0'), now()
+         FROM generate_series(1, $3::int) g`,
+      [c.tenant.id, big.catalogId, PRODUCT_PICKER_LIMIT + 1],
+    );
+    const small = await catalog(c, [['MUG-1', 'Blue mug']]);
+    const svc = automations();
+    const { id } = await svc.createAutomation(owner, { name: 'Mugs' });
+    const listed = (await svc.getAutomation(owner, id)).options.products ?? [];
+    const fromBig = listed.filter((x) => x.catalogId === big.catalogId);
+    expect(fromBig).toHaveLength(PRODUCT_PICKER_LIMIT);
+    expect(fromBig.at(-1)?.retailerId).toBe(`BIG-${PRODUCT_PICKER_LIMIT}`);
+    expect(listed.filter((x) => x.catalogId === small.catalogId).map((x) => x.name)).toEqual([
+      'Blue mug',
+    ]);
   });
 
   it('sends no products, and publishes no products step, when the plan leaves out commerce', async () => {

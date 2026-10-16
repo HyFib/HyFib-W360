@@ -1661,7 +1661,11 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    cannot read a published version with a products step and would fail its runs as unreadable, so
    roll the workers out first; an old web server opens such a draft with the starter steps, so do
    not edit automations with products steps until the web rollout ends. Rolling an image back
-   leaves the wider check in place.
+   leaves the wider check in place. An endpoint whose list was set through the API to all 18 earlier
+   kinds (which ADR-328 made equal to null) keeps that list, so it does not receive products steps:
+   tell its company to tick "Send products" in Settings → Webhooks, or set the list to null. Until
+   the web rollout ends, an old web server refuses to save an endpoint whose list names products
+   steps, in Settings and through the API ("Choose kinds of step from the list.").
 
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.

@@ -582,15 +582,16 @@ export function advance(input: AdvanceInput): StepResult {
             PRODUCT_MESSAGE_LIMITS.bodyLength,
           );
           // A single product may go without a message; a list or the catalog may not, and a list
-          // needs its heading.
-          return (body || current.kind === 'product') &&
-            (current.kind !== 'product_list' || current.header)
+          // needs its heading. Only a list has a heading and a section title: the others are sent
+          // without the ones kept from when the step was a list.
+          const list = current.kind === 'product_list';
+          return (body || current.kind === 'product') && (!list || current.header)
             ? {
                 kind: 'send_products',
                 productKind: current.kind,
                 productIds: current.productIds,
-                sectionTitle: current.sectionTitle,
-                header: current.header,
+                sectionTitle: list ? current.sectionTitle : null,
+                header: list ? current.header : null,
                 body,
                 footer: current.footer,
               }

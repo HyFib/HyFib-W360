@@ -988,7 +988,14 @@ describe('crm deal export (ADR-239)', () => {
       'Bala',
       await phoneOf(bala),
     ]);
-    expect(lost.slice(13)).toEqual([expect.stringMatching(/^2\d{3}-.+Z$/), 'Too expensive', '0']);
+    // Neither deal has products, so their products and total are empty (ADR-380).
+    expect(lost.slice(13)).toEqual([
+      expect.stringMatching(/^2\d{3}-.+Z$/),
+      'Too expensive',
+      '0',
+      '',
+      '',
+    ]);
     const open = all[2]!.split(',');
     expect([...open.slice(0, 11), ...open.slice(13)]).toEqual([
       openId,
@@ -1005,6 +1012,8 @@ describe('crm deal export (ADR-239)', () => {
       '',
       '',
       '1',
+      '',
+      '',
     ]);
     expect(new Date(open[11]!).toISOString()).toBe(open[11]);
 
