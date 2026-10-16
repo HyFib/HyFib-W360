@@ -7,7 +7,7 @@ import { apiDealItemSchema, buildOpenApiDocument } from '../api/openapi';
 import { MAX_DEAL_ITEMS, MAX_ITEM_QUANTITY } from '../crm/deal-items';
 import { MAX_DEAL_MINOR } from '../crm/money';
 import { DEFAULT_EGRESS_POLICY, createEgressClient, EgressError } from '@w360/core/egress';
-import { webhookEgressPolicy, WEBHOOK_USER_AGENT } from './delivery';
+import { createWebhookEgressClient, webhookEgressPolicy, WEBHOOK_USER_AGENT } from './delivery';
 import { WEBHOOK_LIMITS } from './model';
 import {
   buildWebhookPayload,
@@ -502,16 +502,17 @@ describe('products on deals in deal webhook payloads (ADR-395)', () => {
       );
     });
 
-    it('is sent by the webhook egress client, which keeps every other limit of the worker’s', async () => {
+    it('is accepted by the webhook egress client, which keeps every other limit of the worker’s (stopping at the name lookup)', async () => {
       const policy = { ...DEFAULT_EGRESS_POLICY, allowLoopbackForTests: true, timeoutMs: 2_000 };
       expect(webhookEgressPolicy(policy)).toEqual({
         ...policy,
         maxRequestBytes: WEBHOOK_LIMITS.requestBytes,
       });
       // The size is checked before the address is looked up: a body the client takes reaches the
-      // lookup, which fails here on purpose; a larger one is refused as too large.
+      // lookup, which fails here on purpose, so nothing is sent; a larger one is refused as too
+      // large. No test sends a body over 64 KiB over a real connection.
       const lookups: string[] = [];
-      const client = createEgressClient(webhookEgressPolicy(policy), {
+      const client = createWebhookEgressClient(policy, {
         resolve: async (host) => {
           lookups.push(host);
           throw new Error('no lookups in unit tests');
@@ -536,6 +537,9 @@ describe('products on deals in deal webhook payloads (ADR-395)', () => {
       expect(await send('x'.repeat(WEBHOOK_LIMITS.requestBytes))).toBe('looked_up');
       expect(await send('x'.repeat(WEBHOOK_LIMITS.requestBytes + 1))).toBe('too_large');
       expect(lookups).toEqual(['hooks.example.com', 'hooks.example.com']);
+      // The client says the limit it sends with, which deliveries require of their client.
+      expect(client.maxRequestBytes).toBe(WEBHOOK_LIMITS.requestBytes);
+      expect(WEBHOOK_LIMITS.requestBytes).toBe(256 * 1024);
       // Other callers keep the default: the same body is too large for them.
       const other = createEgressClient(policy, {
         resolve: async () => {

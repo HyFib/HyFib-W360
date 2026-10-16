@@ -1,5 +1,10 @@
 import { errorClassAndCode, toError, type Clock, type Keyring } from '@w360/core';
-import { EgressError, type EgressClient, type EgressPolicy } from '@w360/core/egress';
+import {
+  createEgressClient,
+  EgressError,
+  type EgressClient,
+  type EgressPolicy,
+} from '@w360/core/egress';
 import { QUEUES } from '@w360/contracts';
 import {
   and,
@@ -56,12 +61,36 @@ export const WEBHOOK_USER_AGENT = 'HyFib-W360-Webhooks/1';
 
 /**
  * The egress policy deliveries are sent with (ADR-395): the worker's own, with its address checks,
- * deadline, response limit and lookups, but bodies up to `WEBHOOK_LIMITS.requestBytes`, so a deal
- * event listing its products is never refused as too large. Every other caller keeps the policy's
- * own limit.
+ * deadline, response limit and number of lookups at once, but bodies up to
+ * `WEBHOOK_LIMITS.requestBytes`, so a deal event listing its products is never refused as too
+ * large. Every other caller keeps the policy's own limit. The number of lookups is per client: a
+ * client built from it has a lookup budget of its own beside the worker's other clients.
  */
 export function webhookEgressPolicy(policy: EgressPolicy): EgressPolicy {
   return { ...policy, maxRequestBytes: WEBHOOK_LIMITS.requestBytes };
+}
+
+/**
+ * An egress client that sends bodies up to `WEBHOOK_LIMITS.requestBytes`, the only kind deliveries
+ * take (`WebhookDeliveryDeps.egress`), so passing the worker's 64 KiB client instead is a type
+ * error, not deliveries of large deal events failing after two days of retries. Built by
+ * `createWebhookEgressClient`.
+ */
+export interface WebhookEgressClient extends EgressClient {
+  /** The largest body it sends, in bytes. */
+  readonly maxRequestBytes: typeof WEBHOOK_LIMITS.requestBytes;
+}
+
+/** The webhook deliveries' egress client: `policy` with `webhookEgressPolicy` applied. */
+export function createWebhookEgressClient(
+  policy: EgressPolicy,
+  deps?: Parameters<typeof createEgressClient>[1],
+): WebhookEgressClient {
+  const client = createEgressClient(webhookEgressPolicy(policy), deps);
+  return {
+    request: (input) => client.request(input),
+    maxRequestBytes: WEBHOOK_LIMITS.requestBytes,
+  };
 }
 
 /** Headroom over the egress deadline before an attempt still in progress counts as interrupted. */
@@ -93,8 +122,8 @@ export interface WebhookDeliveryLogger {
 export interface WebhookDeliveryDeps extends WebhookDispatchDeps {
   clock: Clock;
   keyring: Keyring;
-  /** Built from `webhookEgressPolicy`, so bodies up to `WEBHOOK_LIMITS.requestBytes` are sent. */
-  egress: EgressClient;
+  /** From `createWebhookEgressClient`, so bodies up to `WEBHOOK_LIMITS.requestBytes` are sent. */
+  egress: WebhookEgressClient;
   /** The egress deadline; the lease covers it plus a margin. */
   timeoutMs: number;
   notices: WebhookNoticeDeps;

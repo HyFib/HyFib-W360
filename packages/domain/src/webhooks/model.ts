@@ -1352,10 +1352,10 @@ export const WEBHOOK_LIMITS = {
   /** The newest campaigns Settings offers to choose from (ADR-185); the API takes any of them. */
   campaignChoices: 200,
   /**
-   * The largest body a delivery sends, in bytes (ADR-395; 64 KiB, the egress guard's default,
-   * before). A deal event with 50 products of the longest names fits with room to spare.
+   * The largest body a delivery sends, in bytes: 256 KiB, written out so that its type is the
+   * number itself (`WebhookEgressClient`) (ADR-395; 64 KiB, the egress guard's default, before). A deal event with 50 products of the longest names fits with room to spare.
    */
-  requestBytes: 256 * 1024,
+  requestBytes: 262_144,
   /** The CRM pipelines an endpoint can choose to take the deals' events of (ADR-263). */
   pipelines: 50,
   /** The CRM stages an endpoint can choose to take the deals' events of (ADR-264). */

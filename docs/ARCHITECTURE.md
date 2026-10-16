@@ -2252,8 +2252,12 @@ state` for one that becomes skipped from another state, each only for a message 
   contact's deal gives them. Adding or removing an item captures nothing (no trigger on
   `app.crm_deal_items`): `changes` never names products, and an event delivered later gives the
   items as they are then. The largest deal event body is 202,667 bytes, so deliveries go through
-  the worker's `webhookEgress` (`webhookEgressPolicy`: the worker's policy with request bodies up
-  to `WEBHOOK_LIMITS.requestBytes`, 256 KiB); every other egress caller keeps 64 KiB.
+  the worker's `webhookEgress` (`createWebhookEgressClient`, applying `webhookEgressPolicy`: the
+  worker's policy with request bodies up to `WEBHOOK_LIMITS.requestBytes`, 256 KiB); every other
+  egress caller keeps 64 KiB. `WebhookDeliveryDeps.egress` is a `WebhookEgressClient` (it carries
+  that `maxRequestBytes`), so the 64 KiB client cannot be passed. Each client limits its own
+  system lookups (`maxConcurrentLookups`, 2), so the worker's four clients (automation HTTP steps,
+  webhooks, stores, alerts) may have 8 in progress at once, 6 for company-chosen addresses.
 - **Task events** (migrations 0177–0178, ADR-261): triggers on `app.crm_tasks` capture
   `task.created` when a task is inserted (members, the runner's task steps, keys) and
   `task.status_changed` when an update changes its status (members, keys through `apiUpdateTask`),

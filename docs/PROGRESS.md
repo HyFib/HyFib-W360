@@ -25,14 +25,15 @@ built.
   `deal.updated`'s descriptions say every deal event carries the products as `GET /deals/{id}/items`
   gives them, that a change of products alone sends no event, and that bodies delivered before have
   none (no decision numbers).
-- **Tests:** unit (`webhooks/deal-items.test.ts`, 9 tests (2 from the review fixes): the schema's identity with the API's
-  item and its place in every deal event, empty and full lists, order, the bound of 50, invalid
-  items, the rendering of all five events with the read's condition and order checked as SQL, no
-  items, erasure, a deal gone or an id that is not one, the OpenAPI entries and wording;
-  `webhooks.test.ts`: the deal fixture gives `items`); integration (`webhook-events.test.ts`: 1 new,
-  a member's and a key's products delivered as `GET /deals/{id}/items` reads them, a product removed
-  between capture and delivery, a deal without products, erasure, another company's products never
-  sent; the ADR-256 test's deal gives `items: []`).
+- **Tests:** unit (`webhooks/deal-items.test.ts`, 9 tests, 2 of them from the review fixes: the
+  schema's identity with the API's item and its place in every deal event, empty and full lists,
+  order, the bound of 50, invalid items, the rendering of all five events with the read's condition
+  and order checked as SQL, no items, erasure, a deal gone or an id that is not one, the OpenAPI
+  entries and wording; `webhooks.test.ts`: the deal fixture gives `items`); integration
+  (`webhook-events.test.ts`: 1 new, a member's and a key's products delivered as `GET
+/deals/{id}/items` reads them, a product removed between capture and delivery, a deal without
+  products, erasure, another company's products never sent; the ADR-256 test's deal gives `items:
+[]`).
 - **Docs:** ADR-395 (and notes in ADR-375 and ADR-378); ARCHITECTURE, SECURITY, THREAT-MODEL T348,
   DEPLOYMENT (rollout: an old worker sends deal events without `deal.items`), RUNBOOKS (products
   read at delivery, no event for a change of products), BACKLOG, and the matrix's H-012 and H-014
@@ -44,22 +45,35 @@ built.
   schema's erasure sentence and either OpenAPI sentence removed, `items` optional): 17 caught by the
   unit tests. The worker's real read under row security is covered by the integration test, which
   runs in CI only.
-- **Review fixes (two High findings):** the new integration test read the fixture in its
-  `describe` body (collected before `beforeAll` sets it, so the whole file would have failed); its
-  API deps are now built inside the test. Webhook bodies were capped at the egress guard's 64 KiB,
-  which a deal with 50 products of long names exceeds (refused as `request_too_large`, retried,
-  then failed): deliveries now have their own egress client, `webhookEgress`, built from the
-  worker's policy by `webhookEgressPolicy` with request bodies up to `WEBHOOK_LIMITS.requestBytes`
-  (256 KiB), every other limit and check unchanged; other callers keep 64 KiB. A unit test builds
-  the largest deal event through the payload code (every text at its column's most, of control
-  characters written as six-byte escapes, 50 items with 500-character names and 100-character
-  content ids, 50 changed field keys): 202,667 bytes (112,667 with product names' 200), more than
-  48 KiB under the new limit, and sends it through the client; the integration tests deliver
-  through the same policy. Wording: the deal and its items are two reads at read committed at
-  delivery, not one snapshot. 8 more deliberate regressions (the limit at 64, 200, 220 or 1,024
+- **Review fixes (two High findings):** the new integration test read the fixture in its `describe`
+  body (collected before `beforeAll` sets it, so the whole file would have failed); its API deps are
+  now built inside the test. Webhook bodies were capped at the egress guard's 64 KiB, which a deal
+  with 50 products of long names exceeds (refused as `request_too_large`, retried, then failed):
+  deliveries now have their own egress client, `webhookEgress`, built from the worker's policy by
+  `webhookEgressPolicy` with request bodies up to `WEBHOOK_LIMITS.requestBytes` (256 KiB), every
+  other limit and check unchanged; other callers keep 64 KiB. A unit test builds the largest deal
+  event through the payload code (every text at its column's most, of control characters written as
+  six-byte escapes, 50 items with 500-character names and 100-character content ids, 50 changed
+  field keys): 202,667 bytes (112,667 with product names' 200), more than 48 KiB under the new
+  limit, and checks that a client built with `webhookEgressPolicy` accepts it (the test stops at the
+  name lookup, so nothing is sent). Wording: the deal and its items are two reads at read committed
+  at delivery, not one snapshot. 8 more deliberate regressions (the limit at 64, 200, 220 or 1,024
   KiB, the policy unchanged, the response limit raised instead, a fixed policy ignoring the
-  worker's, items doubled): 8 caught by the unit tests. The worker wiring (`runtime.ts`, the
-  handler passing `webhookEgress`) has no unit test; typecheck covers that the field exists.
+  worker's, items doubled): 8 caught by the unit tests.
+- **Second review fixes (no High or Medium findings):** the worker's wiring is now a type:
+  deliveries take only a `WebhookEgressClient` (it carries `maxRequestBytes: 262144`), built by
+  `createWebhookEgressClient` with `webhookEgressPolicy`, so passing the 64 KiB client in
+  `runtime.ts` or the handler fails typecheck. 5 deliberate regressions: the handler given
+  `rt.egress`, the runtime building `webhookEgress` with `createEgressClient` (with or without a 256
+  KiB policy), all 3 refused by `tsc`; `createWebhookEgressClient` without the webhook policy, or
+  not using the client it built, both caught by the unit tests. Every integration helper that
+  delivers webhooks (`webhook-events`, `webhooks`, `api-webhook-endpoints`, `api-contact-fields`,
+  `stores`) builds its client that way, keeping its loopback and timeout settings; its fake
+  in-flight client states the limit. No test sends a body over 64 KiB over a real connection. Docs
+  give 256 KiB for webhook deliveries (H-014, H-027, T10, ADR-053) and the per-client lookup budget
+  (2 at once per client; 8 per worker process, 6 for company-chosen addresses) in T10, ARCHITECTURE,
+  DEPLOYMENT and the code; wrapping fixed. The full local check (lint, format, typecheck, `pnpm
+test`, build) ran after these fixes (results below); the integration tests run in CI only.
 - **Not built:** `deal.updated` naming `items` in `changes` when products change (a capture on
   `app.crm_deal_items` in a migration, an endpoint detail and history), the items' total in the
   payload, items in the API's deal object, and an e2e test of its own.

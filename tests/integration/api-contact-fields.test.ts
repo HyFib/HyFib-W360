@@ -4,7 +4,7 @@ import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { isAppError, systemClock, uuidv7 } from '@w360/core';
-import { DEFAULT_EGRESS_POLICY, createEgressClient } from '@w360/core/egress';
+import { DEFAULT_EGRESS_POLICY } from '@w360/core/egress';
 import { authorizedTenantScope, contacts, eq, sql } from '@w360/db';
 import {
   API_CONTACT_SEARCH_WINDOW,
@@ -20,6 +20,7 @@ import {
   contactUpdatedPayloadSchema,
   createApiKeysService,
   createContactsService,
+  createWebhookEgressClient,
   createWebhooksService,
   processWebhookDeliveries,
   WebhookOAuthTokenCache,
@@ -958,7 +959,7 @@ describe('contact.updated for custom field values (ADR-112)', () => {
         db: fx.dbs.app,
         clock: systemClock,
         keyring: fx.keyring,
-        egress: createEgressClient(
+        egress: createWebhookEgressClient(
           { ...DEFAULT_EGRESS_POLICY, allowLoopbackForTests: true, timeoutMs: 2_000 },
           { resolve: async () => [{ address: '127.0.0.1', family: 4 }] },
         ),

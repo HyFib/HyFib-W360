@@ -4,7 +4,7 @@ import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { isAppError, sha256Hex, systemClock, uuidv7, type Clock } from '@w360/core';
-import { DEFAULT_EGRESS_POLICY, createEgressClient } from '@w360/core/egress';
+import { DEFAULT_EGRESS_POLICY } from '@w360/core/egress';
 import {
   authorizedTenantScope,
   contacts,
@@ -57,6 +57,7 @@ import {
   createInboxService,
   createTeamsService,
   createTemplatesService,
+  createWebhookEgressClient,
   createWebhooksService,
   dealCreatedPayloadSchema,
   dealOwnerChangedPayloadSchema,
@@ -78,7 +79,6 @@ import {
   processWebhookDeliveries,
   WEBHOOK_EXACT_TIME_RE,
   WebhookOAuthTokenCache,
-  webhookEgressPolicy,
   runCampaignTick,
   syncTemplates,
   taskAssigneeChangedPayloadSchema,
@@ -214,13 +214,9 @@ async function deliverDue(c: Company) {
       db: fx.dbs.app,
       clock: systemClock,
       keyring: fx.keyring,
-      egress: createEgressClient(
-        // The worker's webhook client (ADR-395): bodies up to WEBHOOK_LIMITS.requestBytes.
-        {
-          ...webhookEgressPolicy(DEFAULT_EGRESS_POLICY),
-          allowLoopbackForTests: true,
-          timeoutMs: 2_000,
-        },
+      // The worker's webhook client (ADR-395): bodies up to WEBHOOK_LIMITS.requestBytes.
+      egress: createWebhookEgressClient(
+        { ...DEFAULT_EGRESS_POLICY, allowLoopbackForTests: true, timeoutMs: 2_000 },
         { resolve: async () => [{ address: '127.0.0.1', family: 4 }] },
       ),
       timeoutMs: 2_000,

@@ -1788,8 +1788,11 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    egress client, which sends bodies up to 256 KiB (every other caller keeps 64 KiB); an old worker
    builds deal bodies without items, which its 64 KiB fits, so the two limits never meet one body.
    Rolling workers back restores both the 64 KiB limit and the bodies it fits. Until the web
-   rollout ends, an old server's OpenAPI document does not describe `deal.items`. The worker reads `app.crm_deal_items`, `app.commerce_products` and
-   `app.commerce_catalogs` as `w360_app`, which already holds `SELECT` on them (0018, 0294).
+   rollout ends, an old server's OpenAPI document does not describe `deal.items`. The worker reads
+   `app.crm_deal_items`, `app.commerce_products` and `app.commerce_catalogs` as `w360_app`, which
+   already holds `SELECT` on them (0018, 0294). The webhook client has a lookup budget of its own
+   (two system lookups at once), so a worker process may have 8 in progress across its four
+   clients (6 before).
 
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.

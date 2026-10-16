@@ -1160,9 +1160,8 @@ notified (bursts coalesce) and the minute sweep runs for retries, missed notific
 that expired. The job claims due deliveries in batches of 10 under row locks (`SKIP LOCKED`) with a
 lease of the request deadline plus 35 s, posts each one through the egress guard (DNS pinned,
 private and metadata addresses refused, no redirects, 10 s timeout, at most 64 KB sent; 256 KiB
-since ADR-395) with no
-transaction open, and records each outcome, locking the endpoint before the delivery: a 2xx answer
-succeeds; anything else, including timeouts and refused addresses, is retried at 1 min, 5 min,
+since ADR-395) with no transaction open, and records each outcome, locking the endpoint before the
+delivery: a 2xx answer succeeds; anything else, including timeouts and refused addresses, is retried at 1 min, 5 min,
 30 min, 2 h, 6 h, 12 h and 24 h (eight attempts over about 45 hours), then the delivery fails. A
 delivery whose lease expired (worker lost) is attempted again (`interrupted` when no attempt is
 left); an outcome recorded after a newer attempt claimed the delivery is dropped. After 200
@@ -16112,8 +16111,8 @@ Decision:
   product was added or removed gives the products as they are then. The deal and its items are two
   reads at read committed in the delivery's transaction, not one snapshot, as the deal and its
   contact already are: a product changed between the two reads can show in the items of a deal
-  read just before it, and the deal's next event gives both again. A deal without products gives `items: []`; an event whose deal is gone still ends
-  as `event_gone` before anything else is read.
+  read just before it, and the deal's next event gives both again. A deal without products gives
+  `items: []`; an event whose deal is gone still ends as `event_gone` before anything else is read.
 - **Bounded:** at most 50 items a deal (ADR-375, enforced under the deal's lock when one is added),
   in the order they were added (added time, then id, as the API orders them); the schema says so
   (`maxItems`). Item names hold at most 500 characters (product names 200) and content ids 100,
@@ -16125,8 +16124,14 @@ Decision:
   their own, the worker's policy with request bodies up to 256 KiB (`WEBHOOK_LIMITS.requestBytes`,
   `webhookEgressPolicy`), its address checks, deadline, response limit, redirects and loopback rule
   unchanged; every other caller (automation HTTP steps, stores, alerts, the web tier's Flows
-  endpoint) keeps 64 KiB. A unit test builds that largest body through the payload code and sends
-  it through the client. The receiver's timeout is unchanged.
+  endpoint) keeps 64 KiB. Deliveries take only a `WebhookEgressClient`, which
+  `createWebhookEgressClient` builds with that policy, so handing them the 64 KiB client is a type
+  error. The client has a lookup budget of its own (two system lookups at once, as each client),
+  so a worker process's four clients may have 8 lookups in progress, 6 for company-chosen
+  addresses. A unit test builds that largest body through the payload code and checks that a
+  client built with `webhookEgressPolicy` accepts it and refuses a byte past the limit; it stops at
+  the name lookup, so nothing is sent, and no test sends a body over 64 KiB over a real
+  connection. The receiver's timeout is unchanged.
 - **Erasure:** a deal's payload is sent as erasure left it (ADR-256): the title replaced, the lost
   reason and custom field values cleared, the contact without number or name. Erasure keeps a deal's
   products, which name catalog products, not the customer (ADR-375), and the API still gives them,
