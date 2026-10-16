@@ -25,7 +25,7 @@ ADR-394 listed "filtering Reports by a choice" as not built: the board, the won 
   it strictly (ADR-391's 400s), names a filtered file `deals-filtered-by-<key>-…` (never the option)
   and audits `report.exported` with `field: { key, match }`.
 - **API (`api/reports.ts`, `openapi.ts`):** `GET /reports?field=` needs `deals.read` too (checked
-  before the text) and the CRM in the plan, refuses a malformed text before the transaction and a
+  before anything in the query) and the CRM in the plan, refuses a malformed text before the transaction and a
   key or value the company's fields do not resolve within it, with 422 naming `field` in the API's
   words; `deals.field` echoes the filter as resolved, or null. The OpenAPI document describes the
   parameter, the scope, the refusals and the echo (no decision numbers).
@@ -34,13 +34,15 @@ ADR-394 listed "filtering Reports by a choice" as not built: the board, the won 
   Reports page reads `field` (a repeated one by its first value), shows the form with the period as
   hidden inputs, keeps the filter in the period form, says which deals the section counts, and links
   the deals export with the filter (`lib/report-links.ts`); the export route passes `field`.
-- **Tests:** unit (23 new: `reports/deal-report.test.ts` 6, each query's condition and where it
-  sits, "Not set", yes/no, the figures, the permission gate reading no fields without `crm.read`;
-  `reports/deal-filter.test.ts` 6, the page's reading for members with and without `crm.read`, the
-  export's refusals in order, the file name; `crm/deal-field-filter.test.ts` 2, the aliased
-  condition and its identity with the board's; `api/reports.test.ts` 6 new and 1 updated, the query
-  schema, the scope before the text, malformed texts before reading, the plan and each refusal
-  against fake fields, the echo, the OpenAPI text; `lib/report-links.test.ts` 3); integration
+- **Tests:** unit (27 new, with the review fixes': `reports/deal-report.test.ts` 7, each query's
+  condition and where it sits, "Not set", yes/no, the figures, the permission gate reading no
+  fields without `crm.read`, a NUL character never refusing the page; `reports/deal-filter.test.ts`
+  6, the page's reading for members with and without `crm.read`, the export's refusals in order,
+  the file name; `crm/deal-field-filter.test.ts` 5, the aliased condition, the text reader, a NUL
+  character in the key or the value ignored by the view, the board and the lists;
+  `api/reports.test.ts` 6 new and 1 updated, the query schema, the scope before the query, malformed
+  texts before reading, the plan and each refusal against fake fields, the echo, the OpenAPI text;
+  `lib/report-links.test.ts` 3); integration
   (`crm.test.ts`: 2 new, every figure by an option, "Not set", yes, no and not set, other sections
   unchanged, ignored filters, a marketer without `crm.read`, the export's rows, file name,
   refusals and audit, isolation between companies; `api.test.ts`: 1 new, the API's report equal to
@@ -60,16 +62,32 @@ ADR-394 listed "filtering Reports by a choice" as not built: the board, the won 
   and text, and the links' filter, period and section rules): 30 caught by the unit tests, each file
   restored exactly. The wiring of `getReport`, `exportSection` and `apiGetReport` to the database
   (what reaches `readReport`) is covered by the integration tests, which run in CI only.
+- **Review fixes (no High or Medium finding; the review recomputed the integration tests'
+  figures):** a NUL character in `field` failed the Reports page, which took validation's refusal
+  for a bad period and asked again with the same text, and, since ADR-391 and ADR-394, the board
+  and the lists. The lenient readings now take the text apart from their input's validation
+  (`dealFieldFilterText`), so such a link shows every deal with the notice (it can never resolve);
+  the exports and the API still refuse it. `GET /reports` now checks `deals.read` before reading the
+  query, so a key without it gets 403 whatever the query holds (an over-long `field` or a bad period
+  got 422 first). The unit test comparing the board's condition with itself was removed, and the
+  browser test has two minutes instead of one. Tests: 5 new unit tests (the text reader; a NUL in
+  the key or the value ignored by the view, by the board and the lists end to end against a fake
+  transaction, and by Reports' reading, with `getReport` reaching the report instead of refusing)
+  and the API's scope test extended (an over-long, NUL or numeric `field` and bad periods from a key
+  without `deals.read`: 403). 6 more deliberate regressions (each fix undone or weakened) and the
+  earlier 30 again, two of them adapted to the scope check's new place: 36/36 caught, each file
+  restored exactly. Lint, format, typecheck, the unit tests and the build ran again (the table);
+  the integration and e2e tests still run in CI only.
 - **Not built:** several field filters at once, text, number or date filters, saved filtered views
   and filtered report emails, the filter on `GET /pipelines/{id}/forecast`, and naming the filter
   inside the CSV file.
 
-### Test commands and results (local, 2026-10-16)
+### Test commands and results (local, 2026-10-16, after the review fixes)
 
 | Command                                            | Result                                                          |
 | -------------------------------------------------- | --------------------------------------------------------------- |
 | `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
-| `pnpm test` (unit)                                 | 169 files, 1,806 tests passed                                   |
+| `pnpm test` (unit)                                 | 169 files, 1,810 tests passed (1,806 before the review fixes)   |
 | `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
 | `pnpm build`                                       | passed                                                          |
 

@@ -166,6 +166,9 @@ test('deals are imported from a CSV file into a pipeline, checked first, rows wi
 test('custom deal field values, a choice among them, are given when a deal is created (ADR-379, ADR-385)', async ({
   page,
 }) => {
+  // About thirty steps, four of them loading Reports (every section's queries): more than the
+  // default minute on slower browsers.
+  test.setTimeout(120_000);
   const { slug } = await createCompany(page, 'crmfields', 'Farah');
   await createPipeline(page, slug);
   // A text field and a yes/no field, defined in Settings → Pipelines (ADR-373).

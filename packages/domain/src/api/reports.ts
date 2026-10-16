@@ -489,13 +489,18 @@ export function toApiReport(report: Report): ApiReport {
   };
 }
 
+/** Whether a query names a deal field filter at all, whatever its value. */
+const asksForField = (query: unknown) =>
+  typeof query === 'object' && query !== null && (query as { field?: unknown }).field !== undefined;
+
 /**
  * The company's report for a period (`MAX_PERIOD_DAYS` at most), as the Reports page reads it: in
  * the company's time zone, in one read-only snapshot. With `field`, the deals section counts only
  * the deals a choice or yes/no field's value matches (ADR-396), read as `GET /deals` reads it: it
- * needs `deals.read` and the CRM in the plan, as `GET /deal-fields` does, since it resolves against
- * those fields; a text written otherwise is refused before the transaction, and a key or value the
- * company's fields do not resolve within it, never ignored.
+ * needs `deals.read` (checked before the query is read) and the CRM in the plan, as
+ * `GET /deal-fields` does, since it resolves against those fields; a text written otherwise is
+ * refused before the transaction, and a key or value the company's fields do not resolve within
+ * it, never ignored.
  */
 export async function apiGetReport(
   deps: Pick<OutboundDeps, 'db' | 'clock'>,
@@ -503,12 +508,12 @@ export async function apiGetReport(
   query: unknown,
 ): Promise<ApiReport> {
   assertScope(ctx, 'reports.read');
+  // A filter needs deals.read, checked before anything in the query is, so a key without it learns
+  // nothing from how its query would be refused.
+  if (asksForField(query)) assertScope(ctx, 'deals.read');
   const input = parseInput(apiReportQuerySchema, query);
-  if (input.field !== undefined) {
-    assertScope(ctx, 'deals.read');
-    if (parseDealFieldFilterParam(input.field) === null) {
-      throw dealFieldFilterRefusal('malformed', apiDealFieldFilterMessage);
-    }
+  if (input.field !== undefined && parseDealFieldFilterParam(input.field) === null) {
+    throw dealFieldFilterRefusal('malformed', apiDealFieldFilterMessage);
   }
   const now = deps.clock.now();
   const report = await deps.db.run(

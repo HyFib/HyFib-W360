@@ -45,6 +45,7 @@ import {
 import {
   dealFieldFilterAudit,
   DEAL_FIELD_FILTER_MAX_LENGTH,
+  dealFieldFilterText,
   dealFieldFilterView,
   dealFieldMatch,
   requireDealFieldFilter,
@@ -224,25 +225,25 @@ const noteSchema = z
   })
   .refine((n) => n.contactId !== null || n.dealId !== null, 'Choose a contact or a deal.');
 
+/**
+ * The board's input. Its field filter (`field`, `<key>:<option>`, ADR-391) is not part of it: it is
+ * read apart (`dealFieldFilterText`), as any text, so one the company's fields do not resolve
+ * (malformed, too long, a deleted field or a removed option, or holding a character validation
+ * refuses, ADR-396) is ignored and reported, and a stale link shows the whole board instead of an
+ * error.
+ */
 const boardSchema = z.object({
   pipelineId: uuidSchema.nullable().default(null),
   owner: z
     .union([z.literal('all'), z.literal('mine'), z.literal('none'), uuidSchema])
     .default('all'),
-  /**
-   * A field filter as the address writes it (`<key>:<option>`, ADR-391). Any text is taken: one the
-   * company's fields do not resolve (malformed, too long, a deleted field or a removed option) is
-   * ignored and reported, so a stale link shows the whole board instead of an error.
-   */
-  field: z.string().nullable().default(null),
 });
 
+/** A list's input; its field filter (ADR-394) is read apart, as the board's is. */
 const listSchema = z.object({
   status: z.enum(['open', 'won', 'lost']).nullable().default(null),
   pipelineId: uuidSchema.nullable().default(null),
   cursor: z.string().max(200).nullable().default(null),
-  /** A field filter as the address writes it (ADR-394), read as the board reads it. */
-  field: boardSchema.shape.field,
 });
 
 const LIST_PAGE = 50;
@@ -485,6 +486,7 @@ export function dealOperations(deps: { db: Database; clock: Clock }) {
     async board(ctx: TenantContext, input: unknown = {}): Promise<Board | null> {
       assertCan(ctx, 'crm.read');
       const data = parseInput(boardSchema, input);
+      const field = dealFieldFilterText(input);
       return db.run(
         ctx.scope,
         async (tx) => {
@@ -497,10 +499,7 @@ export function dealOperations(deps: { db: Database; clock: Clock }) {
             return null;
           }
           // The field filter, resolved against the company's own fields only (ADR-391).
-          const fieldFilter = dealFieldFilterView(
-            await loadDealFields(tx, ctx.tenant.id),
-            data.field,
-          );
+          const fieldFilter = dealFieldFilterView(await loadDealFields(tx, ctx.tenant.id), field);
           const applied = fieldFilter.applied;
           const where = and(
             eq(crmDeals.tenantId, ctx.tenant.id),
@@ -595,6 +594,7 @@ export function dealOperations(deps: { db: Database; clock: Clock }) {
     async listDeals(ctx: TenantContext, input: unknown = {}): Promise<DealListPage> {
       assertCan(ctx, 'crm.read');
       const data = parseInput(listSchema, input);
+      const field = dealFieldFilterText(input);
       let cursor: { at: Date; id: string } | null = null;
       if (data.cursor) {
         const [iso, id] = Buffer.from(data.cursor, 'base64url').toString('utf8').split('|');
@@ -610,10 +610,7 @@ export function dealOperations(deps: { db: Database; clock: Clock }) {
       return db.run(
         ctx.scope,
         async (tx) => {
-          const fieldFilter = dealFieldFilterView(
-            await loadDealFields(tx, ctx.tenant.id),
-            data.field,
-          );
+          const fieldFilter = dealFieldFilterView(await loadDealFields(tx, ctx.tenant.id), field);
           const rows = await tx
             .select({ deal: crmDeals, changedAt })
             .from(crmDeals)

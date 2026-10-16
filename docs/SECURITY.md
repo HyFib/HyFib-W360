@@ -493,10 +493,13 @@ Phase 4 rules (CRM, P4-04):
   resolve with the notice (no echo), the export refuses it, a filter with another section and one
   from a member without `crm.read` before anything is read or audited, and records
   `field: { key, match }` in `report.exported`, never the option; a filtered file's name gives the
-  key only. `GET /reports?field=` needs `deals.read` as well as `reports.read` (checked before the
-  text) and the CRM in the plan, as `GET /deal-fields` does, and refuses with 422 naming `field`
-  what does not resolve; without `field` a `reports.read` key reads the report as before. Other
-  sections and report emails are never filtered.
+  key only. `GET /reports?field=` needs `deals.read` as well as `reports.read` (checked before
+  anything in the query is) and the CRM in the plan, as `GET /deal-fields` does, and refuses with
+  422 naming `field` what does not resolve; without `field` a `reports.read` key reads the report
+  as before. Other sections and report emails are never filtered. The page, the board and the lists
+  read the filter's text apart from their input's validation, so text it refuses (a NUL character)
+  is ignored with the notice instead of failing the page; it can never resolve, and only a resolved
+  filter reaches a query.
 - While a company is suspended, `crm.read` stays available and `crm.write` does not; reminder jobs
   wait, and the sweep sends reminders after reactivation unless they are more than a day late.
 

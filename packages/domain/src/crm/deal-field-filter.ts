@@ -218,9 +218,23 @@ export interface DealFieldFilterView {
 }
 
 /**
- * The lenient reading of the board and the won and lost lists: an absent or empty text asks for
- * nothing, and one that does not resolve is ignored and reported, so a stale link shows every deal
- * instead of an error.
+ * The filter text a lenient view takes from its input: any string, read apart from the input's
+ * validation (ADR-396's fix to ADR-391 and ADR-394), so text validation refuses everywhere else
+ * (the NUL character) cannot fail the board, the lists or Reports. Such text never resolves (keys
+ * are `^[a-z][a-z0-9_]{0,39}$`, and options never hold NUL, which PostgreSQL text cannot store),
+ * so it is ignored and reported like any other stale filter; only a resolved filter reaches a query.
+ * Anything but a string asks for nothing.
+ */
+export function dealFieldFilterText(input: unknown): string | null {
+  if (typeof input !== 'object' || input === null) return null;
+  const field = (input as { field?: unknown }).field;
+  return typeof field === 'string' ? field : null;
+}
+
+/**
+ * The lenient reading of the board, the won and lost lists and Reports: an absent or empty text
+ * asks for nothing, and one that does not resolve is ignored and reported, so a stale link shows
+ * every deal instead of an error.
  */
 export function dealFieldFilterView(
   fields: readonly FilterableFieldShape[],

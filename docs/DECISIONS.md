@@ -16221,15 +16221,34 @@ Decision:
   key and value are resolved in it against the company's own fields, after the CRM plan check, in
   the integration's words (`apiDealFieldFilterMessage`). Since the filter resolves against the
   fields `GET /deal-fields` gives, it needs what that endpoint needs: the `deals.read` scope (403
-  otherwise, checked before the text) and the CRM in the plan (403, reason `not_in_plan`); a key
-  with `reports.read` alone reads the report as before. `deals.field` gives the filter followed, as
-  resolved (`tier:Gold` for `tier:gold`), or null, so a stored response says whether it was
-  filtered. The OpenAPI document describes the parameter, the scope, the refusals and the echo,
-  without decision numbers.
+  otherwise, checked before anything in the query: the period, the text's length, a NUL character
+  or its form) and the CRM in the plan (403, reason `not_in_plan`); a key with `reports.read`
+  alone reads the report as before. `deals.field` gives the filter followed, as resolved
+  (`tier:Gold` for `tier:gold`), or null, so a stored response says whether it was filtered. The
+  OpenAPI document describes the parameter, the scope, the refusals and the echo, without decision
+  numbers.
 - **No index, no migration:** the condition only filters rows the section's queries already read
   (a company's deals, thousands at most), as on the board (ADR-391, ADR-394).
+- **A fix to the lenient reading (ADR-391, ADR-394):** the board, the lists and Reports read the
+  filter's text apart from their input's validation (`dealFieldFilterText`: any string, anything
+  else asks for nothing). Validation refuses the NUL character in every text, so a link with
+  `field=%00` (or `tier:%00`) failed the board and the lists since ADR-391, and the Reports page,
+  which took the refusal for a bad period and asked again with the same text: an error page instead
+  of "Showing every deal". Such text never resolves (keys are `^[a-z][a-z0-9_]{0,39}$`, and options
+  never hold NUL, which PostgreSQL text cannot store), so it is now ignored and reported like any
+  other stale filter; only a resolved filter reaches a query. The exports and the API keep refusing
+  it, as they refuse every filter that does not resolve.
 
 Not built: several field filters at once (or several options of one field), filters by text,
 number or date fields, saving a filtered view (and so filtered report emails), the filter in
 `GET /pipelines/{id}/forecast` (the report's forecast is filtered, the endpoint's is not), and the
 section's CSV naming the filter inside the file.
+
+Review (before merge): an independent review found no High or Medium issue; it recomputed the
+integration tests' figures. It found that a NUL character in `field` failed the Reports page, the
+board and the lists (fixed as described above); that `GET /reports` checked `deals.read` after the
+query's own checks, so a key without the scope sending a 201-character `field` or a bad period got
+422 instead of 403 (the scope is now checked before the query is read); that a unit test comparing
+the board's condition with itself could never fail (removed: the exact SQL of the board's and the
+section's conditions is tested); and that the browser test, now running Reports four more times,
+risked the default minute on slower browsers (it now has two). All were fixed.

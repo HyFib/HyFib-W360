@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { PgDialect } from 'drizzle-orm/pg-core';
-import type { SQL, Tx } from '@w360/db';
+import type { Database, SQL, Tx } from '@w360/db';
 import type { TenantContext } from '../authz/context';
 import { resolveDealFieldFilter, type FilterableFieldShape } from '../crm/deal-field-filter';
 import { resolvePeriod } from './period';
-import { dealReport, readReportDealFilter } from './service';
+import { createReportsService, dealReport, readReportDealFilter } from './service';
 
 const TENANT = '0192f0c4-8e2b-7c1d-9a3e-5b6c7d8e9f01';
 const PIPELINE = '0192f0c4-8e2b-7c1d-9a3e-5b6c7d8e9f02';
@@ -223,5 +223,50 @@ describe('the page’s filter, read in the report’s transaction (ADR-396)', ()
       permitted: false,
     });
     expect(reads()).toBe(0);
+  });
+
+  it('ignores and reports a NUL character in the key or the value, never refusing the page', async () => {
+    const NUL = '\u0000';
+    const withNul = [`ti${NUL}er:Gold`, `tier${NUL}:Gold`, `tier:Go${NUL}ld`, `tier:${NUL}`, NUL];
+    for (const raw of withNul) {
+      expect(
+        await readReportDealFilter(fieldsTx().tx, ctx(['reports.read', 'crm.read']), raw),
+        JSON.stringify(raw),
+      ).toMatchObject({ applied: null, ignored: true, permitted: true });
+      expect(
+        await readReportDealFilter(fieldsTx().tx, ctx(['reports.read']), raw),
+        JSON.stringify(raw),
+      ).toMatchObject({ applied: null, ignored: true, permitted: false });
+    }
+    // The page's reading takes such text past validation into the report's snapshot: the fields
+    // are read, then the report's own queries start, instead of a refusal the page would take for
+    // a bad period.
+    for (const field of withNul) {
+      let selects = 0;
+      const tx = {
+        select: () => {
+          selects += 1;
+          if (selects > 1) throw new Error('reached the report');
+          return {
+            from: () => ({ where: () => ({ orderBy: () => Promise.resolve([...fields]) }) }),
+          };
+        },
+      } as unknown as Tx;
+      const db = {
+        run: (_scope: unknown, fn: (tx: Tx) => unknown) => fn(tx),
+      } as unknown as Database;
+      await expect(
+        createReportsService({ db, clock: { now: () => NOW } }).getReport(
+          {
+            ...ctx(['reports.read', 'crm.read']),
+            tenant: { id: TENANT, timezone: 'Asia/Kolkata' },
+            scope: {},
+          } as unknown as TenantContext,
+          { preset: 'last_7_days', field },
+        ),
+        JSON.stringify(field),
+      ).rejects.toThrow('reached the report');
+      expect(selects).toBe(2);
+    }
   });
 });

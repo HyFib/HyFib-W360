@@ -594,13 +594,32 @@ describe('the deals section filtered by a deal field through the API (ADR-396)',
     expect(apiReportQuerySchema.safeParse({ field: `tier:${'x'.repeat(195)}` }).success).toBe(true);
   });
 
-  it('need deals.read as well, checked before the text and before anything is read', async () => {
-    for (const field of ['tier:Gold', '', 'tier']) {
+  it('need deals.read as well, checked before the query and before anything is read', async () => {
+    const missing = ['forbidden', 'This API key does not have the deals.read scope.', []];
+    // Before the text: over-long, holding NUL, written otherwise or well, and before the period.
+    for (const query of [
+      { field: 'tier:Gold' },
+      { field: '' },
+      { field: 'tier' },
+      { field: `tier:${'x'.repeat(196)}` },
+      { field: 'tier:\u0000' },
+      { field: 7 },
+      { field: 'tier:Gold', preset: 'custom', from: '8 October' },
+      { field: 'tier:Gold', preset: 'yesterday' },
+    ]) {
       expect(
-        await refused(apiGetReport({ db: untouched, clock }, ctx(['reports.read']), { field })),
-        field,
-      ).toEqual(['forbidden', 'This API key does not have the deals.read scope.', []]);
+        await refused(apiGetReport({ db: untouched, clock }, ctx(['reports.read']), query)),
+        JSON.stringify(query),
+      ).toEqual(missing);
     }
+    // With the scope, the same queries are refused for what they hold.
+    expect(
+      (
+        await refused(
+          apiGetReport({ db: untouched, clock }, both, { field: `tier:${'x'.repeat(196)}` }),
+        )
+      )[0],
+    ).toBe('validation_failed');
     // Without `field`, reports.read alone reads the report, as before.
     await expect(
       apiGetReport({ db: company('Asia/Kolkata').db, clock }, ctx(['reports.read']), {}),

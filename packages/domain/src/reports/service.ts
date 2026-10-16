@@ -36,6 +36,7 @@ import { CSV_BOM, csvLine } from '../contacts/csv';
 import {
   DEAL_FIELD_FILTER_MAX_LENGTH,
   dealFieldFilterAudit,
+  dealFieldFilterText,
   dealFieldMatch,
   requireDealFieldFilter,
   type ResolvedDealFieldFilter,
@@ -1639,12 +1640,6 @@ export async function readReport(
   };
 }
 
-/**
- * The Reports page's deal field filter (ADR-396), as its address writes it: any text, read as the
- * board reads it, so one that does not resolve is ignored and reported instead of failing.
- */
-const reportPageInputSchema = z.object({ field: z.string().nullish() });
-
 /** A section export's deal field filter (ADR-396): refused unless it resolves, as the CRM export's. */
 const reportExportInputSchema = z.object({
   field: z
@@ -1676,13 +1671,14 @@ export function createReportsService(deps: ReportsDeps) {
   /**
    * The report for the page. Its deals section follows the filter by a choice or yes/no field in
    * `input.field` (ADR-396) for members who may see the CRM, resolved against the company's own
-   * fields in the report's snapshot; for others it is neither read nor applied.
+   * fields in the report's snapshot; for others it is neither read nor applied. The filter's text is
+   * read as the board reads it, apart from the input's validation, so no text fails the page.
    */
   async function getReport(ctx: TenantContext, input: unknown): Promise<ReportPage> {
     assertCan(ctx, 'reports.read');
     const now = clock.now();
     const period = resolvePeriod(input, ctx.tenant.timezone, now);
-    const { field } = parseInput(reportPageInputSchema, input ?? {});
+    const field = dealFieldFilterText(input);
     return db.run(
       ctx.scope,
       async (tx) => {
