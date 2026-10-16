@@ -484,6 +484,22 @@ Phase 4 rules (CRM, P4-04):
   company's fields within it, after the scope and plan checks. A cursor is a position only and
   carries no filter: each page applies the filters sent with it. Scopes, permissions and rate limits
   are unchanged (`deals.read`; the lists `crm.read`).
+- The same filter on Reports' deals section, its export and `GET /reports` (ADR-396): Reports need
+  only `reports.read`, but the filter's choices name the company's deal fields and options, so the
+  page reads the fields and offers or applies a filter only for members with `crm.read`; for
+  others the section is unfiltered and a filter in the address gives the same notice whether or not
+  it names one of the company's fields. Resolved against the company's own fields in the report's
+  snapshot, under row security, the key and value bound parameters; the page ignores what does not
+  resolve with the notice (no echo), the export refuses it, a filter with another section and one
+  from a member without `crm.read` before anything is read or audited, and records
+  `field: { key, match }` in `report.exported`, never the option; a filtered file's name gives the
+  key only. `GET /reports?field=` needs `deals.read` as well as `reports.read` (checked before
+  anything in the query is) and the CRM in the plan, as `GET /deal-fields` does, and refuses with
+  422 naming `field` what does not resolve; without `field` a `reports.read` key reads the report
+  as before. Other sections and report emails are never filtered. The page, the board and the lists
+  read the filter's text apart from their input's validation, so text it refuses (a NUL character)
+  is ignored with the notice instead of failing the page; it can never resolve, and only a resolved
+  filter reaches a query.
 - While a company is suspended, `crm.read` stays available and `crm.write` does not; reminder jobs
   wait, and the sweep sends reminders after reactivation unless they are more than a day late.
 
@@ -1309,7 +1325,11 @@ Phase 5 rules (Public API, P5-08):
   company's time zone read from the database, never from the request. The report is read under row
   security in the key's company, in one read-only snapshot, and holds counts and the names of
   members, campaigns, automations, pipelines and stages: never a message, a contact, a conversation,
-  a member's role or email (unit tests; integration tests, run in CI only).
+  a member's role or email (unit tests; integration tests, run in CI only). Since ADR-396 `field`
+  filters the deals section only, and needs `deals.read` too (granted only with `crm.read`) and the
+  CRM in the plan, so a key that cannot read the deal fields cannot probe them through the report;
+  `deals.field` echoes the field's key and option as the filter resolved them, which the key could
+  read with `GET /deal-fields`.
 - Flows (ADR-298): `GET /flows` and `GET /flow-responses` need `flows.read`, granted only by members
   who hold it, checked before any query, as is the query. Both read under row security in the key's
   company, read only, on bounded pages, and never select the Flow JSON, the data endpoint, keys or

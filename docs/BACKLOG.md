@@ -357,16 +357,26 @@ verification, app review, Embedded Signup configuration).
   columns, counts, totals and weighted figures with the owner filter, yes/no fields too, kept in the
   address as `field=<key>:<option>` and resolved against the company's own fields; a stale link shows
   every deal with a notice; the export of the view follows it, refusing a filter that does not
-  resolve, audited with the key, never the option. Not built: Reports by a choice, several filters
-  at once, the API filter, since built with the won and lost lists, ADR-394).
+  resolve, audited with the key, never the option. Not built: Reports by a choice (since built,
+  ADR-396), several filters at once, the API filter, since built with the won and lost lists,
+  ADR-394).
   **[The deal field filter on the won and lost lists and in `GET /deals` built; its database and
   browser tests run only in CI]** (ADR-394, no migration; the API part recorded under P5-08: the
   won and lost lists, their pages and their export follow the same filter, a stale link showing
   every deal with the notice, and switching between the board and the lists keeps it; `GET
 /deals?field=<key>:<value>` combines with the other filters and refuses with 422 naming `field` a
   filter that does not resolve; cursors stay positions, each page applying the filters it is sent
-  with. Not built: Reports by a choice, several filters at once, text, number or date filters, saved
-  filtered views).
+  with. Not built: Reports by a choice (since built, ADR-396), several filters at once, text, number
+  or date filters, saved filtered views).
+  **[Filtering Reports' deals section by a choice field built; its database and browser tests run
+  only in CI]** (ADR-396, no migration; the API part recorded under P5-08: the same filter, for
+  members who may see the CRM, counts only the matching deals in every figure of the deals section
+  (closed deals per currency and day, win rate, time to win, open deals by stage, the weighted
+  forecast), other sections and report emails never; a stale link shows every deal with a notice;
+  the section's export follows it strictly, audited with the key, never the option; `GET
+/reports?field=` takes it with `deals.read` and refuses with 422 one that does not resolve. Not
+  built: several filters at once, text, number or date filters, saved filtered views and filtered
+  report emails, the filter on `GET /pipelines/{id}/forecast`).
   **[Automation steps that set custom deal fields built; their database and browser tests run only
   in CI]** (ADR-386, migration 0302 for webhook endpoints' kinds of step: an "Update deal fields"
   step sets 1 to 20 values, with placeholders, on the contact's single open deal in a pipeline,
@@ -1022,7 +1032,8 @@ verification, app review, Embedded Signup configuration).
   requests to Meta queued with the change).
   **[Reports through the public API built; their database tests run only in CI]** (ADR-297,
   migration 0219: `reports.read` reads the numbers the Reports page shows for a period, by the
-  page's reader in one snapshot, with members by id and name).
+  page's reader in one snapshot, with members by id and name; since ADR-396 `field`, with
+  `deals.read`, filters the deals section by a choice or yes/no field, as the page does).
   **[Flows and their responses through the public API built; their database tests run only in CI]**
   (ADR-298, migrations 0220 and 0221: `flows.read` lists the company's flows and the forms customers
   completed with them, newest first on exact pages; who completed them and what they typed only with

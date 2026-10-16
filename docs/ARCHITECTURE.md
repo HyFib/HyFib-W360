@@ -1391,6 +1391,25 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   CRM page's `DealFieldFilter` (the notice and the GET form, the view's other parameters as hidden
   inputs) on the board and the lists; the view links, "Older deals", "Newest" and the lists' export
   link carry the filter as resolved.
+- **The field filter on Reports' deals section and `GET /reports` (ADR-396, no migration):** ADR-391's
+  condition moved unchanged into `dealFieldMatch` (`crm/deal-field-filter.ts`), which takes the
+  attributes as the query names them (`dealFieldCondition` passes the column; Reports' raw queries
+  pass `d.attributes`). `dealReport` (`reports/service.ts`) adds it to its four queries (closed deals,
+  time to win, the open deals' left join, and `readForecastGroups`, which takes the filter);
+  `readReport` takes the resolved filter for the deals section only, and report emails pass none.
+  `getReport` resolves the page's text leniently in the report's snapshot through
+  `readReportDealFilter` (fields read only with `crm.read`; `reports/deal-filter.ts`:
+  `reportDealFilter`, `ReportDealFilter` with `permitted`) and returns it as `ReportPage.dealFilter`;
+  `exportSection` refuses a filter with another section or without `crm.read`
+  (`assertReportDealFilterAllowed`) before resolving it strictly, names a filtered file by the key
+  (`reportExportFilename`) and audits `field: { key, match }`. `apiGetReport` checks `deals.read`
+  before reading the query and the text's form before the transaction, then the CRM plan and the
+  company's fields within it, and gives `deals.field`. The lenient readings (the board,
+  `listDeals`, `getReport`) take the text with `dealFieldFilterText`, apart from their input's
+  validation, so text it refuses (NUL) is ignored and reported instead of failing the page. Web: `DealFieldFilter` moved to `components/crm/deal-field-filter.tsx` and is
+  shared by the board, the lists and Reports' deals section; `lib/report-links.ts` builds the page,
+  "Show all deals" and export links (the filter only on the deals export); the export route passes
+  `field`.
 - **Deal import (ADR-374, no migration):** `crm/deal-import.ts` previews a CSV (columns, first
   rows, suggested mapping) and imports it into one pipeline: `planDealRows` checks each row against
   the company's records (contacts by E.164 number, active stages by name, CRM members by email,
@@ -1845,7 +1864,9 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   run in one repeatable-read, read-only transaction for a period `resolvePeriod` cuts in the
   company's time zone (read from `tenants`); `toApiReport` maps it (ISO times, members by id and
   name, the forecast through `toApiPipelineForecast`), and `apiReportSchema` describes it in the
-  OpenAPI document.
+  OpenAPI document. Since ADR-396 `field` filters the deals section by a choice or yes/no field
+  (with `deals.read` and the CRM in the plan), refused with 422 when it does not resolve, and
+  `deals.field` gives the filter followed.
 - **Flows through the API (ADR-298):** `api/flows.ts` lists with `flows.read` the company's flows
   (`apiListFlows`: in use or archived, keyset pages on `created_at, id`, each flow's numbers from
   `activeNumbers`, shared with the template endpoints) and completed forms (`apiListFlowResponses`:

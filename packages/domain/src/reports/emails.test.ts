@@ -125,6 +125,7 @@ function emptyReport(): Report {
       medianSecondsToWin: null,
       pipelines: [],
       days: [],
+      field: null,
     },
     agents: [],
     campaigns: { rows: [], truncated: false },

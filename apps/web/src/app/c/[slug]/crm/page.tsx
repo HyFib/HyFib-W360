@@ -2,22 +2,12 @@ import type { Metadata } from 'next';
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { isAppError } from '@w360/core';
-import { can, type DealFieldFilterView } from '@w360/domain';
+import { can } from '@w360/domain';
 import { formatMinor } from '@w360/domain/crm-money';
-import {
-  Alert,
-  Badge,
-  Button,
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-  Label,
-  Select,
-} from '@w360/ui';
+import { Badge, Button, Card, CardContent, CardDescription, CardHeader, CardTitle } from '@w360/ui';
 import { NewDealForm, StageSelect } from '@/components/crm/deal-forms';
 import { CrmTabs } from '@/components/crm/crm-tabs';
+import { DealFieldFilter, staleDealFieldFilterNotice } from '@/components/crm/deal-field-filter';
 import { PageHeader } from '@/components/page-header';
 import { ModuleNotInPlan } from '@/components/plan-limit';
 import { contactLabel, DEAL_STATUS } from '@/lib/crm-labels';
@@ -238,9 +228,9 @@ export default async function CrmPage({
                 <span className="text-muted-foreground">Values in {board.pipeline.currency}</span>
               </div>
               <DealFieldFilter
-                base={base}
+                action={base}
                 filter={board.fieldFilter}
-                shown="board"
+                notice={staleDealFieldFilterNotice('board')}
                 hidden={{ pipeline: board.pipeline.id, ...(owner === 'all' ? {} : { owner }) }}
                 clearHref={href({ field: null })}
               />
@@ -340,9 +330,9 @@ export default async function CrmPage({
             {closed ? (
               // The won or lost list's field filter (ADR-394); a new filter starts at the newest page.
               <DealFieldFilter
-                base={base}
+                action={base}
                 filter={closed.fieldFilter}
-                shown="list"
+                notice={staleDealFieldFilterNotice('list')}
                 hidden={{ view, ...(owner === 'all' ? {} : { owner }) }}
                 clearHref={href({ field: null })}
               />
@@ -432,83 +422,6 @@ export default async function CrmPage({
           </Card>
         ) : null}
       </div>
-    </>
-  );
-}
-
-/**
- * The "Deal field" filter of the board (ADR-391) and of the won and lost lists (ADR-394): the
- * notice for a filter the view ignored, and a plain GET form (it works before hydration) whose
- * hidden inputs carry the view's other parameters. A new filter starts at the list's newest page.
- */
-function DealFieldFilter({
-  base,
-  filter,
-  shown,
-  hidden,
-  clearHref,
-}: {
-  base: string;
-  filter: DealFieldFilterView;
-  shown: 'board' | 'list';
-  hidden: Record<string, string>;
-  clearHref: string;
-}) {
-  const applied = filter.applied?.param ?? '';
-  return (
-    <>
-      {filter.ignored ? (
-        <Alert tone="warning" title="Showing every deal">
-          {`The deal field filter in this link matches no field or option of the company (it may have been deleted or renamed), so the ${shown === 'board' ? 'board' : 'list'} is not filtered.`}
-        </Alert>
-      ) : null}
-      {filter.fields.length > 0 ? (
-        <form
-          method="get"
-          action={base}
-          className="flex flex-wrap items-end gap-3"
-          aria-label="Filter deals by a field"
-        >
-          {Object.entries(hidden).map(([name, value]) => (
-            <input key={name} type="hidden" name={name} value={value} />
-          ))}
-          <div className="grid min-w-0 max-w-full gap-1">
-            <Label htmlFor="deal-field-filter">Deal field</Label>
-            {/* Keyed by the applied filter: "Show all deals" and the view links navigate in the
-                browser, which keeps the page's elements, and a kept select would go on showing
-                the filter of the page before. */}
-            <Select
-              key={applied}
-              id="deal-field-filter"
-              name="field"
-              defaultValue={applied}
-              className="w-64 max-w-full"
-            >
-              <option value="">All deals</option>
-              {filter.fields.map((f) => (
-                <optgroup key={f.key} label={f.label}>
-                  {f.choices.map((choice) => (
-                    <option key={choice.param} value={choice.param}>
-                      {`${f.label}: ${choice.label}`}
-                    </option>
-                  ))}
-                </optgroup>
-              ))}
-            </Select>
-          </div>
-          <Button type="submit" variant="outline">
-            Filter deals
-          </Button>
-          {filter.applied ? (
-            <Link
-              href={clearHref}
-              className="self-center text-sm text-primary underline-offset-4 hover:underline"
-            >
-              Show all deals
-            </Link>
-          ) : null}
-        </form>
-      ) : null}
     </>
   );
 }

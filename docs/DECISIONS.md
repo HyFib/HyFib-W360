@@ -9601,6 +9601,10 @@ all the pipeline's active stages, with open deals or not: `forecastByMonth` take
 which `dealReport` reads with the open pipeline in the same snapshot. Such a pipeline's forecast
 weighs, to 0 until a deal enters a stage with a chance. No migration.
 
+Since ADR-396 the forecast, like the rest of the deals section, counts only the deals a choice or
+yes/no field filter matches when one applies; whether a pipeline has chances is still read from all
+its active stages.
+
 ## ADR-253 Reading CRM deals through the public API (P5-08, P4-04) (2026-10-07)
 
 Context: integrations could read a company's contacts, conversations, campaigns and orders through
@@ -15283,7 +15287,7 @@ Decision:
 
 Not built: several options per deal (multi-select), colours or descriptions per option, renaming an
 option that deals have chosen (with its values carried over), and filtering the board or reports by
-a choice.
+a choice (since built: the board, ADR-391; Reports, ADR-396).
 
 ## ADR-386 Automation steps that set custom deal fields (P4-04) (2026-10-16)
 
@@ -15811,9 +15815,10 @@ Decision:
 - **Permissions unchanged:** the board needs `crm.read` (the page checks it itself), the export
   `crm.read` and `contacts.export`. The API is unchanged.
 
-Not built: filtering Reports by a choice, several field filters at once (or several options of one
-field), filters by text, number or date fields, the field filter on the won and lost lists and
-through the public API (`GET /deals`) (since built: ADR-394), and saving a filtered view.
+Not built: filtering Reports by a choice (since built: ADR-396), several field filters at once (or
+several options of one field), filters by text, number or date fields, the field filter on the won
+and lost lists and through the public API (`GET /deals`) (since built: ADR-394), and saving a
+filtered view.
 
 Review (before merge): an independent review found one Medium issue: "Show all deals" navigates in
 the browser, which keeps the page's elements, so the select went on showing the filter it had
@@ -16070,9 +16075,9 @@ Decision:
   also `contacts.export`). The OpenAPI document describes the parameter, its forms, the refusal and
   the cursor.
 
-Not built: filtering Reports by a choice, several field filters at once (or several options of one
-field), filters by text, number or date fields, saving a filtered view, and the field filter on
-`GET /tasks` or deal webhooks.
+Not built: filtering Reports by a choice (since built: ADR-396, with `GET /reports`), several field
+filters at once (or several options of one field), filters by text, number or date fields, saving a
+filtered view, and the field filter on `GET /tasks` or deal webhooks.
 
 Review (before merge): an independent review found no High or Medium issue. It found ADR-391's own
 text still describing the won and lost lists as unfiltered and their links dropping the filter (it
@@ -16150,3 +16155,100 @@ capture on `app.crm_deal_items` in a migration, an endpoint detail, the API's de
 their tests, left for a slice of its own), the items' total in the payload (a receiver sums
 `totalMinor`, as the deal page does, when every item is in the deal's currency), items in the API's
 deal object, and an end-to-end test of its own.
+
+## ADR-396 Filtering the deals section of Reports by a choice field (P4-04, P5-08) (2026-10-16)
+
+Context: the board, the won and lost lists, their export and `GET /deals` can be filtered by one
+choice or yes/no deal field's value (ADR-391, ADR-394), but Reports' deals section counted every
+deal, so a company could not see its win rate, time to win, open pipeline or forecast for its Gold
+accounts without exporting the deals and counting them elsewhere. ADR-385, ADR-391 and ADR-394
+listed "filtering Reports by a choice" as not built.
+
+Decision:
+
+- **The board's filter, unchanged:** the deals section takes `?field=<key>:<option>` (`<key>:yes`,
+  `<key>:no`, `<key>:` for "Not set") exactly as the board does: ADR-391's
+  `parseDealFieldFilterParam` and `resolveDealFieldFilter`, ADR-394's lenient `dealFieldFilterView`
+  on the page and strict `requireDealFieldFilter` in the export and the API, the same lower-case
+  key, a choice option in any case resolved to the option as written, against the company's own
+  fields read in the report's snapshot. A repeated parameter counts by its first value on the page
+  and in the export (the API by its last, as every API parameter). The condition is ADR-391's,
+  moved unchanged into `dealFieldMatch` (`crm/deal-field-filter.ts`), which takes how the query
+  names the attributes: `dealFieldCondition` passes the column, and Reports' raw queries over
+  `app.crm_deals d` pass `d.attributes` (a constant fragment; the key and value stay bound
+  parameters).
+- **Every deal figure of the section, nothing else:** `dealReport` adds the condition to each of
+  its four queries: the closed deals per currency and per day (so the win rate), the time to win,
+  the open deals by stage (in the left join's condition, not the `where`, so every active stage
+  stays listed, with no deals when none match) and the weighted forecast (`readForecastGroups`
+  takes the filter). Whether a pipeline has chances is read from its stages, not its deals, so a
+  filter never makes a pipeline look unweighted, as on the board. Messaging, charges, the inbox,
+  CSAT, automations, member activity, campaigns and the definitions never change. The metric
+  definitions keep their versions: a filter narrows which deals a figure counts, as the period
+  narrows when, without changing what it counts; the page names the filter above the figures
+  ("Every figure in this section counts only the deals with Tier: Gold. No other section is
+  filtered, and report emails count every deal.").
+- **Who may filter:** Reports need `reports.read` (analysts and marketers read the deals section
+  without `crm.read`, SECURITY.md), but the filter's choices name the company's deal fields and
+  options, which only those who may see the CRM see. So the page reads the fields and offers or
+  applies a filter only with `crm.read` (`readReportDealFilter`), as the board does whatever the
+  plan (a plan without the CRM keeps reading). For others the section is unfiltered, no field is
+  read, and a filter in the address gives the same notice whether or not it names one of the
+  company's fields, so nothing about them is revealed.
+- **The page:** the board's GET form, now one shared server component (`DealFieldFilter`,
+  `components/crm/deal-field-filter.tsx`, used by the board, the lists and Reports): an
+  uncontrolled select keyed by the applied filter (ADR-391's fix), "Filter deals", "Show all deals"
+  while one applies, the period's parameters as hidden inputs, and the period form carries the
+  applied filter, so changing either keeps the other. Links carry the filter as resolved, never the
+  address's text. A filter that does not resolve shows every deal with "Showing every deal" (no echo
+  of the text); without `crm.read` the notice says filtering needs the permission to see the CRM.
+- **The export follows, strictly:** the deals section's "Export CSV" link carries the applied
+  filter (other sections' links never do); `exportSection` refuses, before anything is read or
+  audited, a filter sent with another section (400, "Only the deals section can be filtered by a
+  deal field.") or by a member without `crm.read` (403), and one that does not resolve with
+  ADR-391's messages (400), so a file never looks filtered when it is not, nor is wider than asked.
+  The CSV's columns are unchanged (readers of the file keep working); a filtered file is named
+  `deals-filtered-by-<key>-<from>-to-<to>.csv` (the key only: keys are lower-case letters, digits and
+  underscores, held by the database; the option is the company's own text and stays out of the
+  header). `report.exported` records `field: { key, match }` (`option`, `yes`, `no`, `not_set`),
+  never the option, as ADR-391 audits; unfiltered exports are audited as before.
+- **Report emails stay unfiltered:** they are subscriptions to the company's report, sent to members
+  who need only `reports.read`; a filter is a view of the page, never saved, so `readReport` takes
+  it as an argument the emails never pass.
+- **`GET /reports?field=`:** the API mirrors the page (ADR-297), so it takes the same text and
+  filters the `deals` section only, by `GET /deals`'s rules (ADR-394): refused, never ignored. The
+  text's form is checked before the transaction (422 naming `field`, an empty `field` included); the
+  key and value are resolved in it against the company's own fields, after the CRM plan check, in
+  the integration's words (`apiDealFieldFilterMessage`). Since the filter resolves against the
+  fields `GET /deal-fields` gives, it needs what that endpoint needs: the `deals.read` scope (403
+  otherwise, checked before anything in the query: the period, the text's length, a NUL character
+  or its form) and the CRM in the plan (403, reason `not_in_plan`); a key with `reports.read`
+  alone reads the report as before. `deals.field` gives the filter followed, as resolved
+  (`tier:Gold` for `tier:gold`), or null, so a stored response says whether it was filtered. The
+  OpenAPI document describes the parameter, the scope, the refusals and the echo, without decision
+  numbers.
+- **No index, no migration:** the condition only filters rows the section's queries already read
+  (a company's deals, thousands at most), as on the board (ADR-391, ADR-394).
+- **A fix to the lenient reading (ADR-391, ADR-394):** the board, the lists and Reports read the
+  filter's text apart from their input's validation (`dealFieldFilterText`: any string, anything
+  else asks for nothing). Validation refuses the NUL character in every text, so a link with
+  `field=%00` (or `tier:%00`) failed the board and the lists since ADR-391, and the Reports page,
+  which took the refusal for a bad period and asked again with the same text: an error page instead
+  of "Showing every deal". Such text never resolves (keys are `^[a-z][a-z0-9_]{0,39}$`, and options
+  never hold NUL, which PostgreSQL text cannot store), so it is now ignored and reported like any
+  other stale filter; only a resolved filter reaches a query. The exports and the API keep refusing
+  it, as they refuse every filter that does not resolve.
+
+Not built: several field filters at once (or several options of one field), filters by text,
+number or date fields, saving a filtered view (and so filtered report emails), the filter in
+`GET /pipelines/{id}/forecast` (the report's forecast is filtered, the endpoint's is not), and the
+section's CSV naming the filter inside the file.
+
+Review (before merge): an independent review found no High or Medium issue; it recomputed the
+integration tests' figures. It found that a NUL character in `field` failed the Reports page, the
+board and the lists (fixed as described above); that `GET /reports` checked `deals.read` after the
+query's own checks, so a key without the scope sending a 201-character `field` or a bad period got
+422 instead of 403 (the scope is now checked before the query is read); that a unit test comparing
+the board's condition with itself could never fail (removed: the exact SQL of the board's and the
+section's conditions is tested); and that the browser test, now running Reports four more times,
+risked the default minute on slower browsers (it now has two). All were fixed.

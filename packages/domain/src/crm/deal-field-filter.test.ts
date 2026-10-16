@@ -1,13 +1,17 @@
 import { describe, expect, it } from 'vitest';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import { isAppError } from '@w360/core';
+import { sql, type Database, type Tx } from '@w360/db';
+import type { TenantContext } from '../authz/context';
 import {
   DEAL_FIELD_FILTER_MAX_LENGTH,
   dealFieldFilterAudit,
   dealFieldFilterParam,
   dealFieldFilterProblemMessage,
   dealFieldFilterRefusal,
+  dealFieldFilterText,
   dealFieldFilterView,
+  dealFieldMatch,
   filterableDealFields,
   parseDealFieldFilterParam,
   requireDealFieldFilter,
@@ -15,7 +19,7 @@ import {
   type DealFieldFilterProblem,
   type FilterableFieldShape,
 } from './deal-field-filter';
-import { dealFieldCondition } from './deals';
+import { dealFieldCondition, dealOperations } from './deals';
 
 const fields: FilterableFieldShape[] = [
   { key: 'region', label: 'Region', type: 'text', options: null },
@@ -217,6 +221,43 @@ describe('the board query’s field condition (ADR-391)', () => {
   });
 });
 
+describe('the same condition on an aliased table (ADR-396)', () => {
+  const query = (condition: ReturnType<typeof dealFieldMatch>) => {
+    const { sql: text, params } = new PgDialect().sqlToQuery(condition);
+    return { sql: text, params };
+  };
+  const matched = (key: string, value: string | null) => {
+    const resolved = resolveDealFieldFilter(fields, { key, value });
+    if (!resolved.ok) throw new Error(resolved.problem);
+    return query(dealFieldMatch(resolved.filter, sql`d.attributes`));
+  };
+
+  it('names the attributes as the raw query does, with the same bound key and value', () => {
+    expect(matched('tier', 'gOLD')).toEqual({
+      sql: '(d.attributes -> $1::text) = $2::jsonb',
+      params: ['tier', '"Gold"'],
+    });
+    expect(matched('signed', 'no')).toEqual({
+      sql: '(d.attributes -> $1::text) = $2::jsonb',
+      params: ['signed', 'false'],
+    });
+    expect(matched('signed', null)).toEqual({
+      sql: 'not (d.attributes ? $1::text)',
+      params: ['signed'],
+    });
+    // An option holding a quote or a colon is a parameter, never part of the statement.
+    const quoted = resolveDealFieldFilter(
+      [{ key: 'tier', label: 'Tier', type: 'choice', options: [`O'Brien: "gold"`] }],
+      { key: 'tier', value: `o'brien: "GOLD"` },
+    );
+    if (!quoted.ok) throw new Error(quoted.problem);
+    expect(query(dealFieldMatch(quoted.filter, sql`d.attributes`))).toEqual({
+      sql: '(d.attributes -> $1::text) = $2::jsonb',
+      params: ['tier', JSON.stringify(`O'Brien: "gold"`)],
+    });
+  });
+});
+
 describe('the lenient and the strict readings (ADR-394)', () => {
   it('ignores and reports what does not resolve, for the board and the won and lost lists', () => {
     const offered = filterableDealFields(fields);
@@ -282,5 +323,110 @@ describe('the lenient and the strict readings (ADR-394)', () => {
     expect(dealFieldFilterRefusal('no_field').issues).toEqual([
       { path: 'field', message: 'This deal field no longer exists.' },
     ]);
+  });
+});
+
+describe('text that validation refuses elsewhere, in a lenient view’s link (ADR-396)', () => {
+  const NUL = '\u0000';
+  /** A NUL character in the key, around it, in the value, alone. */
+  const withNul = [
+    `ti${NUL}er:Gold`,
+    `${NUL}tier:Gold`,
+    `tier${NUL}:Gold`,
+    `tier:Go${NUL}ld`,
+    `tier:${NUL}`,
+    `signed:yes${NUL}`,
+    NUL,
+  ];
+  const ignored = { fields: filterableDealFields(fields), applied: null, ignored: true };
+
+  it('takes any string as the filter text, apart from validation, and nothing else', () => {
+    expect(dealFieldFilterText({ field: `tier:Go${NUL}ld`, owner: 'all' })).toBe(`tier:Go${NUL}ld`);
+    expect(dealFieldFilterText({ field: '' })).toBe('');
+    for (const input of [
+      undefined,
+      null,
+      'tier:Gold',
+      {},
+      { field: null },
+      { field: 7 },
+      { field: ['tier:Gold'] },
+    ]) {
+      expect(dealFieldFilterText(input), JSON.stringify(input)).toBeNull();
+    }
+  });
+
+  it('never resolves a NUL character in the key or the value: ignored and reported', () => {
+    for (const raw of withNul) {
+      expect(dealFieldFilterView(fields, raw), JSON.stringify(raw)).toEqual(ignored);
+    }
+  });
+
+  describe('on the board and the won and lost lists', () => {
+    const TENANT = '0192f0c4-8e2b-7c1d-9a3e-5b6c7d8e9f01';
+    const PIPELINE = '0192f0c4-8e2b-7c1d-9a3e-5b6c7d8e9f02';
+    const STAGE = '0192f0c4-8e2b-7c1d-9a3e-5b6c7d8e9f03';
+    const ctx = {
+      tenant: { id: TENANT, timezone: 'Asia/Kolkata' },
+      membership: { id: '0192f0c4-8e2b-7c1d-9a3e-5b6c7d8e9f04' },
+      permissions: new Set(['crm.read']),
+      scope: {},
+    } as unknown as TenantContext;
+    const clock = { now: () => new Date('2026-10-16T10:00:00Z') };
+    /** A query that answers `rows` however it is finished. */
+    function answering(rows: unknown[]) {
+      const query: Record<string, unknown> = {};
+      for (const step of ['from', 'where', 'orderBy', 'groupBy', 'limit', 'innerJoin']) {
+        query[step] = () => query;
+      }
+      query.then = (done: (rows: unknown[]) => unknown, failed: (error: unknown) => unknown) =>
+        Promise.resolve(rows).then(done, failed);
+      return query;
+    }
+    /** A database whose transaction answers each select with the next rows given, in order. */
+    function database(answers: unknown[][]) {
+      const tx = { select: () => answering(answers.shift() ?? []) } as unknown as Tx;
+      return { run: (_scope: unknown, fn: (tx: Tx) => unknown) => fn(tx) } as unknown as Database;
+    }
+    const pipeline = {
+      id: PIPELINE,
+      name: 'Sales',
+      currency: 'INR',
+      position: 0,
+      archivedAt: null,
+      version: 1,
+      createdByApiKeyId: null,
+    };
+    const stage = {
+      id: STAGE,
+      pipelineId: PIPELINE,
+      name: 'New',
+      position: 0,
+      archivedAt: null,
+      winPercent: null,
+      openDeals: 0,
+    };
+
+    it('show the whole board with the notice, never an error', async () => {
+      for (const field of withNul) {
+        // The pipelines, their stages, the deal fields, the totals by stage, the ranked deals.
+        const db = database([[pipeline], [stage], [...fields], [], []]);
+        const board = await dealOperations({ db, clock }).board(ctx, {
+          pipelineId: PIPELINE,
+          field,
+        });
+        expect(board?.fieldFilter, JSON.stringify(field)).toEqual(ignored);
+      }
+    });
+
+    it('show the whole list with the notice, never an error', async () => {
+      for (const field of withNul) {
+        // The deal fields, the page of deals, the pipelines' currencies.
+        const db = database([[...fields], [], []]);
+        const page = await dealOperations({ db, clock }).listDeals(ctx, { status: 'won', field });
+        expect(page.fieldFilter, JSON.stringify(field)).toEqual(ignored);
+        expect(page.deals).toEqual([]);
+      }
+    });
   });
 });

@@ -1,5 +1,6 @@
 import { sql, type Tx } from '@w360/db';
 import { zonedParts } from '../campaigns/schedule';
+import { dealFieldMatch, type ResolvedDealFieldFilter } from './deal-field-filter';
 
 /**
  * The CRM board's weighted figures (ADR-242): each stage's open deal value times its chance of
@@ -168,12 +169,14 @@ export function forecastByMonth(
 /**
  * The open deals in active stages of the company's active pipelines, or of one of them (ADR-288),
  * by stage and expected close month, as `forecastByMonth` takes them (ADR-252). Reports and the
- * API read them here, so both weigh the same deals.
+ * API read them here, so both weigh the same deals. Reports' deals section may be filtered by a
+ * choice or yes/no field (ADR-396): then only the deals `filter` matches are read.
  */
 export async function readForecastGroups(
   tx: Tx,
   tenantId: string,
   pipelineId?: string,
+  filter: ResolvedDealFieldFilter | null = null,
 ): Promise<(ForecastGroup & { pipelineId: string })[]> {
   const rows = await tx.execute<{
     pipeline_id: string;
@@ -191,6 +194,7 @@ export async function readForecastGroups(
       join app.crm_pipelines p on p.tenant_id = s.tenant_id and p.id = s.pipeline_id and p.archived_at is null
      where d.tenant_id = ${tenantId} and d.status = 'open'
        ${pipelineId === undefined ? sql`` : sql`and s.pipeline_id = ${pipelineId}`}
+       ${filter === null ? sql`` : sql`and ${dealFieldMatch(filter, sql`d.attributes`)}`}
      group by s.pipeline_id, s.id, s.win_percent, close_month`);
   return rows.rows.map((r) => ({
     pipelineId: r.pipeline_id,

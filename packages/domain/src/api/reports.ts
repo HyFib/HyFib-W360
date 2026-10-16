@@ -1,22 +1,47 @@
 import { z } from 'zod';
 import { notFound } from '@w360/core';
 import { CSAT_SKIP_REASONS, RATE_CATEGORIES, eq, tenants } from '@w360/db';
+import {
+  DEAL_FIELD_FILTER_MAX_LENGTH,
+  dealFieldFilterRefusal,
+  parseDealFieldFilterParam,
+  requireDealFieldFilter,
+  type ResolvedDealFieldFilter,
+} from '../crm/deal-field-filter';
+import { loadDealFields } from '../crm/deal-fields';
 import type { OutboundDeps } from '../messaging/outbound';
 import { PERIOD_PRESETS, periodInputSchema, resolvePeriod } from '../reports/period';
 import { AUTOMATION_OUTCOMES, readReport, type Report } from '../reports/service';
 import { parseInput } from '../validation';
 import { assertScope, type ApiContext } from './context';
+import { apiDealFieldFilterMessage, assertCrmInPlan } from './deals';
 import { apiPipelineForecastSchema, toApiPipelineForecast } from './pipeline-forecast';
 
 /**
  * The Reports page's numbers through the public API (ADR-297), read with `reports.read`: the same
  * reader, for the same period in the company's time zone and in one snapshot, so the two agree.
  * Members are named by id and name only, as `GET /members` names them; estimated Meta charges are
- * given in millionths of the currency, as the exports give them.
+ * given in millionths of the currency, as the exports give them. The deals section may be filtered
+ * by a choice or yes/no deal field as `GET /deals` is (ADR-396), with `deals.read` too.
  */
 
-/** What `GET /reports` takes: a period, as the Reports page's form chooses it. */
-export const apiReportQuerySchema = periodInputSchema.strict();
+/** How `GET /reports` takes a filter of its deals section by a choice or yes/no field (ADR-396). */
+export const API_REPORT_FIELD_FILTER_DESCRIPTION =
+  'Only the deals with this value of a choice or yes/no custom deal field (GET /deal-fields) count in the `deals` section: its closed deals, win rate, time to win, open deals and forecasts. Every other section is unchanged. Written as `GET /deals` takes it: `<key>:<value>`, with one of a choice field’s options (in any case), `yes` or `no` for a yes/no field, or nothing after the colon for the deals without a value. It needs the `deals.read` scope as well and the CRM in the company’s plan, as GET /deal-fields does (403 otherwise). A key or option the company’s fields do not have, a field of another type or a value written otherwise is refused with 422 naming `field`, never ignored; so is an empty `field`, so leave the parameter out to count every deal.';
+
+/**
+ * What `GET /reports` takes: a period, as the Reports page's form chooses it, and a filter of the
+ * deals section by a choice or yes/no field (ADR-396).
+ */
+export const apiReportQuerySchema = periodInputSchema
+  .extend({
+    field: z
+      .string()
+      .max(DEAL_FIELD_FILTER_MAX_LENGTH, apiDealFieldFilterMessage('malformed'))
+      .optional()
+      .describe(API_REPORT_FIELD_FILTER_DESCRIPTION),
+  })
+  .strict();
 
 const count = z.number().int().min(0);
 const seconds = z.number().min(0).nullable();
@@ -245,39 +270,49 @@ export const apiReportSchema = z.object({
     automations: z.array(z.object({ id: z.uuid(), name: z.string(), ...automationCounts })),
     days: z.array(z.object({ day, ...automationCounts })),
   }),
-  deals: z.object({
-    won: z.array(z.object({ currency: z.string(), deals: count, valueMinor: count })),
-    lost: z.array(z.object({ currency: z.string(), deals: count, valueMinor: count })),
-    winRate: ratio.describe('Deals won out of deals closed in the period.'),
-    medianSecondsToWin: seconds.describe('From creation to win; null when none was won.'),
-    pipelines: z
-      .array(
-        z.object({
-          id: z.uuid(),
-          name: z.string(),
-          currency: z.string(),
-          stages: z.array(
-            z.object({ id: z.uuid(), name: z.string(), deals: count, valueMinor: count }),
-          ),
-          forecast: apiPipelineForecastSchema.describe(
-            'As `GET /pipelines/{id}/forecast` gives it.',
-          ),
-        }),
-      )
-      .describe('Open deals now, by pipeline and stage.'),
-    days: z
-      .array(
-        z.object({
-          day,
-          currency: z.string(),
-          won: count,
-          wonValueMinor: count,
-          lost: count,
-          lostValueMinor: count,
-        }),
-      )
-      .describe('Closed deals by day and currency; days without any are left out.'),
-  }),
+  deals: z
+    .object({
+      won: z.array(z.object({ currency: z.string(), deals: count, valueMinor: count })),
+      lost: z.array(z.object({ currency: z.string(), deals: count, valueMinor: count })),
+      winRate: ratio.describe('Deals won out of deals closed in the period.'),
+      medianSecondsToWin: seconds.describe('From creation to win; null when none was won.'),
+      pipelines: z
+        .array(
+          z.object({
+            id: z.uuid(),
+            name: z.string(),
+            currency: z.string(),
+            stages: z.array(
+              z.object({ id: z.uuid(), name: z.string(), deals: count, valueMinor: count }),
+            ),
+            forecast: apiPipelineForecastSchema.describe(
+              'As `GET /pipelines/{id}/forecast` gives it, of the deals `field` matches when it is sent.',
+            ),
+          }),
+        )
+        .describe('Open deals now, by pipeline and stage.'),
+      days: z
+        .array(
+          z.object({
+            day,
+            currency: z.string(),
+            won: count,
+            wonValueMinor: count,
+            lost: count,
+            lostValueMinor: count,
+          }),
+        )
+        .describe('Closed deals by day and currency; days without any are left out.'),
+      field: z
+        .string()
+        .nullable()
+        .describe(
+          'The deal field filter every figure of this section follows, as `<key>:<value>` with the option as the company writes it (`yes` or `no` for a yes/no field, nothing after the colon for the deals without a value); null when every deal is counted.',
+        ),
+    })
+    .describe(
+      'CRM deals: those closed in the period and those open now. With `field`, every figure here counts only the deals it matches.',
+    ),
   members: z
     .array(
       z.object({
@@ -395,6 +430,8 @@ export function toApiReport(report: Report): ApiReport {
     automations: report.automations,
     deals: {
       ...deals,
+      // The filter's address text as resolved, never the internal record (ADR-396).
+      field: deals.field ? deals.field.param : null,
       pipelines: deals.pipelines.map((p) => ({
         id: p.id,
         name: p.name,
@@ -452,9 +489,18 @@ export function toApiReport(report: Report): ApiReport {
   };
 }
 
+/** Whether a query names a deal field filter at all, whatever its value. */
+const asksForField = (query: unknown) =>
+  typeof query === 'object' && query !== null && (query as { field?: unknown }).field !== undefined;
+
 /**
  * The company's report for a period (`MAX_PERIOD_DAYS` at most), as the Reports page reads it: in
- * the company's time zone, in one read-only snapshot.
+ * the company's time zone, in one read-only snapshot. With `field`, the deals section counts only
+ * the deals a choice or yes/no field's value matches (ADR-396), read as `GET /deals` reads it: it
+ * needs `deals.read` (checked before the query is read) and the CRM in the plan, as
+ * `GET /deal-fields` does, since it resolves against those fields; a text written otherwise is
+ * refused before the transaction, and a key or value the company's fields do not resolve within
+ * it, never ignored.
  */
 export async function apiGetReport(
   deps: Pick<OutboundDeps, 'db' | 'clock'>,
@@ -462,7 +508,13 @@ export async function apiGetReport(
   query: unknown,
 ): Promise<ApiReport> {
   assertScope(ctx, 'reports.read');
+  // A filter needs deals.read, checked before anything in the query is, so a key without it learns
+  // nothing from how its query would be refused.
+  if (asksForField(query)) assertScope(ctx, 'deals.read');
   const input = parseInput(apiReportQuerySchema, query);
+  if (input.field !== undefined && parseDealFieldFilterParam(input.field) === null) {
+    throw dealFieldFilterRefusal('malformed', apiDealFieldFilterMessage);
+  }
   const now = deps.clock.now();
   const report = await deps.db.run(
     ctx.scope,
@@ -473,7 +525,16 @@ export async function apiGetReport(
         .where(eq(tenants.id, ctx.tenant.id));
       if (!company) throw notFound('Company');
       const period = resolvePeriod(input, company.timezone, now);
-      return readReport(tx, ctx.tenant.id, company.timezone, period, now);
+      let dealFilter: ResolvedDealFieldFilter | null = null;
+      if (input.field !== undefined) {
+        await assertCrmInPlan(tx, ctx.tenant.id);
+        dealFilter = requireDealFieldFilter(
+          await loadDealFields(tx, ctx.tenant.id),
+          input.field,
+          apiDealFieldFilterMessage,
+        );
+      }
+      return readReport(tx, ctx.tenant.id, company.timezone, period, now, dealFilter);
     },
     { isolationLevel: 'repeatable read', accessMode: 'read only' },
   );

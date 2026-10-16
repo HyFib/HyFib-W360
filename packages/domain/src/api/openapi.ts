@@ -170,7 +170,7 @@ import { DEAL_FIELD_FILTER_MAX_LENGTH } from '../crm/deal-field-filter';
 import { API_NOTE_MAX_LENGTH, apiCreateNoteSchema } from './notes';
 import { apiCreatePipelineSchema, apiUpdatePipelineSchema } from './pipelines';
 import { apiPipelineForecastSchema } from './pipeline-forecast';
-import { apiReportSchema } from './reports';
+import { API_REPORT_FIELD_FILTER_DESCRIPTION, apiReportSchema } from './reports';
 import { apiFlowResponseSchema, apiFlowSchema, apiJsonValueSchema } from './flows';
 import {
   apiChatLinkDetailSchema,
@@ -2939,6 +2939,7 @@ export function buildOpenApiDocument(serverUrl: string) {
           description: [
             `${scopeNote('reports.read')} The numbers the Reports page shows, for one period: messaging outcomes, estimated Meta charges, the inbox and its reply and resolution times, satisfaction surveys, automation runs, CRM deals with each pipeline’s forecast, each member’s activity and the funnel of the campaigns started in the period, with what each metric counts (\`definitions\`). Read as the Reports page reads them, in the company’s time zone and in one snapshot, so they agree with each other and with the page at that moment. Members are named by id and name only, as GET /members names them.`,
             `A period is a preset (\`last_7_days\` by default, \`last_30_days\`, \`this_month\` or \`last_month\`) or \`custom\` days \`from\` and \`to\`, at most ${MAX_PERIOD_DAYS} days and not after today (422 otherwise). Numbers are computed from HyFib’s records when asked: statuses Meta reports late change them later, and the inbox (\`inbox.now\`) and open deals are as they are when asked. Estimated charges are estimates from the published rates, never an invoice.`,
+            '`field` counts only the deals with one value of a choice or yes/no custom deal field in the `deals` section, as the Reports page’s deal field filter does, and says so in `deals.field`; it needs `deals.read` as well. The other sections never change with it.',
           ].join('\n\n'),
           parameters: [
             {
@@ -2962,6 +2963,12 @@ export function buildOpenApiDocument(serverUrl: string) {
               in: 'query',
               schema: { type: 'string', format: 'date' },
               description: 'With `custom`: the last day, included, YYYY-MM-DD.',
+            },
+            {
+              name: 'field',
+              in: 'query',
+              schema: { type: 'string', maxLength: DEAL_FIELD_FILTER_MAX_LENGTH },
+              description: API_REPORT_FIELD_FILTER_DESCRIPTION,
             },
           ],
           responses: {

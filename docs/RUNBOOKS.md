@@ -2178,6 +2178,16 @@ without the filter it used for the first page, or with another one: a cursor is 
 and each page applies the filters sent with it. In the app, the won and lost lists take the same filter and
 show every deal with "Showing every deal" when a link's filter no longer resolves.
 
+**Reports' deals section is not filtered, or its filter is refused (ADR-396).** On the Reports
+page, "Showing every deal" means the link's filter matches no choice or yes/no field or option of
+the company (deleted, renamed, or another company's), or the member lacks `crm.read`, which the
+filter needs (the notice says which); only the deals section is ever filtered, and report emails
+never are. The deals export answers 400 for a filter that does not resolve or one sent with
+another section, 403 without `crm.read`; nothing is audited then (a filtered export is audited as
+`report.exported` with `field: { key, match }`). `GET /api/v1/reports?field=…` answers 403 when
+the key lacks `deals.read` or the plan leaves out the CRM (reason `not_in_plan`), and 422 naming
+`field` as `GET /deals` does; `deals.field` in the answer says which filter was followed.
+
 **`POST /api/v1/deals` answers 403, 404, 409, 422 or 423 (ADR-254).** 403 `forbidden` names the
 scope the key lacks, `deals.write` (granted by members with `crm.write`), or with reason
 `not_in_plan` the company's plan leaves out the CRM or the scope. 404 means the contact is not one
