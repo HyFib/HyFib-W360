@@ -508,27 +508,39 @@ export async function sendDueReportEmails(
       .for('update');
     if (locked.length === 0) return outcome;
     // Locked for share until the emails are queued: a member's suspension, removal or change of
-    // role waits for this, or comes first and is seen here.
+    // role waits for this, or comes first and is seen here. Read without the users' rows, which
+    // are not locked: PostgreSQL takes no schema-qualified name in FOR SHARE OF.
+    const memberRows = await tx
+      .select({
+        id: memberships.id,
+        status: memberships.status,
+        roles: memberships.roles,
+        userId: memberships.userId,
+      })
+      .from(memberships)
+      .where(
+        and(
+          eq(memberships.tenantId, tenantId),
+          inArray(memberships.id, [...new Set(locked.map((s) => s.membershipId))]),
+        ),
+      )
+      .orderBy(asc(memberships.id))
+      .for('share');
+    const emails = new Map(
+      memberRows.length === 0
+        ? []
+        : (
+            await tx
+              .select({ id: users.id, email: users.email })
+              .from(users)
+              .where(inArray(users.id, [...new Set(memberRows.map((m) => m.userId))]))
+          ).map((u) => [u.id, u.email]),
+    );
     const members = new Map(
-      (
-        await tx
-          .select({
-            id: memberships.id,
-            status: memberships.status,
-            roles: memberships.roles,
-            email: users.email,
-          })
-          .from(memberships)
-          .innerJoin(users, eq(users.id, memberships.userId))
-          .where(
-            and(
-              eq(memberships.tenantId, tenantId),
-              inArray(memberships.id, [...new Set(locked.map((s) => s.membershipId))]),
-            ),
-          )
-          .orderBy(asc(memberships.id))
-          .for('share', { of: memberships })
-      ).map((m) => [m.id, m]),
+      memberRows.flatMap((m) => {
+        const email = emails.get(m.userId);
+        return email === undefined ? [] : [[m.id, { ...m, email }] as const];
+      }),
     );
     for (const s of locked) {
       const row = and(
