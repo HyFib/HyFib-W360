@@ -253,48 +253,54 @@ export async function contactForPhone(
   return existing.id;
 }
 
+/**
+ * WHERE conditions (over app.contacts) for the contacts page's filters: the company's contacts not
+ * erased, matching the search, the tag and the marketing consent. Bulk edits (ADR-213, ADR-238) and
+ * members' enrolments in an automation (ADR-401) take the contacts these match.
+ */
+export function contactFilterConditions(
+  ctx: TenantContext,
+  filter: z.infer<typeof contactFilterSchema>,
+): SQL[] {
+  const conditions: SQL[] = [eq(contacts.tenantId, ctx.tenant.id), isNull(contacts.erasedAt)];
+  const q = filter.q?.trim();
+  if (q) {
+    const digits = q.replace(/[\s()+\-.]/g, '');
+    if (/^[0-9]{3,15}$/.test(digits)) {
+      // A member who sees numbers masked finds a contact by its whole number only: searching
+      // by parts of numbers would reveal them digit by digit (ADR-226).
+      conditions.push(
+        seesNumbers(ctx)
+          ? sql`${contacts.phoneE164} like ${likePattern(digits)}`
+          : eq(contacts.phoneE164, `+${digits}`),
+      );
+    } else {
+      const pattern = likePattern(q);
+      conditions.push(
+        sql`(${contacts.displayName} ilike ${pattern} or ${contacts.email} ilike ${pattern})`,
+      );
+    }
+  }
+  if (filter.tag) {
+    const tag = normalizeTag(filter.tag);
+    if (tag.ok) {
+      conditions.push(
+        sql`exists (select 1 from app.contact_tags t where t.tenant_id = ${contacts.tenantId}
+                      and t.contact_id = ${contacts.id} and t.tag = ${tag.tag})`,
+      );
+    }
+  }
+  const marketing = sql`(select cc.status from app.contact_consents cc
+    where cc.tenant_id = ${contacts.tenantId} and cc.contact_id = ${contacts.id} and cc.purpose = 'marketing')`;
+  if (filter.consent === 'marketing_opted_in') conditions.push(sql`${marketing} = 'opted_in'`);
+  if (filter.consent === 'marketing_opted_out') conditions.push(sql`${marketing} = 'opted_out'`);
+  if (filter.consent === 'marketing_unknown') conditions.push(sql`${marketing} is null`);
+  return conditions;
+}
+
 export function createContactsService(deps: { db: Database; clock: Clock }) {
   const { db, clock } = deps;
-
-  function filterConditions(
-    ctx: TenantContext,
-    filter: z.infer<typeof contactFilterSchema>,
-  ): SQL[] {
-    const conditions: SQL[] = [eq(contacts.tenantId, ctx.tenant.id), isNull(contacts.erasedAt)];
-    const q = filter.q?.trim();
-    if (q) {
-      const digits = q.replace(/[\s()+\-.]/g, '');
-      if (/^[0-9]{3,15}$/.test(digits)) {
-        // A member who sees numbers masked finds a contact by its whole number only: searching
-        // by parts of numbers would reveal them digit by digit (ADR-226).
-        conditions.push(
-          seesNumbers(ctx)
-            ? sql`${contacts.phoneE164} like ${likePattern(digits)}`
-            : eq(contacts.phoneE164, `+${digits}`),
-        );
-      } else {
-        const pattern = likePattern(q);
-        conditions.push(
-          sql`(${contacts.displayName} ilike ${pattern} or ${contacts.email} ilike ${pattern})`,
-        );
-      }
-    }
-    if (filter.tag) {
-      const tag = normalizeTag(filter.tag);
-      if (tag.ok) {
-        conditions.push(
-          sql`exists (select 1 from app.contact_tags t where t.tenant_id = ${contacts.tenantId}
-                        and t.contact_id = ${contacts.id} and t.tag = ${tag.tag})`,
-        );
-      }
-    }
-    const marketing = sql`(select cc.status from app.contact_consents cc
-      where cc.tenant_id = ${contacts.tenantId} and cc.contact_id = ${contacts.id} and cc.purpose = 'marketing')`;
-    if (filter.consent === 'marketing_opted_in') conditions.push(sql`${marketing} = 'opted_in'`);
-    if (filter.consent === 'marketing_opted_out') conditions.push(sql`${marketing} = 'opted_out'`);
-    if (filter.consent === 'marketing_unknown') conditions.push(sql`${marketing} is null`);
-    return conditions;
-  }
+  const filterConditions = contactFilterConditions;
 
   async function selectContacts(
     tx: Tx,

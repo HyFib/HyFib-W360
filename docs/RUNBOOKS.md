@@ -698,6 +698,30 @@ cancelled (`bot_stopped`). New runs: Pause the automation (runs in progress fini
 once: Archive (runs in progress stop and their conversations go to people). Each action is audited
 (`automation.*`).
 
+**Enrolments of contacts or a segment (ADR-401).** An owner or administrator enrols contacts from
+an automation's page or the Contacts page; only an active automation whose live version is started
+by a member or through the API can be chosen, at most 10,000 contacts, one running enrolment per
+automation ("Contacts are being enrolled in this automation already": wait or stop that one). The
+enrolment's page (Automations → the automation → its enrolment) counts contacts started, refused
+(with the reasons: erased, on the suppression list, opted out, no marketing opt-in, conversation
+assigned to a member, another automation handling the conversation, the hourly limit of 10 runs,
+no runs left in the plan this month, no phone number, merged into another contact), not started
+and waiting. A refused contact is not retried: fix the cause (record consent, unassign the
+conversation, wait an hour) and enrol it again. Runs start in the background, 50 per job; worker
+log lines "automation enrolment batch" carry the enrolment id, the outcome and the counts. An
+enrolment that stopped by itself says why: the automation was paused or archived, its number is not
+active, its live version takes other inputs, the plan does not include automations, or the member
+who started it left or lost the permission ("automation enrolment member removed"). While the
+company is suspended no run starts and its job looks again every five minutes ("automation
+enrolment deferred"). If an enrolment shows "Running" with nothing waiting changing for minutes,
+check that the worker runs and the `automation.enroll` queue drains (section 3); a job that failed
+all its retries is a dead letter, which platform staff can send back to its queue (each batch
+starts nothing twice), or a member stops the enrolment. Stopping cancels the contacts not started;
+runs already started go on, and each is stopped from its run page. The audit log has
+`automation.enrollment_started`, `automation.enrollment_stopped` and `automation.enrollment_ended`
+(counts only, never the inputs or the search). Runs an enrolment started say so on their page and
+reach webhooks as runs of trigger `api` with no API key.
+
 **Budgets and failed sends.** A run fails, and hands the conversation to people, when it exceeds
 200 steps, enters one step 20 times, sends 50 messages or runs longer than 7 days, or when a
 message cannot be queued (number not active, 24-hour window closed, no WhatsApp id for the contact).

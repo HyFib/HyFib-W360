@@ -638,8 +638,8 @@ export function AutomationEditor({
               Automations start only in conversations nobody is assigned to and no other automation
               is handling. When several match, an exact keyword wins, then a keyword in the message,
               then a new conversation, then any message. An automation started by order messages
-              runs when a store’s rule chooses it for an order event, and one started through the
-              API when your systems call it with a key.
+              runs when a store’s rule chooses it for an order event, and one started by a member or
+              through the API when a member enrols contacts or your systems call it with a key.
             </CardDescription>
           </CardHeader>
           <CardContent className="grid gap-4">
@@ -795,11 +795,12 @@ export function AutomationEditor({
                 </Field>
                 <Alert tone="info">
                   <p>
-                    Your systems start this automation for one contact at a time with an API key
-                    that has the “Start automations” scope (Settings → API keys), after it is
-                    published. It sends from the WhatsApp number chosen above. WhatsApp allows only
-                    templates until the customer replies, so start with a template step and continue
-                    from its reply branches.
+                    After it is published, members who may publish automations enrol contacts or a
+                    segment in it (from its page or the Contacts page), and your systems start it
+                    with an API key that has the “Start automations” scope (Settings → API keys). It
+                    sends from the WhatsApp number chosen above. WhatsApp allows only templates
+                    until the customer replies, so start with a template step and continue from its
+                    reply branches.
                   </p>
                 </Alert>
               </>

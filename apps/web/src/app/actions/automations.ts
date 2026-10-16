@@ -121,3 +121,33 @@ export async function takeOverAction(slug: string, conversationId: string): Prom
     return null;
   });
 }
+
+/** Enrols the contacts or the segment the member chose in an automation (ADR-401). */
+export async function startEnrollmentAction(
+  slug: string,
+  input: unknown,
+): Promise<ActionResult<{ id: string; total: number }>> {
+  return runAction(async () => {
+    const ctx = await tenantForAction(slug);
+    const { automationEnrollments } = await getRuntime();
+    return automationEnrollments.startEnrollment(ctx, input, await requestMeta());
+  });
+}
+
+/** Stops an enrolment: contacts not handled yet are not started (ADR-401). */
+export async function stopEnrollmentAction(
+  slug: string,
+  enrollmentId: string,
+): Promise<ActionResult<{ cancelled: number }>> {
+  return runAction(async () => {
+    const ctx = await tenantForAction(slug);
+    const { automationEnrollments } = await getRuntime();
+    const result = await automationEnrollments.stopEnrollment(
+      ctx,
+      { id: String(enrollmentId) },
+      await requestMeta(),
+    );
+    refresh();
+    return result;
+  });
+}

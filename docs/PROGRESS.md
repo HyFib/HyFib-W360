@@ -29,6 +29,94 @@ Windows. vite reaches the repository only as a development dependency of vitest 
 | `pnpm build`                                       | passed                                                                                                                                                                                                                             |
 | `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them                                                                                                                                                                    |
 
+## 2026-10-16 — Members enrol contacts or a segment in an automation (P4-01, ADR-401)
+
+Status: **Implemented; its database and browser tests run in CI only.** P4-01's Remaining listed
+"enrolling contacts or segments in a sequence without a customer message or order event": runs
+started only from customer messages, store events, members' tests and the public API.
+
+### Completed
+
+- **Which automations:** published, active automations whose live version uses the `api` trigger,
+  renamed "A member's enrolment, or a call from your systems through the HyFib W360 API" (described
+  as "Started by a member or through the API"); no new trigger type, so its inputs, its one-number
+  rule and its templates-before-a-reply rule apply unchanged.
+- **Shared start steps (`automations/starts.ts`):** the API's four steps (ADR-161) moved out of
+  `api/automations.ts`: `loadStartableAutomation`, `startInputVariables`,
+  `automationSendsMarketing` with `activeStartChannel`, and `startRunForContact` (erasure,
+  suppression and opt-outs, the conversation, the hourly limit, the plan's runs, then the run). A
+  start's starter is a key (audited per run, `api_key_id`) or an enrolment (`enrollment_id`, audited
+  once per enrolment); refusals carry their code (`details.startRefusal`), the API's answers are
+  unchanged. Enrolments of automations that send marketing templates also check marketing consent
+  when each run starts.
+- **Enrolments (`automations/enrollments.ts`, `automations/enrollment-model.ts`):** members with
+  `automations.publish` and `contacts.read` (`campaigns.read` for a segment, `campaigns.send` for a
+  marketing automation) enrol the contacts the Contacts page's filters match
+  (`contactFilterConditions`, now exported from the contacts service) or a saved segment's members
+  (`segmentWhere`), at most 10,000, with the count they saw and the inputs once (validated as the
+  API validates them). The snapshot, the audit entry and the first signed `automation.enroll` job
+  are written in one transaction; one running enrolment per automation. Each job, under the
+  enrolment's row lock, re-checks the member and the automation, starts the next 50 pending
+  contacts, each in a savepoint, records each outcome (started with its run, or refused with its
+  reason), the counts and the position, and queues the next batch in the same transaction. Ends:
+  completed, or stopped by a member, by the member leaving or losing the permission, by the
+  automation paused or archived, its number inactive, its inputs changed, or a plan without
+  automations; the contacts not handled are recorded as not started and the inputs cleared. Stop
+  leaves started runs going.
+- **Worker (`apps/worker/src/handlers/automations.ts`):** `automation.enroll` (exclusive, five
+  retries, dead letters); a suspended company's job is queued again five minutes later, a job whose
+  member left ends the enrolment.
+- **Migration 0311 (`0311_automation_enrollments.sql`):** the two tables (forced row security,
+  composite foreign keys, select/insert and column-limited updates for the runtime role, no delete,
+  deletion steps 685 and 692 with the definer role's policies), `automation_runs.enrollment_id`
+  with its foreign key, the check `automation_runs_api_key` replaced (a key or an enrolment, exactly
+  one, on an `api` run; `NOT VALID`, as is the foreign key) and the run guard keeping the new column
+  fixed. Exported with the company (`export-spec.ts`).
+- **Web:** Automations → Enrol contacts (choose the automation and whom, count, give the inputs,
+  confirm with `ClientForm`); an automation's page lists its enrolments and links to it; the
+  Contacts page links its filters to it; an enrolment's page shows its counts, refusals by reason,
+  end and Stop (`ClientButton` in a `ConfirmDialog`), re-rendering every 15 seconds while it runs;
+  run pages and lists name the enrolment. Pages re-check permissions; logic stays in the services.
+- **Webhooks:** enrolled runs reach `automation.run_started`/`run_ended` as before, with trigger
+  `api` and `apiKeyId: null` (descriptions updated).
+- **Tests:** unit (`automations/enrollments.test.ts`, 28 tests: bounds, the schema, the count
+  check, the inputs, refusal codes, job keys, the refusal summary, the batch logic (50 in order,
+  refusals, the plan ending it, other errors thrown), and against a recording database a batch
+  (runs naming the enrolment, outcomes, next job and position, the cursor, every refusal, the
+  plan's runs, marketing consent, each way it ends, ended and missing enrolments, an unexpected
+  error), a start (the snapshot, the audit without inputs, the first job, a segment, permissions,
+  inputs, counts, the second running enrolment) and a stop; `api-trigger.test.ts` updated);
+  integration (`tests/integration/automation-enrollments.test.ts`, 10 tests: the snapshot and
+  batches of 50 with the run's records and audit, a segment and the webhook event, each refusal
+  with its reason, the plan's runs and a plan without automations, a crash mid-batch and two jobs
+  at once without a second run, stop, who may, ends mid-way (paused, demoted member, removed
+  member), isolation between companies, the grants, row security, deletion steps and the run's
+  check and guard); e2e (`automations.spec.ts`: an enrolment from the Contacts page's filters to
+  its completed page and the run naming it). Written for CI; the integration and e2e tests were
+  not run here.
+- **Mutation checks:** 23 deliberate regressions (the batch bound, the plan ending a batch, unknown
+  errors recorded as refusals, the count check, the limit, an empty enrolment, the member's
+  permission, the cursor, the last batch, marketing consent, inputs kept, the marketing
+  permission, the first job's key, stopping an ended enrolment, an ended enrolment processed,
+  changed inputs, the no-number check, `contacts.read`, the run's enrolment, per-run audit, the
+  hourly limit, an assigned conversation, the start step's detail): 23 caught by the unit tests,
+  each file restored.
+- **Docs:** ADR-401; ARCHITECTURE (worker, §6E), SECURITY (rules and grants), THREAT-MODEL T353,
+  DATA-RETENTION, DEPLOYMENT (migration 0311), RUNBOOKS (§10D), BACKLOG P4-01 and the matrix's
+  H-053.
+- **Not built:** enrolling through the public API, scheduling or pacing an enrolment, stopping an
+  enrolment's runs at once, choosing contacts one by one, validating 0311's check and foreign key.
+
+### Test commands and results (local, 2026-10-16)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 177 files, 1,915 tests passed                                   |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| Migration 0311 parsed with pglast                  | 22 statements, 1 PL/pgSQL function (not applied to a database)  |
+| `pnpm build`                                       | passed                                                          |
+
 ## 2026-10-16 — A campaign's notice of its number's messaging limit (P3-04, ADR-400)
 
 Status: **Implemented; its database and browser tests run in CI only.** "Messaging-tier awareness

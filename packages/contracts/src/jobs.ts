@@ -286,6 +286,23 @@ export const QUEUES = {
     deleteAfterHours: 72,
   },
   /**
+   * One batch of a member's enrolment of contacts in an automation (ADR-401): at most 50 starts in
+   * one transaction, each contact's outcome recorded with them, then the next batch's job queued in
+   * the same transaction. The enrolment row is the source of truth, so a retried or duplicate job
+   * starts nothing twice.
+   */
+  automationEnroll: {
+    name: 'automation.enroll',
+    policy: 'exclusive',
+    retryLimit: 5,
+    retryDelaySeconds: 10,
+    retryBackoff: true,
+    retryDelayMaxSeconds: 300,
+    expireInSeconds: 300,
+    deadLetter: 'dead-letter',
+    deleteAfterHours: 72,
+  },
+  /**
    * Makes one automation HTTP call. Retrying the job is safe: only a queued call is ever claimed
    * and sent, so a retry after the claim never sends the request twice.
    */

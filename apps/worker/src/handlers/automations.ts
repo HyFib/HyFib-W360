@@ -3,9 +3,12 @@ import {
   advanceAutomationRun,
   applyAutomationRetention,
   authorizeJob,
+  endEnrollmentForRemovedMember,
   findDueAutomationRuns,
   findDueHttpCalls,
+  processEnrollmentBatch,
   processHttpCall,
+  signalEnrollment,
   signalAutomationRun,
   signalHttpCall,
   stopRunForRemovedTester,
@@ -56,6 +59,69 @@ export function automationRunHandler(rt: WorkerRuntime) {
     rt.logger.info(
       { jobId: job.id, runId: auth.envelope.ref, outcome: result.outcome, steps: result.steps },
       'automation run advanced',
+    );
+  };
+}
+
+/** Minutes before a suspended company's enrolment job looks again (ADR-401). */
+const ENROLLMENT_DEFER_MINUTES = 5;
+
+/**
+ * Handles one batch of a member's enrolment of contacts in an automation (see
+ * automations/enrollments, ADR-401). The enrolment row is the source of truth: each batch records
+ * its contacts' outcomes with their runs and queues the next batch in the same transaction, so a
+ * duplicate or retried job starts nothing twice. The job is signed with the member who started the
+ * enrolment: a member who left ends it; a suspended company's enrolment waits and is looked at again.
+ */
+export function automationEnrollHandler(rt: WorkerRuntime) {
+  return async ([job]: Job<unknown>[]): Promise<void> => {
+    if (!job) return;
+    const auth = await authorizeJob(rt, job.data, {
+      expectedKind: 'automation.enroll',
+      requireActiveTenant: true,
+      requireActiveActor: true,
+    });
+    if (auth.outcome === 'deferred') {
+      // Suspended company: no run starts; the same signed job is queued again for later (the
+      // tenant id comes from the verified envelope).
+      const minute = Math.floor(rt.clock.now().getTime() / 60_000);
+      const { tenantId, actorUserId, ref } = auth.envelope;
+      if (tenantId && actorUserId) {
+        await signalEnrollment(rt, null, {
+          tenantId,
+          enrollmentId: ref,
+          actorUserId,
+          key: `${ref}:deferred:${minute}`,
+          at: new Date(rt.clock.now().getTime() + ENROLLMENT_DEFER_MINUTES * 60_000),
+        });
+      }
+      rt.logger.info({ jobId: job.id, enrollmentId: ref }, 'automation enrolment deferred');
+      return;
+    }
+    if (auth.outcome === 'rejected' && 'cleanupScope' in auth) {
+      const ended = await endEnrollmentForRemovedMember(
+        { db: rt.db, clock: rt.clock },
+        auth.cleanupScope,
+        auth.envelope.ref,
+      );
+      rt.logger.info(
+        { jobId: job.id, enrollmentId: auth.envelope.ref, ended },
+        'automation enrolment member removed',
+      );
+      return;
+    }
+    if (auth.outcome !== 'authorized' || !auth.scope) {
+      rt.logger.warn({ jobId: job.id, outcome: auth.outcome }, 'automation enrolment job dropped');
+      return;
+    }
+    const result = await processEnrollmentBatch(
+      { db: rt.db, jobs: rt.jobs, signer: rt.signer, clock: rt.clock },
+      auth.scope,
+      auth.envelope.ref,
+    );
+    rt.logger.info(
+      { jobId: job.id, enrollmentId: auth.envelope.ref, ...result },
+      'automation enrolment batch',
     );
   };
 }

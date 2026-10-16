@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { AppError, isAppError, notFound, uuidv7 } from '@w360/core';
+import { AppError, isAppError, notFound } from '@w360/core';
 import {
   and,
   asc,
@@ -10,29 +10,26 @@ import {
   conversations,
   eq,
   exactTimestamp,
-  gt,
   inArray,
   isNotNull,
-  messageTemplates,
   sql,
   type AutomationEndReason,
   type AutomationRunStatus,
   type Tx,
 } from '@w360/db';
 import { recordSystemAudit } from '../audit';
+import { triggerSchema } from '../automations/graph';
+import { appendRunStep, endRun, lockActiveRun } from '../automations/runs';
 import {
-  apiInputValues,
-  graphSchema,
-  RUN_BUDGETS,
-  templatesOf,
-  triggerSchema,
-} from '../automations/graph';
-import { appendRunStep, endRun, lockActiveRun, signalAutomationRun } from '../automations/runs';
-import { checkTemplateEligibility } from '../consent/service';
+  activeStartChannel,
+  automationSendsMarketing,
+  loadStartableAutomation,
+  startInputVariables,
+  startRunForContact,
+  type StartableAutomation,
+} from '../automations/starts';
 import { contactForPhone } from '../contacts/service';
-import { emitTenantEvent } from '../messaging/events';
 import type { OutboundDeps } from '../messaging/outbound';
-import { consumeAutomationRun } from '../plans/entitlements';
 import { decodeKeysetCursor, encodeKeysetCursor, parseInput } from '../validation';
 import { apiActor, assertAnyScope, assertScope, hasScope, type ApiContext } from './context';
 import { apiErrorResponse } from './errors';
@@ -44,7 +41,8 @@ import { assertEachNumberOnce, explicitPhone, idempotent, phoneAt, phoneField } 
  * Automations through the public API (ADR-077). A key with `automations.start` lists the
  * automations whose published version starts through the API, starts one for a contact with the
  * inputs its trigger declares, and reads and stops the runs keys started (ADR-079). A run starts with
- * the checks an order message rule's run gets (ADR-050); its template steps check consent and the
+ * the checks an order message rule's run gets (ADR-050), through the start steps members'
+ * enrolments share (automations/starts, ADR-401); its template steps check consent and the
  * marketing frequency cap again when they send.
  */
 
@@ -231,13 +229,6 @@ export async function apiListAutomations(
   );
 }
 
-/** A refusal with a reason integrations can act on. */
-const refused = (
-  code: 'conflict' | 'precondition_failed' | 'forbidden',
-  message: string,
-  apiReason: string,
-) => new AppError(code, message, { details: { apiReason } });
-
 /**
  * Starts an automation whose published version starts through the API for the contact with this
  * number (created when new), with the inputs its trigger declares. One run per idempotency key; a
@@ -257,8 +248,8 @@ export async function apiStartAutomationRun(
   const now = deps.clock.now();
   return deps.db.run(ctx.scope, (tx) =>
     idempotent(tx, ctx, idempotency, now, async () => {
-      const automation = await loadApiAutomation(tx, ctx, automationId);
-      const variables = inputVariables(automation, data.inputs, 'inputs');
+      const automation = await loadStartableAutomation(tx, ctx.tenant.id, automationId);
+      const variables = startInputVariables(automation, data.inputs, 'inputs');
       const channelId = await sendingChannel(tx, ctx, automation);
       const run = await startRunFor(deps, tx, ctx, automation, channelId, phone, variables, now);
       return { status: 201, body: { data: run } };
@@ -301,10 +292,10 @@ export async function apiStartManyAutomationRuns(
   const now = deps.clock.now();
   return deps.db.run(ctx.scope, (tx) =>
     idempotent(tx, ctx, idempotency, now, async () => {
-      const automation = await loadApiAutomation(tx, ctx, automationId);
+      const automation = await loadStartableAutomation(tx, ctx.tenant.id, automationId);
       const prepared = runs.map((run) => ({
         phone: run.phone,
-        variables: inputVariables(automation, run.inputs, `${run.place}.inputs`),
+        variables: startInputVariables(automation, run.inputs, `${run.place}.inputs`),
       }));
       const channelId = await sendingChannel(tx, ctx, automation);
       const starts: ApiAutomationRunStart[] = [];
@@ -335,99 +326,6 @@ export async function apiStartManyAutomationRuns(
   );
 }
 
-/** What a start needs of the automation, checked once for a call (ADR-077, ADR-161). */
-interface LoadedApiAutomation {
-  id: string;
-  versionId: string;
-  /** The inputs its trigger declares. */
-  inputs: readonly string[];
-  /** The step a run starts at. */
-  start: string;
-  /** The templates its steps send. */
-  templateIds: string[];
-  channelAccountId: string | null;
-}
-
-/**
- * The automation, when it is published, starts through the API and is active (archived,
- * unpublished, other triggers and paused automations are refused).
- */
-async function loadApiAutomation(
-  tx: Tx,
-  ctx: ApiContext,
-  automationId: string,
-): Promise<LoadedApiAutomation> {
-  const tenantId = ctx.tenant.id;
-  const [automation] = await tx
-    .select({
-      id: automations.id,
-      status: automations.status,
-      activeVersionId: automations.activeVersionId,
-    })
-    .from(automations)
-    .where(and(eq(automations.tenantId, tenantId), eq(automations.id, automationId)))
-    .for('share');
-  if (!automation) throw notFound('Automation');
-  if (automation.status === 'archived' || !automation.activeVersionId) {
-    throw refused(
-      'precondition_failed',
-      automation.status === 'archived'
-        ? 'This automation is archived.'
-        : 'This automation has not been published.',
-      'automation_unavailable',
-    );
-  }
-  const [version] = await tx
-    .select({
-      id: automationVersions.id,
-      trigger: automationVersions.trigger,
-      graph: automationVersions.graph,
-      channelAccountId: automationVersions.channelAccountId,
-    })
-    .from(automationVersions)
-    .where(
-      and(
-        eq(automationVersions.tenantId, tenantId),
-        eq(automationVersions.id, automation.activeVersionId),
-      ),
-    );
-  const trigger = triggerSchema.safeParse(version?.trigger);
-  const graph = graphSchema.safeParse(version?.graph);
-  if (!version || !trigger.success || !graph.success || trigger.data.type !== 'api') {
-    throw refused(
-      'precondition_failed',
-      'This automation does not start through the API.',
-      'automation_unavailable',
-    );
-  }
-  if (automation.status !== 'active') {
-    throw refused('precondition_failed', 'This automation is paused.', 'automation_paused');
-  }
-  return {
-    id: automation.id,
-    versionId: version.id,
-    inputs: trigger.data.inputs,
-    start: graph.data.start,
-    templateIds: templatesOf(graph.data),
-    channelAccountId: version.channelAccountId,
-  };
-}
-
-/** A start's inputs as the run's variables, refused at `path` when the trigger does not take them. */
-function inputVariables(
-  automation: LoadedApiAutomation,
-  given: Record<string, string>,
-  path: string,
-): Record<string, string> {
-  const inputs = apiInputValues(automation.inputs, given);
-  if (!inputs.ok) {
-    throw new AppError('validation_failed', inputs.message, {
-      issues: [{ path, message: inputs.message }],
-    });
-  }
-  return inputs.variables;
-}
-
 /**
  * The number the automation sends from, when the key may start what it sends (marketing templates
  * need the marketing scope) and the number is active.
@@ -435,210 +333,62 @@ function inputVariables(
 async function sendingChannel(
   tx: Tx,
   ctx: ApiContext,
-  automation: LoadedApiAutomation,
+  automation: StartableAutomation,
 ): Promise<string> {
-  const tenantId = ctx.tenant.id;
   // Marketing templates need the key's marketing scope, as publishing them needs campaigns.send,
   // and the plan must include it (ADR-092).
-  const templateIds = automation.templateIds;
-  if (templateIds.length > 0 && !hasScope(ctx, 'messages.send_marketing')) {
-    const [marketing] = await tx
-      .select({ id: messageTemplates.id })
-      .from(messageTemplates)
-      .where(
-        and(
-          eq(messageTemplates.tenantId, tenantId),
-          inArray(messageTemplates.id, templateIds),
-          eq(messageTemplates.category, 'MARKETING'),
-        ),
-      )
-      .limit(1);
-    if (marketing) {
-      if (ctx.key.scopes.has('messages.send_marketing'))
-        assertScope(ctx, 'messages.send_marketing');
-      throw new AppError(
-        'forbidden',
-        'This automation sends marketing templates, which needs the messages.send_marketing scope.',
-      );
-    }
-  }
-  const channelId = automation.channelAccountId;
-  const [channel] = channelId
-    ? await tx
-        .select({ status: channelAccounts.status })
-        .from(channelAccounts)
-        .where(and(eq(channelAccounts.tenantId, tenantId), eq(channelAccounts.id, channelId)))
-    : [];
-  if (!channelId || !channel || channel.status !== 'active') {
-    throw refused(
-      'precondition_failed',
-      'The WhatsApp number of this automation is not active.',
-      'channel_unavailable',
+  if (
+    !hasScope(ctx, 'messages.send_marketing') &&
+    (await automationSendsMarketing(tx, ctx.tenant.id, automation))
+  ) {
+    if (ctx.key.scopes.has('messages.send_marketing')) assertScope(ctx, 'messages.send_marketing');
+    throw new AppError(
+      'forbidden',
+      'This automation sends marketing templates, which needs the messages.send_marketing scope.',
     );
   }
-  return channelId;
+  return activeStartChannel(tx, ctx.tenant.id, automation);
 }
 
 /**
- * Starts a run of the automation for the contact with this number: the checks that depend on the
- * contact and its conversation, then the run. A refusal throws; the caller's transaction or
- * savepoint rolls back what it wrote, a contact created for the number included.
+ * Starts a run of the automation for the contact with this number (created when new, with source
+ * `api`) through the shared start steps (automations/starts). A refusal throws; the caller's
+ * transaction or savepoint rolls back what it wrote, a contact created for the number included.
  */
 async function startRunFor(
   deps: OutboundDeps,
   tx: Tx,
   ctx: ApiContext,
-  automation: LoadedApiAutomation,
+  automation: StartableAutomation,
   channelId: string,
   phone: string,
   variables: Record<string, string>,
   now: Date,
 ): Promise<ApiAutomationRun> {
-  const tenantId = ctx.tenant.id;
-  // Erasure, suppression and opt-outs; a refusal rolls back a contact created for the number. Each
-  // template step checks its own category's consent when it sends.
-  const contactId = await contactForPhone(tx, tenantId, {
+  const contactId = await contactForPhone(tx, ctx.tenant.id, {
     phoneE164: phone,
     displayName: null,
     source: 'api',
   });
-  const eligibility = await checkTemplateEligibility(tx, {
-    tenantId,
-    contactId,
-    recipientPhones: [phone],
-    category: 'UTILITY',
-  });
-  if (!eligibility.ok) throw new AppError('precondition_failed', eligibility.message);
-
-  // A conversation the run starts is resolved, like a campaign's; the customer's reply opens it.
-  await tx
-    .insert(conversations)
-    .values({
-      id: uuidv7(),
-      tenantId,
-      channelAccountId: channelId,
-      contactId,
-      status: 'resolved',
-      resolvedAt: now,
-    })
-    .onConflictDoNothing();
-  const [conversation] = await tx
-    .select({
-      id: conversations.id,
-      status: conversations.status,
-      resolvedAt: conversations.resolvedAt,
-      assignedMembershipId: conversations.assignedMembershipId,
-    })
-    .from(conversations)
-    .where(
-      and(
-        eq(conversations.tenantId, tenantId),
-        eq(conversations.channelAccountId, channelId),
-        eq(conversations.contactId, contactId),
-      ),
-    )
-    .for('update');
-  if (!conversation) throw new Error('Conversation upsert failed');
-  if (conversation.assignedMembershipId) {
-    throw refused(
-      'conflict',
-      'The conversation with this contact is assigned to a member.',
-      'conversation_assigned',
-    );
-  }
-  if (await lockActiveRun(tx, tenantId, conversation.id)) {
-    throw refused(
-      'conflict',
-      'An automation is already handling the conversation with this contact.',
-      'automation_busy',
-    );
-  }
-  const [recent] = await tx
-    .select({ n: sql<number>`count(*)::int` })
-    .from(automationRuns)
-    .where(
-      and(
-        eq(automationRuns.tenantId, tenantId),
-        eq(automationRuns.conversationId, conversation.id),
-        gt(automationRuns.startedAt, new Date(now.getTime() - 3600_000)),
-      ),
-    );
-  if ((recent?.n ?? 0) >= RUN_BUDGETS.maxRunsPerConversationPerHour) {
-    throw refused(
-      'conflict',
-      `At most ${RUN_BUDGETS.maxRunsPerConversationPerHour} automation runs start in one conversation in an hour.`,
-      'automation_limit',
-    );
-  }
-  // The company's plan: automations included and a run left this month (ADR-051).
-  const counted = await consumeAutomationRun(tx, tenantId, now);
-  if (!counted.ok) {
-    throw counted.reason === 'not_in_plan'
-      ? refused('forbidden', "Your company's plan does not include automations.", 'not_in_plan')
-      : refused(
-          'precondition_failed',
-          "Your company's plan has no automation runs left this month.",
-          'automation_quota',
-        );
-  }
-
-  // The run may work in the conversation while it stays resolved as it is now (the runner compares
-  // the time it was resolved with the run's start), so the start is never before that time.
-  const startedAt =
-    conversation.status === 'resolved' && conversation.resolvedAt && conversation.resolvedAt > now
-      ? conversation.resolvedAt
-      : now;
-  const runId = uuidv7();
-  await tx.insert(automationRuns).values({
-    id: runId,
-    tenantId,
-    automationId: automation.id,
-    versionId: automation.versionId,
-    conversationId: conversation.id,
-    contactId,
-    channelAccountId: channelId,
-    mode: 'live',
-    triggerType: 'api',
-    apiKeyId: ctx.key.id,
-    variables,
-    status: 'running',
-    currentNodeId: automation.start,
-    nextStepAt: now,
-    startedAt,
-  });
-  await appendRunStep(tx, tenantId, runId, {
-    nodeId: null,
-    nodeType: null,
-    outcome: 'started',
-    detail: 'api',
-  });
-  await emitTenantEvent(tx, tenantId, {
-    type: 'automation.started',
-    conversationId: conversation.id,
-    payload: { runId, automationId: automation.id },
-  });
-  await recordSystemAudit(
-    tx,
-    tenantId,
-    {
-      action: 'automation.run_started',
-      subjectType: 'automation_run',
-      subjectId: runId,
-      metadata: { automationId: automation.id, source: 'api' },
-      correlationId: ctx.requestId,
-    },
-    apiActor(ctx),
-  );
-  await signalAutomationRun(deps, tx, { tenantId, runId, actorUserId: null, key: 'start' });
-  return toApiRun({
-    id: runId,
-    automationId: automation.id,
-    contactId,
-    conversationId: conversation.id,
+  const run = await startRunForContact(deps, tx, {
+    tenantId: ctx.tenant.id,
+    automation,
     channelId,
+    contact: { id: contactId, phone },
+    variables,
+    consent: ['UTILITY'],
+    starter: { kind: 'key', apiKeyId: ctx.key.id, correlationId: ctx.requestId },
+    now,
+  });
+  return toApiRun({
+    id: run.id,
+    automationId: automation.id,
+    contactId: run.contactId,
+    conversationId: run.conversationId,
+    channelId: run.channelId,
     status: 'running',
     endReason: null,
-    startedAt,
+    startedAt: run.startedAt,
     endedAt: null,
   });
 }

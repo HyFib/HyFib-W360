@@ -1848,6 +1848,21 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    request more) and handles only that read's failure as one, so a refusal of the field alone does
    not block setup or ask for a reconnect; retryable failures are retried as before. Check
    META-SETUP's messaging limit item on a real number before relying on the line.
+
+   Migration 0311 (ADR-401) adds `app.automation_enrollments` and
+   `app.automation_enrollment_contacts` (forced row security, grants, deletion steps 685 and 692),
+   the nullable column `app.automation_runs.enrollment_id` with its foreign key, replaces the run
+   check `automation_runs_api_key` (a key or an enrolment, exactly one, on an `api` run) and the run
+   guard. The check and the foreign key are added `NOT VALID`, so the migration takes the runs
+   table's lock only briefly and reads none of it; every existing row has no enrolment, so the new
+   check holds for it as the old one did (validating them is left to a later migration, which can
+   do it without blocking writes). Expand only and backward compatible: web servers and workers of
+   the release before never name the new column or tables, and their API starts write runs the new
+   check allows. The new queue `automation.enroll` is declared by the migration command with the
+   others. Roll out workers before web as usual: an enrolment is started only by a web server of
+   this release, and its first job waits in the queue until a worker of this release takes it. To
+   roll back the application past this release, stop the running enrolments first (their jobs would
+   otherwise wait unconsumed until they expire); the tables and column can stay.
    Rolling an image back leaves the columns in place and unused; a number whose health an older
    worker reads meanwhile shows, once this release returns, the limit read before beside the later
    "Checked" time.

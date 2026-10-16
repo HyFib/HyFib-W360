@@ -74,19 +74,31 @@ export default async function AutomationRunPage({
         description={`${run.mode === 'test' ? 'Test of the draft' : `Version ${run.versionNumber ?? '—'}`}, started ${formatDateTime(run.startedAt, tz)} by ${
           run.mode === 'test'
             ? (run.startedByName ?? 'a member')
-            : run.triggerType === 'api'
-              ? run.apiKeyName
-                ? `the API key “${run.apiKeyName}”`
-                : 'an API key'
-              : (TRIGGER_TYPE_LABELS[run.triggerType] ?? run.triggerType).toLowerCase()
+            : run.enrollmentId
+              ? `an enrolment by ${run.enrolledByName ?? 'a member'}`
+              : run.triggerType === 'api'
+                ? run.apiKeyName
+                  ? `the API key “${run.apiKeyName}”`
+                  : 'an API key'
+                : (TRIGGER_TYPE_LABELS[run.triggerType] ?? run.triggerType).toLowerCase()
         }.`}
         actions={
-          <Link
-            href={`${base}/${run.automationId}`}
-            className="text-sm text-primary underline-offset-4 hover:underline"
-          >
-            Open the automation
-          </Link>
+          <>
+            {run.enrollmentId ? (
+              <Link
+                href={`${base}/${run.automationId}/enrollments/${run.enrollmentId}`}
+                className="text-sm text-primary underline-offset-4 hover:underline"
+              >
+                Open the enrolment
+              </Link>
+            ) : null}
+            <Link
+              href={`${base}/${run.automationId}`}
+              className="text-sm text-primary underline-offset-4 hover:underline"
+            >
+              Open the automation
+            </Link>
+          </>
         }
       />
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-[minmax(0,1fr)_300px]">

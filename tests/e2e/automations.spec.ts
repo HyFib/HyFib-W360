@@ -428,3 +428,93 @@ test('an automation creates a CRM task and a deal about the customer, moves the 
     await expect(welcome).toBeVisible({ timeout: 2_000 });
   }).toPass({ timeout: 60_000 });
 });
+
+test('a member enrols the contacts the Contacts page’s filters match in an automation and sees each start (ADR-401)', async ({
+  page,
+}) => {
+  test.setTimeout(180_000);
+  const email = uniqueEmail('enrol');
+  const slug = `enrol-${Date.now().toString(36)}`;
+  await signUpAndVerify(page, { name: 'Esha Enrol', email, password: PASSWORD });
+  await page.getByLabel('Company name').fill('Enrol Emporium');
+  await page.getByLabel('Company address').fill(slug);
+  await page.getByRole('button', { name: 'Create company' }).click();
+  await expect(page).toHaveURL(new RegExp(`/c/${slug}$`));
+  await connectTestChannel({ ownerEmail: email, slug });
+
+  // Two contacts tagged "festival", and one who is not.
+  for (const [name, phone, tag] of [
+    ['Asha Rao', '+91 98111 40001', 'festival'],
+    ['Bina Das', '+91 98111 40002', 'festival'],
+    ['Chitra Iyer', '+91 98111 40003', 'other'],
+  ] as const) {
+    await page.goto(`/c/${slug}/contacts/new`);
+    await page.getByLabel('Name').fill(name);
+    await page.getByLabel('Phone number').fill(phone);
+    await page.getByRole('button', { name: 'Add contact' }).click();
+    await expect(page.getByRole('heading', { name, level: 1 })).toBeVisible();
+    await page.getByLabel('Add tags').fill(tag);
+    await page.getByRole('button', { name: 'Add', exact: true }).click();
+    await expect(page.getByRole('list', { name: 'Tags' })).toContainText(tag);
+  }
+
+  // An automation started by a member or through the API, from the company's number: it tags the
+  // contact, so nothing needs the service window.
+  await openFromNav(page, 'Automations');
+  await page.getByLabel('Name', { exact: true }).fill('Festival follow-up');
+  await page.getByRole('button', { name: 'Create draft' }).click();
+  await expect(page.getByRole('heading', { name: 'Festival follow-up' })).toBeVisible();
+  await page.getByLabel('Start when').selectOption('api');
+  await page.getByLabel('Inputs').fill('offer');
+  await page.getByLabel('WhatsApp number').selectOption({ index: 1 });
+  await page.getByLabel('Add a step').selectOption('update_contact');
+  await page.getByRole('button', { name: 'Add step' }).click();
+  await page.locator('#step-update-contact-1-tag').fill('followed-up');
+  await page.getByLabel('First step', { exact: true }).selectOption('update-contact-1');
+  await page.getByRole('button', { name: 'Delete step welcome' }).click();
+  await expect(page.getByText(/to fix before publishing/)).toBeHidden();
+  await page.getByRole('button', { name: 'Save draft' }).click();
+  await expect(page.getByText('Draft saved.')).toBeVisible();
+  await page.getByRole('button', { name: 'Publish' }).click();
+  await page.getByRole('alertdialog').getByRole('button', { name: 'Publish' }).click();
+  await expect(page.getByText(/Version 1 is live/)).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Enrol contacts or a segment' })).toBeVisible();
+
+  // From the Contacts page, filtered by the tag: the count, the input once, then the enrolment.
+  await page.goto(`/c/${slug}/contacts?tag=festival`);
+  await page
+    .getByRole('link', { name: 'Enrol the contacts these filters match in an automation' })
+    .click();
+  await expect(
+    page.getByRole('heading', { name: 'Enrol contacts in an automation' }),
+  ).toBeVisible();
+  await page.getByLabel('Automation', { exact: true }).selectOption({ index: 1 });
+  await expect(page.getByLabel('Whom')).toContainText('Contacts matching tag “festival”');
+  await page.getByRole('button', { name: 'Count contacts' }).click();
+  await expect(page.getByText('2 contacts', { exact: true })).toBeVisible();
+  await expectNoHorizontalOverflow(page);
+  await page.getByLabel('Input “offer”').fill('Diwali');
+  await page.getByRole('button', { name: 'Enrol 2 contacts' }).click();
+
+  // The enrolment's page: the worker starts both runs; the page updates itself.
+  await expect(
+    page.getByRole('heading', { name: 'Enrolment in Festival follow-up' }),
+  ).toBeVisible();
+  await expect(page.getByText('Completed', { exact: true })).toBeVisible({ timeout: 60_000 });
+  const started = page
+    .locator('dt')
+    .filter({ hasText: /^Started$/ })
+    .locator('..');
+  await expect(started).toContainText('2');
+  await expect(page.getByText('Every contact was handled.', { exact: false })).toBeVisible();
+  await expectNoHorizontalOverflow(page);
+
+  // The automation's page lists the enrolment and marks its runs.
+  await page.getByRole('link', { name: 'Open the automation' }).click();
+  await expect(page.getByText('2 of 2 started')).toBeVisible();
+  await expect(page.getByText('Enrolment', { exact: false }).first()).toBeVisible();
+  await page.goto(`/c/${slug}/automations/runs`);
+  await page.getByRole('table').getByRole('link').first().click();
+  await expect(page.getByText(/by an enrolment by Esha Enrol/)).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Open the enrolment' })).toBeVisible();
+});

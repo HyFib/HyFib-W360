@@ -29,6 +29,7 @@ import {
   createWebhooksService,
   createApiWebhookEndpoints,
   createAutomationService,
+  createAutomationEnrollmentService,
   createCommerceService,
   createStoreService,
   createStoreMessagesService,
@@ -88,6 +89,7 @@ import {
   type WebhooksService,
   type ApiWebhookEndpoints,
   type AutomationService,
+  type AutomationEnrollmentService,
   type CommerceService,
   type CrmService,
   type BillingService,
@@ -231,6 +233,8 @@ export interface Runtime {
   reports: ReportsService;
   reportEmails: ReportEmailsService;
   automations: AutomationService;
+  /** Members' enrolments of contacts or a segment in an automation (ADR-401). */
+  automationEnrollments: AutomationEnrollmentService;
   /** Domains and secrets for the automation HTTP step. */
   webRequests: WebRequestService;
   /** Click-to-chat links, QR codes, website widgets and conversation sources. */
@@ -442,6 +446,12 @@ async function init(): Promise<Runtime> {
     // http:// test targets, only where configuration allows loopback egress (local and test).
     allowInsecureHttp: config.W360_EGRESS_ALLOW_LOOPBACK ?? false,
   });
+  const automationEnrollments = createAutomationEnrollmentService({
+    db,
+    clock: systemClock,
+    jobs,
+    signer,
+  });
   const webRequests = createWebRequestService({ db, clock: systemClock, keyring });
   const growth = createGrowthService({ db, clock: systemClock });
   const flows = createFlowsService({
@@ -624,6 +634,7 @@ async function init(): Promise<Runtime> {
     reports,
     reportEmails,
     automations,
+    automationEnrollments,
     webRequests,
     growth,
     flows,

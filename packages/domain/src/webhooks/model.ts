@@ -179,7 +179,7 @@ export const WEBHOOK_EVENT_INFO: Record<WebhookEventType, { label: string; descr
     'automation.run_started': {
       label: 'Automation started',
       description:
-        'An automation started in a conversation: from a customer message, a store’s order event or a call through the API. Members’ test runs are not sent.',
+        'An automation started in a conversation: from a customer message, a store’s order event, a call through the API or a member’s enrolment of the contact. Members’ test runs are not sent.',
     },
     'automation.run_ended': {
       label: 'Automation ended',

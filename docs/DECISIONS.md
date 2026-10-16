@@ -16772,3 +16772,135 @@ channels. "Never blocks" was tested only with an unknown limit: an integration t
 draft of 251 eligible contacts on `TIER_250`, reviewed as over without a problem. Prototype names
 (`__proto__`, `constructor`) are tested as unknown, the API's `limit` is bounded to 64 characters
 as kept, and the schema test checks the field's types, formats and nullability. All were fixed.
+
+## ADR-401 Members enrol contacts or a segment in an automation (P4-01) (2026-10-16)
+
+Context: runs start from customer messages (ADR-034), store events (ADR-050), members' test runs
+(ADR-038) and the public API, one contact per call (ADR-077) or up to 50 (ADR-161). A member who
+wants a follow-up flow for the customers of a festival sale, or for a saved segment, had no way to
+start it from the web app: P4-01's Remaining listed "enrolling contacts or segments in a sequence
+without a customer message or order event".
+
+Decision:
+
+- **Which automations: the `api` trigger, renamed, not a new one.** Published, active automations
+  whose live version is "Started through the API" already start without a customer message, with
+  declared inputs, limited to one number, with templates before the contact replies (ADR-077). A
+  second trigger would repeat every one of those rules and checks. The trigger keeps its type and
+  its API; the builder now calls it "A member's enrolment, or a call from your systems through the
+  HyFib W360 API", and its description reads "Started by a member or through the API" (with its
+  inputs). A run an enrolment starts keeps `trigger_type = 'api'`, so the runner (which lets such a
+  run work in the resolved conversation it started), webhooks and reports treat it as such a run.
+- **Who may: `automations.publish` and `contacts.read`** (owners and administrators), as starting a
+  live run through the API needs a key only they can grant, and `campaigns.read` to enrol a saved
+  segment. An automation whose live version sends a marketing template also needs `campaigns.send`,
+  as publishing it does and as the API needs `messages.send_marketing`. Pages check the permissions
+  themselves; the domain service checks them again with everything else.
+- **Whom, counted first:** the contacts the Contacts page's filters match (the search, the tag and
+  the marketing consent, through the same conditions as bulk edits, ADR-213, now exported as
+  `contactFilterConditions`), or a saved segment's members (`segmentWhere`, the campaigns' audience,
+  with `assertCanUseDefinition` for conditions on store orders). The page counts them (up to one
+  more than the limit) before the member confirms, and the count goes with the request: a different
+  count when the enrolment starts refuses it (409), as bulk edits do.
+- **The snapshot:** starting an enrolment inserts `app.automation_enrollments` (who, the automation,
+  the source and segment, the inputs, the total) and one `app.automation_enrollment_contacts` row
+  per matched contact, positioned in contact id order, in one transaction with the audit entry and
+  the first job. Contacts added later, or leaving the segment, change nothing.
+- **At most 10,000 contacts per enrolment,** the most a bulk edit of contacts takes. Each contact is
+  a run, a conversation and one of the plan's monthly runs; larger audiences are a campaign's work
+  (up to 50,000, with its caps, pacing and approval). **At most one running enrolment per
+  automation** (a partial unique index): a second is refused until the first ends or is stopped, so
+  two enrolments never race for the same contacts or double the load of one automation.
+- **Inputs once for everyone,** validated by the API's own function (`startInputVariables`, which
+  `apiStartAutomationRun` and `apiStartManyAutomationRuns` now call too): each declared input a text
+  of 1 to 1,000 characters and nothing else. They are kept on the enrolment while it runs and
+  cleared when it ends (a check); each run keeps its own copy with its answers, cleared 30 days
+  after it ends (ADR-077).
+- **A durable background job, never the web request:** `automation.enroll` (exclusive, signed with
+  the member, `singletonKey` the enrolment and the position its batch starts after) handles one
+  batch per job. Under the enrolment's row lock it re-checks the member (active, still holding
+  `automations.publish`, and `campaigns.send` for marketing; as the campaign runner re-checks its
+  launcher) and the automation's checks of a start, once per batch (published, active, `api`, its
+  number active, the inputs its live version takes), then starts the pending contacts after the
+  stored position, **at most 50 per transaction** for ADR-161's reason (each savepoint keeps its
+  transaction id until the commit; PostgreSQL caches 64). It records each outcome, the counts and
+  the new position, and queues the next batch's job, all in the same transaction.
+- **The start steps are the API's** (`automations/starts.ts`, moved from `api/automations.ts`):
+  `loadStartableAutomation`, `startInputVariables`, `automationSendsMarketing`,
+  `activeStartChannel` and `startRunForContact`, each contact in a savepoint of its own: erasure,
+  suppression and opt-outs, the conversation (created resolved, not held by a member or handled by
+  another run), the hourly limit (`maxRunsPerConversationPerHour`), the plan's runs (ADR-051), then
+  the run, its first step, the live `automation.started` event and its first job. An enrolment of
+  an automation that sends marketing templates also checks each contact's marketing consent when it
+  starts (the company's opt-in setting included), so a member's bulk start does not begin runs that
+  would fail at their first template; the API keeps checking it at the template step (ADR-077), as
+  before. A refusal throws an AppError carrying its code (`details.startRefusal`); the API's
+  answers are unchanged.
+- **A refused contact records its reason and the others go on:** the start step's code
+  (`suppressed`, `opted_out`, `contact_erased`, `no_marketing_opt_in`, `conversation_assigned`,
+  `automation_busy`, `automation_limit`, `automation_quota`) or the enrolment's own (`no_number`, a
+  contact without a number; `contact_gone`, a contact merged away since the snapshot). A plan
+  without automations, a paused or archived automation, an inactive number, inputs the live version
+  no longer takes, or a member who lost the right ends the enrolment as `stopped` with that reason;
+  the contacts not handled are recorded as not started (`cancelled`).
+- **Resumable and idempotent:** a batch's runs, outcomes, counts and position commit together, so a
+  crash, a failed job or a deadlock (ADR-161's concurrent starts) rolls the whole batch back and its
+  retry starts the same contacts again from the same position; a duplicate job waits for the row
+  lock and finds them handled. Each contact is in an enrolment once (a unique index), and
+  `startRunForContact` refuses a conversation that already has an active run, so the enrolment
+  never starts a second run for a contact. A suspended company's job is queued again five minutes
+  later (no run starts while it is suspended); a job whose member left ends the enrolment
+  (`member_removed`). A job that fails all its retries goes to the dead letters as any (ADR-108);
+  members can stop its enrolment meanwhile, and no sweep signals it again (a definer function would
+  be needed to find enrolments across companies, and the job is queued in the transaction that
+  needs it, so it is never lost before it runs).
+- **Who started a run:** `automation_runs.enrollment_id` (migration 0311), as `api_key_id` records a
+  key: a check keeps exactly one of the two on a run of an `api` automation and neither on any other
+  run, and the run guard keeps it fixed. Runs act for the company, as live runs do (ADR-038): their
+  jobs carry no member and they go on if the member leaves. The run page says "by an enrolment by"
+  the member, with a link to the enrolment; the runs lists say "Enrolment".
+- **Audit:** `automation.enrollment_started` (the member; the automation, source, segment, whether a
+  search was given, the tag, the consent filter and the count, never the search text or the
+  inputs), `automation.enrollment_stopped` (the member) and `automation.enrollment_ended` (the
+  system, with the status, reason and counts). Runs an enrolment starts are not audited one by one
+  (an API start is): the enrolment's rows name every run.
+- **Stop:** a member who may publish automations stops a running enrolment from its page; under the
+  row lock (a batch in progress finishes first) the contacts not handled are recorded as not started
+  and no further run starts. **Runs already started go on**: stopping each from the web would route
+  every conversation to people as a member's stop does (ADR-036), possibly thousands of contacts
+  who never wrote, and a stop that does not route them needs an end reason of its own; each run can
+  be stopped from its page. Stopping an ended enrolment is refused (409).
+- **Pages:** Automations → an automation → "Enrol contacts or a segment" (while its live version
+  starts by a member or through the API and is active) and its enrolments; Contacts → "Enrol the
+  contacts these filters match in an automation"; both lead to Automations → Enrol contacts, which
+  counts, takes the inputs (`ClientForm`) and starts the enrolment, then shows its page: the counts
+  (contacts, started, refused, not started, waiting), the refusals by reason, the end and who
+  stopped it, and Stop (`ConfirmDialog`). The page re-renders every 15 seconds while it runs.
+- **Webhooks:** a run an enrolment starts is a live run inserted as any, so the capture of 0055 and
+  0241 sends `automation.run_started` and `automation.run_ended` as before, with `trigger: "api"`
+  and `apiKeyId: null`, which tells it from a key's run; an endpoint limited to API keys' runs
+  (`runApiKeyIds`, ADR-319) does not receive it. The payload's descriptions say so; no migration
+  touches the capture.
+- **Public API: out of scope.** Members enrol from the web app; keys already start up to 50 runs per
+  call (ADR-161), and an integration holding the contacts can page through them. A later slice
+  could add `POST /api/v1/automations/{id}/enrollments` (a segment id or contact ids, the inputs,
+  an `Idempotency-Key`) and reading an enrolment's progress, with the scope of starts; the runs of
+  an enrolment are not readable through `GET /automation-runs/{id}` (key runs only, ADR-077).
+- **Migration 0311:** the two tables (`tenant_id NOT NULL`, `UNIQUE (tenant_id, id)`, composite
+  foreign keys to the automation, segment, members, contacts and runs, forced row security), the
+  runtime role's grants (insert and read; updates only of progress, end and outcome columns; no
+  delete), the definer role's deletion policies, deletion steps 685 (outcomes, before the runs they
+  name) and 692 (enrolments, after the runs that name them), and the run's column, check, foreign
+  key and guard. The check replaces 0052's under its name and, with the foreign key, is added
+  `NOT VALID` so `app.automation_runs` is not read under the migration's lock: the rows already
+  there have no enrolment, so for them it is the check 0054 validated. A later migration may
+  validate both without blocking writes. A merged contact's outcome keeps its row with no contact
+  (`ON DELETE SET NULL`), and retention deleting a run clears the outcome's run, so neither the
+  merge (ADR-224) nor retention needs a change. Exported with the company (both tables and the
+  run's column). No definer function, no function executable by PUBLIC.
+
+Not built: enrolling through the public API; scheduling an enrolment for later or pacing it;
+stopping an enrolment's runs at once; choosing contacts one by one on the Contacts page (it has no
+row selection); enrolling in automations started otherwise; an enrolment's contacts listed with
+their outcomes (the page summarises them by reason); validating 0311's check and foreign key; an
+index on `automation_runs.enrollment_id` (no read needs it: the outcomes name the runs).
