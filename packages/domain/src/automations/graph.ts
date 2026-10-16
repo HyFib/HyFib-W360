@@ -1970,6 +1970,11 @@ function dealFieldsStepIssues(node: NodeOf<'update_deal_fields'>, refs: GraphRef
   if (refs.crmPipelines && !refs.crmPipelines.has(node.pipelineId)) {
     out.push('Choose an active pipeline for the deal to update.');
   }
+  // Without deal fields, every row would name one that does not exist: say what to do instead.
+  if (refs.dealFields?.size === 0) {
+    out.push('Add deal fields in the settings of pipelines first.');
+    return out;
+  }
   const seen = new Set<string>();
   for (const { field, value } of node.values) {
     if (seen.has(field)) {

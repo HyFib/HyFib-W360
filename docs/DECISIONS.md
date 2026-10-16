@@ -15326,16 +15326,24 @@ Decision:
   outcome migration), raises the deal's version, records the automation as its changer and adds a
   `deal_updated` activity with `fields: ['custom_fields']`, no actor, the automation and the run,
   shown on the timeline as "Deal edited · by an automation". The run page names the field in its
-  notes. The `updated` outcome, also used by contact and conversation steps, is now labelled "Made
-  the change" on run pages and in Settings → Webhooks.
+  notes. The `updated` outcome, also used by contact and conversation steps, is now labelled
+  "Updated details" on run pages and in Settings → Webhooks.
 - **Who may publish:** as for the other CRM steps, publishing or testing needs the CRM in the plan
   and `crm.write`.
 - **Webhook endpoints** can choose the new kind of step, as every kind the builder defines
   (ADR-328): migration 0302 widens the check on `run_step_node_types` to 1 to 20 kinds.
 
 Not built: setting the deal's title, value, owner or expected close date, fields of a deal the
-contact has in several pipelines at once, values copied from another deal or a contact field, and a
-condition on a deal's field values.
+contact has in several pipelines at once, values copied from another deal or a contact field, a
+condition on a deal's field values, and a warning when a field or an option that published steps
+use is deleted or removed (those steps then change nothing, with a note on each run).
+
+Review (before merge): an independent review found no High or Medium issue. It found the progress
+notes claiming the integration test covered the locks (it covers the writes and the re-checks; the
+lock order is reviewed, not raced), the `updated` outcome's first new label ("Made the change")
+vague, every value control named "Value", a company without deal fields told that each row's field
+does not exist, the simulator showing a value as typed rather than as stored, a date not written as
+YYYY-MM-DD hidden by the date input, and a run note naming choices for any type. All were fixed.
 
 ## ADR-387 Deal import that changes and closes deals (P4-04) (2026-10-16)
 
@@ -15350,21 +15358,26 @@ Decision:
   (suggested for `deal_id`, as the deals export writes it). A row whose cell holds an id changes the
   deal instead of adding one; a row without one adds a deal as before. The deal must be the
   company's (looked up only in the company's scope, under row security), in the pipeline chosen,
-  open (a closed deal is skipped: "reopen it on its page to change it"; changing outcomes from a
-  file would rewrite reports silently), with a live contact (as the deal page refuses), and named by
-  one row only (a second row naming it is skipped, naming the first). A malformed id is skipped
-  without being looked up.
+  with a live contact (as the deal page refuses), and named by one row only (a second row naming it
+  is skipped, naming the first). A malformed id is skipped without being looked up. A closed deal
+  is not changed from a file ("reopen it on its page to change it": changing outcomes from a file
+  would rewrite reports silently), but its row as the export writes it (its status, or a blank one,
+  and nothing else new) is "No change", so a whole export reads back without errors.
 - **Cells given change, blank cells keep:** the stage (a stage of the pipeline by name, any case;
-  moving resets the time in stage), the title, the value (major units in the pipeline's currency,
+  moving resets the time in stage; stage names need not be unique, so a name two active stages share
+  is refused, "More than one stage is named …; rename one in Settings → Pipelines.", for new deals
+  too, unless it is the deal's own stage, archived or not, which the export names), the title, the value (major units in the pipeline's currency,
   parsed exactly as before), the owner, the expected close date and custom field values (checked by
   type over the deal's values, as the deal page does). A blank cell never clears a value: a
   spreadsheet cannot tell an emptied cell from one left alone, so clearing stays on the deal page.
-  The phone number is not read for these rows: a deal's contact never changes, and an export may
-  carry masked numbers (ADR-226). A row whose cells hold the deal's values changes nothing and does
+  The phone number is not read for these rows: a deal's contact is not changed from a file, and an
+  export may carry masked numbers (ADR-226). A row whose cells hold the deal's values changes nothing and does
   not move its version ("No change").
 - **The deals export imports back:** its columns are suggested by name; `products` and
   `products_total` are never suggested and nothing reads them (products are listed on the deal
-  page); `value` is read in major units as written; `owner` holds a name, so an owner is now an
+  page), and a cell may hold up to 30,000 characters, so the products cell of a deal with 50 products
+  of long names still reads (the cells read are bounded on their own: a title 120 characters, a lost
+  reason 200, a text field 500); `value` is read in major units as written; `owner` holds a name, so an owner is now an
   active CRM member's email or their name when no other such member has it ("More than one member is
   named …; give the owner's email."), and a deal whose owner has left keeps them when the cell names
   them. An optional currency column refuses a row in another currency than the pipeline's (an export
@@ -15391,12 +15404,16 @@ Decision:
   they are. The page shows them and sends those versions with the import (`expectedVersions`); a
   deal whose version differs, or that was not among the rows checked, is skipped ("Someone changed
   this deal after the rows were checked. Check the rows again."), as the deal page refuses a stale
-  edit. The import is still one transaction in which each row is planned before anything is written,
+  edit; versions are compared after a row's cells are read, so a row refused for a cell at the check
+  is refused for it again. The import is still one transaction in which each row is planned before anything is written,
   so a row with an error skips only that row.
-- **Locks and entries as the deal page's:** the import locks the contacts of new deals and of the
-  changed deals (`FOR KEY SHARE`, in id order), then the pipeline (`FOR SHARE`), then the deal
-  fields (shared), then the named deals (`FOR UPDATE`, in id order): the fields-then-deal order of
-  the deal page's edit, after the contacts erasure locks first. Each change is one update by the
+- **Locks and entries:** the import locks the contacts of new deals and of the changed deals
+  (`FOR KEY SHARE`, in id order), then the pipeline (`FOR SHARE`), then the deal fields (shared),
+  then the named deals (`FOR UPDATE`, in id order), as a member's new deal takes contact then fields;
+  the deal page's edit takes the fields before the contact, but both locks are shared, so the orders
+  cannot deadlock. A merge (ADR-224) can move a deal to another contact after the deals' contacts
+  were read; such a deal is skipped ("This deal moved to another contact meanwhile. Check the rows
+  again."), since its new contact is neither locked nor checked against erasure. Each change is one update by the
   member (`changed_by` member), with the version moved on and the entries the API writes for a
   combined change (ADR-255): `stage_changed`, `deal_updated` (with the fields and the value's
   change), `owner_changed`, then the close, each marked `imported`.
@@ -15413,3 +15430,10 @@ Decision:
 Not built: clearing values from a file, back-dated close times, changing or reopening closed deals
 from a file, moving deals to another pipeline from a file, creating contacts, matching deals by
 anything but their id, and import through the public API.
+
+Review (before merge): an independent review found two Medium issues: two stages with the same name
+made an unedited export row move its deal to the other one, and a deal with many products made its
+export unreadable (cells were limited to 1,000 characters). It found three Low ones: a row refused
+for a cell at the check was refused at the import as not checked, a merge between reading a deal's
+contact and locking it left the new contact unchecked, and an unedited export listed every closed
+deal as an error. All were fixed with tests.

@@ -1325,6 +1325,7 @@ function DealFieldsStepFields({
               </Field>
               <DealFieldValueInput
                 id={`${p}-value-${i}`}
+                label={`Value ${i + 1}`}
                 field={field}
                 value={row.value}
                 hint={hintFor(options)}
@@ -1377,12 +1378,15 @@ function DealFieldsStepFields({
  */
 function DealFieldValueInput({
   id,
+  label,
   field,
   value,
   hint,
   onChange,
 }: {
   id: string;
+  /** Numbered as its row's field is, so each value has a name of its own. */
+  label: string;
   field: EditorDealField | undefined;
   value: string;
   hint: string;
@@ -1399,7 +1403,7 @@ function DealFieldValueInput({
         : null;
   if (listed) {
     return (
-      <Field id={id} label="Value">
+      <Field id={id} label={label}>
         {(aria) => (
           <Select {...aria} value={value} onChange={(e) => onChange(e.target.value)}>
             <option value="">Clear the value</option>
@@ -1416,12 +1420,12 @@ function DealFieldValueInput({
       </Field>
     );
   }
-  // A date written with a placeholder stays text, so it can be seen and changed.
-  const date = field?.type === 'date' && !value.includes('{{');
+  // A date written with a placeholder, or not as YYYY-MM-DD, stays text, so it can be seen and changed.
+  const date = field?.type === 'date' && (value === '' || /^\d{4}-\d{2}-\d{2}$/.test(value));
   return (
     <Field
       id={id}
-      label="Value"
+      label={label}
       description={date ? 'Leave it empty to clear the field.' : `Empty clears the field. ${hint}`}
     >
       {(aria) => (

@@ -338,8 +338,16 @@ export function AutomationSimulator({
             else if (!value) problem = `${field.label} is empty after filling in placeholders`;
             else {
               const coerced = coerceDealFieldValue(field, value);
-              if (coerced.ok) changes.push(`${field.label} set to ${value}`);
-              else problem = coerced.message.replace(/\.$/, '');
+              // As the deal will hold it: a choice as its option is written, yes/no as Yes or No.
+              if (coerced.ok) {
+                const shown =
+                  typeof coerced.value === 'boolean'
+                    ? coerced.value
+                      ? 'Yes'
+                      : 'No'
+                    : String(coerced.value ?? value);
+                changes.push(`${field.label} set to ${shown}`);
+              } else problem = coerced.message.replace(/\.$/, '');
             }
             if (problem) break;
           }

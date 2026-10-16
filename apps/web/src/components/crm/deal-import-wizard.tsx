@@ -463,7 +463,7 @@ export function DealImportWizard({
                 <ColumnSelect
                   id="map-status"
                   label="Status"
-                  description="open, won or lost. A won or lost row closes its deal now, as Won or Lost on the deal page does: reports count it today, whatever the file's closed_at."
+                  description="open, won or lost. A won or lost row closes its deal now, as Won or Lost on the deal page does: reports count it today, whatever the file's closed_at. A deal already closed changes only after it is reopened on its page."
                   headers={preview.headers}
                   value={mapping.status}
                   onChange={(v) => setMapping({ ...mapping, status: v })}

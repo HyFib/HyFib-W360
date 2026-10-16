@@ -1,5 +1,43 @@
 # Progress
 
+## 2026-10-16 — Review fixes for ADR-386 and ADR-387
+
+Status: **Fixed; the database and browser tests run in CI only.** Independent reviews of both
+features found two Medium and seven Low issues (and nits), all fixed before merge.
+
+### Completed
+
+- **Deal import (ADR-387):** two stages with the same name no longer move a deal whose export row
+  names its own stage (a name two active stages share is refused, "rename one", unless it is the
+  deal's own stage, archived or not) (Medium); a deals export whose products cell is longer than
+  1,000 characters reads back (cells up to 30,000 characters; the cells read are bounded on their
+  own) (Medium); a row refused for a cell at the check is refused for that cell at the import, not as
+  unchecked; a deal a merge moved to another contact after the contacts were read is skipped; a
+  closed deal's row as the export writes it is "No change" instead of an error; ADR-387's and T340's
+  lock-order wording; the page says a closed deal changes only after it is reopened.
+- **Steps that set deal fields (ADR-386):** the `updated` outcome is labelled "Updated details"; each
+  value control is named after its row ("Value 1"); a company without deal fields is told to add
+  them; the simulator shows values as the deal will hold them; a date not written as YYYY-MM-DD stays
+  visible as text; the invalid-value note no longer names choices for every type; the progress notes
+  no longer claim the integration test races the locks; ADR-386 lists the missing warning when a field
+  that published steps use is deleted.
+- **Tests:** unit (shared stage names for new and changed deals, a deal's own stage kept, closed
+  deals' rows unchanged or refused, a deal moved by a merge, a long products cell read back, a cell
+  error reported again at the import, a company without deal fields); integration (the round trip
+  with a lost deal unchanged and refused when renamed).
+- **Mutation checks:** 10 deliberate regressions of the fixes (shared names kept, the own-stage rule,
+  the cell limit, the moved contact, the closed rows' status, reason and change rules, the unchanged
+  outcome, the ambiguous name, the no-fields message), all caught by the unit tests.
+
+### Test commands and results (local, 2026-10-16)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 160 files, 1,676 tests passed                                   |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+
 ## 2026-10-16 — Deal import that changes and closes deals (P4-04, ADR-387)
 
 Status: **Implemented; its database and browser tests run in CI only.** Deal import only added
@@ -83,8 +121,8 @@ and closed deals but could not record what a run learnt in the deal's custom fie
   labels follow.
 - **Web:** the builder's step (pipeline, one row per field with a list for choices and yes/no, a date
   input for dates and text otherwise, add and remove rows), its default, `retarget`, the simulator's
-  note, run-page notes naming the field (`describeDetail`), and the `updated` outcome labelled "Made
-  the change".
+  note, run-page notes naming the field (`describeDetail`), and the `updated` outcome labelled
+  "Updated details".
 - **Tests:** unit (`automations/deal-fields-step.test.ts`, 10 tests: the node, parsing, graph checks
   with and without the company's fields, placeholders, the effect, `stepDealAttributes`;
   `lib/automation-labels.test.ts`: the notes; `webhooks.test.ts`: 20 kinds); integration
@@ -99,8 +137,9 @@ and closed deals but could not record what a run learnt in the deal's custom fie
   placeholder values coerced, the placeholder-only warning, placeholders unchecked, 21 values, no
   clipping, a placeholder left empty taken as a clear, the wrong log outcome, an empty result
   accepted, a clear ignored, deleted fields' values kept, no size bound, a missing field skipped,
-  case-sensitive options, notes not naming the field), all caught by the unit tests. The locks, the
-  writes and the activity are covered by the integration test, which runs in CI only.
+  case-sensitive options, notes not naming the field), all caught by the unit tests. The writes,
+  the activity and the re-checks after a field deletion or an option change are covered by the
+  integration test, which runs in CI only; the lock order is reviewed, not raced in a test.
 
 ### Test commands and results (local, 2026-10-16)
 

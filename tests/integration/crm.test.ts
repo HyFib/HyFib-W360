@@ -1910,22 +1910,22 @@ describe('deal import that changes and closes deals (ADR-387)', () => {
     await expectAppError(svc.checkDealImport(agent, options(csv)), 'forbidden');
     await expectAppError(svc.checkDealImport(marketer, options(csv)), 'forbidden');
 
-    // Read back as it was written, newest first: the open deals are unchanged, the lost one skipped.
+    // Read back as it was written, newest first: every deal unchanged, the lost one too.
     expect(await svc.checkDealImport(owner, options(csv))).toEqual({
       totalRows: 3,
       created: 0,
       updated: 0,
       closed: 0,
-      unchanged: 2,
-      errorCount: 1,
+      unchanged: 3,
+      errorCount: 0,
       rows: [
         {
           row: 2,
-          action: 'skip',
+          action: 'unchanged',
           close: null,
-          dealId: null,
-          title: null,
-          message: 'This deal is lost: reopen it on its page to change it.',
+          dealId: old,
+          title: 'Old one',
+          message: null,
         },
         {
           row: 3,
@@ -1944,10 +1944,11 @@ describe('deal import that changes and closes deals (ADR-387)', () => {
           message: null,
         },
       ],
-      expectedVersions: { [second]: 1, [first]: 1 },
+      expectedVersions: { [old]: 2, [second]: 1, [first]: 1 },
     });
 
-    // The file edited: cells changed, a new lost deal added, the lost deal's row kept.
+    // The file edited: cells changed, a new lost deal added, the lost deal renamed (refused: a
+    // closed deal is changed on its page, after reopening it).
     const lines = csv.slice(1).split('\r\n').filter(Boolean);
     const edited = (id: string, cells: Record<number, string>) => {
       const row = lines.find((l) => l.startsWith(id))!.split(',');
@@ -1967,7 +1968,7 @@ describe('deal import that changes and closes deals (ADR-387)', () => {
       edited(first, { 1: 'Annual plan v2', 3: 'Proposal', 4: 'won', 6: '30000' }),
       edited(second, { 3: 'Qualified', 7: c.owner.email, 10: '2026-12-31', 18: '3' }),
       fresh.join(','),
-      edited(old, {}),
+      edited(old, { 1: 'Old one renamed' }),
     ].join('\r\n');
     const check = await svc.checkDealImport(owner, options(text));
     expect(check).toMatchObject({

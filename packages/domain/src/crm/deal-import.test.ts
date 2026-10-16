@@ -272,15 +272,18 @@ const existing = (over: Partial<ExistingDeal> = {}): ExistingDeal => ({
   id: DEAL_A,
   pipelineId: 'pipeline-sales',
   stageId: 'stage-new',
+  stageName: 'New',
   contactId: 'contact-asha',
   status: 'open',
   title: 'Annual plan',
   valueMinor: 2_500_050,
   ownerMembershipId: 'member-meera',
   expectedCloseOn: '2026-11-30',
+  lostReason: null,
   attributes: { seats: 12, signed: true },
   version: 3,
   contactErased: false,
+  contactMoved: false,
   ...over,
 });
 const withDeals: DealImportLookups = {
@@ -503,7 +506,7 @@ describe('deal import that changes and closes deals (ADR-387)', () => {
       [
         idOnly('nope'),
         idOnly(DEAL_B),
-        idOnly(DEAL_C),
+        idOnly(DEAL_C, { 1: 'Renamed' }),
         idOnly(DEAL_D),
         idOnly(DEAL_E),
         idOnly(DEAL_A, { 3: 'Lost' }),
@@ -570,6 +573,13 @@ describe('deal import that changes and closes deals (ADR-387)', () => {
       'This deal was not among the rows checked. Check the rows again.',
     );
     expect(plan(new Map([[DEAL_A, 3]])).updates.map((u) => u.title)).toEqual(['Renamed']);
+    // A row the check refused for a cell is refused for that cell again, not as unchecked.
+    expect(
+      planDealRows([idOnly(DEAL_A, { 6: 'abc' })], exportMapping, international, {
+        ...withDeals,
+        expectedVersions: new Map(),
+      }).messages[0]?.message,
+    ).toBe('Value must be an amount in INR with at most 2 decimals.');
     // An unchanged row is checked too: the deal may have changed since.
     expect(
       planDealRows([idOnly(DEAL_A)], exportMapping, international, {
@@ -658,5 +668,161 @@ describe('deal import that changes and closes deals (ADR-387)', () => {
       ),
     ).toEqual(['+919812345678']);
     expect(importedPhones([['+919812345678']], { phone: null }, international)).toEqual([]);
+  });
+});
+
+describe('deal import of shared stage names, closed deals and long cells (ADR-387)', () => {
+  const DEAL_F = '0192f0c4-8e2b-7c1d-9a3e-5b6c7d8e9f1f';
+  const shared: DealImportLookups = {
+    ...withDeals,
+    stages: [
+      { id: 'stage-new', name: 'New' },
+      { id: 'stage-follow', name: 'Follow up' },
+      { id: 'stage-follow-2', name: ' follow UP' },
+    ],
+    deals: new Map([
+      [DEAL_A, existing()],
+      [DEAL_B, existing({ id: DEAL_B, stageId: 'stage-follow-2', stageName: ' follow UP' })],
+    ]),
+  };
+
+  it('refuses a stage name two stages share, unless it names the deal’s own stage', () => {
+    const create = planDealRows(
+      [['+919876543210', 'Plan', 'Follow up', '', '', '', '', '']],
+      mapping,
+      international,
+      shared,
+    );
+    expect(create.messages[0]?.message).toBe(
+      'More than one stage is named “Follow up”; rename one in Settings → Pipelines.',
+    );
+    // The deal stays in its own stage when the row names it, as the export does.
+    expect(
+      planDealRows([idOnly(DEAL_B, { 3: 'FOLLOW UP' })], exportMapping, international, shared)
+        .rows[0]?.action,
+    ).toBe('unchanged');
+    expect(
+      planDealRows([idOnly(DEAL_A, { 3: 'follow up' })], exportMapping, international, shared)
+        .messages[0]?.message,
+    ).toBe('More than one stage is named “follow up”; rename one in Settings → Pipelines.');
+    expect(
+      planDealRows([idOnly(DEAL_B, { 3: 'New' })], exportMapping, international, shared).updates[0]
+        ?.stageId,
+    ).toBe('stage-new');
+  });
+
+  it('leaves a closed deal’s row as the export writes it unchanged, and refuses any change', () => {
+    const closed: DealImportLookups = {
+      ...withDeals,
+      deals: new Map([
+        // Won in a stage archived since.
+        [
+          DEAL_C,
+          existing({ id: DEAL_C, status: 'won', stageId: 'stage-old', stageName: 'Old stage' }),
+        ],
+        [DEAL_F, existing({ id: DEAL_F, status: 'lost', lostReason: 'Too dear' })],
+      ]),
+    };
+    const plan = planDealRows(
+      [
+        idOnly(DEAL_C, { 3: 'Old stage', 4: 'WON' }),
+        idOnly(DEAL_F, { 4: 'lost', 14: 'Too dear' }),
+        idOnly(DEAL_F),
+        idOnly(DEAL_C, { 4: 'open' }),
+        idOnly(DEAL_C, { 4: 'lost' }),
+        idOnly(DEAL_F, { 4: 'lost', 14: 'Another reason' }),
+        idOnly(DEAL_F, { 1: 'Renamed' }),
+        idOnly(DEAL_F, { 6: 'abc' }),
+      ],
+      exportMapping,
+      international,
+      closed,
+    );
+    expect(plan.rows.map((r) => [r.row, r.action, r.close])).toEqual([
+      [2, 'unchanged', null],
+      [3, 'unchanged', null],
+      [4, 'skip', null],
+      [5, 'skip', null],
+      [6, 'skip', null],
+      [7, 'skip', null],
+      [8, 'skip', null],
+      [9, 'skip', null],
+    ]);
+    expect(plan.messages.map((m) => [m.row, m.message])).toEqual([
+      [4, 'Row 3 already changes this deal.'],
+      [5, 'Row 2 already changes this deal.'],
+      [6, 'Row 2 already changes this deal.'],
+      [7, 'Row 3 already changes this deal.'],
+      [8, 'Row 3 already changes this deal.'],
+      [9, 'Row 3 already changes this deal.'],
+    ]);
+    expect(plan.updates).toEqual([]);
+    expect(plan.versions).toEqual({ [DEAL_C]: 3, [DEAL_F]: 3 });
+    const one = (row: string[]) =>
+      planDealRows([row], exportMapping, international, closed).messages[0]?.message;
+    expect(one(idOnly(DEAL_C, { 4: 'open' }))).toBe(
+      'This deal is won: reopen it on its page to change it.',
+    );
+    expect(one(idOnly(DEAL_C, { 4: 'lost' }))).toBe(
+      'This deal is won: reopen it on its page to change it.',
+    );
+    expect(one(idOnly(DEAL_F, { 4: 'lost', 14: 'Another reason' }))).toBe(
+      'This deal is lost: reopen it on its page to change it.',
+    );
+    expect(one(idOnly(DEAL_F, { 1: 'Renamed' }))).toBe(
+      'This deal is lost: reopen it on its page to change it.',
+    );
+    expect(one(idOnly(DEAL_F, { 6: 'abc' }))).toBe(
+      'This deal is lost: reopen it on its page to change it.',
+    );
+  });
+
+  it('refuses a deal a merge moved to another contact after the contacts were read', () => {
+    const moved = { ...withDeals, deals: new Map([[DEAL_A, existing({ contactMoved: true })]]) };
+    expect(
+      planDealRows([idOnly(DEAL_A, { 1: 'Renamed' })], exportMapping, international, moved)
+        .messages[0]?.message,
+    ).toBe('This deal moved to another contact meanwhile. Check the rows again.');
+  });
+
+  it('reads back an export whose products cell is longer than a thousand characters', () => {
+    const items = Array.from({ length: 3 }, (_, i) => ({
+      name: `${'Long product name '.repeat(25)}${i}`,
+      quantity: 1,
+      unitPriceMinor: 100,
+      currency: 'INR',
+    }));
+    const file = parseCsv(
+      [
+        [...DEAL_CSV_COLUMNS, 'seats', 'signed'].join(',') + '\r\n',
+        dealCsvLine({
+          id: DEAL_A,
+          title: 'Annual plan',
+          pipelineName: 'Sales',
+          stageName: 'New',
+          status: 'open',
+          currency: 'INR',
+          valueMinor: 2_500_050,
+          ownerName: 'Meera Iyer',
+          contactName: 'Asha Rao',
+          contactPhone: null,
+          contactErased: false,
+          expectedCloseOn: '2026-11-30',
+          createdAt: at,
+          stageEnteredAt: at,
+          closedAt: null,
+          lostReason: null,
+          openTasks: 0,
+          items,
+          itemsTotalMinor: 300,
+          fieldValues: ['12', 'true'],
+        }),
+      ].join(''),
+      DEAL_IMPORT_LIMITS,
+    );
+    expect(file.rows[0]![16]!.length).toBeGreaterThan(1000);
+    expect(planDealRows(file.rows, exportMapping, international, withDeals).rows[0]?.action).toBe(
+      'unchanged',
+    );
   });
 });

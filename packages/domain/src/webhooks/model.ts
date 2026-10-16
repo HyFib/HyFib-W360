@@ -970,7 +970,7 @@ export const WEBHOOK_RUN_STEP_OUTCOME_LABELS: Record<WebhookRunStepOutcome, stri
   retried: 'Asked again',
   timed_out: 'No reply in time',
   branched: 'Checked a condition',
-  updated: 'Made the change',
+  updated: 'Updated details',
   waiting: 'Started waiting',
   resumed: 'Wait ended',
   handed_off: 'Handed off',

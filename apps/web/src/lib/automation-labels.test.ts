@@ -10,7 +10,7 @@ describe('step log details of steps that set deal fields (ADR-386)', () => {
       'the value for the deal field “region” was empty after filling in placeholders',
     );
     expect(describeDetail('deal_field_invalid:seats')).toBe(
-      'the value for the deal field “seats” does not fit it (for a choice, it is not one of its options)',
+      'the value for the deal field “seats” is not one it takes',
     );
   });
 
@@ -27,7 +27,7 @@ describe('step log details of steps that set deal fields (ADR-386)', () => {
     expect(describeDetail('404')).toBe('the server answered with status 404');
     expect(describeDetail('something_else:x')).toBe('something_else:x');
     expect(describeDetail('constructor:x')).toBe('constructor:x');
-    // A step that updates the contact, the conversation or the deal made its change.
-    expect(STEP_OUTCOMES.updated).toBe('Made the change');
+    // A step that updates the contact, the conversation or the deal.
+    expect(STEP_OUTCOMES.updated).toBe('Updated details');
   });
 });

@@ -59,7 +59,10 @@ export const DEAL_IMPORT_LIMITS: CsvLimits = {
   maxBytes: 1_000_000 - 72_000,
   maxRows: 1000,
   maxColumns: 50,
-  maxFieldLength: 1000,
+  // The export's `products` cell (ADR-380), never read, lists up to 50 products of names up to 500
+  // characters, a line each; the cells read are bounded on their own (title 120, lost reason 200,
+  // text fields 500).
+  maxFieldLength: 30_000,
 };
 
 const column = z.number().int().min(0);
@@ -152,16 +155,24 @@ export interface ExistingDeal {
   id: string;
   pipelineId: string;
   stageId: string;
+  /** Its stage's name, archived or not, as the export writes it. */
+  stageName: string;
   contactId: string;
   status: DealStatus;
   title: string;
   valueMinor: number | null;
   ownerMembershipId: string | null;
   expectedCloseOn: string | null;
+  lostReason: string | null;
   attributes: Record<string, AttributeValue>;
   version: number;
   /** Its contact was erased: the deal can no longer be edited. */
   contactErased: boolean;
+  /**
+   * A merge moved it to another contact after its contact was read, so that contact is neither
+   * locked nor checked against erasure: the rows must be checked again.
+   */
+  contactMoved: boolean;
 }
 
 /** What the rows are checked against: the company's records, found before planning. */
@@ -169,7 +180,10 @@ export interface DealImportLookups {
   /** The pipeline the file is imported into. */
   pipelineId: string;
   currency: string;
-  /** Active stages of the pipeline by lower-cased name, in order; the first takes rows without one. */
+  /**
+   * Active stages of the pipeline, in order; the first takes rows without one. A name two stages
+   * share names neither: such a row is refused, unless it names its deal's own stage.
+   */
   stages: readonly { id: string; name: string }[];
   /** Live contacts by E.164 number. */
   contactsByPhone: ReadonlyMap<string, string>;
@@ -298,7 +312,12 @@ export function planDealRows(
   const updates: PlannedUpdate[] = [];
   const messages: ImportRowMessage[] = [];
   const outcomes: DealImportRow[] = [];
-  const stageByName = new Map(lookups.stages.map((s) => [s.name.trim().toLowerCase(), s.id]));
+  // Stage names need not be unique: a name two stages share stands for neither (null).
+  const stageByName = new Map<string, string | null>();
+  for (const s of lookups.stages) {
+    const name = s.name.trim().toLowerCase();
+    stageByName.set(name, stageByName.has(name) ? null : s.id);
+  }
   const firstStage = lookups.stages[0]?.id;
   /** The row that already changes each deal: a deal is changed by one row at most. */
   const claimed = new Map<string, number>();
@@ -309,6 +328,18 @@ export function planDealRows(
     name
       ? `The pipeline has no stage named “${name.slice(0, 80)}”.`
       : 'The pipeline has no active stage.';
+
+  /** The stage a cell names, or why it names none. */
+  const readStage = (name: string): { ok: true; id: string } | { ok: false; message: string } => {
+    const id = stageByName.get(name.toLowerCase());
+    if (id === null) {
+      return {
+        ok: false,
+        message: `More than one stage is named “${name.slice(0, 80)}”; rename one in Settings → Pipelines.`,
+      };
+    }
+    return id ? { ok: true, id } : { ok: false, message: stageError(name) };
+  };
 
   /** The row's currency, when it has one, must be the pipeline's (an export from another one). */
   const currencyError = (row: readonly string[]) => {
@@ -417,7 +448,12 @@ export function planDealRows(
     if (!title) return fail('Title is missing.');
     if (title.length > 120) return fail('Title is longer than 120 characters.');
     const stageName = cell(row, mapping.stage);
-    const stageId = stageName ? stageByName.get(stageName.toLowerCase()) : firstStage;
+    let stageId = firstStage;
+    if (stageName) {
+      const stage = readStage(stageName);
+      if (!stage.ok) return fail(stage.message);
+      stageId = stage.id;
+    }
     if (!stageId) return fail(stageError(stageName));
     const currency = currencyError(row);
     if (currency) return fail(currency);
@@ -459,6 +495,95 @@ export function planDealRows(
     };
   };
 
+  /** An existing deal's values after a row naming it, or why they cannot be read. */
+  const readUpdate = (
+    row: readonly string[],
+    deal: ExistingDeal,
+  ):
+    | { ok: false; message: string }
+    | {
+        ok: true;
+        values: Omit<PlannedUpdate, 'line' | 'deal' | 'close'>;
+        close: PlannedClose | null;
+        /** Something besides the close changes. */
+        changed: boolean;
+      } => {
+    const failed = (message: string) => ({ ok: false as const, message });
+    const titleText = cell(row, mapping.title);
+    if (titleText.length > 120) return failed('Title is longer than 120 characters.');
+    const stageName = cell(row, mapping.stage);
+    let stageId = deal.stageId;
+    // The deal's own stage by its name (as the export writes it) keeps it there, even when another
+    // stage has the same name or its own is archived.
+    if (stageName && stageName.toLowerCase() !== deal.stageName.trim().toLowerCase()) {
+      const stage = readStage(stageName);
+      if (!stage.ok) return failed(stage.message);
+      stageId = stage.id;
+    }
+    const currency = currencyError(row);
+    if (currency) return failed(currency);
+    const valueText = cell(row, mapping.value);
+    let valueMinor = deal.valueMinor;
+    if (valueText) {
+      const value = readValue(valueText);
+      if (!value.ok) return failed(value.message);
+      valueMinor = value.minor;
+    }
+    const ownerText = cell(row, mapping.owner);
+    let ownerMembershipId = deal.ownerMembershipId;
+    const currentOwner = deal.ownerMembershipId
+      ? (lookups.memberAliases.get(deal.ownerMembershipId) ?? [])
+      : [];
+    // The deal's owner as it is, even one who has left (as an export of the deal names them).
+    if (ownerText && !currentOwner.includes(ownerText.toLowerCase())) {
+      const owner = readOwner(ownerText);
+      if (!owner.ok) return failed(owner.message);
+      ownerMembershipId = owner.id;
+    }
+    const closeOn = cell(row, mapping.expectedCloseOn);
+    if (closeOn && !validDate(closeOn)) {
+      return failed('Expected close date must be a date written as YYYY-MM-DD.');
+    }
+    const attributes = readFields(row, deal.attributes, true);
+    if (!attributes.ok) return failed(attributes.message);
+    const close = readClose(row);
+    if (!close.ok) return failed(close.message);
+    const title = titleText || deal.title;
+    const expectedCloseOn = closeOn || deal.expectedCloseOn;
+    const fields: string[] = [];
+    if (title !== deal.title) fields.push('title');
+    if (valueMinor !== deal.valueMinor) fields.push('value');
+    if (expectedCloseOn !== deal.expectedCloseOn) fields.push('expected_close_on');
+    if (!sameAttributes(attributes.attributes, deal.attributes)) fields.push('custom_fields');
+    return {
+      ok: true,
+      values: {
+        stageId,
+        title,
+        valueMinor,
+        ownerMembershipId,
+        expectedCloseOn,
+        attributes: attributes.attributes,
+        fields,
+      },
+      close: close.close,
+      changed:
+        stageId !== deal.stageId ||
+        fields.length > 0 ||
+        ownerMembershipId !== deal.ownerMembershipId,
+    };
+  };
+
+  /** A closed deal's row asks for its outcome as it is: a blank status, or its own, and reason. */
+  const keepsOutcome = (row: readonly string[], deal: ExistingDeal) => {
+    const status = cell(row, mapping.status).toLowerCase();
+    const reason = cell(row, mapping.lostReason);
+    return (
+      (status === '' || status === deal.status) &&
+      (reason === '' || reason === (deal.lostReason ?? '').trim())
+    );
+  };
+
   const planUpdate = (row: readonly string[], line: number, idText: string): RowPlan => {
     if (!DEAL_ID_RE.test(idText)) {
       return fail('Deal id must be the id of a deal, as the deals export writes it.');
@@ -471,12 +596,23 @@ export function planDealRows(
     if (deal.pipelineId !== lookups.pipelineId) {
       return fail('This deal is in another pipeline: choose its pipeline to change it.');
     }
-    if (deal.status !== 'open') {
-      return fail(`This deal is ${deal.status}: reopen it on its page to change it.`);
-    }
     if (deal.contactErased) {
       return fail('The contact was erased; this deal can no longer be edited.');
     }
+    if (deal.contactMoved) {
+      return fail('This deal moved to another contact meanwhile. Check the rows again.');
+    }
+    const read = readUpdate(row, deal);
+    if (deal.status !== 'open') {
+      // A closed deal's row as the export writes it changes nothing; any change needs the deal
+      // reopened on its page (changing outcomes from a file would rewrite reports silently).
+      if (!read.ok || read.changed || !keepsOutcome(row, deal)) {
+        return fail(`This deal is ${deal.status}: reopen it on its page to change it.`);
+      }
+    } else if (!read.ok) {
+      return fail(read.message);
+    }
+    // After the cells, so a row the check refused for a cell is refused for it again.
     if (lookups.expectedVersions) {
       const expected = lookups.expectedVersions.get(id);
       if (expected === undefined) {
@@ -486,74 +622,14 @@ export function planDealRows(
         return fail('Someone changed this deal after the rows were checked. Check the rows again.');
       }
     }
-    const titleText = cell(row, mapping.title);
-    if (titleText.length > 120) return fail('Title is longer than 120 characters.');
-    const stageName = cell(row, mapping.stage);
-    let stageId = deal.stageId;
-    if (stageName) {
-      const named = stageByName.get(stageName.toLowerCase());
-      if (!named) return fail(stageError(stageName));
-      stageId = named;
-    }
-    const currency = currencyError(row);
-    if (currency) return fail(currency);
-    const valueText = cell(row, mapping.value);
-    let valueMinor = deal.valueMinor;
-    if (valueText) {
-      const value = readValue(valueText);
-      if (!value.ok) return fail(value.message);
-      valueMinor = value.minor;
-    }
-    const ownerText = cell(row, mapping.owner);
-    let ownerMembershipId = deal.ownerMembershipId;
-    const currentOwner = deal.ownerMembershipId
-      ? (lookups.memberAliases.get(deal.ownerMembershipId) ?? [])
-      : [];
-    // The deal's owner as it is, even one who has left (as an export of the deal names them).
-    if (ownerText && !currentOwner.includes(ownerText.toLowerCase())) {
-      const owner = readOwner(ownerText);
-      if (!owner.ok) return fail(owner.message);
-      ownerMembershipId = owner.id;
-    }
-    const closeOn = cell(row, mapping.expectedCloseOn);
-    if (closeOn && !validDate(closeOn)) {
-      return fail('Expected close date must be a date written as YYYY-MM-DD.');
-    }
-    const attributes = readFields(row, deal.attributes, true);
-    if (!attributes.ok) return fail(attributes.message);
-    const close = readClose(row);
-    if (!close.ok) return fail(close.message);
-    const title = titleText || deal.title;
-    const expectedCloseOn = closeOn || deal.expectedCloseOn;
-    const fields: string[] = [];
-    if (title !== deal.title) fields.push('title');
-    if (valueMinor !== deal.valueMinor) fields.push('value');
-    if (expectedCloseOn !== deal.expectedCloseOn) fields.push('expected_close_on');
-    if (!sameAttributes(attributes.attributes, deal.attributes)) fields.push('custom_fields');
     claimed.set(id, line);
     versions[id] = deal.version;
-    if (
-      stageId === deal.stageId &&
-      fields.length === 0 &&
-      ownerMembershipId === deal.ownerMembershipId &&
-      close.close === null
-    ) {
+    if (deal.status !== 'open' || (!read.changed && read.close === null)) {
       return { kind: 'unchanged', deal };
     }
     return {
       kind: 'update',
-      update: {
-        line,
-        deal,
-        stageId,
-        title,
-        valueMinor,
-        ownerMembershipId,
-        expectedCloseOn,
-        attributes: attributes.attributes,
-        fields,
-        close: close.close,
-      },
+      update: { line, deal, ...read.values, close: read.close },
     };
   };
 
@@ -722,10 +798,11 @@ function readRows(opts: ParsedOptions, text: string): ParsedCsv {
 
 /**
  * The company's records the rows are checked against, and the plan. For the import (`lock`), in the
- * order members' writes and erasure take them: the contacts of the rows (new deals' and changed
- * deals') against erasure, then the pipeline against archiving, then the deal fields against
- * deletion, then the deals named, FOR UPDATE, as the deal page's edit locks fields, contact and deal.
- * The check takes no lock (a read-only transaction).
+ * order a member's new deal takes them: the contacts of the rows (new deals' and changed deals')
+ * against erasure, then the pipeline against archiving, then the deal fields against deletion, then
+ * the deals named, FOR UPDATE, in id order. The deal page's edit takes the fields before the contact,
+ * but the contact (KEY SHARE) and field (shared) locks are both shared, so the orders cannot
+ * deadlock. The check takes no lock (a read-only transaction).
  */
 async function planImport(
   tx: Tx,
@@ -739,7 +816,8 @@ async function planImport(
   const mode = phoneMode(opts);
   const phones = importedPhones(csv.rows, mapping, mode);
   const dealIds = importedDealIds(csv.rows, mapping);
-  // A deal's contact never changes, so reading it before the locks is safe (lockDealForChange).
+  // The named deals' contacts, read before the locks; a merge moving a deal to another contact
+  // meanwhile is found once the deal is locked (`contactMoved`).
   const refs =
     dealIds.length === 0
       ? []
@@ -823,6 +901,16 @@ async function planImport(
       .orderBy(asc(crmDeals.id));
     dealRows = lock ? await query.for('update') : await query;
   }
+  const dealStageIds = [...new Set(dealRows.map((d) => d.stageId))];
+  const dealStages =
+    dealStageIds.length === 0
+      ? []
+      : await tx
+          .select({ id: crmStages.id, name: crmStages.name })
+          .from(crmStages)
+          .where(and(eq(crmStages.tenantId, tenantId), inArray(crmStages.id, dealStageIds)));
+  const stageNames = new Map(dealStages.map((s) => [s.id, s.name]));
+  const readContacts = new Set(contactRows.map((c) => c.id));
   const erased = new Set(contactRows.filter((c) => c.erasedAt !== null).map((c) => c.id));
   const wantedPhones = new Set(phones);
   const plan = planDealRows(csv.rows, mapping, mode, {
@@ -849,15 +937,18 @@ async function planImport(
           id: d.id,
           pipelineId: d.pipelineId,
           stageId: d.stageId,
+          stageName: stageNames.get(d.stageId) ?? '',
           contactId: d.contactId,
           status: d.status,
           title: d.title,
           valueMinor: d.valueMinor,
           ownerMembershipId: d.ownerMembershipId,
           expectedCloseOn: d.expectedCloseOn,
+          lostReason: d.lostReason,
           attributes: d.attributes,
           version: d.version,
           contactErased: erased.has(d.contactId),
+          contactMoved: !readContacts.has(d.contactId),
         },
       ]),
     ),

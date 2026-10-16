@@ -170,6 +170,10 @@ describe('steps that set deal fields (ADR-386)', () => {
     expect(issuesOf({ values: [{ field: 'seats', value: '3' }] })).toEqual([
       error('The deal field “seats” does not exist.'),
     ]);
+    // A company without deal fields is told to add them, not that each row's field is unknown.
+    expect(issuesOf({}, { ...refs, dealFields: new Map() })).toEqual([
+      error('Add deal fields in the settings of pipelines first.'),
+    ]);
     // Each value is read as a member types it in the deal's form.
     for (const [field, value, message] of [
       ['budget', 'lots', 'Budget must be a number.'],

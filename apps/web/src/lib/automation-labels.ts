@@ -50,7 +50,7 @@ export const STEP_OUTCOMES: Record<string, string> = {
   retried: 'Asked again',
   timed_out: 'No reply in time',
   branched: 'Checked a condition',
-  updated: 'Made the change',
+  updated: 'Updated details',
   waiting: 'Started waiting',
   resumed: 'Wait ended',
   handed_off: 'Handed off',
@@ -194,8 +194,7 @@ const DEAL_FIELD_DETAILS: Record<string, (key: string) => string> = {
   deal_field_missing: (key) => `the deal field “${key}” no longer exists`,
   deal_field_empty: (key) =>
     `the value for the deal field “${key}” was empty after filling in placeholders`,
-  deal_field_invalid: (key) =>
-    `the value for the deal field “${key}” does not fit it (for a choice, it is not one of its options)`,
+  deal_field_invalid: (key) => `the value for the deal field “${key}” is not one it takes`,
 };
 
 /**
