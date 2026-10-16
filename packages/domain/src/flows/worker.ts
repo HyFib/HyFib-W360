@@ -8,7 +8,9 @@ import {
   flowKeyUploads,
   flowKeys,
   flows,
+  desc,
   inArray,
+  isNotNull,
   isNull,
   lt,
   or,
@@ -17,6 +19,7 @@ import {
   type Database,
   type FlowMetaStatus,
   type TenantScope,
+  type Tx,
 } from '@w360/db';
 import type { GraphClient, GraphResult, RemoteFlow } from '../messaging/graph';
 import {
@@ -331,6 +334,75 @@ export async function giveUpFlowSync(
 const normalizePem = (pem: string) => pem.replace(/\s+/g, '');
 
 /**
+ * When the account's previous key may be retired (its private key erased): never while the active
+ * key still has an upload pending (Meta may still encrypt with the previous key, for example while
+ * a pause defers the upload, ADR-399), and only 24 hours after the later of its replacement and the
+ * active key's latest successful upload, so Meta has a full grace period with the new key. A failed
+ * upload does not hold it back, as before. Null: not yet.
+ */
+export function previousKeyRetirementCutoff(
+  replacedBefore: Date,
+  facts: { activeUploadPending: boolean; activeLastUploadedAt: Date | null },
+): Date | null {
+  if (facts.activeUploadPending) return null;
+  if (facts.activeLastUploadedAt && facts.activeLastUploadedAt >= replacedBefore) return null;
+  return replacedBefore;
+}
+
+/**
+ * Retires the account's previous keys whose grace period has passed (`previousKeyRetirementCutoff`),
+ * in the job's transaction, after the active key's uploads for new numbers were written.
+ */
+async function retirePreviousKeys(
+  tx: Tx,
+  tenantId: string,
+  whatsappAccountId: string,
+  activeKeyId: string,
+  now: Date,
+): Promise<void> {
+  const graceStart = new Date(now.getTime() - PREVIOUS_KEY_HOURS * 3_600_000);
+  const [pending] = await tx
+    .select({ id: flowKeyUploads.id })
+    .from(flowKeyUploads)
+    .where(
+      and(
+        eq(flowKeyUploads.tenantId, tenantId),
+        eq(flowKeyUploads.keyId, activeKeyId),
+        eq(flowKeyUploads.state, 'pending'),
+      ),
+    )
+    .limit(1);
+  const [uploaded] = await tx
+    .select({ at: flowKeyUploads.uploadedAt })
+    .from(flowKeyUploads)
+    .where(
+      and(
+        eq(flowKeyUploads.tenantId, tenantId),
+        eq(flowKeyUploads.keyId, activeKeyId),
+        isNotNull(flowKeyUploads.uploadedAt),
+      ),
+    )
+    .orderBy(desc(flowKeyUploads.uploadedAt))
+    .limit(1);
+  const cutoff = previousKeyRetirementCutoff(graceStart, {
+    activeUploadPending: pending !== undefined,
+    activeLastUploadedAt: uploaded?.at ?? null,
+  });
+  if (!cutoff) return;
+  await tx
+    .update(flowKeys)
+    .set({ state: 'retired', privateKeyCiphertext: null, retiredAt: now })
+    .where(
+      and(
+        eq(flowKeys.tenantId, tenantId),
+        eq(flowKeys.whatsappAccountId, whatsappAccountId),
+        eq(flowKeys.state, 'previous'),
+        lt(flowKeys.replacedAt, cutoff),
+      ),
+    );
+}
+
+/**
  * Makes sure the account has an active key, uploads it to every active number that does not have
  * it yet, checks what Meta reports, and retires a replaced key after its grace period.
  */
@@ -389,17 +461,6 @@ export async function processFlowKeys(
   const key = active;
 
   const work = await deps.db.run(scope, async (tx) => {
-    await tx
-      .update(flowKeys)
-      .set({ state: 'retired', privateKeyCiphertext: null, retiredAt: now })
-      .where(
-        and(
-          eq(flowKeys.tenantId, scope.tenantId),
-          eq(flowKeys.whatsappAccountId, whatsappAccountId),
-          eq(flowKeys.state, 'previous'),
-          lt(flowKeys.replacedAt, new Date(now.getTime() - PREVIOUS_KEY_HOURS * 3_600_000)),
-        ),
-      );
     const numbers = await tx
       .select({ id: channelAccounts.id, phoneNumberId: channelAccounts.phoneNumberId })
       .from(channelAccounts)
@@ -417,6 +478,7 @@ export async function processFlowKeys(
         .values({ id: uuidv7(), tenantId: scope.tenantId, keyId: key.id, channelAccountId: n.id })
         .onConflictDoNothing();
     }
+    await retirePreviousKeys(tx, scope.tenantId, whatsappAccountId, key.id, now);
     const pending = await tx
       .select({
         id: flowKeyUploads.id,

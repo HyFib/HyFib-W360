@@ -871,8 +871,9 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
 - **Worker** (`flows/worker.ts`, queues `flow.sync` and `flow.keys`): performs the written-ahead
   operation against the Graph API (multipart create, asset upload, publish, deprecate, delete, read;
   research M-161 to M-163), adopting its own flow after a lost create response; generates keys,
-  uploads them to every active number and reads them back (M-164), and retires previous keys after
-  24 hours. `ops.flow_work_due` feeds the messaging sweep with operations and uploads waiting for
+  uploads them to every active number and reads them back (M-164), and retires previous keys 24
+  hours after the later of the rotation and the active key's latest successful upload, never while
+  that key's upload is pending (ADR-399). `ops.flow_work_due` feeds the messaging sweep with operations and uploads waiting for
   more than two minutes and keys due to retire.
 - **Endpoint** (`/api/flows/endpoint/<public id>` → `flows/endpoint.ts`): 1 MB request limit;
   signature (432), lookup, decryption with the current or previous key (421), health checks and

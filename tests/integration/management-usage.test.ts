@@ -8,8 +8,6 @@ import {
   createOnboardingService,
   createTemplatesService,
   deferPausedJob,
-  findDueCommerceWork,
-  findDueFlowWork,
   giveUpCommerceSync,
   giveUpFlowSync,
   pausedJobKey,
@@ -19,8 +17,6 @@ import {
   STARTER_FLOW_JSON,
   createCommerceService,
   createFlowsService,
-  findAccessChecksDue,
-  findTemplateSyncsDue,
   processChannelOnboarding,
   processTemplateSubmit,
   syncTemplates,
@@ -85,6 +81,50 @@ const requestsFor = (c: Company, from: number) =>
   fx.standIn.state.requests
     .slice(from)
     .filter((r) => r.path.includes(c.wabaId) || r.path.includes(c.phoneNumberId));
+
+/**
+ * What the sweep's due lists give for these companies only. Other test files' rows are made not
+ * due inside a transaction that is rolled back (as `dueAmong` in whatsapp-access.test.ts does), so
+ * neither a list's limit nor the run order can hide these companies' rows, and a row missing from
+ * a list is missing because the list leaves it out.
+ */
+async function dueFor(companies: Company[]) {
+  const client = await fx.dbs.adminPool.connect();
+  try {
+    await client.query('BEGIN');
+    const others = [companies.map((c) => c.tenant.id)];
+    await client.query(
+      `UPDATE app.whatsapp_accounts SET templates_synced_at = now(),
+              templates_sync_requested_at = NULL, token_checked_at = now(),
+              token_check_attempted_at = now(), token_check_requested_at = NULL
+        WHERE NOT (tenant_id = ANY($1::uuid[]))`,
+      others,
+    );
+    await client.query(
+      `UPDATE app.flows SET sync_state = 'failed'
+        WHERE sync_state IN ('queued', 'running') AND NOT (tenant_id = ANY($1::uuid[]))`,
+      others,
+    );
+    await client.query(
+      `UPDATE app.commerce_syncs SET state = 'idle', finished_at = now()
+        WHERE NOT (tenant_id = ANY($1::uuid[]))`,
+      others,
+    );
+    const ids = async (text: string) =>
+      (await client.query<{ id: string }>(text)).rows.map((r) => r.id);
+    return {
+      templateSyncs: await ids('SELECT whatsapp_account_id AS id FROM ops.template_sync_due(500)'),
+      accessChecks: await ids(
+        'SELECT whatsapp_account_id AS id FROM ops.whatsapp_access_checks_due(500)',
+      ),
+      flows: await ids(`SELECT ref AS id FROM ops.flow_work_due(500) WHERE kind = 'sync'`),
+      reads: await ids(`SELECT ref AS id FROM ops.commerce_work_due(500) WHERE kind = 'sync'`),
+    };
+  } finally {
+    await client.query('ROLLBACK');
+    client.release();
+  }
+}
 
 async function pause(c: Company, minutes: number) {
   fx.standIn.state.usageHeader = usageHeaderValue({
@@ -187,9 +227,7 @@ describe('a paused account', () => {
   it('is left out of the sweep’s template syncs and access checks until the pause ends', async () => {
     const c = await fx.company();
     await templates.requestSync(await fx.ctx(c, c.owner), c.whatsappAccountId);
-    expect((await findTemplateSyncsDue(fx.dbs.app, 500)).map((d) => d.whatsappAccountId)).toContain(
-      c.whatsappAccountId,
-    );
+    expect((await dueFor([c])).templateSyncs).toContain(c.whatsappAccountId);
     await pause(c, 5);
     // Asked again (the reading came from the sync); the pause keeps it out of both lists.
     await fx.query(
@@ -197,24 +235,18 @@ describe('a paused account', () => {
         WHERE id = $1`,
       [c.whatsappAccountId],
     );
-    expect(
-      (await findTemplateSyncsDue(fx.dbs.app, 500)).map((d) => d.whatsappAccountId),
-    ).not.toContain(c.whatsappAccountId);
-    expect(
-      (await findAccessChecksDue(fx.dbs.app, 500)).map((d) => d.whatsappAccountId),
-    ).not.toContain(c.whatsappAccountId);
+    let due = await dueFor([c]);
+    expect(due.templateSyncs).not.toContain(c.whatsappAccountId);
+    expect(due.accessChecks).not.toContain(c.whatsappAccountId);
     // The pause ends: both lists have it again.
     await fx.query(
       `UPDATE app.whatsapp_accounts SET management_paused_until = now() - interval '1 second'
         WHERE id = $1`,
       [c.whatsappAccountId],
     );
-    expect((await findTemplateSyncsDue(fx.dbs.app, 500)).map((d) => d.whatsappAccountId)).toContain(
-      c.whatsappAccountId,
-    );
-    expect((await findAccessChecksDue(fx.dbs.app, 500)).map((d) => d.whatsappAccountId)).toContain(
-      c.whatsappAccountId,
-    );
+    due = await dueFor([c]);
+    expect(due.templateSyncs).toContain(c.whatsappAccountId);
+    expect(due.accessChecks).toContain(c.whatsappAccountId);
   });
 
   it('defers a queued submission without calling Graph and queues it for just after the pause', async () => {
@@ -514,12 +546,10 @@ describe('time deferred for a pause does not count against a request', () => {
       [c.whatsappAccountId],
     );
     // The paused account's work is not listed; the other company's flow is.
-    const flowRefs = (await findDueFlowWork(fx.dbs.app, 5000)).map((w) => w.ref);
-    expect(flowRefs).toContain(otherFlow);
-    expect(flowRefs).not.toContain(flowId);
-    expect((await findDueCommerceWork(fx.dbs.app, 5000)).map((w) => w.ref)).not.toContain(
-      c.whatsappAccountId,
-    );
+    const due = await dueFor([c, other]);
+    expect(due.flows).toContain(otherFlow);
+    expect(due.flows).not.toContain(flowId);
+    expect(due.reads).not.toContain(c.whatsappAccountId);
     // A minute after the pause, 41 minutes after the requests: neither is given up.
     const after = at(plus(until, 60_000));
     await giveUpFlowSync({ db: fx.dbs.app, clock: after }, scopeOf(c), flowId);
@@ -584,10 +614,7 @@ describe('time deferred for a pause does not count against a request', () => {
         WHERE whatsapp_account_id = $1`,
       [c.whatsappAccountId],
     );
-    const listed = async () => ({
-      flows: (await findDueFlowWork(fx.dbs.app, 5000)).map((w) => w.ref),
-      reads: (await findDueCommerceWork(fx.dbs.app, 5000)).map((w) => w.ref),
-    });
+    const listed = () => dueFor([c]);
     let due = await listed();
     expect(due.flows).not.toContain(flowId);
     expect(due.reads).not.toContain(c.whatsappAccountId);

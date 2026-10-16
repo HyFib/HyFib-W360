@@ -16591,6 +16591,17 @@ Decision:
   submission, a deletion at Meta, a flow operation, a catalog read, the daily read) clears it in the
   same statement, so a deferral never extends a later request's window nor hides it from the due
   lists, even when Meta ended a pause early and members asked again before the old resume time.
+- **A previous flow key waits for its successor to reach Meta:** the flow keys job retired an
+  account's previous key (erasing its private key) 24 hours after the rotation, before it uploaded
+  the new key, so a pause or refusals near a day long could erase the old private key while Meta
+  still encrypted Flow requests with the old public key. Now, in the job's transaction and after
+  the new numbers' upload rows are written, the previous key is retired only while the active key
+  has no upload `pending`, and 24 hours after the later of the rotation and the active key's latest
+  successful upload (`flow_key_uploads.uploaded_at`; `previousKeyRetirementCutoff`). A `failed`
+  upload does not hold it back, as before (it is retried from Settings and the key's status shows
+  it). No schema change: the sweep's due list still signals the keys job once the rotation is 24
+  hours old, so while the job holds the key back it is signalled every minute and changes nothing
+  (at most for 24 hours after the upload, three small reads a run).
 - **No pause on a high percentage alone:** background work does not defer when usage is merely
   high (for example 90 percent). The percentages cover a rolling hour whose make-up HyFib does not
   know, so a fixed deferral would be a guess about when it frees up; these jobs already run at low
@@ -16644,7 +16655,8 @@ bound with a fake `fetch`, and the transport limit is described above); that a d
 queued was logged as deferred and its key could equal the running job's under clock skew (fixed by
 `pausedJobKey` and the failing job); that the code-100 fallback was tried after a pausing response;
 that the dead-letter sweep could not see a deferral; and that the commerce handler deferred every
-kind to the catalog queue. All were fixed. A second review found that a worker whose clock lags
+kind to the catalog queue. All were fixed. A later review (Codex) found that the flow keys job could
+retire the previous key before a deferred upload of its successor; fixed as above. A second review found that a worker whose clock lags
 the database's re-deferred at once in a loop, because the deferral's absolute start was already
 past for pg-boss (fixed by the delay in seconds above), that a deferral could hide a newer request
 from the due lists (fixed by clearing it with each new request), and gaps in the integration tests

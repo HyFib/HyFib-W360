@@ -572,6 +572,76 @@ describe('flow keys', () => {
       'forbidden',
     );
   });
+
+  it('keeps the previous key until its successor reached Meta and 24 hours passed (ADR-399)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const svc = flowsService();
+    await svc.setupKeys(owner, { whatsappAccountId: c.whatsappAccountId });
+    expect(await processFlowKeys(workerDeps(), scopeOf(c), c.whatsappAccountId)).toBe('done');
+    await svc.rotateKey(owner, { whatsappAccountId: c.whatsappAccountId });
+    const keys = async () =>
+      fx.query<{ state: string; has_private_key: boolean }>(
+        `SELECT state, private_key_ciphertext IS NOT NULL AS has_private_key FROM app.flow_keys
+          WHERE tenant_id = $1 ORDER BY created_at`,
+        [c.tenant.id],
+      );
+    const encryptionCalls = () =>
+      fx.standIn.state.requests.filter((r) =>
+        r.path.endsWith(`/${c.phoneNumberId}/whatsapp_business_encryption`),
+      ).length;
+
+    // Meta throttles the account for longer than the grace period: 25 hours after the rotation the
+    // new key's upload is still pending, so the previous key (and its private key) stays.
+    await fx.query(
+      `UPDATE app.whatsapp_accounts SET management_paused_until = now() + interval '30 hours'
+        WHERE id = $1`,
+      [c.whatsappAccountId],
+    );
+    const before = encryptionCalls();
+    expect(
+      await processFlowKeys(workerDeps(later(25 * 3_600_000)), scopeOf(c), c.whatsappAccountId),
+    ).toMatchObject({ paused: expect.any(Date) });
+    expect(encryptionCalls()).toBe(before);
+    expect(await keys()).toEqual([
+      { state: 'previous', has_private_key: true },
+      { state: 'active', has_private_key: true },
+    ]);
+
+    // The pause ends; the new key reaches Meta (26 hours after the rotation): the previous key stays
+    // for 24 hours after that upload, then is retired.
+    await fx.query(
+      `UPDATE app.whatsapp_accounts SET management_paused_until = NULL WHERE id = $1`,
+      [c.whatsappAccountId],
+    );
+    expect(
+      await processFlowKeys(workerDeps(later(26 * 3_600_000)), scopeOf(c), c.whatsappAccountId),
+    ).toBe('done');
+    expect(encryptionCalls()).toBeGreaterThan(before);
+    const [upload] = await fx.query<{ state: string; uploaded_at: Date | null }>(
+      `SELECT u.state, u.uploaded_at FROM app.flow_key_uploads u
+         JOIN app.flow_keys k ON k.tenant_id = u.tenant_id AND k.id = u.key_id
+        WHERE u.tenant_id = $1 AND k.state = 'active'`,
+      [c.tenant.id],
+    );
+    expect(upload?.state).toBe('uploaded');
+    expect(upload?.uploaded_at).not.toBeNull();
+    expect(
+      await processFlowKeys(workerDeps(later(49 * 3_600_000)), scopeOf(c), c.whatsappAccountId),
+    ).toBe('done');
+    expect((await keys())[0]).toEqual({ state: 'previous', has_private_key: true });
+    expect(
+      await processFlowKeys(
+        workerDeps(later(50 * 3_600_000 + 60_000)),
+        scopeOf(c),
+        c.whatsappAccountId,
+      ),
+    ).toBe('done');
+    expect(await keys()).toEqual([
+      { state: 'retired', has_private_key: false },
+      { state: 'active', has_private_key: true },
+    ]);
+  });
 });
 
 describe('sending forms and applying answers', () => {

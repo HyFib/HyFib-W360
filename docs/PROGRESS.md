@@ -45,6 +45,11 @@ deferring job>` (`pausedJobKey`), and a deferral that was not queued fails the j
   on the row clears the deferral, so it never hides or extends a later request. A deferred job is
   queued with a delay in seconds from the database's now (at least 30), never an absolute time, so
   a worker whose clock lags the database's does not re-defer in a loop.
+- **Flow keys:** a previous key is retired only while the active key has no upload pending, and 24
+  hours after the later of the rotation and the active key's latest successful upload
+  (`previousKeyRetirementCutoff` in `flows/worker.ts`, evaluated after the new numbers' upload rows
+  are written); a failed upload does not hold it back. A pause near a day long could otherwise erase
+  the old private key before the new public key reached Meta (found by Codex on PR #100).
 - **Dead letters:** `ops.dead_letter_work_live` (0089) is recreated in 0310 to see a waiting
   deferral of a setup or a deletion, so the dead-letter sweep does not settle work a deferred job
   will still do.
@@ -65,7 +70,7 @@ deferring job>` (`pausedJobKey`), and a deferral that was not queued fails the j
 ### Verification
 
 - Ran here: `eslint . --max-warnings=0`, `prettier --check .`, `pnpm typecheck` (every package,
-  the integration and e2e suites included), `pnpm test` (the unit project: 174 files, 1,870 tests) and
+  the integration and e2e suites included), `pnpm test` (the unit project: 175 files, 1,873 tests) and
   `pnpm build`, all passing; the pglast parse of migration 0310. Not run here: the integration and
   e2e suites (no PostgreSQL or browsers in this environment; CI runs them).
 - New unit tests: 15 in `usage-header.test.ts` (parser and Graph client, the length bound through a
@@ -74,13 +79,22 @@ deferring job>` (`pausedJobKey`), and a deferral that was not queued fails the j
   Channels view), 4 in
   `apps/worker/src/handlers/management-deferral.test.ts` (each kind's queue, the template sync that
   is not queued, a deferral not queued, kinds that are not paced), and one more in
-  `api/message-template-drafts.test.ts` (the API's 503 and nothing written); an existing API test
+  `api/message-template-drafts.test.ts` (the API's 503 and nothing written), and 3 in
+  `flows/key-retirement.test.ts` (when a previous flow key may be retired); an existing API test
   now expects the account read.
 - Manual mutation testing: 15/15 for the parser, pacing decision, client and view; 9/11 for the
   first review's fixes; 6/8 for the second review's (the deferral delay and the clearing of the
-  deferral by a new request). 30/34 in all: the four survivors (the sync's request clock, the flow
-  give-up's deferral condition, and the clearing in a flow operation and a catalog read request) are
-  exercised only by the integration tests, in CI.
+  deferral by a new request); 3/5 for the flow key retirement. 33/39 in all: the six survivors (the
+  sync's request clock, the flow give-up's deferral condition, the clearing in a flow operation and
+  a catalog read request, and the retirement's reads of the pending upload and the latest upload)
+  are exercised only by the integration tests, in CI.
+- `tests/integration/flows.test.ts`: a previous key 25 hours after a rotation kept, with its
+  private key and no Graph call, while a pause defers its successor's upload; kept for 24 hours after
+  the upload succeeds, then retired. The due-list assertions of `management-usage.test.ts` read the
+  lists with every other company's rows made not due in a rolled-back transaction (`dueFor`, as
+  `dueAmong` in `whatsapp-access.test.ts`), so neither a list's limit nor the run order decides them
+  (CI's first run failed an access-check assertion that a shared database of over 500 never-checked
+  accounts pushed past the limit).
 - `tests/integration/management-usage.test.ts` (stand-in extended with `usageHeader` and
   `usageHeaderValue`): readings stored for the right account and company only, a header naming
   another WABA ignored, malformed headers harmless, a refused call's reading stored, a paused sync
