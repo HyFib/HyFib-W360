@@ -15578,7 +15578,8 @@ Decision:
 
 - **A team's own week:** a team either uses the company's business hours (the default; every
   existing team keeps them) or has its own weekly schedule, `app.team_business_hours` (migration
-  0303; weekday, opening and closing time, as `app.business_hours`), with the same shape and checks
+  0303; weekday, opening and closing time, as `app.business_hours`, and two ranges of a team's day
+  never open at the same time), with the same shape and checks
   as the company's: seven days, up to four ranges a day that end after they start and do not
   overlap, 24:00 for midnight, and at least one opening time in the week (a team never open would
   never be due a reply). It is set with the team's other settings, in Settings → Teams and through
@@ -15599,7 +15600,8 @@ Decision:
   the company's (`calendarFor`), everywhere a business calendar is used for a conversation: the
   inbox's reply timers (list and conversation) and the notice of overdue replies (ADR-241), which
   ranks each team with its own target or week apart (one more than the notice takes from each
-  holds the earliest due of all); the overdue-reply emails (ADR-230); Reports' business-time
+  holds the earliest due of all); the overdue-reply emails (ADR-230), which say in whose business
+  hours a reply was counted; Reports' business-time
   measures; and the automatic reply's delay (ADR-384). A conversation counts by the team it is in
   now, as targets do (ADR-377). The company's calendar and every team's week are loaded once per
   request, sweep or report (`loadBusinessCalendars`: one query for all teams' weeks), never per
@@ -15610,15 +15612,21 @@ Decision:
   definer function is replaced; w360_definer gets only the deletion grants and policies on the new
   table.
 - **Waiting rows planned again:** a waiting automatic reply or overdue notice holds the time an old
-  calendar gave. When a team's week (or, since this ADR, its target) changes, and when the
-  company's week or closed days change, every waiting row of the company is planned again by the
-  next sweep (`replanWaitingTurns`: `replanWaitingSlowReplies` plus the overdue notices); when a
-  conversation changes team, by any path (the inbox, the API, routing, automations, a team's
-  deletion), a trigger on `conversations.team_id` (0303, running as the caller, which may update
-  those columns of waiting rows) plans its own open turn's rows again. Lateness then counts from
-  the time a row was put off to, so a replanned row is not counted late for having waited.
+  calendar gave. When the company's week or closed days change, every waiting row of the company is
+  planned again by the next sweep (`replanWaitingTurns`: the automatic replies and the overdue
+  notices); when a team's week (or, since this ADR, its target) changes, only the waiting rows of
+  that team's conversations are, so one team's change does not fill the sweeps' shared rounds with
+  the whole company's waits; when a conversation changes team, by any path (the inbox, the API,
+  routing, automations, a team's deletion), a trigger on `conversations.team_id` (0303, running as
+  the caller, which may update those columns of waiting rows) plans its own open turn's rows again.
+  Lateness then counts from the time a row was put off to when that is later than its due time, so
+  a replanned row is not counted late for having waited: the automatic reply's rule (ADR-384) and
+  the overdue notice's (`overdueNoticeTooLate`) alike. The overdue sweep takes the conversations
+  (`FOR SHARE SKIP LOCKED`, in id order) before their turns, as the automatic reply's sweep does, so
+  a change of team either waits for the sweep or is seen by it.
 - **Reports:** turns' business seconds are summed over the opening periods of their calendar
-  (`iv(cal, lo, hi)`: '' for the company's, a team's id for its own). New definition versions say so:
+  (`iv(cal, lo, hi)`: '' for the company's, a team's id for its own), built only for the teams whose
+  turns the report counts (open, or started or ended in its range). New definition versions say so:
   `inbox.overdue` v4, `inbox.first_response_business_time` v3 and `inbox.within_target` v5; the
   inbox section and report emails name teams with their own hours ("in their team's or the
   company's business hours"), and `GET /reports` gives `teamBusinessHours`.
@@ -15635,3 +15643,21 @@ Not built: closed days or a time zone per team, holiday calendars per team, a te
 the company's hours are off, per-team hours in automations' conditions and in `GET /business-hours`,
 schedules per WhatsApp number, and measuring a turn by the team (or week) its conversation had when
 the turn started.
+
+Review (before merge): an independent review found one Medium issue: the claim that a replanned
+overdue notice is not counted late for having waited held only for the automatic reply. The overdue
+sweep measured lateness from the newly computed due time alone, so a notice planned again more than
+a day after that time (a conversation moved out of a team whose week had put it off) was skipped as
+too late and nobody was emailed. Lateness now counts from the later of the two
+(`overdueNoticeTooLate`), with unit tests and an integration test that plans a notice again two days
+after its due time. It also found four Low issues and three nits. The overdue sweep read a
+conversation's team without locking it, so a change of team racing a sweep could leave a notice
+with the old calendar's time; it now takes the conversations before their turns. A team's change
+planned again every waiting row of the company; it now plans again only its own conversations'
+rows. Reports built opening periods for every team's week, used or not; now only for teams with
+turns in the report. The overdue email said "of business hours" for a reply counted in its team's
+week; it now names the team's hours. `PATCH /teams`' description named only automatic replies.
+Nothing in the database stopped two of a team's ranges from opening at the same time; a unique
+constraint now does, and its index replaces the read index. All of these were fixed. The ranking of
+the notice of overdue replies by team (ADR-241) still has no test that fails if teams with their own
+week are ranked together with the others; PROGRESS notes the gap.

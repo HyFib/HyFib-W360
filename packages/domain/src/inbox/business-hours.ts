@@ -5,6 +5,8 @@ import {
   asc,
   businessHolidays,
   businessHours,
+  conversationTurns,
+  conversations,
   eq,
   inArray,
   isUniqueViolation,
@@ -586,17 +588,51 @@ export async function replanWaitingSlowReplies(tx: Tx, tenantId: string): Promis
 /**
  * Has the next sweeps look again at every reply that waits for a calendar: the automatic replies
  * (ADR-384) and the overdue-reply notices (ADR-230) put off to a time an old calendar or target
- * gave. Used when the company's schedule or closed days, or a team's own schedule or target,
- * change (ADR-389); a conversation that changes team has its own waiting rows planned again by a
- * database trigger (migration 0303).
+ * gave. Used when the company's schedule or closed days change, and, for the conversations of one
+ * team only (`teamId`), when that team's own schedule or target changes (ADR-389), so one team's
+ * change does not fill the sweeps' rounds with the whole company's waits; a conversation that
+ * changes team has its own waiting rows planned again by a database trigger (migration 0303).
  */
-export async function replanWaitingTurns(tx: Tx, tenantId: string): Promise<void> {
-  await replanWaitingSlowReplies(tx, tenantId);
+export async function replanWaitingTurns(
+  tx: Tx,
+  tenantId: string,
+  scope: { teamId?: string } = {},
+): Promise<void> {
+  const teamTurns =
+    scope.teamId === undefined
+      ? undefined
+      : tx
+          .select({ id: conversationTurns.id })
+          .from(conversationTurns)
+          .innerJoin(
+            conversations,
+            and(
+              eq(conversations.tenantId, conversationTurns.tenantId),
+              eq(conversations.id, conversationTurns.conversationId),
+            ),
+          )
+          .where(
+            and(eq(conversationTurns.tenantId, tenantId), eq(conversations.teamId, scope.teamId)),
+          );
+  await tx
+    .update(slowReplyMessages)
+    .set({ dueAt: sql`now()`, updatedAt: sql`now()` })
+    .where(
+      and(
+        eq(slowReplyMessages.tenantId, tenantId),
+        eq(slowReplyMessages.state, 'waiting'),
+        teamTurns ? inArray(slowReplyMessages.turnId, teamTurns) : undefined,
+      ),
+    );
   await tx
     .update(overdueReplyNotices)
     .set({ dueAt: sql`now()`, updatedAt: sql`now()` })
     .where(
-      and(eq(overdueReplyNotices.tenantId, tenantId), eq(overdueReplyNotices.state, 'waiting')),
+      and(
+        eq(overdueReplyNotices.tenantId, tenantId),
+        eq(overdueReplyNotices.state, 'waiting'),
+        teamTurns ? inArray(overdueReplyNotices.turnId, teamTurns) : undefined,
+      ),
     );
 }
 

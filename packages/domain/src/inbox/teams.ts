@@ -305,7 +305,7 @@ export async function writeUpdateTeam(
     .where(and(eq(teams.tenantId, tenantId), eq(teams.id, teamId)));
   if (hoursChanged) await writeTeamBusinessHours(tx, tenantId, teamId, data.businessHours);
   if (hoursChanged || current.firstResponseTargetMinutes !== data.firstResponseTargetMinutes) {
-    await replanWaitingTurns(tx, tenantId);
+    await replanWaitingTurns(tx, tenantId, { teamId });
   }
   await syncMembersAndChannels(tx, tenantId, teamId, data);
   return { previousAssignment: current.assignment, hoursChanged };

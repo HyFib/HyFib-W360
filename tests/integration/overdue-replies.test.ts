@@ -353,6 +353,7 @@ describe('emails when a waiting customer’s reply is overdue (ADR-230)', () => 
       }).format(d);
     const forTeam = await waitingCustomer(c, '919845100401');
     const noTeam = await waitingCustomer(c, '919845100402');
+    const otherTeam = await waitingCustomer(c, '919845100405');
     // The team opens only the day after tomorrow (the company's dates).
     const [y, m, d] = localDay(forTeam.started_at).split('-').map(Number) as [
       number,
@@ -364,11 +365,18 @@ describe('emails when a waiting customer’s reply is overdue (ADR-230)', () => 
     const teams = createTeamsService({ db: fx.dbs.app, clock: systemClock });
     const teamWeek = Array.from({ length: 7 }, (_, i) => (i === weekdayIndex ? '00:00-24:00' : ''));
     const { teamId } = await teams.createTeam(owner, { name: 'Later', businessHours: teamWeek });
-    await fx.query(`UPDATE app.conversations SET team_id = $1 WHERE tenant_id = $2 AND id = $3`, [
-      teamId,
-      c.tenant.id,
-      forTeam.conversation_id,
-    ]);
+    // Another team with the same week, whose waiting notice no change of 'Later' plans again.
+    const other = await teams.createTeam(owner, { name: 'Other', businessHours: teamWeek });
+    for (const [team, conversationId] of [
+      [teamId, forTeam.conversation_id],
+      [other.teamId, otherTeam.conversation_id],
+    ] as const) {
+      await fx.query(`UPDATE app.conversations SET team_id = $1 WHERE tenant_id = $2 AND id = $3`, [
+        team,
+        c.tenant.id,
+        conversationId,
+      ]);
+    }
 
     await sweep(later(noTeam.started_at, 31));
     // The company's conversation is due by the company's hours (open all week).
@@ -381,16 +389,35 @@ describe('emails when a waiting customer’s reply is overdue (ADR-230)', () => 
     expect(waiting).toMatchObject({ state: 'waiting', emailed: 0 });
     expect(localDay(waiting!.due_at)).toBe(inTwoDays.toISOString().slice(0, 10));
     expect(hhmm(waiting!.due_at)).toBe('00:30');
+    expect(await notice(otherTeam.id)).toMatchObject({ state: 'waiting', due_at: waiting!.due_at });
 
     // The team gives up its own hours: the waiting notice is planned again by the company's, and
-    // the next sweep emails it, not late for having waited.
+    // the next sweep emails it, not late for having waited. The other team's notice keeps its time.
     await teams.updateTeam(owner, teamId, { name: 'Later', businessHours: null });
     expect((await notice(forTeam.id))!.due_at.getTime()).toBeLessThan(waiting!.due_at.getTime());
+    expect(await notice(otherTeam.id)).toMatchObject({ state: 'waiting', due_at: waiting!.due_at });
     await sweep(later(forTeam.started_at, 32));
     expect(await notice(forTeam.id)).toMatchObject({
       state: 'sent',
       due_at: later(forTeam.started_at, 30),
     });
+    expect(await notice(otherTeam.id)).toMatchObject({ state: 'waiting', due_at: waiting!.due_at });
+
+    // The other team opens all week: its notice is planned again and emailed, saying the reply was
+    // counted in that team's business hours.
+    await teams.updateTeam(owner, other.teamId, {
+      name: 'Other',
+      businessHours: Array(7).fill('00:00-24:00'),
+    });
+    await sweep(later(otherTeam.started_at, 33));
+    expect(await notice(otherTeam.id)).toMatchObject({
+      state: 'sent',
+      due_at: later(otherTeam.started_at, 30),
+    });
+    const lines = (await overdueEmails(c.tenant.id)).flatMap((e) => e.lines);
+    expect(lines.filter((l) => l.includes('of the Other team’s business hours'))).not.toHaveLength(
+      0,
+    );
   });
 
   it('plans a waiting notice again when its conversation changes team (ADR-389)', async () => {
@@ -440,6 +467,74 @@ describe('emails when a waiting customer’s reply is overdue (ADR-230)', () => 
     expect((await notice(turn.id))!.due_at.getTime()).toBeLessThan(waiting!.due_at.getTime());
     await sweep(later(turn.started_at, 32));
     expect(await notice(turn.id)).toMatchObject({ state: 'sent' });
+  });
+
+  it('emails a notice planned again more than a day after its due time, not late for having waited (ADR-389)', async () => {
+    const { c, owner } = await companyWithTarget(30);
+    const hours = createBusinessHoursService({ db: fx.dbs.app, clock: systemClock });
+    await hours.updateBusinessHours(owner, { enabled: true, days: Array(7).fill('00:00-24:00') });
+    const teams = createTeamsService({ db: fx.dbs.app, clock: systemClock });
+    const turn = await waitingCustomer(c, '919845100404');
+    const [{ timezone }] = (await fx.query<{ timezone: string }>(
+      'SELECT timezone FROM app.tenants WHERE id = $1',
+      [c.tenant.id],
+    )) as [{ timezone: string }];
+    const today = new Intl.DateTimeFormat('en-CA', {
+      timeZone: timezone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).format(turn.started_at);
+    const [y, m, d] = today.split('-').map(Number) as [number, number, number];
+    // A team open only the day after tomorrow (the company's dates).
+    const weekdayIndex = (new Date(Date.UTC(y, m - 1, d + 2)).getUTCDay() + 6) % 7;
+    const { teamId } = await teams.createTeam(owner, {
+      name: 'Later',
+      businessHours: Array.from({ length: 7 }, (_, i) => (i === weekdayIndex ? '00:00-24:00' : '')),
+    });
+    // The customer wrote two days ago, into the team: by the company's hours the reply fell due
+    // long before now, by the team's it is due the day after tomorrow. (Open turns are guarded;
+    // the retention setting allows moving this one back in time.)
+    const client = await fx.dbs.adminPool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(`SELECT set_config('w360.allow_retention_purge', 'on', true)`);
+      await client.query(
+        `UPDATE app.conversation_turns SET started_at = started_at - interval '48 hours'
+          WHERE tenant_id = $1 AND id = $2`,
+        [c.tenant.id, turn.id],
+      );
+      await client.query('COMMIT');
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+    const started = new Date(turn.started_at.getTime() - 48 * 3_600_000);
+    const inbox = createInboxService({ db: fx.dbs.app, clock: systemClock });
+    const version = async () =>
+      (
+        await fx.query<{ version: number }>(`SELECT version FROM app.conversations WHERE id = $1`, [
+          turn.conversation_id,
+        ])
+      )[0]!.version;
+    await inbox.setTeam(owner, {
+      conversationId: turn.conversation_id,
+      teamId,
+      expectedVersion: await version(),
+    });
+    await sweep(new Date());
+    expect(await notice(turn.id)).toMatchObject({ state: 'waiting' });
+    // Back to no team now: due two days ago by the company's hours, yet emailed, since lateness
+    // counts from the time the notice was put off to.
+    await inbox.setTeam(owner, {
+      conversationId: turn.conversation_id,
+      teamId: null,
+      expectedVersion: await version(),
+    });
+    await sweep(later(new Date(), 1));
+    expect(await notice(turn.id)).toMatchObject({ state: 'sent', due_at: later(started, 30) });
   });
 
   it('lets only the runtime role run the sweep query, and keeps sent notices as they are', async () => {

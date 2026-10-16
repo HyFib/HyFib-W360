@@ -1,5 +1,53 @@
 # Progress
 
+## 2026-10-16 — Review fixes for ADR-388 and ADR-389
+
+Status: **Fixed; the database and browser tests run in CI only.** Independent reviews found one
+High issue in ADR-388 (three integration tests that would have failed) with smaller ones, and one
+Medium and four Low issues (and nits) in ADR-389, all fixed before merge; one gap in tests remains
+(below).
+
+### Completed
+
+- **Business hours per team (ADR-389):** an overdue notice planned again more than a day after the
+  due time its new calendar gives (a conversation moved out of a team whose week had put it off) is
+  emailed instead of skipped as too late: lateness counts from the later of the due time and the
+  time the notice was put off to (`overdueNoticeTooLate`), as ADR-389 claimed and as the automatic
+  reply already did (Medium); the overdue sweep takes the conversations (`FOR SHARE SKIP LOCKED`, in
+  id order) before their turns, so a change of team racing a sweep either waits for it or is seen;
+  a team's change of week or target plans again only its own conversations' waiting rows, not the
+  whole company's; Reports build opening periods only for teams with turns in the report; the
+  overdue email names a team's own business hours; `PATCH /teams` says overdue-reply emails are
+  planned again too, and after a target change; migration 0303 adds a unique constraint on a team's
+  ranges (team, weekday, opening time), whose index replaces the read index.
+- **Teams format for the alert channel (ADR-388):** three integration tests set the address without
+  a format (refused since the format became required; they name `text`); the new claim's format
+  guard is NULL-safe (`IS NOT TRUE`); ADR-388 and the runbook no longer claim the card was checked
+  by tests that run in CI only, or that posting one at a time always stays under Microsoft's
+  throttle.
+- **Tests:** unit (lateness from the time put off to, at the limit and beyond; the email naming a
+  team's own hours for its own target and for the company's); integration (`overdue-replies.test.ts`:
+  a notice planned again two days after its due time is emailed; another team's waiting notice keeps
+  its time when one team's week changes, and is emailed naming its team's hours once that team opens
+  all week; `slow-replies.test.ts`: another team's waiting automatic reply keeps its time).
+- **Not covered:** the ranking of the notice of overdue replies by team (ADR-241) still has no test
+  that fails if teams with their own week are ranked with the others (it changes results only beyond
+  200 waits).
+- **Mutation checks:** 6 deliberate regressions of the lateness rule (the later time, the limit, the
+  time put off to ignored) and the email wording (team hours dropped for either target, or ignored),
+  all caught by the unit tests. The sweep's lock order, the team-scoped replan, the reports' calendars
+  and the sweep passing the time put off to are covered by integration tests, which run in CI only.
+
+### Test commands and results (local, 2026-10-16)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 161 files, 1,712 tests passed                                   |
+| `pnpm build`                                       | passed                                                          |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| Migration 0303, pglast parse check                 | passed (syntax only)                                            |
+
 ## 2026-10-16 — Business hours per team (P3-06, ADR-389)
 
 Status: **Implemented; its database and browser tests run in CI only.** A team's first-response
@@ -61,7 +109,7 @@ team was held to the office's week.
 | -------------------------------------------------- | --------------------------------------------------------------- |
 | `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
 | `pnpm test` (unit)                                 | 161 files, 1688 tests passed                                    |
-| `pnpm build`                                       | passed                                                          |
+| `pnpm build`                                       | passed before a last refactor of one helper; run again above    |
 | `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
 
 ## 2026-10-16 — A Microsoft Teams format for the alert channel (P5-10, ADR-388)

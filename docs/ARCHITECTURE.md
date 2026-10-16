@@ -443,9 +443,11 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   every team's week in one query (`BusinessCalendars`: the company's, and each team's own with the
   company's closed days and time zone), and `calendarFor(calendars, teamId)` picks a conversation's.
   `replanWaitingTurns` sets waiting automatic replies and overdue notices due now when the
-  company's week or closed days, or a team's week or target, change; the trigger
-  `conversations_replan_waiting_turn` does the same for one conversation's open turn when its
-  `team_id` changes. Automations' hours stay the company's.
+  company's week or closed days change, and only those of a team's conversations when that team's
+  week or target changes; the trigger `conversations_replan_waiting_turn` does the same for one
+  conversation's open turn when its `team_id` changes. A row planned again is not counted late for
+  having waited (`overdueNoticeTooLate`, and the automatic reply's rule). Automations' hours stay
+  the company's.
 - **Reply-due timers** (`inbox/sla.ts`): the open reply turn's start plus the first-response target,
   counted in business hours when business hours are on (the timer pauses while closed), else absolute
   time. Since ADR-377 the target is the conversation's team's own (`teams.first_response_target_minutes`, 0296) when it has one, else the company's: `loadReplyTargets` reads both and `targetFor` picks one,

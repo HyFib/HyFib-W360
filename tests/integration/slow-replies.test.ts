@@ -643,6 +643,7 @@ describe('the automatic reply when members are slow to answer (ADR-384)', () => 
     const moved = await waitingCustomer(c, waId());
     const kept = await waitingCustomer(c, waId());
     const noTeam = await waitingCustomer(c, waId());
+    const otherTeam = await waitingCustomer(c, waId());
     // The team opens only the day after tomorrow (the company's dates).
     const [y, m, d] = localDay(moved.started_at).split('-').map(Number) as [number, number, number];
     const inTwoDays = new Date(Date.UTC(y, m - 1, d + 2));
@@ -663,6 +664,13 @@ describe('the automatic reply when members are slow to answer (ADR-384)', () => 
         expectedVersion: await version(turn.conversation_id),
       });
     }
+    // Another team with the same week, whose waiting row no change of 'Later' plans again.
+    const other = await teams.createTeam(owner, { name: 'Other', businessHours: teamWeek });
+    await inboxService().setTeam(owner, {
+      conversationId: otherTeam.conversation_id,
+      teamId: other.teamId,
+      expectedVersion: await version(otherTeam.conversation_id),
+    });
 
     await sweep(later(noTeam.started_at, 11));
     // The company's hours are open all week: the customer without a team gets the text.
@@ -673,6 +681,7 @@ describe('the automatic reply when members are slow to answer (ADR-384)', () => 
     expect(await row(kept.id)).toMatchObject({ state: 'waiting', due_at: waiting!.due_at });
     expect(localDay(waiting!.due_at)).toBe(inTwoDays.toISOString().slice(0, 10));
     expect(hhmm(waiting!.due_at)).toBe('00:10');
+    expect(await row(otherTeam.id)).toMatchObject({ state: 'waiting', due_at: waiting!.due_at });
 
     // One conversation leaves the team: its row alone is planned again (the database's time), and
     // the next sweep sends it by the company's hours, not late for having waited.
@@ -695,9 +704,12 @@ describe('the automatic reply when members are slow to answer (ADR-384)', () => 
       businessHours: Array(7).fill('00:00-24:00'),
     });
     expect((await row(kept.id))!.due_at.getTime()).toBeLessThan(waiting!.due_at.getTime());
+    // Only that team's conversations: the other team's row keeps its time.
+    expect(await row(otherTeam.id)).toMatchObject({ state: 'waiting', due_at: waiting!.due_at });
     await sweep(later(kept.started_at, 13));
     expect(await row(kept.id)).toMatchObject({ state: 'sent' });
     expect(await automaticReplies(kept.conversation_id)).toHaveLength(1);
+    expect(await row(otherTeam.id)).toMatchObject({ state: 'waiting', due_at: waiting!.due_at });
   });
 
   it('lets only the runtime role run the sweep query, and keeps sent rows as they are', async () => {

@@ -19,13 +19,14 @@ CREATE TABLE app.team_business_hours (
   -- '24:00' closes at midnight at the end of the day.
   closes_at time NOT NULL,
   CONSTRAINT team_business_hours_tenant_id_id_uq UNIQUE (tenant_id, id),
+  -- Ranges never overlap (checked when a week is saved); two rows opening at once never exist.
+  CONSTRAINT team_business_hours_range_uq UNIQUE (tenant_id, team_id, weekday, opens_at),
   CONSTRAINT team_business_hours_team_fk FOREIGN KEY (tenant_id, team_id)
     REFERENCES app.teams (tenant_id, id) ON DELETE CASCADE,
   CONSTRAINT team_business_hours_order CHECK (closes_at > opens_at)
 );
--- One read per request or sweep loads every team's schedule of the company, in order.
-CREATE INDEX team_business_hours_team_idx
-  ON app.team_business_hours (tenant_id, team_id, weekday, opens_at);
+-- One read per request or sweep loads every team's schedule of the company, in order: the range
+-- constraint's index serves it.
 SELECT ops.apply_tenant_rls('app.team_business_hours');
 -- The application replaces a team's schedule as a whole (delete, then insert).
 GRANT SELECT, INSERT, DELETE ON app.team_business_hours TO w360_app;

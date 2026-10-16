@@ -582,7 +582,28 @@ async function openingPeriodsCte(
     oldestMs !== null && oldestMs !== undefined && oldestMs < period.start.getTime()
       ? new Date(oldestMs)
       : period.start;
-  const periods = calendarPeriods(calendars, from, now);
+  // Only the weeks of teams whose conversations have turns the report measures (open, started or
+  // ended in the period): every turn scans `iv`, so a week no turn uses would only slow it (ADR-389).
+  const used =
+    calendars.teams.size === 0
+      ? new Set<string>()
+      : new Set(
+          (
+            await tx.execute<{ team_id: string }>(sql`
+              select distinct c.team_id::text as team_id
+                from app.conversation_turns t
+                join app.conversations c on c.tenant_id = t.tenant_id and c.id = t.conversation_id
+               where t.tenant_id = ${tenantId} and c.team_id is not null
+                 and (t.ended_at is null
+                      or (t.started_at >= ${ts(period.start)} and t.started_at < ${ts(period.end)})
+                      or (t.ended_at >= ${ts(period.start)} and t.ended_at < ${ts(period.end)}))`)
+          ).rows.map((r) => r.team_id),
+        );
+  const periods = calendarPeriods(
+    { ...calendars, teams: new Map([...calendars.teams].filter(([id]) => used.has(id))) },
+    from,
+    now,
+  );
   return sql`iv(cal, lo, hi) as (select * from unnest(
     ${sql.param(periods.map((p) => p.cal))}::text[],
     ${sql.param(periods.map((p) => p.start.toISOString()))}::timestamptz[],
