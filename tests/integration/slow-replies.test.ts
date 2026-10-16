@@ -569,6 +569,54 @@ describe('the automatic reply when members are slow to answer (ADR-384)', () => 
     expect(await automaticReplies(first.conversation_id)).toEqual([]);
   });
 
+  it('plans a waiting reply again when the delay or the calendar changes', async () => {
+    const { c, owner } = await companyWithSlowReply(10);
+    const hours = createBusinessHoursService({ db: fx.dbs.app, clock: systemClock });
+    await hours.updateBusinessHours(owner, { enabled: true, days: Array(7).fill('00:00-24:00') });
+    const [{ timezone }] = (await fx.query<{ timezone: string }>(
+      'SELECT timezone FROM app.tenants WHERE id = $1',
+      [c.tenant.id],
+    )) as [{ timezone: string }];
+    const hhmm = (at: Date) =>
+      new Intl.DateTimeFormat('en-GB', {
+        timeZone: timezone,
+        hour: '2-digit',
+        minute: '2-digit',
+        hourCycle: 'h23',
+      }).format(at);
+    const turn = await waitingCustomer(c, waId());
+    // Closed the day the customer wrote and the next (the company's dates): the text waits.
+    const today = new Intl.DateTimeFormat('en-CA', {
+      timeZone: timezone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).format(turn.started_at);
+    const [y, m, d] = today.split('-').map(Number) as [number, number, number];
+    const tomorrow = new Date(Date.UTC(y, m - 1, d + 1)).toISOString().slice(0, 10);
+    await hours.addHoliday(owner, { day: today, name: 'Closed' });
+    await hours.addHoliday(owner, { day: tomorrow, name: 'Closed' });
+    await sweep(later(turn.started_at, 11));
+    expect(await row(turn.id)).toMatchObject({ state: 'waiting' });
+    expect(hhmm((await row(turn.id))!.due_at)).toBe('00:10');
+
+    // A shorter delay: the next sweep plans it again (still closed, now 5 minutes after opening).
+    await service().updateSlowReplySettings(owner, { enabled: true, text: TEXT, delayMinutes: 5 });
+    expect((await row(turn.id))!.due_at.getTime()).toBeLessThan(
+      later(turn.started_at, 11).getTime(),
+    );
+    await sweep(later(turn.started_at, 12));
+    expect(await row(turn.id)).toMatchObject({ state: 'waiting' });
+    expect(hhmm((await row(turn.id))!.due_at)).toBe('00:05');
+
+    // Business hours turned off: the next sweep sends it, counted in absolute time and not late for
+    // having waited.
+    await hours.updateBusinessHours(owner, { enabled: false, days: Array(7).fill('00:00-24:00') });
+    await sweep(later(turn.started_at, 13));
+    expect(await row(turn.id)).toMatchObject({ state: 'sent' });
+    expect(await automaticReplies(turn.conversation_id)).toHaveLength(1);
+  });
+
   it('lets only the runtime role run the sweep query, and keeps sent rows as they are', async () => {
     const [fn] = await fx.query<{ public: boolean; app: boolean; owner: string; definer: boolean }>(
       `SELECT has_function_privilege('public', p.oid, 'EXECUTE') AS public,

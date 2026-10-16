@@ -40,7 +40,11 @@ import type { JobQueue } from '../jobs/queue';
 import { emitTenantEvent } from '../messaging/events';
 import { STATUS_RANK } from '../messaging/status';
 import { parseInput } from '../validation';
-import { loadBusinessCalendar, type BusinessCalendar } from './business-hours';
+import {
+  loadBusinessCalendar,
+  replanWaitingSlowReplies,
+  type BusinessCalendar,
+} from './business-hours';
 import { replyDueAt } from './sla';
 
 /**
@@ -676,6 +680,8 @@ export function createSlowReplyService(deps: { db: Database; clock: Clock }) {
             ...values,
           })
           .onConflictDoUpdate({ target: messagingSettings.tenantId, set: values });
+        // A changed delay can make a waiting reply due earlier or later: plan it again.
+        await replanWaitingSlowReplies(tx, ctx.tenant.id);
         await recordAudit(
           tx,
           ctx,

@@ -15197,8 +15197,9 @@ Decision:
   `message.send` job in one transaction). It is shown in the thread as "Automatic reply" and as the
   conversation's last message.
 - **Once per wait:** `app.slow_reply_messages` holds one row per turn (unique): `waiting` while
-  business hours put the due time later (looked at again then, and not counted late for having
-  waited even if the delay was cut or the calendar changed meanwhile), `sent` with its message or
+  business hours put the due time later (looked at again then, and planned again by the next sweep
+  when the delay or the calendar changes, through Settings or the API, so it is neither held to an
+  old time nor counted late for having waited), `sent` with its message or
   `skipped` with the reason, for good (a guard trigger), written in the transaction that queues the
   message. A worker restart before commit leaves nothing; concurrent sweeps skip the conversations
   one of them holds and then see its row. A customer writing again in the same wait gets nothing more; after a member's reply their
@@ -15227,12 +15228,12 @@ Decision:
 
 Not built: a reply per team or per number, more than one reply per wait (a second after a longer
 wait), templates outside the window, a reply that names the expected wait, the setting in the public
-API, replies to waits that began before it was turned on, and re-planning waiting rows when the
-delay or calendar changes (a waiting row is looked at again at the time it was put off to).
+API, and replies to waits that began before it was turned on.
 
 Review (before merge): an independent review found a queued reply could still be delivered after a
-member answered, when its send was put off (now cancelled at send time), a waiting row turned
-`too_late` after the delay was cut or the calendar changed, erased contacts recorded as `no_phone`,
+member answered, when its send was put off (now cancelled at send time), a waiting row held to its
+old time, and turned `too_late`, after the delay was cut or the calendar changed (Codex found the
+same; such rows are now planned again), erased contacts recorded as `no_phone`,
 a possible deadlock with the campaign runner's set-based conversation update (the sweep now skips
 held conversations), and that turning the reply off required a valid text. All were fixed with
 tests.

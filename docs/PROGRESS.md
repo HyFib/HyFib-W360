@@ -10,8 +10,9 @@ features found one Medium and nine Low issues, all fixed before merge.
 - **Automatic reply (ADR-384):** a queued reply whose wait ended before it could be sent (a member
   answered, the conversation was resolved or an automation took over, e.g. while the number was
   reconnecting) is now cancelled at send time (`slow_reply_answered`) instead of being delivered
-  after the answer (Medium); a waiting row is not counted late for having waited when the delay was
-  cut or the calendar changed; an erased contact is recorded as `contact_erased`, not `no_phone`;
+  after the answer (Medium); a waiting row is planned again by the next sweep when the delay or the
+  calendar changes (Codex found this too), and not counted late for having waited; an erased
+  contact is recorded as `contact_erased`, not `no_phone`;
   the sweep skips conversations another transaction holds (`SKIP LOCKED`), so it cannot deadlock
   with the campaign runner's set-based update; turning the reply off needs no valid text or delay.
 - **Choice-type deal fields (ADR-385):** the "Edit options" button's accessible name starts with its
@@ -20,18 +21,19 @@ features found one Medium and nine Low issues, all fixed before merge.
   multidimensional array, and the order AND's arguments are evaluated in is not defined);
   `GET /deal-fields` mentions the options; ARCHITECTURE's CRM "Not built yet" line is up to date.
 - **Tests:** unit (lateness from the put-off time); integration (cancellation after an answer and
-  after a resolve, erasure while waiting, a held conversation skipped and handled next time, turning
-  off with an invalid text); e2e (the "Edit options" button's name).
+  after a resolve, erasure while waiting, a held conversation skipped and handled next time, a
+  waiting reply planned again after the delay and the calendar change, turning off with an invalid
+  text); e2e (the "Edit options" button's name).
 - **Mutation checks:** the lateness rule's regression is caught by the unit tests; the send-time
-  cancellation, the erased check, `SKIP LOCKED` and the settings rule are covered by integration
-  tests, which run in CI only.
+  cancellation, the erased check, `SKIP LOCKED`, the re-planning and the settings rule are covered
+  by integration tests, which run in CI only.
 
 ### Test commands and results (local, 2026-10-16)
 
 | Command                                            | Result                                                          |
 | -------------------------------------------------- | --------------------------------------------------------------- |
 | `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
-| `pnpm test` (unit)                                 | UNIT_PLACEHOLDER                                                |
+| `pnpm test` (unit)                                 | 158 files, 1,654 tests passed                                   |
 | `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
 | `pnpm build`                                       | passed                                                          |
 
