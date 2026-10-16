@@ -1749,6 +1749,25 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    definitions in place: an older release ignores team hours (the trigger only moves due times of
    waiting rows earlier, which an older sweep simply plans again).
 
+   Migration 0305 (ADR-390) replaces the deal capture function in place and widens its trigger and
+   the changer trigger to `crm_deals.attributes`, so `deal.updated` names custom field value
+   changes (`fields`, with `changedFields`) from the moment it runs, whichever release made the
+   change. It widens `webhook_events.detail`'s size check to 4,096 bytes (NOT VALID, so the table
+   is not read under the brief lock; 0306 validates it while captures go on) and the endpoints'
+   `deal_details` check to accept `fields` (validated at once: at most 10 endpoints per company),
+   and grants the definer role `SELECT (key, created_at)` on `app.crm_deal_fields` with a policy for
+   the company in scope (erasure's capture). Workers from before it render such an event with
+   `changes` leaving out `fields` (an empty list for a change of values alone, which the payload's
+   description does not allow) and without `changedFields`: roll workers out promptly after the
+   migration, and replay the deliveries an old worker made in between (on the endpoint's page in
+   Settings → Webhooks, or `POST /webhook-deliveries/{id}/replay`; a replay is built by the worker
+   that sends it) if a receiver relies on them; rolling workers back does the same. Web servers from before it neither offer nor read `fields`
+   in an endpoint's deal details: until the web rollout ends, an old server shows such a list with
+   an empty label and refuses to save that endpoint ("Choose deal details from the list."), and
+   gives no `fields` in the API's deal history. Endpoints whose deal details list was saved before
+   keep it, so they do not take a change of values alone until `fields` is added. Rolling back
+   leaves the trigger, which old code does not need to know about; events keep their details.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

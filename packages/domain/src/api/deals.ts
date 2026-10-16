@@ -598,7 +598,7 @@ export const apiDealHistoryQuerySchema = z
 
 /**
  * The deal's timeline entries its history gives (ADR-281), and the name of each: the changes the
- * deal events report (ADR-256, ADR-269, ADR-275), never its notes or its tasks' entries.
+ * deal events report (ADR-256, ADR-269, ADR-275, ADR-390), never its notes or its tasks' entries.
  */
 export const API_DEAL_HISTORY_TYPES = {
   deal_created: 'created',
@@ -613,11 +613,15 @@ export const API_DEAL_HISTORY_TYPES = {
 export type ApiDealHistoryType =
   (typeof API_DEAL_HISTORY_TYPES)[keyof typeof API_DEAL_HISTORY_TYPES];
 
-/** The timeline's names of a deal's details and the names its history gives them, as its events do. */
+/**
+ * The timeline's names of a deal's details and the names its history gives them, as its events do:
+ * custom field values as `fields` (ADR-390), without the keys, which the timeline does not keep.
+ */
 export const API_DEAL_HISTORY_DETAILS = {
   title: 'title',
   value: 'valueMinor',
   expected_close_on: 'expectedCloseOn',
+  custom_fields: 'fields',
 } as const;
 
 export type ApiDealHistoryDetail =
@@ -722,8 +726,8 @@ export function toApiDealHistoryEntry(
  * A deal's history (ADR-281): the changes its events report, by members, automations and keys,
  * newest first on exact keyset pages, a page never skipping or repeating one. Erasing a contact
  * deletes its timeline, so an erased contact's deal has no history. A change of a deal's custom
- * fields (ADR-373) or products (ADR-375) alone is not given, as deal events do not report it.
- * Only reads.
+ * field values is given as deal events report it (ADR-390); a change of its products (ADR-375)
+ * alone is not, as deal events do not report it. Only reads.
  */
 export async function apiListDealHistory(
   deps: Pick<OutboundDeps, 'db'>,
@@ -763,9 +767,8 @@ export async function apiListDealHistory(
               crmActivities.kind,
               Object.keys(API_DEAL_HISTORY_TYPES) as (keyof typeof API_DEAL_HISTORY_TYPES)[],
             ),
-            // A change of custom fields (ADR-373) or products (ADR-375) alone names none of the
-            // details history gives.
-            sql`(${crmActivities.kind} <> 'deal_updated' or coalesce(${crmActivities.data} -> 'fields', '[]'::jsonb) ?| array['title', 'value', 'expected_close_on'])`,
+            // A change of products (ADR-375) alone names none of the details history gives.
+            sql`(${crmActivities.kind} <> 'deal_updated' or coalesce(${crmActivities.data} -> 'fields', '[]'::jsonb) ?| array['title', 'value', 'expected_close_on', 'custom_fields'])`,
             cursor
               ? sql`(${crmActivities.createdAt}, ${crmActivities.id}) < (${cursor.at}::timestamptz, ${cursor.id}::uuid)`
               : undefined,

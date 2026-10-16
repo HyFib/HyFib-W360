@@ -2366,9 +2366,9 @@ named.
 
 **An integration misses a deal change, or hears two at once (ADR-256).** Endpoints that take
 `deal.created`, `deal.stage_changed` or `deal.status_changed` are sent one event per deal added and
-per change of a deal's stage or status, whoever made it; edits of its title, value or expected date
-send `deal.updated` to the endpoints that take it (ADR-275), as does erasure's retitling, and merges
-send nothing; a change of its owner sends `deal.owner_changed` to the endpoints that take it
+per change of a deal's stage or status, whoever made it; edits of its title, value, expected date
+or custom field values send `deal.updated` to the endpoints that take it (ADR-275, ADR-390), as does
+erasure's retitling, and merges send nothing; a change of its owner sends `deal.owner_changed` to the endpoints that take it
 (ADR-269). Changes made while no endpoint took the type were not recorded and are not sent later. A
 deal reopened in another stage (its own was removed), or moved and closed by one API request, sends
 two events, in the order the steps happened and possibly with the same `createdAt`, which their
@@ -3269,6 +3269,21 @@ naming pipelines, stages or owners hear it by the deal's as the change left them
 that changes details and closes the deal sends the change first, with status `open`, then the close;
 one that also gives the deal to another owner sends the change of details before the change of
 owner.
+
+**A receiver misses a change of a deal's custom field values, or asks why a field's values
+vanished without an event (ADR-390).** Since migration 0305, `deal.updated` also names `fields`
+(last in `changes`) when a member on the deal page, a key (`PATCH /deals/{id}` with `fields`), an
+automation's "Update deal fields" step, a deal import or erasure changes the deal's values, with the
+keys of the fields whose values were set, changed or removed in `changedFields`, in the order the
+fields were added. Values are never sent: the receiver reads them with `GET /deals/{id}` (`fields`,
+`deals.read`). The same values again send nothing, and so does a step or import row that changed
+nothing ("No change", `deal_fields_unchanged`). Deleting a field in Settings → Pipelines strips its
+values from every deal without per-deal events: tell the receiver to drop that key from every deal
+it keeps (`GET /deal-fields` no longer lists it; the audit log has `crm.deal_field_deleted` with the
+key). An endpoint whose deal details list was saved before 0305 does not take a change of values
+alone until "Custom fields" is ticked (or its list set to null). During a rollout, a worker from
+before 0305 sends such an event with `changes` leaving out `fields` (empty for a change of values
+alone) and without `changedFields`; replay those deliveries once the workers are updated.
 
 **A receiver misses a change of a task's details, or doubts one (ADR-276).** Endpoints that take
 `task.updated` ("Task details") are sent one event each time a member editing a task or a key

@@ -593,7 +593,7 @@ export const apiDealSchema = z.object({
     .enum(CRM_CHANGERS)
     .nullable()
     .describe(
-      'Who made the latest change of what deal events report (its stage, status, owner, title, value or expected close date): a member (member, never which member), an automation’s run (automation) or an API key (api, named by changedByApiKeyId). Null while the deal is as it was added, and when HyFib did not record who made the latest change, such as erasure retitling the deal; never the maker of an earlier change.',
+      'Who made the latest change of what deal events report (its stage, status, owner, title, value, expected close date or custom field values): a member (member, never which member), an automation’s run (automation) or an API key (api, named by changedByApiKeyId). Null while the deal is as it was added, and when HyFib did not record who made the latest change, such as erasure retitling the deal; never the maker of an earlier change.',
     ),
   changedByApiKeyId: z
     .uuid()
@@ -667,7 +667,7 @@ export const apiDealHistoryEntrySchema = z.object({
   type: z
     .enum(Object.values(API_DEAL_HISTORY_TYPES) as [ApiDealHistoryType, ...ApiDealHistoryType[]])
     .describe(
-      'What changed: the deal was added (created), its title, value or expected close date changed (updated), it moved to another stage or pipeline (stage_changed), it was given to another owner or left without one (owner_changed), or it was won, lost or reopened.',
+      'What changed: the deal was added (created), its title, value, expected close date or custom field values changed (updated), it moved to another stage or pipeline (stage_changed), it was given to another owner or left without one (owner_changed), or it was won, lost or reopened.',
     ),
   createdAt: z.iso.datetime().describe('When the change was made.'),
   changedBy: z
@@ -720,7 +720,7 @@ export const apiDealHistoryEntrySchema = z.object({
     )
     .nullable()
     .describe(
-      'updated: what changed, in this order: `title`, `valueMinor` and `expectedCloseOn`; names only, never the title or date before. Null for other changes.',
+      'updated: what changed, in this order: `title`, `valueMinor`, `expectedCloseOn` and `fields` (custom field values, which the history does not name one by one); names only, never the title, date or values before. Null for other changes.',
     ),
   valueMinor: z
     .number()
@@ -1492,7 +1492,7 @@ export const apiWebhookEndpointSchema = z.object({
     .array(z.enum(WEBHOOK_DEAL_DETAILS))
     .nullable()
     .describe(
-      'The deal details whose changes the endpoint receives as deal.updated: a change that changed one of them; null receives every change.',
+      'The deal details whose changes the endpoint receives as deal.updated (fields is any custom field value): a change that changed one of them; null receives every change.',
     ),
   taskDetails: z
     .array(z.enum(WEBHOOK_TASK_DETAILS))
@@ -3983,7 +3983,7 @@ export function buildOpenApiDocument(serverUrl: string) {
           operationId: 'listDealHistory',
           summary: 'A CRM deal’s history, newest first',
           description: [
-            `${scopeNote('deals.read')} The changes the deal events report, as the deal’s timeline keeps them: the deal added, its title, value or expected close date changed, moved to another stage or pipeline, given to another owner, won, lost or reopened, by members, automations and API keys, newest first; pages never skip or repeat a change. Each says who made it (\`changedBy\`, never which member, with the key for one made through the API), so an integration can rebuild how a deal moved, and skip its own changes. Needs the CRM in the company’s plan (403, reason not_in_plan).`,
+            `${scopeNote('deals.read')} The changes the deal events report, as the deal’s timeline keeps them: the deal added, its title, value, expected close date or custom field values changed, moved to another stage or pipeline, given to another owner, won, lost or reopened, by members, automations and API keys, newest first; pages never skip or repeat a change. Each says who made it (\`changedBy\`, never which member, with the key for one made through the API), so an integration can rebuild how a deal moved, and skip its own changes. Needs the CRM in the company’s plan (403, reason not_in_plan).`,
             'Notes and the deal’s tasks are never given here (`GET /notes` and `GET /tasks` read them), nor the title, date or lost reason before a change. Erasing a contact deletes its timeline, so an erased contact’s deal has no history; a merge keeps the deal’s.',
           ].join('\n\n'),
           parameters: [{ $ref: '#/components/parameters/Id' }, ...pageParams],
@@ -4717,7 +4717,7 @@ export function buildOpenApiDocument(serverUrl: string) {
       'deal.updated': webhook(
         'webhookDealUpdated',
         WEBHOOK_EVENT_INFO['deal.updated'].label,
-        `${WEBHOOK_EVENT_INFO['deal.updated'].description} changes names what changed (title, valueMinor, expectedCloseOn), never the values before: the deal is the deal when the event is delivered, so a deal changed again since gives its latest details, and a deal whose contact was erased is sent as erasure left it. One change can also move, reopen, close or give the deal to another owner, and then sends deal.stage_changed, deal.status_changed and deal.owner_changed as well, in the order the steps happen: reopened, moved, details changed, given to another owner, closed; they can have the same createdAt. Pipelines, stages and owners an endpoint names narrow it as the other deal events. An endpoint receives every change unless it names the details it takes (its \`dealDetails\`, or the details ticked in Settings → Webhooks): a change is sent when it changed one of them, and its changes still name every detail it changed. Deliveries are not ordered: the latest change is the one with the latest createdAt.`,
+        `${WEBHOOK_EVENT_INFO['deal.updated'].description} changes names what changed (title, valueMinor, expectedCloseOn, then fields for custom field values, with changedFields naming the keys of the fields whose values were set, changed or removed), never the values before: the deal is the deal when the event is delivered, so a deal changed again since gives its latest details, and a deal whose contact was erased is sent as erasure left it. Custom field values are not sent: read them with GET /deals/{id} (\`deals.read\`, its \`fields\`). Deleting a custom field in Settings removes its values from every deal without sending this event, since the company's fields changed, not its deals; erasing a contact clears its deals' values and names them. One change can also move, reopen, close or give the deal to another owner, and then sends deal.stage_changed, deal.status_changed and deal.owner_changed as well, in the order the steps happen: reopened, moved, details changed, given to another owner, closed; they can have the same createdAt. Pipelines, stages and owners an endpoint names narrow it as the other deal events. An endpoint receives every change unless it names the details it takes (its \`dealDetails\`, or the details ticked in Settings → Webhooks): a change is sent when it changed one of them, and its changes still name every detail it changed. Deliveries are not ordered: the latest change is the one with the latest createdAt.`,
         'WebhookDealUpdated',
       ),
       'deal.stage_changed': webhook(

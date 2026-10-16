@@ -340,8 +340,8 @@ verification, app review, Embedded Signup configuration).
   migration 0293: owners and administrators define up to 50 text, number, date or yes/no fields in
   Settings → Pipelines, audited; members set values on the deal page and keys through `fields` on
   `POST`/`PATCH /deals`, checked by type; `GET /deal-fields`; a CSV column per field; deletion
-  strips values from every deal; erasure clears them. Not built: webhook events for changes of
-  values; automation steps that set values were built later, ADR-386).
+  strips values from every deal; erasure clears them. Webhook events for changes of values and
+  automation steps that set values were built later, ADR-390 and ADR-386).
   **[Choice-type custom deal fields built; their database and browser tests run only in CI]**
   (ADR-385, migration 0301: a `choice` field has 1 to 50 options, in order, unique ignoring case;
   forms show a select and CSV import takes an option in any case, the API exactly; `GET
@@ -1262,6 +1262,13 @@ verification, app review, Embedded Signup configuration).
   or API keys, and for erasure's retitling, naming what changed, never the values before; the
   pipeline, stage and owner lists narrow it; one change that also moves, reopens, closes or gives
   the deal away sends each event in the order the steps happen).
+  **[Deal custom field value events built; their database tests run only in CI]** (ADR-390,
+  migrations 0305 and 0306: `deal.updated` names `fields` after the fixed details, with the keys of
+  the fields whose values changed (`changedFields`), never a value, for members, keys, automation
+  steps, deal imports and erasure's clearing; deleting a field sends no per-deal event; endpoints
+  may choose `fields` among their deal details; the API's deal history names it. Not built: the
+  values in the payload, which fields of a deal's import or step a receiver asked for, a
+  `deal.fields_changed` event of its own).
   **[Task detail events built; their database tests run only in CI]** (ADR-276, migrations 0194 and
   0195: `task.updated` for every change of a task's title, notes, due time or reminder by members or
   API keys, naming what changed, never the values or the notes; the assignee list narrows it; one

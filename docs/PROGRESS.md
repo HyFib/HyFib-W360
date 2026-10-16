@@ -1,5 +1,61 @@
 # Progress
 
+## 2026-10-16 — Webhook events when a deal's custom field values change (P5-09, P4-04, ADR-390)
+
+Status: **Implemented; its database tests run in CI only.** A change of a deal's custom field
+values alone sent no webhook event (ADR-373), so an integration keeping deals in step never learnt
+of values members, keys, automation steps and imports set.
+
+### Completed
+
+- **Migrations 0305 and 0306:** `app.webhook_capture_deal` replaced in place: `deal.updated` names
+  `fields` after the fixed details when the values of any of the company's fields differ, with
+  their keys in `detail.changedFields` in the order the fields were added; only keys of fields
+  that still exist are compared, so a field's deletion (row first, then the strip) captures
+  nothing. Its trigger and `crm_deals_changer` also fire on `attributes`. `webhook_events.detail`
+  may hold 4,096 bytes (NOT VALID; 0306 validates), enough for 50 keys of 40 characters; the
+  endpoints' `deal_details` check takes `fields`; the definer role reads a field's `key` and
+  `created_at` for the company in scope (column grant, policy `deal_capture_read`) for erasure's
+  capture. `app.capture_webhook_event` is unchanged.
+- **Domain:** `WEBHOOK_DEAL_DETAIL_CHANGES` and `WEBHOOK_DEAL_DETAILS` end with `fields` ("Custom
+  fields" in Settings); `dealUpdatedPayloadSchema` adds `changedFields`, filled at delivery by
+  `dealUpdatedChanges` (keys only with `fields`, deduplicated, checked against the key pattern,
+  empty for older events); the deal still carries no values. The event's description and the
+  OpenAPI entry say which writes send it, that values are read with `GET /deals/{id}`, that a
+  field's deletion sends nothing and erasure names the values it clears. The API's deal history
+  (`API_DEAL_HISTORY_DETAILS`) names `fields` for a change of values.
+- **Tests:** unit (`webhooks.test.ts`: the payload with and without keys, refused keys and details,
+  `dealUpdatedChanges`, the detail lists and label, the OpenAPI wording; `deals.test.ts`: the
+  history's names and order; `api.test.ts`: the endpoint schema's description); integration
+  (`webhook-events.test.ts`: 2 new, a member's edits (two values, unchanged values, a title with
+  values, values with a change of owner), a key's move with a value, an import row, an automation
+  step, a field's deletion sending nothing, erasure, the pipeline, stage, owner and detail lists,
+  the delivered payloads without values; erasure of a deal with values in 50 fields of 40-character
+  keys, the detail check, the definer role's column grants and policy, the capture function's
+  settings; `api.test.ts`: the history with changes of values; `webhooks.test.ts`: the detail
+  list's database check with four details).
+- **Docs:** ADR-390 (and ADR-373's note); ARCHITECTURE, SECURITY, THREAT-MODEL T343, DEPLOYMENT
+  (0305, 0306 and the rollout: old workers leave `fields` out until they are replaced), RUNBOOKS,
+  BACKLOG, and the matrix's H-012 and H-014 text and evidence (status unchanged).
+- **Mutation checks:** 17 deliberate regressions in the TypeScript (keys sent without `fields`,
+  keys not deduplicated, the key pattern or the string check dropped, `fields` before the fixed
+  details, `changedFields` unchecked or optional, `fields` left out at delivery, the endpoint list
+  or the label changed, the event's description, the OpenAPI sentences on values and deletion, the
+  history's `fields` dropped or out of order): 15 caught by the unit tests at first; the event's
+  description and the history's order survived and are caught by tests added. The capture trigger,
+  the deletion's silence, erasure, the filters, the grants and the detail check are SQL, covered by
+  the integration tests, which run in CI only.
+
+### Test commands and results (local, 2026-10-16)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 160 files, 1,694 tests passed                                   |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+| Migrations 0305 and 0306, pglast parse check       | passed (syntax only)                                            |
+
 ## 2026-10-16 — Review fixes for ADR-388 and ADR-389
 
 Status: **Fixed; the database and browser tests run in CI only.** Independent reviews found one

@@ -198,6 +198,7 @@ import {
   dealOwnerChangedPayloadSchema,
   dealStatusChangedPayloadSchema,
   dealUpdatedPayloadSchema,
+  dealUpdatedChanges,
   WEBHOOK_DEAL_DETAIL_CHANGES,
   taskCreatedPayloadSchema,
   taskUpdatedPayloadSchema,
@@ -1433,6 +1434,57 @@ describe('webhook payload schemas', () => {
     ).toBe(false);
   });
 
+  it('give a change of details as captured: the details known in their order, custom field values last with their keys (ADR-275, ADR-390)', () => {
+    // The details in the payload's order, whatever order or repeats the capture held.
+    expect(
+      dealUpdatedChanges({ changes: ['fields', 'expectedCloseOn', 'title'], changedFields: ['b'] }),
+    ).toEqual({ changes: ['title', 'expectedCloseOn', 'fields'], changedFields: ['b'] });
+    expect(dealUpdatedChanges({ changes: ['valueMinor', 'valueMinor'] })).toEqual({
+      changes: ['valueMinor'],
+      changedFields: [],
+    });
+    // The keys in the order captured (the order the fields were added), once each.
+    expect(
+      dealUpdatedChanges({ changes: ['fields'], changedFields: ['tier', 'seats', 'tier', 'a1'] }),
+    ).toEqual({ changes: ['fields'], changedFields: ['tier', 'seats', 'a1'] });
+    // Keys only with `fields`: an event of fixed details alone, or captured before keys were
+    // recorded, names none.
+    expect(dealUpdatedChanges({ changes: ['title'], changedFields: ['tier'] })).toEqual({
+      changes: ['title'],
+      changedFields: [],
+    });
+    expect(dealUpdatedChanges({ changes: ['title', 'valueMinor', 'expectedCloseOn'] })).toEqual({
+      changes: ['title', 'valueMinor', 'expectedCloseOn'],
+      changedFields: [],
+    });
+    expect(dealUpdatedChanges({ changes: ['fields'] })).toEqual({
+      changes: ['fields'],
+      changedFields: [],
+    });
+    expect(dealUpdatedChanges({ changes: ['fields'], changedFields: 'tier' })).toEqual({
+      changes: ['fields'],
+      changedFields: [],
+    });
+    // What is not a detail or a key is left out, never sent.
+    expect(
+      dealUpdatedChanges({
+        changes: ['owner', 'custom_fields', 7, null, 'fields'],
+        changedFields: ['Tier', 'fields.tier', 7, null, '', '_x', 'ok_2', 'a'.repeat(41)],
+      }),
+    ).toEqual({ changes: ['fields'], changedFields: ['ok_2'] });
+    expect(dealUpdatedChanges({})).toEqual({ changes: [], changedFields: [] });
+    expect(dealUpdatedChanges({ changes: 'title' })).toEqual({ changes: [], changedFields: [] });
+    // What it gives passes the payload's own description.
+    const given = dealUpdatedChanges({ changes: ['title', 'fields'], changedFields: ['tier'] });
+    expect(dealUpdatedPayloadSchema.shape.data.shape.changes.safeParse(given.changes).success).toBe(
+      true,
+    );
+    expect(
+      dealUpdatedPayloadSchema.shape.data.shape.changedFields.safeParse(given.changedFields)
+        .success,
+    ).toBe(true);
+  });
+
   it('describe the deal events (ADR-256)', () => {
     const deal = {
       id: base.id,
@@ -1491,28 +1543,55 @@ describe('webhook payload schemas', () => {
       ).toBe(true);
     }
     expect(dealOwnerChangedPayloadSchema.safeParse(created).success).toBe(false);
-    // A change of details names what changed, once each, in its order (ADR-275).
+    // A change of details names what changed, once each, in its order (ADR-275), custom field
+    // values last with the keys of the fields whose values changed (ADR-390).
     const updated = { ...created, type: 'deal.updated' };
-    for (const changes of [
-      ['title'],
-      ['valueMinor'],
-      ['expectedCloseOn'],
-      ['title', 'valueMinor', 'expectedCloseOn'],
+    for (const [changes, changedFields] of [
+      [['title'], []],
+      [['valueMinor'], []],
+      [['expectedCloseOn'], []],
+      [['title', 'valueMinor', 'expectedCloseOn'], []],
+      [['fields'], ['tier']],
+      [
+        ['title', 'fields'],
+        ['seats', 'renewal_on'],
+      ],
+      [['title', 'valueMinor', 'expectedCloseOn', 'fields'], ['a']],
     ]) {
       expect(
-        dealUpdatedPayloadSchema.safeParse({ ...updated, data: { ...created.data, changes } })
-          .success,
+        dealUpdatedPayloadSchema.safeParse({
+          ...updated,
+          data: { ...created.data, changes, changedFields },
+        }).success,
         JSON.stringify(changes),
       ).toBe(true);
     }
-    for (const changes of [[], ['owner'], ['lostReason'], undefined]) {
+    for (const [changes, changedFields] of [
+      [[], []],
+      [['owner'], []],
+      [['lostReason'], []],
+      [['custom_fields'], []],
+      [undefined, []],
+      [['title'], undefined],
+      [['title'], null],
+      [['fields'], ['Tier']],
+      [['fields'], ['fields.tier']],
+      [['fields'], [7]],
+    ]) {
       expect(
-        dealUpdatedPayloadSchema.safeParse({ ...updated, data: { ...created.data, changes } })
-          .success,
-        JSON.stringify(changes),
+        dealUpdatedPayloadSchema.safeParse({
+          ...updated,
+          data: { ...created.data, changes, changedFields },
+        }).success,
+        JSON.stringify([changes, changedFields]),
       ).toBe(false);
     }
-    expect(WEBHOOK_DEAL_DETAIL_CHANGES).toEqual(['title', 'valueMinor', 'expectedCloseOn']);
+    expect(WEBHOOK_DEAL_DETAIL_CHANGES).toEqual([
+      'title',
+      'valueMinor',
+      'expectedCloseOn',
+      'fields',
+    ]);
     expect(dealUpdatedPayloadSchema.safeParse(created).success).toBe(false);
     // Who made what the event reports, as captured (ADR-277): each kind, the key for a key's
     // change, or nobody when the change did not record it (erasure's retitling).
@@ -1526,7 +1605,12 @@ describe('webhook payload schemas', () => {
       expect(
         dealUpdatedPayloadSchema.safeParse({
           ...updated,
-          data: { ...created.data, deal: { ...deal, changedBy, apiKeyId }, changes: ['title'] },
+          data: {
+            ...created.data,
+            deal: { ...deal, changedBy, apiKeyId },
+            changes: ['title'],
+            changedFields: [],
+          },
         }).success,
         String(changedBy),
       ).toBe(true);
@@ -2055,13 +2139,36 @@ describe('the OpenAPI document', () => {
     // A change of details (ADR-275).
     const edited = doc.webhooks['deal.updated'].post.description;
     for (const words of [
-      'by a member or an API key, or by its contact’s erasure, which retitles it',
-      'changes names what changed (title, valueMinor, expectedCloseOn), never the values before',
+      'A CRM deal’s title, value, expected close date or custom field values changed: by a member, a deal import or an API key, its custom field values by an automation too, or by its contact’s erasure, which retitles it and clears its values',
+      'changes names what changed (title, valueMinor, expectedCloseOn, then fields for custom field values, with changedFields naming the keys of the fields whose values were set, changed or removed), never the values before',
       'reopened, moved, details changed, given to another owner, closed',
       'Pipelines, stages and owners an endpoint names narrow it as the other deal events',
+      // A change of custom field values (ADR-390): keys only, the values read through the API, a
+      // field's deletion silent and erasure named.
+      'Custom field values are not sent: read them with GET /deals/{id} (`deals.read`, its `fields`)',
+      'Deleting a custom field in Settings removes its values from every deal without sending this event',
+      "erasing a contact clears its deals' values and names them",
     ]) {
       expect(edited).toContain(words);
     }
+    const payload = (
+      doc.components.schemas as unknown as Record<
+        string,
+        { properties: Record<string, { description?: string }> }
+      >
+    ).WebhookDealUpdated?.properties.data as unknown as {
+      properties: Record<string, { description?: string; items?: { enum?: string[] } }>;
+      required?: string[];
+    };
+    expect(payload.properties.changes?.items?.enum).toEqual([
+      'title',
+      'valueMinor',
+      'expectedCloseOn',
+      'fields',
+    ]);
+    expect(payload.properties.changedFields?.description).toContain('Keys only, never the values');
+    expect(payload.required).toEqual(expect.arrayContaining(['changes', 'changedFields']));
+    expect(JSON.stringify(doc.webhooks['deal.updated'])).not.toMatch(/ADR-\d/);
   });
 
   it('describes who changed an order: a member, a key it names or the Payment Link (ADR-270)', () => {
@@ -3387,10 +3494,16 @@ describe('deal and task status filters (ADR-309)', () => {
 });
 
 describe('deal and task detail filters (ADR-310)', () => {
-  it('take 1 to 3 deal details or 1 to 4 task details, once each, in the order the events name their changes; null takes every change', () => {
+  it('take 1 to 4 deal details or 1 to 4 task details, once each, in the order the events name their changes; null takes every change', () => {
     expect(webhookDealDetailsSchema.parse(['expectedCloseOn', 'title', 'expectedCloseOn'])).toEqual(
       ['title', 'expectedCloseOn'],
     );
+    // Custom field values come after the fixed details, as the event's changes name them (ADR-390).
+    expect(webhookDealDetailsSchema.parse(['fields', 'valueMinor'])).toEqual([
+      'valueMinor',
+      'fields',
+    ]);
+    expect(webhookDealDetailsSchema.parse(['fields'])).toEqual(['fields']);
     expect(webhookTaskDetailsSchema.parse(['remindAt', 'dueAt', 'remindAt'])).toEqual([
       'dueAt',
       'remindAt',
@@ -3414,7 +3527,9 @@ describe('deal and task detail filters (ADR-310)', () => {
       ['Title'],
       'title',
       [null],
-      Array(4).fill('title'),
+      ['custom_fields'],
+      ['fields.tier'],
+      Array(5).fill('title'),
     ]) {
       expect(webhookDealDetailsSchema.safeParse(refused).success, JSON.stringify(refused)).toBe(
         false,
@@ -3432,7 +3547,7 @@ describe('deal and task detail filters (ADR-310)', () => {
       'Choose deal details from the list.',
     );
     expect(
-      webhookDealDetailsSchema.safeParse(Array(4).fill('title')).error?.issues[0]?.message,
+      webhookDealDetailsSchema.safeParse(Array(5).fill('title')).error?.issues[0]?.message,
     ).toBe('Give each deal detail once.');
     expect(webhookTaskDetailsSchema.safeParse([]).error?.issues[0]?.message).toBe(
       'Choose at least one task detail, or take every change.',
@@ -3447,6 +3562,7 @@ describe('deal and task detail filters (ADR-310)', () => {
       title: 'Title',
       valueMinor: 'Value',
       expectedCloseOn: 'Expected close date',
+      fields: 'Custom fields',
     });
     expect(WEBHOOK_TASK_DETAIL_LABELS).toEqual({
       title: 'Title',

@@ -3460,7 +3460,7 @@ describe('deal and task detail filters (ADR-310)', () => {
       chosen: ['expectedCloseOn', 'title', 'expectedCloseOn'],
       kept: ['title', 'expectedCloseOn'],
       changed: ['valueMinor'],
-      tooMany: `'{title,valueMinor,expectedCloseOn,title}'`,
+      tooMany: `'{title,valueMinor,expectedCloseOn,fields,title}'`,
     },
     {
       field: 'taskDetails',

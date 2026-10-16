@@ -1338,7 +1338,7 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   take it shared (`lockedDealFields`) before locking the deal, so a deletion's `attributes - key`
   never misses a value written meanwhile. `GET /deal-fields` lists them, `Deal.fields` gives values,
   the deals CSV adds a column per field, and the API's deal history leaves out changes of values
-  alone. 0293 also replaces `app.erase_contact` to clear the erased contact's deals' values. Since
+  alone (since ADR-390 it names them as `fields`, and `deal.updated` reports them). 0293 also replaces `app.erase_contact` to clear the erased contact's deals' values. Since
   ADR-379 the new-deal forms (the board, the contact page and the inbox) take values too:
   `crmLookups` (`apps/web/src/server/crm.ts`) reads the definitions with the pipelines and members,
   and `NewDealForm` sends the non-empty ones to `createDeal`.
@@ -2188,6 +2188,18 @@ state` for one that becomes skipped from another state, each only for a message 
   with the deal, stage and pipeline ids and the names of the changed details in `detail`, between a
   move and a change of owner made by the same update. Its payload (`dealOf`) adds `changes` to the
   deal as it is when delivered.
+- **Deal custom field value events** (migrations 0305–0306, ADR-390): the trigger also fires on
+  `attributes` and names `fields` last in `changes` when the values of any of the company's fields
+  differ, with their keys in `detail.changedFields` in the order the fields were added (read from
+  `app.crm_deal_fields`, so a key no field has is never compared). A field's deletion deletes its
+  row before stripping its key from the deals, so the strip captures nothing; erasure clearing
+  values captures them as the definer role, which may now read a field's key and `created_at` for
+  the company in scope (policy `deal_capture_read`). `crm_deals_changer` also fires on `attributes`.
+  The payload adds `changedFields` (`dealUpdatedChanges`: keys only with `fields`, deduplicated,
+  checked against the key pattern; empty for older events); the deal still carries no values. 0305
+  widens `webhook_events.detail` to 4,096 bytes (NOT VALID; 0306 validates) for 50 keys of 40
+  characters, and lets `deal_details` hold `fields`. The API's deal history names `fields` for a
+  `deal_updated` entry naming `custom_fields`.
 - **Task events** (migrations 0177–0178, ADR-261): triggers on `app.crm_tasks` capture
   `task.created` when a task is inserted (members, the runner's task steps, keys) and
   `task.status_changed` when an update changes its status (members, keys through `apiUpdateTask`),
@@ -2335,7 +2347,7 @@ HyFib-W360-Webhooks/1`. Secrets are `whsec_` + 32 random bytes, encrypted with t
   list.
 - **Deal and task detail filters** (migration 0233, ADR-310): `deal_details` and `task_details` on
   an endpoint list the details whose changes it takes as `deal.updated` (`title`, `valueMinor`,
-  `expectedCloseOn`) or `task.updated` (`title`, `notes`, `dueAt`, `remindAt`), null for every
+  `expectedCloseOn`, and since 0305 `fields`) or `task.updated` (`title`, `notes`, `dueAt`, `remindAt`), null for every
   change; checks keep each to its known details and to endpoints that take its event.
   `app.capture_webhook_event` (replaced with the same signature) creates a change's delivery only
   for endpoints whose list is null or holds a detail the change changed, as the deal and task

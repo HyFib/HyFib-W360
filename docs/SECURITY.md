@@ -165,7 +165,15 @@ Phase 3 rules on top of the matrix (enforced in domain services and re-checked w
   ADR-275) names which of the title, value and expected close date changed, never their values
   before, and gives the deal as it is when delivered, so erasure's retitling replaces a title that
   may name the person; its capture during erasure runs as the definer role, which may read a deal's
-  id and owner beyond what erasure already read, nothing more.
+  id and owner beyond what erasure already read, nothing more. A change of custom field values
+  (ADR-390) is one of those details (`fields`), with the keys of the fields whose values changed,
+  never a value, before or after: a receiver reads values with `GET /deals/{id}` and `deals.read`.
+  Only keys of fields the company still has are compared, read under row security in the change's
+  transaction, so deleting a field (which deletes its row, then strips its values) sends no
+  per-deal event, and nothing a company, a request or a job payload supplies can turn events off:
+  there is no setting or flag to set. Erasure's clearing of values names them, as its retitling
+  does; for it the definer role reads a field's key and when it was added, for the company erasure
+  runs for (a column grant and a policy on the company in scope), and nothing else of a field.
 - Integrations hear of CRM tasks (ADR-261) through the company's own endpoints only: `task.created`
   and `task.status_changed` give the task's title, statuses, due time, assignee and deal ids, its
   creator and its contact as the API describes it, never its notes (free text members write;
@@ -1627,7 +1635,8 @@ Phase 5 rules (outgoing webhooks, P5-09):
   against the details the change changed, in the transaction that changes the deal or the task: it
   narrows what one endpoint receives and never adds an event or a delivery for another endpoint or
   company, and the payload is unchanged (never the values before). Detail names are not personal
-  data. Audited with the lists (unit tests; integration tests, run in CI only).
+  data; `fields` (any custom field value, ADR-390) is one of them. Audited with the lists (unit
+  tests; integration tests, run in CI only).
 - An endpoint can take `satisfaction_survey.answered` only for the answers credited to some members
   or of some teams' conversations (ADR-311), chosen with `developer.manage` in Settings or
   `webhooks.manage` through the API. Each id a list adds is checked in the company's scope (members

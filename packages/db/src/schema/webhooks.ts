@@ -246,7 +246,7 @@ export type WebhookTaskStatus = TaskStatus;
  * The details whose change a `deal.updated` endpoint can choose (ADR-310), as the event's `changes`
  * names them.
  */
-export type WebhookDealDetail = 'title' | 'valueMinor' | 'expectedCloseOn';
+export type WebhookDealDetail = 'title' | 'valueMinor' | 'expectedCloseOn' | 'fields';
 
 /**
  * The details whose change a `task.updated` endpoint can choose (ADR-310), as the event's `changes`

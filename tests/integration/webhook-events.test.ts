@@ -7408,6 +7408,343 @@ describe('deal events (ADR-256)', () => {
     expect(changesAt(titles)).toEqual(['title', 'title+expectedCloseOn']);
     expect(changesAt(everyChange)).toEqual(['title', 'title+expectedCloseOn', 'valueMinor']);
   });
+
+  it("sends a change of custom field values as deal.updated naming fields and the keys, from members, keys, imports and automations, to the endpoints of the deal's pipeline, stage and owner, never for a field's deletion, and for erasure (ADR-390)", async () => {
+    const s = await crmCompany();
+    const { c, owner } = s;
+    const agent = await fx.ctx(c, c.agent);
+    const svc = crm();
+    /** An endpoint of the company taking the events given, with the filters given. */
+    const add = async (eventTypes: WebhookEventType[], filters: Record<string, unknown>) => {
+      const path = `/ok/${randomBytes(6).toString('hex')}`;
+      const created = await webhooks().create(owner, {
+        url: `http://${HOST}:${port}${path}`,
+        eventTypes,
+        ...filters,
+      });
+      return { ...created, path };
+    };
+    const everyone = await add(
+      ['deal.updated', 'deal.stage_changed', 'deal.owner_changed', 'deal.status_changed'],
+      {},
+    );
+    const agents = await add(['deal.updated'], { ownerIds: [agent.membership.id] });
+    const renewals = await add(['deal.updated'], { pipelineIds: [s.renewalsId] });
+    const proposals = await add(['deal.updated'], { stageIds: [s.sales[2]] });
+    const valuesOnly = await add(['deal.updated'], { dealDetails: ['fields'] });
+    const titlesOnly = await add(['deal.updated'], { dealDetails: ['title'] });
+    // The fields in the order they are added: seats, region, tier.
+    await svc.createDealField(owner, { label: 'Seats', key: 'seats', type: 'number' });
+    await svc.createDealField(owner, { label: 'Region', key: 'region', type: 'text' });
+    const tier = await svc.createDealField(owner, {
+      label: 'Tier',
+      key: 'tier',
+      type: 'choice',
+      options: ['Gold', 'Silver'],
+    });
+    const jaya = await newContact(owner, 'Jaya');
+    // Its addition with a value sends deal.created only, which no endpoint here takes.
+    const { id: dealId } = await svc.createDeal(owner, {
+      contactId: jaya.id,
+      pipelineId: s.salesId,
+      stageId: s.sales[0],
+      title: 'Annual plan',
+      ownerMembershipId: agent.membership.id,
+      fields: { seats: '12' },
+    });
+    expect(await dealEventsOf(c)).toEqual([]);
+
+    // A member edits the agent's deal on its page: two values; the same values again (nothing,
+    // the version kept); its title with a value changed and one removed; a value with its owner.
+    const edit = (
+      expectedVersion: number,
+      title: string,
+      fields: Record<string, string>,
+      ownerMembershipId = agent.membership.id,
+    ) =>
+      svc.updateDeal(owner, {
+        id: dealId,
+        expectedVersion,
+        title,
+        value: '',
+        ownerMembershipId,
+        expectedCloseOn: null,
+        fields,
+      });
+    await edit(1, 'Annual plan', { region: 'North', tier: 'gold' });
+    expect(await edit(2, 'Annual plan', { region: 'North', tier: 'Gold', seats: '12' })).toEqual({
+      version: 2,
+    });
+    await edit(2, 'Annual plan 2027', { region: '', seats: '15' });
+    await edit(3, 'Annual plan 2027', { tier: 'Silver' }, owner.membership.id);
+
+    // A key moves it and changes a value in one request (moved, then details changed), then sends
+    // the same value again, which changes nothing.
+    const created = await createApiKeysService({ db: fx.dbs.app, clock: systemClock }).create(
+      owner,
+      { name: 'CRM sync', scopes: ['deals.write'], expiresInDays: 0 },
+    );
+    const key = await authenticateApiToken(fx.dbs.app, created.token, uuidv7());
+    if (!key) throw new Error('a new key does not authenticate');
+    const apiDeps = { db: fx.dbs.app, clock: systemClock };
+    await apiUpdateDeal(apiDeps, key, dealId, { stageId: s.sales[2], fields: { seats: 20 } });
+    await apiUpdateDeal(apiDeps, key, dealId, { fields: { seats: 20 } });
+
+    // Deleting a field strips its value from the deal and sends nothing: the company's fields
+    // changed, not its deals.
+    const before = (await dealEventsOf(c)).length;
+    await svc.deleteDealField(owner, tier.id);
+    const [stripped] = await fx.query<{ attributes: Record<string, unknown> }>(
+      'SELECT attributes FROM app.crm_deals WHERE id = $1',
+      [dealId],
+    );
+    expect(stripped?.attributes).toEqual({ seats: 20 });
+    expect(await dealEventsOf(c)).toHaveLength(before);
+
+    // A deals file changes a value by the deal's id, as the member importing it.
+    const file = {
+      fileName: 'deals.csv',
+      text: ['deal_id,title,seats', `${dealId},Annual plan 2027,25`].join('\n'),
+      pipelineId: s.salesId,
+      phoneFormat: 'international',
+      mapping: { dealId: 0, title: 1, fields: { seats: 2 } },
+    };
+    const check = await svc.checkDealImport(owner, file);
+    expect(check.rows.map((r) => r.action)).toEqual(['update']);
+    expect(
+      await svc.importDeals(owner, { ...file, expectedVersions: check.expectedVersions }),
+    ).toMatchObject({ updated: 1, errorCount: 0 });
+
+    // An automation adds a deal for a customer who writes and sets two of its values.
+    const automations = createAutomationService({
+      db: fx.dbs.app,
+      clock: systemClock,
+      jobs: fx.jobs(),
+      signer: fx.signer,
+    });
+    const { id: automationId } = await automations.createAutomation(owner, { name: 'Leads' });
+    const saved = await automations.updateAutomation(owner, {
+      id: automationId,
+      expectedVersion: 0,
+      name: 'Leads',
+      description: null,
+      channelAccountId: null,
+      trigger: {
+        type: 'keyword',
+        keywords: ['price'],
+        match: 'contains',
+        hours: 'any',
+        cooldownMinutes: 0,
+      },
+      graph: {
+        version: 1,
+        start: 'deal',
+        nodes: [
+          {
+            id: 'deal',
+            type: 'create_deal',
+            title: 'Kettles for {{name}}',
+            pipelineId: s.salesId,
+            stageId: s.sales[0],
+            value: null,
+            ownerMembershipId: null,
+            next: 'fields',
+          },
+          {
+            id: 'fields',
+            type: 'update_deal_fields',
+            pipelineId: s.salesId,
+            values: [
+              { field: 'region', value: 'South' },
+              { field: 'seats', value: '3' },
+            ],
+            next: null,
+          },
+        ],
+      },
+    });
+    expect(saved.issues).toEqual([]);
+    await automations.publishAutomation(owner, {
+      id: automationId,
+      expectedVersion: saved.version,
+      note: null,
+    });
+    const { conversation_id: conversationId } = await inbound(c, waId(), 'what is the price?');
+    const [run] = await fx.query<{ id: string }>(
+      'SELECT id FROM app.automation_runs WHERE conversation_id = $1',
+      [conversationId],
+    );
+    const advanced = await advanceAutomationRun(
+      {
+        db: fx.dbs.app,
+        jobs: fx.jobs(),
+        signer: fx.signer,
+        clock: systemClock,
+        keyring: fx.keyring,
+      },
+      authorizedTenantScope(c.tenant.id, null),
+      run!.id,
+      null,
+    );
+    expect(advanced.outcome).toBe('ended');
+    const [byRun] = await fx.query<{ id: string }>(
+      'SELECT id FROM app.crm_deals WHERE tenant_id = $1 AND created_by_automation_id = $2',
+      [c.tenant.id, automationId],
+    );
+
+    // Erasing Jaya retitles her deal and clears its values, as the definer role: one change of
+    // details naming both, with nobody as its maker.
+    await contactsService().eraseContact(owner, { contactId: jaya.id, suppress: false });
+
+    // One event per change, in order, with the keys of the fields whose values changed in the
+    // order the fields were added, each to the endpoints its filters let through.
+    const events = await dealEventsOf(c);
+    const row = (e: EventRow) => [
+      e.type,
+      e.detail.dealId,
+      e.detail.stageId,
+      (e.detail.changes as string[] | undefined) ?? null,
+      (e.detail.changedFields as string[] | undefined) ?? null,
+      e.detail.changedBy,
+      e.deliveries,
+    ];
+    const [d, run0, s0, s2] = [dealId, byRun!.id, s.sales[0], s.sales[2]];
+    expect(events.map(row)).toEqual([
+      ['deal.updated', d, s0, ['fields'], ['region', 'tier'], 'member', 3],
+      ['deal.updated', d, s0, ['title', 'fields'], ['seats', 'region'], 'member', 4],
+      ['deal.updated', d, s0, ['fields'], ['tier'], 'member', 3],
+      ['deal.owner_changed', d, s0, null, null, 'member', 1],
+      ['deal.stage_changed', d, s2, null, null, 'api', 1],
+      ['deal.updated', d, s2, ['fields'], ['seats'], 'api', 3],
+      ['deal.updated', d, s2, ['fields'], ['seats'], 'member', 3],
+      ['deal.updated', run0, s0, ['fields'], ['seats', 'region'], 'automation', 2],
+      ['deal.updated', d, s2, ['title', 'fields'], ['seats'], null, 4],
+    ]);
+
+    // Delivered, each names what changed and the keys, never a value: the deal carries no custom
+    // field values, as before.
+    await deliverDue(c);
+    const bodies = bodiesById(everyone.path);
+    expect(bodies.size).toBe(events.length);
+    for (const event of events.filter((e) => e.type === 'deal.updated')) {
+      const body = bodies.get(event.id);
+      expect(dealUpdatedPayloadSchema.safeParse(body).success, event.id).toBe(true);
+      expect(body?.data.changes, event.id).toEqual(event.detail.changes);
+      expect(body?.data.changedFields, event.id).toEqual(event.detail.changedFields);
+      expect(dealIn(body), event.id).not.toHaveProperty('fields');
+      expect(JSON.stringify(body)).not.toMatch(/North|South|Silver/);
+    }
+    const keysAt = (path: string) =>
+      bodiesAt(path)
+        .map(
+          (b) =>
+            `${(b.data.changes as string[]).join('+')}:${(b.data.changedFields as string[]).join('+')}`,
+        )
+        .sort();
+    expect(keysAt(agents.path)).toEqual([
+      'fields:region+tier',
+      'fields:tier',
+      'title+fields:seats+region',
+    ]);
+    expect(bodiesAt(renewals.path)).toEqual([]);
+    expect(keysAt(proposals.path)).toEqual(['fields:seats', 'fields:seats', 'title+fields:seats']);
+    expect(keysAt(valuesOnly.path)).toEqual([
+      'fields:region+tier',
+      'fields:seats',
+      'fields:seats',
+      'fields:seats+region',
+      'fields:tier',
+      'title+fields:seats',
+      'title+fields:seats+region',
+    ]);
+    expect(keysAt(titlesOnly.path)).toEqual(['title+fields:seats', 'title+fields:seats+region']);
+  });
+
+  it("captures erasure clearing values in all of a company's fields, and lets the definer role read only fields' keys and order, of the company in scope (ADR-390)", async () => {
+    const s = await crmCompany();
+    const { c, owner } = s;
+    const svc = crm();
+    const hook = await addEndpoint(c, ['deal.updated']);
+    // The most fields a company can have, each with the longest key.
+    const keys = Array.from({ length: 50 }, (_, n) =>
+      `k${String(n).padStart(2, '0')}`.padEnd(40, 'x'),
+    );
+    for (const key of keys) {
+      await svc.createDealField(owner, { label: key, key, type: 'text' });
+    }
+    const jaya = await newContact(owner, 'Jaya');
+    const { id: dealId } = await svc.createDeal(owner, {
+      contactId: jaya.id,
+      pipelineId: s.salesId,
+      stageId: s.sales[0],
+      title: 'Annual plan',
+      fields: Object.fromEntries(keys.map((key) => [key, 'v'])),
+    });
+    // Another company's field of the same key is never read for this company's deals.
+    const other = await crmCompany();
+    await crm().createDealField(other.owner, { label: 'Same key', key: keys[0]!, type: 'text' });
+
+    await contactsService().eraseContact(owner, { contactId: jaya.id, suppress: false });
+    const events = await dealEventsOf(c);
+    expect(events.map((e) => [e.type, e.detail.dealId, e.detail.changes, e.deliveries])).toEqual([
+      ['deal.updated', dealId, ['title', 'fields'], 1],
+    ]);
+    expect(events[0]!.detail.changedFields).toEqual(keys);
+    // Larger than the 2,048 bytes events' details were held to before (measured uncompressed, as
+    // the check measures a row it is given).
+    const [size] = await fx.query<{ bytes: number }>(
+      `SELECT pg_column_size(detail || '{}'::jsonb) AS bytes FROM app.webhook_events WHERE id = $1`,
+      [events[0]!.id],
+    );
+    expect(size!.bytes).toBeGreaterThan(2048);
+    await deliverDue(c);
+    const [body] = bodiesAt(hook.path);
+    expect(dealUpdatedPayloadSchema.safeParse(body).success).toBe(true);
+    expect(body?.data.changedFields).toEqual(keys);
+    // The check holds the new bound, validated (0306).
+    const [check] = await fx.query<{ definition: string; validated: boolean }>(
+      `SELECT pg_get_constraintdef(oid) AS definition, convalidated AS validated FROM pg_constraint
+        WHERE conrelid = 'app.webhook_events'::regclass AND conname = 'webhook_events_detail_check'`,
+    );
+    expect(check).toEqual({ definition: expect.stringContaining('<= 4096'), validated: true });
+
+    // The definer role reads a field's key and when it was added (and the id and company it
+    // already read), nothing else, and changes nothing.
+    const can = async (column: string, privilege: string) =>
+      (
+        await fx.query<{ ok: boolean }>(
+          `SELECT has_column_privilege('w360_definer', 'app.crm_deal_fields', $1, $2) AS ok`,
+          [column, privilege],
+        )
+      )[0]!.ok;
+    for (const column of ['tenant_id', 'id', 'key', 'created_at']) {
+      expect(await can(column, 'SELECT'), column).toBe(true);
+    }
+    for (const column of ['label', 'type', 'options']) {
+      expect(await can(column, 'SELECT'), column).toBe(false);
+    }
+    for (const column of ['key', 'label', 'options']) {
+      expect(await can(column, 'UPDATE'), column).toBe(false);
+    }
+    const [insert] = await fx.query<{ ok: boolean }>(
+      `SELECT has_table_privilege('w360_definer', 'app.crm_deal_fields', 'INSERT') AS ok`,
+    );
+    expect(insert?.ok).toBe(false);
+    // Its new policy reads the company in scope only.
+    const [policy] = await fx.query<{ cmd: string; roles: string[]; qual: string }>(
+      `SELECT cmd, roles::text[] AS roles, qual FROM pg_policies
+        WHERE schemaname = 'app' AND tablename = 'crm_deal_fields'
+          AND policyname = 'deal_capture_read'`,
+    );
+    expect(policy).toMatchObject({ cmd: 'SELECT', roles: ['w360_definer'] });
+    expect(policy?.qual).toContain('current_tenant_id()');
+    // The capture function stays the company's own (not SECURITY DEFINER) and pins its search path.
+    const [fn] = await fx.query<{ definer: boolean; config: string[] }>(
+      `SELECT prosecdef AS definer, proconfig AS config FROM pg_proc
+        WHERE oid = 'app.webhook_capture_deal()'::regprocedure`,
+    );
+    expect(fn).toEqual({ definer: false, config: ['search_path=pg_catalog, pg_temp'] });
+  });
 });
 
 describe('change-maker filters for deal, task and note events (ADR-306)', () => {

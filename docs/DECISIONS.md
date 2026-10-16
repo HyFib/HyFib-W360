@@ -14793,7 +14793,7 @@ Decision:
 
 Not built: deal webhook events for a change of values (deal.updated names title, valueMinor and
 expectedCloseOn only, so a change of values alone sends no event, and the API's deal history does
-not list it), choice or select types, an order of fields other than when they were added, defining
+not list it; since built: ADR-390), choice or select types, an order of fields other than when they were added, defining
 fields through the API, values on the new-deal form in the app (since built: ADR-379), values set
 by automation steps, filtering or reporting by a value, and CSV import of deals (since built:
 ADR-374, with values mapped by key).
@@ -15661,3 +15661,80 @@ Nothing in the database stopped two of a team's ranges from opening at the same 
 constraint now does, and its index replaces the read index. All of these were fixed. The ranking of
 the notice of overdue replies by team (ADR-241) still has no test that fails if teams with their own
 week are ranked together with the others; PROGRESS notes the gap.
+
+## ADR-390 A webhook event when a deal's custom field values change (P5-09, P4-04) (2026-10-16)
+
+Context: `deal.updated` (ADR-275) named changes of a deal's title, value and expected close date,
+but a change of its custom field values (ADR-373) sent no event. Members fill values on the deal
+page, keys through `fields`, automations with "Update deal fields" steps (ADR-386) and imports from
+a file (ADR-387), so an integration keeping deals in step (a CRM, a forecast sheet) never learnt of
+most of what changed on a deal. ADR-373 left webhook events for changes of values unbuilt.
+
+Decision:
+
+- **The same event, one more detail:** `deal.updated` names `fields` in `changes`, after the fixed
+  details (`title`, `valueMinor`, `expectedCloseOn`, `fields`), when an update changes the values of
+  any of the company's fields, and a new `changedFields` gives the keys of the fields whose values
+  were set, changed or removed, once each, in the order the fields were added (as Settings and
+  `GET /deal-fields` list them); it is empty when `changes` does not name `fields`, and for events
+  captured before. A new event type was not chosen: a change of values is a change of the deal's
+  details, endpoints already taking "Deal details" receive it without being changed, one edit of a
+  title and a value stays one event, and the pipeline, stage, owner, change-maker and key lists
+  (ADR-263 to ADR-265, ADR-306, ADR-321) apply as they do to every deal event. Keys go in their own
+  list rather than as `fields.<key>` entries in `changes` (as `contact.updated` names them) so that
+  `changes` stays the fixed list endpoints' detail lists are matched against and older workers
+  filter.
+- **Keys, never values:** values before a change are never sent (ADR-275), and the deal in the
+  payload still carries no custom field values (ADR-373, ADR-385): a receiver reads them with
+  `GET /deals/{id}` (`fields`, `deals.read`). Values are free text a company defines and may name
+  the customer, an endpoint has no scope that would say it may receive them, and every other deal
+  event's payload stays as it was. The OpenAPI document describes `fields` and `changedFields`.
+- **Which writes send it:** every update of `crm_deals.attributes` that changes a value of a field
+  the company has, whoever makes it: a member on the deal page, a key (`PATCH /deals/{id}` with
+  `fields`), an automation's step and a deal import changing a deal, each with its `changedBy`;
+  writes whose values compare equal (the same values again, an import row or a step that changed
+  nothing) send nothing. A deal added with values sends `deal.created` only, as before.
+- **A field's deletion sends no per-deal event:** deleting a field strips its value from every deal
+  (possibly thousands), a change of the company's field definitions, not of its deals; receivers
+  learn it from `GET /deal-fields`. The capture compares only keys of fields the company still has,
+  read under row security in the change's transaction, and the deletion deletes the field's row
+  before stripping the key (ADR-373), so the strip compares nothing. There is no setting, flag or
+  input that turns events off, so nothing a company, a request or a job payload supplies can
+  suppress an event; a stored key no field has (none exists, since deletion strips it under the
+  fields' lock) would never be compared either.
+- **Erasure names the values it clears:** erasing a contact clears its deals' values with their
+  title (ADR-373), and its `deal.updated` names `title` and `fields` with the keys cleared, as
+  ADR-275 sends its retitling, so a receiver drops values that may name the person. Erasure runs as
+  the definer role, which may now read a field's key and when it was added (a column grant) for the
+  company erasure runs for (a policy on `app.current_tenant_id()`), and nothing else of a field.
+- **Its place among one update's steps:** with the other details: reopened, moved, details changed
+  (one `deal.updated` naming every detail the update changed), given to another owner, closed, each
+  stamped with `clock_timestamp()`. A key moving a deal and changing a value sends the move, then the
+  change; an import row closing the deal it changes sends the change, then the close.
+- **Endpoints may choose it:** "Custom fields" (`fields`) joins the details an endpoint taking
+  `deal.updated` may list (ADR-310). Lists saved before keep their details, so they do not receive a
+  change of values alone until it is added; null still takes every change.
+- **The API's deal history** (ADR-281) gives the changes the deal events report, so a `deal_updated`
+  entry naming custom fields is now given, with `fields` in its `changes` (the timeline does not
+  keep keys, so the history names none); a change of products alone is still not given.
+- **Who made the change:** the changer trigger (ADR-277) now also fires on values, so a change of
+  values written without its maker (erasure, a field's deletion) never names an earlier one.
+- **Migrations 0305 and 0306:** 0305 replaces `app.webhook_capture_deal` in place (not SECURITY
+  DEFINER: it runs as the role making the change; search path pinned) and its trigger and the
+  changer trigger with `attributes` in their column lists and conditions; widens the events' detail
+  check from 2,048 to 4,096 bytes (NOT VALID; 0306 validates it while captures go on), since 50
+  keys of 40 characters with the rest of the detail take about 2,600 bytes and erasure of such a
+  deal must not fail; replaces the endpoints' `deal_details` check to take 1 to 4 details with
+  `fields` (validated at once: at most 10 endpoints per company); and grants the definer role
+  `SELECT (key, created_at)` on `app.crm_deal_fields` with the policy `deal_capture_read`.
+  `app.capture_webhook_event` is unchanged: its detail filter already matches `changes`.
+- **Rollout:** the trigger runs in the database, so events name values from the migration on,
+  whichever release changed the deal. A worker from before it renders such an event with `changes`
+  leaving out `fields` (empty for a change of values alone) and without `changedFields`; workers roll
+  out right after the migration, as usual, and a delivery an old worker made can be replayed. An old
+  web server neither offers `fields` in Settings nor saves an endpoint whose list holds it, and its
+  history leaves the entries out (`docs/DEPLOYMENT.md`).
+
+Not built: the values (or values before) in the payload, keys named in the API's deal history,
+an event of its own for a change of values, a notice to receivers when a field is deleted, and an
+end-to-end test of its own.

@@ -6753,10 +6753,16 @@ describe('CRM pipelines and deals (ADR-253)', () => {
     expect(
       (await apiUpdateDeal(deps(), writer.ctx, deal.id, { fields: { signed: true } })).version,
     ).toBe(2);
-    // History names the details deal events report; a change of custom fields alone is not one.
+    // History names the details deal events report, custom field values among them (ADR-390).
     expect(
-      (await apiListDealHistory(deps(), reader.ctx, deal.id, {})).data.map((e) => e.type),
-    ).toEqual(['created']);
+      (await apiListDealHistory(deps(), reader.ctx, deal.id, {})).data.map((e) => [
+        e.type,
+        e.changes,
+      ]),
+    ).toEqual([
+      ['updated', ['fields']],
+      ['created', null],
+    ]);
     await apiUpdateDeal(deps(), writer.ctx, deal.id, {
       title: 'Seats plan',
       fields: { signed: false },
@@ -6767,7 +6773,8 @@ describe('CRM pipelines and deals (ADR-253)', () => {
         e.changes,
       ]),
     ).toEqual([
-      ['updated', ['title']],
+      ['updated', ['title', 'fields']],
+      ['updated', ['fields']],
       ['created', null],
     ]);
   });
