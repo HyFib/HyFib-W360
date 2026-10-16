@@ -970,6 +970,7 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
       'unit_price_minor',
       'currency',
       'created_by_membership_id',
+      'created_by_api_key_id',
       'created_at',
     ],
   },

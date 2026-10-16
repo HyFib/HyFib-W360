@@ -335,7 +335,12 @@ verification, app review, Embedded Signup configuration).
   **[Products on deals built; their database and browser tests run only in CI]** (ADR-375,
   migration 0294: catalog products listed on a deal with a quantity and an exact unit price, at the
   deal's version and on its timeline, their total shown and usable as the deal's value. Not built:
-  items in the API, webhooks and CSV, discounts and taxes).
+  items in webhooks and CSV, discounts and taxes).
+  **[Products on deals through the API built; their database tests run only in CI]** (ADR-378,
+  migrations 0297 and 0298: `GET`/`POST /deals/{id}/items` and `DELETE /deals/{id}/items/{itemId}`;
+  products named by content id from the company's connected catalogs, unit prices in minor units,
+  reading with `deals.read`, adding with `deals.write` and `orders.read`, removing with
+  `deals.write`, at the deal's version, on its timeline and audited as the key).
   **Remaining:** CRM connectors (HubSpot,
   Salesforce, Zoho: integrations), reminder emails through the production SMTP provider (release
   checklist).
@@ -990,6 +995,10 @@ verification, app review, Embedded Signup configuration).
   such as a webhook endpoint's whole configuration, an order with its items or a template with its
   history, are kept past the 64 KiB that failed them with an internal error; a larger answer is
   refused with 422 `idempotency_response_too_large` and the request rolled back).
+  **[Products on deals through the public API built; its database tests run only in CI]**
+  (ADR-378, migrations 0297 and 0298: `GET /deals/{id}/items` with `deals.read`, `POST` with
+  `deals.write` and `orders.read` and `DELETE /deals/{id}/items/{itemId}` with `deals.write`, as
+  members change them on the deal page; recorded under P4-04).
   Remaining: call-to-action messages through the API, taking
   reactions back,
   changing a field's type,

@@ -236,14 +236,14 @@ export const API_SCOPE_INFO: Record<
   'deals.read': {
     label: 'Read CRM deals',
     description:
-      "List the company's CRM pipelines with their stages and each stage's chance of winning, and its deals with their pipeline, stage, status, value, expected close date and owner, and their contact and conversation ids, and read each pipeline's weighted forecast as Reports shows it. Never notes, tasks or the timeline. Needs the CRM in the company's plan.",
+      "List the company's CRM pipelines with their stages and each stage's chance of winning, and its deals with their pipeline, stage, status, value, expected close date and owner, and their contact and conversation ids, and read each pipeline's weighted forecast as Reports shows it and the products listed on each deal. Never notes, tasks or the timeline. Needs the CRM in the company's plan.",
     permission: 'crm.read',
     writes: false,
   },
   'deals.write': {
     label: 'Create and change CRM deals',
     description:
-      "Create deals for the company's contacts in its active pipelines and change them as members do on the board: their title, value, owner and expected close date, their stage or pipeline, and closing them as won or lost or reopening them, recorded as done through the API. Needs the CRM in the company's plan.",
+      "Create deals for the company's contacts in its active pipelines and change them as members do on the board: their title, value, owner and expected close date, their stage or pipeline, and closing them as won or lost or reopening them, and remove products listed on them, recorded as done through the API. With the scope that reads WhatsApp orders, also list products of the company's catalogs on deals. Needs the CRM in the company's plan.",
     permission: 'crm.write',
     writes: true,
   },

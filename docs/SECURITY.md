@@ -1348,6 +1348,16 @@ Phase 5 rules (Public API, P5-08):
   company, both under row security. Changes are at the deal's version and on its timeline; unit
   prices are typed by members, exact, never read from Meta's price text; an erased contact's deal
   takes none.
+- Products on deals through the API (ADR-378): `GET /deals/{id}/items` needs `deals.read`; `POST`
+  needs `deals.write` and `orders.read` (the scopes granted only with `crm.write` and
+  `commerce.read`, the members' rule) and Commerce in the plan; `DELETE` needs `deals.write`; all
+  need the CRM in the plan and writes an active company, checked before anything is read. Deals and
+  products are the key's company's only (row security and explicit company conditions; another
+  company's deal answers 404, its products are unknown content ids). The contact is locked before
+  the deal as erasure does; an erased contact's deal takes no change; `expectedVersion` stops a key
+  overwriting a change it did not see. Each change is on the timeline naming the key, the item
+  names the key that added it (a member or a key, enforced by a check), and the audit log records
+  it as the key (unit tests; integration tests, run in CI only).
 - Following message changes (ADR-116): `GET /message-changes` reads the key's company's messages
   only (`conversations.read`, which only members who read every conversation grant; RLS and an
   explicit company filter). Its cursor is sealed as the contact feed's is, with the feed's name and

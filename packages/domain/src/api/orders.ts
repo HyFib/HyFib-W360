@@ -198,8 +198,11 @@ const toApiOrder = (row: OrderRow, items: ApiOrderItem[]): ApiOrder => ({
   updatedAt: row.updatedAt.toISOString(),
 });
 
-/** Orders are Commerce's: a plan without it reads none, as it sends no products (ADR-086). */
-async function assertCommerceInPlan(tx: Tx, tenantId: string): Promise<void> {
+/**
+ * Orders are Commerce's: a plan without it reads none, as it sends no products (ADR-086), nor puts
+ * catalog products on deals (ADR-378).
+ */
+export async function assertCommerceInPlan(tx: Tx, tenantId: string): Promise<void> {
   const entitlements = await loadEntitlements(tx, tenantId);
   if (!entitlements.modules.has('commerce')) {
     throw new AppError('forbidden', "Your company's plan does not include Commerce.", {

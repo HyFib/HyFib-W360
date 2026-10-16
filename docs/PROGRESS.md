@@ -1,5 +1,51 @@
 # Progress
 
+## 2026-10-16 — Products on deals through the public API (P4-04, P5-08, ADR-378)
+
+Status: **Implemented; its database tests run in CI only.** Members listed catalog products on
+deals (ADR-375), but the public API read and wrote deals without them.
+
+### Completed
+
+- **Database:** migration 0297 lets `app.crm_deal_items.created_by_membership_id` be null and adds
+  `created_by_api_key_id` with a foreign key to the company's keys and a check that an item has
+  exactly one creator, both NOT VALID; 0298 validates them.
+- **Domain:** `api/deal-items.ts`: `GET /deals/{id}/items` (`deals.read`) lists a deal's products
+  with each product's content id and Meta catalog id, quantity, unit price and total in minor units
+  and who added it; `POST /deals/{id}/items` (`deals.write` and `orders.read`, CRM and Commerce in
+  the plan, idempotent) adds a product named by content id from a connected catalog (`catalogId`
+  when two catalogs have it), with the members' limits; `DELETE /deals/{id}/items/{itemId}`
+  (`deals.write`) removes one. Each change locks the contact, then the deal, through
+  `lockApiDeal` (now shared with `PATCH /deals/{id}`), checks `expectedVersion`, moves the version
+  on (`dealVersion`), records a timeline entry naming the key and audits it as the key; no deal
+  event, and the deal's history leaves it out, as for members' changes. The OpenAPI document and
+  the deal scopes' descriptions say so; the company export includes the new column.
+- **Web:** the route handlers under `/api/v1/deals/{id}/items`. The deal page already shows items
+  keys add, and its timeline names the API.
+- **Tests:** unit (`api/deal-items.test.ts`: scopes, suspended companies, requests, totals, who
+  added an item, the document); integration (`api.test.ts`: listing, adding and removing with
+  versions, the timeline, the audit log, idempotent retries, history, other companies' deals and
+  products, catalogs sharing a content id, removed products, the 50-product limit, the creator
+  check, erased contacts, plans without Commerce or the CRM). Written for CI; the integration tests
+  were not run here.
+- **Docs:** ADR-378 (and ADR-375's "not built" note); SECURITY; THREAT-MODEL T335; ARCHITECTURE;
+  DEPLOYMENT (0297, 0298); BACKLOG P4-04 and P5-08; the feature matrix (H-012, H-033, status
+  unchanged).
+- **Mutation checks:** 21 of 21 deliberate regressions in the scope checks, the request schemas,
+  totals and who added an item, the document and the scope descriptions caught by the unit tests.
+  The database paths (locks, versions, catalogs, plans, erasure) are covered by the integration
+  tests, which run in CI only.
+
+### Test commands and results (local, 2026-10-16)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 154 files, 1612 tests passed                                    |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+| migrations 0297, 0298                              | pglast parse check passed (syntax only)                         |
+
 ## 2026-10-16 — Per-team first-response targets (P3-06, ADR-377)
 
 Status: **Implemented; its database and browser tests run in CI only.** The first-response target

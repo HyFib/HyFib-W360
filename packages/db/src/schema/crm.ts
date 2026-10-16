@@ -131,7 +131,9 @@ export const crmDealItems = appSchema.table('crm_deal_items', {
   quantity: integer('quantity').notNull(),
   unitPriceMinor: bigint('unit_price_minor', { mode: 'number' }).notNull(),
   currency: text('currency').notNull(),
-  createdByMembershipId: uuid('created_by_membership_id').notNull(),
+  /** Who added it: a member, or a key through the API (ADR-378); exactly one. */
+  createdByMembershipId: uuid('created_by_membership_id'),
+  createdByApiKeyId: uuid('created_by_api_key_id'),
   createdAt: tz('created_at').notNull().defaultNow(),
 });
 

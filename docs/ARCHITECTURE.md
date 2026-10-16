@@ -1300,6 +1300,14 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   value). Web: the deal page's Products card (`DealProducts`); its "use as value" goes through
   `updateDeal`. The API's deal history now leaves out every `deal_updated` entry naming none of
   title, value and expected close date.
+- **Products on deals through the API (0297, 0298, ADR-378):** `api/deal-items.ts` lists a
+  deal's items with each product's content id and Meta catalog id (`GET /deals/{id}/items`,
+  `deals.read`), adds one named by content id from a connected catalog (`POST`, `deals.write` and
+  `orders.read`, idempotent) and removes one (`DELETE /deals/{id}/items/{itemId}`). Changes go
+  through `lockApiDeal` (`api/deals.ts`, shared with `PATCH /deals/{id}`: the contact locked for
+  key share, then the deal for update, the expected version checked), move the version on with
+  `crmChangedBy({ apiKeyId })`, add a `deal_updated` activity naming `products` and the key, and
+  audit `crm.deal_updated` as the key. `crm_deal_items.created_by_api_key_id` names a key's item.
 - **Defining contact fields (0092, ADR-115):** `contacts/field-definitions.ts` adds, renames and
   deletes a company's custom fields for both Settings (`contacts/service.ts`, by id) and the API
   (`api/contact-fields.ts`, by key, scope `contact_fields.manage`); callers check who may and audit

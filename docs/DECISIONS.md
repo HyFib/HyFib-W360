@@ -14877,9 +14877,9 @@ Decision:
   else. Item names are catalog product names, not customer data, so erasure keeps them. The
   company export includes the table.
 
-Not built: items in the public API, deal webhook events for item changes, items in the deals CSV,
-items without a catalog product, discounts and taxes, the value kept equal to the items' total
-automatically, and items set by automation steps or the deal import.
+Not built: deal webhook events for item changes, items in the deals CSV, items without a catalog
+product, discounts and taxes, the value kept equal to the items' total automatically, and items set
+by automation steps or the deal import. (Items in the public API: ADR-378.)
 
 ## ADR-376 Report emails (P3-05) (2026-10-16)
 
@@ -14962,3 +14962,41 @@ Decision:
 
 Not built: business hours per team, targets per WhatsApp number or customer priority, resolution
 targets, and measuring a turn against the team its conversation was in when the turn started.
+
+## ADR-378 Products on deals through the public API (P4-04, P5-08) (2026-10-16)
+
+Context: members list catalog products on deals (ADR-375), but the public API read and wrote deals
+without them, so an integration that keeps quotes elsewhere could not see or set what a deal
+covered. "Items in the public API" was listed as not built under ADR-375.
+
+Decision:
+
+- **Endpoints:** `GET /deals/{id}/items` lists a deal's products in the order they were added (at
+  most 50, no pages), `POST /deals/{id}/items` adds one and `DELETE /deals/{id}/items/{itemId}`
+  removes one. The deal object and its pages stay as they were, so `GET /deals` costs no more.
+- **Who may:** reading needs `deals.read`, as anyone who reads the CRM sees products on the deal
+  page. Adding needs `deals.write` and `orders.read`, the scopes that stand for the members' rule
+  (`crm.write` and `commerce.read`); removing needs `deals.write`. The CRM must be in the company's
+  plan for all three, and Commerce too for adding, as for reading orders and sending products.
+- **Products by content id:** a key names a product as product messages do (ADR-086): its content
+  id (`retailerId`), in one of the company's connected catalogs, not removed at Meta; `catalogId`
+  (Meta's id) picks the catalog when two have it. Each item reads back with its content id and
+  catalog, its name when it was added, the quantity, the price of one and the total in the minor
+  units of its currency, and who added it (a member, never which, or the key).
+- **Prices from the key:** the unit price is given in the minor units of the deal's pipeline
+  currency, as deal values are; the catalog's price text is never read (research M-172). The
+  members' limits hold: 1 to 100,000 of a product, at most 50 products, a total a deal's value can
+  hold, no changes on an erased contact's deal.
+- **As members change them:** each addition or removal locks the contact, then the deal (as
+  `PATCH /deals/{id}` does, now through one helper), checks `expectedVersion` when given, moves the
+  version on (given back as `dealVersion`), records the key as the deal's changer and a
+  `deal_updated` timeline entry naming `products` and the key, and audits `crm.deal_updated` as the
+  key. Like members' product changes, it sends no deal event and is left out of the deal's history,
+  which report the deal's own details. `POST` takes an `Idempotency-Key`.
+- **Who added an item:** `app.crm_deal_items.created_by_api_key_id` (migrations 0297 and 0298, the
+  foreign key and check added NOT VALID and validated after, as for deals in 0169 and 0170): an item
+  is added by a member or by a key, never both. The company export includes the column.
+
+Not built: changing an item's quantity or price in place (remove and add it again), adding several
+products in one request, items in the deal object, its webhook events or the deals CSV, and items
+added by automation steps.

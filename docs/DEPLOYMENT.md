@@ -1642,6 +1642,13 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    function, which still answers the companies' turns with a target. Rolling an image back leaves
    the column, function and definitions in place: an older release ignores team targets.
 
+   Migration 0297 (ADR-378) lets `app.crm_deal_items.created_by_membership_id` be null and adds
+   `created_by_api_key_id`, with a foreign key to the company's keys and a check that exactly one of
+   the two is set, both NOT VALID so the table is not read under the migration's lock; 0298
+   validates them without blocking writes. It is additive: old web servers still add items as
+   members and do not serve the new endpoints. Rolling an image back leaves the column in place;
+   items keys added stay on their deals and show on the deal page.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

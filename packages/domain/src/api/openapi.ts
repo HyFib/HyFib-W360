@@ -161,6 +161,8 @@ import {
   type ApiDealHistoryDetail,
   type ApiDealHistoryType,
 } from './deals';
+import { apiAddDealItemSchema } from './deal-items';
+import { MAX_DEAL_ITEMS, MAX_ITEM_QUANTITY } from '../crm/deal-items';
 import { API_NOTE_MAX_LENGTH, apiCreateNoteSchema } from './notes';
 import { apiCreatePipelineSchema, apiUpdatePipelineSchema } from './pipelines';
 import { apiPipelineForecastSchema } from './pipeline-forecast';
@@ -597,6 +599,57 @@ export const apiDealSchema = z.object({
     .uuid()
     .nullable()
     .describe('The API key that added the deal, when createdBy is api; null otherwise.'),
+});
+
+/** One product on a CRM deal, as GET /deals/{id}/items gives it (ADR-378). */
+export const apiDealItemSchema = z.object({
+  id: z
+    .uuid()
+    .describe('The product’s line on the deal, which DELETE /deals/{id}/items/{itemId} takes.'),
+  retailerId: z
+    .string()
+    .describe('The product’s content id (its SKU) in its catalog, as product messages name it.'),
+  catalogId: z.string().describe('The Meta catalog the product is in.'),
+  name: z
+    .string()
+    .describe(
+      'The product’s name when it was added: a later rename or removal in the catalog keeps it.',
+    ),
+  quantity: z.number().int().min(1).max(MAX_ITEM_QUANTITY),
+  unitPriceMinor: z
+    .number()
+    .int()
+    .min(0)
+    .describe('The price of one, in the minor units of `currency` (paise for INR).'),
+  currency: z
+    .string()
+    .describe(
+      'The deal’s pipeline currency when the product was added: one added before the deal moved to a pipeline of another currency keeps its own.',
+    ),
+  totalMinor: z
+    .number()
+    .int()
+    .min(0)
+    .describe('`quantity` times `unitPriceMinor`, exact, in the minor units of `currency`.'),
+  createdBy: z
+    .enum(['member', 'api'])
+    .describe('Who added it: a member (member, never which member) or an API key (api).'),
+  createdByApiKeyId: z
+    .uuid()
+    .nullable()
+    .describe('The API key that added it, when createdBy is api; null otherwise.'),
+  createdAt: z.iso.datetime().describe('When it was added.'),
+});
+
+/** A product just added to a deal, with the deal's version after it (ADR-378). */
+export const apiAddedDealItemSchema = apiDealItemSchema.extend({
+  dealVersion: z
+    .number()
+    .int()
+    .min(1)
+    .describe(
+      'The deal’s version after the addition: give it as `expectedVersion` to change the deal next.',
+    ),
 });
 
 /** One change of a CRM deal, as its history gives it (ADR-281). */
@@ -3927,6 +3980,82 @@ export function buildOpenApiDocument(serverUrl: string) {
           },
         },
       },
+      '/deals/{id}/items': {
+        get: {
+          operationId: 'listDealItems',
+          summary: 'A CRM deal’s products',
+          description: `${scopeNote('deals.read')} The products listed on the deal, as the deal page shows them, in the order they were added (at most ${MAX_DEAL_ITEMS}): each a product of one of the company’s WhatsApp catalogs, by content id, with its name when it was added, its quantity, the price of one and their total in the minor units of the deal’s currency then, and who added it. A product added before the deal moved to a pipeline of another currency keeps its own currency. Needs the CRM in the company’s plan (403, reason not_in_plan).`,
+          parameters: [{ $ref: '#/components/parameters/Id' }],
+          responses: {
+            '200': {
+              description: `The deal’s products (at most ${MAX_DEAL_ITEMS}).`,
+              content: json(dataOf({ type: 'array', items: ref('DealItem') })),
+            },
+            ...errors(401, 403, 404, 429, 500),
+          },
+        },
+        post: {
+          operationId: 'addDealItem',
+          summary: 'Add a product to a CRM deal',
+          description: [
+            `Scopes: \`deals.write\` and \`orders.read\`. As members add one on the deal page: a product of one of the company’s WhatsApp catalogs (Commerce → Catalogs), still connected and not removed at Meta, named by its content id (\`catalogId\` picks the catalog when more than one has it), with a quantity and the price of one in the minor units of the deal’s pipeline currency: the catalog’s price is never assumed. The product’s name is kept as it is now. Refused with 422 naming the field for an unknown content id or one more than one catalog has, with 422 when the deal already lists ${MAX_DEAL_ITEMS} products or the quantity times the price is more than a deal can be worth, and with 409 on an erased contact’s deal. Needs the CRM and Commerce in the company’s plan (403, reason not_in_plan). With an \`Idempotency-Key\`, a retry answers the first response.`,
+            'The deal’s version moves on (`dealVersion`), its timeline says the product was added through the API and the audit log names the key; no deal event is sent, as when members add one, and the deal’s history leaves it out. The deal’s value stays as it is: PATCH /deals/{id} sets it.',
+          ].join('\n\n'),
+          parameters: [
+            { $ref: '#/components/parameters/Id' },
+            { $ref: '#/components/parameters/IdempotencyKeyOptional' },
+          ],
+          requestBody: { required: true, content: json(ref('AddDealItem')) },
+          responses: {
+            '201': {
+              description: 'The product on the deal, with the deal’s new version.',
+              content: json(dataOf(ref('AddedDealItem'))),
+            },
+            ...errors(400, 401, 403, 404, 409, 415, 422, 423, 429, 500),
+          },
+        },
+      },
+      '/deals/{id}/items/{itemId}': {
+        delete: {
+          operationId: 'removeDealItem',
+          summary: 'Remove a product from a CRM deal',
+          description: `${scopeNote('deals.write')} As members remove one on the deal page: the deal’s version moves on (\`dealVersion\`), its timeline says the product was removed through the API and the audit log names the key; no deal event is sent. A product already removed answers 404, and an erased contact’s deal 409. Needs the CRM in the company’s plan (403, reason not_in_plan).`,
+          parameters: [
+            { $ref: '#/components/parameters/Id' },
+            {
+              name: 'itemId',
+              in: 'path',
+              required: true,
+              schema: { type: 'string', format: 'uuid' },
+              description: 'The product’s line on the deal (GET /deals/{id}/items).',
+            },
+            {
+              name: 'expectedVersion',
+              in: 'query',
+              schema: { type: 'integer', minimum: 1 },
+              description:
+                'Remove it only at this deal `version`: a deal changed since is refused with 409 (read it again).',
+            },
+          ],
+          responses: {
+            '200': {
+              description: 'Removed.',
+              content: json(
+                dataOf({
+                  type: 'object',
+                  properties: {
+                    id: { type: 'string', format: 'uuid' },
+                    deleted: { const: true },
+                    dealVersion: { type: 'integer', minimum: 1 },
+                  },
+                  required: ['id', 'deleted', 'dealVersion'],
+                }),
+              ),
+            },
+            ...errors(401, 403, 404, 409, 422, 423, 429, 500),
+          },
+        },
+      },
       '/tasks': {
         get: {
           operationId: 'listTasks',
@@ -4869,6 +4998,9 @@ export function buildOpenApiDocument(serverUrl: string) {
         Deal: jsonSchema(apiDealSchema),
         DealField: jsonSchema(apiDealFieldSchema),
         DealHistoryEntry: jsonSchema(apiDealHistoryEntrySchema),
+        DealItem: jsonSchema(apiDealItemSchema),
+        AddedDealItem: jsonSchema(apiAddedDealItemSchema),
+        AddDealItem: jsonSchema(apiAddDealItemSchema, 'input'),
         CreateDeal: jsonSchema(apiCreateDealSchema, 'input'),
         UpdateDeal: jsonSchema(apiUpdateDealSchema, 'input'),
         Task: jsonSchema(apiTaskSchema),
@@ -5047,6 +5179,9 @@ export const API_ROUTES = [
   ['get', '/deals/{id}'],
   ['patch', '/deals/{id}'],
   ['get', '/deals/{id}/history'],
+  ['get', '/deals/{id}/items'],
+  ['post', '/deals/{id}/items'],
+  ['delete', '/deals/{id}/items/{itemId}'],
   ['get', '/tasks'],
   ['post', '/tasks'],
   ['get', '/tasks/{id}'],
