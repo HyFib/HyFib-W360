@@ -1088,6 +1088,38 @@ export const apiCampaignReviewSchema = z.object({
     .describe(
       "The company's cap on marketing campaign messages per contact (at most count in days), which a marketing template's campaign keeps to when it sends; null when none applies.",
     ),
+  messagingLimit: z
+    .object({
+      status: z
+        .enum(['over', 'within', 'unlimited', 'unknown'])
+        .describe(
+          'How audience.eligible compares with the figure: over it, within it (at or under), unlimited, or unknown when there is no figure to compare with (a number never read, Meta reporting no limit, TIER_50, UNTIERED or a value HyFib does not recognise).',
+        ),
+      limit: z
+        .string()
+        .nullable()
+        .describe(
+          "The number's messaging limit as Meta reported it when HyFib last read the number (like TIER_2K), any text Meta gave included; null when Meta reported none or the number was never read.",
+        ),
+      checkedAt: z.iso
+        .datetime()
+        .nullable()
+        .describe(
+          "When HyFib last read the number's messaging limit from Meta; null when it never has.",
+        ),
+      figure: z
+        .number()
+        .int()
+        .min(1)
+        .nullable()
+        .describe(
+          'The unique customers the limit allows outside a customer service window in a moving 24 hours: 250, 2,000, 10,000 or 100,000; null for any other limit.',
+        ),
+    })
+    .nullable()
+    .describe(
+      "The chosen number's messaging limit set against audience.eligible, an upper bound of what counts toward it (contacts whose customer service window is open when their message is sent do not count). A notice that never blocks a submission: Meta, not HyFib, enforces the limit, which is shared by every number of the business portfolio, whose use HyFib cannot see. null while audience is null.",
+    ),
 });
 
 export type ApiCampaignReview = z.infer<typeof apiCampaignReviewSchema>;
@@ -1136,6 +1168,14 @@ export function toApiCampaignReview(
     scheduleAdjustment: review.adjustment,
     approvalRequired: review.approvalRequired,
     frequencyCap: review.frequencyCap,
+    messagingLimit: review.messagingLimit
+      ? {
+          status: review.messagingLimit.status,
+          limit: review.messagingLimit.limit,
+          checkedAt: review.messagingLimit.checkedAt?.toISOString() ?? null,
+          figure: review.messagingLimit.figure,
+        }
+      : null,
   };
 }
 

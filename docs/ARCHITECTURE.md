@@ -1237,7 +1237,13 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
 - **Reviewing drafts (ADR-193):** `apiReviewCampaign` takes `campaigns.write` as a read (whatever
   the company's status), reads the draft and the company's time zone in one read-only snapshot and
   calls `reviewCampaignDraft`, as members' review does; `toApiCampaignReview` answers it with the
-  skip reasons commonest first and amounts in major units. Other statuses get 409.
+  skip reasons commonest first and amounts in major units. Other statuses get 409. Its
+  `messagingLimit` (ADR-400) is the review's notice as data (status, limit, read time, figure),
+  never members' wording: `reviewCampaignDraft` reads the chosen number's limit in the same
+  transaction (`loadNumberMessagingLimit`, `campaigns/messaging-limit-notice.ts`) and
+  `campaignMessagingLimitNotice`, a pure function, sets it against the audience's eligible count;
+  `getCampaign` does the same for a submitted campaign not yet finished, from its audience less
+  those skipped. A notice only: nothing blocks on it.
 - **Submitting drafts (ADR-202):** `apiSubmitCampaign` locks the draft, checks the version and calls
   `submitLockedDraft` (`campaigns/service.ts`), which members' `submitCampaign` calls too: the
   readiness, the audience's size, the snapshot and the event, naming the key or the member. A key's

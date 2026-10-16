@@ -27,7 +27,12 @@ test('a campaign is drafted, reviewed, started by the worker and reported per re
   await page.getByLabel('Company address').fill(slug);
   await page.getByRole('button', { name: 'Create company' }).click();
   await expect(page).toHaveURL(new RegExp(`/c/${slug}$`));
-  const { wabaId, phoneNumberId } = await connectTestChannel({ ownerEmail: email, slug });
+  // Its number's limit as if its health had been read (ADR-398): 250 contacts in 24 hours.
+  const { wabaId, phoneNumberId } = await connectTestChannel({
+    ownerEmail: email,
+    slug,
+    messagingLimit: 'TIER_250',
+  });
 
   // An approved marketing template.
   await page.goto(`/c/${slug}/templates/new`);
@@ -101,6 +106,15 @@ test('a campaign is drafted, reviewed, started by the worker and reported per re
     '1',
   );
   await expect(page.getByText('No marketing opt-in: 1')).toBeVisible();
+  // The number's messaging limit against the contact who can receive it, a notice only (ADR-400).
+  const limitNotice = page.getByRole('status').filter({
+    hasText: "Within the number's messaging limit",
+  });
+  await expect(limitNotice).toContainText(
+    "This campaign may reach up to 1 contact, within the 250 unique customers its number's messaging limit allows outside a customer service window in a moving 24 hours (Meta reported TIER_250 when HyFib last read the number).",
+  );
+  await expect(limitNotice).toContainText('HyFib cannot see how much of it they have used.');
+  await expect(limitNotice).toContainText('Meta, not HyFib, enforces the limit');
   await page.getByRole('button', { name: 'Start campaign' }).click();
   await page.getByRole('alertdialog').getByRole('button', { name: 'Start campaign' }).click();
 

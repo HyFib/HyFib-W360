@@ -40,6 +40,7 @@ import {
 } from './segments';
 import { SEGMENT_NAME_TAKEN, segmentNameRefusal } from '../campaigns/segments';
 import { RECIPIENT_OUTCOMES } from '../campaigns/outcomes';
+import { campaignMessagingLimitNotice } from '../campaigns/messaging-limit-notice';
 import {
   campaignDraftInputOf,
   microsToAmount,
@@ -7926,6 +7927,10 @@ describe('reviewing campaign drafts through the API (ADR-193)', () => {
       adjustment: null,
       approvalRequired: true,
       frequencyCap: { count: 2, days: 7 },
+      messagingLimit: campaignMessagingLimitNotice(
+        { limit: 'TIER_250', checkedAt: new Date('2026-10-16T08:00:00Z') },
+        5,
+      ),
     };
     const answered = toApiCampaignReview({ id, version: 4 }, members);
     expect(answered).toEqual({
@@ -7957,8 +7962,33 @@ describe('reviewing campaign drafts through the API (ADR-193)', () => {
       scheduleAdjustment: null,
       approvalRequired: true,
       frequencyCap: { count: 2, days: 7 },
+      // Data only, never members' wording (ADR-400).
+      messagingLimit: {
+        status: 'within',
+        limit: 'TIER_250',
+        checkedAt: '2026-10-16T08:00:00.000Z',
+        figure: 250,
+      },
     });
     expect(apiCampaignReviewSchema.parse(answered)).toEqual(answered);
+    // An unknown limit (a value Meta's SDK does not list) gives no figure.
+    const unlisted = toApiCampaignReview(
+      { id, version: 4 },
+      {
+        ...members,
+        messagingLimit: campaignMessagingLimitNotice(
+          { limit: 'TIER_1K', checkedAt: new Date('2026-10-16T08:00:00Z') },
+          5,
+        ),
+      },
+    );
+    expect(unlisted.messagingLimit).toEqual({
+      status: 'unknown',
+      limit: 'TIER_1K',
+      checkedAt: '2026-10-16T08:00:00.000Z',
+      figure: null,
+    });
+    expect(apiCampaignReviewSchema.parse(unlisted)).toEqual(unlisted);
     // A draft without an audience or an estimate yet, at a local time the clocks skip.
     const incomplete = toApiCampaignReview(
       { id, version: 0 },
@@ -7972,6 +8002,7 @@ describe('reviewing campaign drafts through the API (ADR-193)', () => {
         adjustment: 'gap_shifted',
         approvalRequired: false,
         frequencyCap: null,
+        messagingLimit: null,
       },
     );
     expect(incomplete).toEqual({
@@ -7985,6 +8016,7 @@ describe('reviewing campaign drafts through the API (ADR-193)', () => {
       scheduleAdjustment: 'gap_shifted',
       approvalRequired: false,
       frequencyCap: null,
+      messagingLimit: null,
     });
     expect(apiCampaignReviewSchema.parse(incomplete)).toEqual(incomplete);
   });
@@ -8029,6 +8061,7 @@ describe('reviewing campaign drafts through the API (ADR-193)', () => {
       'costCurrency',
       'estimate',
       'frequencyCap',
+      'messagingLimit',
       'problems',
       'scheduleAdjustment',
       'scheduledAt',
@@ -8036,6 +8069,23 @@ describe('reviewing campaign drafts through the API (ADR-193)', () => {
     ];
     expect(Object.keys(reviewSchema.properties).sort()).toEqual(fields);
     expect([...(reviewSchema.required ?? [])].sort()).toEqual(fields);
+    // The number's messaging limit as data, described as a notice that never blocks (ADR-400).
+    const limitSchema = JSON.stringify(reviewSchema.properties.messagingLimit);
+    for (const words of [
+      'A notice that never blocks a submission',
+      'Meta, not HyFib, enforces the limit',
+      'shared by every number of the business portfolio, whose use HyFib cannot see',
+      'an upper bound of what counts toward it',
+      '250, 2,000, 10,000 or 100,000; null for any other limit',
+    ]) {
+      expect(limitSchema).toContain(words);
+    }
+    for (const value of ['over', 'within', 'unlimited', 'unknown']) {
+      expect(limitSchema).toContain(`"${value}"`);
+    }
+    expect(op?.description).toContain(
+      "the chosen number's messaging limit as Meta last reported it set against the contacts it would reach (a notice that never blocks a submission)",
+    );
     expect(API_ROUTES).toEqual(expect.arrayContaining([['get', '/campaigns/{id}/review']]));
   });
 });

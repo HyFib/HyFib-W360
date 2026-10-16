@@ -3341,7 +3341,7 @@ export function buildOpenApiDocument(serverUrl: string) {
           operationId: 'reviewCampaign',
           summary: 'What submitting a campaign draft would do now',
           description: [
-            `${scopeNote('campaigns.write')} The draft's review as members see it in the app before they submit it, read now: what must change before a member can submit it, how many contacts it would reach and why the others would be skipped, an upper bound of Meta's charges from the rate card HyFib publishes, when it would start, and whether it would wait for a member's approval. It changes nothing, and is answered whatever the company's status. Counts only: never contacts or members.`,
+            `${scopeNote('campaigns.write')} The draft's review as members see it in the app before they submit it, read now: what must change before a member can submit it, how many contacts it would reach and why the others would be skipped, an upper bound of Meta's charges from the rate card HyFib publishes, when it would start, whether it would wait for a member's approval, and the chosen number's messaging limit as Meta last reported it set against the contacts it would reach (a notice that never blocks a submission). It changes nothing, and is answered whatever the company's status. Counts only: never contacts or members.`,
             'Only a draft is reviewed: any other status is refused with 409, naming it (a submitted campaign keeps the audience it was submitted with, and GET /campaigns/{id} counts its results). A member submits the draft in the app, or a key with POST /campaigns/{id}/submit, and the submission checks it again.',
           ].join('\n\n'),
           parameters: [{ $ref: '#/components/parameters/Id' }],

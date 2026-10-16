@@ -93,6 +93,7 @@ export * from './campaigns/outcomes';
 export * from './campaigns/service';
 export * from './campaigns/runner';
 export * from './campaigns/frequency-cap';
+export * from './campaigns/messaging-limit-notice';
 export * from './platform/rate-cards';
 export * from './reports/definitions';
 export * from './reports/period';

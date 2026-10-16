@@ -35,6 +35,7 @@ import {
   SubmitCampaign,
 } from '@/components/campaigns/campaign-actions';
 import { CampaignEditor, type EditableCampaign } from '@/components/campaigns/campaign-editor';
+import { MessagingLimitNotice } from '@/components/campaigns/messaging-limit-notice';
 import type { Definition } from '@/components/segments/segment-builder';
 import { PageHeader } from '@/components/page-header';
 import {
@@ -273,12 +274,11 @@ async function DraftView({
               To see cost estimates, choose the currency Meta bills you in (Settings → Messaging).
             </p>
           )}
+          {review.messagingLimit ? <MessagingLimitNotice notice={review.messagingLimit} /> : null}
           <p className="text-sm text-muted-foreground">
             {review.approvalRequired
               ? 'Your company requires approval: another member with approval rights must approve it before it starts.'
-              : 'It starts without approval (Settings → Messaging can require one).'}{' '}
-            Meta limits how many people a business can message in 24 hours; messages over that limit
-            fail with Meta’s error and are shown as failed.
+              : 'It starts without approval (Settings → Messaging can require one).'}
           </p>
           <div className="flex flex-wrap items-start gap-4">
             {can(ctx, 'campaigns.write') && can(ctx, 'campaigns.send') ? (
@@ -474,6 +474,7 @@ async function LiveView({
           </CardContent>
         </Card>
       ) : null}
+      {view.messagingLimit ? <MessagingLimitNotice notice={view.messagingLimit} /> : null}
       <Card>
         <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
           <div className="grid gap-1">

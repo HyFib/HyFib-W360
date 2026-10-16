@@ -1,5 +1,70 @@
 # Progress
 
+## 2026-10-16 — A campaign's notice of its number's messaging limit (P3-04, ADR-400)
+
+Status: **Implemented; its database and browser tests run in CI only.** "Messaging-tier awareness
+(read the number's limit from Meta)" remained under P3-04. ADR-398 keeps each number's limit as
+Meta reports it; a draft's review only said that Meta limits how many people a business can message
+in 24 hours.
+
+### Completed
+
+- **Domain (`campaigns/messaging-limit-notice.ts`):** `campaignMessagingLimitNotice`, a pure
+  function, sets the number's limit and read time against the campaign's recipients: a warning
+  above the figure of a tier research M-058 gives one for (250, 2,000, 10,000, 100,000:
+  `messagingLimitFigure`, added to `messaging/messaging-limit.ts`), an informational line at or
+  under it, a line without a warning for `TIER_UNLIMITED`, and "Messaging limit unknown", with no
+  figure, for a number never asked, none reported, `TIER_50`, `UNTIERED` and an unlisted value.
+  Every notice but unlimited says the count is an upper bound (open service windows do not count),
+  that the limit is shared by the business portfolio, whose use HyFib cannot see, and that Meta,
+  not HyFib, enforces it, showing an undelivered message as failed with Meta's code; no error code
+  is named (research documents none for this limit). `loadNumberMessagingLimit` reads the
+  campaign's own number in the scoped transaction, naming the company as well as row security does.
+- **Counts reused:** a draft's `audience.eligible` from `reviewCampaignDraft` (which now returns
+  `messagingLimit`), and a submitted campaign's audience less those skipped
+  (`submittedCampaignRecipients`, as the approval email counts it) in `getCampaign`, for a campaign
+  waiting for approval, scheduled, running or paused. No new query path.
+- **Web:** the Review card of a draft's page shows the notice (`MessagingLimitNotice`, an `Alert`,
+  warning tone only when over) instead of the old sentence; a submitted campaign not yet finished
+  shows it above its results. It never blocks submitting, approving or sending.
+- **API (P5-08):** `GET /campaigns/{id}/review` gains `messagingLimit` (`status`, `limit`,
+  `checkedAt`, `figure`, or null while `audience` is null), documented in the OpenAPI schema and the
+  operation's description, with a schema test.
+- **Tests:** unit (`campaigns/messaging-limit-notice.test.ts`, 12 tests: each tier at its figure,
+  one under and one over, unlimited for any count, each unknown kind far above every figure, a
+  number never asked with a limit, zero and one recipient, the honest lines and no error code, the
+  figures for each listed value, the submitted count and statuses; `api/api.test.ts`: the field
+  mapped, an unlisted limit without a figure, and the OpenAPI schema's fields and words);
+  integration (`campaigns.test.ts`, 2 new: the review and the page read only the campaign's own
+  company's number, `loadNumberMessagingLimit` under one company's scope returns nothing for
+  another company's number by either company's id, unknown kinds, the submitted count, nothing once
+  cancelled or for a draft's page, and a draft with an unfigured limit still submitted;
+  `api-campaigns.test.ts`: the review's new field); e2e (`campaigns.spec.ts`: a number with
+  `TIER_250` shows "Within the number's messaging limit" with its lines in the draft's review, then
+  the campaign starts). Written for CI; the integration and e2e tests were not run here.
+- **Mutation checks:** 13 deliberate regressions in the decision and the figures (`>=` for `>`,
+  `> figure + 1`, the never-asked, not-reported, unlisted and unlimited branches dropped, the
+  warning tone never used, unknown given a warning tone, the portfolio line dropped, the count's
+  floor at zero dropped, `TIER_50` or `UNTIERED` given a figure, `TIER_2K`'s figure changed): 13
+  caught by the unit tests, each file restored exactly. The wiring in the review and the page is
+  exercised by the integration and e2e tests only, which run in CI.
+- **Docs:** ADR-400; ARCHITECTURE (API review), BACKLOG P3-04, RUNBOOKS (each notice and what to
+  tell a member), the matrix's W-030. No migration, no threat-model row (no new data, role or
+  grant: the read stays in the company's scope) and no research row (nothing new verified).
+
+- **Not built:** the notice in the approval email, the API's campaign detail and the campaigns
+  list; any block or pacing on the limit; a refresh of the number's limit before review. Which node
+  gives the limit is still to check on a real number (META-SETUP, ADR-398).
+
+### Test commands and results (local, 2026-10-16)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 172 files, 1,839 tests passed                                   |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+
 ## 2026-10-16 — Pacing WhatsApp management calls by Meta's usage header (P2-02, ADR-399)
 
 Status: **Implemented (migration 0310); unit tests run locally, integration tests in CI only; no

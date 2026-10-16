@@ -410,6 +410,23 @@ a sending window that has not opened, pacing, or a pause reason. Check the worke
 tick is more than 30 seconds late (`campaign ticks signalled`). Sends then follow the send runbooks
 above (message.send queue, unknown outcomes).
 
+**The messaging-limit notice on a campaign (ADR-400).** A draft's review, and the page of a
+campaign waiting for approval, scheduled, sending or paused, set its number's messaging limit, as
+Channels shows it (ADR-398), against the contacts it may reach: those who can receive it now for a
+draft, its audience less those skipped once submitted. That count is an upper bound: contacts whose
+customer service window is open when their message is sent do not count toward Meta's limit.
+"More recipients than the number's messaging limit" is a warning only; "Within the number's
+messaging limit" and "Messaging limit: unlimited" are information; "Messaging limit unknown" means
+the number was never read, Meta reported no limit, or Meta reported `TIER_50`, `UNTIERED` or a value
+HyFib does not recognise, which research gives no figure for. The notice never stops a campaign:
+Meta enforces the limit, which is shared by every number of the business portfolio, so other
+numbers and campaigns (in HyFib or elsewhere) use the same allowance and HyFib cannot see how much
+is left. To reach more people than the limit allows, split the audience into campaigns sent
+more than 24 hours apart, or narrow it. Messages Meta does not deliver are shown as failed with Meta's code
+on the campaign's page; HyFib names no code for the limit, since research documents none. A limit
+that looks out of date is the one Meta gave at the number's last health read (see "Messaging limit
+on Channels" above for when a number is read).
+
 **Stop a campaign now (wrong audience or content).** Cancel it from the detail page (members with
 `campaigns.send`): pending recipients and queued sends that no worker has claimed are cancelled in
 one transaction; sends already handed to Meta cannot be recalled. Pausing instead keeps the
