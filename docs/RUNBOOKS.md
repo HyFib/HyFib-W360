@@ -4041,7 +4041,8 @@ saved. Choose "JSON text" for Slack and services that take a `text` member: some
 templates may take that too, but HyFib has not checked any. The worker sends the same answers'
 rules in both formats (a 2xx is sent; a 429, a 5xx or no answer is tried again). Microsoft documents
 a limit of 28 KB a message, which HyFib's cards stay under, and a throttle above four requests a
-second, which one post at a time does not reach. A Teams workflow belongs to the person who made it:
+second: posts go out one at a time, at most 5 a run, and a 429 has a post tried again a minute
+later. A Teams workflow belongs to the person who made it:
 if that person leaves, the flow can stop, so give it co-owners in Power Automate; posts that fail
 meanwhile show the workflow's answer under the latest posts. Workflows do not yet post to private
 channels, as Microsoft says. During a rollout, a Teams channel's posts wait while only workers from

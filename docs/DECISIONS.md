@@ -15515,8 +15515,9 @@ Decision:
   underscores, such as `whatsapp.access_check`, is HyFib's text: should Teams' Markdown subset read
   a pair of them as emphasis, the name shows in italics, which is cosmetic.
 - **Answers:** unchanged from ADR-338: any 2xx is sent; a 429, a 5xx or no answer is tried again 1,
-  2, 4 and 8 minutes later; anything else fails the post. Posts go out one at a time, below the
-  four requests a second at which Microsoft throttles a webhook.
+  2, 4 and 8 minutes later; anything else fails the post. Posts go out one at a time, at most 5 a
+  run; should a webhook answering fast take more than the four requests a second at which Microsoft
+  throttles, its 429 has the post tried again a minute later.
 - **Migration 0304:** `ops.platform_alert_channel.format` (`text` by default, checked), its update
   grant to the definer role, `ops.platform_alert_posts.plain_body` (nullable, 1 to 4,000 characters);
   the new functions above, and the release before's set, test, queue and claim functions and the
@@ -15550,9 +15551,17 @@ Sources (fetched through the Microsoft Learn documentation tool on 2026-10-16):
 
 Not confirmed (not documented on those pages): the HTTP status a Workflows webhook answers with, and
 any Markdown escape syntax. No post was made to a real Teams channel: the card was checked against
-the documented shape by unit, integration and end-to-end tests with a local receiver only.
+the documented shape by unit tests; integration and end-to-end tests with a local receiver were
+written and run in CI only.
 
 Not built: a format per alert, several channels, PagerDuty's or other formats, Message Cards,
 buttons or other card elements, mentions, reading a legacy connector's 200 answer whose body reports
 an HTTP 429 (Microsoft's sample notes connectors answer so; Workflows are not documented to), and
 dropping `body` (the contract step).
+
+Review (before merge): an independent review found three existing integration tests still setting
+the address without a format (refused since the format became required; they now name `text`), a
+sentence claiming the card was checked by integration and end-to-end tests that had not run, a
+claim that posting one at a time stays under Microsoft's throttle (up to 5 posts go out back to
+back; a 429 is tried again), and a format guard in the new claim that a NULL in the list of formats
+would have passed (now `IS NOT TRUE`). All were fixed.

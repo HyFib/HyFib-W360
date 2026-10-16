@@ -294,7 +294,8 @@ BEGIN
      SET failed_at = now(), last_status = NULL, last_error = 'unticked', lease_until = NULL
    WHERE p.sent_at IS NULL AND p.failed_at IS NULL AND p.kind <> 'test'
      AND NOT (p.kind = ANY (v_kinds));
-  IF p_formats IS NULL OR NOT (v_format = ANY (p_formats)) THEN
+  -- Not true (false or unknown: no list, or a NULL in it) hands out nothing.
+  IF (v_format = ANY (p_formats)) IS NOT TRUE THEN
     RETURN;
   END IF;
   RETURN QUERY

@@ -365,7 +365,7 @@ describe('the chat channel (ADR-338)', () => {
     const port = (closed.address() as AddressInfo).port;
     closed.close();
     await once(closed, 'close');
-    await service().setChannel(owner, { url: `http://127.0.0.1:${port}/hook` });
+    await service().setChannel(owner, { url: `http://127.0.0.1:${port}/hook`, format: 'text' });
     await service().sendTest(owner);
     expect(await send()).toMatchObject({ claimed: 1, retrying: 1 });
     const waiting = (await posts()).find((p) => !p.failed);
@@ -537,7 +537,7 @@ describe('the chat channel (ADR-338)', () => {
     expect((await posts()).map((p) => p.kind)).toEqual(['queues', 'reconciliation', 'unsettled']);
 
     // A new address keeps the kinds chosen.
-    await service().setChannel(owner, { url: `${hookUrl}-2` });
+    await service().setChannel(owner, { url: `${hookUrl}-2`, format: 'text' });
     expect((await service().state(operator)).channel?.kinds).toEqual(financial);
 
     const audit = (await auditOf(owner)).slice(before);
@@ -647,7 +647,7 @@ describe('the chat channel (ADR-338)', () => {
 
     // The new address gets the ticked alert's post only, and ticking the alert again sends none of
     // the posts that failed.
-    await service().setChannel(owner, { url: `${hookUrl}-2` });
+    await service().setChannel(owner, { url: `${hookUrl}-2`, format: 'text' });
     await service().setKinds(owner, { kinds: ['failures', 'reconciliation'] });
     const before = received.length;
     expect(await send()).toMatchObject({ claimed: 1, sent: 1 });
