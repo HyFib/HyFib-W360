@@ -438,7 +438,9 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   time and find the next opening.
 - **Reply-due timers** (`inbox/sla.ts`): the open reply turn's start plus the first-response target,
   counted in business hours when business hours are on (the timer pauses while closed), else absolute
-  time. The inbox list and thread show waiting time, due time, overdue and paused states; a
+  time. Since ADR-377 the target is the conversation's team's own (`teams.first_response_target_minutes`, 0296) when it has one, else the company's: `loadReplyTargets` reads both and `targetFor` picks one;
+  the notice of overdue replies ranks each team with its own target apart (`row_number()` per team)
+  so its earliest waits stay the earliest due, and reports join each turn's conversation and team. The inbox list and thread show waiting time, due time, overdue and paused states; a
   longest-waiting order pages on `date_trunc('milliseconds', started_at)` so keyset cursors
   round-trip exactly.
 - **Cases** (`app.conversation_cases`): opened by a trigger when a conversation is created or
@@ -460,9 +462,10 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   can still see the conversation, with no newer unread mention of the member there; the email names
   the author and the unread count, never the note or the customer.
   **Overdue reply emails** (`inbox/overdue-replies.ts`, ADR-230): the messaging sweep calls
-  `noticeOverdueReplies` after routing. `ops.overdue_reply_turns(now, limit)` (definer, ids only)
-  lists open turns of active companies with a target that started at least the target ago (within 30
-  days) without a notice, or whose `waiting` notice is due. Per company, in its scope, the turns are
+  `noticeOverdueReplies` after routing. `ops.overdue_reply_turns(now, limit)` (definer, ids only;
+  replaced by 0296 to take the conversation's team's target, else the company's) lists open turns
+  with a target that started at least the target ago (within 30 days) without a notice, or whose
+  `waiting` notice is due. Per company, in its scope, the turns are
   locked (`FOR UPDATE`), each gets its due time from `replyDueAt`, and `app.overdue_reply_notices`
   records `waiting` (with the due time), `skipped` (`too_late`, `no_one`, `opted_out`) or `sent`;
   `responsibleMembers` picks the assignee, the team or the members with `inbox.assign`, and each

@@ -1,5 +1,53 @@
 # Progress
 
+## 2026-10-16 — Per-team first-response targets (P3-06, ADR-377)
+
+Status: **Implemented; its database and browser tests run in CI only.** The first-response target
+was the company's only, one number for every conversation.
+
+### Completed
+
+- **Database:** migration 0296 adds `app.teams.first_response_target_minutes` (1 to 1,440, null
+  for none; updated only through a column grant) and replaces `ops.overdue_reply_turns` so the
+  overdue-reply sweep finds turns by their conversation's team's target, else the company's. New
+  metric definition versions: `inbox.overdue` v3 and `inbox.within_target` v4.
+- **Domain:** `inbox/sla.ts` loads the company's target with each team's (`loadReplyTargets`) and
+  picks a conversation's (`targetFor`). The teams service and `POST`/`PATCH /teams` take
+  `firstResponseTargetMinutes` (audited with the team's change). The inbox's reply timers, the
+  notice of overdue replies (each team with its own target ranked apart, so the earliest due of all
+  are still the ones shown), the overdue-reply emails (which name the team's target when it
+  applied) and Reports ("Answered within target" and "Overdue" per turn against its conversation's
+  target; `teamTargets` in the inbox section and in `GET /reports`) use it. Report emails say
+  "within their team's or the company's target" when teams have their own. The company export
+  includes the column. A team's number fields now answer a value that is not a number with their
+  own message rather than a generic one.
+- **Web:** Settings → Teams: "Reply target in minutes (optional)" in the team editor, shown in the
+  list; Settings → Inbox says teams can have their own; Reports names the teams with their own
+  target.
+- **Tests:** unit (`inbox/sla.test.ts`, `inbox/teams.test.ts` for the form's limits, the
+  overdue-reply email's wording, the report email's phrase, the API's team and report schemas);
+  integration (`overdue-replies.test.ts`: a team's target with and without a company target, the
+  sweep and the notice; `reports.test.ts`: turns measured per team; `api.test.ts`: the target
+  through the API); e2e (`inbox-teams.spec.ts`: a team created with a 15-minute target). Written
+  for CI; the integration and e2e tests were not run here.
+- **Docs:** ADR-377; SECURITY; THREAT-MODEL T334; ARCHITECTURE; DEPLOYMENT (0296); BACKLOG P3-06;
+  the feature matrix (H-011, status unchanged).
+- **Mutation checks:** 19 of 19 deliberate regressions in choosing a conversation's target, the
+  overdue-reply email's wording, the report email's phrase, the API's team schema and report
+  mapping, and the team form's limits caught, one after a test was added (the form's 1,440-minute
+  limit). The database paths (the sweep, the notice's ranking, reports) are covered by the
+  integration tests, which run in CI only.
+
+### Test commands and results (local, 2026-10-16)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 153 files, 1605 tests passed                                    |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+| migration 0296                                     | pglast parse check passed (syntax only)                         |
+
 ## 2026-10-16 — Report emails (P3-05, ADR-376)
 
 Status: **Implemented; its database and browser tests run in CI only.** Reports were computed only

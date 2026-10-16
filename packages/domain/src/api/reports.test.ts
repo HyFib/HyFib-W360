@@ -11,6 +11,7 @@ import { apiGetReport, apiReportQuerySchema, apiReportSchema, toApiReport } from
 
 const TENANT = '0192f0c4-8e2b-7c1d-9a3e-5b6c7d8e9f01';
 const MEMBER = '0192f0c4-8e2b-7c1d-9a3e-5b6c7d8e9f02';
+const TEAM = '0192f0c4-8e2b-7c1d-9a3e-5b6c7d8e9f0a';
 const PIPELINE = '0192f0c4-8e2b-7c1d-9a3e-5b6c7d8e9f03';
 const STAGE = '0192f0c4-8e2b-7c1d-9a3e-5b6c7d8e9f04';
 const CAMPAIGN = '0192f0c4-8e2b-7c1d-9a3e-5b6c7d8e9f05';
@@ -127,6 +128,7 @@ const report: Report = {
   },
   inbox: {
     targetMinutes: 15,
+    teamTargets: [{ teamId: TEAM, name: 'Returns', minutes: 30 }],
     businessHours: false,
     now: {
       open: 4,
@@ -393,6 +395,8 @@ describe('reports through the API (ADR-297)', () => {
       { memberId: MEMBER, name: 'Asha', waiting: 1, oldestWaitSeconds: 600 },
       { memberId: null, name: null, waiting: 1, oldestWaitSeconds: 60 },
     ]);
+    // Teams with their own target, by id, name and minutes (ADR-377).
+    expect(api.inbox.teamTargets).toEqual([{ teamId: TEAM, name: 'Returns', targetMinutes: 30 }]);
     expect(api.inbox.turns).toEqual(report.inbox.turns);
     expect(api.inbox.days).toEqual(report.inbox.days);
     expect(api.csat).toEqual(report.csat);

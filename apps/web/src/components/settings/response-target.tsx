@@ -57,7 +57,7 @@ export function ResponseTargetForm({
           <Field
             id="rt-minutes"
             label="Target (minutes)"
-            description="From the customer’s first waiting message to a member’s reply; 1 to 1440."
+            description="From the customer’s first waiting message to a member’s reply; 1 to 1440. A team can set its own in Settings → Teams, which its conversations use instead."
           >
             {(aria) => (
               <Input

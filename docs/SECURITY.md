@@ -238,6 +238,12 @@ Phase 3 rules on top of the matrix (enforced in domain services and re-checked w
   inbox or contact access, such as analysts and marketers, can read them); CSV exports need
   `reports.export` and are audited (`report.exported`). The inbox response target needs
   `tenant.settings.manage`; resolving and reopening conversations is audited.
+- Per-team reply targets (ADR-377): a team's own first-response target is a team setting, set only
+  by members with `inbox.supervise` (keys with `teams.manage`) and audited with the team's change;
+  it changes due times, overdue counts and emails, never who sees a conversation.
+  `ops.overdue_reply_turns` is replaced with the same restrictions (SECURITY DEFINER, pinned search
+  path, ids only, executable by the app role only) and reads only the team's target column besides
+  what it read before.
 - Report emails (ADR-376): a member with `reports.read` turns their own weekly or monthly email on
   or off (audited); nobody chooses for another member. The worker finds companies with an email
   due only through `ops.due_report_email_companies` (SECURITY DEFINER, ids only, active companies)

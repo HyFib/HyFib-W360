@@ -18,6 +18,7 @@ import {
   inArray,
   isNull,
   lt,
+  lte,
   memberships,
   messages,
   messagingSettings,
@@ -52,7 +53,14 @@ import {
 import type { JobSigner } from '../jobs/envelope';
 import type { JobQueue } from '../jobs/queue';
 import { WAITING_REPLY_LIMIT, type WaitingReply } from '../inbox/overdue-notice';
-import { loadReplyTarget, replyDueAt, replyTimer, type ReplyTarget } from '../inbox/sla';
+import {
+  hasAnyTarget,
+  loadReplyTargets,
+  replyDueAt,
+  replyTimer,
+  targetFor,
+  type ReplyTarget,
+} from '../inbox/sla';
 import { decodeKeysetCursor, encodeKeysetCursor, likePattern } from '../validation';
 import { emitTenantEvent } from './events';
 import { messageSnippet } from './message-text';
@@ -309,10 +317,10 @@ export function createInboxService(deps: InboxDeps) {
             )
           : and(isNull(conversations.lastMessageAt), lt(conversations.id, cursor.id));
       }
-      const { rows, target } = await db.run(
+      const { rows, targets } = await db.run(
         ctx.scope,
         async (tx) => {
-          const target = await loadReplyTarget(tx, ctx.tenant.id, ctx.tenant.timezone);
+          const targets = await loadReplyTargets(tx, ctx.tenant.id, ctx.tenant.timezone);
           const rows = await tx
             .select({
               id: conversations.id,
@@ -406,7 +414,7 @@ export function createInboxService(deps: InboxDeps) {
                 : [sql`${conversations.lastMessageAt} desc nulls last`, desc(conversations.id)]),
             )
             .limit(q.limit + 1);
-          return { rows, target };
+          return { rows, targets };
         },
         { accessMode: 'read only' },
       );
@@ -429,7 +437,11 @@ export function createInboxService(deps: InboxDeps) {
         windowOpen: Boolean(
           r.lastInboundAt && now.getTime() - r.lastInboundAt.getTime() <= SERVICE_WINDOW_MS,
         ),
-        ...timerFields(target, r.status === 'resolved' ? null : r.waitingSince, now),
+        ...timerFields(
+          targetFor(targets, r.teamId),
+          r.status === 'resolved' ? null : r.waitingSince,
+          now,
+        ),
         automationActive: r.automationActive,
         version: r.version,
       }));
@@ -638,7 +650,10 @@ export function createInboxService(deps: InboxDeps) {
               ),
             )
             .orderBy(asc(conversationTags.tag));
-          const target = await loadReplyTarget(tx, ctx.tenant.id, ctx.tenant.timezone);
+          const target = targetFor(
+            await loadReplyTargets(tx, ctx.tenant.id, ctx.tenant.timezone),
+            conv.teamId,
+          );
           const survey = await latestCsatSurvey(tx, ctx.tenant.id, conv.id);
           const automation = await automationStateForConversation(tx, ctx.tenant.id, conv.id);
           const source = await latestConversationSource(tx, ctx.tenant.id, conv.id);
@@ -1190,8 +1205,9 @@ export function createInboxService(deps: InboxDeps) {
     /**
      * When the replies to the customers waiting in conversations the member can see are due
      * (ADR-241), the earliest first and at most WAITING_REPLY_LIMIT, for the inbox's notice of
-     * overdue replies; none without a first-response target. Only times and whether each
-     * conversation is the member's: nothing about the customers, conversations or messages.
+     * overdue replies, each against its team's target or the company's (ADR-377); none in
+     * conversations without either. Only times and whether each conversation is the member's:
+     * nothing about the customers, conversations or messages.
      */
     async waitingReplies(ctx: TenantContext): Promise<{ waits: WaitingReply[]; capped: boolean }> {
       if (!can(ctx, 'inbox.read_all') && !can(ctx, 'inbox.read_assigned')) {
@@ -1200,14 +1216,21 @@ export function createInboxService(deps: InboxDeps) {
       return db.run(
         ctx.scope,
         async (tx) => {
-          const target = await loadReplyTarget(tx, ctx.tenant.id, ctx.tenant.timezone);
-          if (!target.minutes) return { waits: [], capped: false };
-          // A due time follows its start (business minutes only move it later), so the earliest
-          // starts are the earliest due.
-          const rows = await tx
+          const targets = await loadReplyTargets(tx, ctx.tenant.id, ctx.tenant.timezone);
+          if (!hasAnyTarget(targets)) return { waits: [], capped: false };
+          // Under one target a due time follows its start (business minutes only move it later),
+          // so the earliest starts are the earliest due. Conversations of each team with its own
+          // target are ranked apart from the rest (ADR-377): one more than the notice takes from
+          // each holds the earliest due of all.
+          const group = sql`case when ${teams.firstResponseTargetMinutes} is not null
+            then ${conversations.teamId} end`;
+          const ranked = tx
             .select({
               startedAt: conversationTurns.startedAt,
               assignedMembershipId: conversations.assignedMembershipId,
+              teamId: conversations.teamId,
+              rank: sql<number>`row_number() over (partition by ${group}
+                order by ${conversationTurns.startedAt}, ${conversationTurns.id})`.as('rank'),
             })
             .from(conversationTurns)
             .innerJoin(
@@ -1217,6 +1240,10 @@ export function createInboxService(deps: InboxDeps) {
                 eq(conversations.id, conversationTurns.conversationId),
               ),
             )
+            .leftJoin(
+              teams,
+              and(eq(teams.tenantId, conversations.tenantId), eq(teams.id, conversations.teamId)),
+            )
             .where(
               and(
                 eq(conversationTurns.tenantId, ctx.tenant.id),
@@ -1225,15 +1252,21 @@ export function createInboxService(deps: InboxDeps) {
                 visibilityFilter(ctx),
               ),
             )
-            .orderBy(asc(conversationTurns.startedAt), asc(conversationTurns.id))
-            .limit(WAITING_REPLY_LIMIT + 1);
-          const waits = rows.slice(0, WAITING_REPLY_LIMIT).flatMap((r) => {
-            const due = replyDueAt(target, r.startedAt);
-            return due
-              ? [{ dueAt: due.toISOString(), mine: r.assignedMembershipId === ctx.membership.id }]
-              : [];
-          });
-          return { waits, capped: rows.length > WAITING_REPLY_LIMIT };
+            .as('ranked');
+          const rows = await tx
+            .select()
+            .from(ranked)
+            .where(lte(ranked.rank, WAITING_REPLY_LIMIT + 1));
+          const due = rows
+            .flatMap((r) => {
+              const at = replyDueAt(targetFor(targets, r.teamId), r.startedAt);
+              return at ? [{ at, mine: r.assignedMembershipId === ctx.membership.id }] : [];
+            })
+            .sort((a, b) => a.at.getTime() - b.at.getTime());
+          const waits = due
+            .slice(0, WAITING_REPLY_LIMIT)
+            .map((w) => ({ dueAt: w.at.toISOString(), mine: w.mine }));
+          return { waits, capped: due.length > WAITING_REPLY_LIMIT };
         },
         { accessMode: 'read only' },
       );

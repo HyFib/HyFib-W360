@@ -1635,6 +1635,13 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    late is skipped for the next period's), and old web servers do not show the choice. Rolling an
    image back leaves the table and queue in place, unused.
 
+   Migration 0296 (ADR-377) adds `app.teams.first_response_target_minutes` (null for every team, so
+   nothing changes until a team sets one), replaces `ops.overdue_reply_turns` (dropped by
+   w360_definer and created again with the same grants) and adds two metric definition versions.
+   Old web servers neither show nor write team targets; old workers' sweeps read the replaced
+   function, which still answers the companies' turns with a target. Rolling an image back leaves
+   the column, function and definitions in place: an older release ignores team targets.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

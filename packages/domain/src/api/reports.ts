@@ -115,6 +115,17 @@ export const apiReportSchema = z.object({
       .int()
       .nullable()
       .describe('The company’s first-response target; null without one.'),
+    teamTargets: z
+      .array(
+        z.object({
+          teamId: z.uuid().describe('The team, as `GET /teams` names it.'),
+          name: z.string(),
+          targetMinutes: z.number().int().min(1),
+        }),
+      )
+      .describe(
+        'Teams with their own first-response target, by name: their conversations are measured against it instead of the company’s.',
+      ),
     businessHours: z
       .boolean()
       .describe('Business hours are on: the target and business-hours times count opening hours.'),
@@ -126,7 +137,11 @@ export const apiReportSchema = z.object({
         oldestWaitSeconds: seconds,
         windowsClosing: count,
         windowsClosed: count,
-        overTarget: count.nullable().describe('Waiting past the target; null without a target.'),
+        overTarget: count
+          .nullable()
+          .describe(
+            'Waiting past their target (their team’s or the company’s); null when neither the company nor a team has one.',
+          ),
         byAssignee: z.array(
           z.object({
             memberId: z
@@ -151,7 +166,11 @@ export const apiReportSchema = z.object({
         businessMedianSeconds: seconds.describe('Null when business hours are off.'),
         businessP90Seconds: seconds.describe('Null when business hours are off.'),
         buckets: z.object({ upTo5m: count, upTo1h: count, upTo24h: count, over24h: count }),
-        withinTarget: ratio.nullable().describe('Null without a target.'),
+        withinTarget: ratio
+          .nullable()
+          .describe(
+            'Each turn against its team’s target or the company’s; null without any target.',
+          ),
       })
       .describe('Reply turns started in the period: a customer waiting for a member’s reply.'),
     resolution: z.object({ resolved: count, medianSeconds: seconds, p90Seconds: seconds }),
@@ -337,6 +356,11 @@ export function toApiReport(report: Report): ApiReport {
     },
     inbox: {
       ...inbox,
+      teamTargets: inbox.teamTargets.map((t) => ({
+        teamId: t.teamId,
+        name: t.name,
+        targetMinutes: t.minutes,
+      })),
       now: {
         ...inbox.now,
         byAssignee: inbox.now.byAssignee.map((a) => ({

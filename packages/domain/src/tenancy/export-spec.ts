@@ -1549,6 +1549,7 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
       'max_open_per_member',
       'routing_keywords',
       'last_assigned_membership_id',
+      'first_response_target_minutes',
       'created_at',
       'updated_at',
     ],

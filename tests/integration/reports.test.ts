@@ -7,6 +7,7 @@ import {
   createCampaignsService,
   currentMetricDefinitions,
   createInboxService,
+  createTeamsService,
   createReportsService,
   dayOf,
   queueTextMessage,
@@ -777,6 +778,8 @@ describe('business hours, resolution time and CSAT', () => {
   let c: Company;
   let agentMembershipId: string;
   let r: Report;
+  /** Conversations of the fixture, for moving them into a team. */
+  const seeded = new Map<string, string>();
 
   async function seededConversation(createdAt: string): Promise<string> {
     const contactId = uuidv7();
@@ -893,6 +896,14 @@ describe('business hours, resolution time and CSAT', () => {
     await seededMessage(cc, 'inbound', '2026-09-25T11:20:00Z');
     const d = await seededConversation('2026-09-24T03:00:00Z');
     await seededMessage(d, 'inbound', '2026-09-24T03:30:00Z');
+    for (const [name, id] of [
+      ['a', a],
+      ['b', b],
+      ['c', cc],
+      ['d', d],
+    ] as const) {
+      seeded.set(name, id);
+    }
 
     await survey(a, '2026-09-15T07:31:00Z', { status: 'read', score: 3 });
     await survey(e, '2026-09-16T05:31:00Z', { status: 'delivered' });
@@ -961,5 +972,39 @@ describe('business hours, resolution time and CSAT', () => {
     // 17 h, 2.5 h and 47 h are all over an hour.
     expect(off.inbox.turns.withinTarget).toEqual({ numerator: 0, denominator: 3 });
     expect(off.inbox.now.overTarget).toBe(2);
+  });
+
+  it('measures each conversation against its team’s own target, else the company’s (ADR-377)', async () => {
+    const owner = await fx.ctx(c, c.owner);
+    // Business hours are off since the test above: targets count absolute time.
+    const { teamId } = await createTeamsService({ db: fx.dbs.app, clock }).createTeam(owner, {
+      name: 'Night shift',
+      firstResponseTargetMinutes: '1440',
+    });
+    for (const name of ['a', 'c']) {
+      await fx.query(`UPDATE app.conversations SET team_id = $1 WHERE id = $2`, [
+        teamId,
+        seeded.get(name),
+      ]);
+    }
+    const reports = createReportsService({ db: fx.dbs.app, clock });
+    const withTeam = await reports.getReport(owner, period);
+    expect(withTeam.inbox.targetMinutes).toBe(60);
+    expect(withTeam.inbox.teamTargets).toEqual([{ teamId, name: 'Night shift', minutes: 1440 }]);
+    // A's 17 h and 2.5 h are within the team's day; B's 47 h is past the company's hour.
+    expect(withTeam.inbox.turns.withinTarget).toEqual({ numerator: 2, denominator: 3 });
+    // C has waited 18 h 40 min, within the team's day; D 50 h 30 min, past the company's hour.
+    expect(withTeam.inbox.now.overTarget).toBe(1);
+
+    // Without the company's target, conversations outside the team have none and are left out.
+    await createInboxService({ db: fx.dbs.app, clock }).updateResponseTarget(owner, {
+      minutes: null,
+    });
+    const teamOnly = await reports.getReport(owner, period);
+    expect(teamOnly.inbox.targetMinutes).toBeNull();
+    expect(teamOnly.inbox.turns.withinTarget).toEqual({ numerator: 2, denominator: 2 });
+    expect(teamOnly.inbox.now.overTarget).toBe(0);
+    const latest = teamOnly.definitions.find((d) => d.key === 'inbox.within_target');
+    expect(latest?.version).toBe(4);
   });
 });

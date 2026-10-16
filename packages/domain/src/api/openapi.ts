@@ -1038,6 +1038,13 @@ export const apiTeamSettingsSchema = z.object({
   routingKeywords: z
     .array(z.string())
     .describe('Words in a customer’s first message that route the conversation to the team.'),
+  firstResponseTargetMinutes: z
+    .number()
+    .int()
+    .nullable()
+    .describe(
+      'The team’s own first-response target in minutes: customers waiting in its conversations are due a reply within it instead of the company’s target; null uses the company’s.',
+    ),
   memberIds: z
     .array(z.uuid())
     .describe(

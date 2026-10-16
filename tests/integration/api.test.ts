@@ -8720,6 +8720,7 @@ describe('assigning conversations (ADR-093)', () => {
       assignment: 'round_robin',
       maxOpenPerMember: 5,
       routingKeywords: ['Refund', 'refund ', 'Order status'],
+      firstResponseTargetMinutes: 20,
       memberIds: [agent.membership.id, supervisor.membership.id],
       channelIds: [c.channelAccountId],
     };
@@ -8735,6 +8736,7 @@ describe('assigning conversations (ADR-093)', () => {
       assignment: 'round_robin',
       maxOpenPerMember: 5,
       routingKeywords: ['refund', 'order status'],
+      firstResponseTargetMinutes: 20,
       channelIds: [c.channelAccountId],
     });
     expect([...support.memberIds].sort()).toEqual(
@@ -8743,6 +8745,8 @@ describe('assigning conversations (ADR-093)', () => {
     expect(await apiGetTeam(deps(), manager.ctx, support.id)).toEqual(support);
     const [inSettings] = (await teams().listTeams(owner)).filter((t) => t.id === support.id);
     expect(inSettings?.channelIds).toEqual([c.channelAccountId]);
+    // Its own reply target holds its conversations (ADR-377).
+    expect(inSettings?.firstResponseTargetMinutes).toBe(20);
     expect((await apiListTeams(deps(), manager.ctx, {})).data.map((t) => t.id)).toEqual([
       support.id,
     ]);
@@ -8750,12 +8754,17 @@ describe('assigning conversations (ADR-093)', () => {
     // A change of some settings keeps the rest; the same change again writes nothing.
     const update = (input: Record<string, unknown>) =>
       apiUpdateTeam(deps(), manager.ctx, support.id, input);
-    const renamed = await update({ name: 'Customer care', memberIds: [agent.membership.id] });
+    const renamed = await update({
+      name: 'Customer care',
+      memberIds: [agent.membership.id],
+      firstResponseTargetMinutes: null,
+    });
     expect(renamed).toMatchObject({
       name: 'Customer care',
       assignment: 'round_robin',
       maxOpenPerMember: 5,
       routingKeywords: ['refund', 'order status'],
+      firstResponseTargetMinutes: null,
       memberIds: [agent.membership.id],
       channelIds: [c.channelAccountId],
     });

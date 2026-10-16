@@ -14929,3 +14929,36 @@ Decision:
 Not built: report emails chosen by administrators for other members or for addresses outside the
 company, other frequencies, days or hours, sections chosen per email, attachments (CSV or PDF),
 and the emails in the public API.
+
+## ADR-377 Per-team first-response targets (P3-06) (2026-10-16)
+
+Context: the first-response target was the company's only (0007, ADR-030), one number for every
+conversation. Companies whose teams promise different service (a priority line that answers in
+minutes, a back office that answers within the day) could not say so, and "per-team SLA targets"
+was listed as remaining under P3-06.
+
+Decision:
+
+- **A team's own target:** `app.teams.first_response_target_minutes` (migration 0296; 1 to 1,440
+  minutes, null for none) is set with the team's other settings, in Settings → Teams and through
+  `POST`/`PATCH /teams` (`firstResponseTargetMinutes`), by those who manage teams (`inbox.supervise`;
+  keys with `teams.manage`), and audited with the team's change.
+- **Which target a conversation has:** its team's own target when the team has one, else the
+  company's (Settings → Inbox); a company without a target of its own may have teams with one. A
+  conversation counts against the team it is in now, as reports already apply the current calendar
+  to the whole period (ADR-030) instead of versioning settings. Business hours stay the company's: a
+  team's target is counted in business hours when they are on.
+- **Everywhere a target is used:** the inbox's reply timers (list and conversation); the notice of
+  overdue replies (ADR-241), where the conversations of each team with its own target are ranked
+  apart, so the waits a page is given are still the earliest due of all; the overdue-reply emails
+  (ADR-230), whose sweep query `ops.overdue_reply_turns` is replaced to find turns by the
+  conversation's team's target, else the company's, and whose email names the team's target when it
+  applied; and Reports, where "Answered within target" and "Overdue" measure each turn against its
+  conversation's target (new definition versions: `inbox.within_target` v4, `inbox.overdue` v3),
+  turns of conversations without any target are left out, and the inbox section names the teams
+  with their own target (also `teamTargets` in `GET /reports`). Report emails (ADR-376) say
+  "within their team's or the company's target" when teams have their own.
+- **Deletion and export:** the column goes with its team; the company export includes it.
+
+Not built: business hours per team, targets per WhatsApp number or customer priority, resolution
+targets, and measuring a turn against the team its conversation was in when the turn started.

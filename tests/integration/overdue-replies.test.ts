@@ -195,6 +195,61 @@ describe('emails when a waiting customer’s reply is overdue (ADR-230)', () => 
     expect(toOwner.lines[1]).toBe('Their conversations: 2 not taken by a member who can reply.');
   });
 
+  it('holds a conversation to its team’s own target, even when the company has none (ADR-377)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const agent = await fx.ctx(c, c.agent);
+    const { teamId } = await createTeamsService({ db: fx.dbs.app, clock: systemClock }).createTeam(
+      owner,
+      { name: 'Returns', memberIds: [agent.membership.id], firstResponseTargetMinutes: '10' },
+    );
+    const forTeam = await waitingCustomer(c, '919845100201');
+    await fx.query(`UPDATE app.conversations SET team_id = $1 WHERE tenant_id = $2 AND id = $3`, [
+      teamId,
+      c.tenant.id,
+      forTeam.conversation_id,
+    ]);
+    const noTeam = await waitingCustomer(c, '919845100202');
+
+    await sweep(later(forTeam.started_at, 9));
+    expect(await notice(forTeam.id)).toBeUndefined();
+    await sweep(later(forTeam.started_at, 11));
+    expect(await notice(forTeam.id)).toEqual({
+      state: 'sent',
+      due_at: later(forTeam.started_at, 10),
+      emailed: 1,
+      skip_reason: null,
+    });
+    const [email, ...others] = await overdueEmails(c.tenant.id);
+    expect(others).toEqual([]);
+    expect(email).toMatchObject({
+      to: c.agent.email,
+      subject: 'A customer is waiting past your reply target',
+    });
+    expect(email!.lines[0]).toBe(
+      'A customer has waited longer than the Returns team’s reply target of 10 minutes, in a conversation for the Returns team that nobody has taken yet.',
+    );
+    // Without a team, the company's target applies, and it has none: nothing is due.
+    await sweep(later(noTeam.started_at, 120));
+    expect(await notice(noTeam.id)).toBeUndefined();
+
+    // Once the company has a target, the customer without a team is due against it.
+    await createInboxService({ db: fx.dbs.app, clock: systemClock }).updateResponseTarget(owner, {
+      minutes: 30,
+    });
+    await sweep(later(noTeam.started_at, 29));
+    expect(await notice(noTeam.id)).toBeUndefined();
+    await sweep(later(noTeam.started_at, 31));
+    expect(await notice(noTeam.id)).toMatchObject({
+      state: 'sent',
+      due_at: later(noTeam.started_at, 30),
+    });
+    const toOwner = (await overdueEmails(c.tenant.id)).find((e) => e.to === c.owner.email);
+    expect(toOwner?.lines[0]).toBe(
+      'A customer has waited longer than your company’s reply target of 30 minutes, in a conversation that no member who can reply has taken.',
+    );
+  });
+
   it('skips a wait whose members all turned these emails off, and one due more than a day ago', async () => {
     const { c } = await companyWithTarget(30);
     const agent = await fx.ctx(c, c.agent);
@@ -348,5 +403,43 @@ describe('the inbox’s notice of overdue replies (ADR-241)', () => {
     // Without a first-response target, nothing is due.
     await inbox.updateResponseTarget(owner, { minutes: null });
     expect(await inbox.waitingReplies(owner)).toEqual({ waits: [], capped: false });
+  });
+
+  it('gives each wait its team’s own target, the earliest due first (ADR-377)', async () => {
+    const { c, owner } = await companyWithTarget(60);
+    const inbox = createInboxService({ db: fx.dbs.app, clock: systemClock });
+    const { teamId } = await createTeamsService({ db: fx.dbs.app, clock: systemClock }).createTeam(
+      owner,
+      { name: 'Priority', firstResponseTargetMinutes: '5' },
+    );
+    const noTeam = await waitingCustomer(c, '919845100301');
+    const priority = await waitingCustomer(c, '919845100302');
+    await fx.query(`UPDATE app.conversations SET team_id = $1 WHERE tenant_id = $2 AND id = $3`, [
+      teamId,
+      c.tenant.id,
+      priority.conversation_id,
+    ]);
+    const priorityDue = later(priority.started_at, 5).toISOString();
+    const noTeamDue = later(noTeam.started_at, 60).toISOString();
+    // The later customer is due first: their team's target is shorter.
+    expect(await inbox.waitingReplies(owner)).toEqual({
+      waits: [
+        { dueAt: priorityDue, mine: false },
+        { dueAt: noTeamDue, mine: false },
+      ],
+      capped: false,
+    });
+    // The inbox's list and the conversation give the same due times.
+    const items = (await inbox.listConversations(owner, {})).items;
+    expect(items.find((i) => i.id === priority.conversation_id)?.replyDueAt).toBe(priorityDue);
+    expect(items.find((i) => i.id === noTeam.conversation_id)?.replyDueAt).toBe(noTeamDue);
+    const detail = await inbox.getConversation(owner, priority.conversation_id);
+    expect(detail.conversation.replyDueAt).toBe(priorityDue);
+    // Without the company's target, only the team's customer is due.
+    await inbox.updateResponseTarget(owner, { minutes: null });
+    expect(await inbox.waitingReplies(owner)).toEqual({
+      waits: [{ dueAt: priorityDue, mine: false }],
+      capped: false,
+    });
   });
 });

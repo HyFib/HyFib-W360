@@ -126,6 +126,44 @@ describe('the overdue reply email (ADR-230)', () => {
     ).toContain('in a conversation that no member who can reply has taken.');
   });
 
+  it('names the team’s own target when the conversation’s team has one (ADR-377)', () => {
+    const team = { reason: 'team' as const, teamName: 'Returns', startedAt: at };
+    expect(
+      overdueReplyEmail({ ...base, items: [{ ...team, teamTargetMinutes: 15 }] }).lines[0],
+    ).toBe(
+      'A customer has waited longer than the Returns team’s reply target of 15 minutes, in a conversation for the Returns team that nobody has taken yet.',
+    );
+    // The company may have no target of its own.
+    const assigned = { reason: 'assigned' as const, teamName: 'Returns', teamTargetMinutes: 90 };
+    expect(
+      overdueReplyEmail({
+        ...base,
+        targetMinutes: null,
+        businessHours: true,
+        items: [{ ...assigned, startedAt: at }],
+      }).lines[0],
+    ).toBe(
+      'A customer has waited longer than the Returns team’s reply target of 1 hour 30 minutes of business hours, in a conversation assigned to you.',
+    );
+    // A burst against one target names it; against several, says so.
+    const burst = (items: Parameters<typeof overdueReplyEmail>[0]['items']) =>
+      overdueReplyEmail({ ...base, items }).lines[0];
+    expect(
+      burst([
+        { ...team, teamTargetMinutes: 15 },
+        { ...team, teamTargetMinutes: 15, startedAt: new Date('2026-10-06T04:40:00Z') },
+      ]),
+    ).toBe('2 customers have waited longer than the Returns team’s reply target of 15 minutes.');
+    expect(
+      burst([
+        { ...team, teamTargetMinutes: 15 },
+        { reason: 'routing', teamName: null, startedAt: at },
+      ]),
+    ).toBe(
+      '2 customers have waited longer than their reply targets: their teams’ own, or your company’s.',
+    );
+  });
+
   it('counts the replies of a burst in one email, the longest wait first', () => {
     const email = overdueReplyEmail({
       ...base,

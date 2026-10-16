@@ -84,6 +84,9 @@ export default async function TeamsSettingsPage({ params }: { params: Promise<{ 
                 {team.description ? `${team.description} · ` : ''}
                 {team.openConversations} open, {team.unassignedConversations} unassigned
                 {team.maxOpenPerMember ? ` · at most ${team.maxOpenPerMember} open per member` : ''}
+                {team.firstResponseTargetMinutes
+                  ? ` · reply target ${team.firstResponseTargetMinutes} min`
+                  : ''}
               </CardDescription>
             </CardHeader>
             <CardContent className="grid gap-4">
@@ -135,6 +138,7 @@ export default async function TeamsSettingsPage({ params }: { params: Promise<{ 
                         assignment: team.assignment,
                         maxOpenPerMember: team.maxOpenPerMember,
                         routingKeywords: team.routingKeywords,
+                        firstResponseTargetMinutes: team.firstResponseTargetMinutes,
                         memberIds: team.members.map((m) => m.membershipId),
                         channelIds: team.channelIds,
                       }}

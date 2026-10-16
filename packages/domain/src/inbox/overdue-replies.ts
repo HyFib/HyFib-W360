@@ -24,15 +24,16 @@ import {
 import { permissionsForRoles } from '../authz/permissions';
 import { enqueueEmail, type OutboxDeps } from '../email/outbox';
 import { wantsEmail } from '../tenancy/email-preferences';
-import { loadReplyTarget, replyDueAt } from './sla';
+import { hasAnyTarget, loadReplyTargets, replyDueAt, targetFor } from './sla';
 
 /**
  * Emails to the members responsible when a waiting customer's reply is overdue (ADR-230). The
  * worker's minute sweep asks `ops.overdue_reply_turns` for open reply turns that may be overdue and
  * works through each company's in the company's own scope: the due time comes from the inbox's own
- * rule (the first-response target, counted in business hours when they are on), and each turn is
- * noticed at most once (`app.overdue_reply_notices`). A reply due later than the sweep thought
- * (business hours) waits for its due time; one due more than a day ago is skipped.
+ * rule (the first-response target of the conversation's team when it has one, else the company's,
+ * ADR-377, counted in business hours when they are on), and each turn is noticed at most once
+ * (`app.overdue_reply_notices`). A reply due later than the sweep thought (business hours) waits
+ * for its due time; one due more than a day ago is skipped.
  *
  * The member responsible is the one the conversation is assigned to; when nobody who can still
  * see it is, the members of its team; when it has no team (or nobody there can answer), the
@@ -103,19 +104,28 @@ export interface OverdueItem {
   reason: OverdueReason;
   teamName: string | null;
   startedAt: Date;
+  /** The target of the conversation's team when it has its own (ADR-377); else the company's. */
+  teamTargetMinutes?: number | null;
 }
 
 /**
  * The email to one member about the replies overdue for them in one sweep: one conversation, or
- * how many and for what reasons. Never the customer's details or messages.
+ * how many and for what reasons, each against its team's target or the company's (`targetMinutes`).
+ * Never the customer's details or messages.
  */
 export function overdueReplyEmail(input: {
-  targetMinutes: number;
+  targetMinutes: number | null;
   businessHours: boolean;
   timeZone: string;
   items: readonly OverdueItem[];
 }): { subject: string; lines: string[] } {
-  const target = `${targetText(input.targetMinutes)}${input.businessHours ? ' of business hours' : ''}`;
+  const inWords = (minutes: number | null) =>
+    `${minutes === null ? 'its target' : targetText(minutes)}${input.businessHours ? ' of business hours' : ''}`;
+  // Whose target a reply was due against, in words: a team's own, or the company's.
+  const whose = (item: OverdueItem) =>
+    item.teamTargetMinutes
+      ? `the ${clipText(item.teamName ?? 'team', 80)} team’s reply target of ${inWords(item.teamTargetMinutes)}`
+      : `your company’s reply target of ${inWords(input.targetMinutes)}`;
   const since = (at: Date) =>
     `${new Intl.DateTimeFormat('en-IN', {
       timeZone: input.timeZone,
@@ -137,7 +147,7 @@ export function overdueReplyEmail(input: {
     return {
       subject: 'A customer is waiting past your reply target',
       lines: [
-        `A customer has waited longer than your company’s reply target of ${target}, ${where}.`,
+        `A customer has waited longer than ${whose(only)}, ${where}.`,
         `They have been waiting since ${since(only.startedAt)}.`,
         'Open the conversation to reply; this email leaves out the customer’s details and messages.',
       ],
@@ -150,10 +160,14 @@ export function overdueReplyEmail(input: {
     [count('routing'), 'not taken by a member who can reply'],
   ] as const;
   const n = input.items.length.toLocaleString('en-IN');
+  const targets = new Set(input.items.map(whose));
+  const [shared] = targets;
   return {
     subject: `${n} customers are waiting past your reply target`,
     lines: [
-      `${n} customers have waited longer than your company’s reply target of ${target}.`,
+      targets.size === 1 && shared
+        ? `${n} customers have waited longer than ${shared}.`
+        : `${n} customers have waited longer than their reply targets: their teams’ own, or your company’s.`,
       `Their conversations: ${parts
         .filter(([k]) => k > 0)
         .map(([k, text]) => `${k.toLocaleString('en-IN')} ${text}`)
@@ -237,8 +251,8 @@ async function noticeCompanyTurns(
     .from(tenants)
     .where(eq(tenants.id, tenantId));
   if (!company) return outcome;
-  const target = await loadReplyTarget(tx, tenantId, company.timezone);
-  if (!target.minutes) return outcome;
+  const targets = await loadReplyTargets(tx, tenantId, company.timezone);
+  if (!hasAnyTarget(targets)) return outcome;
   // Locked so that a member's reply, which closes the turn, either waits for this or is seen.
   const turns = await tx
     .select({
@@ -300,30 +314,7 @@ async function noticeCompanyTurns(
     }
   };
 
-  const overdue: { id: string; conversationId: string; startedAt: Date; dueAt: Date }[] = [];
-  for (const turn of turns) {
-    const state = notices.get(turn.id);
-    if (state && state !== 'waiting') continue;
-    const dueAt = replyDueAt(target, turn.startedAt);
-    if (!dueAt) {
-      // The calendar opens for none of the target within a year: look again in a day.
-      await record(turn.id, {
-        state: 'waiting',
-        dueAt: new Date(now.getTime() + NEVER_DUE_RECHECK_MS),
-      });
-      outcome.waiting += 1;
-    } else if (dueAt > now) {
-      await record(turn.id, { state: 'waiting', dueAt });
-      outcome.waiting += 1;
-    } else if (now.getTime() - dueAt.getTime() > OVERDUE_NOTICE_LATE_LIMIT_MS) {
-      await record(turn.id, { state: 'skipped', dueAt, skipReason: 'too_late' });
-      outcome.skipped += 1;
-    } else {
-      overdue.push({ ...turn, dueAt });
-    }
-  }
-  if (overdue.length === 0) return outcome;
-
+  // Each reply is due against its conversation's team's target, or the company's (ADR-377).
   const convs = new Map(
     (
       await tx
@@ -343,12 +334,39 @@ async function noticeCompanyTurns(
             eq(conversations.tenantId, tenantId),
             inArray(
               conversations.id,
-              overdue.map((t) => t.conversationId),
+              turns.map((t) => t.conversationId),
             ),
           ),
         )
     ).map((c) => [c.id, c]),
   );
+
+  const overdue: { id: string; conversationId: string; startedAt: Date; dueAt: Date }[] = [];
+  for (const turn of turns) {
+    const state = notices.get(turn.id);
+    if (state && state !== 'waiting') continue;
+    const target = targetFor(targets, convs.get(turn.conversationId)?.teamId ?? null);
+    // Neither its team nor the company has a target any more: nothing is due.
+    if (!target.minutes) continue;
+    const dueAt = replyDueAt(target, turn.startedAt);
+    if (!dueAt) {
+      // The calendar opens for none of the target within a year: look again in a day.
+      await record(turn.id, {
+        state: 'waiting',
+        dueAt: new Date(now.getTime() + NEVER_DUE_RECHECK_MS),
+      });
+      outcome.waiting += 1;
+    } else if (dueAt > now) {
+      await record(turn.id, { state: 'waiting', dueAt });
+      outcome.waiting += 1;
+    } else if (now.getTime() - dueAt.getTime() > OVERDUE_NOTICE_LATE_LIMIT_MS) {
+      await record(turn.id, { state: 'skipped', dueAt, skipReason: 'too_late' });
+      outcome.skipped += 1;
+    } else {
+      overdue.push({ ...turn, dueAt });
+    }
+  }
+  if (overdue.length === 0) return outcome;
   const members = (
     await tx
       .select({
@@ -405,6 +423,7 @@ async function noticeCompanyTurns(
         reason: responsible.reason,
         teamName: conv?.teamName ?? null,
         startedAt: turn.startedAt,
+        teamTargetMinutes: conv?.teamId ? (targets.teamMinutes.get(conv.teamId) ?? null) : null,
         turnId: turn.id,
         conversationId: turn.conversationId,
       });
@@ -416,8 +435,8 @@ async function noticeCompanyTurns(
 
   for (const { member, items } of perMember.values()) {
     const { subject, lines } = overdueReplyEmail({
-      targetMinutes: target.minutes,
-      businessHours: target.calendar !== null,
+      targetMinutes: targets.companyMinutes,
+      businessHours: targets.calendar !== null,
       timeZone: company.timezone,
       items,
     });

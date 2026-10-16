@@ -3,12 +3,16 @@ import type { Clock } from '@w360/core';
 import {
   CSAT_SKIP_REASONS,
   RATE_CATEGORIES,
+  and,
+  asc,
   desc,
   eq,
+  isNotNull,
   memberships,
   messagingSettings,
   metricDefinitions,
   sql,
+  teams,
   users,
   type CsatSkipReason,
   type Database,
@@ -29,8 +33,8 @@ import {
 } from '../campaigns/costs';
 import { CSV_BOM, csvLine } from '../contacts/csv';
 import { minorToInput } from '../crm/money';
-import { openPeriods } from '../inbox/business-hours';
-import { loadReplyTarget, type ReplyTarget } from '../inbox/sla';
+import { openPeriods, type BusinessCalendar } from '../inbox/business-hours';
+import { hasAnyTarget, loadReplyTargets, type ReplyTargets } from '../inbox/sla';
 import { parseInput } from '../validation';
 import { METRIC_DEFINITIONS, type MetricDefinition } from './definitions';
 import {
@@ -116,7 +120,13 @@ export interface CostReport {
 }
 
 export interface InboxReport {
+  /** The company's first-response target (Settings → Inbox); null without one. */
   targetMinutes: number | null;
+  /**
+   * Teams with their own first-response target (ADR-377): their conversations are measured against
+   * it instead of the company's. By name.
+   */
+  teamTargets: { teamId: string; name: string; minutes: number }[];
   /** Business hours are on: the target and the business-hours figures count opening hours only. */
   businessHours: boolean;
   now: {
@@ -126,7 +136,7 @@ export interface InboxReport {
     oldestWaitSeconds: number | null;
     windowsClosing: number;
     windowsClosed: number;
-    /** Waiting turns past the target (null without a target). */
+    /** Waiting turns past their target (null when neither the company nor a team has one). */
     overTarget: number | null;
     byAssignee: {
       membershipId: string | null;
@@ -538,11 +548,11 @@ const businessSeconds = (from: SQL, to: SQL) =>
 async function openingPeriodsCte(
   tx: Tx,
   tenantId: string,
-  target: ReplyTarget,
+  calendar: BusinessCalendar | null,
   period: ReportPeriod,
   now: Date,
 ): Promise<SQL | null> {
-  if (!target.calendar) return null;
+  if (!calendar) return null;
   // From the oldest turn the report measures (the period start, or an older waiting turn) to now.
   const oldest = await tx.execute<{ started_ms: number | null }>(sql`
     select (extract(epoch from min(t.started_at)) * 1000)::float8 as started_ms
@@ -552,7 +562,7 @@ async function openingPeriodsCte(
     oldestMs !== null && oldestMs !== undefined && oldestMs < period.start.getTime()
       ? new Date(oldestMs)
       : period.start;
-  const periods = openPeriods(target.calendar, from, now);
+  const periods = openPeriods(calendar, from, now);
   return sql`iv(lo, hi) as (select * from unnest(
     ${sql.param(periods.map((p) => p.start.toISOString()))}::timestamptz[],
     ${sql.param(periods.map((p) => p.end.toISOString()))}::timestamptz[]))`;
@@ -563,11 +573,15 @@ async function inboxReport(
   tenantId: string,
   period: ReportPeriod,
   now: Date,
-  target: ReplyTarget,
+  targets: ReplyTargets,
 ): Promise<InboxReport> {
-  const targetMinutes = target.minutes;
-  const targetSeconds = targetMinutes === null ? null : targetMinutes * 60;
-  const iv = await openingPeriodsCte(tx, tenantId, target, period, now);
+  const anyTarget = hasAnyTarget(targets);
+  // Each turn's target in seconds: its conversation's team's own (ADR-377), else the company's;
+  // null when neither has one. `c` is the conversation and `tm` its team.
+  const targetSeconds = sql`(coalesce(tm.first_response_target_minutes,
+    ${targets.companyMinutes}::int) * 60)::float8`;
+  const teamJoin = sql`left join app.teams tm on tm.tenant_id = c.tenant_id and tm.id = c.team_id`;
+  const iv = await openingPeriodsCte(tx, tenantId, targets.calendar, period, now);
   const withIv = iv ? sql`with ${iv}` : sql``;
   const live = await tx.execute<Record<string, number | null>>(sql`
     ${withIv}
@@ -584,15 +598,16 @@ async function inboxReport(
       (count(*) filter (where w.last_inbound_at is null
                           or w.last_inbound_at <= ${ts(now)} - interval '24 hours'))::int as closed,
       ${
-        targetSeconds === null
-          ? sql`null::int`
-          : sql`(count(*) filter (where w.waited >= ${targetSeconds}::float8))::int`
+        anyTarget
+          ? sql`(count(*) filter (where w.target_s is not null and w.waited >= w.target_s))::int`
+          : sql`null::int`
       } as over_target
     from (
-      select t.started_at, c.last_inbound_at,
+      select t.started_at, c.last_inbound_at, ${targetSeconds} as target_s,
              ${iv ? businessSeconds(sql`t.started_at`, ts(now)) : sql`extract(epoch from ${ts(now)} - t.started_at)::float8`} as waited
         from app.conversation_turns t
         join app.conversations c on c.tenant_id = t.tenant_id and c.id = t.conversation_id
+        ${teamJoin}
        where t.tenant_id = ${tenantId} and t.ended_at is null) w`);
   const l = live.rows[0] ?? {};
   const assignees = await tx.execute<{
@@ -613,6 +628,7 @@ async function inboxReport(
   // reply times, and business waiting time for turns still open.
   const periodTurns = sql`
     select t.started_at, t.ended_at, t.end_reason, ${DURATION}::float8 as dur,
+           ${targetSeconds} as target_s,
            ${iv ? sql`case when t.end_reason = 'replied' then ${businessSeconds(sql`t.started_at`, sql`t.ended_at`)} end` : sql`null::float8`} as biz_dur,
            ${
              iv
@@ -620,11 +636,14 @@ async function inboxReport(
                : sql`case when t.ended_at is null then extract(epoch from ${ts(now)} - t.started_at)::float8 end`
            } as waited
       from app.conversation_turns t
+      join app.conversations c on c.tenant_id = t.tenant_id and c.id = t.conversation_id
+      ${teamJoin}
      where t.tenant_id = ${tenantId} and t.started_at >= ${ts(period.start)}
        and t.started_at < ${ts(period.end)}
        -- Turns an automation took over while the customer waited were answered by the automation.
        and t.end_reason is distinct from 'automated'`;
-  // The target is met by a reply within it; turns still waiting count once they pass it.
+  // A target is met by a reply within it; turns still waiting count once they pass it. Turns of
+  // conversations without a target are left out.
   const replyTime = iv ? sql`pt.biz_dur` : sql`pt.dur`;
   const turns = await tx.execute<Record<string, number | null>>(sql`
     ${withIv}
@@ -644,13 +663,14 @@ async function inboxReport(
       (count(*) filter (where pt.end_reason = 'replied' and pt.dur <= 3600))::int as upto_1h,
       (count(*) filter (where pt.end_reason = 'replied' and pt.dur <= 86400))::int as upto_24h,
       ${
-        targetSeconds === null
-          ? sql`null::int as within_target, null::int as target_denominator`
-          : sql`(count(*) filter (where pt.end_reason = 'replied'
-                                    and ${replyTime} <= ${targetSeconds}::float8))::int as within_target,
-                (count(*) filter (where pt.end_reason = 'replied'
-                                    or (pt.ended_at is null and pt.waited >= ${targetSeconds}::float8)))::int
+        anyTarget
+          ? sql`(count(*) filter (where pt.end_reason = 'replied' and pt.target_s is not null
+                                    and ${replyTime} <= pt.target_s))::int as within_target,
+                (count(*) filter (where pt.target_s is not null
+                                    and (pt.end_reason = 'replied'
+                                         or (pt.ended_at is null and pt.waited >= pt.target_s))))::int
                   as target_denominator`
+          : sql`null::int as within_target, null::int as target_denominator`
       }
     from (${periodTurns}) pt`);
   const p = turns.rows[0] ?? {};
@@ -685,8 +705,16 @@ async function inboxReport(
   const upTo5m = num(p.upto_5m);
   const upTo1h = num(p.upto_1h);
   const upTo24h = num(p.upto_24h);
+  const teamTargets = await tx
+    .select({ teamId: teams.id, name: teams.name, minutes: teams.firstResponseTargetMinutes })
+    .from(teams)
+    .where(and(eq(teams.tenantId, tenantId), isNotNull(teams.firstResponseTargetMinutes)))
+    .orderBy(asc(teams.name), asc(teams.id));
   return {
-    targetMinutes,
+    targetMinutes: targets.companyMinutes,
+    teamTargets: teamTargets.flatMap((r) =>
+      r.minutes === null ? [] : [{ ...r, minutes: r.minutes }],
+    ),
     businessHours: iv !== null,
     now: {
       open: num(l.open),
@@ -695,7 +723,7 @@ async function inboxReport(
       oldestWaitSeconds: seconds(l.oldest_wait),
       windowsClosing: num(l.closing),
       windowsClosed: num(l.closed),
-      overTarget: targetSeconds === null ? null : num(l.over_target),
+      overTarget: anyTarget ? num(l.over_target) : null,
       byAssignee: assignees.rows.map((r) => ({
         membershipId: r.membership_id,
         name: r.name,
@@ -718,10 +746,9 @@ async function inboxReport(
         upTo24h: upTo24h - upTo1h,
         over24h: answered - upTo24h,
       },
-      withinTarget:
-        targetSeconds === null
-          ? null
-          : { numerator: num(p.within_target), denominator: num(p.target_denominator) },
+      withinTarget: anyTarget
+        ? { numerator: num(p.within_target), denominator: num(p.target_denominator) }
+        : null,
     },
     resolution: {
       resolved: num(resolutionTotal?.resolved),
@@ -1154,11 +1181,11 @@ async function loadReportSettings(tx: Tx, tenantId: string, timezone: string) {
     })
     .from(messagingSettings)
     .where(eq(messagingSettings.tenantId, tenantId));
-  const target = await loadReplyTarget(tx, tenantId, timezone);
+  const targets = await loadReplyTargets(tx, tenantId, timezone);
   return {
     costCurrency: row?.costCurrency ?? null,
     csatEnabled: row?.csatEnabled === true,
-    target,
+    targets,
   };
 }
 
@@ -1479,7 +1506,7 @@ export async function readReport(
   const settings = await loadReportSettings(tx, tenantId, timezone);
   const messaging = await messagingReport(tx, tenantId, period);
   const costs = await estimateMetaCharges(tx, tenantId, period, settings.costCurrency);
-  const inbox = await inboxReport(tx, tenantId, period, now, settings.target);
+  const inbox = await inboxReport(tx, tenantId, period, now, settings.targets);
   const csat = await csatReport(tx, tenantId, period, settings.csatEnabled);
   const automations = await automationReport(tx, tenantId, period);
   const deals = await dealReport(tx, tenantId, period, now);

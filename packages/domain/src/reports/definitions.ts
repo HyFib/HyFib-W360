@@ -466,6 +466,23 @@ export const METRIC_DEFINITIONS: readonly MetricDefinition[] = [
     available: true,
   },
   {
+    // Teams have their own targets (ADR-377).
+    key: 'inbox.overdue',
+    version: 3,
+    label: 'Overdue',
+    unit: 'count',
+    description:
+      'Waiting conversations whose customer has waited longer than the first-response target of the conversation’s team, or the company’s when the team has none or the conversation has no team. After an automation’s hand-off the wait counts from the hand-off.',
+    numerator: 'Open reply turns that have waited longer than their target.',
+    denominator: null,
+    window: TARGET_CLOCK,
+    timezoneRule: null,
+    missingData:
+      'Shown only when the company or one of its teams has a target. A conversation counts against the target of the team it is in now. Reply turns are recorded from the release of reports onwards.',
+    freshness: NOW,
+    available: true,
+  },
+  {
     key: 'inbox.windows_closing',
     version: 1,
     label: 'Reply windows closing',
@@ -627,6 +644,24 @@ export const METRIC_DEFINITIONS: readonly MetricDefinition[] = [
     timezoneRule: TURNS_V2,
     missingData:
       'Shown only when a target is set. With business hours on, the current schedule and closed days are applied to the whole period.',
+    freshness: LIVE,
+    available: true,
+  },
+  {
+    // Teams have their own targets (ADR-377).
+    key: 'inbox.within_target',
+    version: 4,
+    label: 'Answered within target',
+    unit: 'rate',
+    description:
+      'Share of reply turns answered within their target: the first-response target of the conversation’s team (Settings → Teams), or the company’s (Settings → Inbox) when the team has none or the conversation has no team.',
+    numerator: 'Turns answered within their target.',
+    denominator:
+      'Turns that started in the period and were answered or have waited longer than their target. Turns resolved without a reply, turns still within their target, turns an automation took over and turns of conversations without any target are left out.',
+    window: TARGET_CLOCK,
+    timezoneRule: TURNS_V2,
+    missingData:
+      'Shown only when the company or one of its teams has a target. Each turn is measured against the target of the team its conversation is in now, and with business hours on, the current schedule and closed days are applied to the whole period.',
     freshness: LIVE,
     available: true,
   },

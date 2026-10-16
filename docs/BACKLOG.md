@@ -174,7 +174,11 @@ verification, app review, Embedded Signup configuration).
   **[Presence of members built; its database and browser tests run only in CI]** (ADR-243, migration
   0157: a conversation names the other members who have it open, reported every 20 seconds while its
   page is visible; a member's row is deleted when they leave and an hour after their last report).
-  **Remaining:** per-team SLA targets and calendars, private team queues (would change visibility,
+  **[Per-team reply targets built; their database and browser tests run only in CI]** (ADR-377,
+  migration 0296: a team's own first-response target, in Settings → Teams and the teams API, used
+  for its conversations instead of the company's in the inbox's timers and notice, the overdue
+  emails and reports, each conversation by the team it is in now).
+  **Remaining:** per-team calendars, private team queues (would change visibility,
   ADR-029), CSAT by template outside the window (needs a consent decision), CSAT with a real WABA
   (phone-number masking: P3-01, ADR-226).
 
