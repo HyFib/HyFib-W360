@@ -1831,6 +1831,27 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    built by the worker that sends it), though a receiver that deduplicates on the event id ignores
    the replay.
 
+   Migration 0309 (ADR-398) adds two nullable columns to `app.channel_accounts`:
+   `messaging_limit` (1 to 64 characters, checked) and `messaging_limit_checked_at` (a limit only
+   with it, checked), with column grants (`UPDATE` for the runtime role, `SELECT` for the platform
+   role). Expand only and backward compatible: nothing is rewritten, both checks are validated at
+   once (every row is null), no function changes, and web servers and workers of the release
+   before never name the columns. Roll out workers before web as usual: until the worker rollout
+   ends, a number whose health an old worker reads keeps the limit read before (or none), and old
+   web servers show no limit. Numbers already active before this release show no limit (not "not
+   reported") until their health is read again: when their account is reconnected after Meta
+   stopped accepting its access, or when the number is connected again, which registers it again
+   (Meta counts registrations; do not do it only for this). Retry setup does not apply to active
+   numbers, and nothing reads them in bulk. A worker of this release asks Meta for
+   `whatsapp_business_manager_messaging_limit` with every health read; when Graph refuses that read
+   as permanent or as lost access (any code), it reads the health once more without the field (one
+   request more) and handles only that read's failure as one, so a refusal of the field alone does
+   not block setup or ask for a reconnect; retryable failures are retried as before. Check
+   META-SETUP's messaging limit item on a real number before relying on the line.
+   Rolling an image back leaves the columns in place and unused; a number whose health an older
+   worker reads meanwhile shows, once this release returns, the limit read before beside the later
+   "Checked" time.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

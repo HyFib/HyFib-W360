@@ -17,14 +17,16 @@ test.skip(!messagingConfigured, 'Meta test configuration (stand-in, app secret) 
 /**
  * A company whose WhatsApp account holds a token of its own at the Graph stand-in, described by
  * debug_token as given (ADR-137). connectTestChannel stores the account directly, never checked, so
- * the worker's minute sweep checks it within about a minute.
+ * the worker's minute sweep checks it within about a minute; its number has the messaging limit
+ * given, as if its health had been read (ADR-398), or was never asked for one.
  */
 async function companyWithToken(
   page: Page,
   request: APIRequestContext,
   token: { valid?: boolean; expiresAt?: number },
-  wabaId?: string,
+  channel: { wabaId?: string; messagingLimit?: string | null } = {},
 ) {
+  const { wabaId, messagingLimit } = channel;
   const email = uniqueEmail('access');
   const suffix = `${Date.now().toString(36)}${randomBytes(2).toString('hex')}`;
   const slug = `access-${suffix}`;
@@ -40,6 +42,7 @@ async function companyWithToken(
     slug,
     token: value,
     ...(wabaId ? { wabaId } : {}),
+    ...(messagingLimit !== undefined ? { messagingLimit } : {}),
   });
   return { email, slug, account: `WhatsApp Business Account ${connected.wabaId}` };
 }
@@ -69,6 +72,8 @@ test('an account whose access Meta no longer accepts is marked for reconnecting,
   await expect(alert).toContainText('Its numbers cannot send messages until it is reconnected.');
   await expect(alert).toContainText('Choose Connect WhatsApp and pick the same account');
   await expect(page.getByText('Reconnect needed')).toBeVisible();
+  // Its health was never read: nothing is said of a messaging limit (ADR-398).
+  await expect(page.getByText(/messaging limit/i)).toHaveCount(0);
   await expect(
     page.getByText(
       'Meta no longer accepts HyFib’s access to this number’s WhatsApp Business Account: Meta reports that the access token is no longer valid. Reconnect WhatsApp.',
@@ -106,7 +111,12 @@ test('an access that expires within 7 days is shown as a warning and its owner i
 }) => {
   test.setTimeout(240_000);
   const expiresAt = Math.floor(Date.now() / 1000) + 3 * 86_400;
-  const { email, slug, account } = await companyWithToken(page, request, { expiresAt });
+  const { email, slug, account } = await companyWithToken(
+    page,
+    request,
+    { expiresAt },
+    { messagingLimit: 'TIER_250' },
+  );
   await page.goto(`/c/${slug}/settings/channels`);
   await waitForAlert(page, 'HyFib’s access to WhatsApp expires soon');
 
@@ -124,6 +134,19 @@ test('an access that expires within 7 days is shown as a warning and its owner i
   ).toBeVisible();
   await expect(page.getByText(/^Access expires /)).toBeVisible();
   await expect(page.getByText(/^Webhooks checked /)).toBeVisible();
+  // The number's messaging limit, as the customers it allows, and what it is (ADR-398).
+  await expect(
+    page.getByText(
+      'Messaging limit: 250 unique customers outside a customer service window in a moving 24 hours (shared by the business portfolio)',
+      { exact: true },
+    ),
+  ).toBeVisible();
+  await expect(
+    page.getByText(
+      'A messaging limit is the number of unique customers a business can reach outside a customer service window in a moving 24 hours. Since 7 October 2025 Meta sets it per business portfolio, shared by all its numbers; HyFib shows the limit Meta reported when it last read the number.',
+      { exact: true },
+    ),
+  ).toBeVisible();
   await expectNoHorizontalOverflow(page);
 
   const text = await waitForEmail(email, `HyFib’s access to ${account} expires on`);
@@ -139,7 +162,7 @@ test('an account whose webhooks HyFib’s app cannot be subscribed to again show
   // Meta no longer lists HyFib's app for the account, and refuses to subscribe it again (ADR-138).
   const wabaId = newWabaId();
   await setStandInSubscription(request, { wabaId, subscribed: false, refuse: true });
-  const { email, slug, account } = await companyWithToken(page, request, {}, wabaId);
+  const { email, slug, account } = await companyWithToken(page, request, {}, { wabaId });
   await page.goto(`/c/${slug}/settings/channels`);
   await waitForAlert(page, 'WhatsApp messages are not reaching HyFib');
 

@@ -46,6 +46,7 @@ import {
 } from './access';
 import { emitTenantEvent } from './events';
 import type { GraphClient, GraphResult } from './graph';
+import { messagingLimitRefusalMetadata, messagingLimitText } from './messaging-limit';
 import { credentialAad } from './outbound';
 import { COUNTED_CHANNEL_STATUSES, assertNumberAvailable } from '../plans/entitlements';
 
@@ -105,6 +106,11 @@ export interface ChannelView {
   onboardingError: string | null;
   qualityRating: string | null;
   nameStatus: string | null;
+  /**
+   * The number's messaging limit as Channels words it (`messagingLimitText`, ADR-398), or null when
+   * HyFib has not asked Meta for it: a number whose health was last read before ADR-398, or never.
+   */
+  messagingLimit: string | null;
   healthCheckedAt: string | null;
   /** The access of the number's account (ADR-137). */
   accountStatus: 'connected' | 'needs_reconnect' | 'disconnected';
@@ -675,6 +681,8 @@ export function createOnboardingService(deps: OnboardingDeps) {
               onboardingError: channelAccounts.onboardingError,
               qualityRating: channelAccounts.qualityRating,
               nameStatus: channelAccounts.nameStatus,
+              storedLimit: channelAccounts.messagingLimit,
+              limitCheckedAt: channelAccounts.messagingLimitCheckedAt,
               healthCheckedAt: channelAccounts.healthCheckedAt,
               accountStatus: whatsappAccounts.status,
               accessCheckedAt: whatsappAccounts.tokenCheckedAt,
@@ -695,8 +703,9 @@ export function createOnboardingService(deps: OnboardingDeps) {
         { accessMode: 'read only' },
       );
       const now = clock.now();
-      return rows.map(({ grantedScopes, ...r }) => ({
+      return rows.map(({ grantedScopes, storedLimit, limitCheckedAt, ...r }) => ({
         ...r,
+        messagingLimit: limitCheckedAt ? messagingLimitText(storedLimit) : null,
         grantedPermissions: grantedPermissionList(grantedScopes),
         healthCheckedAt: r.healthCheckedAt?.toISOString() ?? null,
         accessCheckedAt: r.accessCheckedAt?.toISOString() ?? null,
@@ -938,8 +947,26 @@ export async function processChannelOnboarding(
     await update({ onboardingStep: step });
   }
   if (step === 'health_check' || step === 'done') {
-    const result = await deps.graph.getPhoneNumber(loaded.phoneNumberId, token);
+    const asked = await deps.graph.getPhoneNumber(loaded.phoneNumberId, token);
+    let result = asked;
+    // Which node gives the messaging limit is unconfirmed (Meta's SDK has it on the WhatsApp
+    // Business Account, its documentation says the phone number: research M-059, M-199), and Graph
+    // may refuse a field in more than one way (code 100 for a field it does not have, 200 for a
+    // permission, another code such as 3, or 10, which HyFib reads as lost access). So a read that
+    // asked for it and was refused as permanent or as lost access, whatever the code, is made once
+    // more without it. Only when that read succeeds is the number set up without a limit and the
+    // refusal audited; when it fails too, its failure is handled as before, so a token Meta no
+    // longer accepts still asks for a reconnect (ADR-398). Retryable and unknown failures are
+    // retried as before.
+    let refusal: Extract<typeof asked, { ok: false }> | null = null;
+    if (!asked.ok && (asked.kind === 'permanent' || asked.kind === 'auth')) {
+      result = await deps.graph.getPhoneNumber(loaded.phoneNumberId, token, {
+        messagingLimit: false,
+      });
+      if (result.ok) refusal = asked;
+    }
     if (!result.ok) return handleFailure(result, 'health_check');
+    const checkedAt = deps.clock.now();
     await update(
       {
         status: 'active',
@@ -950,13 +977,17 @@ export async function processChannelOnboarding(
         qualityRating: result.data.qualityRating,
         nameStatus: result.data.nameStatus,
         codeVerificationStatus: result.data.codeVerificationStatus,
-        healthCheckedAt: deps.clock.now(),
+        messagingLimit: result.data.messagingLimit,
+        messagingLimitCheckedAt: checkedAt,
+        healthCheckedAt: checkedAt,
       },
       (tx) =>
         recordSystemAudit(tx, scope.tenantId, {
           action: 'channel.activated',
           subjectType: 'channel',
           subjectId: loaded.id,
+          // Channels shows such a number's limit as not reported; the audit says why.
+          ...(refusal ? { metadata: messagingLimitRefusalMetadata(refusal) } : {}),
         }),
     );
     return 'active';

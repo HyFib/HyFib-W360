@@ -90,6 +90,14 @@ export const channelAccounts = appSchema.table('channel_accounts', {
   defaultTeamId: uuid('default_team_id'),
   createdAt: tz('created_at').notNull().defaultNow(),
   updatedAt: tz('updated_at').notNull().defaultNow(),
+  /**
+   * The number's messaging limit as Meta gave it (`whatsapp_business_manager_messaging_limit`), and
+   * the time of the last health read that asked Meta for it and completed (with the limit, without
+   * one, or by a read without it after Meta refused it): null for a number never asked (ADR-398,
+   * migration 0309).
+   */
+  messagingLimit: text('messaging_limit'),
+  messagingLimitCheckedAt: tz('messaging_limit_checked_at'),
 });
 
 export const channelOnboardingSessions = appSchema.table('channel_onboarding_sessions', {

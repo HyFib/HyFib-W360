@@ -339,6 +339,8 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
       'created_at',
       'updated_at',
       'default_team_id',
+      'messaging_limit',
+      'messaging_limit_checked_at',
     ],
     omitted: { registration_pin_ciphertext: "The number's two-step verification PIN." },
   },
