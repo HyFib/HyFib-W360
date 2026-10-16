@@ -100,6 +100,8 @@ test('deals are imported from a CSV file into a pipeline, checked first, rows wi
   ).toBeVisible();
   await expectNoHorizontalOverflow(page);
   await page.getByRole('button', { name: 'Import 2 rows' }).click();
+  // The check's summary holds the same counts until the result replaces it: wait for the result.
+  await expect(page.getByRole('heading', { name: 'Import finished' })).toBeVisible();
   await expect(
     page.getByText('1 deals added, 0 changed, 0 closed, 0 unchanged, 1 rows with errors (of 2).'),
   ).toBeVisible();
@@ -146,6 +148,7 @@ test('deals are imported from a CSV file into a pipeline, checked first, rows wi
     ),
   ).toBeVisible();
   await page.getByRole('button', { name: 'Import 2 rows' }).click();
+  await expect(page.getByRole('heading', { name: 'Import finished' })).toBeVisible();
   await expect(
     page.getByText('0 deals added, 1 changed, 1 closed, 0 unchanged, 1 rows with errors (of 2).'),
   ).toBeVisible();

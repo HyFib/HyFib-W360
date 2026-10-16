@@ -1,10 +1,11 @@
 # Progress
 
-## 2026-10-16 — Image builds in CI from the first mirror that serves the base image
+## 2026-10-16 — CI fixes: base image mirrors and the deal import's browser test
 
-Status: **Changed; it runs in CI only.** ECR Public's anonymous data limit ("429 Too Many Requests:
+Status: **Changed; both run in CI only.** ECR Public's anonymous data limit ("429 Too Many Requests:
 Data limit exceeded") failed the web or worker image build on PR #90 and PR #92, at least once after
-serving the tag, on the platform's manifest.
+serving the tag, on the platform's manifest. The deal import's browser test (ADR-374, ADR-387)
+failed on Chromium and mobile Chromium on PR #92 (Firefox passed).
 
 ### Completed
 
@@ -12,6 +13,10 @@ serving the tag, on the platform's manifest.
   Docker Hub first (as CI's PostgreSQL service does), then Amazon ECR Public, then Docker Hub, and
   builds from the first whose tag it can read (`docker buildx imagetools inspect`), warning about
   each one it skips. Builds outside CI keep the Dockerfile's default.
+- **`tests/e2e/crm.spec.ts`:** after "Import 2 rows" the test waited for the counts, which the
+  check's summary also holds ("Importing will give: …") until the result replaces it, so it could go
+  on, and leave the page, before the import was written: the deal page then showed the deal
+  unchanged. It now waits for "Import finished" first. The app is unchanged.
 
 ### Test commands and results
 
@@ -19,6 +24,7 @@ serving the tag, on the platform's manifest.
 | ------------------------------ | -------------------------------- |
 | `prettier --check`, YAML parse | clean                            |
 | The containers workflow        | not run here; CI runs it on push |
+| The deal import's browser test | not run here; CI runs it on push |
 
 ## 2026-10-16 — Review fixes for ADR-386 and ADR-387
 
