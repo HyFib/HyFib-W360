@@ -1,6 +1,6 @@
 # Progress
 
-## 2026-10-16 — Each WhatsApp number's messaging limit tier on Channels (P2-10, ADR-398)
+## 2026-10-16 — Each WhatsApp number's messaging limit on Channels (P2-10, ADR-398)
 
 Status: **Implemented; its database and browser tests run in CI only.** "Messaging limits display"
 remained under P2-10: Channels showed a number's quality rating, read with its health during its
@@ -8,64 +8,80 @@ setup, but not its messaging limit (ADR-381: "their Graph fields are not read ye
 
 ### Completed
 
-- **Graph (`messaging/graph.ts`):** `getPhoneNumber` also asks for `messaging_limit_tier` (Meta's
-  OpenAPI description lists it for this read, research M-199: `TIER_50`, `TIER_250`, `TIER_1K`,
-  `TIER_10K`, `TIER_100K`, `TIER_UNLIMITED`); `{ messagingLimitTier: false }` reads the rest as
-  before. `parseMessagingLimitTier` (`messaging/messaging-limit.ts`) keeps any text as given,
-  clipped to 64 characters; absent, empty or not text is null. No new endpoint.
-- **Onboarding (`messaging/onboarding.ts`):** the health step stores the tier and the time of the
-  read (`messaging_limit_checked_at`, the health check's time). Research calls the field deprecated
-  (M-059, M-137) and Graph refuses a field it does not have with code 100, which would fail every
-  number's setup: on a permanent code 100 failure the health is read once more without the tier
-  (one request more, as the template sync falls back to default fields), the number is set up
-  without a tier and `channel.activated` records `messagingLimitTier: refused`. Other failures, and
-  the second read's, are handled as before.
-- **Migration 0309:** `channel_accounts.messaging_limit_tier` (1 to 64 characters) and
-  `messaging_limit_checked_at` (a tier only with it), both checked and validated at once; `UPDATE`
-  for the runtime role and `SELECT` for the platform role, as the number's other facts from Meta;
-  nothing for the definer role. Exported with the number (`export-spec.ts`); deleted with its row.
-  Expand only.
-- **Channels:** under the quality rating, `messagingLimitText` ("Messaging limit: TIER_1K",
-  "Messaging limit: unknown tier (TIER_2K)", "Messaging limit: not reported by Meta"); nothing for
-  a number never asked (health last read before this release, or never); below the numbers, a note
-  that the tier is Meta's for the number and that Meta sets limits per business portfolio since
-  7 October 2025 (M-058). `listChannels` gives the wording (`messagingLimit`), never the columns;
-  the public API does not give it (its channel schema test now also refuses `messagingLimit…`).
-- **Graph stand-in (tests only):** the tier only when the read asks for it, `TIER_1K` by default,
-  any value a test sets (`messagingLimitTiers`: an unlisted tier, not text, or null for none), or
-  the code 100 refusal (`rejectMessagingLimitTier`).
-- **Tests:** unit (`messaging/messaging-limit.test.ts`, 10 tests: the listed tiers, parsing of
-  listed, unlisted, absent, empty, non-text and over-long values, the wording and the note, the
-  read's fields with and without the tier, the health step against a fake transaction and Graph:
-  the tier stored with the health time, the second read on a permanent code 100 only, its audit,
-  the second read's failure reported, every other failure read once, and the view worded only for
-  numbers asked); integration (`messaging.test.ts`: 3 new, the tier stored and worded for listed,
-  unlisted, over-long, absent and non-text answers with the fields asked, Meta refusing the field
-  and accepting it again, a number Graph no longer has failing at the health check after two
-  reads, and the columns' grants and checks; `company-data.test.ts` checks the export's new
-  columns as it checks every column); e2e (`whatsapp-access.spec.ts`: a number with `TIER_250`
-  shows the line and the note, a number never asked shows neither). Written for CI; the
-  integration and e2e tests were not run here.
-- **Docs:** ADR-398 (and a note in ADR-381); research M-199 with its open question and "must not
-  assume"; ARCHITECTURE, SECURITY, THREAT-MODEL T351, META-SETUP (check the field on the pinned
-  version before launch; open question 6), DEPLOYMENT (migration 0309, expand only), RUNBOOKS (the
-  three wordings and the refusal), BACKLOG P2-10, and the matrix's W-030 (now implemented).
-- **Mutation checks:** 31 deliberate regressions (parsing: empty text kept, no clip, non-text
-  stringified, a 63-character bound; the list: case-insensitive, `TIER_2K` added, `TIER_10K`
-  dropped; the wording: none, unlisted and listed tiers worded otherwise, an invented figure, the
-  note; the read: the tier not asked by default, always asked, parsed when not asked, not parsed,
-  never read, a sibling field dropped; the health step: the second read for any kind with code 100,
-  for any permanent failure, for any failure, never, asking the tier again, the tier or its time
-  not stored, its time only with a tier, the audit missing or inverted, the first failure reported;
-  the view: worded when never asked, nothing when not reported, the stored columns leaking): 31
-  caught by the unit tests, each file restored exactly. The migration, the stand-in, the export
-  spec and the page are exercised by the integration and e2e tests only, which run in CI.
-- **Not built:** the business portfolio's own limit (`whatsapp_business_manager_messaging_limit`),
-  a refresh of a number's facts outside its setup, the tier in the public API, webhooks and the
-  operations console, the `phone_number_quality_update` webhook's `current_limit`, and meanings
-  for the tiers (Meta's description gives none).
+- **Graph (`messaging/graph.ts`):** `getPhoneNumber` also asks for
+  `whatsapp_business_manager_messaging_limit`, which replaces the deprecated `messaging_limit_tier`
+  from v24.0 and which Meta's documentation says to request through the phone number (research
+  M-059); `{ messagingLimit: false }` reads the rest as before. The deprecated field is not asked
+  for, and the two are never asked together. `parseMessagingLimit`
+  (`messaging/messaging-limit.ts`) keeps any text as given, clipped to 64 characters; absent,
+  empty or not text is null. No new endpoint.
+- **Onboarding (`messaging/onboarding.ts`):** the health step stores the limit and the time of the
+  read (`messaging_limit_checked_at`, the health check's time). Meta's SDK has the field on the
+  WhatsApp Business Account and Graph refuses a field it does not have with code 100, which would
+  fail every number's setup: on a permanent code 100 failure the health is read once more without
+  the field (one request more, as the template sync falls back to default fields), the number is
+  set up without a limit and `channel.activated` records `messagingLimit: refused`. Other
+  failures, and the second read's, are handled as before.
+- **Migration 0309 (`0309_messaging_limit.sql`):** `channel_accounts.messaging_limit` (1 to 64
+  characters) and `messaging_limit_checked_at` (a limit only with it), both checked and validated
+  at once; `UPDATE` for the runtime role and `SELECT` for the platform role, as the number's other
+  facts from Meta; nothing for the definer role. Exported with the number (`export-spec.ts`);
+  deleted with its row. Expand only.
+- **Channels:** under the quality rating, `messagingLimitText` words M-059's values by research
+  M-058: "Messaging limit: 2,000 unique customers outside a customer service window in a moving 24
+  hours (shared by the business portfolio)" for `TIER_2K` (50, 250, 10,000 and 100,000 alike),
+  "Messaging limit: unlimited (shared by the business portfolio)", "Messaging limit: untiered (as
+  Meta reports it)" (no number: `UNTIERED` has no documented meaning), "Messaging limit: unknown
+  tier (…)" for any other text, "Messaging limit: not reported by Meta" when the answer had none,
+  and nothing for a number never asked (health last read before this release, or never). Below the
+  numbers, a note on what a limit counts and that Meta sets it per business portfolio since
+  7 October 2025. `listChannels` gives the wording (`messagingLimit`), never the columns; the
+  public API does not give it (its channel schema test also refuses `messagingLimit…`).
+- **Graph stand-in (tests only):** the field only when the read asks for it, `TIER_2K` by default,
+  any value a test sets (`messagingLimits`: an unlisted value, not text, or null for none), or the
+  code 100 refusal (`rejectMessagingLimit`).
+- **Tests:** unit (`messaging/messaging-limit.test.ts`, 10 tests: the listed values, parsing of
+  listed, unlisted, absent, empty, non-text and over-long values, each value's wording, prototype
+  names never worded as a tier, the note, the read's fields with and without the limit and the
+  deprecated field never read, the health step against a fake transaction and Graph: the limit
+  stored with the health time, the second read on a permanent code 100 only, its audit, the second
+  read's failure reported, every other failure read once, and the view worded only for numbers
+  asked); integration (`messaging.test.ts`: 3 new, the limit stored and worded for the default,
+  each listed kind, an unlisted, an over-long, an absent and a non-text answer with the fields
+  asked, Meta refusing the field and accepting it again, a number Graph no longer has failing at
+  the health check after two reads, and the columns' grants and checks; `company-data.test.ts`
+  checks the export's new columns as it checks every column); e2e (`whatsapp-access.spec.ts`: a
+  number with `TIER_250` shows its line and the note, a number never asked shows neither). Written
+  for CI; the integration and e2e tests were not run here.
+- **Docs:** ADR-398 (and a note in ADR-381); research M-199 (the spec has no
+  `whatsapp_business_manager_messaging_limit`; the SDK has it on the WABA), its open question and
+  "must not assume"; ARCHITECTURE, SECURITY, THREAT-MODEL T351, META-SETUP (before launch, request
+  the field on a real number and on its WABA and record which gives it; open question 6),
+  DEPLOYMENT (migration 0309, expand only), RUNBOOKS (each wording and the refusal), BACKLOG P2-10,
+  and the matrix's W-030 (implemented).
+- **Mutation checks:** 44 deliberate regressions (parsing: empty text kept, no clip, non-text
+  stringified, a 63-character bound; the list: case-insensitive, the deprecated `TIER_1K` added,
+  `TIER_10K` or `UNTIERED` dropped; the wording: none, unlisted and prototype names worded
+  otherwise, four wrong figures, unlimited given a number, `UNTIERED` given a figure or worded as
+  unknown, the portfolio or the service window left out, the note; the read: the limit not asked
+  by default, always asked, the deprecated field asked instead, both asked, the deprecated field
+  read, parsed when not asked, not parsed, never read, a sibling field dropped; the health step:
+  the second read for any kind with code 100, for any permanent failure, for any failure, never,
+  asking the limit again, the limit or its time not stored, its time only with a limit, the audit
+  missing or inverted, the first failure reported; the view: worded when never asked, nothing when
+  not reported, the stored columns leaking): 44 caught by the unit tests, each file restored
+  exactly. The migration, the stand-in, the export spec and the page are exercised by the
+  integration and e2e tests only, which run in CI.
+- **Rework (before merge):** the first commit read the deprecated `messaging_limit_tier` (listed in
+  Meta's OpenAPI description) and showed its tier names as given. Research M-059 names
+  `whatsapp_business_manager_messaging_limit` as its replacement from v24.0 and HyFib asks v26.0,
+  so the read now asks for the new field (the refusal fallback unchanged), the values are worded by
+  M-058, and 0309 (applied nowhere) names the column `messaging_limit`.
+- **Not built:** reading the limit from the WABA (the SDK's node) should the phone number not give
+  it, a refresh of a number's facts outside its setup, the limit in the public API, webhooks and
+  the operations console, and the `phone_number_quality_update` webhook's `current_limit`.
 
-### Test commands and results (local, 2026-10-16)
+### Test commands and results (local, 2026-10-16, after the rework)
 
 | Command                                            | Result                                                          |
 | -------------------------------------------------- | --------------------------------------------------------------- |

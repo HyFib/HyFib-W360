@@ -12,10 +12,10 @@ import type { TenantContext } from '../authz/context';
 import { GraphClient, type GraphResult } from './graph';
 import {
   MESSAGING_LIMIT_NOTE,
-  MESSAGING_LIMIT_TIERS,
-  isListedMessagingLimitTier,
+  MESSAGING_LIMITS,
+  isListedMessagingLimit,
   messagingLimitText,
-  parseMessagingLimitTier,
+  parseMessagingLimit,
 } from './messaging-limit';
 import {
   createOnboardingService,
@@ -23,60 +23,99 @@ import {
   type OnboardingDeps,
 } from './onboarding';
 
-const TIERS = ['TIER_50', 'TIER_250', 'TIER_1K', 'TIER_10K', 'TIER_100K', 'TIER_UNLIMITED'];
+/** The values Meta's SDK lists for `whatsapp_business_manager_messaging_limit` (research M-059). */
+const LIMITS = [
+  'TIER_50',
+  'TIER_250',
+  'TIER_2K',
+  'TIER_10K',
+  'TIER_100K',
+  'TIER_UNLIMITED',
+  'UNTIERED',
+];
+const SCOPE =
+  'unique customers outside a customer service window in a moving 24 hours (shared by the business portfolio)';
+const FIELD = 'whatsapp_business_manager_messaging_limit';
 
-describe("a number's messaging limit tier from Meta (ADR-398)", () => {
-  it('lists exactly the tiers of Meta’s description', () => {
-    expect([...MESSAGING_LIMIT_TIERS]).toEqual(TIERS);
-    for (const tier of TIERS) expect(isListedMessagingLimitTier(tier)).toBe(true);
-    for (const other of ['TIER_2K', 'UNTIERED', 'tier_1k', ' TIER_1K', 'TIER_1K ', '']) {
-      expect(isListedMessagingLimitTier(other), other).toBe(false);
+describe("a number's messaging limit from Meta (ADR-398)", () => {
+  it('lists exactly the values of Meta’s SDK', () => {
+    expect([...MESSAGING_LIMITS]).toEqual(LIMITS);
+    for (const limit of LIMITS) expect(isListedMessagingLimit(limit)).toBe(true);
+    // The deprecated field's TIER_1K, other spellings and prototype names are not listed.
+    for (const other of [
+      'TIER_1K',
+      'tier_2k',
+      ' TIER_2K',
+      'TIER_2K ',
+      'untiered',
+      '',
+      'constructor',
+      '__proto__',
+      'toString',
+    ]) {
+      expect(isListedMessagingLimit(other), other).toBe(false);
     }
   });
 
   it('keeps any text as Meta gives it, and nothing else', () => {
-    for (const tier of TIERS) expect(parseMessagingLimitTier(tier)).toBe(tier);
-    // A tier the description does not list, exactly as given.
-    expect(parseMessagingLimitTier('TIER_2K')).toBe('TIER_2K');
-    expect(parseMessagingLimitTier(' tier_1k ')).toBe(' tier_1k ');
+    for (const limit of LIMITS) expect(parseMessagingLimit(limit)).toBe(limit);
+    // A value the SDK does not list, exactly as given.
+    expect(parseMessagingLimit('TIER_1K')).toBe('TIER_1K');
+    expect(parseMessagingLimit(' tier_2k ')).toBe(' tier_2k ');
     // At most the 64 characters the column holds, an emoji never split.
-    expect(parseMessagingLimitTier('T'.repeat(64))).toBe('T'.repeat(64));
-    expect(parseMessagingLimitTier('T'.repeat(65))).toBe('T'.repeat(64));
-    expect(parseMessagingLimitTier(`${'T'.repeat(63)}😀`)).toBe('T'.repeat(63));
-    // Absent, empty or not text: Meta reported no tier.
+    expect(parseMessagingLimit('T'.repeat(64))).toBe('T'.repeat(64));
+    expect(parseMessagingLimit('T'.repeat(65))).toBe('T'.repeat(64));
+    expect(parseMessagingLimit(`${'T'.repeat(63)}😀`)).toBe('T'.repeat(63));
+    // Absent, empty or not text: Meta reported no limit.
     for (const none of [
       undefined,
       null,
       '',
-      1000,
+      2000,
       0,
       true,
       false,
-      ['TIER_1K'],
-      { tier: 'TIER_1K' },
+      ['TIER_2K'],
+      { tier: 'TIER_2K' },
     ]) {
-      expect(parseMessagingLimitTier(none), JSON.stringify(none)).toBeNull();
+      expect(parseMessagingLimit(none), JSON.stringify(none)).toBeNull();
     }
   });
 
-  it('words a tier as Meta names it, any other as unknown, and none as not reported', () => {
-    expect(messagingLimitText('TIER_50')).toBe('Messaging limit: TIER_50');
-    expect(messagingLimitText('TIER_1K')).toBe('Messaging limit: TIER_1K');
-    expect(messagingLimitText('TIER_UNLIMITED')).toBe('Messaging limit: TIER_UNLIMITED');
-    expect(messagingLimitText('TIER_2K')).toBe('Messaging limit: unknown tier (TIER_2K)');
-    expect(messagingLimitText('tier_1k')).toBe('Messaging limit: unknown tier (tier_1k)');
+  it('words each tier by the customers it allows, and nothing else as a figure', () => {
+    expect(messagingLimitText('TIER_50')).toBe(`Messaging limit: 50 ${SCOPE}`);
+    expect(messagingLimitText('TIER_250')).toBe(`Messaging limit: 250 ${SCOPE}`);
+    expect(messagingLimitText('TIER_2K')).toBe(`Messaging limit: 2,000 ${SCOPE}`);
+    expect(messagingLimitText('TIER_10K')).toBe(`Messaging limit: 10,000 ${SCOPE}`);
+    expect(messagingLimitText('TIER_100K')).toBe(`Messaging limit: 100,000 ${SCOPE}`);
+    expect(messagingLimitText('TIER_UNLIMITED')).toBe(
+      'Messaging limit: unlimited (shared by the business portfolio)',
+    );
+    // No documented meaning: as Meta reports it, without a number.
+    expect(messagingLimitText('UNTIERED')).toBe('Messaging limit: untiered (as Meta reports it)');
+    // Anything else, the deprecated field's TIER_1K and prototype names included, is unknown.
+    for (const other of [
+      'TIER_1K',
+      'tier_2k',
+      'TIER_2K ',
+      'constructor',
+      '__proto__',
+      'toString',
+    ]) {
+      expect(messagingLimitText(other), other).toBe(`Messaging limit: unknown tier (${other})`);
+    }
     expect(messagingLimitText(null)).toBe('Messaging limit: not reported by Meta');
-    // Never a number of conversations or customers.
-    for (const tier of [...TIERS, 'TIER_2K', null]) {
-      expect(messagingLimitText(tier)).not.toMatch(/conversation|customer|[0-9],[0-9]/i);
+    // No figure where none is documented.
+    for (const none of ['UNTIERED', 'TIER_UNLIMITED', null]) {
+      expect(messagingLimitText(none)).not.toMatch(/[0-9]/);
     }
     expect(MESSAGING_LIMIT_NOTE).toBe(
-      'A number’s messaging limit is the tier Meta reports for it, named as Meta names it. Since 7 October 2025 Meta sets messaging limits per business portfolio, shared by all its numbers.',
+      'A messaging limit is the number of unique customers a business can reach outside a customer service window in a moving 24 hours. Since 7 October 2025 Meta sets it per business portfolio, shared by all its numbers; HyFib shows the limit Meta reported when it last read the number.',
     );
   });
 });
 
-describe("the phone number read's tier (ADR-398)", () => {
+describe("the phone number read's messaging limit (ADR-398)", () => {
   const FIELDS =
     'display_phone_number,verified_name,quality_rating,name_status,code_verification_status';
 
@@ -97,12 +136,13 @@ describe("the phone number read's tier (ADR-398)", () => {
     return { graph, asked };
   }
 
-  it('asks for the tier with the number’s other facts and parses it', async () => {
+  it('asks for the limit with the number’s other facts and parses it', async () => {
     const cases: [unknown, string | null][] = [
       ['TIER_10K', 'TIER_10K'],
-      ['TIER_2K', 'TIER_2K'],
+      ['UNTIERED', 'UNTIERED'],
+      ['TIER_1K', 'TIER_1K'],
       [undefined, null],
-      [1000, null],
+      [2000, null],
       ['', null],
     ];
     for (const [given, kept] of cases) {
@@ -113,11 +153,13 @@ describe("the phone number read's tier (ADR-398)", () => {
         quality_rating: 'GREEN',
         name_status: 'APPROVED',
         code_verification_status: 'VERIFIED',
-        ...(given === undefined ? {} : { messaging_limit_tier: given }),
+        // The deprecated field is neither asked for nor read.
+        messaging_limit_tier: 'TIER_1K',
+        ...(given === undefined ? {} : { [FIELD]: given }),
       });
       const result = await graph.getPhoneNumber('1234', 'token');
       expect(asked.map((u) => `${u.pathname}?${u.searchParams.get('fields')}`)).toEqual([
-        `/v26.0/1234?${FIELDS},messaging_limit_tier`,
+        `/v26.0/1234?${FIELDS},${FIELD}`,
       ]);
       expect(result).toEqual({
         ok: true,
@@ -127,32 +169,27 @@ describe("the phone number read's tier (ADR-398)", () => {
           qualityRating: 'GREEN',
           nameStatus: 'APPROVED',
           codeVerificationStatus: 'VERIFIED',
-          messagingLimitTier: kept,
+          messagingLimit: kept,
         },
       });
     }
   });
 
-  it('reads the rest without it when told, and then gives no tier', async () => {
-    const { graph, asked } = client({ verified_name: 'Acme', messaging_limit_tier: 'TIER_1K' });
-    const result = await graph.getPhoneNumber('1234', 'token', { messagingLimitTier: false });
+  it('reads the rest without it when told, and then gives no limit', async () => {
+    const { graph, asked } = client({ verified_name: 'Acme', [FIELD]: 'TIER_2K' });
+    const result = await graph.getPhoneNumber('1234', 'token', { messagingLimit: false });
     expect(asked.map((u) => u.searchParams.get('fields'))).toEqual([FIELDS]);
-    expect(result.ok && result.data).toMatchObject({
-      verifiedName: 'Acme',
-      messagingLimitTier: null,
-    });
-    const asking = client({ messaging_limit_tier: 'TIER_1K' });
-    await asking.graph.getPhoneNumber('1234', 'token', { messagingLimitTier: true });
-    expect(asking.asked.map((u) => u.searchParams.get('fields'))).toEqual([
-      `${FIELDS},messaging_limit_tier`,
-    ]);
+    expect(result.ok && result.data).toMatchObject({ verifiedName: 'Acme', messagingLimit: null });
+    const asking = client({ [FIELD]: 'TIER_2K' });
+    await asking.graph.getPhoneNumber('1234', 'token', { messagingLimit: true });
+    expect(asking.asked.map((u) => u.searchParams.get('fields'))).toEqual([`${FIELDS},${FIELD}`]);
   });
 });
 
 type PhoneRead = Awaited<ReturnType<GraphClient['getPhoneNumber']>>;
 type Failure = Extract<GraphResult<never>, { ok: false }>;
 
-describe("onboarding's health read and the tier (ADR-398)", () => {
+describe("onboarding's health read and the messaging limit (ADR-398)", () => {
   const TENANT = '0192f0c4-8e2b-7c1d-9a3e-5b6c7d8e9f01';
   const CHANNEL = '0192f0c4-8e2b-7c1d-9a3e-5b6c7d8e9f02';
   const NOW = new Date('2026-10-16T10:00:00Z');
@@ -169,7 +206,7 @@ describe("onboarding's health read and the tier (ADR-398)", () => {
     httpStatus: 400,
     code: 100,
     title: 'OAuthException',
-    detail: '(#100) Tried accessing nonexisting field (messaging_limit_tier)',
+    detail: `(#100) Tried accessing nonexisting field (${FIELD})`,
   };
 
   /**
@@ -237,8 +274,8 @@ describe("onboarding's health read and the tier (ADR-398)", () => {
     return { outcome, reads, updates, audits, events };
   }
 
-  it('stores the tier read with the health, at the same time', async () => {
-    const run = await healthStep([{ ok: true, data: { ...facts, messagingLimitTier: 'TIER_1K' } }]);
+  it('stores the limit read with the health, at the same time', async () => {
+    const run = await healthStep([{ ok: true, data: { ...facts, messagingLimit: 'TIER_2K' } }]);
     expect(run.outcome).toBe('active');
     expect(run.reads).toEqual([undefined]);
     expect(run.updates).toEqual([
@@ -247,7 +284,7 @@ describe("onboarding's health read and the tier (ADR-398)", () => {
         onboardingStep: 'done',
         onboardingError: null,
         ...facts,
-        messagingLimitTier: 'TIER_1K',
+        messagingLimit: 'TIER_2K',
         messagingLimitCheckedAt: NOW,
         healthCheckedAt: NOW,
       },
@@ -258,33 +295,30 @@ describe("onboarding's health read and the tier (ADR-398)", () => {
     expect(run.events).toBe(1);
   });
 
-  it('reads once more without the tier when Graph refuses with code 100, and says so', async () => {
-    const run = await healthStep([
-      refused,
-      { ok: true, data: { ...facts, messagingLimitTier: null } },
-    ]);
+  it('reads once more without the limit when Graph refuses with code 100, and says so', async () => {
+    const run = await healthStep([refused, { ok: true, data: { ...facts, messagingLimit: null } }]);
     expect(run.outcome).toBe('active');
-    expect(run.reads).toEqual([undefined, { messagingLimitTier: false }]);
+    expect(run.reads).toEqual([undefined, { messagingLimit: false }]);
     expect(run.updates).toEqual([
       {
         status: 'active',
         onboardingStep: 'done',
         onboardingError: null,
         ...facts,
-        messagingLimitTier: null,
+        messagingLimit: null,
         messagingLimitCheckedAt: NOW,
         healthCheckedAt: NOW,
       },
     ]);
     expect(run.audits).toMatchObject([
-      { action: 'channel.activated', metadata: { messagingLimitTier: 'refused' } },
+      { action: 'channel.activated', metadata: { messagingLimit: 'refused' } },
     ]);
   });
 
   it('fails with the second read’s reason when that read fails too', async () => {
     const run = await healthStep([refused, { ...refused, detail: 'Unsupported get request.' }]);
     expect(run.outcome).toBe('failed');
-    expect(run.reads).toEqual([undefined, { messagingLimitTier: false }]);
+    expect(run.reads).toEqual([undefined, { messagingLimit: false }]);
     expect(run.updates).toEqual([
       {
         status: 'failed',
@@ -308,15 +342,15 @@ describe("onboarding's health read and the tier (ADR-398)", () => {
       const run = await healthStep([failure]);
       expect(run.outcome, JSON.stringify(failure)).toBe(outcome);
       expect(run.reads, JSON.stringify(failure)).toEqual([undefined]);
-      expect(
-        run.updates.some((u) => 'messagingLimitTier' in u || 'messagingLimitCheckedAt' in u),
-      ).toBe(false);
+      expect(run.updates.some((u) => 'messagingLimit' in u || 'messagingLimitCheckedAt' in u)).toBe(
+        false,
+      );
     }
   });
 });
 
-describe('Channels and the tier (ADR-398)', () => {
-  it('words the tier only for a number whose read asked for it', async () => {
+describe('Channels and the messaging limit (ADR-398)', () => {
+  it('words the limit only for a number whose read asked for it', async () => {
     const at = new Date('2026-10-16T10:00:00Z');
     const base = {
       id: '0192f0c4-8e2b-7c1d-9a3e-5b6c7d8e9f02',
@@ -339,10 +373,11 @@ describe('Channels and the tier (ADR-398)', () => {
     };
     const rows = [
       // Its health read before ADR-398: never asked.
-      { ...base, messagingLimitTier: null, messagingLimitCheckedAt: null },
-      { ...base, messagingLimitTier: null, messagingLimitCheckedAt: at },
-      { ...base, messagingLimitTier: 'TIER_100K', messagingLimitCheckedAt: at },
-      { ...base, messagingLimitTier: 'TIER_2K', messagingLimitCheckedAt: at },
+      { ...base, storedLimit: null, limitCheckedAt: null },
+      { ...base, storedLimit: null, limitCheckedAt: at },
+      { ...base, storedLimit: 'TIER_100K', limitCheckedAt: at },
+      { ...base, storedLimit: 'UNTIERED', limitCheckedAt: at },
+      { ...base, storedLimit: 'TIER_1K', limitCheckedAt: at },
     ];
     const q: Record<string, unknown> = {};
     for (const step of ['from', 'innerJoin', 'where', 'orderBy']) q[step] = () => q;
@@ -359,13 +394,14 @@ describe('Channels and the tier (ADR-398)', () => {
     expect(listed.map((c) => c.messagingLimit)).toEqual([
       null,
       'Messaging limit: not reported by Meta',
-      'Messaging limit: TIER_100K',
-      'Messaging limit: unknown tier (TIER_2K)',
+      `Messaging limit: 100,000 ${SCOPE}`,
+      'Messaging limit: untiered (as Meta reports it)',
+      'Messaging limit: unknown tier (TIER_1K)',
     ]);
     // The stored columns stay behind the wording.
     for (const view of listed) {
-      expect(Object.keys(view)).not.toContain('messagingLimitTier');
-      expect(Object.keys(view)).not.toContain('messagingLimitCheckedAt');
+      expect(Object.keys(view)).not.toContain('storedLimit');
+      expect(Object.keys(view)).not.toContain('limitCheckedAt');
     }
   });
 });

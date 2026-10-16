@@ -91,10 +91,11 @@ export const channelAccounts = appSchema.table('channel_accounts', {
   createdAt: tz('created_at').notNull().defaultNow(),
   updatedAt: tz('updated_at').notNull().defaultNow(),
   /**
-   * The number's messaging limit tier as Meta gave it, and when a health read that asked for it
-   * succeeded: null for a number never asked (ADR-398, migration 0309).
+   * The number's messaging limit as Meta gave it (`whatsapp_business_manager_messaging_limit`), and
+   * when a health read that asked for it succeeded: null for a number never asked (ADR-398,
+   * migration 0309).
    */
-  messagingLimitTier: text('messaging_limit_tier'),
+  messagingLimit: text('messaging_limit'),
   messagingLimitCheckedAt: tz('messaging_limit_checked_at'),
 });
 

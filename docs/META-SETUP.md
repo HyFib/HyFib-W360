@@ -82,12 +82,15 @@ App-secret rotation: set the new secret as `META_APP_SECRET` and the old one as
   unknown-outcome handling; default throughput 80 msg/s per number; ~1 message per 6 s per recipient
   (pair rate limit); messaging limits are per **business portfolio** since 2025-10-07
   (`whatsapp_business_manager_messaging_limit`).
-- **Messaging limit tier:** each number's health read (`GET /{PHONE_NUMBER_ID}`) also asks for
-  `messaging_limit_tier`, which Settings → Channels shows as Meta names it (ADR-398). Research
-  calls the field deprecated (M-059): before launch, read a real number on the pinned version and
-  check whether Meta still gives it. If Graph refuses it (code 100), setup reads the health again
-  without it, the number shows "Messaging limit: not reported by Meta", and its `channel.activated`
-  audit entry records `messagingLimitTier: refused`.
+- **Messaging limit:** each number's health read (`GET /{PHONE_NUMBER_ID}`) also asks for
+  `whatsapp_business_manager_messaging_limit`, which Settings → Channels shows by what it allows
+  (ADR-398, research M-058, M-059). Meta's SDK has the field on the WABA, while the docs snippet
+  says to request it through the Phone Number API, which HyFib does: before launch, request it on a
+  real number and on its WABA (`GET /{WABA_ID}?fields=whatsapp_business_manager_messaging_limit`)
+  on the pinned version and record which node gives it, and whether the values match the SDK's. If
+  Graph refuses it on the number (code 100), setup reads the health again without it, the number
+  shows "Messaging limit: not reported by Meta", and its `channel.activated` audit entry records
+  `messagingLimit: refused`.
 - **Pricing (effective 2026-10-01, verify):** per-message pricing by category and market; service
   messages beyond 1,000 per number per month and utility templates inside the customer service window
   become billable; businesses without a payment method stop receiving delivery of service messages.
@@ -110,8 +113,9 @@ App-secret rotation: set the new secret as `META_APP_SECRET` and the old one as
 3. Whether Tech Providers may re-bill or mark up Meta charges (we assume **not**).
 4. `biz_opaque_callback_data` (or equivalent) support per message type for correlating sends.
 5. BSUID send semantics (`recipient` vs `to`) and go-live dates per message type.
-6. Whether a number's `messaging_limit_tier` is still given on the pinned version, and how it
-   relates to its business portfolio's messaging limit (ADR-398, research M-199).
+6. Which node gives `whatsapp_business_manager_messaging_limit` on the pinned version (the phone
+   number, as the docs snippet says, or only the WABA, as the SDK has it), and what `UNTIERED`
+   means (ADR-398, research M-059, M-199).
 
 ## Templates (phase 3)
 

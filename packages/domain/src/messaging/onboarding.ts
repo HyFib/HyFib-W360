@@ -107,9 +107,8 @@ export interface ChannelView {
   qualityRating: string | null;
   nameStatus: string | null;
   /**
-   * The number's messaging limit tier as Channels words it (`messagingLimitText`, ADR-398), or null
-   * when HyFib has not asked Meta for it: a number whose health was last read before ADR-398, or
-   * never.
+   * The number's messaging limit as Channels words it (`messagingLimitText`, ADR-398), or null when
+   * HyFib has not asked Meta for it: a number whose health was last read before ADR-398, or never.
    */
   messagingLimit: string | null;
   healthCheckedAt: string | null;
@@ -682,8 +681,8 @@ export function createOnboardingService(deps: OnboardingDeps) {
               onboardingError: channelAccounts.onboardingError,
               qualityRating: channelAccounts.qualityRating,
               nameStatus: channelAccounts.nameStatus,
-              messagingLimitTier: channelAccounts.messagingLimitTier,
-              messagingLimitCheckedAt: channelAccounts.messagingLimitCheckedAt,
+              storedLimit: channelAccounts.messagingLimit,
+              limitCheckedAt: channelAccounts.messagingLimitCheckedAt,
               healthCheckedAt: channelAccounts.healthCheckedAt,
               accountStatus: whatsappAccounts.status,
               accessCheckedAt: whatsappAccounts.tokenCheckedAt,
@@ -704,9 +703,9 @@ export function createOnboardingService(deps: OnboardingDeps) {
         { accessMode: 'read only' },
       );
       const now = clock.now();
-      return rows.map(({ grantedScopes, messagingLimitTier, messagingLimitCheckedAt, ...r }) => ({
+      return rows.map(({ grantedScopes, storedLimit, limitCheckedAt, ...r }) => ({
         ...r,
-        messagingLimit: messagingLimitCheckedAt ? messagingLimitText(messagingLimitTier) : null,
+        messagingLimit: limitCheckedAt ? messagingLimitText(storedLimit) : null,
         grantedPermissions: grantedPermissionList(grantedScopes),
         healthCheckedAt: r.healthCheckedAt?.toISOString() ?? null,
         accessCheckedAt: r.accessCheckedAt?.toISOString() ?? null,
@@ -949,14 +948,15 @@ export async function processChannelOnboarding(
   }
   if (step === 'health_check' || step === 'done') {
     let result = await deps.graph.getPhoneNumber(loaded.phoneNumberId, token);
-    // Graph refuses a field it does not have with code 100, and research M-059 calls
-    // `messaging_limit_tier` deprecated: the health is then read once more without it, so the tier
-    // never fails a number's setup, and Meta has reported no tier (ADR-398). Any other failure, or
-    // the second read's, is handled as before.
-    const tierRefused = !result.ok && result.kind === 'permanent' && result.code === 100;
-    if (tierRefused) {
+    // Graph refuses a field it does not have with code 100, and Meta's SDK has the messaging limit
+    // on the WhatsApp Business Account while its documentation says to read it through the phone
+    // number (research M-059): the health is then read once more without it, so the limit never
+    // fails a number's setup, and Meta has reported no limit (ADR-398). Any other failure, or the
+    // second read's, is handled as before.
+    const limitRefused = !result.ok && result.kind === 'permanent' && result.code === 100;
+    if (limitRefused) {
       result = await deps.graph.getPhoneNumber(loaded.phoneNumberId, token, {
-        messagingLimitTier: false,
+        messagingLimit: false,
       });
     }
     if (!result.ok) return handleFailure(result, 'health_check');
@@ -971,7 +971,7 @@ export async function processChannelOnboarding(
         qualityRating: result.data.qualityRating,
         nameStatus: result.data.nameStatus,
         codeVerificationStatus: result.data.codeVerificationStatus,
-        messagingLimitTier: result.data.messagingLimitTier,
+        messagingLimit: result.data.messagingLimit,
         messagingLimitCheckedAt: checkedAt,
         healthCheckedAt: checkedAt,
       },
@@ -980,8 +980,8 @@ export async function processChannelOnboarding(
           action: 'channel.activated',
           subjectType: 'channel',
           subjectId: loaded.id,
-          // Channels shows such a number's tier as not reported; the audit says why.
-          ...(tierRefused ? { metadata: { messagingLimitTier: 'refused' } } : {}),
+          // Channels shows such a number's limit as not reported; the audit says why.
+          ...(limitRefused ? { metadata: { messagingLimit: 'refused' } } : {}),
         }),
     );
     return 'active';

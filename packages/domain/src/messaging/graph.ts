@@ -13,7 +13,7 @@
  */
 import { clipText, parseExternalJson } from '@w360/core';
 import type { FlowValidationError } from '@w360/db';
-import { parseMessagingLimitTier } from './messaging-limit';
+import { parseMessagingLimit } from './messaging-limit';
 
 export type GraphFailureKind = 'retryable' | 'permanent' | 'auth' | 'unknown';
 
@@ -152,7 +152,7 @@ const str = (value: unknown): string | null => (typeof value === 'string' ? valu
 const num = (value: unknown): number | null =>
   typeof value === 'number' && Number.isFinite(value) ? value : null;
 
-/** The fields of a phone number its health read asks for, besides its messaging limit tier. */
+/** The fields of a phone number its health read asks for, besides its messaging limit. */
 const PHONE_NUMBER_FIELDS =
   'display_phone_number,verified_name,quality_rating,name_status,code_verification_status';
 
@@ -732,25 +732,24 @@ export class GraphClient {
   }
 
   /**
-   * GET /{phone-number-id}?fields=... Meta's description lists every field asked here for this read
-   * (operation `getWhatsAppAccountNumberDetails`, research M-137). `messaging_limit_tier` (ADR-398)
-   * is asked unless `messagingLimitTier` is false: research M-059 calls it deprecated, and Graph
-   * refuses a field it does not have with code 100, so a caller can read the rest without it. A read
-   * that does not ask for the tier gives none.
+   * GET /{phone-number-id}?fields=... (research M-137). With the number's facts it asks for
+   * `whatsapp_business_manager_messaging_limit` (ADR-398), which replaces the deprecated
+   * `messaging_limit_tier` from v24.0 and which Meta's documentation says to request through the
+   * phone number (research M-059; its SDK has it on the WhatsApp Business Account). Unless
+   * `messagingLimit` is false: Graph refuses a field it does not have with code 100, so a caller can
+   * read the rest without it. A read that does not ask for the limit gives none.
    */
-  getPhoneNumber(
-    phoneNumberId: string,
-    token: string,
-    options: { messagingLimitTier?: boolean } = {},
-  ) {
-    const withTier = options.messagingLimitTier ?? true;
+  getPhoneNumber(phoneNumberId: string, token: string, options: { messagingLimit?: boolean } = {}) {
+    const withLimit = options.messagingLimit ?? true;
     return this.request(
       'GET',
       `/${encodeURIComponent(phoneNumberId)}`,
       {
         token,
         query: {
-          fields: withTier ? `${PHONE_NUMBER_FIELDS},messaging_limit_tier` : PHONE_NUMBER_FIELDS,
+          fields: withLimit
+            ? `${PHONE_NUMBER_FIELDS},whatsapp_business_manager_messaging_limit`
+            : PHONE_NUMBER_FIELDS,
         },
       },
       (json) => ({
@@ -761,7 +760,9 @@ export class GraphClient {
         nameStatus: typeof json.name_status === 'string' ? json.name_status : null,
         codeVerificationStatus:
           typeof json.code_verification_status === 'string' ? json.code_verification_status : null,
-        messagingLimitTier: withTier ? parseMessagingLimitTier(json.messaging_limit_tier) : null,
+        messagingLimit: withLimit
+          ? parseMessagingLimit(json.whatsapp_business_manager_messaging_limit)
+          : null,
       }),
     );
   }

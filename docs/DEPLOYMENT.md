@@ -1832,19 +1832,20 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    the replay.
 
    Migration 0309 (ADR-398) adds two nullable columns to `app.channel_accounts`:
-   `messaging_limit_tier` (1 to 64 characters, checked) and `messaging_limit_checked_at` (a tier
-   only with it, checked), with column grants (`UPDATE` for the runtime role, `SELECT` for the
-   platform role). Expand only and backward compatible: nothing is rewritten, both checks are
-   validated at once (every row is null), no function changes, and web servers and workers of the
-   release before never name the columns. Roll out workers before web as usual: until the worker
-   rollout ends, a number whose health an old worker reads keeps the tier read before (or none),
-   and old web servers show no tier. Numbers whose health was read before this release show no
-   tier (not "not reported") until it is read again, when the number is connected again, its setup
-   retried or its account reconnected; nothing reads them in bulk. A worker of this release asks
-   Meta for `messaging_limit_tier` with every health read, and reads the health once more without
-   it if Graph refuses it with code 100 (one request more), so a refusal never blocks setup. Rolling
-   an image back leaves the columns in place and unused; a number whose health an older worker
-   reads meanwhile shows, once this release returns, the tier read before beside the later
+   `messaging_limit` (1 to 64 characters, checked) and `messaging_limit_checked_at` (a limit only
+   with it, checked), with column grants (`UPDATE` for the runtime role, `SELECT` for the platform
+   role). Expand only and backward compatible: nothing is rewritten, both checks are validated at
+   once (every row is null), no function changes, and web servers and workers of the release
+   before never name the columns. Roll out workers before web as usual: until the worker rollout
+   ends, a number whose health an old worker reads keeps the limit read before (or none), and old
+   web servers show no limit. Numbers whose health was read before this release show no limit (not
+   "not reported") until it is read again, when the number is connected again, its setup retried
+   or its account reconnected; nothing reads them in bulk. A worker of this release asks Meta for
+   `whatsapp_business_manager_messaging_limit` with every health read, and reads the health once
+   more without it if Graph refuses it with code 100 (one request more), so a refusal never blocks
+   setup; check META-SETUP's messaging limit item on a real number before relying on the line.
+   Rolling an image back leaves the columns in place and unused; a number whose health an older
+   worker reads meanwhile shows, once this release returns, the limit read before beside the later
    "Checked" time.
 
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue

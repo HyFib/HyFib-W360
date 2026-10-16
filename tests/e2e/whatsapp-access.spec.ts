@@ -18,15 +18,15 @@ test.skip(!messagingConfigured, 'Meta test configuration (stand-in, app secret) 
  * A company whose WhatsApp account holds a token of its own at the Graph stand-in, described by
  * debug_token as given (ADR-137). connectTestChannel stores the account directly, never checked, so
  * the worker's minute sweep checks it within about a minute; its number has the messaging limit
- * tier given, as if its health had been read (ADR-398), or was never asked for one.
+ * given, as if its health had been read (ADR-398), or was never asked for one.
  */
 async function companyWithToken(
   page: Page,
   request: APIRequestContext,
   token: { valid?: boolean; expiresAt?: number },
-  channel: { wabaId?: string; messagingLimitTier?: string | null } = {},
+  channel: { wabaId?: string; messagingLimit?: string | null } = {},
 ) {
-  const { wabaId, messagingLimitTier } = channel;
+  const { wabaId, messagingLimit } = channel;
   const email = uniqueEmail('access');
   const suffix = `${Date.now().toString(36)}${randomBytes(2).toString('hex')}`;
   const slug = `access-${suffix}`;
@@ -42,7 +42,7 @@ async function companyWithToken(
     slug,
     token: value,
     ...(wabaId ? { wabaId } : {}),
-    ...(messagingLimitTier !== undefined ? { messagingLimitTier } : {}),
+    ...(messagingLimit !== undefined ? { messagingLimit } : {}),
   });
   return { email, slug, account: `WhatsApp Business Account ${connected.wabaId}` };
 }
@@ -115,7 +115,7 @@ test('an access that expires within 7 days is shown as a warning and its owner i
     page,
     request,
     { expiresAt },
-    { messagingLimitTier: 'TIER_250' },
+    { messagingLimit: 'TIER_250' },
   );
   await page.goto(`/c/${slug}/settings/channels`);
   await waitForAlert(page, 'HyFib’s access to WhatsApp expires soon');
@@ -134,11 +134,16 @@ test('an access that expires within 7 days is shown as a warning and its owner i
   ).toBeVisible();
   await expect(page.getByText(/^Access expires /)).toBeVisible();
   await expect(page.getByText(/^Webhooks checked /)).toBeVisible();
-  // The number's messaging limit tier, as Meta names it, and what it is (ADR-398).
-  await expect(page.getByText('Messaging limit: TIER_250', { exact: true })).toBeVisible();
+  // The number's messaging limit, as the customers it allows, and what it is (ADR-398).
   await expect(
     page.getByText(
-      'A number’s messaging limit is the tier Meta reports for it, named as Meta names it. Since 7 October 2025 Meta sets messaging limits per business portfolio, shared by all its numbers.',
+      'Messaging limit: 250 unique customers outside a customer service window in a moving 24 hours (shared by the business portfolio)',
+      { exact: true },
+    ),
+  ).toBeVisible();
+  await expect(
+    page.getByText(
+      'A messaging limit is the number of unique customers a business can reach outside a customer service window in a moving 24 hours. Since 7 October 2025 Meta sets it per business portfolio, shared by all its numbers; HyFib shows the limit Meta reported when it last read the number.',
       { exact: true },
     ),
   ).toBeVisible();

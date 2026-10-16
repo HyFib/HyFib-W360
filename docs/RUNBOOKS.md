@@ -158,19 +158,23 @@ sweep is not running: nobody is emailed about late queues until it does, so star
 - Other setup errors show the step and Meta's message; fix the cause (for example the number's
   two-step verification PIN set elsewhere) and **Retry setup**.
 
-### Messaging limit tier on Channels (ADR-398)
+### Messaging limit on Channels (ADR-398)
 
-- `Messaging limit: TIER_…`: the tier Meta gave at the number's last health read ("Checked …"), as
-  Meta names it. HyFib does not say what a tier allows; since 7 October 2025 Meta sets messaging
-  limits per business portfolio, which HyFib does not read.
-- `Messaging limit: unknown tier (…)`: Meta gave a value its description does not list (for example
-  a newer tier). Nothing to fix; it is shown as given.
-- `Messaging limit: not reported by Meta`: the read asked for the tier and Meta's answer had none,
+- `Messaging limit: 2,000 unique customers …` (or 50, 250, 10,000, 100,000, or `unlimited`): the
+  `whatsapp_business_manager_messaging_limit` Meta gave at the number's last health read
+  ("Checked …"), worded by research M-058. Since 7 October 2025 the limit belongs to the business
+  portfolio and is shared by all its numbers; a company with several portfolios sees each one's on
+  its numbers.
+- `Messaging limit: untiered (as Meta reports it)`: Meta gave `UNTIERED`, whose meaning research
+  does not give; HyFib shows no number for it.
+- `Messaging limit: unknown tier (…)`: Meta gave a value its SDK does not list (for example the
+  deprecated field's `TIER_1K`, or a newer tier). Nothing to fix; it is shown as given.
+- `Messaging limit: not reported by Meta`: the read asked for the limit and Meta's answer had none,
   or Graph refused the field with code 100 and the health was read again without it; the
-  `channel.activated` audit entry of that read then has `messagingLimitTier: refused`. The number
-  works either way. Refusals for every number mean Meta no longer has the field on the pinned
-  version (research M-059): setup keeps working without it, and reading the portfolio's limit
-  instead needs a decision of its own (not built, ADR-398).
+  `channel.activated` audit entry of that read then has `messagingLimit: refused`. The number works
+  either way. Refusals for every number mean Graph does not give the field on the phone number on
+  the pinned version (Meta's SDK has it on the WABA, research M-059): setup keeps working without
+  it, and reading the WABA instead needs a decision of its own (not built, ADR-398).
 - No messaging limit line: the number's health was last read before ADR-398 (or never); it is read
   when the number is connected again, its setup retried or its account reconnected. Do not reconnect
   a number only for this: connecting again registers it again, which Meta counts.

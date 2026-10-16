@@ -57,12 +57,13 @@ verification, app review, Embedded Signup configuration).
   **[The permissions granted to HyFib shown on Channels; its database and browser tests run only in
   CI]** (ADR-381, no migration: the permissions Meta listed for each account's access at its last
   check, the needed ones first with what each is for). **[Messaging limits display built: each
-  number's messaging limit tier on Channels; its database and browser tests run only in CI]**
-  (ADR-398, migration 0309: `messaging_limit_tier` read with the number's health and shown as Meta
-  names it, an unlisted value as unknown and none as not reported, never as a figure; the health
-  read again without it when Graph refuses the field). Remaining: the business portfolio's own
-  messaging limit (`whatsapp_business_manager_messaging_limit`) and a refresh of a number's facts
-  outside its setup.
+  number's messaging limit on Channels; its database and browser tests run only in CI]** (ADR-398,
+  migration 0309: `whatsapp_business_manager_messaging_limit` read with the number's health and
+  shown by the unique customers it allows (research M-058), `UNTIERED` as Meta reports it, an
+  unlisted value as unknown and none as not reported; the health read again without it when Graph
+  refuses the field on the phone number). Remaining: checking on a real number which node gives the
+  field (META-SETUP), reading it from the WABA should the number not give it, and a refresh of a
+  number's facts outside its setup.
 - **P2-11 Platform quarantine view** — done with P5-10 (ADR-054): the operations console's
   Integrations page lists quarantined webhooks without their content and platform administrators
   resolve them, or retry their receipts, with a reason in the platform audit log.
