@@ -1097,9 +1097,11 @@ export const apiCampaignReviewSchema = z.object({
         ),
       limit: z
         .string()
+        .min(1)
+        .max(64)
         .nullable()
         .describe(
-          "The number's messaging limit as Meta reported it when HyFib last read the number (like TIER_2K), any text Meta gave included; null when Meta reported none or the number was never read.",
+          "The number's messaging limit as Meta reported it when HyFib last read the number (like TIER_2K), any text Meta gave included, clipped to 64 characters as HyFib keeps it; null when Meta reported none or the number was never read.",
         ),
       checkedAt: z.iso
         .datetime()

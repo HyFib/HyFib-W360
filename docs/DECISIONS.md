@@ -16692,8 +16692,11 @@ Decision:
 - **Wording, honest about what HyFib knows:** over: "This campaign may reach up to 2,600 contacts,
   more than the 2,000 unique customers its number's messaging limit allows outside a customer
   service window in a moving 24 hours (Meta reported TIER_2K when HyFib last read the number)."
-  under the title "More recipients than the number's messaging limit"; within: the same with
-  "within the", under "Within the number's messaging limit". Unknown, under "Messaging limit
+  under the title "More recipients than the number's messaging limit" (true of the count); within:
+  the same with "within the", under a title that compares only the campaign's size with the
+  figure, "Up to 1,800 contacts, within the limit's 2,000", never "within the limit": the
+  portfolio's other numbers and campaigns may already have used the allowance. Unknown, under
+  "Messaging limit
   unknown": "HyFib has not read this number's messaging limit from Meta yet", "Meta did not report a
   messaging limit when HyFib last read this number", "Meta reported TIER_50 when HyFib last read
   this number, a level HyFib has no documented figure for", "Meta reported this number as untiered
@@ -16704,8 +16707,11 @@ Decision:
   sent do not count toward the limit, so this count is an upper bound."; "Since 7 October 2025 the
   limit is shared by every number of your business portfolio: its other numbers and campaigns use
   the same allowance, and HyFib cannot see how much of it they have used."; "Meta, not HyFib,
-  enforces the limit, and HyFib does not hold the campaign back for it: a message Meta does not
-  deliver is shown as failed with the code Meta gives." Unlimited, under "Messaging limit:
+  enforces the limit, and HyFib does not hold the campaign back for it. When Meta refuses a message
+  or reports it as failed, HyFib shows it as failed with the code Meta gives." (HyFib marks a
+  message failed only when Graph refuses the send or a status webhook reports it failed; one Meta
+  accepts and never delivers stays sent, and research says nothing of what happens to messages
+  over the limit.) Unlimited, under "Messaging limit:
   unlimited": "Meta reported an unlimited messaging limit (TIER_UNLIMITED) when HyFib last read this
   number." alone. No Meta error code is named. Counts in en-US digits, as M-058's figures and
   Channels' wording are.
@@ -16728,8 +16734,9 @@ Decision:
   where approvers review it before it sends. A completed or cancelled campaign shows none. The
   web's `MessagingLimitNotice` renders the domain's title and lines in an `Alert` (warning tone only
   for `over`); the page already re-checks `campaigns.read` itself. Members who can read campaigns
-  see it; the limit is the number's operational metadata, which members who read channels see on
-  Channels.
+  see it, though Channels shows it only to `channels.read` (ADR-398): every role holding
+  `campaigns.read` also holds `channels.read` (a unit test checks it), and the limit is the
+  number's operational metadata, no credential or contact (SECURITY's Phase 3 rules).
 - **It never blocks:** not a problem in the review, not checked by `submitLockedDraft`, approval or
   the runner. Meta enforces the limit, the portfolio's other numbers and campaigns (in HyFib or
   elsewhere) share it, HyFib cannot see what is left of it, recipients with an open service window
@@ -16738,7 +16745,8 @@ Decision:
   audience, RUNBOOKS).
 - **The API's draft review (P5-08):** `GET /campaigns/{id}/review` answers the members' review
   (ADR-193), so it gains `messagingLimit`: `{ status, limit, checkedAt, figure }` (`over`, `within`,
-  `unlimited`, `unknown`; Meta's text as given; the read's time; 250 to 100,000 or null), or null
+  `unlimited`, `unknown`; Meta's text as given, at most 64 characters as ADR-398 clips it; the
+  read's time; 250 to 100,000 or null), or null
   while `audience` is null; data only, never members' wording, the count being `audience.eligible`.
   An added response field, so existing clients are unaffected. Described in the OpenAPI document
   (the schema and the operation), with a schema test of its fields and descriptions. ADR-398 kept
@@ -16750,3 +16758,17 @@ Not built: the notice in the approval email, in the API's campaign detail and in
 list; a portfolio-wide view of recipients across a company's numbers and campaigns (HyFib cannot
 see the portfolio's other users anyway); reading Meta's remaining allowance (no documented field);
 a refresh of the number's limit before review (ADR-398 has none); any block or pacing on the limit.
+
+Review (before merge): an independent review found no High issue. It found that the enforcement
+line claimed "a message Meta does not deliver is shown as failed", while HyFib marks a message
+failed only when Graph refuses it or a status webhook reports it failed (one Meta accepts and never
+delivers stays sent) and research says nothing of messages over the limit: it now says only that
+what Meta refuses or reports as failed is shown as failed with Meta's code. The title "Within the
+number's messaging limit" stated what HyFib cannot know of a shared allowance: it now compares only
+the campaign's size with the figure ("Up to 1,800 contacts, within the limit's 2,000"). SECURITY
+did not say that campaign readers, and keys through the review (`campaigns.write`), now see the
+sending number's limit: it does, and a unit test checks that every role reading campaigns reads
+channels. "Never blocks" was tested only with an unknown limit: an integration test now submits a
+draft of 251 eligible contacts on `TIER_250`, reviewed as over without a problem. Prototype names
+(`__proto__`, `constructor`) are tested as unknown, the API's `limit` is bounded to 64 characters
+as kept, and the schema test checks the field's types, formats and nullability. All were fixed.

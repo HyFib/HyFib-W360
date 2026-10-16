@@ -54,9 +54,12 @@ export const MESSAGING_LIMIT_UPPER_BOUND =
 /** The portfolio's shared allowance, whose use HyFib cannot see (research M-058). */
 export const MESSAGING_LIMIT_SHARED =
   'Since 7 October 2025 the limit is shared by every number of your business portfolio: its other numbers and campaigns use the same allowance, and HyFib cannot see how much of it they have used.';
-/** Who enforces it, and what HyFib shows of it, without naming a Meta error code. */
+/**
+ * Who enforces it, and what HyFib shows: only what Meta refuses or reports as failed is shown as
+ * failed (research says nothing of what happens to messages over the limit); no code is named.
+ */
 export const MESSAGING_LIMIT_ENFORCED =
-  'Meta, not HyFib, enforces the limit, and HyFib does not hold the campaign back for it: a message Meta does not deliver is shown as failed with the code Meta gives.';
+  'Meta, not HyFib, enforces the limit, and HyFib does not hold the campaign back for it. When Meta refuses a message or reports it as failed, HyFib shows it as failed with the code Meta gives.';
 
 /**
  * The notice for a campaign sending from a number with `number`'s limit to `recipients` contacts
@@ -130,9 +133,11 @@ export function campaignMessagingLimitNotice(
     unknown: null,
     figure,
     tone: over ? 'warning' : 'info',
+    // Within compares only the campaign's size with the tier's figure: the portfolio's other
+    // numbers and campaigns may already have used the allowance, which HyFib cannot see.
     title: over
       ? "More recipients than the number's messaging limit"
-      : "Within the number's messaging limit",
+      : `Up to ${contacts(recipients)}, within the limit's ${count(figure)}`,
     lines: [
       `This campaign may reach ${reach}, ${over ? 'more than' : 'within'} the ${count(figure)} unique customers its number's messaging limit allows outside a customer service window in a moving 24 hours (Meta reported ${limit} when HyFib last read the number).`,
       MESSAGING_LIMIT_UPPER_BOUND,

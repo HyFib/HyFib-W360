@@ -415,15 +415,18 @@ campaign waiting for approval, scheduled, sending or paused, set its number's me
 Channels shows it (ADR-398), against the contacts it may reach: those who can receive it now for a
 draft, its audience less those skipped once submitted. That count is an upper bound: contacts whose
 customer service window is open when their message is sent do not count toward Meta's limit.
-"More recipients than the number's messaging limit" is a warning only; "Within the number's
-messaging limit" and "Messaging limit: unlimited" are information; "Messaging limit unknown" means
+"More recipients than the number's messaging limit" is a warning only; "Up to N contacts, within
+the limit's 2,000" (or 250, 10,000, 100,000) and "Messaging limit: unlimited" are information.
+"Within the limit's" compares only the campaign's size with the tier's figure: the campaign can
+still be over what is left of a shared allowance; "Messaging limit unknown" means
 the number was never read, Meta reported no limit, or Meta reported `TIER_50`, `UNTIERED` or a value
 HyFib does not recognise, which research gives no figure for. The notice never stops a campaign:
 Meta enforces the limit, which is shared by every number of the business portfolio, so other
 numbers and campaigns (in HyFib or elsewhere) use the same allowance and HyFib cannot see how much
 is left. To reach more people than the limit allows, split the audience into campaigns sent
-more than 24 hours apart, or narrow it. Messages Meta does not deliver are shown as failed with Meta's code
-on the campaign's page; HyFib names no code for the limit, since research documents none. A limit
+more than 24 hours apart, or narrow it. A message is shown as failed, with Meta's code, only when Meta refuses
+it or reports it as failed; one Meta accepts but never delivers stays sent. Research says nothing
+of what Meta does with messages over the limit, and HyFib names no code for it. A limit
 that looks out of date is the one Meta gave at the number's last health read (see "Messaging limit
 on Channels" above for when a number is read).
 

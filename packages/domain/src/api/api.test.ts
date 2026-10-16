@@ -8083,6 +8083,43 @@ describe('reviewing campaign drafts through the API (ADR-193)', () => {
     for (const value of ['over', 'within', 'unlimited', 'unknown']) {
       expect(limitSchema).toContain(`"${value}"`);
     }
+    // Its types: the object or null; each field required, nullable where null is an answer.
+    type Node = {
+      type?: string;
+      format?: string;
+      enum?: string[];
+      minLength?: number;
+      maxLength?: number;
+      minimum?: number;
+      anyOf?: Node[];
+      properties?: Record<string, Node>;
+      required?: string[];
+      additionalProperties?: unknown;
+    };
+    const limitNode = reviewSchema.properties.messagingLimit as Node;
+    expect(limitNode.anyOf).toHaveLength(2);
+    const [object, none] = limitNode.anyOf!;
+    expect(none).toEqual({ type: 'null' });
+    expect(object?.type).toBe('object');
+    expect(object?.additionalProperties).toBe(false);
+    expect([...(object?.required ?? [])].sort()).toEqual(
+      ['checkedAt', 'figure', 'limit', 'status'].sort(),
+    );
+    const props = object!.properties!;
+    expect(props.status).toMatchObject({
+      type: 'string',
+      enum: ['over', 'within', 'unlimited', 'unknown'],
+    });
+    expect(props.status?.anyOf).toBeUndefined();
+    const nullable = (node: Node | undefined) => {
+      expect(node?.anyOf).toHaveLength(2);
+      expect(node!.anyOf![1]).toEqual({ type: 'null' });
+      return node!.anyOf![0]!;
+    };
+    expect(nullable(props.limit)).toMatchObject({ type: 'string', minLength: 1, maxLength: 64 });
+    expect(nullable(props.checkedAt)).toMatchObject({ type: 'string', format: 'date-time' });
+    expect(nullable(props.figure)).toMatchObject({ type: 'integer', minimum: 1 });
+    expect(JSON.stringify(props.limit)).toContain('clipped to 64 characters');
     expect(op?.description).toContain(
       "the chosen number's messaging limit as Meta last reported it set against the contacts it would reach (a notice that never blocks a submission)",
     );

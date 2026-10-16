@@ -108,13 +108,15 @@ test('a campaign is drafted, reviewed, started by the worker and reported per re
   await expect(page.getByText('No marketing opt-in: 1')).toBeVisible();
   // The number's messaging limit against the contact who can receive it, a notice only (ADR-400).
   const limitNotice = page.getByRole('status').filter({
-    hasText: "Within the number's messaging limit",
+    hasText: "Up to 1 contact, within the limit's 250",
   });
   await expect(limitNotice).toContainText(
     "This campaign may reach up to 1 contact, within the 250 unique customers its number's messaging limit allows outside a customer service window in a moving 24 hours (Meta reported TIER_250 when HyFib last read the number).",
   );
   await expect(limitNotice).toContainText('HyFib cannot see how much of it they have used.');
-  await expect(limitNotice).toContainText('Meta, not HyFib, enforces the limit');
+  await expect(limitNotice).toContainText(
+    'When Meta refuses a message or reports it as failed, HyFib shows it as failed with the code Meta gives.',
+  );
   await page.getByRole('button', { name: 'Start campaign' }).click();
   await page.getByRole('alertdialog').getByRole('button', { name: 'Start campaign' }).click();
 

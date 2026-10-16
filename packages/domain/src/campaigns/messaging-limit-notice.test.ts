@@ -8,6 +8,7 @@ import {
   submittedCampaignRecipients,
 } from './messaging-limit-notice';
 import { MESSAGING_LIMITS, messagingLimitFigure } from '../messaging/messaging-limit';
+import { ROLE_PERMISSIONS } from '../authz/permissions';
 
 const checkedAt = new Date('2026-10-16T08:00:00Z');
 const read = (limit: string | null) => ({ limit, checkedAt });
@@ -33,7 +34,8 @@ describe('a campaign’s messaging-limit notice (ADR-400)', () => {
         figure,
         recipients: figure,
         tone: 'info',
-        title: "Within the number's messaging limit",
+        // Only the campaign's size against the figure: the portfolio's use is unknown.
+        title: `Up to ${shown} contacts, within the limit's ${shown}`,
         lines: [
           `This campaign may reach up to ${shown} contacts, within the ${shown} unique customers its number's messaging limit allows outside a customer service window in a moving 24 hours (Meta reported ${limit} when HyFib last read the number).`,
           ...COMMON,
@@ -145,11 +147,24 @@ describe('a campaign’s messaging-limit notice (ADR-400)', () => {
     ).toMatchObject({ status: 'unknown', unknown: 'not_asked', figure: null, tone: 'info' });
   });
 
+  it('says unknown for prototype names, never a figure', () => {
+    for (const limit of ['__proto__', 'constructor', 'toString', 'hasOwnProperty']) {
+      expect(campaignMessagingLimitNotice(read(limit), 300), limit).toMatchObject({
+        status: 'unknown',
+        unknown: 'unlisted',
+        figure: null,
+        tone: 'info',
+      });
+      expect(messagingLimitFigure(limit), limit).toBeNull();
+    }
+  });
+
   it('words zero and one recipient', () => {
     expect(campaignMessagingLimitNotice(read('TIER_250'), 0)).toMatchObject({
       status: 'within',
       tone: 'info',
       recipients: 0,
+      title: "Up to 0 contacts, within the limit's 250",
       lines: [
         "This campaign may reach up to 0 contacts, within the 250 unique customers its number's messaging limit allows outside a customer service window in a moving 24 hours (Meta reported TIER_250 when HyFib last read the number).",
         ...COMMON,
@@ -158,9 +173,9 @@ describe('a campaign’s messaging-limit notice (ADR-400)', () => {
     expect(campaignMessagingLimitNotice(read('TIER_50'), 0).lines[0]).toBe(
       'Meta reported TIER_50 when HyFib last read this number, a level HyFib has no documented figure for, so HyFib cannot compare it with the up to 0 contacts this campaign may reach.',
     );
-    expect(campaignMessagingLimitNotice(read('TIER_250'), 1).lines[0]).toContain(
-      'may reach up to 1 contact, within',
-    );
+    const one = campaignMessagingLimitNotice(read('TIER_250'), 1);
+    expect(one.title).toBe("Up to 1 contact, within the limit's 250");
+    expect(one.lines[0]).toContain('may reach up to 1 contact, within');
     expect(campaignMessagingLimitNotice({ limit: null, checkedAt: null }, 0)).toMatchObject({
       status: 'unknown',
       unknown: 'not_asked',
@@ -175,8 +190,10 @@ describe('a campaign’s messaging-limit notice (ADR-400)', () => {
       'Since 7 October 2025 the limit is shared by every number of your business portfolio: its other numbers and campaigns use the same allowance, and HyFib cannot see how much of it they have used.',
     );
     expect(MESSAGING_LIMIT_ENFORCED).toBe(
-      'Meta, not HyFib, enforces the limit, and HyFib does not hold the campaign back for it: a message Meta does not deliver is shown as failed with the code Meta gives.',
+      'Meta, not HyFib, enforces the limit, and HyFib does not hold the campaign back for it. When Meta refuses a message or reports it as failed, HyFib shows it as failed with the code Meta gives.',
     );
+    // Never a claim about messages Meta accepts but does not deliver (they stay sent).
+    expect(MESSAGING_LIMIT_ENFORCED).not.toContain('does not deliver');
     // No Meta error code is claimed for exceeding the limit: research documents none.
     for (const limit of [...MESSAGING_LIMITS, null, 'TIER_1K']) {
       for (const line of campaignMessagingLimitNotice(read(limit), 300).lines) {
@@ -199,6 +216,16 @@ describe('the figures research gives for each limit (ADR-400)', () => {
     ]);
     expect(messagingLimitFigure('TIER_1K')).toBeNull();
     expect(messagingLimitFigure('')).toBeNull();
+  });
+});
+
+describe('who sees the notice (ADR-400)', () => {
+  it('is only roles that also see the limit on Channels', () => {
+    for (const [role, permissions] of Object.entries(ROLE_PERMISSIONS)) {
+      if (permissions.has('campaigns.read')) {
+        expect(permissions.has('channels.read'), role).toBe(true);
+      }
+    }
   });
 });
 

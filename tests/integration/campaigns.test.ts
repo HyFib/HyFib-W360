@@ -1749,6 +1749,50 @@ describe('the messaging-limit notice (ADR-400)', () => {
     });
   });
 
+  it('warns over a figure without blocking: 251 eligible contacts on TIER_250 are still submitted', async () => {
+    // A company of its own, so no other test's rows count.
+    const a = await setup();
+    const owner = await fx.ctx(a.c, a.c.owner);
+    await fx.query(
+      `WITH c AS (
+         INSERT INTO app.contacts (id, tenant_id, display_name, phone_e164, source)
+         SELECT gen_random_uuid(), $1, 'Over ' || g, '+9171' || lpad(g::text, 8, '0'), 'import'
+           FROM generate_series(1, 251) AS g
+         RETURNING id)
+       INSERT INTO app.contact_tags (id, tenant_id, contact_id, tag)
+       SELECT gen_random_uuid(), $1, c.id, 'vip' FROM c`,
+      [a.c.tenant.id],
+    );
+    await fx.query(
+      `INSERT INTO app.consent_events (id, tenant_id, contact_id, purpose, action, source, actor_type, occurred_at)
+       SELECT gen_random_uuid(), tenant_id, id, 'marketing', 'opt_in', 'import', 'system', now()
+         FROM app.contacts WHERE tenant_id = $1`,
+      [a.c.tenant.id],
+    );
+    await setLimit(a.c.channelAccountId, 'TIER_250');
+    const { id } = await a.draft('Over the figure');
+    const review = await a.campaigns.reviewDraft(owner, id);
+    expect(review.audience).toMatchObject({ total: 251, eligible: 251 });
+    expect(review.problems).toEqual([]);
+    expect(review.messagingLimit).toMatchObject({
+      status: 'over',
+      limit: 'TIER_250',
+      figure: 250,
+      recipients: 251,
+      tone: 'warning',
+      title: "More recipients than the number's messaging limit",
+    });
+    expect(await a.campaigns.submitCampaign(owner, id, { expectedVersion: 1 }, {})).toMatchObject({
+      status: 'scheduled',
+      audience: 251,
+      pending: 251,
+    });
+    expect((await a.campaigns.getCampaign(owner, id)).messagingLimit).toMatchObject({
+      status: 'over',
+      recipients: 251,
+    });
+  });
+
   it('is absent until the draft has a number and an audience, and never blocks a submission', async () => {
     const a = await setup();
     await a.contact('+919870000011', { name: 'Asha' });
