@@ -51,6 +51,7 @@ export async function crmLookups(ctx: TenantContext) {
     key: f.key,
     label: f.label,
     type: f.type,
+    options: f.options,
   }));
   return {
     pipelines,

@@ -957,7 +957,7 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
   },
   {
     table: 'app.crm_deal_fields',
-    columns: ['id', 'key', 'label', 'type', 'created_at'],
+    columns: ['id', 'key', 'label', 'type', 'options', 'created_at'],
   },
   {
     table: 'app.crm_deal_items',

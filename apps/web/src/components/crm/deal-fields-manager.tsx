@@ -1,18 +1,21 @@
 'use client';
 import { useState } from 'react';
-import { Button, Field, Input, Select, TBody, TD, TH, THead, TR, Table } from '@w360/ui';
+import { Button, Field, Input, Select, TBody, TD, TH, THead, TR, Table, Textarea } from '@w360/ui';
 import { ConfirmDialog } from '@w360/ui/client';
 import {
   createDealFieldAction,
   deleteDealFieldAction,
   renameDealFieldAction,
+  setDealFieldOptionsAction,
 } from '@/app/actions/crm';
 import { ClientButton, ClientForm } from '@/components/client-form';
 import { FormError, FormSuccess } from '@/components/form-status';
+import { optionLines } from '@/lib/deal-fields';
 
 /**
  * Settings → Pipelines' custom deal fields (ADR-373), as Settings → Messaging lists contact fields:
- * owners and administrators add, rename and delete them; others see them.
+ * owners and administrators add, rename and delete them, and change a choice field's options
+ * (ADR-385), typed one per line; others see them.
  */
 export function DealFieldsManager({
   slug,
@@ -20,27 +23,58 @@ export function DealFieldsManager({
   canEdit,
 }: {
   slug: string;
-  fields: { id: string; key: string; label: string; type: string }[];
+  fields: { id: string; key: string; label: string; type: string; options: string[] | null }[];
   canEdit: boolean;
 }) {
   const [label, setLabel] = useState('');
   const [type, setType] = useState('text');
+  // A new choice field's options, one per line.
+  const [optionsText, setOptionsText] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   // The field being renamed (ADR-262) and its new label.
   const [renaming, setRenaming] = useState<{ id: string; key: string } | null>(null);
   const [newLabel, setNewLabel] = useState('');
+  // The choice field whose options are being changed, and its options as typed.
+  const [editingOptions, setEditingOptions] = useState<{ id: string } | null>(null);
+  const [optionsDraft, setOptionsDraft] = useState('');
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
     setBusy(true);
     setError(null);
     setSaved(null);
-    const result = await createDealFieldAction(slug, { label, type });
+    const result = await createDealFieldAction(
+      slug,
+      type === 'choice' ? { label, type, options: optionLines(optionsText) } : { label, type },
+    );
     setBusy(false);
     if (!result.ok) setError(result.message);
-    else setLabel('');
+    else {
+      setLabel('');
+      setOptionsText('');
+    }
+  }
+
+  async function saveOptions(event: React.FormEvent) {
+    event.preventDefault();
+    if (!editingOptions) return;
+    setBusy(true);
+    setError(null);
+    setSaved(null);
+    const result = await setDealFieldOptionsAction(
+      slug,
+      editingOptions.id,
+      optionLines(optionsDraft),
+    );
+    setBusy(false);
+    if (!result.ok) {
+      setError(result.message);
+      return;
+    }
+    setSaved('Options saved.');
+    setEditingOptions(null);
   }
 
   async function rename(event: React.FormEvent) {
@@ -115,9 +149,71 @@ export function DealFieldsManager({
                   )}
                 </TD>
                 <TD className="font-mono text-xs">{f.key}</TD>
-                <TD className="text-sm">{f.type}</TD>
+                <TD className="text-sm">
+                  {f.type}
+                  {editingOptions?.id === f.id ? (
+                    <ClientForm onSubmit={saveOptions} className="mt-2 grid gap-2">
+                      <Field
+                        id={`deal-field-options-${f.id}`}
+                        label="Options, one per line"
+                        description="Options deals have chosen must stay as they are written."
+                      >
+                        {(aria) => (
+                          <Textarea
+                            {...aria}
+                            rows={5}
+                            value={optionsDraft}
+                            required
+                            onChange={(e) => setOptionsDraft(e.target.value)}
+                          />
+                        )}
+                      </Field>
+                      <div className="flex flex-wrap gap-2">
+                        <Button
+                          type="submit"
+                          size="sm"
+                          disabled={busy || optionLines(optionsDraft).length === 0}
+                        >
+                          Save options
+                        </Button>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => setEditingOptions(null)}
+                        >
+                          Cancel
+                        </Button>
+                      </div>
+                    </ClientForm>
+                  ) : f.options ? (
+                    <ul
+                      aria-label={`Options of “${f.label}”`}
+                      className="mt-1 text-xs text-muted-foreground"
+                    >
+                      {f.options.map((option) => (
+                        <li key={option}>{option}</li>
+                      ))}
+                    </ul>
+                  ) : null}
+                </TD>
                 {canEdit ? (
                   <TD className="text-right">
+                    {f.options ? (
+                      <ClientButton
+                        size="sm"
+                        variant="ghost"
+                        aria-label={`Edit the options of the deal field “${f.label}”`}
+                        onClick={() => {
+                          setEditingOptions({ id: f.id });
+                          setOptionsDraft((f.options ?? []).join('\n'));
+                          setError(null);
+                          setSaved(null);
+                        }}
+                      >
+                        Edit options
+                      </ClientButton>
+                    ) : null}
                     <ClientButton
                       size="sm"
                       variant="ghost"
@@ -174,10 +270,34 @@ export function DealFieldsManager({
                 <option value="number">Number</option>
                 <option value="date">Date</option>
                 <option value="boolean">Yes / no</option>
+                <option value="choice">Choice</option>
               </Select>
             )}
           </Field>
-          <Button type="submit" variant="outline" disabled={busy || !label.trim()}>
+          {type === 'choice' ? (
+            <Field
+              id="deal-field-options"
+              label="Options, one per line"
+              description="Up to 50, each at most 80 characters, none twice."
+            >
+              {(aria) => (
+                <Textarea
+                  {...aria}
+                  rows={4}
+                  value={optionsText}
+                  required
+                  onChange={(e) => setOptionsText(e.target.value)}
+                />
+              )}
+            </Field>
+          ) : null}
+          <Button
+            type="submit"
+            variant="outline"
+            disabled={
+              busy || !label.trim() || (type === 'choice' && optionLines(optionsText).length === 0)
+            }
+          >
             Add deal field
           </Button>
         </ClientForm>

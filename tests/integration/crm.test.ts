@@ -1478,6 +1478,198 @@ describe('custom deal fields (ADR-373)', () => {
     await expectAppError(update(3, { seats: '1' }), 'validation_failed', /no longer exists/);
   });
 
+  it('take a choice among their options; options change while no deal has them chosen (ADR-385)', async () => {
+    const { c, owner, agent, pipeline, newStage } = await setup();
+    const svc = crm();
+    await expectAppError(
+      svc.createDealField(owner, { label: 'Tier', type: 'choice' }),
+      'validation_failed',
+      /at least one option/,
+    );
+    await expectAppError(
+      svc.createDealField(owner, { label: 'Tier', type: 'choice', options: ['Gold', ' gold'] }),
+      'validation_failed',
+      /“gold” is listed twice/,
+    );
+    await expectAppError(
+      svc.createDealField(owner, { label: 'Region', type: 'text', options: ['North'] }),
+      'validation_failed',
+      /Only choice fields have options/,
+    );
+    await expectAppError(
+      svc.createDealField(agent, { label: 'Tier', type: 'choice', options: ['Gold'] }),
+      'forbidden',
+    );
+    const tier = await svc.createDealField(owner, {
+      label: 'Tier',
+      type: 'choice',
+      options: [' Gold ', 'Silver', 'Bronze'],
+    });
+    const region = await svc.createDealField(owner, { label: 'Region', type: 'text' });
+    expect((await svc.listDealFields(agent)).map((f) => [f.key, f.type, f.options])).toEqual([
+      ['tier', 'choice', ['Gold', 'Silver', 'Bronze']],
+      ['region', 'text', null],
+    ]);
+
+    // A deal takes one of the options, whatever the case typed, stored as the option is written.
+    const contactId = await newContact(owner, 'Meera');
+    const { id } = await svc.createDeal(agent, {
+      contactId,
+      pipelineId: pipeline.id,
+      stageId: newStage.id,
+      title: 'Tier deal',
+      fields: { tier: 'silver' },
+    });
+    expect((await svc.getDeal(agent, id)).fields).toEqual([
+      { key: 'tier', label: 'Tier', type: 'choice', value: 'Silver' },
+    ]);
+    await expectAppError(
+      svc.createDeal(agent, {
+        contactId,
+        pipelineId: pipeline.id,
+        stageId: newStage.id,
+        title: 'Bad',
+        fields: { tier: 'Platinum' },
+      }),
+      'validation_failed',
+      /Tier must be one of its options/,
+    );
+
+    // Options deals have chosen stay as written: removing or renaming them is refused, by name.
+    await expectAppError(svc.setDealFieldOptions(agent, tier.id, ['Gold']), 'forbidden');
+    await expectAppError(
+      svc.setDealFieldOptions(owner, region.id, ['North']),
+      'validation_failed',
+      /Only choice fields have options/,
+    );
+    await expectAppError(
+      svc.setDealFieldOptions(owner, tier.id, ['Gold', 'silver', 'Bronze']),
+      'conflict',
+      /Deals have “Silver” chosen, so it cannot be removed or renamed/,
+    );
+    await expectAppError(svc.setDealFieldOptions(owner, tier.id, ['Gold', 'Bronze']), 'conflict');
+    await expectAppError(
+      svc.setDealFieldOptions(owner, tier.id, []),
+      'validation_failed',
+      /at least one option/,
+    );
+    // Added, reordered and an unused option removed; the same list again leaves no trace.
+    await svc.setDealFieldOptions(owner, tier.id, ['Platinum', 'Silver', 'Gold']);
+    await svc.setDealFieldOptions(owner, tier.id, ['Platinum', 'Silver', 'Gold']);
+    expect((await svc.listDealFields(owner))[0]!.options).toEqual(['Platinum', 'Silver', 'Gold']);
+    // Another company finds no such field.
+    const other = await setup();
+    await expectAppError(svc.setDealFieldOptions(other.owner, tier.id, ['Gold']), 'not_found');
+
+    // Once the deal has another option, the old one can go, and is refused as a value.
+    const changed = await svc.updateDeal(agent, {
+      id,
+      expectedVersion: 1,
+      title: 'Tier deal',
+      value: '',
+      ownerMembershipId: null,
+      expectedCloseOn: null,
+      fields: { tier: 'PLATINUM', region: '' },
+    });
+    expect(changed.version).toBe(2);
+    await svc.setDealFieldOptions(owner, tier.id, ['Platinum', 'Gold']);
+    await expectAppError(
+      svc.updateDeal(agent, {
+        id,
+        expectedVersion: 2,
+        title: 'Tier deal',
+        value: '',
+        ownerMembershipId: null,
+        expectedCloseOn: null,
+        fields: { tier: 'Silver' },
+      }),
+      'validation_failed',
+      /Tier must be one of its options/,
+    );
+
+    // The export writes the chosen option in the field's column.
+    let csv = '';
+    for await (const chunk of svc.exportDeals(owner, {})) csv += chunk;
+    const lines = csv.slice(1).split('\r\n');
+    expect(lines[0]).toBe([...DEAL_CSV_COLUMNS, 'tier', 'region'].join(','));
+    expect(lines.find((l) => l.startsWith(id))?.endsWith(',Platinum,')).toBe(true);
+
+    const audits = await fx.query<{ action: string; metadata: Record<string, unknown> }>(
+      `SELECT action, metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND action LIKE 'crm.deal_field_%' ORDER BY occurred_at, id`,
+      [c.tenant.id],
+    );
+    expect(audits).toEqual([
+      {
+        action: 'crm.deal_field_created',
+        metadata: { key: 'tier', type: 'choice', options: 3 },
+      },
+      { action: 'crm.deal_field_created', metadata: { key: 'region', type: 'text' } },
+      {
+        action: 'crm.deal_field_options_changed',
+        metadata: { key: 'tier', options: 3, added: 1, removed: 1 },
+      },
+      {
+        action: 'crm.deal_field_options_changed',
+        metadata: { key: 'tier', options: 2, added: 0, removed: 1 },
+      },
+    ]);
+  });
+
+  it('hold their options in a shape the database checks too (ADR-385)', async () => {
+    const { owner } = await setup();
+    const svc = crm();
+    const tier = await svc.createDealField(owner, {
+      label: 'Tier',
+      type: 'choice',
+      options: ['Gold'],
+    });
+    const region = await svc.createDealField(owner, { label: 'Region', type: 'text' });
+    for (const options of [
+      `'{}'::text[]`,
+      `ARRAY[NULL]::text[]`,
+      `ARRAY['Gold', NULL]`,
+      `ARRAY['']`,
+      `ARRAY[' Gold']`,
+      `ARRAY['Gold ']`,
+      `ARRAY[repeat('x', 81)]`,
+      `ARRAY[E'Two\\nlines']`,
+      `ARRAY[['Gold'], ['Silver']]`,
+      `array_fill('x'::text, ARRAY[51])`,
+      `NULL`,
+    ]) {
+      await expect(
+        fx.query(`UPDATE app.crm_deal_fields SET options = ${options} WHERE id = $1`, [tier.id]),
+        options,
+      ).rejects.toThrow(/crm_deal_fields_options/);
+    }
+    await expect(
+      fx.query(`UPDATE app.crm_deal_fields SET options = ARRAY['North'] WHERE id = $1`, [
+        region.id,
+      ]),
+    ).rejects.toThrow(/crm_deal_fields_options/);
+    await expect(
+      fx.query(`UPDATE app.crm_deal_fields SET type = 'text' WHERE id = $1`, [tier.id]),
+    ).rejects.toThrow(/crm_deal_fields_options/);
+    await expect(
+      fx.query(`UPDATE app.crm_deal_fields SET type = 'select', options = NULL WHERE id = $1`, [
+        region.id,
+      ]),
+    ).rejects.toThrow(/crm_deal_fields_type_check/);
+    // 50 options of up to 80 characters, with spaces inside, fit.
+    await fx.query(
+      `UPDATE app.crm_deal_fields
+          SET options = array_fill(repeat('x', 80), ARRAY[48]) || ARRAY['Two words', 'Ünïcode']
+        WHERE id = $1`,
+      [tier.id],
+    );
+    const [row] = await fx.query<{ n: number }>(
+      'SELECT cardinality(options) AS n FROM app.crm_deal_fields WHERE id = $1',
+      [tier.id],
+    );
+    expect(row).toEqual({ n: 50 });
+  });
+
   it('are cleared by erasure and stay inside their company', async () => {
     const a = await setup();
     const b = await setup();

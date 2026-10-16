@@ -15220,3 +15220,48 @@ Decision:
 Not built: a reply per team or per number, more than one reply per wait (a second after a longer
 wait), templates outside the window, a reply that names the expected wait, the setting in the public
 API, and replies to waits that began before it was turned on.
+
+## ADR-385 Choice-type custom deal fields (P4-04) (2026-10-16)
+
+Context: custom deal fields (ADR-373) took text, a number, a date or yes/no. A company that sorts
+its deals by a fixed list (a tier, a source, a region) had to use text, so members typed "Gold",
+"gold" and "Gld" for the same thing and exports could not be grouped. "Choice types" remained under
+P4-04's custom deal fields.
+
+Decision:
+
+- **A `choice` type** (`crm/deal-fields.ts`): a field with 1 to 50 options, kept in the order
+  given, each trimmed, 1 to 80 characters without line breaks or control characters, and none twice
+  ignoring case. Settings → Pipelines takes them one per line (blank lines left out) and lists them
+  under the field's type. A deal takes one option or none.
+- **Stored on the field** (migration 0301): `app.crm_deal_fields.options` is a text array, null for
+  every other type. A check holds the shape: a choice has 1 to 50 options of 1 to 80 characters with
+  no line break and no space at either end, and other types have none; the type check now accepts
+  `choice`. Options that differ only in case are refused by the service, which a check without a
+  function cannot express. The table holds at most 50 rows a company, so both checks are validated
+  in the migration. The runtime role may update `options` (a column grant); keys and types still
+  never change.
+- **Changing options:** owners and administrators may add options, reorder them, and remove or
+  rename options no deal has chosen. An option a deal has chosen must stay in the list exactly as
+  written (a change of case is a rename), or the change is refused naming it ("Deals have “Silver”
+  chosen, so it cannot be removed or renamed. Change those deals first."). This keeps every stored
+  value one of its field's options without rewriting deals behind members' backs. The change takes
+  the company's deal-field lock exclusively; every write of values takes it shared before checking,
+  so a value is never checked against options that are being replaced. The same list again changes
+  nothing and is not audited.
+- **Values:** the deal page and the new-deal forms show a select with "Not set" and the options.
+  Forms and CSV import take an option whatever its case and store it as the option is written, so
+  "gold" in a file becomes "Gold"; anything else is refused ("Tier must be one of its options.").
+  The API is strict, as for other types: `fields` takes the option exactly as written, as a string
+  (or null, or an empty string, to remove it). The deals CSV writes the chosen option as text, and
+  `Deal.fields` gives it as a string, as text values are. Deal webhook payloads carry no custom
+  field values (ADR-373), so they are unchanged.
+- **API:** `GET /deal-fields` gives each field's `options` (null for other types) and the type
+  `choice`; the OpenAPI document describes both.
+- **Audit:** a choice field's creation records the number of options; a change records
+  `crm.deal_field_options_changed` with the field's key and the numbers of options, added and
+  removed, never the options themselves. Permissions are unchanged.
+
+Not built: several options per deal (multi-select), colours or descriptions per option, renaming an
+option that deals have chosen (with its values carried over), and filtering the board or reports by
+a choice.

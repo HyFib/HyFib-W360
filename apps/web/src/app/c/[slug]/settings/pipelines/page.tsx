@@ -179,9 +179,11 @@ export default async function PipelinesSettingsPage({
         <CardHeader>
           <CardTitle>Deal fields</CardTitle>
           <CardDescription>
-            Fields of your own on every deal, filled in on the deal’s page: text, a number, a date
-            or yes/no. A field’s key names its column in deal exports and its value in the API; the
-            key and the type never change. Changes are recorded in the audit log.
+            Fields of your own on every deal, filled in on the deal’s page: text, a number, a date,
+            yes/no or a choice among options you list. A field’s key names its column in deal
+            exports and its value in the API; the key and the type never change. A choice’s options
+            can be added and reordered later, and removed or renamed while no deal has them chosen.
+            Changes are recorded in the audit log.
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -192,6 +194,7 @@ export default async function PipelinesSettingsPage({
               key: field.key,
               label: field.label,
               type: field.type,
+              options: field.options,
             }))}
             canEdit={manage}
           />

@@ -6771,6 +6771,59 @@ describe('CRM pipelines and deals (ADR-253)', () => {
       ['created', null],
     ]);
   });
+
+  it('give and take a choice field’s options by key, exactly as written (ADR-385)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const writer = await apiKey(c, ['deals.write']);
+    const reader = await apiKey(c, ['deals.read']);
+    const sales = await pipelineOf(owner, 'Sales', 'INR', ['New']);
+    const asha = await contactOf(owner, 'Asha');
+    const tier = await crm().createDealField(owner, {
+      label: 'Tier',
+      type: 'choice',
+      options: ['Gold', 'Silver'],
+    });
+    await crm().createDealField(owner, { label: 'Seats', type: 'number' });
+    expect(
+      (await apiListDealFields(deps(), reader.ctx)).map((f) => [f.key, f.type, f.options]),
+    ).toEqual([
+      ['tier', 'choice', ['Gold', 'Silver']],
+      ['seats', 'number', null],
+    ]);
+    const created = await apiCreateDeal(
+      deps(),
+      writer.ctx,
+      { contactId: asha, pipelineId: sales.id, title: 'Tiered', fields: { tier: 'Gold' } },
+      null,
+    );
+    const deal = (created.body as { data: ApiDeal }).data;
+    expect(deal.fields).toEqual({ tier: 'Gold' });
+    // Strictly one of the options, as written: another case or another type is refused.
+    for (const bad of ['gold', 'Platinum', 1, true]) {
+      await expectAppError(
+        apiUpdateDeal(deps(), writer.ctx, deal.id, { fields: { tier: bad } }),
+        'validation_failed',
+        /Tier takes one of its options/,
+      );
+    }
+    const updated = await apiUpdateDeal(deps(), writer.ctx, deal.id, {
+      fields: { tier: 'Silver' },
+    });
+    expect([updated.fields, updated.version]).toEqual([{ tier: 'Silver' }, 2]);
+    expect((await apiGetDeal(deps(), reader.ctx, deal.id)).fields).toEqual({ tier: 'Silver' });
+    // The option the deal has chosen cannot be taken out of the list; others can.
+    await expectAppError(
+      crm().setDealFieldOptions(owner, tier.id, ['Gold']),
+      'conflict',
+      /“Silver” chosen/,
+    );
+    await crm().setDealFieldOptions(owner, tier.id, ['Silver', 'Bronze']);
+    expect((await apiListDealFields(deps(), reader.ctx))[0]!.options).toEqual(['Silver', 'Bronze']);
+    // null removes the value.
+    const cleared = await apiUpdateDeal(deps(), writer.ctx, deal.id, { fields: { tier: null } });
+    expect([cleared.fields, cleared.version]).toEqual([{}, 3]);
+  });
 });
 
 describe('products on deals through the API (ADR-378)', () => {

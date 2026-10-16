@@ -17,6 +17,7 @@ import {
   sql,
   type CrmActivityKind,
   type CrmChanger,
+  type DealFieldType,
   type DealStatus,
   type Tx,
 } from '@w360/db';
@@ -106,7 +107,7 @@ const expectedCloseOnSchema = z.iso
 const dealFieldValuesSchema = z
   .record(z.string(), z.union([z.string(), z.number(), z.boolean(), z.null()]))
   .describe(
-    'Custom deal field values by field key (GET /deal-fields), each of its field’s type: text, a number, a date as YYYY-MM-DD, or true/false; null removes a value. Keys left out keep their values.',
+    'Custom deal field values by field key (GET /deal-fields), each of its field’s type: text, a number, a date as YYYY-MM-DD, true/false, or one of a choice field’s options written exactly as listed; null removes a value. Keys left out keep their values.',
   );
 
 /** What `POST /deals` takes: the contact, the pipeline and the deal, as members create one. */
@@ -522,11 +523,13 @@ export async function apiListDeals(
   );
 }
 
-/** A custom deal field as the API answers it (ADR-373). */
+/** A custom deal field as the API answers it (ADR-373), a choice with its options (ADR-385). */
 export interface ApiDealField {
   key: string;
   label: string;
-  type: 'text' | 'number' | 'date' | 'boolean';
+  type: DealFieldType;
+  /** A choice field's options, in order; null for every other type. */
+  options: string[] | null;
   createdAt: string;
 }
 
@@ -547,6 +550,7 @@ export async function apiListDealFields(
         key: field.key,
         label: field.label,
         type: field.type,
+        options: field.options,
         createdAt: field.createdAt.toISOString(),
       }));
     },

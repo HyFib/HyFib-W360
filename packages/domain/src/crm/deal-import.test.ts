@@ -21,8 +21,8 @@ const lookups: DealImportLookups = {
   ]),
   ownersByEmail: new Map([['meera@example.test', 'member-meera']]),
   fields: [
-    { id: 'f1', key: 'seats', label: 'Seats', type: 'number', createdAt: at },
-    { id: 'f2', key: 'signed', label: 'Signed', type: 'boolean', createdAt: at },
+    { id: 'f1', key: 'seats', label: 'Seats', type: 'number', options: null, createdAt: at },
+    { id: 'f2', key: 'signed', label: 'Signed', type: 'boolean', options: null, createdAt: at },
   ],
 };
 // phone, title, stage, value, owner, close, seats, signed
@@ -180,6 +180,39 @@ describe('deal import (ADR-374)', () => {
       planDealRows([row({})], mapping, international, { ...lookups, stages: [] }).messages[0]
         ?.message,
     ).toBe('The pipeline has no active stage.');
+  });
+
+  it('takes one of a choice field’s options whatever its case, stored as the option is written (ADR-385)', () => {
+    const withTier: DealImportLookups = {
+      ...lookups,
+      fields: [
+        ...lookups.fields,
+        {
+          id: 'f3',
+          key: 'tier',
+          label: 'Tier',
+          type: 'choice',
+          options: ['Gold', '=Silver'],
+          createdAt: at,
+        },
+      ],
+    };
+    const tierMapping = { ...mapping, fields: { ...mapping.fields, tier: 8 } };
+    const row = (tier: string) => ['+919876543210', 'Plan', '', '', '', '', '', '', tier];
+    const { deals, messages } = planDealRows(
+      [row(' gOLD '), row("'=silver"), row(''), row('Platinum')],
+      tierMapping,
+      international,
+      withTier,
+    );
+    expect(deals.map((d) => [d.line, d.attributes])).toEqual([
+      [2, { tier: 'Gold' }],
+      [3, { tier: '=Silver' }],
+      [4, {}],
+    ]);
+    expect(messages.map((m) => [m.row, m.message])).toEqual([
+      [5, 'Tier must be one of its options.'],
+    ]);
   });
 
   it('reads cells as exported: formula guards removed, and finds each valid number once', () => {

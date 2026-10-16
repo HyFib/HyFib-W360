@@ -236,6 +236,20 @@ export async function renameDealFieldAction(
   });
 }
 
+/** A choice field's options (ADR-385), one per entry, in order. */
+export async function setDealFieldOptionsAction(
+  slug: string,
+  fieldId: string,
+  options: string[],
+): Promise<ActionResult<void>> {
+  return runAction(async () => {
+    const ctx = await tenantForAction(slug);
+    const { crm } = await getRuntime();
+    await crm.setDealFieldOptions(ctx, fieldId, options, await requestMeta());
+    refresh();
+  });
+}
+
 export async function deleteDealFieldAction(
   slug: string,
   fieldId: string,

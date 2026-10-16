@@ -1317,6 +1317,15 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   ADR-379 the new-deal forms (the board, the contact page and the inbox) take values too:
   `crmLookups` (`apps/web/src/server/crm.ts`) reads the definitions with the pipelines and members,
   and `NewDealForm` sends the non-empty ones to `createDeal`.
+- **Choice-type deal fields (0301, ADR-385):** a `choice` field has `options` (a text array of 1 to
+  50, in order; null for other types; the shape held by a check, case-insensitive uniqueness by
+  `dealFieldOptionsSchema`). `coerceDealFieldValue` (forms and CSV import: any case, stored as the
+  option is written) and `apiDealFieldValue` (API: exactly as written) wrap the contact fields'
+  coercions for the other types. `setDealFieldOptions` replaces the list under the field lock taken
+  exclusively and refuses one that drops or rewrites an option some deal has chosen
+  (`removedChosenOptions`, read with `attributes ->> key`), so stored values stay options. Web:
+  `DealFieldsManager` takes options one per line (`optionLines`, `lib/deal-fields.ts`) and
+  `DealFieldControl` shows a select; `GET /deal-fields` gives `options`.
 - **Deal import (ADR-374, no migration):** `crm/deal-import.ts` previews a CSV (columns, first
   rows, suggested mapping) and imports it into one pipeline: `planDealRows` checks each row against
   the company's records (contacts by E.164 number, active stages by name, CRM members by email,

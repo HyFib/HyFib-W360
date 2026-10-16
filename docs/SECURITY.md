@@ -1360,6 +1360,13 @@ Phase 5 rules (Public API, P5-08):
   all; keys and types never change. A deletion removes every deal's value under the company's field
   lock, which deal writes with values take first. Erasure clears the erased contact's deals' values.
   Every definition change is audited with the field's key, never values.
+- Choice-type deal fields (ADR-385): a choice field's options are set when it is added and changed
+  later under the same permission (`tenant.settings.manage`); the runtime role may now update
+  `options` besides `label`, never the key or the type. A value must be one of the field's
+  options, checked in the service for members, imports and keys; a change of options that would
+  drop or rewrite an option some deal has chosen is refused, under the company's field lock, so
+  stored values always remain options. Changes are audited with the field's key and counts, never
+  the options.
 - Importing deals (ADR-374): needs `crm.write` and `contacts.import` (owners, administrators,
   supervisors). Each row's contact is found only among the company's live contacts by number;
   a number no contact has is refused, so deal import never adds a number to the company. Owners are

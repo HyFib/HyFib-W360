@@ -1,5 +1,53 @@
 # Progress
 
+## 2026-10-16 — Choice-type custom deal fields (P4-04, ADR-385)
+
+Status: **Implemented; its database and browser tests run in CI only.** Custom deal fields took
+text, a number, a date or yes/no; a company sorting deals by a fixed list had to use free text.
+
+### Completed
+
+- **Migration 0301:** `app.crm_deal_fields.options` (text array, null for other types), the type
+  check widened to `choice`, and a check of the options' shape (1 to 50, each 1 to 80 characters
+  without a line break or an edge space; none on other types), validated at once (a small table);
+  `UPDATE (options)` for the runtime role. Drizzle: `DEAL_FIELD_TYPES`, `DealFieldType`, `options`.
+- **Domain (`crm/deal-fields.ts`):** `dealFieldOptionsSchema` (trimmed, no control characters,
+  unique ignoring case, in order); `createDealField` takes options for a choice and refuses them for
+  other types; `coerceDealFieldValue` (forms and CSV import: any case, stored as the option is
+  written) and `apiDealFieldValue` (API: exactly as written) feed `mergedDealAttributes` and
+  `apiMergedDealAttributes`; `setDealFieldOptions` (owners and administrators) adds, reorders and
+  removes options under the field lock taken exclusively, refusing to drop or rewrite an option a
+  deal has chosen, audited as `crm.deal_field_options_changed` with counts. `GET /deal-fields` and
+  the OpenAPI document give `options` and the type `choice`; the tenant export lists the column.
+- **Web:** Settings → Pipelines takes a choice's options one per line, lists them under the type and
+  edits them in place ("Edit options"); the deal page and the new-deal forms show a select with "Not
+  set" and the options.
+- **Tests:** unit (`deal-fields.test.ts`: options, values from forms, imports and the API, the change
+  rule and its message; `deal-import.test.ts`: a choice column; `lib/deal-fields.test.ts`: options
+  typed one per line); integration (`crm.test.ts`: definitions, values, option changes refused and
+  saved, isolation, the export, the audit, and the database check against malformed options;
+  `api.test.ts`: `options` listed, strict values, a chosen option kept, null removing); e2e
+  (`crm.spec.ts`: a choice defined, chosen on a new deal, a chosen option's removal refused and an
+  option added).
+- **Docs:** ADR-385; ARCHITECTURE, SECURITY, THREAT-MODEL T338, DEPLOYMENT (0301), BACKLOG, and the
+  matrix's H-012 text and evidence (status unchanged).
+- **Mutation checks:** 17 deliberate regressions (case-sensitive matching, the typed value stored
+  instead of the option, blank not removing, the API accepting any text or an empty string kept, 51
+  options, duplicates or control characters allowed, a choice without options or another type with
+  them, order-insensitive comparison, unused options counted as chosen, the message's number, the
+  merges bypassing the choice check, blank lines kept by the web), all caught by the unit tests. The
+  lock, the read of chosen values and the database check are covered by integration tests, which
+  run in CI only.
+
+### Test commands and results (local, 2026-10-16)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 157 files, 1637 tests passed                                    |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | not run here (left to the integrating build)                    |
+
 ## 2026-10-16 — An automatic reply when members are slow to answer (W-081, P3-06, ADR-384)
 
 Status: **Implemented; its database and browser tests run in CI only.** A customer whose message
