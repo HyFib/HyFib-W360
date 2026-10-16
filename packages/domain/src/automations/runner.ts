@@ -41,6 +41,7 @@ import { buildProductMessageRequest, type ResolvedProductMessage } from '../comm
 import { checkTemplateEligibility } from '../consent/service';
 import { MAX_TAGS_PER_CONTACT, coerceFieldValue } from '../contacts/fields';
 import { addActivity, crmChangedBy, memberRefs } from '../crm/common';
+import { lockedDealFields, sameAttributes, stepDealAttributes } from '../crm/deal-fields';
 import { localDateAfter } from '../crm/time';
 import { scheduleTaskReminder } from '../crm/reminders';
 import { FLOW_TOKEN_DAYS, buildFlowMessageRequest, newFlowToken } from '../flows/model';
@@ -1238,6 +1239,7 @@ async function onlyOpenDeal(tx: Tx, run: AutomationRun, pipelineId: string) {
       id: crmDeals.id,
       stageId: crmDeals.stageId,
       valueMinor: crmDeals.valueMinor,
+      attributes: crmDeals.attributes,
       version: crmDeals.version,
     })
     .from(crmDeals)
@@ -1294,6 +1296,51 @@ async function applyCloseDealEffect(
     actorMembershipId: null,
     kind: effect.outcome === 'won' ? 'deal_won' : 'deal_lost',
     data: effect.outcome === 'won' ? { valueMinor: deal.valueMinor, ...by } : by,
+    at: now,
+  });
+  return null;
+}
+
+/**
+ * Sets custom field values on the run's contact's open deal in the step's pipeline (ADR-386), as
+ * the automation, as a member edits them, and puts the edit on the deal's timeline. Nothing changes
+ * (a note for the step log, which says `skipped`) when the plan leaves out the CRM, the contact was
+ * erased, the pipeline is archived or gone, the contact has no open deal in the pipeline or more
+ * than one, a field no longer exists, a value is empty after filling in placeholders or does not
+ * fit its field (options may have changed since the step was published), the values would be too
+ * large, or the deal already has these values. The company's deal fields are locked shared before
+ * the deal, as a member's edit and a field's deletion take them, so a field deleted or its options
+ * changed meanwhile is either seen or waits for the step.
+ */
+async function applyDealFieldsEffect(
+  tx: Tx,
+  run: AutomationRun,
+  effect: Extract<RunEffect, { kind: 'update_deal_fields' }>,
+  now: Date,
+): Promise<string | null> {
+  const held = await holdForDealChange(tx, run, effect.pipelineId);
+  if (typeof held === 'string') return held;
+  const fields = await lockedDealFields(tx, run.tenantId);
+  const deal = await onlyOpenDeal(tx, run, effect.pipelineId);
+  if (typeof deal === 'string') return deal;
+  const next = stepDealAttributes(fields, deal.attributes, effect.values);
+  if (!next.ok) return next.note;
+  if (sameAttributes(next.attributes, deal.attributes)) return 'deal_fields_unchanged';
+  await tx
+    .update(crmDeals)
+    .set({
+      attributes: next.attributes,
+      version: deal.version + 1,
+      ...crmChangedBy('automation'),
+    })
+    .where(and(eq(crmDeals.tenantId, run.tenantId), eq(crmDeals.id, deal.id)));
+  await addActivity(tx, {
+    tenantId: run.tenantId,
+    contactId: run.contactId,
+    dealId: deal.id,
+    actorMembershipId: null,
+    kind: 'deal_updated',
+    data: { fields: ['custom_fields'], automationId: run.automationId, runId: run.id },
     at: now,
   });
   return null;
@@ -1515,7 +1562,8 @@ async function runStep(
     let messageId: string | null = null;
     const notes: string[] = [];
     let blocked: string | null = null;
-    // A task or deal step that created nothing (ADR-244, ADR-245): the step log says so and why.
+    // A task or deal step that created or changed nothing (ADR-244, ADR-245, ADR-250, ADR-251,
+    // ADR-386): the step log says so and why.
     let skipped = false;
     let handoff: { teamId: string | null } | null = null;
     for (const effect of result.effects) {
@@ -1589,6 +1637,12 @@ async function runStep(
         }
       } else if (effect.kind === 'close_deal') {
         const note = await applyCloseDealEffect(tx, run, effect, now);
+        if (note) {
+          notes.push(note);
+          skipped = true;
+        }
+      } else if (effect.kind === 'update_deal_fields') {
+        const note = await applyDealFieldsEffect(tx, run, effect, now);
         if (note) {
           notes.push(note);
           skipped = true;

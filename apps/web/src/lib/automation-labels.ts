@@ -50,7 +50,7 @@ export const STEP_OUTCOMES: Record<string, string> = {
   retried: 'Asked again',
   timed_out: 'No reply in time',
   branched: 'Checked a condition',
-  updated: 'Updated the contact',
+  updated: 'Made the change',
   waiting: 'Started waiting',
   resumed: 'Wait ended',
   handed_off: 'Handed off',
@@ -124,6 +124,9 @@ export const STEP_DETAILS: Record<string, string> = {
   deal_ambiguous:
     'the contact has more than one open deal in the pipeline, so which one is meant is not known',
   deal_in_stage: 'the deal was already in the stage',
+  // Steps that set deal fields (ADR-386): why nothing changed (and `deal_field_…:<key>` below).
+  deal_fields_unchanged: 'the deal already had these values',
+  deal_fields_too_large: 'the deal’s custom field values would be more than 12 KiB in all',
   tester_not_member: 'the member running the test left the company',
   tester_not_permitted: 'the member running the test may no longer run tests',
   version_unreadable: 'the version could not be read',
@@ -183,9 +186,28 @@ export const TRIGGER_TYPE_LABELS: Record<string, string> = {
   api: 'API',
 };
 
-/** Text for a step-log or end detail code, including send failures (`failed:<code>`). */
+/**
+ * Why a step that sets deal fields changed nothing because of one of its fields (ADR-386), by the
+ * code before the field's key (`deal_field_invalid:<key>`).
+ */
+const DEAL_FIELD_DETAILS: Record<string, (key: string) => string> = {
+  deal_field_missing: (key) => `the deal field “${key}” no longer exists`,
+  deal_field_empty: (key) =>
+    `the value for the deal field “${key}” was empty after filling in placeholders`,
+  deal_field_invalid: (key) =>
+    `the value for the deal field “${key}” does not fit it (for a choice, it is not one of its options)`,
+};
+
+/**
+ * Text for a step-log or end detail code, including send failures (`failed:<code>`) and deal fields
+ * (`deal_field_…:<key>`).
+ */
 export function describeDetail(detail: string): string {
   if (/^[1-5]\d\d$/.test(detail)) return `the server answered with status ${detail}`;
+  const colon = detail.indexOf(':');
+  const code = colon > 0 ? detail.slice(0, colon) : '';
+  const dealField = Object.hasOwn(DEAL_FIELD_DETAILS, code) ? DEAL_FIELD_DETAILS[code] : undefined;
+  if (dealField) return dealField(detail.slice(colon + 1));
   if (detail.startsWith('failed:')) {
     const code = detail.slice('failed:'.length);
     return STEP_DETAILS[code] ?? `WhatsApp did not accept or deliver the message (error ${code})`;

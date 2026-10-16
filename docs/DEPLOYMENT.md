@@ -1689,6 +1689,19 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    column and checks in place; an older release then fails the same way for deals with choice
    values until the choice fields are deleted.
 
+   Migration 0302 (ADR-386) replaces the check on `app.webhook_endpoints.run_step_node_types` with
+   one that also accepts `update_deal_fields` (1 to 20 kinds), as 0299 did for products steps:
+   every list it allowed is still allowed, and the table is small, so the check is validated at
+   once. A worker of the previous release cannot read a published version with a step that sets
+   deal fields and would fail its runs as unreadable, so roll the workers out first and publish such
+   automations only after the worker rollout ends; an old web server opens such a draft with the
+   starter steps, so do not edit automations with these steps until the web rollout ends. Rolling an
+   image back leaves the wider check in place. An endpoint whose list was set through the API to all
+   19 earlier kinds keeps that list, so it does not receive these steps: tell its company to tick
+   "Update deal fields" in Settings → Webhooks, or set the list to null. Until the web rollout ends,
+   an old web server refuses to save an endpoint whose list names these steps ("Choose kinds of step
+   from the list.").
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

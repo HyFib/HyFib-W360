@@ -337,13 +337,20 @@ verification, app review, Embedded Signup configuration).
   Settings → Pipelines, audited; members set values on the deal page and keys through `fields` on
   `POST`/`PATCH /deals`, checked by type; `GET /deal-fields`; a CSV column per field; deletion
   strips values from every deal; erasure clears them. Not built: webhook events for changes of
-  values, automation steps that set values).
+  values; automation steps that set values were built later, ADR-386).
   **[Choice-type custom deal fields built; their database and browser tests run only in CI]**
   (ADR-385, migration 0301: a `choice` field has 1 to 50 options, in order, unique ignoring case;
   forms show a select and CSV import takes an option in any case, the API exactly; `GET
 /deal-fields` gives `options`; options can be added and reordered, and removed or renamed only
   while no deal has them chosen. Not built: multi-select, renaming a chosen option with its values,
   filtering by a choice).
+  **[Automation steps that set custom deal fields built; their database and browser tests run only
+  in CI]** (ADR-386, migration 0302 for webhook endpoints' kinds of step: an "Update deal fields"
+  step sets 1 to 20 values, with placeholders, on the contact's single open deal in a pipeline,
+  read as the deal forms read them; checked when publishing and again when it runs, all or none,
+  a skipped step naming the field otherwise; an empty value clears the field. Not built: the deal's
+  title, value, owner or close date, values from another deal or a contact field, conditions on
+  deal fields).
   **[Custom field values on the new-deal form built; its browser test runs only in CI]** (ADR-379,
   no migration: the board's, the contact page's and the inbox's new-deal forms take a value per
   field, checked by the deal creation's existing rules).

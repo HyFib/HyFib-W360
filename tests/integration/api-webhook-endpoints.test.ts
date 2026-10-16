@@ -1842,13 +1842,17 @@ describe('webhook endpoints through the API (ADR-081)', () => {
         runStepNodeTypes: ['create_deal'],
       }),
     ).toMatchObject({ runStepNodeTypes: ['create_deal'] });
-    // Every kind the builder defines, products steps included (ADR-383), as the database allows.
+    // Every kind the builder defines, products steps (ADR-383) and steps that set deal fields
+    // (ADR-386) included, as the database allows.
     expect(
       await api().update(key.ctx, id, { runStepNodeTypes: [...WEBHOOK_RUN_STEP_NODE_TYPES] }),
     ).toMatchObject({ runStepNodeTypes: [...WEBHOOK_RUN_STEP_NODE_TYPES] });
     expect(await api().update(key.ctx, id, { runStepNodeTypes: ['send_products'] })).toMatchObject({
       runStepNodeTypes: ['send_products'],
     });
+    expect(
+      await api().update(key.ctx, id, { runStepNodeTypes: ['update_deal_fields'] }),
+    ).toMatchObject({ runStepNodeTypes: ['update_deal_fields'] });
     expect(await api().update(key.ctx, id, { runStepNodeTypes: null })).toMatchObject({
       runStepNodeTypes: null,
     });

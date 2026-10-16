@@ -42,6 +42,7 @@ import { AutomationDiagram } from './automation-diagram';
 import { AutomationSimulator } from './automation-simulator';
 import {
   NodeFields,
+  type EditorDealField,
   type EditorPipeline,
   type EditorProduct,
   type EditorTemplate,
@@ -145,6 +146,7 @@ function defaultNode(
   pipeline: EditorPipeline | undefined,
   flow: { id: string } | undefined,
   product: { id: string } | undefined,
+  dealField: EditorDealField | undefined,
 ): AutomationNode {
   const id = newNodeId(graph, type);
   switch (type) {
@@ -302,6 +304,15 @@ function defaultNode(
         lostReason: null,
         next: null,
       };
+    case 'update_deal_fields':
+      return {
+        id,
+        type,
+        label: '',
+        pipelineId: pipeline?.id ?? '',
+        values: [{ field: dealField?.key ?? 'field', value: '' }],
+        next: null,
+      };
     case 'handoff':
       return { id, type, label: '', teamId: null };
     case 'end':
@@ -323,6 +334,7 @@ function retarget(node: AutomationNode, target: string, value: string | null): A
     case 'create_deal':
     case 'move_deal':
     case 'close_deal':
+    case 'update_deal_fields':
     case 'wait':
       return { ...node, next: t(node.next) };
     case 'ask_template':
@@ -375,6 +387,7 @@ export function AutomationEditor({
   teams,
   crmMembers,
   crmPipelines,
+  dealFields,
   flows,
   products,
   fields,
@@ -392,6 +405,8 @@ export function AutomationEditor({
   crmMembers: { id: string; name: string }[];
   /** Active pipelines with their currency and active stages, for deal steps. */
   crmPipelines: EditorPipeline[];
+  /** The company's custom deal fields, for steps that set them (ADR-386). */
+  dealFields: EditorDealField[];
   /** The company's forms that are not archived, for form steps. */
   flows: { id: string; name: string; whatsappAccountId: string; sendable: boolean }[];
   /**
@@ -496,6 +511,7 @@ export function AutomationEditor({
           )
         : undefined,
       fieldKeys: new Set(fields.map((f) => f.key)),
+      dealFields: new Map(dealFields.map((f) => [f.key, f])),
       allowedDomains: web.allowedDomains,
       secrets: new Map(web.secrets.map((s) => [s.name, s.domain])),
       allowInsecureHttp: web.allowInsecureHttp,
@@ -508,6 +524,7 @@ export function AutomationEditor({
       teams,
       crmMembers,
       crmPipelines,
+      dealFields,
       flows,
       products,
       fields,
@@ -569,6 +586,7 @@ export function AutomationEditor({
     teams,
     crmMembers,
     crmPipelines,
+    dealFields,
     flows: usableFlows,
     products: usableProducts,
     fields,
@@ -1030,6 +1048,7 @@ export function AutomationEditor({
                             crmPipelines[0],
                             usableFlows[0],
                             usableProducts?.[0],
+                            dealFields[0],
                           ),
                         ],
                       })),
@@ -1079,6 +1098,7 @@ export function AutomationEditor({
             teams={teams}
             crmMembers={crmMembers}
             crmPipelines={crmPipelines}
+            dealFields={dealFields}
             flows={flows}
             products={products ?? []}
             templates={templates}

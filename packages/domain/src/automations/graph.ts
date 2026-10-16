@@ -9,6 +9,7 @@ import {
   typoAllowance,
 } from '../inbox/keywords';
 import { parseAmountToMinor } from '../crm/money';
+import { coerceDealFieldValue, type DealFieldShape } from '../crm/deal-field-values';
 import { PRODUCT_MESSAGE_LIMITS } from '../commerce/product-message';
 import { FLOW_LIMITS } from '../flows/flow-json';
 import { TEMPLATE_LIMITS } from '../templates/definition';
@@ -63,6 +64,8 @@ export const AUTOMATION_LIMITS = {
   dealCloseDays: 365,
   /** A lost deal's reason, as the CRM limits it (ADR-251). */
   dealLostReasonLength: 200,
+  /** Custom deal fields one step sets (ADR-386); a value has `fieldValueLength` characters. */
+  dealFieldValues: 20,
 } as const;
 
 /**
@@ -622,6 +625,39 @@ const closeDealNode = z.object({
 });
 
 /**
+ * Sets custom field values (ADR-373, ADR-385) on the run's contact's open deal in a pipeline
+ * (ADR-386), as the automation, on the same terms as moving it: nothing changes when the contact
+ * has no open deal there, or more than one. Each value is typed as a member types it in the deal's
+ * form and may hold placeholders, filled in when the step runs; a value left empty clears the
+ * field. Which fields exist and what their values take is checked with the graph, so an unfinished
+ * draft can be saved, and again when the step runs.
+ */
+const updateDealFieldsNode = z.object({
+  id: nodeIdSchema,
+  type: z.literal('update_deal_fields'),
+  label: labelSchema,
+  pipelineId: z.uuid('Choose a pipeline.'),
+  values: z
+    .array(
+      z.object({
+        field: z.string().regex(FIELD_KEY_RE, 'Choose a deal field.'),
+        value: z
+          .string()
+          .trim()
+          .max(
+            AUTOMATION_LIMITS.fieldValueLength,
+            `Values are limited to ${AUTOMATION_LIMITS.fieldValueLength} characters.`,
+          ),
+      }),
+    )
+    .max(
+      AUTOMATION_LIMITS.dealFieldValues,
+      `A step sets at most ${AUTOMATION_LIMITS.dealFieldValues} deal fields.`,
+    ),
+  next: nextSchema,
+});
+
+/**
  * A deal step's value in minor units of the pipeline's currency: null without a value, undefined
  * when the text is not an amount in that currency or is more than a deal can hold.
  */
@@ -646,6 +682,7 @@ export const nodeSchema = z.discriminatedUnion('type', [
   createDealNode,
   moveDealNode,
   closeDealNode,
+  updateDealFieldsNode,
   waitNode,
   handoffNode,
   endNode,
@@ -670,6 +707,7 @@ export const NODE_TYPES: readonly NodeType[] = [
   'create_deal',
   'move_deal',
   'close_deal',
+  'update_deal_fields',
   'wait',
   'handoff',
   'end',
@@ -691,6 +729,7 @@ export const NODE_TYPE_LABELS: Record<NodeType, string> = {
   create_deal: 'Create a CRM deal',
   move_deal: 'Move the CRM deal',
   close_deal: 'Close the CRM deal',
+  update_deal_fields: 'Update deal fields',
   wait: 'Wait',
   handoff: 'Hand off to people',
   end: 'End',
@@ -1260,6 +1299,7 @@ export function edgesOf(node: AutomationNode): { label: string; target: string |
     case 'create_deal':
     case 'move_deal':
     case 'close_deal':
+    case 'update_deal_fields':
     case 'wait':
       return [{ label: 'next', target: node.next }];
     case 'ask_template':
@@ -1334,6 +1374,9 @@ function textsOf(node: AutomationNode): string[] {
     case 'create_task':
     case 'create_deal':
       return [node.title];
+    case 'update_deal_fields':
+      // A value left empty clears its field (nothing to check).
+      return node.values.flatMap((v) => (v.value ? [v.value] : []));
     default:
       return [];
   }
@@ -1366,6 +1409,11 @@ export interface GraphReferences {
   crmPipelines?: ReadonlyMap<string, { currency: string; stageIds: ReadonlySet<string> }>;
   /** Contact field keys of the company; when given, fields must be among them. */
   fieldKeys?: ReadonlySet<string>;
+  /**
+   * The company's custom deal fields by key (ADR-373, ADR-385); when given, steps that set deal
+   * fields must set existing ones, and values without placeholders must fit them (ADR-386).
+   */
+  dealFields?: ReadonlyMap<string, DealFieldShape>;
   /** Domains the company allows HTTP steps to call; when given, addresses must match one. */
   allowedDomains?: readonly string[];
   /**
@@ -1526,6 +1574,7 @@ export function checkGraph(graph: AutomationGraph, refs: GraphReferences = {}): 
       if (
         !found.literal &&
         node.type !== 'update_contact' &&
+        node.type !== 'update_deal_fields' &&
         node.type !== 'send_template' &&
         node.type !== 'ask_template' &&
         !(node.type === 'send_products' && node.kind === 'product')
@@ -1708,6 +1757,11 @@ export function checkGraph(graph: AutomationGraph, refs: GraphReferences = {}): 
         nodeId: node.id,
         message: 'Choose an active pipeline for the deal to close.',
       });
+    }
+    if (node.type === 'update_deal_fields') {
+      for (const message of dealFieldsStepIssues(node, refs)) {
+        issues.push({ level: 'error', nodeId: node.id, message });
+      }
     }
     if (node.type === 'create_deal') {
       for (const message of dealStepIssues(node, refs)) {
@@ -1904,6 +1958,40 @@ function dealStepIssues(node: NodeOf<'create_deal'>, refs: GraphReferences): str
   }
   return issues;
 }
+
+/**
+ * Problems with a step that sets deal fields (ADR-386): no field, a field set twice, a pipeline that
+ * is not active, a field the company does not have, or a value without placeholders that the field
+ * does not take (one with placeholders is checked when the step runs).
+ */
+function dealFieldsStepIssues(node: NodeOf<'update_deal_fields'>, refs: GraphReferences): string[] {
+  const out: string[] = [];
+  if (node.values.length === 0) out.push('Choose at least one deal field to set.');
+  if (refs.crmPipelines && !refs.crmPipelines.has(node.pipelineId)) {
+    out.push('Choose an active pipeline for the deal to update.');
+  }
+  const seen = new Set<string>();
+  for (const { field, value } of node.values) {
+    if (seen.has(field)) {
+      out.push(`Set each deal field once: “${field}” is set twice.`);
+      continue;
+    }
+    seen.add(field);
+    if (!refs.dealFields) continue;
+    const definition = refs.dealFields.get(field);
+    if (!definition) {
+      out.push(`The deal field “${field}” does not exist.`);
+      continue;
+    }
+    if (!hasPlaceholder(value)) {
+      const coerced = coerceDealFieldValue(definition, value);
+      if (!coerced.ok) out.push(coerced.message);
+    }
+  }
+  return out;
+}
+
+const hasPlaceholder = (text: string) => [...text.matchAll(PLACEHOLDER_RE)].length > 0;
 
 /** Steps the first step leads to, directly or not (the first step included). */
 function reachableFrom(start: string, byId: ReadonlyMap<string, AutomationNode>): Set<string> {

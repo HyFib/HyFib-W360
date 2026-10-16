@@ -379,6 +379,12 @@ Phase 4 rules (automations, P4-01):
   several open deals, nothing moves.
 - Steps that close deals (ADR-251): the same rules, for an active pipeline; the deal is closed with
   no member as its closer, and the timeline records the automation and the run.
+- Steps that set custom deal fields (ADR-386): the same permission and plan rules and the same
+  single open deal in an active pipeline. Fields and values are checked when publishing and again
+  when the step runs, under the company's deal-field lock (shared), with the deal forms' rules (a
+  choice only among its current options); a field deleted or a value no longer valid changes
+  nothing. The deal records the automation as its changer and the timeline the automation and the
+  run. Permissions are unchanged.
 
 Phase 4 rules (automation web requests, P4-02):
 

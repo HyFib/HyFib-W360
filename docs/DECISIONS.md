@@ -15282,3 +15282,57 @@ Decision:
 Not built: several options per deal (multi-select), colours or descriptions per option, renaming an
 option that deals have chosen (with its values carried over), and filtering the board or reports by
 a choice.
+
+## ADR-386 Automation steps that set custom deal fields (P4-04) (2026-10-16)
+
+Context: custom deal fields (ADR-373, ADR-385) are filled in by members on the deal page, by CSV
+import and through the API, and automations create, move and close deals (ADR-245, ADR-250,
+ADR-251), but a run could not record what it learnt on the deal: a bot that asks for a budget or a
+tier left a member to copy the answer. "Automation steps that set values" remained under P4-04's
+custom deal fields.
+
+Decision:
+
+- **An `update_deal_fields` step** ("Update deal fields", `automations/graph.ts`): a pipeline and 1
+  to 20 rows of a field key and a value of up to 500 characters, typed as a member types it in the
+  deal's form. The run's contact's open deal in the pipeline changes, found as moves and closes find
+  it (`holdForDealChange`, `onlyOpenDeal`): nothing changes when the contact has none there or more
+  than one, the pipeline is archived or gone, the contact was erased, or the plan leaves out the
+  CRM. It is not a message, so it has no window rule.
+- **Placeholders:** a value may hold {{name}}, {{company}}, {{answer.<name>}} and, where the
+  automation allows them, {{order.<field>}} and {{input.<name>}}, checked as other texts' are and
+  filled in when the step runs, then clipped to 500 characters as a contact field's value is. The
+  builder offers them for text and number fields; choices and yes/no are chosen from a list and
+  dates from a date input.
+- **Empty values:** a value left empty clears its field, whatever its type ("Clear the value" in
+  the builder's lists). A value whose placeholders fill in nothing is not taken as a clear: the step
+  changes nothing and says which field (`deal_field_empty:<key>`), so a question a path skipped
+  never wipes a value a member entered.
+- **Checked with the graph:** at least one field, each field once, an active pipeline, fields the
+  company has, and, for values without placeholders, the deal forms' own reading
+  (`coerceDealFieldValue`: a number as members type it, a real YYYY-MM-DD date, yes or no, one of a
+  choice's options in any case). Publishing refuses a broken step; a draft is saved with its issues.
+  The value reading moved to `crm/deal-field-values.ts`, which has no server dependencies, so the
+  builder checks with the same code; the builder lists the company's deal fields with their options.
+- **When it runs** (`applyDealFieldsEffect`): after the plan, the contact and the pipeline, the
+  company's deal fields are locked shared (`lockedDealFields`) before the deal is locked, the order
+  a member's edit and a field's deletion use. Every value is read again (`stepDealAttributes`):
+  the step sets all of them or none, and its note names the first field it could not set, a field
+  deleted since publishing (`deal_field_missing:<key>`) or a value its field no longer takes, for
+  example an option removed (`deal_field_invalid:<key>`); values over the 12 KiB bound
+  (`deal_fields_too_large`) and values the deal already has (`deal_fields_unchanged`) change nothing
+  either. A step that changed nothing is logged `skipped` with its note and the run goes on; one
+  that changed the deal is logged `updated` (an outcome automation run steps already had, so no
+  outcome migration), raises the deal's version, records the automation as its changer and adds a
+  `deal_updated` activity with `fields: ['custom_fields']`, no actor, the automation and the run,
+  shown on the timeline as "Deal edited · by an automation". The run page names the field in its
+  notes. The `updated` outcome, also used by contact and conversation steps, is now labelled "Made
+  the change" on run pages and in Settings → Webhooks.
+- **Who may publish:** as for the other CRM steps, publishing or testing needs the CRM in the plan
+  and `crm.write`.
+- **Webhook endpoints** can choose the new kind of step, as every kind the builder defines
+  (ADR-328): migration 0302 widens the check on `run_step_node_types` to 1 to 20 kinds.
+
+Not built: setting the deal's title, value, owner or expected close date, fields of a deal the
+contact has in several pipelines at once, values copied from another deal or a contact field, and a
+condition on a deal's field values.

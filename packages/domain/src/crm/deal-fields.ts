@@ -14,13 +14,11 @@ import {
 } from '@w360/db';
 import { recordAudit, type RequestMeta } from '../audit';
 import { assertCan, type TenantContext } from '../authz/context';
-import {
-  apiFieldValue,
-  coerceFieldValue,
-  fieldKeyFromLabel,
-  type AttributeValue,
-} from '../contacts/fields';
+import { apiFieldValue, fieldKeyFromLabel, type AttributeValue } from '../contacts/fields';
 import { parseInput } from '../validation';
+import { coerceDealFieldValue, dealFieldOptionKey, type DealFieldShape } from './deal-field-values';
+
+export { coerceDealFieldValue } from './deal-field-values';
 
 /**
  * A company's custom deal fields (ADR-373): defined by owners and administrators in Settings →
@@ -47,8 +45,13 @@ export const MAX_DEAL_FIELD_OPTIONS = 50;
 /** The most characters an option has (the database holds the same bound, 0301). */
 export const MAX_DEAL_FIELD_OPTION_LENGTH = 80;
 
+/** Whether a deal's values take more than `MAX_DEAL_ATTRIBUTES_BYTES` as JSON. */
+export function dealAttributesTooLarge(next: Readonly<Record<string, AttributeValue>>): boolean {
+  return Buffer.byteLength(JSON.stringify(next), 'utf8') > MAX_DEAL_ATTRIBUTES_BYTES;
+}
+
 function withinSize(next: Record<string, AttributeValue>): Record<string, AttributeValue> {
-  if (Buffer.byteLength(JSON.stringify(next), 'utf8') > MAX_DEAL_ATTRIBUTES_BYTES) {
+  if (dealAttributesTooLarge(next)) {
     const message = "A deal's custom field values are limited to 12 KiB in all.";
     throw new AppError('validation_failed', message, { issues: [{ path: 'fields', message }] });
   }
@@ -68,9 +71,6 @@ export interface DealFieldDefinition {
 /** C0 and C1 control characters, line breaks among them: never part of an option. */
 // eslint-disable-next-line no-control-regex
 const CONTROL_RE = /[\u0000-\u001f\u007f-\u009f]/;
-
-/** Options compare ignoring case, as CSV import matches them. */
-const optionKey = (option: string) => option.toLowerCase();
 
 /**
  * A choice field's options: 1 to 50, each trimmed, 1 to 80 characters without control characters,
@@ -96,7 +96,7 @@ export const dealFieldOptionsSchema = z
   .superRefine((options, ctx) => {
     const seen = new Set<string>();
     options.forEach((option, i) => {
-      const key = optionKey(option);
+      const key = dealFieldOptionKey(option);
       if (seen.has(key)) {
         ctx.addIssue({ code: 'custom', path: [i], message: `“${option}” is listed twice.` });
       }
@@ -156,26 +156,6 @@ export function loadDealFields(tx: Tx, tenantId: string): Promise<DealFieldDefin
     .from(crmDealFields)
     .where(eq(crmDealFields.tenantId, tenantId))
     .orderBy(asc(crmDealFields.createdAt), asc(crmDealFields.id));
-}
-
-/**
- * Converts a value typed in a form or a CSV cell to the field's type, as contact fields are; an
- * empty value removes it (`value: null`). A choice takes one of its options whatever the case, and
- * is stored as the option is written.
- */
-export function coerceDealFieldValue(
-  field: Pick<DealFieldDefinition, 'label' | 'type' | 'options'>,
-  raw: string,
-): { ok: true; value: AttributeValue | null } | { ok: false; message: string } {
-  if (field.type !== 'choice')
-    return coerceFieldValue({ label: field.label, type: field.type }, raw);
-  const value = raw.trim();
-  if (!value) return { ok: true, value: null };
-  const key = optionKey(value);
-  const option = (field.options ?? []).find((candidate) => optionKey(candidate) === key);
-  return option === undefined
-    ? { ok: false, message: `${field.label} must be one of its options.` }
-    : { ok: true, value: option };
 }
 
 /**
@@ -275,6 +255,43 @@ export function apiMergedDealAttributes(
     else next.set(key, checked.value);
   }
   return withinSize(Object.fromEntries(next));
+}
+
+/**
+ * A deal's values after an automation's step sets some (ADR-386): each value given as typed (null
+ * to clear the field) checked against its field, as a member's are, and merged over the current
+ * ones. The step changes all of them or none: instead of values, it gets the note of the first that
+ * cannot be set, naming its field (`deal_field_missing:<key>` for a field that no longer exists,
+ * `deal_field_empty:<key>` for a value whose placeholders filled in nothing,
+ * `deal_field_invalid:<key>` for a value the field does not take), or `deal_fields_too_large` when
+ * the values would be over `MAX_DEAL_ATTRIBUTES_BYTES` in all. Values of fields that no longer
+ * exist are dropped, as for a member's change.
+ */
+export function stepDealAttributes(
+  fields: readonly (DealFieldShape & { key: string })[],
+  current: Readonly<Record<string, AttributeValue>>,
+  given: readonly { field: string; value: string | null }[],
+): { ok: true; attributes: Record<string, AttributeValue> } | { ok: false; note: string } {
+  const byKey = new Map(fields.map((field) => [field.key, field]));
+  const next = new Map(Object.entries(keptDealAttributes(fields, current)));
+  for (const { field: key, value } of given) {
+    const field = byKey.get(key);
+    if (!field) return { ok: false, note: `deal_field_missing:${key}` };
+    if (value === null) {
+      next.delete(key);
+      continue;
+    }
+    if (!value.trim()) return { ok: false, note: `deal_field_empty:${key}` };
+    const coerced = coerceDealFieldValue(field, value);
+    if (!coerced.ok || coerced.value === null) {
+      return { ok: false, note: `deal_field_invalid:${key}` };
+    }
+    next.set(key, coerced.value);
+  }
+  const attributes = Object.fromEntries(next);
+  return dealAttributesTooLarge(attributes)
+    ? { ok: false, note: 'deal_fields_too_large' }
+    : { ok: true, attributes };
 }
 
 /** A deal's values of fields that still exist. */

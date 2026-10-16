@@ -312,6 +312,7 @@ export type WebhookRunStepNodeType =
   | 'create_deal'
   | 'move_deal'
   | 'close_deal'
+  | 'update_deal_fields'
   | 'wait'
   | 'handoff'
   | 'end'

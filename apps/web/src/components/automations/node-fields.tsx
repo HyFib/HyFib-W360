@@ -36,6 +36,14 @@ export interface EditorPipeline {
   stages: { id: string; name: string }[];
 }
 
+/** A custom deal field a step may set (ADR-386), with a choice field's options. */
+export interface EditorDealField {
+  key: string;
+  label: string;
+  type: 'text' | 'number' | 'date' | 'boolean' | 'choice';
+  options: readonly string[] | null;
+}
+
 /** A product of a connected catalog a products step may send (ADR-383). */
 export interface EditorProduct {
   id: string;
@@ -73,6 +81,8 @@ export interface NodeFieldOptions {
   crmMembers: { id: string; name: string }[];
   /** Active pipelines with their currency and active stages, for deal steps. */
   crmPipelines: EditorPipeline[];
+  /** The company's custom deal fields, for steps that set them (ADR-386). */
+  dealFields: EditorDealField[];
   /** The company's forms that can be sent, of the automation's number's account when it has one. */
   flows: { id: string; name: string }[];
   /**
@@ -1183,6 +1193,8 @@ export function NodeFields({
         </div>
       );
     }
+    case 'update_deal_fields':
+      return <DealFieldsStepFields node={node} options={options} onChange={onChange} />;
     case 'wait':
       return (
         <div className="grid gap-4 sm:grid-cols-2">
@@ -1229,6 +1241,201 @@ export function NodeFields({
     case 'end':
       return <p className="text-sm text-muted-foreground">The automation ends here.</p>;
   }
+}
+
+/**
+ * A step that sets custom deal fields (ADR-386): the pipeline whose open deal changes, then one row
+ * per field with an input for its type. Choices and yes/no are chosen from a list and dates from a
+ * date input; text and numbers are typed and may hold placeholders. An empty value clears the field.
+ */
+function DealFieldsStepFields({
+  node,
+  options,
+  onChange,
+}: {
+  node: NodeOf<'update_deal_fields'>;
+  options: NodeFieldOptions;
+  onChange: (node: AutomationNode) => void;
+}) {
+  const p = `step-${node.id}`;
+  const patch = (values: Partial<NodeOf<'update_deal_fields'>>) => onChange({ ...node, ...values });
+  const pipeline = options.crmPipelines.find((pl) => pl.id === node.pipelineId);
+  const setRow = (i: number, row: { field: string; value: string }) =>
+    patch({ values: node.values.map((v, j) => (j === i ? row : v)) });
+  const unused = options.dealFields.find((f) => !node.values.some((v) => v.field === f.key));
+  return (
+    <div className="grid gap-4">
+      <Field
+        id={`${p}-pipeline`}
+        label="Pipeline"
+        description="The contact's open deal in it changes. Nothing changes when the contact has none, or more than one."
+      >
+        {(aria) => (
+          <Select
+            {...aria}
+            value={node.pipelineId}
+            onChange={(e) => patch({ pipelineId: e.target.value })}
+          >
+            {pipeline ? null : <option value={node.pipelineId}>Choose a pipeline</option>}
+            {options.crmPipelines.map((pl) => (
+              <option key={pl.id} value={pl.id}>
+                {pl.name}
+              </option>
+            ))}
+          </Select>
+        )}
+      </Field>
+      <fieldset className="grid gap-3">
+        <legend className="mb-1 text-sm font-medium">
+          Fields (up to {AUTOMATION_LIMITS.dealFieldValues}; a value left empty clears the field)
+        </legend>
+        {options.dealFields.length === 0 ? (
+          <p className="text-sm text-muted-foreground">
+            The company has no custom deal fields yet. Owners and administrators add them in the
+            settings of pipelines.
+          </p>
+        ) : null}
+        {node.values.map((row, i) => {
+          const field = options.dealFields.find((f) => f.key === row.field);
+          return (
+            <div
+              key={i}
+              className="grid gap-3 rounded-md border border-border p-3 sm:grid-cols-[1fr_1fr_auto]"
+            >
+              <Field id={`${p}-field-${i}`} label={`Field ${i + 1}`}>
+                {(aria) => (
+                  <Select
+                    {...aria}
+                    value={row.field}
+                    // Another field may take another type: its value starts empty.
+                    onChange={(e) => setRow(i, { field: e.target.value, value: '' })}
+                  >
+                    {field ? null : <option value={row.field}>Choose a deal field</option>}
+                    {options.dealFields.map((f) => (
+                      <option
+                        key={f.key}
+                        value={f.key}
+                        disabled={f.key !== row.field && node.values.some((v) => v.field === f.key)}
+                      >
+                        {f.label}
+                      </option>
+                    ))}
+                  </Select>
+                )}
+              </Field>
+              <DealFieldValueInput
+                id={`${p}-value-${i}`}
+                field={field}
+                value={row.value}
+                hint={hintFor(options)}
+                onChange={(value) => setRow(i, { field: row.field, value })}
+              />
+              <div className="flex items-end">
+                {node.values.length > 1 ? (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => patch({ values: node.values.filter((_, j) => j !== i) })}
+                  >
+                    Remove<span className="sr-only"> field {i + 1}</span>
+                  </Button>
+                ) : null}
+              </div>
+            </div>
+          );
+        })}
+        {node.values.length < AUTOMATION_LIMITS.dealFieldValues && unused ? (
+          <div>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => patch({ values: [...node.values, { field: unused.key, value: '' }] })}
+            >
+              Add a field
+            </Button>
+          </div>
+        ) : null}
+      </fieldset>
+      <NextSelect
+        id={`${p}-next`}
+        label="Then"
+        value={node.next}
+        self={node.id}
+        options={options}
+        onChange={(next) => patch({ next })}
+      />
+    </div>
+  );
+}
+
+/**
+ * A deal field's value in a step that sets it, as the deal's form takes it: a list for yes/no and
+ * choices, a date input for dates, text otherwise. A value the list does not have (written with a
+ * placeholder, or an option since removed) stays listed as it is, so the checks can name it.
+ */
+function DealFieldValueInput({
+  id,
+  field,
+  value,
+  hint,
+  onChange,
+}: {
+  id: string;
+  field: EditorDealField | undefined;
+  value: string;
+  hint: string;
+  onChange: (value: string) => void;
+}) {
+  const listed =
+    field?.type === 'boolean'
+      ? [
+          { value: 'yes', label: 'Yes' },
+          { value: 'no', label: 'No' },
+        ]
+      : field?.type === 'choice'
+        ? (field.options ?? []).map((option) => ({ value: option, label: option }))
+        : null;
+  if (listed) {
+    return (
+      <Field id={id} label="Value">
+        {(aria) => (
+          <Select {...aria} value={value} onChange={(e) => onChange(e.target.value)}>
+            <option value="">Clear the value</option>
+            {value && !listed.some((o) => o.value === value) ? (
+              <option value={value}>{value}</option>
+            ) : null}
+            {listed.map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label}
+              </option>
+            ))}
+          </Select>
+        )}
+      </Field>
+    );
+  }
+  // A date written with a placeholder stays text, so it can be seen and changed.
+  const date = field?.type === 'date' && !value.includes('{{');
+  return (
+    <Field
+      id={id}
+      label="Value"
+      description={date ? 'Leave it empty to clear the field.' : `Empty clears the field. ${hint}`}
+    >
+      {(aria) => (
+        <Input
+          {...aria}
+          type={date ? 'date' : 'text'}
+          inputMode={field?.type === 'number' ? 'decimal' : undefined}
+          value={value}
+          maxLength={AUTOMATION_LIMITS.fieldValueLength}
+          onChange={(e) => onChange(e.target.value)}
+        />
+      )}
+    </Field>
+  );
 }
 
 const PRODUCT_KIND_LABELS: Record<ProductStepKind, string> = {

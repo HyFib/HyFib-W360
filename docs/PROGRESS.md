@@ -1,5 +1,62 @@
 # Progress
 
+## 2026-10-16 — Automation steps that set custom deal fields (P4-04, ADR-386)
+
+Status: **Implemented; its database and browser tests run in CI only.** Automations created, moved
+and closed deals but could not record what a run learnt in the deal's custom fields; BACKLOG listed
+"automation steps that set values" as not built.
+
+### Completed
+
+- **Domain (`automations/graph.ts`, `interpreter.ts`):** the `update_deal_fields` node ("Update deal
+  fields": a pipeline and 1 to 20 field values of up to 500 characters) in `NODE_TYPES`, its label,
+  `edgesOf` and `textsOf`; `checkGraph` refuses no field, a field set twice, an inactive pipeline,
+  an unknown field and a value without placeholders its field does not take
+  (`GraphReferences.dealFields`). The interpreter renders the values (an empty one clears its field)
+  into an `update_deal_fields` effect logged `updated`.
+- **Domain (`crm/deal-field-values.ts`, `crm/deal-fields.ts`):** `coerceDealFieldValue` moved to a
+  browser-safe module (re-exported); `stepDealAttributes` reads a step's values against the fields
+  and returns the new values or the note of the first field it cannot set;
+  `dealAttributesTooLarge`.
+- **Runner:** `applyDealFieldsEffect` shares `holdForDealChange` and `onlyOpenDeal` with moves and
+  closes, takes the deal-field lock shared before the deal, writes the values with a new version
+  and the automation as changer, and adds a `deal_updated` activity naming the automation and the
+  run; otherwise a `skipped` step with its note.
+- **Service:** the step is a CRM step (plan and `crm.write` to publish or test); the builder's
+  options and the graph checks get the company's deal fields.
+- **Migration 0302:** the webhook endpoints' `run_step_node_types` check takes 1 to 20 kinds,
+  `update_deal_fields` among them; Drizzle's `WebhookRunStepNodeType` and the domain's lists and
+  labels follow.
+- **Web:** the builder's step (pipeline, one row per field with a list for choices and yes/no, a date
+  input for dates and text otherwise, add and remove rows), its default, `retarget`, the simulator's
+  note, run-page notes naming the field (`describeDetail`), and the `updated` outcome labelled "Made
+  the change".
+- **Tests:** unit (`automations/deal-fields-step.test.ts`, 10 tests: the node, parsing, graph checks
+  with and without the company's fields, placeholders, the effect, `stepDealAttributes`;
+  `lib/automation-labels.test.ts`: the notes; `webhooks.test.ts`: 20 kinds); integration
+  (`automations.test.ts`: values set as the automation with its activity, no deal, unchanged values,
+  an option removed, a cleared value, a deleted field, two open deals, publishing refused, the
+  builder's options; `webhooks.test.ts`, `webhook-events.test.ts`, `api-webhook-endpoints.test.ts`:
+  the new kind); e2e (`automations.spec.ts`: the step built, checked, simulated and run, its values
+  and timeline entry on the deal page).
+- **Docs:** ADR-386; ARCHITECTURE, SECURITY, THREAT-MODEL T339, DEPLOYMENT (0302), BACKLOG, and the
+  matrix's H-012 text and evidence (status unchanged).
+- **Mutation checks:** 17 deliberate regressions (no-field and pipeline checks, duplicates allowed,
+  placeholder values coerced, the placeholder-only warning, placeholders unchecked, 21 values, no
+  clipping, a placeholder left empty taken as a clear, the wrong log outcome, an empty result
+  accepted, a clear ignored, deleted fields' values kept, no size bound, a missing field skipped,
+  case-sensitive options, notes not naming the field), all caught by the unit tests. The locks, the
+  writes and the activity are covered by the integration test, which runs in CI only.
+
+### Test commands and results (local, 2026-10-16)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 160 files, 1665 tests passed                                    |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | not run here (left to the integrating build)                    |
+
 ## 2026-10-16 — Review fixes for ADR-384 and ADR-385 (PR #91)
 
 Status: **Fixed; the database and browser tests run in CI only.** Independent reviews of both
