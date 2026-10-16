@@ -15590,7 +15590,7 @@ Decision:
   `businessHoursChanged`). A save that leaves the week as it is writes nothing to it.
 - **Closed days and time zone stay the company's** and apply to every team: a public holiday closes
   the night team too, and one time zone keeps every schedule and report day comparable. Teams that
-  work on holidays are not built (below).
+  work on holidays are not built (below; since built: ADR-392, closed days per team).
 - **Only while the company's business hours are on:** a team's week replaces the company's week,
   not the switch. While business hours are off (or have no opening time) every conversation counts
   absolute time and teams' weeks are kept but unused. One switch keeps "are business hours on?"
@@ -15640,8 +15640,8 @@ Decision:
   delete cascade) and with the company (step 655, before teams); the company export includes the
   table; it holds no personal data, so erasure is unaffected.
 
-Not built: closed days or a time zone per team, holiday calendars per team, a team schedule while
-the company's hours are off, per-team hours in automations' conditions and in `GET /business-hours`,
+Not built: closed days (since built: ADR-392) or a time zone per team, holiday calendars per team,
+a team schedule while the company's hours are off, per-team hours in automations' conditions and in `GET /business-hours`,
 schedules per WhatsApp number, and measuring a turn by the team (or week) its conversation had when
 the turn started.
 
@@ -15819,6 +15819,88 @@ without the notice (it now counts by its first value, as the export reads it), t
 lists' links carried a filter nothing applies there (they drop it), a misleading test comment and a
 slip in this record. All were fixed. A choice option named "Not set" still reads like the field's
 "Not set" in the select, as on the new-deal form.
+
+## ADR-392 Closed days per team (P3-06) (2026-10-16)
+
+Context: ADR-389 gave a team its own weekly schedule but kept closed days the company's: a public
+holiday in Settings → Inbox closed every team, so a support team that works on holidays was held
+to the office's calendar (its customers' reply timers paused, overdue emails and the automatic
+reply waited for the next working day), and a team could not close on a day of its own (a team
+offsite, a regional holiday) without closing the whole company. "Closed days per team" was listed
+as not built under P3-06, in ADR-389 and in the feature matrix (H-011).
+
+Decision:
+
+- **A team's own list, or the company's:** a team either uses the company's closed days (the
+  default; every existing team keeps them) or has its own list, which replaces the company's for
+  it. The list may be empty: the team works on every day its week opens, holidays included. Days
+  are dates in the company's time zone, as the company's closed days are; a team's list starts from
+  the company's in Settings → Teams, so working on one holiday is removing that day. A list holds
+  at most 366 days (a year of days; the company's list has no limit, but a team's is sent whole
+  with the team's settings, so it is bounded), each a real date (`closedDaySchema`, the company's
+  check), kept once each and in order. Past days are kept, as the company's are; they no longer
+  matter to any timer and are removed by hand. Days have no names: the company's closed days name
+  the holiday, a team's list only says which days it is closed.
+- **For every team, independent of its week:** the choice is available to every team, whether it
+  uses the company's week or its own (ADR-389). A team that keeps office hours but answers on public
+  holidays is the common case, and tying the list to an own week would make it copy the company's
+  week, which would then no longer follow the company's changes. A team's calendar is its week (its
+  own, else the company's) with its closed days (its own, else the company's), always in the
+  company's time zone.
+- **Data model (migration 0307):** `app.teams.own_closed_days` (boolean, default false; `w360_app`
+  may update only that new column of it, beside the columns it could already update) says whether
+  the team has a list of its own, so an empty list is told apart from the company's. The days are
+  rows of `app.team_closed_days` (tenant, team, day; unique per team and day, a composite key to
+  the team with delete cascade, FORCE row security, `w360_app` may select, insert and delete). The
+  application replaces a team's list as a whole, only when it changed, the team's row locked
+  (`writeTeamClosedDays`: the flag, then delete and insert). Rows of a team without the flag are
+  never read (`loadTeamClosedDays` joins the flag), so a list is used only while the team says it
+  has one.
+- **One switch, the company's time zone:** a team's closed days apply only while the company's
+  business hours are on (ADR-389's switch); while they are off every conversation counts absolute
+  time and a team's list is kept but unused, as its week is. Settings → Teams and the team's card
+  say so.
+- **Calendars:** `businessCalendars` builds a calendar for each team with its own week or its own
+  closed days (a team with its own closed days but the company's week now has a calendar of its
+  own, keyed by its id in Reports' periods), and `calendarFor` answers it for the team's
+  conversations, everywhere ADR-389 uses a team's calendar: the inbox's reply timers and the notice
+  of overdue replies (a team with its own closed days is ranked apart, `teamsWithOwnClock`), the
+  overdue-reply emails (which name the team's business hours), the automatic reply's delay and
+  Reports' business-time measures. `loadBusinessCalendars` reads every team's closed days in one
+  more query per request, sweep or report, never per conversation. Automations keep the company's
+  calendar, as ADR-389 decided.
+- **Planned again on change:** a change of a team's closed days plans again the waiting automatic
+  replies and overdue notices of that team's conversations only (`replanWaitingTurns` with the
+  team's id), as a change of its week or target does; a save that leaves the list as it is (the
+  same days in another order or repeated) writes nothing and plans nothing again.
+- **Who and audit:** those who manage teams (`inbox.supervise`; keys with `teams.manage`), with the
+  team's other settings, in Settings → Teams and through `POST`/`PATCH /teams` (`closedDays`: a
+  list of dates, or null for the company's; 422 naming `closedDays` or `closedDays.<n>`) and
+  `GET /teams/{id}`. `team.created` and `team.updated` record `ownClosedDays` and the number of days
+  (`closedDays`), and updates `closedDaysChanged`, as the team's week is audited by counts
+  (ADR-389); the days themselves are in the team's settings and the company export. The company's
+  closed day audit names its one day per entry; a team's list may hold hundreds, so it is not
+  copied into every team change. Through the API a change that leaves the team as it is writes and
+  audits nothing (ADR-287); a member's save in Settings is audited as before, with
+  `closedDaysChanged` false.
+- **Reports and definitions:** turns of a team with its own closed days count business time by the
+  team's calendar. The definitions said "Closed days and the time zone are the company's", so the
+  measures get new versions, as ADR-389 did for the week: `inbox.overdue` v5,
+  `inbox.first_response_business_time` v4 and `inbox.within_target` v6 name the team's own closed
+  days (kept equal to migration 0307 by a unit test). The report's inbox section gives
+  `teamClosedDays` (teams with their own list, while business hours are on) beside
+  `teamBusinessHours`, which now lists only teams with their own week; the Reports page and report
+  emails name them.
+- **Deletion, export, erasure:** a team's days are deleted with the team (on delete cascade) and with
+  the company (step 656, before teams at 800, beside the teams' weeks at 655; `w360_definer` gets
+  only the select of the key columns, the delete and the two deletion policies). The company export
+  includes the table and the team's flag. Rows hold dates only, no personal data, so erasure is
+  unaffected.
+
+Not built: holiday calendars imported from a provider (a team's list, like the company's, is
+entered by hand), names for a team's closed days, closed days per WhatsApp number, partial-day
+closures (the company's closed days are whole days too), a time zone per team, automations'
+conditions and `GET /business-hours` by a team's calendar, and pruning past days automatically.
 
 ## ADR-393 Automation conditions on custom deal fields (P4-01, P4-04) (2026-10-16)
 

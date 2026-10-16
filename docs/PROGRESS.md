@@ -70,6 +70,70 @@ values" as not built.
 | `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
 | `pnpm build`                                       | passed                                                          |
 
+## 2026-10-16 — Closed days per team (P3-06, ADR-392)
+
+Status: **Implemented; its database and browser tests run in CI only.** ADR-389 kept closed days
+the company's: a public holiday closed every team, and a team could not close on a day of its own.
+
+### Completed
+
+- **Migration 0307:** `app.teams.own_closed_days` (boolean, default false, a column grant to
+  `w360_app`) and `app.team_closed_days` (tenant, team, day; unique per team and day, composite key
+  to the team on delete cascade, FORCE row security, select/insert/delete for `w360_app`), deletion
+  step 656 (before teams; the definer may read the key columns and delete, with the two deletion
+  policies), and metric definitions `inbox.overdue` v5, `inbox.first_response_business_time` v4,
+  `inbox.within_target` v6 naming the team's own closed days.
+- **Domain:** `closedDaySchema` (the company's date check, now refusing a malformed value once),
+  `teamClosedDaysSchema` (at most 366 real dates, kept once each and in order; null for the
+  company's, an empty list the team's own), `sameClosedDays`, `loadTeamClosedDays` (one query, only
+  teams with the flag), `writeTeamClosedDays`; `businessCalendars` gives a team with its own week or
+  closed days a calendar of its own, so timers, the notice's ranking, overdue emails, the automatic
+  reply and Reports' periods follow it; `loadBusinessCalendars` adds one query. Teams' settings take
+  and give `closedDays`; an update writes and plans waiting rows again only when the list changed
+  (`replanWaitingTurns` with the team's id) and audits `ownClosedDays`, `closedDays` and
+  `closedDaysChanged`. `POST`/`PATCH /teams` and `GET /teams/{id}` take and give `closedDays` (422
+  naming `closedDays.<n>`; an unchanged change writes and audits nothing), described in the
+  OpenAPI document. Reports give `teamClosedDays` (and `teamBusinessHours` now lists only teams with
+  their own week); the Reports page and report emails name them. The company export includes the
+  table and the flag.
+- **Web:** Settings → Teams: "Closed days" with "Use the company’s closed days" / "Its own closed
+  days" (starting from the company's list), dates added with a date field and removed one by one
+  (inside the `ClientForm`, buttons as `ClientButton`), the team's card listing its days; Settings →
+  Inbox says a team with its own list uses it instead.
+- **Tests:** unit (`sla.test.ts`: calendars, due times across a holiday and a team's own day, the
+  timer while the company is closed, ranking, validation, comparison, audit; `teams.test.ts`;
+  `api/teams.test.ts`: schemas, normalisation, refusals naming the entry, unchanged changes, the
+  OpenAPI wording; `calendars.test.ts`: report periods for a team with only its own closed days and
+  with both, the definitions kept equal to 0307; `emails.test.ts`, `api/reports.test.ts`);
+  integration (`inbox-advanced.test.ts`: roles, checks, audit, unchanged saves, the flag, deletion
+  with the team, row security, grants and the deletion step, the inbox's timers and notice;
+  `overdue-replies.test.ts` and `slow-replies.test.ts`: a team working on the company's holiday and
+  one closed on its own day, re-planning on change and not on unchanged saves; `reports.test.ts`:
+  business time by a team's own closed days, the new versions; `api.test.ts`: the teams API;
+  `company-data.test.ts`: export and deletion with the company); e2e (`inbox-teams.spec.ts`: giving
+  the team its own closed day and seeing it saved, no horizontal overflow).
+- **Docs:** ADR-392 (and "since built" notes in ADR-389); ARCHITECTURE, SECURITY, THREAT-MODEL
+  T345, DEPLOYMENT (0307 rollout: workers before web), DATA-RETENTION, RUNBOOKS, BACKLOG, and the
+  matrix's H-011 text and evidence (status unchanged).
+- **Mutation checks:** 20 deliberate regressions in the new TypeScript (the team's closed days or
+  week not used in its calendar, a team with only closed days given none, null and an empty list
+  compared equal, lengths not compared, the 366 bound, days not deduplicated, the malformed-date
+  abort, the audit's flag and count, the schema's default, the API's comparison, input and output,
+  the API bound, the emails' wording, the OpenAPI text, a definition's text, the reports schema):
+  18 caught by the unit tests; one (the OpenAPI text) was caught after a test was added, and one
+  (dropping the day-of-month comparison in the date check) is equivalent, since a day out of range
+  always changes the month. The database reads and writes, re-planning and Reports' SQL are covered
+  by integration tests, which run in CI only.
+
+### Test commands and results (local, 2026-10-16)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 162 files, 1,739 tests passed                                   |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+
 ## 2026-10-16 — Review fixes for ADR-390 and ADR-391
 
 Status: **Fixed; the database and browser tests run in CI only.** Independent reviews found no High

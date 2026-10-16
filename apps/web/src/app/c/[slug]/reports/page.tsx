@@ -522,11 +522,20 @@ function InboxSection({
   const n = i.now;
   const t = i.turns;
   const inBusinessHours = i.businessHours ? ' of business hours' : '';
-  // Teams with their own business hours (ADR-389) count their conversations by them.
-  const teamHoursText =
-    i.businessHours && i.teamBusinessHours.length > 0
-      ? ` The conversations of ${i.teamBusinessHours.map((team) => team.name).join(', ')} count the team’s own hours (Settings → Teams); closed days are the company’s.`
-      : '';
+  // Teams with their own business hours (ADR-389) or closed days (ADR-392) count their
+  // conversations by them.
+  const names = (list: readonly { name: string }[]) => list.map((team) => team.name).join(', ');
+  const teamHoursText = i.businessHours
+    ? `${
+        i.teamBusinessHours.length > 0
+          ? ` The conversations of ${names(i.teamBusinessHours)} count the team’s own hours (Settings → Teams).`
+          : ''
+      }${
+        i.teamClosedDays.length > 0
+          ? ` The conversations of ${names(i.teamClosedDays)} skip the team’s own closed days instead of the company’s.`
+          : ''
+      }`
+    : '';
   // The targets conversations are measured against: their team's own (ADR-377), else the company's.
   const targetsText =
     i.teamTargets.length === 0

@@ -22,6 +22,11 @@ export const teams = appSchema.table('teams', {
   lastAssignedMembershipId: uuid('last_assigned_membership_id'),
   /** The team's own first-response target in minutes (ADR-377); null uses the company's. */
   firstResponseTargetMinutes: smallint('first_response_target_minutes'),
+  /**
+   * The team has its own list of closed days (`team_closed_days`, possibly empty) instead of the
+   * company's (migration 0307, ADR-392).
+   */
+  ownClosedDays: boolean('own_closed_days').notNull().default(false),
   createdAt: tz('created_at').notNull().defaultNow(),
   updatedAt: tz('updated_at').notNull().defaultNow(),
 });
@@ -54,7 +59,8 @@ export const businessHours = appSchema.table('business_hours', {
 
 /**
  * A team's own weekly schedule (migration 0303, ADR-389): a team with rows here counts business
- * time by them instead of the company's schedule; the company's closed days and time zone apply.
+ * time by them instead of the company's schedule; the company's time zone applies, and its closed
+ * days unless the team has its own (ADR-392).
  */
 export const teamBusinessHours = appSchema.table('team_business_hours', {
   id: uuid('id').primaryKey(),
@@ -65,6 +71,18 @@ export const teamBusinessHours = appSchema.table('team_business_hours', {
   /** 'HH:MM:SS'; closes_at may be '24:00:00'. */
   opensAt: time('opens_at').notNull(),
   closesAt: time('closes_at').notNull(),
+});
+
+/**
+ * A team's own closed days (migration 0307, ADR-392), days of the company's time zone: used instead
+ * of the company's while the team's `own_closed_days` is on.
+ */
+export const teamClosedDays = appSchema.table('team_closed_days', {
+  id: uuid('id').primaryKey(),
+  tenantId: uuid('tenant_id').notNull(),
+  teamId: uuid('team_id').notNull(),
+  day: date('day', { mode: 'string' }).notNull(),
+  createdAt: tz('created_at').notNull().defaultNow(),
 });
 
 export const businessHolidays = appSchema.table('business_holidays', {

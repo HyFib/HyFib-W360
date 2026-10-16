@@ -70,3 +70,25 @@ describe('a team’s own business hours in its settings (ADR-389)', () => {
     expect(refused('09:00-17:00')?.[0]?.[0]).toBe('businessHours');
   });
 });
+
+describe('a team’s own closed days in its settings (ADR-392)', () => {
+  it('takes a list of dates, nothing as the company’s closed days, and an empty list as none', () => {
+    expect(teamSchema.parse({ name: 'Care' }).closedDays).toBeNull();
+    expect(teamSchema.parse({ name: 'Care', closedDays: null }).closedDays).toBeNull();
+    expect(teamSchema.parse({ name: 'Care', closedDays: [] }).closedDays).toEqual([]);
+    expect(
+      teamSchema.parse({ name: 'Care', closedDays: ['2026-12-25', '2026-11-08', '2026-11-08'] })
+        .closedDays,
+    ).toEqual(['2026-11-08', '2026-12-25']);
+  });
+
+  it('refuses what is not a real date, naming the entry under closedDays', () => {
+    const issues = (closedDays: unknown) =>
+      teamSchema
+        .safeParse({ name: 'Care', closedDays })
+        .error?.issues.map((i) => [i.path.join('.'), i.message]);
+    expect(issues(['2026-11-08', '2026-11-31'])).toEqual([['closedDays.1', 'Enter a real date.']]);
+    expect(issues(['tomorrow'])).toEqual([['closedDays.0', 'Enter the date as YYYY-MM-DD.']]);
+    expect(issues('2026-11-08')?.[0]?.[0]).toBe('closedDays');
+  });
+});

@@ -9348,6 +9348,95 @@ describe('assigning conversations (ADR-093)', () => {
     ]);
   });
 
+  it('give a team its own closed days, checked as Settings checks them, as the key (ADR-392)', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const manager = await apiKey(c, ['teams.manage']);
+    const created = await apiCreateTeam(
+      deps(),
+      manager.ctx,
+      { name: 'Holidays', closedDays: ['2026-12-25', '2026-11-08', '2026-12-25'] },
+      null,
+    );
+    const holidays = settingsOfBody(created);
+    expect(holidays.closedDays).toEqual(['2026-11-08', '2026-12-25']);
+    expect(await apiGetTeam(deps(), manager.ctx, holidays.id)).toEqual(holidays);
+    const [inSettings] = (await teams().listTeams(owner)).filter((t) => t.id === holidays.id);
+    expect(inSettings?.closedDays).toEqual(['2026-11-08', '2026-12-25']);
+    // A team without its own list uses the company's.
+    expect(
+      settingsOfBody(await apiCreateTeam(deps(), manager.ctx, { name: 'Sales' }, null)).closedDays,
+    ).toBeNull();
+
+    const update = (input: Record<string, unknown>) =>
+      apiUpdateTeam(deps(), manager.ctx, holidays.id, input);
+    const paths = (error: unknown) =>
+      isAppError(error) ? (error.issues ?? []).map((i) => i.path) : [];
+    // Days that are not real dates are refused, naming the entry; nothing changes.
+    expect(
+      paths(
+        await expectAppError(
+          update({ closedDays: ['2026-11-08', '2026-02-30'] }),
+          'validation_failed',
+          /Enter a real date/,
+        ),
+      ),
+    ).toEqual(['closedDays.1']);
+    expect(
+      paths(await expectAppError(update({ closedDays: '2026-11-08' }), 'validation_failed')),
+    ).toEqual(['closedDays']);
+    await expectAppError(
+      update({ closedDays: Array.from({ length: 367 }, () => '2026-11-08') }),
+      'validation_failed',
+      /at most 366 closed days/,
+    );
+    expect((await apiGetTeam(deps(), manager.ctx, holidays.id)).closedDays).toEqual([
+      '2026-11-08',
+      '2026-12-25',
+    ]);
+
+    // Other settings keep the days; the same days again, in another order, write nothing; an empty
+    // list is the team's own; null gives the team the company's again.
+    expect((await update({ description: 'Works on holidays' })).closedDays).toEqual([
+      '2026-11-08',
+      '2026-12-25',
+    ]);
+    const rows = () =>
+      fx.query<{ id: string }>(
+        `SELECT id FROM app.team_closed_days WHERE team_id = $1 ORDER BY id`,
+        [holidays.id],
+      );
+    const before = await rows();
+    expect((await update({ closedDays: ['2026-12-25', '2026-11-08'] })).closedDays).toEqual([
+      '2026-11-08',
+      '2026-12-25',
+    ]);
+    expect(await rows()).toEqual(before);
+    expect((await update({ closedDays: [] })).closedDays).toEqual([]);
+    expect(await rows()).toEqual([]);
+    expect((await update({ closedDays: null })).closedDays).toBeNull();
+
+    const audits = await fx.query<{ action: string; metadata: Record<string, unknown> }>(
+      `SELECT action, metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND subject_id = $2 ORDER BY occurred_at, id`,
+      [c.tenant.id, holidays.id],
+    );
+    expect(
+      audits.map((a) => [
+        a.action,
+        a.metadata.ownClosedDays,
+        a.metadata.closedDays,
+        a.metadata.closedDaysChanged,
+        a.metadata.source,
+      ]),
+    ).toEqual([
+      ['team.created', true, 2, undefined, 'api'],
+      ['team.updated', true, 2, false, 'api'],
+      ['team.updated', true, 0, true, 'api'],
+      ['team.updated', false, 0, true, 'api'],
+    ]);
+  });
+
   it('manage teams with the scope and an active company only, granted with inbox.supervise (ADR-287)', async () => {
     const c = await fx.company();
     const other = await fx.company();

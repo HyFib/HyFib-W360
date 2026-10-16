@@ -9,6 +9,7 @@ import {
 } from '@/app/actions/inbox-settings';
 import { ClientButton, ClientForm } from '@/components/client-form';
 import { FormError, FormSuccess } from '@/components/form-status';
+import { formatDayLong } from '@/lib/report-format';
 
 export interface TeamFormValues {
   id?: string;
@@ -20,6 +21,8 @@ export interface TeamFormValues {
   firstResponseTargetMinutes: number | null;
   /** The team's own week as seven days of text (ADR-389); null uses the company's hours. */
   businessHours: string[] | null;
+  /** The team's own closed days, YYYY-MM-DD (ADR-392); null uses the company's closed days. */
+  closedDays: string[] | null;
   memberIds: string[];
   channelIds: string[];
 }
@@ -39,8 +42,11 @@ export function TeamForm({
   team?: TeamFormValues;
   members: { membershipId: string; name: string }[];
   channels: { id: string; label: string }[];
-  /** The company's business hours: whether they are on, and its time zone (ADR-389). */
-  companyHours: { on: boolean; timeZone: string };
+  /**
+   * The company's business hours: whether they are on, and its time zone (ADR-389), and its closed
+   * days (YYYY-MM-DD), from which a team's own list starts (ADR-392).
+   */
+  companyHours: { on: boolean; timeZone: string; closedDays: string[] };
 }) {
   const prefix = useId();
   const [name, setName] = useState(team?.name ?? '');
@@ -55,6 +61,12 @@ export function TeamForm({
   );
   const [ownHours, setOwnHours] = useState((team?.businessHours ?? null) !== null);
   const [hours, setHours] = useState<string[]>(team?.businessHours ?? CLOSED_WEEK);
+  const [ownClosedDays, setOwnClosedDays] = useState((team?.closedDays ?? null) !== null);
+  // A team's own list starts from the company's closed days: remove the days the team works.
+  const [closedDays, setClosedDays] = useState<string[]>(
+    team?.closedDays ?? companyHours.closedDays,
+  );
+  const [newClosedDay, setNewClosedDay] = useState('');
   const [memberIds, setMemberIds] = useState<string[]>(team?.memberIds ?? []);
   const [channelIds, setChannelIds] = useState<string[]>(team?.channelIds ?? []);
   const [error, setError] = useState<string | null>(null);
@@ -62,6 +74,11 @@ export function TeamForm({
   const [busy, setBusy] = useState(false);
   const toggle = (list: string[], id: string, on: boolean) =>
     on ? [...new Set([...list, id])] : list.filter((x) => x !== id);
+  const addClosedDay = () => {
+    if (!newClosedDay) return;
+    setClosedDays((list) => [...new Set([...list, newClosedDay])].sort());
+    setNewClosedDay('');
+  };
 
   return (
     <ClientForm
@@ -79,6 +96,7 @@ export function TeamForm({
           routingKeywords: keywords,
           firstResponseTargetMinutes: target,
           businessHours: ownHours ? hours : null,
+          closedDays: ownClosedDays ? closedDays : null,
           memberIds,
           channelIds,
         };
@@ -109,6 +127,9 @@ export function TeamForm({
               setTarget('');
               setOwnHours(false);
               setHours(CLOSED_WEEK);
+              setOwnClosedDays(false);
+              setClosedDays(companyHours.closedDays);
+              setNewClosedDay('');
               setMemberIds([]);
               setChannelIds([]);
             }
@@ -227,8 +248,8 @@ export function TeamForm({
         <legend className="text-sm font-medium">Business hours</legend>
         <p className="text-sm text-muted-foreground">
           The hours in which the team’s reply target and the automatic reply’s delay count. A team’s
-          own hours apply only while business hours are on in Settings → Inbox; closed days and the
-          time zone ({companyHours.timeZone}) stay the company’s.
+          own hours apply only while business hours are on in Settings → Inbox; the time zone (
+          {companyHours.timeZone}) stays the company’s.
           {companyHours.on
             ? ''
             : ' Business hours are off now, so every conversation counts absolute time.'}
@@ -277,6 +298,98 @@ export function TeamForm({
                 )}
               </Field>
             ))}
+          </div>
+        ) : null}
+      </fieldset>
+      <fieldset className="grid min-w-0 gap-2">
+        <legend className="text-sm font-medium">Closed days</legend>
+        <p className="text-sm text-muted-foreground">
+          Whole days on which the team’s reply target and the automatic reply’s delay do not count,
+          as days of {companyHours.timeZone}. A list of the team’s own replaces the company’s closed
+          days (Settings → Inbox) for it, so the team can work on a public holiday or close on a day
+          of its own. It applies while business hours are on.
+        </p>
+        <label className="flex items-start gap-2 text-sm">
+          <input
+            type="radio"
+            name={`${prefix}-closed-days`}
+            className="mt-1"
+            checked={!ownClosedDays}
+            onChange={() => setOwnClosedDays(false)}
+          />
+          <span>Use the company’s closed days</span>
+        </label>
+        <label className="flex items-start gap-2 text-sm">
+          <input
+            type="radio"
+            name={`${prefix}-closed-days`}
+            className="mt-1"
+            checked={ownClosedDays}
+            onChange={() => setOwnClosedDays(true)}
+          />
+          <span>
+            Its own closed days
+            <span className="block text-muted-foreground">
+              Starts from the company’s; remove the days the team works and add its own.
+            </span>
+          </span>
+        </label>
+        {ownClosedDays ? (
+          <div className="grid min-w-0 gap-3">
+            {closedDays.length === 0 ? (
+              <p className="text-sm text-muted-foreground">
+                No closed days: the team works on every day its week opens.
+              </p>
+            ) : (
+              <ul
+                className="flex min-w-0 flex-wrap gap-2"
+                aria-label={`Closed days of ${name.trim() || 'the team'}`}
+              >
+                {closedDays.map((day) => (
+                  <li
+                    key={day}
+                    className="inline-flex items-center gap-1 rounded-md border border-border py-0.5 pl-2 text-sm"
+                  >
+                    {formatDayLong(day)}
+                    <ClientButton
+                      type="button"
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => setClosedDays((list) => list.filter((d) => d !== day))}
+                    >
+                      Remove<span className="sr-only"> {formatDayLong(day)}</span>
+                    </ClientButton>
+                  </li>
+                ))}
+              </ul>
+            )}
+            <div className="flex flex-wrap items-end gap-2">
+              <Field id={`${prefix}-closed-day`} label="Add a closed day">
+                {(aria) => (
+                  <Input
+                    {...aria}
+                    type="date"
+                    value={newClosedDay}
+                    onChange={(e) => setNewClosedDay(e.target.value)}
+                    onKeyDown={(e) => {
+                      // Enter adds the day instead of saving the team.
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        addClosedDay();
+                      }
+                    }}
+                  />
+                )}
+              </Field>
+              <ClientButton
+                type="button"
+                variant="outline"
+                disabled={!newClosedDay}
+                onClick={addClosedDay}
+              >
+                Add day
+              </ClientButton>
+            </div>
           </div>
         ) : null}
       </fieldset>

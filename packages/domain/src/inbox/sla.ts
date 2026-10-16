@@ -39,7 +39,10 @@ export interface ReplyTargets {
   teamMinutes: ReadonlyMap<string, number>;
   /** The company's calendar, present only when business hours are on. */
   calendar: BusinessCalendar | null;
-  /** The teams with their own weekly schedule, by team id; empty while business hours are off. */
+  /**
+   * The teams with their own weekly schedule (ADR-389) or closed days (ADR-392), by team id; empty
+   * while business hours are off.
+   */
   teamCalendars: ReadonlyMap<string, BusinessCalendar>;
 }
 
@@ -84,7 +87,7 @@ export function targetFor(targets: ReplyTargets, teamId: string | null): ReplyTa
 
 /**
  * The teams whose conversations may be due at other times than the company's other conversations:
- * those with their own target or their own business hours.
+ * those with their own target, business hours or closed days.
  */
 export function teamsWithOwnClock(targets: ReplyTargets): string[] {
   return [...new Set([...targets.teamMinutes.keys(), ...targets.teamCalendars.keys()])];

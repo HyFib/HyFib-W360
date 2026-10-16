@@ -1558,6 +1558,10 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
     columns: ['id', 'team_id', 'weekday', 'opens_at', 'closes_at'],
   },
   {
+    table: 'app.team_closed_days',
+    columns: ['id', 'team_id', 'day', 'created_at'],
+  },
+  {
     table: 'app.team_members',
     columns: ['id', 'team_id', 'membership_id', 'created_at'],
   },
@@ -1572,6 +1576,7 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
       'routing_keywords',
       'last_assigned_membership_id',
       'first_response_target_minutes',
+      'own_closed_days',
       'created_at',
       'updated_at',
     ],

@@ -190,8 +190,12 @@ verification, app review, Embedded Signup configuration).
   **[Business hours per team built; their database and browser tests run only in CI]** (ADR-389,
   migration 0303: a team's own weekly schedule, in Settings → Teams and the teams API, used while
   the company's business hours are on for its conversations' timers, notice, overdue emails,
-  reports and automatic reply; closed days and the time zone stay the company's).
-  **Remaining:** closed days per team, private team queues (would change visibility,
+  reports and automatic reply; closed days and the time zone stay the company's). **[Closed days
+  per team built; their database and browser tests run only in CI]** (ADR-392, migration 0307: a
+  team uses the company's closed days or a list of its own, possibly empty, in Settings → Teams and
+  the teams API, so it can work on public holidays or close on its own days; used while the
+  company's business hours are on, wherever the team's calendar is; the time zone stays the
+  company's). **Remaining:** private team queues (would change visibility,
   ADR-029), CSAT by template outside the window (needs a consent decision), CSAT with a real WABA
   (phone-number masking: P3-01, ADR-226).
 

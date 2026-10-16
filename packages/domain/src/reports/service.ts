@@ -13,6 +13,7 @@ import {
   messagingSettings,
   metricDefinitions,
   sql,
+  teamBusinessHours as teamBusinessHoursTable,
   teams,
   users,
   type CsatSkipReason,
@@ -135,6 +136,11 @@ export interface InboxReport {
    * business time by the team's weekly schedule instead of the company's. By name.
    */
   teamBusinessHours: { teamId: string; name: string }[];
+  /**
+   * While business hours are on, the teams with their own closed days (ADR-392): their
+   * conversations skip the team's closed days instead of the company's. By name.
+   */
+  teamClosedDays: { teamId: string; name: string }[];
   now: {
     open: number;
     unassigned: number;
@@ -623,9 +629,10 @@ async function inboxReport(
   const targetSeconds = sql`(coalesce(tm.first_response_target_minutes,
     ${targets.companyMinutes}::int) * 60)::float8`;
   const teamJoin = sql`left join app.teams tm on tm.tenant_id = c.tenant_id and tm.id = c.team_id`;
-  // Each turn's calendar (ADR-389): its conversation's team's own hours, else the company's ('').
-  const ownHours = [...targets.teamCalendars.keys()];
-  const cal = sql`(case when c.team_id = any(${sql.param(ownHours)}::uuid[])
+  // Each turn's calendar: its conversation's team's own, from its own week (ADR-389) or closed days
+  // (ADR-392), else the company's ('').
+  const ownCalendars = [...targets.teamCalendars.keys()];
+  const cal = sql`(case when c.team_id = any(${sql.param(ownCalendars)}::uuid[])
     then c.team_id::text else '' end)`;
   const iv = await openingPeriodsCte(tx, tenantId, calendarsOf(targets), period, now);
   const withIv = iv ? sql`with ${iv}` : sql``;
@@ -756,22 +763,31 @@ async function inboxReport(
     .from(teams)
     .where(and(eq(teams.tenantId, tenantId), isNotNull(teams.firstResponseTargetMinutes)))
     .orderBy(asc(teams.name), asc(teams.id));
-  // Teams whose conversations count business time by their own hours (ADR-389), while on.
-  const teamBusinessHours =
-    ownHours.length === 0
+  // Teams whose conversations count business time by their own week (ADR-389) or closed days
+  // (ADR-392), while business hours are on.
+  const ownCalendarTeams =
+    ownCalendars.length === 0
       ? []
       : await tx
-          .select({ teamId: teams.id, name: teams.name })
+          .select({
+            teamId: teams.id,
+            name: teams.name,
+            ownClosedDays: teams.ownClosedDays,
+            ownWeek: sql<boolean>`exists (select 1 from ${teamBusinessHoursTable} h
+              where h.tenant_id = ${teams.tenantId} and h.team_id = ${teams.id})`,
+          })
           .from(teams)
-          .where(and(eq(teams.tenantId, tenantId), inArray(teams.id, ownHours)))
+          .where(and(eq(teams.tenantId, tenantId), inArray(teams.id, ownCalendars)))
           .orderBy(asc(teams.name), asc(teams.id));
+  const named = (r: { teamId: string; name: string }) => ({ teamId: r.teamId, name: r.name });
   return {
     targetMinutes: targets.companyMinutes,
     teamTargets: teamTargets.flatMap((r) =>
       r.minutes === null ? [] : [{ ...r, minutes: r.minutes }],
     ),
     businessHours: iv !== null,
-    teamBusinessHours,
+    teamBusinessHours: ownCalendarTeams.filter((r) => r.ownWeek).map(named),
+    teamClosedDays: ownCalendarTeams.filter((r) => r.ownClosedDays).map(named),
     now: {
       open: num(l.open),
       unassigned: num(l.unassigned),

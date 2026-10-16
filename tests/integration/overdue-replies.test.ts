@@ -537,6 +537,98 @@ describe('emails when a waiting customer’s reply is overdue (ADR-230)', () => 
     expect(await notice(turn.id)).toMatchObject({ state: 'sent', due_at: later(started, 30) });
   });
 
+  it('counts a team’s conversations by its own closed days, planned again when they change (ADR-392)', async () => {
+    const { c, owner } = await companyWithTarget(30);
+    const hours = createBusinessHoursService({ db: fx.dbs.app, clock: systemClock });
+    await hours.updateBusinessHours(owner, { enabled: true, days: Array(7).fill('00:00-24:00') });
+    const [{ timezone }] = (await fx.query<{ timezone: string }>(
+      'SELECT timezone FROM app.tenants WHERE id = $1',
+      [c.tenant.id],
+    )) as [{ timezone: string }];
+    const localDay = (d: Date) =>
+      new Intl.DateTimeFormat('en-CA', {
+        timeZone: timezone,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+      }).format(d);
+    const hhmm = (d: Date) =>
+      new Intl.DateTimeFormat('en-GB', {
+        timeZone: timezone,
+        hour: '2-digit',
+        minute: '2-digit',
+        hourCycle: 'h23',
+      }).format(d);
+    const working = await waitingCustomer(c, '919845100411');
+    const noTeam = await waitingCustomer(c, '919845100412');
+    const ownDay = await waitingCustomer(c, '919845100413');
+    // The company is closed the day the customers wrote and the next (its dates).
+    const today = localDay(working.started_at);
+    const [y, m, d] = today.split('-').map(Number) as [number, number, number];
+    const tomorrow = new Date(Date.UTC(y, m - 1, d + 1)).toISOString().slice(0, 10);
+    const inTwoDays = new Date(Date.UTC(y, m - 1, d + 2)).toISOString().slice(0, 10);
+    await hours.addHoliday(owner, { day: today, name: 'Holiday' });
+    await hours.addHoliday(owner, { day: tomorrow, name: 'Holiday' });
+    // One team works on the company's holidays (a list of its own, empty); another is closed on
+    // the day the customers wrote only, a day of its own.
+    const teams = createTeamsService({ db: fx.dbs.app, clock: systemClock });
+    const holidays = await teams.createTeam(owner, { name: 'Holidays', closedDays: [] });
+    const own = await teams.createTeam(owner, { name: 'Own day', closedDays: [today] });
+    for (const [team, conversationId] of [
+      [holidays.teamId, working.conversation_id],
+      [own.teamId, ownDay.conversation_id],
+    ] as const) {
+      await fx.query(`UPDATE app.conversations SET team_id = $1 WHERE tenant_id = $2 AND id = $3`, [
+        team,
+        c.tenant.id,
+        conversationId,
+      ]);
+    }
+
+    await sweep(later(ownDay.started_at, 31));
+    // The team working on the holiday is due 30 minutes after the customer wrote, and emailed,
+    // saying in whose business hours the reply was counted.
+    expect(await notice(working.id)).toMatchObject({
+      state: 'sent',
+      due_at: later(working.started_at, 30),
+    });
+    const lines = (await overdueEmails(c.tenant.id)).flatMap((e) => e.lines);
+    expect(
+      lines.filter((l) => l.includes('of the Holidays team’s business hours')),
+    ).not.toHaveLength(0);
+    // The company's conversation waits for the day after tomorrow, the other team's only for
+    // tomorrow (the company's holiday, a working day of the team).
+    const companyWait = await notice(noTeam.id);
+    expect(companyWait).toMatchObject({ state: 'waiting', emailed: 0 });
+    expect(localDay(companyWait!.due_at)).toBe(inTwoDays);
+    expect(hhmm(companyWait!.due_at)).toBe('00:30');
+    const ownWait = await notice(ownDay.id);
+    expect(ownWait).toMatchObject({ state: 'waiting', emailed: 0 });
+    expect(localDay(ownWait!.due_at)).toBe(tomorrow);
+    expect(hhmm(ownWait!.due_at)).toBe('00:30');
+
+    // Saving the team's days as they are plans nothing again.
+    await teams.updateTeam(owner, own.teamId, { name: 'Own day', closedDays: [today] });
+    expect(await notice(ownDay.id)).toMatchObject({ state: 'waiting', due_at: ownWait!.due_at });
+    // The team works every day: its waiting notice alone is planned again and emailed, not late
+    // for having waited; the company's keeps its time.
+    await teams.updateTeam(owner, own.teamId, { name: 'Own day', closedDays: [] });
+    expect((await notice(ownDay.id))!.due_at.getTime()).toBeLessThan(ownWait!.due_at.getTime());
+    expect(await notice(noTeam.id)).toMatchObject({
+      state: 'waiting',
+      due_at: companyWait!.due_at,
+    });
+    await sweep(later(ownDay.started_at, 32));
+    expect(await notice(ownDay.id)).toMatchObject({
+      state: 'sent',
+      due_at: later(ownDay.started_at, 30),
+    });
+    expect(await notice(noTeam.id)).toMatchObject({
+      state: 'waiting',
+      due_at: companyWait!.due_at,
+    });
+  });
+
   it('lets only the runtime role run the sweep query, and keeps sent notices as they are', async () => {
     const [fn] = await fx.query<{ public: boolean; app: boolean; owner: string; definer: boolean }>(
       `SELECT has_function_privilege('public', p.oid, 'EXECUTE') AS public,

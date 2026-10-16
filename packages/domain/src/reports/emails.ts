@@ -168,10 +168,11 @@ export function reportEmailRows(report: Report): ReportEmailRow[] {
   ];
   if (turns.withinTarget) {
     const businessHours = report.inbox.businessHours;
-    // Teams may hold their conversations to their own targets (ADR-377) and hours (ADR-389).
+    // Teams may hold their conversations to their own targets (ADR-377), hours (ADR-389) and
+    // closed days (ADR-392).
     const hours = !businessHours
       ? ''
-      : report.inbox.teamBusinessHours.length > 0
+      : report.inbox.teamBusinessHours.length > 0 || report.inbox.teamClosedDays.length > 0
         ? ' in their team’s or the company’s business hours'
         : null;
     const of =

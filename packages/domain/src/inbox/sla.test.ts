@@ -3,13 +3,16 @@ import {
   businessCalendars,
   calendarFor,
   intervalsToDayTexts,
+  MAX_TEAM_CLOSED_DAYS,
+  sameClosedDays,
   sameIntervals,
+  teamClosedDaysSchema,
   teamHoursSchema,
   TEAM_HOURS_EMPTY_MESSAGE,
   type BusinessCalendar,
   type BusinessInterval,
 } from './business-hours';
-import { sameTeamHours, teamHoursAudit } from './teams';
+import { sameTeamHours, teamClosedDaysAudit, teamHoursAudit } from './teams';
 import {
   calendarsOf,
   hasAnyTarget,
@@ -222,5 +225,131 @@ describe('business hours per team (ADR-389)', () => {
     expect(sameTeamHours(a, days([1, 2], 540, 1080))).toBe(false);
     expect(teamHoursAudit(a)).toEqual({ ownBusinessHours: true, businessHoursRanges: 2 });
     expect(teamHoursAudit(null)).toEqual({ ownBusinessHours: false, businessHoursRanges: 0 });
+  });
+});
+
+describe('closed days per team (ADR-392)', () => {
+  // Asia/Kolkata (UTC+05:30). 2026-09-21 is a Monday; Wednesday 2026-09-23 is the company's
+  // closed day.
+  const company: BusinessCalendar = {
+    timezone: 'Asia/Kolkata',
+    intervals: days([1, 2, 3, 4, 5], 9 * 60, 17 * 60),
+    closedDays: new Set(['2026-09-23']),
+  };
+  const HOLIDAY_TEAM = 'team-holidays';
+  const OWN_DAY_TEAM = 'team-own-day';
+  const calendars = businessCalendars(
+    company,
+    new Map(),
+    new Map([
+      [HOLIDAY_TEAM, []],
+      [OWN_DAY_TEAM, ['2026-09-24']],
+    ]),
+  );
+  const targets: ReplyTargets = {
+    companyMinutes: 30,
+    teamMinutes: new Map(),
+    calendar: calendars.company,
+    teamCalendars: calendars.teams,
+  };
+  const due = (teamId: string | null, start: string) =>
+    replyDueAt(targetFor(targets, teamId), new Date(start))?.toISOString();
+
+  it('give a team with its own closed days a calendar of its own, with the company’s week and time zone', () => {
+    const own = calendarFor(calendars, HOLIDAY_TEAM);
+    expect(own?.intervals).toBe(company.intervals);
+    expect(own?.timezone).toBe('Asia/Kolkata');
+    expect([...(own?.closedDays ?? ['x'])]).toEqual([]);
+    expect([...(calendarFor(calendars, OWN_DAY_TEAM)?.closedDays ?? [])]).toEqual(['2026-09-24']);
+    expect(calendarFor(calendars, 'team-sales')).toBe(company);
+    expect(calendarFor(calendars, null)).toBe(company);
+    // A team's own week and its own closed days together.
+    const night = days([1, 2, 3, 4, 5, 6, 7], 18 * 60, 24 * 60);
+    const both = businessCalendars(
+      company,
+      new Map([[NIGHT, night]]),
+      new Map([[NIGHT, ['2026-09-24']]]),
+    );
+    expect(calendarFor(both, NIGHT)).toEqual({
+      timezone: 'Asia/Kolkata',
+      intervals: night,
+      closedDays: new Set(['2026-09-24']),
+    });
+    // A team with an empty week and no list of its own has no calendar of its own.
+    expect(businessCalendars(company, new Map([[NIGHT, []]]), new Map()).teams.size).toBe(0);
+    // Business hours off: no calendar at all, whatever the teams' closed days.
+    const off = businessCalendars(null, new Map(), new Map([[HOLIDAY_TEAM, []]]));
+    expect(off.teams.size).toBe(0);
+    expect(calendarFor(off, HOLIDAY_TEAM)).toBeNull();
+  });
+
+  it('count a team’s reply target through the company’s holiday when the team works on it', () => {
+    // Tuesday 16:50 local: the company's conversations wait for Thursday 09:20; the team working on
+    // holidays is due on Wednesday 09:20.
+    expect(due(null, '2026-09-22T11:20:00Z')).toBe('2026-09-24T03:50:00.000Z');
+    expect(due(HOLIDAY_TEAM, '2026-09-22T11:20:00Z')).toBe('2026-09-23T03:50:00.000Z');
+    // While the company is closed for the holiday, the team's timer runs.
+    const now = new Date('2026-09-23T04:30:00Z');
+    const start = new Date('2026-09-22T11:20:00Z');
+    expect(replyTimer(targetFor(targets, null), start, now).pausedUntil?.toISOString()).toBe(
+      '2026-09-24T03:30:00.000Z',
+    );
+    expect(replyTimer(targetFor(targets, HOLIDAY_TEAM), start, now)).toEqual({
+      dueAt: new Date('2026-09-23T03:50:00.000Z'),
+      overdue: true,
+      pausedUntil: null,
+    });
+  });
+
+  it('close a team on its own day instead of the company’s', () => {
+    // Open on the company's Wednesday holiday: Tuesday 16:50 is due Wednesday 09:20.
+    expect(due(OWN_DAY_TEAM, '2026-09-22T11:20:00Z')).toBe('2026-09-23T03:50:00.000Z');
+    // Wednesday 16:50: the team is closed on Thursday, so due Friday 09:20; the company's
+    // conversations (closed Wednesday, open Thursday) at Thursday 09:30.
+    expect(due(OWN_DAY_TEAM, '2026-09-23T11:20:00Z')).toBe('2026-09-25T03:50:00.000Z');
+    expect(due(null, '2026-09-23T11:20:00Z')).toBe('2026-09-24T04:00:00.000Z');
+  });
+
+  it('rank a team with its own closed days apart', () => {
+    expect(teamsWithOwnClock(targets).sort()).toEqual([HOLIDAY_TEAM, OWN_DAY_TEAM]);
+  });
+
+  it('take real dates, once each and in order, an empty list as the team’s own and null as the company’s', () => {
+    expect(teamClosedDaysSchema.parse(['2026-12-25', '2026-11-08', '2026-12-25'])).toEqual([
+      '2026-11-08',
+      '2026-12-25',
+    ]);
+    expect(teamClosedDaysSchema.parse([])).toEqual([]);
+    expect(teamClosedDaysSchema.parse(null)).toBeNull();
+    const refused = (input: unknown) => {
+      const result = teamClosedDaysSchema.safeParse(input);
+      return result.success ? null : result.error.issues.map((i) => [i.path.join('.'), i.message]);
+    };
+    expect(refused(['2026-11-08', '2026-02-29'])).toEqual([['1', 'Enter a real date.']]);
+    expect(refused(['2026-13-01'])).toEqual([['0', 'Enter a real date.']]);
+    expect(refused(['2026-1-08'])?.[0]).toEqual(['0', 'Enter the date as YYYY-MM-DD.']);
+    expect(refused(Array.from({ length: MAX_TEAM_CLOSED_DAYS + 1 }, () => '2026-11-08'))).toEqual([
+      ['', 'Use at most 366 closed days.'],
+    ]);
+    expect(
+      teamClosedDaysSchema.parse(Array.from({ length: MAX_TEAM_CLOSED_DAYS }, () => '2024-02-29')),
+    ).toEqual(['2024-02-29']);
+  });
+
+  it('compare and audit a team’s closed days', () => {
+    expect(sameClosedDays(['2026-11-08', '2026-12-25'], ['2026-12-25', '2026-11-08'])).toBe(true);
+    expect(sameClosedDays(['2026-11-08'], ['2026-11-08', '2026-11-08'])).toBe(true);
+    expect(sameClosedDays(null, null)).toBe(true);
+    expect(sameClosedDays([], [])).toBe(true);
+    expect(sameClosedDays([], null)).toBe(false);
+    expect(sameClosedDays(null, [])).toBe(false);
+    expect(sameClosedDays(['2026-11-08'], ['2026-11-09'])).toBe(false);
+    expect(sameClosedDays(['2026-11-08'], ['2026-11-08', '2026-11-09'])).toBe(false);
+    expect(teamClosedDaysAudit(['2026-11-08', '2026-12-25'])).toEqual({
+      ownClosedDays: true,
+      closedDays: 2,
+    });
+    expect(teamClosedDaysAudit([])).toEqual({ ownClosedDays: true, closedDays: 0 });
+    expect(teamClosedDaysAudit(null)).toEqual({ ownClosedDays: false, closedDays: 0 });
   });
 });

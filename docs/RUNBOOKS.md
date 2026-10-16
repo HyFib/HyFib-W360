@@ -492,9 +492,12 @@ shown as paused resumes at the next opening. Reports apply the current calendar 
 A conversation of a team with its own business hours (Settings → Teams, ADR-389) counts that
 team's week instead, with the company's closed days, and only while the company's business hours
 are on; check which team the conversation is in now (`app.team_business_hours` holds each team's
-week). After a team's week or target, or a conversation's team, changes, the waiting automatic
-replies and overdue notices of its conversations are planned again by the next minute sweep; a
-notice planned again is not skipped as late for having waited.
+week). A team with closed days of its own (ADR-392; `app.teams.own_closed_days` true, its days in
+`app.team_closed_days`, possibly none) skips those days instead of the company's: it works on the
+company's holidays unless they are in its list. After a team's week, closed days or target, or a
+conversation's team, changes, the waiting automatic replies and overdue notices of its
+conversations are planned again by the next minute sweep; a notice planned again is not skipped as
+late for having waited.
 
 **CSAT surveys are not sent.** Each resolve records a survey with a reason when nothing was sent
 (Reports → CSAT lists the reasons): the 24-hour window had closed, the customer opted out or the

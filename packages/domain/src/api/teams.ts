@@ -2,11 +2,18 @@ import { z } from 'zod';
 import { notFound } from '@w360/core';
 import { TEAM_ASSIGNMENT_MODES, type TeamAssignmentMode, type Tx } from '@w360/db';
 import { recordSystemAudit } from '../audit';
-import { MAX_RANGES_PER_DAY, parseTime, type BusinessInterval } from '../inbox/business-hours';
+import {
+  MAX_RANGES_PER_DAY,
+  MAX_TEAM_CLOSED_DAYS,
+  parseTime,
+  sameClosedDays,
+  type BusinessInterval,
+} from '../inbox/business-hours';
 import {
   MAX_ROUTING_KEYWORDS,
   readTeamSettings,
   sameTeamHours,
+  teamClosedDaysAudit,
   teamHoursAudit,
   teamNameError,
   teamSchema,
@@ -52,6 +59,11 @@ export interface ApiTeamSettings {
    * ranges in the company's time zone; null uses the company's business hours.
    */
   businessHours: ApiTimeRange[][] | null;
+  /**
+   * The team's own closed days (ADR-392): YYYY-MM-DD days of the company's time zone, in order,
+   * used instead of the company's (empty: none); null uses the company's closed days.
+   */
+  closedDays: string[] | null;
   /** The team's active members, as GET /members lists them, in the order they joined. */
   memberIds: string[];
   /** The WhatsApp numbers whose new conversations go to the team, as GET /channels lists them. */
@@ -103,7 +115,14 @@ const businessHoursSchema = z
   .length(7, 'Give seven days, Monday first.')
   .nullable()
   .describe(
-    `The team’s own weekly schedule: seven days, Monday first, each with up to ${MAX_RANGES_PER_DAY} opening ranges that do not overlap (an empty list closes the day), at least one in the week. While the company’s business hours are on (GET /business-hours), the team’s conversations count reply targets and the automatic reply’s delay in these hours instead of the company’s; the company’s closed days and time zone apply. Null uses the company’s business hours.`,
+    `The team’s own weekly schedule: seven days, Monday first, each with up to ${MAX_RANGES_PER_DAY} opening ranges that do not overlap (an empty list closes the day), at least one in the week. While the company’s business hours are on (GET /business-hours), the team’s conversations count reply targets and the automatic reply’s delay in these hours instead of the company’s, with the team’s closed days (\`closedDays\`) and the company’s time zone. Null uses the company’s business hours.`,
+  );
+const closedDaysSchema = z
+  .array(z.string().max(10, 'Give a date as YYYY-MM-DD.'))
+  .max(MAX_TEAM_CLOSED_DAYS, `Use at most ${MAX_TEAM_CLOSED_DAYS} closed days.`)
+  .nullable()
+  .describe(
+    `The team’s own closed days: up to ${MAX_TEAM_CLOSED_DAYS} dates, YYYY-MM-DD, days of the company’s time zone (each a real date; 422 naming \`closedDays.<n>\` otherwise), kept once each and in order; past days are kept, as the company’s are. They replace the company’s closed days for the team: while the company’s business hours are on, the team’s conversations count reply targets and the automatic reply’s delay as closed on these days instead of on the company’s, so a team can work on the company’s public holidays or close on days of its own. An empty list gives the team no closed days at all; null uses the company’s closed days (GET /business-hours/closed-days).`,
   );
 const maxOpenSchema = z
   .number()
@@ -143,6 +162,7 @@ export const apiCreateTeamSchema = z
     routingKeywords: keywordsSchema.optional(),
     firstResponseTargetMinutes: targetSchema.optional(),
     businessHours: businessHoursSchema.optional(),
+    closedDays: closedDaysSchema.optional(),
     memberIds: memberIdsSchema.optional(),
     channelIds: channelIdsSchema.optional(),
   })
@@ -158,6 +178,7 @@ export const apiUpdateTeamSchema = z
     routingKeywords: keywordsSchema.optional(),
     firstResponseTargetMinutes: targetSchema.optional(),
     businessHours: businessHoursSchema.optional(),
+    closedDays: closedDaysSchema.optional(),
     memberIds: memberIdsSchema.optional(),
     channelIds: channelIdsSchema.optional(),
   })
@@ -173,7 +194,8 @@ export function apiDaysToTexts(days: readonly (readonly ApiTimeRange[])[]): stri
 
 /**
  * The settings Settings would keep from these, normalized and checked as members' saves are; a
- * team's hours are checked day by day as Settings checks them (422 naming `businessHours.<n>`).
+ * team's hours are checked day by day as Settings checks them (422 naming `businessHours.<n>`),
+ * and its closed days date by date (422 naming `closedDays.<n>`).
  */
 export function teamSettingsOf(input: z.output<typeof apiCreateTeamSchema>): TeamSettings {
   return parseInput(teamSchema, {
@@ -184,6 +206,7 @@ export function teamSettingsOf(input: z.output<typeof apiCreateTeamSchema>): Tea
     routingKeywords: input.routingKeywords,
     firstResponseTargetMinutes: input.firstResponseTargetMinutes ?? null,
     businessHours: input.businessHours ? apiDaysToTexts(input.businessHours) : null,
+    closedDays: input.closedDays ?? null,
     memberIds: input.memberIds,
     channelIds: input.channelIds,
   });
@@ -210,6 +233,7 @@ export function sameTeamSettings(current: TeamSettings, next: TeamSettings): boo
     current.maxOpenPerMember === next.maxOpenPerMember &&
     current.firstResponseTargetMinutes === next.firstResponseTargetMinutes &&
     sameTeamHours(current.businessHours, next.businessHours) &&
+    sameClosedDays(current.closedDays, next.closedDays) &&
     current.routingKeywords.length === next.routingKeywords.length &&
     current.routingKeywords.every((keyword, i) => keyword === next.routingKeywords[i]) &&
     sameSet(current.memberIds, next.memberIds) &&
@@ -230,6 +254,7 @@ export function toApiTeamSettings(
     routingKeywords: team.routingKeywords,
     firstResponseTargetMinutes: team.firstResponseTargetMinutes,
     businessHours: toApiTeamHours(team.businessHours),
+    closedDays: team.closedDays,
     memberIds: team.memberIds,
     channelIds: team.channelIds,
     createdAt: team.createdAt.toISOString(),
@@ -298,6 +323,7 @@ export async function apiCreateTeam(
             maxOpenPerMember: data.maxOpenPerMember,
             firstResponseTargetMinutes: data.firstResponseTargetMinutes,
             ...teamHoursAudit(data.businessHours),
+            ...teamClosedDaysAudit(data.closedDays),
             members: data.memberIds.length,
             channels: data.channelIds.length,
             keywords: data.routingKeywords.length,
@@ -354,11 +380,12 @@ export async function apiUpdateTeam(
           change.businessHours === undefined
             ? toApiTeamHours(current.businessHours)
             : change.businessHours,
+        closedDays: change.closedDays === undefined ? current.closedDays : change.closedDays,
         memberIds: change.memberIds ?? current.memberIds,
         channelIds: change.channelIds ?? current.channelIds,
       });
       if (sameTeamSettings(current, next)) return toApiTeamSettings(current);
-      const { previousAssignment, hoursChanged } = await writeUpdateTeam(
+      const { previousAssignment, hoursChanged, closedDaysChanged } = await writeUpdateTeam(
         tx,
         ctx.tenant.id,
         id,
@@ -378,6 +405,8 @@ export async function apiUpdateTeam(
             firstResponseTargetMinutes: next.firstResponseTargetMinutes,
             ...teamHoursAudit(next.businessHours),
             businessHoursChanged: hoursChanged,
+            ...teamClosedDaysAudit(next.closedDays),
+            closedDaysChanged,
             members: next.memberIds.length,
             channels: next.channelIds.length,
             keywords: next.routingKeywords.length,
