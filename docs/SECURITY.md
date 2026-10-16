@@ -454,6 +454,12 @@ Phase 4 rules (CRM, P4-04):
   (`crm.deals_exported`, with its filters). Since ADR-380 it also lists each deal's products with
   their prices and total, which anyone who reads the CRM sees on the deal page; a product's name
   never starts a cell.
+- Filtering the board and its export by a choice or yes/no field (ADR-391): the key and option in
+  the address are looked up only among the company's own fields, in the company's scope, and only a
+  field and option found there reach the query, as bound parameters; anything else is ignored on
+  the board (with a notice that does not echo it) and refused by the export before it is audited, so
+  a file is never wider than asked. The audit records the field's key and the kind of match, never
+  the option. Permissions are unchanged (`crm.read`; the export also `contacts.export`).
 - While a company is suspended, `crm.read` stays available and `crm.write` does not; reminder jobs
   wait, and the sweep sends reminders after reactivation unless they are more than a day late.
 

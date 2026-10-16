@@ -192,6 +192,7 @@ test('custom deal field values, a choice among them, are given when a deal is cr
   await page.getByLabel('Phone number').fill('+91 98765 43212');
   await page.getByRole('button', { name: 'Add contact' }).click();
   await expect(page.getByRole('heading', { name: 'Farah Khan', level: 1 })).toBeVisible();
+  const contactUrl = page.url();
   await page.getByText('New deal', { exact: true }).click();
   await page.getByLabel('Deal title').fill('Regional plan');
   await page.getByLabel('Region', { exact: true }).fill('South');
@@ -228,6 +229,59 @@ test('custom deal field values, a choice among them, are given when a deal is cr
   await expect(
     page.getByRole('list', { name: 'Options of “Tier”' }).getByRole('listitem'),
   ).toHaveText(['Gold', 'Silver', 'Bronze']);
+
+  // The board filtered by the choice (ADR-391): a second deal chooses Gold.
+  await page.goto(contactUrl);
+  await page.getByText('New deal', { exact: true }).click();
+  await page.getByLabel('Deal title').fill('Gold plan');
+  await page.getByLabel('Tier', { exact: true }).selectOption('Gold');
+  await page.getByRole('button', { name: 'Create deal' }).click();
+  await expect(page.getByRole('heading', { name: 'Gold plan', level: 1 })).toBeVisible();
+  await page.goto(`/c/${slug}/crm`);
+  const dealLink = (title: string) => page.getByRole('link', { name: title, exact: true });
+  await expect(dealLink('Regional plan')).toBeVisible();
+  await expect(dealLink('Gold plan')).toBeVisible();
+  const filter = page.getByLabel('Deal field', { exact: true });
+  // The choice and yes/no fields, in the order they were added, each with “Not set”.
+  await expect(filter.locator('option')).toHaveText([
+    'All deals',
+    'Signed: Yes',
+    'Signed: No',
+    'Signed: Not set',
+    'Tier: Gold',
+    'Tier: Silver',
+    'Tier: Bronze',
+    'Tier: Not set',
+  ]);
+  await filter.selectOption({ label: 'Tier: Gold' });
+  await page.getByRole('button', { name: 'Filter deals' }).click();
+  await expect(page).toHaveURL(/[?&]field=tier%3AGold(&|$)/);
+  await expect(dealLink('Gold plan')).toBeVisible();
+  await expect(dealLink('Regional plan')).toHaveCount(0);
+  await expect(page.getByText('1 deal', { exact: true })).toBeVisible();
+  await expect(filter).toHaveValue('tier:Gold');
+  // The export of the view follows the filter.
+  await expect(page.getByRole('link', { name: 'Export CSV' })).toHaveAttribute(
+    'href',
+    /[?&]field=tier%3AGold(&|$)/,
+  );
+  await expectNoHorizontalOverflow(page);
+  // “Not set”: neither deal.
+  await filter.selectOption({ label: 'Tier: Not set' });
+  await page.getByRole('button', { name: 'Filter deals' }).click();
+  await expect(page).toHaveURL(/[?&]field=tier%3A(&|$)/);
+  await expect(dealLink('Gold plan')).toHaveCount(0);
+  await expect(dealLink('Regional plan')).toHaveCount(0);
+  await page.getByRole('link', { name: 'Show all deals' }).click();
+  await expect(dealLink('Regional plan')).toBeVisible();
+  await expect(dealLink('Gold plan')).toBeVisible();
+  // A link naming an option the field does not have shows every deal, and says so.
+  await page.goto(`/c/${slug}/crm?field=tier:Platinum`);
+  await expect(page.getByText('Showing every deal')).toBeVisible();
+  await expect(dealLink('Regional plan')).toBeVisible();
+  await expect(dealLink('Gold plan')).toBeVisible();
+  await expect(filter).toHaveValue('');
+  await expectNoHorizontalOverflow(page);
 });
 
 test('a deal moves through a pipeline with tasks, an emailed reminder, notes and reports', async ({

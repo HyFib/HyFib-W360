@@ -15749,3 +15749,62 @@ maker, though deleting a field clears it too; history entries for a change of va
 relying on 0293's `SELECT (tenant_id, id)` grant as well as the new one (now said in 0305). All were
 fixed. The deal detail keeps the label "Custom fields", as the deal's timeline names it: it sits in
 the deal details' own group, apart from the contact event's "Custom fields" group.
+
+## ADR-391 Filtering the deals board by a choice field (P4-04) (2026-10-16)
+
+Context: choice-type deal fields (ADR-385) let a company sort its deals by a fixed list (a tier, a
+source, a region), but the board showed every open deal of a pipeline, filtered by owner only, so a
+member looking at the Gold deals had to open each one or export everything. ADR-385 left "filtering
+the board or reports by a choice" unbuilt.
+
+Decision:
+
+- **One field filter beside the owner filter:** the board takes one choice field and one of its
+  options, or "Not set" (deals without a value); yes/no fields take Yes, No or Not set through the
+  same mechanism. Columns, counts, totals, each stage's weighted figure and the weighted pipeline
+  and month (ADR-242) follow it exactly as they follow the owner filter, and both apply together. A
+  "Deal field" select (choices grouped by field and named "Tier: Gold", "Tier: Not set") with a
+  "Filter deals" button sits under the pipeline and owner filters when the company has a choice or
+  yes/no field, with "Show all deals" while one applies. It is a plain GET form (an uncontrolled
+  select, the pipeline and owner as hidden inputs), so it works before hydration and needs no
+  client code.
+- **In the address, never trusted:** `?field=<key>:<option>`, `<key>:yes` or `<key>:no` for a yes/no
+  field, and `<key>:` for "Not set". Keys never hold a colon (`^[a-z][a-z0-9_]{0,39}$`) and options
+  are never empty, so the text splits at its first colon unambiguously and an option holding a colon
+  still reads. `parseDealFieldFilterParam` and `resolveDealFieldFilter` (`crm/deal-field-filter.ts`,
+  pure) read it and look the key up among the company's own fields, read in the company's scope in
+  the board's read-only transaction: the field must be a choice or yes/no field, and the option one
+  of its options in any case (options never differ by case alone, ADR-385), resolved to the option
+  as written; `yes`/`no` in any case. The page keeps the filter in the board's other links and in the
+  export link as the board resolved it, never as the address wrote it.
+- **The query:** `dealFieldCondition` adds `(attributes -> key) = <value>::jsonb` (the option as a
+  JSON string, or a JSON boolean) or `not (attributes ? key)` for "Not set" to the board's and the
+  export's existing conditions (company, pipeline, status, owner). Values are stored as the option is
+  written (ADR-385) and an empty value removes the key, so an exact JSON comparison is right and a
+  text field holding the same word never matches. The key and the value are bound parameters.
+- **No index, no migration:** the board already reads every open deal of the pipeline for its counts
+  and totals through `crm_deals_board_idx` (tenant, pipeline, status, stage); the field condition
+  only filters those rows, as the owner condition does. A pipeline's open deals are hundreds to a few
+  thousand rows a company, read in one statement for the totals, so an expression index per key
+  (keys are the company's own, up to 50) would add write cost for no measurable read gain. The
+  export filters within the batches it already reads by creation time.
+- **Stale or edited links:** the board ignores a filter that does not resolve (malformed, too long,
+  a deleted field, a removed option, a text, number or date field, another company's key) and shows
+  every deal with a notice, "Showing every deal", that the link's filter matches no field or option,
+  without echoing the address's text. Another company's key resolves only if this company has a
+  field of that key, and then it is this company's field.
+- **The export follows, strictly:** `GET /c/{slug}/crm/export` takes `field` as it takes `owner`;
+  the page sends it only with the board's open deals of a pipeline, the view it filters. An export
+  refuses a filter that does not resolve (400, "This deal field no longer exists.", "This option is
+  not one of the deal field’s options.", "Deals can be filtered only by a choice or yes/no field.",
+  "The deal field filter is not valid.") before anything is audited, so a file is never silently
+  wider than asked. `crm.deals_exported` records `field: { key, match }` with `match` one of
+  `option`, `yes`, `no` and `not_set`: the field's key and the kind of match, never the option, as
+  ADR-385 audits options by count; exports without a field filter are audited as before, without the
+  member.
+- **Permissions unchanged:** the board needs `crm.read` (the page checks it itself), the export
+  `crm.read` and `contacts.export`. The API is unchanged.
+
+Not built: filtering Reports by a choice, several field filters at once (or several options of one
+field), filters by text, number or date fields, the field filter on the won and lost lists and
+through the public API (`GET /deals`), and saving a filtered view.

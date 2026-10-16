@@ -4,7 +4,18 @@ import { notFound } from 'next/navigation';
 import { isAppError } from '@w360/core';
 import { can } from '@w360/domain';
 import { formatMinor } from '@w360/domain/crm-money';
-import { Badge, Button, Card, CardContent, CardDescription, CardHeader, CardTitle } from '@w360/ui';
+import {
+  Alert,
+  Badge,
+  Button,
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+  Label,
+  Select,
+} from '@w360/ui';
 import { NewDealForm, StageSelect } from '@/components/crm/deal-forms';
 import { CrmTabs } from '@/components/crm/crm-tabs';
 import { PageHeader } from '@/components/page-header';
@@ -29,7 +40,13 @@ export default async function CrmPage({
   searchParams,
 }: {
   params: Promise<{ slug: string }>;
-  searchParams: Promise<{ pipeline?: string; owner?: string; view?: string; cursor?: string }>;
+  searchParams: Promise<{
+    pipeline?: string;
+    owner?: string;
+    view?: string;
+    cursor?: string;
+    field?: string | string[];
+  }>;
 }) {
   const { slug } = await params;
   const query = await searchParams;
@@ -43,7 +60,12 @@ export default async function CrmPage({
   const owner = OWNER_FILTERS.find((f) => f.key === query.owner)?.key ?? 'all';
   const lookups = await crmLookups(ctx);
   const pipelineId = lookups.options.find((p) => p.id === query.pipeline)?.id ?? null;
-  const board = view === 'board' ? await crm.board(ctx, { pipelineId, owner }) : null;
+  // A choice or yes/no field's value (ADR-391), as the address writes it: the board resolves it
+  // against the company's own fields and reports one it cannot apply instead of failing.
+  const field = typeof query.field === 'string' ? query.field : null;
+  const board = view === 'board' ? await crm.board(ctx, { pipelineId, owner, field }) : null;
+  // Links carry the filter as the board applied it, never the address's own text.
+  const appliedField = board?.fieldFilter.applied ?? null;
   const cursor = view === 'board' ? null : (query.cursor ?? null);
   let closed: Awaited<ReturnType<typeof crm.listDeals>> | null = null;
   if (view !== 'board') {
@@ -57,7 +79,13 @@ export default async function CrmPage({
   }
   const href = (extra: Record<string, string | null>) => {
     const p = new URLSearchParams();
-    const merged = { pipeline: board?.pipeline.id ?? null, owner, view, ...extra };
+    const merged = {
+      pipeline: board?.pipeline.id ?? null,
+      owner,
+      field: appliedField?.param ?? null,
+      view,
+      ...extra,
+    };
     for (const [k, v] of Object.entries(merged)) {
       if (v && !(k === 'owner' && v === 'all') && !(k === 'view' && v === 'board')) p.set(k, v);
     }
@@ -74,6 +102,7 @@ export default async function CrmPage({
                 status: 'open',
                 pipeline: board.pipeline.id,
                 ...(owner === 'all' ? {} : { owner }),
+                ...(appliedField ? { field: appliedField.param } : {}),
               }
             : { status: view },
         ).toString()}`
@@ -199,6 +228,56 @@ export default async function CrmPage({
                 </nav>
                 <span className="text-muted-foreground">Values in {board.pipeline.currency}</span>
               </div>
+              {board.fieldFilter.ignored ? (
+                <Alert tone="warning" title="Showing every deal">
+                  The deal field filter in this link matches no field or option of the company (it
+                  may have been deleted or renamed), so the board is not filtered.
+                </Alert>
+              ) : null}
+              {board.fieldFilter.fields.length > 0 ? (
+                // A plain GET form (ADR-391): it works before hydration, and the board's other
+                // filters travel with it.
+                <form
+                  method="get"
+                  action={base}
+                  className="flex flex-wrap items-end gap-3"
+                  aria-label="Filter deals by a field"
+                >
+                  <input type="hidden" name="pipeline" value={board.pipeline.id} />
+                  {owner === 'all' ? null : <input type="hidden" name="owner" value={owner} />}
+                  <div className="grid min-w-0 max-w-full gap-1">
+                    <Label htmlFor="deal-field-filter">Deal field</Label>
+                    <Select
+                      id="deal-field-filter"
+                      name="field"
+                      defaultValue={appliedField?.param ?? ''}
+                      className="w-64 max-w-full"
+                    >
+                      <option value="">All deals</option>
+                      {board.fieldFilter.fields.map((f) => (
+                        <optgroup key={f.key} label={f.label}>
+                          {f.choices.map((choice) => (
+                            <option key={choice.param} value={choice.param}>
+                              {`${f.label}: ${choice.label}`}
+                            </option>
+                          ))}
+                        </optgroup>
+                      ))}
+                    </Select>
+                  </div>
+                  <Button type="submit" variant="outline">
+                    Filter deals
+                  </Button>
+                  {appliedField ? (
+                    <Link
+                      href={href({ field: null })}
+                      className="self-center text-sm text-primary underline-offset-4 hover:underline"
+                    >
+                      Show all deals
+                    </Link>
+                  ) : null}
+                </form>
+              ) : null}
               {board.forecast.hasChances ? (
                 // Weighted by each stage's chance of winning (ADR-242). The month's end is a
                 // calendar date in the company's time already, so it is shown as written (UTC).

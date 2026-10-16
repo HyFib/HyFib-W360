@@ -1715,6 +1715,299 @@ describe('custom deal fields (ADR-373)', () => {
   });
 });
 
+describe('filtering the board by a choice or yes/no field (ADR-391)', () => {
+  /** The export's lines without the byte order mark and the last line break. */
+  async function exported(ctx: TenantContext, input: unknown) {
+    let csv = '';
+    for await (const chunk of crm().exportDeals(ctx, input)) csv += chunk;
+    return csv.slice(1).split('\r\n').slice(0, -1);
+  }
+
+  it('filters columns, counts, totals and weighted figures, and the export of the view', async () => {
+    const { c, owner, agent, pipeline, newStage, qualified, proposal } = await setup();
+    const svc = crm();
+    await svc.updatePipeline(owner, {
+      id: pipeline.id,
+      expectedVersion: pipeline.version,
+      name: 'Sales',
+      stages: [
+        { id: newStage.id, name: 'New', winPercent: 10 },
+        { id: qualified.id, name: 'Qualified', winPercent: 50 },
+        { id: proposal.id, name: 'Proposal' },
+      ],
+    });
+    await svc.createDealField(owner, { label: 'Region', type: 'text' });
+    await svc.createDealField(owner, {
+      label: 'Tier',
+      type: 'choice',
+      options: ['Gold', 'Silver'],
+    });
+    const signed = await svc.createDealField(owner, { label: 'Signed', type: 'boolean' });
+    const contactId = await newContact(owner, 'Pooja');
+    const monthEnd = monthEndIn(new Date(), owner.tenant.timezone);
+    const deal = (
+      stageId: string,
+      title: string,
+      value: string,
+      fields: Record<string, string>,
+      extra: { ownerMembershipId?: string; expectedCloseOn?: string } = {},
+    ) =>
+      svc.createDeal(owner, {
+        contactId,
+        pipelineId: pipeline.id,
+        stageId,
+        title,
+        value,
+        fields,
+        ...extra,
+      });
+    const { id: annual } = await deal(
+      newStage.id,
+      'Annual',
+      '1,000',
+      { tier: 'gold', signed: 'yes', region: 'Gold' },
+      { ownerMembershipId: agent.membership.id, expectedCloseOn: monthEnd },
+    );
+    await deal(qualified.id, 'Second store', '500', { tier: 'Silver', signed: 'no' });
+    await deal(
+      qualified.id,
+      'Add-on',
+      '300',
+      { tier: 'Gold' },
+      { ownerMembershipId: agent.membership.id },
+    );
+    await deal(newStage.id, 'Trial', '200', {});
+    // A won Gold deal is not on the board, nor in its export.
+    const { id: won } = await deal(proposal.id, 'Won one', '900', { tier: 'Gold' });
+    await svc.closeDeal(owner, { id: won, expectedVersion: 1, outcome: 'won' });
+
+    const board = async (ctx: TenantContext, input: Record<string, unknown>) =>
+      (await svc.board(ctx, { pipelineId: pipeline.id, ...input }))!;
+    const titles = (b: Awaited<ReturnType<typeof board>>) =>
+      b.columns.map((col) => col.deals.map((d) => d.title).sort());
+
+    // The company's choice and yes/no fields are offered, with "Not set".
+    const all = await board(owner, {});
+    expect(all.fieldFilter).toEqual({
+      fields: [
+        {
+          key: 'tier',
+          label: 'Tier',
+          type: 'choice',
+          choices: [
+            { param: 'tier:Gold', label: 'Gold' },
+            { param: 'tier:Silver', label: 'Silver' },
+            { param: 'tier:', label: 'Not set' },
+          ],
+        },
+        {
+          key: 'signed',
+          label: 'Signed',
+          type: 'boolean',
+          choices: [
+            { param: 'signed:yes', label: 'Yes' },
+            { param: 'signed:no', label: 'No' },
+            { param: 'signed:', label: 'Not set' },
+          ],
+        },
+      ],
+      applied: null,
+      ignored: false,
+    });
+    expect(all.columns.map((col) => col.count)).toEqual([2, 2, 0]);
+
+    // One option: the deals, counts, totals, weighted figures and the month follow it.
+    const gold = await board(owner, { field: 'tier:gold' });
+    expect(gold.fieldFilter.applied).toEqual({
+      key: 'tier',
+      label: 'Tier',
+      type: 'choice',
+      stored: 'Gold',
+      param: 'tier:Gold',
+      valueLabel: 'Gold',
+    });
+    expect(gold.fieldFilter.ignored).toBe(false);
+    expect(titles(gold)).toEqual([['Annual'], ['Add-on'], []]);
+    expect(gold.columns.map((col) => [col.count, col.valueMinor, col.weightedMinor])).toEqual([
+      [1, 100_000, 10_000],
+      [1, 30_000, 15_000],
+      [0, 0, null],
+    ]);
+    expect(gold.forecast).toEqual({
+      hasChances: true,
+      weightedMinor: 25_000,
+      weightedMonthMinor: 10_000,
+      stagesWithoutChance: 0,
+      monthEnd,
+    });
+    // A text field holding the same word is not the choice.
+    expect(titles(await board(owner, { field: 'tier:Silver' }))).toEqual([
+      [],
+      ['Second store'],
+      [],
+    ]);
+
+    // "Not set", and yes/no fields by yes, no and not set.
+    const unset = await board(owner, { field: 'tier:' });
+    expect(titles(unset)).toEqual([['Trial'], [], []]);
+    expect(unset.columns.map((col) => col.valueMinor)).toEqual([20_000, 0, 0]);
+    expect(unset.fieldFilter.applied?.valueLabel).toBe('Not set');
+    expect(titles(await board(owner, { field: 'signed:YES' }))).toEqual([['Annual'], [], []]);
+    expect(titles(await board(owner, { field: 'signed:no' }))).toEqual([[], ['Second store'], []]);
+    expect(titles(await board(owner, { field: 'signed:' }))).toEqual([['Trial'], ['Add-on'], []]);
+
+    // With the owner filter, both apply.
+    expect(titles(await board(agent, { owner: 'mine', field: 'tier:Gold' }))).toEqual([
+      ['Annual'],
+      ['Add-on'],
+      [],
+    ]);
+    const nobodys = await board(owner, { owner: 'none', field: 'tier:Gold' });
+    expect(nobodys.columns.map((col) => col.count)).toEqual([0, 0, 0]);
+    expect(nobodys.forecast.weightedMinor).toBe(0);
+
+    // A filter that does not resolve is ignored and reported: the whole board is shown.
+    for (const field of [
+      'plan:Gold',
+      'tier:Platinum',
+      'region:Gold',
+      'tier',
+      'Tier:Gold',
+      `tier:${'x'.repeat(300)}`,
+    ]) {
+      const ignored = await board(owner, { field });
+      expect(ignored.fieldFilter, field).toMatchObject({ applied: null, ignored: true });
+      expect(
+        ignored.columns.map((col) => col.count),
+        field,
+      ).toEqual([2, 2, 0]);
+    }
+    expect((await board(owner, { field: '' })).fieldFilter.ignored).toBe(false);
+
+    // The export of the view follows the filter, with the owner filter too.
+    const ids = (lines: string[]) => lines.slice(1).map((line) => line.split(',')[0]);
+    const view = { status: 'open', pipelineId: pipeline.id };
+    expect(await exported(owner, { ...view, field: 'tier:Gold' })).toHaveLength(3);
+    expect(
+      ids(await exported(owner, { ...view, owner: agent.membership.id, field: 'signed:yes' })),
+    ).toEqual([annual]);
+    expect(await exported(owner, { ...view, field: 'tier:' })).toHaveLength(2);
+    // A won Gold deal is exported with the won list's filter.
+    expect(ids(await exported(owner, { status: 'won', field: 'tier:Gold' }))).toEqual([won]);
+    // An export never applies less than it was asked: a filter that does not resolve is refused.
+    await expectAppError(
+      exported(owner, { ...view, field: 'plan:Gold' }),
+      'validation_failed',
+      /no longer exists/,
+    );
+    await expectAppError(
+      exported(owner, { ...view, field: 'tier:Platinum' }),
+      'validation_failed',
+      /not one of the deal field’s options/,
+    );
+    await expectAppError(
+      exported(owner, { ...view, field: 'region:Gold' }),
+      'validation_failed',
+      /choice or yes\/no/,
+    );
+    await expectAppError(
+      exported(owner, { ...view, field: 'tier' }),
+      'validation_failed',
+      /not valid/,
+    );
+
+    // A deleted field in a stale link: the board ignores it, an export refuses it.
+    await svc.deleteDealField(owner, signed.id);
+    expect((await board(owner, { field: 'signed:yes' })).fieldFilter).toMatchObject({
+      applied: null,
+      ignored: true,
+    });
+    await expectAppError(
+      exported(owner, { ...view, field: 'signed:yes' }),
+      'validation_failed',
+      /no longer exists/,
+    );
+
+    // Audited with the field's key and the kind of match, never the option; refusals are not.
+    const audit = await fx.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM app.audit_events
+        WHERE tenant_id = $1 AND action = 'crm.deals_exported' ORDER BY id`,
+      [c.tenant.id],
+    );
+    expect(audit.map((a) => a.metadata)).toEqual([
+      {
+        status: 'open',
+        pipelineId: pipeline.id,
+        owner: 'all',
+        field: { key: 'tier', match: 'option' },
+      },
+      {
+        status: 'open',
+        pipelineId: pipeline.id,
+        owner: agent.membership.id,
+        field: { key: 'signed', match: 'yes' },
+      },
+      {
+        status: 'open',
+        pipelineId: pipeline.id,
+        owner: 'all',
+        field: { key: 'tier', match: 'not_set' },
+      },
+      { status: 'won', pipelineId: null, owner: 'all', field: { key: 'tier', match: 'option' } },
+    ]);
+    expect(JSON.stringify(audit)).not.toContain('Gold');
+  });
+
+  it('resolves keys against the company’s own fields only', async () => {
+    const a = await setup();
+    const b = await setup();
+    const svc = crm();
+    await svc.createDealField(a.owner, { label: 'Tier', type: 'choice', options: ['Gold'] });
+    await svc.createDealField(b.owner, {
+      label: 'Tier',
+      type: 'choice',
+      options: ['Silver', 'Bronze'],
+    });
+    const contactId = await newContact(a.owner, 'Ritu');
+    await svc.createDeal(a.owner, {
+      contactId,
+      pipelineId: a.pipeline.id,
+      stageId: a.newStage.id,
+      title: 'A gold deal',
+      fields: { tier: 'Gold' },
+    });
+    // B's field of the same key has no "Gold": B's board ignores it and shows none of A's deals.
+    const bBoard = (await svc.board(b.owner, { pipelineId: b.pipeline.id, field: 'tier:Gold' }))!;
+    expect(bBoard.fieldFilter).toMatchObject({ applied: null, ignored: true });
+    expect(bBoard.fieldFilter.fields[0]!.choices.map((choice) => choice.label)).toEqual([
+      'Silver',
+      'Bronze',
+      'Not set',
+    ]);
+    expect(bBoard.columns.every((col) => col.count === 0)).toBe(true);
+    await expectAppError(
+      exported(b.owner, { status: 'open', field: 'tier:Gold' }),
+      'validation_failed',
+      /not one of/,
+    );
+    // A company without fields offers none and resolves nothing.
+    const other = await setup();
+    const otherBoard = (await svc.board(other.owner, {
+      pipelineId: other.pipeline.id,
+      field: 'tier:Gold',
+    }))!;
+    expect(otherBoard.fieldFilter).toEqual({ fields: [], applied: null, ignored: true });
+    await expectAppError(
+      exported(other.owner, { field: 'tier:Gold' }),
+      'validation_failed',
+      /no longer exists/,
+    );
+    // A's own board still finds its deal.
+    const aBoard = (await svc.board(a.owner, { pipelineId: a.pipeline.id, field: 'tier:Gold' }))!;
+    expect(aBoard.columns[0]!.deals.map((d) => d.title)).toEqual(['A gold deal']);
+  });
+});
+
 describe('deal import (ADR-374)', () => {
   const importInput = (
     pipelineId: string,

@@ -347,7 +347,14 @@ verification, app review, Embedded Signup configuration).
   forms show a select and CSV import takes an option in any case, the API exactly; `GET
 /deal-fields` gives `options`; options can be added and reordered, and removed or renamed only
   while no deal has them chosen. Not built: multi-select, renaming a chosen option with its values,
-  filtering by a choice).
+  filtering by a choice, since built for the board, ADR-391).
+  **[Filtering the deals board by a choice field built; its database and browser tests run only in
+  CI]** (ADR-391, no migration: one choice field's option, or "Not set", filters the board's
+  columns, counts, totals and weighted figures with the owner filter, yes/no fields too, kept in the
+  address as `field=<key>:<option>` and resolved against the company's own fields; a stale link shows
+  every deal with a notice; the export of the view follows it, refusing a filter that does not
+  resolve, audited with the key, never the option. Not built: Reports by a choice, several filters
+  at once, the API filter).
   **[Automation steps that set custom deal fields built; their database and browser tests run only
   in CI]** (ADR-386, migration 0302 for webhook endpoints' kinds of step: an "Update deal fields"
   step sets 1 to 20 values, with placeholders, on the contact's single open deal in a pipeline,

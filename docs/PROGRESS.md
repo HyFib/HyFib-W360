@@ -1,5 +1,50 @@
 # Progress
 
+## 2026-10-16 — Filtering the deals board by a choice field (P4-04, ADR-391)
+
+Status: **Implemented; its database and browser tests run in CI only.** ADR-385 left filtering the
+board by a choice unbuilt; the board filtered by owner only.
+
+### Completed
+
+- **Domain (`crm/deal-field-filter.ts`, `crm/deals.ts`):** `parseDealFieldFilterParam` reads
+  `field=<key>:<option>` (`<key>:yes`/`no`, `<key>:` for "Not set"), `resolveDealFieldFilter` looks
+  it up among the company's own choice and yes/no fields (an option in any case, resolved as
+  written), `filterableDealFields` lists the choices, `dealFieldFilterAudit` gives the key and kind
+  of match. `board` takes `field`, filters its columns, counts, totals and weighted figures with
+  `dealFieldCondition` (an exact JSON comparison, or the key absent), and returns `fieldFilter`
+  (fields, the filter applied, whether one was ignored); `exportDeals` takes `field`, refuses one
+  that does not resolve before auditing, and records `field: { key, match }`. No migration: the
+  board's existing index scan covers it.
+- **Web:** the CRM board's "Deal field" GET form (an uncontrolled select grouped by field, the
+  pipeline and owner as hidden inputs, "Show all deals"), a notice for a stale link, the filter kept
+  in the board's links and the export link as resolved; the export route passes `field`.
+- **Tests:** unit (`deal-field-filter.test.ts`: 11, the address read and written, malformed and
+  overlong text, the choices offered, options in any case, yes/no, the problems named, the audit,
+  the query's condition rendered); integration (`crm.test.ts`: 2 new, the board by an option, "Not
+  set" and yes/no with counts, totals, weighted figures and the month, with the owner filter, unknown
+  keys and options, a deleted field, isolation, the export following the filter and refusing what
+  does not resolve, and its audit); e2e (`crm.spec.ts`: the ADR-385 test filters the board by the
+  Tier choice, "Not set", a stale link, the export link, no horizontal overflow).
+- **Docs:** ADR-391; ARCHITECTURE, SECURITY, THREAT-MODEL T344, BACKLOG, and the matrix's text and
+  evidence (status unchanged).
+- **Mutation checks:** 14 deliberate regressions in the new TypeScript (the length bound's `>=`,
+  "Not set" read as malformed, a blank option accepted, yes/no fields not offered, "Not set" listed
+  first, the type check dropped, yes or no resolved to the wrong boolean, options matched by case,
+  the link keeping the address's text, `false` audited as not set, the not-set condition without its
+  `not`, a value compared as text instead of JSON, no condition for a filter): 14 caught by the unit
+  tests. The board's notice, the export's refusals and its audit are covered by integration tests,
+  and the page by the e2e step, which run in CI only.
+
+### Test commands and results (local, 2026-10-16)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 161 files, 1,704 tests passed                                   |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+
 ## 2026-10-16 — Webhook events when a deal's custom field values change (P5-09, P4-04, ADR-390)
 
 Status: **Implemented; its database tests run in CI only.** A change of a deal's custom field

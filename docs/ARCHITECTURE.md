@@ -1352,6 +1352,15 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   (`removedChosenOptions`, read with `attributes ->> key`), so stored values stay options. Web:
   `DealFieldsManager` takes options one per line (`optionLines`, `lib/deal-fields.ts`) and
   `DealFieldControl` shows a select; `GET /deal-fields` gives `options`.
+- **Filtering the board by a choice field (ADR-391, no migration):** `crm/deal-field-filter.ts`
+  (pure) reads `?field=<key>:<option>` (`<key>:yes`/`no` for yes/no fields, `<key>:` for "Not set")
+  and resolves it against the company's fields (`resolveDealFieldFilter`: a choice option in any
+  case to the option as written, `yes`/`no` to booleans); `dealFieldCondition` (`crm/deals.ts`) adds
+  `(attributes -> key) = value::jsonb` or `not (attributes ? key)` to the board's and the export's
+  conditions, within the existing `crm_deals_board_idx` scan. `board` returns `fieldFilter` (the
+  filterable fields with their choices, the filter applied, and whether one asked for was ignored);
+  `exportDeals` refuses one that does not resolve and audits its key and kind of match. Web: the CRM
+  page's "Deal field" GET form and its notice for a stale link; the export route passes `field`.
 - **Deal import (ADR-374, no migration):** `crm/deal-import.ts` previews a CSV (columns, first
   rows, suggested mapping) and imports it into one pipeline: `planDealRows` checks each row against
   the company's records (contacts by E.164 number, active stages by name, CRM members by email,
