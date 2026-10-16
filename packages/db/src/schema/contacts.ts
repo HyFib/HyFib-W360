@@ -189,6 +189,14 @@ export const messagingSettings = appSchema.table('messaging_settings', {
   csatLabels: text('csat_labels').array(),
   /** Read receipts and typing indicators to customers (migration 0146, ADR-223). */
   readReceipts: boolean('read_receipts').notNull().default(false),
+  /**
+   * The automatic reply when members are slow to answer (migration 0300, ADR-384): on or off, the
+   * text, the delay in minutes and when it was last turned on (only waits started since get it).
+   */
+  slowReplyEnabled: boolean('slow_reply_enabled').notNull().default(false),
+  slowReplyText: text('slow_reply_text'),
+  slowReplyDelayMinutes: smallint('slow_reply_delay_minutes'),
+  slowReplySince: tz('slow_reply_since'),
   updatedByUserId: text('updated_by_user_id'),
   createdAt: tz('created_at').notNull().defaultNow(),
   updatedAt: tz('updated_at').notNull().defaultNow(),

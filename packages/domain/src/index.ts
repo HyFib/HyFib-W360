@@ -106,6 +106,7 @@ export * from './inbox/overdue-replies';
 export * from './inbox/overdue-notice';
 export * from './inbox/conversation-tags';
 export * from './inbox/read-receipts';
+export * from './inbox/slow-reply';
 export * from './inbox/presence';
 export * from './inbox/presence-service';
 export * from './automations/graph';

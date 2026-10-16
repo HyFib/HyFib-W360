@@ -69,6 +69,20 @@ export async function updateReadReceiptsAction(
   });
 }
 
+/** The automatic reply when members are slow to answer (ADR-384). */
+export async function updateSlowReplyAction(
+  slug: string,
+  input: { enabled: boolean; text: string; delayMinutes: string },
+): Promise<ActionResult> {
+  return runAction(async () => {
+    const ctx = await tenantForAction(slug);
+    const { slowReply } = await getRuntime();
+    await slowReply.updateSlowReplySettings(ctx, input, await requestMeta());
+    refresh();
+    return null;
+  });
+}
+
 export interface TeamFormInput {
   name: string;
   description: string;

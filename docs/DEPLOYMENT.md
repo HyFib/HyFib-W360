@@ -1667,6 +1667,18 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    the web rollout ends, an old web server refuses to save an endpoint whose list names products
    steps, in Settings and through the API ("Choose kinds of step from the list.").
 
+   Migration 0300 (ADR-384) adds the automatic reply's four columns to `app.messaging_settings`
+   (off for every company, constant defaults, so the table is not rewritten; the new checks are
+   validated at once on its one row per company), creates `app.slow_reply_messages` (row security,
+   composite keys to reply turns and messages, a guard trigger, deletion step 326) and the sweep
+   function `ops.slow_reply_turns` (SECURITY DEFINER, owned by w360_definer, executable by w360_app
+   only). Nothing is sent until a company turns the reply on. Old web servers neither show nor save
+   the setting; old workers do not run the sweep, so a company that turns it on during the rollout
+   gets its first automatic replies once the new workers run (only for waits that started after it
+   was turned on, at most an hour late, otherwise skipped as `too_late`). Old workers send a queued
+   automatic reply without the send-time consent check, which the new sweep already made when it
+   queued it. Rolling an image back leaves the columns, table and function in place, unused.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

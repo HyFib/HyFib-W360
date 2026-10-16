@@ -45,6 +45,7 @@ import {
 } from '../consent/service';
 import { phoneFromWaId, waRecipientFromPhone } from '../contacts/phone';
 import { csatSendBlock } from '../inbox/csat';
+import { slowReplySendBlock } from '../inbox/slow-reply';
 import type { JobSigner } from '../jobs/envelope';
 import type { JobQueue } from '../jobs/queue';
 import {
@@ -833,6 +834,17 @@ export async function processSendIntent(
     if (!blocked && ctx.messageType === 'interactive') {
       const to = (current.request as { to?: unknown }).to;
       blocked = await csatSendBlock(tx, {
+        tenantId: scope.tenantId,
+        messageId: current.messageId,
+        contactId: ctx.contactId,
+        recipient: typeof to === 'string' ? phoneFromWaId(to) : null,
+      });
+    }
+    // The automatic reply when members are slow (ADR-384), likewise: an opt-out, a suppression or
+    // an erasure after it was queued stops it here.
+    if (!blocked && ctx.messageType === 'text') {
+      const to = (current.request as { to?: unknown }).to;
+      blocked = await slowReplySendBlock(tx, {
         tenantId: scope.tenantId,
         messageId: current.messageId,
         contactId: ctx.contactId,

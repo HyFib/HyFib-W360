@@ -15160,3 +15160,63 @@ number changed (Codex), left removed products in a list with no way to take them
 heading WhatsApp does not send for a single product, warned that a single product's message of
 placeholders alone could stop it, and cut the products at 500 across every catalog. All were fixed
 with tests; the checks of `commerce.read` are now tested too.
+
+## ADR-384 An automatic reply when members are slow to answer (P3-06) (2026-10-16)
+
+Context: a customer whose message nobody answers hears nothing until a member replies. Automations
+answer out of hours (W-079) and round-robin teams spread conversations, and the overdue-reply
+emails (ADR-230) and notice (ADR-241) tell members, but the customer is never told their message
+arrived when members are busy. The feature matrix listed "an automatic reply when members are slow
+to answer" as not built under W-081.
+
+Decision:
+
+- **A company setting:** Settings → Inbox, beside the first-response target, turns on a plain
+  WhatsApp text (1 to 1,024 characters, placeholders {{name}} and {{company}} only, filled by the
+  automations' renderer, and some words besides them) and a delay of 1 to 1,440 minutes
+  (`app.messaging_settings.slow_reply_*`, migration 0300). It is off by default; the text starts as
+  a neutral "Thank you for waiting…". Reading it needs `tenant.read`, changing it
+  `tenant.settings.manage`, as the other inbox settings; each change is audited
+  (`inbox.slow_reply_updated`, with on or off and the delay).
+- **When:** the delay counts from the start of the customer's reply turn, the same turn reply
+  targets measure, and in business hours when the company uses them (the timer pauses while the
+  business is closed), otherwise in absolute time. The delay is the company's own and applies to
+  every conversation: team targets (ADR-377) say when members owe a reply, and a team with a short
+  target can be given a shorter company delay; the reply never changes when a reply is overdue.
+  Only waits that start after the reply was turned on get it (`slow_reply_since`, the database's
+  time), so turning it on never messages customers already waiting; turning it off stops it at once.
+- **How it is sent:** the worker's minute sweep asks `ops.slow_reply_turns` (SECURITY DEFINER, ids
+  only) for open turns of active companies with the reply on that may be due (started at least the
+  delay ago; business hours only move a due time later), then works through each company in its own
+  scope: it locks the conversations, then the turns (the order a member's reply, a resolve and an
+  automation's start take them), computes the due time with the company's calendar, and queues the
+  text as a `system` message through the ordinary send pipeline (message, send intent and signed
+  `message.send` job in one transaction). It is shown in the thread as "Automatic reply" and as the
+  conversation's last message.
+- **Once per wait:** `app.slow_reply_messages` holds one row per turn (unique): `waiting` while
+  business hours put the due time later (looked at again then), `sent` with its message or `skipped`
+  with the reason, for good (a guard trigger), written in the transaction that queues the message.
+  A worker restart before commit leaves nothing; concurrent sweeps wait on the locks and then see
+  the row. A customer writing again in the same wait gets nothing more; after a member's reply their
+  next message starts a new wait.
+- **When it is not sent:** while an automation run handles the conversation (no turn is open then,
+  and the sweep checks again), in a resolved conversation (a resolve ends the turn), after a member
+  replied; and, recorded as skipped: an inactive number (`channel_inactive`), the 24-hour customer
+  service window closed (`window_closed`), no WhatsApp id on the number's account (`no_phone`), a
+  contact who opted out of non-marketing messages, is suppressed or erased (`opted_out`,
+  `suppressed`, `contact_erased`, the CSAT questions' check), or due more than an hour before the
+  sweep saw it (`too_late`: the worker was down, the company suspended). The send worker checks the
+  window and the contact's consent again before the request leaves, so an opt-out after queueing
+  stops it. The text names at most the customer's own name and the company, never a number, so
+  number masking (ADR-226) is unaffected.
+- **Not a reply:** the message is the company's, not a member's, so the wait goes on: the inbox's
+  reply timers, the overdue emails and notice and Reports' first-response figures still wait for a
+  member. Reports count it among the messages sent, neither by members nor by campaigns, as CSAT
+  questions; webhooks and the API report it as sent by `system`.
+- **Deletion and export:** rows are deleted with the company (step 326, before the turns and
+  messages they name) and go with their turn; the company export includes the table and the four
+  columns.
+
+Not built: a reply per team or per number, more than one reply per wait (a second after a longer
+wait), templates outside the window, a reply that names the expected wait, the setting in the public
+API, and replies to waits that began before it was turned on.

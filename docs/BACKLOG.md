@@ -181,7 +181,12 @@ verification, app review, Embedded Signup configuration).
   **[Per-team reply targets built; their database and browser tests run only in CI]** (ADR-377,
   migration 0296: a team's own first-response target, in Settings → Teams and the teams API, used
   for its conversations instead of the company's in the inbox's timers and notice, the overdue
-  emails and reports, each conversation by the team it is in now).
+  emails and reports, each conversation by the team it is in now). **[An automatic reply when
+  members are slow to answer built; its database and browser tests run only in CI]** (ADR-384,
+  W-081, migration 0300: a company setting in Settings → Inbox, a text and a delay counted in
+  business hours when they are on, sent once per wait by the worker's minute sweep through the send
+  pipeline, inside the service window, never while an automation handles the conversation, never in
+  a resolved conversation, never to customers who opted out; it does not end the wait).
   **Remaining:** per-team calendars, private team queues (would change visibility,
   ADR-029), CSAT by template outside the window (needs a consent decision), CSAT with a real WABA
   (phone-number masking: P3-01, ADR-226).

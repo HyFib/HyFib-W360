@@ -81,6 +81,44 @@ export const overdueReplyNotices = appSchema.table('overdue_reply_notices', {
   updatedAt: tz('updated_at').notNull().defaultNow(),
 });
 
+/**
+ * The automatic reply when members are slow to answer (migration 0300, ADR-384): at most one per
+ * reply turn. `waiting` while business hours put the due time off (the sweep looks again at
+ * `dueAt`); `sent` with its message or `skipped` with the reason for good.
+ */
+export const SLOW_REPLY_STATES = ['waiting', 'sent', 'skipped'] as const;
+export type SlowReplyState = (typeof SLOW_REPLY_STATES)[number];
+
+/**
+ * `too_late`: due more than an hour before the sweep saw it (the worker was down, the company was
+ * suspended); `channel_inactive`: the conversation's number is not active; `window_closed`: the
+ * customer's last message is more than 24 hours old; `no_phone`: the contact has no WhatsApp id on
+ * the number's account; `opted_out`, `suppressed`, `contact_erased`: the customer may not be sent
+ * non-marketing messages.
+ */
+export const SLOW_REPLY_SKIP_REASONS = [
+  'too_late',
+  'channel_inactive',
+  'window_closed',
+  'no_phone',
+  'opted_out',
+  'suppressed',
+  'contact_erased',
+] as const;
+export type SlowReplySkipReason = (typeof SLOW_REPLY_SKIP_REASONS)[number];
+
+export const slowReplyMessages = appSchema.table('slow_reply_messages', {
+  id: uuid('id').primaryKey(),
+  tenantId: uuid('tenant_id').notNull(),
+  turnId: uuid('turn_id').notNull(),
+  state: text('state', { enum: SLOW_REPLY_STATES }).notNull(),
+  dueAt: tz('due_at').notNull(),
+  messageId: uuid('message_id'),
+  skipReason: text('skip_reason', { enum: SLOW_REPLY_SKIP_REASONS }),
+  createdAt: tz('created_at').notNull().defaultNow(),
+  updatedAt: tz('updated_at').notNull().defaultNow(),
+});
+
 /** How often a member's report email goes out (ADR-376). */
 export const REPORT_EMAIL_FREQUENCIES = ['weekly', 'monthly'] as const;
 export type ReportEmailFrequency = (typeof REPORT_EMAIL_FREQUENCIES)[number];

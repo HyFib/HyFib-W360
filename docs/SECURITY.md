@@ -244,6 +244,17 @@ Phase 3 rules on top of the matrix (enforced in domain services and re-checked w
   `ops.overdue_reply_turns` is replaced with the same restrictions (SECURITY DEFINER, pinned search
   path, ids only, executable by the app role only) and reads only the team's target column besides
   what it read before.
+- Automatic reply when members are slow (ADR-384): reading the setting needs `tenant.read`,
+  changing it `tenant.settings.manage` (audited, `inbox.slow_reply_updated`); no new permission.
+  The worker finds turns only through `ops.slow_reply_turns` (SECURITY DEFINER, pinned search path,
+  ids only, executable by the app role only, reading the three setting columns and the new table's
+  turn, state and due time besides the turn, company, conversation and run columns it was already
+  granted) and works in each company's scope with tenant ids from that query, not from a payload.
+  The message goes through the send pipeline as a `system` message with a signed `message.send`
+  job and no acting user; it is sent only inside the service window, on an active number, to a
+  contact who has not opted out of non-marketing messages and is neither suppressed nor erased,
+  checked when queued and again by the send worker. It holds the company's text with at most the
+  customer's own name and the company's name, never a number.
 - Report emails (ADR-376): a member with `reports.read` turns their own weekly or monthly email on
   or off (audited); nobody chooses for another member. The worker finds companies with an email
   due only through `ops.due_report_email_companies` (SECURITY DEFINER, ids only, active companies)

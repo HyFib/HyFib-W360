@@ -1,5 +1,57 @@
 # Progress
 
+## 2026-10-16 — An automatic reply when members are slow to answer (W-081, P3-06, ADR-384)
+
+Status: **Implemented; its database and browser tests run in CI only.** A customer whose message
+members did not answer heard nothing until a member replied; the matrix listed this reply as not
+built under W-081.
+
+### Completed
+
+- **Domain (`inbox/slow-reply.ts`):** the setting (a text of 1 to 1,024 characters with only
+  {{name}} and {{company}}, filled by the automations' renderer, and a delay of 1 to 1,440 minutes;
+  `tenant.read` to read, `tenant.settings.manage` to change, audited as `inbox.slow_reply_updated`);
+  `sendSlowReplies`, the minute sweep (the definer query, then per company: conversations and turns
+  locked, `planSlowReply` with the business calendar, `slowReplyOutcome`, the WhatsApp id and the
+  utility consent check, then a `system` text message, its send intent, the turn's row and a signed
+  `message.send` job in one transaction); `slowReplySendBlock`, the consent check again in the send
+  worker's claim. Only waits started after the reply was turned on get it; one due more than an hour
+  before the sweep saw it is skipped.
+- **Migration 0300:** the four `messaging_settings.slow_reply_*` columns with their checks,
+  `app.slow_reply_messages` (one row per turn, row security, composite keys, guard trigger, deletion
+  step 326, definer reads) and `ops.slow_reply_turns` (SECURITY DEFINER, ids only). Drizzle schema
+  and the company export follow.
+- **Worker:** the messaging sweep calls `sendSlowReplies` after the overdue-reply emails.
+- **Web:** Settings → Inbox has an "Automatic reply when members are slow" card (`SlowReplyForm`
+  in a `ClientForm`, `updateSlowReplyAction`); the thread labels the message "Automatic reply".
+- **Tests:** unit (`slow-reply.test.ts`, 16 tests: settings and placeholders, due times with and
+  without business hours, the plan per turn, the skip rules and their order, consent mapping, the
+  rendered text and request); integration (`slow-replies.test.ts`: settings, permissions and audit,
+  once per wait with the send through Meta's stand-in, three concurrent sweeps, answered and
+  resolved conversations, waits from before it was turned on or while off, opted out, window
+  closed, too late, inactive number, an opt-out after queueing, business hours, the guard, the
+  unique turn and the function's privileges); e2e (`slow-reply.spec.ts`: the setting saved, the
+  text sent by the running worker and shown in the thread).
+- **Docs:** ADR-384; ARCHITECTURE, SECURITY, THREAT-MODEL T337, DATA-RETENTION, DEPLOYMENT (0300),
+  RUNBOOKS, BACKLOG (P3-06) and the matrix's W-081 (now implemented, not locally verified).
+- **Mutation checks:** 17 deliberate regressions in `slow-reply.ts` (a skipped turn handled again,
+  resolved conversations or active automation runs not ignored, the boundaries of the start, the due
+  time, the lateness limit and the window, a never-due turn sent at once, lateness checked after the
+  number, the number's check, a suppression reported as an opt-out, the start kept after turning it
+  off, business hours ignored, placeholders alone allowed, placeholders case-sensitive, link
+  previews on, a two-hour lateness limit), all caught by the unit tests. The locks, the unique row,
+  the definer query and the send-time check are covered by the integration tests, which run in CI
+  only.
+
+### Test commands and results (local, 2026-10-16)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 158 files, 1646 tests passed                                    |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | not run here (left to the integration build)                    |
+
 ## 2026-10-16 — Fixes before merging ADR-377 to ADR-383 (PR #90)
 
 Status: **Fixed; the database and browser tests run in CI only.** PR #90's first CI run failed

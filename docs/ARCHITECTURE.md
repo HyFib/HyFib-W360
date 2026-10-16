@@ -474,6 +474,21 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   member gets one `tenant.notice` (`overdueReplyEmail`, dedupe key
   `reply-overdue:<first turn>:<member>`). A company's failure is logged and retried by the next
   sweep.
+  **Automatic reply when members are slow** (`inbox/slow-reply.ts`, ADR-384, migration 0300): the
+  company's setting (`messaging_settings.slow_reply_enabled`, `_text`, `_delay_minutes`, `_since`)
+  is read and changed by `createSlowReplyService` (`tenant.read`, `tenant.settings.manage`,
+  audited). After the overdue emails the messaging sweep calls `sendSlowReplies`:
+  `ops.slow_reply_turns(now, limit)` (definer, ids only) lists open turns of active companies with
+  the reply on that started since it was turned on and at least the delay ago (within 30 days),
+  without a row or with a due `waiting` row, in conversations not resolved and without an active
+  automation run. Per company, in its scope, the conversations and then the turns are locked
+  (`FOR UPDATE`); `planSlowReply` ignores, waits (due time from `replyDueAt` with the business
+  calendar) or handles each turn; `slowReplyOutcome`, the WhatsApp id and the consent check
+  (`checkTemplateEligibility`, utility) decide between a `skipped` row and the send: a `system` text
+  message (`content.slowReply`), its send intent, a `sent` row naming the message and a signed
+  `message.send` job, in one transaction. `app.slow_reply_messages` is unique per turn and guarded
+  once sent or skipped. The send worker's claim runs `slowReplySendBlock` for text messages (the
+  consent check again). The thread labels it "Automatic reply"; it does not end the turn.
 - **Transcripts** (`messaging/transcript.ts`, `exportTranscript` in `messaging/inbox.ts`, ADR-212):
   an async generator checks `inbox.export` and that the member can see the conversation and writes
   the audit entry in one transaction, then yields the header and pages of 500 messages (keyset on

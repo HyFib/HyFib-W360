@@ -577,6 +577,18 @@ it) or `opted_out` (every member responsible turned these emails off), or `sent`
 emailed. The worker logs `overdue replies` with counts, and
 `overdue reply emails failed; will retry` with the company when a pass failed.
 
+**A customer did not get the automatic reply (or a company asks why one was sent).** It goes only
+to companies that turned it on (Settings → Inbox), for waits that started after it was turned on,
+once per wait, after the delay (in business hours when they are on). `app.slow_reply_messages` for
+the turn says what happened: no row (not due yet, a member replied or the conversation was resolved
+first, an automation was handling it, or the worker's sweep has not run), `waiting` (due at
+`due_at`, business hours), `skipped` with `too_late` (due more than an hour before the sweep saw
+it), `channel_inactive`, `window_closed`, `no_phone`, `opted_out`, `suppressed` or
+`contact_erased`, or `sent` with the message, whose own status says whether Meta accepted it (a
+send-time consent refusal fails it with the reason). The worker logs
+`automatic replies to waiting customers` with counts, and `automatic replies failed; will retry`
+with the company when a pass failed.
+
 **Migration 0010 failed.** It builds `app.conversations_team_idx` concurrently. If it failed, an
 INVALID index can remain: run `DROP INDEX CONCURRENTLY app.conversations_team_idx;` and run the
 migrations again.

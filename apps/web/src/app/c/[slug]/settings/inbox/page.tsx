@@ -7,6 +7,7 @@ import {
   ClosedDaysManager,
   CsatSettingsForm,
   ReadReceiptsForm,
+  SlowReplyForm,
 } from '@/components/settings/inbox-settings';
 import { ResponseTargetForm } from '@/components/settings/response-target';
 import { formatDayLong } from '@/lib/report-format';
@@ -22,12 +23,13 @@ export default async function InboxSettingsPage({ params }: { params: Promise<{ 
   const ctx = await requireTenant(slug);
   const manage = can(ctx, 'tenant.settings.manage');
   if (!manage && !canUseInbox(ctx)) notFound();
-  const { inbox, businessHours, csat, readReceipts } = await getRuntime();
-  const [target, hours, survey, receipts] = await Promise.all([
+  const { inbox, businessHours, csat, readReceipts, slowReply } = await getRuntime();
+  const [target, hours, survey, receipts, automaticReply] = await Promise.all([
     inbox.getResponseTarget(ctx),
     businessHours.getBusinessHours(ctx),
     csat.getCsatSettings(ctx),
     readReceipts.getSettings(ctx),
+    slowReply.getSlowReplySettings(ctx),
   ]);
   return (
     <div className="grid grid-cols-1 gap-6">
@@ -41,6 +43,23 @@ export default async function InboxSettingsPage({ params }: { params: Promise<{ 
         </CardHeader>
         <CardContent>
           <ResponseTargetForm slug={ctx.tenant.slug} initial={target} canEdit={manage} />
+        </CardContent>
+      </Card>
+      <Card>
+        <CardHeader>
+          <CardTitle>Automatic reply when members are slow</CardTitle>
+          <CardDescription>
+            A message HyFib sends a waiting customer when no member has replied within the time you
+            choose, so they know their message arrived.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <SlowReplyForm
+            slug={ctx.tenant.slug}
+            initial={automaticReply}
+            businessHours={hours.enabled}
+            canEdit={manage}
+          />
         </CardContent>
       </Card>
       <Card>
