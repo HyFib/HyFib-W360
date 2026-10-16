@@ -115,6 +115,13 @@ test('an access that expires within 7 days is shown as a warning and its owner i
   // The number keeps sending meanwhile, and Channels says when the access was checked and expires.
   await expect(page.getByText('Active', { exact: true })).toBeVisible();
   await expect(page.getByText(/^Access checked /)).toBeVisible();
+  // And which permissions Meta lists for the access (ADR-381).
+  await expect(
+    page.getByText(
+      'Granted to HyFib: manage the account, its numbers and templates (whatsapp_business_management); send messages (whatsapp_business_messaging)',
+      { exact: true },
+    ),
+  ).toBeVisible();
   await expect(page.getByText(/^Access expires /)).toBeVisible();
   await expect(page.getByText(/^Webhooks checked /)).toBeVisible();
   await expectNoHorizontalOverflow(page);

@@ -1,5 +1,34 @@
 # Progress
 
+## 2026-10-16 — The permissions granted to HyFib on Channels (P2-10, ADR-381)
+
+Status: **Implemented; its database and browser tests run in CI only.** The permissions Meta lists
+for each account's access were kept but shown only when one went missing.
+
+### Completed
+
+- **Domain:** `grantedPermissionList` (`messaging/access.ts`) orders an account's stored permissions
+  (the needed ones first, each with what it is for, then the others by name, each once);
+  `listChannels` gives each number its account's list. No new request to Meta and no migration.
+- **Web:** Settings → Channels shows "Granted to HyFib: …" under the access check time of each
+  connected account's numbers.
+- **Tests:** unit (`access.test.ts`: order, purposes, duplicates and blanks); integration
+  (`whatsapp-access.test.ts`: the list after a check); e2e (`whatsapp-access.spec.ts`: the line on
+  Channels). Written for CI; the integration and e2e tests were not run here.
+- **Docs:** ADR-381; SECURITY; ARCHITECTURE; BACKLOG P2-10; the feature matrix (W-021, status
+  unchanged).
+- **Mutation checks:** 5 of 5 deliberate regressions in the list's order, trimming and purposes
+  caught by the unit test.
+
+### Test commands and results (local, 2026-10-16)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 155 files, 1615 tests passed                                    |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+
 ## 2026-10-16 — Products in the deals CSV (P4-04, ADR-380)
 
 Status: **Implemented; its database test runs in CI only.** The deals CSV gave a deal's value but

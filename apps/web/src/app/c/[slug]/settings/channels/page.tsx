@@ -163,6 +163,14 @@ export default async function ChannelsPage({ params }: { params: Promise<{ slug:
                             Access checked {formatDateTime(ch.accessCheckedAt, ctx.tenant.timezone)}
                           </div>
                         ) : null}
+                        {ch.accountStatus === 'connected' && ch.grantedPermissions.length > 0 ? (
+                          <div className="max-w-sm break-words text-xs text-muted-foreground">
+                            Granted to HyFib:{' '}
+                            {ch.grantedPermissions
+                              .map((p) => (p.purpose ? `${p.purpose} (${p.scope})` : p.scope))
+                              .join('; ')}
+                          </div>
+                        ) : null}
                         {ch.accountStatus === 'connected' && ch.webhooksCheckedAt ? (
                           <div className="text-xs text-muted-foreground">
                             Webhooks checked{' '}

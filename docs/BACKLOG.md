@@ -51,8 +51,10 @@ verification, app review, Embedded Signup configuration).
   disconnect, quality and health time. **[The overview's setup checklist built from the company's
   data; its database and browser tests run only in CI]** (ADR-233, W-026: two-factor, an active
   number or one to reconnect, an approved template, contacts, teammates or a pending invitation, a
-  first-response target, each shown to members who can read its data; no migration). Remaining:
-  messaging limits and granted permissions display.
+  first-response target, each shown to members who can read its data; no migration).
+  **[The permissions granted to HyFib shown on Channels; its database and browser tests run only in
+  CI]** (ADR-381, no migration: the permissions Meta listed for each account's access at its last
+  check, the needed ones first with what each is for). Remaining: messaging limits display.
 - **P2-11 Platform quarantine view** — done with P5-10 (ADR-054): the operations console's
   Integrations page lists quarantined webhooks without their content and platform administrators
   resolve them, or retry their receipts, with a reason in the platform audit log.

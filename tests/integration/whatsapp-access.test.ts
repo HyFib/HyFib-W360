@@ -435,6 +435,14 @@ describe('a daily check of each connected account', () => {
       accountStatus: 'connected',
       accessExpiresAt: new Date(inThreeDays * 1000).toISOString(),
       accessExpired: false,
+      // And the permissions Meta listed at the check (ADR-381).
+      grantedPermissions: [
+        {
+          scope: 'whatsapp_business_management',
+          purpose: 'manage the account, its numbers and templates',
+        },
+        { scope: 'whatsapp_business_messaging', purpose: 'send messages' },
+      ],
     });
 
     // Once the expiry has passed, the banner and Channels say so and the account is checked again

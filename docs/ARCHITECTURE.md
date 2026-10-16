@@ -233,7 +233,9 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   a failed request changes nothing and is retried after 30 minutes. Once Meta admits the token,
   the same job lists the account's subscribed apps and subscribes HyFib's app again when it is
   missing (ADR-138): a restoration is audited and emailed; one that fails is emailed once, shown on
-  every page of the company and tried again after 30 minutes.
+  every page of the company and tried again after 30 minutes. `listChannels` gives each number its
+  account's stored permissions through `grantedPermissionList` (ADR-381), which Settings → Channels
+  shows.
 - **Not built yet:** media download to private object storage, message search, Meta-side
   deregistration on disconnect (templates and template sends: section 6A).
 

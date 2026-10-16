@@ -15043,3 +15043,26 @@ Decision:
 
 Not built: a line per product (one line stays one deal), retailer ids in the file, and the products
 in the deal import.
+
+## ADR-381 The permissions granted to HyFib on Settings → Channels (P2-10) (2026-10-16)
+
+Context: onboarding and the daily access check (ADR-137) keep the permissions Meta's `debug_token`
+lists for each WhatsApp account's access (`whatsapp_accounts.granted_scopes`), but the company saw
+them only when one went missing, in the reconnect banner. "Granted permissions display" was listed
+as remaining under P2-10.
+
+Decision:
+
+- **On each number's row:** Settings → Channels shows, for a connected account, the permissions
+  Meta listed when its access was last checked (or connected): those HyFib's access needs first, in
+  their order, each with what it lets HyFib do ("send messages", "manage the account, its numbers
+  and templates"), then any others by their Meta name, each once (`grantedPermissionList`).
+- **What is shown is what is stored:** no new request to Meta. The list changes when a check
+  succeeds; an account that lost a permission is marked for reconnecting by the check, and its
+  banner says which, as before.
+- **Who sees it:** members who can read channels (`channels.read`), as the access check times on the
+  same row; permission names are not secrets, and no token, id or other data of Meta's answer is
+  shown.
+
+Not built: the messaging limits of each number (their Graph fields are not read yet), and which
+assets each permission covers (`granular_scopes` target ids).

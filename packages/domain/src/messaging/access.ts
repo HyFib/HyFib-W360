@@ -85,6 +85,27 @@ const PERMISSION_PURPOSES: Record<string, string> = {
   whatsapp_business_management: 'manage the account, its numbers and templates',
 };
 
+/** A Meta permission of an account's access, and what it lets HyFib do when HyFib knows. */
+export interface GrantedPermission {
+  scope: string;
+  purpose: string | null;
+}
+
+/**
+ * The permissions Meta listed for an account's access when it was last checked or connected, as
+ * Settings → Channels shows them (ADR-381): those HyFib's access needs first, in their order, each
+ * with what it is for, then any others by name, each once.
+ */
+export function grantedPermissionList(scopes: readonly string[]): GrantedPermission[] {
+  const given = new Set(scopes.map((scope) => scope.trim()).filter(Boolean));
+  const required: readonly string[] = REQUIRED_META_PERMISSIONS;
+  const ordered = [
+    ...required.filter((scope) => given.has(scope)),
+    ...[...given].filter((scope) => !required.includes(scope)).sort(),
+  ];
+  return ordered.map((scope) => ({ scope, purpose: PERMISSION_PURPOSES[scope] ?? null }));
+}
+
 /**
  * Why Meta no longer accepts HyFib's access, as a clause ("Meta no longer accepts HyFib's access to
  * the account: <reason>"). A problem recorded before the checks (null) is a token Meta refused.
