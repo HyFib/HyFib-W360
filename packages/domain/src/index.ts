@@ -38,6 +38,7 @@ export * from './messaging/interactive';
 export * from './messaging/onboarding';
 export * from './messaging/access';
 export * from './messaging/messaging-limit';
+export * from './messaging/number-facts';
 export * from './billing/razorpay';
 export * from './billing/notices';
 export * from './billing/payments';

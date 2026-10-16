@@ -29,6 +29,71 @@ Windows. vite reaches the repository only as a development dependency of vitest 
 | `pnpm build`                                       | passed                                                                                                                                                                                                                             |
 | `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them                                                                                                                                                                    |
 
+## 2026-10-16 — Refreshing each active WhatsApp number's facts from Meta daily (P2-10, ADR-402)
+
+Status: **Implemented (no migration); unit tests run locally, integration and e2e tests in CI
+only; no live Meta traffic.** A number's quality rating, messaging limit and other facts from Meta
+were read only at the end of its setup, so numbers active before migration 0309 never got a limit
+and every number's facts went stale. This closes P2-10's "refresh of a number's facts outside its
+setup".
+
+### Completed
+
+- **One shared read (`messaging/number-facts.ts`):** `readNumberFacts` (the read with the limit
+  field and ADR-398's field-less read after a permanent or lost-access refusal, paced by ADR-399)
+  and `numberFactsColumns` (what a completed read stores) are factored out of setup's health step,
+  which now calls them; its behaviour and ADR-398's tests are unchanged.
+- **Daily refresh, no new schedule:** the access-check job calls `checkAccessAndRefreshNumbers`;
+  only after a `healthy` outcome it refreshes the account's active numbers last read 20 hours ago
+  or more, or never with the limit (`refreshNumberFacts`, stalest first, no read started after 40
+  seconds of the job). Each write re-reads that the number is still active and its account
+  connected, in the company's scope. No migration, no definer function, no new queue.
+- **Failures:** a failed read stores nothing, changes no status (an `auth` refusal does not ask for
+  a reconnect; the access check decides that) and is logged; the number is read again at the next
+  check. An error of the refresh is logged as an error without failing the job or changing the
+  access outcome. A paused account is asked nothing; a pause during the refresh stops it.
+- **Audit:** nothing for a routine refresh; `channel.messaging_limit_refused` (ADR-398's metadata)
+  only when a refusal changes Channels from a limit, or from never asked, to "not reported".
+- **Web:** Channels says under its numbers that HyFib reads each active number's facts about once a
+  day with the account's access check, and that "Checked" is the last read (`NUMBER_FACTS_NOTE`).
+- **Tests:** unit (`messaging/number-facts.test.ts`, 16 tests: the shared read's single read, the
+  second read after permanent and auth refusals, the second read's failure, no second read for
+  retryable, unknown or after a pause, the stored columns, the due rule and its boundary, the audit
+  rule, the refresh of due numbers stalest first, accounts not connected, an active pause, a failed
+  read going on with the next number and touching no account, a pause met mid-refresh, the time
+  budget, races with a disconnection or a lost access, a refusal audited only when Channels
+  changes); the 12 tests of `messaging-limit.test.ts` (ADR-398, setup's health step among them) still pass unchanged. Integration (`number-facts.test.ts`, 5
+  tests against the Graph stand-in, which now gives per-number quality ratings and per-number read
+  errors: only the account's active numbers refreshed and no other company's, Channels' wording
+  and time, no re-read within 20 hours and a re-read the next day; a number set up before ADR-398
+  given its limit at once; a refused field stored as none after the field-less read and audited
+  once, code 10 marking nothing for reconnecting; an auth and a rate-limit failure changing no
+  status nor the access outcome, then read again; a paused account, before or during the check,
+  asked nothing). e2e (`whatsapp-access.spec.ts`: the note and "Checked" on Channels). Written for
+  CI; the integration and e2e tests were not run here.
+- **Mutation checks:** 13 deliberate regressions (no second read on auth, the second read asking
+  for the limit, the first failure given instead of the second, `>=` to `>` in the due rule, the
+  never-asked clause dropped, the audit made unconditional, the pause check, the time budget and
+  the due filter dropped, the write ignoring the number's or the account's status, the limit's
+  check time not stored, the refresh of an account not connected): 13 caught by the unit tests,
+  the file restored exactly. The wiring after a healthy check is exercised by the integration
+  tests only, which run in CI.
+- **Docs:** ADR-402; ARCHITECTURE, RUNBOOKS (how often facts refresh, what "Checked" means, the log
+  lines), BACKLOG P2-10, the matrix's W-030. No threat-model row (no new data, role, grant or
+  provider; the same read in the same scope, once a day) and no research row (nothing new
+  verified).
+- **Not built:** an on-demand refresh, processing `phone_number_quality_update`, reading the limit
+  from the WABA; which node gives the limit is still to check on a real number (META-SETUP).
+
+### Test commands and results (local, 2026-10-16)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 177 files, 1,903 tests passed                                   |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed                                                          |
+
 ## 2026-10-16 — Members enrol contacts or a segment in an automation (P4-01, ADR-401)
 
 Status: **Implemented; its database and browser tests run in CI only.** P4-01's Remaining listed

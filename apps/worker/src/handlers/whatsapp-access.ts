@@ -1,14 +1,22 @@
 import type { Job } from 'pg-boss';
+import { toError } from '@w360/core';
 import { QUEUES } from '@w360/contracts';
-import { authorizeJob, checkWhatsAppAccess, findAccessChecksDue } from '@w360/domain';
+import {
+  authorizeJob,
+  checkAccessAndRefreshNumbers,
+  findAccessChecksDue,
+  type NumberFactsRefresh,
+} from '@w360/domain';
 import type { WorkerRuntime } from '../runtime';
 import { RetryableJobError } from './email';
 
 /**
  * Checks one WhatsApp account's access with `debug_token` (ADR-137) and, once Meta admits the token,
- * its webhook subscription (ADR-138). A check that could not be made is recorded on the account and
- * logged, and the minute sweep signals it again after 30 minutes; only a failure of the job itself
- * (the database, a crash) is retried by pg-boss.
+ * its webhook subscription (ADR-138) and then the facts of its active numbers due a refresh
+ * (ADR-402). A check that could not be made is recorded on the account and logged, and the minute
+ * sweep signals it again after 30 minutes; only a failure of the access check itself (the database,
+ * a crash) is retried by pg-boss. A number whose facts could not be read is logged and read again
+ * at the next check; an error of the refresh is logged and never fails the job.
  */
 export function whatsappAccessCheckHandler(rt: WorkerRuntime) {
   return async ([job]: Job<unknown>[]): Promise<void> => {
@@ -23,7 +31,11 @@ export function whatsappAccessCheckHandler(rt: WorkerRuntime) {
       return;
     }
     if (!rt.graph || !rt.meta) throw new RetryableJobError('Meta is not configured');
-    const result = await checkWhatsAppAccess(
+    const {
+      access: result,
+      numbers,
+      numbersError,
+    } = await checkAccessAndRefreshNumbers(
       {
         db: rt.db,
         keyring: rt.keyring,
@@ -64,7 +76,49 @@ export function whatsappAccessCheckHandler(rt: WorkerRuntime) {
     } else {
       rt.logger.info(facts, 'WhatsApp access checked');
     }
+    if (numbersError !== undefined) {
+      rt.logger.error(
+        { ...facts, err: toError(numbersError).message },
+        'WhatsApp numbers’ facts could not be refreshed; the next check tries again',
+      );
+    } else if (numbers) {
+      logNumberFacts(rt, facts, numbers);
+    }
   };
+}
+
+/** What the refresh of an account's numbers' facts did (ADR-402). */
+function logNumberFacts(
+  rt: WorkerRuntime,
+  facts: Record<string, unknown>,
+  refresh: NumberFactsRefresh,
+): void {
+  for (const number of refresh.numbers) {
+    if (number.state === 'failed') {
+      rt.logger.warn(
+        {
+          ...facts,
+          channelAccountId: number.channelAccountId,
+          kind: number.kind,
+          error: number.error,
+        },
+        'WhatsApp number’s facts could not be read from Meta; the next check tries again',
+      );
+    }
+  }
+  const counts = {
+    refreshed: refresh.numbers.filter((n) => n.state === 'refreshed').length,
+    failed: refresh.numbers.filter((n) => n.state === 'failed').length,
+    left: refresh.left,
+  };
+  if (refresh.outcome === 'paused') {
+    rt.logger.info(
+      { ...facts, ...counts, pausedUntil: refresh.pausedUntil },
+      'WhatsApp numbers’ facts refresh stopped: Meta is limiting management requests',
+    );
+  } else if (refresh.numbers.length > 0 || refresh.left > 0) {
+    rt.logger.info({ ...facts, ...counts }, 'WhatsApp numbers’ facts refreshed');
+  }
 }
 
 /** Signals a check for every account due one (called from the messaging sweep). */

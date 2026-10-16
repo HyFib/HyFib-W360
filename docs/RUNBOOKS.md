@@ -182,9 +182,35 @@ sweep is not running: nobody is emailed about late queues until it does, so star
   instead needs a decision of its own (not built, ADR-398).
 - No messaging limit line: the number's health was last read before ADR-398 (or never). A number
   in setup is read when its setup completes (Retry setup for a failed one). A number already active
-  is read only when its account is reconnected after Meta stopped accepting its access, or when the
-  number is connected again; Retry setup does not apply to it. Do not connect a number again only
+  is read at its account's next daily access check (ADR-402, below). Do not connect a number again
   for this: connecting again registers it again, which Meta counts.
+
+### How often a number's facts refresh (ADR-402)
+
+- Each active number's quality rating, messaging limit, display number, verified name and name
+  status are read from Meta about once a day: after the daily access check of its account finds
+  Meta still admits the token, the same `whatsapp.access_check` job reads each active number whose
+  facts were last read 20 hours ago or more, or never with the limit (stalest first, starting no
+  read after 40 seconds of the job; the rest are read first at the next check). Other checks of the
+  day (asked after a refused send, or every 30 minutes while a webhook subscription is not
+  confirmed) read nothing new within 20 hours.
+- "Checked <time>" on Channels is the last read that completed. A failed read stores nothing, so
+  the time stays; the worker logs `WhatsApp number’s facts could not be read from Meta` with the
+  number, the failure's kind and code, and the next check tries again. A failed read never marks
+  a number or account for reconnecting: only the access check decides that (ADR-137). A Checked
+  time older than two days on an active number means its reads keep failing: read the worker log
+  for that number (an unknown number at Meta answers code 100; an expired token makes the access
+  check itself fail and ask for a reconnect).
+- Nothing is read while the account needs reconnecting, is disconnected, or while Meta is limiting
+  its management requests (ADR-399): a pause met during the refresh stops it, and the numbers left
+  are read at the next daily check.
+- A refusal of the limit field during a refresh is followed by the read without it, as at setup,
+  and is audited as `channel.messaging_limit_refused` (Graph's kind, status, code, subcode and
+  clipped message) only when the number showed a limit or had never been asked; the same refusal
+  on later days is not audited again. A successful refresh audits nothing.
+- `WhatsApp numbers’ facts could not be refreshed` (error) is a database or code error during the
+  refresh: the access check's outcome is already stored and the job is not retried for it; the
+  next check tries again. Investigate if it repeats.
 
 ## 8. Data restoration
 

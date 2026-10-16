@@ -53,6 +53,7 @@ import {
   untilPaused,
   type ManagementPaused,
 } from './management-pace';
+import { numberFactsColumns, readNumberFacts } from './number-facts';
 import { credentialAad } from './outbound';
 import { COUNTED_CHANNEL_STATUSES, assertNumberAvailable } from '../plans/entitlements';
 
@@ -1008,40 +1009,22 @@ export async function processChannelOnboarding(
       await update({ onboardingStep: step });
     }
     if (step === 'health_check' || step === 'done') {
-      const asked = await call(() => deps.graph.getPhoneNumber(loaded.phoneNumberId, token));
-      let result = asked;
-      // Which node gives the messaging limit is unconfirmed (Meta's SDK has it on the WhatsApp
-      // Business Account, its documentation says the phone number: research M-059, M-199), and Graph
-      // may refuse a field in more than one way (code 100 for a field it does not have, 200 for a
-      // permission, another code such as 3, or 10, which HyFib reads as lost access). So a read that
-      // asked for it and was refused as permanent or as lost access, whatever the code, is made once
-      // more without it. Only when that read succeeds is the number set up without a limit and the
-      // refusal audited; when it fails too, its failure is handled as before, so a token Meta no
-      // longer accepts still asks for a reconnect (ADR-398). Retryable and unknown failures are
-      // retried as before. The second read is paced too: when the first response paused the
-      // account, it is not made and the step runs again after the pause (ADR-399).
-      let refusal: Extract<typeof asked, { ok: false }> | null = null;
-      if (!asked.ok && (asked.kind === 'permanent' || asked.kind === 'auth')) {
-        result = await call(() =>
-          deps.graph.getPhoneNumber(loaded.phoneNumberId, token, { messagingLimit: false }),
-        );
-        if (result.ok) refusal = asked;
-      }
-      if (!result.ok) return handleFailure(result, 'health_check');
-      const checkedAt = deps.clock.now();
+      // The read the daily refresh makes too (`readNumberFacts`, ADR-402): with the messaging
+      // limit, and once more without it when Graph refuses it as permanent or as lost access; only
+      // when that read succeeds is the number set up without a limit and the refusal audited. When
+      // it fails too, its failure is handled as before, so a token Meta no longer accepts still asks
+      // for a reconnect (ADR-398). Retryable and unknown failures are retried as before. When the
+      // first response paused the account, the second read is not made and the step runs again
+      // after the pause (ADR-399).
+      const read = await readNumberFacts(deps.graph, call, loaded.phoneNumberId, token);
+      if (!read.ok) return handleFailure(read.failure, 'health_check');
+      const refusal = read.limitRefusal;
       await update(
         {
           status: 'active',
           onboardingStep: 'done',
           onboardingError: null,
-          displayPhoneNumber: result.data.displayPhoneNumber,
-          verifiedName: result.data.verifiedName,
-          qualityRating: result.data.qualityRating,
-          nameStatus: result.data.nameStatus,
-          codeVerificationStatus: result.data.codeVerificationStatus,
-          messagingLimit: result.data.messagingLimit,
-          messagingLimitCheckedAt: checkedAt,
-          healthCheckedAt: checkedAt,
+          ...numberFactsColumns(read.facts, deps.clock.now()),
         },
         (tx) =>
           recordSystemAudit(tx, scope.tenantId, {

@@ -69,7 +69,12 @@ verification, app review, Embedded Signup configuration).
   reports them, an unlisted value as unknown and none as not reported; the health read again
   without it when Graph refuses the field on the phone number, whatever the code). Remaining:
   checking on a real number which node gives the field (META-SETUP), reading it from the WABA
-  should the number not give it, and a refresh of a number's facts outside its setup.
+  should the number not give it. **[A daily refresh of each active number's facts; its database
+  and browser tests run only in CI]** (ADR-402, no migration: after the daily access check finds
+  Meta still admits an account's token, the same job reads each of its active numbers due one
+  with the setup's health read and fallback, stalest first within 40 seconds, and stores its
+  quality rating, messaging limit and other facts; a failed read changes no status and is read
+  again at the next check; nothing while Meta is limiting the account's management requests).
 - **P2-11 Platform quarantine view** — done with P5-10 (ADR-054): the operations console's
   Integrations page lists quarantined webhooks without their content and platform administrators
   resolve them, or retry their receipts, with a reason in the platform audit log.

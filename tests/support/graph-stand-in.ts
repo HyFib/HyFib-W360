@@ -94,6 +94,13 @@ export interface StandInState {
    * app may not read (403, code 200, 3 or 10); a read without the field is answered as usual.
    */
   messagingLimitError: { status: number; code: number; subcode?: number; message: string } | null;
+  /** A number's quality rating in its reads (ADR-402): `GREEN` for a number not in this map. */
+  qualityRatings: Map<string, string>;
+  /**
+   * Numbers whose every read (with or without the messaging limit) fails with this Graph error, as
+   * Graph refuses a read for now (rate limit), for good, or with a token it no longer accepts.
+   */
+  phoneNumberErrors: Map<string, { status: number; code: number; message: string }>;
   sendQueue: SendBehaviour[];
   registerError: { status: number; code: number; message: string } | null;
   requests: RecordedRequest[];
@@ -710,6 +717,8 @@ export async function startGraphStandIn(options: {
     numbers: new Map(),
     messagingLimits: new Map(),
     messagingLimitError: null,
+    qualityRatings: new Map(),
+    phoneNumberErrors: new Map(),
     sendQueue: [],
     registerError: null,
     requests: [],
@@ -1359,6 +1368,8 @@ export async function startGraphStandIn(options: {
       if (req.method === 'GET' && first && !second) {
         const number = state.numbers.get(first);
         if (!number) return graphError(res, 400, 100, 'Unsupported get request.');
+        const failure = state.phoneNumberErrors.get(first);
+        if (failure) return graphError(res, failure.status, failure.code, failure.message);
         // The messaging limit only when the read asks for it (ADR-398), refused with the test's
         // Graph error when it says Graph does not give the field on the number.
         const limitAsked = (url.searchParams.get('fields') ?? '')
@@ -1380,7 +1391,7 @@ export async function startGraphStandIn(options: {
           : 'TIER_2K';
         return json(res, 200, {
           ...number,
-          quality_rating: 'GREEN',
+          quality_rating: state.qualityRatings.get(first) ?? 'GREEN',
           name_status: 'APPROVED',
           code_verification_status: 'VERIFIED',
           ...(limitAsked && limit !== null

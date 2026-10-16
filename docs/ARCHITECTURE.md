@@ -246,6 +246,17 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   worded by `messagingLimitText` (ADR-398: a tier by the unique customers research M-058 says it
   allows, `TIER_50` and `UNTIERED` as Meta reports them, an unlisted value as unknown, none as not
   reported, nothing for a number never asked), which Settings → Channels shows.
+- **Number facts refresh (ADR-402):** the access-check job, once its outcome is `healthy`
+  (`checkAccessAndRefreshNumbers`), refreshes the account's active numbers due one
+  (`refreshNumberFacts`: last read 20 hours ago or more, or never with the limit; stalest first;
+  no read started after 40 seconds of the job, which expires at 120). Each is read with
+  `readNumberFacts`, the function the setup's health step uses (the limit field, and once more
+  without it after a permanent or lost-access refusal), through the job's paced calls, and stored
+  with `numberFactsColumns` in the company's scope after re-reading that the number is still
+  active and its account connected. A failed read stores nothing and never changes a status; a
+  refusal of the limit is audited only when it changes what Channels shows; an error of the refresh
+  is logged without failing the job. No new due list or definer function: the access check's
+  daily cadence and its pause handling apply.
 - **Management usage (ADR-399):** the Graph client parses Meta's `x-business-use-case-usage` header
   on every response (`messaging/usage-header.ts`, bounded, never changing a call's classification)
   and gives each WABA's `whatsapp_business_management` percentages and minutes to regain access as

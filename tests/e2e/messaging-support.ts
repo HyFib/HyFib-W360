@@ -38,8 +38,9 @@ export async function connectTestChannel(opts: {
   displayPhoneNumber?: string;
   verifiedName?: string;
   /**
-   * The messaging limit a health read got from Meta, null for none (ADR-398), stored as read now;
-   * without it the number was never asked, as a number connected before ADR-398.
+   * The messaging limit a health read got from Meta, null for none (ADR-398), stored with the
+   * health as read now (so the daily refresh, ADR-402, does not read the number again for 20
+   * hours); without it the number was never asked, as a number connected before ADR-398.
    */
   messagingLimit?: string | null;
 }) {
@@ -94,8 +95,9 @@ export async function connectTestChannel(opts: {
     await app.query(
       `INSERT INTO app.channel_accounts
          (id, tenant_id, whatsapp_account_id, phone_number_id, status, display_phone_number, verified_name,
-          messaging_limit, messaging_limit_checked_at)
-       VALUES ($1, $2, $3, $4, 'active', $5, $6, $7, CASE WHEN $8 THEN now() END)`,
+          messaging_limit, messaging_limit_checked_at, health_checked_at)
+       VALUES ($1, $2, $3, $4, 'active', $5, $6, $7, CASE WHEN $8 THEN now() END,
+               CASE WHEN $8 THEN now() END)`,
       [
         channelAccountId,
         tenantId,

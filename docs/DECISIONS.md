@@ -16993,3 +16993,91 @@ the database by more than a second left every queued job `not_due` until the swe
 it skipped the pace; every read and write now uses the database's `now()` and jobs are queued with
 a delay in seconds (above). A nit: the runbook's query for 0312 also finds runs naming an enrolment
 that does not exist.
+
+## ADR-402 Refreshing each active WhatsApp number's facts from Meta daily (P2-10) (2026-10-16)
+
+Context: a number's facts from Meta (`GET /{phone-number-id}`: display number, verified name,
+quality rating, name status, code verification status and, since ADR-398, the messaging limit) were
+read only in the last step of its setup (`processChannelOnboarding`'s health step) and when its
+account was reconnected. So a number active before migration 0309 never got a messaging limit, and
+every number's quality rating and limit went stale until it was set up again, which registers it
+again (Meta counts that). ADR-398 left "a periodic or on-demand refresh of a number's facts" not
+built, and ADR-400's campaign notice compares recipients with whatever limit was read last. The
+daily per-account access check (ADR-137, ADR-138) already holds an authorized company scope, a
+decrypted token and ADR-399's paced calls for each connected account.
+
+Decision:
+
+- **One read, shared (`messaging/number-facts.ts`):** the health step's read is factored out as
+  `readNumberFacts` (the read with `whatsapp_business_manager_messaging_limit`; after a refusal as
+  permanent or as lost access, whatever the code, once more without it, giving the facts and the
+  refusal only when that read succeeds; retryable and unknown failures get no second read) and what
+  a completed read stores as `numberFactsColumns` (the facts, with the time as both
+  `health_checked_at` and `messaging_limit_checked_at`; never a status). Setup now calls both, with
+  unchanged behaviour (ADR-398's unit tests pass unchanged). Both reads go through the job's
+  `pacedManagementCalls`, so the field-less read is never made after a pausing response (ADR-399).
+- **Scheduling: piggy-backed on the daily access check, no new due list.** The worker's access-check
+  handler now calls `checkAccessAndRefreshNumbers`: the access check as before, then, only when its
+  outcome is `healthy`, `refreshNumberFacts` for that account in the same job. No migration, no
+  definer function, no new queue: the access check's cadence (daily per connected account of an
+  active company), its due list's exclusions (paused accounts, accounts not connected) and its
+  job's signed-envelope authorization apply. A number is refreshed when it is `active`, its account
+  is `connected` with a token, and its facts were last read 20 hours ago or more, or never with the
+  limit (`numberFactsDue`; a number set up before ADR-398 is read at the next check however recent
+  its health). 20 hours, below the check's 24, makes every daily check refresh, while the other
+  checks of the day (asked after a refused send, or every 30 minutes while a webhook subscription
+  is unconfirmed) read nothing new. Numbers are read stalest first, and no read starts once the job
+  has run 40 seconds (`NUMBER_FACTS_BUDGET_MS`): the job expires after 120 seconds and a number's
+  two reads may take 60 at the worker's 30-second Graph timeout; numbers left are the stalest at
+  the next check. A separate cadence (its own due list and queue) was not needed: the account-level
+  check already runs daily with the token in hand, and a separate job would repeat its
+  authorization and pause handling for the same calls.
+- **Failures are the number's alone.** A failed read stores nothing and never changes the number's
+  or the account's status, whatever its kind: an `auth` refusal of a number's read does not mark
+  anything for reconnecting, since losing access stays the access check's decision under ADR-137's
+  rules (which just admitted the token). The access check's outcome is stored before the refresh
+  starts and is returned unchanged. Each failure is logged with the number, kind and code, and the
+  number, still due, is read again at the next check (normally the next day; a retryable failure is
+  not retried within the job, since the access check's job is not re-run for it). An error the
+  refresh throws (the database) is returned as `numbersError` and logged as an error without
+  failing the job: a pg-boss retry would ask Meta for the access again, and the next check retries.
+  Before writing, the number is re-read under a row lock: one no longer active, moved, or whose
+  account is no longer connected is skipped.
+- **Nothing new is recorded for failures.** No refresh-error or attempt column: "Checked <time>"
+  already shows the last read that completed, which is what members need to judge how fresh the
+  quality and limit are, and an error code would add a migration and wording for an operator's
+  concern, which the worker log covers (RUNBOOKS: a Checked time older than two days on an active
+  number means its reads keep failing).
+- **Pauses (ADR-399):** an account paused when the refresh starts is asked nothing (`paused`, the
+  due numbers counted as left); a pause set by any response of the job, the access check's own
+  included, stops the refresh before its next call, a number already read is stored, and a limit
+  refusal whose response paused the account gets no field-less read and stores nothing. The numbers
+  left are read at the next daily check (skipped, not deferred: the access check's timestamp was
+  updated, so it is not due again sooner; facts are at most a day later).
+- **Audit:** a successful refresh audits nothing (it is routine and daily). A refused limit field
+  followed by a successful field-less read is audited as `channel.messaging_limit_refused` (result
+  `failure`, ADR-398's metadata: kind, HTTP status, code, subcode and Meta's message clipped, links
+  and tokens replaced) only when it changes what Channels shows, from a limit or from never asked
+  to "not reported by Meta" (`limitRefusalAuditDue`); a number already stored without a limit is not
+  audited again each day. Setup's `channel.activated` entry is unchanged. Each stored refresh emits
+  the internal `channel.updated` live event, as setup does, so an open Channels page refreshes.
+- **Webhooks:** HyFib does not process `phone_number_quality_update` (only template fields, M-034,
+  M-056, M-141), so no event is duplicated; the refresh only stores the facts.
+- **On Channels:** "Checked <time>" stays the time of the last completed read, now normally within
+  the last day. Below the numbers, when one is active: "HyFib reads each active number’s quality
+  rating, messaging limit and name from Meta about once a day, with the daily check of its account’s
+  access, but not while the account needs reconnecting or Meta is limiting management requests.
+  “Checked” is when HyFib last read them." (`NUMBER_FACTS_NOTE`). The e2e fixture that stores a
+  number "as read now" with a limit now also stores its health time, so the worker's refresh does
+  not read it again within 20 hours.
+- **Tenant isolation:** every read and write runs in `db.run(scope, …)` with the scope the signed
+  access-check job was authorized for, names the company in each query besides row security, and
+  reads only numbers of that account; the runtime role already selects and updates these columns
+  (0003, 0309). No grant changes.
+
+Known limits: the refresh is as fresh as the daily check, so a quality drop Meta signals by webhook
+shows up to a day later; an account whose check keeps failing (`not_checked`) or that stays paused
+gets no refresh until it succeeds; a quality rating or name longer than the columns' checks (32,
+200 characters) fails the write as it does at setup (not seen in research). Not built: an
+on-demand "refresh now", processing `phone_number_quality_update`, reading the limit from the WABA,
+and any verification against Meta (the Graph stand-in only).
