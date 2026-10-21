@@ -1130,7 +1130,9 @@ web log has `order report: a day outside the period was left out (time zone data
 company id, its time zone, the day and how many orders. PostgreSQL dated orders by its own time
 zone data while the period's days come from Node's ICU data; when the two disagree about a zone's
 offsets (one was updated for a new daylight-saving rule and the other not), orders near midnight
-fall on a day outside the period and are left out, as Reports leave such rows out. Update the time
+fall on a day outside the period and are left out of the totals, days and statuses, as Reports
+leave such rows out; the product table still counts them (it is bounded by the period's instants,
+not by day labels), so its quantities can exceed the orders shown. Update the time
 zone data of the older side (the PostgreSQL server or image, or the Node.js runtime) so both carry
 the same IANA release; nothing in HyFib needs changing and the totals are right once they agree.
 

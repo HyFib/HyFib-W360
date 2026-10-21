@@ -280,6 +280,8 @@ export async function readOrderReport(
   // The period's visible items, read once (a CTE referenced several times is materialised), and
   // every product figure derived from them: totals, names and priced subtotals for the listed
   // products only. Priced and unpriced lines are exact complements, so they add up to the quantity.
+  // The priced subtotals are grouped into JSON once and joined, never a correlated subquery per
+  // product, which PostgreSQL would run once per listed product over every line.
   const products = await tx.execute<{
     retailer_id: string;
     name: string | null;
@@ -316,14 +318,19 @@ export async function readOrderReport(
         from lines l join listed p on p.retailer_id = l.retailer_id
        where ${PRICED_LINE}
        group by 1, 2
+    ), priced_json as (
+      select retailer_id,
+             json_agg(json_build_object('currency', currency, 'lines', lines,
+                                        'subtotal', subtotal) order by currency) as priced
+        from priced
+       group by retailer_id
     )
     select p.retailer_id, n.name, p.quantity::text as quantity, p.orders,
            p.unpriced_quantity::text as unpriced_quantity, p.product_count,
-           coalesce((select json_agg(json_build_object('currency', c.currency, 'lines', c.lines,
-                                                       'subtotal', c.subtotal) order by c.currency)
-                       from priced c where c.retailer_id = p.retailer_id), '[]'::json) as priced
+           coalesce(j.priced, '[]'::json) as priced
       from listed p
       left join names n on n.retailer_id = p.retailer_id
+      left join priced_json j on j.retailer_id = p.retailer_id
      order by p.quantity desc, p.retailer_id`);
   return {
     period,

@@ -314,18 +314,20 @@ describe('reading the order report (ADR-409)', () => {
     expect(products.sql).toContain(
       'coalesce(sum(quantity) filter (where unit_price_minor is null or currency is null), 0)',
     );
+    // The priced subtotals are grouped into JSON once and joined; no subquery runs per product.
+    expect(products.sql).toContain(
+      "priced_json as ( select retailer_id, json_agg(json_build_object('currency', currency, 'lines', lines, 'subtotal', subtotal) order by currency) as priced from priced group by retailer_id )",
+    );
+    expect(products.sql).toContain(
+      "coalesce(j.priced, '[]'::json) as priced from listed p left join names n on n.retailer_id = p.retailer_id left join priced_json j on j.retailer_id = p.retailer_id order by p.quantity desc, p.retailer_id",
+    );
+    expect(products.sql.match(/\(select /g)).toBeNull();
+    expect(products.sql).toContain('(count(*) over ())::int as product_count');
   });
 
-  it('counts each line once: priced and unpriced are exact complements', () => {
-    // Every combination of a read price and a read currency is either priced or unpriced, never
-    // both and never neither, so the two always add up to the product's quantity.
-    const priced = (price: boolean, currency: boolean) => price && currency;
-    const unpriced = (price: boolean, currency: boolean) => !price || !currency;
-    for (const price of [true, false]) {
-      for (const currency of [true, false]) {
-        expect(priced(price, currency)).not.toBe(unpriced(price, currency));
-      }
-    }
+  it('writes the priced and unpriced line conditions as exact complements', () => {
+    // The SQL text of both conditions, so a change to one shows here: a line is priced only with
+    // both a price and a currency, and unpriced when either is missing.
     expect(query(sql`${PRICED_LINE}`).sql).toBe(
       'unit_price_minor is not null and currency is not null',
     );

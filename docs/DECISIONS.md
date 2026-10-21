@@ -17892,13 +17892,16 @@ Decision:
   one products statement that reads the period's visible items once (a CTE, by order id, which
   `commerce_order_items_position_uq (tenant_id, order_id, position)` leads with) and derives from
   that set the product totals, the names (`distinct on`, for the listed products only) and the
-  priced subtotals (listed products only). Both indexes exist since 0018, so no migration (no
+  priced subtotals (listed products only, grouped into JSON once and joined, not a subquery per
+  product). Both indexes exist since 0018, so no migration (no
   0322). No query plan was examined (no database here); the indexes say what the planner can use,
   not what it chooses.
 - **Days the database and the runtime disagree on:** a group PostgreSQL dates outside the
   period's days (possible only if its time zone data and Node's ICU data differ) is left out of
-  every figure, as Reports leave such rows out, and the page logs it (zone, day, count; RUNBOOKS
-  §10H) so the gap is not silent.
+  totals, days and statuses, as Reports leave such rows out, and the page logs it (zone, day,
+  count; RUNBOOKS §10H) so the gap is not silent. Known limit: the product figures still include
+  those orders, since the products statement is bounded by the period's instants rather than by
+  day labels; bounding it by labels would cost every page for a case this rare.
 - **Tables only**, as the Reports page has no charts.
 
 Not built: a CSV of the totals and the report through the public API (both would repeat the page's
@@ -17917,4 +17920,8 @@ tables lacked captions and row headers (added, as on Reports); a day outside the
 page (now left out and logged, as above, with a RUNBOOKS entry); and no case crossed a
 daylight-saving change (added for New York's on 1 November 2026). Nits: the day column is
 WhatsApp's time, the name is the latest order's that had one, and a line without a currency now
-counts as unpriced, so priced and unpriced lines always add up. All were fixed.
+counts as unpriced, so priced and unpriced lines always add up. All were fixed. A second review
+found one Medium issue: the priced subtotals were a correlated subquery per listed product, which
+PostgreSQL would run once per product over every line of the period; they are now grouped once and
+joined. A Low issue: the product figures still count orders a time zone skew drops from the days;
+the limit is now stated here and in RUNBOOKS.

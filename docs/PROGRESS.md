@@ -37,18 +37,25 @@ catalog, but totals per day or per product took an export and a spreadsheet. Thi
   page, with a RUNBOOKS §10H entry on time zone data skew; the day column described as WhatsApp's
   time and the name as the latest order's that had one; a line without a currency counts as
   unpriced, so priced and unpriced add up. New integration cases: product names, the priced
-  subtotals' visibility, a daylight-saving change.
+  subtotals' visibility, a daylight-saving change. Second review: the priced subtotals are grouped
+  into JSON once and joined instead of a correlated subquery per listed product (which would have
+  re-read every line once per product); the unit test asserts the join and that no subquery is
+  left. ADR-409 and RUNBOOKS §10H now say the product figures still include orders a time zone
+  skew drops from the days. The complement test keeps only its SQL-text assertions. Reports'
+  `RowHeader` is still copied in the page rather than shared (moving it would touch Reports).
 
 ### Tests
 
 - Unit (`commerce/order-report.test.ts`, 15 tests): aggregation into every day of the period, per
   status and currency, orders without a total and unreadable items apart, rows outside the period
-  left out of every figure and returned to log, a subtotal without a currency refused; exact major-unit text and display beyond 2^53 minor units (INR,
+  left out of the order figures and returned to log, a subtotal without a currency refused; exact major-unit text and display beyond 2^53 minor units (INR,
   USD, JPY, BHD); period bounds at Kolkata's midnight and the 92-day and "after today" refusals;
   both statements checked for the company, the period's bounds, the time zone, the visibility
   condition, the currency grouping, the numeric product, the single read of the items, the name
-  rule and the complementary priced and unpriced conditions. Deliberate regressions: 26 of 26 in
-  `order-report.ts` caught; 2 in the service (visibility not passed, period in UTC) survive the unit
+  rule, the complementary priced and unpriced conditions and the priced subtotals joined once.
+  Deliberate regressions: 26 of 26 in `order-report.ts` caught, and 4 of 4 for the second review
+  (a correlated subquery restored, the join dropped, the product count taken after the limit, the
+  unpriced condition changed); 2 in the service (visibility not passed, period in UTC) survive the unit
   tests, and the integration tests (CI only) are written to catch them. The page's log line is not
   tested.
 - Integration (CI only, `commerce.test.ts`, "order report (ADR-409)"): exact totals across
