@@ -8,7 +8,12 @@ import { AutomationEditor } from '@/components/automations/automation-editor';
 import { AutomationStatusActions, TestRunForm } from '@/components/automations/automation-actions';
 import { CopyField } from '@/components/growth/copy-field';
 import { PageHeader } from '@/components/page-header';
-import { AUTOMATION_STATUS, RUN_STATUS, TRIGGER_TYPE_LABELS } from '@/lib/automation-labels';
+import {
+  AUTOMATION_STATUS,
+  ENROLLMENT_STATUS,
+  RUN_STATUS,
+  TRIGGER_TYPE_LABELS,
+} from '@/lib/automation-labels';
 import { formatDateTime } from '@/lib/format';
 import { getRuntime } from '@/server/runtime';
 import { requireTenant } from '@/server/session';
@@ -24,7 +29,7 @@ export default async function AutomationPage({
   const { slug, automationId } = await params;
   const ctx = await requireTenant(slug);
   if (!can(ctx, 'automations.read')) notFound();
-  const { automations, config } = await getRuntime();
+  const { automations, automationEnrollments, config } = await getRuntime();
   let detail: Awaited<ReturnType<typeof automations.getAutomation>>;
   try {
     detail = await automations.getAutomation(ctx, automationId);
@@ -49,6 +54,13 @@ export default async function AutomationPage({
   // Started through the API (ADR-077): what an integration calls, once a version is published.
   const apiInputs = detail.draft.trigger?.type === 'api' ? detail.draft.trigger.inputs : null;
   const apiRuns = new URL(`/api/v1/automations/${detail.id}/runs`, config.APP_BASE_URL).toString();
+  // Members' enrolments (ADR-401): only while the live version is active and starts by a member or
+  // through the API, for members who may publish automations and read contacts.
+  const mayEnrol =
+    canPublish &&
+    can(ctx, 'contacts.read') &&
+    (await automationEnrollments.enrollableAutomations(ctx)).some((a) => a.id === detail.id);
+  const enrollments = await automationEnrollments.listEnrollments(ctx, detail.id);
   return (
     <>
       <PageHeader
@@ -149,6 +161,52 @@ export default async function AutomationPage({
                     })}'`,
                   ].join('\n')}
                 />
+              </CardContent>
+            </Card>
+          ) : null}
+          {mayEnrol || enrollments.length > 0 ? (
+            <Card>
+              <CardHeader>
+                <CardTitle>Enrol contacts</CardTitle>
+                <CardDescription>
+                  Start the live version for contacts you choose, or a saved segment, without
+                  waiting for them to write. Runs start in the background.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="grid gap-3">
+                {mayEnrol ? (
+                  <Link
+                    href={`${base}/enroll?automation=${detail.id}`}
+                    className="text-sm text-primary underline-offset-4 hover:underline"
+                  >
+                    Enrol contacts or a segment
+                  </Link>
+                ) : null}
+                {enrollments.length > 0 ? (
+                  <ul className="grid gap-2 text-sm">
+                    {enrollments.slice(0, 10).map((e) => {
+                      const es = ENROLLMENT_STATUS[e.status] ?? {
+                        label: e.status,
+                        tone: 'neutral' as const,
+                      };
+                      return (
+                        <li key={e.id} className="flex flex-wrap items-center gap-2">
+                          <Link
+                            href={`${base}/${detail.id}/enrollments/${e.id}`}
+                            className="text-primary underline-offset-4 hover:underline"
+                          >
+                            {formatDateTime(e.createdAt.toISOString(), tz)}
+                          </Link>
+                          <Badge tone={es.tone}>{es.label}</Badge>
+                          <span className="text-xs text-muted-foreground">
+                            {e.started.toLocaleString('en-IN')} of {e.total.toLocaleString('en-IN')}{' '}
+                            started
+                          </span>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                ) : null}
               </CardContent>
             </Card>
           ) : null}
@@ -269,7 +327,11 @@ export default async function AutomationPage({
                         </Link>
                         <Badge tone={rs.tone}>{rs.label}</Badge>
                         <span className="text-xs text-muted-foreground">
-                          {r.mode === 'test' ? 'Test' : (TRIGGER_TYPE_LABELS[r.triggerType] ?? '')}
+                          {r.mode === 'test'
+                            ? 'Test'
+                            : r.enrollmentId
+                              ? 'Enrolment'
+                              : (TRIGGER_TYPE_LABELS[r.triggerType] ?? '')}
                           {r.versionNumber ? ` · v${r.versionNumber}` : ''}
                         </span>
                       </li>

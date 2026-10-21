@@ -18,6 +18,14 @@ export const RUN_STATUS: Record<string, { label: string; tone: Tone }> = {
   failed: { label: 'Failed', tone: 'danger' },
 };
 
+/** An enrolment of contacts in an automation (ADR-401). */
+export const ENROLLMENT_STATUS: Record<string, { label: string; tone: Tone }> = {
+  running: { label: 'Running', tone: 'info' },
+  completed: { label: 'Completed', tone: 'success' },
+  stopped: { label: 'Stopped', tone: 'warning' },
+  failed: { label: 'Failed', tone: 'danger' },
+};
+
 export const END_REASONS: Record<string, string> = {
   end_node: 'Reached an End step.',
   no_next: 'Reached a step with nothing after it.',
@@ -72,6 +80,7 @@ export const STEP_DETAILS: Record<string, string> = {
   any_message: 'a customer message',
   test: 'a test started by a member',
   api: 'a call through the HyFib W360 API',
+  enrollment: 'an enrolment by a member',
   'store_event:order_placed': 'a new order in a store',
   'store_event:order_shipped': 'an order shipped by a store',
   'store_event:order_delivered': 'an order delivered',

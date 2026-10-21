@@ -124,6 +124,8 @@ export const automationRuns = appSchema.table('automation_runs', {
   }),
   /** The API key a run started through the API came from (migration 0052, ADR-077). */
   apiKeyId: uuid('api_key_id'),
+  /** The members' enrolment a run of an `api` automation came from (migration 0311, ADR-401). */
+  enrollmentId: uuid('enrollment_id'),
   startedByMembershipId: uuid('started_by_membership_id'),
   startedByUserId: text('started_by_user_id'),
   status: text('status', { enum: AUTOMATION_RUN_STATUSES }).notNull().default('running'),
@@ -258,4 +260,86 @@ export const automationHttpCalls = appSchema.table('automation_http_calls', {
   leaseUntil: tz('lease_until'),
   finishedAt: tz('finished_at'),
   createdAt: tz('created_at').notNull().defaultNow(),
+});
+
+/** What an enrolment started from (migration 0311, ADR-401). */
+export const AUTOMATION_ENROLLMENT_SOURCES = ['contacts', 'segment'] as const;
+export type AutomationEnrollmentSource = (typeof AUTOMATION_ENROLLMENT_SOURCES)[number];
+
+export const AUTOMATION_ENROLLMENT_STATUSES = [
+  'running',
+  'completed',
+  'stopped',
+  'failed',
+] as const;
+export type AutomationEnrollmentStatus = (typeof AUTOMATION_ENROLLMENT_STATUSES)[number];
+
+/** Why an enrolment stopped before every contact was handled (the table's CHECK lists the same). */
+export const AUTOMATION_ENROLLMENT_END_REASONS = [
+  'stopped_by_member',
+  'member_removed',
+  'automation_paused',
+  'automation_unavailable',
+  'channel_unavailable',
+  'not_in_plan',
+  'inputs_changed',
+  'marketing_not_allowed',
+  /** Failed: its batch made no progress after the sweep signalled it 3 times. */
+  'stalled',
+] as const;
+export type AutomationEnrollmentEndReason = (typeof AUTOMATION_ENROLLMENT_END_REASONS)[number];
+
+/**
+ * Members' enrolments of contacts or a segment in an automation started by a member or through the
+ * API (migration 0311, ADR-401): who, which automation, whom, the inputs (cleared at the end), the
+ * counts and the position of the last contact handled.
+ */
+export const automationEnrollments = appSchema.table('automation_enrollments', {
+  id: uuid('id').primaryKey(),
+  tenantId: uuid('tenant_id').notNull(),
+  automationId: uuid('automation_id').notNull(),
+  source: text('source', { enum: AUTOMATION_ENROLLMENT_SOURCES }).notNull(),
+  segmentId: uuid('segment_id'),
+  inputs: jsonb('inputs')
+    .notNull()
+    .default(sql`'{}'::jsonb`)
+    .$type<Record<string, string>>(),
+  status: text('status', { enum: AUTOMATION_ENROLLMENT_STATUSES }).notNull().default('running'),
+  endReason: text('end_reason', { enum: AUTOMATION_ENROLLMENT_END_REASONS }),
+  total: integer('total').notNull(),
+  startedCount: integer('started_count').notNull().default(0),
+  refusedCount: integer('refused_count').notNull().default(0),
+  cancelledCount: integer('cancelled_count').notNull().default(0),
+  cursorPosition: integer('cursor_position').notNull().default(0),
+  /** When the next batch is due (paced by the number's send rate); null once ended. */
+  nextBatchAt: tz('next_batch_at'),
+  /** Sweep signals since the last batch handled (ADR-401); at 3 the next sweep fails it. */
+  resignalCount: smallint('resignal_count').notNull().default(0),
+  createdByMembershipId: uuid('created_by_membership_id').notNull(),
+  createdByUserId: text('created_by_user_id').notNull(),
+  stoppedByMembershipId: uuid('stopped_by_membership_id'),
+  createdAt: tz('created_at').notNull().defaultNow(),
+  updatedAt: tz('updated_at').notNull().defaultNow(),
+  endedAt: tz('ended_at'),
+});
+
+export const AUTOMATION_ENROLLMENT_OUTCOMES = [
+  'pending',
+  'started',
+  'refused',
+  'cancelled',
+] as const;
+export type AutomationEnrollmentOutcome = (typeof AUTOMATION_ENROLLMENT_OUTCOMES)[number];
+
+/** Each enrolled contact, in snapshot order, with its outcome (migration 0311, ADR-401). */
+export const automationEnrollmentContacts = appSchema.table('automation_enrollment_contacts', {
+  id: uuid('id').primaryKey(),
+  tenantId: uuid('tenant_id').notNull(),
+  enrollmentId: uuid('enrollment_id').notNull(),
+  position: integer('position').notNull(),
+  contactId: uuid('contact_id'),
+  outcome: text('outcome', { enum: AUTOMATION_ENROLLMENT_OUTCOMES }).notNull().default('pending'),
+  reason: text('reason'),
+  runId: uuid('run_id'),
+  processedAt: tz('processed_at'),
 });

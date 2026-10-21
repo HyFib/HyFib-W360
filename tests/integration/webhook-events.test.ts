@@ -2672,6 +2672,7 @@ describe('automation run events (ADR-078)', () => {
         automationName: 'Brochure',
         trigger: 'keyword',
         apiKeyId: null,
+        enrollmentId: null,
         status: 'running',
         endReason: null,
         startedAt: run.started_at.toISOString(),

@@ -29,6 +29,279 @@ Windows. vite reaches the repository only as a development dependency of vitest 
 | `pnpm build`                                       | passed                                                                                                                                                                                                                             |
 | `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them                                                                                                                                                                    |
 
+## 2026-10-16 — Refreshing each active WhatsApp number's facts from Meta daily (P2-10, ADR-402)
+
+Status: **Implemented (migration 0313); unit tests run locally, integration and e2e tests in CI
+only; no live Meta traffic.** A number's quality rating, messaging limit and other facts from Meta
+were read only at the end of its setup, so numbers active before migration 0309 never got a limit
+and every number's facts went stale. This closes P2-10's "refresh of a number's facts outside its
+setup".
+
+### Completed
+
+- **One shared read (`messaging/number-facts.ts`):** `readNumberFacts` (the read with the limit
+  field and ADR-398's field-less read after a permanent or lost-access refusal, paced by ADR-399)
+  and `numberFactsColumns` (what a completed read stores) are factored out of setup's health step,
+  which now calls them; its behaviour and ADR-398's tests are unchanged.
+- **Daily refresh, no new schedule:** the access-check job calls `checkAccessAndRefreshNumbers`;
+  only after a `healthy` outcome it refreshes the account's active numbers last read 20 hours ago
+  or more, or never with the limit (`refreshNumberFacts`, stalest first, no read started after 40
+  seconds of the job). Each write re-reads that the number is still active and its account
+  connected and setup has not read it since, in the company's scope. No definer function, no new
+  queue; migration 0313 adds `channel_accounts.facts_attempted_at`, so a number is tried at most
+  once in 20 hours whatever the outcome.
+- **Failures:** a failed read stores only its attempt, changes no status (an `auth` refusal does
+  not ask for a reconnect; the access check decides that) and is logged; the number is tried again
+  20 hours later. A number whose read cannot be stored is its own `store_failed` result and the
+  others go on, unless its attempt cannot be recorded either (the database out of reach): the
+  refresh then stops and the rest are left for the next check. Errors are logged through the `err` serializer (no query values). An error of the
+  refresh is logged as an error without failing the job or changing the access outcome. A paused
+  account is asked nothing; a pause during the refresh stops it.
+- **Bounded facts:** `getPhoneNumber` keeps each fact within its column (name 200, quality 32,
+  statuses 64, clipped; a display number over 32 not kept), for setup too, which now completes
+  where an over-long value used to fail it. A refresh keeps a stored name, display number or status
+  Meta left out (never a quality rating or limit), and Channels' note says so.
+- **Audit:** nothing for a routine refresh; `channel.messaging_limit_refused` (ADR-398's metadata)
+  only when a refusal changes Channels from a limit, or from never asked, to "not reported".
+- **Web:** Channels says under its numbers that HyFib reads each active number's facts about once a
+  day with the account's access check, and that "Checked" is the last read (`NUMBER_FACTS_NOTE`).
+- **Tests:** unit (`messaging/number-facts.test.ts`, 22 tests: the bounded parse, the attempt in
+  the due rule, partial answers, one number's store failure not stopping the others, a newer setup
+  read kept, and the shared read's single read, the
+  second read after permanent and auth refusals, the second read's failure, no second read for
+  retryable, unknown or after a pause, the stored columns, the due rule and its boundary, the audit
+  rule, the refresh of due numbers stalest first, accounts not connected, an active pause, a failed
+  read going on with the next number and touching no account, a pause met mid-refresh, the time
+  budget, races with a disconnection or a lost access, a refusal audited only when Channels
+  changes; `messaging/number-facts-job.test.ts`, 3 tests with the access check stubbed: no refresh
+  and no read after `lost`, `not_checked`, `skipped` or `paused`, a refresh after `healthy`, and a
+  refresh's error returned with the stored outcome); the 12 tests of `messaging-limit.test.ts`
+  (ADR-398, setup's health step among them) still pass unchanged. Integration
+  (`number-facts.test.ts`, 6
+  tests against the Graph stand-in, which now gives per-number quality ratings and per-number read
+  errors: only the account's active numbers refreshed and no other company's, Channels' wording
+  and time, no re-read within 20 hours and a re-read the next day; a number set up before ADR-398
+  given its limit at once; a refused field stored as none after the field-less read and audited
+  once, code 10 marking nothing for reconnecting; an auth and a rate-limit failure changing no
+  status nor the access outcome, not read again the same day and read again the next; an
+  over-long name stored clipped beside another number's facts; a paused account, before or during
+  the check, asked nothing). e2e (`whatsapp-access.spec.ts`: the note on Channels). Written for
+  CI; the integration and e2e tests were not run here.
+- **Mutation checks:** 30 deliberate regressions: the first 13 (no second read on auth, the second
+  read asking for the limit, the first failure given instead of the second, `>=` to `>` in the due
+  rule, the never-asked clause dropped, the audit made unconditional, the pause check, the time
+  budget and the due filter dropped, the write ignoring the number's or the account's status, the
+  limit's check time not stored, the refresh of an account not connected) and 14 after the review
+  (a store error escaping the loop, no attempt after a store error or a failed read, the due rule
+  ignoring the attempt, no attempt stored with the facts, omitted facts written as null, an old
+  limit kept, a newer setup read overwritten, a refresh after any outcome, a refresh's error
+  thrown, the display number unbounded or clipped, the name unbounded, a wrong status bound) and 3
+  after the second review (no stop when an attempt cannot be recorded, Meta's failure relabelled
+  when its attempt fails, the quality rating kept): 30 caught by the unit tests, each file
+  restored exactly.
+- **Review fixes (no High finding):** one number's unstorable read no longer holds back the
+  others (bounded parse, per-number `store_failed`); the job's gating and catch path are tested;
+  errors are logged through the `err` serializer; failing numbers are tried once a day (0313); the
+  e2e "Checked" step that passed because of its fixture is dropped; a partial answer keeps stored
+  facts; a setup finishing during a refresh's read keeps its newer read. Second review (no High or
+  Medium): the refresh stops once an attempt cannot be recorded; the quality rating is never kept
+  and the note says which facts may be earlier; 0313's grant is asserted; Meta's failure is kept
+  when its attempt fails; wording fixed.
+- **Docs:** ADR-402; ARCHITECTURE, RUNBOOKS (how often facts refresh, what "Checked" means, the log
+  lines), DEPLOYMENT (0313), BACKLOG P2-10, the matrix's W-030. No threat-model row (no new data
+  beyond an attempt time, no new role or provider; the same read in the same scope, once a day)
+  and no research row (nothing new verified).
+- **Not built:** an on-demand refresh, processing `phone_number_quality_update`, reading the limit
+  from the WABA; which node gives the limit is still to check on a real number (META-SETUP).
+
+### Test commands and results (local, 2026-10-16)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 178 files, 1,912 tests passed                                   |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed (after the review fixes)                                 |
+
+## 2026-10-16 — Members enrol contacts or a segment in an automation (P4-01, ADR-401)
+
+Status: **Implemented; its database and browser tests run in CI only.** P4-01's Remaining listed
+"enrolling contacts or segments in a sequence without a customer message or order event": runs
+started only from customer messages, store events, members' tests and the public API.
+
+### Completed
+
+- **Which automations:** published, active automations whose live version uses the `api` trigger,
+  renamed "A member's enrolment, or a call from your systems through the HyFib W360 API" (described
+  as "Started by a member or through the API"); no new trigger type, so its inputs, its one-number
+  rule and its templates-before-a-reply rule apply unchanged.
+- **Shared start steps (`automations/starts.ts`):** the API's four steps (ADR-161) moved out of
+  `api/automations.ts`: `loadStartableAutomation`, `startInputVariables`,
+  `automationSendsMarketing` with `activeStartChannel`, and `startRunForContact` (erasure,
+  suppression and opt-outs, the conversation, the hourly limit, the plan's runs, then the run). A
+  start's starter is a key (audited per run, `api_key_id`) or an enrolment (`enrollment_id`, audited
+  once per enrolment); refusals carry their code (`details.startRefusal`), the API's answers are
+  unchanged. Enrolments of automations that send marketing templates also check marketing consent
+  when each run starts.
+- **Enrolments (`automations/enrollments.ts`, `automations/enrollment-model.ts`):** members with
+  `automations.publish` and `contacts.read` (`campaigns.read` for a segment, `campaigns.send` for a
+  marketing automation) enrol the contacts the Contacts page's filters match
+  (`contactFilterConditions`, now exported from the contacts service) or a saved segment's members
+  (`segmentWhere`), at most 10,000, with the count they saw and the inputs once (validated as the
+  API validates them). The snapshot, the audit entry and the first signed `automation.enroll` job
+  are written in one transaction; one running enrolment per automation. Each job, under the
+  enrolment's row lock, re-checks the member and the automation, starts the next 50 pending
+  contacts, each in a savepoint, records each outcome (started with its run, or refused with its
+  reason), the counts and the position, and queues the next batch in the same transaction. Ends:
+  completed, or stopped by a member, by the member leaving or losing the permission, by the
+  automation paused or archived, its number inactive, its inputs changed, or a plan without
+  automations; the contacts not handled are recorded as not started and the inputs cleared. Stop
+  leaves started runs going.
+- **Worker (`apps/worker/src/handlers/automations.ts`):** `automation.enroll` (exclusive, five
+  retries, dead letters); a suspended company's job is queued again five minutes later, a job whose
+  member left ends the enrolment.
+- **Migration 0311 (`0311_automation_enrollments.sql`):** the two tables (forced row security,
+  composite foreign keys, select/insert and column-limited updates for the runtime role, no delete,
+  deletion steps 685 and 692 with the definer role's policies), `automation_runs.enrollment_id`
+  with its foreign key, the check `automation_runs_api_key` replaced (a key or an enrolment, exactly
+  one, on an `api` run; `NOT VALID`, as is the foreign key) and the run guard keeping the new column
+  fixed. Exported with the company (`export-spec.ts`).
+- **Web:** Automations → Enrol contacts (choose the automation and whom, count, give the inputs,
+  confirm with `ClientForm`); an automation's page lists its enrolments and links to it; the
+  Contacts page links its filters to it; an enrolment's page shows its counts, refusals by reason,
+  end and Stop (`ClientButton` in a `ConfirmDialog`), re-rendering every 15 seconds while it runs;
+  run pages and lists name the enrolment. Pages re-check permissions; logic stays in the services.
+- **Webhooks:** enrolled runs reach `automation.run_started`/`run_ended` as before, with trigger
+  `api` and `apiKeyId: null` (descriptions updated).
+- **Tests:** unit (`automations/enrollments.test.ts`, 45 tests after the reviews' fixes: bounds,
+  the schema, the count check, the inputs, refusal codes, job keys, the refusal summary, the batch
+  logic (50 in order, refusals, the plan ending it, other errors thrown), and against a recording
+  database a batch (runs naming the enrolment, outcomes, next job and position, the cursor, every
+  refusal, the plan's runs, marketing consent, each way it ends, ended and missing enrolments, an
+  unexpected error), a start (the snapshot, the audit without inputs, the first job, a segment,
+  permissions, inputs, counts, the second running enrolment) and a stop; `api-trigger.test.ts`
+  updated); integration (`tests/integration/automation-enrollments.test.ts`, 19 tests (9 added by
+  the reviews' fixes): the snapshot and batches of 50 with the run's records and audit, a segment
+  and the webhook event, each refusal with its reason, the plan's runs and a plan without
+  automations, a crash mid-batch and two jobs at once without a second run, stop, who may, ends
+  mid-way (paused, demoted member, removed member), isolation between companies, the grants, row
+  security, deletion steps and the run's check and guard); e2e (`automations.spec.ts`: an enrolment
+  from the Contacts page's filters to its completed page and the run naming it). Written for CI; the
+  integration and e2e tests were not run here.
+- **Mutation checks:** 23 deliberate regressions (the batch bound, the plan ending a batch, unknown
+  errors recorded as refusals, the count check, the limit, an empty enrolment, the member's
+  permission, the cursor, the last batch, marketing consent, inputs kept, the marketing
+  permission, the first job's key, stopping an ended enrolment, an ended enrolment processed,
+  changed inputs, the no-number check, `contacts.read`, the run's enrolment, per-run audit, the
+  hourly limit, an assigned conversation, the start step's detail): 23 caught by the unit tests,
+  each file restored.
+- **Docs:** ADR-401; ARCHITECTURE (worker, §6E), SECURITY (rules and grants), THREAT-MODEL T353,
+  DATA-RETENTION, DEPLOYMENT (migration 0311), RUNBOOKS (§10D), BACKLOG P4-01 and the matrix's
+  H-053.
+- **Review fixes (no High finding; second commit):**
+  - **M1, enrolments stuck running after a dead letter:** `next_batch_at` records when the next
+    batch is due; the minute sweep (`signalDueEnrollments`) reads `ops.automation_enrollments_due`
+    (SECURITY DEFINER, pinned search path, runtime role only, a definer policy for running rows) and
+    signals each enrolment more than 10 minutes overdue under its batch's own key; the page says "No
+    progress since …" (`stalledSince`). Integration test: a dead-lettered batch is due, a second
+    sweep collapses into the first signal, three jobs at once start each contact once, a suspended
+    company's enrolment is left out; unit tests of the due list, its keys and the stall bound.
+  - **M2, webhook trigger filters:** run payloads (`run_started`, `run_ended`, `run_step`) carry
+    `run.enrollmentId`; the `runTriggers` descriptions (API and Settings label "API or a member's
+    enrolment"), the payload's and ADR-401 say an `api` filter receives enrolled runs.
+  - **M3, pacing:** the next batch's job starts after `enrollmentBatchDelayMs` (runs started at
+    `META_SEND_RATE_PER_SECOND`, the worker's send rate); the messaging limit's remaining risk is in
+    ADR-401 and RUNBOOKS. Unit tests of the delay and the job's `startAfter`; an integration test
+    of the queued job's delay and `next_batch_at`.
+  - **L1:** migration 0312 validates 0311's check and foreign key; **L2:** the DEPLOYMENT note moved
+    out of 0309's; **L3:** integration tests of marketing consent at run start, the job's
+    authorisation (authorised, deferred while suspended, another kind refused, `actor_not_member`
+    and its clean-up) and `contact_gone` through `app.merge_contacts` (with `no_number`);
+    `marketing_not_allowed` cannot be reached with today's roles, so it has no test; **L4:** a
+    partial index `automation_runs (tenant_id, enrollment_id)`, built concurrently by migration 0314
+    (as 0053; not inside 0311, which holds the runs table's exclusive lock), with a test that the
+    foreign key's generic plan uses it; **L5:** the enrolment takes `contactFilterSchema`.
+  - Nits: the inputs' refusal is caught only as `validation_failed`, the counts come from
+    `RETURNING`, the browser's requests clear `busy` on failure, the migration's comment is fixed.
+  - Mutation checks: 33 deliberate regressions (the 23 above, the pacing delay, the stall bound,
+    the delayed job, the stored, cleared and initial `next_batch_at`, counts not from `RETURNING`,
+    the sweep's key, the run step's `enrollmentId`, and any error read as changed inputs): 32
+    caught; the last cannot be observed, as `startInputVariables` throws only validation errors.
+- **Second review fixes (no High finding; third and fourth commits):**
+  - L4 of the first review: the partial index moved out of 0311 into migration 0314, built
+    concurrently outside a transaction (as 0053), with its recovery in RUNBOOKS and DEPLOYMENT.
+  - **M1, pacing bypassed:** under the row lock a job more than a second before `next_batch_at`
+    returns `not_due` and does nothing; the deferral (`deferEnrollment`) moves `next_batch_at` to
+    its time. The pace is documented as per enrolment only. Unit tests (early chain, due within the
+    slack, deferral) and integration tests (an early job, a deferred enrolment not due).
+  - **L1:** no stall notice while the company is suspended (integration test).
+  - **L2:** the integration tests read the due list through `dueAmong`, with every other company's
+    running enrolments made not due in a rolled-back transaction, and handle only their own
+    enrolments (`resignalEnrollment`).
+  - **L3:** unit test that built `run_started` and `run_ended` payloads carry `run.enrollmentId`.
+  - **L4, endless dead letters:** `resignal_count` (0311) counts sweep signals without a batch
+    handled; after three the next sweep ends the enrolment as `failed` (`stalled`), audited once,
+    pending contacts cancelled, started runs untouched; each sweep write runs in the company's scope
+    under the row lock. Unit and integration tests.
+  - **L5:** the enrolment sweep runs after retention, each enrolment on its own, errors logged at
+    error level with the error; the rest of the sweep is not held up.
+  - Nits: `REVOKE EXECUTE ... FROM PUBLIC` on the due list; the stall bound is "10 minutes or more"
+    in SQL and code alike. The ADR-401 heading, dropped by the 0314 commit's doc edit, is restored.
+  - Mutation checks: 45 deliberate regressions (the 33 above, an early job let through, the due
+    slack, the count not reset, the cap off by one, a moved cursor ignored, the signal not counted
+    or not made due, `stalled` not failed, the deferral not moving the next batch, the stall shown
+    while suspended, one sweep error stopping the rest, and the start and end payloads'
+    `enrollmentId`): 44 caught; the miss is the unobservable one above.
+- **Third review fixes (fifth commit):**
+  - **M1, mixed clocks:** `next_batch_at` was set and compared by the worker's clock while pg-boss
+    starts jobs by the database's, so a worker ahead by more than a second stalled an enrolment
+    until the sweep and one behind skipped its pace. The batch, the start, the deferral, the sweep's
+    signal and the stall notice now read the database's `now()` (the transaction's start, which is
+    pg-boss's `job_now()` for a job queued in the same transaction), and jobs are queued with
+    `startAfter` in seconds; `deferEnrollment` takes a delay. ADR-401 says why `now()` and not
+    `clock_timestamp()`, and that a `not_due` job can now only be an early duplicate. Unit tests
+    with worker clocks an hour ahead and behind (a due batch runs, an early one does not, the next
+    job's delay is relative, the sweep and the stall notice judge by the database); integration
+    tests that the waiting job's `start_after` equals `next_batch_at` (paced, deferred, and on
+    skewed worker clocks).
+  - L1 (informational): `dueAmong` is left as it is. Nit: the runbook's query for 0312 also finds
+    runs naming an enrolment that does not exist.
+  - Mutation checks: 50 deliberate regressions (the 45 above, and the batch's due check, the next
+    job's start as an instant, the sweep's signal, the stall notice and the deferral each by the
+    worker's clock): 49 caught; the miss is the unobservable one above.
+- **Not built:** enrolling through the public API, scheduling an enrolment or a rate of its own,
+  pacing shared across enrolments and campaigns of one number, stopping an enrolment's runs at
+  once, choosing contacts one by one.
+- **CI's first run (PR #104, 2026-10-21):** 6 of `automation-enrollments.test.ts`'s integration
+  tests failed on PostgreSQL 17 and 18; every other file passed. One was a defect: the enrolment
+  page's "No progress since" (`stalledSince`) came back as the driver's text, not a date, and is
+  now mapped as its column is. The rest were the tests':
+  - `drain` ran each next batch at once, which the pacing leaves not yet due; it now makes each
+    batch due first, as its job's wait would (the pacing has tests of its own);
+  - an exact batch result left out `nextBatchAt`;
+  - two audit queries ordered by a `created_at` the table does not have (it is `occurred_at`);
+  - the skewed-clock test measured the next batch from a later `now()` instead of the batch's own
+    time.
+
+  The end-to-end run then failed two steps, both the tests', on WebKit and again on retry:
+  `getByLabel('Whom')` also matched the enrol page's form, whose label ends "and whom" (now exact),
+  and `webhook-events.spec.ts` still named the api trigger's checkbox by its old label, "API (api)".
+  The next run failed one more step on Chromium and mobile Chromium: the test typed the
+  automation's name before the Automations page had replaced the contact page, whose own "Name"
+  field took it, so "Create draft" stayed disabled; it now waits for the Automations page first.
+  The run after that failed on mobile Chromium only: a loose `getByText('Enrolment')` found hidden
+  text first (the trigger list's options); it now matches the runs list's "Enrolment · v1".
+
+### Test commands and results (local, 2026-10-16)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 177 files, 1,930 tests passed (after both reviews' fixes)       |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| Migrations 0311, 0312 and 0314 parsed with pglast  | 29, 2 and 1 statements (not applied to a database)              |
+| `pnpm build`                                       | passed                                                          |
+
 ## 2026-10-16 — A campaign's notice of its number's messaging limit (P3-04, ADR-400)
 
 Status: **Implemented; its database and browser tests run in CI only.** "Messaging-tier awareness

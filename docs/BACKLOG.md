@@ -69,7 +69,13 @@ verification, app review, Embedded Signup configuration).
   reports them, an unlisted value as unknown and none as not reported; the health read again
   without it when Graph refuses the field on the phone number, whatever the code). Remaining:
   checking on a real number which node gives the field (META-SETUP), reading it from the WABA
-  should the number not give it, and a refresh of a number's facts outside its setup.
+  should the number not give it. **[A daily refresh of each active number's facts; its database
+  and browser tests run only in CI]** (ADR-402, migration 0313: after the daily access check finds
+  Meta still admits an account's token, the same job reads each of its active numbers due one
+  with the setup's health read and fallback, stalest first within 40 seconds, and stores its
+  quality rating, messaging limit and other facts, bounded to their columns; a failed read changes
+  no status and the number is tried again 20 hours after the attempt; one number's failure never
+  holds back the others; nothing while Meta is limiting the account's management requests).
 - **P2-11 Platform quarantine view** — done with P5-10 (ADR-054): the operations console's
   Integrations page lists quarantined webhooks without their content and platform administrators
   resolve them, or retry their receipts, with a reason in the platform audit log.
@@ -244,9 +250,15 @@ verification, app review, Embedded Signup configuration).
   P5-08 (ADR-077). **[Products steps built; their database and browser tests run only in CI]**
   (ADR-383, migration 0299: a step sends one product, a list of products or the catalog of a
   connected catalog, as the inbox sends them, while the plan includes commerce; webhook endpoints
-  can choose its steps). **Remaining:** starting runs from campaigns, enrolling contacts or segments in a sequence without a customer message or order event,
-  a drag-and-drop canvas (ADR-034), usage billing for automation steps, a real sandbox run (release
-  checklist).
+  can choose its steps). **[Enrolling contacts or a segment built; their database and browser
+  tests run only in CI]** (ADR-401, migration 0311: members who may publish automations enrol the
+  contacts the Contacts page's filters match, or a saved segment, at most 10,000, in an active
+  automation started by a member or through the API, with its inputs given once; a signed
+  `automation.enroll` job starts them 50 per transaction with the API's start steps, each refusal
+  recorded with its reason, resumable without a second run; one running enrolment per automation;
+  stop leaves started runs going). **Remaining:** starting runs from campaigns, enrolling through
+  the public API, a drag-and-drop canvas (ADR-034), usage billing for automation steps, a real
+  sandbox run (release checklist).
 - **P4-02 HTTP node + egress guard** — _implemented and locally verified (2026-09-27) against a
   local target server only_: "Call a web address" steps (method, address with URL-encoded
   placeholders, headers, JSON body, values saved from the response, success and failure branches);

@@ -82,9 +82,11 @@ describe('the API trigger (ADR-077)', () => {
       expect(matchTrigger(parsed.trigger, message)).toBeNull();
     }
     expect(describeTrigger(parsed.trigger)).toBe(
-      'Started through the API with “appointment_time”, “doctor”',
+      'Started by a member or through the API with “appointment_time”, “doctor”',
     );
-    expect(describeTrigger({ type: 'api', inputs: [] })).toBe('Started through the API');
+    expect(describeTrigger({ type: 'api', inputs: [] })).toBe(
+      'Started by a member or through the API',
+    );
   });
 
   it('refuses input names that are not answer-like, and more inputs than allowed', () => {

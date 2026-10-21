@@ -7,6 +7,7 @@ import {
   asc,
   automationRunSteps,
   automationHttpCalls,
+  automationEnrollments,
   automationRuns,
   automationVersions,
   automations,
@@ -270,6 +271,8 @@ export interface RunSummary {
   status: string;
   endReason: string | null;
   triggerType: string;
+  /** The members' enrolment that started the run (ADR-401), or null. */
+  enrollmentId: string | null;
   startedAt: string;
   endedAt: string | null;
   steps: number;
@@ -291,6 +294,8 @@ export interface RunDetail extends RunSummary {
   storeEvent: string | null;
   /** The name of the API key that started the run (runs started through the API). */
   apiKeyName: string | null;
+  /** The member whose enrolment started the run (ADR-401); null for other runs. */
+  enrolledByName: string | null;
   /** The order the run reads (members with `commerce.read`; null when none or gone). */
   order: { id: string; name: string; storeName: string } | null;
   graph: AutomationGraph | null;
@@ -1683,6 +1688,7 @@ export function createAutomationService(deps: AutomationServiceDeps) {
               status: r.run.status,
               endReason: r.run.endReason,
               triggerType: r.run.triggerType,
+              enrollmentId: r.run.enrollmentId,
               startedAt: r.run.startedAt.toISOString(),
               endedAt: r.run.endedAt?.toISOString() ?? null,
               steps: r.run.stepCount,
@@ -1802,8 +1808,16 @@ export function createAutomationService(deps: AutomationServiceDeps) {
               graph: automationVersions.graph,
               assigned: conversations.assignedMembershipId,
               apiKeyName: apiKeys.name,
+              enrolledBy: automationEnrollments.createdByMembershipId,
             })
             .from(automationRuns)
+            .leftJoin(
+              automationEnrollments,
+              and(
+                eq(automationEnrollments.tenantId, automationRuns.tenantId),
+                eq(automationEnrollments.id, automationRuns.enrollmentId),
+              ),
+            )
             .leftJoin(
               apiKeys,
               and(
@@ -1834,9 +1848,11 @@ export function createAutomationService(deps: AutomationServiceDeps) {
             )
             .where(and(eq(automationRuns.tenantId, ctx.tenant.id), eq(automationRuns.id, runId)));
           if (!r) throw notFound('Run');
-          const memberIds = [r.run.endedByMembershipId, r.run.startedByMembershipId].filter(
-            (x): x is string => x !== null,
-          );
+          const memberIds = [
+            r.run.endedByMembershipId,
+            r.run.startedByMembershipId,
+            r.enrolledBy,
+          ].filter((x): x is string => x !== null);
           const names =
             memberIds.length > 0
               ? await tx
@@ -1917,6 +1933,7 @@ export function createAutomationService(deps: AutomationServiceDeps) {
             status: r.run.status,
             endReason: r.run.endReason,
             triggerType: r.run.triggerType,
+            enrollmentId: r.run.enrollmentId,
             startedAt: r.run.startedAt.toISOString(),
             endedAt: r.run.endedAt?.toISOString() ?? null,
             steps: r.run.stepCount,
@@ -1931,6 +1948,7 @@ export function createAutomationService(deps: AutomationServiceDeps) {
             startedByName: nameOf(r.run.startedByMembershipId),
             storeEvent: r.run.storeEvent,
             apiKeyName: r.apiKeyName,
+            enrolledByName: nameOf(r.enrolledBy),
             order: order ?? null,
             graph: graph.ok ? graph.graph : null,
             variables: visible ? r.run.variables : null,

@@ -165,7 +165,9 @@ export default async function AutomationRunsPage({
                         ) : null}
                       </TD>
                       <TD className="text-sm">
-                        {TRIGGER_TYPE_LABELS[r.triggerType] ?? r.triggerType}
+                        {r.enrollmentId
+                          ? 'Enrolment'
+                          : (TRIGGER_TYPE_LABELS[r.triggerType] ?? r.triggerType)}
                       </TD>
                       <TD className="text-sm">
                         {r.steps}

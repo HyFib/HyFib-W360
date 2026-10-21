@@ -25,9 +25,10 @@ specified here but not yet implemented.
   endpoints through the egress guard while WhatsApp waits, section 6H). Node.js runtime only.
   **[built]**
 - **worker** processes durable jobs: email delivery, webhook processing, outbound sends, campaign
-  ticks, automation runs, flow operations at Meta and flow keys, billing events, auto-recharge,
-  catalog reads and Payment Links, reads from companies' Shopify and WooCommerce stores (section 6J),
-  order messages (section 6K) and the minute sweepers. **[built]**
+  ticks, automation runs and members' enrolments (section 6E), flow operations at Meta and flow
+  keys, billing events, auto-recharge, catalog reads and Payment Links, reads from companies'
+  Shopify and WooCommerce stores (section 6J), order messages (section 6K) and the minute sweepers.
+  **[built]**
 - **PostgreSQL** is the system of record, the job queue (pg-boss) and the durable event log. There is
   no Redis, Kafka or search cluster (ADR-015).
 
@@ -245,6 +246,22 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   worded by `messagingLimitText` (ADR-398: a tier by the unique customers research M-058 says it
   allows, `TIER_50` and `UNTIERED` as Meta reports them, an unlisted value as unknown, none as not
   reported, nothing for a number never asked), which Settings → Channels shows.
+- **Number facts refresh (ADR-402):** the access-check job, once its outcome is `healthy`
+  (`checkAccessAndRefreshNumbers`), refreshes the account's active numbers due one
+  (`refreshNumberFacts`: last read 20 hours ago or more, or never with the limit; stalest first;
+  no read started after 40 seconds of the job, which expires at 120). Each is read with
+  `readNumberFacts`, the function the setup's health step uses (the limit field, and once more
+  without it after a permanent or lost-access refusal; `getPhoneNumber` bounds each fact to its
+  column), through the job's paced calls, and stored with `refreshedFactsColumns` (a name, display
+  number or status Meta left out keeps its stored value; the quality rating and limit never do) in the company's scope after re-reading that
+  the number is still active, its account connected and setup has not read it since. Every read
+  records `channel_accounts.facts_attempted_at` (0313), so a number is tried at most once in 20
+  hours whatever the outcome. A failed read stores nothing else and never changes a status; a
+  number whose read cannot be stored is its own `store_failed` result and the others go on, unless
+  its attempt cannot be recorded either (the refresh then stops); a
+  refusal of the limit is audited only when it changes what Channels shows; an error of the refresh
+  is logged through the `err` serializer without failing the job. No new due list or definer
+  function: the access check's daily cadence and its pause handling apply.
 - **Management usage (ADR-399):** the Graph client parses Meta's `x-business-use-case-usage` header
   on every response (`messaging/usage-header.ts`, bounded, never changing a call's classification)
   and gives each WABA's `whatsapp_business_management` percentages and minutes to regain access as
@@ -667,23 +684,24 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
 - **Model** (`packages/domain/src/automations/graph.ts`, browser-safe): a trigger (a message is or
   contains a keyword; a customer starts a conversation; any customer message; optionally only while
   the business is open or closed; a cooldown per conversation; started by a store's order messages,
-  §6M; or started through the API with the inputs it declares, §6N) and a graph of typed steps: send a message, ask with reply buttons (Meta's limits:
-  1–3 buttons, titles ≤ 20, body ≤ 1024, header and footer ≤ 60; research M-157/M-159), ask a
-  question (any text, a number or an email; retries; answer saved under a name), send a template and
-  ask with a template (an approved utility or marketing template with its variables as texts; the
-  asking step branches on each quick-reply button, any other reply and no reply; ADR-050), condition
-  (answers, contact fields, tags, business hours), update contact (tags, custom fields), wait
-  (≤ 24 h), hand off to people (a team, or routed like a new case), end. Texts may use `{{name}}`,
-  `{{company}}`, `{{answer.<name>}}`, in automations started by order messages
-  `{{order.<field>}}`, and in automations started through the API `{{input.<name>}}`. `checkGraph`
-  rejects missing targets, unsaved answers, unknown or misplaced
-  placeholders, missing teams or fields, loops that never pass through a question or a wait, empty
-  template variables, templates HyFib cannot send or whose variables, buttons or account no longer
-  match (checked against the company's synced templates), and, in automations started by order
-  messages or through the API, a message or question that some path reaches before the customer
-  replied; an automation started through the API must be limited to one number (`triggerIssues`). A wait or a
-  question timeout over 23 hours warns only when a message that is not a template can follow it
-  before a reply (templates need no window, so a run can follow up a day or more later).
+  §6M; or started by a member's enrolment or through the API with the inputs it declares, §6N) and a
+  graph of typed steps: send a message, ask with reply buttons (Meta's limits: 1–3 buttons, titles ≤
+  20, body ≤ 1024, header and footer ≤ 60; research M-157/M-159), ask a question (any text, a number
+  or an email; retries; answer saved under a name), send a template and ask with a template (an
+  approved utility or marketing template with its variables as texts; the asking step branches on
+  each quick-reply button, any other reply and no reply; ADR-050), condition (answers, contact
+  fields, tags, business hours), update contact (tags, custom fields), wait (≤ 24 h), hand off to
+  people (a team, or routed like a new case), end. Texts may use `{{name}}`, `{{company}}`,
+  `{{answer.<name>}}`, in automations started by order messages `{{order.<field>}}`, and in
+  automations started through the API `{{input.<name>}}`. `checkGraph` rejects missing targets,
+  unsaved answers, unknown or misplaced placeholders, missing teams or fields, loops that never pass
+  through a question or a wait, empty template variables, templates HyFib cannot send or whose
+  variables, buttons or account no longer match (checked against the company's synced templates),
+  and, in automations started by order messages or through the API, a message or question that some
+  path reaches before the customer replied; an automation started through the API must be limited to
+  one number (`triggerIssues`). A wait or a question timeout over 23 hours warns only when a message
+  that is not a template can follow it before a reply (templates need no window, so a run can follow
+  up a day or more later).
 - **Interpreter** (`automations/interpreter.ts`): a pure function (graph, run state, event, facts)
   → new state, effects, log entry; one call is one step. Reply buttons, and the quick-reply buttons
   of an asking template step (as their payload), carry `w360bot:<run>:<step>:<visit>:<position>`
@@ -744,6 +762,25 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   retried. The minute sweep re-signals queued calls whose job was lost
   (`ops.automation_http_calls_due`). Settings → Web requests manages domains and secrets
   (`integrations.manage`); run pages list each call (method, host, path, outcome).
+- **Enrolments** (`automations/enrollments.ts`, migration 0311, ADR-401): a member with
+  `automations.publish` and `contacts.read` enrols the contacts the Contacts page's filters match
+  (`contactFilterConditions`) or a saved segment's members (`segmentWhere`), at most 10,000, in an
+  active automation whose live version starts by a member or through the API, with its inputs given
+  once. Starting snapshots them (`app.automation_enrollments`, one
+  `app.automation_enrollment_contacts` row per contact in id order) and queues a signed
+  `automation.enroll` job (exclusive, keyed by the enrolment and the position its batch starts
+  after) in the same transaction; at most one enrolment of an automation runs at a time. Each job
+  locks the enrolment, re-checks the member's roles and the automation's checks of a start
+  (`automations/starts.ts`, shared with the API's starts of one run and of many), starts the next
+  50 pending contacts in order, each in a savepoint through `startRunForContact` (a refusal records
+  its code), and records the outcomes, counts and position and queues the next batch's job in the
+  same transaction, so a retry or a duplicate job never starts a second run. Runs record their
+  enrolment (`automation_runs.enrollment_id`) and act for the company. Stopping cancels the
+  contacts not handled; started runs go on. Each next batch's job starts no sooner than the runs
+  the batch started take at the number's send rate (`next_batch_at`), and the minute sweep signals
+  again, through the definer due list `ops.automation_enrollments_due`, a running enrolment whose
+  next batch is more than 10 minutes overdue (a lost job, or one out of retries). A suspended
+  company's job is queued again five minutes later; a job whose member left ends the enrolment.
 - **Not built yet:** templates with media headers in template steps, usage billing. Form steps
   (ADR-248), runs started through the public API (ADR-077), template steps' website buttons whose
   link ends with a value (ADR-229), products steps (ADR-383), steps that set deal fields

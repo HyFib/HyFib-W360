@@ -894,7 +894,7 @@ test('automation run events reach an endpoint: a live run starts and ends, a mem
   ]) {
     await triggerBox(name).uncheck();
   }
-  await expect(triggerBox('API (api)')).toBeChecked();
+  await expect(triggerBox('API or a member’s enrolment (api)')).toBeChecked();
   await page.getByRole('button', { name: 'Add endpoint' }).click();
   await expect(page.getByLabel('Signing secret')).toBeVisible();
   await page.getByRole('button', { name: 'I have stored the secret' }).click();
@@ -959,7 +959,7 @@ test('automation run events reach an endpoint: a live run starts and ends, a mem
     .click();
   await expect(page.getByRole('heading', { name: /^Deliveries to/ })).toBeVisible();
   await expect(page.getByText('No deliveries yet.')).toBeVisible();
-  await expect(triggerBox('API (api)')).toBeChecked();
+  await expect(triggerBox('API or a member’s enrolment (api)')).toBeChecked();
   await expect(triggerBox('Keyword (keyword)')).not.toBeChecked();
   expect(forApi()).toEqual([]);
   // Nothing came after Farewell's message, so the fourth endpoint hears its completion.

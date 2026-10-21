@@ -889,8 +889,9 @@ export const triggerSchema = z.discriminatedUnion('type', [
    */
   z.object({ type: z.literal('store_event') }),
   /**
-   * Started through the public API by a key (ADR-077), never by a customer message. Every call gives
-   * the inputs named here, which the steps use as {{input.<name>}}.
+   * Started through the public API by a key (ADR-077), or by a member's enrolment of contacts or a
+   * segment (ADR-401), never by a customer message. Every start gives the inputs named here, which
+   * the steps use as {{input.<name>}}.
    */
   z.object({
     type: z.literal('api'),
@@ -916,7 +917,7 @@ export const TRIGGER_LABELS: Record<TriggerType, string> = {
   conversation_started: 'A customer starts a conversation',
   any_message: 'Any customer message',
   store_event: 'An order event in a store (chosen in the store’s Order messages)',
-  api: 'A call from your systems through the HyFib W360 API',
+  api: 'A member’s enrolment, or a call from your systems through the HyFib W360 API',
 };
 
 /**
@@ -961,8 +962,8 @@ export function describeTrigger(trigger: AutomationTrigger): string {
   if (trigger.type === 'store_event') return 'Started by a store’s order messages';
   if (trigger.type === 'api') {
     return trigger.inputs.length > 0
-      ? `Started through the API with ${trigger.inputs.map((i) => `“${i}”`).join(', ')}`
-      : 'Started through the API';
+      ? `Started by a member or through the API with ${trigger.inputs.map((i) => `“${i}”`).join(', ')}`
+      : 'Started by a member or through the API';
   }
   const hours =
     trigger.hours === 'open'

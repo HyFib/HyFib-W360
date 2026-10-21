@@ -1,5 +1,5 @@
 import type { Metadata } from 'next';
-import { MESSAGING_LIMIT_NOTE, assertCan, can } from '@w360/domain';
+import { MESSAGING_LIMIT_NOTE, NUMBER_FACTS_NOTE, assertCan, can } from '@w360/domain';
 import {
   Alert,
   Badge,
@@ -221,6 +221,9 @@ export default async function ChannelsPage({ params }: { params: Promise<{ slug:
           )}
           {channels.some((ch) => ch.messagingLimit !== null) ? (
             <p className="text-xs text-muted-foreground">{MESSAGING_LIMIT_NOTE}</p>
+          ) : null}
+          {channels.some((ch) => ch.status === 'active') ? (
+            <p className="text-xs text-muted-foreground">{NUMBER_FACTS_NOTE}</p>
           ) : null}
         </CardContent>
       </Card>

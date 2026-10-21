@@ -285,7 +285,7 @@ export type SubscriptionFinding =
   | { state: 'not_checked'; error: string };
 
 /** A failed request as stored: its kind, code and title, never the token or the URL. */
-function failureText(result: Extract<GraphResult<unknown>, { ok: false }>): string {
+export function graphFailureText(result: Extract<GraphResult<unknown>, { ok: false }>): string {
   return `${result.kind}${result.code !== undefined ? ` ${result.code}` : ''}: ${result.title}`.slice(
     0,
     300,
@@ -300,7 +300,7 @@ async function checkSubscription(
   token: string,
 ): Promise<SubscriptionFinding> {
   const listed = await call(() => deps.graph.listSubscribedApps(wabaId, token));
-  if (!listed.ok) return { state: 'not_checked', error: failureText(listed) };
+  if (!listed.ok) return { state: 'not_checked', error: graphFailureText(listed) };
   if (listed.data.appIds.includes(deps.meta.appId)) return { state: 'subscribed' };
   // An app whose id could not be read, or a page that follows, may be HyFib's: only a complete list
   // tells that it is missing.
@@ -308,7 +308,9 @@ async function checkSubscription(
   // The call onboarding makes; a disconnection racing it changes nothing, since disconnecting does
   // not unsubscribe the app at Meta.
   const restored = await call(() => deps.graph.subscribeApp(wabaId, token));
-  return restored.ok ? { state: 'restored' } : { state: 'missing', error: failureText(restored) };
+  return restored.ok
+    ? { state: 'restored' }
+    : { state: 'missing', error: graphFailureText(restored) };
 }
 
 /** What a finding stores on the account. */
@@ -407,7 +409,7 @@ export async function checkWhatsAppAccess(
       return { outcome: 'skipped' as const };
     }
     if (!debug.ok) {
-      const error = failureText(debug);
+      const error = graphFailureText(debug);
       await tx
         .update(whatsappAccounts)
         .set({ tokenCheckAttemptedAt: startedAt, tokenCheckError: error })

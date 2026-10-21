@@ -16772,3 +16772,369 @@ channels. "Never blocks" was tested only with an unknown limit: an integration t
 draft of 251 eligible contacts on `TIER_250`, reviewed as over without a problem. Prototype names
 (`__proto__`, `constructor`) are tested as unknown, the API's `limit` is bounded to 64 characters
 as kept, and the schema test checks the field's types, formats and nullability. All were fixed.
+
+## ADR-401 Members enrol contacts or a segment in an automation (P4-01) (2026-10-16)
+
+Context: runs start from customer messages (ADR-034), store events (ADR-050), members' test runs
+(ADR-038) and the public API, one contact per call (ADR-077) or up to 50 (ADR-161). A member who
+wants a follow-up flow for the customers of a festival sale, or for a saved segment, had no way to
+start it from the web app: P4-01's Remaining listed "enrolling contacts or segments in a sequence
+without a customer message or order event".
+
+Decision:
+
+- **Which automations: the `api` trigger, renamed, not a new one.** Published, active automations
+  whose live version is "Started through the API" already start without a customer message, with
+  declared inputs, limited to one number, with templates before the contact replies (ADR-077). A
+  second trigger would repeat every one of those rules and checks. The trigger keeps its type and
+  its API; the builder now calls it "A member's enrolment, or a call from your systems through the
+  HyFib W360 API", and its description reads "Started by a member or through the API" (with its
+  inputs). A run an enrolment starts keeps `trigger_type = 'api'`, so the runner (which lets such a
+  run work in the resolved conversation it started), webhooks and reports treat it as such a run.
+- **Who may: `automations.publish` and `contacts.read`** (owners and administrators), as starting a
+  live run through the API needs a key only they can grant, and `campaigns.read` to enrol a saved
+  segment. An automation whose live version sends a marketing template also needs `campaigns.send`,
+  as publishing it does and as the API needs `messages.send_marketing`. Pages check the permissions
+  themselves; the domain service checks them again with everything else.
+- **Whom, counted first:** the contacts the Contacts page's filters match (the search, the tag and
+  the marketing consent, through the same conditions as bulk edits, ADR-213, now exported as
+  `contactFilterConditions`), or a saved segment's members (`segmentWhere`, the campaigns' audience,
+  with `assertCanUseDefinition` for conditions on store orders). The page counts them (up to one
+  more than the limit) before the member confirms, and the count goes with the request: a different
+  count when the enrolment starts refuses it (409), as bulk edits do.
+- **The snapshot:** starting an enrolment inserts `app.automation_enrollments` (who, the automation,
+  the source and segment, the inputs, the total) and one `app.automation_enrollment_contacts` row
+  per matched contact, positioned in contact id order, in one transaction with the audit entry and
+  the first job. Contacts added later, or leaving the segment, change nothing.
+- **At most 10,000 contacts per enrolment,** the most a bulk edit of contacts takes. Each contact is
+  a run, a conversation and one of the plan's monthly runs; larger audiences are a campaign's work
+  (up to 50,000, with its caps, pacing and approval). **At most one running enrolment per
+  automation** (a partial unique index): a second is refused until the first ends or is stopped, so
+  two enrolments never race for the same contacts or double the load of one automation.
+- **Inputs once for everyone,** validated by the API's own function (`startInputVariables`, which
+  `apiStartAutomationRun` and `apiStartManyAutomationRuns` now call too): each declared input a text
+  of 1 to 1,000 characters and nothing else. They are kept on the enrolment while it runs and
+  cleared when it ends (a check); each run keeps its own copy with its answers, cleared 30 days
+  after it ends (ADR-077).
+- **A durable background job, never the web request:** `automation.enroll` (exclusive, signed with
+  the member, `singletonKey` the enrolment and the position its batch starts after) handles one
+  batch per job. Under the enrolment's row lock it re-checks the member (active, still holding
+  `automations.publish`, and `campaigns.send` for marketing; as the campaign runner re-checks its
+  launcher) and the automation's checks of a start, once per batch (published, active, `api`, its
+  number active, the inputs its live version takes), then starts the pending contacts after the
+  stored position, **at most 50 per transaction** for ADR-161's reason (each savepoint keeps its
+  transaction id until the commit; PostgreSQL caches 64). It records each outcome (the counts
+  taken from the rows the update changed), the counts and the new position, and queues the next
+  batch's job, all in the same transaction.
+- **Paced by the number's send rate:** the next batch's job starts (`startAfter`, stored as
+  `next_batch_at`) no sooner than the runs this batch started take at `META_SEND_RATE_PER_SECOND`,
+  the rate campaigns pace by when they have no rate of their own (50 runs at the default 20 a
+  second: 2.5 seconds; a batch that started none queues the next one at once). Under the row lock, a
+  job that arrives more than a second before `next_batch_at` does nothing (`not_due`), so a second
+  chain of jobs (a deferred one beside the sweep's, a retry after a lost completion) collapses into
+  the one queued for that time instead of doubling the pace, and a deferral moves `next_batch_at` to
+  its own time. **One clock, the database's:** every read and write of `next_batch_at` (the due
+  check, the next batch's time, the start, the deferral, the sweep's signal and the page's stall
+  notice) uses the database's `now()`, and the next job is queued with `startAfter` as a number of
+  seconds, which pg-boss adds to its `job_now()`, never as an instant by a worker's clock. `now()`
+  rather than `clock_timestamp()`: it is the transaction's start, the same instant pg-boss's
+  `job_now()` returns for a job queued in that transaction, so the job's start equals the stored
+  `next_batch_at`; a batch's own duration (up to 50 starts) would otherwise put `next_batch_at`
+  after the job's start, and waiting for the row lock only makes the real time later, never
+  earlier. With both sides on that clock, a worker whose clock runs ahead or behind can neither
+  stall an enrolment nor skip its pace, and a `not_due` job can only be a genuine early duplicate.
+  **The pace is per enrolment only:** two enrolments on one number, or an enrolment
+  beside a campaign or the inbox, each start runs at the full rate, and the number's send bucket is
+  what finally spaces their messages. Campaigns' own `rate_per_minute` has no equivalent here (a
+  later slice could add one). Meta's messaging limit is not paced: it counts unique customers
+  reached outside a service window in a moving 24 hours, per business portfolio and shared by its
+  numbers (ADR-398), so an enrolment whose first step is a template can reach it; Settings →
+  Channels shows the number's limit (ADR-398), as a campaign's page warns of it (ADR-400), and
+  RUNBOOKS says to compare the count with it before enrolling.
+- **The start steps are the API's** (`automations/starts.ts`, moved from `api/automations.ts`):
+  `loadStartableAutomation`, `startInputVariables`, `automationSendsMarketing`,
+  `activeStartChannel` and `startRunForContact`, each contact in a savepoint of its own: erasure,
+  suppression and opt-outs, the conversation (created resolved, not held by a member or handled by
+  another run), the hourly limit (`maxRunsPerConversationPerHour`), the plan's runs (ADR-051), then
+  the run, its first step, the live `automation.started` event and its first job. An enrolment of
+  an automation that sends marketing templates also checks each contact's marketing consent when it
+  starts (the company's opt-in setting included), so a member's bulk start does not begin runs that
+  would fail at their first template; the API keeps checking it at the template step (ADR-077), as
+  before. A refusal throws an AppError carrying its code (`details.startRefusal`); the API's
+  answers are unchanged.
+- **A refused contact records its reason and the others go on:** the start step's code
+  (`suppressed`, `opted_out`, `contact_erased`, `no_marketing_opt_in`, `conversation_assigned`,
+  `automation_busy`, `automation_limit`, `automation_quota`) or the enrolment's own (`no_number`, a
+  contact without a number; `contact_gone`, a contact merged away since the snapshot). A plan
+  without automations, a paused or archived automation, an inactive number, inputs the live version
+  no longer takes, or a member who lost the right ends the enrolment as `stopped` with that reason;
+  the contacts not handled are recorded as not started (`cancelled`).
+- **Resumable and idempotent:** a batch's runs, outcomes, counts and position commit together, so a
+  crash, a failed job or a deadlock (ADR-161's concurrent starts) rolls the whole batch back and its
+  retry starts the same contacts again from the same position; a duplicate job waits for the row
+  lock and finds them handled. Each contact is in an enrolment once (a unique index), and
+  `startRunForContact` refuses a conversation that already has an active run, so the enrolment
+  never starts a second run for a contact. A suspended company's job is queued again five minutes
+  later (no run starts while it is suspended); a job whose member left ends the enrolment
+  (`member_removed`).
+- **Lost and failed jobs: the minute sweep signals again, as runs and campaigns are (H-026).** A
+  job that fails all its retries goes to the dead letters (ADR-108), and the enrolment would stay
+  running, refusing every other enrolment of its automation. So the minute sweep reads
+  `ops.automation_enrollments_due` (SECURITY DEFINER, pinned search path, executable by the runtime
+  role only, reading running rows through a policy of their own: ids, the member and the position)
+  for running enrolments of active companies whose next batch is 10 minutes overdue or more (the
+  page's stall check uses the same bound). Each is then handled on its own, in its company's scope
+  (the company from the due list) under its row lock: still running, overdue and at the same
+  position, it is signalled under its batch's own key (a job still waiting or retrying collapses
+  with it, one out of retries is replaced), its `resignal_count` raised and its next batch made due
+  now. A batch handled resets the count. **After three signals with no batch handled, the next sweep
+  ends it as `failed` (`stalled`):** its pending contacts are not started, started runs go on, the
+  end is audited once and shown on its page, so a batch that fails every time stops instead of
+  dead-lettering for ever. The batch starts only contacts after the stored position, under the row
+  lock, so a signal never starts a contact twice (integration test: three jobs at once after a
+  re-signal). The enrolment's page says "No progress since" its last handled contact while it is
+  stalled (overdue, or signalled since its last batch), except while the company is suspended (no
+  run starts then; the deferral keeps its next batch in the future). The sweep runs last in the
+  automation sweep, after retention, and its errors are logged per enrolment at error level while
+  the others go on. Ending it on the first dead letter (ADR-111's stranded work) was not chosen:
+  most failures (a deadlock, a lost connection) succeed when tried again, which the sweep does.
+- **Who started a run:** `automation_runs.enrollment_id` (migration 0311), as `api_key_id` records a
+  key: a check keeps exactly one of the two on a run of an `api` automation and neither on any other
+  run, and the run guard keeps it fixed. Runs act for the company, as live runs do (ADR-038): their
+  jobs carry no member and they go on if the member leaves. The run page says "by an enrolment by"
+  the member, with a link to the enrolment; the runs lists say "Enrolment".
+- **Audit:** `automation.enrollment_started` (the member; the automation, source, segment, whether a
+  search was given, the tag, the consent filter and the count, never the search text or the
+  inputs), `automation.enrollment_stopped` (the member) and `automation.enrollment_ended` (the
+  system, with the status, reason and counts). Runs an enrolment starts are not audited one by one
+  (an API start is): the enrolment's rows name every run.
+- **Stop:** a member who may publish automations stops a running enrolment from its page; under the
+  row lock (a batch in progress finishes first) the contacts not handled are recorded as not started
+  and no further run starts. **Runs already started go on**: stopping each from the web would route
+  every conversation to people as a member's stop does (ADR-036), possibly thousands of contacts
+  who never wrote, and a stop that does not route them needs an end reason of its own; each run can
+  be stopped from its page. Stopping an ended enrolment is refused (409).
+- **Pages:** Automations → an automation → "Enrol contacts or a segment" (while its live version
+  starts by a member or through the API and is active) and its enrolments; Contacts → "Enrol the
+  contacts these filters match in an automation"; both lead to Automations → Enrol contacts, which
+  counts, takes the inputs (`ClientForm`) and starts the enrolment, then shows its page: the counts
+  (contacts, started, refused, not started, waiting), the refusals by reason, the end and who
+  stopped it, and Stop (`ConfirmDialog`). The page re-renders every 15 seconds while it runs.
+- **Webhooks:** a run an enrolment starts is a live run inserted as any, so the capture of 0055 and
+  0241 sends `automation.run_started`, `automation.run_ended` and `automation.run_step` as before,
+  with `trigger: "api"`, `apiKeyId: null` and the new `run.enrollmentId` (null for every other run),
+  read from the run when the event is delivered: additive, and it tells receivers which runs one
+  enrolment started. An endpoint filtering `runTriggers: ["api"]` therefore receives members'
+  enrolled runs too (up to 10,000 per enrolment), as the filter's descriptions (`runTriggers` in the
+  API, "API or a member's enrolment" in Settings → Webhooks) and the payload's say; one limited to
+  API keys' runs (`runApiKeyIds`, ADR-319) does not. No migration touches the capture or the
+  filter.
+- **Public API: out of scope.** Members enrol from the web app; keys already start up to 50 runs per
+  call (ADR-161), and an integration holding the contacts can page through them. A later slice
+  could add `POST /api/v1/automations/{id}/enrollments` (a segment id or contact ids, the inputs,
+  an `Idempotency-Key`) and reading an enrolment's progress, with the scope of starts; the runs of
+  an enrolment are not readable through `GET /automation-runs/{id}` (key runs only, ADR-077).
+- **Migration 0311:** the two tables (`tenant_id NOT NULL`, `UNIQUE (tenant_id, id)`, composite
+  foreign keys to the automation, segment, members, contacts and runs, forced row security), the
+  runtime role's grants (insert and read; updates only of progress, end and outcome columns; no
+  delete), the definer role's deletion policies, deletion steps 685 (outcomes, before the runs they
+  name) and 692 (enrolments, after the runs that name them), and the run's column, check, foreign
+  key and guard, and the sweep's due list. The check replaces 0052's under its name
+  and, with the foreign key, is added `NOT VALID`: the rows already there have no enrolment, so for
+  them it is the check 0054 validated. **Migration 0312** validates both without blocking writes, as
+  0054 did for 0052. **Migration 0314** builds a partial index on `(tenant_id, enrollment_id)`
+  concurrently (`-- migrate:no-transaction`, as 0053), so runs stay readable and writable while it
+  is built; it serves the foreign key's check when company deletion removes enrolments (step 692;
+  PostgreSQL proves `enrollment_id = $n` implies its predicate, which an integration test checks
+  with the check's generic plan). A merged contact's outcome keeps its row with no contact
+  (`ON DELETE SET NULL`), and retention deleting a run clears the outcome's run, so neither the merge
+  (ADR-224) nor retention needs a change. Exported with the company (both tables and the run's
+  column). One definer function (the due list), with EXECUTE revoked from PUBLIC explicitly and
+  granted to the runtime role before its ownership moves to `w360_definer`.
+
+Not built: enrolling through the public API; scheduling an enrolment for later, or a rate of its
+own; stopping an enrolment's runs at once; choosing contacts one by one on the Contacts page (it
+has no row selection); enrolling in automations started otherwise; an enrolment's contacts listed
+with their outcomes (the page summarises them by reason).
+
+Review (before merge): an independent review found no High issue. It found that a job out of
+retries left its enrolment running for ever, refusing every other enrolment of the automation (now
+the minute sweep signals it again, and the page says it has made no progress); that endpoints
+filtering `runTriggers: ["api"]` would receive enrolled runs undocumented (now documented, and
+`run.enrollmentId` tells them apart); that batches were not paced, so 10,000 contacts with a
+template first could leave one number in minutes (now paced by the send rate, the messaging limit's
+remaining risk documented); that 0311's check and foreign key were never validated (0312), that the
+DEPLOYMENT note sat inside 0309's, that marketing consent, the job's authorisation and merged
+contacts had no database tests (added; `marketing_not_allowed` cannot be reached with today's
+roles, since every role holding `automations.publish` holds `campaigns.send`, so it stays a guard
+covered by no test), that company deletion probed the runs without an index (added by 0314,
+built concurrently: a first fix built it inside 0311, which would have scanned the runs under
+0311's exclusive lock), and that the
+enrolment repeated the Contacts filter's schema (it now uses it). Smaller fixes: the inputs'
+refusal is caught only as a validation error, the counts come from the rows changed, and the
+browser's requests clear their busy state when they fail.
+
+Second review (before merge): no High issue; it confirmed that a double start is impossible. It
+found that pacing could be bypassed (a batch never read `next_batch_at`, and after a suspension the
+deferred chain and the sweep's could both run, at twice the pace): a job now does nothing before its
+batch is due, and the deferral moves `next_batch_at`; that the stall notice showed while the
+company was suspended (now not); that the integration tests read the cross-company due list, which
+its limit could truncate (they now read it with every other company's enrolments made not due, in a
+transaction rolled back); that the start and end events' `enrollmentId` had no test (added); that a
+batch failing every time looped through dead letters for ever (now ended as `failed` after three
+signals); that the enrolment sweep could stop the automation sweep before retention (now last, its
+errors logged per enrolment); and two nits: an explicit `REVOKE ... FROM PUBLIC` and the stall bound
+aligned between SQL and code. The index of the first review, first built inside 0311 (which would
+have scanned the runs under its exclusive lock), is built concurrently by 0314.
+
+Third review (before merge): it found that pacing mixed clocks (`next_batch_at` was set and
+compared by the worker's clock while pg-boss starts jobs by the database's), so a worker ahead of
+the database by more than a second left every queued job `not_due` until the sweep, and one behind
+it skipped the pace; every read and write now uses the database's `now()` and jobs are queued with
+a delay in seconds (above). A nit: the runbook's query for 0312 also finds runs naming an enrolment
+that does not exist.
+
+## ADR-402 Refreshing each active WhatsApp number's facts from Meta daily (P2-10) (2026-10-16)
+
+Context: a number's facts from Meta (`GET /{phone-number-id}`: display number, verified name,
+quality rating, name status, code verification status and, since ADR-398, the messaging limit) were
+read only in the last step of its setup (`processChannelOnboarding`'s health step) and when its
+account was reconnected. So a number active before migration 0309 never got a messaging limit, and
+every number's quality rating and limit went stale until it was set up again, which registers it
+again (Meta counts that). ADR-398 left "a periodic or on-demand refresh of a number's facts" not
+built, and ADR-400's campaign notice compares recipients with whatever limit was read last. The
+daily per-account access check (ADR-137, ADR-138) already holds an authorized company scope, a
+decrypted token and ADR-399's paced calls for each connected account.
+
+Decision:
+
+- **One read, shared (`messaging/number-facts.ts`):** the health step's read is factored out as
+  `readNumberFacts` (the read with `whatsapp_business_manager_messaging_limit`; after a refusal as
+  permanent or as lost access, whatever the code, once more without it, giving the facts and the
+  refusal only when that read succeeds; retryable and unknown failures get no second read) and what
+  a completed read stores as `numberFactsColumns` (the facts, with the time as both
+  `health_checked_at` and `messaging_limit_checked_at`; never a status). Setup now calls both, with
+  unchanged behaviour (ADR-398's unit tests pass unchanged). Both reads go through the job's
+  `pacedManagementCalls`, so the field-less read is never made after a pausing response (ADR-399).
+- **Facts bounded as they are parsed (`GraphClient.getPhoneNumber`, `PHONE_NUMBER_FACT_LIMITS`):**
+  each fact is kept within its column's check (0003), as HyFib bounds other text from Meta
+  (ADR-131): the verified name is clipped to 200 characters and the quality rating, name status
+  and code verification status to 32, 64 and 64 (a clipped status is still Meta's text, shown as
+  given); a display number longer than 32 characters is not kept at all (null), since a cut phone
+  number would show another number. An empty value is none. Setup gets the same protection: where
+  an over-long value used to fail its health step on the column's check, setup now stores the
+  bounded value (or no display number) and completes.
+- **Scheduling: piggy-backed on the daily access check, no new due list.** The worker's access-check
+  handler now calls `checkAccessAndRefreshNumbers`: the access check as before, then, only when its
+  outcome is `healthy`, `refreshNumberFacts` for that account in the same job. No definer function
+  and no new queue: the access check's cadence (daily per connected account of an
+  active company), its due list's exclusions (paused accounts, accounts not connected) and its
+  job's signed-envelope authorization apply. A number is refreshed when it is `active`, its account
+  is `connected` with a token, and its facts were last read 20 hours ago or more, or never with the
+  limit (`numberFactsDue`; a number set up before ADR-398 is read at the next check however recent
+  its health), and no refresh read was made for it in the last 20 hours, whatever its outcome
+  (`facts_attempted_at`, below). 20 hours, below the check's 24, makes every daily check refresh,
+  while the other checks of the day (asked after a refused send, or every 30 minutes while a
+  webhook subscription is unconfirmed) read nothing again, a number whose reads fail included. Numbers are read stalest first, and no read starts once the job
+  has run 40 seconds (`NUMBER_FACTS_BUDGET_MS`): the job expires after 120 seconds and a number's
+  two reads may take 60 at the worker's 30-second Graph timeout; numbers left are the stalest at
+  the next check. A separate cadence (its own due list and queue) was not needed: the account-level
+  check already runs daily with the token in hand, and a separate job would repeat its
+  authorization and pause handling for the same calls.
+- **Failures are the number's alone.** A failed read stores nothing but its attempt and never changes the number's
+  or the account's status, whatever its kind: an `auth` refusal of a number's read does not mark
+  anything for reconnecting, since losing access stays the access check's decision under ADR-137's
+  rules (which just admitted the token). The access check's outcome is stored before the refresh
+  starts and is returned unchanged. Each failure is logged with the number, kind and code, and the
+  number is read again at the first check 20 hours after the attempt (normally the next day; a
+  retryable failure is not retried within the job, since the access check's job is not re-run for
+  it). A number whose read cannot be stored (the write throws, for example on the database) is
+  that number's `store_failed` result: its attempt is still recorded in its own transaction, the
+  error is logged at error level, and the refresh goes on with the next number, so one bad row can
+  never hold back the account's others. When recording a number's attempt fails too (after a failed
+  store or after Meta's failure, whose kind and code stay the number's `failed` result with the
+  `attemptError`), the database is most likely out of reach: the refresh stops there and counts
+  the remaining numbers as left, rather than making reads whose answers and attempts could not be
+  stored. An error the refresh throws outside a number's store (the
+  database while loading the account) is returned as `numbersError` and logged as an error without
+  failing the job: a pg-boss retry would ask Meta for the access again, and the next check retries.
+  Errors are logged through the logger's `err` serializer (ADR-129), which keeps each error's code
+  and cause (since ADR-129, `db.run`'s errors quote no values either way). Before
+  writing, the number is re-read under a row lock: one no longer active, moved, or whose account is
+  no longer connected is skipped, and so is one whose health setup read after this read started (a
+  setup finishing during the refresh keeps its newer read).
+- **The attempt is recorded, not the error (migration 0313):** `channel_accounts.facts_attempted_at`
+  is the time of the last refresh read made for the number (when it started), whatever its outcome,
+  written with the facts or alone after a failure; a pause met before or between a number's two
+  reads records nothing.
+  Without it a number Meta no longer has would be read twice at every access check of the day
+  (every 30 minutes while a webhook subscription is unconfirmed, about 96 reads a day), spending
+  the account's management allowance. No error column: "Checked <time>" already shows the last
+  read that completed, which is what members need to judge how fresh the quality and limit are,
+  and the worker log covers the error (RUNBOOKS: a Checked time older than two days on an active
+  number means its reads keep failing). The column: nullable, no default (nothing rewritten),
+  `UPDATE` for the runtime role only (which already selects the table), exported with the number
+  and deleted with it (whole rows). Expand only.
+- **A partial answer keeps a stored name, display number or status (`refreshedFactsColumns`, the
+  refresh only):** one Meta leaves out, or gives in a form not kept (an over-long display number),
+  keeps the stored value, so a partial answer does not wipe them each day; they change rarely, and
+  Channels' note says such a value may come from an earlier read. The quality rating and the
+  messaging limit are time-sensitive and never kept: an answer without the rating stores none
+  (unknown), as setup does, and one without the limit stores "not reported by Meta" (ADR-398);
+  an older value beside the new "Checked" time would show what Meta no longer reported. Setup
+  stores every fact as Meta gave it, as before.
+- **Pauses (ADR-399):** an account paused when the refresh starts is asked nothing (`paused`, the
+  due numbers counted as left); a pause set by any response of the job, the access check's own
+  included, stops the refresh before its next call, a number already read is stored, and a limit
+  refusal whose response paused the account gets no field-less read and stores nothing. The numbers
+  left are read at the next daily check (skipped, not deferred: the access check's timestamp was
+  updated, so it is not due again sooner; facts are at most a day later).
+- **Audit:** a successful refresh audits nothing (it is routine and daily). A refused limit field
+  followed by a successful field-less read is audited as `channel.messaging_limit_refused` (result
+  `failure`, ADR-398's metadata: kind, HTTP status, code, subcode and Meta's message clipped, links
+  and tokens replaced) only when it changes what Channels shows, from a limit or from never asked
+  to "not reported by Meta" (`limitRefusalAuditDue`); a number already stored without a limit is not
+  audited again each day. Setup's `channel.activated` entry is unchanged. Each stored refresh emits
+  the internal `channel.updated` live event, as setup does, so an open Channels page refreshes.
+- **Webhooks:** HyFib does not process `phone_number_quality_update` (only template fields, M-034,
+  M-056, M-141), so no event is duplicated; the refresh only stores the facts.
+- **On Channels:** "Checked <time>" stays the time of the last completed read, now normally within
+  the last day. Below the numbers, when one is active: "HyFib reads each active number’s quality
+  rating, messaging limit and name from Meta about once a day, with the daily check of its account’s
+  access, but not while the account needs reconnecting or Meta is limiting management requests.
+  “Checked” is when HyFib last read them; a name, display number or status Meta left out of that
+  answer keeps the value from an earlier read." (`NUMBER_FACTS_NOTE`). The e2e fixture that stores a
+  number "as read now" with a limit now also stores its health time, so the worker's refresh does
+  not read it again within 20 hours.
+- **Tenant isolation:** every read and write runs in `db.run(scope, …)` with the scope the signed
+  access-check job was authorized for, names the company in each query besides row security, and
+  reads only numbers of that account; the runtime role already selects and updates these columns
+  (0003, 0309), and 0313 grants it `UPDATE` on the new one only.
+
+Known limits: the refresh is as fresh as the daily check, so a quality drop Meta signals by webhook
+shows up to a day later; an account whose check keeps failing (`not_checked`) or that stays paused
+gets no refresh until it succeeds; a number whose read failed waits 20 hours, even should Meta
+answer again sooner. Not built: an on-demand "refresh now", processing
+`phone_number_quality_update`, reading the limit from the WABA, and any verification against Meta
+(the Graph stand-in only).
+
+Review (before merge): an independent review found no High issue. It found that a number whose
+read could not be stored (an over-long name failing the column's check) threw out of the loop and,
+read first every day as the stalest, held back the account's other numbers for good (fixed by the
+bounded parse and the per-number `store_failed` result above); that the job's two central claims,
+no refresh after any outcome but `healthy` and a refresh's error returned with the stored outcome,
+had no test (unit tests now stub the access check); that the error's message was logged as text
+(now the error itself through the `err` serializer, which keeps its code and cause; the review's
+premise that the text repeated a query's values was wrong, as `db.run` maps those errors since
+ADR-129); that a number whose
+reads fail was read again at every check of the day (fixed by `facts_attempted_at`, migration
+0313); that an e2e step's "Checked" assertion passed because of the fixture, not the refresh
+(dropped); that a partial answer wiped stored facts daily (kept in the refresh); and that a setup
+finishing during a refresh's read could be overwritten by an older read (now skipped). All were
+fixed. A second review found no High or Medium issue. It found that with the database out of reach
+the refresh went on reading every remaining number for up to 40 seconds, throwing the answers away
+(it now stops once an attempt cannot be recorded); that a kept quality rating sat beside a new
+"Checked" time (the rating is no longer kept, and the note says which facts may come from an
+earlier read); that 0313's grant had no test (now asserted); that an attempt failing after Meta's
+failure relabelled it as a store failure (Meta's kind and code are kept); and wording and test
+gaps. All were fixed.

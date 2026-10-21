@@ -12,7 +12,11 @@ import {
   planPaymentRefundHandler,
   settlementReconHandler,
 } from './handlers/billing';
-import { automationHttpHandler, automationRunHandler } from './handlers/automations';
+import {
+  automationEnrollHandler,
+  automationHttpHandler,
+  automationRunHandler,
+} from './handlers/automations';
 import { campaignRunHandler } from './handlers/campaigns';
 import { crmReminderHandler } from './handlers/crm';
 import { reportEmailHandler } from './handlers/reports';
@@ -156,6 +160,12 @@ async function main(): Promise<void> {
     QUEUES.automationHttp.name,
     { localConcurrency: concurrency, batchSize: 1, pollingIntervalSeconds: 1 },
     logFailures(rt, QUEUES.automationHttp.name, automationHttpHandler(rt)),
+  );
+  // Members' enrolments (ADR-401): one batch of up to 50 starts per job, two at a time.
+  await rt.boss.work(
+    QUEUES.automationEnroll.name,
+    { localConcurrency: 2, batchSize: 1 },
+    logFailures(rt, QUEUES.automationEnroll.name, automationEnrollHandler(rt)),
   );
   // Outgoing webhooks: one job per company at a time (stately queue), woken by the listener below
   // and the minute sweep.

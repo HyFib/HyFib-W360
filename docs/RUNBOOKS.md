@@ -182,9 +182,49 @@ sweep is not running: nobody is emailed about late queues until it does, so star
   instead needs a decision of its own (not built, ADR-398).
 - No messaging limit line: the number's health was last read before ADR-398 (or never). A number
   in setup is read when its setup completes (Retry setup for a failed one). A number already active
-  is read only when its account is reconnected after Meta stopped accepting its access, or when the
-  number is connected again; Retry setup does not apply to it. Do not connect a number again only
+  is read at its account's next daily access check (ADR-402, below). Do not connect a number again
   for this: connecting again registers it again, which Meta counts.
+
+### How often a number's facts refresh (ADR-402)
+
+- Each active number's quality rating, messaging limit, display number, verified name and name
+  status are read from Meta about once a day: after the daily access check of its account finds
+  Meta still admits the token, the same `whatsapp.access_check` job reads each active number whose
+  facts were last read 20 hours ago or more, or never with the limit (stalest first, starting no
+  read after 40 seconds of the job; the rest are read first at the next check). Every read records
+  `facts_attempted_at` (migration 0313), whatever its outcome, and a number is read again only 20
+  hours after it: the other checks of the day (asked after a refused send, or every 30 minutes
+  while a webhook subscription is not confirmed) read no number again, one whose reads fail
+  included, which is therefore tried once a day.
+- Facts are kept within their columns: a verified name over 200 characters is clipped, a status
+  over its column's length (32 or 64) is clipped, and a display number over 32 characters is not
+  kept (the stored one stays in a refresh; none at setup). A name, display number or status Meta
+  leaves out of a refresh's answer keeps the value from an earlier read (Channels' note says so);
+  a quality rating it leaves out is shown as none, and a missing messaging limit as "not reported
+  by Meta", beside the new "Checked" time.
+- "Checked <time>" on Channels is the last read that completed. A failed read stores nothing, so
+  the time stays; the worker logs `WhatsApp number’s facts could not be read from Meta` with the
+  number, the failure's kind and code, and the first check 20 hours later tries again. A failed read never marks
+  a number or account for reconnecting: only the access check decides that (ADR-137). A Checked
+  time older than two days on an active number means its reads keep failing: read the worker log
+  for that number (an unknown number at Meta answers code 100; an expired token makes the access
+  check itself fail and ask for a reconnect).
+- Nothing is read while the account needs reconnecting, is disconnected, or while Meta is limiting
+  its management requests (ADR-399): a pause met during the refresh stops it, and the numbers left
+  are read at the next daily check.
+- A refusal of the limit field during a refresh is followed by the read without it, as at setup,
+  and is audited as `channel.messaging_limit_refused` (Graph's kind, status, code, subcode and
+  clipped message) only when the number showed a limit or had never been asked; the same refusal
+  on later days is not audited again. A successful refresh audits nothing.
+- `WhatsApp number’s facts could not be stored` (error, with the number and `err`): the read
+  succeeded but writing it failed. The other numbers go on, the attempt is recorded and the number
+  is tried again the next day. `WhatsApp number’s facts refresh attempt could not be recorded`
+  (error) means recording the attempt failed too, after a store failure or after Meta's failure:
+  the database is most likely out of reach, so the refresh stops and the remaining numbers are
+  read at the next check. `err` is the error through the logger's serializer (ADR-129).
+- `WhatsApp numbers’ facts could not be refreshed` (error, with `err`) is a database or code error
+  outside one number's write (loading the account): the access check's outcome is already stored and
+  the job is not retried for it; the next check tries again. Investigate if it repeats.
 
 ## 8. Data restoration
 
@@ -697,6 +737,44 @@ run page. The conversation goes to people and bot messages not yet claimed by a 
 cancelled (`bot_stopped`). New runs: Pause the automation (runs in progress finish). Everything at
 once: Archive (runs in progress stop and their conversations go to people). Each action is audited
 (`automation.*`).
+
+**Enrolments of contacts or a segment (ADR-401).** An owner or administrator enrols contacts from an
+automation's page or the Contacts page; only an active automation whose live version is started by a
+member or through the API can be chosen, at most 10,000 contacts, one running enrolment per
+automation ("Contacts are being enrolled in this automation already": wait or stop that one). The
+enrolment's page (Automations → the automation → its enrolment) counts contacts started, refused
+(with the reasons: erased, on the suppression list, opted out, no marketing opt-in, conversation
+assigned to a member, another automation handling the conversation, the hourly limit of 10 runs, no
+runs left in the plan this month, no phone number, merged into another contact), not started and
+waiting. A refused contact is not retried: fix the cause (record consent, unassign the conversation,
+wait an hour) and enrol it again. Runs start in the background, 50 per job; worker log lines
+"automation enrolment batch" carry the enrolment id, the outcome and the counts. An enrolment that
+stopped by itself says why: the automation was paused or archived, its number is not active, its
+live version takes other inputs, the plan does not include automations, or the member who started it
+left or lost the permission ("automation enrolment member removed"). While the company is suspended
+no run starts and its job looks again every five minutes ("automation enrolment deferred"). Batches
+are paced by the number's send rate (`META_SEND_RATE_PER_SECOND`): 10,000 contacts at the default 20
+a second take about nine minutes to start. The pace is per enrolment: two enrolments on one number,
+or an enrolment beside a campaign, each go at that rate, and the number's send bucket spaces their
+messages. Meta's messaging limit is not paced: it counts the unique customers reached outside a
+service window in a moving 24 hours, per business portfolio and shared by its numbers, so before
+enrolling thousands of contacts in an automation whose first step is a template, compare the count
+with the limit Settings → Channels shows for its number (a campaign's page warns of the same,
+ADR-400); sends beyond it fail with Meta's error and fail their runs. If an enrolment's page says
+"No progress since …", its next batch is 10 minutes overdue or more (its job was lost or ran out of
+retries): the minute sweep signals it again ("automation enrolments signalled again or failed as
+stalled" in the worker log; each batch starts nothing twice), at most three times without a batch
+handled; the next sweep then ends it as failed ("Its next batch kept failing"), leaving started runs
+going. Before that, check that the worker runs and the `automation.enroll` queue drains (section 3)
+and read the dead letter's error. The notice does not show while the company is suspended.
+"automation enrolment sweep failed" at error level means the sweep could not handle an enrolment
+(the error is logged); the rest of the sweep ran, and the next minute's sweep tries again. Stopping
+cancels the contacts not started; runs already started go on, and each is stopped from its run page.
+The audit log has `automation.enrollment_started`, `automation.enrollment_stopped` and
+`automation.enrollment_ended` (counts only, never the inputs or the search). Runs an enrolment
+started say so on their page and reach webhooks as runs of trigger `api` with no API key and their
+`enrollmentId`: an endpoint that filters runs by the trigger `api` receives them too; one limited to
+API keys' runs does not.
 
 **Budgets and failed sends.** A run fails, and hands the conversation to people, when it exceeds
 200 steps, enters one step 20 times, sends 50 messages or runs longer than 7 days, or when a
@@ -1567,6 +1645,26 @@ app.automation_runs_api_key_idx;` and run the migrations again. 0054 validates t
 constraints without blocking writes; it fails only if a stored run breaks one, which no code writes:
 find it with `SELECT id, trigger_type, api_key_id FROM app.automation_runs WHERE (trigger_type =
 'api') <> (api_key_id IS NOT NULL)` before running it again.
+
+**Migration 0311, 0312 or 0314 failed (ADR-401).** 0311 and 0312 each run in one transaction, so a
+failure applies nothing. 0312 validates the run's check `automation_runs_api_key` and foreign key
+`automation_runs_enrollment_fk`; it fails only if a stored run breaks one, which no code writes:
+find it (a run with the wrong starter for its trigger, or naming an enrolment that does not exist)
+with this query before running it again:
+
+```sql
+SELECT r.id, r.trigger_type, r.api_key_id, r.enrollment_id
+  FROM app.automation_runs r
+ WHERE num_nonnulls(r.api_key_id, r.enrollment_id)
+         <> CASE WHEN r.trigger_type = 'api' THEN 1 ELSE 0 END
+    OR (r.enrollment_id IS NOT NULL AND NOT EXISTS (
+          SELECT 1 FROM app.automation_enrollments e
+           WHERE e.tenant_id = r.tenant_id AND e.id = r.enrollment_id));
+```
+
+0314 runs outside a transaction (one `CREATE INDEX CONCURRENTLY`): a failure can leave an INVALID
+index; run `DROP INDEX CONCURRENTLY IF EXISTS app.automation_runs_enrollment_idx;` and run the
+migrations again.
 
 **Migration 0051 failed.** It runs in one transaction, so a failure applies nothing. It adds
 `app.api_keys.allowed_networks` with its check and grants, creates

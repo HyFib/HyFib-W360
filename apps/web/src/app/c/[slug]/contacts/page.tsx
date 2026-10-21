@@ -181,6 +181,17 @@ export default async function ContactsPage({
             ) : null}
           </div>
         ) : null}
+        {can(ctx, 'automations.publish') && list.items.length > 0 ? (
+          <Link
+            href={`/c/${ctx.tenant.slug}/automations/enroll?${new URLSearchParams([
+              ...query,
+              ['source', 'contacts'],
+            ]).toString()}`}
+            className="justify-self-start text-sm text-primary underline-offset-4 hover:underline"
+          >
+            Enrol the contacts these filters match in an automation
+          </Link>
+        ) : null}
         {list.items.length === 0 ? (
           <EmptyState
             title={query.size > 0 ? 'No contacts match these filters' : 'No contacts yet'}
