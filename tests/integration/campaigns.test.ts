@@ -13,6 +13,7 @@ import {
   createSegmentsService,
   createTemplatesService,
   findDueCampaigns,
+  loadNumberMessagingLimit,
   outboxAad,
   pauseCampaignForRemovedLauncher,
   processSendIntent,
@@ -1640,6 +1641,173 @@ describe('isolation', () => {
       tx.execute(sql`SELECT count(*)::int AS n FROM app.campaign_recipients`),
     );
     expect(leaked.rows[0]).toEqual({ n: 0 });
+  });
+});
+
+describe('the messaging-limit notice (ADR-400)', () => {
+  /** Stores a number's limit as a health read that asked for it would (ADR-398). */
+  const setLimit = (channelAccountId: string, limit: string | null, asked = true) =>
+    fx.query(
+      `UPDATE app.channel_accounts
+          SET messaging_limit = $2, messaging_limit_checked_at = CASE WHEN $3 THEN now() END
+        WHERE id = $1`,
+      [channelAccountId, limit, asked],
+    );
+
+  it("reads only the campaign's own company's number, under its scope, for its review and its page", async () => {
+    const a = await setup();
+    const b = await setup();
+    await a.contact('+919870000001', { name: 'Asha' });
+    await a.contact('+919870000002', { name: 'Bina' });
+    await a.contact('+919870000003', { name: 'Chitra', optIn: false });
+    const owner = await fx.ctx(a.c, a.c.owner);
+    const { id } = await a.draft('Limit check');
+
+    // Never asked: unknown, with no figure.
+    const never = await a.campaigns.reviewDraft(owner, id);
+    expect(never.audience).toMatchObject({ total: 3, eligible: 2 });
+    expect(never.messagingLimit).toMatchObject({
+      status: 'unknown',
+      unknown: 'not_asked',
+      limit: null,
+      checkedAt: null,
+      figure: null,
+      recipients: 2,
+      tone: 'info',
+    });
+
+    // The other company's number has another limit, which A's review never shows.
+    await setLimit(a.c.channelAccountId, 'TIER_250');
+    await setLimit(b.c.channelAccountId, 'TIER_UNLIMITED');
+    const within = await a.campaigns.reviewDraft(owner, id);
+    expect(within.messagingLimit).toMatchObject({
+      status: 'within',
+      limit: 'TIER_250',
+      figure: 250,
+      recipients: 2,
+      tone: 'info',
+    });
+    expect(within.messagingLimit?.checkedAt).toBeInstanceOf(Date);
+    // The review counts the audience once, as before: the notice uses its eligible count.
+    expect(within.messagingLimit?.recipients).toBe(within.audience?.eligible);
+
+    // A number of another company is never read: not by A's company id under A's scope, and not by
+    // B's company id under A's scope either (row security).
+    for (const tenantId of [a.c.tenant.id, b.c.tenant.id]) {
+      expect(
+        await fx.dbs.app.run(scopeOf(a.c), (tx) =>
+          loadNumberMessagingLimit(tx, tenantId, b.c.channelAccountId),
+        ),
+      ).toBeNull();
+    }
+    expect(
+      await fx.dbs.app.run(scopeOf(a.c), (tx) =>
+        loadNumberMessagingLimit(tx, a.c.tenant.id, a.c.channelAccountId),
+      ),
+    ).toMatchObject({ limit: 'TIER_250' });
+
+    // Unknown kinds: Meta gave none, or a value research gives no figure for.
+    await setLimit(a.c.channelAccountId, null);
+    expect((await a.campaigns.reviewDraft(owner, id)).messagingLimit).toMatchObject({
+      status: 'unknown',
+      unknown: 'not_reported',
+      figure: null,
+    });
+    await setLimit(a.c.channelAccountId, 'TIER_50');
+    expect((await a.campaigns.reviewDraft(owner, id)).messagingLimit).toMatchObject({
+      status: 'unknown',
+      unknown: 'no_figure',
+      limit: 'TIER_50',
+      figure: null,
+    });
+
+    // Submitted and not finished: the page shows it from the frozen audience less those skipped.
+    await setLimit(a.c.channelAccountId, 'TIER_250');
+    expect(await a.campaigns.submitCampaign(owner, id, { expectedVersion: 1 }, {})).toMatchObject({
+      status: 'scheduled',
+      audience: 3,
+      pending: 2,
+    });
+    const live = await a.campaigns.getCampaign(owner, id);
+    expect(live.messagingLimit).toMatchObject({
+      status: 'within',
+      limit: 'TIER_250',
+      figure: 250,
+      recipients: 2,
+    });
+    // B's owner cannot read A's campaign at all.
+    await expectAppError(b.campaigns.getCampaign(await fx.ctx(b.c, b.c.owner), id), 'not_found');
+
+    // Finished: no notice.
+    await a.campaigns.cancelCampaign(owner, id, {});
+    expect((await a.campaigns.getCampaign(owner, id)).messagingLimit).toBeNull();
+    // A draft's page takes the notice from its review, not from the campaign.
+    const { id: draft } = await a.draft('Another check');
+    expect((await a.campaigns.getCampaign(owner, draft)).messagingLimit).toBeNull();
+    expect((await a.campaigns.reviewDraft(owner, draft)).messagingLimit).toMatchObject({
+      status: 'within',
+    });
+  });
+
+  it('warns over a figure without blocking: 251 eligible contacts on TIER_250 are still submitted', async () => {
+    // A company of its own, so no other test's rows count.
+    const a = await setup();
+    const owner = await fx.ctx(a.c, a.c.owner);
+    await fx.query(
+      `WITH c AS (
+         INSERT INTO app.contacts (id, tenant_id, display_name, phone_e164, source)
+         SELECT gen_random_uuid(), $1, 'Over ' || g, '+9171' || lpad(g::text, 8, '0'), 'import'
+           FROM generate_series(1, 251) AS g
+         RETURNING id)
+       INSERT INTO app.contact_tags (id, tenant_id, contact_id, tag)
+       SELECT gen_random_uuid(), $1, c.id, 'vip' FROM c`,
+      [a.c.tenant.id],
+    );
+    await fx.query(
+      `INSERT INTO app.consent_events (id, tenant_id, contact_id, purpose, action, source, actor_type, occurred_at)
+       SELECT gen_random_uuid(), tenant_id, id, 'marketing', 'opt_in', 'import', 'system', now()
+         FROM app.contacts WHERE tenant_id = $1`,
+      [a.c.tenant.id],
+    );
+    await setLimit(a.c.channelAccountId, 'TIER_250');
+    const { id } = await a.draft('Over the figure');
+    const review = await a.campaigns.reviewDraft(owner, id);
+    expect(review.audience).toMatchObject({ total: 251, eligible: 251 });
+    expect(review.problems).toEqual([]);
+    expect(review.messagingLimit).toMatchObject({
+      status: 'over',
+      limit: 'TIER_250',
+      figure: 250,
+      recipients: 251,
+      tone: 'warning',
+      title: "More recipients than the number's messaging limit",
+    });
+    expect(await a.campaigns.submitCampaign(owner, id, { expectedVersion: 1 }, {})).toMatchObject({
+      status: 'scheduled',
+      audience: 251,
+      pending: 251,
+    });
+    expect((await a.campaigns.getCampaign(owner, id)).messagingLimit).toMatchObject({
+      status: 'over',
+      recipients: 251,
+    });
+  });
+
+  it('is absent until the draft has a number and an audience, and never blocks a submission', async () => {
+    const a = await setup();
+    await a.contact('+919870000011', { name: 'Asha' });
+    const owner = await fx.ctx(a.c, a.c.owner);
+    const { id: empty } = await a.campaigns.createDraft(owner, { name: 'Empty' }, {});
+    expect((await a.campaigns.reviewDraft(owner, empty)).messagingLimit).toBeNull();
+    // A limit research gives no figure for, far from any figure: the draft is still submitted.
+    await setLimit(a.c.channelAccountId, 'UNTIERED');
+    const { id } = await a.draft('Untiered');
+    const review = await a.campaigns.reviewDraft(owner, id);
+    expect(review.problems).toEqual([]);
+    expect(review.messagingLimit).toMatchObject({ status: 'unknown', unknown: 'no_figure' });
+    expect(await a.campaigns.submitCampaign(owner, id, { expectedVersion: 1 }, {})).toMatchObject({
+      status: 'scheduled',
+    });
   });
 });
 

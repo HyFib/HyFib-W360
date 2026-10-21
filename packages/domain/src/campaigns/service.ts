@@ -63,6 +63,13 @@ import {
 } from './audience';
 import { loadRateTable, marketFor, parseAmountToMicros, priceFor, rateCategoryFor } from './costs';
 import { recountedCounters } from './counters';
+import {
+  SUBMITTED_NOTICE_STATUSES,
+  campaignMessagingLimitNotice,
+  loadNumberMessagingLimit,
+  submittedCampaignRecipients,
+  type CampaignMessagingLimitNotice,
+} from './messaging-limit-notice';
 import { campaignAnalytics, type CampaignAnalytics } from './results';
 import {
   formatTimeOfDay,
@@ -811,6 +818,11 @@ export interface CampaignDraftReview {
   adjustment: ScheduleAdjustment | null;
   approvalRequired: boolean;
   frequencyCap: { count: number; days: number } | null;
+  /**
+   * The chosen number's messaging limit against the contacts who can receive it now (ADR-400); null
+   * until it has a number of the company and an audience counted. A notice: it never blocks.
+   */
+  messagingLimit: CampaignMessagingLimitNotice | null;
 }
 
 /**
@@ -851,6 +863,12 @@ export async function reviewCampaignDraft(
       }
     }
   }
+  // The audience's own count, in this transaction under the company's scope (ADR-400).
+  let messagingLimit: CampaignMessagingLimitNotice | null = null;
+  if (r.channel && audience) {
+    const number = await loadNumberMessagingLimit(tx, company.id, r.channel.id);
+    if (number) messagingLimit = campaignMessagingLimitNotice(number, audience.eligible);
+  }
   return {
     problems,
     audience,
@@ -863,6 +881,7 @@ export async function reviewCampaignDraft(
       settings.capCount && settings.capDays && r.template?.category === 'MARKETING'
         ? { count: settings.capCount, days: settings.capDays }
         : null,
+    messagingLimit,
   };
 }
 
@@ -1839,6 +1858,12 @@ export function createCampaignsService(deps: CampaignDeps) {
                   and(eq(apiKeys.tenantId, ctx.tenant.id), eq(apiKeys.id, c.submittedByApiKeyId)),
                 )
             : [];
+          // A submitted campaign not yet finished: its number's limit against its frozen audience
+          // less those skipped (ADR-400). A draft's comes with its review.
+          const number =
+            SUBMITTED_NOTICE_STATUSES.includes(c.status) && c.channelAccountId
+              ? await loadNumberMessagingLimit(tx, ctx.tenant.id, c.channelAccountId)
+              : null;
           return {
             campaign: c,
             variables: readCampaignVariables(c.variables),
@@ -1873,6 +1898,9 @@ export function createCampaignsService(deps: CampaignDeps) {
             },
             analytics:
               c.status === 'draft' ? null : await campaignAnalytics(tx, ctx.tenant.id, campaignId),
+            messagingLimit: number
+              ? campaignMessagingLimitNotice(number, submittedCampaignRecipients(c))
+              : null,
           };
         },
         { accessMode: 'read only' },

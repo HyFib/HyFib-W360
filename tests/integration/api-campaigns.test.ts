@@ -1788,6 +1788,7 @@ describe('reviewing campaign drafts through the API (ADR-193)', () => {
       costCurrency: null,
       approvalRequired: false,
       frequencyCap: null,
+      messagingLimit: null,
     });
     expect(empty.problems).toEqual(
       expect.arrayContaining([
@@ -1857,6 +1858,8 @@ describe('reviewing campaign drafts through the API (ADR-193)', () => {
       scheduleAdjustment: null,
       approvalRequired: true,
       frequencyCap: { count: 2, days: 7 },
+      // The fixture's number was never read from Meta (ADR-400): no figure to compare with.
+      messagingLimit: { status: 'unknown', limit: null, checkedAt: null, figure: null },
     });
     // The same review members read, in the API's words; reading it changed nothing.
     expect(reviewed).toEqual(

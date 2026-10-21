@@ -1,5 +1,114 @@
 # Progress
 
+## 2026-10-21 — CI: the dependency audit cleared again (vite, GHSA-587h-7wmj-h5pm)
+
+Status: **Fixed and locally verified; CI to confirm.** PR #102's "Dependency audit and secret
+scan" job failed on GHSA-587h-7wmj-h5pm, published after main's last run: a high-severity advisory
+for vite 8.3.0 to 8.3.2, whose bundled `launch-editor` file existence check can be bypassed on
+Windows. vite reaches the repository only as a development dependency of vitest (through
+`vitest`, `@vitest/mocker` and `@vitest/coverage-v8`, as `pnpm why vite` shows); the lockfile had
+8.3.1. Unlike ADR-142's braces, the advisory has a patched release (8.3.3) within vitest's range.
+
+### Completed
+
+- **Override** in `pnpm-workspace.yaml`, as for sharp: `'vite@<8.3.3': '^8.3.3'`, with the
+  advisory named beside it. The lockfile resolves vite 8.3.4 and the releases of its own
+  dependencies it asks for (rolldown 1.2.14 and its platform bindings, `@oxc-project/types`
+  0.154.0, postcss 8.5.31, nanoid 3.3.20); nothing else changes. Every new release passed the
+  workspace's minimum release age when installed.
+- Dependabot's PR #101, which also moves vitest to 5.0.4, was not taken: it carries six other
+  updates, TypeScript 7 among them, beyond what clearing the audit needs.
+
+### Test commands and results (local, 2026-10-21)
+
+| Command                                            | Result                                                                                                                                                                                                                             |
+| -------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm audit --audit-level=high`                    | before (CI): 3 found, 1 high (vite, GHSA-587h-7wmj-h5pm) and 2 moderate; after: no known vulnerabilities                                                                                                                           |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                                                                                                                                                                                              |
+| `pnpm test` (unit, on vite 8.3.4)                  | 1,885 of 1,887 passed in the full run; the other 2, which read every migration file, timed out at 5 seconds while two other builds loaded the machine (load average about 6), and their two files passed when run again (12 tests) |
+| `pnpm build`                                       | passed                                                                                                                                                                                                                             |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them                                                                                                                                                                    |
+
+## 2026-10-16 — A campaign's notice of its number's messaging limit (P3-04, ADR-400)
+
+Status: **Implemented; its database and browser tests run in CI only.** "Messaging-tier awareness
+(read the number's limit from Meta)" remained under P3-04. ADR-398 keeps each number's limit as
+Meta reports it; a draft's review only said that Meta limits how many people a business can message
+in 24 hours.
+
+### Completed
+
+- **Domain (`campaigns/messaging-limit-notice.ts`):** `campaignMessagingLimitNotice`, a pure
+  function, sets the number's limit and read time against the campaign's recipients: a warning
+  above the figure of a tier research M-058 gives one for (250, 2,000, 10,000, 100,000:
+  `messagingLimitFigure`, added to `messaging/messaging-limit.ts`), an informational line at or
+  under it, a line without a warning for `TIER_UNLIMITED`, and "Messaging limit unknown", with no
+  figure, for a number never asked, none reported, `TIER_50`, `UNTIERED` and an unlisted value.
+  Every notice but unlimited says the count is an upper bound (open service windows do not count),
+  that the limit is shared by the business portfolio, whose use HyFib cannot see, and that Meta,
+  not HyFib, enforces it, and that what Meta refuses or reports as failed is shown as failed with
+  Meta's code; no error code is named (research documents none for this limit). At or under a
+  figure the title compares only the campaign's size with it ("Up to 1 contact, within the
+  limit's 250"), since the shared allowance may already be used. `loadNumberMessagingLimit` reads the
+  campaign's own number in the scoped transaction, naming the company as well as row security does.
+- **Counts reused:** a draft's `audience.eligible` from `reviewCampaignDraft` (which now returns
+  `messagingLimit`), and a submitted campaign's audience less those skipped
+  (`submittedCampaignRecipients`, as the approval email counts it) in `getCampaign`, for a campaign
+  waiting for approval, scheduled, running or paused. No new query path.
+- **Web:** the Review card of a draft's page shows the notice (`MessagingLimitNotice`, an `Alert`,
+  warning tone only when over) instead of the old sentence; a submitted campaign not yet finished
+  shows it above its results. It never blocks submitting, approving or sending.
+- **API (P5-08):** `GET /campaigns/{id}/review` gains `messagingLimit` (`status`, `limit`,
+  `checkedAt`, `figure`, or null while `audience` is null), documented in the OpenAPI schema and the
+  operation's description, with a schema test.
+- **Tests:** unit (`campaigns/messaging-limit-notice.test.ts`, 14 tests: each tier at its figure,
+  one under and one over, unlimited for any count, each unknown kind far above every figure,
+  prototype names as unknown, a number never asked with a limit, zero and one recipient, the honest
+  lines and no error code, the figures for each listed value, every role reading campaigns also
+  reading channels, the submitted count and statuses; `api/api.test.ts`: the field mapped, an
+  unlisted limit without a figure, and the OpenAPI schema's fields, words, types, formats and
+  nullability); integration (`campaigns.test.ts`, 3 new: the review and the page read only the
+  campaign's own company's number, `loadNumberMessagingLimit` under one company's scope returns
+  nothing for another company's number by either company's id, unknown kinds, the submitted count,
+  nothing once cancelled or for a draft's page; 251 eligible contacts on `TIER_250` reviewed as
+  over with no problem and submitted; a draft with an unfigured limit still submitted;
+  `api-campaigns.test.ts`: the review's new field); e2e (`campaigns.spec.ts`: a number with
+  `TIER_250` shows "Up to 1 contact, within the limit's 250" with its lines in the draft's review,
+  then the campaign starts). Written for CI; the integration and e2e tests were not run here.
+- **Mutation checks:** 17 deliberate regressions in the decision and the figures (`>=` for `>`,
+  `> figure + 1`, the never-asked, not-reported, unlisted and unlimited branches dropped, the
+  warning tone never used, unknown given a warning tone, the portfolio line dropped, the count's
+  floor at zero dropped, `TIER_50` or `UNTIERED` given a figure, `TIER_2K`'s figure changed, the
+  figure read without the listed-value guard, the old "Within the number's messaging limit" title
+  and the old enforcement line restored, the title's figure replaced by the count): 17 caught by
+  the unit tests, each file restored exactly. The wiring in the review and the page is
+  exercised by the integration and e2e tests only, which run in CI.
+- **Docs:** ADR-400; ARCHITECTURE (API review), SECURITY (campaign readers and reviewing keys see
+  the sending number's limit), BACKLOG P3-04, RUNBOOKS (each notice and what to tell a member), the
+  matrix's W-030. No migration, no threat-model row (no new data, role or
+  grant: the read stays in the company's scope) and no research row (nothing new verified).
+- **Review fixes (no High finding):** the enforcement line no longer says an undelivered message is
+  shown as failed (one Meta accepts and never delivers stays sent); the title at or under a figure
+  no longer says "within the limit"; SECURITY says who now sees the limit; "never blocks" is tested
+  over a figure (251 contacts on `TIER_250`); prototype names are tested; the API's `limit` is
+  bounded to 64 characters and its schema's types are tested.
+- **Not built:** the notice in the approval email, the API's campaign detail and the campaigns
+  list; any block or pacing on the limit; a refresh of the number's limit before review. Which node
+  gives the limit is still to check on a real number (META-SETUP, ADR-398).
+
+### Test commands and results (local, 2026-10-16)
+
+| Command                                            | Result                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                           |
+| `pnpm test` (unit)                                 | 172 files, 1,841 tests passed (after the review fixes)          |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them |
+| `pnpm build`                                       | passed after the review fixes (see below)                       |
+
+The first commit's build passed on its third run: the first two failed with ENOSPC (the disk was
+full, shared with other builders' builds), unrelated to the change. The build after the review
+fixes passed on its first run.
+
 ## 2026-10-16 — Pacing WhatsApp management calls by Meta's usage header (P2-02, ADR-399)
 
 Status: **Implemented (migration 0310); unit tests run locally, integration tests in CI only; no

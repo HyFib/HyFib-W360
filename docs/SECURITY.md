@@ -134,6 +134,13 @@ Phase 3 rules on top of the matrix (enforced in domain services and re-checked w
   `tenant.settings.manage`. Adding a number to the suppression list needs `contacts.write`;
   removing one needs `tenant.settings.manage` (it re-enables messaging).
 - Deleting a template Meta already has needs `templates.submit` as well as `templates.write`.
+- A campaign's messaging-limit notice (ADR-400): members with `campaigns.read` see the sending
+  number's messaging limit, as Meta last reported it, in a draft's review and on the page of a
+  campaign not yet finished, though Settings → Channels shows it only to `channels.read` (ADR-398);
+  keys see it in `GET /campaigns/{id}/review`, which needs `campaigns.write`. Every role holding
+  `campaigns.read` also holds `channels.read`, and the limit is operational metadata of the
+  company's own number (no credential, no contact), read only from that number under the company's
+  scope.
 - Erasing a contact needs `contacts.delete` (also while the company is suspended).
 - Merging contacts (ADR-224) needs `contacts.write` and `contacts.delete` (owners and
   administrators, not while the company is suspended) and is audited with the counts.
@@ -1095,7 +1102,9 @@ Phase 5 rules (Public API, P5-08):
   holding `campaigns.write`, which already reads drafts' settings: it shows counts of the audience
   and an estimate of Meta's charges, never contacts or members, and keys that only read campaigns
   get 403. It reads one draft of the key's company in a read-only transaction and changes nothing,
-  so a company that is not active still reads it.
+  so a company that is not active still reads it. Since ADR-400 it also gives the draft's sending
+  number's messaging limit as Meta last reported it (`messagingLimit`: status, Meta's text, the read
+  time and the tier's figure), read from the key's company's number only.
 - Submitting drafts (ADR-202): a key with `campaigns.write` submits one of its company's drafts with
   members' checks, but it can never start a campaign: the submission always waits for a member with
   `campaigns.approve` who also holds `campaigns.send`, and the campaign runs under that member's

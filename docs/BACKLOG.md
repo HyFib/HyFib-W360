@@ -142,10 +142,15 @@ verification, app review, Embedded Signup configuration).
   public API (ADR-186, ADR-193, ADR-202). **[Segment conditions on store orders built; their
   database tests run only in CI]** (ADR-231, W-051: how many orders a contact placed, or what they
   spent in one currency, in the last days or ever, in one store or all, matched by number; members
-  need store order access to use them and keys `orders.read`; no migration). **Remaining:** the 10k
-  run in staging with real dispatch, per-recipient time zones, A/B variants, messaging-tier
-  awareness (read the number's limit from Meta), media-header templates (only the API sends them,
-  ADR-201).
+  need store order access to use them and keys `orders.read`; no migration). **[Messaging-limit
+  awareness built; its database and browser tests run only in CI]** (ADR-400, no migration: a
+  draft's review and the page of a campaign not yet finished set the sending number's limit, as
+  Meta last reported it (ADR-398), against the contacts the campaign may reach, an upper bound; a
+  warning only above a tier's figure from research M-058, "limit unknown" for `TIER_50`, `UNTIERED`,
+  an unlisted value, none reported or a number never read; a notice that never blocks; the API's
+  draft review gives it as `messagingLimit`). **Remaining:** the 10k run in staging with real
+  dispatch, per-recipient time zones, A/B variants, media-header templates (only the API sends
+  them, ADR-201).
 - **P3-05 Reports** — _implemented (2026-09-26); provider data verified against the Graph stand-in
   only_: persisted, versioned metric definitions; periods of whole days in the company time zone;
   messaging outcomes with denominators; estimated Meta charges from Meta's billable flag and

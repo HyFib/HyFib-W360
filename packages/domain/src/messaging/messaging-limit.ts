@@ -32,6 +32,26 @@ const TIER_CUSTOMERS: Readonly<
   TIER_100K: '100,000',
 };
 
+/** The same figures as numbers, to compare a campaign's recipients with (ADR-400). */
+const TIER_FIGURES: Readonly<Record<keyof typeof TIER_CUSTOMERS, number>> = {
+  TIER_250: 250,
+  TIER_2K: 2_000,
+  TIER_10K: 10_000,
+  TIER_100K: 100_000,
+};
+
+/**
+ * The unique customers `limit` allows outside a customer service window in a moving 24 hours, as
+ * research M-058 gives them (ADR-400): 250, 2,000, 10,000 or 100,000 for the four tiers it gives a
+ * figure for; null for `TIER_UNLIMITED` (unlimited, no figure), for `TIER_50` and `UNTIERED`
+ * (research gives none) and for any value Meta's SDK does not list. Never an invented figure.
+ */
+export function messagingLimitFigure(limit: string): number | null {
+  if (!isListedMessagingLimit(limit)) return null;
+  if (limit === 'TIER_50' || limit === 'TIER_UNLIMITED' || limit === 'UNTIERED') return null;
+  return TIER_FIGURES[limit];
+}
+
 /** The most characters of a limit HyFib keeps: the column's check, as `name_status`'s (0003). */
 export const MESSAGING_LIMIT_MAX = 64;
 
