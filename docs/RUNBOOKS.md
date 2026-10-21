@@ -4980,8 +4980,23 @@ of a company at a time).
   configured key means a key was removed while parts still used it: section 13 removes a key only
   when the console counts nothing sealed with it, parts included.
 - _Space._ `SELECT pg_size_pretty(pg_total_relation_size('app.company_export_parts'))`. Each company
-  holds at most one ready file of 512 MiB compressed (about 700 MB sealed); expired ones are deleted
+  holds normally one ready file of at most 512 MiB compressed (about 700 MB sealed), up to two while
+  a new one is written and three for the 30 minutes after a replacement; expired ones are deleted
   every minute.
+- _Vacuum held back._ A run's snapshot holds back vacuum across the database while it runs (at most
+  30 minutes, then it fails as `timed_out`). To see runs:
+  `SELECT pid, xact_start, state FROM pg_stat_activity WHERE application_name = 'w360-worker-exports' AND backend_xmin IS NOT NULL ORDER BY xact_start;`.
+  To stop one, `SELECT pg_cancel_backend(<pid>)` (or `pg_terminate_backend`): the run fails on its
+  next read with a cancelled statement, a transient error, so the export stays `running` until its
+  lease runs out and the next run takes over; to stop it for good, also have the owner wait (the
+  fourth start fails it as `interrupted`) or ask HyFib engineering to fail it.
+- _Transient errors._ A broken connection, a deadlock, a cancelled statement or the pool timing out
+  does not fail an export: the worker logs the job's failure, and the next run takes over once the
+  lease runs out (up to 5 minutes and a minute's sweep).
+- _Limits._ A company may ask 3 times and download 20 times a day; past that the page shows the
+  refusal (429, `rate_limited`) and nothing is written or emailed. The buckets are
+  `company-export:request:<company id>` and `company-export:download:<company id>` in
+  `ops.rate_limit_buckets`.
 
 **A deletion is scheduled.** The company is `pending_deletion` until `due_at` (14 days) and works as
 suspended. Any owner cancels in Settings → Company data until the run starts; after that the page

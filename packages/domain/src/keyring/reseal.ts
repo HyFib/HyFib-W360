@@ -314,13 +314,38 @@ const SEALED_VALUES: Record<SealedValueKind, SealedValueSpec> = {
       return res.rows[0]?.swapped === true;
     },
   },
-  company_export_part: sealedColumn({
-    table: companyExportParts,
-    id: companyExportParts.id,
-    tenantId: companyExportParts.tenantId,
-    sealed: companyExportParts.ciphertext,
-    aad: (r) => companyExportPartAad(r.tenantId, r.id),
-  }),
+  // A part's associated data names its export, run and position too (ADR-415), read from its row.
+  company_export_part: {
+    async read(tx, ref) {
+      const res = await tx.execute<{
+        sealed: string;
+        export_id: string;
+        attempt: number;
+        seq: number;
+      }>(
+        sql`select ${companyExportParts.ciphertext} as sealed, ${companyExportParts.exportId} as export_id,
+                   ${companyExportParts.attempt} as attempt, ${companyExportParts.seq} as seq
+              from ${companyExportParts}
+             where ${companyExportParts.id} = ${ref.id}
+               and ${companyExportParts.tenantId} = ${ref.tenantId}`,
+      );
+      const row = res.rows[0];
+      if (!row || !ref.tenantId) return null;
+      return {
+        sealed: row.sealed,
+        aad: companyExportPartAad(ref.tenantId, row.export_id, row.attempt, row.seq, ref.id),
+      };
+    },
+    async write(tx, ref, stored, next) {
+      const res = await tx.execute(
+        sql`update ${companyExportParts} set ciphertext = ${next}
+             where ${companyExportParts.id} = ${ref.id}
+               and ${companyExportParts.tenantId} = ${ref.tenantId}
+               and ${companyExportParts.ciphertext} = ${stored.sealed}`,
+      );
+      return res.rowCount === 1;
+    },
+  },
 };
 
 const KIND_SET: ReadonlySet<string> = new Set(SEALED_VALUE_KINDS);

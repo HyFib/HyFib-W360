@@ -15,21 +15,24 @@ streamed export stays as it was (it is now refused while a stored export is bein
 - **The run:** the streamed export's own lines (`writeExportLines`, shared) from one read-only
   snapshot, gzip-compressed and cut into 1 MiB parts (`CompressedParts`), each sealed with the
   keyring and inserted in its own transaction while the run's lease and attempt hold; ready with
-  size, SHA-256 and a 7-day expiry; older ready files of the company expired; owners and
-  administrators emailed a link to the page.
+  size, SHA-256 and a 7-day expiry; an older ready file of the company no longer offered and
+  expired 30 minutes later; owners and administrators emailed a link to the page.
 - **Bounds:** at most 512 MiB compressed per export and one ready file per company (a larger one
-  fails as `too_large` and points to the streamed export); 7 days, then the minute sweep deletes the
-  parts and records the export expired.
+  fails as `too_large` and points to the streamed export); a new run deletes earlier runs' parts; 7
+  days, then the minute sweep deletes the parts and records the export expired. A company may ask 3
+  times and download 20 times a day (token buckets).
 - **One at a time:** the export lock for the streamed and stored reads, a unique index for waiting or
   running stored exports; asking refused while a stream runs, the stream refused while a stored
   export waits.
 - **Crashes and failures:** a 5-minute lease renewed every part and at least every minute, fenced by
   the attempt number; a crashed run taken over, the fourth start failed as `interrupted`, a day
-  waiting as `timed_out`, a requester no longer an owner as `requester_not_allowed`; failures store
-  a code and a SQLSTATE only, delete the parts, email the owners and show on the page.
+  waiting or a run past 30 minutes as `timed_out`, a requester no longer an owner as
+  `requester_not_allowed`; a transient database error left to the lease; failures store a code and a
+  SQLSTATE only, delete the parts, email the owners and show on the page. Runs use a worker pool of
+  their own (4 connections).
 - **Downloading:** `/c/{slug}/settings/data/exports/{id}`, owners with the step-up, the company's own
-  ready exports only, audited and emailed, streamed part by part through the app with each part's
-  size and the file's size and SHA-256 checked.
+  current ready exports only, audited and emailed, streamed part by part through the app with each
+  part's size checked, and the file's size and SHA-256 before its last part.
 - **Keys and deletion:** the parts join the keyring sweep (`company_export_part`), so a key is removed
   only once no part uses it; company deletion removes both tables (steps 37 and 38); both are left
   out of the export.
@@ -38,33 +41,52 @@ streamed export stays as it was (it is now refused while a stored export is bein
 
 ### Tests
 
-| Suite                      | Files                                                                                              | Result                               |
-| -------------------------- | -------------------------------------------------------------------------------------------------- | ------------------------------------ |
-| Unit (new)                 | `tenancy/export-parts.test.ts`, `tenancy/stored-export.test.ts`                                    | 6 and 13 tests, passed locally       |
-| Unit (changed)             | `platform/queue-waits.test.ts`                                                                     | passed locally                       |
-| Unit (whole suite)         | see the final check                                                                                | passed locally (`pnpm test`)         |
-| Integration (new, CI only) | `stored-exports.test.ts`                                                                           | 14 tests, type-checked, not run here |
-| Integration (changed)      | `company-data.test.ts` (deletion with a stored export), `keyring-reseal.test.ts` (parts re-sealed) | type-checked, not run here           |
-| E2E (new step, CI only)    | `company-data.spec.ts`                                                                             | type-checked, not run here           |
+| Suite                      | Files                                                                        | Result                         |
+| -------------------------- | ---------------------------------------------------------------------------- | ------------------------------ |
+| Unit (new)                 | `tenancy/export-parts.test.ts`, `tenancy/stored-export.test.ts`              | 6 and 18 tests, passed locally |
+| Unit (changed)             | `platform/queue-waits.test.ts`                                               | passed locally                 |
+| Unit (whole suite)         | 188 files                                                                    | 2,167 tests, passed locally    |
+| Integration (new, CI only) | `stored-exports.test.ts`                                                     | 19 tests, type-checked         |
+| Integration (changed)      | `company-data.test.ts`, `keyring-reseal.test.ts`, `tenant-isolation.test.ts` | type-checked, not run here     |
+| E2E (new step, CI only)    | `company-data.spec.ts`                                                       | type-checked, not run here     |
 
-- Hand mutation of 30 rules and bounds, one at a time. **20 caught by the unit tests** (the size
-  bound three ways, the file hash, the last part, part numbering, the 7 days, the requester's status
-  and permission, the permission and step-up of asking, listing and downloading, the export id
-  check, the file's SHA-256 and each part's size on reading, the part's associated data, the
-  export's own table classified, the job's expiry). **10 need the database**, each exercised by a
-  named integration test that did not run here: taking over an expired lease ("takes over a run
-  whose lease ran out…"), the attempts limit ("gives up after 3 interrupted runs…"), one ready
-  file per company ("keeps one ready file…"), the streamed export refusing while a stored one waits
-  and asking taking the export lock ("counts the streamed export and a stored one together…"), a
-  failure deleting the parts ("fails a file past the largest size…"), expiry deleting the parts
-  ("deletes a ready export’s file once it expires…"), the requester and waiting checks ("does not
-  prepare an export for someone who is no longer an owner…"), the deletion steps
-  (`company-data.test.ts` "removes HyFib from the providers, deletes every company row…") and a
-  download by another company ("lets only an owner of the company…"). Two guards are not
-  distinguished by any test, honestly: the unique index on waiting or running exports (asking takes
-  the export lock first, so concurrent requests are already refused before it) and the attempt fence
-  on part inserts (reads already take only the finishing attempt's parts); both are kept as
+- Hand mutation of 44 rules and bounds, one at a time (30 first, 14 after the review; the first
+  run's associated-data mutation is replaced by four). **31 caught by the unit tests**: the size bound three ways, the file hash, the last part, part numbering, the
+  7 days, the requester's status and permission, the permission and step-up of asking, listing and
+  downloading, the export id check, the file's SHA-256 and each part's size on reading, the export's
+  own table classified, the job's expiry; after the review, the part's associated data naming the
+  company, the export, the run and the position (four mutations), the whole-file check before the
+  last part, the request and download limits taken (two), the transient classification of a
+  connection error and of a serialization failure (two), the run's 30-minute bound, the replaced
+  file's 30 minutes, and the request limit's size. **13 need the database**, each exercised by
+  a named integration test that did not run here: taking over an expired lease and a new run deleting
+  earlier runs' parts ("takes over a run whose lease ran out…"), the attempts limit ("gives up after
+  3 interrupted runs…"), one ready file and the 30-minute replacement ("keeps one ready file…"), the
+  streamed export refusing while a stored one waits and asking taking the export lock ("counts the
+  streamed export and a stored one together…"), a failure deleting the parts ("fails a file past the
+  largest size…"), expiry deleting the parts ("deletes a ready export’s file once it expires…"), the
+  requester and waiting checks ("does not prepare an export for someone who is no longer an
+  owner…"), the deletion steps (`company-data.test.ts` "removes HyFib from the providers, deletes
+  every company row…"), a download by another company ("lets only an owner of the company…"), a
+  transient error left to the lease ("leaves the export to its lease on a broken connection…"), the
+  run's time bound ("fails a run that takes longer than its bound…") and the limits' buckets per
+  company ("refuses a request past 3 in a day…", "refuses a download past 20 in a day…"). Two guards are not distinguished by
+  any test: the unique index on waiting or running exports (asking takes the export lock first) and
+  the attempt fence on part inserts (reads take only the finishing attempt's parts); both are kept as
   defence in depth.
+
+### Review fixes (before merge)
+
+- **Medium:** a new run deletes earlier runs' parts when it claims the export; per-company limits on
+  asking (3 a day) and downloading (20 a day); runs on a worker pool of their own, transient database
+  errors left to the lease, a 30-minute run bound, and the vacuum effect documented (DEPLOYMENT,
+  RUNBOOKS §10Q).
+- **Low:** the whole file is checked before its last part; the part's associated data names its
+  export, run and position (the keyring sweep reads them); a replaced file expires 30 minutes later
+  instead of at once, no longer offered; the job's hour stated against the run's bound; no
+  `download` attribute on the link; a failed export sweep no longer skips the rest of the billing
+  sweep; grant checks for `ops.company_exports_due` in the isolation suite; the integration test's
+  comparison with the streamed export states what writes between the two.
 
 ## 2026-10-21 — Store follow-ups per shipment (P4-06f, ADR-413)
 

@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
-import { Keyring, isAppError } from '@w360/core';
+import { AppError, DatabaseQueryError, Keyring, isAppError } from '@w360/core';
 import { QUEUES } from '@w360/contracts';
 import {
   authorizedTenantScope,
@@ -12,14 +12,19 @@ import type { TenantContext } from '../authz/context';
 import { permissionsForRoles } from '../authz/permissions';
 import { EXPORT_EXCLUDED_TABLES } from './export-spec';
 import {
+  STORED_EXPORT_DOWNLOAD_LIMIT,
   STORED_EXPORT_FAILURE_LABELS,
   STORED_EXPORT_LEASE_SECONDS,
   STORED_EXPORT_MAX_ATTEMPTS,
+  STORED_EXPORT_MAX_RUN_MINUTES,
   STORED_EXPORT_RENEW_SECONDS,
+  STORED_EXPORT_REPLACED_MINUTES,
+  STORED_EXPORT_REQUEST_LIMIT,
   STORED_EXPORT_RETENTION_DAYS,
   STORED_EXPORT_STATUS_LABELS,
   companyExportPartAad,
   formatByteSize,
+  isTransientDatabaseError,
   listStoredExports,
   openStoredExport,
   readParts,
@@ -82,6 +87,50 @@ describe('stored exports: limits and wording (ADR-415)', () => {
     expect(STORED_EXPORT_RENEW_SECONDS * 3).toBeLessThan(STORED_EXPORT_LEASE_SECONDS);
   });
 
+  it('bounds a run to 30 minutes, within its job’s hour, and keeps a replaced file 30 minutes', () => {
+    expect(STORED_EXPORT_MAX_RUN_MINUTES).toBe(30);
+    expect(STORED_EXPORT_MAX_RUN_MINUTES * 60).toBeLessThan(QUEUES.companyExport.expireInSeconds);
+    expect(STORED_EXPORT_REPLACED_MINUTES).toBe(30);
+  });
+
+  it('lets a company ask 3 times and download 20 times a day', () => {
+    expect(STORED_EXPORT_REQUEST_LIMIT.capacity).toBe(3);
+    expect(STORED_EXPORT_REQUEST_LIMIT.refillPerSecond * 86_400).toBeCloseTo(3, 10);
+    expect(STORED_EXPORT_DOWNLOAD_LIMIT.capacity).toBe(20);
+    expect(STORED_EXPORT_DOWNLOAD_LIMIT.refillPerSecond * 86_400).toBeCloseTo(20, 10);
+  });
+
+  it('leaves a run to its lease on a transient database error, and fails it on any other', () => {
+    const transient = [
+      new AppError('conflict', 'retry', { details: { retryable: true } }),
+      new DatabaseQueryError({ code: '40001' }),
+      new DatabaseQueryError({ code: '40P01' }),
+      new DatabaseQueryError({ code: '57014' }),
+      new DatabaseQueryError({ code: '57P01' }),
+      new DatabaseQueryError({ code: '53300' }),
+      new DatabaseQueryError({ code: '08006' }),
+      new DatabaseQueryError({ stoppedBy: 'Error' }),
+      Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' }),
+      new Error('timeout exceeded when trying to connect'),
+      new Error('Connection terminated unexpectedly'),
+    ];
+    for (const error of transient)
+      expect(isTransientDatabaseError(error), String(error)).toBe(true);
+    const permanent = [
+      new AppError('conflict', 'A record with the same unique value already exists.'),
+      new AppError('forbidden', 'no'),
+      new DatabaseQueryError({ code: '23505' }),
+      new DatabaseQueryError({ code: '42501' }),
+      new DatabaseQueryError({ code: '22P02' }),
+      new Error('boom'),
+      'not an error',
+      null,
+    ];
+    for (const error of permanent) {
+      expect(isTransientDatabaseError(error), String(error)).toBe(false);
+    }
+  });
+
   it('labels every status and failure reason the database allows', () => {
     expect(Object.keys(STORED_EXPORT_STATUS_LABELS).sort()).toEqual(
       [...COMPANY_EXPORT_STATUSES].sort(),
@@ -105,17 +154,28 @@ describe('stored exports: limits and wording (ADR-415)', () => {
     expect(() => formatByteSize(-1)).toThrow();
   });
 
-  it('seals each part for its company and part, so a part moved elsewhere does not open', () => {
+  it('seals each part for its company, export, run and place, so a moved part does not open', () => {
     const keyring = new Keyring({ primaryKeyId: 'k', keys: { k: randomBytes(32) } });
-    expect(companyExportPartAad(TENANT, EXPORT_ID)).toBe(
-      `company-export-part:${TENANT}:${EXPORT_ID}`,
+    const PART = '0192f0c4-8e2b-7c1d-9a3e-5b6c7d8e9f04';
+    expect(companyExportPartAad(TENANT, EXPORT_ID, 2, 7, PART)).toBe(
+      `company-export-part:${TENANT}:${EXPORT_ID}:2:7:${PART}`,
     );
-    const sealed = keyring.encrypt(Buffer.from('part'), companyExportPartAad(TENANT, EXPORT_ID));
-    expect(keyring.decrypt(sealed, companyExportPartAad(TENANT, EXPORT_ID)).toString()).toBe(
-      'part',
+    const sealed = keyring.encrypt(
+      Buffer.from('part'),
+      companyExportPartAad(TENANT, EXPORT_ID, 2, 7, PART),
     );
-    expect(() => keyring.decrypt(sealed, companyExportPartAad(OTHER, EXPORT_ID))).toThrow();
-    expect(() => keyring.decrypt(sealed, companyExportPartAad(TENANT, OTHER))).toThrow();
+    expect(
+      keyring.decrypt(sealed, companyExportPartAad(TENANT, EXPORT_ID, 2, 7, PART)).toString(),
+    ).toBe('part');
+    for (const moved of [
+      companyExportPartAad(OTHER, EXPORT_ID, 2, 7, PART),
+      companyExportPartAad(TENANT, OTHER, 2, 7, PART),
+      companyExportPartAad(TENANT, EXPORT_ID, 1, 7, PART),
+      companyExportPartAad(TENANT, EXPORT_ID, 2, 6, PART),
+      companyExportPartAad(TENANT, EXPORT_ID, 2, 7, OTHER),
+    ]) {
+      expect(() => keyring.decrypt(sealed, moved), moved).toThrow();
+    }
   });
 
   it('runs as a long, exclusive, retried job with a dead letter', () => {
@@ -164,6 +224,29 @@ describe('stored exports: who may ask and download (ADR-415)', () => {
     }
   });
 
+  it('limits asking and downloading per company, checked after the owner and the step-up', async () => {
+    // A database whose token bucket is empty: the only statement is the bucket's, in the system
+    // scope, and nothing of the company is read or written.
+    const calls: string[] = [];
+    const empty = {
+      run: async (scope: { kind: string }, fn: (tx: unknown) => Promise<unknown>) => {
+        calls.push(scope.kind);
+        return fn({ execute: async () => ({ rows: [] }) });
+      },
+    } as unknown as Database;
+    const limited = { ...deps(), db: empty };
+    const asked = await requestStoredExport(limited, ctx(['owner'])).catch((e: unknown) => e);
+    expect(isAppError(asked) && asked.code).toBe('rate_limited');
+    expect(isAppError(asked) && asked.publicMessage).toMatch(/streamed export/);
+    expect(calls).toEqual(['system']);
+    calls.length = 0;
+    const opened = await openStoredExport(limited, ctx(['owner']), EXPORT_ID).catch(
+      (e: unknown) => e,
+    );
+    expect(isAppError(opened) && opened.code).toBe('rate_limited');
+    expect(calls).toEqual(['system']);
+  });
+
   it('does not look up an export id that is not a UUID', async () => {
     for (const id of ['', 'x', '../export', `${EXPORT_ID}'`]) {
       expect(await refusal(openStoredExport(deps(), ctx(['owner']), id)), id).toBe('not_found');
@@ -205,7 +288,7 @@ describe('reading a stored export back (ADR-415)', () => {
       return {
         id,
         byte_size: bytes.length,
-        ciphertext: keyring.encrypt(bytes, companyExportPartAad(TENANT, id)),
+        ciphertext: keyring.encrypt(bytes, companyExportPartAad(TENANT, EXPORT_ID, 1, i, id)),
       };
     });
   }
@@ -241,7 +324,10 @@ describe('reading a stored export back (ADR-415)', () => {
     ).rejects.toThrow(/missing/);
     const foreign = {
       ...sealed[1]!,
-      ciphertext: keyring.encrypt(chunks[1]!, companyExportPartAad(OTHER, sealed[1]!.id)),
+      ciphertext: keyring.encrypt(
+        chunks[1]!,
+        companyExportPartAad(OTHER, EXPORT_ID, 1, 1, sealed[1]!.id),
+      ),
     };
     await expect(
       read([sealed[0]!, foreign, sealed[2]!], { byteSize: whole.length, sha256 }),
@@ -254,12 +340,41 @@ describe('reading a stored export back (ADR-415)', () => {
     ).rejects.toThrow(/wrong size/);
   });
 
-  it('stops when the whole file differs from its recorded size or SHA-256', async () => {
-    await expect(read(seal(chunks), { byteSize: whole.length + 1, sha256 })).rejects.toThrow(
-      /does not match/,
-    );
+  it('stops on parts in the wrong order, or of another run', async () => {
+    const sealed = seal(chunks);
     await expect(
-      read(seal(chunks), { byteSize: whole.length, sha256: '0'.repeat(64) }),
-    ).rejects.toThrow(/does not match/);
+      read([sealed[1]!, sealed[0]!, sealed[2]!], { byteSize: whole.length, sha256 }),
+    ).rejects.toThrow();
+    const otherRun = {
+      ...sealed[2]!,
+      ciphertext: keyring.encrypt(
+        chunks[2]!,
+        companyExportPartAad(TENANT, EXPORT_ID, 2, 2, sealed[2]!.id),
+      ),
+    };
+    await expect(
+      read([sealed[0]!, sealed[1]!, otherRun], { byteSize: whole.length, sha256 }),
+    ).rejects.toThrow();
+  });
+
+  it('checks the whole file before sending its last part, so a wrong file is never complete', async () => {
+    for (const file of [
+      { byteSize: whole.length + 1, sha256 },
+      { byteSize: whole.length, sha256: '0'.repeat(64) },
+    ]) {
+      const sent: Buffer[] = [];
+      const reading = (async () => {
+        for await (const bytes of readParts({ db: partsDb(seal(chunks)), keyring }, scope, TENANT, {
+          id: EXPORT_ID,
+          attempt: 1,
+          partCount: chunks.length,
+          ...file,
+        })) {
+          sent.push(Buffer.from(bytes));
+        }
+      })();
+      await expect(reading).rejects.toThrow(/does not match/);
+      expect(sent).toHaveLength(chunks.length - 1);
+    }
   });
 });

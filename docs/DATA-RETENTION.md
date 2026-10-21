@@ -115,8 +115,8 @@ they are not a statement of legal compliance. Retention jobs are phase 5–7 unl
   owners and administrators.
 - Stored company export **[built, ADR-415]**: the same file, prepared by a worker job and kept in
   `app.company_export_parts`, 1 MiB parts each sealed with the keyring, at most 512 MiB a company
-  and one ready file per company. Kept **7 days** after it is ready, or until a newer one is ready,
-  then its parts are deleted by the minute sweep and the export recorded as expired (`deleted_at`);
+  and one ready file per company. Kept **7 days** after it is ready, or **30 minutes** after a newer
+  one is ready, then its parts are deleted by the minute sweep and the export recorded as expired (`deleted_at`);
   a failed export's parts are deleted when it fails. The record (`app.company_exports`: who asked,
   when, status, size, SHA-256, a failure code) holds no company data and is kept until the company
   is deleted. Company deletion deletes both (ADR-055 steps). Backups keep the sealed parts until the

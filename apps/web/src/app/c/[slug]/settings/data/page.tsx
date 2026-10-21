@@ -102,7 +102,9 @@ export default async function CompanyDataPage({ params }: { params: Promise<{ sl
                     >
                       <p>
                         <span className="font-medium">
-                          {STORED_EXPORT_STATUS_LABELS[item.status]}
+                          {item.replaced
+                            ? 'Replaced by a newer export'
+                            : STORED_EXPORT_STATUS_LABELS[item.status]}
                         </span>
                         {' · '}asked for {formatDateTime(item.requestedAt, tz)}
                         {item.requestedByName ? ` by ${item.requestedByName}` : ''}
@@ -110,7 +112,8 @@ export default async function CompanyDataPage({ params }: { params: Promise<{ sl
                       {item.status === 'ready' && item.byteSize !== null && item.expiresAt ? (
                         <>
                           <p className="text-muted-foreground">
-                            {formatByteSize(item.byteSize)}, kept until{' '}
+                            {formatByteSize(item.byteSize)},{' '}
+                            {item.replaced ? 'deleted at' : 'kept until'}{' '}
                             {formatDateTime(item.expiresAt, tz)}
                           </p>
                           {item.sha256 ? (
@@ -118,11 +121,10 @@ export default async function CompanyDataPage({ params }: { params: Promise<{ sl
                               SHA-256 <code className="break-all">{item.sha256}</code>
                             </p>
                           ) : null}
-                          {recent ? (
+                          {recent && !item.replaced ? (
                             <div>
                               <a
                                 href={`/c/${ctx.tenant.slug}/settings/data/exports/${item.id}`}
-                                download
                                 rel="noopener noreferrer"
                                 className="inline-flex h-10 items-center rounded-md border border-border bg-background px-4 text-sm font-medium hover:bg-muted"
                               >

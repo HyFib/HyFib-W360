@@ -487,6 +487,24 @@ describe('database roles', () => {
       expect(await can('w360_auth', fn), fn).toBe(false);
       expect(await can('w360_platform', fn), fn).toBe(false);
     }
+    // The stored exports' sweep (0325, ADR-415): the runtime app role only, a SECURITY DEFINER
+    // function owned by the definer, with its search path pinned.
+    const exportsDue = 'ops.company_exports_due(integer)';
+    expect(await can('w360_app', exportsDue)).toBe(true);
+    expect(await can('w360_auth', exportsDue)).toBe(false);
+    expect(await can('w360_platform', exportsDue)).toBe(false);
+    const [exportsDueFn] = (
+      await dbs.adminPool.query<{ secdef: boolean; owner: string; config: string[] | null }>(
+        `SELECT p.prosecdef AS secdef, pg_get_userbyid(p.proowner) AS owner, p.proconfig AS config
+           FROM pg_proc p WHERE p.oid = $1::regprocedure`,
+        [exportsDue],
+      )
+    ).rows;
+    expect(exportsDueFn).toEqual({
+      secdef: true,
+      owner: 'w360_definer',
+      config: ['search_path=pg_catalog, pg_temp'],
+    });
     expect(await can('w360_definer', 'ops.deleting_tenant_id()')).toBe(true);
     for (const role of ['w360_app', 'w360_auth', 'w360_platform']) {
       expect(await can(role, 'ops.deleting_tenant_id()'), role).toBe(false);

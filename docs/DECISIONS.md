@@ -18596,8 +18596,9 @@ Decision:
 - **Stored in PostgreSQL, sealed, in bounded parts.** The gzip output is cut into parts of 1 MiB of
   compressed bytes (`CompressedParts`, which hands each part on before compressing more, so a run
   holds about two parts in memory), each sealed with the keyring like every other value HyFib keeps
-  sealed (AES-256-GCM, associated data `company-export-part:<company>:<part id>`, so a part copied
-  to another company or row does not open) and inserted in its own short transaction into
+  sealed (AES-256-GCM, associated data
+  `company-export-part:<company>:<export>:<attempt>:<seq>:<part id>`, so a part moved to another
+  company, export, run or position does not open) and inserted in its own short transaction into
   `app.company_export_parts`. The sealed text is the keyring's base64url format (a third larger than
   the bytes) so the keyring sweep re-seals parts like other sealed values (`company_export_part` in
   `ops.sealed_value_keys`, migration 0325): an old key is removed only once no part uses it. Its
@@ -18606,9 +18607,13 @@ Decision:
   SHA-256 of the whole file and the part count.
 - **Bounded per company: 512 MiB.** A file past 512 MiB compressed stops as soon as the next part
   would pass it, keeps no part and fails with `too_large`, whose words (on the page and in the
-  owners' email) send the owner to the streamed export. A company keeps one ready file: when a new
-  export is ready, older ready ones are expired and their parts deleted in the same transaction, so
-  a company holds at most 512 MiB, and twice that only while a new one is written. Why 512 MiB: a
+  owners' email) send the owner to the streamed export. A run deletes earlier runs' parts when it
+  claims the export (the export lock it holds proves they are dead), so an export holds one run's
+  parts. A company keeps one ready file: when a new export is ready, an older ready one is no longer
+  offered (not listed for download, refused when opened) and expires 30 minutes later
+  (`STORED_EXPORT_REPLACED_MINUTES`), so a download already under way can finish; the minute sweep
+  then deletes it. So a company holds normally 512 MiB, up to 1 GiB while a new one is written, and
+  at most 1.5 GiB in the 30 minutes after a replacement if a third is asked for meanwhile. Why 512 MiB: a
   message line is a few hundred bytes of JSON that gzip shrinks several times, so 512 MiB holds
   millions of messages, far beyond the companies whose streamed download a timeout cuts; a larger
   bound would put gigabytes of write-ahead log and backup per request on the shared database for
@@ -18619,7 +18624,7 @@ Decision:
   download it, every download is audited (`tenant.export_downloaded`) and emailed to owners and
   administrators, and no email carries a link that downloads (they link to Settings → Company data).
   Expiry: 7 days after it is ready (a week covers a weekend and an owner who is away for days; more
-  would keep a whole-company copy longer than its purpose needs), or sooner when a newer one is
+  would keep a whole-company copy longer than its purpose needs), or 30 minutes after a newer one is
   ready; the minute sweep deletes the parts and records the export as `expired` with `deleted_at`.
   Why the database is acceptable: the copy is bounded (512 MiB a company), short-lived (7 days),
   encrypted, and of data the same database already holds in the clear to its runtime role; it adds
@@ -18641,9 +18646,30 @@ Decision:
   token: a run that lost its lease writes parts nobody reads and cannot mark the export ready; the
   part key includes the attempt). A crashed run's lease runs out; the job's retry or the minute
   sweep, which signals every waiting export and every running one whose lease ran out, starts a new
-  run, which takes over and reads only its own parts (earlier runs' are deleted at ready). The
+  run, which deletes the earlier runs' parts and starts the file again. The
   fourth start fails the export as `interrupted`; an export that could not start in 24 hours fails
   as `timed_out`; an owner who stopped being one before the run fails it as `requester_not_allowed`.
+  A transient database error (a serialization failure or deadlock, a cancelled statement, the server
+  shutting down or out of connections, a connection error, the pool timing out:
+  `isTransientDatabaseError`) does not fail the export: the run throws it on, the job is retried, and
+  once the lease runs out the next run takes over (within the attempts limit); any other error fails
+  it as `error`.
+- **A bounded run, on its own pool.** A run's repeatable-read snapshot holds back vacuum across the
+  whole database (messages, pg-boss's tables) while it runs, so a run that passes 30 minutes
+  (`STORED_EXPORT_MAX_RUN_MINUTES`; a 512 MiB export reads and compresses in a few minutes) fails as
+  `timed_out`, checked as it writes (each page read is bounded by the 15-second statement timeout).
+  The `company.export` job expires after an hour, past the run's bound, so pg-boss does not start a
+  second run beside one still working. Runs use a pool of their own in the worker (four connections:
+  two runs at a time, a snapshot and a part each), so they never take the shared pool's connections
+  from other jobs. DEPLOYMENT and RUNBOOKS say what to watch and how to stop a run.
+- **Limits per company.** Asking: 3 at once, then one every 8 hours (`STORED_EXPORT_REQUEST_LIMIT`);
+  each request can write up to 512 MiB into the database and emails every owner and administrator,
+  so a loop, an owner's or a stolen fresh session's, is bounded, while an owner who needs a new copy
+  or asks again after a failure has room. Downloading: 20 at once, then one every 72 minutes
+  (`STORED_EXPORT_DOWNLOAD_LIMIT`), enough for several owners and retried downloads the same day,
+  while bounding how often each part is opened and how often a whole-company copy can leave. Both
+  are token buckets in `ops.rate_limit_buckets` (as the public API's), taken after the permission and
+  step-up checks; a refusal is 429 `rate_limited` and writes, audits and emails nothing.
 - **Failures recorded and visible, with no data.** A failure stores a reason code and, for a
   database error, its SQLSTATE only (ADR-129), deletes the export's parts, emails the owners and
   administrators the reason in words and shows it on the page; the error itself goes to the
@@ -18651,10 +18677,11 @@ Decision:
 - **Downloading.** `GET /c/{slug}/settings/data/exports/{id}` re-checks the session, the permission
   and the step-up itself, finds the export in the company's scope only (another company's id, an
   expired, failed or unknown one: 404), audits and emails, then streams the parts through the app,
-  each read and opened in its own short read-only transaction, checking each part's size and, at the
-  end, the whole file's size and SHA-256 against the record: a mismatch stops the download with an
-  error, so a client is left with an incomplete file, never a wrong one. The page shows the SHA-256
-  to compare. No storage-signed or bearer link exists.
+  each read and opened in its own short read-only transaction, checking each part's size and, before
+  the last part is sent, the whole file's size and SHA-256 against the record: a mismatch stops the
+  download with an error, so a client is left with an incomplete file, never a complete wrong one.
+  The page shows the SHA-256 to compare. The link carries no `download` attribute, so a refusal (a
+  sign-in window that lapsed) is shown, not saved as a file. No storage-signed or bearer link exists.
 - **Migration 0325.** `app.company_exports` and `app.company_export_parts`: `tenant_id NOT NULL`,
   `UNIQUE (tenant_id, id)`, composite foreign keys (the requester's membership, the export),
   `ops.apply_tenant_rls`, the runtime role granted select and insert and only the state columns'
@@ -18667,3 +18694,19 @@ Not built: object storage (a separate decision), formats other than JSON Lines, 
 more than one ready file per company, a size estimate before the run (the size is known only as the
 file is written; the run stops at the bound), and resuming a run from its last part (a takeover
 starts the file again).
+
+Review (before merge): an independent review found no High issue. Three Medium issues: a crashed
+run's parts stayed until the export was ready or failed, so three killed runs could leave about
+2 GiB (a new run now deletes earlier runs' parts when it claims the export, and the bounds above
+are restated); asking and downloading had no limit (now 3 requests and 20 downloads a company a
+day); and a run held a connection of the shared pool for its whole length, failed the export on any
+error, transient ones included, and held back vacuum for as long as it ran (runs now have their own
+pool, transient errors are left to the lease, a run is bounded to 30 minutes, and DEPLOYMENT and
+RUNBOOKS say what to watch). Low issues: the file's SHA-256 was checked after its last byte was
+sent (now before the last part); a part's associated data did not name its export, run or position
+(it does now, and the keyring sweep reads them); a newer file deleted the older one under a download
+(the older now expires 30 minutes later); the job's expiry is now stated against the run's bound; the
+link's `download` attribute saved a refusal as a file (removed); a failed export sweep skipped the
+rest of the minute's billing sweep (the rest now runs, and the failure is logged and thrown at the
+end); and the sweep function had no specific grant check (added to the isolation suite). All were
+fixed.

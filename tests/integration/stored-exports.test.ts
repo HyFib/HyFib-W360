@@ -2,8 +2,10 @@ import { createHash } from 'node:crypto';
 import { gunzipSync } from 'node:zlib';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { isAppError, systemClock, uuidv7 } from '@w360/core';
-import { authorizedTenantScope, sql } from '@w360/db';
+import { authorizedTenantScope, sql, type Database } from '@w360/db';
 import {
+  STORED_EXPORT_DOWNLOAD_LIMIT,
+  STORED_EXPORT_REQUEST_LIMIT,
   STORED_EXPORT_RETENTION_DAYS,
   companyExportPartAad,
   expireStoredExport,
@@ -48,6 +50,25 @@ const deps = (limits?: StoredExportDeps['limits']): StoredExportDeps => ({
   ...(limits ? { limits } : {}),
 });
 const scopeOf = (c: Company) => authorizedTenantScope(c.tenant.id, null);
+
+/**
+ * The test database, with `before` called ahead of the `nth` transaction a run opens (1 loads the
+ * export, 2 is the snapshot, 3 the claim, 4 the first part's insert): to look at the database at
+ * that moment, or to fail that transaction as a broken connection would.
+ */
+function watchedDb(nth: number, before: () => Promise<void>): Database {
+  let calls = 0;
+  const real = fx.dbs.app;
+  return {
+    pool: real.pool,
+    close: () => real.close(),
+    run: async (scope, fn, options) => {
+      calls += 1;
+      if (calls === nth) await before();
+      return real.run(scope, fn, options);
+    },
+  };
+}
 
 async function expectAppError(promise: Promise<unknown>, code: string, message?: RegExp) {
   try {
@@ -192,7 +213,10 @@ describe('preparing and downloading a stored export', () => {
     expect(createHash('sha256').update(file).digest('hex')).toBe(stored.sha256);
     const lines = gunzipSync(file).toString('utf8').trimEnd().split('\n');
     // The same export as the streamed one: the same header but its time, and the same rows,
-    // but for the audit events of this download and of the streamed export itself.
+    // but for the audit events of this download and of the streamed export itself. Between the two,
+    // only these paths write: the run (company_exports, company_export_parts and email_outbox, all
+    // excluded from the export), the download and the streamed export (audit_events, compared apart
+    // below, and email_outbox) and the rate limit (ops.rate_limit_buckets, no company table).
     const live = (await streamed(owner)).trimEnd().split('\n');
     const header = (text: string) => {
       const { exportedAt: _at, ...rest } = JSON.parse(text) as Record<string, unknown>;
@@ -268,20 +292,41 @@ describe('preparing and downloading a stored export', () => {
 });
 
 describe('what a company keeps (ADR-415)', () => {
-  it('keeps one ready file: a newer export expires the older one and deletes its parts', async () => {
+  it('keeps one ready file: a newer one replaces the older, which a download under way can finish', async () => {
     const c = await fx.company();
     const owner = await fx.ctx(c, c.owner);
     const first = await ready(c, owner);
+    // A download of the first file starts before the second is ready.
+    const reading = await openStoredExport(deps(), owner, first);
+    const firstPart = await reading.parts.next();
+    expect(firstPart.done).toBe(false);
     const other = await fx.company();
     const othersFile = await ready(other, await fx.ctx(other, other.owner));
     const second = await ready(c, owner);
+
+    // The first is no longer offered and expires within 30 minutes; its parts are still there.
     const old = await row(first);
-    expect(old).toMatchObject({ status: 'expired' });
-    expect(old.deleted_at).not.toBeNull();
+    expect(old).toMatchObject({ status: 'ready', deleted_at: null });
+    expect(old.expires_at!.getTime()).toBeLessThanOrEqual(Date.now() + 30 * 60_000 + 5_000);
+    expect((await parts(first)).length).toBeGreaterThan(0);
+    await expectAppError(openStoredExport(deps(), owner, first), 'not_found');
+    const listed = await listStoredExports(deps(), owner);
+    expect(listed.find((e) => e.id === first)).toMatchObject({ status: 'ready', replaced: true });
+    expect(listed.find((e) => e.id === second)).toMatchObject({ status: 'ready', replaced: false });
+    // The download under way finishes.
+    const rest: Buffer[] = [Buffer.from(firstPart.value!)];
+    for await (const bytes of reading.parts) rest.push(Buffer.from(bytes));
+    expect(gunzipSync(Buffer.concat(rest)).toString('utf8')).toMatch(/"end":true/);
+
+    // When it expires, the sweep deletes it; the newer one and another company's stay.
+    await fx.query(
+      `UPDATE app.company_exports SET expires_at = now() - interval '1 second' WHERE id = $1`,
+      [first],
+    );
+    await sweepStoredExports(deps(), 500);
+    expect(await row(first)).toMatchObject({ status: 'expired' });
     expect(await parts(first)).toEqual([]);
     expect(await row(second)).toMatchObject({ status: 'ready' });
-    await expectAppError(openStoredExport(deps(), owner, first), 'not_found');
-    // Another company's file is not touched.
     expect(await row(othersFile)).toMatchObject({ status: 'ready' });
     expect((await parts(othersFile)).length).toBeGreaterThan(0);
   });
@@ -299,7 +344,10 @@ describe('one export of a company at a time (ADR-415)', () => {
     expect(fulfilled).toHaveLength(1);
     for (const r of results) {
       if (r.status === 'rejected') {
-        expect(isAppError(r.reason) && r.reason.code, String(r.reason)).toBe('conflict');
+        // Refused as one already being prepared, or past the company's 3 requests a day.
+        expect(['conflict', 'rate_limited'], String(r.reason)).toContain(
+          isAppError(r.reason) ? r.reason.code : String(r.reason),
+        );
       }
     }
     const [{ n }] = (await fx.query<{ n: number }>(
@@ -361,14 +409,68 @@ describe('crashes and failures (ADR-415)', () => {
         strayId,
         c.tenant.id,
         id,
-        fx.keyring.encrypt('stray', companyExportPartAad(c.tenant.id, strayId)),
+        fx.keyring.encrypt('stray', companyExportPartAad(c.tenant.id, id, 1, 0, strayId)),
       ],
     );
-    const result = await runStoredExport(deps({ partBytes: 2_048 }), scopeOf(c), id);
+    // The new run deletes the dead run's parts when it claims the export, before writing its own.
+    let strayAtFirstPart: number | null = null;
+    const db = watchedDb(4, async () => {
+      strayAtFirstPart = (await parts(id)).filter((p) => p.attempt === 1).length;
+    });
+    const result = await runStoredExport({ ...deps({ partBytes: 2_048 }), db }, scopeOf(c), id);
     expect(result).toMatchObject({ outcome: 'ready', attempt: 2 });
+    expect(strayAtFirstPart).toBe(0);
     const left = await parts(id);
     expect(new Set(left.map((p) => p.attempt))).toEqual(new Set([2]));
     expect(gunzipSync(await download(owner, id)).toString('utf8')).toMatch(/"end":true/);
+  });
+
+  it('leaves the export to its lease on a broken connection, and the next run finishes it', async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const { id } = await requestStoredExport(deps(), owner);
+    const db = watchedDb(4, async () => {
+      throw new Error('Connection terminated unexpectedly');
+    });
+    await expect(
+      runStoredExport({ ...deps({ partBytes: 2_048 }), db }, scopeOf(c), id),
+    ).rejects.toThrow(/Connection terminated/);
+    expect(await row(id)).toMatchObject({ status: 'running', attempts: 1, failure_reason: null });
+    // While its lease lasts nothing takes over; once it runs out, the next run finishes it.
+    expect(await runStoredExport(deps(), scopeOf(c), id)).toEqual({ outcome: 'busy' });
+    await fx.query(
+      `UPDATE app.company_exports SET lease_until = now() - interval '1 second' WHERE id = $1`,
+      [id],
+    );
+    expect(await runStoredExport(deps({ partBytes: 2_048 }), scopeOf(c), id)).toMatchObject({
+      outcome: 'ready',
+      attempt: 2,
+    });
+    expect(new Set((await parts(id)).map((p) => p.attempt))).toEqual(new Set([2]));
+  });
+
+  it('fails the export on an error that is not transient, keeping no part', async () => {
+    const c = await fx.company();
+    const { id } = await requestStoredExport(deps(), await fx.ctx(c, c.owner));
+    const db = watchedDb(4, async () => {
+      throw new Error('boom');
+    });
+    expect(
+      await runStoredExport({ ...deps({ partBytes: 2_048 }), db }, scopeOf(c), id),
+    ).toMatchObject({ outcome: 'failed', reason: 'error' });
+    expect(await row(id)).toMatchObject({ status: 'failed', failure_reason: 'error' });
+    expect(await parts(id)).toEqual([]);
+  });
+
+  it('fails a run that takes longer than its bound as timed out', async () => {
+    const c = await fx.company();
+    const { id } = await requestStoredExport(deps(), await fx.ctx(c, c.owner));
+    expect(await runStoredExport(deps({ maxRunMs: -1 }), scopeOf(c), id)).toMatchObject({
+      outcome: 'failed',
+      reason: 'timed_out',
+    });
+    expect(await row(id)).toMatchObject({ status: 'failed', failure_reason: 'timed_out' });
+    expect(await parts(id)).toEqual([]);
   });
 
   it(`gives up after ${3} interrupted runs, tells the owners and lets them ask again`, async () => {
@@ -496,6 +598,43 @@ describe('the minute sweep (ADR-415)', () => {
       [id],
     );
     expect(job!.n).toBe(1);
+  });
+});
+
+describe('limits per company (ADR-415)', () => {
+  it(`refuses a request past ${STORED_EXPORT_REQUEST_LIMIT.capacity} in a day, without writing or emailing`, async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    for (let i = 0; i < STORED_EXPORT_REQUEST_LIMIT.capacity; i += 1) {
+      const { id } = await requestStoredExport(deps(), owner);
+      // Each fails at once, so the next one can be asked for.
+      await runStoredExport(deps({ partBytes: 512, maxBytes: 512 }), scopeOf(c), id);
+    }
+    const before = (await emails(c.tenant.id)).length;
+    await expectAppError(requestStoredExport(deps(), owner), 'rate_limited', /streamed export/);
+    expect((await emails(c.tenant.id)).length).toBe(before);
+    const [{ n }] = (await fx.query<{ n: number }>(
+      'SELECT count(*)::int AS n FROM app.company_exports WHERE tenant_id = $1',
+      [c.tenant.id],
+    )) as [{ n: number }];
+    expect(n).toBe(STORED_EXPORT_REQUEST_LIMIT.capacity);
+    // Another company is not limited by it.
+    const other = await fx.company();
+    await requestStoredExport(deps(), await fx.ctx(other, other.owner));
+  });
+
+  it(`refuses a download past ${STORED_EXPORT_DOWNLOAD_LIMIT.capacity} in a day, unrecorded`, async () => {
+    const c = await fx.company();
+    const owner = await fx.ctx(c, c.owner);
+    const id = await ready(c, owner);
+    for (let i = 0; i < STORED_EXPORT_DOWNLOAD_LIMIT.capacity; i += 1) {
+      await openStoredExport(deps(), owner, id);
+    }
+    const downloads = async () =>
+      (await auditActions(c.tenant.id)).filter((a) => a === 'tenant.export_downloaded').length;
+    expect(await downloads()).toBe(STORED_EXPORT_DOWNLOAD_LIMIT.capacity);
+    await expectAppError(openStoredExport(deps(), owner, id), 'rate_limited');
+    expect(await downloads()).toBe(STORED_EXPORT_DOWNLOAD_LIMIT.capacity);
   });
 });
 

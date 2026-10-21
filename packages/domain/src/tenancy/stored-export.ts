@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto';
 import {
+  AppError,
   conflict,
+  isAppError,
   isDatabaseQueryError,
   notFound,
   uuidv7,
@@ -25,6 +27,7 @@ import { permissionsForRoles } from '../authz/permissions';
 import { assertRecentSignIn } from '../authz/step-up';
 import { recordAudit, type RequestMeta } from '../audit';
 import { enqueueEmail, type OutboxDeps } from '../email/outbox';
+import { takeToken } from '../messaging/rate-limit';
 import type { JobQueue } from '../jobs/queue';
 import type { JobSigner } from '../jobs/envelope';
 import { deletionRecipients, formatCompanyTime } from './deletion';
@@ -53,6 +56,31 @@ export const STORED_EXPORT_RENEW_SECONDS = 60;
 export const STORED_EXPORT_QUEUED_HOURS = 24;
 /** Exports the page lists, newest first. */
 export const STORED_EXPORT_LIST_LIMIT = 10;
+/**
+ * Minutes a run may take before it fails as `timed_out`: its repeatable-read snapshot holds back
+ * vacuum across the whole database while it runs, so a run is bounded. A 512 MiB export (the
+ * largest kept) reads and compresses in a few minutes; 30 leaves room for a slow database without
+ * letting a stuck run hold the horizon for long.
+ */
+export const STORED_EXPORT_MAX_RUN_MINUTES = 30;
+/**
+ * Minutes a replaced file stays after a newer one is ready, so a download already under way can
+ * finish; it is no longer offered, and the minute sweep deletes it.
+ */
+export const STORED_EXPORT_REPLACED_MINUTES = 30;
+/**
+ * Stored exports a company may ask for: 3 at once, then one every 8 hours. Each one writes up to
+ * the largest file into the database (its write-ahead log and backups) and emails every owner and
+ * administrator, so a loop, an owner's or a stolen fresh session's, is bounded; an owner who needs a
+ * new copy, or asks again after a failure, has room. A refused request counts too.
+ */
+export const STORED_EXPORT_REQUEST_LIMIT = { capacity: 3, refillPerSecond: 3 / 86_400 } as const;
+/**
+ * Downloads of a company's stored exports: 20 at once, then one every 72 minutes. Each opens and
+ * checks every part of the file; 20 lets several owners download, and retry broken downloads, the
+ * same day, while bounding how often a whole-company copy leaves through one stolen session.
+ */
+export const STORED_EXPORT_DOWNLOAD_LIMIT = { capacity: 20, refillPerSecond: 20 / 86_400 } as const;
 
 /** What each failure reason means, for the page (codes only are stored, ADR-129). */
 export const STORED_EXPORT_FAILURE_LABELS: Record<CompanyExportFailureReason, string> = {
@@ -61,7 +89,7 @@ export const STORED_EXPORT_FAILURE_LABELS: Record<CompanyExportFailureReason, st
   requester_not_allowed:
     'The owner who asked for it is no longer an owner, so it was not prepared.',
   interrupted: `It was interrupted ${STORED_EXPORT_MAX_ATTEMPTS} times, so HyFib stopped trying.`,
-  timed_out: `It could not start within ${STORED_EXPORT_QUEUED_HOURS} hours, so HyFib stopped trying.`,
+  timed_out: `It could not start within ${STORED_EXPORT_QUEUED_HOURS} hours, or took longer than ${STORED_EXPORT_MAX_RUN_MINUTES} minutes to prepare, so HyFib stopped trying.`,
   error: 'It failed. HyFib logged the error.',
 };
 
@@ -88,8 +116,48 @@ export function formatByteSize(bytes: number): string {
   return `${value < 10 ? value.toFixed(1) : Math.round(value).toString()} ${units[unit]}`;
 }
 
-export function companyExportPartAad(tenantId: string, partId: string): string {
-  return `company-export-part:${tenantId}:${partId}`;
+/**
+ * A part's associated data: its company, export, run and place in the file, and its own id, so a
+ * part moved to another company, export, run or position does not open.
+ */
+export function companyExportPartAad(
+  tenantId: string,
+  exportId: string,
+  attempt: number,
+  seq: number,
+  partId: string,
+): string {
+  return `company-export-part:${tenantId}:${exportId}:${attempt}:${seq}:${partId}`;
+}
+
+const TRANSIENT_SQLSTATES = new Set([
+  '40001',
+  '40P01',
+  '57014',
+  '57P01',
+  '57P02',
+  '57P03',
+  '53300',
+]);
+const TRANSIENT_NODE_CODES = new Set(['ECONNRESET', 'ECONNREFUSED', 'EPIPE', 'ETIMEDOUT']);
+
+/**
+ * Whether a run's error may pass if the run is tried again: a serialization failure or deadlock
+ * (mapped to a retryable conflict), a cancelled statement, the server shutting down or out of
+ * connections, a connection error (SQLSTATE class 08, a socket error, or a query stopped before the
+ * server answered), or the pool timing out. Such a run is left to its lease (the next run takes
+ * over, within the attempts limit) instead of failing the export.
+ */
+export function isTransientDatabaseError(error: unknown): boolean {
+  if (isAppError(error)) return error.code === 'conflict' && error.details?.retryable === true;
+  if (isDatabaseQueryError(error)) {
+    if (!error.code) return true;
+    return TRANSIENT_SQLSTATES.has(error.code) || error.code.startsWith('08');
+  }
+  if (!(error instanceof Error)) return false;
+  const code = (error as { code?: unknown }).code;
+  if (typeof code === 'string' && TRANSIENT_NODE_CODES.has(code)) return true;
+  return /^(timeout exceeded when trying to connect|Connection terminated)/.test(error.message);
 }
 
 export interface StoredExportDeps extends OutboxDeps {
@@ -99,8 +167,8 @@ export interface StoredExportDeps extends OutboxDeps {
   jobs: JobQueue;
   signer: JobSigner;
   appBaseUrl: string;
-  /** Part size and largest file, compressed; the defaults unless given (smaller in tests). */
-  limits?: { partBytes?: number; maxBytes?: number };
+  /** Part size, largest file and longest run; the defaults unless given (smaller in tests). */
+  limits?: { partBytes?: number; maxBytes?: number; maxRunMs?: number };
 }
 
 export interface StoredExportView {
@@ -113,6 +181,8 @@ export interface StoredExportView {
   byteSize: number | null;
   sha256: string | null;
   failureReason: CompanyExportFailureReason | null;
+  /** Ready, but a newer export is ready too: no longer offered, deleted shortly. */
+  replaced: boolean;
 }
 
 type ExportRow = {
@@ -170,6 +240,18 @@ export async function requestStoredExport(
   assertCan(ctx, 'tenant.export');
   const now = deps.clock.now();
   assertRecentSignIn(ctx, now);
+  if (
+    !(await takeToken(
+      deps.db,
+      `company-export:request:${ctx.tenant.id}`,
+      STORED_EXPORT_REQUEST_LIMIT,
+    ))
+  ) {
+    throw new AppError(
+      'rate_limited',
+      'This company has asked for several stored exports today. Try again later, or download the streamed export.',
+    );
+  }
   const id = uuidv7();
   try {
     await deps.db.run(ctx.scope, async (tx) => {
@@ -225,9 +307,14 @@ export async function listStoredExports(
   return deps.db.run(
     ctx.scope,
     async (tx) => {
-      const res = await tx.execute<ExportRow & { requested_by_name: string | null }>(
+      const res = await tx.execute<
+        ExportRow & { requested_by_name: string | null; replaced: boolean }
+      >(
         sql`select e.id, e.status, e.attempts, e.requested_at, e.finished_at, e.expires_at,
-                   e.byte_size, e.sha256, e.part_count, e.failure_reason, u.name as requested_by_name
+                   e.byte_size, e.sha256, e.part_count, e.failure_reason, u.name as requested_by_name,
+                   (e.status = 'ready' and exists (
+                     select 1 from app.company_exports n
+                      where n.status = 'ready' and n.finished_at > e.finished_at)) as replaced
               from app.company_exports e
               left join app.memberships m on m.tenant_id = e.tenant_id
                    and m.id = e.requested_by_membership_id
@@ -245,6 +332,7 @@ export async function listStoredExports(
         byteSize: toNumber(row.byte_size),
         sha256: row.sha256,
         failureReason: row.failure_reason,
+        replaced: row.replaced,
       }));
     },
     { accessMode: 'read only' },
@@ -264,8 +352,10 @@ export interface StoredExportDownload {
  * the company's own exports only (another company's id is not found). Audited
  * (`tenant.export_downloaded`); owners and administrators are emailed, as for every export. The
  * parts are opened as they are read; a part missing, of the wrong size or failing the keyring's
- * check, or a file whose SHA-256 differs from the recorded one, stops the download with an error
- * (the client is left with an incomplete file, never a wrong one).
+ * check, or a file whose size or SHA-256 differs from the recorded one, stops the download with an
+ * error before the last part is sent (the client is left with an incomplete file, never a wrong
+ * one). A replaced file is no longer offered. At most `STORED_EXPORT_DOWNLOAD_LIMIT` downloads a
+ * company a day.
  */
 export async function openStoredExport(
   deps: StoredExportDeps,
@@ -277,12 +367,26 @@ export async function openStoredExport(
   const now = deps.clock.now();
   assertRecentSignIn(ctx, now);
   if (!UUID_RE.test(exportId)) throw notFound('Export');
+  if (
+    !(await takeToken(
+      deps.db,
+      `company-export:download:${ctx.tenant.id}`,
+      STORED_EXPORT_DOWNLOAD_LIMIT,
+    ))
+  ) {
+    throw new AppError(
+      'rate_limited',
+      'The stored exports of this company have been downloaded many times today. Try again later.',
+    );
+  }
   const row = await deps.db.run(ctx.scope, async (tx) => {
     const res = await tx.execute<ExportRow>(
       sql`select id, status, attempts, requested_at, finished_at, expires_at, byte_size, sha256,
                  part_count, failure_reason
-            from app.company_exports
-           where id = ${exportId}::uuid and status = 'ready' and expires_at > now()`,
+            from app.company_exports e
+           where id = ${exportId}::uuid and status = 'ready' and expires_at > now()
+             and not exists (select 1 from app.company_exports n
+                              where n.status = 'ready' and n.finished_at > e.finished_at)`,
     );
     const found = res.rows[0];
     if (!found) return null;
@@ -344,16 +448,23 @@ export async function* readParts(
       { accessMode: 'read only' },
     );
     if (!part) throw new Error('A part of the stored export is missing (it may have expired)');
-    const bytes = deps.keyring.decrypt(part.ciphertext, companyExportPartAad(tenantId, part.id));
+    const bytes = deps.keyring.decrypt(
+      part.ciphertext,
+      companyExportPartAad(tenantId, file.id, file.attempt, seq, part.id),
+    );
     if (bytes.length !== part.byte_size) {
       throw new Error('A part of the stored export has the wrong size');
     }
     total += bytes.length;
     hash.update(bytes);
+    // The whole file is checked before its last part is sent, so a wrong file is never complete.
+    if (
+      seq === file.partCount - 1 &&
+      (total !== file.byteSize || hash.digest('hex') !== file.sha256)
+    ) {
+      throw new Error('The stored export does not match its recorded size and SHA-256');
+    }
     yield bytes;
-  }
-  if (total !== file.byteSize || hash.digest('hex') !== file.sha256) {
-    throw new Error('The stored export does not match its recorded size and SHA-256');
   }
 }
 
@@ -366,6 +477,14 @@ export type StoredExportRunOutcome =
       /** The error that failed it, for the worker's log (never stored). */
       error: unknown;
     };
+
+/** The run passed `STORED_EXPORT_MAX_RUN_MINUTES`. */
+class RunTooLongError extends Error {
+  constructor() {
+    super('The stored export run took too long');
+    this.name = 'RunTooLongError';
+  }
+}
 
 /** The run lost its export: another run took it over, or the export was deleted. */
 class LostLeaseError extends Error {
@@ -578,7 +697,16 @@ async function claim(
              and (status = 'queued' or (status = 'running' and lease_until <= now()))
        returning attempts`,
     );
-    return res.rows[0]?.attempts ?? null;
+    const attempt = res.rows[0]?.attempts ?? null;
+    if (attempt !== null) {
+      // Earlier runs are dead (this run holds the export lock they read under), so their parts go
+      // now: an export holds at most one run's parts (ADR-415).
+      await tx.execute(
+        sql`delete from app.company_export_parts
+             where export_id = ${exportId}::uuid and attempt <> ${attempt}`,
+      );
+    }
+    return attempt;
   });
 }
 
@@ -604,7 +732,10 @@ async function writeStoredExport(
   const file = new CompressedParts(async (seq, bytes) => {
     await deps.db.run(scope, async (tx) => {
       const partId = uuidv7();
-      const sealed = deps.keyring.encrypt(bytes, companyExportPartAad(scope.tenantId, partId));
+      const sealed = deps.keyring.encrypt(
+        bytes,
+        companyExportPartAad(scope.tenantId, exportId, attempt, seq, partId),
+      );
       const res = await tx.execute(
         sql`insert into app.company_export_parts
                    (id, tenant_id, export_id, attempt, seq, byte_size, ciphertext)
@@ -619,10 +750,14 @@ async function writeStoredExport(
     });
   }, deps.limits);
 
+  const startedAt = deps.clock.now().getTime();
+  const maxRunMs = deps.limits?.maxRunMs ?? STORED_EXPORT_MAX_RUN_MINUTES * 60_000;
   try {
     const exportedAt = deps.clock.now();
     await writeExportLines(snapshot, company, exportedAt, async (chunk) => {
-      if (deps.clock.now().getTime() - lastRenewal >= STORED_EXPORT_RENEW_SECONDS * 1000) {
+      const now = deps.clock.now().getTime();
+      if (now - startedAt > maxRunMs) throw new RunTooLongError();
+      if (now - lastRenewal >= STORED_EXPORT_RENEW_SECONDS * 1000) {
         await deps.db.run(scope, renew);
       }
       await file.write(chunk);
@@ -640,20 +775,13 @@ async function writeStoredExport(
       );
       const marked = res.rows[0];
       if (!marked) throw new LostLeaseError();
-      // Earlier runs' parts are never read.
+      // One ready file per company: an older ready file is no longer offered and expires shortly,
+      // so a download under way can finish; the minute sweep deletes it (ADR-415).
       await tx.execute(
-        sql`delete from app.company_export_parts
-             where export_id = ${exportId}::uuid and attempt <> ${attempt}`,
-      );
-      // One ready file per company: older ready exports are expired and their files deleted, so a
-      // company holds at most STORED_EXPORT_MAX_BYTES (ADR-415).
-      await tx.execute(
-        sql`with superseded as (
-              update app.company_exports set status = 'expired', deleted_at = now()
-               where status = 'ready' and id <> ${exportId}::uuid
-           returning id)
-            delete from app.company_export_parts
-             where export_id in (select id from superseded)`,
+        sql`update app.company_exports
+               set expires_at = least(expires_at,
+                     now() + make_interval(mins => ${STORED_EXPORT_REPLACED_MINUTES}))
+             where status = 'ready' and id <> ${exportId}::uuid`,
       );
       await tellOwners(deps, tx, company, 'Company data export ready', [
         `The stored export of ${company.name}'s data asked for on ${formatCompanyTime(new Date(marked.requested_at), company.timezone)} is ready.`,
@@ -667,8 +795,14 @@ async function writeStoredExport(
   } catch (error) {
     file.destroy();
     if (error instanceof LostLeaseError) return { outcome: 'lost_lease' };
+    // A transient error leaves the export to its lease: the next run takes over (ADR-415).
+    if (isTransientDatabaseError(error)) throw error;
     const reason: CompanyExportFailureReason =
-      error instanceof StoredExportTooLargeError ? 'too_large' : 'error';
+      error instanceof StoredExportTooLargeError
+        ? 'too_large'
+        : error instanceof RunTooLongError
+          ? 'timed_out'
+          : 'error';
     const failed = await failExport(deps, scope, company, exportId, { attempt }, reason, error);
     return failed ? { outcome: 'failed', reason, error } : { outcome: 'lost_lease' };
   }

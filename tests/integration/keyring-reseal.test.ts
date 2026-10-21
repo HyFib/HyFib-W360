@@ -443,7 +443,7 @@ async function sealEverything(c: Company, ring: Keyring): Promise<Seeded[]> {
         column: 'ciphertext',
         id: partId,
         plain: partPlain,
-        aad: companyExportPartAad(t, partId),
+        aad: companyExportPartAad(t, exportId, 1, 0, partId),
       }),
     ],
   );

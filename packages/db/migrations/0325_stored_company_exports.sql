@@ -9,11 +9,15 @@
 -- HyFib has no object storage in use (the S3_* settings are read by nothing; received media are
 -- fetched from Meta each time, ADR-216), so the file is kept in PostgreSQL, in parts of at most
 -- 1 MiB of compressed bytes, each sealed with the keyring as every other value HyFib keeps sealed
--- (AES-256-GCM, its own associated data naming the company and the part), and at most 512 MiB
--- per export. A company keeps one ready file: when a new one is ready, older ready ones are expired
--- and their parts deleted, so a company holds at most 512 MiB, and twice that while a new one is
--- being written. A row of app.company_exports records one request: who asked, its status, its size and
--- SHA-256 once ready, its times and, if it failed, a reason code (never data, ADR-129).
+-- (AES-256-GCM, its own associated data naming the company, the export, the run, the part's place
+-- and the part), and at most 512 MiB per export. A run deletes earlier runs' parts when it starts,
+-- so an export holds one run's parts. A company keeps one ready file: when a new one is ready, an
+-- older one is no longer offered and expires 30 minutes later (a download under way can finish),
+-- when the minute sweep deletes it. So a company holds at most one ready file of 512 MiB, plus one
+-- being written, plus for 30 minutes after a replacement the replaced one: at most 1.5 GiB
+-- compressed, and normally 512 MiB. A row of app.company_exports records one request: who asked,
+-- its status, its size and SHA-256 once ready, its times and, if it failed, a reason code (never
+-- data, ADR-129).
 CREATE TABLE app.company_exports (
   id uuid PRIMARY KEY,
   tenant_id uuid NOT NULL REFERENCES app.tenants (id),
@@ -90,7 +94,7 @@ GRANT UPDATE (status, attempts, lease_until, started_at, finished_at, expires_at
   byte_size, sha256, part_count, failure_reason, failure_code) ON app.company_exports TO w360_app;
 
 -- The stored file, in order: part `seq` of the run `attempt`. Only the run whose number the export
--- records is read; parts of an earlier run are deleted when the export is ready.
+-- records is read; parts of an earlier run are deleted when a new run starts.
 CREATE TABLE app.company_export_parts (
   id uuid PRIMARY KEY,
   tenant_id uuid NOT NULL,
@@ -99,7 +103,8 @@ CREATE TABLE app.company_export_parts (
   seq integer NOT NULL CHECK (seq BETWEEN 0 AND 511),
   -- The compressed bytes of the part, before sealing.
   byte_size integer NOT NULL CHECK (byte_size BETWEEN 1 AND 1048576),
-  -- The part sealed with the keyring (`company-export-part:<company>:<part id>`), base64url text.
+  -- The part sealed with the keyring
+  -- (`company-export-part:<company>:<export>:<attempt>:<seq>:<part id>`), base64url text.
   ciphertext text NOT NULL CHECK (starts_with(ciphertext, 'v1:')),
   CONSTRAINT company_export_parts_tenant_id_id_uq UNIQUE (tenant_id, id),
   CONSTRAINT company_export_parts_seq_uq UNIQUE (tenant_id, export_id, attempt, seq),

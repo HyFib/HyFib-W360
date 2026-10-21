@@ -279,7 +279,8 @@ async function main(): Promise<void> {
     { localConcurrency: 1, batchSize: 1 },
     logFailures(rt, QUEUES.tenantDelete.name, tenantDeleteHandler(rt)),
   );
-  // Stored company exports (ADR-415): long jobs, two at a time; the billing sweep signals them.
+  // Stored company exports (ADR-415): long jobs, two at a time (their pool holds two runs); the
+  // billing sweep signals them.
   await rt.boss.work(
     QUEUES.companyExport.name,
     { localConcurrency: 2, batchSize: 1 },

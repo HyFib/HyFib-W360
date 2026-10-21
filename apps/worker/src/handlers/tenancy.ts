@@ -97,9 +97,9 @@ export async function sweepTenantDeletions(rt: WorkerRuntime): Promise<number> {
   return due.length;
 }
 
-function storedExportDeps(rt: WorkerRuntime): StoredExportDeps {
+function storedExportDeps(rt: WorkerRuntime, db = rt.db): StoredExportDeps {
   return {
-    db: rt.db,
+    db,
     clock: rt.clock,
     keyring: rt.keyring,
     jobs: rt.jobs,
@@ -128,7 +128,8 @@ export function companyExportHandler(rt: WorkerRuntime) {
     }
     const exportId = auth.envelope.ref;
     const tenantId = auth.scope.tenantId;
-    const result = await runStoredExport(storedExportDeps(rt), auth.scope, exportId);
+    // A transient database error is thrown on (the job is retried; the lease lets a run take over).
+    const result = await runStoredExport(storedExportDeps(rt, rt.exportDb), auth.scope, exportId);
     if (result.outcome === 'failed') {
       rt.logger.warn(
         {

@@ -63,7 +63,8 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
 
 `DATABASE_POOL_MAX_APP` (default 10) + `DATABASE_POOL_MAX_AUTH` (5) + `DATABASE_POOL_MAX_PLATFORM` (2)
 
-- pg-boss producer (2) per web replica; worker: app pool 10 + pg-boss `max(4, concurrency+2)`.
+- pg-boss producer (2) per web replica; worker: app pool 10 + pg-boss `max(4, concurrency+2)` +
+  the stored-export pool (4, ADR-415).
   Keep the sum across replicas below the database's `max_connections` minus 20% headroom. LISTEN
   connections (pg-boss notify, SSE hints) must connect directly, not through a transaction-mode pooler.
 
@@ -2207,11 +2208,21 @@ jsonb_path_exists(draft_graph, '$.nodes[*].save[*].from')`, and the same on
    created by the migration command from the queue list.
 
    Space: stored exports live in PostgreSQL, sealed (about a third larger than the compressed
-   file), at most 512 MiB compressed per company and one ready file per company, kept 7 days. Plan
-   for the database, its write-ahead log and its backups to hold up to about 700 MB for each company
-   that keeps an export, twice that while a new one is written; most companies' exports are a few
-   megabytes. Expired parts are deleted by the minute sweep, and the space is reused after vacuum.
+   file), at most 512 MiB compressed per export and one ready file per company, kept 7 days (a
+   replaced one 30 minutes). Plan for the database, its write-ahead log and its backups to hold up to
+   about 700 MB for each company that keeps an export, up to twice that while a new one is written
+   and three times for the 30 minutes after a replacement; most companies' exports are a few
+   megabytes. A company may ask 3 times a day. Expired parts are deleted by the minute sweep, and the
+   space is reused after vacuum.
    `SELECT pg_size_pretty(pg_total_relation_size('app.company_export_parts'))` shows the total.
+
+   Connections: each worker replica opens a second pool of 4 connections (`w360-worker-exports`)
+   for stored export runs, beside its app pool; add it to the connection budget.
+
+   Vacuum: a run reads from one repeatable-read snapshot for its whole length, which holds back
+   vacuum across the database (messages, pg-boss's job table) while it runs. Runs are bounded to 30
+   minutes (then the export fails as `timed_out`), two per worker replica at a time. RUNBOOKS §10Q
+   says how to see and stop one.
 
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.

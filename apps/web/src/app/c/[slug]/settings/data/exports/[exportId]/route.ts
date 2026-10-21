@@ -8,8 +8,10 @@ export const dynamic = 'force-dynamic';
  * Downloads a stored company export (ADR-415) through the app: the signed-in owner, with a recent
  * sign-in, of the company's own exports only. The file is read a part at a time from the company's
  * rows and opened with the keyring as the response is read; nothing hands out a link of its own.
- * A refusal is a plain error response, never a file; a part that cannot be read stops the download
- * (the file is then incomplete, and its SHA-256 on the page does not match).
+ * A refusal is a plain error response, never a file (the link carries no download attribute, so a
+ * browser shows it rather than saving it); a part that cannot be read, or a file that does not match
+ * its recorded size and SHA-256, stops the download before its last part (the file is then
+ * incomplete, and its SHA-256 on the page does not match).
  */
 export async function GET(
   _request: Request,
@@ -31,7 +33,9 @@ export async function GET(
         ? 403
         : error.code === 'not_found'
           ? 404
-          : 400;
+          : error.code === 'rate_limited'
+            ? 429
+            : 400;
     return new Response(error.publicMessage, {
       status,
       headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' },
