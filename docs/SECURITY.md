@@ -1419,7 +1419,26 @@ Phase 5 rules (Public API, P5-08):
   company's reply answers 404, as an unknown one does), through the checks and writes Settings uses,
   at most 500 a company, and give no conversation or customer data: a reply names the key that added
   or changed it by its id, and a member never. Each change is audited as the key, naming the
-  shortcut, never the text (unit tests; integration tests, run in CI only).
+  shortcut, never the text (unit tests; integration tests, run in CI only). Each reply now also
+  carries `attachment`, its file's id, type, MIME type, name, size and whether its text is the
+  caption (ADR-411): never the file's content or where it is kept; keys cannot add or remove a
+  file, and a change of the text keeps it (refused over 1,024 characters while it is a photo, video
+  or document).
+- Saved replies' files (ADR-411, migration 0321): adding, replacing and removing a reply's file
+  needs `inbox.supervise` (audited with the kind and size, never the name or content), through
+  `/api/c/<company>/saved-replies/<id>/file` (trusted origin, the member's session, at most 16 MB
+  and 64 KB read, the file checked as an inbox file). Members with `inbox.reply` use them: inserting
+  a reply checks, in a conversation they can see, that its file is there and reads back whole (its
+  length and SHA-256 computed in the database), and sending names the reply and the file inserted,
+  sent only while that reply still carries that very file, through the inbox's file path and its
+  checks (window, number, collision). Both `inbox.reply` and `inbox.supervise` open a file at
+  `/c/<company>/settings/saved-replies/files/<id>` (`FILE_POLICY`, `nosniff`, no caching, only
+  photos, recordings and videos shown inline). The tables are tenant tables with forced row
+  security, composite foreign keys (an attachment names its company's reply, file and member), the
+  runtime role holding `SELECT`, `INSERT` and `DELETE` only (a stored file is never changed), and
+  checks of each file's type pair, size (1 byte to 16 MB), name and SHA-256 against its bytes.
+  Every write takes the company's saved-replies lock first, so a file is never deleted while
+  another write starts to name it and the company's total of 100 MB is counted without a race.
 - Satisfaction surveys (ADR-292): `GET /satisfaction-surveys` needs `conversations.read` (granted
   only with `inbox.read_all`) and reads in a read-only transaction the key's company's surveys only
   (row security and an explicit company condition), leaving out those of erased contacts'

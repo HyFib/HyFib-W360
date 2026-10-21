@@ -552,7 +552,15 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   days has its own key too, and the inbox section lists such teams (`teamClosedDays`).
 - **Saved replies** (`inbox/saved-replies.ts`): shared answers with `{{name}}`, `{{agent}}` and
   `{{company}}` placeholders, filled server-side for the conversation; the composer inserts the text
-  and the member sends it as an ordinary reply.
+  and the member sends it as an ordinary reply. Since ADR-411 a reply may carry one file
+  (`inbox/saved-reply-files.ts`, migration 0321): its bytes in `app.saved_reply_files`, once per
+  company (same bytes, type and name), named by `app.saved_reply_attachments` (one per reply), every
+  write under the company's `saved-replies:<id>` advisory lock, which also deletes files no reply
+  names. `ReplyTools` (conversation page) joins the composer and the "Send a file" card: inserting
+  such a reply calls `savedReplyFileForInsert` (the file there and whole, checked in SQL), then hands
+  the card the file with the text as its caption (a recording's text stays in the composer); the card
+  posts `savedReplyId` and `savedReplyFileId` in place of a file, and `queueSavedReplyFileReply`
+  reads the bytes and sends them through `queueFileReply`'s own path (ADR-218).
 - **Mentions** (`app.note_mentions`): a note can name members who can see the conversation at that
   moment; Inbox → Mentions lists a member's mentions in conversations they can still see, with an
   unread count cleared when they open the conversation.

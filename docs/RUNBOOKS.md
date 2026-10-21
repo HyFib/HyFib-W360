@@ -2658,6 +2658,24 @@ company is suspended or its plan has ended; reads still work. The audit log has 
 key, naming the shortcut, and Settings → Saved replies shows a reply a key changed last as changed
 through the API.
 
+**A saved reply's file is refused, cannot be inserted or is not sent (ADR-411).** Saving a file in
+Settings → Saved replies answers 422 for a file of another type, an empty one or one over 16 MB
+(the types members send from the inbox), and for a photo, video or document when the reply's text
+is longer than 1,024 characters (the text becomes its caption; a recording takes none): shorten
+the text first. 409 means the company's files would pass 100 MB in all: remove a file from another
+reply (a file several replies share counts once). 403 means the member does not supervise the
+inbox. In a conversation, "The file of “…” was removed after the page loaded" means a supervisor
+removed or replaced it meanwhile: reload. "… can no longer be read" means its stored bytes no
+longer match their length and SHA-256 or its type is no longer one members send; nothing was
+attached: have a supervisor attach the file again, and look at the database's health (the rows
+are checked on insert, so this should not happen). "This saved reply's file was changed or removed
+after you inserted it, so nothing was sent" (409) on Send file means the reply's file changed
+between inserting and sending: insert the reply again. Other refusals on Send file are those of
+any file (ADR-218): the window, the number, Meta's upload. A file a supervisor stored is never
+uploaded to Meta until a member sends it, and each send uploads it again (Meta keeps an upload 30
+days, for one number). The audit log has `saved_reply.file_attached` and `saved_reply.file_removed`
+with the kind and size, never the name or the content. Database size: see DEPLOYMENT (0321).
+
 **A business hours request answers 403, 404, 409, 422 or 423, or `open` is not what a team expects
 (ADR-290).** 403 `forbidden` names the scope the key lacks: `business_hours.read` or
 `business_hours.manage` to read, `business_hours.manage` to change (granted by owners and

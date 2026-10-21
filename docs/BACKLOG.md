@@ -133,7 +133,8 @@ verification, app review, Embedded Signup configuration).
   company's marketing opt-out keyword as a button; no migration). **Remaining:** creating media
   headers (Resumable Upload + media storage) and sending them outside the API (which sends them with
   a link since ADR-201), named parameters, authentication/OTP, carousel, LTO, copy-code and catalog
-  templates, changing a template's category in an edit, starters in other languages, and a sandbox
+  templates (copy-code waits for a source, M-202: the OpenAPI description has no coupon button;
+  Meta's sample app shows one only inside a limited-time-offer template), changing a template's category in an edit, starters in other languages, and a sandbox
   run with a real WABA. **[Editing a template Meta has built; its database and browser tests run
   only in CI]** (ADR-404: `POST /{template-id}` from the Templates page and the API, written ahead,
   paced, re-read from Meta, lost answers settled by the sync; name, language and category stay;
@@ -240,9 +241,16 @@ verification, app review, Embedded Signup configuration).
   team uses the company's closed days or a list of its own, possibly empty, in Settings → Teams and
   the teams API, so it can work on public holidays or close on its own days; used while the
   company's business hours are on, wherever the team's calendar is; the time zone stays the
-  company's). **Remaining:** private team queues (would change visibility,
+  company's). **[Saved replies that carry a file built; their database and browser tests run only
+  in CI]** (ADR-411, W-087, migration 0321: a saved reply may carry one photo, video, recording or
+  document of the inbox's types, kept once per company in the database and shared by replies with
+  the same file, 100 MB a company; supervisors add, replace and remove it in Settings; inserting
+  the reply checks the file and attaches it to Send a file with the text as its caption, for the
+  member to review and send through the inbox's file path; the API describes it on each reply).
+  **Remaining:** private team queues (would change visibility,
   ADR-029), CSAT by template outside the window (needs a consent decision), CSAT with a real WABA
-  (phone-number masking: P3-01, ADR-226).
+  (phone-number masking: P3-01, ADR-226), saved replies' files in automations and keys adding them,
+  stored templates or bots as reply material (W-087), and object storage for files (none exists).
 
 ## Phase 4 — automation, Flows, CRM, commerce
 

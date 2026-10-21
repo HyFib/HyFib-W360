@@ -1,6 +1,13 @@
 import { z } from 'zod';
 import { AppError, type Keyring } from '@w360/core';
-import { and, eq, messages, whatsappAccounts } from '@w360/db';
+import {
+  and,
+  eq,
+  messages,
+  savedReplyAttachments,
+  savedReplyFiles,
+  whatsappAccounts,
+} from '@w360/db';
 import { assertCan, type TenantContext } from '../authz/context';
 import { credentialAad } from './credentials';
 import type { GraphClient, GraphFailureKind } from './graph';
@@ -57,6 +64,15 @@ export const fileReplySchema = z.object({
   afterMessageId: z.uuid().optional(),
 });
 
+/**
+ * A saved reply's file a member inserted in the reply box (ADR-411): the reply and the file it
+ * carried then, sent only while the reply still carries that very file.
+ */
+export const savedReplyFileReplySchema = fileReplySchema.extend({
+  savedReplyId: z.uuid(),
+  savedReplyFileId: z.uuid(),
+});
+
 export interface ReplyFile {
   name: string;
   type: string;
@@ -106,104 +122,168 @@ export function uploadFailure(failure: {
   );
 }
 
+/** Parses a file reply's form fields, naming the first problem. */
+function parseFileInput<S extends z.ZodType>(schema: S, input: unknown): z.output<S> {
+  const parsed = schema.safeParse(input);
+  if (!parsed.success) {
+    throw new AppError('validation_failed', parsed.error.issues[0]?.message ?? 'Invalid file', {
+      issues: parsed.error.issues.map((i) => ({ path: i.path.join('.'), message: i.message })),
+    });
+  }
+  return parsed.data;
+}
+
 export interface FileRepliesDeps extends OutboundDeps {
   keyring: Keyring;
   graph: Pick<GraphClient, 'uploadMedia'>;
 }
 
 export function createFileRepliesService(deps: FileRepliesDeps) {
+  /**
+   * Checks the reply as a text reply is, reads the file, uploads it for the conversation's number,
+   * then queues a reply naming the media. A retry of the same submission returns the first message
+   * without reading or uploading the file again. If the reply is refused after the upload, the
+   * media is never sent and Meta deletes it.
+   */
+  async function sendFile(
+    ctx: TenantContext,
+    data: z.output<typeof fileReplySchema>,
+    load: () => Promise<ReplyFile>,
+  ) {
+    // A retry of a sent file answers the first message without uploading it again.
+    const [duplicate] = await deps.db.run(
+      ctx.scope,
+      (tx) =>
+        tx
+          .select({ id: messages.id })
+          .from(messages)
+          .where(and(eq(messages.tenantId, ctx.tenant.id), eq(messages.clientKey, data.clientKey))),
+      { accessMode: 'read only' },
+    );
+    if (duplicate) return { messageId: duplicate.id, duplicate: true };
+
+    const route = await prepareReply(deps, ctx, data.conversationId);
+    const file = await load();
+    const { kind, mimeType } = checkReplyFile(file);
+    const [account] = await deps.db.run(
+      ctx.scope,
+      (tx) =>
+        tx
+          .select({
+            status: whatsappAccounts.status,
+            credential: whatsappAccounts.credentialCiphertext,
+          })
+          .from(whatsappAccounts)
+          .where(
+            and(
+              eq(whatsappAccounts.tenantId, ctx.tenant.id),
+              eq(whatsappAccounts.id, route.whatsappAccountId),
+            ),
+          ),
+      { accessMode: 'read only' },
+    );
+    if (!account || account.status !== 'connected' || !account.credential) {
+      throw new AppError(
+        'precondition_failed',
+        'This number’s WhatsApp account is disconnected. Reconnect it in Settings → Channels.',
+      );
+    }
+    const token = deps.keyring.decryptString(
+      account.credential,
+      credentialAad(ctx.tenant.id, route.whatsappAccountId),
+    );
+    const filename = mediaFilename({
+      type: kind,
+      mimeType,
+      filename: file.name,
+      messageId: null,
+    });
+    const uploaded = await deps.graph.uploadMedia(route.phoneNumberId, token, {
+      filename,
+      contentType: mimeType,
+      bytes: file.bytes,
+    });
+    if (!uploaded.ok) throw uploadFailure(uploaded);
+
+    const caption = kind === 'audio' ? undefined : data.caption;
+    const media = {
+      id: uploaded.data.mediaId,
+      ...(caption ? { caption } : {}),
+      // The spec's examples send a document's file name with its id (research M-197).
+      ...(kind === 'document' ? { filename } : {}),
+    };
+    const body: ReplyBody = {
+      type: kind,
+      content: { ...media, mime_type: mimeType },
+      payload: { [kind]: media },
+      preview: caption ?? FILE_PREVIEWS[kind],
+      media: {
+        providerMediaId: uploaded.data.mediaId,
+        mimeType,
+        filename: kind === 'document' ? filename : null,
+        sizeBytes: file.bytes.byteLength,
+      },
+    };
+    return queueReply(deps, ctx, data, body);
+  }
+
   return {
-    /**
-     * Sends a file in a conversation the member can reply in: checked as a text reply is, uploaded
-     * for the conversation's number, then queued as a reply naming the media. A retry of the same
-     * submission returns the first message without uploading again. If the reply is refused after
-     * the upload, the media is never sent and Meta deletes it.
-     */
+    /** Sends a file the member chose, in a conversation the member can reply in (ADR-218). */
     async queueFileReply(ctx: TenantContext, input: unknown, file: ReplyFile) {
       assertCan(ctx, 'inbox.reply');
-      const parsed = fileReplySchema.safeParse(input);
-      if (!parsed.success) {
-        throw new AppError('validation_failed', parsed.error.issues[0]?.message ?? 'Invalid file', {
-          issues: parsed.error.issues.map((i) => ({ path: i.path.join('.'), message: i.message })),
-        });
-      }
-      const data = parsed.data;
-      const { kind, mimeType } = checkReplyFile(file);
-      // A retry of a sent file answers the first message without uploading it again.
-      const [duplicate] = await deps.db.run(
-        ctx.scope,
-        (tx) =>
-          tx
-            .select({ id: messages.id })
-            .from(messages)
-            .where(
-              and(eq(messages.tenantId, ctx.tenant.id), eq(messages.clientKey, data.clientKey)),
-            ),
-        { accessMode: 'read only' },
-      );
-      if (duplicate) return { messageId: duplicate.id, duplicate: true };
+      const data = parseFileInput(fileReplySchema, input);
+      checkReplyFile(file);
+      return sendFile(ctx, data, () => Promise.resolve(file));
+    },
 
-      const route = await prepareReply(deps, ctx, data.conversationId);
-      const [account] = await deps.db.run(
-        ctx.scope,
-        (tx) =>
-          tx
-            .select({
-              status: whatsappAccounts.status,
-              credential: whatsappAccounts.credentialCiphertext,
-            })
-            .from(whatsappAccounts)
-            .where(
-              and(
-                eq(whatsappAccounts.tenantId, ctx.tenant.id),
-                eq(whatsappAccounts.id, route.whatsappAccountId),
+    /**
+     * Sends the file of a saved reply a member inserted in the reply box (ADR-411), as a file the
+     * member chose is sent: the same checks, upload and queueing. Its bytes are read from the
+     * company's saved replies' files only while the reply still carries the file the member
+     * reviewed; otherwise nothing is sent and the member is asked to insert the reply again.
+     */
+    async queueSavedReplyFileReply(ctx: TenantContext, input: unknown) {
+      assertCan(ctx, 'inbox.reply');
+      const data = parseFileInput(savedReplyFileReplySchema, input);
+      return sendFile(ctx, data, async () => {
+        const [row] = await deps.db.run(
+          ctx.scope,
+          (tx) =>
+            tx
+              .select({
+                filename: savedReplyFiles.filename,
+                mimeType: savedReplyFiles.mimeType,
+                content: savedReplyFiles.content,
+              })
+              .from(savedReplyAttachments)
+              .innerJoin(
+                savedReplyFiles,
+                and(
+                  eq(savedReplyFiles.tenantId, savedReplyAttachments.tenantId),
+                  eq(savedReplyFiles.id, savedReplyAttachments.fileId),
+                ),
+              )
+              .where(
+                and(
+                  eq(savedReplyAttachments.tenantId, ctx.tenant.id),
+                  eq(savedReplyAttachments.savedReplyId, data.savedReplyId),
+                  eq(savedReplyAttachments.fileId, data.savedReplyFileId),
+                ),
               ),
-            ),
-        { accessMode: 'read only' },
-      );
-      if (!account || account.status !== 'connected' || !account.credential) {
-        throw new AppError(
-          'precondition_failed',
-          'This number’s WhatsApp account is disconnected. Reconnect it in Settings → Channels.',
+          { accessMode: 'read only' },
         );
-      }
-      const token = deps.keyring.decryptString(
-        account.credential,
-        credentialAad(ctx.tenant.id, route.whatsappAccountId),
-      );
-      const filename = mediaFilename({
-        type: kind,
-        mimeType,
-        filename: file.name,
-        messageId: null,
+        if (!row) {
+          throw new AppError(
+            'conflict',
+            'This saved reply’s file was changed or removed after you inserted it, so nothing was sent. Insert the reply again.',
+          );
+        }
+        return {
+          name: row.filename,
+          type: row.mimeType,
+          bytes: new Uint8Array(row.content) as Uint8Array<ArrayBuffer>,
+        };
       });
-      const uploaded = await deps.graph.uploadMedia(route.phoneNumberId, token, {
-        filename,
-        contentType: mimeType,
-        bytes: file.bytes,
-      });
-      if (!uploaded.ok) throw uploadFailure(uploaded);
-
-      const caption = kind === 'audio' ? undefined : data.caption;
-      const media = {
-        id: uploaded.data.mediaId,
-        ...(caption ? { caption } : {}),
-        // The spec's examples send a document's file name with its id (research M-197).
-        ...(kind === 'document' ? { filename } : {}),
-      };
-      const body: ReplyBody = {
-        type: kind,
-        content: { ...media, mime_type: mimeType },
-        payload: { [kind]: media },
-        preview: caption ?? FILE_PREVIEWS[kind],
-        media: {
-          providerMediaId: uploaded.data.mediaId,
-          mimeType,
-          filename: kind === 'document' ? filename : null,
-          sizeBytes: file.bytes.byteLength,
-        },
-      };
-      return queueReply(deps, ctx, data, body);
     },
   };
 }

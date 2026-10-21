@@ -58,8 +58,9 @@ async function refusal(promise: Promise<unknown>) {
 
 /**
  * A transaction that answers its reads and the rows its updates and deletes return, in order, with
- * `answers`, and records each step: the lock taken, reads (with any row lock), inserts (without
- * their new ids), updates and deletes. An answer beyond them fails the test.
+ * `answers`, and records each step: the lock taken, reads (with any row lock), reads of a reply's
+ * file (`join`, ADR-411), inserts (without their new ids), updates and deletes. An answer beyond
+ * them fails the test.
  */
 function recorder(answers: unknown[][]) {
   const queue = [...answers];
@@ -87,6 +88,12 @@ function recorder(answers: unknown[][]) {
             },
           });
         },
+        innerJoin: () => ({
+          where: () => {
+            steps.push(['join']);
+            return Promise.resolve(next());
+          },
+        }),
       }),
     }),
     insert: () => ({
@@ -285,6 +292,8 @@ describe('saved replies through the API (ADR-291)', () => {
         const tx = {
           select: () => ({
             from: () => ({
+              // The replies' files (ADR-411): none.
+              innerJoin: () => ({ where: () => Promise.resolve([]) }),
               where: () => ({
                 orderBy: () => ({
                   limit: (n: number) => {
@@ -306,6 +315,7 @@ describe('saved replies through the API (ADR-291)', () => {
           ['thanks', 'member', 'api'],
         ]);
         expect(runs).toEqual([{ accessMode: 'read only' }]);
+        expect(data.map((r) => r.attachment)).toEqual([null, null]);
         expect(limits).toEqual([MAX_SAVED_REPLIES]);
       }
     }
@@ -322,6 +332,7 @@ describe('saved replies through the API (ADR-291)', () => {
       updatedByApiKeyId: null,
       createdAt: '2026-10-01T09:00:00.000Z',
       updatedAt: '2026-10-07T10:00:00.000Z',
+      attachment: null,
     });
     expect(toApiSavedReply(row({ createdByApiKeyId: CALLER }))).toMatchObject({
       createdBy: 'api',
@@ -390,26 +401,34 @@ describe('saved replies through the API (ADR-291)', () => {
   });
 
   it('changes a reply naming who changed it last, and deletes one; neither finds another company’s', async () => {
-    const byKey = recorder([[{ id: REPLY }]]);
+    // Under the company's lock, the reply's file read first (ADR-411): none here.
+    const byKey = recorder([[], [{ id: REPLY }]]);
     expect(await writeUpdateSavedReply(byKey.tx, TENANT, REPLY, thanks, { apiKeyId: CALLER })).toBe(
       true,
     );
     expect(byKey.steps).toEqual([
+      [
+        'lock',
+        'select pg_advisory_xact_lock(hashtextextended($1, 0))',
+        [`saved-replies:${TENANT}`],
+      ],
+      ['join'],
       ['update', { ...thanks, updatedByMembershipId: null, updatedByApiKeyId: CALLER }],
     ]);
-    const byMember = recorder([[{ id: REPLY }]]);
+    const byMember = recorder([[], [{ id: REPLY }]]);
     await writeUpdateSavedReply(byMember.tx, TENANT, REPLY, thanks, { membershipId: MEMBER });
-    expect(byMember.steps).toEqual([
-      ['update', { ...thanks, updatedByMembershipId: MEMBER, updatedByApiKeyId: null }],
+    expect(byMember.steps.at(-1)).toEqual([
+      'update',
+      { ...thanks, updatedByMembershipId: MEMBER, updatedByApiKeyId: null },
     ]);
-    const missing = recorder([[]]);
+    const missing = recorder([[], []]);
     expect(
       await writeUpdateSavedReply(missing.tx, TENANT, REPLY, thanks, { apiKeyId: CALLER }),
     ).toBe(false);
-    expect(
-      await writeDeleteSavedReply(recorder([[{ shortcut: 'thanks' }]]).tx, TENANT, REPLY),
-    ).toEqual({ shortcut: 'thanks' });
-    expect(await writeDeleteSavedReply(recorder([[]]).tx, TENANT, REPLY)).toBeNull();
+    const deleted = recorder([[], [{ shortcut: 'thanks' }]]);
+    expect(await writeDeleteSavedReply(deleted.tx, TENANT, REPLY)).toEqual({ shortcut: 'thanks' });
+    expect(deleted.steps.map((s) => s[0])).toEqual(['lock', 'join', 'delete']);
+    expect(await writeDeleteSavedReply(recorder([[], []]).tx, TENANT, REPLY)).toBeNull();
   });
 
   it('adds a reply as the key, audited as the key, and answers 201 with it', async () => {
@@ -418,7 +437,7 @@ describe('saved replies through the API (ADR-291)', () => {
       updatedByMembershipId: null,
       updatedByApiKeyId: CALLER,
     };
-    const added = recorder([[{ n: 3 }], [row(byKey)]]);
+    const added = recorder([[{ n: 3 }], [row(byKey)], []]);
     const { db } = on(added.tx);
     const response = await apiCreateSavedReply(
       { db, clock: { now: () => NOW } },
@@ -433,8 +452,8 @@ describe('saved replies through the API (ADR-291)', () => {
       },
       replayed: false,
     });
-    const [lock, count, insert, audit, readBack] = added.steps;
-    expect([lock?.[0], count, readBack]).toEqual(['lock', ['read'], ['read']]);
+    const [lock, count, insert, audit, readBack, file] = added.steps;
+    expect([lock?.[0], count, readBack, file]).toEqual(['lock', ['read'], ['read'], ['join']]);
     expect(insert).toEqual([
       'insert',
       expect.objectContaining({ ...thanks, createdByApiKeyId: CALLER, updatedByApiKeyId: CALLER }),
@@ -460,20 +479,33 @@ describe('saved replies through the API (ADR-291)', () => {
       [{ body: 'Thank you, {{name}}.' }, { ...thanks, body: 'Thank you, {{name}}.' }],
       [{ shortcut: 'ty' }, { ...thanks, shortcut: 'ty' }],
     ] as const) {
-      const changed = recorder([[current], [{ id: REPLY }], [row(written)]]);
+      const changed = recorder([[current], [], [{ id: REPLY }], [row(written)], []]);
       const { db } = on(changed.tx);
       expect(
         await apiUpdateSavedReply({ db }, ctx(['saved_replies.manage']), REPLY, change),
       ).toEqual(toApiSavedReply(row(written)));
+      // The company's lock before the reply's row lock (ADR-411), then the reply's file.
       expect(changed.steps).toEqual([
+        [
+          'lock',
+          'select pg_advisory_xact_lock(hashtextextended($1, 0))',
+          [`saved-replies:${TENANT}`],
+        ],
         ['read', 'update'],
+        [
+          'lock',
+          'select pg_advisory_xact_lock(hashtextextended($1, 0))',
+          [`saved-replies:${TENANT}`],
+        ],
+        ['join'],
         ['update', { ...written, updatedByMembershipId: null, updatedByApiKeyId: CALLER }],
         audited('saved_reply.updated', written.shortcut),
         ['read'],
+        ['join'],
       ]);
     }
     // The same text after the checks tidy it: nothing written, nothing audited.
-    const same = recorder([[current], [row()]]);
+    const same = recorder([[current], [row()], []]);
     const { db } = on(same.tx);
     expect(
       await apiUpdateSavedReply({ db }, ctx(['saved_replies.manage']), REPLY, {
@@ -481,7 +513,12 @@ describe('saved replies through the API (ADR-291)', () => {
         title: 'Thank you ',
       }),
     ).toEqual(toApiSavedReply(row()));
-    expect(same.steps).toEqual([['read', 'update'], ['read']]);
+    expect(same.steps.map((s) => s.slice(0, 2))).toEqual([
+      ['lock', 'select pg_advisory_xact_lock(hashtextextended($1, 0))'],
+      ['read', 'update'],
+      ['read'],
+      ['join'],
+    ]);
     const missing = recorder([[]]);
     expect(
       (
@@ -492,22 +529,31 @@ describe('saved replies through the API (ADR-291)', () => {
         )
       )[1],
     ).toBe('Saved reply not found.');
-    expect(missing.steps).toEqual([['read', 'update']]);
+    expect(missing.steps.map((s) => s[0])).toEqual(['lock', 'read']);
   });
 
   it('deletes a reply audited as the key; one already deleted answers 404', async () => {
-    const deleted = recorder([[{ shortcut: 'thanks' }]]);
+    const deleted = recorder([[], [{ shortcut: 'thanks' }]]);
     expect(
       await apiDeleteSavedReply({ db: on(deleted.tx).db }, ctx(['saved_replies.manage']), REPLY),
     ).toEqual({ id: REPLY, deleted: true });
-    expect(deleted.steps).toEqual([['delete'], audited('saved_reply.deleted', 'thanks')]);
-    const gone = recorder([[]]);
+    expect(deleted.steps).toEqual([
+      [
+        'lock',
+        'select pg_advisory_xact_lock(hashtextextended($1, 0))',
+        [`saved-replies:${TENANT}`],
+      ],
+      ['join'],
+      ['delete'],
+      audited('saved_reply.deleted', 'thanks'),
+    ]);
+    const gone = recorder([[], []]);
     expect(
       await refusal(
         apiDeleteSavedReply({ db: on(gone.tx).db }, ctx(['saved_replies.manage']), REPLY),
       ),
     ).toEqual(['not_found', 'Saved reply not found.', []]);
-    expect(gone.steps).toEqual([['delete']]);
+    expect(gone.steps.map((s) => s[0])).toEqual(['lock', 'join', 'delete']);
   });
 
   it('answers a shortcut another reply has with 409, adding or changing', async () => {

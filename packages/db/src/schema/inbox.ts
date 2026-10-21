@@ -1,4 +1,14 @@
-import { boolean, date, smallint, text, time, timestamp, uuid } from 'drizzle-orm/pg-core';
+import {
+  boolean,
+  customType,
+  date,
+  integer,
+  smallint,
+  text,
+  time,
+  timestamp,
+  uuid,
+} from 'drizzle-orm/pg-core';
 import { appSchema } from './tenancy';
 
 /**
@@ -118,6 +128,45 @@ export const savedReplies = appSchema.table('saved_replies', {
   updatedByApiKeyId: uuid('updated_by_api_key_id'),
   createdAt: tz('created_at').notNull().defaultNow(),
   updatedAt: tz('updated_at').notNull().defaultNow(),
+});
+
+/** A bytea column read and written as bytes (node-postgres reads bytea as a Buffer). */
+const bytea = customType<{ data: Uint8Array; driverData: Buffer }>({
+  dataType: () => 'bytea',
+  toDriver: (value) => Buffer.from(value.buffer, value.byteOffset, value.byteLength),
+  fromDriver: (value) => new Uint8Array(value.buffer, value.byteOffset, value.byteLength),
+});
+
+export const SAVED_REPLY_FILE_KINDS = ['image', 'video', 'audio', 'document'] as const;
+export type SavedReplyFileKind = (typeof SAVED_REPLY_FILE_KINDS)[number];
+
+/**
+ * A file saved replies carry (migration 0321, ADR-411), stored once per company: the same bytes,
+ * type and name are one row, which any number of replies name through `saved_reply_attachments`.
+ * Never updated; deleted once no reply names it.
+ */
+export const savedReplyFiles = appSchema.table('saved_reply_files', {
+  id: uuid('id').primaryKey(),
+  tenantId: uuid('tenant_id').notNull(),
+  kind: text('kind', { enum: SAVED_REPLY_FILE_KINDS }).notNull(),
+  mimeType: text('mime_type').notNull(),
+  filename: text('filename').notNull(),
+  sizeBytes: integer('size_bytes').notNull(),
+  /** Lower-case hex SHA-256 of `content`; the database checks it. */
+  sha256: text('sha256').notNull(),
+  content: bytea('content').notNull(),
+  createdByMembershipId: uuid('created_by_membership_id').notNull(),
+  createdAt: tz('created_at').notNull().defaultNow(),
+});
+
+/** Which saved reply carries which file: at most one per reply (migration 0321, ADR-411). */
+export const savedReplyAttachments = appSchema.table('saved_reply_attachments', {
+  id: uuid('id').primaryKey(),
+  tenantId: uuid('tenant_id').notNull(),
+  savedReplyId: uuid('saved_reply_id').notNull(),
+  fileId: uuid('file_id').notNull(),
+  attachedByMembershipId: uuid('attached_by_membership_id').notNull(),
+  attachedAt: tz('attached_at').notNull().defaultNow(),
 });
 
 export const noteMentions = appSchema.table('note_mentions', {

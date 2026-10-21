@@ -12,6 +12,11 @@ export interface ExportTableSpec {
   columns: readonly string[];
   /** Columns left out, with the reason. */
   omitted?: Readonly<Record<string, string>>;
+  /**
+   * Rows read per query when rows are large (bytes are written as base64 text): saved replies'
+   * files are up to 16 MB each (ADR-411). The default is 1,000.
+   */
+  pageSize?: number;
 }
 
 /** Tables left out of the export, with the reason. */
@@ -1595,6 +1600,26 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
       'created_at',
       'updated_at',
     ],
+  },
+  {
+    table: 'app.saved_reply_attachments',
+    columns: ['id', 'saved_reply_id', 'file_id', 'attached_by_membership_id', 'attached_at'],
+  },
+  {
+    // The files themselves (ADR-411): `content` is the file's bytes, written as base64.
+    table: 'app.saved_reply_files',
+    columns: [
+      'id',
+      'kind',
+      'mime_type',
+      'filename',
+      'size_bytes',
+      'sha256',
+      'content',
+      'created_by_membership_id',
+      'created_at',
+    ],
+    pageSize: 2,
   },
   {
     table: 'app.segments',

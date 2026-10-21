@@ -3,11 +3,17 @@ import { useRouter } from 'next/navigation';
 import { useId, useRef, useState, useSyncExternalStore } from 'react';
 import { clipText } from '@w360/core/text';
 import { Button, Select, Textarea } from '@w360/ui';
-import { sendReplyAction, showTypingAction } from '@/app/actions/inbox';
+import {
+  savedReplyFileForInsertAction,
+  sendReplyAction,
+  showTypingAction,
+} from '@/app/actions/inbox';
 import { FormError } from '@/components/form-status';
 import { ClientForm } from '@/components/client-form';
 
 const MAX_LENGTH = 4096;
+/** A caption's limit, as the file card has it (ADR-218). */
+const CAPTION_MAX_LENGTH = 1024;
 
 function newClientKey(): string {
   return crypto.randomUUID().replaceAll('-', '');
@@ -21,6 +27,13 @@ function readDraft(key: string): string {
   }
 }
 
+const FILE_WORDS = {
+  image: 'a photo',
+  video: 'a video',
+  audio: 'a recording',
+  document: 'a document',
+};
+
 // sessionStorage has no same-tab change events; the draft is read once per render.
 const noSubscription = () => () => undefined;
 
@@ -32,6 +45,19 @@ export interface ComposerSavedReply {
   text: string;
   /** Placeholders that had no value (for example a customer without a name). */
   missing: string[];
+  /** The file it carries (ADR-411), or null. */
+  attachment: { fileId: string; kind: 'image' | 'video' | 'audio' | 'document' } | null;
+}
+
+/** A saved reply's file inserted from the reply box, for the file card (ADR-411). */
+export interface ComposerInsertedFile {
+  savedReplyId: string;
+  title: string;
+  fileId: string;
+  kind: 'image' | 'video' | 'audio' | 'document';
+  filename: string;
+  sizeBytes: number;
+  caption: string | null;
 }
 
 /**
@@ -40,6 +66,11 @@ export interface ComposerSavedReply {
  * person using the same browser. Each submission carries an idempotency key; if the network fails
  * mid-request the same key is reused, so a retry cannot create a duplicate message. It also carries
  * the newest message shown, so a reply another member sent meanwhile is shown before this one goes.
+ *
+ * A saved reply with a file (ADR-411) is checked when inserted: its file must still be there and
+ * readable, or the member is told and nothing is inserted. A photo, video or document goes to the
+ * file card with the reply's text as its caption; a recording goes there without one and its text
+ * comes here. Nothing is sent until the member presses Send.
  */
 export function Composer({
   slug,
@@ -49,6 +80,7 @@ export function Composer({
   savedReplies = [],
   latestMessageId,
   typingIndicator = false,
+  onInsertFile,
 }: {
   slug: string;
   conversationId: string;
@@ -58,6 +90,8 @@ export function Composer({
   latestMessageId?: string;
   /** The company shows customers that a member is writing (ADR-223). */
   typingIndicator?: boolean;
+  /** Gives the file card a saved reply's file; without it, replies with files are not offered. */
+  onInsertFile?: (file: ComposerInsertedFile) => void;
 }) {
   const router = useRouter();
   const id = useId();
@@ -72,6 +106,9 @@ export function Composer({
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  const [inserting, setInserting] = useState(false);
+  // Without a file card (the window is closed), a reply's file could not be sent.
+  const offered = onInsertFile ? savedReplies : savedReplies.filter((r) => !r.attachment);
   const pendingKey = useRef<string | null>(null);
   // When the customer was last shown that a member is writing, or -1 once the server said no.
   const typingShownAt = useRef(0);
@@ -130,6 +167,61 @@ export function Composer({
     }
   };
 
+  const insertText = (chosen: ComposerSavedReply) => {
+    const next = text.trim() ? `${text.trimEnd()}\n${chosen.text}` : chosen.text;
+    update(clipText(next, MAX_LENGTH));
+  };
+
+  const missingNote = (chosen: ComposerSavedReply) =>
+    chosen.missing.includes('name')
+      ? ' This customer has no name on file, so {{name}} was left empty: check the text.'
+      : '';
+
+  const insert = (chosen: ComposerSavedReply) => {
+    setError(null);
+    if (!chosen.attachment || !onInsertFile) {
+      insertText(chosen);
+      setNotice(
+        chosen.missing.includes('name')
+          ? `Inserted “${chosen.title}”. This customer has no name on file, so {{name}} was left empty: check the text.`
+          : `Inserted “${chosen.title}”. Review it before sending.`,
+      );
+      return;
+    }
+    setInserting(true);
+    setNotice(null);
+    void savedReplyFileForInsertAction(slug, conversationId, chosen.id)
+      .then((result) => {
+        if (!result.ok) {
+          setError(result.message);
+          return;
+        }
+        const file = result.data;
+        const caption = file.caption ? clipText(chosen.text, CAPTION_MAX_LENGTH) : null;
+        if (!file.caption) insertText(chosen);
+        onInsertFile({
+          savedReplyId: chosen.id,
+          title: chosen.title,
+          fileId: file.fileId,
+          kind: file.kind,
+          filename: file.filename,
+          sizeBytes: file.sizeBytes,
+          caption,
+        });
+        const cut =
+          caption !== null && caption.length < chosen.text.length
+            ? ' The text was cut to the 1,024 characters a caption holds.'
+            : '';
+        setNotice(
+          file.caption
+            ? `Inserted “${chosen.title}”: its file and its text as the caption are in Send a file below. Review them before sending.${cut}${missingNote(chosen)}`
+            : `Inserted “${chosen.title}”: its text is in the reply box and its recording in Send a file below, sent separately. Review them before sending.${missingNote(chosen)}`,
+        );
+      })
+      .catch(() => setError('The saved reply’s file could not be checked: the connection failed.'))
+      .finally(() => setInserting(false));
+  };
+
   if (disabledReason) {
     return (
       <div className="rounded-md border border-border bg-muted/40 p-3 text-sm text-muted-foreground">
@@ -174,7 +266,7 @@ export function Composer({
         <span id={`${id}-hint`} className="text-xs text-muted-foreground">
           Ctrl + Enter to send · {text.length}/{MAX_LENGTH}
         </span>
-        {savedReplies.length > 0 ? (
+        {offered.length > 0 ? (
           <>
             <label htmlFor={`${id}-saved`} className="sr-only">
               Insert a saved reply
@@ -183,22 +275,17 @@ export function Composer({
               id={`${id}-saved`}
               className="w-auto min-w-40"
               value=""
+              disabled={inserting}
               onChange={(event) => {
-                const chosen = savedReplies.find((r) => r.id === event.target.value);
-                if (!chosen) return;
-                const next = text.trim() ? `${text.trimEnd()}\n${chosen.text}` : chosen.text;
-                update(clipText(next, MAX_LENGTH));
-                setNotice(
-                  chosen.missing.includes('name')
-                    ? `Inserted “${chosen.title}”. This customer has no name on file, so {{name}} was left empty: check the text.`
-                    : `Inserted “${chosen.title}”. Review it before sending.`,
-                );
+                const chosen = offered.find((r) => r.id === event.target.value);
+                if (chosen) insert(chosen);
               }}
             >
               <option value="">Saved replies…</option>
-              {savedReplies.map((r) => (
+              {offered.map((r) => (
                 <option key={r.id} value={r.id}>
                   /{r.shortcut} · {r.title}
+                  {r.attachment ? ` (with ${FILE_WORDS[r.attachment.kind]})` : ''}
                 </option>
               ))}
             </Select>

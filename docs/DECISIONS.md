@@ -18173,6 +18173,93 @@ error from an inverted range; readiness now builds them only for a valid set, `v
 refuses an invalid one in words, and the test covers both. A Low: the e2e's `PATCH` now grows the
 draft, so it exercises the limit the API routes pass on. All were fixed.
 
+## ADR-411 Saved replies that carry a file (P3-06, W-087) (2026-10-21)
+
+Context: saved replies were text only (ADR-291 kept them that way through the API), so a member who
+answered "here is our price list" every day typed the text from a saved reply, then found the PDF
+on their computer and sent it from the "Send a file" card (ADR-218). WATI's reply materials hold
+media as well as text (research W-087). HyFib has no object storage (ADR-218, ADR-219): a member's
+file passes through memory and is uploaded to Meta when sent, and Meta keeps an upload only 30 days
+and for one number (research M-046), so a Meta media id cannot be the stored copy of a reply that
+any number sends for months. Private object storage is planned (ARCHITECTURE) but not built:
+`app.media_objects.storage_key` and its key scheme were planned in 0003 and never written.
+
+Decision:
+
+- **One file per reply, kept in the database.** A saved reply may carry one file of the types and
+  size members send from the inbox (`checkReplyFile`: JPEG or PNG photos, MP4 or 3GPP videos, AAC,
+  AMR, MP3, MP4 or OGG recordings, PDF, text and Office documents, up to 16 MB). Its bytes are kept
+  in `app.saved_reply_files` (`bytea`), once per company: the same bytes, type and cleaned name
+  (`mediaFilename`) are one row, which any number of replies name through
+  `app.saved_reply_attachments` (one row per reply). A stored file is never changed. A company keeps
+  at most 100 MB of files in all (`SAVED_REPLY_FILES_MAX_TOTAL_BYTES`; a shared file counts once),
+  a bound chosen so that 500 replies cannot put gigabytes per company into the database, backups
+  and exports; a file being replaced counts as freed only when no other reply has it. This is a
+  stopgap until object storage exists, stated in DEPLOYMENT (size to watch) and BACKLOG.
+- **The text becomes the caption.** With a photo, video or document the reply's text is the file's
+  caption, so it is held to 1,024 characters, the caption limit the inbox's file path already
+  applies (`fileReplySchema`, research M-191): attaching such a file to a longer reply, and changing
+  such a reply's text past it (in Settings or through the API), are refused naming `body`. A
+  recording takes no caption (M-191), so with one the text keeps the 4,096 characters of a text
+  message and is inserted into the reply box as text, sent separately.
+- **Sharing and deletion under one lock.** Every write of saved replies and their files (adding,
+  changing and deleting replies, attaching, replacing and removing files, in Settings and through
+  the API) takes the company's saved-replies advisory lock first, before any row lock (the API's
+  change now takes it before its row lock, so the two orders never meet). Under it, a file is
+  deleted as soon as no attachment names it: when its reply is deleted (the attachment goes by
+  `ON DELETE CASCADE`), when the reply's file is removed or replaced, and, before each new file is
+  stored, any file no reply names (a server of the release before deletes replies without knowing
+  of files). The attachments' foreign key to the file has no cascade, so the database refuses
+  deleting a file a reply still names. This follows how the codebase treats shared rows elsewhere
+  (references counted by existence under a lock, never a stored counter); media rows of messages
+  are never shared, each message has its own (ADR-219).
+- **Migration 0321:** the two tables, new and empty, with `tenant_id NOT NULL`, `UNIQUE (tenant_id,
+id)`, composite foreign keys to the company's replies (cascade), files and members, forced row
+  security, the runtime role holding `SELECT`, `INSERT` and `DELETE` only, and checks of each
+  file's (kind, MIME type) pair against `REPLY_FILE_TYPES` (a unit test keeps them equal), its size
+  (1 byte to 16 MB), its name (1 to 150 characters) and its SHA-256 against its bytes. They join the
+  company deletion as steps 125 (attachments) and 126 (files), before the replies (130) and the
+  members (810), with w360_definer's policies limited to the company being deleted. The company
+  export carries both, the files two rows a page with their bytes as base64 (`exportRow`,
+  `ExportTableSpec.pageSize`). `app.saved_replies` is not altered.
+- **Managing (Settings → Saved replies):** members with `inbox.supervise` attach, replace and
+  remove a reply's file in its edit panel, posted to `/api/c/<company>/saved-replies/<id>/file`
+  (under /api so Next's proxy neither buffers nor cuts 16 MB; trusted origin, the member's
+  session). The list shows each reply's file with a link to it. Audit entries
+  (`saved_reply.file_attached`, `saved_reply.file_removed`) record the shortcut, kind and size and
+  whether the file was shared, replaced or deleted, never its name or content, as saved replies'
+  entries never record the text.
+- **Using (the conversation page):** members with `inbox.reply` who cannot manage saved replies use
+  them, as before. Choosing a reply with a file ("/prices · Price list (with a photo)") first asks
+  the server, in a conversation the member can see, whether the file is still there and reads back
+  whole (`savedReplyFileForInsert`: its length and SHA-256 computed from the stored bytes in SQL,
+  its type still one members send); if not, the member is told now ("was removed after the page
+  loaded", "can no longer be read") and nothing is inserted. Otherwise `ReplyTools`, which now holds
+  the composer and the file card together, gives the card the file (a preview for a photo, a link
+  otherwise) with the text, placeholders filled, as its caption (cut to 1,024 characters with a
+  notice if the filled text is longer). Nothing is sent: the member reviews it and presses Send
+  file, or removes it. The card posts `savedReplyId` and `savedReplyFileId` in place of a file;
+  `queueSavedReplyFileReply` reads the bytes only while that reply still carries that very file
+  (otherwise 409: insert it again) and sends them through `queueFileReply`'s own path: the reply's
+  checks (window, number, the collision warning), the upload to Meta for the conversation's number,
+  the queued reply and its retry key. Each send uploads the file again.
+- **Preview route:** `/c/<company>/settings/saved-replies/files/<id>` gives a file to members who
+  reply or supervise, with `FILE_POLICY` (proxy.ts's `FILE_ROUTE` now matches it), `nosniff`, no
+  caching, and only photos, recordings and videos inline (`mediaPresentation`).
+- **API (additive, P5-08):** each saved reply carries `attachment` (its id, `type`, MIME type,
+  name, size and `caption`, whether the text goes as its caption) or null; never the content, a
+  storage key or a link. Keys cannot add or remove files; `PATCH` keeps the file and refuses a text
+  over 1,024 characters while it is a photo, video or document; `DELETE` deletes the file with the
+  reply unless another reply carries it. Webhooks have no saved-reply events, so none change.
+- **Automations are out.** No automation step uses saved replies today (send-message steps carry
+  their own text), so none was extended.
+
+Not built: automations (keyword or routing) drawing on saved replies or their files, templates or
+bots stored as reply material (the rest of W-087), keys adding or removing files, more than one
+file per reply, stickers, files over 16 MB, object storage (and with it moving these bytes out of
+PostgreSQL), reusing one upload to Meta for repeated sends of the same file, and any verification
+against Meta (the Graph stand-in only).
+
 ## ADR-412 Call-to-action URL buttons and taking reactions back: not built, no source (P5-08) (2026-10-21)
 
 Context: P5-08's remaining list names "call-to-action messages through the API" and "taking

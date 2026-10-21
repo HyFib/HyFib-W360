@@ -192,6 +192,7 @@ import { apiUpdateMemberSchema } from './members';
 import { apiCreateClosedDaySchema, apiUpdateBusinessHoursSchema } from './business-hours';
 import { MAX_RANGES_PER_DAY } from '../inbox/business-hours';
 import { MAX_SAVED_REPLIES } from '../inbox/saved-replies';
+import { REPLY_FILE_MAX_BYTES } from '../messaging/file-replies';
 import { GROWTH_LIMITS } from '../growth/model';
 import {
   SATISFACTION_SURVEY_STATUSES,
@@ -895,6 +896,23 @@ export const apiSavedReplySchema = z.object({
   updatedByApiKeyId: z.uuid().nullable(),
   createdAt: z.iso.datetime(),
   updatedAt: z.iso.datetime(),
+  attachment: z
+    .object({
+      id: z.uuid(),
+      type: z.enum(['image', 'video', 'audio', 'document']),
+      mimeType: z.string(),
+      filename: z.string().describe('The name it was added under, as a document is sent with it.'),
+      sizeBytes: z.number().int().min(1).max(REPLY_FILE_MAX_BYTES),
+      caption: z
+        .boolean()
+        .describe(
+          'Whether the reply’s text goes as the file’s caption: true for a photo, video or document, whose text is then at most 1,024 characters; false for a recording, which takes no caption, so its text stays a text message.',
+        ),
+    })
+    .nullable()
+    .describe(
+      'The file the reply carries, added by members in Settings → Saved replies, which the reply box attaches when a member inserts the reply; null when it carries none. Its details only: the API gives neither its content nor where it is kept, and keys cannot add or remove it.',
+    ),
 });
 
 /** A template's content as HyFib represents it (ADR-294). */
@@ -3313,7 +3331,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         get: {
           operationId: 'listSavedReplies',
           summary: 'Saved replies, by shortcut',
-          description: `${scopeNote('messages.reply', 'saved_replies.manage')} The company’s saved replies, the answers members put in the reply box, all of them (a company keeps at most ${MAX_SAVED_REPLIES}), by shortcut. A reply’s placeholders are left as written: fill {{name}}, {{agent}} and {{company}} before sending it. Reading works while the company is suspended.`,
+          description: `${scopeNote('messages.reply', 'saved_replies.manage')} The company’s saved replies, the answers members put in the reply box, all of them (a company keeps at most ${MAX_SAVED_REPLIES}), by shortcut. A reply’s placeholders are left as written: fill {{name}}, {{agent}} and {{company}} before sending it. Each reply names the file it carries, if any, in \`attachment\`. Reading works while the company is suspended.`,
           responses: {
             '200': {
               description: 'The saved replies.',
@@ -3342,7 +3360,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         patch: {
           operationId: 'updateSavedReply',
           summary: 'Change a saved reply',
-          description: `${scopeNote('saved_replies.manage')} As members save one in Settings → Saved replies: what is given changes and the rest stays as it is, with the same checks as when adding one. A change that leaves the reply as it is answers it as it is, with no audit entry, so a retry needs no \`Idempotency-Key\`; otherwise the audit log names the key.`,
+          description: `${scopeNote('saved_replies.manage')} As members save one in Settings → Saved replies: what is given changes and the rest stays as it is, with the same checks as when adding one. The file a member attached stays; while it is a photo, video or document, the text is its caption and is refused over 1,024 characters (422 naming \`body\`). A change that leaves the reply as it is answers it as it is, with no audit entry, so a retry needs no \`Idempotency-Key\`; otherwise the audit log names the key.`,
           parameters: [{ $ref: '#/components/parameters/Id' }],
           requestBody: { required: true, content: json(ref('UpdateSavedReply')) },
           responses: {
@@ -3356,7 +3374,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         delete: {
           operationId: 'deleteSavedReply',
           summary: 'Delete a saved reply',
-          description: `${scopeNote('saved_replies.manage')} As members do in Settings → Saved replies. One already deleted answers 404. The audit log names the key.`,
+          description: `${scopeNote('saved_replies.manage')} As members do in Settings → Saved replies. One already deleted answers 404. Its file is deleted with it unless another saved reply carries the same file. The audit log names the key.`,
           parameters: [{ $ref: '#/components/parameters/Id' }],
           responses: {
             '200': {

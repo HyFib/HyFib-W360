@@ -2084,6 +2084,26 @@ jsonb_path_exists(draft_graph, '$.nodes[*].save[*].from')`, and the same on
 
    Rolling forward needs no step; raise the setting again once every server runs the release.
 
+   Migration 0321 (ADR-411) creates `app.saved_reply_files` (a saved reply's file, its bytes in a
+   `bytea` column, checked against its length and SHA-256) and `app.saved_reply_attachments` (which
+   reply carries which file), both new and empty, with row security, grants (`SELECT`, `INSERT`,
+   `DELETE`, no `UPDATE`) and the company deletion's steps 125 and 126. Nothing is rewritten:
+   `app.saved_replies` is not altered, and the attachments' foreign key to it only takes a brief
+   lock on it while the empty table is created. Workers do not use the tables. It is additive: web
+   servers of the release before know nothing of files and keep listing, inserting and sending
+   saved replies as text. Two things they do differently: deleting a reply removes its attachment
+   row (the cascade) but leaves the file, which the next file a supervisor stores for the company
+   deletes (no file stays without a reply for longer than that, and such files are exported); and
+   changing the text of a reply that carries a photo, video or document past 1,024 characters is
+   not refused, so a new server cuts the caption to 1,024 characters when the reply is inserted and
+   says so. Apply 0321, then roll out web servers; offer files once the rollout ends. Storage: files
+   live in PostgreSQL (there is no object storage), at most 16 MB each and 100 MB a company in all,
+   so database size, backups and replicas grow with them; watch
+   `pg_total_relation_size('app.saved_reply_files')` and its TOAST table. A company's export carries
+   each file as base64 (about a third larger than the file), two files a page. Rolling an image
+   back leaves the tables and grants in place; the older release ignores them, and the files stay
+   until a release with ADR-411 deletes their replies or the company is deleted.
+
    Migration 0324 (ADR-414, automations started by replies to a campaign) runs in one transaction.
    It replaces `automation_runs_trigger_type_check` with one that also takes `campaign_reply`,
    `NOT VALID`, so `app.automation_runs` is not read under the migration's brief exclusive lock

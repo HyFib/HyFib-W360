@@ -1,5 +1,90 @@
 # Progress
 
+## 2026-10-21 — Saved replies that carry a file (P3-06, W-087, ADR-411)
+
+Status: **Implemented (migration 0321); unit tests run locally, integration and e2e tests in CI
+only; no live Meta traffic.** A saved reply may carry one file, which the reply box attaches for
+review when a member inserts the reply. W-087 stays **planned**: automations do not draw on saved
+replies, and templates and bots are not stored as reply material. Copy-code templates were
+researched first and not built (research M-202, BACKLOG P3-03): Meta's OpenAPI description has no
+coupon copy-code button, and Meta's sample app shows one only inside a limited-time-offer template.
+
+### Completed
+
+- **Storage:** there is no object storage, and Meta keeps an upload 30 days for one number, so a
+  file's bytes are kept in `app.saved_reply_files` (migration 0321), once per company (same bytes,
+  type and name), named by `app.saved_reply_attachments` (one per reply). The types and 16 MB of
+  the inbox's file path (`checkReplyFile`); 100 MB a company in all
+  (`SAVED_REPLY_FILES_MAX_TOTAL_BYTES`). Composite foreign keys, forced row security, no `UPDATE`
+  grant, database checks of the type pair, size, name and SHA-256 against the bytes; deletion
+  steps 125 and 126; the export carries the files as base64, two a page.
+- **Rules:** with a photo, video or document the text is the caption, at most 1,024 characters
+  (refused when attaching and when the text changes, in Settings or through the API); a recording
+  takes none and its text stays a text message. Every write takes the company's saved-replies lock
+  first; a file is deleted as soon as no reply names it (reply deleted, file removed or replaced),
+  and files left by an older server are deleted before the next file is stored.
+- **Settings → Saved replies:** supervisors attach, replace and remove a reply's file in its edit
+  panel (`/api/c/<company>/saved-replies/<id>/file`); the list links each file. Audited with the
+  kind and size, never the name or content.
+- **Conversation page:** `ReplyTools` joins the composer and Send a file. Inserting a reply with a
+  file checks it is there and reads back whole (`savedReplyFileForInsert`), or says why not and
+  inserts nothing; otherwise the card gets the file (photo preview) with the filled text as its
+  caption. The member reviews and sends it; the send names the reply and file inserted and goes
+  only while the reply still carries that file, through `queueFileReply`'s path (window, number,
+  collision warning, Meta upload). Members who reply but do not manage saved replies use them.
+- **Preview route:** `/c/<company>/settings/saved-replies/files/<id>` for members who reply or
+  supervise, under `FILE_POLICY` (`FILE_ROUTE` extended).
+- **API (additive):** each saved reply carries `attachment` (id, type, MIME type, name, size,
+  `caption`) or null; never content or a storage location. `PATCH` keeps the file and refuses a
+  text over 1,024 characters with a captioned file; `DELETE` deletes an unshared file. OpenAPI
+  updated. No webhook covers saved replies.
+- **Not built:** automations using saved replies, templates or bots as reply material, keys adding
+  files, more than one file per reply, object storage, reusing one Meta upload across sends.
+- **Docs:** ADR-411, THREAT-MODEL T360, research M-202 (copy-code, and its wording fixed), BACKLOG
+  P3-03 (copy-code waits for a source) and P3-06, SECURITY, DATA-RETENTION, DEPLOYMENT (0321,
+  database size, rolling deploy), RUNBOOKS, ARCHITECTURE, feature matrix W-087 (still planned,
+  what is missing stated) and W-033.
+
+### Tests
+
+- Unit: `inbox/saved-reply-files.test.ts` (new, 22 tests: caption limits for each kind, the
+  update's and the attach's refusals before writing, the file checks before the lock, storing
+  with SHA-256 and cleaned name, sharing, an unchanged re-attach, the 100 MB total at and past the
+  limit with a replaced file freed only when unshared, removal and deletion of a reply's file, the
+  orphan sweep, unreadable files, the permission split for managing, inserting, previewing and
+  sending, the send schema, the API's attachment and description, the export's base64 and paging,
+  migration 0321 against `REPLY_FILE_TYPES`); `api/saved-replies.test.ts` (lock order, the file's
+  read in every write, `attachment` in answers); `lib/document-routes.test.ts` (the preview route's
+  policy).
+- Integration (CI only): `saved-reply-files.test.ts` (sharing, replacing and deleting with the last
+  reply; caption limits both ways and the company's total; database checks, composite foreign keys,
+  RLS across companies and no `UPDATE`; the permission split; a send through the Graph stand-in and
+  a refused send after the file changed; the API's details, `PATCH` and `DELETE`; an older server's
+  orphan swept; two concurrent attaches and a delete racing a replace) and `company-data.test.ts`
+  (the export carries the file as base64; the deletion deletes both tables).
+- E2E (CI only): `saved-reply-files.spec.ts`: a supervisor attaches a photo in Settings, the reply
+  is inserted in a conversation (preview and caption shown, nothing sent), sent through the Graph
+  stand-in as an image with its caption, and shown in the thread.
+- Hand mutation of 30 rules, bounds and checks: 28 caught by the unit tests (26 at first; tests for
+  deleting a reply's file and for the API's create answer were added for the other two). The 2
+  others need the database and are exercised by named integration tests that did not run here: the
+  unused-file deletion's `NOT EXISTS` ("stores a file once, shares it between replies and deletes
+  it with the last reply that has it", and the concurrency test) and the send's condition on the
+  inserted file ("sends an inserted file through the inbox’s file path, and refuses one changed
+  since").
+
+### Test commands and results (local, 2026-10-21)
+
+| Command                                                      | Result                                                                 |
+| ------------------------------------------------------------ | ---------------------------------------------------------------------- |
+| `npx eslint . --max-warnings=0`                              | clean                                                                  |
+| `prettier --check .`                                         | clean                                                                  |
+| `pnpm typecheck` (includes `tests/integration`, `tests/e2e`) | clean                                                                  |
+| `pnpm test` (unit)                                           | 2,162 of 2,162 passed (187 files)                                      |
+| `pnpm build`                                                 | passed                                                                 |
+| hand mutation of 30 rules, bounds and checks                 | 28 caught by unit tests; 2 exercised only by integration tests (above) |
+| `pnpm test:integration`, `pnpm test:e2e`                     | not run here: no local PostgreSQL or browser; CI runs them             |
+
 ## 2026-10-21 — Automations started by replies to a campaign (P4-01, ADR-414)
 
 Status: **Implemented (migrations 0324 and 0327); unit tests run locally, integration and e2e tests in CI

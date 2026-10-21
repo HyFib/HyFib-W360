@@ -17,7 +17,8 @@ import { EXPORT_TABLES, MEMBER_ACCOUNT_COLUMNS, type ExportTableSpec } from './e
  * - `{"table": "app.contacts", "row": {...}}`, one per row, with the columns of the export spec;
  * - `{"end": true, "counts": {"app.contacts": 12, ...}}`: a file without it is incomplete.
  *
- * 64-bit integers (money in minor units) are strings; times are ISO 8601 in UTC.
+ * 64-bit integers (money in minor units) are strings; times are ISO 8601 in UTC; bytes (saved
+ * replies' files, ADR-411) are base64 text.
  */
 export const EXPORT_FORMAT = 'hyfib-w360-company-export';
 export const EXPORT_VERSION = 1;
@@ -32,6 +33,20 @@ const PAGE_SIZE = 1_000;
 
 const identifier = (name: string) => `"${name.replace(/"/g, '""')}"`;
 const qualified = (table: string) => table.split('.').map(identifier).join('.');
+
+const pageSizeOf = (spec: ExportTableSpec) => spec.pageSize ?? PAGE_SIZE;
+
+/** A row as the export writes it: bytes (a bytea column) as base64 text. */
+export function exportRow(row: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(row)) {
+    out[key] =
+      value instanceof Uint8Array
+        ? Buffer.from(value.buffer, value.byteOffset, value.byteLength).toString('base64')
+        : value;
+  }
+  return out;
+}
 
 /** The SQL selecting one page of a table's rows, keyset-paged by id. */
 function pageQuery(spec: ExportTableSpec, afterId: string | null) {
@@ -49,7 +64,7 @@ function pageQuery(spec: ExportTableSpec, afterId: string | null) {
   }
   const hasId = spec.columns.includes('id');
   const keyset = hasId && afterId !== null ? sql` AND t.id > ${afterId}::uuid` : sql``;
-  const order = hasId ? sql.raw(` ORDER BY t.id LIMIT ${PAGE_SIZE}`) : sql``;
+  const order = hasId ? sql.raw(` ORDER BY t.id LIMIT ${pageSizeOf(spec)}`) : sql``;
   return sql`${sql.raw(`SELECT ${columns.join(', ')} FROM ${from} WHERE t.tenant_id = `)}${sql`(SELECT app.current_tenant_id())`}${keyset}${order}`;
 }
 
@@ -65,11 +80,12 @@ async function writeTable(
       pageQuery(spec, afterId),
     );
     for (const row of result.rows) {
-      await write(`${JSON.stringify({ table: spec.table, row })}\n`);
+      await write(`${JSON.stringify({ table: spec.table, row: exportRow(row) })}\n`);
       count += 1;
     }
     const last: Record<string, unknown> | undefined = result.rows.at(-1);
-    if (!spec.columns.includes('id') || result.rows.length < PAGE_SIZE || !last) return count;
+    if (!spec.columns.includes('id') || result.rows.length < pageSizeOf(spec) || !last)
+      return count;
     afterId = String(last.id);
   }
 }
