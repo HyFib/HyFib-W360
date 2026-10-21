@@ -449,7 +449,9 @@ export type TrackingUpdateDecision =
  * waits while the shipment's "Shipment sent" message is still waiting, since that message carries
  * the tracking current when it goes; and once that message went carrying this tracking or a later
  * one, this one is not sent again. So a quick correction, whichever message it lands on, gives the
- * customer the newest values once.
+ * customer the newest values once. Only a queued template carries the shipment's tracking: an
+ * automation the rule started instead may send anything or nothing (its `{{order.tracking_*}}` read
+ * the order's copy when a step runs), so it never stops an update.
  */
 export function trackingUpdateDecision(input: {
   revision: number;
@@ -460,8 +462,7 @@ export function trackingUpdateDecision(input: {
   const created = input.created;
   if (created?.state === 'pending') return 'wait_for_created';
   if (
-    created &&
-    (created.state === 'queued' || created.state === 'started') &&
+    created?.state === 'queued' &&
     created.trackingRevision !== null &&
     input.revision <= created.trackingRevision
   ) {

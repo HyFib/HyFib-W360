@@ -302,7 +302,9 @@ describe('tracking updates at send time', () => {
   it('wait for a waiting “Shipment sent”, and never repeat the tracking it carried', () => {
     expect(decide(1, 1, { state: 'pending', trackingRevision: null })).toBe('wait_for_created');
     expect(decide(1, 1, { state: 'queued', trackingRevision: 1 })).toBe('tracking_already_sent');
-    expect(decide(1, 1, { state: 'started', trackingRevision: 2 })).toBe('tracking_already_sent');
+    // An automation started instead carried nothing HyFib knows of, whatever it recorded.
+    expect(decide(1, 1, { state: 'started', trackingRevision: 2 })).toBe('send');
+    expect(decide(1, 1, { state: 'started', trackingRevision: null })).toBe('send');
     expect(decide(2, 2, { state: 'queued', trackingRevision: 1 })).toBe('send');
     expect(decide(1, 1, { state: 'queued', trackingRevision: 0 })).toBe('send');
     // Not sent at all: the update goes.

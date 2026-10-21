@@ -319,6 +319,11 @@ got none; BACKLOG P4-06f listed this as not built.
   tracking skips a waiting update; shipment rules go on only after both rollouts; the research
   cites `@shopify/shopify-api` 11.14.1 and 15.0.0, both read; SECURITY says `order_id` is used;
   the transit rules reclassified above; the rule editor's automation note.
+- **Codex review (PR #107):** a "Shipment sent" rule that starts an automation recorded the
+  tracking current at the start, so a "Tracking updated" message for that tracking was skipped as
+  `tracking_already_sent` though the run may send no tracking at all. Only a queued template now
+  records and stops anything; the unit test checks an automation start with or without a recorded
+  tracking.
 
 ### Test commands and results (local, 2026-10-21)
 
@@ -431,6 +436,12 @@ coupon copy-code button, and Meta's sample app shows one only inside a limited-t
   reply deleted by an older server during an attach answers not found (`isForeignKeyViolation` on
   `saved_reply_attachments_reply_fk`) instead of a server error; inserting a reply never replaces a
   file or caption the member put in Send a file (refused with a message).
+- **Codex review (PR #107):** the reply box and the card stay editable while a reply's file is
+  checked, but the check's answer used them as they were when it started: it overwrote text typed
+  meanwhile and replaced a file or caption given to the card meanwhile. It now reads both as they
+  are when the answer comes (kept in a ref the composer updates after each render), keeps the typed
+  text before the reply's, and refuses the insertion if the card was filled meanwhile. No automated
+  test covers this timing.
 
 ### Test commands and results (local, 2026-10-21)
 

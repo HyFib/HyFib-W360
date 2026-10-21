@@ -439,7 +439,8 @@ export async function processStoreMessage(
     }
 
     const storeName = store.name ?? store.shopDomain ?? new URL(store.storeUrl).hostname;
-    // A sent "Shipment sent" message records the tracking it carried (ADR-413).
+    // A queued "Shipment sent" template records the tracking it carried; an automation started
+    // instead records none, since HyFib cannot know what it sends (ADR-413).
     let carriedRevision = 0;
     const carried = () =>
       row.event === 'shipment_created' ? { trackingRevision: carriedRevision } : {};
@@ -635,7 +636,6 @@ export async function processStoreMessage(
             state: 'started',
             automationRunId: started.runId,
             contactId: started.contactId,
-            ...carried(),
           })
           .where(
             and(eq(commerceStoreMessages.tenantId, tenantId), eq(commerceStoreMessages.id, row.id)),

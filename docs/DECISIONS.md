@@ -18240,7 +18240,9 @@ id)`, composite foreign keys to the company's replies (cascade), files and membe
   notice if the filled text is longer). Nothing is sent: the member reviews it and presses Send
   file, or removes it. A file is inserted only into an empty card: when the card already holds a
   file or a caption the member chose, the reply is not inserted and the member is told, so nothing
-  they chose is discarded. The card posts `savedReplyId` and `savedReplyFileId` in place of a file;
+  they chose is discarded. Both stay editable while the file is checked, so its answer is applied
+  to what they hold when it comes back: text typed meanwhile stays, with the reply's text after it,
+  and a file or caption given to the card meanwhile stops the insertion the same way. The card posts `savedReplyId` and `savedReplyFileId` in place of a file;
   `queueSavedReplyFileReply` reads the bytes only while that reply still carries that very file
   (otherwise 409: insert it again) and sends them through `queueFileReply`'s own path: the reply's
   checks (window, number, the collision warning), the upload to Meta for the conversation's number,
@@ -18282,7 +18284,10 @@ a change of only the title or shortcut was refused when an older server had stor
 with a photo (the caption limit is now checked only when the text changes); a reply deleted by an
 older server during an attach was a server error (now not found, from the foreign key's
 violation); and inserting a reply replaced a file or caption the member had already put in the
-card (now refused with a message). All were fixed.
+card (now refused with a message). All were fixed. Codex's review of PR #107 found the same loss
+while the check runs: its answer used the reply box and the card as they were when it started, so
+it overwrote text typed meanwhile and replaced a file chosen meanwhile; it now reads them as they
+are when it comes back.
 
 ## ADR-412 Call-to-action URL buttons and taking reactions back: not built, no source (P5-08) (2026-10-21)
 
@@ -18371,7 +18376,10 @@ Decision:
   that is still waiting, because that message carries whatever tracking is current when it goes;
   and a sent "Shipment sent" records the tracking it carried (`tracking_revision`, its place among
   the remembered ones), so an update for that tracking or an earlier one is skipped
-  (`tracking_already_sent`).
+  (`tracking_already_sent`). Only a queued template carries the shipment's tracking: a "Shipment
+  sent" rule that starts an automation records none, and never stops an update (Codex's review of
+  PR #107 found that an automation start first counted as carrying it, which skipped updates no
+  message had carried).
 - **One message per shipment and key, in the database.** Migration 0323 adds
   `app.commerce_store_shipments` (one row per Shopify fulfillment and store, under its order: the
   statuses as status words, `failed`, the times, the first tracking entry, and `tracking_keys`, the
@@ -18420,7 +18428,8 @@ shipment_id) = 1`): the old unique key of one message per order and event stays 
 - **Automations.** A shipment rule may start a published automation instead (ADR-050's path is
   generic): the run keeps the shipment's order and its event (`store_event`, check widened). Its
   `{{order.tracking_*}}` placeholders read the order's copy, which holds the latest shipment's
-  tracking, not necessarily the one that started the run.
+  tracking, not necessarily the one that started the run, and only when a step runs, so HyFib
+  cannot know which tracking, if any, a run sent.
 - **Reports and privacy.** The store's report and the order page list shipment messages with their
   order. A tracking number and its link go with the customer's details: whenever an order is
   written as redacted (erasure as `w360_definer`, Shopify's `customers/redact`, or a read of an

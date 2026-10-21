@@ -1,6 +1,6 @@
 'use client';
 import { useRouter } from 'next/navigation';
-import { useId, useRef, useState, useSyncExternalStore } from 'react';
+import { useEffect, useId, useRef, useState, useSyncExternalStore } from 'react';
 import { clipText } from '@w360/core/text';
 import { Button, Select, Textarea } from '@w360/ui';
 import {
@@ -110,6 +110,12 @@ export function Composer({
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [inserting, setInserting] = useState(false);
+  // What the reply box and the file card hold now: both stay editable while a saved reply's file
+  // is checked, so its result must not apply the text or the card as they were when it started.
+  const latest = useRef({ text, fileCardInUse });
+  useEffect(() => {
+    latest.current = { text, fileCardInUse };
+  });
   // Without a file card (the window is closed), a reply's file could not be sent.
   const offered = onInsertFile ? savedReplies : savedReplies.filter((r) => !r.attachment);
   const pendingKey = useRef<string | null>(null);
@@ -171,7 +177,8 @@ export function Composer({
   };
 
   const insertText = (chosen: ComposerSavedReply) => {
-    const next = text.trim() ? `${text.trimEnd()}\n${chosen.text}` : chosen.text;
+    const current = latest.current.text;
+    const next = current.trim() ? `${current.trimEnd()}\n${chosen.text}` : chosen.text;
     update(clipText(next, MAX_LENGTH));
   };
 
@@ -204,6 +211,13 @@ export function Composer({
       .then((result) => {
         if (!result.ok) {
           setError(result.message);
+          return;
+        }
+        // A file or a caption the member gave the card while the file was checked stays.
+        if (latest.current.fileCardInUse) {
+          setError(
+            `Send a file below now holds a file or a caption, so “${chosen.title}” was not inserted. Send it or clear it first.`,
+          );
           return;
         }
         const file = result.data;
