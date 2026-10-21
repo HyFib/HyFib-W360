@@ -18084,7 +18084,9 @@ Decision:
   replacing or removing a variant before the last, moves the buckets of the variants after it (a
   draft's variants are labelled in order, so removing C relabels D as C). Stored labels that skip
   one (never written by the app) are refused before a submission ("The variants are out of order:
-  save the draft again …") rather than split. Each variant's SQL condition is a half-open
+  save the draft again …") rather than split, and so are stored shares that leave A under 10% or
+  pass 100% (as an older server could store): no audience is split by them, and `variantRanges`
+  refuses such a set in words rather than render an inverted range. Each variant's SQL condition is a half-open
   `int4range` containing the bucket, so the MD5 is computed once per contact per variant; with
   five variants the submission's transaction makes up to five passes over the audience (one per
   variant, each classified by its own rules), a cost not measured (the 10,000-contact staging run
@@ -18154,4 +18156,9 @@ variant is now offered only while A keeps 20%, `canAddVariant`); the new refusal
 had no row waited for good (now a pause naming it); no test sent `variants` through the API routes
 (the e2e does); ADR-405's stability promise was not restated for more variants, and the
 submission's cost was not stated (both above); and a stored gap in the labels was a server error
-(now a readiness problem). All were fixed.
+(now a readiness problem). All were fixed. A second review found one High and one Medium issue
+from one gap: readiness still built each variant's audience for an invalid stored set, so a
+5% A over few contacts added a second problem (a flaky test) and a set past 100% raised a database
+error from an inverted range; readiness now builds them only for a valid set, `variantRanges`
+refuses an invalid one in words, and the test covers both. A Low: the e2e's `PATCH` now grows the
+draft, so it exercises the limit the API routes pass on. All were fixed.

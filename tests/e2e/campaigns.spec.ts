@@ -748,26 +748,30 @@ test('an A/B/C campaign is drafted with three templates, reviewed by its approve
   ).data;
   expect(draft.settings.variantB).toMatchObject({ sharePercent: 40 });
   expect(draft.settings.variants.map((v) => v.sharePercent)).toEqual([40, 30]);
-  // The key gives the variants after A through the API too: this deployment allows five
-  // (CAMPAIGN_VARIANTS_MAX), so a draft of three templates is taken.
-  const patched = await request.patch(`/api/v1/campaigns/${campaignId}`, {
+  // The key gives the variants after A through the API too: it trims the draft to B alone, then
+  // grows it back to three templates, which only a deployment allowing at least three
+  // (CAMPAIGN_VARIANTS_MAX, 5 in CI) takes: the routes pass the setting on.
+  const variantsGiven = draft.settings.variants.map((v) => ({
+    templateId: v.templateId,
+    variables: v.variables,
+    sharePercent: v.sharePercent,
+  }));
+  type Patched = { data: { version: number; settings: { variants: { sharePercent: number }[] } } };
+  const trimmed = await request.patch(`/api/v1/campaigns/${campaignId}`, {
     headers: auth,
-    data: {
-      expectedVersion: draft.version,
-      variants: draft.settings.variants.map((v) => ({
-        templateId: v.templateId,
-        variables: v.variables,
-        sharePercent: v.sharePercent,
-      })),
-    },
+    data: { expectedVersion: draft.version, variants: variantsGiven.slice(0, 1) },
   });
-  expect(patched.status()).toBe(200);
-  const patchedDraft = (
-    (await patched.json()) as {
-      data: { version: number; settings: { variants: { sharePercent: number }[] } };
-    }
-  ).data;
-  expect(patchedDraft.version).toBe(draft.version + 1);
+  expect(trimmed.status()).toBe(200);
+  const trimmedDraft = ((await trimmed.json()) as Patched).data;
+  expect(trimmedDraft.version).toBe(draft.version + 1);
+  expect(trimmedDraft.settings.variants.map((v) => v.sharePercent)).toEqual([40]);
+  const grown = await request.patch(`/api/v1/campaigns/${campaignId}`, {
+    headers: auth,
+    data: { expectedVersion: trimmedDraft.version, variants: variantsGiven },
+  });
+  expect(grown.status()).toBe(200);
+  const patchedDraft = ((await grown.json()) as Patched).data;
+  expect(patchedDraft.version).toBe(draft.version + 2);
   expect(patchedDraft.settings.variants.map((v) => v.sharePercent)).toEqual([40, 30]);
   const submitted = await request.post(`/api/v1/campaigns/${campaignId}/submit`, {
     headers: auth,

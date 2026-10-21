@@ -2514,7 +2514,7 @@ describe('A/B template variants (ADR-405)', () => {
     const s = await setup();
     const wide = wideService(s);
     const owner = await fx.ctx(s.c, s.c.owner);
-    for (let i = 0; i < 20; i += 1)
+    for (let i = 0; i < 40; i += 1)
       await s.contact(`+9198490000${String(i).padStart(2, '0')}`, { name: `K${i}` });
     const bId = await approvedTemplate(s, 'store_news_check_b', notice);
     const cId = await approvedTemplate(s, 'store_news_check_c', notice);
@@ -2556,6 +2556,22 @@ describe('A/B template variants (ADR-405)', () => {
       wide.submitCampaign(owner, id, { expectedVersion: 2 }, {}),
       'precondition_failed',
       /^Variant A needs at least 10% of the recipients: the other variants take 95%\.$/,
+    );
+    expect(await variantRows(id)).toHaveLength(0);
+    // Past 100% (an older web server checks B alone and keeps C): refused in words too, never a
+    // database error from an inverted range.
+    await fx.query(
+      `UPDATE app.campaign_variants SET share_percent = CASE label WHEN 'B' THEN 90 ELSE 30 END
+        WHERE campaign_id = $1`,
+      [id],
+    );
+    expect((await wide.reviewDraft(owner, id)).problems).toEqual([
+      'Variant A needs at least 10% of the recipients: the other variants take 120%.',
+    ]);
+    await expectAppError(
+      wide.submitCampaign(owner, id, { expectedVersion: 2 }, {}),
+      'precondition_failed',
+      /^Variant A needs at least 10% of the recipients: the other variants take 120%\.$/,
     );
     expect(await variantRows(id)).toHaveLength(0);
 

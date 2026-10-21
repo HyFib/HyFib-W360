@@ -921,7 +921,9 @@ async function evaluateReadiness(
   // Labels follow one another (B, C, …) as drafts are written; a stored gap is refused, not split.
   const inOrder = variants.every((v, i) => v.label === VARIANT_LABELS[i]);
   if (!inOrder) problems.push(VARIANTS_OUT_OF_ORDER);
-  if (def.ok && channel && inOrder && variants.every((v) => v.template)) {
+  // Each variant's audience only for a valid set of shares: an invalid one (A under 10%, or past
+  // 100%, as an older server could store) is refused above, not split.
+  if (def.ok && channel && inOrder && !setProblem && variants.every((v) => v.template)) {
     const settings = await loadMessagingSettings(tx, company.id);
     arms = variants.map((v) => {
       const template = v.template as TemplateInfo;

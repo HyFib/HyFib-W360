@@ -41,10 +41,11 @@ only; no live Meta traffic.** ADR-405 let a campaign test two templates; its "No
   E and a refused unknown label; the setting's default and range; approval and resuming checking
   every variant and refusing a waiting label without a row; each refusal's field path;
   `apps/web/src/lib/campaign-variants.test.ts`: the editor's default shares.
-- Hand mutation of 38 branches (30 first, 8 after the review): 29 caught by the unit tests. The 9
-  others need the database, and each is exercised by a named integration test that did not run
-  here: the SQL condition given every share and readiness checking every variant's template and
-  the stored shares ("checks a third variant's template and the stored shares", and the
+- Hand mutation of 40 branches (30 first, 10 after the reviews): 30 caught by the unit tests. The
+  10 others need the database, and each is exercised by a named integration test that did not run
+  here: the SQL condition given every share, readiness checking every variant's template and the
+  stored shares, and readiness building no audience for an invalid set (whose ranges would then be
+  refused, so the review would throw) ("checks a third variant's template and the stored shares", and the
   three-variant test, whose review would throw), the runner loading every variant and test sends
   of C ("assigns, approves, sends and reports three variants"), the runner's pause for a label
   without a row ("pauses for a recipient whose variant has no row"), readiness refusing labels
@@ -60,12 +61,13 @@ only; no live Meta traffic.** ADR-405 let a campaign test two templates; its "No
   and reading three variants; `campaign.recipient_skipped` naming C; the two-variant and plain
   campaigns of ADR-405 unchanged (their tests kept, with the new `variants` field); after the
   review, a paused C template and stored shares of B 50 and C 45 refusing the review and the
-  submission with their exact words, a stored gap in the labels refused and repaired by saving,
+  submission with their exact words, and so do stored shares of B 90 and C 30 (past 100%, never a
+  database error), on 40 contacts so no variant's share is empty by chance, a stored gap in the labels refused and repaired by saving,
   and a recipient whose variant lost its row pausing the runner and refusing a resume.
 - E2E (CI only, `campaigns.spec.ts`): ADR-405's step extended to a third template: drafted in the
-  editor, reviewed, given again by the key's `PATCH` with three templates (200, as CI sets
-  `CAMPAIGN_VARIANTS_MAX` to 5), submitted by the key, approved from the email, sent and reported
-  per variant.
+  editor, reviewed, trimmed to B by the key's `PATCH` and grown back to three templates by a
+  second one (200 each, the version up by two: growth past two needs the limit the API routes pass
+  on, 5 in CI), submitted by the key, approved from the email, sent and reported per variant.
 
 ### Review fixes (before merge)
 
@@ -83,19 +85,25 @@ only; no live Meta traffic.** ADR-405 let a campaign test two templates; its "No
   submission's unmeasured cost (also RUNBOOKS); the SQL condition computes the bucket once per row
   (`int4range`); a stored gap in the labels is a readiness problem, not a server error; the e2e's
   odds of an empty variant corrected.
+- **Second review (High, Medium, Low):** readiness built each variant's audience even when the
+  stored shares were invalid, so B 50 and C 45 over few contacts could add "Variant A: no contact
+  in its share …" (the new test was flaky) and B 90 and C 30 raised a database error from an
+  inverted `int4range`; readiness now builds them only for a valid set, and `variantRanges`
+  refuses an invalid set in `variantSetProblem`'s words. The test has 40 contacts and a
+  past-100% case. The e2e's `PATCH` now trims and grows, so it exercises the routes' limit.
 
 ### Test commands and results (local, 2026-10-21)
 
-| Command                                                       | Result                                                                 |
-| ------------------------------------------------------------- | ---------------------------------------------------------------------- |
-| `npx eslint . --max-warnings=0 --ignore-pattern '.claude/**'` | clean                                                                  |
-| `prettier --check` on the changed files                       | clean                                                                  |
-| `pnpm typecheck`                                              | clean                                                                  |
-| `pnpm test` (unit, after the review fixes)                    | 2,050 of 2,050 passed (182 files)                                      |
-| `tsc --noEmit -p tests/integration`, `-p tests/e2e`           | clean                                                                  |
-| `pnpm build`                                                  | passed                                                                 |
-| hand mutation of 38 bounds, rules, checks and guards          | 29 caught by unit tests; 9 exercised only by integration tests (above) |
-| `pnpm test:integration`, `pnpm test:e2e`                      | not run here: no local PostgreSQL or browser; CI runs them             |
+| Command                                                       | Result                                                                  |
+| ------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| `npx eslint . --max-warnings=0 --ignore-pattern '.claude/**'` | clean                                                                   |
+| `prettier --check` on the changed files                       | clean                                                                   |
+| `pnpm typecheck`                                              | clean                                                                   |
+| `pnpm test` (unit, after the review fixes)                    | 2,050 of 2,050 passed (182 files)                                       |
+| `tsc --noEmit -p tests/integration`, `-p tests/e2e`           | clean                                                                   |
+| `pnpm build`                                                  | passed                                                                  |
+| hand mutation of 40 bounds, rules, checks and guards          | 30 caught by unit tests; 10 exercised only by integration tests (above) |
+| `pnpm test:integration`, `pnpm test:e2e`                      | not run here: no local PostgreSQL or browser; CI runs them              |
 
 ## 2026-10-21 — Choice-type custom contact fields (P3-01, ADR-407)
 

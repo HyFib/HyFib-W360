@@ -169,6 +169,15 @@ describe('variant assignment for up to five variants (ADR-410)', () => {
       { label: 'A', from: 40, to: 100 },
     ]);
     expect(variantRanges([])).toEqual([{ label: 'A', from: 0, to: 100 }]);
+    // An invalid set (as an older server could store) is refused in words, never an inverted range.
+    for (const [shares, words] of [
+      [[90, 30], 'Variant A needs at least 10% of the recipients: the other variants take 120%.'],
+      [[50, 45], 'Variant A needs at least 10% of the recipients: the other variants take 95%.'],
+    ] as const) {
+      expect(() => variantRanges(shares)).toThrow(words);
+      expect(() => variantOfBucket(0, shares)).toThrow(words);
+      expect(() => variantConditionSql(campaignId, sql`c.id`, 'A', shares)).toThrow(words);
+    }
     for (const [bucket, label] of [
       [0, 'B'],
       [29, 'B'],

@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
-import type { FieldIssue } from '@w360/core';
+import { AppError, type FieldIssue } from '@w360/core';
 import { sql, type SQL } from '@w360/db';
 import { linkButtons, type SendSpec } from '../templates/definition';
 import { checkVariables, type CampaignVariables } from './variables';
@@ -154,9 +154,14 @@ export interface VariantRange {
  * Each variant's buckets, given the shares of the variants after A in label order (ADR-410): B takes
  * the first `shares[0]` buckets, C the next `shares[1]`, and so on, and A the rest, last. With B
  * alone this is ADR-405's rule (B below its share, A from it), so a two-variant campaign splits as
- * it always did. Without variants (no shares) A takes every bucket.
+ * it always did. Without variants (no shares) A takes every bucket. An invalid set (A under 10%,
+ * a share off the steps, more than five) is refused with `variantSetProblem`'s words.
  */
 export function variantRanges(shares: readonly number[]): VariantRange[] {
+  // Never an inverted or overlapping range: an invalid set (as an older server could store) is
+  // refused in words here too, though readiness refuses it before any range is asked for.
+  const problem = variantSetProblem(shares);
+  if (problem) throw new AppError('precondition_failed', problem);
   const ranges: VariantRange[] = [];
   let from = 0;
   for (const [i, share] of shares.entries()) {
