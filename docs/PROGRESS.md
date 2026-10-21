@@ -66,6 +66,70 @@ two messages took two campaigns over hand-split audiences. This closes P3-04's "
 | hand mutation of 16 key branches                   | 15 caught by unit tests; the API recipient's variant is left to the integration test |
 | `pnpm test:integration`, `pnpm test:e2e`           | not run here: no local PostgreSQL or browser; CI runs them                           |
 
+## 2026-10-21 — Editing a template Meta already has (P3-03, ADR-404)
+
+Status: **Implemented (migration 0316); unit tests run locally, integration and e2e tests in CI
+only; no live Meta traffic.** A template could change only while Meta did not have it. This closes
+P3-03's "editing approved templates (`POST /{template-id}`)".
+
+### Completed
+
+- **Graph client:** `editTemplate` (`POST /{template-id}`, a typed `EditTemplateRequest` with the
+  unchanged category and the components only; `success: true` is the only answer read as done) and
+  `getTemplate` (`GET /{template-id}`, Meta's default fields), from Meta's OpenAPI description
+  (research M-201, quoted there and in ADR-404).
+- **Domain:** `templates/edit-model.ts` (the request, `templateEditRefusal`, `sameTemplateContent`,
+  `editReconciliation`, `editRefusalText`) and `templates/edit.ts` (`templateUsage`,
+  `writeEditTemplate`, the `processTemplateEdit` worker, the sync's `reconcileTemplateEdit`); shared
+  template writes moved to `templates/shared.ts` without change. The service gains `editTemplate`
+  and `templateUsage` (`templates.submit`); deleting waits for an edit's answer.
+- **Worker:** a `template.edit` queue (5 retries of a connection that failed before sending), its
+  handler, and its pause deferral (ADR-399).
+- **Web:** on a template Meta has, members who submit templates get the editor with the category
+  fixed and a "Send edit to Meta" confirmation listing unfinished campaigns, published automations
+  and store messages that use it; the page shows an edit waiting for Meta, or Meta's refusal with its
+  code, and the history labels `Edit sent to Meta`, `Edited`, `Edit failed`.
+- **Public API:** `POST /api/v1/message-templates/{id}/edit` (`templates.submit`, optional
+  `Idempotency-Key`, OpenAPI described); templates give `edit`, and history `source` may be `edit`.
+- **Migration 0316:** the edit columns, the `edit` source, `ops.template_sync_due` syncing accounts
+  with an edit sending every 5 minutes.
+- **Graph stand-in (tests only):** template edit (accept, refuse, apply then drop, drop) and read by
+  id, with an e2e control.
+- **Docs:** ADR-404, research M-201 (and item 22 of the unconfirmed list), ARCHITECTURE, SECURITY,
+  RUNBOOKS (what to tell a member when Meta refuses or an edit waits), DEPLOYMENT (0316), BACKLOG,
+  feature matrix (W-059). No THREAT-MODEL row: the edit reaches Meta only through the existing
+  permission, paced job and audit trail, and adds no new input from outside the company.
+
+### Tests
+
+- Unit: `templates/edit-model.test.ts` (request builder and Graph calls, every refusal, content
+  comparison, the window and deferral, the refusal text), `api/message-template-drafts.test.ts`
+  (scope, id and body refusals before reading, the written-ahead transaction, refusals that write
+  nothing, deletion while an edit is sending, the OpenAPI text), `api/message-templates.test.ts`
+  (`edit` in a template), the worker's deferral queues.
+- Integration (`tests/integration/template-edits.test.ts`, CI only): an edit sent once and the
+  template stored as Meta reports it; the status kept and a sync requested when the read fails; a
+  lost answer confirmed, and another unconfirmed after the window, with the due list including the
+  account; Meta's refusal with its code; the category kept and no change refused; the usage list and
+  the refusal while a campaign is sending; a draft refused; another company's template not found
+  (service and worker); an agent refused, a marketer allowed.
+- E2E (`tests/e2e/templates.spec.ts`, CI only): a template submitted and approved, edited after the
+  usage confirmation and read back; Meta's refusal shown with its code and the editor starting from
+  the content sent.
+- Hand mutations of key branches: 18/18 caught by the unit tests (refusals, window and deferral,
+  confirmation by content, the request's category and fields, `success: true` only, the member and
+  job key written ahead, validation before reads, deletion while sending, the refusal text).
+
+### Test commands and results (local, 2026-10-21)
+
+| Command                                        | Result                                                                        |
+| ---------------------------------------------- | ----------------------------------------------------------------------------- |
+| `eslint`, `prettier --check`, `pnpm typecheck` | clean                                                                         |
+| `pnpm test` (unit)                             | 1,975 of 1,975 passed (180 files)                                             |
+| `pnpm build`                                   | passed                                                                        |
+| migration parse (pglast)                       | 0316 parses                                                                   |
+| `pnpm test:integration`, `pnpm test:e2e`       | not run here: the local PostgreSQL and browsers are unavailable; CI runs them |
+
 ## 2026-10-21 — Review fixes in API enrolments (P4-01, ADR-403)
 
 Status: **Fixed; unit tests run locally, integration and e2e tests in CI only.** The independent

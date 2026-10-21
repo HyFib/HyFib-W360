@@ -35,6 +35,7 @@ const SOURCE_LABEL: Record<string, string> = {
   sync: 'Meta',
   send: 'Reported when sending',
   delete: 'Deletion',
+  edit: 'Edit',
 };
 
 export default async function TemplatePage({
@@ -58,7 +59,21 @@ export default async function TemplatePage({
   const tz = ctx.tenant.timezone;
   const canWrite = can(ctx, 'templates.write');
   const canSubmit = can(ctx, 'templates.submit');
-  const deletable = !['deleted', 'pending_deletion', 'submitting'].includes(template.status);
+  const deletable =
+    !['deleted', 'pending_deletion', 'submitting'].includes(template.status) &&
+    template.editState !== 'sending';
+  // Editing a template Meta has (ADR-404): for members who may submit templates, after they see
+  // where it is used. The service checks everything again when the edit is sent.
+  const metaEditor =
+    detail.metaEditable && canSubmit && detail.definition
+      ? {
+          usage: await templates.templateUsage(ctx, template.id),
+          definition:
+            template.editState === 'failed' && detail.editDefinition
+              ? detail.editDefinition
+              : detail.definition,
+        }
+      : null;
 
   return (
     <>
@@ -103,12 +118,26 @@ export default async function TemplatePage({
         ) : template.submitError ? (
           <Alert tone="info">{template.submitError}</Alert>
         ) : null}
+        {template.editState === 'sending' && template.editRequestedAt ? (
+          <Alert tone="info" title="Edit sent to Meta">
+            Sent {formatDateTime(template.editRequestedAt.toISOString(), tz)}.{' '}
+            {template.editError ?? 'Waiting for Meta’s answer.'} Until Meta takes it, sends use the
+            content shown below.
+          </Alert>
+        ) : template.editState === 'failed' ? (
+          <Alert tone="danger" title="Meta did not take the edit">
+            {template.editError ?? 'Meta did not confirm the edit.'} The editor below starts from
+            the content you sent; sends use the content Meta has.
+          </Alert>
+        ) : null}
         {template.status === 'rejected' ? (
           <Alert tone="danger" title="Rejected by Meta">
             {template.rejectionReason
               ? `Reason given: ${template.rejectionReason}.`
               : 'Meta did not give a reason.'}{' '}
-            Create a new template with the changes; rejected templates cannot be edited here.
+            {metaEditor
+              ? 'You can edit it below and send the edit to Meta, which decides whether it takes it.'
+              : 'Create a new template with the changes.'}
           </Alert>
         ) : null}
         {detail.unsupportedReason ? <Alert tone="warning">{detail.unsupportedReason}</Alert> : null}
@@ -128,6 +157,31 @@ export default async function TemplatePage({
                   language: template.language,
                   definition: detail.definition,
                 }}
+              />
+            </CardContent>
+          </Card>
+        ) : metaEditor ? (
+          <Card>
+            <CardHeader>
+              <CardTitle>Edit template</CardTitle>
+              <CardDescription>
+                Meta has this template. Its name, language and category stay; Meta reviews the new
+                content and decides whether it takes the edit.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <TemplateEditor
+                key={`${template.version}`}
+                slug={ctx.tenant.slug}
+                accounts={[]}
+                existing={{
+                  id: template.id,
+                  version: template.version,
+                  name: template.name,
+                  language: template.language,
+                  definition: metaEditor.definition,
+                }}
+                atMeta={{ usage: metaEditor.usage }}
               />
             </CardContent>
           </Card>

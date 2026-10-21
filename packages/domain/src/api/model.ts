@@ -82,7 +82,7 @@ export const API_SCOPE_INFO: Record<
   'templates.submit': {
     label: 'Submit templates',
     description:
-      'Submit template drafts to Meta for review and, with the scope that writes templates, delete templates Meta has, which can then no longer be sent, as members who submit templates do on the Templates page, in the audit log as done by the key.',
+      'Submit template drafts to Meta for review, edit templates Meta has and, with the scope that writes templates, delete templates Meta has, which can then no longer be sent, as members who submit templates do on the Templates page, in the audit log as done by the key.',
     permission: 'templates.submit',
     writes: true,
   },

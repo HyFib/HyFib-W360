@@ -318,6 +318,21 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   per-minute messaging sweep (`ops.template_sync_due`: requested, in review every 5 minutes, or
   older than 6 hours) and by members. The sweep lists the accounts asked for first, and their syncs,
   like members' refreshes, are queued at a higher pg-boss priority than routine ones (ADR-178).
+- **Editing a template Meta has (ADR-404):** `templates/edit-model.ts` decides (the request, the
+  refusals, how a sync settles a lost answer) and `templates/edit.ts` writes; shared writes live in
+  `templates/shared.ts`. A member with `templates.submit` (or a key with that scope, `POST
+/message-templates/{id}/edit`) sends new content in the draft editor after seeing where the
+  template is used (`templateUsage`: unfinished campaigns, published automations, store rules);
+  name, language and category stay, and an edit is refused while a campaign using it is `running`.
+  Written ahead on the template (`edit_state = 'sending'`, `edit_components`, who and when, an
+  `edit_requested` status change, migration 0316) and sent by the `template.edit` queue (paced by
+  ADR-399, deferred like a submission): `POST /{template-id}` with the unchanged category and the
+  components; on `success: true` the job reads `GET /{template-id}` and stores Meta's status,
+  category and components (no status assumed; a sync is requested when the read cannot be made);
+  a refusal leaves the edit `failed` with Meta's code and message. The sync settles a lost answer by
+  comparing Meta's components with the content sent (`editReconciliation`, 10-minute window), and
+  `ops.template_sync_due` syncs an account with an edit sending every 5 minutes. The template's own
+  `status`, `category` and `components` always mirror Meta.
 - **Starter templates (ADR-232):** `TEMPLATE_STARTERS` (`templates/library.ts`) holds HyFib's
   starters as editor definitions; `starterDraft` gives a company's draft of one (its name, its
   definition and, on a marketing starter, a quick reply with the company's first marketing opt-out

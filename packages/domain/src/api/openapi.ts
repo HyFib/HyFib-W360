@@ -113,6 +113,7 @@ import { TEMPLATE_HEADER_MEDIA } from '../templates/definition';
 import {
   apiCreateMessageTemplateSchema,
   apiUpdateMessageTemplateSchema,
+  apiEditMessageTemplateSchema,
 } from './message-template-drafts';
 import { MESSAGE_TEMPLATE_HISTORY } from './message-templates';
 import {
@@ -963,6 +964,28 @@ export const apiMessageTemplateSchema = z.object({
   definition: apiTemplateDefinitionSchema
     .nullable()
     .describe('Its content as HyFib represents it; null when HyFib cannot (`unsupportedReason`).'),
+  edit: z
+    .object({
+      state: z
+        .enum(['sending', 'failed'])
+        .describe(
+          '`sending`: sent, or about to be sent, to Meta, waiting for its answer; `failed`: Meta refused it (`error` gives Meta’s code and message) or never confirmed it.',
+        ),
+      definition: apiTemplateDefinitionSchema
+        .nullable()
+        .describe(
+          'The content the edit sends; `definition` stays what Meta has until Meta takes it.',
+        ),
+      error: z
+        .string()
+        .nullable()
+        .describe('Why it failed, or that HyFib waits for Meta’s answer.'),
+      requestedAt: z.iso.datetime(),
+    })
+    .nullable()
+    .describe(
+      'An edit of a template Meta has, while it is sending or once it failed; null when none is open. Once Meta takes it, it is null and the template gives the status, category and content Meta reports.',
+    ),
   headerMedia: z
     .enum(TEMPLATE_HEADER_MEDIA)
     .nullable()
@@ -984,9 +1007,9 @@ export const apiMessageTemplateDetailSchema = apiMessageTemplateSchema.extend({
         status: z.string(),
         reason: z.string().nullable().describe('Meta’s reason, or HyFib’s, when one was given.'),
         source: z
-          .enum(['submit', 'sync', 'send', 'delete'])
+          .enum(['submit', 'sync', 'send', 'delete', 'edit'])
           .describe(
-            '`submit`: sent for review; `sync`: read from Meta; `send`: refused by Meta on a send; `delete`.',
+            '`submit`: sent for review; `sync`: read from Meta; `send`: refused by Meta on a send; `delete`; `edit`: an edit sent to Meta (`edit_requested`, `edited`, `edit_failed`, and the status Meta reported after it).',
           ),
         occurredAt: z.iso.datetime(),
       }),
@@ -2193,6 +2216,33 @@ export function buildOpenApiDocument(serverUrl: string) {
               content: json(dataOf(ref('MessageTemplateDetail'))),
             },
             ...errors(400, 401, 403, 404, 412, 422, 423, 429, 500),
+            '503': {
+              description:
+                'Meta is limiting management requests for the template’s WhatsApp Business account: nothing was queued. The message gives the time in UTC and `details.pausedUntil` the instant; retry after it.',
+              content: json(ref('Error')),
+            },
+          },
+        },
+      },
+      '/message-templates/{id}/edit': {
+        post: {
+          operationId: 'editMessageTemplate',
+          summary: 'Edit a template Meta has',
+          description: [
+            `${scopeNote('templates.submit')} Sends Meta an edit of a template it has, as members do on the Templates page: its whole new content, checked as the template editor checks drafts (422). Its name, language and category stay (a different \`definition.category\` answers 422). Refused with 412 for a template Meta does not have (change the draft instead), one whose edit is still waiting for Meta’s answer, content HyFib cannot represent, the content Meta has already, or while one of the company’s campaigns using it is sending (pause it first), and with 409 for one deleted or being deleted; its WhatsApp Business account must be connected (412). HyFib does not limit which statuses can be edited or how often: Meta decides, and its refusal is given with its code and message in \`edit.error\`, \`edit.state\` \`failed\`. While the edit is \`sending\` the template keeps the status and content Meta has; once Meta takes it, HyFib reads the template from Meta again and gives the status, category and content Meta reports, which later sends use. Its history records the edit (\`edit_requested\`, \`edited\` or \`edit_failed\`, source \`edit\`). While Meta limits management requests for the account, it answers 503 and nothing changes. The audit log names the key.`,
+            'With an `Idempotency-Key`, a retry answers the first response; without one, editing it again while the first edit is sending is refused with 412.',
+          ].join('\n\n'),
+          parameters: [
+            { $ref: '#/components/parameters/Id' },
+            { $ref: '#/components/parameters/IdempotencyKeyOptional' },
+          ],
+          requestBody: { required: true, content: json(ref('EditMessageTemplate')) },
+          responses: {
+            '200': {
+              description: 'The template, its edit being sent.',
+              content: json(dataOf(ref('MessageTemplateDetail'))),
+            },
+            ...errors(400, 401, 403, 404, 409, 412, 415, 422, 423, 429, 500),
             '503': {
               description:
                 'Meta is limiting management requests for the template’s WhatsApp Business account: nothing was queued. The message gives the time in UTC and `details.pausedUntil` the instant; retry after it.',
@@ -5128,6 +5178,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         MessageTemplateDetail: jsonSchema(apiMessageTemplateDetailSchema),
         CreateMessageTemplate: jsonSchema(apiCreateMessageTemplateSchema, 'input'),
         UpdateMessageTemplate: jsonSchema(apiUpdateMessageTemplateSchema, 'input'),
+        EditMessageTemplate: jsonSchema(apiEditMessageTemplateSchema, 'input'),
         SavedReply: jsonSchema(apiSavedReplySchema),
         CreateSavedReply: jsonSchema(apiCreateSavedReplySchema, 'input'),
         UpdateSavedReply: jsonSchema(apiUpdateSavedReplySchema, 'input'),
@@ -5238,6 +5289,7 @@ export const API_ROUTES = [
   ['patch', '/message-templates/{id}'],
   ['delete', '/message-templates/{id}'],
   ['post', '/message-templates/{id}/submit'],
+  ['post', '/message-templates/{id}/edit'],
   ['get', '/channels'],
   ['get', '/contacts'],
   ['post', '/contacts'],

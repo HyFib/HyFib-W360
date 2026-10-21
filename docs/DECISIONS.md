@@ -17273,6 +17273,118 @@ scopes are checked before conditions (403 before 422), `segmentId` is given only
 FK's brief lock on `app.api_keys` noted in DEPLOYMENT. Overwriting the stopper follows 0311's
 pattern and stays.
 
+## ADR-404 Editing a template Meta already has (P3-03) (2026-10-21)
+
+Context: a template could change only while it was a draft Meta never received (ADR-295); once
+submitted, a member who needed a correction deleted it and created another under a new name, or
+edited it in WhatsApp Manager, and every campaign, automation and store rule naming it had to be
+pointed at the replacement. Meta's OpenAPI description (`business-messaging-api_v23.0.yaml`, path
+`/{Version}/{TEMPLATE_ID}`) defines the call, research M-201:
+
+- `post`, summary "Edit template", operationId `editTemplate`; its request body schema lists
+  `category` (example `MARKETING`), `components` (the creation shape: `HEADER` with `format: TEXT`,
+  `BODY` with `example.body_text`, `FOOTER`, `BUTTONS` with `QUICK_REPLY`), `language` and `name`,
+  none marked required; its example sends all four;
+- its `200` answer is `{ "success": true }` (schema `success: boolean`);
+- the same path's `get` (operationId `getTemplateByIdDefaultFields`, "Get template by ID (default
+  fields)") answers `id`, `name`, `language`, `status`, `category` and `components`.
+
+The description says nothing of how often a template can be edited, which statuses allow an edit,
+whether the category may change in one, or what status Meta gives an edited template; research
+M-096 found no limits either. HyFib assumes none of them.
+
+Decision:
+
+- **Who and what:** a member with `templates.submit` (owners, administrators, marketers; the
+  permission that sends content to Meta for review) edits a template Meta has (one with a Meta id)
+  on its page, in the draft editor with the draft's validation (`templates/definition.ts`). Name and
+  language cannot change (not in the editor, not sent). **The category stays**: the description's
+  example sends a category but nothing confirms Meta accepts a change on an edit or what it does to
+  an approved template's review, so the editor shows it fixed and the service refuses a different
+  one (422). The request (`EditTemplateRequest`) carries the category Meta last reported, unchanged,
+  and the components; not name or language, which the path already names. Whether Meta accepts the
+  components without the category is not confirmed, so sending the unchanged one was the safer
+  reading of the example.
+- **Statuses:** HyFib refuses only what it must: a template Meta does not have (412; change the
+  draft), one deleted or being deleted (409), one whose edit is still on its way (412), content its
+  editor cannot represent such as a photo header or an authentication template (`unsupported`; edit
+  it in WhatsApp Manager), the content Meta has already (412), and a category change (422). Any
+  Meta status (approved, rejected, paused, in review, …) may be edited; Meta's refusal is recorded
+  and shown with its code and message (`editRefusalText`: "Meta refused the edit (code N): …").
+  The Rejected notice now says the template can be edited and sent to Meta.
+- **Where it is used, before confirming:** the Send edit to Meta button opens a confirmation that
+  lists the unfinished campaigns (draft to paused), the published automations (active or paused,
+  whose live version has a template step naming it) and the store's order message and cart
+  reminder rules that send it (`templateUsage`, at most 50 of each), and says that until Meta takes
+  the edit sends use the content Meta has, and afterwards the content Meta approves.
+  `templates.submit` reads the list (it names campaigns and automations the member may not
+  otherwise open; the edit affects them, so the member must see them).
+- **Refused while a campaign using it is sending (`running`)**: a running campaign queues its
+  recipients over minutes to hours, and an edit Meta takes mid-run would split the audience between
+  two contents and, if Meta then reviews the template again (unconfirmed, but a status other than
+  approved stops the send worker's approval check), skip or fail the rest of the run. The member
+  pauses the campaign (or waits for it to finish), which they can see in the usage list, edits,
+  then resumes it knowingly. Paused, scheduled and draft campaigns are only listed. The check reads
+  the campaigns in the edit's transaction without locking them, so a campaign launched at the same
+  instant can still start; the confirmation shows its status either way.
+- **Written ahead, one at a time, paced:** in one transaction the template records
+  `edit_state = 'sending'`, the components sent, when, who (the member, or null for a key, which the
+  audit log names), its version moves on, an `edit_requested` status change (source `edit`) is
+  written and a `template.edit` job queued (singleton key `<id>:edit:<version>`). Its `status`,
+  `category` and `components` stay what Meta reports. Another edit, and a deletion, wait for Meta's
+  answer (412). The job re-reads the row under the company's scope; while Meta throttles the
+  account it defers as submissions do (ADR-399, `management_deferred_until`, queue
+  `template.edit` in `PAUSE_DEFERRAL_QUEUES`), and a refusal for now whose own response paused the
+  account defers too.
+- **Meta's answer:** `success: true` makes the edit; the job then reads the template by id
+  (`GET /{template-id}`, default fields) unless that answer paused the account, and stores the
+  status, category and components Meta reports, with `edited` (naming the member who asked) and,
+  when the status changed, that status (source `edit`, which reaches webhook endpoints as
+  `template.status_changed` like any Meta status). No status is assumed: when the read fails or is
+  skipped, the stored status stays and a sync is requested. A refusal (`permanent` or `auth`) makes
+  the edit `failed` with Meta's code and message, keeps the content so the member can change it and
+  send again (the editor starts from it), records `edit_failed` and `template.edit_failed`, and for
+  `auth` asks for an access check (ADR-137). A connection that failed before sending is retried;
+  anything else that may have reached Meta (`unknown`, or `retryable` with an HTTP status) leaves
+  the edit `sending` with "Waiting for Meta to confirm the edit." and requests a sync. Any answer
+  other than `success: true` is read as `unknown`.
+- **Lost answers:** the template sync compares Meta's components with the content sent, as the
+  editor reads them (`sameTemplateContent`: key order, type case and an example given as text or a
+  list do not matter; JSON otherwise). Equal: the edit is made (`edited`, source `sync`). Not equal
+  10 minutes after the request, or after its deferral when later (`editReconciliation`): `failed`
+  with "HyFib could not confirm the edit: Meta's template does not show the new content. Check it in
+  WhatsApp Manager, or edit it again." A template Meta no longer lists fails its edit. Nothing is
+  sent again automatically. `ops.template_sync_due` (migration 0316) syncs every 5 minutes an account
+  with an edit sending, so the window is reached; as for a submission, an edit whose job is still
+  retrying a connection failure after 10 minutes is called unconfirmed and its later job skips it.
+- **Audit:** `template.edit_requested` (the member, or the key with `source: api`),
+  `template.edited` and `template.edit_failed` (system entries naming `requestedByUserId`).
+- **Public API:** keys already submit and delete templates (ADR-296), so `POST
+/api/v1/message-templates/{id}/edit` (`editMessageTemplate`) takes `{ definition }` with the
+  `templates.submit` scope (its description now says so), answers the template with its edit, once
+  per optional `Idempotency-Key`, and the same refusals (503 while Meta limits management requests).
+  Templates give `edit` (`state`, the content sent, `error`, `requestedAt`, or null) and history
+  `source` may be `edit`. No new scope, so no scope migration.
+- **Migration 0316:** five nullable columns on `app.message_templates` (`edit_state` checked to
+  `sending` or `failed`, `edit_components` jsonb array within 32 KiB, `edit_error` within 1,000
+  characters, `edit_requested_at`, `edit_requested_by_user_id` referencing `auth.users`) and a check
+  that a state has its content and time; UPDATE on them for `w360_app`, SELECT on `edit_state` only
+  for `w360_definer`; `template_status_events.source` also takes `edit` (check replaced and
+  validated in the migration: the table is append-only and small); `ops.template_sync_due` recreated
+  as 0310 did (dropped by its owner, created by the migration role with a pinned search path,
+  granted to `w360_app` before ownership moves back). Row security unchanged. The columns are
+  exported with the template and deleted with it. Expand only; the release before never names them.
+- **Graph stand-in (tests only):** `POST /{template-id}` accepts only `category` and `components`,
+  applies them and answers `success: true`, or refuses with a test's Graph error, applies then drops
+  the connection, or drops it; `GET /{template-id}` answers the default fields or a test's error;
+  `/__stand-in/template-edit` queues an answer for e2e. What status an edited template gets is the
+  test's choice, since Meta's is not confirmed.
+
+Not built: changing the category, editing media-header, authentication or other templates HyFib's
+editor cannot represent, an edit of several language versions at once, and any verification against
+Meta (the Graph stand-in only); the per-template edit limits Meta may apply are reported as Meta
+reports them.
+
 ## ADR-405 A/B template variants for campaigns (P3-04, P5-08, P5-09) (2026-10-21)
 
 Context: P3-04 listed "A/B variants" as remaining. A campaign sent one template to its whole

@@ -11,8 +11,14 @@ import {
   type TemplateButton,
   type TemplateDefinition,
 } from '@w360/domain/template-definition';
+import type { TemplateUsage } from '@w360/domain';
 import { Button, Field, Input, Select, Textarea } from '@w360/ui';
-import { createTemplateDraftAction, updateTemplateDraftAction } from '@/app/actions/templates';
+import { ConfirmDialog } from '@w360/ui/client';
+import {
+  createTemplateDraftAction,
+  editTemplateAction,
+  updateTemplateDraftAction,
+} from '@/app/actions/templates';
 import { ClientForm } from '@/components/client-form';
 import { FormError, FormSuccess } from '@/components/form-status';
 import { TemplatePreview } from './template-preview';
@@ -30,15 +36,69 @@ function variableCount(text: string): number {
   return vars.ok ? new Set(vars.numbers).size : 0;
 }
 
+const CAMPAIGN_STATUS_LABEL: Record<string, string> = {
+  draft: 'draft',
+  pending_approval: 'waiting for approval',
+  scheduled: 'scheduled',
+  running: 'sending now',
+  paused: 'paused',
+};
+
+const STORE_EVENT_LABEL: Record<string, string> = {
+  order_placed: 'new order',
+  cod_confirmation: 'cash on delivery confirmation',
+  order_shipped: 'order shipped',
+  order_delivered: 'order delivered',
+  order_cancelled: 'order cancelled',
+  cart_reminder: 'cart reminder',
+  cart_second_reminder: 'second cart reminder',
+};
+
+/** Where the template is used, as the confirmation of an edit lists it (ADR-404). */
+function UsageList({ usage }: { usage: TemplateUsage }) {
+  const items = [
+    ...usage.campaigns.map(
+      (c) => `Campaign “${c.name}” (${CAMPAIGN_STATUS_LABEL[c.status] ?? c.status})`,
+    ),
+    ...usage.automations.map(
+      (a) => `Automation “${a.name}” (${a.status === 'active' ? 'live' : 'paused'})`,
+    ),
+    ...usage.storeRules.map(
+      (r) =>
+        `${r.storeName ?? 'Store'}: ${STORE_EVENT_LABEL[r.event] ?? r.event} message (${r.enabled ? 'on' : 'off'})`,
+    ),
+  ];
+  if (items.length === 0) {
+    return (
+      <p className="text-sm text-muted-foreground">
+        No unfinished campaign, published automation or store message uses this template.
+      </p>
+    );
+  }
+  return (
+    <div className="grid gap-1 text-sm">
+      <p className="font-medium">Used by</p>
+      <ul className="list-disc pl-5" data-testid="template-usage">
+        {items.map((item, i) => (
+          <li key={i}>{item}</li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 /**
- * Template draft editor with a live preview. Checks run here for fast feedback and again on the
- * server; Meta reviews the template after submission.
+ * Template editor with a live preview, for drafts and, with `atMeta`, for an edit of a template
+ * Meta has (ADR-404: its name, language and category stay; the member confirms after seeing where
+ * it is used). Checks run here for fast feedback and again on the server; Meta reviews the template
+ * after submission.
  */
 export function TemplateEditor({
   slug,
   accounts,
   existing,
   initial,
+  atMeta,
 }: {
   slug: string;
   accounts: { id: string; name: string }[];
@@ -51,6 +111,8 @@ export function TemplateEditor({
   };
   /** A new draft's name and content to start from, such as a starter's (ADR-232). */
   initial?: { name: string; definition: TemplateDefinition };
+  /** Editing a template Meta has: where it is used, shown before the edit is sent. */
+  atMeta?: { usage: TemplateUsage };
 }) {
   const router = useRouter();
   const langList = useId();
@@ -74,14 +136,39 @@ export function TemplateEditor({
   const setButton = (index: number, button: TemplateButton) =>
     update({ buttons: def.buttons.map((b, i) => (i === index ? button : b)) });
 
-  function submit(event: React.FormEvent) {
-    event.preventDefault();
+  const cleaned = (): TemplateDefinition => ({
+    ...def,
+    body: { ...def.body, examples: def.body.examples.slice(0, bodyVars) },
+  });
+
+  /** Sends the edit to Meta, once the member has confirmed it (ADR-404). */
+  function sendEdit() {
+    if (!existing) return;
     setError(null);
     setSaved(false);
-    const definition = {
-      ...def,
-      body: { ...def.body, examples: def.body.examples.slice(0, bodyVars) },
-    };
+    const definition = cleaned();
+    startTransition(async () => {
+      try {
+        const result = await editTemplateAction(slug, existing.id, { definition });
+        startTransition(() => {
+          if (!result.ok) setError(result.message);
+          else setSaved(true);
+        });
+      } catch {
+        startTransition(() =>
+          setError('The edit could not be sent because the connection failed. Try again.'),
+        );
+      }
+    });
+  }
+
+  function submit(event: React.FormEvent) {
+    event.preventDefault();
+    // An edit at Meta is sent from its confirmation dialog only.
+    if (atMeta) return;
+    setError(null);
+    setSaved(false);
+    const definition = cleaned();
     // The actions refresh the page on the server: their response carries the new render, so no
     // client refresh follows. State set after the await is wrapped again to stay in the
     // transition, so the message appears together with that render, not before it.
@@ -118,7 +205,15 @@ export function TemplateEditor({
     <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_20rem]">
       <ClientForm onSubmit={submit} className="grid gap-4">
         <FormError message={error} />
-        <FormSuccess message={saved ? 'Draft saved.' : null} />
+        <FormSuccess
+          message={
+            saved
+              ? atMeta
+                ? 'Edit sent to Meta. The status updates here when Meta answers.'
+                : 'Draft saved.'
+              : null
+          }
+        />
         {!existing ? (
           <>
             {accounts.length > 1 ? (
@@ -183,11 +278,16 @@ export function TemplateEditor({
         <Field
           id="tpl-category"
           label="Category"
-          description="Utility: updates about something the customer asked for, with no promotion. Marketing: everything else. Meta may change the category."
+          description={
+            atMeta
+              ? 'The category stays as it is when a template Meta has is edited.'
+              : 'Utility: updates about something the customer asked for, with no promotion. Marketing: everything else. Meta may change the category.'
+          }
         >
           {(aria) => (
             <Select
               {...aria}
+              disabled={atMeta !== undefined}
               value={def.category}
               onChange={(e) =>
                 update({ category: e.target.value as TemplateDefinition['category'] })
@@ -430,9 +530,25 @@ export function TemplateEditor({
           </ul>
         ) : null}
         <div>
-          <Button type="submit" disabled={busy || (!existing && accounts.length === 0)}>
-            {busy ? 'Saving…' : 'Save draft'}
-          </Button>
+          {atMeta ? (
+            <ConfirmDialog
+              title="Send this edit to Meta?"
+              description="Meta reviews the new content. Until Meta takes it, sends use the content Meta has now; afterwards every send, including the ones below, uses the content Meta approves. Meta decides how often a template can be edited and may refuse the edit."
+              confirmLabel="Send edit to Meta"
+              onConfirm={sendEdit}
+              trigger={
+                <Button type="button" disabled={busy || issues.length > 0}>
+                  {busy ? 'Sending…' : 'Send edit to Meta'}
+                </Button>
+              }
+            >
+              <UsageList usage={atMeta.usage} />
+            </ConfirmDialog>
+          ) : (
+            <Button type="submit" disabled={busy || (!existing && accounts.length === 0)}>
+              {busy ? 'Saving…' : 'Save draft'}
+            </Button>
+          )}
         </div>
       </ClientForm>
       <div className="grid content-start gap-2">

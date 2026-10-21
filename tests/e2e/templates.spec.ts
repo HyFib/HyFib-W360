@@ -186,3 +186,98 @@ test('a template drafted from a starter keeps its copy and the company’s opt-o
   await expect(page.getByLabel('Name')).toHaveValue('');
   await expect(page.getByLabel('Body')).toHaveValue('');
 });
+
+test('a template Meta has is edited after the member sees where it is used, and Meta’s refusal is shown', async ({
+  page,
+  request,
+}) => {
+  const email = uniqueEmail('template-edits');
+  const slug = `tpe-${Date.now().toString(36)}`;
+  await signUpAndVerify(page, { name: 'Esha Edits', email, password: PASSWORD });
+  await page.getByLabel('Company name').fill('Edit Emporium');
+  await page.getByLabel('Company address').fill(slug);
+  await page.getByRole('button', { name: 'Create company' }).click();
+  await expect(page).toHaveURL(new RegExp(`/c/${slug}$`));
+  const { wabaId } = await connectTestChannel({ ownerEmail: email, slug });
+
+  await page.goto(`/c/${slug}/templates/new`);
+  await page.getByLabel('Name').fill('delivery_note');
+  await page.getByLabel('Language code').fill('en');
+  await page.getByLabel('Body').fill('Hi {{1}}, your parcel arrives today.');
+  await page.getByLabel('{{1}}').fill('Asha');
+  await page.getByRole('button', { name: 'Save draft' }).click();
+  await expect(page.getByRole('heading', { name: 'delivery_note', level: 1 })).toBeVisible();
+  await page.getByRole('button', { name: 'Submit to Meta' }).click();
+  await page.getByRole('button', { name: 'Submit for review' }).click();
+  await expect(page.getByRole('button', { name: /^Submit/ })).toHaveCount(0);
+  await expect(async () => {
+    await page.reload();
+    await expect(page.getByText('In review', { exact: true }).first()).toBeVisible({
+      timeout: 1_000,
+    });
+  }).toPass({ timeout: 30_000 });
+  const approved = await request.post(`${standIn}/__stand-in/template-status`, {
+    data: { wabaId, name: 'delivery_note', status: 'APPROVED' },
+  });
+  expect(approved.status()).toBe(200);
+  const templatePage = page.url();
+  await page.goto(`/c/${slug}/templates`);
+  await page.getByRole('button', { name: 'Refresh from Meta' }).click();
+  await expect(page.getByText(/Refresh requested/)).toBeVisible();
+  await expect(async () => {
+    await page.goto(templatePage);
+    await expect(page.getByRole('heading', { name: 'Edit template' })).toBeVisible({
+      timeout: 1_000,
+    });
+  }).toPass({ timeout: 30_000 });
+
+  // The editor of a template Meta has: the category stays.
+  await expect(page.getByLabel('Category')).toBeDisabled();
+  await page.getByLabel('Body').fill('Hi {{1}}, your parcel arrives this evening.');
+  await page.getByRole('button', { name: 'Send edit to Meta' }).click();
+  // Before confirming, where it is used.
+  await expect(page.getByRole('alertdialog')).toContainText(
+    'No unfinished campaign, published automation or store message uses this template.',
+  );
+  await page.getByRole('alertdialog').getByRole('button', { name: 'Send edit to Meta' }).click();
+  // The worker sends it; Meta takes it and HyFib reads the template again.
+  await expect(async () => {
+    await page.reload();
+    await expect(page.getByRole('cell', { name: /^Edited/ }).first()).toBeVisible({
+      timeout: 1_000,
+    });
+  }).toPass({ timeout: 30_000 });
+  await expect(page.getByLabel('Body')).toHaveValue('Hi {{1}}, your parcel arrives this evening.');
+  const edit = (await standInRequests(request)).filter(
+    (r) => r.method === 'POST' && /^\/v26\.0\/\d+$/.test(r.path),
+  );
+  expect(edit.at(-1)?.body).toMatchObject({ category: 'UTILITY' });
+
+  // Meta refuses the next edit: its code and message are shown, and the content Meta has stays.
+  const refused = await request.post(`${standIn}/__stand-in/template-edit`, {
+    data: {
+      behaviour: {
+        kind: 'error',
+        status: 400,
+        code: 2388299,
+        message: 'This template cannot be edited now',
+      },
+    },
+  });
+  expect(refused.status()).toBe(200);
+  await page.getByLabel('Body').fill('Hi {{1}}, your parcel arrives tomorrow.');
+  await page.getByRole('button', { name: 'Send edit to Meta' }).click();
+  await page.getByRole('alertdialog').getByRole('button', { name: 'Send edit to Meta' }).click();
+  await expect(async () => {
+    await page.reload();
+    await expect(page.getByText('Meta did not take the edit')).toBeVisible({ timeout: 1_000 });
+  }).toPass({ timeout: 30_000 });
+  await expect(
+    page.getByText('Meta refused the edit (code 2388299): This template cannot be edited now'),
+  ).toBeVisible();
+  // The editor starts from the content sent, to change and send again.
+  await expect(page.getByLabel('Body')).toHaveValue('Hi {{1}}, your parcel arrives tomorrow.');
+  await expect(page.getByLabel('Template preview')).toContainText(
+    'Hi Asha, your parcel arrives tomorrow.',
+  );
+});

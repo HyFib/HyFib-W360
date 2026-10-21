@@ -1913,6 +1913,20 @@ IS NOT NULL`); the columns and checks can stay.
    `SHARE ROW EXCLUSIVE` on `app.api_keys`, which holds key authentication's `last_used_at` update
    (and so API requests) until the migration commits; it reads only the small enrolments table.
 
+   Migration 0316 (ADR-404) adds five nullable columns for an edit of a template Meta has to
+   `app.message_templates` (`edit_state`, `edit_components`, `edit_error`, `edit_requested_at`,
+   `edit_requested_by_user_id`) with their checks, `UPDATE` on them for the runtime role and `SELECT`
+   on `edit_state` for the definer; replaces `template_status_events`' source check to also take
+   `edit` (validated in the migration, a short scan of an append-only table under the lock the
+   replacement takes); and recreates `ops.template_sync_due` so an account with an edit sending is
+   synced every 5 minutes. Expand only and backward compatible: nothing is rewritten, and the release
+   before never names the columns. The migration runner declares the new `template.edit` queue. Roll
+   out workers before web as usual: a web server of this release queues `template.edit` jobs, which
+   only a worker of this release consumes (a job queued before then waits for it, and an edit whose
+   job waits more than 10 minutes is called unconfirmed by the sync and can be sent again). Rolling
+   back leaves the columns unused; edits left `sending` stay so until a worker of this release
+   returns.
+
    Migration 0317 (ADR-405) first adds the column `app.campaign_recipients.variant` (`NOT NULL
 DEFAULT 'A'`, a constant default, so nothing is rewritten) with its check added `NOT VALID`, so
    the recipients table is not read under the migration's lock, then creates

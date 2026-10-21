@@ -435,6 +435,25 @@ to the template webhook fields (docs/META-SETUP.md). A refresh, and a sync Meta'
 asks for, is queued ahead of routine syncs (ADR-178): if statuses still take more than a few
 minutes, look at the template.sync queue's oldest wait on Operations → Queues.
 
+**A member's template edit is "Sent to Meta" for a while (ADR-404).** The `template.edit` job
+sends it; Meta's `success: true` settles it and HyFib reads the template again. When the answer was
+lost, the page says "Waiting for Meta to confirm the edit." and the sync (every 5 minutes while an
+edit is sending) settles it: Meta's template showing the new content confirms it; otherwise, 10
+minutes after the request (or after a deferral while Meta limited management requests), it is
+"Meta did not take the edit" with "HyFib could not confirm the edit". Tell the member to check the
+template in WhatsApp Manager and, if the new content is not there, send the edit again (the editor
+starts from it); nothing is resent automatically. Check the `template.edit` and `template.sync`
+queues on Operations → Queues.
+
+**Meta refused a template edit.** The page and the API (`edit.error`) give Meta's code and message
+as Meta sent them, and the history an "Edit failed" row with the same. HyFib does not limit which
+statuses can be edited or how often, because Meta's documentation does not say (research M-201):
+tell the member what Meta's message says (for example a limit on edits, or content Meta does not
+take), that the template keeps the content and status Meta has, and that they can change the
+content and send it again, or make a new template. A credential error (190 and similar) also starts
+an access check; reconnect the account if Channels says so. An edit is refused in HyFib while a
+campaign using the template is sending: pause the campaign, edit, then resume it.
+
 **A template send failed with 132015 / 132016.** Meta paused or disabled the template; HyFib marks it
 and requests a sync. Improve the template (quality) or use another one; do not resend blindly.
 

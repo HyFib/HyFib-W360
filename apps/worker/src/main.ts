@@ -38,6 +38,7 @@ import {
 } from './handlers/messaging';
 import {
   templateDeleteHandler,
+  templateEditHandler,
   templateSubmitHandler,
   templateSyncHandler,
 } from './handlers/templates';
@@ -135,6 +136,11 @@ async function main(): Promise<void> {
     QUEUES.templateDelete.name,
     { localConcurrency: 2, batchSize: 1 },
     logFailures(rt, QUEUES.templateDelete.name, templateDeleteHandler(rt)),
+  );
+  await rt.boss.work(
+    QUEUES.templateEdit.name,
+    { localConcurrency: 2, batchSize: 1 },
+    logFailures(rt, QUEUES.templateEdit.name, templateEditHandler(rt)),
   );
   await rt.boss.work(
     QUEUES.templateSync.name,

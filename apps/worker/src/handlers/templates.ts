@@ -6,6 +6,7 @@ import {
   findTemplateSyncsDue,
   isManagementPaused,
   processTemplateDelete,
+  processTemplateEdit,
   processTemplateSubmit,
   syncTemplates,
   TEMPLATE_SYNC_PRIORITY,
@@ -16,7 +17,7 @@ import type { WorkerRuntime } from '../runtime';
 import { RetryableJobError } from './email';
 import { deferPausedWork } from './management-deferral';
 
-type TemplateKind = 'template.submit' | 'template.delete' | 'template.sync';
+type TemplateKind = 'template.submit' | 'template.delete' | 'template.edit' | 'template.sync';
 
 /**
  * Template jobs: the template (or WABA) row is the source of truth and each job re-reads it under
@@ -65,6 +66,10 @@ export const templateSubmitHandler = (rt: WorkerRuntime) =>
 
 export const templateDeleteHandler = (rt: WorkerRuntime) =>
   templateHandler(rt, 'template.delete', processTemplateDelete);
+
+/** Sends an edit of a template Meta has (ADR-404). */
+export const templateEditHandler = (rt: WorkerRuntime) =>
+  templateHandler(rt, 'template.edit', processTemplateEdit);
 
 export const templateSyncHandler = (rt: WorkerRuntime) =>
   templateHandler(rt, 'template.sync', syncTemplates);

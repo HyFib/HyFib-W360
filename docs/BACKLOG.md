@@ -127,8 +127,11 @@ verification, app review, Embedded Signup configuration).
   company's marketing opt-out keyword as a button; no migration). **Remaining:** creating media
   headers (Resumable Upload + media storage) and sending them outside the API (which sends them with
   a link since ADR-201), named parameters, authentication/OTP, carousel, LTO, copy-code and catalog
-  templates, editing approved templates (`POST /{template-id}`), starters in other languages, and a
-  sandbox run with a real WABA.
+  templates, changing a template's category in an edit, starters in other languages, and a sandbox
+  run with a real WABA. **[Editing a template Meta has built; its database and browser tests run
+  only in CI]** (ADR-404: `POST /{template-id}` from the Templates page and the API, written ahead,
+  paced, re-read from Meta, lost answers settled by the sync; name, language and category stay;
+  refused while a campaign using it is sending; migration 0316).
 - **P3-04 Campaigns** — _implemented (2026-09-26), sends verified against the Graph stand-in
   only_: saved segments (incl. campaign-response retargeting), drafts with a review panel,
   audience snapshots re-checked when queued and before dispatch, optional four-eyes approval,

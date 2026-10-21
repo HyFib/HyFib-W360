@@ -134,6 +134,14 @@ Phase 3 rules on top of the matrix (enforced in domain services and re-checked w
   `tenant.settings.manage`. Adding a number to the suppression list needs `contacts.write`;
   removing one needs `tenant.settings.manage` (it re-enables messaging).
 - Deleting a template Meta already has needs `templates.submit` as well as `templates.write`.
+- Editing a template Meta already has (ADR-404) needs `templates.submit`, the permission that sends
+  content to Meta for review; the same members see, before confirming, the unfinished campaigns,
+  published automations and store rules that send it (names and statuses only), since the edit
+  changes what they send. The template is read and locked under row security in the member's
+  company (another company's answers 404), the edit is written ahead in that transaction with the
+  member named, and the signed `template.edit` job re-reads it in the company's scope. Keys need
+  the `templates.submit` scope (`POST /message-templates/{id}/edit`). Audit:
+  `template.edit_requested`, `template.edited`, `template.edit_failed`.
 - A campaign's messaging-limit notice (ADR-400): members with `campaigns.read` see the sending
   number's messaging limit, as Meta last reported it, in a draft's review and on the page of a
   campaign not yet finished, though Settings → Channels shows it only to `channels.read` (ADR-398);
@@ -1399,7 +1407,9 @@ Phase 5 rules (Public API, P5-08):
   granted only by members who hold it and refused while the company is suspended or restricted. The
   template is read and locked under row security in the key's company (another company's answers
   404); only a draft Meta never received is submitted, for a connected account, its content checked
-  again. The status change and the request to Meta are written in one transaction; the job is signed
+  again (an edit of a template Meta has, `POST /message-templates/{id}/edit`, ADR-404, needs the
+  same scope and is checked as the Templates page checks it). The status change and the request to
+  Meta are written in one transaction; the job is signed
   for the company with no member, and the worker checks its signature, kind and company before it
   calls Meta with the account's stored credential, which keys never see. The audit log names the key
   (unit tests; integration tests, run in CI only).
