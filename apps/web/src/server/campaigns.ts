@@ -22,7 +22,7 @@ export async function segmentBuilderInputs(ctx: TenantContext): Promise<{
     orders ? stores.orderCurrencies(ctx) : Promise.resolve([]),
   ]);
   return {
-    fields: fields.map((f) => ({ key: f.key, label: f.label, type: f.type })),
+    fields: fields.map((f) => ({ key: f.key, label: f.label, type: f.type, options: f.options })),
     campaigns: list.items
       .filter((c) => c.status !== 'draft' && c.status !== 'pending_approval')
       .map((c) => ({ id: c.id, name: c.name })),

@@ -1546,6 +1546,13 @@ Phase 5 rules (Public API, P5-08):
   field, as in Settings. Additions of one company take turns under a lock, so the 50-field limit
   holds for members and keys at once. Every change is audited as the key or the member with the
   field's key, never values; renames are audited now, in Settings too.
+- Choice-type contact fields (ADR-407): no permission row changes. A field's options are set and
+  changed with the permission that defines fields (`tenant.settings.manage` in Settings → Messaging,
+  `contact_fields.manage` through the API), in the company's scope only (another company's field is
+  not found); the runtime role may update `options` (a column grant, 0320) besides `label`, never
+  the key or the type. Values are set by those who could already set values (`contacts.write`,
+  `contacts.import`, automations, Flows) and checked against the options; an option a contact has
+  chosen cannot be removed or renamed. Audit entries hold the key and counts, never the options.
 - Custom deal fields (ADR-373): adding, renaming and deleting the company's deal fields needs
   `tenant.settings.manage` (owners and administrators, in Settings → Pipelines); anyone who reads
   the CRM sees them, and members who change deals (and keys with `deals.write`) set values. Values

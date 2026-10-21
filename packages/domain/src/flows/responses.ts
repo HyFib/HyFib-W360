@@ -12,6 +12,7 @@ import {
   type FlowAnswerOutcome,
   type Tx,
 } from '@w360/db';
+import { lockContactFieldValues } from '../contacts/field-definitions';
 import { coerceFieldValue, normalizeEmail } from '../contacts/fields';
 import { FLOW_TOKEN_RE } from './model';
 
@@ -126,14 +127,21 @@ export async function recordFlowCompletion(
       message: 'The form was sent to another contact, so the answers were not applied.',
     });
   } else if (send && completion.answers && send.mapping.length > 0) {
-    // The answers belong to the contact the form was sent to (the token names that send).
+    // The answers belong to the contact the form was sent to (the token names that send). The
+    // company's contact-field lock first, as every write of values takes it (ADR-407).
+    await lockContactFieldValues(tx, input.tenantId);
     const [contact] = await tx
       .select({ id: contacts.id, erasedAt: contacts.erasedAt })
       .from(contacts)
       .where(and(eq(contacts.tenantId, input.tenantId), eq(contacts.id, send.contactId)))
       .for('update');
     const fieldRows = await tx
-      .select({ key: contactFields.key, label: contactFields.label, type: contactFields.type })
+      .select({
+        key: contactFields.key,
+        label: contactFields.label,
+        type: contactFields.type,
+        options: contactFields.options,
+      })
       .from(contactFields)
       .where(eq(contactFields.tenantId, input.tenantId));
     const fields = new Map(fieldRows.map((f) => [f.key, f]));

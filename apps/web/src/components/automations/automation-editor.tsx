@@ -414,7 +414,7 @@ export function AutomationEditor({
    * send); null for a member who cannot see the catalogs.
    */
   products: EditorProduct[] | null;
-  fields: { key: string; label: string; type: string }[];
+  fields: { key: string; label: string; type: string; options?: string[] | null }[];
   /** What web request steps may use: allowed domains and secrets (names and domains only). */
   web: {
     allowedDomains: string[];

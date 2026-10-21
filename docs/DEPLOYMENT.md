@@ -1984,6 +1984,20 @@ DEFAULT 'A'`, a constant default, so nothing is rewritten) with its check added 
 jsonb_path_exists(draft_graph, '$.nodes[*].save[*].from')`, and the same on
    `app.automation_versions.graph`.
 
+   Migration 0320 (ADR-407) adds `app.contact_fields.options` (null for every existing field),
+   replaces the type check with one that also accepts `choice`, adds a check on the options' shape
+   (0301's, for contact fields) and grants the runtime role `UPDATE (options)`; the table holds at
+   most 50 rows a company, so both checks are validated at once, under the migration's brief lock on
+   the table. It is additive: old web servers and workers neither offer nor change choice fields,
+   and they cannot read a choice value: a contact form, an import, a bulk edit, an API request, an
+   automation step or a Flow answer that gives one a value fails with an internal error (or, in a
+   run, a failed step) and stores nothing. Create choice fields only after both the worker and the
+   web rollouts end. Every write of contact field values now takes the company's contact-field
+   advisory lock shared (`contact-fields:<company id>`, the key additions already took); expect no
+   change in contention, since only additions and changes of options take it exclusively. Rolling an
+   image back leaves the column, checks and grant in place; an older release then fails the same way
+   for choice values until the choice fields are deleted.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

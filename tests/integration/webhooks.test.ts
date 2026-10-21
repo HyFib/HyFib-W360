@@ -7206,8 +7206,8 @@ describe('custom field filters (ADR-184)', () => {
     await fieldOf(c, 'city', 'City');
     await fieldOf(await fx.company(), 'zone', 'Zone');
     expect(await webhooks().contactFieldChoices(owner)).toEqual([
-      { key: 'city', label: 'City', type: 'text' },
-      { key: 'tier', label: 'Tier', type: 'text' },
+      { key: 'city', label: 'City', type: 'text', options: null },
+      { key: 'tier', label: 'Tier', type: 'text', options: null },
     ]);
     for (const user of [c.agent, c.marketer]) {
       await expectAppError(webhooks().contactFieldChoices(await fx.ctx(c, user)), 'forbidden');

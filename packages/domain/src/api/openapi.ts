@@ -1798,7 +1798,7 @@ export const apiWebhookEndpointSchema = z.object({
           value: z
             .union([z.string(), z.number(), z.boolean()])
             .describe(
-              'A value of the field’s type: text, a number, a date as YYYY-MM-DD, or true or false for yes/no.',
+              'A value of the field’s type: text, a number, a date as YYYY-MM-DD, true or false for yes/no, or one of a choice field’s options as GET /contact-fields lists it.',
             ),
         }),
         z.object({
@@ -2411,7 +2411,7 @@ export function buildOpenApiDocument(serverUrl: string) {
                 additionalProperties: { type: 'string', maxLength: 500 },
                 maxProperties: MAX_FIELD_FILTERS,
               },
-              description: `Only contacts whose custom field has this value, as \`fields[<key>]=<value>\` (keys from GET /contact-fields), at most ${MAX_FIELD_FILTERS}: text equal whatever its case, a number equal as a number, a date as YYYY-MM-DD, \`true\` or \`false\` for yes/no. An unknown key or a value of another type is refused, naming \`fields.<key>\`.`,
+              description: `Only contacts whose custom field has this value, as \`fields[<key>]=<value>\` (keys from GET /contact-fields), at most ${MAX_FIELD_FILTERS}: text equal whatever its case, a number equal as a number, a date as YYYY-MM-DD, \`true\` or \`false\` for yes/no, one of a choice field's options whatever its case. An unknown key or a value of another type is refused, naming \`fields.<key>\`.`,
             },
           ],
           responses: {
@@ -2567,7 +2567,7 @@ export function buildOpenApiDocument(serverUrl: string) {
         post: {
           operationId: 'createContactField',
           summary: 'Add a custom field',
-          description: `${scopeNote('contact_fields.manage')} A company has at most ${MAX_CONTACT_FIELDS} fields. The key is made from the label unless given; a key the company has is refused with 409 (path \`key\`). The key and the type never change. One field per \`Idempotency-Key\`: a retry answers with the field as first added.`,
+          description: `${scopeNote('contact_fields.manage')} A company has at most ${MAX_CONTACT_FIELDS} fields. The key is made from the label unless given; a key the company has is refused with 409 (path \`key\`). The key and the type never change. A \`choice\` field takes its \`options\`; no other type takes any. One field per \`Idempotency-Key\`: a retry answers with the field as first added.`,
           parameters: [{ $ref: '#/components/parameters/IdempotencyKeyOptional' }],
           requestBody: { required: true, content: json(ref('ContactFieldCreate')) },
           responses: {
@@ -2579,13 +2579,13 @@ export function buildOpenApiDocument(serverUrl: string) {
       '/contact-fields/{key}': {
         patch: {
           operationId: 'updateContactField',
-          summary: 'Rename a custom field',
-          description: `${scopeNote('contact_fields.manage')} Only the label changes: values stay under the key. The same label changes nothing, so a retry is safe without an \`Idempotency-Key\`.`,
+          summary: 'Rename a custom field or change its options',
+          description: `${scopeNote('contact_fields.manage')} Changes the label, a choice field's options, or both: values stay under the key, and the key and the type never change. Options can be added, reordered, and removed or renamed while no contact has them chosen; leaving out or rewriting one a contact has chosen is refused with 409 naming it (path \`options\`), and options of another type of field with 422. What the field has already changes nothing, so a retry is safe without an \`Idempotency-Key\`.`,
           parameters: [{ $ref: '#/components/parameters/FieldKey' }],
           requestBody: { required: true, content: json(ref('ContactFieldUpdate')) },
           responses: {
             '200': { description: 'The field.', content: json(dataOf(ref('ContactField'))) },
-            ...errors(400, 401, 403, 404, 415, 422, 423, 429, 500),
+            ...errors(400, 401, 403, 404, 409, 415, 422, 423, 429, 500),
           },
         },
         delete: {

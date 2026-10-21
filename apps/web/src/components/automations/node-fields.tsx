@@ -95,7 +95,8 @@ export interface NodeFieldOptions {
    * null for a member who cannot see the catalogs.
    */
   products: EditorProduct[] | null;
-  fields: { key: string; label: string; type: string }[];
+  /** The company's contact fields; a choice field with its options (ADR-407). */
+  fields: { key: string; label: string; type: string; options?: string[] | null }[];
   /** Answer names saved by questions and web requests in this automation. */
   answers: string[];
   /** Domains web request steps may call, and the secrets they may use (names only). */
@@ -128,6 +129,16 @@ const FORMAT_LABELS: Record<(typeof ANSWER_FORMATS)[number], string> = {
 const PLACEHOLDER_HINT = 'Use {{name}}, {{company}} or {{answer.<name>}} to fill in values.';
 const STORE_PLACEHOLDER_HINT =
   'Use {{name}}, {{company}}, {{answer.<name>}} or the order’s {{order.number}}, {{order.total}}, {{order.items}} and more.';
+/**
+ * The hint under a "Set a contact field" step's value: for a choice field (ADR-407), its options,
+ * which the run matches whatever their case (another value changes nothing, noted on the run).
+ */
+const setFieldHint = (
+  field: { type: string; options?: string[] | null } | undefined,
+  hint: string,
+): string =>
+  field?.type === 'choice' && field.options ? `One of: ${field.options.join(', ')}. ${hint}` : hint;
+
 const hintFor = (options: NodeFieldOptions) =>
   options.storeEvent
     ? STORE_PLACEHOLDER_HINT
@@ -951,7 +962,14 @@ export function NodeFields({
             )}
           </div>
           {action.kind === 'set_field' ? (
-            <Field id={`${p}-value`} label="Value" description={hintFor(options)}>
+            <Field
+              id={`${p}-value`}
+              label="Value"
+              description={setFieldHint(
+                options.fields.find((f) => f.key === action.field),
+                hintFor(options),
+              )}
+            >
               {(aria) => (
                 <Input
                   {...aria}

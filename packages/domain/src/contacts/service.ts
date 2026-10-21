@@ -11,6 +11,7 @@ import {
   contacts,
   contactTags,
   conversations,
+  CONTACT_FIELD_TYPES,
   desc,
   eq,
   exactTimestamp,
@@ -40,13 +41,22 @@ import {
 import type { BulkFieldResult } from './bulk-fields';
 import { BULK_TAG_LIMIT, type BulkTagResult } from './bulk-tags';
 import { CsvError, CSV_BOM, csvLine, parseCsv, restoreCell, type CsvLimits } from './csv';
-import { createContactField, deleteContactField, renameContactField } from './field-definitions';
+import {
+  createContactField,
+  deleteContactField,
+  lockContactFieldValues,
+  renameContactField,
+  setContactFieldOptions,
+} from './field-definitions';
 import {
   MAX_TAGS_PER_CONTACT,
   coerceFieldValue,
+  fieldOptionsSchema,
   normalizeEmail,
   normalizeTag,
   parseConsentCell,
+  refineFieldOptions,
+  sameOptions,
   type AttributeValue,
 } from './fields';
 import { seesNumbers, shownNumber } from './number-masking';
@@ -134,14 +144,22 @@ export const updateContactSchema = z.object({
   attributes: z.record(z.string(), z.string().max(1000)).optional(),
 });
 
-export const createFieldSchema = z.object({
-  label: z.string().trim().min(1, 'Enter a label').max(80),
-  key: z
-    .string()
-    .regex(/^[a-z][a-z0-9_]{0,39}$/, 'Use lower-case letters, digits and underscores')
-    .optional(),
-  type: z.enum(['text', 'number', 'date', 'boolean']),
-});
+const fieldLabelSchema = z.string().trim().min(1, 'Enter a label').max(80);
+
+export const createFieldSchema = z
+  .object({
+    label: fieldLabelSchema,
+    key: z
+      .string()
+      .regex(/^[a-z][a-z0-9_]{0,39}$/, 'Use lower-case letters, digits and underscores')
+      .optional(),
+    type: z.enum(CONTACT_FIELD_TYPES, {
+      error: 'Choose the type: text, number, date, yes/no or a choice.',
+    }),
+    /** A choice field's options (ADR-407); other types take none. */
+    options: fieldOptionsSchema.optional(),
+  })
+  .superRefine(refineFieldOptions);
 
 export const importMappingSchema = z.object({
   phone: z.number().int().min(0),
@@ -192,6 +210,23 @@ export interface ContactFieldRow {
   key: string;
   label: string;
   type: ContactFieldType;
+  /** A choice field's options, in order; null for every other type (ADR-407). */
+  options: string[] | null;
+}
+
+/**
+ * Whether a field takes the same values as it did: its id, type and options as written. An import
+ * reads its rows against the fields before its transaction and checks them again under the lock
+ * (ADR-407).
+ */
+export function sameFieldShape(a: ContactFieldRow, b: ContactFieldRow): boolean {
+  return (
+    a.id === b.id &&
+    a.type === b.type &&
+    (a.options === null || b.options === null
+      ? a.options === b.options
+      : sameOptions(a.options, b.options))
+  );
 }
 
 function csvToAppError(error: unknown): never {
@@ -363,10 +398,20 @@ export function createContactsService(deps: { db: Database; clock: Clock }) {
         key: contactFields.key,
         label: contactFields.label,
         type: contactFields.type,
+        options: contactFields.options,
       })
       .from(contactFields)
       .where(eq(contactFields.tenantId, tenantId))
       .orderBy(asc(contactFields.label));
+  }
+
+  /**
+   * The fields, read under the company's contact-field lock (ADR-407), for writes of values: taken
+   * before any contact is locked, so a choice field's options cannot change until they commit.
+   */
+  async function lockedFields(tx: Tx, tenantId: string): Promise<ContactFieldRow[]> {
+    await lockContactFieldValues(tx, tenantId);
+    return loadFields(tx, tenantId);
   }
 
   /** Validates raw attribute strings against the field definitions (empty value = remove). */
@@ -613,7 +658,7 @@ export function createContactsService(deps: { db: Database; clock: Clock }) {
       assertCan(ctx, 'contacts.write');
       const data = parseInput(bulkFieldSchema, input);
       return db.run(ctx.scope, async (tx) => {
-        const field = (await loadFields(tx, ctx.tenant.id)).find((f) => f.key === data.key);
+        const field = (await lockedFields(tx, ctx.tenant.id)).find((f) => f.key === data.key);
         if (!field) {
           const message = 'Choose one of the company’s custom fields.';
           throw new AppError('validation_failed', message, {
@@ -783,7 +828,7 @@ export function createContactsService(deps: { db: Database; clock: Clock }) {
       if (!email.ok) throw new AppError('validation_failed', email.message);
       const tags = normalizeTags(data.tags ?? []);
       return db.run(ctx.scope, async (tx) => {
-        const fields = await loadFields(tx, ctx.tenant.id);
+        const fields = data.attributes ? await lockedFields(tx, ctx.tenant.id) : [];
         const attributes = mergeAttributes({}, coerceAttributes(fields, data.attributes ?? {}));
         const id = uuidv7();
         const [row] = await tx
@@ -840,6 +885,8 @@ export function createContactsService(deps: { db: Database; clock: Clock }) {
       assertCan(ctx, 'contacts.write');
       const data = parseInput(updateContactSchema, input);
       await db.run(ctx.scope, async (tx) => {
+        // The fields before the contact, as every write of values takes them (ADR-407).
+        const fields = data.attributes ? await lockedFields(tx, ctx.tenant.id) : [];
         const current = await lockContact(tx, ctx, contactId);
         const set: Partial<typeof contacts.$inferInsert> = {};
         if (data.displayName !== current.displayName) set.displayName = data.displayName;
@@ -885,7 +932,6 @@ export function createContactsService(deps: { db: Database; clock: Clock }) {
           }
         }
         if (data.attributes) {
-          const fields = await loadFields(tx, ctx.tenant.id);
           const next = mergeAttributes(
             current.attributes,
             coerceAttributes(fields, data.attributes),
@@ -992,7 +1038,11 @@ export function createContactsService(deps: { db: Database; clock: Clock }) {
             action: 'contact_field.created',
             subjectType: 'contact_field',
             subjectId: field.id,
-            metadata: { key: field.key, type: field.type },
+            metadata: {
+              key: field.key,
+              type: field.type,
+              ...(field.options ? { options: field.options.length } : {}),
+            },
           },
           meta,
         );
@@ -1002,7 +1052,7 @@ export function createContactsService(deps: { db: Database; clock: Clock }) {
 
     async renameField(ctx: TenantContext, fieldId: string, label: string, meta: RequestMeta = {}) {
       assertCan(ctx, 'tenant.settings.manage');
-      const parsed = parseInput(createFieldSchema.shape.label, label);
+      const parsed = parseInput(fieldLabelSchema, label);
       if (!z.uuid().safeParse(fieldId).success) throw notFound('Field');
       await db.run(ctx.scope, async (tx) => {
         const result = await renameContactField(tx, ctx.tenant.id, { id: fieldId }, parsed);
@@ -1020,6 +1070,44 @@ export function createContactsService(deps: { db: Database; clock: Clock }) {
             meta,
           );
         }
+      });
+    },
+
+    /**
+     * Gives a choice field a new list of options (ADR-407), as Settings → Messaging sends it: options
+     * can be added, reordered, and removed or renamed while no contact has them chosen; an option a
+     * contact has chosen must stay as it is written, or the change is refused naming it. Audited
+     * with the counts, never the options; the same list changes nothing and leaves no trace.
+     */
+    async setFieldOptions(
+      ctx: TenantContext,
+      fieldId: string,
+      options: unknown,
+      meta: RequestMeta = {},
+    ) {
+      assertCan(ctx, 'tenant.settings.manage');
+      const next = parseInput(fieldOptionsSchema, options);
+      if (!z.uuid().safeParse(fieldId).success) throw notFound('Field');
+      await db.run(ctx.scope, async (tx) => {
+        const result = await setContactFieldOptions(tx, ctx.tenant.id, { id: fieldId }, next);
+        if (!result) throw notFound('Field');
+        if (!result.changed) return;
+        await recordAudit(
+          tx,
+          ctx,
+          {
+            action: 'contact_field.options_changed',
+            subjectType: 'contact_field',
+            subjectId: fieldId,
+            metadata: {
+              key: result.field.key,
+              options: next.length,
+              added: result.added,
+              removed: result.removed,
+            },
+          },
+          meta,
+        );
       });
     },
 
@@ -1244,6 +1332,22 @@ export function createContactsService(deps: { db: Database; clock: Clock }) {
 
       const now = clock.now();
       const result = await db.run(ctx.scope, async (tx) => {
+        // The values were read against the fields above; under the company's contact-field lock
+        // (ADR-407) the fields mapped must be as they were then, so no value is stored that a
+        // field's options or type no longer take.
+        if (Object.keys(opts.mapping.fields).length > 0) {
+          const locked = await lockedFields(tx, ctx.tenant.id);
+          for (const key of Object.keys(opts.mapping.fields)) {
+            const before = fields.find((f) => f.key === key);
+            const after = locked.find((f) => f.key === key);
+            if (!before || !after || !sameFieldShape(before, after)) {
+              throw new AppError(
+                'conflict',
+                'The custom fields changed while the file was read. Import it again.',
+              );
+            }
+          }
+        }
         const importId = uuidv7();
         let created = 0;
         let updated = 0;

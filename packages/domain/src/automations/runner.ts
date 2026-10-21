@@ -39,6 +39,7 @@ import { permissionsForRoles } from '../authz/permissions';
 import { lockCampaignSends, marketingCapReached } from '../campaigns/frequency-cap';
 import { buildProductMessageRequest, type ResolvedProductMessage } from '../commerce/model';
 import { checkTemplateEligibility } from '../consent/service';
+import { lockContactFieldValues } from '../contacts/field-definitions';
 import { MAX_TAGS_PER_CONTACT, coerceFieldValue } from '../contacts/fields';
 import { addActivity, crmChangedBy, memberRefs } from '../crm/common';
 import {
@@ -912,6 +913,9 @@ async function applyContactEffect(
   run: AutomationRun,
   effect: Extract<RunEffect, { kind: 'add_tag' | 'remove_tag' | 'set_field' }>,
 ): Promise<string | null> {
+  // A value is checked against its field's options under the company's contact-field lock, taken
+  // before the contact as every write of values takes it (ADR-407).
+  if (effect.kind === 'set_field') await lockContactFieldValues(tx, run.tenantId);
   const [contact] = await tx
     .select({ erasedAt: contacts.erasedAt })
     .from(contacts)
@@ -943,7 +947,12 @@ async function applyContactEffect(
     return null;
   }
   const [field] = await tx
-    .select({ key: contactFields.key, label: contactFields.label, type: contactFields.type })
+    .select({
+      key: contactFields.key,
+      label: contactFields.label,
+      type: contactFields.type,
+      options: contactFields.options,
+    })
     .from(contactFields)
     .where(and(eq(contactFields.tenantId, run.tenantId), eq(contactFields.key, effect.field)));
   if (!field) return 'field_missing';

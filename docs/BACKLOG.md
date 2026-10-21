@@ -110,8 +110,14 @@ verification, app review, Embedded Signup configuration).
   the page's filters match, after a confirmation, with the checks of a member's edit and of bulk tag
   edits; no migration). **[Renaming custom fields in Settings built; its browser test runs only in
   CI]** (ADR-262: owners and administrators rename a field's label in Settings → Messaging, audited,
-  its key and so every value, CSV column and API name kept; no migration). **Remaining:** joining
-  conversations.
+  its key and so every value, CSV column and API name kept; no migration). **[Choice-type custom
+  contact fields built; their database and browser tests run only in CI]** (ADR-407, migration 0320:
+  a `choice` field has 1 to 50 options, in order, unique ignoring case; members, imports, bulk
+  edits, automations and Flow answers take an option in any case and the API exactly as written;
+  options can be added, reordered, and removed or renamed while no contact has them chosen, in
+  Settings → Messaging and through `PATCH /contact-fields/{key}`, under a company lock every write of
+  values takes; segments and webhook filters compare or tick options). **Remaining:** joining
+  conversations, multi-select fields and field order.
 - **P3-02 Consent & suppression** — _implemented (2026-09-26)_: consent events with provenance,
   opt-out/opt-in keywords, Meta 131050 opt-outs, suppression list, send-time enforcement (race test
   with a queued template, and with campaigns). **Remaining:** review Meta's

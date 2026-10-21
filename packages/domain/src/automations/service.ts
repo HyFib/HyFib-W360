@@ -543,7 +543,12 @@ export function createAutomationService(deps: AutomationServiceDeps) {
       .where(eq(teams.tenantId, tenantId))
       .orderBy(asc(sql`lower(${teams.name})`));
     const fieldRows = await tx
-      .select({ key: contactFields.key, label: contactFields.label, type: contactFields.type })
+      .select({
+        key: contactFields.key,
+        label: contactFields.label,
+        type: contactFields.type,
+        options: contactFields.options,
+      })
       .from(contactFields)
       .where(eq(contactFields.tenantId, tenantId))
       .orderBy(asc(contactFields.label));

@@ -1597,6 +1597,24 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   label (`contact_fields` grants `UPDATE (label)` only); a deletion removes the field row, then the
   values (`attributes - key`), in the order a contact change locks them (ADR-112). 0092 widens the
   scope checks of `app.api_keys` and `ops.plans`.
+- **Choice-type contact fields (0320, ADR-407):** `app.contact_fields.options` (a text array of 1
+  to 50, in order; null for other types; 0301's shape check; `UPDATE (options)` for the runtime
+  role). Every reader and writer of values goes through `contacts/fields.ts`: `coerceFieldValue`
+  (forms, CSV import, bulk edits, automation steps, Flow answers, Settings → Webhooks' lines: any
+  case, stored as the option is written), `apiFieldValue` (the API: exactly as written) and
+  `apiFieldFilterValue` (`fields[<key>]`: any case, a value that is no option refused); they take a
+  `FieldShape` (label, type, options), so a caller that leaves out the options does not compile.
+  Deal fields share them (`coerceDealFieldValue` now delegates; `fieldOptionsSchema`,
+  `sameOptions` and `removedChosenOptions` moved from `crm/deal-fields.ts`, which re-exports them).
+  `setContactFieldOptions` (`field-definitions.ts`, for Settings and `PATCH /contact-fields/{key}`)
+  takes the `contact-fields:<company>` advisory lock exclusively, reads the distinct values
+  (`attributes ->> key`) and refuses a list that drops or rewrites a chosen one. Every write of
+  values takes that lock shared (`lockContactFieldValues`) before it reads the fields and before
+  it locks a contact: the contacts service (create, change, bulk edit, import, whose rows are read
+  before its transaction and whose mapped fields are compared again under the lock,
+  `sameFieldShape`), the API's `lockFields`, the automation runner's `set_field`, Flow answers and
+  merges. Deletions keep ADR-112's row order and do not take it. Segments compare a choice as text
+  (`FIELD_OPS.choice`: equals, not equals, set, not set); webhook field value filters tick options.
 - **Following message changes (0093, ADR-116):** triggers on `messages` (insert, and an update that
   changes the status, status time, error or content) call `app.message_changes_capture`, a SECURITY
   DEFINER function that upserts the message's one `app.message_changes` row with `xact` =

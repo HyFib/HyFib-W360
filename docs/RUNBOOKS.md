@@ -418,6 +418,22 @@ changed. Each edit is in the audit log as `contacts.bulk_field_set` with the fie
 counts (never the value); each changed contact also appears in the contact feed and as a
 `contact.updated` webhook event.
 
+**A choice field's option cannot be removed or renamed, or a value is refused (ADR-407).** An
+option some contact has chosen stays exactly as written: Settings → Messaging (and
+`PATCH /contact-fields/{key}`, 409) refuses a list that leaves it out or changes it, even only its
+case, naming it. Find those contacts with a segment ("Tier is Silver") or
+`GET /contacts?fields[tier]=Silver`, change them (a bulk field edit sets another option on all the
+contacts a filter matches), then change the options. Members, imports, bulk edits, automations and
+Flow answers take an option whatever its case and store it as written; anything else is refused
+("Tier must be one of its options."; a CSV row error; an automation step `skipped` with
+`invalid_value`; a Flow answer `invalid`). The API takes the option exactly as `GET /contact-fields`
+lists it. An import refused with "The custom fields changed while the file was read" met a change of
+a mapped field's options (or its deletion) between reading the file and writing it: import it
+again. Changes are audited as `contact_field.options_changed` with the key and counts, never the
+options. Every write of values takes the company's `contact-fields:<company id>` advisory lock
+shared and a change of options takes it exclusively, so a change of options waits for writes in
+progress (and they for it); a wait is visible in `pg_locks` (`locktype = 'advisory'`, not granted).
+
 **Erasure request.** A member with `contacts.delete` erases the contact from its page (keep the
 number suppressed unless the requester asks otherwise). The action is audited
 (`contact.erased`). Data already delivered to Meta is outside our database (see

@@ -74,6 +74,40 @@ describe('defining contact fields through the API (ADR-115)', () => {
     }
   });
 
+  it('adds a choice field with its options, and no other type with any (ADR-407)', () => {
+    expect(
+      apiContactFieldCreateSchema.parse({
+        label: 'Tier',
+        type: 'choice',
+        options: [' Gold ', 'Silver'],
+      }),
+    ).toEqual({ label: 'Tier', type: 'choice', options: ['Gold', 'Silver'] });
+    for (const bad of [
+      { label: 'Tier', type: 'choice' },
+      { label: 'Tier', type: 'choice', options: [] },
+      { label: 'Tier', type: 'choice', options: ['Gold', 'gold'] },
+      { label: 'Tier', type: 'choice', options: ['Go\nld'] },
+      { label: 'Tier', type: 'choice', options: ['x'.repeat(81)] },
+      { label: 'Tier', type: 'choice', options: Array.from({ length: 51 }, (_, i) => `o${i}`) },
+      { label: 'City', type: 'text', options: ['Gold'] },
+    ]) {
+      expect(apiContactFieldCreateSchema.safeParse(bad).success, JSON.stringify(bad)).toBe(false);
+    }
+  });
+
+  it('changes a choice field’s options, its label, or both (ADR-407)', () => {
+    expect(apiContactFieldUpdateSchema.parse({ options: ['Gold', ' Silver'] })).toEqual({
+      options: ['Gold', 'Silver'],
+    });
+    expect(apiContactFieldUpdateSchema.parse({ label: 'Tier', options: ['Gold'] })).toEqual({
+      label: 'Tier',
+      options: ['Gold'],
+    });
+    for (const bad of [{ options: [] }, { options: ['A', 'a'] }, { options: 'Gold' }]) {
+      expect(apiContactFieldUpdateSchema.safeParse(bad).success, JSON.stringify(bad)).toBe(false);
+    }
+  });
+
   it('refuses before anything is read: without the scope, while the company is not active, keys no field can have, and other bodies', async () => {
     const deps = { db: untouched, clock: { now: () => new Date() } };
     const create = (c: ApiContext, body: unknown) =>
@@ -107,11 +141,27 @@ describe('defining contact fields through the API (ADR-115)', () => {
   it('lists the fields for keys that read contacts or define the fields, and no other', async () => {
     const createdAt = new Date('2026-10-02T10:00:00.000Z');
     const db = {
-      run: async () => [{ key: 'city', label: 'City', type: 'text', createdAt }],
+      run: async () => [
+        { key: 'city', label: 'City', type: 'text', options: null, createdAt },
+        { key: 'tier', label: 'Tier', type: 'choice', options: ['Gold', 'Silver'], createdAt },
+      ],
     } as unknown as Database;
     for (const scopes of [['contacts.read'], ['contact_fields.manage']]) {
       expect(await apiListContactFields({ db }, ctx(scopes))).toEqual([
-        { key: 'city', label: 'City', type: 'text', createdAt: '2026-10-02T10:00:00.000Z' },
+        {
+          key: 'city',
+          label: 'City',
+          type: 'text',
+          options: null,
+          createdAt: '2026-10-02T10:00:00.000Z',
+        },
+        {
+          key: 'tier',
+          label: 'Tier',
+          type: 'choice',
+          options: ['Gold', 'Silver'],
+          createdAt: '2026-10-02T10:00:00.000Z',
+        },
       ]);
     }
     expect(await code(() => apiListContactFields({ db: untouched }, ctx(['contacts.write'])))).toBe(
@@ -132,7 +182,10 @@ describe('defining contact fields through the API (ADR-115)', () => {
       '`contacts.read` or `contact_fields.manage`',
     );
     expect(paths['/contact-fields/{key}']?.patch?.operationId).toBe('updateContactField');
-    expect(paths['/contact-fields/{key}']?.patch?.description).toContain('Only the label changes');
+    expect(paths['/contact-fields/{key}']?.patch?.description).toContain(
+      "Changes the label, a choice field's options, or both",
+    );
+    expect(paths['/contact-fields/{key}']?.patch?.description).toContain('refused with 409');
     expect(paths['/contact-fields/{key}']?.delete?.operationId).toBe('deleteContactField');
     expect(paths['/contact-fields/{key}']?.delete?.description).toContain(
       "Every contact's value for the field is deleted with it",
@@ -145,6 +198,16 @@ describe('defining contact fields through the API (ADR-115)', () => {
     expect(parameters.FieldKey?.schema.pattern).toBe('^[a-z][a-z0-9_]{0,39}$');
     const schemas = doc.components.schemas as Record<string, { required?: string[] }>;
     expect(schemas.ContactFieldCreate?.required).toEqual(['label', 'type']);
-    expect(schemas.ContactFieldUpdate?.required).toEqual(['label']);
+    // Either the label or the options, or both (ADR-407).
+    expect(schemas.ContactFieldUpdate?.required).toBeUndefined();
+    const field = doc.components.schemas as Record<
+      string,
+      { properties?: Record<string, { enum?: string[] }>; required?: string[] }
+    >;
+    expect(field.ContactField?.properties?.type?.enum).toContain('choice');
+    expect(field.ContactField?.properties).toHaveProperty('options');
+    expect(field.ContactField?.required).toContain('options');
+    expect(field.ContactFieldCreate?.properties).toHaveProperty('options');
+    expect(field.ContactFieldUpdate?.properties).toHaveProperty('options');
   });
 });

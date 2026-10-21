@@ -215,6 +215,21 @@ export async function renameFieldAction(
   });
 }
 
+/** A choice field's options (ADR-407), one per entry, in order. */
+export async function setFieldOptionsAction(
+  slug: string,
+  fieldId: string,
+  options: string[],
+): Promise<ActionResult> {
+  return runAction(async () => {
+    const ctx = await tenantForAction(slug);
+    const { contacts } = await getRuntime();
+    await contacts.setFieldOptions(ctx, String(fieldId), options, await requestMeta());
+    refresh();
+    return null;
+  });
+}
+
 export async function deleteFieldAction(slug: string, fieldId: string): Promise<ActionResult> {
   return runAction(async () => {
     const ctx = await tenantForAction(slug);

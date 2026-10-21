@@ -5,12 +5,15 @@ import { Button, Field, Input, Select } from '@w360/ui';
 import { createContactAction, updateContactAction } from '@/app/actions/contacts';
 import { ClientForm } from '@/components/client-form';
 import { FormError, FormSuccess } from '@/components/form-status';
+import { choiceOptions } from '@/lib/contact-fields';
 
 export interface ContactFieldDef {
   id: string;
   key: string;
   label: string;
-  type: 'text' | 'number' | 'date' | 'boolean';
+  type: 'text' | 'number' | 'date' | 'boolean' | 'choice';
+  /** A choice field's options, in order; null for every other type (ADR-407). */
+  options: string[] | null;
 }
 
 interface Values {
@@ -155,6 +158,20 @@ export function ContactForm({
                   <option value="">Not set</option>
                   <option value="yes">Yes</option>
                   <option value="no">No</option>
+                </Select>
+              ) : f.type === 'choice' ? (
+                <Select
+                  {...aria}
+                  value={value}
+                  disabled={!canEdit}
+                  onChange={(e) => setAttr(f.key, e.target.value)}
+                >
+                  <option value="">Not set</option>
+                  {choiceOptions(f.options, value).map((option) => (
+                    <option key={option} value={option}>
+                      {option}
+                    </option>
+                  ))}
                 </Select>
               ) : (
                 <Input

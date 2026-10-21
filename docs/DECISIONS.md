@@ -4320,8 +4320,8 @@ Decision:
   most). Existing keys keep their scopes.
 
 Not built: changing a field's type, renaming fields in the app (Settings adds and deletes them;
-the service could always rename, and now audits it), choices for a field (a list of allowed values),
-field order, and events for field definitions.
+the service could always rename, and now audits it), choices for a field (a list of allowed values;
+since built: ADR-407), field order, and events for field definitions.
 
 ## ADR-116 Following messages through the public API (2026-10-03)
 
@@ -9919,7 +9919,8 @@ Decision:
   after saving. A rename sends no webhook and records no contact change (ADR-112, ADR-114). No
   migration.
 
-Not built: changing a field's type (ADR-115 keeps it fixed), choices for a field, and field order.
+Not built: changing a field's type (ADR-115 keeps it fixed), choices for a field (since built:
+ADR-407), and field order.
 
 ## ADR-263 Choosing the CRM pipelines whose deal events a webhook endpoint receives (P5-09, P4-04) (2026-10-07)
 
@@ -17775,6 +17776,89 @@ from eight characters), with the claim that a cut echo reveals at most three cha
 It also found that one to three character secrets drop ordinary values (new ones now need four)
 and nits (the token boundary only on a side where the secret's edge is a letter or digit, one
 matcher per response). All were fixed.
+
+## ADR-407 Choice-type custom contact fields (P3-01) (2026-10-21)
+
+Context: custom contact fields took text, a number, a date or yes/no (ADR-112, ADR-115). A company
+that sorts its contacts by a fixed list (a tier, a branch, a lead source) used text, so members,
+imports and integrations wrote "Gold", "gold" and "Gld" for one thing, and segments and webhook
+filters missed some. Custom deal fields gained a `choice` type in ADR-385; ADR-115 and ADR-262 left
+"choices for a field" unbuilt for contacts.
+
+Decision: ADR-385's design, for contacts, through the same functions.
+
+- **A `choice` type** (`contacts/fields.ts`): 1 to 50 options, kept in the order given, each
+  trimmed, 1 to 80 characters without line breaks or control characters, none twice ignoring case
+  (`fieldOptionsSchema`, now shared with deal fields, whose `dealFieldOptionsSchema` is the same
+  schema). Settings → Messaging takes them one per line (blank lines left out) and lists them under
+  the field's type; `POST /contact-fields` takes `options` for a choice and refuses them for any
+  other type. A contact takes one option or none.
+- **Stored on the field** (migration 0320): `app.contact_fields.options`, a text array, null for
+  every other type, with 0301's shape check and a type check that accepts `choice`; both are
+  validated in the migration (at most 50 rows a company). The runtime role may update `options` (a
+  column grant); keys and types still never change. Options differing only in case are refused by
+  the service, which a check without a function cannot express.
+- **Changing options:** owners and administrators in Settings → Messaging, and keys with
+  `contact_fields.manage` through `PATCH /contact-fields/{key}` (which now takes `label`,
+  `options`, or both), may add options, reorder them, and remove or rename options no contact has
+  chosen. An option a contact has chosen stays exactly as written (a change of case is a rename), or
+  the change is refused naming it ("Contacts have “Silver” chosen, so it cannot be removed or
+  renamed. Change those contacts first."; 409 through the API). Erased contacts hold no values, so
+  they never keep an option. The same list changes nothing and is not audited. Changing options of
+  another type of field is refused (422).
+- **The company's contact-field lock:** a change of options takes `contact-fields:<company>`
+  exclusively (the advisory lock additions already took, ADR-115), and every write of values takes
+  it shared before reading the fields and before locking a contact (`lockContactFieldValues`), so a
+  value is never checked against options being replaced and a change of options counts every value
+  committed. Writers: the contact page and new-contact form, CSV import, bulk field edits (ADR-238),
+  `POST`/`PATCH /contacts` and the call that changes many (through `lockFields`, before its row
+  locks), automation steps that set a field, Flow answers saved into fields, and merges (ADR-224),
+  whose values move unchecked, both being values of the company's fields.
+- **Values, where members type them:** the contact page and the new-contact form show a select with
+  "Not set" and the options (a value the options no longer hold, which the rules above prevent, is
+  still listed first so the select never hides it); bulk field edits a select. Forms, bulk edits, CSV
+  import, automation steps ("Set a contact field", whose builder now lists the options under the
+  value) and Flow answers take an option whatever its case and store it as written; anything else is
+  refused ("Tier must be one of its options."; a CSV row error; a run step `skipped` with
+  `invalid_value`; a Flow answer `invalid`), as other types' bad values are. The deal function
+  `coerceDealFieldValue` now delegates to the contact one, which handles choices.
+- **Values through the API** are strict, as for other types: the option as written, as a string
+  (spaces around it ignored, as for text; null or an empty string removes it). `GET /contacts`'s
+  `fields[<key>]` filter takes an option whatever its case and refuses a value that is none (it
+  could find nothing). `Contact.fields`, in the API and the contact webhooks, gives the option as a
+  string; `GET /contact-fields` gives each field's `options` (null for other types) and the type
+  `choice`; the OpenAPI document describes both, with schema tests.
+- **Reading:** the contacts CSV export writes the option as text (unchanged code). Segments, and
+  contact searches through the API (ADR-117), compare a choice as they compare text: is, is not
+  (also contacts without a value), set and not set, whatever its case; a value that is no option is
+  accepted and matches nobody, so a segment saved before an unused option was removed still reads.
+  The Contacts page filters do not filter by field values, so they are unchanged. Webhook field value
+  filters (ADR-332): a choice field's options are ticked in Settings → Webhooks (a stored value that
+  is no longer an option is listed apart and kept, as values of deleted fields are); the API takes
+  values exactly as written, and words and ranges are refused for a choice ("not a text field: give
+  a value of it instead"). Automation conditions on contact fields compare as text ignoring case
+  (unchanged). Campaign variables, automation placeholders and template variables fill in the option
+  as text (unchanged).
+- **Audit:** a choice field's creation records the number of options; a change records
+  `contact_field.options_changed` with the key and the numbers of options, added and removed, never
+  the options. Permissions are unchanged.
+
+Where contacts differ from deals: contacts have far more writers (imports of 5,000 rows, bulk edits,
+automations, Flows, merges and three API calls), and each takes the shared lock before it locks a
+contact; a CSV import reads its rows against the fields before its transaction, so under the lock it
+compares each mapped field with what it read (`sameFieldShape`: id, type, options as written) and is
+refused ("The custom fields changed while the file was read. Import it again.") rather than store a
+value read against options since replaced. Field deletion keeps ADR-112's order (the field row, then
+the values) and takes no advisory lock, unlike deal deletion, which takes the deal-field lock: a
+writer that already holds a contact (an automation run, which holds the conversation and keys the
+contact) would otherwise wait for a deletion that waits for that contact. Contact fields are defined
+through the API too (ADR-115), so options are given and changed there, and the API filters contacts
+by a value (ADR-113), which takes the option in any case. Segments accept a value that is no option,
+where the deals board's filter (ADR-391) offers only options.
+
+Not built: several options per contact (multi-select), colours or descriptions per option, renaming
+an option contacts have chosen with its values carried over, a value list for automation conditions
+on a choice (they take text), and changing a field's type into or out of `choice`.
 
 ## ADR-408 An enrolment's contacts listed with their outcomes (P4-01) (2026-10-21)
 

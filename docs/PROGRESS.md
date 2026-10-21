@@ -1,5 +1,74 @@
 # Progress
 
+## 2026-10-21 — Choice-type custom contact fields (P3-01, ADR-407)
+
+Status: **Implemented (migration 0320); unit tests run locally, integration and e2e tests in CI
+only.** Custom contact fields took text, a number, a date or yes/no; a company that sorts contacts
+by a fixed list typed "Gold", "gold" and "Gld" for one thing. This closes "choices for a field",
+left unbuilt by ADR-115 and ADR-262, with ADR-385's design for deal fields, through the same
+functions.
+
+### Completed
+
+- **The type and its options** (`contacts/fields.ts`, migration 0320): `choice` with 1 to 50
+  options, in order, each trimmed, 1 to 80 characters without line breaks or control characters,
+  none twice ignoring case (`fieldOptionsSchema`, now shared with deal fields); stored in
+  `app.contact_fields.options` with 0301's shape check and a type check accepting `choice`, both
+  validated in the migration; `UPDATE (options)` granted to the runtime role.
+- **Changing options** (`setContactFieldOptions`): Settings → Messaging ("Edit options", one per
+  line) and `PATCH /contact-fields/{key}` (`label`, `options` or both) add, reorder, and remove or
+  rename options no contact has chosen; a chosen option left out or rewritten is refused naming it
+  (409 through the API). The company's `contact-fields:<company>` advisory lock is taken
+  exclusively; every write of values takes it shared before reading fields and before locking a
+  contact. Audited as `contact_field.options_changed` with the key and counts; the same list changes
+  nothing.
+- **Writers:** contact page and new-contact form (a select with "Not set"), CSV import (any case,
+  stored as written, otherwise a row error; mapped fields compared again under the lock), bulk field
+  edits (a select), `POST`/`PATCH /contacts` and update-many (exactly as written), automation
+  "Set a contact field" steps (any case; the builder lists the options), Flow answers (any case),
+  and merges (values move under the lock). `coerceDealFieldValue` now delegates to the contact
+  function.
+- **Readers:** the CSV export (option as text, unchanged), `Contact.fields` and
+  `GET /contact-fields` (`options`, type `choice`, OpenAPI and schema tests), `fields[<key>]`
+  filters (any case; a non-option refused), segments and API contact searches (is, is not, set, not
+  set, as text), Settings → Webhooks' field value filters (options ticked; words and ranges refused
+  for a choice), automation conditions and placeholders (as text, unchanged).
+- Docs: ADR-407 (and "since built" notes on ADR-115 and ADR-262), BACKLOG P3-01, SECURITY (no
+  permission row changes), THREAT-MODEL T356, DATA-RETENTION, DEPLOYMENT (0320), RUNBOOKS,
+  ARCHITECTURE, the feature matrix's W-048 row.
+
+### Tests
+
+- Unit (`contacts/field-choices.test.ts`, `api/contact-fields.test.ts`, `contacts/fields.test.ts`,
+  `apps/web/src/lib/contact-fields.test.ts`): the options schema, Settings' and the API's field
+  schemas, every writer's reading (forms, imports, bulk edits, automations, Flows, the API and its
+  filter), segments' comparisons, Settings → Webhooks' ticks, the change rules with a scripted
+  transaction (lock modes and key, same list, chosen options refused, not found, another type), the
+  import's field comparison, the select's stale value, and the service's permission and input
+  checks before any read.
+- Integration (`tests/integration/contact-field-choices.test.ts`, CI only): values through the
+  service, export, import, bulk edit and API (strict values, the filter, options through POST and
+  PATCH); options changed while in use; a change waiting on a writer holding the lock, then refused;
+  segments; another company's field not found; the database check and the grants. Existing exact
+  matches gained `options: null` (`api-contact-field-definitions.test.ts` twice,
+  `webhooks.test.ts` once).
+- End-to-end (`tests/e2e/contacts.spec.ts`, CI only): a choice field added in Settings, set on a
+  contact and read back after a reload, a chosen option refused on removal, then the options
+  reordered.
+- Manual mutation testing of key branches: 20/21 caught by the unit tests; the one missed skips the
+  import's re-check at its call site (the comparison itself is unit tested; no test races an import
+  against a change of options).
+
+### Test commands and results (local, 2026-10-21)
+
+| Command                                            | Result                                                               |
+| -------------------------------------------------- | -------------------------------------------------------------------- |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                                |
+| `pnpm test` (unit)                                 | 1,980 of 1,980 passed (181 files)                                    |
+| `pnpm build`                                       | passed                                                               |
+| migration 0320                                     | parses (pglast); not applied here                                    |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: no PostgreSQL or browser on this machine; CI runs them |
+
 ## 2026-10-21 — WhatsApp order reports by day and product (P4-06a, ADR-409)
 
 Status: **Implemented (no migration); unit tests run locally, integration and e2e tests in CI only;
