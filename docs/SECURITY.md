@@ -449,7 +449,9 @@ Phase 4 rules (automations, P4-01):
   the check stands for a narrower role), checked by the service before anything is written; the
   editor lists campaigns only to members with `campaigns.read` (the 200 most recent and the
   chosen one, in the company's scope), and a draft naming another company's campaign is refused
-  as an unknown one. Runs act for the company, as for the other message triggers. What a run
+  as an unknown one; a member without `campaigns.read` gets no campaign's name in the editor's
+  checks, and publishing and testing check the permission before the draft's checks, whose
+  messages name the campaign. Runs act for the company, as for the other message triggers. What a run
   answers is kept in `app.automation_run_campaigns` (migration 0324): FORCE row security, composite
   foreign keys to the company's run and campaign, `SELECT` and `INSERT` for the app role only (no
   `UPDATE`, which a trigger also rejects, and no `DELETE`: rows go with their run, by cascade,

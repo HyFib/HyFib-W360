@@ -18252,9 +18252,13 @@ Decision:
   named by its WAMID, or one of another number, is not found. CSAT and cash on delivery taps are
   taken by their own features first, as before, and start no automation.
 - **Old campaigns: 72 hours after queueing.** `CAMPAIGN_REPLY_HOURS` equals campaign attribution's
-  window (`ATTRIBUTION_WINDOW_HOURS`, a unit test keeps them equal), so a run starts exactly for a
-  reply the campaign's results can count as one, and the two never disagree about whether a reply
-  answered the campaign. Within it, a tap is almost always a direct answer to the offer; a tap days
+  window (`ATTRIBUTION_WINDOW_HOURS`, a unit test keeps them equal), so a reply older than the
+  campaign's results would count never starts its automation either. They share the bound, not the
+  rule: attribution is last touch (the most recent campaign message to the contact on that number
+  within 72 hours, delivered, counted once), while the trigger follows the message the reply quotes
+  or whose button it taps. A customer sent Diwali on Monday and Winter on Tuesday who taps a
+  Diwali button on Wednesday starts the Diwali automation, while attribution counts the reply for
+  Winter. Within the bound, a tap is almost always a direct answer to the offer; a tap days
   later on an old message, or a quote while scrolling back, is more likely about something else, and
   the follow-up (built for that campaign's offer, perhaps ended) would then mislead. The customer
   service window a reply opens is 24 hours from the reply either way, so the bound does not limit
@@ -18291,7 +18295,10 @@ Decision:
   its templates has is a warning (templates change at Meta). Saving, publishing and testing such an
   automation need `campaigns.read` besides the automations permissions; every role that holds those
   holds it today, so nobody loses anything, and the editor lists no campaign to a member without it.
-  Saving refuses another company's campaign id as an unknown one. The run's page says "A reply to
+  Saving refuses another company's campaign id as an unknown one. A member without the permission
+  never reads a campaign's name: the editor's checks then leave the campaign out (as the browser
+  does without the list), and publishing and testing check the permission before the draft's own
+  checks, whose messages name the campaign. The run's page says "A reply to
   Diwali launch, variant B, tapping “Interested”." with a link to the campaign, the campaign only to
   members with `campaigns.read` (others read that it was a reply to a campaign they cannot see),
   the button only to members who can see the conversation, as the run's answers. A test run of a
@@ -18302,7 +18309,7 @@ Decision:
   `automation.run_ended` and `automation.run_step`, and the first two give `run.campaign` (id,
   name when delivered, variant), null for every other run. The button is not given: like a
   question's answer (ADR-326), it is the customer's reply. Endpoints' run trigger filters
-  (`runTriggers`, ADR-183) take `campaign_reply` (the database check now takes six); a stored list
+  (`runTriggers`, ADR-183) take `campaign_reply` (the database check now takes six, in migration 0327: a transaction of its own, since a run event's delivery reads the endpoints before the runs and 0324 locks the runs); a stored list
   never held it, so an endpoint that chose some triggers keeps receiving exactly those, and one
   that takes every run receives these too. OpenAPI and its schema tests follow. Automations
   themselves are exposed through the API only for those started by the API (ADR-077), so no API

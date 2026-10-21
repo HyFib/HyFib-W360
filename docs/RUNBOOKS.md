@@ -979,12 +979,15 @@ WhatsApp's acceptance of the campaign message (a tap within the same second or s
 message with that WAMID yet and starts what any other message would. The run's page names the
 campaign, the variant and the button to members who may see them.
 
-**Migration 0324 failed.** It runs in one transaction, so a failure applies nothing. It needs
-brief exclusive locks on `app.automation_runs` (replacing a check, `NOT VALID`) and share row
-locks on `app.campaigns` for the new table's foreign key: a lock timeout means a long transaction
-held one of them; run the migrations again in a quieter moment. A failure on
-`webhook_endpoints_run_triggers` means a stored list breaks the new check, which allows every list
-the old one did; report it as a bug.
+**Migration 0324 or 0327 failed.** Each runs in its own transaction, so a failure applies nothing
+of that file. 0324 needs a brief exclusive lock on `app.automation_runs` (replacing a check,
+`NOT VALID`) and share row locks on `app.automation_runs` and `app.campaigns` for the new table's
+foreign keys; 0327 needs a brief exclusive lock on `app.webhook_endpoints` only (they are apart so
+no transaction holds both and deadlocks with a run event's delivery, which reads the endpoints
+first). A lock timeout means a long transaction held one of them: run the migrations again in a
+quieter moment; 0324 applied and 0327 not yet is a safe state (an endpoint just cannot choose
+`campaign_reply` yet). A failure on `webhook_endpoints_run_triggers` means a stored list breaks
+the new check, which allows every list the old one did; report it as a bug.
 
 **Worker restarts and deploys.** Runs are rows, so a restart delays steps but never loses or repeats
 one: queued `automation.run` jobs continue, and runs whose signal was lost are picked up by the sweep

@@ -2091,12 +2091,18 @@ jsonb_path_exists(draft_graph, '$.nodes[*].save[*].from')`, and the same on
    the check stays unvalidated and nothing relies on `convalidated`). It creates the empty table
    `app.automation_run_campaigns` (row security forced, `SELECT` and `INSERT` for the runtime role,
    an update-rejecting trigger, deletion step 688), whose foreign keys take a brief lock on
-   `app.automation_runs` and `app.campaigns` (no rows to check). It replaces
-   `webhook_endpoints_run_triggers` with one taking six triggers, validated at once (at most 10
-   endpoints a company). No index is built on a large table: the reply lookup uses
-   `messages_external_uq` and `campaign_recipients_message_uq`, which exist. No setting is added.
+   `app.automation_runs` and `app.campaigns` (no rows to check). No index is built on a large
+   table: the reply lookup uses `messages_external_uq` and `campaign_recipients_message_uq`, which
+   exist. No setting is added.
 
-   Order: apply 0324, roll out **workers first**, then web servers (the usual order), and publish
+   Migration 0327 (ADR-414) replaces `webhook_endpoints_run_triggers` with one taking six
+   triggers, `campaign_reply` among them, validated at once (at most 10 endpoints a company). It is
+   a file and a transaction of its own because a run event's delivery reads
+   `app.webhook_endpoints` before `app.automation_runs`: one transaction locking the runs (0324)
+   and then the endpoints could deadlock with a delivery, so no transaction holds both. Both run in
+   the same deployment, 0324 first; 0325 and 0326 belong to other changes and may run between them.
+
+   Order: apply 0324 and 0327, roll out **workers first**, then web servers (the usual order), and publish
    automations started by replies to a campaign only once both rollouts end. A worker of the release
    before skips such automations when a reply arrives (it cannot parse the trigger), so nothing
    starts from it; but if a new worker started a run and an older worker took its next step, the
@@ -2115,10 +2121,17 @@ jsonb_path_exists(draft_graph, '$.nodes[*].save[*].from')`, and the same on
    COMMIT;
    ```
 
-   and let their running runs end (or stop them from the run pages). Rolling **web servers** back
+   and let their running runs end (or stop them from the run pages). Webhook deliveries are built
+   when they are sent, so a delivery of such a run still pending when workers are rolled back is
+   built by the older payload code: `run.trigger` `campaign_reply`, a value its schema does not
+   list, and no `run.campaign`. After the pause, wait until the endpoints that take run events
+   have no pending delivery (an endpoint's Deliveries page lists them; run events are captured
+   when a run starts or ends, so none are added once the runs ended), then roll back. An endpoint
+   whose receiver must not see such a body can be disabled instead, which ends its pending
+   deliveries unsent (`endpoint_disabled`). Rolling **web servers** back
    makes such drafts fail to parse in the editor (shown as an invalid trigger), and Settings →
    Webhooks of the release before shows an endpoint that chose `campaign_reply` with a blank label
-   and refuses to save it until it is unticked. The table, column check and endpoint check can stay
+   and refuses to save it until it is unticked. The table, the runs' check and the endpoints' check can stay
    after a rollback; older code never writes `campaign_reply`.
 
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue

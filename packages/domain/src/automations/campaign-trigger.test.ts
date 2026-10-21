@@ -22,7 +22,7 @@ import {
   type CampaignReplyContext,
 } from './graph';
 import { advance, initialRunState, type RunFacts } from './interpreter';
-import { findCampaignReply } from './dispatch';
+import { dispatchInboundToAutomation, findCampaignReply } from './dispatch';
 import { campaignPlaceholderValues } from './run-campaigns';
 
 /** Automations started by replies to a campaign: the trigger, its ranking and its fields (ADR-414). */
@@ -409,5 +409,98 @@ describe('finding the campaign message a reply answers (ADR-414)', () => {
     });
     expect(blank?.buttonText).toBeNull();
     expect(await findCampaignReply(answering([]).tx, input)).toBeNull();
+  });
+});
+
+describe('the dispatcher’s campaign lookup (ADR-414)', () => {
+  /**
+   * A transaction whose reads answer `answers` in order, each query once awaited, and that records
+   * every query; a write or a read past the answers fails the test.
+   */
+  function recording(answers: unknown[][]) {
+    const queue = [...answers];
+    let reads = 0;
+    const query = () => {
+      reads += 1;
+      const chain: Record<string, unknown> = {};
+      for (const method of ['from', 'innerJoin', 'where', 'orderBy', 'limit', 'for']) {
+        chain[method] = () => chain;
+      }
+      chain.then = (resolve: (rows: unknown[]) => unknown, reject: (e: unknown) => unknown) => {
+        const rows = queue.shift();
+        return rows ? resolve(rows) : reject(new Error('an unexpected read'));
+      };
+      return chain;
+    };
+    return {
+      tx: { select: query } as unknown as Parameters<typeof dispatchInboundToAutomation>[0],
+      reads: () => reads,
+      unread: () => queue.length,
+    };
+  }
+  const graph = {
+    version: 1,
+    start: 'say',
+    nodes: [{ id: 'say', type: 'send_text', text: 'Hi', next: null }],
+  };
+  const candidate = (name: string, trigger: unknown) => ({
+    automationId: '0190a3e4-8888-7000-8000-00000000000' + String(name.length % 10),
+    name,
+    versionId: '0190a3e4-9999-7000-8000-000000000009',
+    trigger,
+    graph,
+  });
+  const keywordOnly = candidate('Prices', {
+    type: 'keyword',
+    keywords: ['price'],
+    match: 'contains',
+    hours: 'any',
+    cooldownMinutes: 0,
+  });
+  const input = {
+    tenantId: '0190a3e4-6666-7000-8000-000000000006',
+    conversationId: '0190a3e4-aaaa-7000-8000-00000000000a',
+    channelAccountId: NUMBER,
+    contactId: '0190a3e4-7777-7000-8000-000000000007',
+    assignedMembershipId: null,
+    messageId: '0190a3e4-bbbb-7000-8000-00000000000b',
+    text: 'Interested',
+    newCase: false,
+    consent: null,
+    contextExternalId: 'wamid.HBgLOTE5ODQ1MDEyMzQ1',
+    buttonText: 'Interested',
+    sentAt: new Date('2026-10-21T10:00:00Z'),
+  };
+  const deps = {
+    clock: { now: () => new Date('2026-10-21T10:00:01Z') },
+  } as unknown as Parameters<typeof dispatchInboundToAutomation>[1];
+  const company = [{ status: 'active', timezone: 'Asia/Kolkata' }];
+
+  it('looks nothing up when no active automation starts from replies to a campaign', async () => {
+    const reads = recording([[], company, [keywordOnly]]);
+    expect(await dispatchInboundToAutomation(reads.tx, deps, input)).toBe('none');
+    // The active run, the company and the candidates: no fourth read for a campaign message.
+    expect(reads.reads()).toBe(3);
+    expect(reads.unread()).toBe(0);
+  });
+
+  it('looks the campaign message up once when one does, and not for a message quoting nothing', async () => {
+    const replies = candidate('Diwali follow-up', {
+      type: 'campaign_reply',
+      campaignId: null,
+      button: null,
+      hours: 'any',
+      cooldownMinutes: 0,
+    });
+    // The lookup finds no campaign message, so nothing matches and nothing is written.
+    const found = recording([[], company, [keywordOnly, replies], []]);
+    expect(await dispatchInboundToAutomation(found.tx, deps, input)).toBe('none');
+    expect(found.reads()).toBe(4);
+    expect(found.unread()).toBe(0);
+    const unquoted = recording([[], company, [keywordOnly, replies]]);
+    expect(
+      await dispatchInboundToAutomation(unquoted.tx, deps, { ...input, contextExternalId: null }),
+    ).toBe('none');
+    expect(unquoted.reads()).toBe(3);
   });
 });

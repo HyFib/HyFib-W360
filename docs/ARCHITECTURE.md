@@ -765,7 +765,7 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   the trigger allows them (ADR-240: optimal string alignment per word in `inbox/keywords.ts`), new
   conversation, any message; then name order), subject to business-hours filters, cooldowns and 10
   runs per conversation per hour.
-- **Campaign replies** (ADR-414, migration 0324): when an active automation starts from replies to
+- **Campaign replies** (ADR-414, migrations 0324 and 0327): when an active automation starts from replies to
   a campaign and the message has a `context.id`, `findCampaignReply` finds the outbound message
   of the same number with that WAMID (`messages_external_uq`) and its campaign recipient row
   (`campaign_recipients_message_uq`), of the same contact, queued at most 72 hours before the

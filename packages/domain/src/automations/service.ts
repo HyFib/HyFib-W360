@@ -1149,13 +1149,11 @@ export function createAutomationService(deps: AutomationServiceDeps) {
             trigger.ok && trigger.trigger.type === 'campaign_reply'
               ? trigger.trigger.campaignId
               : null;
-          const campaignRefs = await campaignOptions(
-            tx,
-            ctx.tenant.id,
-            chosenCampaign,
-            seesCampaigns,
-            refs.templates,
-          );
+          // Without the permission nothing about a campaign is read or named, not even in the
+          // checks (the server checks the campaign again when the draft is published).
+          const campaignRefs = seesCampaigns
+            ? await campaignOptions(tx, ctx.tenant.id, chosenCampaign, true, refs.templates)
+            : null;
           if (!trigger.ok) issues.push({ level: 'error', nodeId: null, message: trigger.message });
           else {
             issues.push(...triggerIssues(trigger.trigger, a.draftChannelAccountId));
@@ -1163,7 +1161,7 @@ export function createAutomationService(deps: AutomationServiceDeps) {
               ...campaignTriggerIssues(
                 trigger.trigger,
                 a.draftChannelAccountId,
-                new Map(campaignRefs.map((o) => [o.id, o])),
+                campaignRefs ? new Map(campaignRefs.map((o) => [o.id, o])) : undefined,
               ),
             );
           }
@@ -1260,7 +1258,7 @@ export function createAutomationService(deps: AutomationServiceDeps) {
               dealFields: refs.dealFields,
               flows: refs.flows,
               products: seesCatalogs ? refs.products : null,
-              campaigns: seesCampaigns ? campaignRefs : null,
+              campaigns: campaignRefs,
               fields: fieldRows,
               allowedDomains: refs.domains,
               secrets: refs.secrets,
@@ -1460,8 +1458,10 @@ export function createAutomationService(deps: AutomationServiceDeps) {
           throw new AppError('precondition_failed', 'Restore the automation before publishing it.');
         // The first publication makes the automation live.
         if (row.status === 'draft') await assertLiveAutomationAvailable(tx, ctx.tenant.id, row.id);
+        // Before the draft's checks, whose messages can name the campaign.
+        const draftTrigger = parseTrigger(row.draftTrigger);
+        if (draftTrigger.ok) assertMayFollowCampaigns(ctx, draftTrigger.trigger, 'publish');
         const { trigger, graph } = await runnableDraft(tx, row);
-        assertMayFollowCampaigns(ctx, trigger, 'publish');
         await assertMayUseTemplates(tx, ctx, graph, 'publish');
         assertMayChangeCrm(ctx, graph, 'publish');
         assertMayCheckDeals(ctx, graph, 'publish');
@@ -1666,8 +1666,10 @@ export function createAutomationService(deps: AutomationServiceDeps) {
         const row = await lockAutomation(tx, ctx, data.id, data.expectedVersion);
         if (row.status === 'archived')
           throw new AppError('precondition_failed', 'Restore the automation before testing it.');
+        // Before the draft's checks, whose messages can name the campaign.
+        const draftTrigger = parseTrigger(row.draftTrigger);
+        if (draftTrigger.ok) assertMayFollowCampaigns(ctx, draftTrigger.trigger, 'test');
         const { trigger, graph } = await runnableDraft(tx, row);
-        assertMayFollowCampaigns(ctx, trigger, 'test');
         await assertMayUseTemplates(tx, ctx, graph, 'test');
         assertMayChangeCrm(ctx, graph, 'test');
         assertMayCheckDeals(ctx, graph, 'test');

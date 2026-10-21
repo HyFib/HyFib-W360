@@ -290,7 +290,7 @@ verification, app review, Embedded Signup configuration).
   for members with `automations.read` and `contacts.read`, numbers masked as elsewhere and erased
   contacts named as erased; `GET /automations/{id}/enrollments/{enrollmentId}/contacts` gives them
   by id with `automations.start` and `contacts.read`). **[Runs started by replies to a campaign
-  built; their database and browser tests run only in CI]** (ADR-414, migration 0324: a
+  built; their database and browser tests run only in CI]** (ADR-414, migrations 0324 and 0327: a
   `campaign_reply` trigger starts when a customer quotes a campaign message or taps one of its
   template's quick-reply buttons within 72 hours of its queueing, for any campaign or a chosen one
   and optionally one button's text, ranked above every keyword; the run records the campaign, the

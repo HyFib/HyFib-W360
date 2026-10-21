@@ -534,6 +534,35 @@ describe('automations started by replies to a campaign (ADR-414)', () => {
       }),
       'precondition_failed',
     );
+    // A member who cannot see campaigns never reads the campaign's name: not in the editor's
+    // checks, and not in a refusal to publish or test (the permission is checked first).
+    expect(JSON.stringify(await svc.getAutomation(owner, limited.id))).toContain('Diwali');
+    const blindView = await svc.getAutomation(blind, limited.id);
+    expect(JSON.stringify(blindView)).not.toContain('Diwali');
+    expect(blindView.issues).toEqual([]);
+    for (const attempt of [
+      () =>
+        svc.publishAutomation(blind, {
+          id: limited.id,
+          expectedVersion: limited.version,
+          note: null,
+        }),
+      () =>
+        svc.startTestRun(blind, {
+          id: limited.id,
+          expectedVersion: limited.version,
+          conversationId: person.conversationId,
+        }),
+    ]) {
+      try {
+        await attempt();
+        throw new Error('expected a refusal');
+      } catch (error) {
+        expect(isAppError(error) && error.code, String(error)).toBe('forbidden');
+        expect(JSON.stringify(error)).not.toContain('Diwali');
+        expect(String(error)).not.toContain('Diwali');
+      }
+    }
   });
 
   it('name the campaign on a run’s page only to members who can read campaigns, its button only to those who can see the conversation, and in test runs', async () => {
@@ -629,22 +658,36 @@ describe('automations started by replies to a campaign (ADR-414)', () => {
         [uuidv7(), other.tenant.id, run.id, diwali],
       ),
     ).rejects.toThrow(/automation_run_campaigns_run_fk|automation_run_campaigns_campaign_fk/);
-    // One row per run, variants A to Z, button texts of 1 to 60 characters.
-    for (const [variant, button] of [
-      ['A', null],
-      ['a', null],
-      ['A', ''],
-      ['A', 'x'.repeat(61)],
+    // Variants A to Z and button texts of 1 to 60 characters, each refused by its own check, on a
+    // run that has no row yet (a keyword's), so the one-row-per-run key cannot be what refuses them.
+    await publish(owner, 'Zebra', keyword('zebra'));
+    const plain = await customer(c);
+    await reply(c, plain.from, 'zebra please');
+    const [keywordRun] = await runsIn(plain.conversationId);
+    expect(keywordRun?.trigger_type).toBe('keyword');
+    expect(await answered(keywordRun!.id)).toEqual([]);
+    const insert = (runId: string, variant: string | null, button: string | null) =>
+      fx.query(
+        `INSERT INTO app.automation_run_campaigns (id, tenant_id, run_id, campaign_id, variant, button_text)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [uuidv7(), c.tenant.id, runId, diwali, variant, button],
+      );
+    for (const [variant, button, check] of [
+      ['a', null, 'automation_run_campaigns_variant_check'],
+      ['AB', null, 'automation_run_campaigns_variant_check'],
+      ['A', '', 'automation_run_campaigns_button_text_check'],
+      ['A', 'x'.repeat(61), 'automation_run_campaigns_button_text_check'],
     ] as const) {
-      await expect(
-        fx.query(
-          `INSERT INTO app.automation_run_campaigns (id, tenant_id, run_id, campaign_id, variant, button_text)
-           VALUES ($1, $2, $3, $4, $5, $6)`,
-          [uuidv7(), c.tenant.id, run.id, diwali, variant, button],
-        ),
-        `${variant} ${button}`,
-      ).rejects.toThrow();
+      await expect(insert(keywordRun!.id, variant, button), `${variant} ${button}`).rejects.toThrow(
+        new RegExp(check),
+      );
     }
+    // The bounds themselves are taken, and a second row for the same run is refused by the key.
+    await insert(keywordRun!.id, 'Z', 'x'.repeat(60));
+    await expect(insert(keywordRun!.id, 'A', null)).rejects.toThrow(
+      /automation_run_campaigns_run_uq/,
+    );
+    await expect(insert(run.id, null, null)).rejects.toThrow(/automation_run_campaigns_run_uq/);
     // The runs' trigger check takes the new trigger and still refuses unknown ones (0324).
     const [check] = await fx.query<{ definition: string }>(
       `SELECT pg_get_constraintdef(oid) AS definition FROM pg_constraint

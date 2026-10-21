@@ -6,6 +6,8 @@
 -- hours of the recipient being queued. The dispatcher finds the campaign through two unique indexes
 -- that already exist: `messages_external_uq` (tenant, number, WAMID; 0003) and
 -- `campaign_recipients_message_uq` (tenant, message; 0006), so no index is added for the lookup.
+-- Webhook endpoints' run trigger filters take the trigger in 0327, a transaction of its own, so this
+-- one never holds the runs' lock and the endpoints' together.
 
 -- Runs ---------------------------------------------------------------------------------------------
 -- The run records what started it (0011). The check is replaced NOT VALID, so app.automation_runs is
@@ -60,18 +62,3 @@ CREATE POLICY tenant_deletion_read ON app.automation_run_campaigns FOR SELECT TO
   USING (tenant_id = (SELECT ops.deleting_tenant_id()));
 CREATE POLICY tenant_deletion_delete ON app.automation_run_campaigns FOR DELETE TO w360_definer
   USING (tenant_id = (SELECT ops.deleting_tenant_id()));
-
--- Webhook endpoints' run trigger filters (0131, 0247) take the new trigger: a list holds 1 to 6 of
--- the triggers `run.trigger` names. A company has at most 10 endpoints, so the table is small and
--- the check is validated here, as 0131 and 0247 did. Endpoints with a list keep receiving exactly
--- what they chose (a run of the new trigger is in no stored list); those without one receive every
--- run, these included.
-ALTER TABLE app.webhook_endpoints
-  DROP CONSTRAINT webhook_endpoints_run_triggers,
-  ADD CONSTRAINT webhook_endpoints_run_triggers CHECK (
-    run_triggers IS NULL
-    OR (cardinality(run_triggers) BETWEEN 1 AND 6
-        AND run_triggers <@ ARRAY['keyword', 'conversation_started', 'any_message', 'store_event',
-                                  'api', 'campaign_reply']::text[]
-        AND event_types && ARRAY['automation.run_started', 'automation.run_ended',
-                                 'automation.run_step']::text[]));

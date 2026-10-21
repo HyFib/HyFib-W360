@@ -1040,10 +1040,12 @@ const triggerCommon = {
 
 /**
  * How long after a campaign message was queued a reply to it may start an automation (ADR-414): the
- * window in which campaign attribution counts a reply for the campaign (`ATTRIBUTION_WINDOW_HOURS`,
- * campaigns/attribution.ts; a unit test keeps the two equal), so a run starts only for a reply the
- * campaign's results count as one. A reply quoting an older campaign message starts what any other
- * message would start.
+ * same 72-hour bound as campaign attribution's (`ATTRIBUTION_WINDOW_HOURS`, campaigns/attribution.ts;
+ * a unit test keeps the two equal). They share the bound, not the rule: attribution is last touch
+ * (the most recent delivered campaign message to the contact on the number), while the trigger
+ * follows the message the reply quotes, so a tap on an older campaign's message within the bound
+ * starts that campaign's automation while attribution counts the newer campaign. A reply quoting a
+ * message queued earlier starts what any other message would start.
  */
 export const CAMPAIGN_REPLY_HOURS = 72;
 

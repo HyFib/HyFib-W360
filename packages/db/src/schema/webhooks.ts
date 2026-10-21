@@ -328,7 +328,7 @@ export type WebhookRunTrigger =
   | 'any_message'
   | 'store_event'
   | 'api'
-  /** A reply to a campaign message (migration 0324, ADR-414). */
+  /** A reply to a campaign message (migration 0327, ADR-414). */
   | 'campaign_reply';
 
 /**
