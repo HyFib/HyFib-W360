@@ -10,8 +10,6 @@ import {
   eq,
   inArray,
   messageTemplates,
-  automationRuns,
-  ACTIVE_RUN_STATUSES,
   sql,
   type CampaignStatus,
   type Database,
@@ -72,16 +70,17 @@ export interface TemplateUsage {
    * Campaigns not finished yet that send it, `running` ones sending it now. A name is null for a
    * member who may not read campaigns (as for automations and stores below).
    */
-  campaigns: { id: string; name: string | null; status: CampaignStatus }[];
+  campaigns: { id: string | null; name: string | null; status: CampaignStatus }[];
+  // An id is null, as the name, for an item the caller may not read (`maskUsage`).
   /** Published automations (active or paused) whose live version has a step sending it. */
-  automations: { id: string; name: string | null; status: string }[];
+  automations: { id: string | null; name: string | null; status: string }[];
   /**
    * Automations with runs in progress (running or waiting) on a version that sends it, whatever
    * version is live now: each run keeps its own version, so they rely on the template too.
    */
-  automationRuns: { id: string; name: string | null; runs: number }[];
+  automationRuns: { id: string | null; name: string | null; runs: number }[];
   /** Order message and cart reminder rules of the company's stores that send it. */
-  storeRules: { id: string; storeName: string | null; event: string; enabled: boolean }[];
+  storeRules: { id: string | null; storeName: string | null; event: string; enabled: boolean }[];
 }
 
 /** Where the template is used (at most 50 of each kind), in the company's scope. */
@@ -121,37 +120,29 @@ export async function templateUsage(
     )
     .orderBy(asc(automations.name), asc(automations.id))
     .limit(USAGE_LIMIT);
-  const runRows = await tx
-    .select({
-      id: automations.id,
-      name: automations.name,
-      runs: sql<number>`count(*)::int`,
-    })
-    .from(automationRuns)
-    .innerJoin(
-      automationVersions,
-      and(
-        eq(automationVersions.tenantId, automationRuns.tenantId),
-        eq(automationVersions.id, automationRuns.versionId),
-      ),
-    )
-    .innerJoin(
-      automations,
-      and(
-        eq(automations.tenantId, automationRuns.tenantId),
-        eq(automations.id, automationRuns.automationId),
-      ),
-    )
-    .where(
-      and(
-        eq(automationRuns.tenantId, tenantId),
-        inArray(automationRuns.status, [...ACTIVE_RUN_STATUSES]),
-        sql`jsonb_path_exists(${automationVersions.graph}, '$.nodes[*] ? (@.templateId == $id)', jsonb_build_object('id', ${templateId}::text))`,
-      ),
-    )
-    .groupBy(automations.id, automations.name)
-    .orderBy(asc(automations.name), asc(automations.id))
-    .limit(USAGE_LIMIT);
+  // Active runs grouped by version first, so each version's graph is tested once, not once per
+  // run; the versions that send the template are then summed per automation.
+  const runRows = (
+    await tx.execute<{ id: string; name: string; runs: number | string }>(sql`
+      with versions as (
+        select r.version_id, count(*) as runs
+          from app.automation_runs r
+         where r.tenant_id = ${tenantId} and r.status in ('running', 'waiting')
+         group by r.version_id
+      ), sending as (
+        select v.automation_id, versions.runs
+          from versions
+          join app.automation_versions v on v.tenant_id = ${tenantId} and v.id = versions.version_id
+         where jsonb_path_exists(v.graph, '$.nodes[*] ? (@.templateId == $id)',
+                                 jsonb_build_object('id', ${templateId}::text))
+      )
+      select a.id, a.name, sum(sending.runs)::int as runs
+        from sending
+        join app.automations a on a.tenant_id = ${tenantId} and a.id = sending.automation_id
+       group by a.id, a.name
+       order by a.name, a.id
+       limit ${USAGE_LIMIT}`)
+  ).rows;
   const ruleRows = await tx
     .select({
       id: commerceStoreMessageRules.id,
@@ -179,7 +170,7 @@ export async function templateUsage(
   return {
     campaigns: campaignRows,
     automations: automationRows,
-    automationRuns: runRows.map((r) => ({ ...r, runs: Number(r.runs) })),
+    automationRuns: runRows.map((r) => ({ id: r.id, name: r.name, runs: Number(r.runs) })),
     storeRules: ruleRows,
   };
 }
@@ -206,31 +197,30 @@ export interface UsageVisibility {
  * "a store" then stand for them (ADR-404). The Templates page and a refusal both show it so.
  */
 export function maskUsage(usage: TemplateUsage, visible: UsageVisibility): TemplateUsage {
+  const published = new Set(usage.automations.map((a) => a.id));
   return {
-    campaigns: usage.campaigns.map((c) => ({ ...c, name: visible.campaigns ? c.name : null })),
-    automations: usage.automations.map((a) => ({
-      ...a,
-      name: visible.automations ? a.name : null,
-    })),
-    automationRuns: usage.automationRuns.map((a) => ({
-      ...a,
-      name: visible.automations ? a.name : null,
-    })),
-    storeRules: usage.storeRules.map((r) => ({
-      ...r,
-      storeName: visible.stores ? r.storeName : null,
-    })),
+    campaigns: usage.campaigns.map((c) => (visible.campaigns ? c : { ...c, id: null, name: null })),
+    automations: usage.automations.map((a) =>
+      visible.automations ? a : { ...a, id: null, name: null },
+    ),
+    // A published automation is not listed again for its runs; that is decided before ids go.
+    automationRuns: usage.automationRuns
+      .filter((a) => !published.has(a.id))
+      .map((a) => (visible.automations ? a : { ...a, id: null, name: null })),
+    storeRules: usage.storeRules.map((r) =>
+      visible.stores ? r : { ...r, id: null, storeName: null },
+    ),
   };
 }
 
 /** What uses the template, as a refusal names it ("campaign “Diwali”", …). */
 export function usageLabels(usage: TemplateUsage): string[] {
-  const published = new Set(usage.automations.map((a) => a.id));
+  const published = new Set(usage.automations.flatMap((a) => (a.id ? [a.id] : [])));
   return [
     ...usage.campaigns.map((c) => (c.name ? `campaign “${c.name}”` : 'a campaign')),
     ...usage.automations.map((a) => (a.name ? `automation “${a.name}”` : 'an automation')),
     ...usage.automationRuns
-      .filter((a) => !published.has(a.id))
+      .filter((a) => a.id === null || !published.has(a.id))
       .map(
         (a) =>
           `${a.name ? `automation “${a.name}”` : 'an automation'} (${a.runs} ${a.runs === 1 ? 'run' : 'runs'} in progress)`,
@@ -325,6 +315,7 @@ export async function writeEditTemplate(
       editRequestedAt: sql`now()`,
       editRequestedByUserId: actorUserId,
       editAttemptedAt: null,
+      editFailedAt: null,
       // A new request: an earlier deferral for a pause no longer applies (ADR-399).
       managementDeferredUntil: null,
       version: sql`${messageTemplates.version} + 1`,
@@ -371,6 +362,7 @@ const EDIT_CLEARED = {
   editRequestedAt: null,
   editRequestedByUserId: null,
   editAttemptedAt: null,
+  editFailedAt: null,
   managementDeferredUntil: null,
 } as const;
 
@@ -500,7 +492,12 @@ async function settleEditFailed(
   if (!(await lockOpenEdit(tx, tenantId, row.id, row.editId, ['sending']))) return false;
   await tx
     .update(messageTemplates)
-    .set({ editState: 'failed', editError: error.slice(0, 1000), managementDeferredUntil: null })
+    .set({
+      editState: 'failed',
+      editError: error.slice(0, 1000),
+      editFailedAt: sql`now()`,
+      managementDeferredUntil: null,
+    })
     .where(and(eq(messageTemplates.tenantId, tenantId), eq(messageTemplates.id, row.id)));
   await insertStatusEvent(tx, tenantId, {
     templateId: row.id,

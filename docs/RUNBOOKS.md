@@ -448,8 +448,8 @@ Meta approves it is not confirmed (research M-201): if it does not, a lost answe
 also sends an edit without the template's name and language, which Meta's only example includes;
 if Meta refuses edits for that, its message says so and the refusal is shown as usual. An edit is
 sent at most once: a job run again after its attempt, or after a 5xx that paused the account, only
-asks for a sync. A failed edit keeps its account synced every 5 minutes for an hour after the
-request, so an edit Meta applies late is confirmed then (later, at the 6-hourly sync). Check the
+asks for a sync. A failed edit keeps its account synced every 5 minutes for an hour after it
+failed, so an edit Meta applies late is confirmed then (later, at the 6-hourly sync). Check the
 `template.edit` and `template.sync` queues on Operations → Queues.
 
 **Meta refused a template edit.** The page and the API (`edit.error`) give Meta's code and message

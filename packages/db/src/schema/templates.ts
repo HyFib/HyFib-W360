@@ -81,6 +81,8 @@ export const messageTemplates = appSchema.table('message_templates', {
   editRequestedByUserId: text('edit_requested_by_user_id'),
   /** When the job committed its one attempt to send the edit (the database's time). */
   editAttemptedAt: tz('edit_attempted_at'),
+  /** When the edit failed (the database's time); the sweep keeps syncing it for an hour. */
+  editFailedAt: tz('edit_failed_at'),
   lastSyncedAt: tz('last_synced_at'),
   createdAt: tz('created_at').notNull().defaultNow(),
   updatedAt: tz('updated_at').notNull().defaultNow(),

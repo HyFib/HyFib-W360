@@ -53,15 +53,6 @@ import {
   writeEditTemplate,
   type UsageVisibility,
 } from './edit';
-
-/** The usage names a member may read: those their read permissions cover (ADR-404). */
-export function memberVisibility(ctx: TenantContext): UsageVisibility {
-  return {
-    campaigns: can(ctx, 'campaigns.read'),
-    automations: can(ctx, 'automations.read'),
-    stores: can(ctx, 'commerce.read'),
-  };
-}
 import { templateEditBlocker } from './edit-model';
 import {
   enqueueTemplateJob,
@@ -73,6 +64,15 @@ import {
 } from './shared';
 
 export { PROVIDER_TEMPLATE_STATUS, mapProviderTemplateStatus, wabaCredential } from './shared';
+
+/** The usage names a member may read: those their read permissions cover (ADR-404). */
+export function memberVisibility(ctx: TenantContext): UsageVisibility {
+  return {
+    campaigns: can(ctx, 'campaigns.read'),
+    automations: can(ctx, 'automations.read'),
+    stores: can(ctx, 'commerce.read'),
+  };
+}
 
 /**
  * WhatsApp message templates. Local states (`draft`, `submitting`, `submit_failed`) exist before

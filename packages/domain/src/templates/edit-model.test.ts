@@ -495,6 +495,28 @@ describe('names a caller may not read', () => {
     ).toBe('a store’s order shipped message');
   });
 
+  it('leave out the ids of what the caller may not read, and list a published automation once', () => {
+    const masked = maskUsage(
+      {
+        ...usage,
+        automationRuns: [...usage.automationRuns, { id: 'a1', name: 'Follow-up', runs: 2 }],
+      },
+      { campaigns: false, automations: false, stores: false },
+    );
+    expect(masked).toEqual({
+      campaigns: [{ id: null, name: null, status: 'draft' }],
+      automations: [{ id: null, name: null, status: 'active' }],
+      automationRuns: [{ id: null, name: null, runs: 3 }],
+      storeRules: [{ id: null, storeName: null, event: 'order_shipped', enabled: true }],
+    });
+    expect(usageLabels(masked)).toEqual([
+      'a campaign',
+      'an automation',
+      'an automation (3 runs in progress)',
+      'a store’s order shipped message',
+    ]);
+  });
+
   it('for a key: campaigns with campaigns.read, never automations or stores', () => {
     const key = (scopes: string[]) =>
       ({
@@ -516,14 +538,18 @@ describe('names a caller may not read', () => {
 });
 
 describe('which refusals prove Meta did nothing', () => {
-  it('a 429 or a rate-limit code; not a 5xx or a transient code', () => {
-    expect(isRateLimited({ httpStatus: 429 })).toBe(true);
+  it('a retryable 429 or rate-limit code; not a 5xx, a transient code or another kind', () => {
+    const retryable = 'retryable' as const;
+    expect(isRateLimited({ kind: retryable, httpStatus: 429 })).toBe(true);
     for (const code of [4, 17, 32, 613, 80007, 130429, 131056]) {
-      expect(isRateLimited({ httpStatus: 400, code })).toBe(true);
+      expect(isRateLimited({ kind: retryable, httpStatus: 400, code })).toBe(true);
     }
-    expect(isRateLimited({ httpStatus: 500, code: 1 })).toBe(false);
-    expect(isRateLimited({ httpStatus: 500, code: 2 })).toBe(false);
-    expect(isRateLimited({ httpStatus: 503, code: 131000 })).toBe(false);
-    expect(isRateLimited({})).toBe(false);
+    expect(isRateLimited({ kind: retryable, httpStatus: 500, code: 1 })).toBe(false);
+    expect(isRateLimited({ kind: retryable, httpStatus: 500, code: 2 })).toBe(false);
+    expect(isRateLimited({ kind: retryable, httpStatus: 503, code: 131000 })).toBe(false);
+    expect(isRateLimited({ kind: retryable })).toBe(false);
+    // Only a retryable answer: an auth or permanent kind with such a code is not one.
+    expect(isRateLimited({ kind: 'auth', httpStatus: 400, code: 4 })).toBe(false);
+    expect(isRateLimited({ kind: 'permanent', httpStatus: 429 })).toBe(false);
   });
 });

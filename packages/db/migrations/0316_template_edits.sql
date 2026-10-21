@@ -34,6 +34,7 @@ ALTER TABLE app.message_templates
   ADD COLUMN edit_requested_at timestamptz,
   ADD COLUMN edit_requested_by_user_id text REFERENCES auth.users (id),
   ADD COLUMN edit_attempted_at timestamptz,
+  ADD COLUMN edit_failed_at timestamptz,
   ADD CONSTRAINT message_templates_edit_shape
     CHECK (edit_state IS NULL
            OR (edit_id IS NOT NULL AND edit_components IS NOT NULL AND edit_requested_at IS NOT NULL));
@@ -41,10 +42,10 @@ ALTER TABLE app.message_templates
 -- The web app and the worker write the edit in the company's scope (the table's RLS applies); the
 -- runtime role already selects every column of the table (0005).
 GRANT UPDATE (edit_id, edit_state, edit_components, edit_error, edit_requested_at,
-              edit_requested_by_user_id, edit_attempted_at)
+              edit_requested_by_user_id, edit_attempted_at, edit_failed_at)
   ON app.message_templates TO w360_app;
--- The sweep's due list below reads an edit's state and request time, and nothing else of it.
-GRANT SELECT (edit_state, edit_requested_at) ON app.message_templates TO w360_definer;
+-- The sweep's due list below reads an edit's state and when it failed, and nothing else of it.
+GRANT SELECT (edit_state, edit_failed_at) ON app.message_templates TO w360_definer;
 
 -- Status history records the edit (asked, refused, made) under its own source. The check is
 -- replaced and validated at once: the table is append-only and holds a few rows per template, and
@@ -54,9 +55,9 @@ ALTER TABLE app.template_status_events ADD CONSTRAINT template_status_events_sou
   CHECK (source IN ('submit', 'sync', 'send', 'delete', 'edit'));
 
 -- Template syncs: the due list of 0310, which also syncs every 5 minutes an account with an edit
--- still sending, so a lost answer is settled within its window, and for an hour after its request
--- one whose edit failed, so an edit Meta applies late is confirmed within minutes, not at the
--- 6-hourly sync. The owner drops the function and
+-- still sending, so a lost answer is settled within its window, and for an hour after it failed
+-- (`edit_failed_at`, the database's time, whatever pause came before) one whose edit failed, so an
+-- edit Meta applies late is confirmed within minutes, not at the 6-hourly sync. The owner drops the function and
 -- the migration role creates it again, granting before handing it back (see 0011).
 SET ROLE w360_definer;
 DROP FUNCTION ops.template_sync_due(integer);
@@ -86,7 +87,7 @@ CREATE FUNCTION ops.template_sync_due(p_limit integer)
                                  AND (m.status IN ('submitting', 'pending', 'in_appeal')
                                       OR m.edit_state = 'sending'
                                       OR (m.edit_state = 'failed'
-                                          AND m.edit_requested_at > now() - interval '1 hour')))))
+                                          AND m.edit_failed_at > now() - interval '1 hour')))))
     ) d
    ORDER BY d.requested DESC,
             CASE WHEN d.requested THEN d.templates_sync_requested_at END,

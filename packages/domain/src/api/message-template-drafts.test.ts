@@ -1155,6 +1155,7 @@ describe('editing a template Meta has through the API (ADR-404)', () => {
         editRequestedAt: 'now()',
         editRequestedByUserId: 'user-1',
         editAttemptedAt: null,
+        editFailedAt: null,
         managementDeferredUntil: null,
         version: VERSION_PLUS_ONE,
       },

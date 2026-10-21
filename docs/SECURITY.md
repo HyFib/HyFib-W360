@@ -146,7 +146,8 @@ Phase 3 rules on top of the matrix (enforced in domain services and re-checked w
   matrix); a member whose company removed one of those sees the item without its name, in the
   list and in the refusal of an edit that changes the template's variables or buttons alike. A key
   sees campaign names in that refusal only with the `campaigns.read` scope, and never automation or
-  store names (no scope reads them): "a campaign", "an automation", "a store" stand for them. Audit:
+  store names (no scope reads them): "a campaign", "an automation", "a store" stand for them, and
+  the page carries no id of such an item. Audit:
   `template.edit_requested`, `template.edited`, `template.edit_failed`.
 - A campaign's messaging-limit notice (ADR-400): members with `campaigns.read` see the sending
   number's messaging limit, as Meta last reported it, in a draft's review and on the page of a

@@ -21,8 +21,9 @@ type TemplateKind = 'template.submit' | 'template.delete' | 'template.edit' | 't
 
 /**
  * Template jobs: the template (or WABA) row is the source of truth and each job re-reads it under
- * the company's RLS scope. Only a connection that failed before sending is retried automatically;
- * lost responses are settled by the next sync (see templates/service).
+ * the company's RLS scope. Only work Meta certainly did not do is retried automatically: a
+ * connection that failed before sending, and for an edit also a rate limit that paused nothing
+ * (ADR-404); lost responses are settled by the next sync (see templates/service and edit).
  */
 function templateHandler(
   rt: WorkerRuntime,

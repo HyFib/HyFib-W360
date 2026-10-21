@@ -317,13 +317,13 @@ describe('editing a template Meta has', () => {
       expect(await due()).toEqual([c.whatsappAccountId]);
       // A failed edit keeps it due for an hour after its request (a late-applied edit is confirmed).
       await client.query(
-        `UPDATE app.message_templates SET edit_state = 'failed'
+        `UPDATE app.message_templates SET edit_state = 'failed', edit_failed_at = now()
           WHERE whatsapp_account_id = $1 AND edit_state = 'sending'`,
         [c.whatsappAccountId],
       );
       expect(await due()).toEqual([c.whatsappAccountId]);
       await client.query(
-        `UPDATE app.message_templates SET edit_requested_at = now() - interval '61 minutes'
+        `UPDATE app.message_templates SET edit_failed_at = now() - interval '61 minutes'
           WHERE whatsapp_account_id = $1 AND edit_state = 'failed'`,
         [c.whatsappAccountId],
       );
@@ -667,7 +667,7 @@ describe('an edit’s one attempt and its window (ADR-404 review)', () => {
     });
   });
 
-  it('gives the runtime role alone the edit columns, and the definer only the state and request time to read (migration 0316)', async () => {
+  it('gives the runtime role alone the edit columns, and the definer only the state and failure time to read (migration 0316)', async () => {
     const rows = await fx.query<{
       c: string;
       app_update: boolean;
@@ -683,7 +683,8 @@ describe('an edit’s one attempt and its window (ADR-404 review)', () => {
                 AS definer_update,
               has_column_privilege('public', 'app.message_templates', c, 'UPDATE') AS public_update
          FROM (VALUES ('edit_id'), ('edit_state'), ('edit_components'), ('edit_error'),
-                      ('edit_requested_at'), ('edit_requested_by_user_id'), ('edit_attempted_at')) AS v(c)
+                      ('edit_requested_at'), ('edit_requested_by_user_id'), ('edit_attempted_at'),
+                      ('edit_failed_at')) AS v(c)
         ORDER BY c`,
     );
     expect(rows).toEqual(
@@ -691,6 +692,7 @@ describe('an edit’s one attempt and its window (ADR-404 review)', () => {
         'edit_attempted_at',
         'edit_components',
         'edit_error',
+        'edit_failed_at',
         'edit_id',
         'edit_requested_at',
         'edit_requested_by_user_id',
@@ -698,7 +700,7 @@ describe('an edit’s one attempt and its window (ADR-404 review)', () => {
       ].map((c) => ({
         c,
         app_update: true,
-        definer_select: c === 'edit_state' || c === 'edit_requested_at',
+        definer_select: c === 'edit_state' || c === 'edit_failed_at',
         definer_update: false,
         public_update: false,
       })),
@@ -716,11 +718,12 @@ describe('runs pinned to an older automation version (ADR-404 second review)', (
       [c.tenant.id, c.owner.id],
     );
     // A customer's conversation, for the run.
-    await fx.deliver(fx.messagesBody(c, { messages: [{ text: 'Hello' }] }));
+    await fx.deliver(fx.messagesBody(c, { messages: [{ waId: '919855500404', text: 'Hello' }] }));
     const [conversation] = await fx.query<{ id: string; contact_id: string }>(
       'SELECT id, contact_id FROM app.conversations WHERE tenant_id = $1 LIMIT 1',
       [c.tenant.id],
     );
+    expect(conversation, 'the customer’s message opened a conversation').toBeTruthy();
     const automation = uuidv7();
     const v1 = uuidv7();
     const v2 = uuidv7();
@@ -759,8 +762,8 @@ describe('runs pinned to an older automation version (ADR-404 second review)', (
     const run = uuidv7();
     await fx.query(
       `INSERT INTO app.automation_runs (id, tenant_id, automation_id, version_id, conversation_id,
-              contact_id, channel_account_id, trigger_type)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, 'keyword')`,
+              contact_id, channel_account_id, trigger_type, next_step_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'keyword', now())`,
       [
         run,
         c.tenant.id,
@@ -790,7 +793,8 @@ describe('runs pinned to an older automation version (ADR-404 second review)', (
     // Once the run has ended, the same change is allowed.
     await fx.query(
       `UPDATE app.automation_runs
-          SET status = 'stopped', ended_at = now(), end_reason = 'automation_archived'
+          SET status = 'stopped', ended_at = now(), end_reason = 'automation_archived',
+              next_step_at = NULL
         WHERE id = $1`,
       [run],
     );
@@ -860,7 +864,8 @@ describe('answers that pause the account (ADR-404 second review)', () => {
     await templates.editTemplate(owner, id, { definition: delayed });
     const ref = await editRef(id);
     fx.standIn.state.templateEditQueue = [
-      { kind: 'error', status: 400, code: 80007, message: 'Rate limit hit' },
+      // HTTP 429 with a header that pauses the account.
+      { kind: 'error', status: 429, code: 80007, message: 'Rate limit hit' },
     ];
     fx.standIn.state.usageHeader = usageHeaderValue({ [c.wabaId]: { regainMinutes: 5 } });
     expect(await processTemplateEdit(workerDeps(), scopeOf(c), ref)).toMatchObject({

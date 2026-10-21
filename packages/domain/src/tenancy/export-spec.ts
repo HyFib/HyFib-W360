@@ -1354,6 +1354,7 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
       'edit_requested_at',
       'edit_requested_by_user_id',
       'edit_attempted_at',
+      'edit_failed_at',
       'last_synced_at',
       'created_at',
       'updated_at',

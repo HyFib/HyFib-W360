@@ -17469,7 +17469,9 @@ Second review (before merge): no High issue; four Mediums and the rest fixed:
 - **Failed edits stay due for an hour:** `ops.template_sync_due` also syncs every 5 minutes an
   account with an edit that failed within the last hour, so an edit Meta applies late is confirmed
   within minutes rather than at the 6-hourly sync; later than an hour, the routine sync confirms
-  it. The definer also reads `edit_requested_at` for this.
+  it. The hour counts from the failure (`edit_failed_at`, migration 0316, the database's time),
+  so a pause before it does not use it up (third review); the definer reads that column and
+  `edit_state` only.
 - **The shape is broader than each sender needs (accepted):** quick-reply titles and positions
   matter only to automation asking steps and store cash-on-delivery rules, and link positions to
   link values; campaigns and other steps compare counts only. HyFib refuses any shape change while
@@ -17480,6 +17482,15 @@ Second review (before merge): no High issue; four Mediums and the rest fixed:
   member who asked for it (`edited`, their name), even if the content reached Meta through
   WhatsApp Manager instead; HyFib cannot tell the two apart.
 - **Rollback note:** DEPLOYMENT now gives a statement that works under forced row security.
+
+Third review (before merge): the production code was found sound. Fixed: the pinned-version runs
+integration test now delivers its customer's message with a WhatsApp id and writes the run's
+`next_step_at` as the table's checks require (started and stopped); the failed edit's fast sync
+counts its hour from the failure (`edit_failed_at`, the database's time) rather than the request,
+so a pause before it does not use it up; the runs in progress are grouped by version first, so
+each version's graph is tested once rather than once per run; `isRateLimited` also requires a
+retryable answer; a member's masked usage carries no ids of what they may not read (run counts
+stay); the rollback steps in DEPLOYMENT say how to reach `w360_definer`, which cannot log in.
 
 ## ADR-405 A/B template variants for campaigns (P3-04, P5-08, P5-09) (2026-10-21)
 

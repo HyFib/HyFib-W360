@@ -152,12 +152,23 @@ broader than each sender needs; the credit of a late confirmation. Hand mutation
 branches: 10/11 caught by the unit tests; the eleventh (the refusal's masking inside
 `writeEditTemplate`) is covered only by a new integration test, run in CI.
 
+### Third review fixes (before merge)
+
+The production code was found sound. Fixed (ADR-404's third review): the pinned-version runs
+integration test (a customer message with a WhatsApp id, and the run's `next_step_at` per the
+table's checks; every raw insert and update in the new tests was re-read against the checks and
+NOT NULL columns); the failed edit's fast sync counts from the failure (`edit_failed_at`); the
+runs query tests each version's graph once; `isRateLimited` requires a retryable answer; masked
+usage drops ids; DEPLOYMENT's rollback reaches `w360_definer` through `SET ROLE`; the worker's
+comment and `memberVisibility`'s place. The rate-limit integration test now answers HTTP 429 with
+a pausing header.
+
 ### Test commands and results (local, 2026-10-21)
 
 | Command                                        | Result                                                                        |
 | ---------------------------------------------- | ----------------------------------------------------------------------------- |
 | `eslint`, `prettier --check`, `pnpm typecheck` | clean                                                                         |
-| `pnpm test` (unit)                             | 1,984 of 1,984 passed (180 files)                                             |
+| `pnpm test` (unit)                             | 1,985 of 1,985 passed (180 files)                                             |
 | `pnpm build`                                   | passed                                                                        |
 | migration parse (pglast)                       | 0316 parses                                                                   |
 | `pnpm test:integration`, `pnpm test:e2e`       | not run here: the local PostgreSQL and browsers are unavailable; CI runs them |
