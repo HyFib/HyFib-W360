@@ -1206,7 +1206,12 @@ export const apiAutomationEnrollmentSchema = z.object({
   source: z
     .enum(AUTOMATION_ENROLLMENT_SOURCES)
     .describe('contacts: the contacts filters found; segment: a saved segment’s members.'),
-  segmentId: z.uuid().nullable().describe('The segment, for a segment’s members; null otherwise.'),
+  segmentId: z
+    .uuid()
+    .nullable()
+    .describe(
+      'The segment, for a segment’s members, given only to a key that reads segments (`campaigns.read`); null otherwise.',
+    ),
   status: z
     .enum(AUTOMATION_ENROLLMENT_STATUSES)
     .describe(
@@ -1551,13 +1556,13 @@ export const apiWebhookEndpointSchema = z.object({
     .array(z.enum(WEBHOOK_RUN_TRIGGERS))
     .nullable()
     .describe(
-      'What started the runs whose events (automation.run_started, automation.run_ended and automation.run_step) the endpoint receives, as run.trigger names it; null receives every run. api takes both the runs API keys started and the runs members’ enrolments started (run.apiKeyId or run.enrollmentId says which); runApiKeyIds narrows to keys’ runs.',
+      'What started the runs whose events (automation.run_started, automation.run_ended and automation.run_step) the endpoint receives, as run.trigger names it; null receives every run. api takes both the runs API keys started and the runs enrolments started, by a member or an API key (run.apiKeyId or run.enrollmentId says which); runApiKeyIds narrows to the runs keys started one by one.',
     ),
   runApiKeyIds: z
     .array(z.uuid())
     .nullable()
     .describe(
-      'The API keys whose runs (automation.run_started, automation.run_ended and automation.run_step) the endpoint receives, as run.apiKeyId names them: the runs one of them started through the API, or a key one of them was rotated from or into. A run started otherwise is not received. null receives every run.',
+      'The API keys whose runs (automation.run_started, automation.run_ended and automation.run_step) the endpoint receives, as run.apiKeyId names them: the runs one of them started through the API, or a key one of them was rotated from or into. A run started otherwise is not received. A run an enrolment started, a key’s enrolment included, carries no key (run.apiKeyId null, run.enrollmentId set), so a list of keys never matches it. null receives every run.',
     ),
   consentChanges: z
     .array(z.enum(WEBHOOK_CONSENT_CHANGES))
@@ -3699,7 +3704,7 @@ export function buildOpenApiDocument(serverUrl: string) {
           operationId: 'startAutomationEnrollment',
           summary: 'Enrol contacts or a segment in an automation',
           description: [
-            `${scopeNote('automations.start')} Also needs \`contacts.read\`, \`campaigns.read\` for a segment, the scopes that read a segment's conditions on conversations (\`conversations.read\`) or store orders (\`orders.read\`), and \`messages.send_marketing\` when the automation sends marketing templates. Enrols in a published, active automation started by a member or through the API either a saved segment's members (\`segmentId\`) or the contacts a tag and marketing consent find (\`contacts.conditions\`, written as POST /contacts/search writes them: the Contacts page's filters), with every input its trigger declares, once for everyone.`,
+            `${scopeNote('automations.start')} Also needs \`contacts.read\`, \`campaigns.read\` for a segment, the scopes that read a segment's conditions on conversations (\`conversations.read\`) or store orders (\`orders.read\`), and \`messages.send_marketing\` when the automation sends marketing templates. Enrols in a published, active automation started by a member or through the API either a saved segment's members (\`segmentId\`) or the contacts a tag and marketing consent find (\`contacts.conditions\`, written as POST /contacts/search writes them: the Contacts page's filters, one condition at least; none is refused with 422, so a call never enrols every contact unasked: enrol a segment for that), with every input its trigger declares, once for everyone. With \`expectedCount\`, a snapshot of another number of contacts is refused with 409, enrolling nobody, as a member's enrolment is when its count changed.`,
             `The contacts are counted and snapshotted now, in contact id order: 1 to ${ENROLLMENT_LIMITS.contacts.toLocaleString('en-US')} (422 otherwise; send a campaign to more); contacts matching later are not enrolled. Runs then start in the background in batches of ${ENROLLMENT_LIMITS.batch}, paced by the number's send rate, each contact with the checks of POST /automations/{id}/runs (a refused contact is counted with its reason and the others go on). One enrolment of an automation runs at a time: another is refused with 409 (reason \`enrollment_running\`, naming it).`,
             'Each batch checks the key again as a request would: a key revoked or expired since, a plan that no longer includes the API or a scope this needs, ends the enrolment (`stopped`, with the reason); contacts not handled are not started and runs already started go on. The call counts as one request; batches count none. Runs it starts send `automation.run_started` and the other run events with `run.enrollmentId` set and `run.apiKeyId` null. One enrolment per `Idempotency-Key`: a retry answers as the first request did.',
           ].join('\n\n'),
@@ -4764,7 +4769,7 @@ export function buildOpenApiDocument(serverUrl: string) {
       'automation.run_started': webhook(
         'webhookAutomationRunStarted',
         WEBHOOK_EVENT_INFO['automation.run_started'].label,
-        `${WEBHOOK_EVENT_INFO['automation.run_started'].description} For a run started through the API, run.id is the id POST /automations/{id}/runs answered and run.apiKeyId names the key that called it. An endpoint receives every automation's runs unless it names the automations it takes (its \`automationIds\`, or the automations chosen in Settings → Webhooks), and every run unless it names the API keys whose runs it takes (its \`runApiKeyIds\`, or the keys ticked in Settings → Webhooks): then it receives the runs those keys started, or a key rotated from or into one of them.`,
+        `${WEBHOOK_EVENT_INFO['automation.run_started'].description} For a run started through the API, run.id is the id POST /automations/{id}/runs answered and run.apiKeyId names the key that called it. An endpoint receives every automation's runs unless it names the automations it takes (its \`automationIds\`, or the automations chosen in Settings → Webhooks), and every run unless it names the API keys whose runs it takes (its \`runApiKeyIds\`, or the keys ticked in Settings → Webhooks): then it receives the runs those keys started through POST /automations/{id}/runs (or start-many), or a key rotated from or into one of them; runs of an enrolment, by a member or a key, carry no key (run.apiKeyId null, run.enrollmentId set) and are not received.`,
         'WebhookAutomationRunStarted',
       ),
       'automation.run_ended': webhook(

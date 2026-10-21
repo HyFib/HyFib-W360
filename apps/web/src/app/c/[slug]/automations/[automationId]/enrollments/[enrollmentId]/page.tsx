@@ -72,7 +72,7 @@ export default async function EnrollmentPage({
               : 'Contacts chosen on the Contacts page'
         }, started ${formatDateTime(enrollment.createdAt.toISOString(), tz)} ${
           enrollment.startedBy === 'api'
-            ? `through the API with key ${enrollment.createdByKeyName ?? 'a key'}`
+            ? `through the API with key “${enrollment.createdByKeyName ?? 'a key'}”`
             : `by ${enrollment.createdByName ?? 'a member'}`
         }.`}
         actions={
@@ -91,11 +91,14 @@ export default async function EnrollmentPage({
               {running
                 ? 'Runs start in the background, at most 50 at a time. This page updates itself.'
                 : enrollment.endReason
-                  ? `${ENROLLMENT_END_REASON_LABELS[enrollment.endReason]}${
+                  ? `${
+                      // The raw code when a label is missing (a release that rolled back, ADR-403).
+                      ENROLLMENT_END_REASON_LABELS[enrollment.endReason] ?? enrollment.endReason
+                    }${
                       enrollment.stoppedByName
                         ? ` (${enrollment.stoppedByName})`
                         : enrollment.stoppedByKeyName
-                          ? ` (key ${enrollment.stoppedByKeyName})`
+                          ? ` (key “${enrollment.stoppedByKeyName}”)`
                           : ''
                     } Ended ${formatDateTime(enrollment.endedAt?.toISOString() ?? null, tz)}.`
                   : `Every contact was handled. Ended ${formatDateTime(

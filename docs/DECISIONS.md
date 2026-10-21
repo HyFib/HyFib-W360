@@ -17165,8 +17165,9 @@ Decision:
   `contacts.conditions.<n>`) with "save a segment with them and enrol it": no second filter language,
   and no condition silently dropped. The search text is not offered (it compares numbers by how a
   member sees them, which a key has no notion of). A tag the app would not keep is refused: the
-  Contacts page's filter ignores one, which would take every contact. No conditions take every
-  contact that is not erased, as an empty Contacts filter does. The mapped filter goes through the
+  Contacts page's filter ignored one, which would take every contact (it now fails closed, below).
+  At least one condition is required: none is refused (422, naming `contacts.conditions`) and
+  points to a segment, so a call never enrols every contact, up to 10,000, without being asked to. The mapped filter goes through the
   same conditions (`contactFilterConditionsFor`, the member function's body without a member).
   Supporting every search condition was not chosen: the snapshot, the audit (`filter.tag`,
   `filter.consent`) and members' pages describe ADR-401's filter, and segments already carry the
@@ -17182,9 +17183,10 @@ Decision:
 - **ADR-401's checks, unchanged:** the automation's checks of a start (404 another company's or an
   unknown one; 412 paused, unavailable, inactive number), the inputs as a start validates them (422
   naming `inputs.<name>`), a segment not archived (404; a segment with a problem 412 saying it, as
-  reading its contacts does), 1 to 10,000 contacts (422 otherwise). No `expectedCount`: the member's
-  count guards a page that counted before the member confirmed; a key has no preview, and the
-  answer gives `total`.
+  reading its contacts does), 1 to 10,000 contacts (422 otherwise). An optional `expectedCount`
+  (1 to 10,000), when given, is checked against the snapshot exactly as a member's count is (409
+  "These contacts now number …", enrolling nobody), for an integration that counted first
+  (`GET /segments/{id}`, `POST /contacts/search`).
 - **409 when one is running, clearly:** before the snapshot the call looks for a running enrolment
   of the automation and refuses with 409, reason `enrollment_running`, its message naming that
   enrolment's id, so an integration can wait for it or stop it. Two calls at once still meet
@@ -17207,7 +17209,8 @@ Decision:
   (`automation.enrollment_started` and `automation.enrollment_stopped`, actor `api_key`, with the
   request id; never the inputs). Keys read every enrolment of the company, members' included, as
   ids and counts (`startedBy` member or api, `apiKeyId`, `stoppedBy`, `stoppedByApiKeyId`, the
-  counts, refusals by reason, `stalledSince`), never a member's name or the inputs; members with
+  counts, refusals by reason, `stalledSince`; `segmentId` only to a key holding `campaigns.read`,
+  null otherwise), never a member's name or the inputs; members with
   `automations.read` see keys' enrolments on the automation's page and the enrolment's page
   ("started … through the API with key <name>", "(key <name>)" for a key's stop), and a run page
   says "an enrolment through the API with key “<name>”".
@@ -17243,6 +17246,29 @@ Decision:
   row names a contact and a run that `GET /automation-runs/{id}` does not read (key runs only), so
   the right shape (contacts with `contacts.read`, runs readable) is a slice of its own.
 
+- **The Contacts page's tag filter fails closed** (`contactFilterConditionsFor`): a tag the app
+  would not keep (empty after normalising, over 40 characters, a comma or a control character) now
+  adds `false`, matching nobody, where it was skipped and so matched every contact. For members,
+  the Contacts page, the count and bulk tag and field edits (ADR-213, ADR-238), the contacts export
+  and ADR-401's enrolment with such a tag in the address or form now find nobody (an enrolment or a
+  bulk edit is refused as having no contact) instead of acting on everyone. No contact can carry
+  such a tag, so no real filter changes. Segments do not use this filter (`segmentWhere`).
+- **Docs read by integrators:** the run payload's `trigger`, `apiKeyId` and `enrollmentId`, the
+  `automation.run_started` description, `runTriggers` and every `runApiKeyIds` description say an
+  enrolment is by a member or an API key, and that a key's enrolment's runs carry no key, so a list
+  of keys never matches them. The Settings label "API or a member's enrolment" stays: a member's
+  enrolment is still one of its meanings.
+
 Not built: an enrolment's contacts listed with their outcomes; enrolling contacts by id; the
-search text or other search conditions (save a segment); `expectedCount`; scheduling an enrolment;
-moving a rotated key's enrolments to its successor.
+search text or other search conditions (save a segment); scheduling an enrolment; moving a rotated
+key's enrolments to its successor.
+
+Review (before merge): an independent review found no High or Medium issue. Low: integrator docs
+still called every enrolment a member's (fixed, above); `{"contacts": {}}` enrolled every contact
+unasked (now refused, and `expectedCount` added); the Contacts filter skipped an invalid tag and so
+matched everyone, a fail-open older than this slice (now fails closed); a rollback past 0315 shows
+the new end reasons blank (DEPLOYMENT says so; the page now falls back to the reason's code). Nits:
+scopes are checked before conditions (403 before 422), `segmentId` is given only with
+`campaigns.read`, key names are quoted alike on all three pages, two stale comments, and the
+FK's brief lock on `app.api_keys` noted in DEPLOYMENT. Overwriting the stopper follows 0311's
+pattern and stays.

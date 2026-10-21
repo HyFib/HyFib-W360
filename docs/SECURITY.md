@@ -928,7 +928,10 @@ Phase 5 rules (Public API, P5-08):
   filters, written as `POST /contacts/search` writes them; any other condition is refused, and a tag
   the app would not keep is refused rather than ignored, which would take every contact) or a
   segment's members, at most 10,000, one running enrolment per automation, once per
-  `Idempotency-Key`; the call counts as one request. The enrolment names its key
+  `Idempotency-Key`; the call counts as one request. At least one condition is required, so a call
+  never takes every contact unasked, and an optional `expectedCount` refuses a snapshot of another
+  number (409). The Contacts page's own tag filter now fails closed on a tag the app would not keep
+  (matching nobody), for members' bulk edits, exports and enrolments too. The enrolment names its key
   (`created_by_api_key_id`, a composite foreign key, exactly one of member and key by a check,
   never updatable by the runtime role) and its jobs are signed with no user, so they act for the
   company as live runs do. **Each batch re-checks the key as a fresh request would:** not revoked
@@ -939,7 +942,7 @@ Phase 5 rules (Public API, P5-08):
   deferred), as for a member's enrolment. The month's request count is not re-checked: batches are
   not requests. Keys read (`automations.start`, also while suspended) and stop (`automations.start`,
   active company) every enrolment of the company, members' included, by id and counts only: never
-  a member's name, the inputs or the contacts; a stop is audited as the key and names it
+  a member's name, the inputs or the contacts, and the segment's id only with `campaigns.read`; a stop is audited as the key and names it
   (`stopped_by_api_key_id`). Members with `automations.read` see keys' enrolments on their pages,
   naming the key, as run pages name a key.
 - Template sends to many numbers (ADR-163, `POST /messages/send-many`) need the scopes one send

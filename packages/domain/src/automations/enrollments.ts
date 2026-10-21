@@ -78,14 +78,15 @@ import {
 
 /**
  * Members (ADR-401) and API keys (ADR-403, api/automation-enrollments) enrol contacts or a segment
- * in an automation started by a member or through the API. A member who may publish automations chooses the contacts the contacts page's filters
- * match, or a saved segment, gives the trigger's inputs once (validated as the API validates them)
- * and confirms the count; the enrolment snapshots those contacts and a signed `automation.enroll`
- * job starts their runs in batches of at most 50 per transaction, each contact through the API's
- * start steps (automations/starts) in a savepoint of its own. A refused contact records its reason
- * and the others go on. The batch's outcomes, counts and position commit with its runs, so a
- * retried or restarted job never starts a second run for a contact the enrolment handled. Stopping
- * cancels the contacts not handled yet; runs already started go on.
+ * in an automation started by a member or through the API. A member who may publish automations
+ * chooses the contacts the contacts page's filters match, or a saved segment, gives the trigger's
+ * inputs once (validated as the API validates them) and confirms the count; the enrolment
+ * snapshots those contacts and a signed `automation.enroll` job starts their runs in batches of at
+ * most 50 per transaction, each contact through the API's start steps (automations/starts) in a
+ * savepoint of its own. A refused contact records its reason and the others go on. The batch's
+ * outcomes, counts and position commit with its runs, so a retried or restarted job never starts a
+ * second run for a contact the enrolment handled. Stopping cancels the contacts not handled yet;
+ * runs already started go on.
  */
 
 /** `META_SEND_RATE_PER_SECOND`'s default, for callers that do not give the configured rate. */

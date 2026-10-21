@@ -197,7 +197,7 @@ export async function sweepAutomationRuns(rt: WorkerRuntime): Promise<{ signalle
   if (retention.cleared + retention.deleted > 0) {
     rt.logger.info(retention, 'automation retention applied');
   }
-  // Members' enrolments whose next batch is 10 minutes overdue: a lost job, or one that ran out of
+  // Enrolments (members' and API keys') whose next batch is 10 minutes overdue: a lost job, or one that ran out of
   // retries (ADR-401). Tenant ids come from the definer due list. Last and on its own, so a failure
   // here holds up none of the sweep's other work; it is logged as an error and the next minute's
   // sweep tries again.

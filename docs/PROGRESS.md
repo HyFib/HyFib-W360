@@ -1,5 +1,39 @@
 # Progress
 
+## 2026-10-21 — Review fixes in API enrolments (P4-01, ADR-403)
+
+Status: **Fixed; unit tests run locally, integration and e2e tests in CI only.** The independent
+review of ADR-403 found no High or Medium issue; these are its Low findings and nits.
+
+### Completed
+
+- **L1:** the run payload's `trigger`, `apiKeyId` and `enrollmentId`, the `automation.run_started`
+  description, `runTriggers` and every `runApiKeyIds` description (OpenAPI, endpoint fields) say an
+  enrolment is by a member or an API key and that a key's enrolment's runs carry no key. The
+  Settings label "API or a member's enrolment" is kept.
+- **L2:** `contacts.conditions` needs at least one condition (none: 422 pointing to a segment), and
+  an optional `expectedCount` is checked against the snapshot as a member's count is (409).
+- **L3:** the Contacts page's tag filter (`contactFilterConditionsFor`) adds `false` for a tag the
+  app would not keep, so the page, bulk edits, the export and members' enrolments find nobody
+  instead of everyone.
+- **L4:** DEPLOYMENT says enrolments ended with the new reasons stay and show blank on the older
+  page; the enrolment page now shows a reason without a label as its code.
+- **Nits:** scopes before conditions (403 before 422); `segmentId` only with `campaigns.read`; key
+  names quoted alike on the run, enrolment and automation pages; the worker sweep comment and a long
+  doc comment; DEPLOYMENT notes the foreign keys' brief lock on `app.api_keys`.
+- Cherry-picked PR #104's e2e label fix (5acc435) first.
+
+### Test commands and results (local, 2026-10-21)
+
+| Command                                                               | Result                                                               |
+| --------------------------------------------------------------------- | -------------------------------------------------------------------- |
+| `eslint`, `prettier --check`, `pnpm typecheck`                        | clean                                                                |
+| `pnpm test` (unit)                                                    | 1,981 of 1,981 passed (179 files)                                    |
+| `pnpm build`                                                          | passed                                                               |
+| manual mutations of the new branches                                  | 5/5 caught by `enrollments.test.ts`                                  |
+| exact assertions in integration and e2e tests on the extended objects | none break: they use `toMatchObject` or pick fields                  |
+| `pnpm test:integration`, `pnpm test:e2e`                              | not run here: no PostgreSQL or browser on this machine; CI runs them |
+
 ## 2026-10-21 — API keys enrol contacts or a segment in an automation (P4-01, ADR-403)
 
 Status: **Implemented (migration 0315); unit tests run locally, integration and e2e tests in CI

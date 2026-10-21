@@ -563,7 +563,7 @@ test('a member enrols the contacts the Contacts page’s filters match in an aut
     ((await all.json()) as { data: { startedBy: string }[] }).data.map((e) => e.startedBy),
   ).toEqual(['api', 'member']);
   await page.goto(`/c/${slug}/automations/${automation!.id}/enrollments/${enrollment.id}`);
-  await expect(page.getByText(/through the API with key Booking system/)).toBeVisible();
+  await expect(page.getByText(/through the API with key “Booking system”/)).toBeVisible();
   await page.goto(`/c/${slug}/automations/${automation!.id}`);
-  await expect(page.getByText('Started through the API with key Booking system')).toBeVisible();
+  await expect(page.getByText('Started through the API with key “Booking system”')).toBeVisible();
 });

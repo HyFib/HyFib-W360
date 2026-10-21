@@ -204,7 +204,7 @@ export default async function AutomationPage({
                           </span>
                           {e.startedBy === 'api' ? (
                             <span className="text-xs text-muted-foreground">
-                              Started through the API with key {e.createdByKeyName ?? 'a key'}
+                              Started through the API with key “{e.createdByKeyName ?? 'a key'}”
                             </span>
                           ) : null}
                         </li>

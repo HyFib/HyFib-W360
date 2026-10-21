@@ -452,19 +452,19 @@ const webhookRunSchema = z.object({
   trigger: z
     .enum(WEBHOOK_RUN_TRIGGERS)
     .describe(
-      'What started it: a keyword, a new conversation, any message, a store’s order event, or a call through the API or a member’s enrolment of the contact (api; apiKeyId or enrollmentId says which).',
+      'What started it: a keyword, a new conversation, any message, a store’s order event, or a call through the API or an enrolment of the contact by a member or an API key (api; apiKeyId or enrollmentId says which).',
     ),
   apiKeyId: z
     .uuid()
     .nullable()
     .describe(
-      'The API key that started it, for a run started through the API; null for every other run, including a run of an automation started through the API that a member’s enrolment started.',
+      'The API key that started it, for a run started through the API; null for every other run, including a run an enrolment started, whether a member or an API key started the enrolment (enrollmentId names it; the enrolment names its key).',
     ),
   enrollmentId: z
     .uuid()
     .nullable()
     .describe(
-      'The member’s enrolment that started it (trigger api, apiKeyId null); null for every other run. One enrolment starts many runs, one per contact.',
+      'The enrolment that started it, by a member or an API key (trigger api, apiKeyId null); null for every other run. One enrolment starts many runs, one per contact.',
     ),
   status: z
     .enum(AUTOMATION_RUN_STATUSES)

@@ -1906,6 +1906,12 @@ lower burst capacity. Acceptable only with customers informed of the availabilit
    roll the application back past this release, stop the running enrolments keys started first
    (`SELECT id FROM app.automation_enrollments WHERE status = 'running' AND created_by_api_key_id
 IS NOT NULL`); the columns and checks can stay.
+   Enrolments that already ended with the new reasons (`stopped_by_api`, `api_key_revoked`,
+   `api_key_expired`, `api_not_in_plan`, `api_scope_missing`) stay as they are, and the older
+   release's enrolment page shows their reason blank or as "undefined"; this release's page shows
+   a reason it has no label for as its code. Adding the two foreign keys briefly takes
+   `SHARE ROW EXCLUSIVE` on `app.api_keys`, which holds key authentication's `last_used_at` update
+   (and so API requests) until the migration commits; it reads only the small enrolments table.
 
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.

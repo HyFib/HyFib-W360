@@ -295,12 +295,14 @@ export function contactFilterConditionsFor(
   }
   if (filter.tag) {
     const tag = normalizeTag(filter.tag);
-    if (tag.ok) {
-      conditions.push(
-        sql`exists (select 1 from app.contact_tags t where t.tenant_id = ${contacts.tenantId}
-                      and t.contact_id = ${contacts.id} and t.tag = ${tag.tag})`,
-      );
-    }
+    // A tag the app would not keep matches nobody (ADR-403): no contact can have it, and skipping
+    // it would take every contact into a bulk edit, an export or an enrolment.
+    conditions.push(
+      tag.ok
+        ? sql`exists (select 1 from app.contact_tags t where t.tenant_id = ${contacts.tenantId}
+                      and t.contact_id = ${contacts.id} and t.tag = ${tag.tag})`
+        : sql`false`,
+    );
   }
   const marketing = sql`(select cc.status from app.contact_consents cc
     where cc.tenant_id = ${contacts.tenantId} and cc.contact_id = ${contacts.id} and cc.purpose = 'marketing')`;

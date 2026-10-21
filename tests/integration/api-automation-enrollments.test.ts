@@ -307,11 +307,7 @@ describe('enrolling contacts through the public API (ADR-403)', () => {
       await refusalOf(apiStartEnrollment(deps(), ctx, automationId, other, idem('seg-1', other))),
     ).toMatchObject({ code: 'validation_failed', reason: 'idempotency_key_reused' });
     // A second enrolment while one runs: 409 naming it, enrolling nothing.
-    expect(
-      await refusalOf(
-        enrolThroughApi(ctx, automationId, { contacts: {}, inputs: { campaign: 'x' } }),
-      ),
-    ).toMatchObject({
+    expect(await refusalOf(enrolThroughApi(ctx, automationId, byTag('vip')))).toMatchObject({
       code: 'conflict',
       reason: 'enrollment_running',
       message: expect.stringContaining(id),

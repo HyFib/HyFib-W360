@@ -43,7 +43,7 @@ import {
   assertOrderConditionScope,
   type ApiSearchCondition,
 } from './contact-search';
-import { apiActor, assertAnyScope, assertScope, type ApiContext } from './context';
+import { apiActor, assertAnyScope, assertScope, hasScope, type ApiContext } from './context';
 import type { ApiResponse, IdempotencyInput } from './idempotency';
 import { API_LIMITS } from './model';
 import { idempotent } from './resources';
@@ -75,10 +75,20 @@ const enrollmentContactsSchema = z
       .max(2, 'Give at most a tag and a marketing consent condition.')
       .default([])
       .describe(
-        'At most one `tag` condition with op `has` and one `consent` condition for purpose `marketing`, as POST /contacts/search takes them: the filters of the Contacts page. None takes every contact that is not erased. Other conditions are refused (422): save a segment with them and enrol it.',
+        'One or two conditions: at most one `tag` condition with op `has` and one `consent` condition for purpose `marketing`, as POST /contacts/search takes them: the filters of the Contacts page. None is refused (422): to enrol every contact, enrol a segment whose conditions take them all. Other conditions are refused (422): save a segment with them and enrol it.',
       ),
   })
   .strict();
+
+const expectedCountField = z
+  .number()
+  .int()
+  .min(1, 'No contact to enrol.')
+  .max(ENROLLMENT_LIMITS.contacts, `At most ${ENROLLMENT_LIMITS.contacts} contacts.`)
+  .optional()
+  .describe(
+    'Optional: how many contacts you expect, as a count you read before (GET /segments/{id} or POST /contacts/search). Given, an enrolment that would take another number is refused with 409, enrolling nobody, as a member’s enrolment is when the count changed.',
+  );
 
 /** `POST /automations/{id}/enrollments`: a segment's members, or the contacts conditions find. */
 export const apiStartEnrollmentSchema = z.union([
@@ -90,6 +100,7 @@ export const apiStartEnrollmentSchema = z.union([
           "One of the company's saved segments that is not archived (GET /segments); needs `campaigns.read`.",
         ),
       inputs: inputsField,
+      expectedCount: expectedCountField,
     })
     .strict(),
   z
@@ -98,6 +109,7 @@ export const apiStartEnrollmentSchema = z.union([
         'The contacts the Contacts page’s tag and marketing consent filters find.',
       ),
       inputs: inputsField,
+      expectedCount: expectedCountField,
     })
     .strict(),
 ]);
@@ -124,10 +136,16 @@ const MARKETING_CONSENT: Record<
   not_recorded: 'marketing_unknown',
 };
 
-const invalidCondition = (index: number, message: string) =>
+const invalidCondition = (index: number | null, message: string) =>
   new AppError('validation_failed', message, {
-    issues: [{ path: `contacts.conditions.${index}`, message }],
+    issues: [
+      { path: index === null ? 'contacts.conditions' : `contacts.conditions.${index}`, message },
+    ],
   });
+
+/** An enrolment of contacts without a condition is refused with this (every contact, unconfirmed). */
+export const ENROLLMENT_NO_CONDITION_REFUSAL =
+  'Give at least one condition: a tag, or a marketing consent. To enrol every contact, enrol a segment whose conditions take them all.';
 
 /**
  * The Contacts page's filter (ADR-401's `contactFilterSchema`) that conditions written as
@@ -137,6 +155,8 @@ const invalidCondition = (index: number, message: string) =>
  * is refused too, never ignored (the page's filter ignores one, which would take every contact).
  */
 export function enrollmentFilterOf(conditions: readonly ApiSearchCondition[]): ContactFilter {
+  // No condition would take every contact, up to 10,000, with nothing to confirm (ADR-403 review).
+  if (conditions.length === 0) throw invalidCondition(null, ENROLLMENT_NO_CONDITION_REFUSAL);
   const filter: ContactFilter = { consent: 'any' };
   conditions.forEach((condition, index) => {
     if (condition.type === 'tag' && condition.op === 'has' && filter.tag === undefined) {
@@ -185,12 +205,19 @@ export interface ApiAutomationEnrollmentDetail extends ApiAutomationEnrollment {
   stalledSince: string | null;
 }
 
-export function toApiEnrollment(e: EnrollmentSummary): ApiAutomationEnrollment {
+/**
+ * An enrolment as the API gives it; the segment's id only to a key that reads segments
+ * (`campaigns.read`), null otherwise.
+ */
+export function toApiEnrollment(
+  e: EnrollmentSummary,
+  readsSegments: boolean,
+): ApiAutomationEnrollment {
   return {
     id: e.id,
     automationId: e.automationId,
     source: e.source,
-    segmentId: e.segmentId,
+    segmentId: readsSegments ? e.segmentId : null,
     status: e.status,
     endReason: e.endReason,
     total: e.total,
@@ -207,9 +234,12 @@ export function toApiEnrollment(e: EnrollmentSummary): ApiAutomationEnrollment {
   };
 }
 
-export function toApiEnrollmentDetail(e: EnrollmentDetail): ApiAutomationEnrollmentDetail {
+export function toApiEnrollmentDetail(
+  e: EnrollmentDetail,
+  readsSegments: boolean,
+): ApiAutomationEnrollmentDetail {
   return {
-    ...toApiEnrollment(e),
+    ...toApiEnrollment(e, readsSegments),
     refusals: e.refusals.map((r) => ({ reason: r.reason, count: r.count })),
     stalledSince: e.stalledSince?.toISOString() ?? null,
   };
@@ -296,11 +326,12 @@ export async function apiStartEnrollment(
   assertScope(ctx, 'automations.start');
   if (!z.uuid().safeParse(automationId).success) throw notFound('Automation');
   const data = parseInput(apiStartEnrollmentSchema, input);
+  // The scopes first, so a key that may not enrol is refused (403) before its conditions are read.
+  assertMayEnrolThroughApi(ctx, 'segmentId' in data ? 'segment' : 'contacts');
   const audience =
     'segmentId' in data
       ? { kind: 'segment' as const, segmentId: data.segmentId }
       : { kind: 'contacts' as const, filter: enrollmentFilterOf(data.contacts.conditions) };
-  assertMayEnrolThroughApi(ctx, audience.kind);
   const now = deps.clock.now();
   try {
     return await deps.db.run(ctx.scope, (tx) =>
@@ -318,8 +349,12 @@ export async function apiStartEnrollment(
                 sql` and `,
               );
         const ids = await matchingContactIds(tx, where);
-        // Nobody, or more than the limit; no count was shown to compare with.
-        assertEnrollableCount(ids.length, Math.min(ids.length, ENROLLMENT_LIMITS.contacts));
+        // Nobody, or more than the limit; and, when the key gave a count, another number (409), as
+        // a member's enrolment checks the count the member was shown.
+        assertEnrollableCount(
+          ids.length,
+          data.expectedCount ?? Math.min(ids.length, ENROLLMENT_LIMITS.contacts),
+        );
         const id = uuidv7();
         await snapshotEnrollment(deps, tx, {
           id,
@@ -359,7 +394,10 @@ export async function apiStartEnrollment(
           apiActor(ctx),
         );
         const detail = await readEnrollmentDetail(tx, ctx.tenant.id, id, true);
-        return { status: 201, body: { data: toApiEnrollmentDetail(detail) } };
+        return {
+          status: 201,
+          body: { data: toApiEnrollmentDetail(detail, hasScope(ctx, 'campaigns.read')) },
+        };
       }),
     );
   } catch (error) {
@@ -399,7 +437,7 @@ export async function apiListEnrollments(
       const shown = rows.slice(0, q.limit);
       const last = shown.at(-1);
       return {
-        data: shown.map(toApiEnrollment),
+        data: shown.map((e) => toApiEnrollment(e, hasScope(ctx, 'campaigns.read'))),
         nextCursor:
           rows.length > q.limit && last ? encodeKeysetCursor(last.cursorAt, last.id) : null,
       };
@@ -429,7 +467,7 @@ export async function apiGetEnrollment(
         ctx.tenant.status === 'active',
       );
       if (detail.automationId !== automationId) throw notFound('Enrolment');
-      return toApiEnrollmentDetail(detail);
+      return toApiEnrollmentDetail(detail, hasScope(ctx, 'campaigns.read'));
     },
     { accessMode: 'read only' },
   );
@@ -479,6 +517,7 @@ export async function apiStopEnrollment(
     );
     return toApiEnrollmentDetail(
       await readEnrollmentDetail(tx, ctx.tenant.id, enrollment.id, true),
+      hasScope(ctx, 'campaigns.read'),
     );
   });
 }

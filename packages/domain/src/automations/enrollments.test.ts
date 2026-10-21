@@ -1,21 +1,24 @@
 import { describe, expect, it } from 'vitest';
-import { getTableName, type SQL, type Table } from 'drizzle-orm';
+import { getTableName, sql, type SQL, type Table } from 'drizzle-orm';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import { QUEUES } from '@w360/contracts';
 import { AppError, isAppError } from '@w360/core';
 import { AUTOMATION_ENROLLMENT_END_REASONS, type Database, type TenantScope } from '@w360/db';
 import {
   ENROLLMENT_CONDITION_REFUSAL,
+  ENROLLMENT_NO_CONDITION_REFUSAL,
   apiGetEnrollment,
   apiListEnrollments,
   apiStartEnrollment,
   apiStartEnrollmentSchema,
   apiStopEnrollment,
   enrollmentFilterOf,
+  toApiEnrollment,
 } from '../api/automation-enrollments';
 import type { ApiContext } from '../api/context';
 import { API_ROUTES, buildOpenApiDocument } from '../api/openapi';
 import type { TenantContext } from '../authz/context';
+import { contactFilterConditionsFor } from '../contacts/service';
 import { RecordingJobQueue } from '../jobs/queue';
 import { JobSigner } from '../jobs/envelope';
 import {
@@ -1807,7 +1810,7 @@ describe('enrolling through the public API (ADR-403)', () => {
       { segmentId: SEGMENT, contacts: {} },
       { contacts: { conditions: [], q: 'asha' } },
       { contacts: {}, inputs: { patient: 3 } },
-      { contacts: {}, expectedCount: 2 },
+      { contacts: {}, expectedCount: 0 },
       {
         contacts: {
           conditions: [
@@ -1823,7 +1826,6 @@ describe('enrolling through the public API (ADR-403)', () => {
   });
 
   it('maps conditions onto the Contacts page’s filter and refuses any other, naming its place', () => {
-    expect(enrollmentFilterOf([])).toEqual({ consent: 'any' });
     expect(
       enrollmentFilterOf([
         { type: 'tag', op: 'has', tag: '  VIP ' },
@@ -1980,6 +1982,106 @@ describe('enrolling through the public API (ADR-403)', () => {
       apiKeyId: KEY,
       stoppedBy: null,
     });
+  });
+
+  it('refuses an enrolment of contacts without a condition, naming the place and saying to use a segment (review L2)', async () => {
+    const db = { run: () => Promise.reject(new Error('read')) } as unknown as Database;
+    for (const contacts of [{}, { conditions: [] }]) {
+      expect(
+        await refusal(
+          apiStartEnrollment(
+            deps(db),
+            apiCtx(ENROLLER_KEY_SCOPES),
+            AUTOMATION,
+            body({ contacts }),
+            idem,
+          ),
+        ),
+      ).toMatchObject({
+        code: 'validation_failed',
+        message: ENROLLMENT_NO_CONDITION_REFUSAL,
+        issues: [{ path: 'contacts.conditions', message: ENROLLMENT_NO_CONDITION_REFUSAL }],
+      });
+    }
+    expect(ENROLLMENT_NO_CONDITION_REFUSAL).toContain('enrol a segment');
+  });
+
+  it('checks an expected count against the snapshot as a member’s enrolment does (review L2)', async () => {
+    const shown = recordingDb(apiAnswers({ contacts: 2 }));
+    const res = await apiStartEnrollment(
+      deps(shown.db),
+      apiCtx(ENROLLER_KEY_SCOPES),
+      AUTOMATION,
+      body({ expectedCount: 2 }),
+      idem,
+    );
+    expect(res.status).toBe(201);
+    const changed = recordingDb(apiAnswers({ contacts: 3 }));
+    expect(
+      await refusal(
+        apiStartEnrollment(
+          deps(changed.db),
+          apiCtx(ENROLLER_KEY_SCOPES),
+          AUTOMATION,
+          body({ expectedCount: 2 }),
+          idem,
+        ),
+      ),
+    ).toMatchObject({
+      code: 'conflict',
+      message: 'These contacts now number 3, not 2. Review them and try again.',
+    });
+    expect(
+      changed.steps.some((st) => st.op === 'insert' && st.table === 'automation_enrollments'),
+    ).toBe(false);
+    for (const bad of [0, 10_001, 1.5, '2']) {
+      expect(
+        apiStartEnrollmentSchema.safeParse({ segmentId: SEGMENT, expectedCount: bad }).success,
+        String(bad),
+      ).toBe(false);
+    }
+  });
+
+  it('refuses a key without the scopes with 403 before its conditions are read (review N1)', async () => {
+    const db = { run: () => Promise.reject(new Error('read')) } as unknown as Database;
+    expect(
+      await refusal(
+        apiStartEnrollment(
+          deps(db),
+          apiCtx(['automations.start']),
+          AUTOMATION,
+          body({ contacts: { conditions: [{ type: 'source', source: 'api' }] } }),
+          idem,
+        ),
+      ),
+    ).toMatchObject({ code: 'forbidden' });
+  });
+
+  it('gives the segment’s id only to a key that reads segments (review N2)', async () => {
+    const summary = {
+      id: ENROLLMENT,
+      automationId: AUTOMATION,
+      source: 'segment' as const,
+      segmentId: SEGMENT,
+      segmentName: 'VIPs',
+      status: 'running' as const,
+      endReason: null,
+      total: 3,
+      started: 1,
+      refused: 0,
+      cancelled: 0,
+      startedBy: 'member' as const,
+      createdByName: 'Asha',
+      createdByApiKeyId: null,
+      createdByKeyName: null,
+      stoppedBy: null,
+      stoppedByApiKeyId: null,
+      createdAt: NOW,
+      endedAt: null,
+    };
+    expect(toApiEnrollment(summary, true).segmentId).toBe(SEGMENT);
+    expect(toApiEnrollment(summary, false)).toMatchObject({ segmentId: null, pending: 2 });
+    expect(JSON.stringify(toApiEnrollment(summary, true))).not.toContain('Asha');
   });
 
   it('answers 409 naming the running enrolment, and 409 when the index refuses a second at once', async () => {
@@ -2190,5 +2292,63 @@ describe('the OpenAPI document of enrolments (ADR-403)', () => {
     );
     expect(JSON.stringify(schemas.StartAutomationEnrollment)).toContain('segmentId');
     expect(JSON.stringify(schemas.StartAutomationEnrollment)).toContain('conditions');
+  });
+});
+
+describe('the Contacts page’s filter fails closed on a tag the app would not keep (ADR-403 review L3)', () => {
+  const where = (tag: string | undefined) =>
+    dialect.sqlToQuery(
+      sql.join(
+        contactFilterConditionsFor(
+          TENANT,
+          { consent: 'any', ...(tag === undefined ? {} : { tag }) },
+          {
+            seesNumbers: true,
+          },
+        ),
+        sql` and `,
+      ),
+    );
+
+  it('matches nobody for an invalid tag, the tag for a valid one, and leaves no tag unfiltered', () => {
+    const invalid = where('a,b');
+    expect(invalid.sql).toContain('false');
+    expect(invalid.sql).not.toContain('contact_tags');
+    const valid = where(' VIP ');
+    expect(valid.sql).toContain('contact_tags');
+    expect(valid.sql).not.toMatch(/\bfalse\b/);
+    expect(valid.params).toContain('vip');
+    const none = where(undefined);
+    expect(none.sql).not.toContain('contact_tags');
+    expect(none.sql).not.toMatch(/\bfalse\b/);
+  });
+
+  it('enrols nobody for a member’s filter with an invalid tag (refused: no contact matches)', async () => {
+    const recording = recordingDb((step) => {
+      if (step.op === 'select' && step.table === 'contacts') {
+        // The database answers the filter: `false` matches no row.
+        return dialect.sqlToQuery(step.where as SQL).sql.includes('false')
+          ? []
+          : [{ id: contactId(1) }];
+      }
+      return startAnswers({ contacts: 1 })(step);
+    });
+    const ctx = memberCtx(ENROLLER);
+    await expect(
+      createAutomationEnrollmentService({
+        db: recording.db,
+        clock,
+        jobs: new RecordingJobQueue(),
+        signer,
+      }).startEnrollment(ctx, {
+        automationId: AUTOMATION,
+        audience: { kind: 'contacts', filter: { tag: 'a,b' } },
+        inputs: { patient: 'Asha' },
+        expectedCount: 1,
+      }),
+    ).rejects.toMatchObject({
+      code: 'validation_failed',
+      publicMessage: 'No contact matches: nobody to enrol.',
+    });
   });
 });
