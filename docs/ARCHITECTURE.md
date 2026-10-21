@@ -1597,34 +1597,46 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   label (`contact_fields` grants `UPDATE (label)` only); a deletion removes the field row, then the
   values (`attributes - key`), in the order a contact change locks them (ADR-112). 0092 widens the
   scope checks of `app.api_keys` and `ops.plans`.
-- **Choice-type contact fields (0320, ADR-407):** `app.contact_fields.options` (a text array of 1
-  to 50, in order; null for other types; 0301's shape check; `UPDATE (options)` for the runtime
-  role). Every reader and writer of values goes through `contacts/fields.ts`: `coerceFieldValue`
-  (forms, CSV import, bulk edits, automation steps, Flow answers, Settings → Webhooks' lines: any
-  case, stored as the option is written), `apiFieldValue` (the API: exactly as written) and
+- **Choice-type contact fields (0320, ADR-407):** `app.contact_fields.options` (a text array of 1 to
+  50, in order; null for other types; 0301's shape check; `UPDATE (options)` for the runtime role).
+  Every reader and writer of values goes through `contacts/fields.ts`: `coerceFieldValue` (forms,
+  CSV import, bulk edits, automation steps, Flow answers, Settings → Webhooks' lines: any case,
+  stored as the option is written), `apiFieldValue` (the API: exactly as written) and
   `apiFieldFilterValue` (`fields[<key>]`: any case, a value that is no option refused); they take a
   `FieldShape` (label, type, options), so a caller that leaves out the options does not compile.
-  Deal fields share them (`coerceDealFieldValue` now delegates; `fieldOptionsSchema`,
-  `sameOptions` and `removedChosenOptions` moved from `crm/deal-fields.ts`, which re-exports them).
+  Deal fields share them (`coerceDealFieldValue` now delegates; `fieldOptionsSchema`, `sameOptions`
+  and `removedChosenOptions` moved from `crm/deal-fields.ts`, which re-exports them).
   `setContactFieldOptions` (`field-definitions.ts`, for Settings and `PATCH /contact-fields/{key}`)
   takes the `contact-fields:<company>` advisory lock exclusively, reads the distinct values
   (`attributes ->> key`) and refuses a list that drops or rewrites a chosen one. Every write of
   values takes that lock shared (`lockContactFieldValues`), then locks the rows of only the fields
   it writes `FOR SHARE`, both before it locks a contact: the contacts service (create and change:
   the keys given; bulk edit: its field; import: the mapped fields, read before its transaction and
-  compared again under the lock, `sameFieldShape`), the API's `lockFields`, the automation
-  runner's `set_field` (after a key share lock on the contact, which a deletion does not wait for)
-  and Flow answers (the form's `field:` targets). Merges (the service's and the API's) lock every
-  field row (`lockContactFieldsForMerge`), since `app.merge_contacts` copies values unfiltered.
-  Deletions keep ADR-112's row order and do not take the advisory lock; the row locks make them
-  wait for writers of their field, or those writers for them, and after deleting the row they lock
-  the contacts holding a value `FOR NO KEY UPDATE` in id order (as bulk edits, imports and the
-  API's many-contact calls lock contacts) before removing the values. Imports lock the contacts
-  they change up front in id order and write `attributes || set - removed` (`attributePatch`).
-  Renames of other fields never wait for writers. A Flow answer is saved in an inbound transaction that may already hold some contact locked by an earlier message of the same webhook change (an earlier form answer, or the name filled in when a new WhatsApp identity joins an existing contact); if that contact has a value of a field being deleted, the two deadlock. PostgreSQL fails one: a failed deletion is reported to the member, who retries; a failed change rolls back whole, its receipt is marked failed and the webhook job retries it with backoff, skipping changes already committed. The contact page sends only
-  changed values (`changedAttributes`, `lib/contact-fields.ts`). The company export carries
-  `options`. Segments compare a choice as text
-  (`FIELD_OPS.choice`: equals, not equals, set, not set); webhook field value filters tick options.
+  compared again under the lock, `sameFieldShape`), the API's `lockFields`, the automation runner's
+  `set_field` (after a key share lock on the contact, which a deletion does not wait for) and Flow
+  answers (the form's `field:` targets). Merges (the service's and the API's) lock every field row
+  (`lockContactFieldsForMerge`), since `app.merge_contacts` copies values unfiltered. Deletions keep
+  ADR-112's row order and do not take the advisory lock; the row locks make them wait for writers of
+  their field, or those writers for them, and after deleting the row they lock the contacts holding
+  a value `FOR NO KEY UPDATE` in id order before removing the values. Bulk field edits and imports
+  lock contacts `FOR NO KEY UPDATE` in id order too; bulk tag edits and the API's many-contact calls
+  lock `FOR UPDATE` in id order (they change tags). Imports lock every existing contact the file
+  names up front (contacts created or merged meanwhile when found) and write `attributes || set -
+removed` (`attributePatch`). Renames of other fields never wait for writers. What can still cycle,
+  each detected by PostgreSQL, which fails one transaction: a bulk tag edit or the API's call
+  changing many contacts (both lock `FOR UPDATE`, as they change tags, which automation steps take
+  turns on through their key share lock) with an automation step waiting for a field being deleted
+  and that deletion; a contact created or merged during an import, locked out of id order; and a
+  Flow answer whose inbound transaction already holds some contact locked by an earlier message of
+  the same webhook change (an earlier form answer, or the name filled in when a new identity joins
+  an existing contact) that has a value of a field being deleted, possibly with a change of options
+  too. A member's or key's request then gets a conflict to retry; a failed automation step rolls
+  back and its run stays due, so its job or the minute sweep runs it again; a failed inbound change
+  rolls back whole, its receipt is marked failed and the webhook job retries it with backoff,
+  skipping changes already committed. The contact page sends only changed values
+  (`changedAttributes`, `lib/contact-fields.ts`). The company export carries `options`. Segments
+  compare a choice as text (`FIELD_OPS.choice`: equals, not equals, set, not set); webhook field
+  value filters tick options.
 - **Following message changes (0093, ADR-116):** triggers on `messages` (insert, and an update that
   changes the status, status time, error or content) call `app.message_changes_capture`, a SECURITY
   DEFINER function that upserts the message's one `app.message_changes` row with `xact` =

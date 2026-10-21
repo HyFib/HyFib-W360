@@ -55,14 +55,30 @@ An independent review found one High and one Medium; both are fixed, with the Lo
   the value, not the order inside the deletion, which the other races cover).
 - **Third review:** an import read existing contacts without locking them and wrote back the whole
   object, so a field deleted meanwhile came back and a member's concurrent change was lost. It now
-  locks the contacts it changes `FOR UPDATE` in id order up front and writes a patch
-  (`attributes || set - removed`, `attributePatch`, unchanged contacts not rewritten). A deletion
-  locks the contacts holding a value `FOR NO KEY UPDATE` in id order before removing values (not
-  `FOR UPDATE`, which would wait for an automation step's key share lock while that step waits for
-  the field's row), so it cannot cross a bulk edit or an import. More than 50 keys in one change are
-  refused before any lock. Integration tests race an import with a deletion holding the contact and
-  with a member's change of another field, and a bulk edit with a deletion over two contacts. Not
-  raced: automation steps and Flow answers (their lock order is reviewed). A Flow answer is saved in an inbound transaction that may already hold some contact locked by an earlier message of the same webhook change (an earlier form answer, or the name filled in when a new WhatsApp identity joins an existing contact); if that contact has a value of a field being deleted, the two deadlock. PostgreSQL fails one: a failed deletion is reported to the member, who retries; a failed change rolls back whole, its receipt is marked failed and the webhook job retries it with backoff, skipping changes already committed.
+  locks every existing contact the file names in id order up front and writes a patch (`attributes
+|| set - removed`, `attributePatch`, unchanged contacts not rewritten). A deletion locks the
+  contacts holding a value `FOR NO KEY UPDATE` in id order before removing values (not `FOR UPDATE`,
+  which would wait for an automation step's key share lock while that step waits for the field's
+  row). More than 50 keys in one change are refused before any lock. Integration tests race an
+  import with a deletion holding the contact and with a member's change of another field, and a bulk
+  edit with a deletion over two contacts.
+- **Fourth review:** the import locked its contacts `FOR UPDATE`, which waits for an automation
+  step's key share lock, bringing back a three-way cycle with a deletion. Imports and bulk field
+  edits now lock `FOR NO KEY UPDATE` (they never change `tenant_id` or `id`, the only key other
+  tables reference; the number's unique index is partial, so it is no key), so automation steps and
+  foreign key checks no longer wait for them. Bulk tag edits and the API's many-contact calls keep
+  `FOR UPDATE`, since automation steps take turns with them on tags through that conflict. A contact
+  read during an import but not locked up front (created or merged into since) is now locked and
+  read again before its patch is decided. The bulk edit and deletion race now uses three contacts
+  whose physical order differs from their id order (asserted by `ctid`), so it fails with the
+  deletion's old scan-order locking, and waits on the two pids involved. What can still cycle, each
+  detected by PostgreSQL and retried (a member's or key's request gets a conflict; a failed
+  automation step stays due and runs again; a failed inbound change is retried by the webhook job):
+  a bulk tag edit or the API's many-contact call with an automation step and a deletion; a contact
+  created or merged during an import; and a Flow answer whose inbound transaction already holds some
+  contact locked by an earlier message of the same webhook change that has a value of a field being
+  deleted, possibly with a change of options too. Not raced in tests: automation steps and Flow
+  answers (their lock order is reviewed).
 - DEPLOYMENT now says old servers also fail segments, campaigns and API filters naming a choice
   field (500s), including after a rollback. The contact page sends only changed values and shows a
   value its options no longer hold as a disabled option. The W-048 matrix row is `implemented`

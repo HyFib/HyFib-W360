@@ -640,53 +640,87 @@ describe('choice-type custom contact fields (ADR-407)', () => {
     expect(await attributesOf(id)).toEqual({ city: 'Delhi', tier: 'Silver' });
   });
 
-  it('a bulk edit and a field’s deletion over two contacts both finish, locking contacts in id order', async () => {
+  it('a bulk edit and a field’s deletion cross no locks, whatever order the contacts are stored in', async () => {
     const { owner, tier } = await setup();
-    // Created in turn, so the first has the lower id (UUIDv7).
-    const first = await contactsSvc().createContact(owner, {
-      phone: nextPhone(),
-      tags: ['vip'],
-      attributes: { tier: 'Gold' },
-    });
-    const second = await contactsSvc().createContact(owner, {
-      phone: nextPhone(),
-      tags: ['vip'],
-      attributes: { tier: 'Silver' },
-    });
-    expect(first.id < second.id).toBe(true);
-    const blocked = async () =>
+    // Created in turn, so a < b < c by id (UUIDv7), all with a value of the field to delete.
+    const made: string[] = [];
+    for (const value of ['Gold', 'Silver', 'Bronze']) {
+      const { id } = await contactsSvc().createContact(owner, {
+        phone: nextPhone(),
+        tags: ['vip'],
+        attributes: { tier: value },
+      });
+      made.push(id);
+    }
+    const [a, b, c] = made as [string, string, string];
+    expect(a < b && b < c).toBe(true);
+    // Rewrite a, then b, until each row version is stored after c's, so a scan in storage order
+    // meets c first: the deletion's old locking (in its update's scan order) would lock c, then
+    // wait for a, which the bulk edit holds while it waits for b, then for c.
+    const after = async (id: string, other: string) =>
       (
-        await fx.query<{ n: number }>(
-          `SELECT count(*)::int AS n FROM pg_stat_activity
-            WHERE datname = current_database() AND cardinality(pg_blocking_pids(pid)) > 0`,
+        await fx.query<{ later: boolean }>(
+          `SELECT (SELECT ctid FROM app.contacts WHERE id = $1) >
+                  (SELECT ctid FROM app.contacts WHERE id = $2) AS later`,
+          [id, other],
         )
-      )[0]!.n;
+      )[0]!.later;
+    for (const id of [a, b]) {
+      for (let attempt = 0; attempt < 20 && !(await after(id, c)); attempt += 1) {
+        await fx.query(
+          `UPDATE app.contacts SET display_name = coalesce(display_name, '') || '.' WHERE id = $1`,
+          [id],
+        );
+      }
+    }
+    expect(
+      (
+        await fx.query<{ id: string }>(
+          'SELECT id FROM app.contacts WHERE id = ANY($1::uuid[]) ORDER BY ctid',
+          [made],
+        )
+      ).map((r) => r.id)[0],
+    ).toBe(c);
+    const blockedBy = async (pid: number) =>
+      (
+        await fx.query<{ pid: number }>(
+          'SELECT pid FROM pg_stat_activity WHERE $1 = ANY (pg_blocking_pids(pid))',
+          [pid],
+        )
+      ).map((r) => r.pid);
     const holder = await fx.dbs.adminPool.connect();
     let bulk: Promise<string> | undefined;
     let deletion: Promise<string> | undefined;
     try {
-      // The second contact is held, so the bulk edit locks the first and waits for the second.
+      // b is held, so the bulk edit (in id order) locks a and waits for b.
       await holder.query('BEGIN');
-      await holder.query('SELECT 1 FROM app.contacts WHERE id = $1 FOR UPDATE', [second.id]);
+      await holder.query('SELECT 1 FROM app.contacts WHERE id = $1 FOR UPDATE', [b]);
+      const [lock] = (await holder.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')).rows;
       bulk = settled(
         contactsSvc().bulkSetField(owner, {
           filter: { tag: 'vip' },
           key: 'city',
           value: 'Pune',
-          expectedCount: 2,
+          expectedCount: 3,
         }),
       );
+      let bulkPid = 0;
       await vi.waitFor(
         async () => {
-          if ((await blocked()) < 1) throw new Error('the bulk edit is not waiting yet');
+          const [pid] = await blockedBy(lock!.pid);
+          if (pid === undefined) throw new Error('the bulk edit is not waiting yet');
+          bulkPid = pid;
         },
         { timeout: 4_000, interval: 20 },
       );
-      // The deletion locks the contacts with a value in id order: it waits for the first.
+      // The deletion locks the contacts with a value in id order, so it waits for a, held by the
+      // bulk edit, without locking c first.
       deletion = settled(contactsSvc().deleteField(owner, tier.id));
       await vi.waitFor(
         async () => {
-          if ((await blocked()) < 2) throw new Error('the deletion is not waiting yet');
+          if ((await blockedBy(bulkPid)).length < 1) {
+            throw new Error('the deletion is not waiting yet');
+          }
         },
         { timeout: 4_000, interval: 20 },
       );
@@ -696,8 +730,7 @@ describe('choice-type custom contact fields (ADR-407)', () => {
     }
     expect(await bulk).toBe('done');
     expect(await deletion).toBe('done');
-    expect(await attributesOf(first.id)).toEqual({ city: 'Pune' });
-    expect(await attributesOf(second.id)).toEqual({ city: 'Pune' });
+    for (const id of made) expect(await attributesOf(id)).toEqual({ city: 'Pune' });
   });
 
   it('refuse more keys in one change than a company can have fields, before locking any', async () => {

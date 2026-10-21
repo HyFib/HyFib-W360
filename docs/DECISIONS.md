@@ -17813,30 +17813,40 @@ Decision: ADR-385's design, for contacts, through the same functions.
   committed. Each writer then locks the rows of the fields it writes `FOR SHARE` (only those, so
   other fields' renames never wait for it), still before the contact, in the order a field's
   deletion takes them (ADR-112), so a value written while its field is being deleted is refused once
-  the deletion commits, or removed by it. A deletion then locks the contacts holding a value `FOR NO
-KEY UPDATE` in id order before removing the values, so it waits for any transaction holding one
-  of those contacts; writers wait on each other's contact locks, which bulk edits, imports, the
-  API's calls changing many contacts and deletions all take in id order. An import locks the
-  contacts it changes before writing and writes values as a patch over the locked row, so neither
-  a deleted field's value nor a member's concurrent change is written back from an earlier read. A
-  merge locks every field row, since `app.merge_contacts` copies the merged contact's values
-  unfiltered. A Flow answer is saved in an inbound transaction that may already hold some contact locked by an earlier message of the same webhook change (an earlier form answer, or the name filled in when a new WhatsApp identity joins an existing contact); if that contact has a value of a field being deleted, the two deadlock. PostgreSQL fails one: a failed deletion is reported to the member, who retries; a failed change rolls back whole, its receipt is marked failed and the webhook job retries it with backoff, skipping changes already committed. Writers: the
-  contact page and new-contact form, CSV import, bulk field edits (ADR-238), `POST`/`PATCH
-/contacts` and the call that changes many (through `lockFields`), automation steps that set a
-  field, Flow answers saved into fields (which now read the fields before locking the contact),
-  and merges by members and through the API (ADR-224, ADR-227), whose values move unchecked, both
-  being values of the company's fields.
+  the deletion commits, or removed by it. A deletion then locks the contacts holding a value
+  `FOR NO KEY UPDATE` in id order before removing the values, so it waits for any transaction
+  holding one of those contacts. Bulk field edits and imports lock the contacts they may change `FOR NO KEY UPDATE`
+  in id order too (they never change `tenant_id` or `id`, the only key other tables reference), so
+  neither crosses a deletion, and automation steps and foreign key checks do not wait for them. An
+  import locks every existing contact the file names before writing and writes values as a patch
+  over the locked row, so neither a deleted field's value nor a member's concurrent change is
+  written back from an earlier read. A merge locks every field row, since `app.merge_contacts`
+  copies the merged contact's values unfiltered. What can still cycle, each detected by PostgreSQL,
+  which fails one transaction: a bulk tag edit or the API's call changing many contacts (both lock
+  `FOR UPDATE`, as they change tags, which automation steps take turns on through their key share
+  lock) with an automation step waiting for a field being deleted and that deletion; a contact
+  created or merged during an import, locked out of id order; and a Flow answer whose inbound
+  transaction already holds some contact locked by an earlier message of the same webhook change (an
+  earlier form answer, or the name filled in when a new identity joins an existing contact) that has
+  a value of a field being deleted, possibly with a change of options too. A member's or key's
+  request then gets a conflict to retry; a failed automation step rolls back and its run stays due,
+  so its job or the minute sweep runs it again; a failed inbound change rolls back whole, its
+  receipt is marked failed and the webhook job retries it with backoff, skipping changes already
+  committed. Writers: the contact page and new-contact form, CSV import, bulk field edits (ADR-238),
+  `POST`/`PATCH /contacts` and the call that changes many (through `lockFields`), automation steps
+  that set a field, Flow answers saved into fields (which read the fields before locking the
+  contact), and merges by members and through the API (ADR-224, ADR-227), whose values move
+  unchecked, both being values of the company's fields.
 - **Values, where members type them:** the contact page and the new-contact form show a select with
   "Not set" and the options (a value the options no longer hold, which the rules above prevent but a
-  page read before a change can show, is listed first and disabled, so the select never hides it
-  and it cannot be chosen again); a saved contact page sends only the values the member changed, so
-  a value left alone is never checked again and never blocks saving the rest; bulk field edits a
-  select. Forms, bulk edits, CSV
-  import, automation steps ("Set a contact field", whose builder now lists the options under the
-  value) and Flow answers take an option whatever its case and store it as written; anything else is
-  refused ("Tier must be one of its options."; a CSV row error; a run step `skipped` with
-  `invalid_value`; a Flow answer `invalid`), as other types' bad values are. The deal function
-  `coerceDealFieldValue` now delegates to the contact one, which handles choices.
+  page read before a change can show, is listed first and disabled, so the select never hides it and
+  it cannot be chosen again); a saved contact page sends only the values the member changed, so a
+  value left alone is never checked again and never blocks saving the rest; bulk field edits a
+  select. Forms, bulk edits, CSV import, automation steps ("Set a contact field", whose builder now
+  lists the options under the value) and Flow answers take an option whatever its case and store it
+  as written; anything else is refused ("Tier must be one of its options."; a CSV row error; a run
+  step `skipped` with `invalid_value`; a Flow answer `invalid`), as other types' bad values are. The
+  deal function `coerceDealFieldValue` now delegates to the contact one, which handles choices.
 - **Values through the API** are strict, as for other types: the option as written, as a string
   (spaces around it ignored, as for text; null or an empty string removes it). `GET /contacts`'s
   `fields[<key>]` filter takes an option whatever its case and refuses a value that is none (it

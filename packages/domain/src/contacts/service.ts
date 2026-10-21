@@ -226,8 +226,10 @@ interface ContactLockRow {
 
 /**
  * The patch an import writes over a contact's values (ADR-407), as `mergeAttributes` would change
- * them: the values given set, the keys given null removed; null when it changes nothing, compared
- * value by value with the locked row so an unchanged contact is not rewritten.
+ * them: the values given set, the keys given null removed (an import never gives null, since a
+ * blank cell leaves a value alone, so for it `removed` is always empty; the rule is kept so the
+ * patch means what `mergeAttributes` means); null when it changes nothing, compared value by value
+ * with the locked row so an unchanged contact is not rewritten.
  */
 export function attributePatch(
   current: Readonly<Record<string, AttributeValue>>,
@@ -522,7 +524,12 @@ export function createContactsService(deps: { db: Database; clock: Clock }) {
   /**
    * Locks the contacts a bulk edit's filters match, in id order, and returns their ids: refused
    * beyond BULK_TAG_LIMIT contacts, or when the filters no longer match the number the member was
-   * shown (ADR-213).
+   * shown (ADR-213). A tag edit locks them `FOR UPDATE`, which an automation step's key share lock
+   * waits for before it changes a tag, so the two take turns on a contact's tags. A field edit
+   * changes only `attributes`, never `tenant_id` or `id` (the only key other tables reference;
+   * the number's unique index is partial, so no key), so it locks `FOR NO KEY UPDATE` (ADR-407):
+   * automation steps and foreign key checks (a tag, a message's conversation) do not wait for it,
+   * and it cannot join a deletion and an automation step in a cycle.
    */
   async function lockMatching(
     tx: Tx,
@@ -537,7 +544,7 @@ export function createContactsService(deps: { db: Database; clock: Clock }) {
       .where(and(...filterConditions(ctx, filter)))
       .orderBy(asc(contacts.id))
       .limit(BULK_TAG_LIMIT + 1)
-      .for('update');
+      .for(done === 'tagged' ? 'update' : 'no key update');
     if (locked.length > BULK_TAG_LIMIT) {
       throw new AppError(
         'validation_failed',
@@ -1428,11 +1435,15 @@ export function createContactsService(deps: { db: Database; clock: Clock }) {
           return rows.flatMap((r) => (r.phoneE164 ? [[r.phoneE164, r] as const] : []));
         };
         /**
-         * Locks contacts the import changes `FOR UPDATE` in id order, as bulk edits and field
-         * deletions lock them, and reads them as they are once locked: values are written as a
-         * patch over the locked row, so a value a field's deletion removed meanwhile, or a member's
-         * change of another field, is never written back from an earlier read (ADR-407).
+         * Locks contacts the import may change `FOR NO KEY UPDATE` in id order, as bulk field edits
+         * and field deletions lock them, and reads them as they are once locked: values are written
+         * as a patch over the locked row, so a value a field's deletion removed meanwhile, or a
+         * member's change of another field, is never written back from an earlier read (ADR-407).
+         * The import changes the name, email and values, never `tenant_id` or `id` (the only key
+         * other tables reference), so automation steps and foreign key checks (an inbound message's
+         * conversation, a tag, a consent event) do not wait for it.
          */
+        const lockedIds = new Set<string>();
         const lockContacts = async (ids: string[]) => {
           const rows: ContactLockRow[] = [];
           for (const part of chunks([...ids].sort(), 1000)) {
@@ -1442,14 +1453,16 @@ export function createContactsService(deps: { db: Database; clock: Clock }) {
                 .from(contacts)
                 .where(and(eq(contacts.tenantId, ctx.tenant.id), inArray(contacts.id, part)))
                 .orderBy(asc(contacts.id))
-                .for('update')),
+                .for('no key update')),
             );
           }
+          for (const row of rows) lockedIds.add(row.id);
           return rows;
         };
         if (opts.updateExisting) {
           // Every contact the file names that exists now, locked before any is changed, all in id
-          // order; a contact another request adds meanwhile is locked when found below.
+          // order. Contacts created or merged during the import are found below and locked then,
+          // out of id order (a rare cycle PostgreSQL detects; the member imports again).
           const known: string[] = [];
           for (const part of chunks([...records.keys()], 1000)) {
             for (const [, e] of await selectByPhones(part)) known.push(e.id);
@@ -1488,11 +1501,20 @@ export function createContactsService(deps: { db: Database; clock: Clock }) {
             // Numbers another request created meanwhile are handled like existing contacts.
             const raced = fresh.map((f) => f.phoneE164).filter((p) => !insertedPhones.has(p));
             if (raced.length > 0) {
-              const found = await selectByPhones(raced);
-              const locked = opts.updateExisting
-                ? await lockContacts(found.map(([, e]) => e.id))
-                : found.map(([, e]) => e);
-              for (const e of locked) if (e.phoneE164) existing.set(e.phoneE164, e);
+              for (const [phone, e] of await selectByPhones(raced)) existing.set(phone, e);
+            }
+          }
+          if (opts.updateExisting) {
+            // A contact read here but not locked above (created or merged into since) is locked
+            // now and read again, so the patch is decided on the locked row.
+            const unlocked = [...existing.values()].filter((e) => !lockedIds.has(e.id));
+            if (unlocked.length > 0) {
+              for (const phone of unlocked.map((e) => e.phoneE164)) {
+                if (phone) existing.delete(phone);
+              }
+              for (const e of await lockContacts(unlocked.map((u) => u.id))) {
+                if (e.phoneE164) existing.set(e.phoneE164, e);
+              }
             }
           }
           for (const [phone, e] of existing) {
