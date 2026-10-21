@@ -61,6 +61,7 @@ import {
   toApiSatisfactionSurvey,
 } from '../api/satisfaction-survey-view';
 import { campaignAnalytics, campaignResultsSchema, toCampaignResults } from '../campaigns/results';
+import { VARIANT_LABELS, parseVariantLabel } from '../campaigns/variants';
 import { COMMERCE_LIMITS } from '../commerce/model';
 import { crmCreatedBy, noteWriter } from '../crm/common';
 import { MAX_DEAL_ITEMS } from '../crm/deal-item-limits';
@@ -684,13 +685,13 @@ const webhookCampaignSchema = z.object({
     .uuid()
     .nullable()
     .describe(
-      'Variant A’s (the campaign’s own) template; a campaign with variant B also sends B’s (see `variants` in GET /campaigns/{id}).',
+      'Variant A’s (the campaign’s own) template; a campaign with variants also sends theirs, B to E (see `variants` in GET /campaigns/{id}).',
     ),
   templateName: z
     .string()
     .nullable()
     .describe(
-      'Variant A’s (the campaign’s own) template’s name when the event is delivered; see `variants` in GET /campaigns/{id} for variant B’s.',
+      'Variant A’s (the campaign’s own) template’s name when the event is delivered; see `variants` in GET /campaigns/{id} for the other variants’.',
     ),
   scheduledAt: z.iso.datetime().nullable().describe('When it was set to start.'),
   startedAt: z.iso.datetime().nullable(),
@@ -736,9 +737,9 @@ export const campaignRecipientSkippedPayloadSchema = envelope(
           'Why the campaign did not send it its message, as the campaign’s page explains it: contact_erased, no_phone (no WhatsApp number), suppressed (on the suppression list), opted_out, no_marketing_opt_in, missing_variable (no value for a variable without a fallback), frequency_capped (the marketing frequency cap), cost_unknown (no price for the number’s market under a spending cap) or expired (the sending period ended first).',
         ),
       variant: z
-        .enum(['A', 'B'])
+        .enum(VARIANT_LABELS)
         .describe(
-          'The variant the recipient was given when the audience was taken, as GET /campaigns/{id}/recipients gives it: A, the campaign’s own template, or B, its second template. A for every recipient of a campaign without variant B. The reason was checked against its variant’s template (a marketing variant needs marketing consent).',
+          'The variant the recipient was given when the audience was taken, as GET /campaigns/{id}/recipients gives it: A, the campaign’s own template, B, its second template, or C, D or E, its third to fifth for a campaign that tests more than two. A for every recipient of a campaign without variants. The reason was checked against its variant’s template (a marketing variant needs marketing consent).',
         ),
     }),
     campaign: z.object({
@@ -2819,11 +2820,12 @@ export async function buildWebhookPayload(
       return {
         ...base,
         data: {
-          // The variant recorded with the snapshot (ADR-405): it never changes.
+          // The variant recorded with the snapshot (ADR-405, A to E since ADR-410): it never
+          // changes.
           recipient: {
             id: recipient.id,
             skipReason,
-            variant: recipient.variant === 'B' ? ('B' as const) : ('A' as const),
+            variant: parseVariantLabel(recipient.variant),
           },
           campaign: {
             id: campaign.id,

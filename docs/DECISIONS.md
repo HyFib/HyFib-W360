@@ -18044,3 +18044,84 @@ found one Medium issue: the priced subtotals were a correlated subquery per list
 PostgreSQL would run once per product over every line of the period; they are now grouped once and
 joined. A Low issue: the product figures still count orders a time zone skew drops from the days;
 the limit is now stated here and in RUNBOOKS.
+
+## ADR-410 Campaigns that test up to five templates (P3-04, P5-08, P5-09) (2026-10-21)
+
+Context: ADR-405 let a campaign send two templates side by side (variants A and B) and listed "more
+than two variants" as not built. Companies comparing several messages (a short one, a long one,
+one with an offer) still had to run them two at a time, each pair with its own approval and its
+own audience, and compare the pairs by eye. Its table already took labels B to Z.
+
+Decision:
+
+- **Up to five variants, at least 10% each.** A draft may add variants C, D and E after B, so a
+  campaign tests up to five templates (`MAX_VARIANTS`): A, the campaign's own template, and B to E
+  in `app.campaign_variants`, one row each, each with its own template of the number's account,
+  its own mapping and its share, 10% to 90% in steps of 5 (`variantShareSchema`, unchanged). A gets
+  the rest, which must also be at least 10% (`variantSetProblem`), so the shares sum to 100% and no
+  variant gets less than a tenth of the audience. Five because the approval email, the review's and
+  the page's tables and a member's attention still take every variant at once, and each of five
+  keeps at least a tenth of the recipients: with 1,000 contacts a 10% variant has about 100
+  recipients, a binomial standard deviation of 0.95 points, while 5% would leave about 50, whose
+  differences are harder still to tell from chance (the results claim no winner either way). Steps of 5 are kept so the
+  table's check is unchanged and an even three-way split is 35/35/30 (the closest the steps give).
+  A campaign without variants and one with B alone behave exactly as before.
+- **No migration.** The checks of 0317 (labels B to Z, shares of 10% to 90% in steps of 5, the
+  recipients' variant A to Z), its unique label per campaign and its grants (`INSERT`, `DELETE`,
+  `UPDATE` of template, mapping and share) already take C to E, and nothing else limits variants to
+  A and B in the database. A draft's variants are written in its transaction: rows past the last
+  label removed, each label upserted; a later variant is never left without the one before.
+- **Assignment generalised, still recorded once.** The bucket is ADR-405's (first 32 bits of the
+  MD5 of "campaign id:contact id" modulo 100); the buckets are laid end to end in label order
+  (`variantRanges`): B the first `shares[0]`, C the next `shares[1]`, then D and E, and A the rest,
+  last. With B alone this is ADR-405's rule exactly (B below its share), so two-variant campaigns
+  split as they always did. `variantOfBucket`, `assignVariant` and `variantConditionSql` (each
+  variant's range in SQL) are one rule; the snapshot records each label and the runtime role still
+  cannot update it, so no contact is rerolled by a retry, a restart, a pause or a resume. Adding a
+  variant to a draft takes its buckets from A only (B keeps its contacts). The unit tests check all
+  1,593 valid share sets (17 of two variants, 120 of three, 455 of four, 1,001 of five) over the
+  10,000 deterministic contacts of ADR-405: every variant's count within three of its own binomial
+  standard deviations, Pearson's statistic below the chi-square's 0.999 quantile for its degrees
+  of freedom, and for two other campaign ids every variant within ADR-405's 1.5 points; the largest
+  deviation is 1.12 points (38.88% for the variant given buckets 50 to 89, 2.3 deviations). The
+  ids are fixed, so the outcome is too.
+- **Every check per variant, as B's.** Readiness checks each variant's template with
+  `variantTemplateProblems` (chosen, approved by Meta, of the number's account, sendable, its
+  category's consent and opt-in, its mapping complete, media and parameter rules through its send
+  spec), and a variant nobody in its share can receive blocks submitting; problems name their
+  variant ("Variant C: …"). Costs, the frequency cap and the messaging-limit notice are per variant
+  as for B. Approval and resuming check every variant's template while it has pending recipients
+  (`assertVariantTemplatesApproved`, "Variant C's template is no longer approved by Meta."), and so
+  does the runner, which loads every variant row and pauses naming the variant. Every variant sends
+  from the campaign's number.
+- **Draft, review, approval and results show every variant.** The editor adds variants one after
+  another ("Add variant C: another approved message for part of the audience"; removing one removes
+  those after it) and says what A keeps; the review's Variants table, the campaign page's header and
+  Variants card, the approval email ("It tests 3 templates side by side: …; Approving it approves
+  all 3") and test sends ("Variant to test") take every variant. `campaignVariantAnalytics` counts
+  the campaign's own labels, so a campaign of three reports three, never empty D and E.
+- **API and webhooks additive (P5-08, P5-09).** Drafts take `variants` (every variant after A in
+  order, at most four; given, it replaces them all; left out, they stay) beside ADR-405's `variantB`,
+  whose meaning is kept: B alone, set without dropping C to E, and null removing every variant (a C
+  without B would leave a gap); the two are refused together. `settings.variants` gives them all
+  and `settings.variantB` still gives B. The labels C, D and E join the enums of `variants` on
+  `GET /campaigns/{id}` and the draft review, of each recipient's `variant` and of
+  `recipient.variant` in `campaign.recipient_skipped`, values that appear only for campaigns that
+  test more than two templates; no field changes meaning, and the top-level template stays A's. A
+  recorded label is read back strictly (`parseVariantLabel` throws on any label HyFib does not
+  write) instead of mapping it to A.
+- **Rolling deploy gated.** A web server or worker of the release before reads variant B only. Met
+  with a variant C, an older web server submits its contacts as A, shows and checks only A and B
+  on the review and approval pages (an approver would approve a template they never saw) and
+  reports C's recipients as A; an older worker never sends C's recipients (they stay pending, a
+  batch of them stalling the campaign) and names them A in webhooks. So web servers let a draft
+  grow past two variants only up to `CAMPAIGN_VARIANTS_MAX` (2 to 5, **2 when unset**,
+  `nextCampaignVariants`), which the deployment raises once every server runs this release and
+  lowers before a rollback (DEPLOYMENT has the steps). At 2 a new server writes what ADR-405 writes;
+  a draft that already has more (the setting lowered for a rollback) can still be edited or trimmed,
+  never grown. Workers handle any number and do not read it.
+
+Not built: more than five variants, shares below 10% or off the 5% steps, a per-variant schedule,
+audience or number, a winner or significance, per-variant results in `campaign.status_changed`,
+detecting older servers automatically (the gate is the deployment's setting), and any
+verification against Meta (the Graph stand-in only).

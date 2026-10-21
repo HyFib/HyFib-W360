@@ -156,11 +156,12 @@ Phase 3 rules on top of the matrix (enforced in domain services and re-checked w
   `campaigns.read` also holds `channels.read`, and the limit is operational metadata of the
   company's own number (no credential, no contact), read only from that number under the company's
   scope.
-- A campaign's variant B (ADR-405) is edited as the draft is (`campaigns.write`, drafts only, by
-  members and by keys with `campaigns.write`); its template must be one of the company's own (read
+- A campaign's variants B to E (ADR-405, ADR-410) are edited as the draft is (`campaigns.write`,
+  drafts only, by members and by keys with `campaigns.write`; no new permission); each template must
+  be one of the company's own (read
   under the company's scope, and `app.campaign_variants` has a composite foreign key to the
-  company's templates, so another company's template id is not found), and submitting checks it as
-  A's template is checked. The variant each recipient is given is written once with the snapshot:
+  company's templates, so another company's template id is not found), and submitting checks each
+  as A's template is checked. The variant each recipient is given is written once with the snapshot:
   the runtime role holds no `UPDATE` on `app.campaign_recipients.variant`, so a recorded variant
   cannot be changed. Results per variant are counts, as the campaign's are.
 - Erasing a contact needs `contacts.delete` (also while the company is suspended).

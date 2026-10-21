@@ -41,8 +41,11 @@ export interface EditableCampaign {
   budgetAmount: string;
   budgetCurrency: string | null;
   stopAfterHours: number;
-  /** Variant B (ADR-405): a second template with its own mapping and its share; null for none. */
-  variantB: EditableVariant | null;
+  /**
+   * The variants after A (ADR-405, ADR-410): B, then C to E, each a template with its own mapping
+   * and its share; empty for none.
+   */
+  variants: EditableVariant[];
 }
 
 type Variables = { header: Source[]; body: Source[]; buttons: Source[] };
@@ -53,10 +56,22 @@ export interface EditableVariant {
   sharePercent: number;
 }
 
-/** B's share of the recipients a member chooses from: 10% to 90% in steps of 5 (the server checks). */
+/** A variant's share a member chooses from: 10% to 90% in steps of 5 (the server checks). */
 const VARIANT_SHARES = Array.from({ length: 17 }, (_, i) => 10 + i * 5);
 
+/** The least share any variant, A included, may have (the server checks). */
+const MIN_SHARE = 10;
+
+/** The labels of the variants after A, in order (ADR-410): a campaign tests up to five templates. */
+const LABELS_AFTER_A = ['B', 'C', 'D', 'E'] as const;
+
 const EMPTY_VARIABLES: Variables = { header: [], body: [], buttons: [] };
+
+/** A new variant's share: half of what A has left, in steps of 5, at least 10% (B starts at 50%). */
+function newVariantShare(variants: EditableVariant[]): number {
+  const rest = 100 - variants.reduce((sum, v) => sum + v.sharePercent, 0);
+  return Math.max(MIN_SHARE, Math.floor(rest / 2 / 5) * 5);
+}
 
 function fill(text: string, values: string[]): string {
   return text.replace(/\{\{\s*(\d+)\s*\}\}/g, (m, n: string) => values[Number(n) - 1] || m);
@@ -131,6 +146,7 @@ export function CampaignEditor({
   orderCurrencies,
   timezones,
   currencies,
+  variantsLimit,
 }: {
   slug: string;
   campaign: EditableCampaign;
@@ -144,6 +160,8 @@ export function CampaignEditor({
   orderCurrencies: string[];
   timezones: string[];
   currencies: string[];
+  /** The most variants this server lets the draft reach, A included (ADR-410). */
+  variantsLimit: number;
 }) {
   const [c, setC] = useState(campaign);
   const [audienceKind, setAudienceKind] = useState<'segment' | 'conditions'>(
@@ -178,9 +196,15 @@ export function CampaignEditor({
     next[part][index] = source;
     update({ variables: next });
   };
-  // Variant B (ADR-405): a template of the same number's account, sized and previewed as A's.
-  const templateB = c.variantB ? available.find((t) => t.id === c.variantB?.templateId) : undefined;
-  const variablesB = c.variantB ? sized(templateB, c.variantB.variables) : null;
+  // Variants B to E (ADR-405, ADR-410): templates of the same number's account, each sized and
+  // previewed as A's.
+  const others = c.variants.map((v) => {
+    const t = available.find((x) => x.id === v.templateId);
+    return { variant: v, template: t, variables: sized(t, v.variables) };
+  });
+  const shareOfA = 100 - c.variants.reduce((sum, v) => sum + v.sharePercent, 0);
+  const setVariant = (index: number, patch: Partial<EditableVariant>) =>
+    update({ variants: c.variants.map((v, i) => (i === index ? { ...v, ...patch } : v)) });
 
   function submit(event: React.FormEvent) {
     event.preventDefault();
@@ -215,14 +239,11 @@ export function CampaignEditor({
               ? { amount: c.budgetAmount, currency: c.budgetCurrency }
               : null,
           stopAfterHours: c.stopAfterHours,
-          variantB:
-            c.variantB && variablesB
-              ? {
-                  templateId: templateB ? templateB.id : null,
-                  variables: variablesB,
-                  sharePercent: c.variantB.sharePercent,
-                }
-              : null,
+          variants: others.map((o) => ({
+            templateId: o.template ? o.template.id : null,
+            variables: o.variables,
+            sharePercent: o.variant.sharePercent,
+          })),
         });
         startTransition(() => {
           if (!result.ok) setError(result.message);
@@ -267,9 +288,11 @@ export function CampaignEditor({
                   update({
                     channelAccountId: e.target.value || null,
                     templateId: null,
-                    variantB: c.variantB
-                      ? { ...c.variantB, templateId: null, variables: EMPTY_VARIABLES }
-                      : null,
+                    variants: c.variants.map((v) => ({
+                      ...v,
+                      templateId: null,
+                      variables: EMPTY_VARIABLES,
+                    })),
                   })
                 }
               >
@@ -347,144 +370,68 @@ export function CampaignEditor({
 
       <fieldset className="grid gap-4">
         <legend className="mb-2 text-base font-semibold">A/B test</legend>
-        <label htmlFor="cmp-variant-b" className="flex items-center gap-2 text-sm">
-          <Checkbox
-            id="cmp-variant-b"
-            checked={Boolean(c.variantB)}
-            onChange={(e) =>
-              update({
-                variantB: e.target.checked
-                  ? { templateId: null, variables: EMPTY_VARIABLES, sharePercent: 50 }
-                  : null,
-              })
-            }
-          />
-          Add variant B: a second approved message for part of the audience
-        </label>
-        {c.variantB && variablesB ? (
-          <>
-            <p className="text-sm text-muted-foreground">
-              Each contact gets one variant, chosen by a fixed rule from the campaign and the
-              contact, so the split is close to the share you choose but rarely exact. The template
-              above is variant A. Both are checked before the campaign can start, and the results
-              show their counts side by side without picking a winner.
-            </p>
-            <div className="grid gap-4 sm:grid-cols-2">
-              <Field
-                id="cmp-template-b"
-                label="Variant B template"
-                description={
-                  channel && available.length === 0
-                    ? 'No approved template for this number’s account yet.'
-                    : undefined
-                }
-              >
-                {(aria) => (
-                  <Select
-                    {...aria}
-                    value={templateB?.id ?? ''}
-                    disabled={!channel}
-                    onChange={(e) =>
-                      update({
-                        variantB: c.variantB
-                          ? {
-                              ...c.variantB,
-                              templateId: e.target.value || null,
+        {LABELS_AFTER_A.map((label, index) => {
+          const o = others[index];
+          // Variant B can be added; C to E once the one before is, up to this server's limit
+          // (A included). A draft that already has more keeps them.
+          if (!o && (index > c.variants.length || index + 1 >= variantsLimit)) return null;
+          const id = `cmp-variant-${label.toLowerCase()}`;
+          return (
+            <div key={label} className="grid gap-4">
+              <label htmlFor={id} className="flex items-center gap-2 text-sm">
+                <Checkbox
+                  id={id}
+                  checked={Boolean(o)}
+                  onChange={(e) =>
+                    update({
+                      // Removing a variant removes those after it: labels follow one another.
+                      variants: e.target.checked
+                        ? [
+                            ...c.variants,
+                            {
+                              templateId: null,
                               variables: EMPTY_VARIABLES,
-                            }
-                          : null,
-                      })
-                    }
-                  >
-                    <option value="">Choose an approved template</option>
-                    {available.map((t) => (
-                      <option key={t.id} value={t.id}>
-                        {t.name} ({t.language}, {t.category.toLowerCase()})
-                      </option>
-                    ))}
-                  </Select>
-                )}
-              </Field>
-              <Field
-                id="cmp-share-b"
-                label="Share of recipients for variant B"
-                description={`Variant A gets the other ${100 - c.variantB.sharePercent}%.`}
-              >
-                {(aria) => (
-                  <Select
-                    {...aria}
-                    value={String(c.variantB?.sharePercent ?? 50)}
-                    onChange={(e) =>
-                      update({
-                        variantB: c.variantB
-                          ? { ...c.variantB, sharePercent: Number(e.target.value) }
-                          : null,
-                      })
-                    }
-                  >
-                    {VARIANT_SHARES.map((share) => (
-                      <option key={share} value={share}>
-                        {share}%
-                      </option>
-                    ))}
-                  </Select>
-                )}
-              </Field>
-            </div>
-            {templateB ? (
-              <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_20rem]">
-                <div className="grid gap-3">
-                  {[
-                    ...variablesB.header.map((s, i) => ({
-                      part: 'header' as const,
-                      index: i,
-                      source: s,
-                    })),
-                    ...variablesB.body.map((s, i) => ({
-                      part: 'body' as const,
-                      index: i,
-                      source: s,
-                    })),
-                    ...variablesB.buttons.map((s, i) => ({
-                      part: 'buttons' as const,
-                      index: i,
-                      source: s,
-                    })),
-                  ].map(({ part, index, source }) => (
-                    <VariableInput
-                      key={`b-${part}-${index}`}
-                      id={`cmp-var-b-${part}-${index}`}
-                      label={
-                        part === 'buttons'
-                          ? `Variant B: end of the “${templateB.links[index]?.text ?? ''}” link`
-                          : `Variant B: ${part === 'header' ? 'header' : 'body'} variable {{${index + 1}}}`
-                      }
-                      source={source}
-                      fields={fields}
-                      onChange={(next) => {
-                        if (!c.variantB) return;
-                        const vars = {
-                          header: [...variablesB.header],
-                          body: [...variablesB.body],
-                          buttons: [...variablesB.buttons],
-                        };
-                        vars[part][index] = next;
-                        update({ variantB: { ...c.variantB, variables: vars } });
-                      }}
-                    />
-                  ))}
-                  {variablesB.header.length + variablesB.body.length + variablesB.buttons.length ===
-                  0 ? (
-                    <p className="text-sm text-muted-foreground">
-                      Variant B’s template has no variables.
-                    </p>
-                  ) : null}
-                </div>
-                <TemplatePreview
-                  rendered={previewOf(templateB, variablesB, fields)}
-                  label="Variant B message preview"
+                              sharePercent: index === 0 ? 50 : newVariantShare(c.variants),
+                            },
+                          ]
+                        : c.variants.slice(0, index),
+                    })
+                  }
                 />
-              </div>
+                {index === 0
+                  ? 'Add variant B: a second approved message for part of the audience'
+                  : `Add variant ${label}: another approved message for part of the audience`}
+              </label>
+              {index === 0 && o ? (
+                <p className="text-sm text-muted-foreground">
+                  Each contact gets one variant, chosen by a fixed rule from the campaign and the
+                  contact, so the split is close to the shares you choose but rarely exact. The
+                  template above is variant A. Every variant is checked before the campaign can
+                  start, and the results show their counts side by side without picking a winner.
+                </p>
+              ) : null}
+              {o ? (
+                <VariantFields
+                  label={label}
+                  variant={o.variant}
+                  template={o.template}
+                  variables={o.variables}
+                  available={available}
+                  channelChosen={Boolean(channel)}
+                  fields={fields}
+                  onChange={(patch) => setVariant(index, patch)}
+                />
+              ) : null}
+            </div>
+          );
+        })}
+        {c.variants.length > 0 ? (
+          <>
+            <p className="text-sm">Variant A gets the other {shareOfA}%.</p>
+            {shareOfA < MIN_SHARE ? (
+              <p className="text-sm text-destructive">
+                Variant A needs at least {MIN_SHARE}% of the recipients: lower the other shares.
+              </p>
             ) : null}
           </>
         ) : null}
@@ -739,6 +686,126 @@ export function CampaignEditor({
         </Button>
       </div>
     </ClientForm>
+  );
+}
+
+/**
+ * One variant after A (ADR-405, ADR-410): its template of the number's account, its share and its
+ * own variables, previewed as variant A's are.
+ */
+function VariantFields({
+  label,
+  variant,
+  template,
+  variables,
+  available,
+  channelChosen,
+  fields,
+  onChange,
+}: {
+  label: string;
+  variant: EditableVariant;
+  template: SendableTemplate | undefined;
+  /** Its variables sized to its template. */
+  variables: Variables;
+  available: SendableTemplate[];
+  channelChosen: boolean;
+  fields: BuilderField[];
+  onChange: (patch: Partial<EditableVariant>) => void;
+}) {
+  const key = label.toLowerCase();
+  return (
+    <>
+      <div className="grid gap-4 sm:grid-cols-2">
+        <Field
+          id={`cmp-template-${key}`}
+          label={`Variant ${label} template`}
+          description={
+            channelChosen && available.length === 0
+              ? 'No approved template for this number’s account yet.'
+              : undefined
+          }
+        >
+          {(aria) => (
+            <Select
+              {...aria}
+              value={template?.id ?? ''}
+              disabled={!channelChosen}
+              onChange={(e) =>
+                onChange({ templateId: e.target.value || null, variables: EMPTY_VARIABLES })
+              }
+            >
+              <option value="">Choose an approved template</option>
+              {available.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.name} ({t.language}, {t.category.toLowerCase()})
+                </option>
+              ))}
+            </Select>
+          )}
+        </Field>
+        <Field id={`cmp-share-${key}`} label={`Share of recipients for variant ${label}`}>
+          {(aria) => (
+            <Select
+              {...aria}
+              value={String(variant.sharePercent)}
+              onChange={(e) => onChange({ sharePercent: Number(e.target.value) })}
+            >
+              {VARIANT_SHARES.map((share) => (
+                <option key={share} value={share}>
+                  {share}%
+                </option>
+              ))}
+            </Select>
+          )}
+        </Field>
+      </div>
+      {template ? (
+        <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_20rem]">
+          <div className="grid gap-3">
+            {[
+              ...variables.header.map((s, i) => ({ part: 'header' as const, index: i, source: s })),
+              ...variables.body.map((s, i) => ({ part: 'body' as const, index: i, source: s })),
+              ...variables.buttons.map((s, i) => ({
+                part: 'buttons' as const,
+                index: i,
+                source: s,
+              })),
+            ].map(({ part, index, source }) => (
+              <VariableInput
+                key={`${key}-${part}-${index}`}
+                id={`cmp-var-${key}-${part}-${index}`}
+                label={
+                  part === 'buttons'
+                    ? `Variant ${label}: end of the “${template.links[index]?.text ?? ''}” link`
+                    : `Variant ${label}: ${part === 'header' ? 'header' : 'body'} variable {{${index + 1}}}`
+                }
+                source={source}
+                fields={fields}
+                onChange={(next) => {
+                  const vars = {
+                    header: [...variables.header],
+                    body: [...variables.body],
+                    buttons: [...variables.buttons],
+                  };
+                  vars[part][index] = next;
+                  onChange({ variables: vars });
+                }}
+              />
+            ))}
+            {variables.header.length + variables.body.length + variables.buttons.length === 0 ? (
+              <p className="text-sm text-muted-foreground">
+                Variant {label}’s template has no variables.
+              </p>
+            ) : null}
+          </div>
+          <TemplatePreview
+            rendered={previewOf(template, variables, fields)}
+            label={`Variant ${label} message preview`}
+          />
+        </div>
+      ) : null}
+    </>
   );
 }
 

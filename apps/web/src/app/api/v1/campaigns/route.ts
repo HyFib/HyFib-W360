@@ -19,7 +19,12 @@ export function POST(request: NextRequest) {
   return handleApiRequest(
     request,
     ({ ctx, runtime, body, idempotency }) =>
-      apiCreateCampaign(runtime.outbound, ctx, body, idempotency),
+      apiCreateCampaign(
+        { ...runtime.outbound, campaignVariantsLimit: runtime.config.CAMPAIGN_VARIANTS_MAX },
+        ctx,
+        body,
+        idempotency,
+      ),
     { json: true, idempotency: 'optional' },
   );
 }

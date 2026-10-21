@@ -3084,3 +3084,90 @@ describe('A/B variants through the API (ADR-405)', () => {
     expect(plainRecipients.data.every((r) => r.variant === 'A')).toBe(true);
   });
 });
+
+describe('campaigns that test up to five templates through the API (ADR-410)', () => {
+  it('creates a draft with three variants where the deployment allows it, keeps C when variantB changes, and names each recipient’s', async () => {
+    const s = await setup();
+    const key = await apiKey(
+      s.c,
+      ['campaigns.read', 'campaigns.write', 'contacts.read'],
+      'Three-way drafts',
+    );
+    for (let i = 0; i < 45; i += 1)
+      await s.contact(`+9198260000${String(i).padStart(2, '0')}`, `Abc${i}`);
+    const variant = (sharePercent: number, value: string) => ({
+      templateId: s.templateId,
+      variables: { header: [], body: [{ source: 'static', value }], buttons: [] },
+      sharePercent,
+    });
+    const input = {
+      name: 'API A/B/C',
+      channelId: s.c.channelAccountId,
+      templateId: s.templateId,
+      variables: { header: [], body: [{ source: 'name', fallback: 'there' }], buttons: [] },
+      audience: { match: 'all', conditions: [{ type: 'tag', op: 'has', tag: 'vip' }] },
+      variants: [variant(30, 'friend'), variant(25, 'neighbour')],
+    };
+    // A web server whose deployment has not raised the limit refuses a third variant.
+    const refusedDraft = await refusal(apiCreateCampaign(writeDeps(), key, input, null));
+    expect(refusedDraft.code).toBe('validation_failed');
+    const wide = () => ({ ...writeDeps(), campaignVariantsLimit: 5 });
+    const created = await apiCreateCampaign(wide(), key, input, null);
+    expect(created.status).toBe(201);
+    const draft = (created.body as { data: ApiCampaignDetail }).data;
+    expect(draft.settings?.variants).toEqual(input.variants);
+    // variantB keeps its meaning: variant B alone.
+    expect(draft.settings?.variantB).toEqual(input.variants[0]);
+    // variantB given changes B and keeps C, even where the limit is two.
+    const editedB = await apiUpdateCampaign(writeDeps(), key, draft.id, {
+      variantB: variant(35, 'pal'),
+    });
+    expect(editedB.settings?.variants).toEqual([variant(35, 'pal'), input.variants[1]]);
+    // Shares that leave A under 10%, and variantB with variants, are refused.
+    for (const body of [
+      { variants: [variant(50, 'a'), variant(45, 'b')] },
+      { variantB: variant(30, 'a'), variants: [] },
+    ])
+      expect((await refusal(apiUpdateCampaign(wide(), key, draft.id, body))).code).toBe(
+        'validation_failed',
+      );
+
+    const review = await apiReviewCampaign(writeDeps(), key, draft.id);
+    expect(review.problems).toEqual([]);
+    expect(review.variants?.map((v) => [v.variant, v.sharePercent])).toEqual([
+      ['A', 40],
+      ['B', 35],
+      ['C', 25],
+    ]);
+    expect((review.variants ?? []).reduce((n, v) => n + (v.total ?? 0), 0)).toBe(45);
+
+    await apiSubmitCampaign(submitDeps(), key, draft.id, { expectedVersion: editedB.version });
+    await s.campaigns.approveCampaign(s.owner, draft.id, {}, {});
+    expect(await s.tick(draft.id)).toMatchObject({ outcome: 'progress', queued: 45 });
+
+    const detail = await apiGetCampaign(deps(), key, draft.id);
+    expect(detail.variants?.map((v) => [v.variant, v.sharePercent])).toEqual([
+      ['A', 40],
+      ['B', 35],
+      ['C', 25],
+    ]);
+    expect(detail.variants!.reduce((n, v) => n + v.results.audience, 0)).toBe(
+      detail.results!.audience,
+    );
+    // The top-level template stays variant A's.
+    expect(detail.templateId).toBe(s.templateId);
+    const listed = await apiListCampaignRecipients(deps(), key, draft.id, { limit: '100' });
+    expect(listed.data).toHaveLength(45);
+    const recorded = new Map(
+      (
+        await fx.query<{ id: string; variant: string }>(
+          `SELECT id, variant FROM app.campaign_recipients WHERE campaign_id = $1`,
+          [draft.id],
+        )
+      ).map((r) => [r.id, r.variant]),
+    );
+    for (const r of listed.data) expect(r.variant).toBe(recorded.get(r.id));
+    const c = detail.variants!.find((v) => v.variant === 'C')!;
+    expect(listed.data.filter((r) => r.variant === 'C')).toHaveLength(c.results.audience);
+  });
+});

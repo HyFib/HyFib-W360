@@ -98,15 +98,15 @@ export function SubmitCampaign({
 export function SendTest({
   slug,
   campaignId,
-  withVariantB = false,
+  variantLabels = [],
 }: {
   slug: string;
   campaignId: string;
-  /** Whether the campaign has a variant B to test (ADR-405). */
-  withVariantB?: boolean;
+  /** The campaign's variants after A, B to E, that a test can send (ADR-405, ADR-410). */
+  variantLabels?: readonly string[];
 }) {
   const [phones, setPhones] = useState('');
-  const [variant, setVariant] = useState<'A' | 'B'>('A');
+  const [variant, setVariant] = useState('A');
   const [results, setResults] = useState<{ phone: string; ok: boolean; message: string }[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -124,7 +124,7 @@ export function SendTest({
           .filter(Boolean);
         void sendCampaignTestAction(slug, campaignId, {
           phones: list,
-          variant: withVariantB ? variant : 'A',
+          variant: variantLabels.includes(variant) ? variant : 'A',
         }).then((r) => {
           setBusy(false);
           if (!r.ok) setError(r.message);
@@ -142,16 +142,16 @@ export function SendTest({
           <Textarea {...aria} rows={2} value={phones} onChange={(e) => setPhones(e.target.value)} />
         )}
       </Field>
-      {withVariantB ? (
+      {variantLabels.length > 0 ? (
         <Field id="test-variant" label="Variant to test">
           {(aria) => (
-            <Select
-              {...aria}
-              value={variant}
-              onChange={(e) => setVariant(e.target.value === 'B' ? 'B' : 'A')}
-            >
+            <Select {...aria} value={variant} onChange={(e) => setVariant(e.target.value)}>
               <option value="A">Variant A (the campaign’s template)</option>
-              <option value="B">Variant B</option>
+              {variantLabels.map((label) => (
+                <option key={label} value={label}>
+                  Variant {label}
+                </option>
+              ))}
             </Select>
           )}
         </Field>

@@ -99,16 +99,18 @@ export default async function CampaignPage({
             <Badge tone={status.tone}>{status.label}</Badge>
             {view.template ? (
               <span>
-                {view.variantB ? 'Variant A: template' : 'Template'} {view.template.name} (
-                {view.template.language}, {view.template.category.toLowerCase()})
+                {view.variants.length > 0 ? 'Variant A: template' : 'Template'} {view.template.name}{' '}
+                ({view.template.language}, {view.template.category.toLowerCase()})
               </span>
             ) : null}
-            {view.variantB?.template ? (
-              <span>
-                Variant B: template {view.variantB.template.name} ({view.variantB.template.language}
-                , {view.variantB.template.category.toLowerCase()})
-              </span>
-            ) : null}
+            {view.variants.map((v) =>
+              v.template ? (
+                <span key={v.label}>
+                  Variant {v.label}: template {v.template.name} ({v.template.language},{' '}
+                  {v.template.category.toLowerCase()})
+                </span>
+              ) : null,
+            )}
           </span>
         }
       />
@@ -164,13 +166,11 @@ async function DraftView({
     budgetAmount: micros(c.budgetMicros),
     budgetCurrency: c.budgetCurrency,
     stopAfterHours: c.stopAfterHours,
-    variantB: view.variantB
-      ? {
-          templateId: view.variantB.templateId,
-          variables: view.variantB.variables,
-          sharePercent: view.variantB.sharePercent,
-        }
-      : null,
+    variants: view.variants.map((v) => ({
+      templateId: v.templateId,
+      variables: v.variables,
+      sharePercent: v.sharePercent,
+    })),
   };
   const audience = review.audience;
   const summary = audience
@@ -198,6 +198,7 @@ async function DraftView({
               templates={sendable}
               segments={segmentList.map((s) => ({ id: s.id, name: s.name }))}
               fields={inputs.fields}
+              variantsLimit={view.variantsLimit}
               campaigns={inputs.campaigns}
               stores={inputs.stores}
               orderCurrencies={inputs.orderCurrencies}
@@ -315,7 +316,11 @@ async function DraftView({
             <CardTitle>Test</CardTitle>
           </CardHeader>
           <CardContent>
-            <SendTest slug={slug} campaignId={c.id} withVariantB={Boolean(view.variantB)} />
+            <SendTest
+              slug={slug}
+              campaignId={c.id}
+              variantLabels={view.variants.map((v) => v.label)}
+            />
           </CardContent>
         </Card>
       ) : null}
@@ -489,7 +494,7 @@ async function LiveView({
         </Card>
       ) : null}
       {view.messagingLimit ? <MessagingLimitNotice notice={view.messagingLimit} /> : null}
-      {view.variantB ? <VariantsCard view={view} /> : null}
+      {view.variants.length > 0 ? <VariantsCard view={view} /> : null}
       <Card>
         <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
           <div className="grid gap-1">
@@ -686,7 +691,7 @@ type Review = Awaited<
   ReturnType<Awaited<ReturnType<typeof getRuntime>>['campaigns']['reviewDraft']>
 >;
 
-/** Each variant's template, share and audience in a draft's review (ADR-405). */
+/** Each variant's template, share and audience in a draft's review (ADR-405, A to E ADR-410). */
 function VariantReview({ variants }: { variants: NonNullable<Review['variants']> }) {
   return (
     <div className="grid gap-2">
@@ -732,16 +737,21 @@ function VariantReview({ variants }: { variants: NonNullable<Review['variants']>
 }
 
 /**
- * A campaign's variants side by side (ADR-405): each template and share, and once submitted each
- * variant's counts with the same denominators as the campaign's results. Descriptive only.
+ * A campaign's variants side by side (ADR-405), A and B to E (ADR-410): each template and share, and
+ * once submitted each variant's counts with the same denominators as the campaign's results.
+ * Descriptive only.
  */
 function VariantsCard({ view }: { view: View }) {
-  const b = view.variantB;
-  if (!b) return null;
+  if (view.variants.length === 0) return null;
   const rows = view.variantResults;
-  const templateOf = (label: 'A' | 'B') =>
-    label === 'A' ? (view.template?.name ?? '—') : (b.template?.name ?? '—');
-  const shareOf = (label: 'A' | 'B') => (label === 'A' ? 100 - b.sharePercent : b.sharePercent);
+  const shareOfA = 100 - view.variants.reduce((sum, v) => sum + v.sharePercent, 0);
+  // "Variant A (60% of the audience) sends x; variant B (25%) sends y; variant C (15%) sends z."
+  const split = [
+    `Variant A (${shareOfA}% of the audience) sends ${view.template?.name ?? '—'}`,
+    ...view.variants.map(
+      (v) => `variant ${v.label} (${v.sharePercent}%) sends ${v.template?.name ?? '—'}`,
+    ),
+  ].join('; ');
   const line = (label: string, cell: (a: CampaignAnalytics) => string) => (
     <TR key={label}>
       <TD>{label}</TD>
@@ -757,10 +767,8 @@ function VariantsCard({ view }: { view: View }) {
       <CardHeader>
         <CardTitle>Variants</CardTitle>
         <CardDescription>
-          Variant A ({shareOf('A')}% of the audience) sends {templateOf('A')}; variant B (
-          {shareOf('B')}%) sends {templateOf('B')}. These are descriptive counts side by side: HyFib
-          picks no winner and computes no significance, and differences between small groups can be
-          chance.
+          {split}. These are descriptive counts side by side: HyFib picks no winner and computes no
+          significance, and differences between small groups can be chance.
         </CardDescription>
       </CardHeader>
       {rows ? (

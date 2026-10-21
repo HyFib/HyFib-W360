@@ -524,9 +524,13 @@ of what Meta does with messages over the limit, and HyFib names no code for it. 
 that looks out of date is the one Meta gave at the number's last health read (see "Messaging limit
 on Channels" above for when a number is read).
 
-**A/B variants (ADR-405).** A draft can add variant B under "A/B test": a second approved template
-of the same number's account, with its own variables, for 10% to 90% of the recipients in steps of
-5 (A, the campaign's own template, gets the rest). What a member sees and what to tell them:
+**A/B variants (ADR-405, ADR-410).** A draft can add variant B under "A/B test": a second approved
+template of the same number's account, with its own variables, for 10% to 90% of the recipients in
+steps of 5, and then variants C, D and E the same way, so a campaign tests up to five templates (A,
+the campaign's own template, gets the rest, which must stay at least 10%). Variants after B appear
+only where the deployment sets `CAMPAIGN_VARIANTS_MAX` above 2 (DEPLOYMENT); a member told "A
+campaign can test at most 2 templates for now" is on a deployment that has not raised it. Removing
+a variant removes those after it. What a member sees and what to tell them:
 
 - The split is close to the share but rarely exact (with 1,000 contacts, a 30% share commonly gives
   between about 27% and 33%): each contact's variant comes from a fixed rule on the campaign and the
@@ -539,19 +543,19 @@ of the same number's account, with its own variables, for 10% to 90% of the reci
   opt-in: use a utility template, or more opted-in contacts).
 - Each variant is checked by its own template: a marketing variant needs marketing consent (and
   the opt-in when the company requires it) and keeps to the frequency cap; a utility one does not.
-  So the two variants can skip different contacts; the Variants table shows each one's counts.
+  So the variants can skip different contacts; the Variants table shows each one's counts.
 - The cost estimate prices each variant's contacts at its own category's rate, once; the spending
-  cap counts both. Meta bills the company directly: no wallet funds are reserved for campaigns.
-- Approvers see both templates and the split on the campaign's page and in the approval email;
-  approving approves both. A variant's template is checked only while that variant still has
+  cap counts them all. Meta bills the company directly: no wallet funds are reserved for campaigns.
+- Approvers see every template and the split on the campaign's page and in the approval email;
+  approving approves them all. A variant's template is checked only while that variant still has
   contacts waiting: if it stops being approved then, the whole campaign pauses ("its template can
   no longer be sent"; the history names the variant) and resumes once it is approved again. A
   variant that has finished (nobody of it waiting) is not checked, so Meta pausing its template
-  later never stops the other variant, and a resume is not refused for it.
+  later never stops the others, and a resume is not refused for it.
 - The Variants table on the page gives each variant's counts and rates with the same denominators
   as the results. It picks no winner and computes no significance: tell members that a difference
   between small groups can be chance, and to compare counts, not only percentages.
-- Test sends can use either variant ("Variant to test"). The recipients page and its CSV export
+- Test sends can use any variant ("Variant to test"). The recipients page and its CSV export
   name each recipient's variant; the API gives `variant` on each recipient, `variants` on
   `GET /campaigns/{id}`, and `campaign.recipient_skipped` gives `recipient.variant`.
 

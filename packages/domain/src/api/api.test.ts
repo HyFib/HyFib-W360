@@ -9654,13 +9654,19 @@ describe('A/B variants through the API (ADR-405)', () => {
   it("name each recipient's variant, A or B, required", () => {
     const recipient = schemas.CampaignRecipient!;
     expect(recipient.required).toContain('variant');
-    expect(recipient.properties?.variant).toMatchObject({ type: 'string', enum: ['A', 'B'] });
+    expect(recipient.properties?.variant).toMatchObject({
+      type: 'string',
+      enum: ['A', 'B', 'C', 'D', 'E'],
+    });
     expect(recipient.properties?.variant?.description).toContain('never changes');
     const webhook = schemas.WebhookCampaignRecipientSkipped!;
     const data = webhook.properties!.data!;
     const recipientNode = data.properties!.recipient!;
     expect(recipientNode.required).toContain('variant');
-    expect(recipientNode.properties?.variant).toMatchObject({ type: 'string', enum: ['A', 'B'] });
+    expect(recipientNode.properties?.variant).toMatchObject({
+      type: 'string',
+      enum: ['A', 'B', 'C', 'D', 'E'],
+    });
   });
 
   it('give each variant’s results side by side, descriptive only, null without B', () => {
@@ -9672,7 +9678,7 @@ describe('A/B variants through the API (ADR-405)', () => {
     expect([...(item.required ?? [])].sort()).toEqual(
       ['results', 'sharePercent', 'templateId', 'templateName', 'variant'].sort(),
     );
-    expect(item.properties?.variant).toMatchObject({ enum: ['A', 'B'] });
+    expect(item.properties?.variant).toMatchObject({ enum: ['A', 'B', 'C', 'D', 'E'] });
     expect(item.properties?.sharePercent).toMatchObject({
       type: 'integer',
       minimum: 10,
@@ -9799,6 +9805,142 @@ describe('A/B variants through the API (ADR-405)', () => {
         estimate: { total: '0.6', pricedCount: 3, unpricedCount: 0 },
       },
     ]);
+    expect(apiCampaignReviewSchema.parse(answered)).toEqual(answered);
+  });
+});
+
+describe('campaigns that test up to five templates through the API (ADR-410)', () => {
+  type Node = {
+    type?: string;
+    enum?: string[];
+    minimum?: number;
+    maximum?: number;
+    maxItems?: number;
+    description?: string;
+    anyOf?: Node[];
+    items?: Node;
+    properties?: Record<string, Node>;
+    required?: string[];
+  };
+  const doc = buildOpenApiDocument('https://app.example.com/api/v1');
+  const schemas = (doc.components as { schemas: Record<string, Node> }).schemas;
+  const nullable = (node: Node | undefined) => {
+    expect(node?.anyOf).toHaveLength(2);
+    return node!.anyOf![0]!;
+  };
+  const variant = (sharePercent: number) => ({
+    templateId: null,
+    variables: { header: [], body: [] },
+    sharePercent,
+  });
+
+  it('give every variant after A in the settings, beside variantB, whose meaning is unchanged', () => {
+    const settings = nullable(schemas.CampaignWithResults!.properties?.settings);
+    expect(settings.required).toEqual(expect.arrayContaining(['variantB', 'variants']));
+    const list = settings.properties!.variants!;
+    expect(list.type).toBe('array');
+    expect(list.maxItems).toBe(4);
+    expect([...(list.items!.required ?? [])].sort()).toEqual(
+      ['sharePercent', 'templateId', 'variables'].sort(),
+    );
+    expect(list.items!.properties?.sharePercent).toMatchObject({ minimum: 10, maximum: 90 });
+    expect(list.description).toContain('B first, then C, D and E');
+    expect(list.description).toContain('at least 10%');
+    // variantB stays variant B, and says what it does beside variants.
+    expect(settings.properties?.variantB?.description).toContain(
+      'sets B and keeps the variants after it',
+    );
+    for (const name of ['CreateCampaign', 'UpdateCampaign']) {
+      expect(Object.keys(schemas[name]?.properties ?? {})).toEqual(
+        expect.arrayContaining(['variantB', 'variants']),
+      );
+      expect(schemas[name]?.required ?? []).not.toContain('variants');
+    }
+    // The results, the review, the recipients and the webhook name C to E.
+    expect(schemas.CampaignWithResults!.properties?.variants?.description).toContain('B to E');
+    expect(schemas.CampaignReview!.properties?.variants?.description).toContain('B to E');
+    expect(schemas.CampaignRecipient!.properties?.variant?.description).toContain('C, D or E');
+    const webhook = schemas.WebhookCampaignRecipientSkipped!.properties!.data!;
+    expect(webhook.properties!.recipient!.properties?.variant?.enum).toEqual([
+      'A',
+      'B',
+      'C',
+      'D',
+      'E',
+    ]);
+  });
+
+  it('take up to four variants after A in a draft, and pass them on as given', () => {
+    const four = [variant(20), variant(20), variant(20), variant(20)];
+    expect(apiCreateCampaignSchema.safeParse({ name: 'A to E', variants: four }).success).toBe(
+      true,
+    );
+    expect(apiUpdateCampaignSchema.safeParse({ variants: [] }).success).toBe(true);
+    expect(apiUpdateCampaignSchema.safeParse({ variants: [...four, variant(10)] }).success).toBe(
+      false,
+    );
+    expect(apiUpdateCampaignSchema.safeParse({ variants: [variant(12)] }).success).toBe(false);
+    expect(apiUpdateCampaignSchema.safeParse({ variants: null }).success).toBe(false);
+    expect(
+      apiUpdateCampaignSchema.safeParse({ variants: [{ ...variant(20), variant: 'C' }] }).success,
+    ).toBe(false);
+    const base = apiDraftInputFrom(
+      {
+        name: 'x',
+        channelAccountId: null,
+        templateId: null,
+        variables: { header: [], body: [], buttons: [] },
+        audience: { kind: 'none' },
+        schedule: { kind: 'now', timezone: 'Asia/Kolkata' },
+        window: null,
+        ratePerMinute: null,
+        maxMessages: null,
+        budget: null,
+        stopAfterHours: 24,
+      },
+      { name: 'y' },
+    );
+    // Left out, the draft's variants stay; given, they are passed on in order.
+    expect('variants' in base).toBe(false);
+    const given = apiUpdateCampaignSchema.parse({ variants: four.slice(0, 2) });
+    expect(apiDraftInputFrom(base, given).variants).toEqual(given.variants);
+    expect(given.variants?.map((v) => v.sharePercent)).toEqual([20, 20]);
+    expect(apiDraftInputFrom(base, { variants: [] }).variants).toEqual([]);
+    const onlyB = apiUpdateCampaignSchema.parse({ variantB: variant(30) });
+    expect('variants' in apiDraftInputFrom(base, onlyB)).toBe(false);
+  });
+
+  it("answer each of a draft's three variants in its review", () => {
+    const part = (label: 'A' | 'B' | 'C', sharePercent: number, eligible: number) => ({
+      label,
+      templateId: null,
+      templateName: `t_${label.toLowerCase()}`,
+      category: 'UTILITY' as const,
+      sharePercent,
+      audience: { total: eligible, eligible, skipped: {} },
+      estimate: null,
+    });
+    const answered = toApiCampaignReview(
+      { id: '0192a1b2-0000-7000-8000-000000000001', version: 3 },
+      {
+        problems: ['Variant C: The template is not approved by Meta.'],
+        audience: { total: 10, eligible: 10, skipped: {} },
+        estimate: null,
+        costCurrency: null,
+        scheduledAt: null,
+        adjustment: null,
+        approvalRequired: false,
+        frequencyCap: null,
+        messagingLimit: null,
+        variants: [part('A', 50, 5), part('B', 30, 3), part('C', 20, 2)],
+      },
+    );
+    expect(answered.variants?.map((v) => [v.variant, v.sharePercent, v.eligible])).toEqual([
+      ['A', 50, 5],
+      ['B', 30, 3],
+      ['C', 20, 2],
+    ]);
+    expect(answered.problems).toEqual(['Variant C: The template is not approved by Meta.']);
     expect(apiCampaignReviewSchema.parse(answered)).toEqual(answered);
   });
 });

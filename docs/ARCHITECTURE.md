@@ -410,23 +410,27 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   recipients only. Analytics compute rates with explicit denominators from `METRIC_DEFINITIONS`
   (`packages/domain/src/reports/definitions.ts`); clicks and conversions are reported as not
   measured. Per-recipient CSV export is formula-safe and audited.
-- **A/B variants (ADR-405, `campaigns/variants.ts`):** a draft may add variant B in
-  `app.campaign_variants` (labels B to Z, so more variants need no new table; two are built): a
-  second template of the number's account with its own mapping and its share (10% to 90% in steps
-  of 5); the campaign's own template is A. `evaluateReadiness` checks each variant with
-  `variantTemplateProblems` (with B, each problem names its variant) and builds one `AudienceArm`
-  per variant: its template's rules and `variantConditionSql`, the bucket of the MD5 of
-  "campaign:contact" (first 32 bits modulo 100, `variantBucket` in TypeScript), below B's share for
-  B. `insertSnapshot` freezes each arm's contacts with its label in
+- **A/B variants (ADR-405, ADR-410, `campaigns/variants.ts`):** a draft may add variants B to E
+  in `app.campaign_variants` (one row each; the table's labels B to Z needed no change), so a
+  campaign tests up to five templates: each a template of the number's account with its own mapping
+  and its share (10% to 90% in steps of 5), A, the campaign's own template, keeping the rest and at
+  least 10% (`variantSetProblem`). A web server lets a draft grow past two variants only up to
+  `CAMPAIGN_VARIANTS_MAX` (2 unless the deployment raised it, ADR-410's rolling-deploy gate;
+  `nextCampaignVariants`). Keys give `variants` (all after A) or ADR-405's `variantB` (B alone,
+  C to E kept). `evaluateReadiness` checks each variant with `variantTemplateProblems` (with
+  variants, each problem names its variant) and builds one `AudienceArm` per variant: its
+  template's rules and `variantConditionSql`, the bucket of the MD5 of "campaign:contact" (first 32
+  bits modulo 100, `variantBucket` in TypeScript) within the variant's range (`variantRanges`: B
+  the first buckets, then C, D and E, A the rest; with B alone ADR-405's rule). `insertSnapshot` freezes each arm's contacts with its label in
   `campaign_recipients.variant`, never updated (no grant). The review classifies and prices each
   arm (`estimateFromTable` at its category, summed by `combineEstimates`), refuses a variant
   nobody in its share can receive, and the messaging-limit notice counts all of them. Approval,
   resuming and the runner check each variant's template (`variantSendable`) while that variant has
-  pending recipients (`pendingByVariant`), so a finished variant never holds the other back; a tick
+  pending recipients (`pendingByVariant`), so a finished variant never holds the others back; a tick
   sends each recipient
   its recorded variant's template, checked against its variant's consent purpose and the
   frequency cap for marketing variants, priced at its category. `campaignVariantAnalytics` counts
-  each variant as `campaignAnalytics` counts the campaign; the page, `GET /campaigns/{id}`
+  each of the campaign's variants as `campaignAnalytics` counts the campaign; the page, `GET /campaigns/{id}`
   (`variants`), the recipients list and `campaign.recipient_skipped` (`variant`) show them.
   Descriptive only: no winner, no significance.
 - **Rate cards** (`ops.rate_cards`, `rate_card_prefixes`, `rate_card_prices`): entered by platform

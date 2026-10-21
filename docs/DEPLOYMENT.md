@@ -2019,6 +2019,43 @@ jsonb_path_exists(draft_graph, '$.nodes[*].save[*].from')`, and the same on
    deleted (which removes their values and leaves those segments refused as naming a field that does
    not exist).
 
+   ADR-410 (campaigns that test up to five templates) has no migration: the labels B to Z, the
+   shares of 10% to 90% in steps of 5, the unique label per campaign and the grants of 0317 already
+   take variants C to E, and the recipients' check takes any label A to Z. It adds the web setting
+   `CAMPAIGN_VARIANTS_MAX` (2 to 5, **2 when unset**): a web server lets a draft grow past two
+   variants only up to it. Workers do not read it; they send, check and report any number of
+   variants.
+
+   Why the setting: a server of the release before (ADR-405, two variants) that meets a campaign
+   with a variant C, D or E does the wrong thing. An older web server submitting such a draft reads
+   variant B only, so C's contacts are given variant A and sent A's template (C's row is ignored);
+   its review, campaign page and approval page show A and B only, so an approver would approve a
+   template they never saw, and only A's and B's templates are checked; its results, the API's
+   `variants` and the recipients list leave C out or report C's recipients as A. An older worker
+   loads A and B only: a recipient recorded as C has no template there, so it is never sent (not
+   sent the wrong template) and stays pending, a batch full of them stalls the campaign until a new
+   worker takes it, and its `campaign.recipient_skipped` events name C's recipients as A. A release
+   before ADR-405 ignores every variant, as DEPLOYMENT says for 0317. With the setting at 2 during
+   the rollout no draft gets a third variant, so no older server can meet one; a new server with the
+   setting at 2 behaves exactly as ADR-405 for two-variant campaigns and for those without
+   variants, and reads, checks and sends a campaign that already has more correctly (it can edit or
+   trim such a draft, never grow it).
+
+   Rollout: deploy as usual (workers, then web) with `CAMPAIGN_VARIANTS_MAX` unset. Once every web
+   server and worker runs this release (no image of the release before is left, including canaries
+   and jobs that run web code), set `CAMPAIGN_VARIANTS_MAX=5` on the web servers and roll them
+   again; servers still at 2 during that roll are of this release, so they read such drafts
+   correctly. Rollback to an image without ADR-410: first set `CAMPAIGN_VARIANTS_MAX=2` (or unset
+   it) and roll the web servers, so no new draft gets a third variant. Then campaigns that already
+   have one must not reach the older code: pause those still sending (an older worker would leave
+   their C to E recipients pending, and report them as A), and have their companies trim drafts to
+   two variants or leave them unsubmitted until the release returns (an older web server would
+   submit one as A and B, C's contacts getting A). The owner role cannot list them across
+   companies (forced row security): connected with the runtime role's credentials and
+   `app.tenant_id` set for a company as above,
+   `SELECT DISTINCT campaign_id FROM app.campaign_variants WHERE label > 'B';` lists that company's.
+   Rolling forward needs no step; raise the setting again once every server runs the release.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

@@ -1,5 +1,67 @@
 # Progress
 
+## 2026-10-21 — Campaigns that test up to five templates (P3-04, ADR-410)
+
+Status: **Implemented (no migration); unit tests run locally, integration and e2e tests in CI
+only; no live Meta traffic.** ADR-405 let a campaign test two templates; its "Not built" began with
+"more than two variants". This closes it.
+
+### Completed
+
+- **Variants:** a draft may add C, D and E after B (at most five templates, `MAX_VARIANTS`), each
+  10% to 90% in steps of 5, A keeping at least 10% (`variantSetProblem`), checked when written and
+  again before a submission. No migration: 0317's checks, unique key and grants already take them.
+- **Assignment:** ADR-405's hash buckets laid end to end (`variantRanges`: B first, A last), in SQL
+  and TypeScript, recorded once with the snapshot; with B alone the split is ADR-405's exactly, and
+  adding a variant takes buckets from A only.
+- **Checks per variant:** readiness, costs, consent, the frequency cap, approval, resuming, the
+  runner's pause (naming the variant) and test sends cover every variant as they cover B.
+- **Pages:** the editor adds variants one after another and says what A keeps; the review, the
+  campaign page, the approval page and email ("approves all 3") and the results show every variant.
+- **API and webhooks (additive):** `variants` on draft create/edit and in settings (every variant
+  after A), beside `variantB` (B alone, C to E kept; null removes all; the two refused together);
+  C to E in the enums of `variants`, each recipient's `variant` and `recipient.variant`; recorded
+  labels read back strictly. OpenAPI descriptions updated.
+- **Rolling deploy:** `CAMPAIGN_VARIANTS_MAX` (2 to 5, 2 unless set) gates drafts with more than
+  two variants until no server of the release before is left (an older web server would submit C's
+  contacts as A and show approvers two templates; an older worker would never send them and name
+  them A). DEPLOYMENT has the analysis, rollout and rollback; CI's e2e environment sets it to 5.
+- **Docs:** ADR-410, THREAT-MODEL T359, ARCHITECTURE §6B, RUNBOOKS §10A, DEPLOYMENT, SECURITY,
+  DATA-RETENTION, BACKLOG P3-04, feature matrix W-052, `.env.example`.
+
+### Tests
+
+- Unit (`campaigns/variants.test.ts`, `api/api.test.ts`, `webhooks/webhooks.test.ts`,
+  `core/config.test.ts`): labels, bounds and shares; all 1,593 valid share sets over 10,000
+  deterministic contacts, each variant within three of its own binomial standard deviations and
+  Pearson's statistic below the chi-square's 0.999 quantile, two other campaigns within 1.5 points,
+  the largest deviation pinned at 1.12 points; stability and ADR-405's split for two variants; SQL
+  ranges; the draft's variants (replace, B alone, both refused, the limit, trimming); results per
+  variant; the approval email for three; the API's schemas and mapping; the webhook body for C to
+  E and a refused unknown label; the setting's default and range; approval and resuming checking every variant. Hand mutation of 30 branches: 23 caught by unit tests; the 7 others (the SQL condition's ranges, readiness checking every variant and the stored shares, the runner loading every variant, test sends of C, and the members' and keys' paths passing the limit) are caught only by the integration tests, which did not run here.
+- Integration (CI only, `campaigns.test.ts`, `api-campaigns.test.ts`, `webhook-events.test.ts`):
+  three variants reviewed, test-sent, submitted, refused for approval while C's template is paused,
+  approved, sent through the Graph stand-in and reported, each recipient keeping its variant (SQL
+  equal to TypeScript); a paused C pausing the runner and a resume only while C has pending
+  recipients; the limit at two refusing a third variant, another company's template refused as C,
+  shares leaving A under 10%, `variantB` keeping C, trimming; the API creating, editing, reviewing
+  and reading three variants; `campaign.recipient_skipped` naming C; the two-variant and plain
+  campaigns of ADR-405 unchanged (their tests kept, with the new `variants` field).
+- E2E (CI only, `campaigns.spec.ts`): ADR-405's step extended to a third template: drafted in the
+  editor, reviewed, submitted by a key, approved from the email, sent and reported per variant.
+
+### Test commands and results (local, 2026-10-21)
+
+| Command                                                       | Result                                                           |
+| ------------------------------------------------------------- | ---------------------------------------------------------------- |
+| `npx eslint . --max-warnings=0 --ignore-pattern '.claude/**'` | clean                                                            |
+| `prettier --check` on the changed files                       | clean                                                            |
+| `pnpm typecheck`                                              | clean                                                            |
+| `pnpm test` (unit)                                            | 2,046 of 2,046 passed (181 files)                                |
+| `pnpm build`                                                  | passed                                                           |
+| hand mutation of 30 bounds, rules, checks and guards          | 23 caught by unit tests; 7 left to the integration tests (below) |
+| `pnpm test:integration`, `pnpm test:e2e`                      | not run here: no local PostgreSQL or browser; CI runs them       |
+
 ## 2026-10-21 — Choice-type custom contact fields (P3-01, ADR-407)
 
 Status: **Implemented (migration 0320); unit tests run locally, integration and e2e tests in CI

@@ -322,3 +322,23 @@ describe('job signing key rotation (ADR-135)', () => {
     }
   });
 });
+
+describe('campaign variants limit (ADR-410)', () => {
+  const web = (env: Record<string, string>) =>
+    loadWebConfig({
+      ...base,
+      APP_ENV: 'local',
+      NODE_ENV: 'development',
+      APP_BASE_URL: 'http://localhost:3000',
+      ...env,
+    });
+
+  it('is two unless set, as the release before builds, and takes two to five', () => {
+    expect(web({}).CAMPAIGN_VARIANTS_MAX).toBe(2);
+    expect(web({ CAMPAIGN_VARIANTS_MAX: '' }).CAMPAIGN_VARIANTS_MAX).toBe(2);
+    for (const n of [2, 3, 4, 5])
+      expect(web({ CAMPAIGN_VARIANTS_MAX: String(n) }).CAMPAIGN_VARIANTS_MAX).toBe(n);
+    for (const bad of ['1', '6', '2.5', 'five'])
+      expect(() => web({ CAMPAIGN_VARIANTS_MAX: bad }), bad).toThrow(/CAMPAIGN_VARIANTS_MAX/);
+  });
+});

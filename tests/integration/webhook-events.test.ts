@@ -5750,6 +5750,84 @@ describe('campaign events (ADR-087)', () => {
     ).toEqual([{ state: 'failed', last_error: 'event_gone' }]);
   });
 
+  it('names each skipped recipient’s variant, C included, for a campaign that tests three templates (ADR-410)', async () => {
+    const s = await campaignCompany(30);
+    const { c } = s;
+    const owner = await fx.ctx(c, c.owner);
+    const hook = await addEndpoint(c, ['campaign.recipient_skipped']);
+    // A web server whose deployment allows five variants writes the draft.
+    const wide = createCampaignsService({
+      db: fx.dbs.app,
+      jobs: fx.jobs(),
+      signer: fx.signer,
+      clock: s.clock,
+      notices: fx.notices(),
+      variantsLimit: 5,
+    });
+    const id = await s.draft(owner, 'Three-way sale');
+    const variant = (sharePercent: number) => ({
+      templateId: s.templateId,
+      variables: { header: [], body: [{ source: 'name', fallback: 'friend' }] },
+      sharePercent,
+    });
+    await wide.updateDraft(
+      owner,
+      id,
+      {
+        expectedVersion: 1,
+        name: 'Three-way sale',
+        channelAccountId: c.channelAccountId,
+        templateId: s.templateId,
+        variables: { header: [], body: [{ source: 'name', fallback: 'there' }] },
+        audience: {
+          kind: 'conditions',
+          definition: { match: 'all', conditions: [{ type: 'tag', op: 'has', tag: 'vip' }] },
+        },
+        schedule: { kind: 'now', timezone: 'Asia/Kolkata' },
+        window: null,
+        ratePerMinute: null,
+        maxMessages: null,
+        budget: null,
+        stopAfterHours: 24,
+        variants: [variant(30), variant(35)],
+      },
+      {},
+    );
+    await wide.submitCampaign(owner, id, { expectedVersion: 2 }, {});
+    // Every contact opts out before the campaign reaches them: each is skipped as the runner
+    // reaches it, in its own variant.
+    const consent = createConsentService({ db: fx.dbs.app, clock: systemClock });
+    const recorded = await fx.query<{ id: string; contact_id: string; variant: string }>(
+      'SELECT id, contact_id, variant FROM app.campaign_recipients WHERE campaign_id = $1',
+      [id],
+    );
+    expect(recorded).toHaveLength(30);
+    for (const r of recorded)
+      await consent.recordConsent(owner, {
+        contactId: r.contact_id,
+        purpose: 'marketing',
+        action: 'opt_out',
+        note: 'Asked by phone',
+      });
+    expect(await s.tick(id)).toMatchObject({ outcome: 'progress', skipped: 30 });
+    await deliverDue(c);
+    const bodies = bodiesAt(hook.path);
+    expect(bodies).toHaveLength(30);
+    const variantOf = new Map(recorded.map((r) => [r.id, r.variant]));
+    for (const b of bodies) {
+      expect(campaignRecipientSkippedPayloadSchema.safeParse(b).success, JSON.stringify(b)).toBe(
+        true,
+      );
+      const recipient = b.data.recipient as { id: string; skipReason: string; variant: string };
+      expect(recipient.skipReason).toBe('opted_out');
+      expect(recipient.variant).toBe(variantOf.get(recipient.id));
+      // The campaign's top-level template stays variant A's.
+      expect((b.data.campaign as { templateId: string }).templateId).toBe(s.templateId);
+    }
+    const named = new Set(bodies.map((b) => (b.data.recipient as { variant: string }).variant));
+    expect(named).toEqual(new Set(recorded.map((r) => r.variant)));
+  });
+
   it('captures the skips of a large audience together within the statement timeout: 10,000 when the campaign starts, the rest when its sending period ends (ADR-358)', async () => {
     const s = await campaignCompany(0);
     const { c } = s;

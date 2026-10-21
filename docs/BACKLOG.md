@@ -169,9 +169,15 @@ verification, app review, Embedded Signup configuration).
   recipients in steps of 5; each recipient's variant comes from a stable hash of the campaign and
   the contact, recorded once with the snapshot; every check, estimate and the approval runs per
   variant; results per variant side by side, descriptive only; the API creates, reviews and reads
-  variants and names each recipient's, as does `campaign.recipient_skipped`). **Remaining:** the
-  10k run in staging with real dispatch, per-recipient time zones, more than two variants (the
-  table takes them), media-header templates (only the API sends them, ADR-201).
+  variants and names each recipient's, as does `campaign.recipient_skipped`). **[Up to five
+  variants built; their database and browser tests run only in CI]** (ADR-410, no migration: a
+  draft may add variants C, D and E after B, so a campaign tests up to five templates, each share
+  10% to 90% in steps of 5 with A keeping at least 10%; the hash's buckets are laid end to end, B
+  first and A last, so two-variant campaigns split as before; every per-variant check, the
+  approval, the results, the API's `variants` and `recipient.variant` cover C to E; web servers
+  allow more than two only once the deployment raises `CAMPAIGN_VARIANTS_MAX` after every server
+  runs this release). **Remaining:** the 10k run in staging with real dispatch, per-recipient time
+  zones, media-header templates (only the API sends them, ADR-201).
 - **P3-05 Reports** — _implemented (2026-09-26); provider data verified against the Graph stand-in
   only_: persisted, versioned metric definitions; periods of whole days in the company time zone;
   messaging outcomes with denominators; estimated Meta charges from Meta's billable flag and
