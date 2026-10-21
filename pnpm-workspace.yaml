@@ -15,6 +15,10 @@ patchedDependencies:
 # has no patched release.
 # sharp before 0.35.5 carries a vulnerable librsvg (GHSA-wq5f-xc86-pv6w); Next asks for ^0.35.4, so
 # the patched release fits its range.
+# vite 8.3.0 to 8.3.2 ship a launch-editor whose file existence check can be bypassed on Windows
+# (GHSA-587h-7wmj-h5pm, high); vite is a development dependency of vitest only, and 8.3.3 is
+# patched and within vitest's range.
 overrides:
   '@next/eslint-plugin-next>fast-glob': '-'
   'sharp@<0.35.5': '^0.35.5'
+  'vite@<8.3.3': '^8.3.3'

@@ -1,5 +1,34 @@
 # Progress
 
+## 2026-10-21 — CI: the dependency audit cleared again (vite, GHSA-587h-7wmj-h5pm)
+
+Status: **Fixed and locally verified; CI to confirm.** PR #102's "Dependency audit and secret
+scan" job failed on GHSA-587h-7wmj-h5pm, published after main's last run: a high-severity advisory
+for vite 8.3.0 to 8.3.2, whose bundled `launch-editor` file existence check can be bypassed on
+Windows. vite reaches the repository only as a development dependency of vitest (through
+`vitest`, `@vitest/mocker` and `@vitest/coverage-v8`, as `pnpm why vite` shows); the lockfile had
+8.3.1. Unlike ADR-142's braces, the advisory has a patched release (8.3.3) within vitest's range.
+
+### Completed
+
+- **Override** in `pnpm-workspace.yaml`, as for sharp: `'vite@<8.3.3': '^8.3.3'`, with the
+  advisory named beside it. The lockfile resolves vite 8.3.4 and the releases of its own
+  dependencies it asks for (rolldown 1.2.14 and its platform bindings, `@oxc-project/types`
+  0.154.0, postcss 8.5.31, nanoid 3.3.20); nothing else changes. Every new release passed the
+  workspace's minimum release age when installed.
+- Dependabot's PR #101, which also moves vitest to 5.0.4, was not taken: it carries six other
+  updates, TypeScript 7 among them, beyond what clearing the audit needs.
+
+### Test commands and results (local, 2026-10-21)
+
+| Command                                            | Result                                                                                                                                                                                                                             |
+| -------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm audit --audit-level=high`                    | before (CI): 3 found, 1 high (vite, GHSA-587h-7wmj-h5pm) and 2 moderate; after: no known vulnerabilities                                                                                                                           |
+| `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                                                                                                                                                                                              |
+| `pnpm test` (unit, on vite 8.3.4)                  | 1,885 of 1,887 passed in the full run; the other 2, which read every migration file, timed out at 5 seconds while two other builds loaded the machine (load average about 6), and their two files passed when run again (12 tests) |
+| `pnpm build`                                       | passed                                                                                                                                                                                                                             |
+| `pnpm test:integration`, `pnpm test:e2e`           | not run here: the local PostgreSQL is unavailable; CI runs them                                                                                                                                                                    |
+
 ## 2026-10-16 — A campaign's notice of its number's messaging limit (P3-04, ADR-400)
 
 Status: **Implemented; its database and browser tests run in CI only.** "Messaging-tier awareness
