@@ -327,6 +327,11 @@ export interface RunDetail extends RunSummary {
     statusCode: number | null;
     errorCode: string | null;
     durationMs: number | null;
+    /**
+     * Answers the call left out for safety, by name, with the reason (ADR-406): `refused_header`,
+     * `secret_header` or `echoed_secret`. Names only, never values.
+     */
+    droppedValues: Record<string, string>;
     createdAt: string;
     finishedAt: string | null;
   }[];
@@ -1898,6 +1903,7 @@ export function createAutomationService(deps: AutomationServiceDeps) {
               statusCode: automationHttpCalls.statusCode,
               errorCode: automationHttpCalls.errorCode,
               durationMs: automationHttpCalls.durationMs,
+              droppedValues: automationHttpCalls.droppedValues,
               createdAt: automationHttpCalls.createdAt,
               finishedAt: automationHttpCalls.finishedAt,
             })

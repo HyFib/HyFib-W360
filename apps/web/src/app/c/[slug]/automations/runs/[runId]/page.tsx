@@ -27,6 +27,7 @@ import {
   STORE_EVENT_LABELS,
   TRIGGER_TYPE_LABELS,
   describeDetail,
+  describeDroppedValues,
 } from '@/lib/automation-labels';
 import { formatDateTime } from '@/lib/format';
 import { getRuntime } from '@/server/runtime';
@@ -182,6 +183,7 @@ export default async function AutomationRunPage({
                         tone: 'neutral' as const,
                       };
                       const code = c.statusCode !== null ? String(c.statusCode) : c.errorCode;
+                      const dropped = describeDroppedValues(c.droppedValues);
                       return (
                         <TR key={c.id}>
                           <TD className="whitespace-nowrap text-sm text-muted-foreground">
@@ -201,6 +203,9 @@ export default async function AutomationRunPage({
                                 {describeDetail(code)}
                                 {c.durationMs !== null ? ` (${c.durationMs} ms)` : ''}
                               </span>
+                            ) : null}
+                            {dropped ? (
+                              <span className="block text-xs text-warning">{dropped}</span>
                             ) : null}
                           </TD>
                         </TR>

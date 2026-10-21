@@ -803,8 +803,11 @@ sending → accepted → sent → delivered → read/played`, or `failed`, `canc
   (`integrations.manage`); run pages list each call (method, host, path, outcome). Saved headers
   are matched without regard to case (repeated ones joined with ", "), a text body only from a
   textual UTF-8 content type; headers that carry credentials or sessions, a header the step sends a
-  secret in or one named like a company secret are never saved, and the worker leaves out any value
-  holding a secret the request carried (`savedValuesFrom`, ADR-406).
+  secret in or one named like a company secret are refused, and the worker leaves out any value
+  holding a secret the request carried, checked before clipping and in ordinary encodings
+  (`automations/echo.ts`; secrets transformed otherwise are not recognised). Answers left out are
+  recorded by name and reason in `dropped_values` (migration 0319) and shown on the run page
+  (`savedValuesFrom`, ADR-406).
 - **Enrolments** (`automations/enrollments.ts`, migration 0311, ADR-401): a member with
   `automations.publish` and `contacts.read` enrols the contacts the Contacts page's filters match
   (`contactFilterConditions`) or a saved segment's members (`segmentWhere`), at most 10,000, in an

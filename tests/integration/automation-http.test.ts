@@ -55,6 +55,7 @@ beforeAll(async () => {
       } else if (req.url === '/receipt') {
         // A plain-text answer with headers to save (ADR-406): one repeated, one a cookie.
         res.setHeader('x-request-id', 'req-7781');
+        res.setHeader('x-late-ref', 'late-1');
         res.setHeader('x-trace', ['first', 'second']);
         res.setHeader('set-cookie', ['sid=abc; HttpOnly']);
         res.writeHead(201, { 'content-type': 'text/plain; charset=utf-8' });
@@ -273,6 +274,15 @@ async function callsOf(runId: string) {
        FROM app.automation_http_calls WHERE run_id = $1 ORDER BY created_at, id`,
     [runId],
   );
+}
+
+/** The answers a call left out for safety, by name and reason (migration 0319, ADR-406). */
+async function droppedOf(callId: string) {
+  const [row] = await fx.query<{ dropped_values: Record<string, string> }>(
+    `SELECT dropped_values FROM app.automation_http_calls WHERE id = $1`,
+    [callId],
+  );
+  return row?.dropped_values;
 }
 
 async function onlyCall(runId: string) {
@@ -656,6 +666,10 @@ describe('automation HTTP step', () => {
     const done = await onlyCall(run.id);
     expect(done.saved_values).toStrictEqual({ code: '200' });
     expect(JSON.stringify(done.saved_values)).not.toContain(TOKEN);
+    // The answer left out is named with its reason, never its value, and the run page gets it.
+    expect(await droppedOf(call.id)).toStrictEqual({ status: 'echoed_secret' });
+    const view = await automations().getRun(s.owner, run.id);
+    expect(view.httpCalls.map((c) => c.droppedValues)).toStrictEqual([{ status: 'echoed_secret' }]);
   });
 
   it('refuses at publish a header named like a company secret (ADR-406)', async () => {
@@ -674,6 +688,36 @@ describe('automation HTTP step', () => {
       'precondition_failed',
       /X-Crm-Ref header is named like the secret “crm_ref”/,
     );
+  });
+
+  it('does not save a header named like a secret added after publishing, and says so (ADR-406)', async () => {
+    const s = await setup();
+    const graph = orderGraph('/receipt');
+    await publish(s.owner, {
+      ...graph,
+      nodes: graph.nodes.map((n) =>
+        n.id === 'call'
+          ? {
+              ...n,
+              save: [
+                { from: 'header', header: 'X-Late-Ref', saveAs: 'status' },
+                { from: 'status', saveAs: 'code' },
+              ],
+            }
+          : n,
+      ),
+    });
+    const { run, call } = await waitingAtCall(s);
+    // The secret arrives between publishing and the call: the worker reads the current names.
+    await webRequests().saveSecret(s.owner, {
+      name: 'late_ref',
+      domain: HOST,
+      value: 'late-ref-77aa',
+    });
+    expect(await processHttpCall(httpDeps(), scopeOf(s), call.id)).toBe('succeeded');
+    const done = await onlyCall(run.id);
+    expect(done.saved_values).toStrictEqual({ code: '201' });
+    expect(await droppedOf(call.id)).toStrictEqual({ status: 'secret_header' });
   });
 
   it('takes the failure branch on an error status, a removed domain or a missing secret', async () => {

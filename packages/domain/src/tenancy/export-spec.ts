@@ -179,6 +179,7 @@ export const EXPORT_TABLES: readonly ExportTableSpec[] = [
       'error_code',
       'duration_ms',
       'saved_values',
+      'dropped_values',
       'started_at',
       'lease_until',
       'finished_at',

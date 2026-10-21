@@ -1970,6 +1970,20 @@ DEFAULT 'A'`, a constant default, so nothing is rewritten) with its check added 
    was checked when written and older rows hold the default, so it cannot fail on them. It runs in
    the same deployment, after 0317.
 
+   Migration 0319 (ADR-406) adds `app.automation_http_calls.dropped_values` (jsonb, default `{}`,
+   no table rewrite) with a check and `UPDATE` on it for the runtime role, and replaces the call's
+   guard function with the same body plus the column among what a finished call keeps. Workers of
+   the release before never name the column. Order matters for HTTP steps' saved value sources:
+   apply 0319, then roll out **workers first**, then web servers. That forward order is safe.
+   Rolling **workers** back once any graph uses `from` (a header, body text or status source) is
+   not: the older `graphSchema` refuses those pinned versions, so their runs fail, and an older
+   worker's `savedValuesFrom` throws a TypeError after the request was sent, so the call stays
+   `in_flight` and becomes `unknown` at its run's deadline. Rolling **web servers** back makes such
+   drafts fail to parse in the editor and at publishing. Before rolling either back, check for
+   graphs with a source: `SELECT count(*) FROM app.automations WHERE
+jsonb_path_exists(draft_graph, '$.nodes[*].save[*].from')`, and the same on
+   `app.automation_versions.graph`.
+
 4. Roll out workers, then web (rolling, readiness `/api/health/ready`), watching error rates, queue
    lag and dead letters.
 5. Rollback: redeploy the previous image digest. Database changes are not rolled back

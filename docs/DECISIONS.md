@@ -17631,42 +17631,84 @@ Decision:
   its pinned version's definition, as before.
 - **Only successful responses save values,** as before: a failure branch sees nothing saved, so
   the status saved is always 2xx (it tells 200 from 201, 202 or 204). Values are clipped to an
-  answer's 1,000 characters without splitting an emoji, kept in the call's `saved_values` and the
-  run's answers as before, and cleared by retention and erasure as before; nothing new is stored.
+  answer's 1,000 UTF-16 code units (`clipText`: an emoji counts as two and is never split), kept in
+  the call's `saved_values` and the run's answers as before, and cleared by retention and erasure
+  as before.
 - **Headers:** matched by name without regard to case; the name is validated as a header name
   (letters, digits and -, at most 60). Node joins a header received several times with ", "
   (keeping only the first for headers that allow one value, such as Content-Type), and the egress
   client joins any list the same way, so a repeated header is saved as its values in the order
   received, separated by a comma and a space (RFC 9110, section 5.3). A header the response lacks
-  saves nothing.
+  saves nothing. Node reads header values as latin1, so UTF-8 text in a header arrives as its
+  latin1 characters (garbled); a value that must carry other scripts belongs in the body.
 - **Body text:** only when the content type is textual: `text/*`, `application/json`,
   `application/xml` and the `+json`/`+xml` types, with no charset, `utf-8` or `us-ascii`. It is
   decoded as UTF-8 (invalid bytes as U+FFFD, a byte order mark dropped, each NUL as U+FFFD as
   ADR-130 requires), trimmed of outer white space and clipped as answers are. An image, a PDF, an
   octet stream, another charset, no content type or an empty body saves nothing.
-- **Headers that are never saved:** any whose name contains `cookie`, `auth`, `token`, `secret`,
-  `passw`, `session`, `credential`, `csrf`, `xsrf`, `apikey` or `signature`, or has `key` as a
-  part (Set-Cookie, Authorization, WWW-Authenticate, X-Api-Key, X-Session-Id, X-Functions-Key):
+- **Headers that are not saved:** a name containing `cookie`, `authoriz`, `authent`, `oauth`,
+  `token`, `secret`, `passw`, `session`, `credential`, `csrf`, `xsrf`, `signature` or `bearer`; a
+  part (between -) that is `auth`, `jwt`, `pwd`, `otp`, `sig` or `sid`; or a part ending in `key`
+  (Set-Cookie, Authorization, WWW-Authenticate, X-Api-Key, X-Accesskey, X-JWT, X-Hmac-Sig). Short
+  words count only as whole parts, so Author, X-Design or X-Hotpath are allowed; a part ending in
+  `key` also refuses X-Idempotency-Key and X-Monkey, which errs on the safe side. These are
   refused when the draft is saved ("The Set-Cookie header can carry credentials or a session, so
-  HyFib does not save it."). Two refusals need the company's settings and run with the checks
-  that block publishing: a header the step itself sends a secret in (a server may echo it back) and
-  a header named like a company secret (X-Crm-Ref for `crm_ref`, the name lowercased with - read
-  as _). The worker applies all three again when it saves, with the company's current secret names
-  (a secret added after publishing counts), and leaves out any value, from any source, that holds
-  a secret value the request carried, so an echoing server cannot hand a secret to whoever reads
-  the run's answers (T355).
+  HyFib does not save it."). Two refusals need the company's settings and run with the checks that
+  block publishing: a header the step itself sends a secret in (a server may echo it back) and a
+  header named like a company secret. A header names a secret when, lowercased with - read as _
+  and an X- prefix ignored, it is the secret's name (X-Ref for `ref`), or holds a secret name of at
+  least six characters as whole parts (X-Crm-Ref-Id for `crm_ref`); a short secret name such as
+  `id` or `ref` therefore never refuses X-Request-Id or X-Ref-Count. Location is allowed, since a
+  created resource's address is a common value to save, although a server may put a signed
+  address in it; that address is then an answer like any other (T355).
+- **Echoed secrets:** the worker leaves out a value, from any source, that holds a secret value
+  the request carried, so a server echoing the request does not hand the secret to whoever reads
+  the run's answers or a message sends it on. The check (`automations/echo.ts`) runs on the whole
+  value before it is clipped, so padding cannot move a secret across the 1,000-character cut. It
+  reads the value as written and in the encodings ordinary echoes use: JSON string escapes
+  (`\/`, `\"`, `\u002F`), URL and form encoding (`%2F`, `+`), XML and HTML character references
+  (`&#x2F;`, `&#47;`, `&sol;`), and the secret in base64 or base64url at any of the three
+  alignments. A value whose last four or more characters (an escape cut short ignored) are the
+  start of a secret, before or after clipping, is also left out, so a server that cuts its echo
+  inside a secret reveals at most its first three characters. Secrets shorter than eight
+  characters are not looked for (any value holding "201" would match one). A secret the server
+  transforms in any other way (hashed, split, encrypted, encoded twice, or in another encoding) is
+  not recognised: allowing a domain still means trusting its server (ADR-043).
+- **The answers left out are recorded:** each refused header (`refused_header`), a header the step
+  sends a secret in or named like a company secret (`secret_header`) and each echoed secret
+  (`echoed_secret`) is recorded by answer name with its reason, never the value, in the call's
+  `dropped_values` (migration 0319, written with the outcome and fixed with it by the call's
+  guard). The run page's web request table shows them ("Not saved: ref (it held a secret the
+  request sent, which the server echoed)"), and the runbook tells operators to replace a secret
+  that was echoed. The names are configuration, not customer content: exported with the call and
+  deleted with its run.
 - **Editor:** each saved value has "Value N from" (JSON path, Header, Body text, Status code) and
   the input its source needs: the path, the header's name, or a line saying what is saved. The
   domain's `withHttpSaveSource` changes a value's source keeping its answer name; the simulator
   names each value's source ("ref (from the X-Request-Id header)"). Messages are written as the
-  editor's others are. No migration: sources live in the automation's graph.
+  editor's others are. Sources live in the automation's graph; the only migration is 0319.
 - **Run pages, webhooks and the API:** run pages list saved answers by name and calls by method,
-  host, path and outcome; `automation.run_step` events carry no saved values; neither assumed a
-  JSON path, and no field was added to them.
+  host, path and outcome, now with the answers left out; `automation.run_step` events carry no
+  saved values and are unchanged; neither assumed a JSON path.
+- **Deployment:** apply 0319, then roll out workers, then web servers (`docs/DEPLOYMENT.md`).
+  Rolling workers back once a graph uses `from` fails pinned versions in the older parser, and an
+  older worker's save would throw after the request was sent, leaving the call to become unknown;
+  rolling web servers back makes such drafts unreadable to the editor.
 
-Known limits: a value is saved only from a 2xx response; a secret the server transforms (encodes,
-splits or hashes) before echoing it is not recognised; headers are matched as Node presents them,
-so one Node drops as a duplicate (a second Content-Type) cannot be saved.
+Known limits: a value is saved only from a 2xx response; secrets the server transforms other than
+as above are not recognised; headers are matched as Node presents them, so one Node drops as a
+duplicate (a second Content-Type) cannot be saved.
 
 Not built: values from failure responses, the body of a non-UTF-8 charset, binary bodies, a part
 of a text body (a pattern or a line), and saving all headers at once.
+
+Review (before merge): an independent review found one High: the echo check ran on values after
+they were clipped, so a member who can edit automations but not see secrets could pad a header to
+an echoing endpoint and save all but the last characters of a secret across the cut (now checked
+on the whole value, and a value ending with a secret's start is left out). It also found that
+ordinary encodings (JSON's `\/`, URL encoding, character references, `\u` escapes, base64) got past
+the check on body text (now read), that values left out for safety left no trace (now recorded in
+`dropped_values` and shown on the run page), that a short secret name such as `id` refused
+X-Request-Id (now whole names or six characters), deny-list gaps (`jwt`, `bearer`, `pwd`, `otp`,
+`sig`, parts ending in `key`; Author no longer refused), an untested worker-time refusal of a
+secret added after publishing (now an integration test) and no deployment note. All were fixed.

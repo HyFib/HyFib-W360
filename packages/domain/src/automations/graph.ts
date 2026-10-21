@@ -392,13 +392,18 @@ export type HttpSave =
 export const httpSaveSource = (item: HttpSave): HttpSaveSource => item.from ?? 'json';
 
 /**
- * Words in a header name that suggest a credential or a session. They cover the headers that carry
- * one by definition (Set-Cookie, Cookie, Authorization, WWW-Authenticate, Proxy-Authenticate,
- * Authentication-Info) and common ones (X-Api-Key, X-Auth-Token, X-Session-Id, X-CSRF-Token).
+ * What in a header name suggests a credential or a session (ADR-406). Words found anywhere in the
+ * name cover the headers that carry one by definition (Set-Cookie, Cookie, Authorization,
+ * WWW-Authenticate, Proxy-Authenticate, Authentication-Info) and common ones (X-Auth-Token,
+ * X-Session-Id, X-CSRF-Token, X-Amz-Security-Token). Short words count only as a whole part of the
+ * name, so Author, X-Design or X-Hotpath are not refused. Any part ending in "key" is refused
+ * (X-Api-Key, X-Accesskey, X-Privatekey), which also refuses X-Idempotency-Key and X-Monkey.
  */
-const CREDENTIAL_NAME_PARTS = [
+const CREDENTIAL_WORDS = [
   'cookie',
-  'auth',
+  'authoriz',
+  'authent',
+  'oauth',
   'token',
   'secret',
   'passw',
@@ -406,14 +411,16 @@ const CREDENTIAL_NAME_PARTS = [
   'credential',
   'csrf',
   'xsrf',
-  'apikey',
   'signature',
+  'bearer',
 ];
+const CREDENTIAL_PARTS: ReadonlySet<string> = new Set(['auth', 'jwt', 'pwd', 'otp', 'sig', 'sid']);
 
 /**
  * Why a response header cannot be saved, or null: its name must be a header name, and headers that
- * carry credentials or session state are never saved (cookies, authorization and anything named
- * like a token, key, secret, password or session).
+ * carry credentials or session state are never saved (see `CREDENTIAL_WORDS`). Location is allowed
+ * (a created resource's address is a common value to save), although a server may put a signed
+ * address in it.
  */
 export function responseHeaderRefusal(name: string): string | null {
   if (!HTTP_HEADER_NAME_RE.test(name)) {
@@ -421,21 +428,30 @@ export function responseHeaderRefusal(name: string): string | null {
   }
   const lower = name.toLowerCase();
   if (
-    CREDENTIAL_NAME_PARTS.some((part) => lower.includes(part)) ||
-    lower.split('-').includes('key')
+    CREDENTIAL_WORDS.some((word) => lower.includes(word)) ||
+    lower.split('-').some((part) => CREDENTIAL_PARTS.has(part) || part.endsWith('key'))
   ) {
     return `The ${name} header can carry credentials or a session, so HyFib does not save it.`;
   }
   return null;
 }
 
+/** The shortest secret name a header name may hold among other parts and still name it. */
+export const SECRET_NAME_MATCH_LENGTH = 6;
+
 /**
- * Whether a response header's name names a company secret: the name, lowercased with - read as _,
- * is the secret's name or holds it between separators (X-Crm-Key names the secret crm_key).
+ * Whether a response header's name names a company secret (ADR-406). The name is lowercased with -
+ * read as _, and an X- prefix is ignored: it names the secret when it is the secret's name (X-Ref
+ * names `ref`) or, for a secret name of at least `SECRET_NAME_MATCH_LENGTH` characters, holds it
+ * as whole parts (X-Crm-Ref-Id names `crm_ref`). A short secret name such as `id` or `ref` does not
+ * make X-Request-Id or X-Ref-Count refused.
  */
 export function headerNamesSecret(header: string, secretName: string): boolean {
-  const normalized = `_${header.toLowerCase().replace(/-/g, '_')}_`;
-  return normalized.includes(`_${secretName}_`);
+  const normalized = header.toLowerCase().replace(/-/g, '_').replace(/^x_/, '');
+  if (normalized === secretName) return true;
+  return (
+    secretName.length >= SECRET_NAME_MATCH_LENGTH && `_${normalized}_`.includes(`_${secretName}_`)
+  );
 }
 
 const httpSaveSchema = z

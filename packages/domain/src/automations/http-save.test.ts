@@ -10,13 +10,17 @@ import {
   type AutomationGraph,
   type HttpSave,
 } from './graph';
+import { ECHO_MIN_SECRET_LENGTH, holdsSecret } from './echo';
 import {
   responseHeaderValue,
-  savedValuesFrom,
+  savedValuesFrom as savedFrom,
   textualContentType,
   type SavableResponse,
 } from './http';
 import { advance, initialRunState, type RunState } from './interpreter';
+
+/** The values saved (what most tests check; `savedFrom` also gives the answers left out). */
+const savedValuesFrom = (...args: Parameters<typeof savedFrom>) => savedFrom(...args).values;
 
 /** ADR-406: an HTTP step saves values from a JSON path, a header, the body as text or the status. */
 
@@ -134,6 +138,16 @@ describe('saved value sources in the graph (ADR-406)', () => {
       'X-Signature',
       'X-Credentials',
       'X-Functions-Key',
+      'X-Accesskey',
+      'X-Privatekey',
+      'X-Monkey',
+      'X-JWT',
+      'X-Bearer-Info',
+      'X-Pwd',
+      'X-OTP-Code',
+      'X-Hmac-Sig',
+      'X-Auth',
+      'X-OAuth-Scopes',
     ]) {
       const message = `The ${name} header can carry credentials or a session, so HyFib does not save it.`;
       expect(responseHeaderRefusal(name), name).toBe(message);
@@ -148,7 +162,11 @@ describe('saved value sources in the graph (ADR-406)', () => {
       'X-RateLimit-Remaining',
       'Content-Type',
       'Keep-Alive',
-      'X-Monkey',
+      'Author',
+      'X-Author',
+      'X-Design',
+      'X-Hotpath',
+      'X-Signal',
     ]) {
       expect(responseHeaderRefusal(name), name).toBeNull();
     }
@@ -191,7 +209,14 @@ describe('saved value sources in the graph (ADR-406)', () => {
       errors(graphOf(rawGraph([{ from: 'header', header: 'X-Crm-Reference', saveAs: 'ref' }]))),
     ).toEqual([]);
     expect(headerNamesSecret('Crm-Ref', 'crm_ref')).toBe(true);
+    expect(headerNamesSecret('X-Crm-Ref-Id', 'crm_ref')).toBe(true);
     expect(headerNamesSecret('X-Crm-Refs', 'crm_ref')).toBe(false);
+    // A short secret name matches only the whole header name (an X- prefix aside).
+    expect(headerNamesSecret('X-Ref', 'ref')).toBe(true);
+    expect(headerNamesSecret('Ref', 'ref')).toBe(true);
+    expect(headerNamesSecret('X-Request-Id', 'id')).toBe(false);
+    expect(headerNamesSecret('X-Ref-Count', 'ref')).toBe(false);
+    expect(headerNamesSecret('X-Order-Ref', 'order')).toBe(false);
   });
 
   it('a value saved by any source is an answer later steps can use', () => {
@@ -408,18 +433,27 @@ describe('values saved from a response (ADR-406)', () => {
     expect(saved).toStrictEqual({ ref: 'r1', note: 'queued', code: '202' });
   });
 
-  it('never saves a refused header, even from a request written without the checks', () => {
+  it('leaves out a refused header and names it, even from a request written without the checks', () => {
     const headers = { 'set-cookie': 'sid=1', authorization: 'Bearer x', 'x-api-key': 'k' };
     expect(
-      savedValuesFrom(response({ headers }), [
+      savedFrom(response({ headers }), [
         { from: 'header', header: 'Set-Cookie', saveAs: 'a' },
         { from: 'header', header: 'Authorization', saveAs: 'b' },
         { from: 'header', header: 'X-Api-Key', saveAs: 'c' },
+        { from: 'header', header: 'X-Absent-Key', saveAs: 'd' },
       ]),
-    ).toStrictEqual({});
+    ).toStrictEqual({
+      values: {},
+      dropped: {
+        a: 'refused_header',
+        b: 'refused_header',
+        c: 'refused_header',
+        d: 'refused_header',
+      },
+    });
   });
 
-  it('never saves a header the request sent a secret in, or one named like a secret', () => {
+  it('leaves out a header the request sent a secret in, or one named like a secret, and names it', () => {
     const headers = { 'x-shop': 'Bearer s3cr3t-value', 'x-crm-ref': 'r', 'x-other': 'o' };
     const save: HttpSave[] = [
       { from: 'header', header: 'X-Shop', saveAs: 'a' },
@@ -427,28 +461,152 @@ describe('values saved from a response (ADR-406)', () => {
       { from: 'header', header: 'X-Other', saveAs: 'c' },
     ];
     expect(
-      savedValuesFrom(response({ headers }), save, {
+      savedFrom(response({ headers }), save, {
         requestHeaders: [{ name: 'x-shop', value: 'Bearer {{secret.shop_token}}' }],
         secretNames: ['shop_token', 'crm_ref'],
       }),
-    ).toStrictEqual({ c: 'o' });
+    ).toStrictEqual({ values: { c: 'o' }, dropped: { a: 'secret_header', b: 'secret_header' } });
   });
 
-  it('leaves out any value holding a secret the request carried', () => {
+  it('leaves out any value holding a secret the request carried, and names it', () => {
     const secret = 's3cr3t-value';
-    const saved = savedValuesFrom(
-      response({
-        headers: { 'content-type': 'application/json', 'x-echo': `got ${secret}` },
-        body: Buffer.from(JSON.stringify({ echo: secret, id: 'ok' })),
+    expect(
+      savedFrom(
+        response({
+          headers: { 'content-type': 'application/json', 'x-echo': `got ${secret}` },
+          body: Buffer.from(JSON.stringify({ echo: secret, id: 'ok' })),
+        }),
+        [
+          { from: 'header', header: 'X-Echo', saveAs: 'a' },
+          { from: 'text', saveAs: 'b' },
+          { path: 'echo', saveAs: 'c' },
+          { path: 'id', saveAs: 'd' },
+        ],
+        { secretValues: [secret, ''] },
+      ),
+    ).toStrictEqual({
+      values: { d: 'ok' },
+      dropped: { a: 'echoed_secret', b: 'echoed_secret', c: 'echoed_secret' },
+    });
+  });
+
+  it('checks the whole value before clipping: a secret across the cut is not saved', () => {
+    const secret = 'sk_live_AbC/9+xyZ=';
+    const limit = AUTOMATION_LIMITS.answerLength;
+    // Padding puts the cut inside the secret at every offset (12 of 19 characters, say).
+    for (const before of [limit - 12, limit - 4, limit - 1, limit - secret.length + 1]) {
+      const echoed = `${'p'.repeat(before)}${secret}`;
+      const guard = { secretValues: [secret] };
+      const header = savedFrom(
+        response({ headers: { 'x-echo': echoed } }),
+        [{ from: 'header', header: 'X-Echo', saveAs: 'h' }],
+        guard,
+      );
+      const text = savedFrom(
+        response({ headers: { 'content-type': 'text/plain' }, body: Buffer.from(echoed) }),
+        [{ from: 'text', saveAs: 't' }],
+        guard,
+      );
+      const json = savedFrom(
+        response({ body: Buffer.from(JSON.stringify({ h: echoed })) }),
+        [{ path: 'h', saveAs: 'j' }],
+        guard,
+      );
+      expect([header, text, json], String(before)).toStrictEqual([
+        { values: {}, dropped: { h: 'echoed_secret' } },
+        { values: {}, dropped: { t: 'echoed_secret' } },
+        { values: {}, dropped: { j: 'echoed_secret' } },
+      ]);
+    }
+  });
+
+  it('leaves out a value that ends with the start of a secret (a server cutting its echo)', () => {
+    const secret = 'sk_live_AbC/9+xyZ=';
+    const cut = (value: string) =>
+      savedFrom(
+        response({ headers: { 'x-echo': value } }),
+        [{ from: 'header', header: 'X-Echo', saveAs: 'h' }],
+        { secretValues: [secret] },
+      ).dropped;
+    expect(cut('Bearer sk_live_Ab')).toStrictEqual({ h: 'echoed_secret' });
+    expect(cut('Bearer sk_l')).toStrictEqual({ h: 'echoed_secret' });
+    // Fewer than four characters of a secret's start are not enough to count.
+    expect(cut('Bearer sk_')).toStrictEqual({});
+  });
+
+  it('recognises a secret echoed in ordinary encodings', () => {
+    const secret = 'sk_live_AbC/9+xyZ=';
+    const headers = { 'content-type': 'text/plain' };
+    const echoes = [
+      // JSON with "/" escaped (PHP's default) and with \u escapes.
+      `{"h":"Bearer sk_live_AbC\\/9+xyZ="}`,
+      `{"h":"Bearer sk_live_AbC\\u002F9\\u002BxyZ\\u003D"}`,
+      // URL and form encoding.
+      `h=${encodeURIComponent(`Bearer ${secret}`)}`,
+      `h=Bearer+sk_live_AbC%2F9%2BxyZ%3D`,
+      // XML and HTML character references.
+      `<h>Bearer sk_live_AbC&#x2F;9&#43;xyZ&#61;</h>`,
+      `<h>Bearer sk_live_AbC&sol;9&plus;xyZ&equals;</h>`,
+      // base64 and base64url at each alignment.
+      Buffer.from(`Bearer ${secret}`).toString('base64'),
+      Buffer.from(`Bearer: ${secret}`).toString('base64'),
+      Buffer.from(`Bearer:: ${secret}`).toString('base64url'),
+      Buffer.from(secret).toString('base64'),
+    ];
+    for (const body of echoes) {
+      expect(
+        savedFrom(response({ headers, body: Buffer.from(body) }), [{ from: 'text', saveAs: 't' }], {
+          secretValues: [secret],
+        }),
+        body,
+      ).toStrictEqual({ values: {}, dropped: { t: 'echoed_secret' } });
+    }
+    // An encoded echo cut inside the secret is recognised too.
+    const long = `${'p'.repeat(AUTOMATION_LIMITS.answerLength - 20)}{"h":"Bearer sk_live_AbC\\/9+xyZ="}`;
+    expect(
+      savedFrom(response({ headers, body: Buffer.from(long) }), [{ from: 'text', saveAs: 't' }], {
+        secretValues: [secret],
+      }).dropped,
+    ).toStrictEqual({ t: 'echoed_secret' });
+  });
+
+  it('reads + as a space in a form-encoded echo, and an escape cut at the end', () => {
+    // A secret with spaces, form-encoded with +.
+    expect(holdsSecret('h=pass+word+1234', 'h=pass+word+1234', ['pass word 1234'])).toBe(true);
+    const secret = 'sk_live_AbC/9+xyZ=';
+    // The echo ends inside an escape: what precedes it still starts the secret.
+    for (const cut of [
+      'Bearer sk_live_AbC\\/9\\u00',
+      'Bearer sk_live_AbC%2F9%2',
+      'sk_live_AbC&#x2',
+    ]) {
+      expect(holdsSecret(cut, cut, [secret]), cut).toBe(true);
+    }
+    // base64url differs from base64 when the encoding holds + or /.
+    const plusy = 's3cr3t?>~~value';
+    expect(Buffer.from(plusy).toString('base64')).toContain('+');
+    const url = `x=${Buffer.from(`>>>${plusy}`).toString('base64url')}.`;
+    expect(holdsSecret(url, url, [plusy])).toBe(true);
+  });
+
+  it('does not look for secrets shorter than eight characters', () => {
+    expect(ECHO_MIN_SECRET_LENGTH).toBe(8);
+    expect(
+      savedFrom(response({ status: 201 }), [{ from: 'status', saveAs: 'code' }], {
+        secretValues: ['201', '2012345'],
       }),
-      [
-        { from: 'header', header: 'X-Echo', saveAs: 'a' },
-        { from: 'text', saveAs: 'b' },
-        { path: 'echo', saveAs: 'c' },
-        { path: 'id', saveAs: 'd' },
-      ],
-      { secretValues: [secret, ''] },
-    );
-    expect(saved).toStrictEqual({ d: 'ok' });
+    ).toStrictEqual({ values: { code: '201' }, dropped: {} });
+    expect(holdsSecret('x 20123456 y', 'x 20123456 y', ['20123456'])).toBe(true);
+  });
+
+  it('saves values that merely resemble encodings of nothing secret', () => {
+    const secret = 'sk_live_AbC/9+xyZ=';
+    const headers = { 'content-type': 'text/plain' };
+    const body = 'Order 42: 100%25 paid &amp; packed, ref c2tf.';
+    expect(
+      savedFrom(response({ headers, body: Buffer.from(body) }), [{ from: 'text', saveAs: 't' }], {
+        secretValues: [secret],
+      }),
+    ).toStrictEqual({ values: { t: body }, dropped: {} });
   });
 });

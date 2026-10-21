@@ -1,5 +1,22 @@
 import { describe, expect, it } from 'vitest';
-import { dealFieldComparisonLabel, describeDetail, STEP_OUTCOMES } from './automation-labels';
+import {
+  dealFieldComparisonLabel,
+  describeDetail,
+  describeDroppedValues,
+  STEP_OUTCOMES,
+} from './automation-labels';
+
+describe('answers a web request left out for safety (ADR-406)', () => {
+  it('names each answer with its reason, and nothing when none was left out', () => {
+    expect(describeDroppedValues({})).toBeNull();
+    expect(describeDroppedValues({ ref: 'echoed_secret', sid: 'refused_header' })).toBe(
+      'Not saved: ref (it held a secret the request sent, which the server echoed); sid (the header can carry credentials or a session).',
+    );
+    expect(describeDroppedValues({ key: 'secret_header' })).toBe(
+      'Not saved: key (the step sends a secret in that header, or it is named like a secret).',
+    );
+  });
+});
 
 describe('conditions on deal fields (ADR-393)', () => {
   it('name a comparison for the field’s type: dates as days, the rest as other rules do', () => {

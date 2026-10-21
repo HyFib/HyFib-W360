@@ -178,6 +178,22 @@ export const HTTP_CALL_STATE: Record<string, { label: string; tone: Tone }> = {
   canceled: { label: 'Not made', tone: 'neutral' },
 };
 
+/** Why a web request left an answer out for safety (ADR-406), on the run page. */
+export const HTTP_DROP_REASONS: Record<string, string> = {
+  refused_header: 'the header can carry credentials or a session',
+  secret_header: 'the step sends a secret in that header, or it is named like a secret',
+  echoed_secret: 'it held a secret the request sent, which the server echoed',
+};
+
+/** The answers a web request left out for safety, in words, or null when there were none. */
+export function describeDroppedValues(dropped: Readonly<Record<string, string>>): string | null {
+  const entries = Object.entries(dropped);
+  if (entries.length === 0) return null;
+  return `Not saved: ${entries
+    .map(([name, reason]) => `${name} (${HTTP_DROP_REASONS[reason] ?? reason})`)
+    .join('; ')}.`;
+}
+
 /** The order event that started a run (runs started by order messages). */
 export const STORE_EVENT_LABELS: Record<string, string> = {
   order_placed: 'Started by a new order',

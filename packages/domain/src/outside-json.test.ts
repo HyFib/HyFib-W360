@@ -69,7 +69,7 @@ describe('outside JSON with the NUL character', () => {
     expect(
       savedValuesFrom({ status: 200, headers: {}, body }, [
         { path: 'customer.name', saveAs: 'name' },
-      ]),
+      ]).values,
     ).toEqual({
       name: `Pri${KEPT}ya`,
     });
@@ -79,7 +79,7 @@ describe('outside JSON with the NUL character', () => {
     const body = Buffer.from(`Pri${NUL}ya`);
     const headers = { 'content-type': 'text/plain' };
     expect(
-      savedValuesFrom({ status: 200, headers, body }, [{ from: 'text', saveAs: 'name' }]),
+      savedValuesFrom({ status: 200, headers, body }, [{ from: 'text', saveAs: 'name' }]).values,
     ).toEqual({ name: `Pri${KEPT}ya` });
   });
 

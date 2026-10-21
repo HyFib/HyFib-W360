@@ -2,7 +2,7 @@
 
 ## 2026-10-21 — HTTP steps save response headers, a text body and the status (P4-02, ADR-406)
 
-Status: **Implemented (no migration); unit tests run locally, integration and e2e tests in CI
+Status: **Implemented (migration 0319); unit tests run locally, integration and e2e tests in CI
 only; no call against a real company API.** An automation's "Call a web address" step saved values
 only from a JSON body by path, so a plain-text answer, a header such as a request id or the status
 saved nothing. This closes P4-02's "response headers or non-JSON bodies as values".
@@ -11,48 +11,77 @@ saved nothing. This closes P4-02's "response headers or non-JSON bodies as value
 
 - **Sources** (`automations/graph.ts`, `automations/http.ts`): each saved value has `from`: `json`
   (a path, the default and what a value without `from` means), `header` (by name, without regard to
-  case; a repeated header joined with ", " in the order received), `text` (the whole body, only for
-  `text/*`, JSON and XML content types in UTF-8; decoded as UTF-8, NUL as U+FFFD, trimmed, clipped
-  to 1,000 characters) or `status` (as digits). Values are still saved only from 2xx responses.
+  case; a repeated header joined with ", " in the order received; Node reads values as latin1),
+  `text` (the whole body, only for `text/*`, JSON and XML content types in UTF-8; decoded as UTF-8,
+  NUL as U+FFFD, trimmed, clipped to 1,000 UTF-16 code units) or `status` (as digits). Values are
+  still saved only from 2xx responses.
 - **Compatibility:** stored graphs, published versions, runs in progress and requests already
   written ahead (`{path, saveAs}`) parse and read back unchanged (no `from` added, so definition
   hashes and exports are the same); the graph stays version 1, as for ADR-236's `bodyFormat`.
-- **Refused headers:** names containing cookie, auth, token, secret, passw, session, credential,
-  csrf, xsrf, apikey or signature, or with key as a part, are refused when the draft is saved; a
-  header the step sends a secret in, or one named like a company secret, is refused by the
-  publish checks. The worker repeats all three with the company's current secret names and leaves
-  out any value holding a secret value the request carried (T355).
+- **Refused headers:** names containing cookie, authoriz, authent, oauth, token, secret, passw,
+  session, credential, csrf, xsrf, signature or bearer, with a part auth, jwt, pwd, otp, sig or
+  sid, or a part ending in key, are refused when the draft is saved (Author and Location are
+  allowed); a header the step sends a secret in, or one named like a company secret (the whole
+  name, or a secret name of six or more characters as whole parts), is refused by the publish
+  checks. The worker repeats them with the company's current secret names.
+- **Echoed secrets** (`automations/echo.ts`): the worker leaves out a value holding a secret value
+  (eight characters or more) the request carried, checked on the whole value before clipping, as
+  written and JSON-unescaped, URL- and form-decoded, with character references read, and for the
+  secret in base64 or base64url at every alignment; a value ending with four or more characters of
+  a secret's start is left out too. Secrets transformed otherwise are not recognised (T355).
+- **Answers left out are recorded:** by name and reason (`refused_header`, `secret_header`,
+  `echoed_secret`; never the value) in `automation_http_calls.dropped_values` (migration 0319,
+  with the call's guard extended), returned in the run view's `httpCalls` and shown on the run
+  page ("Not saved: …"); exported with the call.
 - **Editor:** "Value N from" (JSON path, Header, Body text, Status code) with the input the source
   needs, inside the editor's hydration-gated fieldset; the simulator names each value's source.
-  Run pages and `automation.run_step` webhooks needed no change (no field added).
-- **Docs:** ADR-406, ARCHITECTURE, RUNBOOKS (a value that was not saved), BACKLOG P4-02,
+- **Docs:** ADR-406 (with the review), ARCHITECTURE, RUNBOOKS (a value that was not saved, an
+  echoed secret), DEPLOYMENT (0319, workers first, what a rollback breaks), BACKLOG P4-02,
   THREAT-MODEL T355, FEATURE-MATRIX W-077.
+
+### Review fixes (second commit)
+
+An independent review found one High and two Mediums, all fixed: the echo check ran after
+clipping, so padding could save most of a secret across the cut (now on the whole value, plus the
+cut-start rule); ordinary encodings got past it (now read); answers left out left no trace (now
+recorded and shown). Also: short secret names refused X-Request-Id, deny-list gaps (`jwt`,
+`bearer`, `pwd`, `otp`, `sig`, parts ending in `key`; Author was refused), the first version of
+this entry claimed a test of the worker's secret-name check that did not exist (now written), and
+DEPLOYMENT had no note.
 
 ### Tests
 
-- Unit (`automations/http-save.test.ts`, `outside-json.test.ts`): each source, old-shape
-  compatibility (parsed graph identical to the stored one), refused headers at save, the publish
-  checks (a secret's request header, a secret's name), content types and charsets, UTF-8 decoding,
-  byte order marks, NUL, clipping, repeated headers, a non-JSON body with other sources, runtime
-  refusals, echoed secrets, the editor's source changes and the simulator's labels, and the
-  interpreter carrying sources and saving the worker's values.
+- Unit (`automations/http-save.test.ts`, `outside-json.test.ts`, `apps/web` labels): each source,
+  old-shape compatibility (parsed graph identical to the stored one), refused headers at save and
+  those allowed, the publish checks (a secret's request header, a secret's name, short secret
+  names), content types and charsets, UTF-8 decoding, byte order marks, NUL, clipping, repeated
+  headers, a non-JSON body with other sources, runtime refusals and the reasons recorded, echoed
+  secrets across the 1,000-character cut for the header, text and JSON sources, a cut echo, each
+  encoding, short secrets, values that only look encoded, the run page's wording of answers left
+  out, the editor's source changes and the simulator's labels, and the interpreter carrying
+  sources and saving the worker's values.
 - Integration (`automation-http.test.ts`, CI only): a header, a repeated header, a text body and
   the status saved from the local target and used by a later message; a cookie and a
   credential-like name refused at save; a secret's header and a secret's name refused at publish;
-  an echoing server's text left out while the status is saved.
+  an echoing server's text left out while the status is saved, recorded as `echoed_secret` and
+  returned by `getRun`; a secret added after publishing makes the worker leave its header out
+  (`secret_header`).
 - E2e (`web-requests.spec.ts`, CI only): a header and the status code chosen in the editor, a
   refused Set-Cookie with its message, the simulator's labels and the live answer using them.
-- Manual mutation testing: 23/23 deliberate regressions caught by the unit tests (a 24th, a fixed
-  list of credential headers, survived because the name parts already cover it; the list was
-  removed). The worker's loading of secret names is checked only by the integration tests.
+- Manual mutation testing: 23/23 deliberate regressions caught by the unit tests in the first
+  commit (a 24th, a redundant fixed list of credential headers, survived and the list was
+  removed); for the review's fixes 25/25 (24/25 first: base64url was not distinguished from base64
+  until the test used a secret whose encoding holds +). The worker's loading of secret names and
+  the column, its check and guard are covered by the integration tests only.
 
 ### Test commands and results (local, 2026-10-21)
 
 | Command                                            | Result                                                     |
 | -------------------------------------------------- | ---------------------------------------------------------- |
 | `pnpm lint`, `pnpm format:check`, `pnpm typecheck` | clean                                                      |
-| `pnpm test` (unit)                                 | 1,978 of 1,978 passed (180 files)                          |
+| `pnpm test` (unit)                                 | 1,985 of 1,985 passed (180 files)                          |
 | `pnpm build`                                       | passed                                                     |
+| migration 0319 parse check (pglast)                | parsed, PL/pgSQL included                                  |
 | `pnpm test:integration`, `pnpm test:e2e`           | not run here: no local PostgreSQL or browser; CI runs them |
 
 ## 2026-10-21 — A/B template variants for campaigns (P3-04, ADR-405)

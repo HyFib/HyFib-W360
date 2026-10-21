@@ -291,7 +291,9 @@ verification, app review, Embedded Signup configuration).
   status as values built; unit tests run locally, the database and browser tests only in CI]**
   (ADR-406: each saved value comes from a JSON path, a header, the body as text or the status;
   credential and session headers, a header carrying the step's secret or named like a company
-  secret refused; echoed secrets never saved; stored graphs unchanged; no migration).
+  secret refused; a value holding a secret the request carried left out, checked before clipping
+  and in ordinary encodings (secrets transformed otherwise are not recognised); answers left out
+  recorded and shown on the run page (migration 0319); stored graphs unchanged).
   **Remaining:** calls against a real company API in an authorized environment (release
   checklist), values from failure responses, retries a company opts into for idempotent requests,
   OAuth client flows.
