@@ -17811,16 +17811,18 @@ Decision:
   `automations.read` (ADR-401); listing its contacts also needs what the Contacts page needs, so
   the list names no contact a member could not find there: supervisors, marketers, administrators
   and owners see it; analysts (who see enrolments but not contacts) see the counts only and no
-  Contacts card. The page checks both itself and the service checks them again. Names and numbers
+  Contacts card. The page checks both itself and the service checks them again; a refusal from the
+  service (`forbidden`) also shows the counts without the card, never an error. Names and numbers
   come through `shownNumber`, so a role the company masks sees numbers masked as everywhere else
   (ADR-226). No permission is new and the permission matrix does not change.
 - **Through the API:** `GET /automations/{id}/enrollments/{enrollmentId}/contacts` with `limit`
-  (1 to 200, default 50), `cursor` and `outcome` (`pending`, `started`, `refused`, `cancelled`), the
+  (1 to 100, default 50), `cursor` and `outcome` (`pending`, `started`, `refused`, `cancelled`), the
   `{ data, nextCursor }` shape and error answers of the API's other lists (422 for an invalid query
   or cursor, 404 for another company's enrolment, another automation's or an unknown one). Scopes:
   `automations.start`, which reading the enrolment needs, and `contacts.read`, as the list names
-  contacts (as `GET /campaigns/{id}/recipients` needs it); both read, so the list works while the
-  company is suspended, each within the plan's scopes (ADR-092). Each row gives `position`,
+  contacts (as `GET /campaigns/{id}/recipients` needs it); both are checked as reads
+  (`assertAnyScope`), as ADR-403's reads are, so the list works while the company is suspended,
+  each within the plan's scopes (ADR-092). Each row gives `position`,
   `contactId`, `contact` (the state), `outcome`, `reason`, `runId` and `processedAt`: ids only.
   Names and numbers are left out although `contacts.read` reads them elsewhere: `GET /contacts/{id}`
   gives them, and an integration that enrolled the contacts has them already. An erased contact's

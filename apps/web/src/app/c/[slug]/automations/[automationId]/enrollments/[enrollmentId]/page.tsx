@@ -75,12 +75,24 @@ export default async function EnrollmentPage({
   const outcome = OUTCOME_FILTERS.some(([v]) => v === sp.outcome) ? (sp.outcome as string) : 'all';
   // A cursor the service would refuse starts from the first page instead.
   const cursor = enrolledContactsCursorSchema.safeParse(sp.cursor).success ? sp.cursor : null;
-  const enrolled = can(ctx, 'contacts.read')
-    ? await automationEnrollments.listEnrolledContacts(ctx, automationId, enrollment.id, {
-        ...(outcome === 'all' ? {} : { outcome }),
-        ...(cursor ? { cursor } : {}),
-      })
-    : null;
+  let enrolled: Awaited<ReturnType<typeof automationEnrollments.listEnrolledContacts>> | null =
+    null;
+  if (can(ctx, 'contacts.read')) {
+    try {
+      enrolled = await automationEnrollments.listEnrolledContacts(
+        ctx,
+        automationId,
+        enrollment.id,
+        {
+          ...(outcome === 'all' ? {} : { outcome }),
+          ...(cursor ? { cursor } : {}),
+        },
+      );
+    } catch (error) {
+      // The service checks the permissions again: a refusal shows the counts without the list.
+      if (!isAppError(error) || error.code !== 'forbidden') throw error;
+    }
+  }
   const tz = ctx.tenant.timezone;
   const status = ENROLLMENT_STATUS[enrollment.status] ?? {
     label: enrollment.status,

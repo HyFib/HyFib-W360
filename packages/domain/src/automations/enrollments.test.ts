@@ -2607,7 +2607,13 @@ describe('an enrolment’s contacts with their outcomes (ADR-408)', () => {
         apiListEnrolledContacts({ db: refusing }, outOfPlan, AUTOMATION, ENROLLMENT, {}),
       ),
     ).toMatchObject({ code: 'forbidden' });
-    for (const query of [{ limit: '0' }, { limit: '201' }, { cursor: 'x' }, { outcome: 'x' }]) {
+    for (const query of [
+      { limit: '0' },
+      { limit: '101' },
+      { limit: '201' },
+      { cursor: 'x' },
+      { outcome: 'x' },
+    ]) {
       expect(
         await refusal(
           apiListEnrolledContacts(

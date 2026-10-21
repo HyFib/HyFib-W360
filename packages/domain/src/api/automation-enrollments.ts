@@ -528,8 +528,9 @@ export function toApiEnrolledContact(c: EnrolledContact): ApiEnrolledContact {
 /**
  * An enrolment's contacts in position order with their outcomes, on keyset pages, of one outcome
  * when asked (ADR-408): the scope reading the enrolment needs (`automations.start`) and
- * `contacts.read`, as the list names contacts; both read, so also while the company is suspended.
- * Another automation's or company's enrolment is not found.
+ * `contacts.read`, as the list names contacts; both checked as reads (`assertAnyScope`), as
+ * ADR-403's reads are, so also while the company is suspended. Another automation's or company's
+ * enrolment is not found.
  */
 export async function apiListEnrolledContacts(
   deps: Pick<OutboundDeps, 'db'>,

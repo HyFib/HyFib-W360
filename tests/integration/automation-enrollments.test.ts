@@ -1727,15 +1727,17 @@ describe('an enrolment’s contacts with their outcomes (ADR-408)', () => {
     try {
       await client.query('BEGIN');
       await client.query('SET LOCAL enable_seqscan = off');
+      // Sorting penalised too: the key gives the order itself, so the plan needs no sort.
+      await client.query('SET LOCAL enable_sort = off');
       for (const outcome of ['', `AND outcome = 'refused'`]) {
         const plan = await client.query<{ 'QUERY PLAN': string }>(
           `EXPLAIN SELECT position FROM app.automation_enrollment_contacts
             WHERE tenant_id = '${uuidv7()}' AND enrollment_id = '${uuidv7()}' ${outcome}
               AND position > 50 ORDER BY position LIMIT 51`,
         );
-        expect(plan.rows.map((r) => r['QUERY PLAN']).join('\n')).toContain(
-          'automation_enrollment_contacts_position_uq',
-        );
+        const text = plan.rows.map((r) => r['QUERY PLAN']).join('\n');
+        expect(text).toContain('automation_enrollment_contacts_position_uq');
+        expect(text).not.toMatch(/\bSort\b/);
       }
     } finally {
       await client.query('ROLLBACK');

@@ -976,7 +976,8 @@ Phase 5 rules (Public API, P5-08):
   (`stopped_by_api_key_id`). Members with `automations.read` see keys' enrolments on their pages,
   naming the key, as run pages name a key. An enrolment's contacts
   (`GET /automations/{id}/enrollments/{enrollmentId}/contacts`, ADR-408) need `automations.start`
-  and `contacts.read` (both read, so also while suspended, within the plan's scopes) and give ids
+  and `contacts.read` (both checked as reads, as ADR-403's reads are, so also while suspended,
+  within the plan's scopes) and give ids
   and outcomes only: never a name or a number, and no id for an erased contact; another
   automation's or company's enrolment is not found (an integration test, run in CI).
 - Template sends to many numbers (ADR-163, `POST /messages/send-many`) need the scopes one send

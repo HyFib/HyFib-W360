@@ -481,7 +481,7 @@ describe('enrolling contacts through the public API (ADR-403)', () => {
     ).toMatchObject({ stoppedByName: null, stoppedByKeyName: 'Stopper' });
   });
 
-  it('lists an enrolment’s contacts with their outcomes on keyset pages, by outcome, with contacts.read only (ADR-408)', async () => {
+  it('lists an enrolment’s contacts with their outcomes on keyset pages, by outcome, needing automations.start and contacts.read (ADR-408)', async () => {
     const a = await fx.company();
     const b = await fx.company();
     const ownerA = await fx.ctx(a, a.owner);

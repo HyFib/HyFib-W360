@@ -21,14 +21,28 @@ app and the API)".
   service); numbers masked as elsewhere (ADR-226); "Erased contact" for an erased one. Analysts
   see the counts only.
 - **API:** `GET /automations/{id}/enrollments/{enrollmentId}/contacts` (`limit`, `cursor`,
-  `outcome`), scopes `automations.start` and `contacts.read` (read scopes, so also while
-  suspended), ids and outcomes only; another company's or automation's enrolment 404. OpenAPI
-  schema `AutomationEnrollmentContact`, the operation and an example page.
+  `outcome`), scopes `automations.start` and `contacts.read` (both checked as reads, as
+  ADR-403's reads are, so also while suspended), `limit` 1 to 100, ids and outcomes only; another
+  company's or automation's enrolment 404. OpenAPI schema `AutomationEnrollmentContact`, the
+  operation and an example page.
 - **Index:** none needed: 0311's unique key `(tenant_id, enrollment_id, position)` serves the page
   with or without an outcome (at most 10,000 rows per enrolment); an integration test checks the
   plan.
 - **Docs:** ADR-408, THREAT-MODEL T357, SECURITY (no permission is new), ARCHITECTURE §6E,
   RUNBOOKS (enrolments), BACKLOG P4-01, feature matrix H-053.
+- **Review fixes (before merge):** ADR-408 said the API's `limit` went to 200; it is 1 to 100
+  (`API_LIMITS.pageSize`), now pinned by a unit test (101 refused). The page treats a `forbidden`
+  from the list as "no Contacts card" as well as checking `contacts.read` itself, and an e2e step
+  has an analyst open the enrolment page and see the counts without the list. The e2e read of the
+  key's enrolment's contacts no longer assumes both started: the member's runs of the same
+  contacts may still be going, so each row is started with its run or refused as
+  `automation_busy`, and the rows add up to the total. The scopes are described as checked as
+  reads (`assertAnyScope`, as ADR-403's reads are), not as read scopes (`automations.start`
+  writes). The integration test's title names both scopes; the `automations.start` scope's
+  description on the API keys page mentions listing an enrolment's contacts; the plan test also
+  turns sorting off and checks the plan has no sort. Not changed: the API reads the contact's name
+  and number columns and drops them (a separate column list would split the shared reader for no
+  exposure, since nothing leaves the server).
 
 ### Tests
 
@@ -44,18 +58,19 @@ app and the API)".
   key's enrolment of 55, an erased contact without an id, the outcome filter, a key without
   `contacts.read` refused, isolation).
 - E2E (CI only, `automations.spec.ts`): after a member's enrolment, its page lists both contacts
-  with their runs and filters by outcome; the key's enrolment's contacts read through the API.
+  with their runs and filters by outcome; the key's enrolment's contacts read through the API; an
+  invited analyst sees the enrolment's counts and no contacts list.
 
 ### Test commands and results (local, 2026-10-21)
 
-| Command                                                             | Result                                                                                            |
-| ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
-| `npx eslint . --max-warnings=0`, prettier on changed files          | clean                                                                                             |
-| `pnpm typecheck`                                                    | clean                                                                                             |
-| `pnpm test` (unit)                                                  | 2,036 of 2,036 passed (181 files)                                                                 |
-| `pnpm build`                                                        | passed                                                                                            |
-| deliberate regressions (permissions, scoping, filters, pages, maps) | 28 of 29 caught by unit tests; the page's own `contacts.read` gate has none (the service refuses) |
-| `pnpm test:integration`, `pnpm test:e2e`                            | not run here: no local PostgreSQL or browser; CI runs them                                        |
+| Command                                                               | Result                                                                                                     |
+| --------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `npx eslint . --max-warnings=0`, prettier on changed files            | clean                                                                                                      |
+| `pnpm typecheck`, `tsc --noEmit -p tests/integration`, `-p tests/e2e` | clean                                                                                                      |
+| `pnpm test` (unit)                                                    | 2,036 of 2,036 passed (181 files)                                                                          |
+| `pnpm build`                                                          | passed                                                                                                     |
+| deliberate regressions (permissions, scoping, filters, pages, maps)   | 28 of 29 caught by unit tests; the page's own `contacts.read` gate is covered by the e2e analyst step (CI) |
+| `pnpm test:integration`, `pnpm test:e2e`                              | not run here: no local PostgreSQL or browser; CI runs them                                                 |
 
 ## 2026-10-21 — HTTP steps save response headers, a text body and the status (P4-02, ADR-406)
 

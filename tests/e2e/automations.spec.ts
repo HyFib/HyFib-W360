@@ -8,7 +8,14 @@ import {
   sendSignedWebhook,
   standInRequests,
 } from './messaging-support';
-import { expectNoHorizontalOverflow, openFromNav, signUpAndVerify, uniqueEmail } from './support';
+import {
+  expectNoHorizontalOverflow,
+  firstLink,
+  openFromNav,
+  signUpAndVerify,
+  uniqueEmail,
+  waitForEmail,
+} from './support';
 
 const PASSWORD = 'correct horse battery staple 42';
 
@@ -430,10 +437,11 @@ test('an automation creates a CRM task and a deal about the customer, moves the 
 });
 
 test('a member enrols the contacts the Contacts page’s filters match in an automation and sees each start (ADR-401)', async ({
+  browser,
   page,
   request,
 }) => {
-  test.setTimeout(180_000);
+  test.setTimeout(240_000);
   const email = uniqueEmail('enrol');
   const slug = `enrol-${Date.now().toString(36)}`;
   await signUpAndVerify(page, { name: 'Esha Enrol', email, password: PASSWORD });
@@ -514,6 +522,7 @@ test('a member enrols the contacts the Contacts page’s filters match in an aut
   await expect(started).toContainText('2');
   await expect(page.getByText('Every contact was handled.', { exact: false })).toBeVisible();
   await expectNoHorizontalOverflow(page);
+  const memberEnrollmentUrl = page.url();
 
   // Its contacts one by one (ADR-408): both started, each with its run; filtered by outcome.
   const enrolledTable = page.getByRole('table').filter({ hasText: 'Handled' });
@@ -587,14 +596,19 @@ test('a member enrols the contacts the Contacts page’s filters match in an aut
   );
   expect(enrolledContacts.status()).toBe(200);
   const contactsPage = (await enrolledContacts.json()) as {
-    data: { position: number; outcome: string; runId: string | null }[];
+    data: { position: number; outcome: string; reason: string | null; runId: string | null }[];
     nextCursor: string | null;
   };
-  expect(contactsPage.data.map((c) => [c.position, c.outcome])).toEqual([
-    [1, 'started'],
-    [2, 'started'],
-  ]);
-  expect(contactsPage.data.every((c) => c.runId !== null)).toBe(true);
+  // Every contact once, in order. The member's runs of the same contacts may still be going when
+  // the key enrols them, so each is started with its run or refused as another run's conversation.
+  expect(contactsPage.data.map((c) => c.position)).toEqual([1, 2]);
+  for (const c of contactsPage.data) {
+    expect(
+      (c.outcome === 'started' && c.reason === null && c.runId !== null) ||
+        (c.outcome === 'refused' && c.reason === 'automation_busy' && c.runId === null),
+      JSON.stringify(c),
+    ).toBe(true);
+  }
   expect(contactsPage.nextCursor).toBeNull();
   // Both enrolments, newest first: the key's, then the member's.
   const all = await request.get(`/api/v1/automations/${automation!.id}/enrollments`, {
@@ -607,4 +621,46 @@ test('a member enrols the contacts the Contacts page’s filters match in an aut
   await expect(page.getByText(/through the API with key “Booking system”/)).toBeVisible();
   await page.goto(`/c/${slug}/automations/${automation!.id}`);
   await expect(page.getByText('Started through the API with key “Booking system”')).toBeVisible();
+
+  // An analyst (enrolments but not contacts) sees the counts and no contacts list (ADR-408).
+  const enrollmentPath = new URL(memberEnrollmentUrl).pathname;
+  const analystEmail = uniqueEmail('enrol-analyst');
+  await page.goto(`/c/${slug}/settings/members`);
+  await page.getByLabel('Email address').fill(analystEmail);
+  // Enabled once the form has hydrated and holds the address, so the role changes below register.
+  await expect(page.getByRole('button', { name: 'Send invitation' })).toBeEnabled();
+  await page.getByRole('checkbox', { name: /^Agent/ }).uncheck();
+  await page.getByRole('checkbox', { name: /^Analyst/ }).check();
+  await page.getByRole('button', { name: 'Send invitation' }).click();
+  await expect(page.getByText(`Invitation sent to ${analystEmail}.`)).toBeVisible();
+  const invitePath = new URL(firstLink(await waitForEmail(analystEmail, "You're invited")))
+    .pathname;
+  const analystCtx = await browser.newContext();
+  const analyst = await analystCtx.newPage();
+  await analyst.goto(invitePath);
+  await signUpAndVerify(analyst, {
+    name: 'Anu Analyst',
+    email: analystEmail,
+    password: PASSWORD,
+    next: invitePath,
+  });
+  await analyst.goto(invitePath);
+  await analyst.getByRole('button', { name: 'Accept invitation' }).click();
+  await expect(analyst).toHaveURL(new RegExp(`/c/${slug}$`));
+  await analyst.goto(enrollmentPath);
+  await expect(analyst).toHaveURL(new RegExp(`${enrollmentPath}$`));
+  await expect(
+    analyst.getByRole('heading', { name: 'Enrolment in Festival follow-up' }),
+  ).toBeVisible();
+  await expect(
+    analyst
+      .locator('dt')
+      .filter({ hasText: /^Started$/ })
+      .locator('..'),
+  ).toContainText('2');
+  await expect(analyst.getByRole('navigation', { name: 'Filter contacts by outcome' })).toHaveCount(
+    0,
+  );
+  await expect(analyst.getByRole('link', { name: 'Asha Rao', exact: true })).toHaveCount(0);
+  await analystCtx.close();
 });
