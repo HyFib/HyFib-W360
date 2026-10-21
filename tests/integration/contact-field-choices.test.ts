@@ -643,46 +643,54 @@ describe('choice-type custom contact fields (ADR-407)', () => {
   });
 
   it('a bulk edit and a field’s deletion cross no locks, whatever order the contacts are stored in', async () => {
-    const { owner, tier } = await setup();
-    // Created in turn, so a < b < c by id (UUIDv7), all with a value of the field to delete.
-    const made: string[] = [];
-    for (const value of ['Gold', 'Silver', 'Bronze']) {
-      const { id } = await contactsSvc().createContact(owner, {
-        phone: nextPhone(),
-        tags: ['vip'],
-        attributes: { tier: value },
-      });
-      made.push(id);
-    }
-    const [a, b, c] = made as [string, string, string];
-    expect(a < b && b < c).toBe(true);
-    // Rewrite a, then b, until each row version is stored after c's, so a scan in storage order
-    // meets c first: the deletion's old locking (in its update's scan order) would lock c, then
-    // wait for a, which the bulk edit holds while it waits for b, then for c.
-    const after = async (id: string, other: string) =>
-      (
-        await fx.query<{ later: boolean }>(
-          `SELECT (SELECT ctid FROM app.contacts WHERE id = $1) >
-                  (SELECT ctid FROM app.contacts WHERE id = $2) AS later`,
-          [id, other],
-        )
-      )[0]!.later;
-    for (const id of [a, b]) {
-      for (let attempt = 0; attempt < 20 && !(await after(id, c)); attempt += 1) {
-        await fx.query(
-          `UPDATE app.contacts SET display_name = coalesce(display_name, '') || '.' WHERE id = $1`,
-          [id],
-        );
-      }
-    }
-    expect(
+    // A scan in storage order has to meet c, the contact with the highest id (UUIDv7), before a and
+    // b: a deletion that locked contacts in its scan's order (its old locking) would then lock c,
+    // then wait for a, which the bulk edit holds while it waits for b, then for c. PostgreSQL
+    // chooses where rows are stored, so c is created first (with the clock a few seconds ahead, so
+    // that its id is still the highest) and a and b after it, in a new company each time, until c
+    // is stored first. (Rewriting a and b until they were stored after c failed on PostgreSQL 17:
+    // an update stays on its page while the page has room, so a row on an earlier page never
+    // passed c.)
+    const firstStored = async (ids: string[]) =>
       (
         await fx.query<{ id: string }>(
-          'SELECT id FROM app.contacts WHERE id = ANY($1::uuid[]) ORDER BY ctid',
-          [made],
+          'SELECT id FROM app.contacts WHERE id = ANY($1::uuid[]) ORDER BY ctid LIMIT 1',
+          [ids],
         )
-      ).map((r) => r.id)[0],
-    ).toBe(c);
+      )[0]?.id;
+    const withClockAhead = async <T>(work: () => Promise<T>): Promise<T> => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(Date.now() + 5_000);
+      try {
+        return await work();
+      } finally {
+        vi.useRealTimers();
+      }
+    };
+    let found: (Awaited<ReturnType<typeof setup>> & { made: [string, string, string] }) | null =
+      null;
+    for (let attempt = 0; attempt < 30 && !found; attempt += 1) {
+      const company = await setup();
+      const create = async (value: string) =>
+        (
+          await contactsSvc().createContact(company.owner, {
+            phone: nextPhone(),
+            tags: ['vip'],
+            attributes: { tier: value },
+          })
+        ).id;
+      const highest = await withClockAhead(() => create('Bronze'));
+      const lowest = await create('Gold');
+      const middle = await create('Silver');
+      if ((await firstStored([lowest, middle, highest])) === highest) {
+        found = { ...company, made: [lowest, middle, highest] };
+      }
+    }
+    if (!found) throw new Error('No company stored its highest-id contact first in 30 attempts.');
+    const { owner, tier, made } = found;
+    const [a, b, c] = made;
+    expect(a < b && b < c).toBe(true);
+    expect(await firstStored(made)).toBe(c);
     const blockedBy = async (pid: number) =>
       (
         await fx.query<{ pid: number }>(
