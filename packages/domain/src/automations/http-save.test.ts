@@ -818,7 +818,8 @@ describe('values saved from a response (ADR-406)', () => {
     expect(slashed).toContain('/');
     expect(plussed).toContain('+');
     const cases: [string, string][] = [
-      [`{"t":"${slashed.replace(/\//g, '\\/')}x"}`, slashy],
+      // As a JSON escaper that also escapes "/" writes it: backslashes first (base64 has none).
+      [`{"t":"${slashed.replace(/\\/g, '\\\\').replace(/\//g, '\\/')}x"}`, slashy],
       [`t=${encodeURIComponent(plussed)}x`, plusy],
       [`t=${encodeURIComponent(slashed)}x`, slashy],
     ];
